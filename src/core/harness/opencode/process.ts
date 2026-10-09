@@ -1,3 +1,4 @@
+import type { ToolDef } from "../../provider.js";
 import { HarnessEndingUnconfirmedError, HarnessOperationEndedError } from "../container.js";
 // How a run's OpenCode is launched (docs/reference/specs/harness.md, the
 // OpenCode process item; record 0038's fourth amendment): the layout of the
@@ -249,7 +250,7 @@ export interface OpenCodeLaunchSpec {
   /** Public runner-owned values inherited by OpenCode and its shell. */
   environment?: Record<string, string>;
   /** The harness's own tools the plugin will register, so the prompt can name them. */
-  relayTools: readonly string[];
+  relayTools: readonly ToolDef[];
   /** The run's resolved model card (record 0052): what the configuration says
    *  of the model — `limit.context` from the window, `capabilities.input` from
    *  the inputs, one `variants` entry per tier whose `body` overlay spells the
@@ -408,7 +409,11 @@ export function openCodeSystemPrompt(spec: OpenCodeLaunchSpec): string {
     spec.identity === "none"
       ? ""
       : `\nTemporary files belong in ${spec.paths.scratchDir}. Use that absolute path with file tools and $TMPDIR in shell. This directory is temporary.\n`;
-  return `${spec.system.trimEnd()}\n\n${openCodePromptNote(spec.relayTools, spec.identity, spec.commandPolicy)}\n${scratch}`;
+  return `${spec.system.trimEnd()}\n\n${openCodePromptNote(
+    spec.relayTools.map((tool) => tool.name),
+    spec.identity,
+    spec.commandPolicy,
+  )}\n${scratch}`;
 }
 
 /** The run's configuration as the object the file holds (`packages/schema/src/config.ts`):
@@ -530,11 +535,11 @@ export interface OpenCodeFile {
 
 /** Every file the container must hold before the server starts, none of them a
  *  secret: the configuration, the relay plugin (the tool that speaks the bot's
- *  protocol; U12's `OPENCODE_PLUGIN_SOURCE`), the tailer. */
+ *  protocol; `openCodePluginSource`), the tailer. */
 export function openCodeLaunchFiles(spec: OpenCodeLaunchSpec): OpenCodeFile[] {
   return [
     { path: spec.paths.config, content: openCodeConfigJson(spec) },
-    { path: spec.paths.plugin, content: openCodePluginSource(spec.commandPolicy) },
+    { path: spec.paths.plugin, content: openCodePluginSource(spec.relayTools, spec.commandPolicy) },
     { path: spec.paths.tailerScript, content: OPENCODE_TAILER_SOURCE },
   ];
 }

@@ -378,3 +378,13 @@ Hygiene traps: tracker numbers in code comments, dates outside records, 32-hex f
 - Repository at `81c51c4f`: `src/core/dispatch/runLoop.ts`, `run.ts`, `provision.ts`, `reattach.ts`; `src/core/harness/pi/*`; `src/channels/harnessRoutes.ts`, `modelProxy.ts`; `src/core/modelProxy/runBearers.ts`; `src/load/scriptedProvider.ts`, `piProcess.ts`; `src/core/harness/oneHarness.test.ts`; `src/deploy/imagePins.ts`, `imagePiHarness.test.ts`; `src/config.ts`, `src/config/validate.ts`.
 - The OpenCode spike of 2026-09-15/16 (sections 1 to 11): two source checkouts of `anomalyco/opencode`, `dev` at 1.18.31 and tag `v2.0.3`; `@opencode/cli`, `@opencode/protocol`, `@opencode/plugin` 2.0.3 and `opencode-ai`, `@opencode-ai/sdk`, `@opencode-ai/plugin` 1.18.31 on npm; `opencode.ai/docs` and `opencode.ai/v2/docs`; the open-issue list for the headless server.
 - The Codex research of 2026-09-15, kept as the probe's record in record 0038's Appendix B.
+
+## Amended 2026-10-09: launch-owned tool declarations
+
+**Re-evaluation.** KTD7 chose a local plugin so relayed tools keep the bot's gate, context and call-id idempotency. Its startup GET is not necessary for that contract: the runner already owns the registered run's tool definitions before either process starts. A transient boot refusal at discovery can leave the runtime without its relays.
+
+For new launches, both adapters receive the same existing projection of name, description and input schema in the launch input. The generated runtime code registers that frozen metadata locally; prompts and allowlists derive from it. This replaces the discovery step in KTD7 and the U12 registration procedure, while authorization and execution still ask the current bot. Metadata confers no grant.
+
+No new lifecycle owner, readiness acknowledgement, retry scheduler or startup manager is added. Scratch and registration failures retain their existing closed gates; OpenCode's current activation check still prevents model entry after failed setup. Reattachment does not rewrite a retained process or replace it merely to update declarations. The old discovery route remains for its retained consumers.
+
+The living harness specs bind the replacement to both generated adapters and their existing gate, relay and survival proofs. The historical failure's discarded exception remains unknown; local proof does not establish deployment or live recovery.

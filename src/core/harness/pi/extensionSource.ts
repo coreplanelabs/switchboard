@@ -1,9 +1,10 @@
+import type { ToolDef } from "../../provider.js";
 // The pi extension a run's container loads (docs/reference/specs/harness-pi.md
 // item 7), as the text the harness writes there before pi starts. Plain
 // JavaScript using Node builtins and pi's pinned SDK (its loader resolves
 // the SDK even in a directory with no node_modules). It also binds bash's
 // spill files to isolated output-only scratch and safely reads them. It
-// registers the run's relayed tools — the definitions it fetches from the bot, one JSON
+// registers the run's relayed tools — the launch definitions from the runner, one JSON
 // Schema each — so `update_status`, `submit_pr_description` and the rest run
 // in the bot with the run's own context and answer here, a call the bot says
 // is still running asked again with the same call id until it answers (the
@@ -18,9 +19,8 @@
 // process environment the harness started pi with; the bot decides authority.
 // The read wrapper only narrows the trusted scratch binding to an open file.
 //
-// Shipped as a string on purpose: the file the container runs is exactly this
-// text, the tests import it from a file they write, and `tsc` carries it to
-// `dist/` like any constant.
+// Rendered as standalone JavaScript: the launch writes this exact text and
+// its tool declarations, and the tests load the same file the container runs.
 
 /** The two reasons the extension blocks a call with by itself, without a
  *  verdict from the bot: a refusal at the door (a 4xx) and a bot that did not
@@ -30,13 +30,17 @@
 export const BLOCKED_AT_DOOR_PREFIX = "authorization refused at the door: ";
 export const BLOCKED_UNAVAILABLE_PREFIX = "authorization unavailable: ";
 
-export const PI_EXTENSION_SOURCE = `// Switchboard's pi harness extension. Written into the run's directory by the
+export function piExtensionSource(tools: readonly ToolDef[]): string {
+  return `// Switchboard's pi harness extension. Written into the run's directory by the
 // bot before pi starts; loaded with \`-e\`.
 import { constants } from "node:fs";
 import { mkdir, mkdtemp, open, realpath, stat as fileStat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createReadToolDefinition, getPackageDir } from "@earendil-works/pi-coding-agent";
+
+// Parse data, not an object literal: schema keys such as __proto__ stay own properties.
+const TOOL_DEFINITIONS = JSON.parse(${JSON.stringify(JSON.stringify(tools))});
 
 const BEARER_ENV = "SWITCHBOARD_RUN_BEARER";
 const URL_ENV = "SWITCHBOARD_HARNESS_URL";
@@ -84,11 +88,11 @@ async function call(method, path, body, signal) {
   try {
     json = JSON.parse(text);
   } catch {
-    throw new Error("switchboard harness: " + method + " " + path + " answered " + res.status + " with a body that is not JSON");
+    throw new HarnessAnswerError("switchboard harness: " + method + " " + path + " answered " + res.status + " with a body that is not JSON", res.status);
   }
   if (!res.ok) {
     throw new HarnessAnswerError(
-      "switchboard harness: " + method + " " + path + " answered " + res.status + ": " + (json.error || text),
+      "switchboard harness: " + method + " " + path + " answered " + res.status + ": " + (json && typeof json.error === "string" ? json.error : text),
       res.status,
     );
   }
@@ -134,6 +138,17 @@ function requestSignal(signal) {
   if (!timeout) return signal;
   if (!signal) return timeout;
   return typeof AbortSignal.any === "function" ? AbortSignal.any([signal, timeout]) : signal;
+}
+
+/** Startup failures reach the run's tool result. Only structural words are
+ * exposed: an upstream body, filesystem path or bearer must never ride along. */
+function initializationError(err) {
+  if (err instanceof HarnessAnswerError) return "HTTP " + err.status;
+  const codes = ["EACCES", "EPERM", "ENOENT", "EEXIST", "ENOSPC", "EMFILE", "ENFILE", "ELOOP", "ENOTDIR", "EROFS",
+    "ERR_MODULE_NOT_FOUND", "ERR_PACKAGE_PATH_NOT_EXPORTED"];
+  if (err && codes.includes(err.code)) return err.code;
+  const names = ["TypeError", "TimeoutError", "AbortError"];
+  return err && names.includes(err.name) ? err.name : "Error";
 }
 
 /** A relayed tool's result. The call is posted with its id; a bot that answers
@@ -311,21 +326,27 @@ async function outputReadTool() {
 
 export default async function switchboardHarness(pi) {
   let initialized = false;
+  let failure = "harness initialization has not completed";
+  let stage = "settings";
   pi.on("tool_call", async (event) => {
-    if (!initialized) return { block: true, reason: "authorization unavailable: harness initialization failed; tool execution blocked" };
+    if (!initialized) return { block: true, reason: "${BLOCKED_UNAVAILABLE_PREFIX}" + failure + "; tool execution blocked" };
     const verdict = await authorize(event);
     if (!verdict.allow) return { block: true, reason: verdict.reason };
     return undefined;
   });
   try {
-    const { tools } = await call("GET", "/harness/tools");
+    settings();
+    stage = "scratch setup";
     const read = await outputReadTool();
+    stage = "tool registration";
     if (read) pi.registerTool(read);
-    for (const def of tools) pi.registerTool(relayTool(def));
+    for (const def of TOOL_DEFINITIONS) pi.registerTool(relayTool(def));
     pi.on("session_before_compact", compaction);
     initialized = true;
-  } catch {
+  } catch (err) {
     // Return the extension with its gate intact; pi discards extensions that throw.
+    failure = "harness initialization failed during " + stage + " (" + initializationError(err) + ")";
   }
 }
 `;
+}

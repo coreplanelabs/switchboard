@@ -1,3 +1,4 @@
+import type { ToolDef } from "../../provider.js";
 // How a run's pi is launched (docs/reference/specs/harness-pi.md item 4): the
 // argument list that pins RPC mode and turns every discovery off but the
 // harness's own extension, the environment that hands pi the run bearer as its
@@ -14,7 +15,7 @@ import { billerHarnessProvider, WIRE_ALIASES, type ProviderConfig, type Wire } f
 import type { PiCompactionConfig } from "../../../config.js";
 import type { HarnessPaths, HarnessStart } from "../container.js";
 import type { HarnessCommandPolicy } from "../contract.js";
-import { PI_EXTENSION_SOURCE } from "./extensionSource.js";
+import { piExtensionSource } from "./extensionSource.js";
 
 /** The program the container starts: pi on the container's PATH. */
 export const PI_BIN = "pi";
@@ -144,7 +145,7 @@ export interface PiLaunchSpec {
   /** Public runner-owned values inherited by pi and its shell. */
   environment?: Record<string, string>;
   /** The harness's own tools the extension registers, so the prompt can name them. */
-  relayTools: readonly string[];
+  relayTools: readonly ToolDef[];
   /** The run's resolved model card (record 0052): what `models.json` says of
    *  the model — the level map, the window, the cap field, the cache rule —
    *  in place of the invented one, so the word on the wire is the card's and
@@ -186,7 +187,7 @@ export function piLaunchArgs(spec: PiLaunchSpec): string[] {
     "--tools",
     [
       ...piBuiltinToolsFor(spec.identity).filter((tool) => spec.commandPolicy !== "hosted-review" || tool !== "bash"),
-      ...spec.relayTools,
+      ...spec.relayTools.map((tool) => tool.name),
     ].join(","),
     "--provider",
     PROXY_PROVIDER,
@@ -404,7 +405,11 @@ export function piSystemPrompt(spec: PiLaunchSpec): string {
     spec.identity === "none"
       ? ""
       : `\nTemporary files belong in ${spec.paths.scratchDir}. Use that absolute path with file tools and $TMPDIR in bash. This directory is temporary.\n`;
-  return `${spec.system.trimEnd()}\n\n${harnessPromptNote(spec.relayTools, spec.identity, spec.commandPolicy)}\n${scratch}`;
+  return `${spec.system.trimEnd()}\n\n${harnessPromptNote(
+    spec.relayTools.map((tool) => tool.name),
+    spec.identity,
+    spec.commandPolicy,
+  )}\n${scratch}`;
 }
 
 /** What pi's settings prepend to every bash command (`shellCommandPrefix`),
@@ -462,6 +467,6 @@ export function piLaunchFiles(spec: PiLaunchSpec): PiFile[] {
     },
     { path: `${spec.paths.agentDir}/models.json`, content: piModelsJson(spec) },
     { path: `${spec.paths.agentDir}/SYSTEM.md`, content: piSystemPrompt(spec) },
-    { path: spec.paths.extension, content: PI_EXTENSION_SOURCE },
+    { path: spec.paths.extension, content: piExtensionSource(spec.relayTools) },
   ];
 }

@@ -20,7 +20,6 @@ import {
   takesAdaptiveThinking,
   type PiLaunchSpec,
 } from "./process.js";
-import { PI_EXTENSION_SOURCE } from "./extensionSource.js";
 import type { ModelCard } from "../../modelCard.js";
 
 // Feature: docs/reference/specs/harness-pi.md item 4 — how a run's pi is
@@ -38,7 +37,11 @@ const spec: PiLaunchSpec = {
   effort: "high",
   identity: "write",
   system: "You are the coding agent.\n",
-  relayTools: ["update_status", "submit_pr_description"],
+  relayTools: ["update_status", "submit_pr_description"].map((name) => ({
+    name,
+    description: name,
+    inputSchema: { type: "object" },
+  })),
 };
 
 /** The review preset's launch: a read identity, the readonly toolset's relays. */
@@ -47,7 +50,11 @@ const reviewSpec: PiLaunchSpec = {
   identity: "read",
   effort: "medium",
   system: "You are the review agent.\n",
-  relayTools: ["update_status", "submit_verdict", "diff_digest"],
+  relayTools: ["update_status", "submit_verdict", "diff_digest"].map((name) => ({
+    name,
+    description: name,
+    inputSchema: { type: "object" },
+  })),
 };
 
 /** The general preset's launch: no identity and no workspace, the assistant toolset's relays. */
@@ -57,7 +64,11 @@ const generalSpec: PiLaunchSpec = {
   effort: undefined,
   harnessUrl: "http://127.0.0.1:8080",
   system: "You are the general agent.\n",
-  relayTools: ["web_fetch", "update_status", "github_repos", "github_issue_create"],
+  relayTools: ["web_fetch", "update_status", "github_repos", "github_issue_create"].map((name) => ({
+    name,
+    description: name,
+    inputSchema: { type: "object" },
+  })),
 };
 
 describe("piRunPaths", () => {
@@ -514,7 +525,6 @@ describe("piLaunchFiles", () => {
     });
     expect(files[2].content.startsWith("You are the coding agent.\n\nHARNESS NOTE:")).toBe(true);
     expect(files[2].content).toContain("`update_status`, `submit_pr_description`");
-    expect(files[3].content).toBe(PI_EXTENSION_SOURCE);
     for (const f of files) expect(f.content).not.toContain("s3cret");
   });
   // harness-pi item 4: the deployment's compaction thresholds ride pi's own
@@ -582,12 +592,22 @@ describe("hosted Review launch policy", () => {
     const hosted = {
       ...reviewSpec,
       commandPolicy: "hosted-review",
-      relayTools: ["run_check", "submit_verdict"],
+      relayTools: ["run_check", "submit_verdict"].map((name) => ({
+        name,
+        description: name,
+        inputSchema: { type: "object" },
+      })),
     } as PiLaunchSpec;
     const args = piLaunchArgs(hosted);
     const tools = args[args.indexOf("--tools") + 1].split(",");
     expect(tools).not.toContain("bash");
-    expect(harnessPromptNote(hosted.relayTools, hosted.identity, hosted.commandPolicy)).toContain("Use `run_check`");
+    expect(
+      harnessPromptNote(
+        hosted.relayTools.map((tool) => tool.name),
+        hosted.identity,
+        hosted.commandPolicy,
+      ),
+    ).toContain("Use `run_check`");
     expect(tools).toEqual(["read", "grep", "find", "ls", "run_check", "submit_verdict"]);
     expect(piLaunchArgs(spec)[piLaunchArgs(spec).indexOf("--tools") + 1].split(",")).toContain("bash");
     expect(piLaunchArgs(reviewSpec)[piLaunchArgs(reviewSpec).indexOf("--tools") + 1].split(",")).toContain("bash");

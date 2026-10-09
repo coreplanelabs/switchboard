@@ -1,3 +1,4 @@
+import type { ToolDef } from "../../provider.js";
 import type { HarnessCommandPolicy } from "../contract.js";
 // The OpenCode plugin a run's container loads (docs/reference/specs/harness.md
 // item 3; the relay clause), the sibling of pi's `extensionSource.ts`, as the
@@ -6,8 +7,8 @@ import type { HarnessCommandPolicy } from "../contract.js";
 // runs the directory's `index.js` as written, with no `bun install` and no
 // package (directory loading was proven against `@opencode/cli@2.0.3`;
 // the 2.0.12 protocol exposes activation through `GET /api/plugin`). It does one
-// thing. At load it fetches the run's relayed tools from `GET /harness/tools`
-// and registers each through the v2 `tool.transform` editor with its JSON
+// thing. At load it registers the runner's launch tool declarations
+// through the v2 `tool.transform` editor with its JSON
 // Schema — registered as a DIRECT tool (`options.codemode: false`) so the
 // model calls it by its own name, not through CodeMode's meta-tool (an
 // omitted `codemode` makes the tool reachable only inside `execute`, and a
@@ -35,10 +36,13 @@ import type { HarnessCommandPolicy } from "../contract.js";
 export const OC_BLOCKED_AT_DOOR_PREFIX = "authorization refused at the door: ";
 export const OC_BLOCKED_UNAVAILABLE_PREFIX = "authorization unavailable: ";
 
-export function openCodePluginSource(commandPolicy?: HarnessCommandPolicy): string {
+export function openCodePluginSource(tools: readonly ToolDef[], commandPolicy?: HarnessCommandPolicy): string {
   return `// Switchboard's OpenCode plugin. Written into the run's plugin directory by the
 // bot before \`opencode serve\` starts; loaded as \`./plugins/switchboard\`'s
 // \`index.js\`. Imports nothing.
+
+// Parse data, not an object literal: schema keys such as __proto__ stay own properties.
+const TOOL_DEFINITIONS = JSON.parse(${JSON.stringify(JSON.stringify(tools))});
 
 const BEARER_ENV = "SWITCHBOARD_RUN_BEARER";
 const URL_ENV = "SWITCHBOARD_HARNESS_URL";
@@ -93,7 +97,7 @@ async function call(method, path, body, signal) {
   }
   if (!res.ok && status !== 202) {
     throw new HarnessAnswerError(
-      "switchboard plugin: " + method + " " + path + " answered " + status + ": " + (json.error || text),
+      "switchboard plugin: " + method + " " + path + " answered " + status + ": " + (json && typeof json.error === "string" ? json.error : text),
       status,
     );
   }
@@ -208,11 +212,10 @@ function relayTool(def) {
 export default {
   id: "switchboard",
   async setup(ctx) {
-    const { json } = await call("GET", "/harness/tools");
-    const tools = (json && json.tools) || [];
+    settings();
     await ctx.tool.transform((editor) => {
       ${commandPolicy === "hosted-review" ? 'editor.remove("shell");' : ""}
-      for (const def of tools) editor.add(relayTool(def));
+      for (const def of TOOL_DEFINITIONS) editor.add(relayTool(def));
     });
     // The seam the harness watches for a call OpenCode is about to run; the gate
     // itself rides \`permission.asked\` in the bot, never a decision here.
@@ -221,5 +224,3 @@ export default {
 };
 `;
 }
-
-export const OPENCODE_PLUGIN_SOURCE = openCodePluginSource();

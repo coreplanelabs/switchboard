@@ -355,3 +355,11 @@ Changed by this amendment: nothing above it in the body; the gate clause's readi
 **What stays owed.** The pi scripted double that can play an already-running pi (#1482); the waitable-typed third shape's re-attach in place (#1609); a steer the server took but had not delivered at the finale (#1598); the store-only reading of the tombstone (#1640); the heartbeat under an attaching row (#1655); OpenCode's finale wording residuals (#1670); and the second harness's clean live coding run: the first ran the harness, a non-Anthropic model through the OpenRouter route and forty-eight tool calls, then ended on the gate's correct refusal of a credential read and the cascade above. The retake with a real task closes the live rows the stage A plan's thirteenth unit names.
 
 Changed by this amendment: nothing above it in the body except criterion 5's wording (settle, close and re-dispatch is the floor that holds) and the stage gates' rule (the real-binary row is the gate for every clause); the OpenCode conformance rows and harness.md items 2 and 4 already carry the real-binary rule in the pull requests merged before this note.
+
+## Amended 2026-10-09: declarations belong to the existing launch
+
+**Re-evaluation.** This record keeps authority and the durable record in the bot while each runtime implements registration and its protocol. Startup discovery duplicated metadata already owned by the run and coupled local registration to the bot's boot takeover. That dependency is unnecessary for the gate or relay clauses.
+
+Both existing launch adapters now serialize only the registered run's names, descriptions and input schemas. The same snapshot supplies the adapter's local registration, prompt and allowlist. Definitions are data; each real tool call still asks the current bot and carries its original call id. The native gates, bearer binding, admitted allowance, custody and survival owners do not change.
+
+This removes the new-launch discovery dependency rather than adding a shared retry client or another readiness controller. Retained processes keep their original files, so the discovery endpoint cannot retire without separate consumer evidence. Failed local registration remains closed. Shared generated-adapter tests and the existing conformance rows are the source proof; exact-head review, deployment and live recovery remain distinct.

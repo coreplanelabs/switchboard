@@ -14,7 +14,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PI_EXTENSION_SOURCE } from "./extensionSource.js";
+import { piExtensionSource } from "./extensionSource.js";
+import type { ToolDef } from "../../provider.js";
+const PI_EXTENSION_SOURCE = piExtensionSource([]);
 import { HARNESS_URL_ENV, RUN_BEARER_ENV } from "./process.js";
 
 // Feature: docs/reference/specs/harness-pi.md item 7 — the extension pi loads
@@ -85,18 +87,21 @@ const originalTmpdir = process.env.TMPDIR;
 const originalOutputRoot = process.env.SWITCHBOARD_PI_OUTPUT_ROOT;
 const originalRunScratch = process.env.SWITCHBOARD_RUN_SCRATCH;
 let dir: string;
-let load: () => Promise<(pi: unknown) => Promise<void>>;
+let load: (tools?: readonly ToolDef[]) => Promise<(pi: unknown) => Promise<void>>;
 
 beforeEach(() => {
   delete process.env.SWITCHBOARD_PI_OUTPUT_ROOT;
   delete process.env.SWITCHBOARD_RUN_SCRATCH;
   dir = realpathSync(mkdtempSync(join(tmpdir(), "swb-pi-ext-")));
   const file = join(dir, "extension.mjs");
-  writeFileSync(file, PI_EXTENSION_SOURCE);
+  writeFileSync(file, piExtensionSource(TOOLS.tools));
   // pi's pinned loader aliases its SDK even outside node_modules. Native
   // imports in this fixture use the same installed SDK through a temp link.
   symlinkSync(resolve("node_modules"), join(dir, "node_modules"), "dir");
-  load = async () => ((await import(pathToFileURL(file).href)) as { default: (pi: unknown) => Promise<void> }).default;
+  load = async (tools = TOOLS.tools) => {
+    writeFileSync(file, piExtensionSource(tools));
+    return ((await import(pathToFileURL(file).href)) as { default: (pi: unknown) => Promise<void> }).default;
+  };
   process.env[HARNESS_URL_ENV] = "https://bot.example.com/";
   process.env[RUN_BEARER_ENV] = "sbr_run-7.s3cret";
 });
@@ -158,16 +163,72 @@ describe("the harness extension", () => {
   });
 
   it("retains a blocking gate when extension initialization fails", async () => {
-    fakeBot({
-      "/harness/tools": () => {
-        throw new Error("initialization failed");
-      },
+    fakeBot({});
+    const pi = fakePi();
+    const register = pi.api.registerTool;
+    pi.api.registerTool = (tool) => {
+      if (tool.name === "submit_pr_description") throw new Error("private registration details");
+      register(tool);
+    };
+    await (
+      await load()
+    )(pi.api);
+    expect(pi.tools.map((tool) => tool.name)).toEqual(["update_status"]);
+    expect(
+      await pi.handlers.get("tool_call")!({ toolCallId: "blocked", toolName: "update_status", input: {} }, {}),
+    ).toEqual({
+      block: true,
+      reason:
+        "authorization unavailable: harness initialization failed during tool registration (Error); tool execution blocked",
+    });
+  });
+
+  it.each([null, "private upstream text"])("keeps authorization and relay 4xx final for body %j", async (body) => {
+    const bot = fakeBot({
+      "/harness/tools": TOOLS,
+      "/harness/authorize": () => new Response(typeof body === "string" ? body : JSON.stringify(body), { status: 403 }),
+      "/harness/tool": () => new Response(typeof body === "string" ? body : JSON.stringify(body), { status: 403 }),
     });
     const pi = fakePi();
-    await expect((await load())(pi.api)).resolves.toBeUndefined();
+    await (
+      await load()
+    )(pi.api);
+    const verdict = await pi.handlers.get("tool_call")!(
+      { toolCallId: "blocked", toolName: "update_status", input: {} },
+      {},
+    );
+    expect(verdict).toEqual({
+      block: true,
+      reason:
+        body === null
+          ? "authorization refused at the door: switchboard harness: POST /harness/authorize answered 403: null"
+          : "authorization refused at the door: switchboard harness: POST /harness/authorize answered 403 with a body that is not JSON",
+    });
+    await expect(pi.tools[0].execute("blocked", {})).rejects.toThrow(
+      body === null
+        ? "switchboard harness: POST /harness/tool answered 403: null"
+        : "switchboard harness: POST /harness/tool answered 403 with a body that is not JSON",
+    );
+    expect(bot.calls.filter((call) => call.path === "/harness/authorize")).toHaveLength(1);
+    expect(bot.calls.filter((call) => call.path === "/harness/tool")).toHaveLength(1);
+  });
+
+  it("names scratch setup failure without exposing paths or opening the gate", async () => {
+    process.env.SWITCHBOARD_PI_OUTPUT_ROOT = join(dir, "output");
+    process.env.SWITCHBOARD_RUN_SCRATCH = join(dir, "private-file");
+    writeFileSync(process.env.SWITCHBOARD_RUN_SCRATCH, "occupied");
+    fakeBot({ "/harness/tools": TOOLS });
+    const pi = fakePi();
+    await (
+      await load()
+    )(pi.api);
     expect(
-      await pi.handlers.get("tool_call")!({ toolCallId: "b", toolName: "bash", input: { command: "touch file" } }, {}),
-    ).toMatchObject({ block: true });
+      await pi.handlers.get("tool_call")!({ toolCallId: "blocked", toolName: "bash", input: { command: "ls" } }, {}),
+    ).toEqual({
+      block: true,
+      reason:
+        "authorization unavailable: harness initialization failed during scratch setup (EEXIST); tool execution blocked",
+    });
   });
 
   it("uses the pinned reader's path normalization before checking and reading the target", async () => {
@@ -394,22 +455,16 @@ describe("the harness extension", () => {
     expect(bot.calls).toHaveLength(0);
   });
 
-  it("registers every tool the bot serves as a relay with the bot's schema, asking with the bearer and never with anything else", async () => {
+  it("registers every launch definition as a relay without a discovery request", async () => {
     const bot = fakeBot({ "/harness/tools": TOOLS });
     const pi = fakePi();
     await (
       await load()
     )(pi.api);
     expect(pi.tools.map((t) => t.name)).toEqual(["update_status", "submit_pr_description"]);
-    expect(pi.tools[0].parameters).toEqual(TOOLS.tools[0].inputSchema);
+    expect(pi.tools[0].parameters).toEqual({ type: "object", properties: { checklist: { type: "string" } } });
     expect(pi.tools[0].description).toBe("the card");
-    expect(bot.calls[0]).toMatchObject({ method: "GET", path: "/harness/tools" });
-    expect(bot.calls[0].headers.authorization).toBe("Bearer sbr_run-7.s3cret");
-    expect(Object.keys(bot.calls[0].headers).map((h) => h.toLowerCase())).toEqual([
-      "authorization",
-      "content-type",
-      "accept",
-    ]);
+    expect(bot.calls).toEqual([]);
     expect(pi.handlers.has("tool_call")).toBe(true);
   });
 
@@ -712,7 +767,7 @@ describe("hosted Review extension relay", () => {
     });
     const pi = fakePi();
     await (
-      await load()
+      await load([{ name: "run_check", description: "Recorded command", inputSchema: { type: "object" } }])
     )(pi.api);
     expect(pi.tools.map((tool) => tool.name)).toEqual(["run_check"]);
     const input = { command: "git status --short", purpose: "verification", timeoutMs: 10000 };

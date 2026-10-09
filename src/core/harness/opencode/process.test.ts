@@ -14,7 +14,6 @@ import {
 import { HARNESS_URL_ENV, PROXY_PROVIDER, RUN_BEARER_ENV } from "../pi/process.js";
 import { FakeHarnessContainer } from "../testing/fakeContainer.js";
 import { OPENCODE_VERSION, openCodeAuthHeader, type OpenCodePermissionRule } from "./client.js";
-import { OPENCODE_PLUGIN_SOURCE } from "./pluginSource.js";
 import {
   ASK_ALL_RULE,
   OPENCODE_AGENT,
@@ -67,7 +66,11 @@ const spec: OpenCodeLaunchSpec = {
   harnessUrl: "https://bot.example.com/",
   identity: "write",
   system: "You are the coding agent.\n",
-  relayTools: ["update_status", "submit_pr_description"],
+  relayTools: ["update_status", "submit_pr_description"].map((name) => ({
+    name,
+    description: name,
+    inputSchema: { type: "object" },
+  })),
 };
 
 /** The review preset's launch: a read identity on the completions dialect. */
@@ -76,7 +79,11 @@ const reviewSpec: OpenCodeLaunchSpec = {
   model: { id: "gpt-x-large", providerType: "openai-compatible", maxTokens: 32000 },
   identity: "read",
   system: "You are the review agent.\n",
-  relayTools: ["update_status", "submit_verdict", "diff_digest"],
+  relayTools: ["update_status", "submit_verdict", "diff_digest"].map((name) => ({
+    name,
+    description: name,
+    inputSchema: { type: "object" },
+  })),
 };
 
 /** The general preset's launch: no identity and no workspace, on the bot host. */
@@ -85,7 +92,11 @@ const generalSpec: OpenCodeLaunchSpec = {
   identity: "none",
   harnessUrl: "http://127.0.0.1:8080",
   system: "You are the general agent.\n",
-  relayTools: ["web_fetch", "update_status", "github_repos"],
+  relayTools: ["web_fetch", "update_status", "github_repos"].map((name) => ({
+    name,
+    description: name,
+    inputSchema: { type: "object" },
+  })),
 };
 
 /** A card fixture (record 0052): the wire-default card on a generic block —
@@ -336,14 +347,23 @@ describe("the gate's rules and the identity's tools", () => {
   });
 
   it("the harness note names OpenCode's own tools for the identity, maps the native names onto them, and lists the relayed tools", () => {
-    const write = openCodePromptNote(spec.relayTools, "write");
+    const write = openCodePromptNote(
+      spec.relayTools.map((tool) => tool.name),
+      "write",
+    );
     expect(write).toContain("`read`, `shell`, `edit`, `write`, `glob`, `grep` and `skill`");
     expect(write).toContain("where they say `bash` use `shell`");
     expect(write).toContain("`update_status`, `submit_pr_description`");
-    const read = openCodePromptNote(reviewSpec.relayTools, "read");
+    const read = openCodePromptNote(
+      reviewSpec.relayTools.map((tool) => tool.name),
+      "read",
+    );
     expect(read).toContain("it has no `edit` and no `write`");
     expect(read).not.toContain("`write_file`");
-    const none = openCodePromptNote(generalSpec.relayTools, "none");
+    const none = openCodePromptNote(
+      generalSpec.relayTools.map((tool) => tool.name),
+      "none",
+    );
     expect(none).toContain("this run has no workspace");
     expect(none).toContain("exactly these");
     expect(openCodePromptNote([], "none")).toContain("No tools are available in this run.");
@@ -527,7 +547,10 @@ describe("the configuration writer", () => {
       expect(config.default_agent).toBe(OPENCODE_AGENT);
       expect(config.agents.switchboard.mode).toBe("primary");
       expect(config.agents.switchboard.system).toBe(
-        `${s.system.trimEnd()}\n\n${openCodePromptNote(s.relayTools, s.identity)}\n${s.identity === "none" ? "" : `\nTemporary files belong in ${s.paths.scratchDir}. Use that absolute path with file tools and $TMPDIR in shell. This directory is temporary.\n`}`,
+        `${s.system.trimEnd()}\n\n${openCodePromptNote(
+          s.relayTools.map((tool) => tool.name),
+          s.identity,
+        )}\n${s.identity === "none" ? "" : `\nTemporary files belong in ${s.paths.scratchDir}. Use that absolute path with file tools and $TMPDIR in shell. This directory is temporary.\n`}`,
       );
       expect(config.agents.switchboard.permissions).toEqual(openCodePermissionRules(s.identity));
       expect(config.agents.title).toEqual({ disabled: true });
@@ -564,9 +587,7 @@ describe("the configuration writer", () => {
     expect(files.map((f) => f.path)).toEqual([spec.paths.config, spec.paths.plugin, spec.paths.tailerScript]);
     expect(files[0].content).toBe(openCodeConfigJson(spec));
     // The relay plugin (U12), not the placeholder: it registers the run's tools
-    // from GET /harness/tools and speaks pi's `/harness/*` protocol.
-    expect(files[1].content).toBe(OPENCODE_PLUGIN_SOURCE);
-    expect(files[1].content).toContain("/harness/tools");
+    // from the launch declarations and speaks the bot's `/harness/*` protocol.
     expect(files[1].content).toContain("/harness/authorize");
     expect(files[1].content).toContain("/harness/tool");
     expect(files[2].content).toBe(OPENCODE_TAILER_SOURCE);
@@ -1115,7 +1136,11 @@ describe("launchOpenCode — the original deadline and cancellation", () => {
 
 describe("hosted Review permission policy", () => {
   it("puts native shell deny last without widening direct command or coding/explore permissions", () => {
-    const hosted = { ...reviewSpec, commandPolicy: "hosted-review", relayTools: ["run_check"] } as OpenCodeLaunchSpec;
+    const hosted = {
+      ...reviewSpec,
+      commandPolicy: "hosted-review",
+      relayTools: ["run_check"].map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
+    } as OpenCodeLaunchSpec;
     const permissions = openCodePermissionRules(hosted.identity, hosted.commandPolicy);
     expect(permissions.at(-1)).toEqual({ action: "shell", resource: "*", effect: "deny" });
     for (const action of ["execute", "subagent", "webfetch", "websearch"])
@@ -1131,7 +1156,19 @@ describe("hosted Review permission policy", () => {
       resource: "*",
       effect: "deny",
     });
-    expect(openCodePromptNote(hosted.relayTools, hosted.identity, hosted.commandPolicy)).toContain("Use `run_check`");
-    expect(openCodePromptNote(hosted.relayTools, hosted.identity, hosted.commandPolicy)).not.toContain("use `shell`");
+    expect(
+      openCodePromptNote(
+        hosted.relayTools.map((tool) => tool.name),
+        hosted.identity,
+        hosted.commandPolicy,
+      ),
+    ).toContain("Use `run_check`");
+    expect(
+      openCodePromptNote(
+        hosted.relayTools.map((tool) => tool.name),
+        hosted.identity,
+        hosted.commandPolicy,
+      ),
+    ).not.toContain("use `shell`");
   });
 });

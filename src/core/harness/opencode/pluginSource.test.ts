@@ -1,18 +1,21 @@
+import type { ToolDef } from "../../provider.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
-import { OC_BLOCKED_AT_DOOR_PREFIX, OPENCODE_PLUGIN_SOURCE, openCodePluginSource } from "./pluginSource.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { OC_BLOCKED_AT_DOOR_PREFIX, openCodePluginSource } from "./pluginSource.js";
 
 // Feature: docs/reference/specs/harness.md item 3 — the relay plugin. The plugin
 // text is a constant the harness writes into the run's plugin directory; loaded
 // by OpenCode as `./plugins/switchboard/index.js`, it registers the run's
-// relayed tools from `GET /harness/tools` and runs each through
+// relayed tools from the launch declarations and runs each through
 // `POST /harness/authorize` then `POST /harness/tool` with the model's call id,
 // honouring a `202 pending` by re-asking under the same id — pi's protocol
 // exactly. The test writes the constant to a file, imports it, and drives its
 // default export against a stubbed `fetch` and a fake plugin context.
+
+const OPENCODE_PLUGIN_SOURCE = openCodePluginSource([]);
 
 const BEARER = "sbr_run-c.the-secret-no-plugin-text-may-carry";
 const URL = "https://bot.example.com";
@@ -42,6 +45,7 @@ async function loadPlugin(
  *  answers the tool roster, the door and the relay, and can be scripted to
  *  answer a relay call `202 pending` a set number of times first. */
 interface FakeHarness {
+  definitions: ToolDef[];
   calls: Array<{ path: string; body: Record<string, unknown> }>;
   toolAnswers: Record<string, unknown>;
   authorize: (body: Record<string, unknown>) => { status: number; body: unknown };
@@ -51,7 +55,7 @@ interface FakeHarness {
 
 function fakeHarness(
   opts: {
-    tools?: Array<{ name: string; description: string; inputSchema: unknown }>;
+    tools?: ToolDef[];
     authorize?: (body: Record<string, unknown>) => { status: number; body: unknown };
     toolAnswer?: unknown;
     pendingBefore?: number;
@@ -61,6 +65,7 @@ function fakeHarness(
     { name: "update_status", description: "A relayed tool.", inputSchema: { type: "object" } },
   ];
   const fake: FakeHarness = {
+    definitions: tools,
     calls: [],
     toolAnswers: {},
     authorize: opts.authorize ?? (() => ({ status: 200, body: { allow: true } })),
@@ -91,6 +96,7 @@ function fakeHarness(
 const originalFetch = globalThis.fetch;
 const dirs: string[] = [];
 afterEach(() => {
+  vi.useRealTimers();
   globalThis.fetch = originalFetch;
   delete process.env.SWITCHBOARD_RUN_BEARER;
   delete process.env.SWITCHBOARD_HARNESS_URL;
@@ -108,7 +114,7 @@ async function register(fake: FakeHarness): Promise<AddedTool[]> {
   process.env.SWITCHBOARD_RUN_BEARER = BEARER;
   process.env.SWITCHBOARD_HARNESS_URL = URL;
   globalThis.fetch = fake.fetch;
-  const plugin = await loadPlugin(scratch());
+  const plugin = await loadPlugin(scratch(), openCodePluginSource(fake.definitions));
   const added: AddedTool[] = [];
   const hooks: Record<string, unknown> = {};
   await plugin.setup({
@@ -128,7 +134,7 @@ describe("the OpenCode relay plugin", () => {
     expect(OPENCODE_PLUGIN_SOURCE).not.toContain("the-secret");
     expect(OPENCODE_PLUGIN_SOURCE).toContain("process.env[BEARER_ENV]");
     expect(OPENCODE_PLUGIN_SOURCE).toContain("SWITCHBOARD_RUN_BEARER");
-    // Deterministic: the same text every time (a constant, not a per-run render).
+    // The rendered metadata includes no runtime secret.
     expect(typeof OPENCODE_PLUGIN_SOURCE).toBe("string");
   });
 
@@ -148,8 +154,8 @@ describe("the OpenCode relay plugin", () => {
     expect(added[0].options).toEqual({ codemode: false });
     expect(added[0].description).toBe("Report the checklist.");
     expect(added[0].input).toEqual({ type: "object", properties: { checklist: { type: "string" } } });
-    // The roster came from GET /harness/tools with the run bearer.
-    expect(fake.calls[0].path).toBe("/harness/tools");
+    // Registration uses metadata only; authority is asked when a tool executes.
+    expect(fake.calls).toEqual([]);
   });
 
   it("runs a call through the door then the relay with the SAME call id, and returns the tool's text once", async () => {
@@ -163,6 +169,81 @@ describe("the OpenCode relay plugin", () => {
     expect(harnessCalls[0].body.toolCallId).toBe("call_7");
     expect(harnessCalls[1].body.toolCallId).toBe("call_7");
     expect(harnessCalls[0].body.tool).toBe("update_status");
+  });
+
+  it("rejects setup when registration fails after adding one tool", async () => {
+    process.env.SWITCHBOARD_RUN_BEARER = BEARER;
+    process.env.SWITCHBOARD_HARNESS_URL = URL;
+    const plugin = await loadPlugin(
+      scratch(),
+      openCodePluginSource([
+        { name: "update_status", description: "Status", inputSchema: { type: "object" } },
+        { name: "submit_verdict", description: "Verdict", inputSchema: { type: "object" } },
+      ]),
+    );
+    const added: string[] = [];
+    await expect(
+      plugin.setup({
+        tool: {
+          transform: async (fn: (editor: unknown) => void) =>
+            fn({
+              add: (tool: AddedTool) => {
+                if (tool.name === "submit_verdict") throw new Error("registration refused");
+                added.push(tool.name);
+              },
+            }),
+          hook: () => {},
+        },
+      }),
+    ).rejects.toThrow("registration refused");
+    expect(added).toEqual(["update_status"]);
+  });
+
+  it.each(["null", "object-error", "non-JSON"])(
+    "keeps a %s authorization refusal final without relaying",
+    async (shape) => {
+      const fake = fakeHarness();
+      const fetch = fake.fetch;
+      fake.fetch = (async (...args: Parameters<typeof fetch>) => {
+        if (String(args[0]).endsWith("/harness/authorize")) {
+          fake.calls.push({ path: "/harness/authorize", body: JSON.parse(String(args[1]?.body)) });
+          const body =
+            shape === "null"
+              ? "null"
+              : shape === "object-error"
+                ? JSON.stringify({ error: { toString: null } })
+                : "private upstream text";
+          return new Response(body, { status: 403 });
+        }
+        return fetch(...args);
+      }) as typeof fake.fetch;
+      const [tool] = await register(fake);
+      await expect(tool.execute({}, { id: "refused" })).rejects.toThrow(
+        /authorization refused at the door: .*answered 403/,
+      );
+      expect(fake.calls.map((call) => call.path)).toEqual(["/harness/authorize"]);
+    },
+  );
+
+  it("waits through a resuming bot and keeps the original id through pending relay answers", async () => {
+    vi.useFakeTimers();
+    let asks = 0;
+    const fake = fakeHarness({
+      authorize: () =>
+        ++asks <= 2 ? { status: 503, body: { error: "run_resuming" } } : { status: 200, body: { allow: true } },
+      pendingBefore: 1,
+    });
+    const [tool] = await register(fake);
+    const result = tool.execute({ checklist: "ready" }, { id: "original-call" });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await result).toEqual({ content: "relayed OK" });
+    expect(fake.calls.map((call) => [call.path, call.body.toolCallId])).toEqual([
+      ["/harness/authorize", "original-call"],
+      ["/harness/authorize", "original-call"],
+      ["/harness/authorize", "original-call"],
+      ["/harness/tool", "original-call"],
+      ["/harness/tool", "original-call"],
+    ]);
   });
 
   it("re-asks a 202 pending under the same call id until the bot answers, and runs the tool's result out once", async () => {
@@ -199,7 +280,7 @@ describe("hosted Review plugin table", () => {
     process.env.SWITCHBOARD_RUN_BEARER = BEARER;
     process.env.SWITCHBOARD_HARNESS_URL = URL;
     globalThis.fetch = fake.fetch;
-    const plugin = await loadPlugin(scratch(), openCodePluginSource("hosted-review"));
+    const plugin = await loadPlugin(scratch(), openCodePluginSource(fake.definitions, "hosted-review"));
     const added: AddedTool[] = [];
     const removed: string[] = [];
     await plugin.setup({
@@ -223,6 +304,6 @@ describe("hosted Review plugin table", () => {
         input: { command: "git status --short", purpose: "verification" },
       },
     ]);
-    expect(openCodePluginSource()).not.toContain('editor.remove("shell")');
+    expect(openCodePluginSource([])).not.toContain('editor.remove("shell")');
   });
 });
