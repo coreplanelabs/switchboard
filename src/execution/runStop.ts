@@ -4,6 +4,7 @@ import { processSecrets, type Secrets } from "../secrets.js";
 import type { LiveRunRow } from "../core/runLedger/types.js";
 import {
   cancellationRuntimeSupported,
+  cancellationRefusalOf,
   type RunCancellation,
   type RuntimeStopResult,
 } from "../core/runLedger/cancellation.js";
@@ -37,23 +38,37 @@ export function createRunStop(
     if (!resident && binding.backend !== "sandbox") return { stopped: false };
     const { url, token } = target(binding);
     if (!url || !token) return { stopped: false };
-    const response = await fetchImpl(new URL("/cancel-run", url), {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${token.reveal()}`,
-        "content-type": "application/json",
-        ...(!resident && binding.sandboxKey ? { "x-thread-key": binding.sandboxKey } : {}),
-      },
-      body: JSON.stringify({ cancellation, binding, ...(resident ? { resource: `repo:${row.meta.repo}` } : {}) }),
-      signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+    const phase = resident ? "resident" : "sandbox";
+    const unconfirmed = (): RuntimeStopResult => ({
+      stopped: false as const,
+      refusal: { phase, cause: "runtime-unconfirmed" as const },
     });
-    if (!response.ok) return { stopped: false };
-    const result = (await response.json()) as Record<string, unknown>;
-    return result.stopped === true &&
-      result.cancellationId === cancellation.id &&
-      result.disposition === (resident ? "processes-stopped" : "workspace-discarded")
-      ? { stopped: true, disposition: resident ? "processes-stopped" : "workspace-discarded" }
-      : { stopped: false };
+    try {
+      const response = await fetchImpl(new URL("/cancel-run", url), {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token.reveal()}`,
+          "content-type": "application/json",
+          ...(!resident && binding.sandboxKey ? { "x-thread-key": binding.sandboxKey } : {}),
+        },
+        body: JSON.stringify({ cancellation, binding, ...(resident ? { resource: `repo:${row.meta.repo}` } : {}) }),
+        signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+      });
+      const result = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+      if (result?.cancellationId === cancellation.id && result.stopped === false) {
+        const refusal = cancellationRefusalOf(result.refusal);
+        if (refusal && (refusal.phase === "prepare" || refusal.phase === phase)) return { stopped: false, refusal };
+      }
+      if (!response.ok) return { stopped: false, refusal: { phase, cause: "runtime-http-refusal" } };
+      if (!result || result.cancellationId !== cancellation.id || result.stopped !== true) return unconfirmed();
+      if (resident && (result.disposition === "processes-stopped" || result.disposition === "runtime-retired"))
+        return { stopped: true, disposition: result.disposition };
+      if (!resident && result.disposition === "workspace-discarded")
+        return { stopped: true, disposition: "workspace-discarded" };
+      return unconfirmed();
+    } catch {
+      return unconfirmed();
+    }
   };
   return Object.assign(stop, {
     supports: (row: LiveRunRow) => {

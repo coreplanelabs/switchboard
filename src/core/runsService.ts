@@ -1,3 +1,4 @@
+import type { CancellationRefusal } from "./runLedger/cancellation.js";
 import type { RunCancellation, RuntimeStopResult } from "./runLedger/cancellation.js";
 import { reclaimedRunRecord } from "./dispatch/record.js";
 import type { LedgerRun as TrackedLedgerRun, LedgerWriteThrough } from "./runLedger/writeThrough.js";
@@ -73,7 +74,8 @@ export type { RunActor } from "./runEvents.js";
  *  live-view items 10 and 16): the units run elsewhere, so a soft stop would
  *  end nothing — the surfaces answer 409 naming the hard escape. */
 export type Result<T> =
-  { ok: true; value: T } | { ok: false; error: "not_found" | "conflict" | "hosted" | "unavailable" };
+  | { ok: true; value: T }
+  | { ok: false; error: "not_found" | "conflict" | "hosted" | "unavailable"; refusal?: CancellationRefusal };
 
 /**
  * One run as every surface sees it — live or persisted, the same shape. A
@@ -1487,7 +1489,8 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             const prepared = await ledger.prepareCancellation(id, sanitizeActor(actor));
             if (prepared.ok) {
               const runtime = await deps.stopRuntime(prepared.row, prepared.cancellation);
-              if (!runtime.stopped) return { ok: false, error: "unavailable" };
+              if (!runtime.stopped)
+                return { ok: false, error: "unavailable", ...(runtime.refusal ? { refusal: runtime.refusal } : {}) };
               const events = await ledger.readEvents(id);
               const record = reclaimedRunRecord({
                 row: prepared.row,

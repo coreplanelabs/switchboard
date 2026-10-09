@@ -1951,6 +1951,63 @@ describe("RunsService.stopRun", () => {
     expectNoToken(res);
   });
 
+  it("keeps a refused cancellation fenced and seals the same ticket after an acknowledged retirement", async () => {
+    const { reg, store } = setup();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+    const threadKey = "slack:C9:retired";
+    await ledger.claim({
+      runId: id,
+      threadKey,
+      gen: "g-original",
+      leaseMs: 30_000,
+      startedAt: NOW,
+      meta: { agent: "review", channelId: "slack:C9", userId: "slack:UIVY", threadKey, repo: "fixture/repo" },
+      card: null,
+      system: "",
+      tools: [],
+      state: {
+        binding: {
+          backend: "resident",
+          workspace: "/workspace/original",
+          ref: "main",
+          user: "worker2",
+          container: "original-boot",
+          ownerGen: "g-original",
+          ownerFence: 7,
+        },
+      },
+    });
+    let acknowledged = false;
+    const service = createRunsService({
+      registry: reg,
+      store,
+      ledger,
+      clock: () => NOW,
+      stopRuntime: async () =>
+        acknowledged
+          ? { stopped: true, disposition: "runtime-retired" }
+          : { stopped: false, refusal: { phase: "resident", cause: "native-outcome-unknown" } },
+    });
+    expect(await service.stopRun(id, "hard", actor)).toEqual({
+      ok: false,
+      error: "unavailable",
+      refusal: { phase: "resident", cause: "native-outcome-unknown" },
+    });
+    const ticket = ledger.live.get(id)?.state.cancellation;
+    expect(ledger.live.get(id)).toMatchObject({ runId: id, ownerGen: "g-original", stop: "hard" });
+    acknowledged = true;
+    expect(await service.stopRun(id, "hard", actor)).toEqual({
+      ok: true,
+      value: { id, mode: "hard", state: "stopped" },
+    });
+    expect(ledger.finished.get(id)).toMatchObject({
+      id,
+      status: "stopped_hard",
+      cancellation: { cancellation: ticket, disposition: "runtime-retired" },
+    });
+  });
+
   it("strips disallowed characters from actor.id and caps it at 128", async () => {
     const { reg, svc } = setup();
     const { id, token } = reg.create();

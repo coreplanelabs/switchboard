@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRunStop } from "./runStop.js";
 import { secretsFrom } from "../secrets.js";
-import { cancellationTargetPrepared, type RunCancellation } from "../core/runLedger/cancellation.js";
+import { readCancellationPreparation, type RunCancellation } from "../core/runLedger/cancellation.js";
 import type { LiveRunRow } from "../core/runLedger/types.js";
 
 // Feature: docs/reference/specs/run-history.md — hard stop targets an existing runtime.
@@ -47,6 +47,94 @@ function row(): LiveRunRow {
 }
 
 describe("run runtime stop", () => {
+  it("preserves an exact closed refusal without exposing the Worker's private payload", async () => {
+    const target = row();
+    target.state.binding = {
+      backend: "resident",
+      workspace: "/workspace/thread",
+      ref: "main",
+      user: "worker2",
+      container: "original-container",
+      ownerGen: "g1",
+      ownerFence: 7,
+    };
+    const stop = createRunStop(
+      { type: "cloudflare", resident: { baseUrl: "https://resident.example" } },
+      secretsFrom({ RESIDENT_OPERATOR_TOKEN: "fixture" }),
+      async () =>
+        Response.json({
+          stopped: false,
+          cancellationId: cancellation.id,
+          refusal: { phase: "resident", cause: "kill-unconfirmed" },
+          privateBody: "must not leave this boundary",
+        }),
+    );
+    expect(await stop!(target, cancellation)).toEqual({
+      stopped: false,
+      refusal: { phase: "resident", cause: "kill-unconfirmed" },
+    });
+  });
+  it("accepts an exact resident retirement receipt without claiming a kill on its old boot", async () => {
+    const target = row();
+    target.state.binding = {
+      backend: "resident",
+      workspace: "/workspace/thread",
+      ref: "main",
+      user: "worker2",
+      container: "original-container",
+      ownerGen: "g1",
+      ownerFence: 7,
+    };
+    const stop = createRunStop(
+      { type: "cloudflare", resident: { baseUrl: "https://resident.example" } },
+      secretsFrom({ RESIDENT_OPERATOR_TOKEN: "fixture" }),
+      async () => Response.json({ stopped: true, cancellationId: cancellation.id, disposition: "runtime-retired" }),
+    );
+    expect(await stop!(target, cancellation)).toEqual({ stopped: true, disposition: "runtime-retired" });
+  });
+  it.each(["foreign ticket", "foreign phase", "unknown cause", "malformed phase", "lost answer"])(
+    "keeps an unconfirmed runtime outcome private: %s",
+    async (outcome) => {
+      const stop = createRunStop(
+        { type: "cloudflare", url: "https://sandbox.example" },
+        secretsFrom({ SANDBOX_TOKEN: "fixture" }),
+        async () => {
+          if (outcome === "lost answer") throw new Error("private transport payload");
+          return Response.json({
+            stopped: false,
+            cancellationId: outcome === "foreign ticket" ? "foreign" : cancellation.id,
+            refusal: {
+              phase: outcome === "foreign phase" ? "resident" : outcome === "malformed phase" ? ["sandbox"] : "sandbox",
+              cause: outcome === "unknown cause" ? "private payload" : "destroy-unconfirmed",
+            },
+          });
+        },
+      );
+      expect(await stop!(row(), cancellation)).toEqual({
+        stopped: false,
+        refusal: { phase: "sandbox", cause: "runtime-unconfirmed" },
+      });
+    },
+  );
+  it("retains the exact prepared-check refusal on a non-success HTTP response", async () => {
+    const stop = createRunStop(
+      { type: "cloudflare", url: "https://sandbox.example" },
+      secretsFrom({ SANDBOX_TOKEN: "fixture" }),
+      async () =>
+        Response.json(
+          {
+            stopped: false,
+            cancellationId: cancellation.id,
+            refusal: { phase: "prepare", cause: "state-not-prepared" },
+          },
+          { status: 409 },
+        ),
+    );
+    expect(await stop!(row(), cancellation)).toEqual({
+      stopped: false,
+      refusal: { phase: "prepare", cause: "state-not-prepared" },
+    });
+  });
   it("requires affirmative no-workspace evidence and leaves unsupported backends on ordinary stop", async () => {
     const stop = createRunStop(
       { type: "cloudflare", url: "https://sandbox.example" },
@@ -123,13 +211,16 @@ describe("run runtime stop", () => {
       secretsFrom({ SANDBOX_TOKEN: "fixture" }),
       async () => Response.json({ stopped: true, cancellationId: "foreign", disposition: "workspace-discarded" }),
     );
-    expect(await unknown!(row(), cancellation)).toEqual({ stopped: false });
+    expect(await unknown!(row(), cancellation)).toEqual({
+      stopped: false,
+      refusal: { phase: "sandbox", cause: "runtime-unconfirmed" },
+    });
   });
   it("logs a closed prepared-check cause and exact identity without private exception data", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       expect(
-        await cancellationTargetPrepared(
+        await readCancellationPreparation(
           cancellation,
           row().state.binding,
           "https://state.example",
@@ -138,7 +229,7 @@ describe("run runtime stop", () => {
             throw new Error("private transport body and credential");
           },
         ),
-      ).toBe(false);
+      ).toMatchObject({ stopped: false, refusal: { phase: "prepare", cause: "state-unreachable" } });
       expect(JSON.parse(String(warn.mock.calls[0]?.[0]))).toEqual({
         event: "run.cancellation.refused",
         phase: "prepare",
@@ -148,14 +239,14 @@ describe("run runtime stop", () => {
       });
       warn.mockClear();
       expect(
-        await cancellationTargetPrepared(
+        await readCancellationPreparation(
           cancellation,
           row().state.binding,
           "https://state.example",
           "fixture",
           async () => Response.json({ prepared: true, cancellationId: "foreign" }),
         ),
-      ).toBe(false);
+      ).toMatchObject({ stopped: false, refusal: { phase: "prepare", cause: "ticket-mismatch" } });
       expect(JSON.parse(String(warn.mock.calls[0]?.[0]))).toMatchObject({ phase: "prepare", cause: "ticket-mismatch" });
     } finally {
       warn.mockRestore();
@@ -164,15 +255,18 @@ describe("run runtime stop", () => {
   it("requires the actual store-fenced binding before a Worker can kill a target", async () => {
     const binding = row().state.binding;
     expect(
-      await cancellationTargetPrepared(cancellation, binding, "https://state.example", "fixture", async () =>
+      await readCancellationPreparation(cancellation, binding, "https://state.example", "fixture", async () =>
         Response.json({ prepared: true, cancellationId: cancellation.id }),
       ),
-    ).toBe(true);
+    ).toEqual({ prepared: true });
     expect(
-      await cancellationTargetPrepared(cancellation, binding, "https://state.example", "fixture", async () =>
+      await readCancellationPreparation(cancellation, binding, "https://state.example", "fixture", async () =>
         Response.json({ prepared: true, cancellationId: "foreign" }),
       ),
-    ).toBe(false);
-    expect(await cancellationTargetPrepared(cancellation, binding, undefined, undefined)).toBe(false);
+    ).toMatchObject({ stopped: false, refusal: { phase: "prepare", cause: "ticket-mismatch" } });
+    expect(await readCancellationPreparation(cancellation, binding, undefined, undefined)).toMatchObject({
+      stopped: false,
+      refusal: { phase: "prepare", cause: "state-unconfigured" },
+    });
   });
 });

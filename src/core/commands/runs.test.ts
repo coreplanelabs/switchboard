@@ -787,6 +787,28 @@ describe("runs.stop", () => {
     });
   });
 
+  it("names a known shutdown refusal without claiming the stop was unrecorded or suggesting replay", async () => {
+    const { reg, registry, deps } = await setup();
+    const { id } = reg.create("live", {
+      agent: "review",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:t",
+    });
+    const runs = await deps.runs();
+    vi.spyOn(runs, "stopRun").mockResolvedValue({
+      ok: false,
+      error: "unavailable",
+      refusal: { phase: "resident", cause: "native-outcome-unknown" },
+    });
+    expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "hard" } }, reader, deps)).toMatchObject({
+      ok: false,
+      error: "unavailable",
+      status: 503,
+      message: "An earlier operation has an unknown outcome.",
+    });
+  });
+
   it("stops a live run and records the caller as the structured actor", async () => {
     const { reg, registry, deps } = await setup();
     const { id, token } = reg.create("coding · acme/live", {

@@ -17,8 +17,88 @@ export interface RunCancellation {
   repo?: string;
   actor: CancellationActor;
 }
-export type CancellationDisposition = "workspace-discarded" | "processes-stopped" | "no-workspace";
-export type RuntimeStopResult = { stopped: true; disposition: CancellationDisposition } | { stopped: false };
+export type CancellationDisposition = "workspace-discarded" | "processes-stopped" | "runtime-retired" | "no-workspace";
+export type CancellationPhase = "prepare" | "sandbox" | "resident";
+const CANCELLATION_REFUSAL_CAUSES = [
+  "state-unconfigured",
+  "state-http-refusal",
+  "state-not-prepared",
+  "ticket-mismatch",
+  "state-unreachable",
+  "target-mismatch",
+  "ticket-conflict",
+  "custody-unverified",
+  "destroy-unconfirmed",
+  "invalid-request",
+  "kill-unconfirmed",
+  "operations-busy",
+  "native-outcome-unknown",
+  "runtime-unavailable",
+  "native-observation-unconfirmed",
+  "target-changed",
+  "runtime-unconfirmed",
+  "runtime-http-refusal",
+] as const;
+export interface CancellationRefusal {
+  phase: CancellationPhase;
+  cause: (typeof CANCELLATION_REFUSAL_CAUSES)[number];
+}
+export type RuntimeStopResult =
+  { stopped: true; disposition: CancellationDisposition } | { stopped: false; refusal?: CancellationRefusal };
+
+/** Only the closed diagnostic crosses the runtime boundary, never its body. */
+export function cancellationRefusalOf(value: unknown): CancellationRefusal | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const v = value as Record<string, unknown>;
+  if (
+    Object.keys(v).some((key) => !["phase", "cause"].includes(key)) ||
+    typeof v.phase !== "string" ||
+    !["prepare", "sandbox", "resident"].includes(v.phase) ||
+    !CANCELLATION_REFUSAL_CAUSES.includes(v.cause as CancellationRefusal["cause"])
+  )
+    return;
+  return { phase: v.phase as CancellationPhase, cause: v.cause as CancellationRefusal["cause"] };
+}
+
+export function cancellationFailureMessage(refusal?: CancellationRefusal): string {
+  switch (refusal?.cause) {
+    case "state-unconfigured":
+      return "The shutdown service is unavailable.";
+    case "state-http-refusal":
+      return "The shutdown check was refused.";
+    case "state-unreachable":
+      return "The shutdown check did not answer.";
+    case "ticket-mismatch":
+    case "ticket-conflict":
+      return "The shutdown request does not match the recorded stop.";
+    case "target-mismatch":
+      return "The shutdown target could not be confirmed.";
+    case "target-changed":
+      return "The shutdown target changed before confirmation.";
+    case "state-not-prepared":
+      return "The recorded stop could not be verified.";
+    case "custody-unverified":
+      return "The run's workspace could not be verified.";
+    case "operations-busy":
+      return "The run still has operations in progress.";
+    case "native-outcome-unknown":
+      return "An earlier operation has an unknown outcome.";
+    case "runtime-unavailable":
+      return "The run's runtime is unavailable.";
+    case "runtime-http-refusal":
+      return "The runtime refused the shutdown request.";
+    case "kill-unconfirmed":
+      return "Process shutdown was not confirmed.";
+    case "destroy-unconfirmed":
+      return "Workspace shutdown was not confirmed.";
+    case "native-observation-unconfirmed":
+      return "Runtime shutdown could not be verified.";
+    case "runtime-unconfirmed":
+      return "The shutdown operation has an unknown outcome.";
+    default:
+      return "Shutdown is not confirmed.";
+  }
+}
 export type CancellationPreparation =
   | { ok: true; row: LiveRunRow; cancellation: RunCancellation }
   | { ok: false; reason: "unknown-run" | "fenced" | "unsupported" };
@@ -96,7 +176,7 @@ export function cancellationRecordMatches(record: RunRecord, cancellation: RunCa
     receipt.version === 1 &&
     receipt.actor.kind === cancellation.actor.kind &&
     receipt.actor.id === cancellation.actor.id &&
-    ["workspace-discarded", "processes-stopped", "no-workspace"].includes(receipt.disposition) &&
+    ["workspace-discarded", "processes-stopped", "runtime-retired", "no-workspace"].includes(receipt.disposition) &&
     sameCancellation(cancellationOf(receipt.cancellation), cancellation)
   );
 }
@@ -114,25 +194,8 @@ export function cancellationBindingMatches(actual: unknown, requested: unknown):
 /** Only closed causes and validated identity enter this operator diagnostic. */
 export function cancellationRefusal(
   cancellation: RunCancellation | undefined,
-  phase: "prepare" | "sandbox" | "resident",
-  cause:
-    | "state-unconfigured"
-    | "state-http-refusal"
-    | "state-not-prepared"
-    | "ticket-mismatch"
-    | "state-unreachable"
-    | "target-mismatch"
-    | "ticket-conflict"
-    | "custody-unverified"
-    | "destroy-unconfirmed"
-    | "invalid-request"
-    | "kill-unconfirmed"
-    | "operations-busy"
-    | "native-outcome-unknown"
-    | "runtime-unavailable"
-    | "native-observation-unconfirmed"
-    | "target-changed"
-    | "runtime-unconfirmed",
+  phase: CancellationPhase,
+  cause: CancellationRefusal["cause"],
 ): false {
   console.warn(
     JSON.stringify({
@@ -145,14 +208,27 @@ export function cancellationRefusal(
   return false;
 }
 
-export async function cancellationTargetPrepared(
+export function cancellationFailure(
+  cancellation: RunCancellation | undefined,
+  phase: CancellationPhase,
+  cause: CancellationRefusal["cause"],
+) {
+  cancellationRefusal(cancellation, phase, cause);
+  return {
+    stopped: false as const,
+    ...(cancellation ? { cancellationId: cancellation.id } : {}),
+    refusal: { phase, cause },
+  };
+}
+
+export async function readCancellationPreparation(
   cancellation: RunCancellation,
   binding: unknown,
   url: string | undefined,
   token: string | undefined,
   fetchImpl = fetch,
-): Promise<boolean> {
-  if (!url || !token) return cancellationRefusal(cancellation, "prepare", "state-unconfigured");
+): Promise<{ prepared: true } | ReturnType<typeof cancellationFailure>> {
+  if (!url || !token) return cancellationFailure(cancellation, "prepare", "state-unconfigured");
   try {
     const response = await fetchImpl(new URL("/runs/cancellation/read", url), {
       method: "POST",
@@ -160,14 +236,14 @@ export async function cancellationTargetPrepared(
       body: JSON.stringify({ storeKey: "runs:default", cancellation, binding }),
       signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
     });
-    if (!response.ok) return cancellationRefusal(cancellation, "prepare", "state-http-refusal");
+    if (!response.ok) return cancellationFailure(cancellation, "prepare", "state-http-refusal");
     const result = (await response.json()) as Record<string, unknown>;
-    if (result.prepared !== true) return cancellationRefusal(cancellation, "prepare", "state-not-prepared");
+    if (result.prepared !== true) return cancellationFailure(cancellation, "prepare", "state-not-prepared");
     if (result.cancellationId !== cancellation.id)
-      return cancellationRefusal(cancellation, "prepare", "ticket-mismatch");
-    return true;
+      return cancellationFailure(cancellation, "prepare", "ticket-mismatch");
+    return { prepared: true };
   } catch {
-    return cancellationRefusal(cancellation, "prepare", "state-unreachable");
+    return cancellationFailure(cancellation, "prepare", "state-unreachable");
   }
 }
 
