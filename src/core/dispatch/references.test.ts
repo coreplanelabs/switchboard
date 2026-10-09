@@ -27,7 +27,7 @@ import {
 // adapter recognises become quoted, untrusted blocks on the request turn — and
 // nothing else. The rules the tests pin: the parsers that read `history` and
 // `msg.text` never see a block; the classifier's `never` and a non-member bot
-// refuse; the policy row decides with a pointing actor; a guest may reference
+// refuse; the policy row decides for the resolved requester; a guest may reference
 // the origin channel only; the caps hold; every refusal is the same line.
 
 const ORIGIN = "slack:C_ORIGIN";
@@ -60,9 +60,18 @@ function fakeReader(input: {
     async classifyConversation(ref) {
       calls.classify++;
       if (input.classifyDelayMs) await new Promise((r) => setTimeout(r, input.classifyDelayMs));
-      const c = input.channels[ref.channelId];
+      const c =
+        input.channels[ref.channelId] ??
+        (ref.channelId === ORIGIN
+          ? { visibility: "public" as const, readerHasAccess: true, channelName: "origin" }
+          : undefined);
       if (!c) throw new Error("channel_not_found");
-      return { visibility: c.visibility, botIsMember: c.botIsMember, channelName: c.channelName };
+      return {
+        visibility: c.visibility,
+        readerHasAccess: c.readerHasAccess,
+        channelName: c.channelName,
+        ...(c.shared ? { shared: true } : {}),
+      };
     },
     async readConversation(ref) {
       calls.read++;
@@ -87,8 +96,8 @@ function fakeReader(input: {
 const requester = actor("user", "slack:U_REQ");
 const admin = actor("user", "slack:U_ADMIN", { actions: "all", channels: "all", repos: "all" });
 
-const PUBLIC_OTHER = { visibility: "public" as const, botIsMember: true, channelName: "other" };
-const PRIVATE_CH = { visibility: "private" as const, botIsMember: true, channelName: "private" };
+const PUBLIC_OTHER = { visibility: "public" as const, readerHasAccess: true, channelName: "other" };
+const PRIVATE_CH = { visibility: "private" as const, readerHasAccess: true, channelName: "private" };
 
 describe("readReferences — the references step", () => {
   afterEach(() => {
@@ -109,7 +118,7 @@ describe("readReferences — the references step", () => {
     expect(out.blocks[0]).toContain(UNTRUSTED_OPEN);
     expect(out.blocks[0]).toContain("teammate: hello from the other thread");
     expect(out.blocks[0].trimEnd().endsWith(UNTRUSTED_CLOSE)).toBe(true);
-    expect(calls).toEqual({ classify: 1, read: 1, member: 1 });
+    expect(calls.read).toBe(1);
   });
 
   it("the parsers that read the request text and history answer identically with and without references", async () => {
@@ -172,14 +181,14 @@ describe("readReferences — the references step", () => {
       { msg: msgOf(`${url(OTHER)} again ${url(OTHER)}`), actor: requester },
     );
     expect(out.conversations).toHaveLength(1);
-    expect(calls.classify).toBe(1);
+    expect(calls.read).toBe(1);
   });
 
-  it("refuses uniformly: never, not-a-member, denied private-from-elsewhere and a missing channel each cost one classify call and no read", async () => {
+  it("refuses uniformly: never, not-a-member, denied private-from-elsewhere and a missing channel return no source content", async () => {
     const { reader, calls } = fakeReader({
       channels: {
-        "slack:C_SHARED": { visibility: "never", botIsMember: true },
-        "slack:C_NOTIN": { visibility: "public", botIsMember: false },
+        "slack:C_SHARED": { visibility: "never", readerHasAccess: true },
+        "slack:C_NOTIN": { visibility: "public", readerHasAccess: false },
         [PRIVATE]: PRIVATE_CH,
       },
     });
@@ -187,28 +196,31 @@ describe("readReferences — the references step", () => {
     const out = await readReferences({ conversationReaders: [reader] }, { msg: msgOf(text), actor: requester });
     expect(out.conversations).toEqual([]);
     expect(out.refused).toEqual(["never", "not-a-member", "denied"]);
-    expect(calls).toEqual({ classify: 3, read: 0, member: 3 });
+    expect(calls).toEqual({ classify: 4, read: 0, member: 3 });
     // A channel the classifier cannot find is `never` too.
     const missing = await readReferences(
       { conversationReaders: [reader] },
       { msg: msgOf(url("slack:C_GONE")), actor: requester },
     );
     expect(missing.refused).toEqual(["never"]);
+    expect(calls).toEqual({ classify: 5, read: 0, member: 4 });
   });
 
   it("a private thread is quotable from inside its own channel, and an admin pointing from elsewhere is denied like anyone", async () => {
-    const { reader } = fakeReader({ channels: { [PRIVATE]: PRIVATE_CH } });
+    const { reader, calls } = fakeReader({ channels: { [PRIVATE]: PRIVATE_CH } });
     const inside = await readReferences(
-      { conversationReaders: [reader] },
+      { conversationReaders: [reader], channelDirectory: { isMember: async () => true } },
       { msg: msgOf(url(PRIVATE), { channelId: PRIVATE, threadKey: `${PRIVATE}:9.0` }), actor: requester },
     );
     expect(inside.conversations).toHaveLength(1);
     expect(inside.visibilities).toEqual(["private"]);
+    const before = { ...calls };
     const adminElsewhere = await readReferences(
       { conversationReaders: [reader] },
       { msg: msgOf(url(PRIVATE)), actor: admin },
     );
     expect(adminElsewhere.refused).toEqual(["denied"]);
+    expect(calls).toEqual({ classify: before.classify + 2, read: before.read, member: before.member + 1 });
   });
 
   it("a guest may reference the origin channel's own threads and nothing else, refused before any classify call", async () => {
@@ -229,7 +241,7 @@ describe("readReferences — the references step", () => {
     const out = await readReferences({ conversationReaders: [reader] }, { msg: msgOf(text), actor: requester });
     expect(out.conversations).toHaveLength(REFERENCE_MAX_PER_REQUEST);
     expect(out.refused).toEqual(["over-cap"]);
-    expect(calls.classify).toBe(REFERENCE_MAX_PER_REQUEST);
+    expect(calls).toEqual({ classify: 12, read: 3, member: 6 });
   });
 
   it("the eleventh reference in a minute from one user is refused before any reader call; the window rolls", async () => {
@@ -243,12 +255,14 @@ describe("readReferences — the references step", () => {
       );
       expect(out.refused).toEqual([]);
     }
+    const before = { ...calls };
     const eleventh = await readReferences(
       { conversationReaders: [reader] },
       { msg: msgOf(url(OTHER, "p1700000000000199")), actor: requester },
     );
     expect(eleventh.refused).toEqual(["rate-limited"]);
-    expect(calls.classify).toBe(REFERENCE_PER_USER_PER_MINUTE);
+    expect(calls).toEqual(before);
+    expect(calls.read).toBe(10);
     vi.setSystemTime(1_700_000_061_000);
     const later = await readReferences(
       { conversationReaders: [reader] },

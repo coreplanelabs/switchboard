@@ -1,3 +1,5 @@
+import type { ChannelDirectory } from "../../core/authz/types.js";
+import type { Secret } from "../../secrets.js";
 import { sourceHash } from "../../core/references/receipts.js";
 import { humanizeMessageText } from "../../core/dispatch/reply.js";
 import type {
@@ -15,8 +17,8 @@ import { threadTurns, type SlackThreadMessage } from "./threadTurns.js";
 // recognises this workspace's host alone (channel ids are per-workspace and
 // look alike, so a link into another workspace must stay plain text); the
 // classifier is one fresh `conversations.info` per call under a short cache,
-// answering `never` for everything it cannot affirmatively place — a shared or
-// external channel, a DM, a missing channel, an error; the fetch is text only
+// answering `never` for everything it cannot affirmatively place —
+// a DM, a missing channel, an error; sharing is reported independently; the fetch is text only
 // and keeps the newest messages; the requester's standing is `users.info`'s
 // guest flags. No new scope: `channels:history`, `groups:history`,
 // `channels:read`, `groups:read` and `users:read` are already required.
@@ -33,7 +35,15 @@ export const REPLIES_MAX_PAGES = 10;
 
 /** The slice of the Slack Web API the reader uses — structural, so a test fake satisfies it. */
 export interface ReferenceClient {
-  auth: { test(): Promise<{ url?: string; team_id?: string }> };
+  auth: {
+    test(): Promise<{
+      url?: string;
+      team_id?: string;
+      user_id?: string;
+      bot_id?: string;
+      response_metadata?: { scopes?: string[] };
+    }>;
+  };
   conversations: {
     info(args: { channel: string }): Promise<{
       channel?: {
@@ -112,6 +122,26 @@ const THREAD_TS = /^\d{10}\.\d{6}$/;
 
 export class SlackConversationReader implements ConversationReader {
   readonly platform = SLACK;
+  get workspacePublicRead(): boolean {
+    return this.options.workspacePublicRead === true;
+  }
+  get directory() {
+    return this.options.directory;
+  }
+  get token() {
+    return this.options.token;
+  }
+  forReference(originChannelId: string, ref: ConversationRef): SlackConversationReader {
+    return ref.channelId !== originChannelId ? (this.options.crossChannel ?? this) : this;
+  }
+  readThread(ref: ConversationRef, target?: string | readonly string[]): Promise<SlackThreadMessage[]> {
+    return fetchSlackReplies(
+      this.client,
+      ref.channelId.slice(SLACK.length + 1),
+      ref.threadKey.slice(ref.channelId.length + 1),
+      target,
+    );
+  }
   private host: string | undefined;
   private readonly readyP: Promise<void>;
   private readonly cache = new Map<string, { at: number; answer: ConversationClassification }>();
@@ -119,6 +149,13 @@ export class SlackConversationReader implements ConversationReader {
   constructor(
     private readonly client: ReferenceClient,
     private readonly now: () => number = Date.now,
+    private readonly options: {
+      workspacePublicRead?: boolean;
+      workspaceTeamId?: string;
+      directory?: Pick<ChannelDirectory, "isMember">;
+      crossChannel?: SlackConversationReader;
+      token?: Secret;
+    } = {},
   ) {
     // The host is this workspace's `auth.test` URL, read once per process
     // (`resolveTeamUrl`'s memo). Until it is known nothing parses: a guess
@@ -166,52 +203,33 @@ export class SlackConversationReader implements ConversationReader {
     const channel = ref.channelId.slice(SLACK.length + 1);
     const hit = this.cache.get(channel);
     if (hit && this.now() - hit.at < CLASSIFY_CACHE_MS) return hit.answer;
-    let answer: ConversationClassification;
-    try {
-      const c = (await this.client.conversations.info({ channel })).channel;
-      if (!c) return NEVER;
-      // Everything the record says is never quotable across channels: a DM or
-      // group DM, and a channel shared with another workspace in any state.
-      if (c.is_im || c.is_mpim || c.is_shared || c.is_ext_shared || c.is_org_shared || c.is_pending_ext_shared) {
-        return NEVER;
-      }
-      answer = {
-        visibility: c.is_private ? "private" : "public",
-        botIsMember: c.is_member === true,
-        ...(c.name ? { channelName: c.name } : {}),
-      };
-    } catch {
-      // A failure is `never` and is not cached, so a transient error costs one refusal, not thirty seconds of them.
-      return NEVER;
-    }
-    this.cache.set(channel, { at: this.now(), answer });
-    return answer;
+    return this.classifyConversationFresh(ref);
   }
 
-  /** A post-fetch authority check cannot accept the short classification cache. */
+  /** Source boundaries bypass the cache; the adapter reports facts, never read policy. */
   async classifyConversationFresh(ref: ConversationRef): Promise<ConversationClassification> {
     const channel = ref.channelId.slice(SLACK.length + 1);
     this.cache.delete(channel);
     try {
       const c = (await this.client.conversations.info({ channel })).channel;
-      if (
-        !c ||
-        c.is_im ||
-        c.is_mpim ||
-        typeof c.is_private !== "boolean" ||
-        c.is_member !== true ||
-        c.is_shared ||
-        c.is_ext_shared ||
-        c.is_org_shared ||
-        c.is_pending_ext_shared
-      )
-        return NEVER;
-      return {
+      if (!c || c.is_mpim) return NEVER;
+      if (c.is_im)
+        return {
+          ...NEVER,
+          direct: true,
+          ...(c.is_shared || c.is_ext_shared || c.is_org_shared || c.is_pending_ext_shared ? { shared: true } : {}),
+        };
+      if (typeof c.is_private !== "boolean") return NEVER;
+      const answer: ConversationClassification = {
         visibility: c.is_private ? "private" : "public",
-        botIsMember: true,
+        readerHasAccess: c.is_member === true || (this.workspacePublicRead && c.is_private === false),
+        ...(c.is_shared || c.is_ext_shared || c.is_org_shared || c.is_pending_ext_shared ? { shared: true } : {}),
         ...(c.name ? { channelName: c.name } : {}),
       };
+      this.cache.set(channel, { at: this.now(), answer });
+      return answer;
     } catch {
+      // Missing facts are never cached as permission.
       return NEVER;
     }
   }
@@ -265,7 +283,7 @@ export class SlackConversationReader implements ConversationReader {
     const user = userId.startsWith(`${SLACK}:`) ? userId.slice(SLACK.length + 1) : userId;
     try {
       const u = (await this.client.users.info({ user })).user;
-      if (!u) return false;
+      if (!u || (this.options.workspaceTeamId && u.team_id !== this.options.workspaceTeamId)) return false;
       return u.is_restricted !== true && u.is_ultra_restricted !== true;
     } catch {
       return false;
@@ -273,7 +291,7 @@ export class SlackConversationReader implements ConversationReader {
   }
 }
 
-const NEVER: ConversationClassification = Object.freeze({ visibility: "never", botIsMember: false });
+const NEVER: ConversationClassification = Object.freeze({ visibility: "never", readerHasAccess: false });
 
 /** Stable content identity excludes reply counts and transport URLs that change on append. */
 export function slackMessageHash(message: SlackThreadMessage): Promise<string> {

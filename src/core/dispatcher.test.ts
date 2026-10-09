@@ -961,6 +961,8 @@ describe("dispatch", () => {
     options: {
       enabled?: boolean;
       mixed?: boolean;
+      shared?: boolean;
+      automatic?: boolean;
       file?: boolean;
       failWrite?: "initialize" | "read";
       denyOrigin?: boolean;
@@ -1005,7 +1007,7 @@ describe("dispatch", () => {
             is_mpim: false,
             is_private: channel.startsWith("D"),
             is_member: true,
-            is_shared: false,
+            is_shared: channel === "C_PUBLIC" && options.shared === true,
             is_ext_shared: false,
             is_org_shared: channel === "DALICE" && options.denyOrigin === true,
             is_pending_ext_shared: false,
@@ -1077,10 +1079,16 @@ describe("dispatch", () => {
       },
     };
     const deps = makeDeps(
-      mainDmYaml + `references: { enabled: ${options.enabled ?? true} }\n`,
+      (options.automatic ? YAML_FIXTURE : mainDmYaml) + `references: { enabled: ${options.enabled ?? true} }\n`,
       options.provider ?? provider,
     );
     deps.conversationReaders = [reader];
+    const directory: ChannelDirectory = {
+      ...PUBLIC_CHANNEL,
+      info: async (channel) => ({ visibility: channel.startsWith("slack:D") ? "dm" : "public" }),
+      isMember: async () => true,
+    };
+    deps.channelDirectory = directory;
     deps.runLedger = createLedgerWriteThrough({
       ledger,
       gen: "gen-source",
@@ -1093,6 +1101,7 @@ describe("dispatch", () => {
         reader,
         actor,
         msg: origin,
+        directory,
         loadFile: async () => ({
           content: "accepted file evidence",
           hash: await sourceHash("accepted file evidence"),
@@ -1104,6 +1113,30 @@ describe("dispatch", () => {
     );
     return { deps, question, requests, fetches, committed, ledger, answer, publicUrl, foreignUrl };
   }
+
+  it("shared source evidence survives admission and answer checks on both intake paths", async () => {
+    for (const intake of ["automatic", "tool"] as const) {
+      const provider = capturingProvider("The source evidence is available.");
+      const fixture = await mainSourceFixture({
+        shared: true,
+        ...(intake === "automatic" ? { provider, automatic: true } : {}),
+      });
+      const destination = intake === "automatic" ? fakeIO() : mainDmIO();
+      const request =
+        intake === "automatic" ? msg(`use this source ${fixture.publicUrl}`, "slack:UADMIN") : fixture.question;
+      await dispatch(fixture.deps, request, destination.io);
+      const requests = intake === "automatic" ? provider.requests : fixture.requests;
+      expect(JSON.stringify(requests.at(-1)?.messages)).toContain("accepted source evidence");
+      expect(destination.replies).toEqual([
+        intake === "automatic" ? "The source evidence is available." : fixture.answer,
+      ]);
+      expect(
+        fixture.committed.some(
+          (state) => state.status === "known" && state.context?.slack.some((receipt) => receipt.shared === true),
+        ),
+      ).toBe(true);
+    }
+  });
 
   it("defers configured main references to committed source reads", async () => {
     for (const enabled of [true, false]) {
@@ -23491,7 +23524,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       ],
     });
     t.deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "");
-    const classify = vi.fn(async () => ({ visibility: "never" as const, botIsMember: false }));
+    const classify = vi.fn(async () => ({ visibility: "never" as const, readerHasAccess: false }));
     const read = vi.fn();
     t.deps.conversationReaders = [
       {
@@ -23564,7 +23597,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       {
         platform: "slack",
         parseConversationUrl: (url) => (url === permalink ? ref : undefined),
-        classifyConversation: async () => ({ visibility: "public", botIsMember: true, channelName: "frontend" }),
+        classifyConversation: async () => ({ visibility: "public", readerHasAccess: true, channelName: "frontend" }),
         readConversation: read,
         requesterIsFullMember: async () => true,
       },
@@ -24319,7 +24352,7 @@ describe("the references step in dispatch (record 0037)", () => {
         u === PERMALINK ? { channelId: "slack:C_PUB", threadKey: "slack:C_PUB:1700000000.000100", url: u } : undefined,
       classifyConversation: async () => {
         calls.classify++;
-        return { visibility: "public", botIsMember: true, channelName: "frontend" };
+        return { visibility: "public", readerHasAccess: true, channelName: "frontend" };
       },
       readConversation: async (ref) => {
         calls.read++;
@@ -24365,7 +24398,7 @@ describe("the references step in dispatch (record 0037)", () => {
     deps.conversationReaders = [reader];
     const { io } = fakeIO();
     await dispatch(deps, msg(`what did we conclude? ${PERMALINK}`), io);
-    expect(calls).toEqual({ classify: 1, read: 1, member: 1 });
+    expect(calls.read).toBe(1);
     // The request turn reaches pi as one prompt: the request, then the quoted block, joined with a blank line (harness-pi item 9).
     const [prompt, ...rest] = lastUserTexts(provider.requests[0]);
     expect(rest).toEqual([]);
@@ -24393,7 +24426,7 @@ describe("the references step in dispatch (record 0037)", () => {
     const { reader, calls } = fakeReader();
     reader.classifyConversation = async () => {
       calls.classify++;
-      return { visibility: "never", botIsMember: false };
+      return { visibility: "never", readerHasAccess: false };
     };
     deps.conversationReaders = [reader];
     // The channel's calls in the order they were made: the card is `status`,

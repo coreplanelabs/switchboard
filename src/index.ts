@@ -18,8 +18,7 @@ import { capabilitiesFrom } from "./core/capabilities.js";
 import { PiAiProviders } from "./core/harness/piAi.js";
 import { createSlackApp, wireIntakeGate, type SlackIntakeGate } from "./channels/slack.js";
 import { SlackChannelDirectory } from "./channels/slackChannelDirectory.js";
-import { SlackConversationReader } from "./channels/slack/references.js";
-import { createSlackContextCapability } from "./channels/slack/context.js";
+import { createSlackReadAccess } from "./channels/slack/readAccess.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
 import { FilePersonalTokenStore, WorkerPersonalTokenStore } from "./mcp/personalTokens.js";
@@ -1095,20 +1094,20 @@ export async function runBot(): Promise<void> {
     app.event(moved, async () => channelDirectory.forgetAll());
   receiver.client.on("connected", () => channelDirectory.forgetAll());
   // The conversation reader (record 0037): a permalink to another thread the
-  // bot is in becomes a quoted, untrusted block on the request turn — this
+  // requester may read becomes a quoted, untrusted block on the request turn — this
   // workspace's URL grammar, one fresh `conversations.info` per classification,
   // a text-only fetch. Inert until `references.enabled` is set; the host it
   // recognises is read from `auth.test` once the socket is up.
-  const conversationReader = new SlackConversationReader(app.client);
-  deps.conversationReaders = [conversationReader];
-  deps.slackContextForRun = (actor, msg) =>
-    createSlackContextCapability({
-      client: app.client,
-      reader: conversationReader,
-      actor,
-      msg,
-      directory: channelDirectory,
-    });
+  const readerTokenEnv = config.config.slack?.readerTokenEnv;
+  const readToken = readerTokenEnv ? processSecrets.named(readerTokenEnv) : undefined;
+  if (readerTokenEnv && !readToken) throw new Error(`Missing ${readerTokenEnv} for Slack source reads.`);
+  const slackReads = await createSlackReadAccess({
+    listener: app.client,
+    directory: channelDirectory,
+    ...(readToken ? { token: readToken } : {}),
+  });
+  deps.conversationReaders = [slackReads.reader];
+  deps.slackContextForRun = slackReads.context;
   // Connect tickets bind to the requester's email when Slack can tell us
   // (`users:read.email`); without the scope the lookup yields undefined and the
   // ticket binds to the first Access identity that opens it instead.

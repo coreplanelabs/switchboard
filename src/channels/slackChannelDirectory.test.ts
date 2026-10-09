@@ -342,6 +342,14 @@ describe("SlackChannelDirectory — a forget during a lookup wins", () => {
 });
 
 describe("SlackChannelDirectory.isMember — the person's own channel set", () => {
+  it("a fresh source check observes membership loss without accepting the cached allow", async () => {
+    const members = { UA: [["C1"]] };
+    const { client } = fakeClient({}, members);
+    const dir = new SlackChannelDirectory(client);
+    expect(await dir.isMember("slack:UA", "slack:C1")).toBe(true);
+    members.UA = [[]];
+    expect(await dir.isMember("slack:UA", "slack:C1", { fresh: true })).toBe(false);
+  });
   it("is true for a channel in the set, false for one outside it, unknown when the set is unknown, and the fallback's unknown for a non-Slack actor", async () => {
     const { client, conversations } = fakeClient({}, { UA: [["C1"]], UERR: new Error("down") });
     const dir = new SlackChannelDirectory(client, { now: clock().now });

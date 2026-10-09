@@ -85,3 +85,14 @@ Set `BRAVE_SEARCH_API_KEY`; without it the research agent has no web search.
 
 - [Configuration](../reference/configuration.md): every block that names an environment variable.
 - [Security model](../explanation/security-model.md): why the GitHub credential lives where it does.
+
+
+## Optional Slack source read account
+
+To read linked sources without adding Switchboard to those channels, an admin can authorize one read-only Slack user account on the existing app. Store its user OAuth token as `SLACK_READ_TOKEN` in the deployment profile's secret source and set `slack.readerTokenEnv: SLACK_READ_TOKEN`. Provision that secret on the bot Worker and restart through the normal deployment path. Do not put the token in configuration, chat or the repository.
+
+The read account needs `channels:read`, `channels:history` and `users:read`. Add `groups:read` and `groups:history` only for approved private sources, and `files:read` when file reads are needed. The app manifest lists these user scopes separately from the bot's scopes. The connection must belong to a full user in the same workspace and have no other scopes. Users do not connect accounts individually.
+
+This account makes HTTP reads only. It neither joins channels nor changes the bot's subscriptions. Public sources require a full workspace requester. Private sources additionally require fresh requester membership and private delivery. The bot retains listening, current-thread context and replies. Configuring the connection without its named token fails startup; leaving it unconfigured preserves the existing bot-member-only source reader.
+
+Slack documents user-token access for [thread replies](https://docs.slack.dev/reference/methods/conversations.replies/) and [channel history](https://docs.slack.dev/reference/methods/conversations.history/).

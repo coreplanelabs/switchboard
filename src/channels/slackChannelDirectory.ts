@@ -87,7 +87,7 @@ export interface SlackChannelDirectoryOptions {
 }
 
 const SLACK_PREFIX = "slack:";
-const SLACK_USER_PREFIX = `${SLACK_PREFIX}U`;
+const isSlackUser = (id: string) => /^slack:[UW][A-Z0-9_]+$/.test(id);
 
 type Channels = ReadonlySet<string> | "unknown";
 
@@ -141,8 +141,14 @@ export class SlackChannelDirectory implements ChannelDirectory {
   }
 
   /** In the channel, by the person's own channel set; a non-Slack actor is the fallback's answer. */
-  async isMember(actorId: string, channelId: string): Promise<boolean | "unknown"> {
-    if (!actorId.startsWith(SLACK_USER_PREFIX)) return this.fallback.isMember(actorId, channelId);
+  async isMember(actorId: string, channelId: string, options?: { fresh: boolean }): Promise<boolean | "unknown"> {
+    if (!isSlackUser(actorId)) return this.fallback.isMember(actorId, channelId);
+    if (options?.fresh) {
+      // A source consumption boundary cannot use a cached allow or an older in-flight lookup.
+      this.forgetMember(actorId);
+      const channels = await this.lookupChannels(actorId);
+      return channels === "unknown" ? "unknown" : channels.has(channelId);
+    }
     const channels = await this.channelsOf(actorId);
     return channels === "unknown" ? "unknown" : channels.has(channelId);
   }
@@ -152,7 +158,7 @@ export class SlackChannelDirectory implements ChannelDirectory {
    *  call; any failure is `unknown` for the TTL (one call, one `[authz]` line per
    *  window). Only a Slack person (`slack:U…`) is this adapter's to describe. */
   async channelsOf(actorId: string): Promise<Channels> {
-    if (!actorId.startsWith(SLACK_USER_PREFIX)) return this.fallback.channelsOf(actorId);
+    if (!isSlackUser(actorId)) return this.fallback.channelsOf(actorId);
     const hit = this.members.get(actorId);
     if (hit && hit.expiresAt > this.now()) return hit.channels;
     const pending = this.membersInFlight.get(actorId);

@@ -18,6 +18,7 @@ import {
   validateContextCheckpoint,
   type CanonicalCheckpointSource,
 } from "../references/contextCheckpoint.js";
+import type { ConversationRef } from "../references/types.js";
 import type { MemoryScope } from "../memory/types.js";
 import { githubCapabilityFor } from "./run.js";
 import type { ChannelIO, IncomingMessage, SlackDirectAudience } from "../types.js";
@@ -210,6 +211,15 @@ function buildContextAccess(deps: ContextAccessDeps, { msg, io }: { msg: Incomin
     text: "",
     directAudience: undefined,
   });
+  const sourceAllowedAtDestination = async (ref: ConversationRef): Promise<boolean> => {
+    let destination = msg;
+    if (msg.threadKey.startsWith("worker:")) {
+      const audience = await destinationAudience();
+      if (!audience) return false;
+      destination = { ...msg, channelId: audience.channelId, threadKey: audience.threadKey, directAudience: audience };
+    }
+    return (await deps.slackContextForRun?.(actor(), destination).canReadSource?.(ref)) === true;
+  };
   const originAllowed = async (origin: ContextOrigin): Promise<boolean> => {
     const row = await load(origin.runId);
     if (!row || !admitted(row)) return false;
@@ -257,7 +267,12 @@ function buildContextAccess(deps: ContextAccessDeps, { msg, io }: { msg: Incomin
     const capability = deps.slackContextForRun?.(actor(), originMessage(visibilityOrigin));
     const visibility = await capability?.originAudience?.();
     if (visibility === undefined) return false;
-    if (visibility === "public") return true;
+    if (visibility === "public")
+      return sourceAllowedAtDestination({
+        channelId: visibilityOrigin.channelId,
+        threadKey: visibilityOrigin.threadKey,
+        url: "",
+      });
     if (origin.requester !== msg.userId) return false;
     if (origin.channelId === msg.channelId && visibility !== "dm") return true;
     return (await destinationAudience()) !== undefined;
@@ -345,7 +360,12 @@ function buildContextAccess(deps: ContextAccessDeps, { msg, io }: { msg: Incomin
         if (!(await originAllowed(origin))) return denied();
       }
       const slack = await revalidateSourcesDecision(dependencies.slack, async (receipt) => {
-        if (receipt.requester !== msg.userId || !deps.slackContextForRun) return false;
+        if (
+          receipt.requester !== msg.userId ||
+          !deps.slackContextForRun ||
+          !(await sourceAllowedAtDestination(receipt.source))
+        )
+          return false;
         if (
           receipt.visibility !== "public" &&
           receipt.source.channelId !== msg.channelId &&

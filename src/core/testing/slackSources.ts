@@ -13,6 +13,7 @@ export function testSlackCapability(
 ): VerifiedSlackContextCapability {
   return {
     verifyDirectOrigin: async () => true,
+    canReadSource: async () => true,
     originAudience: async () => (msg.channelId.startsWith("slack:D") ? "dm" : "public"),
     revalidateSource: revalidate,
     readSource: async (request) => ({ kind: "read", content: await read(request), receipt: testSlackReceipt(msg) }),

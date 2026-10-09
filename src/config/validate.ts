@@ -453,7 +453,12 @@ export function validateSlack(slack: unknown): void {
   if (slack === undefined) return;
   if (typeof slack !== "object" || slack === null || Array.isArray(slack))
     throw new Error("config.yaml: slack must be a mapping");
-  const { relayApps } = slack as SlackConfig;
+  const { relayApps, readerTokenEnv } = slack as SlackConfig;
+  if (
+    readerTokenEnv !== undefined &&
+    (typeof readerTokenEnv !== "string" || !/^[A-Z_][A-Z0-9_]*$/.test(readerTokenEnv))
+  )
+    throw new Error("config.yaml: slack.readerTokenEnv must name an environment variable");
   if (relayApps === undefined) return;
   if (!Array.isArray(relayApps)) throw new Error("config.yaml: slack.relayApps must be a list of Slack bot ids (B…)");
   relayApps.forEach((id, i) => {

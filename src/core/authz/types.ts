@@ -211,7 +211,7 @@ export type Predicate =
 /** Adapter-supplied channel facts. `unknown` is never a member (fail-closed). */
 export interface ChannelDirectory {
   info(channelId: string): Promise<{ visibility: ChannelVisibility }>;
-  isMember(actorId: string, channelId: string): Promise<boolean | "unknown">;
+  isMember(actorId: string, channelId: string, options?: { fresh: boolean }): Promise<boolean | "unknown">;
   /** Every channel the actor is in, platform-namespaced — what the resolver puts on
    *  `Actor.memberOf`; `unknown` when the adapter cannot say (fail-closed). */
   channelsOf(actorId: string): Promise<ReadonlySet<string> | "unknown">;

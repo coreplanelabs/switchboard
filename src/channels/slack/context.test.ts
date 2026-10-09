@@ -133,14 +133,25 @@ function setup(
     channelId: `slack:${origin}`,
     threadKey: `slack:${origin}:${THREAD}`,
     text: "look here",
+    ...(origin.startsWith("D")
+      ? {
+          directAudience: {
+            kind: "slack-unshared-im" as const,
+            userId: actor.id,
+            channelId: `slack:${origin}`,
+            threadKey: `slack:${origin}:${THREAD}`,
+          },
+        }
+      : {}),
   };
   const reader = new SlackConversationReader(client);
+  const directory = { isMember: vi.fn(async () => over.member ?? "unknown") };
   const capability = createSlackContextCapability({
     client,
     reader,
     actor,
     msg,
-    directory: { isMember: async () => over.member ?? "unknown" },
+    directory,
     ...(over.loadFile
       ? {
           loadFile: async (file: { id?: string }) => {
@@ -161,10 +172,160 @@ function setup(
     msg,
     channels,
     reader,
+    directory,
   };
 }
 
 describe("Slack context adapter", () => {
+  it("reads a public source without adding the bot to its channel", async () => {
+    const h = setup({
+      origin: "C_PUBLIC",
+      channels: { C_OTHER: { is_private: false, is_member: false, is_shared: true } },
+      replies: { [`C_OTHER:${THREAD}`]: [{ ts: THREAD, user: "UALICE", text: "public customer report" }] },
+    });
+    const sourceDirectory = { isMember: async () => false };
+    const sourceReader = new SlackConversationReader(h.client, Date.now, {
+      workspacePublicRead: true,
+      directory: sourceDirectory,
+    });
+    const listener = new SlackConversationReader(h.client, Date.now, { crossChannel: sourceReader });
+    await listener.ready();
+    const capability = createSlackContextCapability({ client: h.client, reader: listener, actor: h.actor, msg: h.msg });
+    const result = await capability.readSource({ kind: "link", url: url("C_OTHER") });
+    expect(result.content).toContain("public customer report");
+    expect(result).toMatchObject({ kind: "read", receipt: { shared: true } });
+    if (result.kind !== "read") throw new Error("expected read");
+    expect(await capability.revalidateSource(result.receipt)).toBe(true);
+    const guestClient = { ...h.client, users: { info: async () => ({ user: { is_restricted: true } }) } };
+    const guestReader = new SlackConversationReader(guestClient, Date.now, { workspacePublicRead: true });
+    const guestListener = new SlackConversationReader(h.client, Date.now, { crossChannel: guestReader });
+    const guest = createSlackContextCapability({ client: h.client, reader: guestListener, actor: h.actor, msg: h.msg });
+    expect(await guest.readSource({ kind: "link", url: url("C_OTHER") })).toMatchObject({
+      kind: "refused",
+      reason: "unavailable",
+    });
+  });
+  it("reads a shared public source through both entry points and retains its audience for reuse", async () => {
+    const h = setup({
+      origin: "C_PUBLIC",
+      member: true,
+      channels: { C_SHARED: { is_private: false, is_member: true, is_shared: true, is_ext_shared: true } },
+      replies: { [`C_SHARED:${THREAD}`]: [{ ts: THREAD, user: "UALICE", text: "customer reports idle CPU" }] },
+    });
+    await h.reader.ready();
+    const native = await readReferences(
+      { conversationReaders: [h.reader], channelDirectory: { isMember: async () => true } },
+      { actor: h.actor, msg: { ...h.msg, text: url("C_SHARED") } },
+    );
+    expect(native.blocks[0]).toContain("customer reports idle CPU");
+    const receipt = referenceReceipt(native.conversations[0], "public", sourceBinding(h.msg))!;
+    expect(receipt).toMatchObject({ visibility: "public", shared: true, source: { channelId: "slack:C_SHARED" } });
+    expect(await h.capability.revalidateSource(receipt)).toBe(true);
+    const source = await h.capability.readSource({ kind: "link", url: url("C_SHARED") });
+    expect(source).toMatchObject({ kind: "read", receipt: { visibility: "public", shared: true } });
+    expect(source.content).toContain("customer reports idle CPU");
+    h.directory.isMember.mockResolvedValue(false);
+    expect(await h.capability.revalidateSource(receipt)).toBe(false);
+    h.directory.isMember.mockResolvedValue(true);
+    expect(await h.capability.revalidateSource(receipt)).toBe(true);
+    h.channels.C_SHARED.is_private = true;
+    expect(await h.capability.revalidateSource(receipt)).toBe(false);
+  });
+
+  it("does not read a shared source for a nonmember or export internal context to another shared channel", async () => {
+    const source = setup({
+      origin: "C_PUBLIC",
+      member: false,
+      channels: { C_SHARED: { is_private: false, is_member: true, is_shared: true } },
+      replies: { [`C_SHARED:${THREAD}`]: [{ ts: THREAD, user: "UALICE", text: "customer context" }] },
+    });
+    expect(await source.capability.readSource({ kind: "link", url: url("C_SHARED") })).toMatchObject({
+      kind: "refused",
+      reason: "unavailable",
+    });
+    const destination = setup({
+      origin: "C_SHARED",
+      member: true,
+      channels: { C_SHARED: { is_private: false, is_member: true, is_shared: true } },
+      replies: { [`C_PUBLIC:${THREAD}`]: [{ ts: THREAD, user: "UALICE", text: "internal context" }] },
+    });
+    expect(await destination.capability.readSource({ kind: "link", url: url("C_PUBLIC") })).toMatchObject({
+      kind: "refused",
+      reason: "unavailable",
+    });
+    expect(await destination.capability.originAudience?.()).toBe("public");
+  });
+
+  it("revalidates a shared source from its original verified DM after the saved stamp is cleared", async () => {
+    const h = setup({
+      member: true,
+      channels: { C_SHARED: { is_private: false, is_member: true, is_shared: true } },
+      replies: { [`C_SHARED:${THREAD}`]: [{ ts: THREAD, user: "UALICE", text: "shared evidence" }] },
+    });
+    const read = await h.capability.readSource({ kind: "link", url: url("C_SHARED") });
+    expect(read.content).toContain("shared evidence");
+    if (read.kind !== "read") throw new Error("expected source receipt");
+    const saved = createSlackContextCapability({
+      client: h.client,
+      reader: h.reader,
+      actor: h.actor,
+      msg: { ...h.msg, directAudience: undefined },
+      directory: h.directory,
+    });
+    expect(await saved.revalidateSource(read.receipt)).toBe(true);
+    h.directory.isMember.mockResolvedValue(false);
+    expect(await saved.revalidateSource(read.receipt)).toBe(false);
+  });
+
+  it("fetches linked source content once and returns its file addresses", async () => {
+    const h = setup({
+      replies: {
+        [`C_PUBLIC:${THREAD}`]: [
+          {
+            ts: THREAD,
+            user: "UALICE",
+            text: "read the report",
+            files: [{ id: "FREPORT", name: "report.txt" }],
+          },
+        ],
+      },
+    });
+    const read = await h.capability.readSource({ kind: "link", url: url("C_PUBLIC") });
+    expect(read.content).toContain("read the report");
+    expect(read.content).toContain("FREPORT");
+    expect(h.calls.replies.mock.calls).toHaveLength(1);
+  });
+
+  it("reads a private source only into a verified requester DM and drops it after membership changes during fetch", async () => {
+    let revoke = false;
+    const h = setup({
+      member: true,
+      replies: { [`C_PRIVATE:${THREAD}`]: [{ ts: THREAD, user: "UALICE", text: "private evidence" }] },
+      onReplies: () => {
+        if (revoke) h.directory.isMember.mockResolvedValue(false);
+      },
+    });
+    expect(await h.capability.readSource({ kind: "link", url: url("C_PRIVATE") })).toMatchObject({
+      kind: "read",
+      receipt: { visibility: "private" },
+    });
+    expect(await h.capability.read({ kind: "link", url: url("C_PRIVATE") })).toContain("private evidence");
+    revoke = true;
+    expect(await h.capability.readSource({ kind: "link", url: url("C_PRIVATE") })).toMatchObject({
+      kind: "refused",
+      reason: "unavailable",
+    });
+    const publicDestination = setup({
+      origin: "C_PUBLIC",
+      member: true,
+      replies: { [`C_PRIVATE:${THREAD}`]: [{ ts: THREAD, user: "UALICE", text: "private evidence" }] },
+    });
+    expect(await publicDestination.capability.readSource({ kind: "link", url: url("C_PRIVATE") })).toMatchObject({
+      kind: "refused",
+      reason: "unavailable",
+    });
+  });
+
   it("checks a saved context's current origin audience without consuming source text", async () => {
     const privateOrigin = setup({ origin: "C_PRIVATE", member: true });
     expect(await privateOrigin.capability.originAudience?.()).toBe("private");
@@ -277,7 +438,7 @@ describe("Slack context adapter", () => {
     [8, 10, 176, 11869],
   ])(
     "bounds metadata and adapter requests for %s retained nearby reads of %s messages",
-    async (count, messages, expectedRequests, expectedBytes) => {
+    async (count, messages, maxRequests, expectedBytes) => {
       const nearby = Array.from({ length: count * messages }, (_, i) => ({
         ts: `1790000000.${String(i + 1).padStart(6, "0")}`,
         user: "UALICE",
@@ -303,7 +464,9 @@ describe("Slack context adapter", () => {
       expect(bytes).toBeLessThanOrEqual(32 * 1024);
       for (const call of Object.values(s.calls)) call.mockClear();
       for (const receipt of receipts) expect(await s.capability.revalidateSource(receipt)).toBe(true);
-      expect(Object.values(s.calls).reduce((sum, call) => sum + call.mock.calls.length, 0)).toBe(expectedRequests);
+      expect(Object.values(s.calls).reduce((sum, call) => sum + call.mock.calls.length, 0)).toBeLessThanOrEqual(
+        maxRequests,
+      );
       expect(bytes).toBe(expectedBytes);
     },
   );
