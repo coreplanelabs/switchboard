@@ -12878,6 +12878,34 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
 });
 
 // Feature: coding-checks.md — model selection precedes typed execution.
+describe("runLoop checkout-bound tools", () => {
+  it("computes a digest in the acknowledged cold checkout", async () => {
+    const observed = watched(piHarness);
+    observed.harness.open = async (_deps, request) => {
+      const digest = request.tools.find((tool) => tool.name === "diff_digest")!;
+      const answer = await digest.run({ base: "main" }, request.toolContext);
+      return { answer: String(answer), followUp: async () => "", remainingMs: () => 60_000, end: async () => {} };
+    };
+    const s = setup("unused", {
+      agent: "review",
+      cold: { ref: "work", sha: "a".repeat(40), workspace: "/workspace/checkout" },
+      executor: {
+        exec: async (command) =>
+          command.startsWith("git -C '/workspace/checkout' diff --numstat")
+            ? "1\t0\tsrc/a.ts\n@@diff_digest:name-status@@\nM\tsrc/a.ts\n"
+            : "exit 129: Not a git repository",
+      },
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example",
+        loopbackUrl: "http://127.0.0.1:8080",
+      },
+    });
+    expect(answered(await runLoop(s.deps, s.ctx)).answer).toContain("1 file changed, +1 -0");
+  });
+});
+
 describe("runLoop adaptive coding checks", () => {
   it.each(["missing", "untracked"] as const)(
     "refuses recording before execution when the ledger is %s",

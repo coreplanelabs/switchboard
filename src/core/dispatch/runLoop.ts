@@ -2136,6 +2136,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         }
       : {}),
     executor,
+    checkout: () => currentCheckout,
     ...(ctx.sourceReads ? { sourceReads: ctx.sourceReads } : {}),
     ...(checkExecution ? { checkExecution } : {}),
     reportProgress,

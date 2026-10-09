@@ -237,6 +237,29 @@ describe("diff_digest tool on a real multi-commit branch (LocalExecutor)", () =>
       { complete: true, base: "origin/HEAD", totals: { files: 4, additions: 4204, deletions: 0 } },
     ]);
   });
+
+  it("uses the bound checkout when the executor starts outside the repository", async () => {
+    const reports: DigestReport[] = [];
+    const ctx: ToolContext = {
+      executor: new LocalExecutor(dir),
+      checkout: () => wt,
+      onDigest: (report) => reports.push(report),
+    };
+    const out = await diffDigestTool.run({}, ctx);
+    expect(out).toContain("4 files changed, +4204 -0");
+    expect(reports).toEqual([
+      { complete: true, base: "origin/HEAD", totals: { files: 4, additions: 4204, deletions: 0 } },
+    ]);
+  });
+
+  it("deepens the bound shallow checkout when the executor starts outside it", async () => {
+    const shallow = join(dir, "shallow");
+    sh(dir, `git clone -q --depth 1 --branch feature file://${wt} ${shallow}`);
+    const ctx: ToolContext = { executor: new LocalExecutor(dir), checkout: () => shallow };
+    const out = await diffDigestTool.run({ base: "origin/main" }, ctx);
+    expect(out).toContain("4 files changed, +4204 -0");
+    expect(sh(shallow, "git rev-parse --is-shallow-repository").trim()).toBe("false");
+  });
 });
 
 describe("diff_digest toolset wiring", () => {
