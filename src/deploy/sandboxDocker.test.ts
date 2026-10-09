@@ -55,6 +55,7 @@ describe("the cold sandbox image ships a Docker engine", () => {
       "iptables",
       "squashfs-tools",
       "ripgrep",
+      "fd-find",
       "gh",
     ]);
   });

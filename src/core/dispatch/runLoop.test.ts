@@ -524,6 +524,51 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  it("a completed tool error stays in the run history without a refusal warning on the final card", async () => {
+    const observed = watched(piHarness);
+    observed.harness.open = async (_deps, run) => {
+      run.onEvent?.({ type: "tool_call", tool: "find", summary: "find source files", callId: "find-1" });
+      run.onEvent?.({
+        type: "tool_result",
+        tool: "find",
+        ok: false,
+        summary: "fd is not available and could not be downloaded",
+        callId: "find-1",
+      });
+      run.onEvent?.({ type: "tool_call", tool: "grep", summary: "search source files", callId: "grep-1" });
+      run.onEvent?.({ type: "tool_result", tool: "grep", ok: true, summary: "found source", callId: "grep-1" });
+      run.toolContext.reportProgress?.("✓ Read sources\n✓ Deliver findings");
+      return {
+        answer: "Reviewed the sources using grep.",
+        followUp: async () => "",
+        remainingMs: () => 60_000,
+        end: async () => {},
+      };
+    };
+    const s = setup("unused", {
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        loopbackUrl: "http://127.0.0.1:8080",
+      },
+    });
+    const out = answered(await runLoop(s.deps, s.ctx));
+    await deliverAnswer({ ...s.ctx, ...out, liveUrl: undefined, stopped: undefined });
+    expect(s.replies.at(-1)).toBe("Reviewed the sources using grep.");
+    expect(s.closes.at(-1)?.title).toContain("✅");
+    expect(s.closes.at(-1)?.detail).toBe("✓ Read sources\n✓ Deliver findings");
+    s.ending.drain(true);
+    await s.writer.settled();
+    expect((await s.store.get(s.run.id))?.events).toContainEqual(
+      expect.objectContaining({
+        type: "tool_result",
+        tool: "find",
+        ok: false,
+        summary: "fd is not available and could not be downloaded",
+      }),
+    );
+  });
+
   it.each(["landed", "retried", "newer owner", "failed", "hard stop", "late hard stop"] as const)(
     "ordinary review release waits for its exact terminal ledger write (%s)",
     async (mode) => {
@@ -9884,46 +9929,65 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     );
   });
 
-  it("a normally ended run retains a pre-restart tool refusal on its final card", async () => {
-    const s = setup("", { provider: neverCalled() });
-    const answerOutcome = { version: 1 as const, ending: "answered" as const, output: "present" as const };
-    const resume = finishing("One record was verified; the requested check did not run.", {
-      state: { answerOutcome, checklist: "✓ Verify one record\n✓ Run the requested check" },
-      events: [
-        { type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 },
-        { type: "tool_call", tool: "bash", summary: "run requested check", callId: "check-1", at: 2, seq: 2 },
-        note("tool_refused", "bash refused before execution", 3),
-        { type: "tool_result", tool: "bash", ok: false, summary: "refused", callId: "check-1", at: 4, seq: 4 },
-      ],
-    });
-    const out = answered(
-      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
-    );
-    await deliverAnswer({
-      msg: s.ctx.msg,
-      io: s.ctx.io,
-      agent: s.ctx.agent,
-      run: s.run,
-      answer: out.answer,
-      liveUrl: undefined,
-      prNote: out.prNote,
-      stopped: undefined,
-      ledgerRun: undefined,
-      ending: s.ending,
-      card: s.ctx.card,
-      shell: s.ctx.shell,
-      checklistAsLeft: out.checklistAsLeft,
-      hasIncompleteToolEffects: out.hasIncompleteToolEffects,
-      answerOutcome: out.answerOutcome,
-      doneLines: s.ctx.doneLines,
-      runDiagnosis: out.runDiagnosis,
-      releaseWorkspace: out.releaseWorkspace,
-      root: s.ctx.root,
-    });
-    expect(s.replies.at(-1)).toContain("One record was verified");
-    expect(s.closes.at(-1)?.title).toContain("⚠️");
-    expect(s.closes.at(-1)?.detail).toContain("✓ Verify one record\n✓ Run the requested check");
-  });
+  it.each(["error", "refusal", "cut", "missing result", "source refusal"] as const)(
+    "a normally ended run classifies a pre-restart tool %s on its final card",
+    async (effect) => {
+      const s = setup("", { provider: neverCalled() });
+      const answerOutcome = { version: 1 as const, ending: "answered" as const, output: "present" as const };
+      const resume = finishing("One record was verified; the requested check did not run.", {
+        state: { answerOutcome, checklist: "✓ Verify one record\n✓ Run the requested check" },
+        events: [
+          { type: "input", messageId: "m1", text: "hello there", at: 1, seq: 1 },
+          { type: "tool_call", tool: "bash", summary: "run requested check", callId: "check-1", at: 2, seq: 2 },
+          ...(effect === "refusal" ? [note("tool_refused", "bash refused before execution", 3)] : []),
+          ...(effect === "source refusal" ? [note("work_source_refused", "source access refused", 3)] : []),
+          ...(effect === "missing result"
+            ? []
+            : [
+                {
+                  type: "tool_result" as const,
+                  tool: "bash",
+                  ok: false,
+                  summary: "exit 1",
+                  callId: "check-1",
+                  ...(effect === "cut" ? { cut: true as const } : {}),
+                  at: 4,
+                  seq: 4,
+                },
+              ]),
+        ],
+      });
+      const out = answered(
+        await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+      );
+      await deliverAnswer({
+        msg: s.ctx.msg,
+        io: s.ctx.io,
+        agent: s.ctx.agent,
+        run: s.run,
+        answer: out.answer,
+        liveUrl: undefined,
+        prNote: out.prNote,
+        stopped: undefined,
+        ledgerRun: undefined,
+        ending: s.ending,
+        card: s.ctx.card,
+        shell: s.ctx.shell,
+        checklistAsLeft: out.checklistAsLeft,
+        hasIncompleteToolEffects: out.hasIncompleteToolEffects,
+        answerOutcome: out.answerOutcome,
+        doneLines: s.ctx.doneLines,
+        runDiagnosis: out.runDiagnosis,
+        releaseWorkspace: out.releaseWorkspace,
+        root: s.ctx.root,
+      });
+      expect(s.replies.at(-1)).toContain("One record was verified");
+      expect(s.closes.at(-1)?.title).toContain(effect === "error" ? "✅" : "⚠️");
+      if (effect === "error") expect(s.closes.at(-1)?.detail).toBe("✓ Verify one record\n✓ Run the requested check");
+      else expect(s.closes.at(-1)?.detail).toContain("A tool request was refused or its result is unverified.");
+      expect(s.closes.at(-1)?.detail).toContain("✓ Verify one record\n✓ Run the requested check");
+    },
+  );
 
   it.each(["absent", "present"] as const)(
     "a recovered %s write-up uses its saved outcome rather than the nonempty answer text",
