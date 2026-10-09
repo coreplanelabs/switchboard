@@ -31,7 +31,7 @@ Staging and production run similar agent scenarios in different environments. Ke
 
 Automatic full staging runs only for release PRs. Ordinary PRs can opt in with `deploy:staging`, manual dispatch or the CLI; their normal staging check reports **not required**, not live acceptance. See [Staging](staging.md#github).
 
-Slack connection health and an actual test-user message round trip are separate acceptance checks. HTTP/MCP scenarios do not prove Slack delivery. The next Slack check sends the existing read-only `status show` command to the staging bot and compares its reply with the deployed process: no additional model run is needed. An authenticated testing user and a testing-workspace-only credential are required before this can become a CI gate.
+Slack connection health and an actual test-user message round trip are separate acceptance checks. HTTP/MCP scenarios do not prove Slack delivery. The configured Slack check sends a `status show` mention as a normal testing user in an operator-selected public channel, then checks the bot’s threaded reply against the deployed process. It adds no model run. See [Slack acceptance](staging.md#slack-acceptance) for setup.
 
 ## Merge the release PR
 

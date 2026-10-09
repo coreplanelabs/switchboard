@@ -223,6 +223,7 @@ jobs:
       SMOKE_INGRESS_TOKEN: ${{ secrets.SMOKE_INGRESS_TOKEN }}
       SMOKE_INGRESS_ORIGIN: ${{ vars.SMOKE_INGRESS_ORIGIN }}
       SMOKE_INGRESS_CONFIG: ${{ vars.SMOKE_INGRESS_CONFIG }}
+      SMOKE_REQUIRE_SLACK_CONNECTION: ${{ vars.SMOKE_REQUIRE_SLACK_CONNECTION }}
       # The profile (and, through its `configSource`, the bot's config): the
       # `profile` input, else the calling repository's variable. A `github://`
       # profile is read with CONFIG_REPO_TOKEN, the App token minted below.

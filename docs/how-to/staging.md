@@ -68,6 +68,22 @@ Use the [release and deploy contract](../reference/specs/release-and-deploy.md) 
 
 Keep capability smoke until these staged paths are repeatable. Ship can be tested here while production Review remains pinned to its current release. They still share one bot artifact; independent agent releases need a separate architecture change.
 
+## Slack acceptance
+
+Staging checks Slack connection health before and after each agent scenario. When `STAGING_SLACK_SMOKE_CONFIG` is configured, it also sends one `@bot status show` mention as the normal testing member in the selected public channel and checks the threaded reply. This proves Slack delivery without another model call. Messages stay visible; receipts retain native channel and message/reply timestamps. An unknown post is never resent.
+
+Set the staging environment variable `STAGING_SLACK_SMOKE_CONFIG` to:
+
+```json
+{"disposable":true,"workspaceId":"TTEST001","userId":"UTEST001","botUserId":"UBOT0001","channelId":"CCI00001"}
+```
+
+The operator chooses `channelId`, such as the testing workspace’s `#ci`. Add the bot and join with the testing member. The runner refuses a wrong workspace/user, bot credentials, private or shared channel (including pending external sharing), or missing membership before posting. The sender app uses user scopes `chat:write`, `channels:read` and `channels:history`; these allow public-channel information/history in the testing workspace, while the runner uses only its configured channel. Keep normal member grants and remove temporary app collaborator access after setup.
+
+Save the member’s token in the staging secret `STAGING_SLACK_TEST_USER_TOKEN`, then enable the configuration variable. The token stays in CI/operator secrets, outside the bot and executors. CLI operators use `SMOKE_SLACK_CONFIG` and `SMOKE_SLACK_USER_TOKEN` with the existing ingress smoke inputs and `SMOKE_EXPECTED_COMMIT`. `smoke:ingress --check` validates setup without messages; CI runs it before uploads. Unset configuration disables only the user-message check; configured but incomplete setup fails.
+
+A pass requires the configured bot’s reply to match the deployed commit, process start and loaded base configuration, with Slack connected before and after. Production operators can require connection health with `SMOKE_REQUIRE_SLACK_CONNECTION=true`; staging user credentials are not used in production.
+
 ## First installation
 
 `npm run staging:deploy -- --initialize` creates an empty staging installation from a clean checkout. Use the same profile and account pins as `--check`, with a local staging secret directory. It needs the manifest's required secrets, separate GitHub credentials, ingress and executor bearers, MCP credential encryption and both bucket-scoped R2 pairs. The operator's `MEMORY_TOKEN` and `SANDBOX_TOKEN` must match that directory. Docker must be available. The profile must name a restart deployer with one matching ingress bearer.

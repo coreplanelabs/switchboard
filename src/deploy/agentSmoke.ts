@@ -163,6 +163,7 @@ export interface AgentSmokeReceipt {
     maxObservedUsd: number;
   };
   observedUsd: number;
+  slackConnection?: { required: true; connected?: boolean; checks: number };
   scenarios: ScenarioReceipt[];
   liveGaps: ["private-question-fix-draft-pr"];
   productAcceptance: typeof PRODUCT_ACCEPTANCE_GAP;
@@ -199,6 +200,7 @@ function scenarios(config: SmokeConfig): SmokeScenario[] {
 export async function runAgentSmoke(input: {
   config: unknown;
   expectedCommit?: string;
+  requireSlackConnection?: boolean;
   thread: string;
   transport: SmokeTransport;
   onReceipt?: (receipt: AgentSmokeReceipt) => Promise<void>;
@@ -221,6 +223,7 @@ export async function runAgentSmoke(input: {
       maxObservedUsd: config.maxObservedUsd,
     },
     observedUsd: 0,
+    ...(input.requireSlackConnection ? { slackConnection: { required: true as const, checks: 0 } } : {}),
     scenarios: selected.map((s) => ({
       id: s.id,
       outcome: "skipped",
@@ -233,13 +236,29 @@ export async function runAgentSmoke(input: {
   const save = async () => {
     await input.onReceipt?.(structuredClone(receipt));
   };
+  const readHealth = async () => {
+    const health = await input.transport.health();
+    const build = buildSchema.parse(health);
+    if (receipt.slackConnection) {
+      const slack = z.object({ slackConnected: z.boolean().optional() }).safeParse(health);
+      const connected = slack.success ? slack.data.slackConnected : undefined;
+      receipt.slackConnection.connected = connected;
+      receipt.slackConnection.checks++;
+      if (connected !== true) return undefined;
+    }
+    return build;
+  };
   await save();
   for (const [index, scenario] of selected.entries()) {
     const row = receipt.scenarios[index]!;
     row.outcome = "incomplete";
     row.reason = "build_unproven";
     try {
-      const build = buildSchema.parse(await input.transport.health());
+      const build = await readHealth();
+      if (!build) {
+        row.reason = "slack_connection_unproven";
+        break;
+      }
       receipt.build ??= build;
       if (
         (input.expectedCommit && build.commit !== input.expectedCommit) ||
@@ -398,7 +417,11 @@ export async function runAgentSmoke(input: {
         row.reason = "observed_spend_exceeded";
         break;
       }
-      const after = buildSchema.parse(await input.transport.health());
+      const after = await readHealth();
+      if (!after) {
+        row.reason = "slack_connection_unproven";
+        break;
+      }
       if (after.commit !== build.commit || after.version !== build.version) {
         row.reason = "build_changed";
         break;
@@ -443,8 +466,10 @@ export function agentSmokeTransport(input: {
     async health() {
       const response = await boundedFetch(input.healthUrl, { signal: AbortSignal.timeout(minutesToMs(0.5)) });
       if (!response.ok) throw new Error("health_unavailable");
-      const body = z.object({ ok: z.literal(true), build: buildSchema }).parse(await response.json());
-      return body.build;
+      const body = z
+        .object({ ok: z.literal(true), build: buildSchema, slack: z.object({ connected: z.boolean() }).optional() })
+        .parse(await response.json());
+      return { ...body.build, ...(body.slack ? { slackConnected: body.slack.connected } : {}) };
     },
     async request(scenario, thread) {
       const deadline = systemClock() + minutesToMs(scenario.minutes + 1);
