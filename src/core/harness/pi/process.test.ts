@@ -187,6 +187,7 @@ describe("piLaunchEnv", () => {
       SWITCHBOARD_RUN_ID: "run-7",
       PI_CODING_AGENT_DIR: "/var/tmp/switchboard-pi-run-7/agent",
       SWITCHBOARD_PI_OUTPUT_ROOT: "/var/tmp/switchboard-pi-run-7/output",
+      SWITCHBOARD_RUN_SCRATCH: "/var/tmp/switchboard-pi-run-7/scratch",
       PI_SKIP_VERSION_CHECK: "1",
       PI_OFFLINE: "1",
       PI_TELEMETRY: "0",

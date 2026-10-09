@@ -4534,72 +4534,88 @@ describe("review post-step", () => {
     expect(post.fn).not.toHaveBeenCalled();
   });
 
-  it("a soft stop before review activity replies only that it stopped and runs no review tail", async () => {
-    const registry = new RunRegistry({ genId: () => "r-early-stop", genToken: () => "t-early-stop" });
-    let turn = 0;
-    const provider: Provider & { requests: CompletionRequest[] } = {
-      name: "fake",
-      requests: [],
-      async complete(req): Promise<CompletionResult> {
-        this.requests.push(req);
-        turn++;
-        if (turn === 1) {
-          registry.requestStop("r-early-stop", "t-early-stop", "soft");
-          return { content: [{ type: "text", text: "no review activity yet" }], stopReason: "end_turn" };
-        }
-        if (turn === 2) return { content: [{ type: "text", text: "there were no findings" }], stopReason: "end_turn" };
-        return {
-          content: [
-            {
-              type: "tool_use",
-              id: "synthetic-verdict",
-              name: "submit_verdict",
-              input: {
-                verdict: "request_changes",
-                summary: "checkout was not at the pull request head",
-                findings: [
-                  {
-                    id: "F1",
-                    severity: "blocking",
-                    title: "No checkout",
-                    detail: "No code was reviewed.",
-                  },
-                ],
+  it.each([false, true])(
+    "a soft stop before review activity replies only that it stopped and runs no review tail: pending completion %s",
+    async (pendingCompletion) => {
+      const registry = new RunRegistry({ genId: () => "r-early-stop", genToken: () => "t-early-stop" });
+      let turn = 0;
+      const provider: Provider & { requests: CompletionRequest[] } = {
+        name: "fake",
+        requests: [],
+        async complete(req): Promise<CompletionResult> {
+          this.requests.push(req);
+          turn++;
+          if (turn === 1) {
+            registry.requestStop("r-early-stop", "t-early-stop", "soft");
+            if (pendingCompletion) await new Promise((resolve) => setTimeout(resolve, 20));
+            return { content: [{ type: "text", text: "no review activity yet" }], stopReason: "end_turn" };
+          }
+          if (turn === 2)
+            return { content: [{ type: "text", text: "there were no findings" }], stopReason: "end_turn" };
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "synthetic-verdict",
+                name: "submit_verdict",
+                input: {
+                  verdict: "request_changes",
+                  summary: "checkout was not at the pull request head",
+                  findings: [
+                    {
+                      id: "F1",
+                      severity: "blocking",
+                      title: "No checkout",
+                      detail: "No code was reviewed.",
+                    },
+                  ],
+                },
               },
-            },
-          ],
-          stopReason: "tool_use",
-        };
-      },
-    };
-    const deps = makeDeps(YAML_FIXTURE, provider);
-    deps.runRegistry = registry;
-    const store = new InMemoryRunStore();
-    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
-    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
-    headExecutor(PR_HEAD);
-    const post = postSpy();
-    if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
-    deps.postReviewComment = post.fn;
-    const { io, replies } = fakeIO();
+            ],
+            stopReason: "tool_use",
+          };
+        },
+      };
+      const deps = makeDeps(YAML_FIXTURE, provider);
+      deps.runRegistry = registry;
+      const store = new InMemoryRunStore();
+      deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: PR_HEAD });
+      headExecutor(PR_HEAD);
+      const post = postSpy();
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+      deps.postReviewComment = post.fn;
+      const { io, replies } = fakeIO();
 
-    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
-    await deps.runHistoryWriter.settled();
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
+      await deps.runHistoryWriter.settled();
 
-    expect(replies).toEqual(["⏹ Review stopped before it started."]);
-    const events = registry.snapshotById("r-early-stop")!.events;
-    expect(events.some((e) => e.type === "tool_call" && e.tool === "submit_verdict")).toBe(false);
-    expect(events.some((e) => e.type === "run_note" && e.kind === "review_not_posted")).toBe(false);
-    expect(JSON.stringify(events)).not.toContain("checkout was not at the pull request head");
-    expect(JSON.stringify(events)).not.toContain('"id":"F1"');
-    expect(provider.requests).toHaveLength(1);
-    expect(post.fn).not.toHaveBeenCalled();
-    const record = await deps.runStore.get("r-early-stop");
-    expect(record).toMatchObject({ status: "stopped_soft" });
-    expect(record).not.toHaveProperty("reviewHead");
-    expect(record).not.toHaveProperty("verdict");
-    expect(record).not.toHaveProperty("reviewPost");
-  });
+      expect(replies).toEqual(["⏹ Review stopped before it started."]);
+      const events = registry.snapshotById("r-early-stop")!.events;
+      expect(events.some((e) => e.type === "tool_call" && e.tool === "submit_verdict")).toBe(false);
+      expect(events.some((e) => e.type === "run_note" && e.kind === "review_not_posted")).toBe(false);
+      expect(JSON.stringify(events)).not.toContain("checkout was not at the pull request head");
+      expect(JSON.stringify(events)).not.toContain('"id":"F1"');
+      // Settlement can beat the stop check; otherwise the harness requests its
+      // bounded stop summary. Neither ordering may request a review verdict.
+      expect([1, 2]).toContain(provider.requests.length);
+      if (pendingCompletion) expect(provider.requests).toHaveLength(2);
+      for (const extra of provider.requests.slice(1)) {
+        const last = extra.messages.at(-1)!;
+        expect(last.role).toBe("user");
+        expect(JSON.stringify(last.content)).toContain(
+          "An operator has asked this run to stop. You can make no more tool calls.",
+        );
+        expect(JSON.stringify(last.content)).not.toContain("submit_verdict");
+      }
+      expect(post.fn).not.toHaveBeenCalled();
+      const record = await deps.runStore.get("r-early-stop");
+      expect(record).toMatchObject({ status: "stopped_soft" });
+      expect(record).not.toHaveProperty("reviewHead");
+      expect(record).not.toHaveProperty("verdict");
+      expect(record).not.toHaveProperty("reviewPost");
+    },
+  );
 
   it("a soft stop during a substantive head fetch aborts settlement before notifications, movement, follow-up, or publication", async () => {
     const registry = new RunRegistry({ genId: () => "r-settle-stop", genToken: () => "t-settle-stop" });
@@ -13199,7 +13215,7 @@ describe("MCP tools (docs/reference/specs/mcp-tools.md)", () => {
     });
   });
 
-  it("no source, or no server scoped to the agent → the request is byte-identical", async () => {
+  it("no source, or no server scoped to the agent → only the run-owned temporary path differs", async () => {
     const withSource = capturingProvider();
     await dispatch(
       { ...makeDeps(YAML_FIXTURE, withSource), mcp: mcpSource().source },
@@ -13208,7 +13224,14 @@ describe("MCP tools (docs/reference/specs/mcp-tools.md)", () => {
     );
     const without = capturingProvider();
     await dispatch(makeDeps(YAML_FIXTURE, without), msg("agent:review look at the code"), fakeIO().io);
-    expect(JSON.stringify(withSource.requests[0])).toBe(JSON.stringify(without.requests[0]));
+    const normalize = (request: (typeof withSource.requests)[number]) => ({
+      ...request,
+      system: request.system?.replace(
+        /\/var\/tmp\/switchboard-pi-[a-f0-9-]+\/scratch/g,
+        "/var/tmp/switchboard-pi-<run>/scratch",
+      ),
+    });
+    expect(JSON.stringify(normalize(withSource.requests[0]))).toBe(JSON.stringify(normalize(without.requests[0])));
     expect(withSource.requests[0].system).not.toContain("External MCP tools");
     expect(withSource.requests[0].tools?.some((t) => t.name.startsWith("mcp__"))).toBe(false);
   });

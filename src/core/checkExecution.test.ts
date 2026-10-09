@@ -490,7 +490,7 @@ describe("recorded coding checks", () => {
           try {
             const stdout = execFileSync("bash", ["-c", command], {
               cwd: tmpdir(),
-              env,
+              env: { ...env, ...options?.env },
               encoding: "utf8",
               timeout: options?.timeoutMs,
               stdio: ["ignore", "pipe", "pipe"],
@@ -512,6 +512,16 @@ describe("recorded coding checks", () => {
           outcome: { kind: "completed", stdout: workspace, exitCode: 7 },
         },
       });
+      const scratch = realpathSync(mkdtempSync(join(tmpdir(), "swb-check-scratch-")));
+      s.binding.temporaryDirectory = () => scratch;
+      try {
+        expect(await capability.run({ ...input, command: 'printf "%s" "$TMPDIR"' }, "scratch-call")).toMatchObject({
+          kind: "recorded",
+          receipt: { outcome: { kind: "completed", stdout: scratch, exitCode: 0 } },
+        });
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
       writeFileSync(join(workspace, "source.txt"), "after\n");
       expect(await capability.run(actualInput, "real-call")).toEqual(receipt);
     } finally {

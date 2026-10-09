@@ -6550,6 +6550,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       identity: "write",
       checkout: "/srv/wt/the-pr",
       outputDir: "/var/tmp/switchboard-pi-run-l/output",
+      scratchDir: "/var/tmp/switchboard-pi-run-l/scratch",
       branch: "fix/the-pr-head",
       protectedBranches: ["main"],
       loopEndsIn: expect.any(Function),
@@ -6566,6 +6567,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       checkout: "/workspace",
       branch: "unit/u26",
       outputDir: "/var/tmp/switchboard-pi-run-l/output",
+      scratchDir: "/var/tmp/switchboard-pi-run-l/scratch",
       protectedBranches: ["feat/trunk"],
       loopEndsIn: expect.any(Function),
     });
@@ -6672,6 +6674,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       identity: "write",
       checkout: "/workspace",
       outputDir: "/var/tmp/switchboard-pi-run-l/output",
+      scratchDir: "/var/tmp/switchboard-pi-run-l/scratch",
       branch: "unit/u27",
       protectedBranches: ["feat/trunk"],
       loopEndsIn: expect.any(Function),
@@ -6684,6 +6687,7 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
       identity: "write",
       checkout: "/workspace",
       outputDir: "/var/tmp/switchboard-pi-run-l/output",
+      scratchDir: "/var/tmp/switchboard-pi-run-l/scratch",
       protectedBranches: ["main"],
       loopEndsIn: expect.any(Function),
     });

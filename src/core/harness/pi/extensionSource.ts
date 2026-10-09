@@ -33,7 +33,7 @@ export const BLOCKED_UNAVAILABLE_PREFIX = "authorization unavailable: ";
 export const PI_EXTENSION_SOURCE = `// Switchboard's pi harness extension. Written into the run's directory by the
 // bot before pi starts; loaded with \`-e\`.
 import { constants } from "node:fs";
-import { mkdir, mkdtemp, open, realpath } from "node:fs/promises";
+import { mkdir, mkdtemp, open, realpath, stat as fileStat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createReadToolDefinition, getPackageDir } from "@earendil-works/pi-coding-agent";
@@ -241,31 +241,52 @@ async function outputReadTool() {
   if (!root) return undefined;
   const { resolveReadPathAsync } = await import(pathToFileURL(resolve(getPackageDir(), "dist/core/tools/path-utils.js")).href);
   let scratch;
+  let workspaceScratch;
+  let canonicalWorkspaceScratch;
   if (process.platform === "linux") {
     await mkdir(root, { recursive: true, mode: 0o700 });
     if (await realpath(root) !== resolve(root)) throw new Error("output scratch root is not canonical");
     scratch = await mkdtemp(resolve(root, "process-"));
     process.env.TMPDIR = scratch;
   }
+  workspaceScratch = process.env.SWITCHBOARD_RUN_SCRATCH;
+  if (workspaceScratch !== undefined) {
+    await mkdir(workspaceScratch, { recursive: true, mode: 0o700 });
+    canonicalWorkspaceScratch = await realpath(workspaceScratch);
+    const declared = resolve(workspaceScratch);
+    // macOS's system-owned /var and /tmp aliases preserve the same run root.
+    const systemAlias = process.platform === "darwin" &&
+      (declared.startsWith("/var/") || declared.startsWith("/tmp/")) && canonicalWorkspaceScratch === "/private" + declared;
+    if (canonicalWorkspaceScratch !== declared && !systemAlias) throw new Error("run scratch root is not canonical");
+    process.env.TMPDIR = workspaceScratch;
+  }
   const inside = (dir, file) => {
     const path = relative(dir, file);
     return path !== "" && path !== ".." && !path.startsWith("../") && !isAbsolute(path);
   };
   const normal = createReadToolDefinition(process.cwd());
+  const withinScratch = (file) =>
+    (scratch !== undefined && inside(scratch, file)) ||
+    (workspaceScratch !== undefined && inside(workspaceScratch, file)) ||
+    (canonicalWorkspaceScratch !== undefined && inside(canonicalWorkspaceScratch, file));
   const output = createReadToolDefinition(process.cwd(), {
     operations: {
       access: async () => {},
       async readFile(path) {
-        if (scratch === undefined || !inside(scratch, path)) throw new Error("read refused: path is outside this process's output scratch");
+        if (!withinScratch(path)) throw new Error("read refused: path is outside this run's scratch");
         // O_NOFOLLOW excludes a final symlink. The descriptor's canonical
         // path excludes ancestor swaps; nlink excludes aliases to other files.
         // Read the SAME open file, not a path checked before an async gate.
         const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
         try {
           const stat = await file.stat();
-          const actual = await realpath("/proc/self/fd/" + file.fd);
-          if (!stat.isFile() || stat.nlink !== 1 || !inside(scratch, actual))
+          const actual = await realpath(process.platform === "linux" ? "/proc/self/fd/" + file.fd : path);
+          if (!stat.isFile() || stat.nlink !== 1 || !withinScratch(actual))
             throw new Error("read refused: output file identity is outside this process's scratch");
+          if (process.platform !== "linux") {
+            const named = await fileStat(actual);
+            if (named.dev !== stat.dev || named.ino !== stat.ino) throw new Error("read refused: scratch file identity changed");
+          }
           return await file.readFile();
         } finally {
           await file.close();

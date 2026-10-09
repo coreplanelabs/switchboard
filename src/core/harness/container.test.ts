@@ -125,7 +125,7 @@ describe("the container scripts", () => {
     // The directories at 700 in a subshell: the run's root is the caller's alone, and the process's own umask is untouched.
     expect(
       script.startsWith(
-        `(umask 077 && mkdir -p '${paths.dir}' '${paths.sessionDir}' '${paths.commandDir}' '${paths.outputDir}') && `,
+        `(umask 077 && mkdir -p '${paths.dir}' '${paths.sessionDir}' '${paths.commandDir}' '${paths.outputDir}' '${paths.scratchDir}') && `,
       ),
     ).toBe(true);
     expect(script).toContain(`mkfifo -m 600 '${paths.fifo}'`);

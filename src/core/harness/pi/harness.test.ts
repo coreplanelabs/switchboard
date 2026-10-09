@@ -634,11 +634,12 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
         logOffset: 0,
         root: paths.dir,
         bearerHash: bearerHashOf(w.bearer),
-        ...(outputScratch ? { outputScratch: true } : {}),
+        ...(outputScratch ? { outputScratch: true, workspaceScratch: true } : {}),
       }),
     };
     scriptedPi(w.container, (_n, c) => {
       expect(w.registry.get("run-7")?.rules.outputDir).toBe(outputScratch ? paths.outputDir : undefined);
+      expect(w.registry.get("run-7")?.rules.scratchDir).toBe(outputScratch ? paths.scratchDir : undefined);
       finalTurn(c, "done");
     });
     expect(await w.start()).toBe("done");
@@ -666,6 +667,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       logOffset: 0,
       root: paths.dir,
       outputScratch: true,
+      workspaceScratch: true,
       bearerHash: bearerHashOf(w.bearer),
       wire: "anthropic-messages",
       container: "vm-fake",
@@ -745,6 +747,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       logOffset: 0,
       root: paths.dir,
       outputScratch: true,
+      workspaceScratch: true,
       bearerHash: bearerHashOf(w.bearer),
       wire: "anthropic-messages",
       container: "vm-fake",
@@ -6807,6 +6810,7 @@ describe("runPiHarness — a read-identity preset", () => {
       identity: "read",
       checkout: "/workspace/threads/t/main",
       outputDir: paths.outputDir,
+      scratchDir: paths.scratchDir,
       protectedBranches: ["main"],
       loopEndsIn: expect.any(Function),
     });
@@ -6833,6 +6837,7 @@ describe("runPiHarness — a read-identity preset", () => {
       identity: "write",
       checkout: "/workspace/threads/t/main",
       outputDir: paths.outputDir,
+      scratchDir: paths.scratchDir,
       protectedBranches: ["main"],
       loopEndsIn: expect.any(Function),
     });
@@ -7306,6 +7311,7 @@ describe("runPiHarness — the relaunch in the replacement container", () => {
       logOffset: 0,
       root: paths.dir,
       outputScratch: true,
+      workspaceScratch: true,
       bearerHash: bearerHashOf(w.bearer),
       wire: "anthropic-messages",
       container: "vm-fake",

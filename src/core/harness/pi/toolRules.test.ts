@@ -184,6 +184,36 @@ describe("judgeToolCall — output scratch", () => {
   });
 });
 
+describe("judgeToolCall — run temporary files", () => {
+  it("uses the run's temporary directory for file tools without granting other run or runtime paths", () => {
+    const rules = { ...ctx, scratchDir: "/var/tmp/run-one/scratch" };
+    for (const tool of ["read", "grep", "find", "ls", "write", "edit"]) {
+      expect(judgeToolCall(tool, { path: "/var/tmp/run-one/scratch/review.diff" }, rules)).toEqual({
+        verdict: "allowed",
+      });
+      expect(judgeToolCall(tool, { path: "/var/tmp/run-two/scratch/review.diff" }, rules).verdict).toBe("refused");
+      expect(judgeToolCall(tool, { path: "/var/tmp/run-one/scratch/../agent/models.json" }, rules).verdict).toBe(
+        "refused",
+      );
+    }
+    expect(judgeToolCall("ls", { path: rules.scratchDir }, rules)).toEqual({ verdict: "allowed" });
+    expect(judgeToolCall("read", { path: "/tmp/review.diff" }, rules).verdict).toBe("refused");
+    expect(judgeToolCall("read", { path: `${rules.scratchDir}/review.diff` }, ctx).verdict).toBe("refused");
+  });
+
+  it("keeps review source writes refused while permitting reads and searches of its own temporary files", () => {
+    const rules = { ...ctx, identity: "read" as const, scratchDir: "/var/tmp/run-one/scratch" };
+    for (const tool of ["read", "grep", "find", "ls"])
+      expect(judgeToolCall(tool, { path: "/var/tmp/run-one/scratch/review.diff" }, rules)).toEqual({
+        verdict: "allowed",
+      });
+    for (const tool of ["write", "edit"])
+      expect(judgeToolCall(tool, { path: "/var/tmp/run-one/scratch/review.diff" }, rules).verdict).toBe(
+        "outside-profile",
+      );
+  });
+});
+
 describe("judgeToolCall — typed publication", () => {
   const native = { ...ctx, noShellPush: true };
   it("allows harmless wildcards, interpreters and shell composition without minting publication", () => {

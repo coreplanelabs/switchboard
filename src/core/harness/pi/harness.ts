@@ -972,6 +972,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       reattached = true;
       paths = piRunPathsAt(recorded.root);
       rules.outputDir = recorded.outputScratch === true ? paths.outputDir : undefined;
+      rules.scratchDir = recorded.workspaceScratch === true ? paths.scratchDir : undefined;
     }
     if (reattached && recorded && paths !== undefined) {
       pid = recorded.pid;
@@ -1008,6 +1009,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // under whatever root comes back. Original recorded custody was checked above.
       paths = piRunPathsAt(await container.makeRoot(piRunPaths(run.runId).dir));
       rules.outputDir = paths.outputDir;
+      rules.scratchDir = run.agent.identity === "none" ? undefined : paths.scratchDir;
       const spec: PiLaunchSpec = {
         runId: run.runId,
         paths,
@@ -1154,7 +1156,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         ...(started.processBirth === undefined ? {} : { processBirth: started.processBirth }),
         logOffset: 0,
         root: paths.dir,
-        ...(run.agent.identity !== "none" ? { outputScratch: true as const } : {}),
+        ...(run.agent.identity !== "none" ? { outputScratch: true as const, workspaceScratch: true as const } : {}),
         ...(bearerHash !== undefined ? { bearerHash } : {}),
         wire: runWire,
         ...(here !== undefined ? { container: here } : {}),

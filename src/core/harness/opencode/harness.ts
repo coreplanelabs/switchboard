@@ -196,6 +196,7 @@ async function feedEndFrom(container: HarnessContainer, feed: string, from: numb
 /** What `open` continues on, whichever way the server came to be: this
  *  generation's launch, or the dead generation's server re-attached. */
 interface OpenCodeLive {
+  workspaceScratch?: true;
   pid: number;
   port: number;
   tailerPid: number;
@@ -496,6 +497,7 @@ export async function openOpenCodeRun(
             processBirth: started.processBirth,
             port: started.port,
             paths: started.paths,
+            workspaceScratch: started.workspaceScratch,
             tailerPid: started.tailerPid,
             tailerProcessBirth: started.tailerProcessBirth,
           },
@@ -518,6 +520,7 @@ export async function openOpenCodeRun(
       openingCustodyUnknown = false;
     }
 
+    run.rules.scratchDir = server.workspaceScratch === true ? server.paths.scratchDir : undefined;
     for (const m of server.reattach?.store ?? []) known.add(m.id);
     const conn: OpenCodeConnection = {
       relay: live,
@@ -771,6 +774,7 @@ async function reattachOpenCode(
     tailerRestarted,
     server: {
       pid: facts.pid,
+      ...(facts.workspaceScratch === true ? { workspaceScratch: true as const } : {}),
       port: facts.port,
       tailerPid,
       ...(tailerProcessBirth === undefined ? {} : { tailerProcessBirth }),

@@ -83,11 +83,13 @@ const pending = (toolCallId: string) => new Response(JSON.stringify({ pending: t
 
 const originalTmpdir = process.env.TMPDIR;
 const originalOutputRoot = process.env.SWITCHBOARD_PI_OUTPUT_ROOT;
+const originalRunScratch = process.env.SWITCHBOARD_RUN_SCRATCH;
 let dir: string;
 let load: () => Promise<(pi: unknown) => Promise<void>>;
 
 beforeEach(() => {
   delete process.env.SWITCHBOARD_PI_OUTPUT_ROOT;
+  delete process.env.SWITCHBOARD_RUN_SCRATCH;
   dir = realpathSync(mkdtempSync(join(tmpdir(), "swb-pi-ext-")));
   const file = join(dir, "extension.mjs");
   writeFileSync(file, PI_EXTENSION_SOURCE);
@@ -106,6 +108,8 @@ afterEach(() => {
   delete process.env[RUN_BEARER_ENV];
   if (originalOutputRoot === undefined) delete process.env.SWITCHBOARD_PI_OUTPUT_ROOT;
   else process.env.SWITCHBOARD_PI_OUTPUT_ROOT = originalOutputRoot;
+  if (originalRunScratch === undefined) delete process.env.SWITCHBOARD_RUN_SCRATCH;
+  else process.env.SWITCHBOARD_RUN_SCRATCH = originalRunScratch;
   if (originalTmpdir === undefined) delete process.env.TMPDIR;
   else process.env.TMPDIR = originalTmpdir;
   rmSync(dir, { recursive: true, force: true });
@@ -327,10 +331,54 @@ describe("the harness extension", () => {
       expect(bot.calls.some((call) => call.path === "/harness/authorize")).toBe(true);
     },
   );
+  it.each(process.platform === "darwin" ? ["canonical", "macOS alias"] : ["canonical"])(
+    "reads a run-owned temporary file while keeping runtime files and aliases outside the grant: %s",
+    async (spelling) => {
+      const checkout = join(dir, "checkout");
+      const scratch = join(
+        spelling === "macOS alias" ? dir.replace(/^\/private(?=\/var\/)/, "") : dir,
+        "run",
+        "scratch",
+      );
+      const runtime = join(dir, "run", "agent");
+      mkdirSync(checkout);
+      mkdirSync(runtime, { recursive: true });
+      process.env.SWITCHBOARD_PI_OUTPUT_ROOT = join(dir, "run", "output");
+      process.env.SWITCHBOARD_RUN_SCRATCH = scratch;
+      fakeBot({
+        "/harness/tools": TOOLS,
+        "/harness/authorize": (body: unknown) => {
+          const ask = body as { tool: string; input: unknown };
+          const verdict = judgeToolCall(ask.tool, ask.input, { identity: "read", checkout, scratchDir: scratch });
+          return verdict.verdict === "allowed" ? { allow: true } : { allow: false, reason: verdict.reason };
+        },
+      });
+      const pi = fakePi();
+      await (
+        await load()
+      )(pi.api);
+      expect(process.env.TMPDIR).toBe(scratch);
+      const path = join(scratch, "review.diff");
+      writeFileSync(path, "verified temporary diff");
+      const tool = pi.tools.find((t) => t.name === "read")!;
+      expect(await tool.execute("scratch-read", { path }, undefined, undefined, { cwd: checkout })).toMatchObject({
+        content: [{ type: "text", text: "verified temporary diff" }],
+      });
+      const privateFile = join(runtime, "models.json");
+      writeFileSync(privateFile, "runtime config");
+      await expect(
+        tool.execute("runtime-read", { path: privateFile }, undefined, undefined, { cwd: checkout }),
+      ).rejects.toThrow();
+      symlinkSync(privateFile, join(scratch, "alias"));
+      await expect(
+        tool.execute("alias-read", { path: join(scratch, "alias") }, undefined, undefined, { cwd: checkout }),
+      ).rejects.toThrow();
+    },
+  );
   it("imports only the pinned pi SDK and Node builtins and reads its settings from the environment", async () => {
     expect(PI_EXTENSION_SOURCE.match(/^import .* from "([^"]+)"/gm)).toEqual([
       'import { constants } from "node:fs"',
-      'import { mkdir, mkdtemp, open, realpath } from "node:fs/promises"',
+      'import { mkdir, mkdtemp, open, realpath, stat as fileStat } from "node:fs/promises"',
       'import { isAbsolute, relative, resolve } from "node:path"',
       'import { pathToFileURL } from "node:url"',
       'import { createReadToolDefinition, getPackageDir } from "@earendil-works/pi-coding-agent"',
