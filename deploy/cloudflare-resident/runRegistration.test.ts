@@ -1031,6 +1031,7 @@ const ownerMethods = [
   "claimRetainedThreadUser",
   "markPoolUserSpent",
   "poolUserOwnerMatches",
+  "workspaceDiscarded",
   "registerRun",
   "detachThread",
   "retainWorkspacePredecessor",

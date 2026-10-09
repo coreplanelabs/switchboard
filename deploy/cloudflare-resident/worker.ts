@@ -5994,6 +5994,78 @@ export class ResidentDO extends Sandbox<Env> {
     const key = threadBindingKey(next.threadKey);
     await this.ctx.storage.transaction(async (txn) => {
       const prior = await txn.get<ThreadBinding>(key);
+      const scope = this.threadOperationScope?.getStore();
+      const retired = await txn.get<WorkspaceOwner>(`discarded-thread:${next.threadKey}`);
+      if (await txn.get(`discarding:${next.threadKey}`)) throw new Error("workspace discarded");
+      let newWorkspaceAfterDiscard = false;
+      if (retired) {
+        const fence = await txn.get<unknown>(runFenceKey(next.threadKey));
+        const registration = await txn.get<RunRegistration>(runRegKey(next.threadKey));
+        const samePlacement =
+          prior &&
+          ["threadKey", "ref", "container", "worktreePath", "boundAt"].every(
+            (field) => next[field as keyof ThreadBinding] === prior[field as keyof ThreadBinding],
+          );
+        const sameAllocation = prior && next.user === prior.user && next.evicted === prior.evicted;
+        const currentOwner =
+          isWorkspaceOwner(retired) &&
+          isWorkspaceOwner(registration) &&
+          isWorkspaceOwner(fence) &&
+          registration.ownerFence > retired.ownerFence &&
+          workspaceOwnerKey(registration) === workspaceOwnerKey(fence);
+        const ownerMetadata =
+          currentOwner &&
+          isWorkspaceOwner(next.lastRunOwner) &&
+          workspaceOwnerKey(next.lastRunOwner) === workspaceOwnerKey(registration!);
+        const currentRelease = ownerMetadata && next.evicted && next.user === "" && prior && !prior.evicted;
+        const sameSnapshot =
+          samePlacement &&
+          next.lastAttachAt === prior!.lastAttachAt &&
+          (currentRelease ||
+            (sameAllocation &&
+              (ownerMetadata || JSON.stringify(next.lastRunOwner) === JSON.stringify(prior!.lastRunOwner))));
+        const activeOwner = scope?.active && scope.threadKey === next.threadKey && isWorkspaceOwner(scope.owner);
+        const attachment =
+          activeOwner &&
+          scope.attachment &&
+          isWorkspaceOwner(retired) &&
+          scope.owner.ownerFence > retired.ownerFence &&
+          isWorkspaceOwner(fence) &&
+          registeredRunAllowsClaim(fence, scope.owner.runId, scope.owner.ownerGen, scope.owner.ownerFence) &&
+          registeredRunAllowsClaim(registration, scope.owner.runId, scope.owner.ownerGen, scope.owner.ownerFence);
+        const currentScope =
+          activeOwner && currentOwner && workspaceOwnerKey(scope.owner) === workspaceOwnerKey(registration!);
+        newWorkspaceAfterDiscard = !!(attachment && prior?.evicted);
+        if (
+          !isWorkspaceOwner(retired) ||
+          !(
+            attachment ||
+            (currentScope && samePlacement && (sameAllocation || currentRelease)) ||
+            (!scope && sameSnapshot)
+          )
+        )
+          throw new Error("workspace discarded");
+      }
+      const loss =
+        newWorkspaceAfterDiscard && retired
+          ? await txn.get<{ completed?: boolean; binding?: ThreadBinding }>(
+              `discarded:${next.threadKey}:${retired.runId}`,
+            )
+          : undefined;
+      const remainingPredecessors = newWorkspaceAfterDiscard
+        ? prior?.workspacePredecessors?.filter(
+            (p) =>
+              !isWorkspaceOwner(p.owner) ||
+              !isWorkspaceOwner(retired) ||
+              workspaceOwnerKey(p.owner) !== workspaceOwnerKey(retired) ||
+              !loss?.completed ||
+              !loss.binding ||
+              p.binding?.ref !== loss.binding.ref ||
+              p.binding?.workspace !== loss.binding.worktreePath ||
+              p.binding?.user !== loss.binding.user ||
+              p.binding?.container !== loss.binding.container,
+          )
+        : prior?.workspacePredecessors;
       const oldUser = prior && !prior.evicted ? prior.user : "";
       const newUser = !next.evicted ? next.user : "";
       if (oldUser && !THREAD_USERS.includes(oldUser)) throw new Error("pool-binding-index: unknown old UID");
@@ -6015,8 +6087,8 @@ export class ResidentDO extends Sandbox<Env> {
         prior && !replaceWorkspaceFacts
           ? {
               ...next,
-              workspacePredecessors: prior.workspacePredecessors,
-              workspaceSettlement: prior.workspaceSettlement,
+              workspacePredecessors: remainingPredecessors,
+              workspaceSettlement: newWorkspaceAfterDiscard ? undefined : prior.workspaceSettlement,
               ownBranches: prior.ownBranches,
             }
           : next,
@@ -6507,6 +6579,8 @@ export class ResidentDO extends Sandbox<Env> {
           // attach cannot slip between this check and a fallback-eligible refusal.
           if (!validRunOwner(runId, ownerGen, ownerFence))
             return { error: "run-registration-incomplete: attach requires a verifiable owner", status: 400 };
+          if (await this.workspaceDiscarded(threadKey, runId))
+            return { error: "workspace discarded", status: 409 } satisfies ThreadErr;
           if (await this.ctx.storage.get(`cancelled:${threadKey}:${runId}`))
             return { error: "run cancelled", status: 409 } satisfies ThreadErr;
           const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
@@ -6545,6 +6619,7 @@ export class ResidentDO extends Sandbox<Env> {
                   !registeredRunAllowsClaim(accepted, runId, ownerGen, ownerFence)
                 )
                   return { error: "run-registration-mismatch: a newer generation owns the thread", status: 409 };
+                if (await this.workspaceDiscarded(threadKey, runId)) throw new Error("workspace discarded");
                 const retained = await this.retainWorkspacePredecessor(threadKey, {
                   runId: runId!,
                   ownerGen: ownerGen!,
@@ -8305,7 +8380,8 @@ export class ResidentDO extends Sandbox<Env> {
   private async assertThreadOperationAllowed(): Promise<void> {
     const scope = this.threadOperationScope?.getStore();
     if (!scope) return;
-    if (!scope.active) throw new RunCancelledError("run cancelled");
+    if (!scope.active || (await this.workspaceDiscarded(scope.threadKey, scope.owner.runId)))
+      throw new RunCancelledError("run cancelled");
     const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(scope.threadKey));
     if (
       (!scope.attachment &&
@@ -8331,6 +8407,7 @@ export class ResidentDO extends Sandbox<Env> {
         const last =
           registration ?? (await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey)))?.lastRunOwner;
         if (
+          (await this.workspaceDiscarded(threadKey, requestOwner?.runId ?? last?.runId)) ||
           (requestOwner &&
             (!isWorkspaceOwner(requestOwner) ||
               !registeredRunOwnsRelease(
@@ -9052,6 +9129,13 @@ export class ResidentDO extends Sandbox<Env> {
       if (!binding || !previous || !hasRunOwnerField(previous)) return;
       if (binding.threadKey !== threadKey) return { error: "workspace-owner-unverified", status: 409 };
       if (!isWorkspaceOwner(previous)) return { error: "workspace-owner-unverified", status: 409 };
+      const loss = await txn.get<{ completed?: boolean; owner?: unknown }>(`discarded:${threadKey}:${previous.runId}`);
+      if (
+        loss?.completed &&
+        isWorkspaceOwner(loss.owner) &&
+        workspaceOwnerKey(loss.owner) === workspaceOwnerKey(previous)
+      )
+        return;
       const key = workspaceOwnerKey(previous);
       if (key === workspaceOwnerKey(owner)) return;
       const pending = binding.workspacePredecessors ?? [];
@@ -9795,6 +9879,243 @@ export class ResidentDO extends Sandbox<Env> {
     );
   }
 
+  /** A loss receipt is separate from cancellation and publication evidence.
+   * Pending retirement blocks successors; a completed receipt blocks only its old run. */
+  private async workspaceDiscarded(threadKey: string, runId?: string): Promise<boolean> {
+    return !!(
+      (await this.ctx.storage.get(`discarding:${threadKey}`)) ||
+      (runId && (await this.ctx.storage.get(`discarded:${threadKey}:${runId}`)))
+    );
+  }
+
+  /** Explicit operator loss can retire absent private work without fabricating
+   * publication. Present bytes still require a separately qualified disposal path. */
+  async discardAbsentBinding(input: unknown): Promise<
+    | { discarded: false; reason: string; owner?: WorkspaceOwner }
+    | {
+        discarded: true;
+        runId: string;
+        user: string;
+        disposition: "absent-workspace-retired";
+        owner?: WorkspaceOwner;
+        fence?: WorkspaceOwner;
+        currentBoot?: string | null;
+      }
+    | ThreadErr
+  > {
+    const refuse = (reason: string) => ({ discarded: false as const, reason });
+    if (!input || typeof input !== "object" || Array.isArray(input)) return refuse("invalid-input");
+    const request = input as Record<string, unknown>;
+    const fields = [
+      "confirmDiscard",
+      "threadKey",
+      "runId",
+      "ownerGen",
+      "ownerFence",
+      "ref",
+      "user",
+      "container",
+      "lastAttachAt",
+    ];
+    if (Object.keys(request).some((key) => !fields.includes(key))) return refuse("invalid-input");
+    const parsed = parseThreadKey(request.threadKey);
+    if (
+      "error" in parsed ||
+      request.confirmDiscard !== true ||
+      ["runId", "ref", "user", "container", "lastAttachAt"].some(
+        (key) => typeof request[key] !== "string" || !request[key] || (request[key] as string).length > 512,
+      )
+    )
+      return refuse("invalid-input");
+    const { threadKey } = parsed;
+    const runId = request.runId as string;
+    const key = `discarded:${threadKey}:${runId}`;
+    type Receipt = {
+      request: Record<string, unknown>;
+      owner: WorkspaceOwner;
+      completed: boolean;
+      user: string;
+      binding: ThreadBinding;
+    };
+    const matches = (prior: Receipt) =>
+      ["threadKey", "runId", "ownerGen", "ownerFence", "ref", "user", "container", "lastAttachAt"].every(
+        (field) => prior.request[field] === request[field],
+      );
+    const done = (user: string) => ({
+      discarded: true as const,
+      runId,
+      user,
+      disposition: "absent-workspace-retired" as const,
+    });
+    const readBoot = async () => {
+      const command = ["cat", "/proc/sys/kernel/random/boot_id"];
+      const result = await this.run(command);
+      const boot = result.stdout.trim();
+      return result.exitCode === 0 &&
+        !result.timedOut &&
+        !result.truncated &&
+        !result.stderr &&
+        /^[A-Za-z0-9-]{1,64}$/.test(boot)
+        ? boot
+        : undefined;
+    };
+    return this.withDeployAdmission(() =>
+      this.threadAttaches.run(threadKey, async () => {
+        const prior = await this.ctx.storage.get<Receipt>(key);
+        if (prior && !matches(prior)) return refuse("discard-target-mismatch");
+        if (prior?.completed) {
+          const retired = await this.ctx.storage.get<unknown>(`discarded-thread:${threadKey}`);
+          const fence = await this.ctx.storage.get<unknown>(runFenceKey(threadKey));
+          if (
+            !isWorkspaceOwner(retired) ||
+            !isWorkspaceOwner(fence) ||
+            retired.ownerFence < prior.owner.ownerFence ||
+            fence.ownerFence < prior.owner.ownerFence ||
+            (retired.ownerFence === prior.owner.ownerFence &&
+              workspaceOwnerKey(retired) !== workspaceOwnerKey(prior.owner)) ||
+            (fence.ownerFence === prior.owner.ownerFence && workspaceOwnerKey(fence) !== workspaceOwnerKey(prior.owner))
+          )
+            return refuse("discard-receipt-unverified");
+          // Receipt verification is metadata-only: SDK execution could wake a VM
+          // that stopped during a storage await. Physical reset proof is separate.
+          return { ...done(prior.user), owner: prior.owner, fence, currentBoot: null };
+        }
+        const pending = await this.ctx.storage.get<WorkspaceOwner>(`discarding:${threadKey}`);
+        if (pending && (!prior || workspaceOwnerKey(pending) !== workspaceOwnerKey(prior.owner)))
+          return refuse("discard-in-progress");
+        const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+        const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+        const fence = await this.ctx.storage.get<unknown>(runFenceKey(threadKey));
+        if (
+          !binding ||
+          binding.evicted ||
+          binding.threadKey !== threadKey ||
+          ["ref", "user", "container", "lastAttachAt"].some(
+            (field) => binding[field as keyof ThreadBinding] !== request[field],
+          ) ||
+          !THREAD_USERS.includes(binding.user)
+        )
+          return refuse("binding-mismatch");
+        if (
+          !isWorkspaceOwner(registration) ||
+          registration.threadKey !== threadKey ||
+          registration.runId !== runId ||
+          !isWorkspaceOwner(fence) ||
+          workspaceOwnerKey(fence) !== workspaceOwnerKey(registration) ||
+          (prior && workspaceOwnerKey(prior.owner) !== workspaceOwnerKey(registration))
+        )
+          return refuse("owner-fence-mismatch");
+        const owner: WorkspaceOwner = { runId, ownerGen: registration.ownerGen, ownerFence: registration.ownerFence };
+        const physical = workspaceBindingOf(registration.workspace, owner);
+        if (
+          !physical ||
+          physical.ref !== binding.ref ||
+          physical.workspace !== binding.worktreePath ||
+          physical.user !== binding.user ||
+          physical.container !== binding.container
+        )
+          return refuse("owner-workspace-mismatch");
+        const observed = (await this.observeRunForEviction(registration, binding)) as {
+          kind?: string;
+          record?: { id?: string; threadKey?: string; status?: string; provisional?: boolean; repo?: string };
+          revision?: number;
+        } | null;
+        const saved = workspaceSettlementOf(binding.workspaceSettlement);
+        const record =
+          observed?.kind === "terminal"
+            ? observed.record
+            : isAcknowledgedWorkspaceOwner(observed, owner) &&
+                saved &&
+                workspaceOwnerKey(saved.owner) === workspaceOwnerKey(owner) &&
+                observed?.revision === saved.revision
+              ? saved.record
+              : undefined;
+        if (
+          record?.id !== runId ||
+          record.threadKey !== threadKey ||
+          `repo:${record.repo}` !== (await this.ctx.storage.get<string>(RESOURCE_KEY)) ||
+          ("provisional" in record && record.provisional === true) ||
+          !["completed", "failed", "interrupted", "stopped_soft", "stopped_hard"].includes(record.status ?? "")
+        )
+          return refuse("owner-not-terminal");
+        if (request.ownerGen === undefined && request.ownerFence === undefined)
+          return { discarded: false as const, reason: "owner-confirmation-required", owner };
+        if (request.ownerGen !== owner.ownerGen || request.ownerFence !== owner.ownerFence)
+          return refuse("owner-fence-mismatch");
+        if (
+          this.destroying ||
+          this.hydration !== null ||
+          !(await this.isRuntimeActive()) ||
+          (await this.getStatus()).state !== "warm" ||
+          (await this.recreateAdmission.blocked())
+        )
+          return refuse("runtime-unavailable");
+        if (
+          this.workspaceExclusiveOpsInFlight.has(threadKey) ||
+          (this.threadOpsInFlight.get(threadKey) ?? 0) > 0 ||
+          this.opUsersInUse.has(binding.user) ||
+          (await this.ctx.storage.list({ prefix: `native-operation:${threadKey}:`, limit: 1 })).size
+        )
+          return refuse("workspace-busy");
+        if (!(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`)))
+          return refuse("uid-owner-unverified");
+        this.workspaceExclusiveOpsInFlight.add(threadKey);
+        try {
+          const receipt: Receipt = { request, owner, user: binding.user, completed: false, binding };
+          await this.ctx.storage.transaction(async (txn) => {
+            await txn.put(key, receipt);
+            await txn.put(`discarding:${threadKey}`, owner);
+          });
+          const result = await this.withMirrorLock(async () => {
+            const boot = await readBoot();
+            if (!boot || !(await this.observeAbsentPrivateTree(binding)))
+              return refuse("private-tree-absence-unverified");
+            if ((await readBoot()) !== boot || this.ctx.container?.running !== true) return refuse("runtime-changed");
+            return this.ctx.storage.transaction(async (txn) => {
+              const current = await txn.get<ThreadBinding>(threadBindingKey(threadKey));
+              const currentOwner = await txn.get<RunRegistration>(runRegKey(threadKey));
+              const currentFence = await txn.get<unknown>(runFenceKey(threadKey));
+              if (
+                JSON.stringify(current) !== JSON.stringify(binding) ||
+                JSON.stringify(currentOwner) !== JSON.stringify(registration) ||
+                JSON.stringify(currentFence) !== JSON.stringify(fence) ||
+                (this.threadOpsInFlight.get(threadKey) ?? 0) > 0 ||
+                (await txn.list({ prefix: `native-operation:${threadKey}:`, limit: 1 })).size
+              )
+                return refuse("target-changed");
+              const claimants = await txn.get<unknown>(poolBindingKey(binding.user));
+              if (!Array.isArray(claimants) || claimants.length !== 1 || claimants[0] !== threadKey)
+                return refuse("uid-owner-unverified");
+              const remaining = releasePoolBinding(claimants, threadKey);
+              if (!remaining) return refuse("uid-owner-unverified");
+              await txn.put(poolBindingKey(binding.user), remaining);
+              await txn.put(threadBindingKey(threadKey), {
+                ...binding,
+                user: "",
+                evicted: true,
+                evictedAt: new Date(systemClock()).toISOString(),
+                evictedWhy: "operator-discard",
+                evictedUnmeasured: "operator-authorized loss; private tree verified absent",
+                preservationBlocked: undefined,
+                lastRunOwner: registration,
+              } satisfies ThreadBinding);
+              await txn.delete(runRegKey(threadKey));
+              await txn.put(key, { ...receipt, completed: true });
+              await txn.put(`discarded-thread:${threadKey}`, owner);
+              await txn.delete(`discarding:${threadKey}`);
+              return { ...done(binding.user), currentBoot: boot };
+            });
+          });
+          return result.value;
+        } catch {
+          return refuse("observation-unconfirmed");
+        } finally {
+          this.workspaceExclusiveOpsInFlight.delete(threadKey);
+        }
+      }),
+    );
+  }
+
   async cancelRun(
     cancellation: RunCancellation,
     expected: { user?: string; ownerGen?: string; ownerFence?: number; container?: string; workspace?: string },
@@ -10137,6 +10458,7 @@ export class ResidentDO extends Sandbox<Env> {
     attached?: AttachOk,
   ): Promise<void> {
     if (!validRunOwner(runId, ownerGen, ownerFence)) throw new Error("run-registration-incomplete");
+    if (await this.workspaceDiscarded(threadKey, runId)) throw new Error("workspace discarded");
     const retained = await this.retainWorkspacePredecessor(threadKey, {
       runId: runId!,
       ownerGen: ownerGen!,
@@ -10145,6 +10467,8 @@ export class ResidentDO extends Sandbox<Env> {
     if (retained) throw new Error(retained.error);
     const now = systemClock();
     await this.ctx.storage.transaction(async (txn) => {
+      if ((await txn.get(`discarding:${threadKey}`)) || (await txn.get(`discarded:${threadKey}:${runId}`)))
+        throw new Error("workspace discarded");
       await txn.put(runFenceKey(threadKey), { runId, ownerGen, ownerFence });
       await txn.put(runRegKey(threadKey), {
         threadKey,
@@ -10685,11 +11009,17 @@ export class ResidentDO extends Sandbox<Env> {
   /** Debug fault injection: age a binding so the sweep's TTL path can be
    *  exercised without waiting N days. */
   async debugBackdateThread(threadKey: string, days: number): Promise<{ ok: boolean; lastAttachAt?: string }> {
-    const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
-    if (!binding) return { ok: false };
-    const lastAttachAt = new Date(systemClock() - days * 86_400_000).toISOString();
-    await this.putThreadBinding({ ...binding, lastAttachAt } satisfies ThreadBinding);
-    return { ok: true, lastAttachAt };
+    return this.threadAttaches.run(threadKey, () =>
+      this.ctx.storage.transaction(async (txn) => {
+        const binding = await txn.get<ThreadBinding>(threadBindingKey(threadKey));
+        if (!binding || (await txn.get(`discarding:${threadKey}`))) return { ok: false };
+        const lastAttachAt = new Date(systemClock() - days * 86_400_000).toISOString();
+        // Admin authority changes only the current row's activity clock. Never
+        // replay a cached binding through the ordinary owner/placement fence.
+        await txn.put(threadBindingKey(threadKey), { ...binding, lastAttachAt } satisfies ThreadBinding);
+        return { ok: true, lastAttachAt };
+      }),
+    );
   }
 
   /** Debug: run the sweep pass now (the exact function the `sweep` step runs). */
@@ -13149,6 +13479,8 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
       return json(await stub.debugThreads());
     case "inspect-dependencies":
       return json(await stub.inspectThreadDependencies(body.input));
+    case "discard-absent-binding":
+      return json(await stub.discardAbsentBinding(body.input));
     case "inspect-preservation":
       return json(await stub.inspectThreadPreservation(body.input));
     case "reconcile-owner": {
