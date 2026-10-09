@@ -76,6 +76,7 @@ export interface Env {
   // secrets (wrangler secret put ...)
   SLACK_BOT_TOKEN: string;
   SLACK_APP_TOKEN: string;
+  SLACK_READ_TOKEN?: string;
   ANTHROPIC_API_KEY: string;
   OPENAI_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
@@ -122,6 +123,7 @@ export interface Env {
 /** Every secret/var the Worker forwards into the container. Optional entries
  *  are forwarded only when set, so the bot sees "not configured" as absence. */
 const FORWARDED_OPTIONAL = [
+  "SLACK_READ_TOKEN",
   "OPENAI_API_KEY",
   "OPENROUTER_API_KEY",
   "TYPESAFE_API_KEY",

@@ -565,6 +565,8 @@ export interface AppConfig extends AgentConfiguration {
 }
 
 export interface SlackConfig {
+  /** Optional workspace read-only user credential; the bot remains the listener and writer. */
+  readerTokenEnv?: string;
   /**
    * Reconnect catch-up (docs/decisions/0012-reconnect-catch-up-as-recovery.md):
    * on every Socket Mode (re)connect, re-read

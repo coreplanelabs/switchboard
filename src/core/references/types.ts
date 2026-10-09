@@ -1,3 +1,4 @@
+import type { ChannelDirectory } from "../authz/types.js";
 import type { SourceCoverage } from "./receipts.js";
 // The vocabulary of record 0037: a URL in a request that a channel adapter
 // recognises as one of its conversations, what the adapter can say about that
@@ -18,12 +19,16 @@ export interface ConversationRef {
 }
 
 /** What the adapter affirmatively knows about a conversation's channel.
- *  `never` is everything it cannot place: a DM, a shared or external channel,
+ *  `never` is everything it cannot place: a DM,
  *  a missing channel, an error, a slow answer. */
 export interface ConversationClassification {
   readonly visibility: "public" | "private" | "never";
-  /** Whether the bot itself can read the channel. */
-  readonly botIsMember: boolean;
+  /** Whether the selected read account can read the channel. */
+  readonly readerHasAccess: boolean;
+  /** The source includes another workspace's audience. Access is decided by the core. */
+  readonly shared?: boolean;
+  /** An individual direct conversation; usable only as an attested destination. */
+  readonly direct?: boolean;
   /** The channel's display name from the same fresh lookup, for the block's header. */
   readonly channelName?: string;
 }
@@ -49,6 +54,7 @@ export interface ReferencedConversation {
   readonly permalink: string;
   readonly messages: readonly ReferencedMessage[];
   readonly coverage?: SourceCoverage;
+  readonly shared?: boolean;
 }
 
 /**
@@ -60,6 +66,11 @@ export interface ConversationReader {
   /** The id prefix the reader's platform namespaces channels with (`slack`), so
    *  the step can ask the requester's OWN platform about the requester. */
   readonly platform: string;
+  /** Select a read-only source connection without changing the listening surface. */
+  forReference?(originChannelId: string, ref: ConversationRef): ConversationReader;
+  /** A verified workspace read account can read public channels without joining. */
+  readonly workspacePublicRead?: boolean;
+  readonly directory?: Pick<ChannelDirectory, "isMember">;
   /** The adapter's URL grammar; `undefined` for a URL that is not one of its conversations. */
   parseConversationUrl(url: string): ConversationRef | undefined;
   /** One fresh lookup per call (cached briefly by the adapter), never a guess. */

@@ -1,8 +1,7 @@
 import { SOURCE_READ_MESSAGE_MAX } from "../references/receipts.js";
 import type { RefusalCode } from "../refusal.js";
 import { authorize } from "../authz/authorize.js";
-import { pointingActor } from "../authz/pointingActor.js";
-import type { Actor } from "../authz/types.js";
+import type { Actor, ChannelDirectory } from "../authz/types.js";
 import { wrapUntrusted } from "../commandRegistry.js";
 import type {
   ConversationClassification,
@@ -201,20 +200,118 @@ export interface ReadReferencesInput {
   now?: () => number;
 }
 
+type ReferenceAccessDeps = ReferenceDeps & { channelDirectory?: Pick<ChannelDirectory, "isMember"> };
+
+export type ReferenceAccess =
+  | { classification: ConversationClassification & { visibility: "public" | "private" }; reader: ConversationReader }
+  | { refused: ReferenceRefusal };
+
+/** One source policy for automatic references, explicit reads and saved-source checks.
+ * The platform reports facts; the policy table decides for the resolved requester. */
+export async function referenceAccess(
+  deps: ReferenceAccessDeps,
+  input: ReadReferencesInput,
+  { reader, ref }: ParsedReference,
+  fresh = false,
+): Promise<ReferenceAccess> {
+  const { msg, actor } = input;
+  const sourceReader = reader.forReference?.(msg.channelId, ref) ?? reader;
+  const timeoutMs = deps.referenceTimeoutMs ?? REFERENCE_TIMEOUT_MS;
+  const membership = (channelId: string, directory = sourceReader.directory ?? deps.channelDirectory) =>
+    actor.kind !== "user" || actor.id !== msg.userId || actor.onBehalfOf
+      ? Promise.resolve(false)
+      : bounded(
+          async () => (await directory?.isMember(msg.userId, channelId, { fresh: true })) ?? "unknown",
+          timeoutMs,
+        );
+  if (input.purpose !== "revalidate" && !admitOne(msg.userId, (input.now ?? Date.now)()))
+    return { refused: "rate-limited" };
+  const lookup = (target: ConversationRef) =>
+    bounded(
+      () =>
+        fresh && sourceReader.classifyConversationFresh
+          ? sourceReader.classifyConversationFresh(target)
+          : sourceReader.classifyConversation(target),
+      timeoutMs,
+    );
+  const platform = msg.channelId.slice(0, msg.channelId.indexOf(":"));
+  const originReader = deps.conversationReaders?.find((r) => r.platform === platform) ?? reader;
+  if (ref.channelId !== msg.channelId) {
+    const full = await bounded(
+      () => (sourceReader.platform === platform ? sourceReader : originReader).requesterIsFullMember(msg.userId),
+      timeoutMs,
+    );
+    if (full !== true) return { refused: full === TIMED_OUT ? "timed-out" : "guest" };
+  }
+  const classification = await lookup(ref);
+  if (classification === TIMED_OUT) return { refused: "timed-out" };
+  if (!classification || classification.visibility === "never") return { refused: "never" };
+  if (!classification.readerHasAccess) return { refused: "not-a-member" };
+  if (ref.channelId !== msg.channelId) {
+    const originRef = { channelId: msg.channelId, threadKey: msg.threadKey, url: msg.sourceUrl ?? "" };
+    const origin = await bounded(
+      () =>
+        originReader.classifyConversationFresh
+          ? originReader.classifyConversationFresh(originRef)
+          : originReader.classifyConversation(originRef),
+      timeoutMs,
+    );
+    if (origin === TIMED_OUT) return { refused: "timed-out" };
+    const direct = msg.directAudience;
+    const verifiedDirect =
+      origin?.direct &&
+      direct?.channelId === msg.channelId &&
+      direct.userId === msg.userId &&
+      direct.threadKey === msg.threadKey;
+    if (
+      !origin ||
+      origin.shared ||
+      (!origin.readerHasAccess && !verifiedDirect) ||
+      (origin.visibility === "never" && !verifiedDirect)
+    )
+      return { refused: "denied" };
+    if (classification.visibility === "private" && !verifiedDirect) return { refused: "denied" };
+    if (origin.visibility === "private") {
+      const member = await membership(msg.channelId, originReader.directory ?? deps.channelDirectory);
+      if (member !== true) return { refused: member === TIMED_OUT ? "timed-out" : "denied" };
+    }
+  }
+  let principal = actor;
+  if ((classification.shared && !sourceReader.workspacePublicRead) || classification.visibility === "private") {
+    const member = await membership(ref.channelId);
+    if (member !== true) return { refused: member === TIMED_OUT ? "timed-out" : "denied" };
+    principal = { ...principal, memberOf: new Set([ref.channelId]) };
+  }
+  const decision = authorize(principal, "conversation:read", {
+    type: "channel",
+    id: ref.channelId,
+    visibility: classification.shared && !sourceReader.workspacePublicRead ? "private" : classification.visibility,
+  });
+  return decision.allow
+    ? { classification: { ...classification, visibility: classification.visibility }, reader: sourceReader }
+    : { refused: "denied" };
+}
+
+export function sameReferenceAudience(
+  a: { visibility: string; shared?: boolean },
+  b: { visibility: string; shared?: boolean },
+): boolean {
+  return a.visibility === b.visibility && !!a.shared === !!b.shared;
+}
+
 /**
  * Resolve every reference in `msg.text`. Per reference, in order: the
  * per-request cap and the per-user window (no adapter call), the requester's
  * standing on their own platform when the channel is not the origin, the
- * closed classifier (bounded), the `conversation:read` row for the pointing
- * actor, the bounded fetch, the caps. A URL no reader parses is plain text.
+ * closed classifier and destination checks (bounded), the `conversation:read` row for the resolved
+ * requester, the bounded fetch, the caps. A URL no reader parses is plain text.
  * Every decision is one `[references]` log line with its reason; the reply
  * carries only `REFERENCE_REFUSAL`, once, when anything was refused.
  */
-export async function readReferences(deps: ReferenceDeps, input: ReadReferencesInput): Promise<ReferencesResult> {
+export async function readReferences(deps: ReferenceAccessDeps, input: ReadReferencesInput): Promise<ReferencesResult> {
   const readers = deps.conversationReaders ?? [];
   if (readers.length === 0) return NO_REFERENCES;
-  const { msg, actor } = input;
-  const now = input.now ?? Date.now;
+  const { msg } = input;
   const timeoutMs = deps.referenceTimeoutMs ?? REFERENCE_TIMEOUT_MS;
 
   // Parse first: a URL no reader owns is not a reference and costs nothing.
@@ -231,54 +328,19 @@ export async function readReferences(deps: ReferenceDeps, input: ReadReferencesI
     refused.push(why);
     log(ref, `refused reason=${why}`);
   };
-  // The requester's own platform answers about the requester; the reader that
-  // parsed the URL may be another platform's.
-  const platform = msg.channelId.slice(0, msg.channelId.indexOf(":"));
-  const originReader = readers.find((r) => r.platform === platform);
-
   for (const [i, { reader, ref }] of refs.entries()) {
     if (i >= REFERENCE_MAX_PER_REQUEST) {
       refuse(ref, "over-cap");
       continue;
     }
-    if (input.purpose !== "revalidate" && !admitOne(msg.userId, now())) {
-      refuse(ref, "rate-limited");
+    const access = await referenceAccess(deps, input, { reader, ref });
+    if ("refused" in access) {
+      refuse(ref, access.refused);
       continue;
     }
-    if (ref.channelId !== msg.channelId) {
-      const full = await bounded(() => (originReader ?? reader).requesterIsFullMember(msg.userId), timeoutMs);
-      if (full !== true) {
-        // Fail closed either way; the log token says which — a slow lookup is
-        // an infra fact, not a standing decision about the requester.
-        refuse(ref, full === TIMED_OUT ? "timed-out" : "guest");
-        continue;
-      }
-    }
-    const cls = await bounded(() => reader.classifyConversation(ref), timeoutMs);
-    if (cls === TIMED_OUT) {
-      refuse(ref, "timed-out");
-      continue;
-    }
-    const classification: ConversationClassification = cls ?? { visibility: "never", botIsMember: false };
-    if (classification.visibility === "never") {
-      refuse(ref, "never");
-      continue;
-    }
-    if (!classification.botIsMember) {
-      refuse(ref, "not-a-member");
-      continue;
-    }
-    const decision = authorize(pointingActor(actor, msg.channelId), "conversation:read", {
-      type: "channel",
-      id: ref.channelId,
-      visibility: classification.visibility,
-    });
-    if (!decision.allow) {
-      refuse(ref, "denied");
-      continue;
-    }
+    const { classification } = access;
     const read = await bounded(
-      () => reader.readConversation(ref, { maxMessages: REFERENCE_MAX_MESSAGES, maxBytes: REFERENCE_MAX_BYTES }),
+      () => access.reader.readConversation(ref, { maxMessages: REFERENCE_MAX_MESSAGES, maxBytes: REFERENCE_MAX_BYTES }),
       timeoutMs,
     );
     if (read === TIMED_OUT || read === undefined || read.messages.length === 0) {
@@ -287,25 +349,15 @@ export async function readReferences(deps: ReferenceDeps, input: ReadReferencesI
       refuse(ref, read === TIMED_OUT ? "timed-out" : "fetch-failed");
       continue;
     }
-    if (reader.classifyConversationFresh) {
-      const fresh = await bounded(() => reader.classifyConversationFresh!(ref), timeoutMs);
-      const full =
-        ref.channelId === msg.channelId ||
-        (await bounded(() => (originReader ?? reader).requesterIsFullMember(msg.userId), timeoutMs)) === true;
-      if (
-        !fresh ||
-        fresh === TIMED_OUT ||
-        !fresh.botIsMember ||
-        fresh.visibility !== classification.visibility ||
-        !full
-      ) {
-        refuse(ref, "denied");
-        continue;
-      }
+    const fresh = await referenceAccess(deps, { ...input, purpose: "revalidate" }, { reader, ref }, true);
+    if ("refused" in fresh || !sameReferenceAudience(classification, fresh.classification)) {
+      refuse(ref, "denied");
+      continue;
     }
     const conversation = capped({
       ...read,
       channelName: classification.channelName ?? read.channelName,
+      ...(classification.shared ? { shared: true } : {}),
     });
     conversations.push(conversation);
     blocks.push(quotedBlock(conversation));

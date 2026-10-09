@@ -123,22 +123,22 @@ describe("SlackConversationReader.classifyConversation — closed and fresh", ()
     const r = new SlackConversationReader(client);
     expect(await r.classifyConversation(ref("C_PUB"))).toEqual({
       visibility: "public",
-      botIsMember: true,
+      readerHasAccess: true,
       channelName: "frontend",
     });
     expect(await r.classifyConversation(ref("C_PRIV"))).toEqual({
       visibility: "private",
-      botIsMember: true,
+      readerHasAccess: true,
       channelName: "leads",
     });
     expect(await r.classifyConversation(ref("C_OUT"))).toEqual({
       visibility: "public",
-      botIsMember: false,
+      readerHasAccess: false,
       channelName: "music",
     });
   });
 
-  it("freshly accepts sparse public metadata but rejects an affirmative shared or DM flag", async () => {
+  it("reports shared audience facts and keeps direct conversations unavailable as linked sources", async () => {
     const { client } = fakeClient({
       channels: {
         C_PUB: PUBLIC,
@@ -149,22 +149,43 @@ describe("SlackConversationReader.classifyConversation — closed and fresh", ()
     const r = new SlackConversationReader(client);
     expect(await r.classifyConversationFresh(ref("C_PUB"))).toEqual({
       visibility: "public",
-      botIsMember: true,
+      readerHasAccess: true,
       channelName: "frontend",
     });
-    expect(await r.classifyConversationFresh(ref("C_SHARED"))).toEqual({ visibility: "never", botIsMember: false });
-    expect(await r.classifyConversationFresh(ref("D_DM"))).toEqual({ visibility: "never", botIsMember: false });
+    expect(await r.classifyConversationFresh(ref("C_SHARED"))).toEqual({
+      visibility: "public",
+      readerHasAccess: true,
+      shared: true,
+      channelName: "frontend",
+    });
+    expect(await r.classifyConversationFresh(ref("D_DM"))).toEqual({
+      visibility: "never",
+      readerHasAccess: false,
+      direct: true,
+    });
   });
 
-  it("every shared flag alone is `never` even when is_private is false; so are a DM, a group DM and a missing channel", async () => {
+  it("reports every shared flag independently of visibility and refuses group DMs and missing metadata", async () => {
     const flags = ["is_shared", "is_ext_shared", "is_org_shared", "is_pending_ext_shared", "is_im", "is_mpim"] as const;
     const channels: Record<string, Info> = {};
     for (const f of flags)
       channels[`C_${f}`] = { id: `C_${f}`, name: f, is_private: false, is_member: true, [f]: true };
     const { client } = fakeClient({ channels });
     const r = new SlackConversationReader(client);
-    for (const f of flags) expect((await r.classifyConversation(ref(`C_${f}`))).visibility, f).toBe("never");
-    expect(await r.classifyConversation(ref("C_GONE"))).toEqual({ visibility: "never", botIsMember: false });
+    for (const f of flags.slice(0, 4))
+      expect(await r.classifyConversation(ref(`C_${f}`))).toEqual({
+        visibility: "public",
+        readerHasAccess: true,
+        shared: true,
+        channelName: f,
+      });
+    expect(await r.classifyConversation(ref("C_is_im"))).toEqual({
+      visibility: "never",
+      readerHasAccess: false,
+      direct: true,
+    });
+    expect(await r.classifyConversation(ref("C_is_mpim"))).toEqual({ visibility: "never", readerHasAccess: false });
+    expect(await r.classifyConversation(ref("C_GONE"))).toEqual({ visibility: "never", readerHasAccess: false });
   });
 
   it("serves a classification from its own cache for CLASSIFY_CACHE_MS and asks again after", async () => {

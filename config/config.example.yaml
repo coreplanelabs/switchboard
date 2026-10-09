@@ -725,6 +725,10 @@ workspaceDir: ./workspaces
 # value is kept but warned about at startup. Needs channels:read + groups:read
 # (channel listing) on top of the history scopes.
 # slack:
+#   # One admin-managed, read-only user token for linked sources. Public channels
+#   # need no bot invite. Users do not sign in individually. This client never
+#   # subscribes to messages or posts; the bot's existing token does those jobs.
+#   readerTokenEnv: SLACK_READ_TOKEN
 #   catchUp:
 #     enabled: true
 #     windowMinutes: 30

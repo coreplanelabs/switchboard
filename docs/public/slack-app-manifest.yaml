@@ -22,6 +22,16 @@ features:
     always_online: false
 oauth_config:
   scopes:
+    # Optional: one admin authorizes the separate read account. Ordinary users
+    # do not install or connect anything. This token has no write scopes and
+    # does not add user event subscriptions.
+    user:
+      - channels:read
+      - channels:history
+      - users:read
+      - groups:read
+      - groups:history
+      - files:read
     bot:
       # Receive mentions; post and edit messages (the status card edits itself in place).
       - app_mentions:read

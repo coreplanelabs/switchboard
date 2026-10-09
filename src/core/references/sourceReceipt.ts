@@ -19,6 +19,8 @@ export interface SlackSourceReceipt extends SourceBinding {
   kind: "slack-source";
   source: ConversationRef;
   visibility: "public" | "private" | "dm";
+  /** Sharing is an audience fact, independent of native public/private visibility. */
+  shared?: boolean;
   readKind: "reference" | "thread" | "nearby" | "link" | "file";
   messages: readonly { id: string; hash: string }[];
   coverage: SourceCoverage;
@@ -57,6 +59,7 @@ export function isSlackSourceReceipt(value: unknown): value is SlackSourceReceip
     typeof r.source.url === "string" &&
     r.source.url.length <= 2048 &&
     ["public", "private", "dm"].includes(r.visibility) &&
+    (r.shared === undefined || typeof r.shared === "boolean") &&
     ["reference", "thread", "nearby", "link", "file"].includes(r.readKind) &&
     !!r.coverage &&
     ["complete", "bounded"].includes(r.coverage.kind) &&

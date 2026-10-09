@@ -61,6 +61,7 @@ export function referenceReceipt(
     ...binding,
     source: conversation.ref,
     visibility,
+    ...(conversation.shared ? { shared: true } : {}),
     readKind: "reference",
     messages: conversation.messages.map((m) => ({ id: m.ts!, hash: m.sourceHash! })),
     coverage: conversation.coverage,

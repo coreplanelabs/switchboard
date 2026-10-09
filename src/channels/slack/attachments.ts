@@ -4,7 +4,7 @@
 
 import { extname } from "node:path";
 import type { DocumentAttachment, ImageAttachment, StagedFile } from "../../core/types.js";
-import { processSecrets } from "../../secrets.js";
+import { processSecrets, type Secret } from "../../secrets.js";
 
 // Attachment ingestion. Only image types every provider accepts; Slack file
 // downloads need the files:read bot scope.
@@ -169,6 +169,7 @@ export async function fetchImages(
   files: SlackFile[] | undefined,
   maxImages: number,
   maxTotalBytes = Infinity,
+  token?: Secret,
 ): Promise<{
   images: ImageAttachment[];
   acceptedFiles: Array<{ file: SlackFile; size: number }>;
@@ -213,7 +214,7 @@ export async function fetchImages(
   // An image is never text/html, so any HTML answer is Slack's login page.
   const downloads = await Promise.all(
     candidates.map(({ url, label }) =>
-      downloadSlackFile(url, label, (contentType) => contentType.includes("text/html")),
+      downloadSlackFile(url, label, (contentType) => contentType.includes("text/html"), token),
     ),
   );
   candidates.forEach(({ f, label, mediaType }, i) => {
@@ -263,8 +264,8 @@ async function downloadSlackFile(
   url: string,
   label: string,
   isLoginPage: (contentType: string) => boolean,
+  token = processSecrets.get("SLACK_BOT_TOKEN"),
 ): Promise<Buffer | undefined> {
-  const token = processSecrets.get("SLACK_BOT_TOKEN");
   try {
     const res = await fetch(url, { headers: token ? { authorization: `Bearer ${token.reveal()}` } : {} });
     if (!res.ok || isLoginPage(res.headers.get("content-type") ?? "")) {
@@ -289,6 +290,7 @@ export async function fetchDocuments(
   files: SlackFile[] | undefined,
   maxDocs: number,
   maxTotalBytes = Infinity,
+  token?: Secret,
 ): Promise<{
   documents: DocumentAttachment[];
   acceptedFiles: Array<{ file: SlackFile; size: number }>;
@@ -317,7 +319,12 @@ export async function fetchDocuments(
   }
   const downloads = await Promise.all(
     candidates.map(({ url, label, f }) =>
-      downloadSlackFile(url, label, (contentType) => contentType.includes("text/html") && f.mimetype !== "text/html"),
+      downloadSlackFile(
+        url,
+        label,
+        (contentType) => contentType.includes("text/html") && f.mimetype !== "text/html",
+        token,
+      ),
     ),
   );
   candidates.forEach(({ f, label, kind }, i) => {

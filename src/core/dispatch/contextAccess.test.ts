@@ -119,7 +119,7 @@ function setup() {
     config: { grantsFor: () => ALL_GRANTS, userGithubBinding: () => undefined },
     runStore: { get: async (id: string) => records.get(id) },
     runLedger: { readLiveRuns: async () => live, readSessionTail: vi.fn() },
-    slackContextForRun: () => ({ originAudience }),
+    slackContextForRun: () => ({ originAudience, canReadSource: async () => true }),
     mcp: { toolsFor: vi.fn() },
     runs: { getRunEvents },
   } as unknown as ContextAccessDeps;
@@ -449,6 +449,27 @@ describe("canonical saved operator decisions", () => {
 });
 
 describe("message-bound context access", () => {
+  it("checks the current destination before reusing a public source", async () => {
+    const f = setup();
+    const source = { ...origin, channelId: "slack:C_INTERNAL", threadKey: "slack:C_INTERNAL:1" };
+    Object.assign(f.record, { channelId: source.channelId, threadKey: source.threadKey, channelVisibility: "public" });
+    f.record.contextDependencies = { ...clean, origins: [source] };
+    f.deps.slackContextForRun = (_actor, request) =>
+      ({
+        originAudience: async () => "public",
+        canReadSource: async () => request.channelId !== "slack:C_SHARED",
+      }) as never;
+    expect(await f.access.readRunDependencies(source.runId)).toEqual({ ...clean, origins: [source] });
+    const destination = contextAccessForMessage(f.deps, {
+      msg: { ...msg, channelId: "slack:C_SHARED", threadKey: "slack:C_SHARED:2", directAudience: undefined },
+      io: f.io,
+    });
+    expect(await destination.validateDependencies({ ...clean, origins: [source] })).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+    });
+    expect(await destination.readRunDependencies(source.runId)).toBeUndefined();
+  });
   it("normalizes retained identity aliases before access without erasing mismatched checkpoint hashes or external leaves", async () => {
     const f = setup();
     const source: CanonicalCheckpointSource = {

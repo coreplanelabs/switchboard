@@ -75,11 +75,9 @@ export const POLICY: readonly Rule[] = [
   { action: "steer:write", resource: "run", actorKinds: ["service"], when: [grant("steer:write")] },
 
   // ── conversations ────────────────────────────────────────────────────────
-  // Who may point the bot at another thread (record 0037). Asked for a
-  // pointing actor (`pointingActor`: one membership, the origin channel, no
-  // grants), so `member-of` reads: a public channel from anywhere, a private
-  // channel only from inside it, an admin's `all` not consulted. The row has
-  // no caller until the references dispatch step lands behind its flag.
+  // Source reads use the resolved requester. The reference policy verifies bot
+  // access and fresh native membership for private or shared sources before
+  // this row; configuration grants cannot replace those platform facts.
   { action: "conversation:read", resource: "channel", when: [MEMBER_OF] },
 
   // ── review ───────────────────────────────────────────────────────────────
