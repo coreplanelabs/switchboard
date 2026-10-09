@@ -18,6 +18,7 @@ import {
   type SandboxGateDeps,
 } from "./run.js";
 import { TEST_PROFILE } from "./testing/profile.js";
+import { OPERATOR_ROOT } from "./host.js";
 
 // Exercise the real runner's ordering. Only external process and rendering I/O
 // are replaced: config reads, validation and conditional writes stay real.
@@ -27,8 +28,10 @@ const processes = vi.hoisted(() => ({
   uploads: [] as { name: string; account: string; bucketConfig?: string }[],
   onMemory: () => {},
   onBot: () => {},
+  onInstall: () => {},
   memoryCode: 0,
   botCode: 1,
+  botOutput: undefined as string | undefined,
 }));
 vi.mock("./operatorRoot.js", async (original) => ({
   ...(await original<typeof import("./operatorRoot.js")>()),
@@ -36,13 +39,20 @@ vi.mock("./operatorRoot.js", async (original) => ({
 }));
 vi.mock("node:child_process", () => ({
   spawn: (cmd: string, args: string[], opts: { cwd: string; env: Record<string, string> }) => {
-    const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter() });
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      kill: () => true,
+    });
     queueMicrotask(() => {
       let output = "";
       let code = 0;
       if (cmd === "git") output = "a".repeat(40);
       else if (args.includes("whoami")) output = TEST_PROFILE.account;
-      else if (cmd === "npm" && args.includes("deploy")) {
+      else if (cmd === "npm" && args.includes("ci")) {
+        processes.calls.push("install");
+        processes.onInstall();
+      } else if (cmd === "npm" && args.includes("deploy")) {
         const name = opts.cwd.endsWith("cloudflare-memory") ? "memory" : "bot";
         processes.calls.push(`upload:${name}`);
         const configIndex = args.indexOf("--config");
@@ -63,6 +73,7 @@ vi.mock("node:child_process", () => ({
           code = processes.botCode;
         }
         output = code === 0 ? "Current Version ID: worker-version" : "upload failed";
+        if (name === "bot" && processes.botOutput !== undefined) output = processes.botOutput;
       }
       child.stdout.emit("data", Buffer.from(output));
       child.emit("close", code);
@@ -161,7 +172,9 @@ afterEach(() => {
   processes.onMemory = () => {};
   processes.memoryCode = 0;
   processes.botCode = 1;
+  processes.botOutput = undefined;
   processes.onBot = () => {};
+  processes.onInstall = () => {};
 });
 
 function runner(store: ReturnType<typeof stateStore>, only: WorkerName[] = ["memory", "bot"], stateWorker = true) {
@@ -326,6 +339,367 @@ describe("config publication inputs", () => {
 });
 
 describe("runDeployPlan config publication", () => {
+  it("cancellation during an informational wake preserves a completed Memory upload without later Bot work", async () => {
+    const store = stateStore();
+    const h = runner(store);
+    const control = new AbortController();
+    h.deps.signal = control.signal;
+    const phases: string[] = [];
+    vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/plane/deploy") {
+        phases.push(JSON.parse(String(init?.body)).phase);
+        return Response.json({ ok: true, admitted: 0 });
+      }
+      const response = await store.fetchImpl(url, init);
+      if (path === "/healthz" && processes.calls.includes("upload:memory")) control.abort();
+      return response;
+    });
+    expect(await runDeployPlan(h.plan, h.io, h.deps)).toEqual({
+      kind: "ran",
+      ok: false,
+      results: [
+        { name: "memory", script: "switchboard-memory", live: "n/a", status: "deployed (no version id in output?)" },
+      ],
+      notAttempted: ["bot"],
+    });
+    expect(phases).toEqual(["pending", "landed"]);
+    expect(processes.calls).toEqual(["upload:memory"]);
+    expect(store.state.document).toEqual(prior);
+    expect(store.slotState.document).toBeNull();
+  });
+
+  it("an unconfirmed cancelled install retains its waiting window before any Worker upload", async () => {
+    const root = OPERATOR_ROOT.root;
+    try {
+      for (const cancel of [false, true]) {
+        const store = stateStore();
+        const h = runner(store, ["bot"]);
+        OPERATOR_ROOT.root = processes.workArea;
+        const control = new AbortController();
+        h.deps.signal = control.signal;
+        processes.calls = [];
+        processes.onInstall = () => {
+          if (cancel) control.abort();
+        };
+        const phases: string[] = [];
+        vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+          if (new URL(String(url)).pathname === "/plane/deploy") {
+            phases.push(JSON.parse(String(init?.body)).phase);
+            return Response.json({ ok: true, admitted: 0 });
+          }
+          return store.fetchImpl(url, init);
+        });
+        const result = await runDeployPlan(h.plan, h.io, h.deps);
+        expect(result).toMatchObject({
+          kind: "ran",
+          ok: false,
+          results: [{ name: "bot", live: "not deployed", status: cancel ? "npm ci failed" : "FAILED: upload failed" }],
+          notAttempted: [],
+        });
+        expect(phases).toEqual(cancel ? ["pending"] : ["pending", "landed"]);
+        expect(processes.calls).toEqual(cancel ? ["install"] : ["install", "upload:bot"]);
+        expect(store.state.document).toEqual(prior);
+        expect(store.slotState.document?.yaml).toBe(candidateText);
+      }
+    } finally {
+      OPERATOR_ROOT.root = root;
+    }
+  });
+
+  it.each(["pending", "activation", "publication"])(
+    "cancellation during %s before a Worker command closes only the waiting window",
+    async (stage) => {
+      const store = stateStore();
+      const h = runner(store, ["bot"]);
+      const control = new AbortController();
+      h.deps.signal = control.signal;
+      let nativeReads = 0;
+      const readApp = h.deps.readAppState;
+      h.deps.readAppState = async (...args) => {
+        const result = await readApp(...args);
+        if (stage === "activation" && ++nativeReads === 2) control.abort();
+        return result;
+      };
+      const phases: string[] = [];
+      vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/plane/deploy") {
+          const phase = JSON.parse(String(init?.body)).phase;
+          phases.push(phase);
+          if (stage === "pending" && phase === "pending") control.abort();
+          return Response.json({ ok: true, admitted: 0 });
+        }
+        const result = await store.fetchImpl(url, init);
+        if (
+          stage === "publication" &&
+          path === "/config/put" &&
+          JSON.parse(String(init?.body)).key === `base-${"a".repeat(40)}`
+        )
+          control.abort();
+        return result;
+      });
+      expect(await runDeployPlan(h.plan, h.io, h.deps)).toEqual({
+        kind: "ran",
+        ok: false,
+        results: [],
+        notAttempted: ["bot"],
+      });
+      expect(phases).toEqual(["pending", "landed"]);
+      expect(processes.calls).toEqual([]);
+      expect(store.state.document).toEqual(prior);
+      expect(store.slotState.document?.yaml ?? null).toBe(stage === "publication" ? candidateText : null);
+    },
+  );
+
+  it.each(["valid", "error", "malformed", "mismatch", "initial"])(
+    "cancelled Bot %s pre-upload evidence closes the settled window without an upload",
+    async (evidence) => {
+      const store = stateStore();
+      const h = runner(store, ["bot"]);
+      h.plan.steps[0]!.botImage = "registry.example/bot:new";
+      const control = new AbortController();
+      h.deps.signal = control.signal;
+      if (evidence === "initial") {
+        const readApp = h.deps.readAppState;
+        let reads = 0;
+        h.deps.readAppState = async (...args) => {
+          const result = await readApp(...args);
+          if (++reads === 3) control.abort();
+          return result;
+        };
+      }
+      h.deps.readListedAppState = async () => {
+        control.abort();
+        return evidence === "error"
+          ? { error: "read failed" }
+          : evidence === "malformed"
+            ? ({ value: {} } as never)
+            : {
+                value: {
+                  version: evidence === "mismatch" ? 4 : 3,
+                  image: evidence === "mismatch" ? "registry.example/bot:new" : "registry.example/bot:old",
+                },
+              };
+      };
+      const phases: string[] = [];
+      vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        if (new URL(String(url)).pathname === "/plane/deploy") {
+          phases.push(JSON.parse(String(init?.body)).phase);
+          return Response.json({ ok: true, admitted: 0 });
+        }
+        return store.fetchImpl(url, init);
+      });
+      const result = await runDeployPlan(h.plan, h.io, h.deps);
+      expect(result, JSON.stringify(result)).toMatchObject({
+        kind: "ran",
+        ok: false,
+        results: [{ name: "bot", live: "not deployed" }],
+      });
+      expect(phases).toEqual(["pending", "landed"]);
+      expect(processes.calls).toEqual([]);
+      expect(store.state.document).toEqual(prior);
+      expect(store.slotState.document?.yaml).toBe(candidateText);
+    },
+  );
+
+  it.each(["valid", "error", "incomplete", "regressed"])(
+    "cancelled Resident %s pre-upload evidence closes the settled window without an upload",
+    async (evidence) => {
+      const store = stateStore();
+      const h = runner(store, ["resident", "bot"]);
+      h.plan.steps.reverse();
+      for (const step of h.plan.steps) {
+        step.requiredEnv = [];
+        step.capabilities = [];
+      }
+      const control = new AbortController();
+      h.deps.signal = control.signal;
+      const readApp = h.deps.readAppState;
+      h.deps.readAppState = async (...args) => {
+        if (args[0] !== "deploy/cloudflare-resident") return readApp(...args);
+        control.abort();
+        return evidence === "error"
+          ? { error: "read failed" }
+          : ({
+              value:
+                evidence === "incomplete"
+                  ? { version: 17 }
+                  : { version: evidence === "regressed" ? -1 : 17, image: "registry.example/resident:old" },
+            } as never);
+      };
+      h.deps.env.RESIDENT_DRAIN_TOKEN = "fixture";
+      h.deps.postJson = async (url) =>
+        url.endsWith("/undrain")
+          ? { status: 200, body: { cleared: true, draining: null } }
+          : { status: 200, body: { draining: { since: "start", until: "later" } } };
+      const phases: string[] = [];
+      vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        if (new URL(String(url)).pathname === "/plane/deploy") {
+          phases.push(JSON.parse(String(init?.body)).phase);
+          return Response.json({ ok: true, admitted: 0 });
+        }
+        return store.fetchImpl(url, init);
+      });
+      const result = await runDeployPlan(h.plan, h.io, h.deps);
+      expect(result, JSON.stringify(result)).toMatchObject({
+        kind: "ran",
+        ok: false,
+        results: [{ name: "resident", live: "not deployed" }],
+        notAttempted: ["bot"],
+      });
+      expect(phases).toEqual(["pending", "landed"]);
+      expect(processes.calls).toEqual([]);
+      expect(store.state.document).toEqual(prior);
+      expect(store.slotState.document).toBeNull();
+    },
+  );
+
+  it.each(["ack", "403", "409", "lost", "held"])(
+    "cancellation during %s cleanup preserves completed no-upload settlement only",
+    async (cleanup) => {
+      const store = stateStore();
+      const h = runner(store, ["resident", "bot"]);
+      h.plan.steps.reverse();
+      for (const step of h.plan.steps) {
+        step.requiredEnv = [];
+        step.capabilities = [];
+      }
+      h.plan.steps[0]!.retryOnPreflightRefusal = false;
+      const control = new AbortController();
+      h.deps.signal = control.signal;
+      processes.botOutput = "[resident-preflight] preflight REFUSED: fixture";
+      h.deps.env.RESIDENT_DRAIN_TOKEN = "fixture";
+      h.deps.postJson = async (url) => {
+        if (!url.endsWith("/undrain")) return { status: 200, body: { draining: { since: "start", until: "later" } } };
+        control.abort();
+        return cleanup === "lost"
+          ? { error: "reply lost" }
+          : cleanup === "held"
+            ? { status: 200, body: { cleared: false, held: ["repo:example/service"] } }
+            : {
+                status: cleanup === "ack" ? 200 : Number(cleanup),
+                body: { cleared: cleanup === "ack", draining: null },
+              };
+      };
+      const phases: string[] = [];
+      vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        if (new URL(String(url)).pathname === "/plane/deploy") {
+          phases.push(JSON.parse(String(init?.body)).phase);
+          return Response.json({ ok: true, admitted: 0 });
+        }
+        return store.fetchImpl(url, init);
+      });
+      const result = await runDeployPlan(h.plan, h.io, h.deps);
+      expect(result, JSON.stringify(result)).toMatchObject({
+        kind: "ran",
+        ok: false,
+        results: [{ name: "resident", live: "not deployed" }],
+        notAttempted: ["bot"],
+      });
+      expect(phases).toEqual(["pending", "landed"]);
+      expect(h.logs.some((line) => line.includes("fleet reopened"))).toBe(cleanup === "ack");
+      expect(processes.calls).toHaveLength(1);
+      expect(store.state.document).toEqual(prior);
+      expect(store.slotState.document).toBeNull();
+    },
+  );
+
+  it.each(["valid", "observation", "prepare", "supersede"])(
+    "%s completion starts no observer window after cancellation",
+    async (stage) => {
+      const store = stateStore();
+      const h = runner(store, ["bot"]);
+      const control = new AbortController();
+      h.deps.signal = control.signal;
+      if (stage === "observation") {
+        const readApp = h.deps.readAppState;
+        h.deps.readAppState = async (...args) => {
+          const result = await readApp(...args);
+          control.abort();
+          return result;
+        };
+      }
+      const phases: string[] = [];
+      vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/plane/deploy") {
+          phases.push(JSON.parse(String(init?.body)).phase);
+          return Response.json({ ok: true, admitted: 0 });
+        }
+        const response = await store.fetchImpl(url, init);
+        if (
+          (stage === "prepare" && path === "/config/get" && String(init?.body).includes("deploy-base-")) ||
+          (stage === "supersede" && path === "/healthz")
+        )
+          control.abort();
+        return response;
+      });
+      const result = await runDeployPlan(h.plan, h.io, h.deps);
+      expect(store.state.document).toEqual(prior);
+      if (stage === "valid") {
+        expect(result).toMatchObject({ kind: "ran", ok: false });
+        expect(phases).toEqual(["pending", "landed"]);
+        expect(processes.calls).toEqual(["upload:bot"]);
+      } else {
+        expect(result).toEqual({ kind: "refused", problems: ["deployment cancelled"] });
+        expect(phases).toEqual([]);
+        expect(processes.calls).toEqual([]);
+        expect(store.slotState.document).toBeNull();
+      }
+    },
+  );
+
+  it("an active unconfirmed cancellation leaves its observer window unconfirmed", async () => {
+    const store = stateStore();
+    const h = runner(store, ["bot"]);
+    const control = new AbortController();
+    h.deps.signal = control.signal;
+    processes.onBot = () => control.abort();
+    const phases: string[] = [];
+    vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      if (new URL(String(url)).pathname === "/plane/deploy") {
+        phases.push(JSON.parse(String(init?.body)).phase);
+        return Response.json({ ok: true, admitted: 0 });
+      }
+      return store.fetchImpl(url, init);
+    });
+    const result = await runDeployPlan(h.plan, h.io, h.deps);
+    expect(result).toMatchObject({
+      kind: "ran",
+      ok: false,
+      results: [{ name: "bot", live: "upload outcome uncertain", status: "FAILED: deployment cancelled" }],
+    });
+    expect(phases).toEqual(["pending"]);
+  });
+
+  it("a known no-upload cancellation lifts its own observer window without claiming readiness", async () => {
+    const store = stateStore();
+    const h = runner(store, ["bot"]);
+    const control = new AbortController();
+    h.deps.signal = control.signal;
+    h.deps.sleep = async () => {
+      control.abort();
+    };
+    processes.botOutput = "[preflight] preflight REFUSED: fixture";
+    const phases: string[] = [];
+    vi.stubGlobal("fetch", async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      if (new URL(String(url)).pathname === "/plane/deploy") {
+        phases.push(JSON.parse(String(init?.body)).phase);
+        return Response.json({ ok: true, admitted: 0 });
+      }
+      return store.fetchImpl(url, init);
+    });
+    const result = await runDeployPlan(h.plan, h.io, h.deps);
+    expect(result).toMatchObject({
+      kind: "ran",
+      ok: false,
+      results: [{ name: "bot", live: "not deployed", status: "FAILED: deployment cancelled" }],
+    });
+    expect(processes.calls).toEqual(["upload:bot"]);
+    expect(phases).toEqual(["pending", "landed"]);
+  });
+
   it.each(["current", "original-legacy", "original-owned"])(
     "%s source refuses account A contradiction after the profile changes to eligible B",
     async (source) => {
@@ -436,12 +810,14 @@ describe("runDeployPlan config publication", () => {
     },
   );
 
-  it.each(["live", "final", "valid"])(
+  it.each(["live", "final", "valid", "cancelled"])(
     "%s acceptance reads A after upload changes the shared Wrangler account to B",
     async (phase) => {
       const store = stateStore();
       const h = runner(store);
       let uploaded = false;
+      const control = new AbortController();
+      h.deps.signal = control.signal;
       let inventoryReads = 0;
       let clock = 0;
       const accounts: string[] = [];
@@ -491,6 +867,7 @@ describe("runDeployPlan config publication", () => {
       h.deps.readInstances = async (_dir, _app, config) => {
         const account = accountOf(config);
         if (uploaded) inventoryReads++;
+        if (phase === "cancelled" && inventoryReads === 2) control.abort();
         const contradictory =
           uploaded &&
           account === TEST_PROFILE.account &&
@@ -506,6 +883,16 @@ describe("runDeployPlan config publication", () => {
       expect(processes.calls).toEqual(["upload:memory", "upload:bot"]);
       expect(store.calls.filter((call) => call === "put")).toHaveLength(1);
       expect(store.state.document).toEqual(prior);
+      if (phase === "cancelled") {
+        expect(result).toMatchObject({
+          results: [
+            expect.anything(),
+            { live: "deployed, not live: deployment cancelled", status: "FAILED: deployment cancelled" },
+          ],
+        });
+        expect(store.calls).toEqual(["get", "get", "put"]);
+        expect(inventoryReads).toBe(2);
+      }
       if (phase === "final") {
         expect(result).toMatchObject({
           results: [expect.anything(), { live: expect.stringContaining("deployed, not live") }],

@@ -204,6 +204,88 @@ describe("the pure pieces", () => {
 });
 
 describe("deployStep (resident) drains the fleet", () => {
+  it("cancellation during the before-upload native read starts no command", async () => {
+    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" }, [drained, lifted]);
+    const control = new AbortController();
+    Object.assign(h.deps, { signal: control.signal });
+    const read = h.deps.readAppState;
+    h.deps.readAppState = async (...args) => {
+      const result = await read(...args);
+      control.abort();
+      return result;
+    };
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result).toMatchObject({
+      ok: false,
+      live: "not deployed",
+      reason: "deployment cancelled",
+      noUpload: true,
+    });
+    expect(h.calls.filter((c) => c.dep === "exec")).toEqual([]);
+    expect(h.plain()).toContain("[deploy:all] resident: fleet reopened");
+  });
+
+  it.each([403, 409, "lost", "held"])("cancel cleanup %s grants no reopened credit", async (ending) => {
+    const cleanup =
+      typeof ending === "number"
+        ? { status: ending, body: { error: "refused" } }
+        : ending === "lost"
+          ? { error: "connection lost" }
+          : { status: 200, body: { cleared: false, draining: { until: UNTIL }, held: ["repo:acme/api"] } };
+    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" }, [drained, cleanup]);
+    const control = new AbortController();
+    Object.assign(h.deps, { signal: control.signal });
+    const sleep = h.deps.sleep;
+    h.deps.sleep = async (ms) => {
+      control.abort();
+      await sleep(ms);
+    };
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 100));
+    expect(result).toMatchObject({ ok: false, live: "not deployed", reason: "deployment cancelled" });
+    expect(h.calls.filter((c) => c.dep === "exec")).toHaveLength(1);
+    expect(h.calls.filter((c) => c.dep === "postJson")).toHaveLength(2);
+    expect(h.plain().join("\n")).not.toContain("fleet reopened");
+  });
+
+  it("a cancelled active command retains unknown upload and cannot lift from partial refusal output", async () => {
+    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn" }, [drained]);
+    const control = new AbortController();
+    Object.assign(h.deps, { signal: control.signal });
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, async () => {
+      control.abort();
+      return { code: 130, cancelled: true, output: REFUSED };
+    });
+    expect(result).toEqual({ ok: false, live: "upload outcome uncertain", reason: "deployment cancelled" });
+    expect(h.calls.filter((c) => c.dep === "postJson")).toHaveLength(1);
+    expect(h.plain().at(-1)).toContain("fleet stays closed");
+  });
+
+  it("cancels a completed-refusal retry wait without another attempt and acknowledges guarded cleanup", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, lifted]);
+    const control = new AbortController();
+    Object.assign(h.deps, { signal: control.signal });
+    const sleep = h.deps.sleep;
+    h.deps.sleep = async (ms) => {
+      control.abort();
+      await sleep(ms);
+    };
+    const result = await deployStep(
+      residentStep,
+      { ...plan, waitMaxMs: plan.pollMs },
+      HEAD,
+      h.io,
+      h.deps,
+      exec(h, 100),
+    );
+    expect(result).toMatchObject({ ok: false, reason: "deployment cancelled" });
+    expect(h.calls.filter((c) => c.dep === "exec")).toHaveLength(1);
+    expect(h.calls.filter((c) => c.dep === "postJson").map((c) => c.args[0])).toEqual([
+      "https://switchboard-resident.example.test/drain",
+      "https://switchboard-resident.example.test/undrain",
+    ]);
+    expect(h.plain()).toContain("[deploy:all] resident: fleet reopened");
+  });
+
   it("with the admin bearer: /drain is posted BEFORE the first attempt, the refusals are waited out, the deploy lands, /reconcile is posted INSIDE the drain window, /undrain after it", async () => {
     const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
     const r = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 2));

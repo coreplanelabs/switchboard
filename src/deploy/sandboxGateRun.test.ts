@@ -112,6 +112,23 @@ function harness(script: Scripted, env: Record<string, string> = { SANDBOX_TOKEN
 }
 
 describe("waitUntilSandboxLive", () => {
+  it("cancellation during the owned probe prevents the next inventory read without readiness credit", async () => {
+    for (const cancel of [false, true]) {
+      const h = harness({ health: [serving(HEAD)] });
+      const control = new AbortController();
+      h.deps.signal = control.signal;
+      h.deps.probeExec = async () => {
+        if (cancel) control.abort();
+        return ok;
+      };
+      const result = await waitUntilSandboxLive(step, gate, HEAD, rollout, h.io, h.deps);
+      expect(result).toEqual(
+        cancel ? { live: false, reason: "deployment cancelled" } : { live: true, waitedMs: 0, detail: LIVE_DETAIL },
+      );
+      expect(h.count("readInstances")).toBe(cancel ? 0 : 1);
+    }
+  });
+
   it("refuses without the bearer in the env — nothing is read or probed", async () => {
     const h = harness({ health: [serving(HEAD)] }, {});
     expect(await waitUntilSandboxLive(step, gate, HEAD, rollout, h.io, h.deps)).toEqual({

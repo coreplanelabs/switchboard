@@ -155,6 +155,7 @@ import {
 export interface RunResult {
   code: number;
   output: string;
+  cancelled?: true;
 }
 
 export interface DeployStepResult {
@@ -185,13 +186,26 @@ export interface DeployRunnerIO {
 export function run(
   cmd: string,
   args: string[],
-  opts: { cwd: string; unset?: readonly string[]; set?: Record<string, string>; stream?: (chunk: string) => void },
+  opts: {
+    cwd: string;
+    unset?: readonly string[];
+    set?: Record<string, string>;
+    stream?: (chunk: string) => void;
+    signal?: AbortSignal;
+  },
 ): Promise<RunResult> {
+  if (opts.signal?.aborted) return Promise.resolve({ code: 130, output: "", cancelled: true });
   const env: NodeJS.ProcessEnv = { ...process.env, ...(opts.set ?? {}) };
   for (const k of opts.unset ?? []) delete env[k];
   return new Promise((resolve) => {
     const child = spawn(cmd, args, { cwd: opts.cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
+    let spawnError: Error | undefined;
+    const stop = () => {
+      child.kill("SIGTERM");
+    };
+    opts.signal?.addEventListener("abort", stop, { once: true });
+    if (opts.signal?.aborted) stop();
     const onData = (chunk: Buffer) => {
       const text = chunk.toString();
       output += text;
@@ -199,21 +213,48 @@ export function run(
     };
     child.stdout.on("data", onData);
     child.stderr.on("data", onData);
-    child.on("error", (err) => resolve({ code: 127, output: output + `\n${err.message}` }));
-    child.on("close", (code) => resolve({ code: code ?? 1, output }));
+    child.on("error", (err) => {
+      spawnError = err;
+    });
+    child.on("close", (code) => {
+      opts.signal?.removeEventListener("abort", stop);
+      resolve(
+        opts.signal?.aborted
+          ? { code: 130, output, cancelled: true }
+          : spawnError
+            ? { code: 127, output: output + `\n${spawnError.message}` }
+            : { code: code ?? 1, output },
+      );
+    });
   });
 }
 
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+    if (signal?.aborted) done();
+  });
 
 /** Cloudflare's per-account token verify — the only way an ACCOUNT-owned token
  *  (no `/user`, so `wrangler whoami` lists nothing) proves which account it is
  *  for. Never throws: a network failure is "not verified", and refused. */
-async function verifyTokenAgainstAccount(account: string, token: string): Promise<TokenVerifyResult | undefined> {
+async function verifyTokenAgainstAccount(
+  account: string,
+  token: string,
+  signal?: AbortSignal,
+): Promise<TokenVerifyResult | undefined> {
+  if (signal?.aborted) return undefined;
   try {
+    const timeout = AbortSignal.timeout(20_000);
     const res = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/tokens/verify`, {
       headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(20_000),
+      signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
     });
     return { status: res.status, body: await res.text() };
   } catch {
@@ -224,14 +265,17 @@ async function verifyTokenAgainstAccount(account: string, token: string): Promis
 /** A Worker directory as wrangler runs in it: under the tree in a checkout, under the work area from the package. */
 const workerDir = (dir: string) => workPath(OPERATOR_ROOT, dir);
 
-async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]> {
+async function preChecks(plan: DeployPlan, io: DeployRunnerIO, signal?: AbortSignal): Promise<string[]> {
+  if (signal?.aborted) return ["deployment cancelled"];
   const problems: string[] = [];
   // `whoami` needs a wrangler to run: the first step's directory has one (in a checkout every
   // directory resolves the root's; from the package each step's was just installed).
   const who = await run("npx", ["wrangler", "whoami"], {
     cwd: workerDir(plan.steps[0]?.dir ?? WORKER_DIRS.bot),
     unset: UNSET_ENV,
+    signal,
   });
+  if (signal?.aborted) return ["deployment cancelled"];
   const token = process.env.CLOUDFLARE_API_TOKEN;
   const account = decideAccount({
     account: plan.checks.account,
@@ -239,9 +283,10 @@ async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]
     whoamiExit: who.code,
     tokenSet: !!token,
     ...(token && !who.output.includes(plan.checks.account)
-      ? { tokenVerify: await verifyTokenAgainstAccount(plan.checks.account, token) }
+      ? { tokenVerify: await verifyTokenAgainstAccount(plan.checks.account, token, signal) }
       : {}),
   });
+  if (signal?.aborted) return ["deployment cancelled"];
   if (account.ok) io.log(`[deploy:all] account: ${account.how}`);
   else problems.push(account.problem);
   // Capabilities BEFORE any Worker deploys: the same command each is about to
@@ -249,17 +294,21 @@ async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]
   const checked = new Map<string, Promise<RunResult>>();
   for (const step of plan.steps) {
     for (const check of step.capabilities) {
+      if (signal?.aborted) return ["deployment cancelled"];
       const key = check.command.join(" ");
       let r = checked.get(key);
-      if (!r) checked.set(key, (r = run("npx", [...check.command], { cwd: workerDir(step.dir), unset: UNSET_ENV })));
+      if (!r)
+        checked.set(key, (r = run("npx", [...check.command], { cwd: workerDir(step.dir), unset: UNSET_ENV, signal })));
       const result = await r;
+      if (signal?.aborted) return ["deployment cancelled"];
       const problem = capabilityProblem(step.name, check, result.code, result.output);
       if (problem) problems.push(problem);
       else io.log(`[deploy:all] ${step.name}: credential can \`${key}\` (${check.needs})`);
     }
   }
   if (plan.checks.cleanTree) {
-    const status = await run("git", ["status", "--porcelain"], { cwd: OPERATOR_ROOT.root });
+    const status = await run("git", ["status", "--porcelain"], { cwd: OPERATOR_ROOT.root, signal });
+    if (signal?.aborted) return ["deployment cancelled"];
     if (status.output.trim() !== "")
       problems.push(
         "working tree is not clean — commit, stash, or deploy from a fresh checkout (wrangler builds the CURRENT tree)",
@@ -267,13 +316,16 @@ async function preChecks(plan: DeployPlan, io: DeployRunnerIO): Promise<string[]
   }
   if (plan.checks.atOriginMain) {
     // A failed fetch would let the check pass against a stale origin/main — treat it as a problem, not a warning.
-    const fetch = await run("git", ["fetch", "-q", "origin"], { cwd: OPERATOR_ROOT.root });
+    const fetch = await run("git", ["fetch", "-q", "origin"], { cwd: OPERATOR_ROOT.root, signal });
+    if (signal?.aborted) return ["deployment cancelled"];
     if (fetch.code !== 0)
       problems.push(
         `git fetch origin failed (exit ${fetch.code}): ${fetch.output.trim().split("\n").pop() ?? ""} — cannot verify HEAD == origin/main`,
       );
-    const head = (await run("git", ["rev-parse", "HEAD"], { cwd: OPERATOR_ROOT.root })).output.trim();
-    const main = (await run("git", ["rev-parse", "origin/main"], { cwd: OPERATOR_ROOT.root })).output.trim();
+    const head = (await run("git", ["rev-parse", "HEAD"], { cwd: OPERATOR_ROOT.root, signal })).output.trim();
+    if (signal?.aborted) return ["deployment cancelled"];
+    const main = (await run("git", ["rev-parse", "origin/main"], { cwd: OPERATOR_ROOT.root, signal })).output.trim();
+    if (signal?.aborted) return ["deployment cancelled"];
     if (head !== main)
       problems.push(
         `HEAD ${head.slice(0, 7)} != origin/main ${main.slice(0, 7)} — \`git checkout --detach origin/main\`, or pass --allow-branch deliberately`,
@@ -1043,7 +1095,7 @@ export async function pushConfigOnHost(input: {
   );
 }
 
-async function ensureNodeModules(step: DeployStep, io: DeployRunnerIO): Promise<boolean> {
+async function ensureNodeModules(step: DeployStep, io: DeployRunnerIO, signal?: AbortSignal): Promise<boolean> {
   if (hasNodeModules(step.dir)) return true;
   // A checkout installs at its root: every Worker is an npm workspace of it, and an `npm ci` run
   // inside a workspace directory prunes the tree to that workspace — the bundle then cannot resolve
@@ -1051,16 +1103,18 @@ async function ensureNodeModules(step: DeployStep, io: DeployRunnerIO): Promise<
   // work area is installed per Worker by `ensureWorkAreaOnHost` before this; a miss here is its dir.
   const cwd = OPERATOR_ROOT.mode === "checkout" ? OPERATOR_ROOT.root : workerDir(step.dir);
   io.log(`[deploy:all] ${step.name}: install missing — npm ci in ${cwd}`);
-  const r = await run("npm", ["ci", "--silent"], { cwd });
+  const r = await run("npm", ["ci", "--silent"], { cwd, signal });
   if (r.code !== 0) io.warn(r.output);
   return r.code === 0;
 }
 
 /** One GET of the Worker's `/healthz` after its deploy, so it (and its Durable Objects) are awake
  *  before the next step needs them. Informational: the deploy is done either way. */
-async function wake(name: string, url: string, io: DeployRunnerIO): Promise<void> {
+async function wake(name: string, url: string, io: DeployRunnerIO, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(180_000) });
+    const timeout = AbortSignal.timeout(180_000);
+    const res = await fetch(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
     io.log(`[deploy:all] ${name}: awake — GET ${url} → HTTP ${res.status}`);
   } catch (err) {
     io.warn(`[deploy:all] ${name}: wake GET ${url} failed (${err instanceof Error ? err.message : String(err)})`);
@@ -1069,11 +1123,17 @@ async function wake(name: string, url: string, io: DeployRunnerIO): Promise<void
 
 /** GET a `/healthz`, with a bearer when the Worker sits behind one (the sandbox):
  *  the status and the parsed body, or why the request failed. Never throws. */
-async function readHealthz(url: string, bearer?: string, timeoutMs = 20_000): Promise<HealthRead> {
+async function readHealthz(
+  url: string,
+  bearer?: string,
+  timeoutMs = 20_000,
+  signal?: AbortSignal,
+): Promise<HealthRead> {
+  if (signal?.aborted) return { error: "deployment cancelled" };
   try {
     const res = await fetch(url, {
       headers: bearer ? { authorization: `Bearer ${bearer}` } : {},
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     });
     return { status: res.status, body: parseHealthz(await res.text()) };
   } catch (err) {
@@ -1082,13 +1142,15 @@ async function readHealthz(url: string, bearer?: string, timeoutMs = 20_000): Pr
 }
 
 /** The body of an unauthenticated `/healthz`; undefined when unreachable or not JSON. */
-async function fetchHealthz(url: string): Promise<HealthzBody | undefined> {
-  const r = await readHealthz(url);
+async function fetchHealthz(url: string, signal?: AbortSignal): Promise<HealthzBody | undefined> {
+  const r = await readHealthz(url, undefined, undefined, signal);
   return "body" in r ? r.body : undefined;
 }
 
 export interface StepOutcome {
   ok: boolean;
+  /** No command started, or every completed attempt proved a pre-upload refusal. */
+  noUpload?: true;
   versionId?: string;
   live: string;
   reason?: string;
@@ -1101,8 +1163,10 @@ type GateOutcome = { live: true; detail: string; waitedMs: number } | { live: fa
 
 /** The sandbox gate's I/O, injectable so the loop is unit-tested without a network, wrangler or a clock. */
 export interface SandboxGateDeps {
+  /** Only this operator deployment; cancellation grants no native ending or lift proof. */
+  signal?: AbortSignal;
   env: Record<string, string | undefined>;
-  readHealth(url: string, bearer?: string, timeoutMs?: number): Promise<HealthRead>;
+  readHealth(url: string, bearer?: string, timeoutMs?: number, signal?: AbortSignal): Promise<HealthRead>;
   /** `wrangler containers info <app> --json` → the application's version and image, run in `dir`. */
   readAppState(dir: string, containerApp: string, config?: string): Promise<Read<AppState>>;
   /** `wrangler containers instances <app> --json`, every page, run in `dir`. */
@@ -1112,7 +1176,7 @@ export interface SandboxGateDeps {
   /** `POST /exec` `echo ok` on the probe thread; the streamed body parsed. */
   probeExec(execUrl: string, bearer: string, threadKey: string): Promise<ProbeResult>;
   now(): number;
-  sleep(ms: number): Promise<void>;
+  sleep(ms: number, signal?: AbortSignal): Promise<void>;
   /** One authenticated JSON POST (the fleet drain's `/drain` and `/undrain`, release-and-deploy
    *  item 31); absent → the runner never drains and says why. */
   postJson?(url: string, bearer: string, body: Record<string, unknown>): Promise<PostAnswer>;
@@ -1155,7 +1219,7 @@ const INSTANCES_PER_PAGE = 100;
 export const defaultSandboxGateDeps: SandboxGateDeps = {
   env: process.env,
   postJson,
-  readHealth: (url, bearer, timeoutMs) => readHealthz(url, bearer, timeoutMs),
+  readHealth: (url, bearer, timeoutMs, signal) => readHealthz(url, bearer, timeoutMs, signal),
   readListedAppState: async (dir, containerApp, account) => {
     // Capture privately: neither successful credentials nor failed auth output
     // may enter a deploy log. Use the same auth modes as Wrangler's upload.
@@ -1295,10 +1359,16 @@ export async function waitUntilBotLive(
 ): Promise<GateOutcome> {
   const started = deps.now();
   for (;;) {
+    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
     const elapsed = deps.now() - started;
     const app = await deps.readAppState(step.dir, gate.containerApp);
+    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
     const instances = await deps.readInstances(step.dir, gate.containerApp);
-    const health = await deps.readHealth(gate.healthUrl);
+    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
+    const health = deps.signal
+      ? await deps.readHealth(gate.healthUrl, undefined, undefined, deps.signal)
+      : await deps.readHealth(gate.healthUrl);
+    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
     const decision = decideBotLive({
       containerApp: gate.containerApp,
       health,
@@ -1313,7 +1383,7 @@ export async function waitUntilBotLive(
     io.log(
       `[deploy:all] ${step.name}: deployed, not live yet — ${decision.reason} (${Math.floor(elapsed / 60_000)}m ${Math.floor((elapsed % 60_000) / 1000)}s)`,
     );
-    await deps.sleep(LIVE_GATE_POLL_MS);
+    await deps.sleep(LIVE_GATE_POLL_MS, deps.signal);
   }
 }
 
@@ -1350,20 +1420,26 @@ export async function waitUntilSandboxLive(
   const execUrl = new URL("/exec", gate.healthUrl).toString();
   const started = deps.now();
   for (;;) {
+    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
     const elapsed = deps.now() - started;
-    const health = await deps.readHealth(gate.healthUrl, bearer);
+    const health = deps.signal
+      ? await deps.readHealth(gate.healthUrl, bearer, undefined, deps.signal)
+      : await deps.readHealth(gate.healthUrl, bearer);
+    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
     const app = decideWorker(health, expectedCommit).ok ? await deps.readAppState(step.dir, gate.containerApp) : null;
+    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
     const registered =
       app !== null &&
       "value" in app &&
       (rollout.target === null || rolloutAdvanced(app.value, rollout.before, rollout.target).ok);
-    const rest = registered
-      ? {
-          app,
-          probe: await deps.probeExec(execUrl, bearer, threadKey),
-          instances: await deps.readInstances(step.dir, gate.containerApp),
-        }
-      : { app, probe: null, instances: null };
+    const probe = registered ? await deps.probeExec(execUrl, bearer, threadKey) : null;
+    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
+    const rest = {
+      app,
+      probe,
+      instances: registered ? await deps.readInstances(step.dir, gate.containerApp) : null,
+    };
+    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
     const d = decideSandboxLive({
       health,
       ...rest,
@@ -1378,7 +1454,7 @@ export async function waitUntilSandboxLive(
     io.log(
       `[deploy:all] ${step.name}: deployed, not live yet — ${d.reason} (${Math.floor(elapsed / 60_000)}m ${Math.floor((elapsed % 60_000) / 1000)}s)`,
     );
-    await deps.sleep(LIVE_GATE_POLL_MS);
+    await deps.sleep(LIVE_GATE_POLL_MS, deps.signal);
   }
 }
 
@@ -1403,13 +1479,14 @@ async function readAppBeforeUpload(
 }
 
 /** A step's `npm run deploy` in its dir, output streamed — the one spawn `deployStep` makes, injectable. */
-export type StepExec = (step: DeployStep, io: DeployRunnerIO) => Promise<RunResult>;
-const runStepCommand: StepExec = (step, io) =>
+export type StepExec = (step: DeployStep, io: DeployRunnerIO, signal?: AbortSignal) => Promise<RunResult>;
+const runStepCommand: StepExec = (step, io, signal) =>
   run(step.command[0], step.command.slice(1), {
     cwd: workerDir(step.dir),
     unset: step.unsetEnv,
     set: { ...step.setEnv, ...stampEnvOnHost() },
     stream: (c) => io.stream(c),
+    signal,
   });
 
 /** From the package, the commit the step's deploy stamps into its Worker (`deploy/bin/build-stamp.mjs`,
@@ -1434,6 +1511,8 @@ export async function deployStep(
   deps: SandboxGateDeps,
   exec: StepExec = runStepCommand,
 ): Promise<StepOutcome> {
+  if (deps.signal?.aborted) return { ok: false, live: "not deployed", reason: "deployment cancelled", noUpload: true };
+  let noUpload = true;
   // One `deploy.step.<worker>` root per step on the runner's own output, its
   // live gate a `deploy.wait_live` child carrying the `waitedMs` the "live"
   // line prints (docs/reference/specs/tracing.md item 20; release-and-deploy.md item 19).
@@ -1443,7 +1522,10 @@ export async function deployStep(
     `deploy.step.${step.name}`,
   );
   try {
-    const r = await deployStepTraced(step, plan, expectedCommit, io, deps, exec, root);
+    const result = await deployStepTraced(step, plan, expectedCommit, io, deps, exec, root, (mayHaveUploaded) => {
+      noUpload = !mayHaveUploaded;
+    });
+    const r = noUpload ? { ...result, noUpload: true as const } : result;
     root.end(r.ok ? "ok" : "error", { outcome: stepOutcomeWord(r) });
     return r;
   } catch (err) {
@@ -1467,6 +1549,7 @@ async function deployStepTraced(
   deps: SandboxGateDeps,
   exec: StepExec,
   root: Span,
+  onUploadState: (mayHaveUploaded: boolean) => void,
 ): Promise<StepOutcome> {
   const started = deps.now();
   // A step may carry its own budget (the resident's, sized for runs and a
@@ -1504,6 +1587,7 @@ async function deployStepTraced(
         drained: drain.drained,
       },
       (mayHaveUploaded) => {
+        onUploadState(mayHaveUploaded);
         if (step.name === "resident") safeToLift = !mayHaveUploaded;
       },
       async () => {
@@ -1516,16 +1600,28 @@ async function deployStepTraced(
         residentPrintedTarget = rolloutTargetFromDeployOutput(output);
       },
     );
+    // An informational wake cannot undo a completed non-Resident step.
+    // Resident upload still owes its separate reconciliation/readiness below.
+    if (deps.signal?.aborted && !(result.ok && step.name !== "resident"))
+      return {
+        ...result,
+        ok: false,
+        live: safeToLift ? result.live : "upload outcome uncertain",
+        reason: "deployment cancelled",
+      };
     if (result.ok && step.name === "resident") {
       readyDeadline = deps.now() + RESIDENT_READY_WAIT_MS;
       // Reconcile only against the new Worker; an old healthy build can stamp
       // the old image current before the platform routes the uploaded version.
       const healthProblem = await waitForResident(step, expectedCommit, readyDeadline, io, deps);
+      if (deps.signal?.aborted) return { ok: false, live: "upload outcome uncertain", reason: "deployment cancelled" };
       if (healthProblem) result = residentNotReady(result, healthProblem);
       else {
         const residentAfter = step.residentContainerApp
           ? await deps.readAppState(step.dir, step.residentContainerApp)
           : undefined;
+        if (deps.signal?.aborted)
+          return { ok: false, live: "upload outcome uncertain", reason: "deployment cancelled" };
         const application = residentApplicationChange(residentBefore, residentAfter, step.residentContainerApp);
         if (application.kind === "unknown") result = residentNotReady(result, application.reason);
         else if (application.kind === "unchanged" && residentPrintedTarget === null) {
@@ -1533,8 +1629,15 @@ async function deployStepTraced(
           const bearer = RESIDENT_BEARER_ENVS.map((name) => deps.env[name]).find((value) => value?.trim());
           const registry =
             base && bearer && deps.now() < readyDeadline
-              ? await deps.readHealth(new URL("/residents", base).toString(), bearer, readyDeadline - deps.now())
+              ? await deps.readHealth(
+                  new URL("/residents", base).toString(),
+                  bearer,
+                  readyDeadline - deps.now(),
+                  deps.signal,
+                )
               : { error: "resident origin or read bearer missing" };
+          if (deps.signal?.aborted)
+            return { ok: false, live: "upload outcome uncertain", reason: "deployment cancelled" };
           const problem = residentImageReportsProblem(registry);
           if (problem) result = residentNotReady(result, problem);
           else {
@@ -1552,6 +1655,8 @@ async function deployStepTraced(
           // Without this deploy's reconcile, an absent pending marker reads as
           // current even on an old image. Missing reconcile capability fails closed.
           const answer = await reconcileFleet(step, io, deps);
+          if (deps.signal?.aborted)
+            return { ok: false, live: "upload outcome uncertain", reason: "deployment cancelled" };
           const reconciled = answer && reconciledResources(answer);
           if (!reconciled)
             result = residentNotReady(
@@ -1660,11 +1765,13 @@ async function waitForResident(
   let lastLoggedAt = -Infinity;
   let nextReconcileAt = 0;
   while (deps.now() < deadline) {
+    if (deps.signal?.aborted) return "deployment cancelled";
     const timeoutMs = Math.min(LIVE_GATE_POLL_MS, deadline - deps.now());
     const [health, registry] = await Promise.all([
-      deps.readHealth(new URL("/healthz", base).toString(), undefined, timeoutMs),
-      resources ? deps.readHealth(new URL("/residents", base).toString(), bearer, timeoutMs) : undefined,
+      deps.readHealth(new URL("/healthz", base).toString(), undefined, timeoutMs, deps.signal),
+      resources ? deps.readHealth(new URL("/residents", base).toString(), bearer, timeoutMs, deps.signal) : undefined,
     ]);
+    if (deps.signal?.aborted) return "deployment cancelled";
     const problems = [
       residentWorkerProblem(health, expectedCommit),
       registry && residentRegistryProblem(registry, resources),
@@ -1687,11 +1794,12 @@ async function waitForResident(
       !residentWorkerProblem(health, expectedCommit)
     ) {
       const retry = await reconcileFleet(step, io, deps, false);
+      if (deps.signal?.aborted) return "deployment cancelled";
       if (retry && !reconciledResources(retry)) io.log(reconcileLine(step.name, retry));
       nextReconcileAt = deps.now() + MINUTE_MS;
     }
     const left = deadline - deps.now();
-    if (left > 0) await deps.sleep(Math.min(LIVE_GATE_POLL_MS, left));
+    if (left > 0) await deps.sleep(Math.min(LIVE_GATE_POLL_MS, left), deps.signal);
   }
   return `${problem} — readiness not proven within ${RESIDENT_READY_WAIT_MS / MINUTE_MS} min`;
 }
@@ -1707,7 +1815,7 @@ async function beginDrain(
   io: DeployRunnerIO,
   deps: SandboxGateDeps,
 ): Promise<{ attempted: boolean; drained: boolean; until: string | undefined }> {
-  if (!step.drain) return { attempted: false, drained: false, until: undefined };
+  if (deps.signal?.aborted || !step.drain) return { attempted: false, drained: false, until: undefined };
   const bearer = deps.env[step.drain.tokenEnv];
   if (!bearer || !deps.postJson) {
     io.log(drainSkippedLine(step.name, step.drain.tokenEnv));
@@ -1732,6 +1840,7 @@ async function reconcileFleet(
   deps: SandboxGateDeps,
   log = true,
 ): Promise<PostAnswer | undefined> {
+  if (deps.signal?.aborted) return;
   const bearer = step.drain ? deps.env[step.drain.tokenEnv] : undefined;
   if (!step.drain || !bearer || !deps.postJson) return;
   const answer = await deps.postJson(reconcileUrl(step.drain.url), bearer, {});
@@ -1766,10 +1875,12 @@ async function deployStepLoop(
 ): Promise<StepOutcome> {
   const { started, waitMaxMs, deadline } = wait;
   for (;;) {
+    if (deps.signal?.aborted) return { ok: false, live: "not deployed", reason: "deployment cancelled" };
     io.log(`\n[deploy:all] ▶ ${step.name} (${step.script}) — ${step.dir}: ${step.command.join(" ")}`);
     const application = step.liveGate
       ? { before: await readAppBeforeUpload(step, step.liveGate, io, deps) }
       : undefined;
+    if (deps.signal?.aborted) return { ok: false, live: "not deployed", reason: "deployment cancelled" };
     if (step.liveGate?.kind === "bot") {
       const listed = deps.readListedAppState
         ? await deps.readListedAppState(step.dir, step.liveGate.containerApp, step.botAccount ?? "")
@@ -1777,19 +1888,23 @@ async function deployStepLoop(
       const problem = botUploadProblem(application!.before, listed, step.botImage);
       if (problem) return { ok: false, live: "not deployed", reason: `bot upload refused: ${problem}` };
     }
+    if (deps.signal?.aborted) return { ok: false, live: "not deployed", reason: "deployment cancelled" };
     if (step.name === "resident") {
       const beforeRead = await readResidentBeforeUpload();
       const before = residentApplicationChange(beforeRead, beforeRead, step.residentContainerApp);
       if (before.kind === "unknown")
         return { ok: false, live: "not deployed", reason: `resident upload refused: ${before.reason}` };
-      uploadState(true);
+      if (deps.signal?.aborted) return { ok: false, live: "not deployed", reason: "deployment cancelled" };
     }
-    const r = await exec(step, io);
+    uploadState(true);
+    const r = await exec(step, io, deps.signal);
+    if (r.cancelled || deps.signal?.aborted)
+      return { ok: false, live: "upload outcome uncertain", reason: "deployment cancelled" };
     if (step.name === "resident") onResidentOutput(r.output);
     const outcome = classifyDeployOutput(r.code, r.output);
     if (outcome.kind === "deployed") {
       if (!step.liveGate) {
-        if (step.wakeUrl && step.name !== "resident") await wake(step.name, step.wakeUrl, io);
+        if (step.wakeUrl && step.name !== "resident") await wake(step.name, step.wakeUrl, io, deps.signal);
         return { ok: true, versionId: outcome.versionId, live: "n/a" };
       }
       io.log(
@@ -1850,7 +1965,14 @@ async function deployStepLoop(
         return uncertainResidentUpload(outcome.reason);
       uploadState(false);
     }
+    if (
+      outcome.kind === "preflight-refused" &&
+      step.name !== "resident" &&
+      !/\bUploaded\b|Current Version ID:/i.test(r.output)
+    )
+      uploadState(false);
     if (outcome.kind === "preflight-refused" && step.retryOnPreflightRefusal) {
+      if (deps.signal?.aborted) return { ok: false, live: "not deployed", reason: "deployment cancelled" };
       const left = deadline - deps.now();
       // The budget ran out with the refusal standing: the step FAILS by name,
       // never a deploy over what refused (liveGate.ts `preflightGaveUpLine`).
@@ -1861,7 +1983,8 @@ async function deployStepLoop(
           reason: preflightGaveUpLine(waitMaxMs, outcome.reason) + (wait.drained ? DRAINED_GAVE_UP_SUFFIX : ""),
         };
       // Never a silent wait: say what is in flight and how far into the budget we are.
-      const body = step.healthUrl ? await fetchHealthz(step.healthUrl) : undefined;
+      const body = step.healthUrl ? await fetchHealthz(step.healthUrl, deps.signal) : undefined;
+      if (deps.signal?.aborted) return { ok: false, live: "not deployed", reason: "deployment cancelled" };
       io.log(
         step.healthUrl
           ? heartbeatLine(step.name, body, deps.now() - started, waitMaxMs)
@@ -1869,11 +1992,38 @@ async function deployStepLoop(
       );
       io.log(`[deploy:all] ${step.name}: retrying in ${plan.pollMs / 1000}s (${Math.ceil(left / 60_000)} min left)`);
       // The injected clock (the default is the real one): a test drives the wait without waiting.
-      await deps.sleep(plan.pollMs);
+      await deps.sleep(plan.pollMs, deps.signal);
       continue;
     }
     if (step.name === "resident" && outcome.kind === "failed") return uncertainResidentUpload(outcome.reason);
     return { ok: false, live: "not deployed", reason: outcome.reason };
+  }
+}
+
+/** Host signal ownership lasts only for this deployment. Force kill or runner
+ * loss cannot execute cleanup; an interrupted command retains unknown upload. */
+export async function runDeployPlanOnHost(
+  plan: DeployPlan,
+  io: DeployRunnerIO,
+  deps: SandboxGateDeps = defaultSandboxGateDeps,
+): Promise<DeployRunResult> {
+  const control = new AbortController();
+  const signal = deps.signal ? AbortSignal.any([control.signal, deps.signal]) : control.signal;
+  const stop = () => control.abort();
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  try {
+    return await runDeployPlan(plan, io, {
+      ...deps,
+      signal,
+      readHealth: (url, bearer, timeout) =>
+        signal.aborted
+          ? Promise.resolve({ error: "deployment cancelled" })
+          : deps.readHealth(url, bearer, timeout, signal),
+    });
+  } finally {
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
   }
 }
 
@@ -1884,6 +2034,7 @@ export async function runDeployPlan(
   io: DeployRunnerIO,
   originalDeps: SandboxGateDeps = defaultSandboxGateDeps,
 ): Promise<DeployRunResult> {
+  if (originalDeps.signal?.aborted) return { kind: "refused", problems: ["deployment cancelled"] };
   const plan = structuredClone(input);
   if (plan.steps.length === 0) return runSelectedDeployPlan(plan, io, originalDeps);
   const directory = mkdtempSync(join(tmpdir(), "switchboard-plan-native-"));
@@ -1909,6 +2060,8 @@ async function runSelectedDeployPlan(
   deps: SandboxGateDeps = defaultSandboxGateDeps,
   uploadConfigs: string[] = [],
 ): Promise<DeployRunResult> {
+  const cancelled = () => deps.signal?.aborted === true;
+  if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
   if (plan.affected) io.log(formatAffectedText(plan.affected));
   if (plan.steps.length === 0) {
     io.log("[deploy:all] nothing to deploy — every Worker already serves this tree's inputs");
@@ -1931,6 +2084,7 @@ async function runSelectedDeployPlan(
     plan.steps.map((s) => s.dir),
     (l) => io.log(l),
   );
+  if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
   if (!ready.ok) return { kind: "refused", problems: [ready.problem] };
   const selectedConfigs = new Map<string, string>();
   const renderProblems = await renderWorkerConfigsOnHost(
@@ -1947,6 +2101,7 @@ async function runSelectedDeployPlan(
     },
     { origin: plan.profile.origin, path: plan.profile.path, profile: plan.profile.selection },
   );
+  if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
   if (renderProblems.length > 0) return { kind: "refused", problems: renderProblems };
   for (const step of plan.steps) {
     const config = selectedConfigs.get(`${step.dir}/${RENDERED_FILE}`);
@@ -1954,7 +2109,8 @@ async function runSelectedDeployPlan(
     step.command.push("--", "--config", config);
     step.setEnv.SWITCHBOARD_DEPLOY_CONFIG = config;
   }
-  const problems = await preChecks(plan, io);
+  const problems = await preChecks(plan, io, deps.signal);
+  if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
   if (problems.length > 0) return { kind: "refused", problems };
   // The commit being deployed — what a gated Worker's /healthz must report
   // before its step counts as live. In a checkout, HEAD, read AFTER the origin/main check;
@@ -1965,8 +2121,9 @@ async function runSelectedDeployPlan(
   // refused the same way.
   const expectedCommit =
     plan.root.mode === "checkout"
-      ? (await run("git", ["rev-parse", "HEAD"], { cwd: OPERATOR_ROOT.root })).output.trim()
+      ? (await run("git", ["rev-parse", "HEAD"], { cwd: OPERATOR_ROOT.root, signal: deps.signal })).output.trim()
       : packageSourceOnHost().commit;
+  if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
   if (!/^[0-9a-f]{40}$/.test(expectedCommit)) {
     return {
       kind: "refused",
@@ -1993,6 +2150,7 @@ async function runSelectedDeployPlan(
       );
     } else {
       const read = await readConfigForPush(plan.config.source);
+      if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
       if (!read.ok) return { kind: "refused", problems: [read.problem] };
       const identity = parseConfigConsumerIdentity(JSON.stringify({ commit: expectedCommit }));
       if (!identity.ok) return { kind: "refused", problems: [identity.problem] };
@@ -2004,6 +2162,7 @@ async function runSelectedDeployPlan(
         deps.readAppState(bot.dir, bot.liveGate.containerApp),
         deps.readInstances(bot.dir, bot.liveGate.containerApp),
       ]);
+      if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
       const observed = configSourceObservation(sourceHealth, sourceApp, sourceInstances);
       const original = plan.config.originalSource;
       const input = observed.ok
@@ -2035,6 +2194,7 @@ async function runSelectedDeployPlan(
         onSnapshot: (key) =>
           io.log(`[deploy:all] config: input snapshot "${key}" (private data, not restoration authority)`),
       });
+      if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
       if (!prepared.ok) return { kind: "refused", problems: [prepared.problem] };
       configPublication = prepared.publication;
       configSource = input;
@@ -2055,14 +2215,19 @@ async function runSelectedDeployPlan(
     env: deps.env,
     readLive: async (url, bearerEnv) => {
       const bearer = bearerEnv ? deps.env[bearerEnv] : undefined;
-      const r = await readHealthz(url, bearer);
+      const r = await readHealthz(url, bearer, undefined, deps.signal);
       return "body" in r && r.status >= 200 && r.status < 300 ? r.body : undefined;
     },
     liveContains: async (deploying, live) => {
-      const r = await run("git", ["merge-base", "--is-ancestor", deploying, live], { cwd: OPERATOR_ROOT.root });
+      if (cancelled()) return undefined;
+      const r = await run("git", ["merge-base", "--is-ancestor", deploying, live], {
+        cwd: OPERATOR_ROOT.root,
+        signal: deps.signal,
+      });
       return r.code === 0 ? true : r.code === 1 ? false : undefined;
     },
   });
+  if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
   for (const note of supersede.notes) io.warn(`[deploy:all] WARNING ${note}`);
   if (supersede.problems.length > 0) return { kind: "refused", problems: supersede.problems };
 
@@ -2076,14 +2241,17 @@ async function runSelectedDeployPlan(
       : undefined;
   if (planeDeploy) await postPlaneDeploy(planeDeploy, "pending", expectedCommit);
   const results: DeployStepResult[] = [];
+  let windowSettled = true;
   try {
     for (const step of plan.steps) {
+      if (deps.signal?.aborted) break;
       if (step.name === "bot" && configPublication) {
         // After the memory step (the document lives there), before the bot rolls (it reads it on start).
         const currentApp =
           step.liveGate?.kind === "bot"
             ? await deps.readAppState(step.dir, step.liveGate.containerApp)
             : { error: "bot application unavailable" };
+        if (cancelled()) break;
         if (!configSource || !unchangedConfigSourceApplication(configSource, currentApp)) {
           results.push({
             name: step.name,
@@ -2094,6 +2262,7 @@ async function runSelectedDeployPlan(
           break;
         }
         const pushed = await publishConfigPublication(configPublication, { env: process.env });
+        if (cancelled()) break;
         if (!pushed.ok) {
           results.push({
             name: step.name,
@@ -2107,12 +2276,17 @@ async function runSelectedDeployPlan(
           `[deploy:all] config: ${pushed.how} → document "${configPublication.key}" v${pushed.version} on ${stateWorkerUrl} (sha256 ${pushed.sha256.slice(0, 12)}, ${pushed.bytes} bytes)`,
         );
       }
-      if (!(await ensureNodeModules(step, io))) {
+      if (deps.signal?.aborted) break;
+      if (!(await ensureNodeModules(step, io, deps.signal))) {
+        if (deps.signal?.aborted) windowSettled = false;
         results.push({ name: step.name, script: step.script, live: "not deployed", status: "npm ci failed" });
         break;
       }
+      if (cancelled()) break;
+      windowSettled = false;
       let r = await deployStep(step, plan, expectedCommit, io, deps);
-      if (r.ok && step.liveGate?.kind === "bot" && configPublication) {
+      windowSettled = r.noUpload === true || r.ok;
+      if (r.ok && !deps.signal?.aborted && step.liveGate?.kind === "bot" && configPublication) {
         const client = new ConfigDocumentClient({
           baseUrl: configPublication.stateWorkerUrl,
           token: process.env[STATE_WORKER_TOKEN_ENV] ?? "",
@@ -2122,16 +2296,20 @@ async function runSelectedDeployPlan(
           deps.readAppState(step.dir, step.liveGate.containerApp),
           deps.readInstances(step.dir, step.liveGate.containerApp),
         ]);
-        const confirmed = await confirmConsumerConfigPublication(
-          configPublication,
-          { commit: expectedCommit },
-          health,
-          app,
-          instances,
-          (key) => client.readBase(key),
-          step.botImage,
-        );
-        if (!confirmed.ok)
+        const confirmed = cancelled()
+          ? { ok: false as const, problem: "deployment cancelled" }
+          : await confirmConsumerConfigPublication(
+              configPublication,
+              { commit: expectedCommit },
+              health,
+              app,
+              instances,
+              (key) => client.readBase(key),
+              step.botImage,
+            );
+        if (cancelled())
+          r = { ...r, ok: false, live: "deployed, not live: deployment cancelled", reason: "deployment cancelled" };
+        else if (!confirmed.ok)
           r = { ...r, ok: false, live: `deployed, not live: ${confirmed.problem}`, reason: confirmed.problem };
       }
       // wrangler always prints `Current Version ID`; a deploy that exits 0 without one is odd enough to say so.
@@ -2150,12 +2328,13 @@ async function runSelectedDeployPlan(
       }
     }
   } finally {
-    // Landed or failed, the deploy is settled: the window lifts and the plane
-    // walks its queue (the state Worker logs how many asks were admitted).
-    if (planeDeploy) await postPlaneDeploy(planeDeploy, "landed", expectedCommit);
+    // A cancelled active command cannot certify observer-window settlement.
+    // Lifting a known settled window certifies neither readiness nor native ending.
+    if (planeDeploy && (!cancelled() || windowSettled)) await postPlaneDeploy(planeDeploy, "landed", expectedCommit);
   }
   const notAttempted = plan.steps.slice(results.length).map((s) => s.name);
   const ok =
+    !cancelled() &&
     results.every((r) => r.status.startsWith("deployed") && !r.live.startsWith("deployed, not live")) &&
     notAttempted.length === 0;
   return { kind: "ran", ok, results, notAttempted };

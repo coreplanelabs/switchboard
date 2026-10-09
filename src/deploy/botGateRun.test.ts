@@ -1,7 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { LIVE_GATE_POLL_MS } from "./liveGate.js";
 import { workersFor, type DeployStep, type BotLiveGate } from "./plan.js";
-import { deployStep, readRawBotApplication, type SandboxGateDeps, type StepExec } from "./run.js";
+import {
+  deployStep,
+  readRawBotApplication,
+  waitUntilBotLive,
+  defaultSandboxGateDeps,
+  type SandboxGateDeps,
+  type StepExec,
+} from "./run.js";
 import { parseInstancesPage, type AppState, type HealthRead, type Read } from "./sandboxLiveGate.js";
 import { TEST_PROFILE } from "./testing/profile.js";
 
@@ -88,6 +95,43 @@ function harness(script: Scripted) {
   };
   return { deps, io, exec, calls, lines };
 }
+
+describe("deployment health cancellation", () => {
+  it("aborts an already pending health response and performs no later poll", async () => {
+    try {
+      const positive = harness({ app: [after], health: [serving(PRIOR_COMMIT)] });
+      expect(await waitUntilBotLive(botStep, gate, PRIOR_COMMIT, positive.io, positive.deps)).toMatchObject({
+        live: true,
+        waitedMs: 0,
+      });
+      const h = harness({ app: [after], health: [] });
+      const control = new AbortController();
+      let sends = 0;
+      vi.stubGlobal("fetch", async (_url: Parameters<typeof fetch>[0], init: RequestInit) => {
+        sends++;
+        const response = new Response(
+          new ReadableStream({
+            start(c) {
+              init.signal?.addEventListener("abort", () => c.error(new Error("fixture aborted")), { once: true });
+            },
+          }),
+        );
+        queueMicrotask(() => control.abort());
+        return response;
+      });
+      h.deps.signal = control.signal;
+      h.deps.readHealth = defaultSandboxGateDeps.readHealth;
+      expect(await waitUntilBotLive(botStep, gate, PRIOR_COMMIT, h.io, h.deps)).toEqual({
+        live: false,
+        reason: "deployment cancelled",
+      });
+      expect(sends).toBe(1);
+      expect(h.calls).toEqual(["readAppState", "readInstances"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
 
 describe("deployStep (bot rollback fence)", () => {
   it("uses fresh singleton health when Wrangler reports an inactive placement without a version", async () => {
