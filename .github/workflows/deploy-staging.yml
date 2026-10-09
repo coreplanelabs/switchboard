@@ -203,6 +203,20 @@ jobs:
           owner: ${{ vars.CONFIG_REPO_OWNER }}
           repositories: ${{ vars.CONFIG_REPO_NAME }}
           permission-contents: read
+      - name: validate acceptance configuration before upload
+        if: (steps.recheck.outputs.eligible == 'true' || (github.event_name == 'workflow_dispatch' && inputs.pr == '')) && (github.event_name == 'pull_request_target' || inputs.pr != '' || inputs.review_e2e)
+        env:
+          SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_STAGING_PROFILE }}
+          CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
+          SMOKE_INGRESS_CONFIG: ${{ vars.STAGING_SMOKE_CONFIG }}
+          SMOKE_INGRESS_ORIGIN: ${{ vars.STAGING_SMOKE_ORIGIN }}
+          SMOKE_INGRESS_TOKEN: ${{ secrets.STAGING_SMOKE_TOKEN }}
+          SMOKE_EXPECTED_COMMIT: ${{ needs.authorize.outputs.commit }}
+          SMOKE_SLACK_CONFIG: ${{ vars.STAGING_SLACK_SMOKE_CONFIG }}
+          SMOKE_SLACK_USER_TOKEN: ${{ secrets.STAGING_SLACK_TEST_USER_TOKEN }}
+        run: |
+          npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/staging-fleet.json"
+          npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-setup.json" --check
       - name: deploy the captured commit to staging
         id: deploy
         if: steps.recheck.outputs.eligible == 'true' || (github.event_name == 'workflow_dispatch' && inputs.pr == '')
@@ -240,9 +254,16 @@ jobs:
           SMOKE_INGRESS_TOKEN: ${{ secrets.STAGING_SMOKE_TOKEN }}
           SMOKE_INGRESS_THREAD: staging-${{ github.run_id }}-${{ github.run_attempt }}
           SMOKE_EXPECTED_COMMIT: ${{ needs.authorize.outputs.commit }}
+          SMOKE_REQUIRE_SLACK_CONNECTION: "true"
+          SMOKE_SLACK_CONFIG: ${{ vars.STAGING_SLACK_SMOKE_CONFIG }}
+          SMOKE_SLACK_USER_TOKEN: ${{ secrets.STAGING_SLACK_TEST_USER_TOKEN }}
         run: |
           npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/staging-fleet.json"
           npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-e2e.json"
+          jq -e '.slackConnection.required == true and .slackConnection.connected == true and .slackConnection.checks == ((.scenarios | length) * 2)' "$RUNNER_TEMP/staging-e2e.json" > /dev/null
+          if [ -n "$SMOKE_SLACK_CONFIG" ]; then
+            jq -e '.slackCommand.outcome == "passed"' "$RUNNER_TEMP/staging-e2e.json" > /dev/null
+          fi
           echo "accepted=true" >> "$GITHUB_OUTPUT"
       - name: staging deployment receipt
         if: always()
@@ -257,6 +278,7 @@ jobs:
           name: staging-deploy-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/staging-deploy.log
+            ${{ runner.temp }}/staging-setup.json
             ${{ runner.temp }}/staging-fleet.json
             ${{ runner.temp }}/staging-e2e.json
           if-no-files-found: ignore

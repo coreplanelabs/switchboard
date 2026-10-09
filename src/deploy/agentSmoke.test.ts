@@ -86,6 +86,53 @@ describe("bounded agent smoke", () => {
     }
   });
 
+  it("requires Slack connection before and after runs when configured", async () => {
+    for (const connected of [false, undefined]) {
+      const { transport } = fixture();
+      transport.health = vi.fn(async () => ({ commit, version: "1.0.0", slackConnected: connected }));
+      const receipt = await runAgentSmoke({
+        config,
+        expectedCommit: commit,
+        thread: "release-1",
+        transport,
+        requireSlackConnection: true,
+      });
+      expect(receipt.scenarios[0]).toMatchObject({ outcome: "incomplete", reason: "slack_connection_unproven" });
+      expect(receipt.scenarios[1].outcome).toBe("skipped");
+      expect(transport.request).not.toHaveBeenCalled();
+    }
+    const before = fixture();
+    before.transport.health = vi.fn(async () => ({ commit, version: "1.0.0", slackConnected: true }));
+    const passed = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "release-1",
+      transport: before.transport,
+      requireSlackConnection: true,
+    });
+    expect(passed.capabilityOutcome).toBe("passed");
+    expect(passed.slackConnection).toEqual({ required: true, connected: true, checks: 6 });
+    const lost = fixture();
+    lost.transport.health = vi
+      .fn()
+      .mockResolvedValueOnce({ commit, version: "1.0.0", slackConnected: true })
+      .mockResolvedValue({ commit, version: "1.0.0", slackConnected: false });
+    const failed = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "release-1",
+      transport: lost.transport,
+      requireSlackConnection: true,
+    });
+    expect(failed.scenarios[0]).toMatchObject({
+      runId: "run-answer",
+      outcome: "incomplete",
+      reason: "slack_connection_unproven",
+    });
+    expect(failed.slackConnection).toEqual({ required: true, connected: false, checks: 2 });
+    expect(lost.transport.request).toHaveBeenCalledTimes(1);
+  });
+
   it("refuses health-only, fallback output, missing execution and mismatched publication", async () => {
     for (const change of [
       { answerOutcome: undefined },

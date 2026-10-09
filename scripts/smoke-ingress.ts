@@ -1,4 +1,5 @@
 import { readFile, rename, writeFile } from "node:fs/promises";
+import { parseSlackSmokeConfig, runSlackCommandSmoke, type SlackSmokeReceipt } from "../src/deploy/slackSmoke.js";
 import {
   agentSmokeTransport,
   parseSmokeConfig,
@@ -35,6 +36,12 @@ try {
     token: process.env.SMOKE_INGRESS_TOKEN ?? "",
     config,
   });
+  const slackConfig = process.env.SMOKE_SLACK_CONFIG
+    ? parseSlackSmokeConfig(JSON.parse(process.env.SMOKE_SLACK_CONFIG))
+    : undefined;
+  if (slackConfig && !process.env.SMOKE_SLACK_USER_TOKEN) throw new Error("SMOKE_SLACK_USER_TOKEN is not set");
+  if (slackConfig && !process.env.SMOKE_EXPECTED_COMMIT)
+    throw new Error("Slack acceptance requires an exact candidate commit");
   if (mode === "--check") {
     await save({
       version: 1,
@@ -49,11 +56,29 @@ try {
       throw new Error("SMOKE_INGRESS_THREAD is not set; use a fresh disposable thread prefix");
     const receipt = await runAgentSmoke({
       config,
+      requireSlackConnection: process.env.SMOKE_REQUIRE_SLACK_CONNECTION === "true",
       transport,
       expectedCommit: process.env.SMOKE_EXPECTED_COMMIT || undefined,
       thread: process.env.SMOKE_INGRESS_THREAD,
       onReceipt: save,
     });
+    if (receipt.capabilityOutcome === "passed" && slackConfig) {
+      const saveSlack = async (slackCommand: SlackSmokeReceipt) =>
+        save({
+          ...receipt,
+          capabilityOutcome: slackCommand.outcome === "passed" ? "passed" : "incomplete",
+          slackCommand,
+        });
+      const slackCommand = await runSlackCommandSmoke({
+        origin: process.env.SMOKE_INGRESS_ORIGIN ?? "",
+        healthUrl,
+        expectedCommit: process.env.SMOKE_EXPECTED_COMMIT!,
+        userToken: process.env.SMOKE_SLACK_USER_TOKEN!,
+        config: slackConfig,
+        onReceipt: saveSlack,
+      });
+      if (slackCommand.outcome !== "passed") receipt.capabilityOutcome = "incomplete";
+    }
     process.stdout.write(
       `Deployment capability acceptance: ${receipt.capabilityOutcome}. Private draft-PR path remains unproven.\n`,
     );
