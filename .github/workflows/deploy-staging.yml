@@ -1,7 +1,7 @@
 name: deploy staging
 
 # The controller comes from the base branch. Current same-repository PR heads
-# owned by repository writers or installed write Apps deploy after validation.
+# release heads owned by repository writers or installed write Apps deploy after validation.
 # This explicitly authorizes candidate execution, after the writer/head gates,
 # with staging-only secrets. No fork or production credential reaches deploy.
 on: # zizmor: ignore[dangerous-triggers]
@@ -29,6 +29,7 @@ permissions:
   contents: read
   pull-requests: read
   checks: read
+  actions: read
 
 jobs:
   authorize:
@@ -37,6 +38,9 @@ jobs:
     timeout-minutes: 5
     outputs:
       commit: ${{ steps.request.outputs.commit }}
+      requested: ${{ steps.request.outputs.requested }}
+      automatic: ${{ steps.request.outputs.automatic }}
+      require_label: ${{ steps.request.outputs.require_label }}
     steps:
       - name: authorize and capture the candidate
         id: request
@@ -45,7 +49,32 @@ jobs:
           REQUESTED_COMMIT: ${{ inputs.commit }}
           VALIDATE_PR: ${{ inputs.pr }}
           AUTOMATIC: ${{ github.event_name == 'pull_request_target' && github.event.action != 'labeled' }}
+          RELEASE_BRANCH: release-please--branches--main--components--switchboard
         run: |
+          require_label=false
+          if [ "$GITHUB_EVENT_NAME" = pull_request_target ]; then
+            require_label=$(jq -er 'if (.pull_request.labels | type) == "array" then ((.action == "labeled" and .label.name == "deploy:staging") or any(.pull_request.labels[]; .name == "deploy:staging")) | tostring else error("Missing PR labels") end' "$GITHUB_EVENT_PATH") || { echo '::error::Missing staging label metadata'; exit 1; }
+          fi
+          if [ "$AUTOMATIC" = true ]; then
+            head_ref=$(jq -er '.pull_request.head.ref | select(type == "string" and length > 0)' "$GITHUB_EVENT_PATH") || { echo '::error::Missing release branch metadata'; exit 1; }
+            if [ "$head_ref" != "$RELEASE_BRANCH" ]; then
+              if [ "$require_label" = true ]; then
+                AUTOMATIC=false
+              else
+                head_sha=$(jq -er '.pull_request.head.sha | select(type == "string" and test("^[0-9a-f]{40}$"))' "$GITHUB_EVENT_PATH") || { echo '::error::Missing staging head metadata'; exit 1; }
+                # A same-head branch dispatch is an explicit request. A later PR
+                # event must not replace its failed acceptance with "not required".
+                history=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/deploy-staging.yml/runs?event=workflow_dispatch&head_sha=$head_sha&per_page=1") || { echo '::error::Staging request history is unavailable'; exit 1; }
+                prior_request=$(jq -er --arg sha "$head_sha" '.workflow_runs | if type == "array" then any(.[]; .event == "workflow_dispatch" and .head_sha == $sha) | tostring else error("Missing workflow runs") end' <<< "$history") || { echo '::error::Staging request history is unavailable'; exit 1; }
+                if [ "$prior_request" = true ]; then
+                  AUTOMATIC=false
+                else
+                  echo 'requested=false' >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+              fi
+            fi
+          fi
           if [ "$AUTOMATIC" != true ]; then
             permission=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$GITHUB_ACTOR/permission" --jq .permission)
             case "$permission" in admin|maintain|write) ;; *) echo '::error::Staging deployment requires repository write access'; exit 1 ;; esac
@@ -67,11 +96,14 @@ jobs:
           fi
           [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::An exact source commit is required'; exit 1; }
           gh api "repos/$GITHUB_REPOSITORY/commits/$commit" --jq .sha | { read -r actual; [ "$actual" = "$commit" ]; }
+          echo "automatic=$AUTOMATIC" >> "$GITHUB_OUTPUT"
+          echo "require_label=$require_label" >> "$GITHUB_OUTPUT"
+          echo 'requested=true' >> "$GITHUB_OUTPUT"
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
 
   validate:
     needs: authorize
-    if: github.event_name == 'pull_request_target' || inputs.pr != ''
+    if: needs.authorize.outputs.requested == 'true' && (github.event_name == 'pull_request_target' || inputs.pr != '')
     runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 40
     concurrency:
@@ -94,8 +126,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           STAGING_COMMIT: ${{ needs.authorize.outputs.commit }}
           STAGING_PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
-          STAGING_REQUIRE_LABEL: ${{ github.event.action == 'labeled' }}
-          STAGING_AUTOMATIC: ${{ github.event_name == 'pull_request_target' && github.event.action != 'labeled' }}
+          STAGING_REQUIRE_LABEL: ${{ needs.authorize.outputs.require_label }}
+          STAGING_AUTOMATIC: ${{ needs.authorize.outputs.automatic }}
           STAGING_ACTOR: ${{ github.actor }}
 
   deploy:
@@ -103,7 +135,7 @@ jobs:
     outputs:
       accepted: ${{ steps.e2e.outputs.accepted }}
     needs: [authorize, validate]
-    if: always() && needs.authorize.result == 'success' && (needs.validate.result == 'skipped' || (needs.validate.result == 'success' && needs.validate.outputs.eligible == 'true'))
+    if: always() && needs.authorize.result == 'success' && needs.authorize.outputs.requested == 'true' && (needs.validate.result == 'skipped' || (needs.validate.result == 'success' && needs.validate.outputs.eligible == 'true'))
     runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 60
     environment: staging
@@ -142,8 +174,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           STAGING_COMMIT: ${{ needs.authorize.outputs.commit }}
           STAGING_PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
-          STAGING_REQUIRE_LABEL: ${{ github.event.action == 'labeled' }}
-          STAGING_AUTOMATIC: ${{ github.event_name == 'pull_request_target' && github.event.action != 'labeled' }}
+          STAGING_REQUIRE_LABEL: ${{ needs.authorize.outputs.require_label }}
+          STAGING_AUTOMATIC: ${{ needs.authorize.outputs.automatic }}
           STAGING_ACTOR: ${{ github.actor }}
           STAGING_VALIDATE_MODE: recheck
       - name: staging inputs are complete
@@ -238,8 +270,14 @@ jobs:
     steps:
       - name: require deployment and a real posted Review
         env:
+          REQUESTED: ${{ needs.authorize.outputs.requested }}
+          AUTHORIZE_RESULT: ${{ needs.authorize.result }}
           DEPLOY_RESULT: ${{ needs.deploy.result }}
           ACCEPTED: ${{ needs.deploy.outputs.accepted }}
         run: |
+          if [ "$AUTHORIZE_RESULT" = success ] && [ "$REQUESTED" = false ]; then
+            echo 'Staging E2E is automatic for release PRs only. Not required for this ordinary PR; use deploy:staging or manual dispatch to request it.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           [ "$DEPLOY_RESULT" = success ] && [ "$ACCEPTED" = true ] || { echo '::error::Full-stack staging Review acceptance did not pass. See the deployment and E2E receipts.'; exit 1; }
           echo 'Full-stack staging deployment and live Review passed.' >> "$GITHUB_STEP_SUMMARY"

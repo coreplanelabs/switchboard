@@ -136,12 +136,92 @@ describe("staging workflow isolation", () => {
     const commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     writeFileSync(
       join(directory, "gh"),
-      `#!${process.execPath}\nconst route=process.argv[3]; console.log(route.endsWith('/permission')?process.env.TEST_PERMISSION:route.includes('/pulls/')?process.env.TEST_HEAD:process.env.TEST_COMMIT);`,
+      `#!${process.execPath}\nconst route=process.argv[3]; console.log(route.includes('/actions/workflows/')?process.env.TEST_HISTORY:route.endsWith('/permission')?process.env.TEST_PERMISSION:route.includes('/pulls/')?process.env.TEST_HEAD:process.env.TEST_COMMIT);`,
       { mode: 0o755 },
     );
     try {
       for (const scenario of [
+        {
+          permission: "write",
+          repo: "example/service",
+          head: commit,
+          branch: "feature/change",
+          action: "labeled",
+          status: 0,
+          message: "",
+        },
+        {
+          permission: "write",
+          repo: "example/service",
+          head: commit,
+          branch: "feature/change",
+          automatic: "true",
+          labels: ["deploy:staging"],
+          action: "ready_for_review",
+          status: 0,
+          message: "",
+        },
+        {
+          permission: "write",
+          repo: "example/service",
+          head: commit,
+          branch: "feature/change",
+          automatic: "true",
+          labels: ["deploy:staging"],
+          action: "reopened",
+          status: 0,
+          message: "",
+        },
+        {
+          permission: "write",
+          repo: "example/service",
+          head: commit,
+          branch: "feature/change",
+          automatic: "true",
+          manualHistory: true,
+          status: 0,
+          message: "",
+        },
+        {
+          permission: "read",
+          repo: "example/service",
+          head: commit,
+          branch: "feature/change",
+          automatic: "true",
+          labels: ["deploy:staging"],
+          status: 1,
+          message: "requires repository write access",
+        },
+        {
+          permission: "write",
+          repo: "example/service",
+          head: commit,
+          branch: "feature/change",
+          automatic: "true",
+          historyFailure: true,
+          status: 1,
+          message: "Staging request history is unavailable",
+        },
         { permission: "write", repo: "example/service", head: commit, status: 0, message: "" },
+        {
+          permission: "read",
+          repo: "example/service",
+          head: commit,
+          branch: "",
+          automatic: "true",
+          status: 1,
+          message: "release branch metadata",
+        },
+        {
+          permission: "read",
+          repo: "outside/service",
+          head: commit,
+          branch: "feature/change",
+          automatic: "true",
+          requested: false,
+          status: 0,
+          message: "",
+        },
         { permission: "read", repo: "example/service", head: commit, automatic: "true", status: 0, message: "" },
         {
           permission: "read",
@@ -175,7 +255,19 @@ describe("staging workflow isolation", () => {
       ]) {
         writeFileSync(
           join(directory, "event.json"),
-          JSON.stringify({ pull_request: { number: 7, head: { sha: commit, repo: { full_name: scenario.repo } } } }),
+          JSON.stringify({
+            action: scenario.action ?? "synchronize",
+            label: { name: "deploy:staging" },
+            pull_request: {
+              number: 7,
+              labels: (scenario.labels ?? []).map((name) => ({ name })),
+              head: {
+                ref: scenario.branch ?? "release-please--branches--main--components--switchboard",
+                sha: commit,
+                repo: { full_name: scenario.repo },
+              },
+            },
+          }),
         );
         writeFileSync(join(directory, "output"), "");
         const result = spawnSync("bash", ["-c", script], {
@@ -185,10 +277,18 @@ describe("staging workflow isolation", () => {
             PATH: `${directory}:${process.env.PATH}`,
             GITHUB_ACTOR: "maintainer",
             AUTOMATIC: scenario.automatic ?? "false",
+            RELEASE_BRANCH: workflow.jobs.authorize.steps[0].env.RELEASE_BRANCH,
             GITHUB_REPOSITORY: "example/service",
             GITHUB_EVENT_NAME: "pull_request_target",
             GITHUB_EVENT_PATH: join(directory, "event.json"),
             GITHUB_OUTPUT: join(directory, "output"),
+            TEST_HISTORY: scenario.historyFailure
+              ? "null"
+              : JSON.stringify({
+                  workflow_runs: scenario.manualHistory
+                    ? [{ id: 99, event: "workflow_dispatch", head_sha: commit }]
+                    : [],
+                }),
             TEST_PERMISSION: scenario.permission,
             TEST_HEAD: scenario.head,
             TEST_COMMIT: commit,
@@ -197,7 +297,9 @@ describe("staging workflow isolation", () => {
         expect(result.status, result.stderr).toBe(scenario.status);
         if (scenario.status === 0)
           expect(readFileSync(join(directory, "output"), "utf8")).toBe(
-            "commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            scenario.requested === false
+              ? "requested=false\n"
+              : `automatic=${scenario.labels?.includes("deploy:staging") || scenario.manualHistory ? "false" : (scenario.automatic ?? "false")}\nrequire_label=${scenario.action === "labeled" || scenario.labels?.includes("deploy:staging") ? "true" : "false"}\nrequested=true\ncommit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n`,
           );
         else expect(result.stdout).toContain(scenario.message);
       }
@@ -265,6 +367,8 @@ describe("staging workflow isolation", () => {
       { result: "success", accepted: "true", status: 0 },
       { result: "success", accepted: "", status: 1 },
       { result: "skipped", accepted: "", status: 1 },
+      { result: "skipped", accepted: "", requested: "false", authorize: "success", status: 0 },
+      { result: "skipped", accepted: "", requested: "false", authorize: "failure", status: 1 },
       { result: "failure", accepted: "true", status: 1 },
     ]) {
       const directory = mkdtempSync(join(tmpdir(), "staging-acceptance-"));
@@ -274,6 +378,8 @@ describe("staging workflow isolation", () => {
           env: {
             ...process.env,
             DEPLOY_RESULT: scenario.result,
+            REQUESTED: scenario.requested ?? "true",
+            AUTHORIZE_RESULT: scenario.authorize ?? "success",
             ACCEPTED: scenario.accepted,
             GITHUB_STEP_SUMMARY: join(directory, "summary"),
           },
