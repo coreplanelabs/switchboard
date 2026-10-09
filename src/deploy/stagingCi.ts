@@ -2,7 +2,7 @@ export interface StagingPull {
   number: number;
   state: string;
   user: { login: string };
-  head: { sha: string; repo: { full_name: string } | null };
+  head: { ref?: string; sha: string; repo: { full_name: string } | null };
 }
 
 export interface ValidationCheck {
@@ -41,6 +41,8 @@ export function stagingValidation(input: {
     return { kind: "refused", reason: "head_changed" };
   if (!input.automatic && !["write", "maintain", "admin"].includes(input.permission ?? ""))
     return { kind: "refused", reason: "actor_not_trusted" };
+  if (input.automatic && input.pull.head.ref !== "release-please--branches--main--components--switchboard")
+    return { kind: "refused", reason: "not_a_release" };
   for (const gate of validationChecks) {
     const check = input.checks
       .filter((item) => item.name === gate.name && item.app.slug === gate.app)

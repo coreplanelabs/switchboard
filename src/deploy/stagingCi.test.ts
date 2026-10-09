@@ -22,7 +22,11 @@ const input = () => ({
     number: 1,
     state: "open",
     user: { login: "maintainer" },
-    head: { sha: commit, repo: { full_name: "example/gateway" } },
+    head: {
+      ref: "release-please--branches--main--components--switchboard",
+      sha: commit,
+      repo: { full_name: "example/gateway" },
+    },
   },
   checks: structuredClone(checks),
 });
@@ -38,6 +42,16 @@ describe("staging validation before credentials", () => {
         check.conclusion = "skipped";
       });
     expect(stagingValidation(skipped)).toEqual({ kind: "ready" });
+  });
+  it("automatically stages release PRs and keeps ordinary PR staging opt-in", () => {
+    const ordinary = input();
+    ordinary.pull.head.ref = "feature/change";
+    expect(stagingValidation({ ...ordinary, automatic: true, permission: undefined })).toEqual({
+      kind: "refused",
+      reason: "not_a_release",
+    });
+    expect(stagingValidation(ordinary)).toEqual({ kind: "ready" });
+    expect(stagingValidation({ ...input(), automatic: true, permission: undefined })).toEqual({ kind: "ready" });
   });
   it("refuses a fork, closed pull, moved head and a manual actor without repository write access", () => {
     const fork = input();
