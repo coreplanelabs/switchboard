@@ -215,6 +215,7 @@ describe("openCodeLaunchArgs and the environment", () => {
           RUN_BEARER_ENV,
           HARNESS_URL_ENV,
           "SWITCHBOARD_RUN_ID",
+          "TMPDIR",
           "XDG_DATA_HOME",
           "XDG_CONFIG_HOME",
           "XDG_CACHE_HOME",
@@ -230,6 +231,7 @@ describe("openCodeLaunchArgs and the environment", () => {
       );
       expect(env[RUN_BEARER_ENV]).toBe(BEARER);
       expect(env[HARNESS_URL_ENV]).toBe("https://bot.example.com/");
+      expect(env.TMPDIR).toBe("/var/tmp/switchboard-oc-run-7/scratch");
       expect(env.SWITCHBOARD_RUN_ID).toBe("run-7");
       expect(env).not.toHaveProperty("HOME");
       expect(env.XDG_DATA_HOME).toBe(spec.paths.xdg.data);
@@ -525,7 +527,7 @@ describe("the configuration writer", () => {
       expect(config.default_agent).toBe(OPENCODE_AGENT);
       expect(config.agents.switchboard.mode).toBe("primary");
       expect(config.agents.switchboard.system).toBe(
-        `${s.system.trimEnd()}\n\n${openCodePromptNote(s.relayTools, s.identity)}\n`,
+        `${s.system.trimEnd()}\n\n${openCodePromptNote(s.relayTools, s.identity)}\n${s.identity === "none" ? "" : `\nTemporary files belong in ${s.paths.scratchDir}. Use that absolute path with file tools and $TMPDIR in shell. This directory is temporary.\n`}`,
       );
       expect(config.agents.switchboard.permissions).toEqual(openCodePermissionRules(s.identity));
       expect(config.agents.title).toEqual({ disabled: true });

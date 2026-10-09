@@ -82,6 +82,8 @@ const stateSchema = z.object({ version: z.literal(1), receipts: z.array(receiptS
 export interface CheckExecutionBinding {
   executor: () => Pick<Executor, "execResult">;
   workspace: () => string | undefined;
+  /** Owned run scratch, supplied by the harness rather than model input. */
+  temporaryDirectory?: () => string | undefined;
   /** Initial capability absence is distinct from a later failed durable write. */
   recordingAvailable: boolean;
   owner: CheckExecutionOwner;
@@ -341,10 +343,15 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
       );
       const commandSignal = execDeadline(receipt.timeoutMs, signal);
       try {
+        const temporaryDirectory = binding.temporaryDirectory?.();
         const result = boundedResult(
           await executor.execResult(
             `cd -- ${shellQuote(receipt.workspace.cwd)} && bash -c ${shellQuote(input.command)}`,
-            { timeoutMs: receipt.timeoutMs, signal: commandSignal },
+            {
+              timeoutMs: receipt.timeoutMs,
+              signal: commandSignal,
+              ...(temporaryDirectory ? { env: { TMPDIR: temporaryDirectory } } : {}),
+            },
           ),
         );
         receipt.outcome = !result

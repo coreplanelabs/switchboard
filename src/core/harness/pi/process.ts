@@ -68,6 +68,7 @@ export interface PiRunPaths extends HarnessPaths {
   extension: string;
   /** Output-only scratch parent; never the agent config directory. */
   outputDir: string;
+  scratchDir: string;
 }
 
 /** Every path is derived from the run id, so two runs never share a file and
@@ -111,8 +112,9 @@ export function piRunPathsAt(dir: string): PiRunPaths {
   return {
     dir,
     // The directories the start makes at 700, the root first (harness-pi item 4).
-    dirs: [dir, sessionDir, commandDir, `${dir}/output`],
+    dirs: [dir, sessionDir, commandDir, `${dir}/output`, `${dir}/scratch`],
     outputDir: `${dir}/output`,
+    scratchDir: `${dir}/scratch`,
     agentDir: `${dir}/agent`,
     sessionDir,
     extension: `${dir}/extension.js`,
@@ -206,7 +208,9 @@ export function piLaunchEnv(spec: PiLaunchSpec, bearer: string): Record<string, 
     [HARNESS_URL_ENV]: spec.harnessUrl,
     SWITCHBOARD_RUN_ID: spec.runId,
     PI_CODING_AGENT_DIR: spec.paths.agentDir,
-    ...(spec.identity !== "none" ? { SWITCHBOARD_PI_OUTPUT_ROOT: spec.paths.outputDir } : {}),
+    ...(spec.identity !== "none"
+      ? { SWITCHBOARD_PI_OUTPUT_ROOT: spec.paths.outputDir, SWITCHBOARD_RUN_SCRATCH: spec.paths.scratchDir }
+      : {}),
     PI_SKIP_VERSION_CHECK: "1",
     PI_OFFLINE: "1",
     PI_TELEMETRY: "0",
@@ -396,7 +400,11 @@ export function harnessPromptNote(
 /** The run's system prompt as pi reads it from `SYSTEM.md`: the dispatcher's
  *  composed prompt, then the harness note. */
 export function piSystemPrompt(spec: PiLaunchSpec): string {
-  return `${spec.system.trimEnd()}\n\n${harnessPromptNote(spec.relayTools, spec.identity, spec.commandPolicy)}\n`;
+  const scratch =
+    spec.identity === "none"
+      ? ""
+      : `\nTemporary files belong in ${spec.paths.scratchDir}. Use that absolute path with file tools and $TMPDIR in bash. This directory is temporary.\n`;
+  return `${spec.system.trimEnd()}\n\n${harnessPromptNote(spec.relayTools, spec.identity, spec.commandPolicy)}\n${scratch}`;
 }
 
 /** What pi's settings prepend to every bash command (`shellCommandPrefix`),

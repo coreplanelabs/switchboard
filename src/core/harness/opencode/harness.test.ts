@@ -397,6 +397,62 @@ describe("OpenCodeHarness — the re-attach onto a still-answering server", () =
     facts,
   });
 
+  it("retains the actual launch temporary-directory capability through saved facts and reattachment", async () => {
+    const driver = openCodeDriver();
+    const turns: RunScript["turns"] = [
+      {
+        content: [
+          {
+            type: "tool_use",
+            id: "scratch-read",
+            name: "read",
+            input: { path: "/var/tmp/switchboard-oc-run-c/scratch/review.diff" },
+          },
+        ],
+        stopReason: "tool_use",
+      },
+      { content: [{ type: "text", text: "done" }], stopReason: "end_turn" },
+    ];
+    const fresh = await driver.run({ turns });
+    expect(fresh.outcome).toEqual({ kind: "answered", answer: "done" });
+    const saved = fresh.facts[0];
+    expect(saved).toMatchObject({ harness: "opencode", workspaceScratch: true });
+    if (saved.harness !== "opencode") throw new Error("unexpected harness facts");
+    const continued = await driver.run({ turns, processAliveOnResume: true, resume: resume(saved, [request], []) });
+    expect(continued.outcome).toEqual({ kind: "answered", answer: "done" });
+    expect(toolResults(continued).map((e) => [e.callId, e.ok])).toEqual([["scratch-read", true]]);
+    expect(continued.starts).toHaveLength(0);
+  });
+
+  it.each([false, true])(
+    "restores temporary file reads only for recorded scratch-capable OpenCode: %s",
+    async (workspaceScratch) => {
+      const driver = openCodeDriver();
+      const rowFacts = rowFor(driver, workspaceScratch ? { workspaceScratch: true } : {});
+      const r = await driver.run({
+        processAliveOnResume: true,
+        resume: resume(rowFacts, [request], []),
+        turns: [
+          {
+            content: [
+              {
+                type: "tool_use",
+                id: "scratch-read",
+                name: "read",
+                input: { path: `${rowFacts.root}/scratch/review.diff` },
+              },
+            ],
+            stopReason: "tool_use",
+          },
+          { content: [{ type: "text", text: "done" }], stopReason: "end_turn" },
+        ],
+      });
+      expect(r.outcome).toEqual({ kind: "answered", answer: "done" });
+      expect(toolResults(r).map((e) => [e.callId, e.ok])).toEqual([["scratch-read", workspaceScratch]]);
+      expect(r.starts).toHaveLength(0);
+    },
+  );
+
   it("re-attaches onto the server with the row's password: no second server, the tailer kept, the store read back and the session steered on — the relayed call in flight is answered from the record when the plugin asks again, its result reaches the record as the next step's user turn, the row carries the tailer, the container and the offset with the relaunch count unchanged, the offset follows the refills, and one resumed note says the process still runs", async () => {
     const driver = openCodeDriver();
     const inFlight = { type: "tool_use" as const, id: "c-s", name: "update_status", input: { checklist: "step 1" } };

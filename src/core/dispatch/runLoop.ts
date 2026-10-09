@@ -2100,6 +2100,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       ? createCheckExecution({
           executor: () => executor,
           workspace: () => currentCheckout,
+          temporaryDirectory: () =>
+            lastFacts?.workspaceScratch === true && lastFacts.root ? `${lastFacts.root}/scratch` : undefined,
           recordingAvailable: ledgerRun?.tracked() === true,
           authorizeCommand: (command) => {
             const rules = {

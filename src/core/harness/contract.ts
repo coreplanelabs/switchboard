@@ -77,9 +77,11 @@ export interface PiHarnessFacts {
    *  is ended and a fresh one started. */
   root?: string;
   /** Launch capability, not a path grant: this pi has the guarded read
-   * override; hosts without Linux descriptor paths retain checkout-only reads. Absent on older processes,
+   * override for Linux output spills. General temporary files have a separate launch capability. Absent on older processes,
    * which must never gain an outside-checkout read on reattach. */
   outputScratch?: true;
+  /** This producer was launched with an owned general-purpose temporary directory. */
+  workspaceScratch?: true;
   /** The SHA-256 (hex) of the secret in the bearer pi was started with
    *  (`bearerHashOf`; model-proxy item 2) — never the bearer. The generation
    *  that re-attaches adopts it onto its own proxy, so the calls pi keeps
@@ -114,6 +116,7 @@ export interface PiHarnessFacts {
  *  hash, the container and the relaunch count. Nothing in this tree writes one
  *  yet; the union carries it so the seam is read against two shapes, not one. */
 export interface OpenCodeHarnessFacts {
+  workspaceScratch?: true;
   /** Original logical launch policy; never an effective native-table attestation. */
   sessionPolicy?: OriginalSessionPolicy;
   harness: "opencode";

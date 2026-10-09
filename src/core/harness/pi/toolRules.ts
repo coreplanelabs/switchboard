@@ -107,6 +107,8 @@ export interface ToolRuleContext {
   /** Trusted run output-only scratch parent. Only read reaches it; the pi
    * extension checks the open file against its active process's scratch. */
   outputDir?: string;
+  /** Runner-created temporary files for this run, separate from runtime config. */
+  scratchDir?: string;
   /** The run's branch, when the run was given one (a plan unit's, the spike's):
    *  then the one push target it may use. Absent, the run names its own
    *  branch and may push any but the protected ones. */
@@ -562,6 +564,10 @@ function judgePath(path: unknown, ctx: ToolRuleContext, readOutput: boolean): To
   if (typeof path !== "string") return refused("malformed — a path tool without a string path");
   if (CREDENTIAL_FILE.test(path)) return refused("credential — reads the executor's credential store");
   const absolute = resolve(ctx.checkout, path);
+  if (ctx.scratchDir !== undefined) {
+    const scratch = relative(ctx.scratchDir, absolute);
+    if (scratch === "" || (scratch !== ".." && !scratch.startsWith("../") && !isAbsolute(scratch))) return allowed;
+  }
   if (readOutput && ctx.outputDir !== undefined) {
     const output = relative(ctx.outputDir, absolute);
     if (output !== "" && output !== ".." && !output.startsWith("../") && !isAbsolute(output)) return allowed;

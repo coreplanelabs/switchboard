@@ -82,6 +82,7 @@ const READY_TAIL_BYTES = 2000;
  *  the command directory) plus OpenCode's own roots and files, and a second
  *  seam layout for the tailer, whose stdout the seam appends to the feed. */
 export interface OpenCodeRunPaths extends HarnessPaths {
+  scratchDir: string;
   /** The four XDG roots (`packages/util/src/global-roots.ts:5-8`): every global path OpenCode has, under the run. */
   xdg: { data: string; config: string; cache: string; state: string };
   /** `OPENCODE_CONFIG`: the one configuration document the server loads. */
@@ -127,7 +128,8 @@ export function openCodeRunPathsAt(dir: string): OpenCodeRunPaths {
   return {
     dir,
     // The directories the start makes at 700, the root first.
-    dirs: [dir, xdg.data, xdg.config, xdg.cache, xdg.state, pluginDir, commandDir],
+    dirs: [dir, xdg.data, xdg.config, xdg.cache, xdg.state, pluginDir, commandDir, `${dir}/scratch`],
+    scratchDir: `${dir}/scratch`,
     fifo: `${dir}/serve.in`,
     log: `${dir}/serve.log`,
     errLog: `${dir}/serve.err`,
@@ -402,7 +404,11 @@ export function openCodePromptNote(
 
 /** The agent's system prompt: the dispatcher's composed prompt, then the harness note. */
 export function openCodeSystemPrompt(spec: OpenCodeLaunchSpec): string {
-  return `${spec.system.trimEnd()}\n\n${openCodePromptNote(spec.relayTools, spec.identity, spec.commandPolicy)}\n`;
+  const scratch =
+    spec.identity === "none"
+      ? ""
+      : `\nTemporary files belong in ${spec.paths.scratchDir}. Use that absolute path with file tools and $TMPDIR in shell. This directory is temporary.\n`;
+  return `${spec.system.trimEnd()}\n\n${openCodePromptNote(spec.relayTools, spec.identity, spec.commandPolicy)}\n${scratch}`;
 }
 
 /** The run's configuration as the object the file holds (`packages/schema/src/config.ts`):
@@ -568,6 +574,7 @@ export function openCodeLaunchEnv(spec: OpenCodeLaunchSpec, bearer: string, pass
     [RUN_BEARER_ENV]: bearer,
     [HARNESS_URL_ENV]: spec.harnessUrl,
     SWITCHBOARD_RUN_ID: spec.runId,
+    ...(spec.identity !== "none" ? { TMPDIR: paths.scratchDir } : {}),
     XDG_DATA_HOME: paths.xdg.data,
     XDG_CONFIG_HOME: paths.xdg.config,
     XDG_CACHE_HOME: paths.xdg.cache,
@@ -654,6 +661,7 @@ export interface OpenCodeLaunchDeps {
  *  password the requests carry, the paths the files went to (the root the
  *  container made), and the version the info answered. */
 export interface OpenCodeStarted {
+  workspaceScratch?: true;
   pid: number;
   processBirth?: string;
   port: number;
@@ -863,6 +871,7 @@ export async function launchOpenCode(
     check();
     return {
       pid,
+      ...(spec.identity !== "none" ? { workspaceScratch: true as const } : {}),
       processBirth: started.processBirth,
       port,
       tailerPid: tailer.pid,
@@ -891,7 +900,10 @@ export async function launchOpenCode(
  *  feed byte the ledger's effect reaches, the bearer's hash (never the
  *  bearer), the container's word, and the loop's relaunch count. */
 export function openCodeFacts(
-  started: Pick<OpenCodeStarted, "pid" | "processBirth" | "port" | "paths" | "tailerPid" | "tailerProcessBirth">,
+  started: Pick<
+    OpenCodeStarted,
+    "pid" | "processBirth" | "port" | "paths" | "tailerPid" | "tailerProcessBirth" | "workspaceScratch"
+  >,
   run: {
     sessionID: string;
     logOffset: number;
@@ -904,6 +916,7 @@ export function openCodeFacts(
   const bearerHash = run.bearer === undefined ? undefined : bearerHashOf(run.bearer);
   return {
     harness: "opencode",
+    ...(started.workspaceScratch === true ? { workspaceScratch: true as const } : {}),
     ...(run.sessionPolicy ? { sessionPolicy: run.sessionPolicy } : {}),
     pid: started.pid,
     ...(started.processBirth === undefined ? {} : { processBirth: started.processBirth }),
