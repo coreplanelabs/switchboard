@@ -16,7 +16,7 @@ export interface ContextOrigin {
 /** Cumulative dependencies of everything admitted to a context, including
  * summaries and notes. Each leaf keeps its original audience and action. */
 export interface ContextDependencies {
-  version: 1;
+  version: 1 | 2;
   status: "known" | "unknown" | "revoked";
   revision: number;
   origins: readonly ContextOrigin[];
@@ -24,12 +24,30 @@ export interface ContextDependencies {
   mcp: readonly SourceReadReference[];
   /** One catalog-access leaf, containing the original exposed repository names. */
   githubRepos?: readonly string[];
+  /** Exact native results reusable only by the original acknowledged execution. */
+  executionGithub?: readonly ExecutionGithubReference[];
   /** Storage scopes remain access dependencies after their content is transformed. */
   memoryScopes?: readonly string[];
   /** Immutable typed work status in the existing coordinator/session stores. */
   unitStatuses?: readonly UnitStatusReference[];
   reason?: "legacy" | "overflow" | "equivocation" | "invalid";
 }
+export interface ExecutionGithubReference {
+  runId: string;
+  callId: string;
+  resultHash: string;
+  admissionHash: string;
+}
+export function isExecutionGithubReference(value: unknown): value is ExecutionGithubReference {
+  if (!value || typeof value !== "object") return false;
+  const r = value as ExecutionGithubReference;
+  return (
+    Object.keys(r).every((key) => ["runId", "callId", "resultHash", "admissionHash"].includes(key)) &&
+    [r.runId, r.callId].every((v) => typeof v === "string" && v.length > 0 && v.length <= 256) &&
+    [r.resultHash, r.admissionHash].every((v) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v))
+  );
+}
+const executionKey = (r: ExecutionGithubReference) => JSON.stringify([r.runId, r.callId]);
 export const CONTEXT_DEPENDENCY_MAX = 32;
 export const CONTEXT_GITHUB_REPO_MAX = 256;
 export const CONTEXT_MEMORY_SCOPE_MAX = 256;
@@ -50,7 +68,12 @@ export function isContextDependencies(value: unknown): value is ContextDependenc
   if (!value || typeof value !== "object") return false;
   const c = value as ContextDependencies;
   return (
-    c.version === 1 &&
+    (c.version === 1 ? c.executionGithub === undefined : c.version === 2) &&
+    (c.executionGithub === undefined ||
+      (Array.isArray(c.executionGithub) &&
+        c.executionGithub.length <= 256 &&
+        c.executionGithub.every(isExecutionGithubReference) &&
+        new Set(c.executionGithub.map(executionKey)).size === c.executionGithub.length)) &&
     ["known", "unknown", "revoked"].includes(c.status) &&
     Number.isSafeInteger(c.revision) &&
     c.revision >= 0 &&
@@ -76,6 +99,7 @@ export function isContextDependencies(value: unknown): value is ContextDependenc
     c.origins.length +
       c.slack.length +
       c.mcp.length +
+      (c.executionGithub?.length ? 1 : 0) +
       (c.githubRepos?.length ? 1 : 0) +
       (c.memoryScopes?.length ? 1 : 0) +
       (c.unitStatuses?.length ? 1 : 0) <=
@@ -128,6 +152,8 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
     const githubRepos = [...(previous.githubRepos ?? [])];
     const memoryScopes = [...(previous.memoryScopes ?? [])];
     const unitStatuses = [...(previous.unitStatuses ?? [])];
+    const executionGithub = [...(previous.executionGithub ?? [])];
+    const version = previous.version === 2 || next.version === 2 ? (2 as const) : (1 as const);
     const groups = [
       ["githubRepos", githubRepos, next.githubRepos ?? [], CONTEXT_GITHUB_REPO_MAX],
       ["memoryScopes", memoryScopes, next.memoryScopes ?? [], CONTEXT_MEMORY_SCOPE_MAX],
@@ -136,7 +162,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
       for (const key of incoming) {
         if (current.includes(key)) continue;
         const candidate = {
-          version: 1 as const,
+          version,
           status,
           revision: 0,
           origins,
@@ -145,6 +171,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
           githubRepos,
           memoryScopes,
           unitStatuses,
+          executionGithub,
           [field]: [...current, key],
         };
         if (
@@ -155,7 +182,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
             (candidate.githubRepos.length ? 1 : 0) +
             (candidate.memoryScopes.length ? 1 : 0) +
             (unitStatuses.length ? 1 : 0) >
-            CONTEXT_DEPENDENCY_MAX ||
+            CONTEXT_DEPENDENCY_MAX - (executionGithub.length ? 1 : 0) ||
           bytes(candidate) > CONTEXT_DEPENDENCY_MAX_BYTES - 128
         ) {
           if (status !== "revoked") status = "unknown";
@@ -174,7 +201,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
         continue;
       }
       const candidate = {
-        version: 1,
+        version,
         status,
         revision: 0,
         origins,
@@ -183,11 +210,12 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
         githubRepos,
         memoryScopes,
         unitStatuses: [...unitStatuses, reference],
+        executionGithub,
       };
       if (
         candidate.unitStatuses.length > 256 ||
         origins.length + slack.length + mcp.length + (githubRepos.length ? 1 : 0) + (memoryScopes.length ? 1 : 0) + 1 >
-          CONTEXT_DEPENDENCY_MAX ||
+          CONTEXT_DEPENDENCY_MAX - (executionGithub.length ? 1 : 0) ||
         bytes(candidate) > CONTEXT_DEPENDENCY_MAX_BYTES - 128
       ) {
         if (status !== "revoked") status = "unknown";
@@ -215,7 +243,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
         continue;
       }
       const candidate = {
-        version: 1 as const,
+        version,
         status,
         revision: 0,
         origins: [...origins, origin],
@@ -224,6 +252,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
         githubRepos,
         memoryScopes,
         unitStatuses,
+        executionGithub,
       };
       if (
         candidate.origins.length +
@@ -232,7 +261,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
           (githubRepos.length ? 1 : 0) +
           (memoryScopes.length ? 1 : 0) +
           (unitStatuses.length ? 1 : 0) >
-          CONTEXT_DEPENDENCY_MAX ||
+          CONTEXT_DEPENDENCY_MAX - (executionGithub.length ? 1 : 0) ||
         bytes(candidate) > CONTEXT_DEPENDENCY_MAX_BYTES - 128
       ) {
         if (status !== "revoked") status = "unknown";
@@ -249,7 +278,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
         continue;
       }
       const candidate = {
-        version: 1 as const,
+        version,
         status,
         revision: 0,
         origins,
@@ -258,6 +287,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
         githubRepos,
         memoryScopes,
         unitStatuses,
+        executionGithub,
       };
       if (
         origins.length +
@@ -266,7 +296,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
           (githubRepos.length ? 1 : 0) +
           (memoryScopes.length ? 1 : 0) +
           (unitStatuses.length ? 1 : 0) >
-          CONTEXT_DEPENDENCY_MAX ||
+          CONTEXT_DEPENDENCY_MAX - (executionGithub.length ? 1 : 0) ||
         bytes(candidate) > CONTEXT_DEPENDENCY_MAX_BYTES - 128
       ) {
         if (status !== "revoked") status = "unknown";
@@ -285,7 +315,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
         continue;
       }
       const candidate = {
-        version: 1 as const,
+        version,
         status,
         revision: 0,
         origins,
@@ -294,6 +324,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
         githubRepos,
         memoryScopes,
         unitStatuses,
+        executionGithub,
       };
       if (
         origins.length +
@@ -302,7 +333,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
           (githubRepos.length ? 1 : 0) +
           (memoryScopes.length ? 1 : 0) +
           (unitStatuses.length ? 1 : 0) >
-          CONTEXT_DEPENDENCY_MAX ||
+          CONTEXT_DEPENDENCY_MAX - (executionGithub.length ? 1 : 0) ||
         bytes(candidate) > CONTEXT_DEPENDENCY_MAX_BYTES - 128
       ) {
         if (status !== "revoked") status = "unknown";
@@ -311,9 +342,48 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
       }
       mcp.push(reference);
     }
+    for (const reference of next.executionGithub ?? []) {
+      const existing = executionGithub.find((r) => executionKey(r) === executionKey(reference));
+      if (existing) {
+        if (canonical(existing) !== canonical(reference)) {
+          if (status !== "revoked") status = "unknown";
+          reason = "equivocation";
+        }
+        continue;
+      }
+      if (
+        executionGithub.length >= 256 ||
+        bytes({
+          version,
+          status,
+          revision: 0,
+          origins,
+          slack,
+          mcp,
+          githubRepos,
+          memoryScopes,
+          unitStatuses,
+          executionGithub: [...executionGithub, reference],
+        }) >
+          CONTEXT_DEPENDENCY_MAX_BYTES - 128 ||
+        origins.length +
+          slack.length +
+          mcp.length +
+          (githubRepos.length ? 1 : 0) +
+          (memoryScopes.length ? 1 : 0) +
+          (unitStatuses.length ? 1 : 0) +
+          1 >
+          CONTEXT_DEPENDENCY_MAX
+      ) {
+        if (status !== "revoked") status = "unknown";
+        reason = "overflow";
+        continue;
+      }
+      executionGithub.push(reference);
+    }
     const revision = Math.max(previous.revision, next.revision);
     const merged = normalize({
-      version: 1,
+      version,
       status,
       revision,
       origins,
@@ -322,6 +392,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
       ...(githubRepos.length ? { githubRepos } : {}),
       ...(memoryScopes.length ? { memoryScopes } : {}),
       ...(unitStatuses.length ? { unitStatuses } : {}),
+      ...(executionGithub.length ? { executionGithub } : {}),
       ...(status !== "known" && reason ? { reason } : {}),
     });
     if (sameContent(previous, merged)) result = { ...merged, revision };
@@ -336,6 +407,7 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
     const githubRepos = [...(result!.githubRepos ?? [])];
     const memoryScopes = [...(result!.memoryScopes ?? [])];
     const unitStatuses = [...(result!.unitStatuses ?? [])];
+    const executionGithub = [...(result!.executionGithub ?? [])];
     result = {
       ...result!,
       status: result!.status === "revoked" ? "revoked" : "unknown",
@@ -346,9 +418,11 @@ export function mergeContextDependencies(...values: readonly (ContextDependencie
       ...(githubRepos.length ? { githubRepos } : {}),
       ...(memoryScopes.length ? { memoryScopes } : {}),
       ...(unitStatuses.length ? { unitStatuses } : {}),
+      ...(executionGithub.length ? { executionGithub } : {}),
     };
     while (bytes(result) > CONTEXT_DEPENDENCY_MAX_BYTES) {
-      if (unitStatuses.length) unitStatuses.pop();
+      if (executionGithub.length) executionGithub.pop();
+      else if (unitStatuses.length) unitStatuses.pop();
       else if (memoryScopes.length) memoryScopes.pop();
       else if (githubRepos.length) githubRepos.pop();
       else if (mcp.length) mcp.pop();
@@ -384,6 +458,9 @@ export function contextDependenciesContain(current: ContextDependencies, snapsho
     ) &&
     snapshot.slack.every((r) => current.slack.some((c) => canonical(c) === canonical(r))) &&
     snapshot.mcp.every((r) => current.mcp.some((c) => canonical(c) === canonical(r))) &&
+    (snapshot.executionGithub ?? []).every((r) =>
+      current.executionGithub?.some((c) => canonical(c) === canonical(r)),
+    ) &&
     (snapshot.githubRepos ?? []).every((repo) =>
       current.githubRepos?.some((currentRepo) => currentRepo.toLowerCase() === repo.toLowerCase()),
     ) &&
@@ -399,9 +476,12 @@ export async function contextDependenciesHash(value: ContextDependencies): Promi
 }
 
 function normalize(value: ContextDependencies): ContextDependencies {
-  const { githubRepos, memoryScopes, unitStatuses, ...rest } = value;
+  const { githubRepos, memoryScopes, unitStatuses, executionGithub, ...rest } = value;
   return {
     ...rest,
+    ...(executionGithub?.length
+      ? { executionGithub: [...executionGithub].sort((a, b) => compareText(executionKey(a), executionKey(b))) }
+      : {}),
     ...(githubRepos?.length
       ? { githubRepos: [...githubRepos].map((repo) => repo.toLowerCase()).sort(compareText) }
       : {}),

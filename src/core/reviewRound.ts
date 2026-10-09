@@ -709,7 +709,11 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
     if (stopped()) return outcome();
     if (current && !sameCommit(current, expected) && sameCommit(reviewed, current)) {
       const history = turn.toolContext.reviewHistory;
-      if (history) history.requiredHead = current;
+      if (history) {
+        if (history.commitRequiredHead && !(await history.commitRequiredHead(current)))
+          throw new ReviewWorkspaceAdvanceError(current, "review target could not be committed");
+        history.requiredHead = current;
+      }
       const verdictHead = normalizeHead(verdict?.head);
       const snapshotHead = normalizeHead(history?.snapshot?.head);
       const currentEvidence =
@@ -783,6 +787,11 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         // copied sink. Neither old pages nor a matching old SHA can authorize
         // the newly required head, even if another read still returns old history.
         if (turn.toolContext.reviewHistory) {
+          if (
+            turn.toolContext.reviewHistory.commitRequiredHead &&
+            !(await turn.toolContext.reviewHistory.commitRequiredHead(current))
+          )
+            throw new ReviewWorkspaceAdvanceError(current, "review target could not be committed");
           turn.toolContext.reviewHistory.requiredHead = current;
           delete turn.toolContext.reviewHistory.snapshot;
           delete turn.toolContext.reviewHistory.progress;

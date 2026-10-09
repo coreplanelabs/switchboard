@@ -15,7 +15,8 @@ import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
 import { contextDependenciesOf, type ContextDependencies } from "../references/contextDependencies.js";
 import { GITHUB_READ_TOOLS } from "../../tools/github.js";
 import { githubReadWithContext } from "./githubReadContext.js";
-import type { ReviewHistoryContext } from "../reviewHistory.js";
+import { reconstructRecordedReviewHistory, revalidateRecordedReviewHistory } from "./reviewHistoryRestore.js";
+import { validateReviewFollowup, type ReviewHistoryContext } from "../reviewHistory.js";
 import type { ParentContext } from "./handoff.js";
 import type { UnitContext } from "./unitContext.js";
 import { answerOutcomeOf, captureAnswerOutcome, type AnswerOutcome } from "../answerOutcome.js";
@@ -343,6 +344,7 @@ export interface RunLoopContext {
   privateAudienceLatch?: PrivateAudienceLatch;
   publicationContextCheck?: () => Promise<import("../audienceDecision.js").AudienceCheck>;
   admitSourceContext?: (context: ContextDependencies) => Promise<boolean>;
+  validateExecutionContext?: (context: ContextDependencies) => Promise<import("../audienceDecision.js").AudienceCheck>;
   /** The severity to address in force for this run (agent-review.md item 5a),
    *  resolved by the dispatcher — directive > user > channel > org — for the
    *  verdict parser: a submitted or restored approve carrying a finding at or
@@ -2553,6 +2555,112 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           },
         });
     }
+    if (!reviewHistory && reentry && !finish && run.control.requested === undefined) {
+      const dependencies = restored.contextDependencies as ContextDependencies | undefined;
+      if (
+        dependencies?.executionGithub?.length &&
+        (!ctx.validateExecutionContext || !(await ctx.validateExecutionContext(dependencies)).ok)
+      )
+        throw new Error("The original execution context could not be revalidated.");
+    }
+    if (reviewHistory && !finish && run.control.requested === undefined) {
+      const saved = restored.reviewHistory as
+        { target?: { repo?: unknown; number?: unknown }; requiredHead?: unknown } | undefined;
+      if (saved !== undefined) {
+        if (
+          !saved ||
+          typeof saved !== "object" ||
+          Array.isArray(saved) ||
+          typeof saved.target?.repo !== "string" ||
+          saved.target.repo.toLowerCase() !== reviewHistory.target.repo.toLowerCase() ||
+          saved.target.number !== reviewHistory.target.number ||
+          (saved.requiredHead !== undefined &&
+            (typeof saved.requiredHead !== "string" || !/^[a-f0-9]{40}$/.test(saved.requiredHead)))
+        )
+          throw new Error("The saved review target could not be verified.");
+        if (saved.requiredHead !== undefined) {
+          if (coordinator?.publication && saved.requiredHead !== coordinator.publication.expectedHeadSha)
+            throw new Error("The saved review target differs from its publication binding.");
+          reviewHistory.requiredHead = saved.requiredHead as string;
+          if (reentry) reviewHead = reviewHistory.requiredHead;
+        }
+      }
+      if (ledgerRun?.tracked()) {
+        reviewHistory.commitRequiredHead = async (head) => {
+          if (!/^[a-f0-9]{40}$/.test(head) || !ledgerRun.tracked()) return false;
+          const invalidate = verdict?.head !== head;
+          const saved = await ledgerRun.setStateAndFlush({
+            reviewHistory: { target: reviewHistory.target, requiredHead: head },
+            ...(invalidate ? { verdict: undefined } : {}),
+          });
+          if (saved && invalidate) verdict = undefined;
+          return saved;
+        };
+        if (reviewHistory.requiredHead && !(await reviewHistory.commitRequiredHead(reviewHistory.requiredHead)))
+          throw new Error("The review target could not be committed before model work.");
+        if (reentry) {
+          const dependencies = restored.contextDependencies as ContextDependencies | undefined;
+          const recorded = await root.span("run.review_history_restore", () =>
+            reconstructRecordedReviewHistory({
+              runId: run.id,
+              target: reviewHistory.target,
+              messages: reentry.messages,
+              receipts: restored.sourceResults,
+              context: restored.contextDependencies as ContextDependencies | undefined,
+            }),
+          );
+          if (
+            dependencies?.executionGithub?.length &&
+            (!ctx.validateExecutionContext || !(await ctx.validateExecutionContext(dependencies)).ok)
+          )
+            throw new Error("The original execution context could not be revalidated.");
+          if (recorded) {
+            const matched = await root.span("run.review_history_revalidate", async (span) => {
+              const matched = await revalidateRecordedReviewHistory(
+                recorded,
+                toolContext,
+                dependencies?.version === 2 && !!dependencies.executionGithub?.length && !!ctx.validateExecutionContext,
+              );
+              span.setAttrs({ outcome: matched ? "matched" : "invalidated" });
+              return matched;
+            });
+            // This generation's fresh activity is an audit receipt, never replay authority on the next restart.
+            if (
+              !(await ledgerRun.setStateAndFlush({
+                reviewHistory: {
+                  target: reviewHistory.target,
+                  requiredHead: reviewHistory.requiredHead,
+                  validation: {
+                    runId: run.id,
+                    generation: deps.runLedger?.gen,
+                    head: recorded.read.head,
+                    fingerprint: recorded.read.fingerprint,
+                    matched,
+                  },
+                },
+              }))
+            )
+              throw new Error("The review history validation could not be committed before model work.");
+            if (matched) {
+              reviewHistory.snapshot = recorded.snapshot;
+              reviewHistory.progress = recorded.progress;
+            }
+          }
+          // A cached verdict is not a substitute for this resumed turn's proven current history.
+          if (
+            postedBefore === undefined &&
+            verdict &&
+            (!reviewHistory.snapshot ||
+              verdict.head !== reviewHistory.snapshot.head ||
+              validateReviewFollowup(verdict, reviewHistory.snapshot.findings))
+          ) {
+            if (!(await ledgerRun.setStateAndFlush({ verdict: undefined })))
+              throw new Error("The stale review verdict could not be invalidated before model work.");
+            verdict = undefined;
+          }
+        }
+      }
+    }
     if (finish) {
       onEvent({
         type: "run_note",
@@ -2908,6 +3016,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 GITHUB_READ_TOOLS.includes(tool) && ctx.admitSourceContext && ledgerRun?.tracked()
                   ? githubReadWithContext(tool, {
                       runId: run.id,
+                      ...(deps.runLedger
+                        ? { execution: { gen: deps.runLedger.gen, owner: originalPublicationOwner } }
+                        : {}),
                       commit: async (receipt, context) =>
                         (await ctx.admitSourceContext!(context)) && (await ledgerRun!.recordSourceResult(receipt)),
                     })

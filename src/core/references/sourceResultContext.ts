@@ -1,4 +1,4 @@
-import type { ChatMessage, ContentPart } from "../chatMessage.js";
+import { MAX_TOOL_RESULT_CHARS, type ChatMessage, type ContentPart } from "../chatMessage.js";
 import { requiresFreshSourceTool } from "../runLedger/sessionLog.js";
 import type { TranscriptRow } from "../runLedger/types.js";
 import type { ContextDependencies } from "./contextDependencies.js";
@@ -7,19 +7,86 @@ import { sourceHash } from "./receipts.js";
 /** Controller-written proof for one returned public GitHub result. Access
  * remains the repository dependency, while this receipt binds stored bytes. */
 export interface SourceResultReceipt {
-  version: 1;
+  version: 1 | 2;
   runId: string;
   callId: string;
   tool: string;
   repos: readonly string[];
   resultHash: string;
+  /** Native page identity and its exact structured payload inside the returned bytes. */
+  reviewHistory?: ReviewHistoryReadReceipt;
+  /** Same-run execution provenance; current access must be checked separately. */
+  admissionHash?: string;
+  inputHash?: string;
+}
+
+export interface ReviewHistoryReadReceipt {
+  repo: string;
+  number: number;
+  head: string;
+  fingerprint: string;
+  page: number;
+  pages: number;
+  pageSize: number;
+  payload: { offset: number; length: number; hash: string };
+}
+
+export function isReviewHistoryReadReceipt(value: unknown): value is ReviewHistoryReadReceipt {
+  if (!value || typeof value !== "object") return false;
+  const r = value as ReviewHistoryReadReceipt;
+  return (
+    Object.keys(r).every((key) =>
+      ["repo", "number", "head", "fingerprint", "page", "pages", "pageSize", "payload"].includes(key),
+    ) &&
+    typeof r.repo === "string" &&
+    /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(r.repo) &&
+    r.repo.length <= 256 &&
+    Number.isSafeInteger(r.number) &&
+    r.number > 0 &&
+    typeof r.head === "string" &&
+    /^[a-f0-9]{40}$/.test(r.head) &&
+    typeof r.fingerprint === "string" &&
+    /^[a-f0-9]{64}$/.test(r.fingerprint) &&
+    [r.page, r.pages, r.pageSize].every((n) => Number.isSafeInteger(n) && n > 0) &&
+    r.page <= r.pages &&
+    r.pageSize <= MAX_TOOL_RESULT_CHARS &&
+    !!r.payload &&
+    typeof r.payload === "object" &&
+    Object.keys(r.payload).every((key) => ["offset", "length", "hash"].includes(key)) &&
+    Number.isSafeInteger(r.payload.offset) &&
+    r.payload.offset >= 0 &&
+    Number.isSafeInteger(r.payload.length) &&
+    r.payload.length > 0 &&
+    r.payload.length <= r.pageSize &&
+    r.payload.offset + r.payload.length <= MAX_TOOL_RESULT_CHARS &&
+    typeof r.payload.hash === "string" &&
+    /^[a-f0-9]{64}$/.test(r.payload.hash)
+  );
 }
 export function isSourceResultReceipt(value: unknown): value is SourceResultReceipt {
   if (!value || typeof value !== "object") return false;
   const r = value as SourceResultReceipt;
   return (
-    Object.keys(r).every((key) => ["version", "runId", "callId", "tool", "repos", "resultHash"].includes(key)) &&
-    r.version === 1 &&
+    Object.keys(r).every((key) =>
+      [
+        "version",
+        "runId",
+        "callId",
+        "tool",
+        "repos",
+        "resultHash",
+        "reviewHistory",
+        "admissionHash",
+        "inputHash",
+      ].includes(key),
+    ) &&
+    (r.version === 1
+      ? r.admissionHash === undefined && r.inputHash === undefined
+      : r.version === 2 &&
+        typeof r.admissionHash === "string" &&
+        /^[a-f0-9]{64}$/.test(r.admissionHash) &&
+        typeof r.inputHash === "string" &&
+        /^[a-f0-9]{64}$/.test(r.inputHash)) &&
     [r.runId, r.callId, r.tool].every((s) => typeof s === "string" && s.length > 0 && s.length <= 256) &&
     Array.isArray(r.repos) &&
     r.repos.length > 0 &&
@@ -33,7 +100,11 @@ export function isSourceResultReceipt(value: unknown): value is SourceResultRece
     ) &&
     new Set(r.repos).size === r.repos.length &&
     typeof r.resultHash === "string" &&
-    /^[a-f0-9]{64}$/.test(r.resultHash)
+    /^[a-f0-9]{64}$/.test(r.resultHash) &&
+    (r.reviewHistory === undefined ||
+      (r.tool === "github_pull_get" &&
+        isReviewHistoryReadReceipt(r.reviewHistory) &&
+        r.repos.includes(r.reviewHistory.repo)))
   );
 }
 
@@ -108,7 +179,16 @@ export function uncoveredSourceResult(
       receipt.callId === part.toolUseId &&
       receipt.tool === name &&
       (writerRunId === undefined || receipt.runId === writerRunId) &&
-      receipt.repos.every((repo) => context?.githubRepos?.includes(repo))
+      (receipt.version === 1
+        ? receipt.repos.every((repo) => context?.githubRepos?.includes(repo))
+        : context?.version === 2 &&
+          context.executionGithub?.some(
+            (ref) =>
+              ref.runId === receipt.runId &&
+              ref.callId === receipt.callId &&
+              ref.resultHash === receipt.resultHash &&
+              ref.admissionHash === receipt.admissionHash,
+          ))
     )
       continue;
     if (name === undefined || requiresFreshSourceTool(name)) return true;

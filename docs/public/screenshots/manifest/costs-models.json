@@ -140,7 +140,7 @@
     "src/core/readingDiff.ts": "82d6f1b3d0af9eb9a5e105cde1473e1ac35a260dee08cfdb0835daa753003280",
     "src/core/redact.ts": "03df97cd8b376d8c27a5323a2ecc587d2196dd0e375c7b1b7ac369c01b8bc3a5",
     "src/core/references/contextCheckpoint.ts": "d9106ef74e5c9489bb931306728812d1a806e6b32ad4e866518cde5a04741a3c",
-    "src/core/references/contextDependencies.ts": "27ace147feae2def3685147597bdebd6c55097ce7529654ef004b4b0a27ae720",
+    "src/core/references/contextDependencies.ts": "0d1c503205eb16a15d95711667a2c9b6a6bbaabf5cf2b7894c156ffeff7283e9",
     "src/core/references/receipts.ts": "011458ca2fb30c26547b0b8be700046a9cb67854c6cfc0d8fcd4937b8ff8ed64",
     "src/core/references/sourceReceipt.ts": "03a4fc0fe383095f85ef21a56d03a6ba5fc3f863ccf0e1ac3bd08f198c48b647",
     "src/core/references/unitStatusReference.ts": "a7d07aa188ec78fcfd8763a3d6f1ae3a814e5aa50f3c8d55edc085a3b9203084",

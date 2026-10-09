@@ -3,6 +3,7 @@ import { isFindingShape, parseVerdictInput, redactVerdict, type Finding, type Re
 import { normalizeHead } from "./reviewedHead.js";
 import { redactSecrets } from "./redact.js";
 import { mapStringLeaves } from "./prDescription.js";
+import type { ReviewHistoryReadReceipt } from "./references/sourceResultContext.js";
 
 export interface PriorReviewFinding {
   reviewId: number;
@@ -18,7 +19,13 @@ export interface ReviewHistoryContext {
   requiredHead?: string;
   snapshot?: { head: string; findings: PriorReviewFinding[] };
   /** Pages are delivered in order from one unchanged source snapshot. */
-  progress?: { head: string; fingerprint: string; nextPage: number };
+  progress?: { head: string; fingerprint: string; nextPage: number; pageSize?: number };
+  /** Controller-only layout override for validating a recorded read without widening the result budget. */
+  pageSize?: number;
+  /** Controller-only native metadata for this read; persisted on its source result receipt. */
+  lastRead?: ReviewHistoryReadReceipt;
+  /** The existing required-head guard is committed before a head-move model turn. */
+  commitRequiredHead?: (head: string) => Promise<boolean>;
 }
 
 const VERDICT_MARKER = /^<!-- switchboard:verdict (\{[^\r\n]*\}) -->\r?$/gm;

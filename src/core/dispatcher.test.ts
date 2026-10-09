@@ -13757,6 +13757,150 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
   }
 
   it.each([
+    ["pi", false],
+    ["opencode", false],
+    ["pi", true],
+  ] as const)(
+    "resumes an acknowledged private review through dispatch and publishes its exact-head verdict on %s (revoked=%s)",
+    async (name, revoked) => {
+      const head = "b".repeat(40);
+      const repoCtx = { repo: "acme/api", pr: 7, ref: "fix/review", baseRef: "main", headSha: head, refFromPr: true };
+      const api = new InMemoryGithubApi({
+        "acme/api": {
+          private: true,
+          files: { "src/x.ts": "private code" },
+          pulls: [
+            {
+              number: 7,
+              title: "fix",
+              body: "",
+              state: "open",
+              draft: false,
+              url: "https://github.com/acme/api/pull/7",
+              author: "author",
+              updatedAt: "2026-01-01T00:00:00Z",
+              head: { repo: "acme/api", ref: "fix/review", sha: head },
+              base: { repo: "acme/api", ref: "main" },
+            },
+          ],
+        },
+      });
+      const crash = new InMemoryRunLedger();
+      const yaml = YAML_FIXTURE + `harness:\n  review: ${name}\n`;
+      const first = wired(capturingProvider("must not run"), { yaml });
+      const executor = {
+        exec: async () => head + "\n",
+        execResult: async () => ({ exitCode: 0, stdout: head + "\n", stderr: "", truncated: false }),
+        readFile: async () => "",
+        writeFile: async () => "",
+        release: async () => ({ released: true }),
+      };
+      const configure = (deps: TestDeps) => {
+        deps.githubApi = api;
+        deps.resolveRepoContext = () => repoCtx;
+        deps.fetchPrHead = async () => head;
+        deps.slackContextForRun = (_actor, origin) => testSlackCapability(origin, async () => "source");
+        deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
+      };
+      configure(first.deps);
+      const base = name === "pi" ? piHarness : openCodeHarness;
+      vi.spyOn(base, "open").mockImplementationOnce(async (_deps, run) => {
+        let idx = run.messages.length;
+        for (const [id, toolName, input] of [
+          ["original-history", "github_pull_get", { repo: "acme/api", number: 7, includeReviewHistory: true }],
+          ["original-file", "github_file", { repo: "acme/api", path: "src/x.ts" }],
+        ] as const) {
+          await run.onStep!({
+            firstIdx: idx++,
+            turns: [{ role: "assistant", content: [{ type: "tool_use", id, name: toolName, input }] }],
+            inFlight: [{ callId: id, tool: toolName }],
+            turn: idx,
+            iteration: idx,
+            remainingMs: 240_000,
+            inboxConsumedSeq: 0,
+          });
+          const content = await run.tools
+            .find((tool) => tool.name === toolName)!
+            .run(input, { ...run.toolContext, callId: id });
+          expect(content).not.toContain("unavailable");
+          await run.onStep!({
+            firstIdx: idx++,
+            turns: [{ role: "user", content: [{ type: "tool_result", toolUseId: id, content }] }],
+            inFlight: [],
+            turn: idx,
+            iteration: idx,
+            remainingMs: 240_000,
+            inboxConsumedSeq: 0,
+          });
+        }
+        // Preserve the canonical store image at the crash boundary, before any finish.
+        for (const key of ["live", "steps", "events", "inbox", "jobs", "sessions"] as const) {
+          const target = crash[key] as Map<string, unknown>;
+          for (const [id, value] of first.ledger[key]) target.set(id, structuredClone(value));
+        }
+        return piAnswered("read before restart");
+      });
+      vi.mocked(makeExecutor).mockResolvedValueOnce({ executor });
+      await dispatch(
+        first.deps,
+        msg("agent:review https://github.com/acme/api/pull/7", "slack:UADMIN"),
+        ioWithCard().io,
+      );
+      await first.writer.settled();
+      const saved = crash.live.get("run-l")!;
+      expect(saved.state.sourceResults).toHaveLength(2);
+      expect(saved.state.sourceResults).toEqual(
+        expect.arrayContaining([expect.objectContaining({ version: 2, tool: "github_file" })]),
+      );
+      saved.leaseUntil = 0;
+      const [reclaimed] = await crash.reclaim("gen-NEW", Date.now(), 30_000);
+      const resumed = wired(capturingProvider("must not run"), { ledger: crash, gen: "gen-NEW", yaml });
+      configure(resumed.deps);
+      const transcript = await crash.readSession(saved.meta.session!.key, saved.meta.session!.seedFrom);
+      const plan = planResume({ transcript, lastStep: reclaimed.lastStep!, tools: knownToolsFor(getAgent("review")) });
+      expect(plan.kind).toBe("resume");
+      if (plan.kind !== "resume") throw new Error("private read was not preserved");
+      vi.spyOn(base, "open").mockImplementationOnce(async (_deps, run) => {
+        expect(run.toolContext.reviewHistory?.snapshot).toEqual({ head, findings: [] });
+        if (revoked)
+          api.getPullRequestFeedback = async () => {
+            throw new Error("native review access revoked after admission");
+          };
+        const verdict = await run.tools
+          .find((tool) => tool.name === "submit_verdict")!
+          .run({ verdict: "approve", summary: "Reviewed private code", head, findings: [] }, run.toolContext);
+        expect(verdict).toBe("verdict recorded: approve (0 findings)");
+        return piAnswered("Reviewed private code");
+      });
+      vi.mocked(makeExecutor).mockResolvedValueOnce({ executor });
+      const { io, replies } = ioWithCard();
+      await dispatch(resumed.deps, resumeMessage(reclaimed.row, "review the PR"), io, {
+        resume: {
+          row: reclaimed.row,
+          lastStep: reclaimed.lastStep!,
+          plan,
+          events: await crash.readEvents("run-l"),
+          lastSeq: reclaimed.lastStep!.seq,
+          repoCtx,
+          inbox: [],
+        },
+      });
+      await resumed.writer.settled();
+      if (revoked) {
+        expect(resumed.deps.postReviewComment).not.toHaveBeenCalled();
+        expect(replies.join("\n")).not.toContain("Reviewed private code");
+      } else {
+        expect(resumed.deps.postReviewComment).toHaveBeenCalledWith(
+          { repo: "acme/api", number: 7, commitId: head },
+          expect.stringContaining("Reviewed private code"),
+        );
+        expect(replies.join("\n")).toContain("Reviewed private code");
+      }
+      expect(crash.finished.get("run-l")?.verdict?.verdict).toBe("approve");
+    },
+  );
+
+  it.each([
     ["reserve", false],
     ["reserve", true],
     ["open", false],

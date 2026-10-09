@@ -1128,56 +1128,71 @@ describe("mintGeneration", () => {
 });
 
 describe("open — claim and seed", () => {
-  it("writes admitted GitHub result receipts with their exact mirrored bytes and preserves them in a later seed", async () => {
-    const { ledger, wt } = harness();
-    const req = openReq();
-    req.seed!.context = {
-      version: 1,
-      status: "known",
-      revision: 0,
-      origins: [],
-      slack: [],
-      mcp: [],
-      githubRepos: ["acme/api"],
-    };
-    const run = (await openRun(wt, req))!;
-    const { sourceHash } = await import("../references/receipts.js");
-    const receipt = {
-      version: 1 as const,
-      runId: "r1",
-      callId: "read",
-      tool: "github_file",
-      repos: ["acme/api"],
-      resultHash: await sourceHash("public source"),
-    };
-    await run.step(
-      step({
-        firstIdx: 3,
-        turns: [{ role: "assistant", content: [{ type: "tool_use", id: "read", name: "github_file", input: {} }] }],
-      }),
-    );
-    expect(await run.recordSourceResult(receipt)).toBe(true);
-    expect(ledger.live.get("r1")!.state.sourceResults).toEqual([receipt]);
-    await run.step(
-      step({
-        firstIdx: 4,
-        turns: [{ role: "user", content: [{ type: "tool_result", toolUseId: "read", content: "public source" }] }],
-      }),
-    );
-    const saved = await ledger.readSessionTail(run.session!.key, 100_000);
-    expect(saved.sources?.context?.status).toBe("known");
-    expect(saved.transcript.messages.at(-1)?.sourceResults).toEqual([receipt]);
-    await run.sink.put({ ...record("r1"), agent: "review" });
-    const next = openReq({
-      runId: "r2",
-      threadKey: "slack:C1:2.0",
-      meta: { ...req.meta, threadKey: "slack:C1:2.0" },
-      seed: { messages: saved.transcript.messages, budgetMs: 600_000, context: saved.sources!.context },
-    });
-    const child = (await openRun(wt, next))!;
-    expect((await ledger.readSessionTail(child.session!.key, 100_000)).sources?.context?.status).toBe("known");
-    await child.close();
-  });
+  it.each([1, 2] as const)(
+    "writes admitted GitHub result receipts with their exact mirrored bytes and preserves them in a later seed (v%s)",
+    async (version) => {
+      const { ledger, wt } = harness();
+      const req = openReq();
+      const { sourceHash } = await import("../references/receipts.js");
+      req.seed!.context = {
+        version,
+        status: "known",
+        revision: 0,
+        origins: [],
+        slack: [],
+        mcp: [],
+        ...(version === 1
+          ? { githubRepos: ["acme/api"] }
+          : {
+              executionGithub: [
+                {
+                  runId: "r1",
+                  callId: "read",
+                  resultHash: await sourceHash("public source"),
+                  admissionHash: "a".repeat(64),
+                },
+              ],
+            }),
+      };
+      const run = (await openRun(wt, req))!;
+      const receipt = {
+        version,
+        runId: "r1",
+        callId: "read",
+        tool: "github_file",
+        repos: ["acme/api"],
+        resultHash: await sourceHash("public source"),
+        ...(version === 2 ? { admissionHash: "a".repeat(64), inputHash: await sourceHash({}) } : {}),
+      };
+      await run.step(
+        step({
+          firstIdx: 3,
+          turns: [{ role: "assistant", content: [{ type: "tool_use", id: "read", name: "github_file", input: {} }] }],
+        }),
+      );
+      expect(await run.recordSourceResult(receipt)).toBe(true);
+      expect(ledger.live.get("r1")!.state.sourceResults).toEqual([receipt]);
+      await run.step(
+        step({
+          firstIdx: 4,
+          turns: [{ role: "user", content: [{ type: "tool_result", toolUseId: "read", content: "public source" }] }],
+        }),
+      );
+      const saved = await ledger.readSessionTail(run.session!.key, 100_000);
+      expect(saved.sources?.context?.status).toBe("known");
+      expect(saved.transcript.messages.at(-1)?.sourceResults).toEqual([receipt]);
+      await run.sink.put({ ...record("r1"), agent: "review" });
+      const next = openReq({
+        runId: "r2",
+        threadKey: "slack:C1:2.0",
+        meta: { ...req.meta, threadKey: "slack:C1:2.0" },
+        seed: { messages: saved.transcript.messages, budgetMs: 600_000, context: saved.sources!.context },
+      });
+      const child = (await openRun(wt, next))!;
+      expect((await ledger.readSessionTail(child.session!.key, 100_000)).sources?.context?.status).toBe("known");
+      await child.close();
+    },
+  );
 
   it("merges retained session dependencies before a later run writes its own context", async () => {
     const { ledger, wt } = harness();

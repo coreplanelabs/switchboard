@@ -1,8 +1,14 @@
 import { capToolResultContent } from "../chatMessage.js";
 import { githubRepositoryDependencies, type ContextDependencies } from "../references/contextDependencies.js";
 import { sourceHash } from "../references/receipts.js";
-import { isSourceResultReceipt, type SourceResultReceipt } from "../references/sourceResultContext.js";
+import {
+  isReviewHistoryReadReceipt,
+  isSourceResultReceipt,
+  type SourceResultReceipt,
+} from "../references/sourceResultContext.js";
 import type { RunnableTool } from "../../tools/runnableTool.js";
+import type { LiveRunRow } from "../runLedger/types.js";
+import { executionAdmissionHash } from "./executionGithubContext.js";
 
 /** Applied to the declared GitHub read tools by the controller. Source names
  * come from the read capability, never parsed from a model's result prose. */
@@ -11,11 +17,13 @@ export function githubReadWithContext(
   input: {
     runId: string;
     commit(receipt: SourceResultReceipt, dependencies: ContextDependencies): Promise<boolean>;
+    execution?: { gen: string; owner(): Promise<LiveRunRow | undefined> };
   },
 ): RunnableTool {
   return {
     ...tool,
     async run(args, ctx) {
+      const inputHash = await sourceHash(args);
       if (!ctx.github) return tool.run(args, ctx);
       const repositories = new Set<string>();
       const github = {
@@ -27,9 +35,24 @@ export function githubReadWithContext(
       };
       // A snapshot enables submission only when the corresponding source can be delivered.
       const stagedHistory = ctx.reviewHistory ? { ...ctx.reviewHistory } : undefined;
-      const result = capToolResultContent(
-        await tool.run(args, { ...ctx, github, ...(stagedHistory ? { reviewHistory: stagedHistory } : {}) }),
-      );
+      const raw = await tool.run(args, { ...ctx, github, ...(stagedHistory ? { reviewHistory: stagedHistory } : {}) });
+      const result = capToolResultContent(raw);
+      let page =
+        tool.name === "github_pull_get" && stagedHistory?.lastRead !== ctx.reviewHistory?.lastRead
+          ? stagedHistory?.lastRead
+          : undefined;
+      if (
+        page &&
+        (raw !== result ||
+          typeof result !== "string" ||
+          !isReviewHistoryReadReceipt(page) ||
+          (await sourceHash(result.slice(page.payload.offset, page.payload.offset + page.payload.length))) !==
+            page.payload.hash)
+      ) {
+        page = undefined;
+        delete stagedHistory!.snapshot;
+        delete stagedHistory!.progress;
+      }
       const publishHistory = (delivered: boolean) => {
         if (
           ctx.reviewHistory &&
@@ -54,21 +77,46 @@ export function githubReadWithContext(
         readable = new Set();
       }
       const repos = [...repositories].sort();
+      let admissionHash: string | undefined;
       if (repos.some((repo) => !readable.has(repo))) {
-        publishHistory(ctx.agentName !== "orchestrator");
-        return ctx.agentName === "orchestrator"
-          ? "GitHub result unavailable: current repository access could not be verified."
-          : result;
+        const owner = input.execution && (await input.execution.owner().catch(() => undefined));
+        if (
+          owner?.runId === input.runId &&
+          owner.ownerGen === input.execution?.gen &&
+          owner.meta.agent === ctx.agentName &&
+          owner.meta.repo === ctx.repo
+        )
+          admissionHash = await executionAdmissionHash(owner.meta);
+        if (!admissionHash) {
+          publishHistory(ctx.agentName !== "orchestrator");
+          return ctx.agentName === "orchestrator"
+            ? "GitHub result unavailable: current repository access could not be verified."
+            : result;
+        }
       }
       const receipt: SourceResultReceipt = {
-        version: 1,
+        version: admissionHash ? 2 : 1,
         runId: input.runId,
         callId: ctx.callId,
         tool: tool.name,
         repos,
         resultHash: await sourceHash(result),
+        ...(page ? { reviewHistory: page } : {}),
+        ...(admissionHash ? { admissionHash, inputHash } : {}),
       };
-      const context = githubRepositoryDependencies(repos);
+      const context: ContextDependencies = admissionHash
+        ? {
+            version: 2,
+            status: "known",
+            revision: 0,
+            origins: [],
+            slack: [],
+            mcp: [],
+            executionGithub: [
+              { runId: input.runId, callId: ctx.callId, resultHash: receipt.resultHash, admissionHash },
+            ],
+          }
+        : githubRepositoryDependencies(repos);
       if (!isSourceResultReceipt(receipt) || context.status !== "known" || !(await input.commit(receipt, context))) {
         publishHistory(false);
         return "GitHub result unavailable: its source context could not be durably recorded.";

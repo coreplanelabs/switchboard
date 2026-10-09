@@ -30,6 +30,8 @@ import { authorize } from "../authz/authorize.js";
 import type { AudienceCheck } from "../audienceDecision.js";
 import { RUN_EVENTS_MAX_PAGE, operatorOfEvents, type RunOperatorDecision, type RunRecord } from "../runRecord.js";
 import type { LiveRunRow } from "../runLedger/types.js";
+import { executionAdmissionHash, recordedGithubRead, currentGithubReadCapability } from "./executionGithubContext.js";
+import { isSourceResultReceipt } from "../references/sourceResultContext.js";
 import {
   isContextDependencies,
   contextDependenciesOf,
@@ -109,6 +111,18 @@ export function contextAccessForMessage(
   return buildContextAccess(deps, input).message;
 }
 
+/** Only the active execution controller supplies this identity, never a message or handoff reader. */
+export function contextAccessForExecution(
+  deps: ContextAccessDeps,
+  input: {
+    msg: IncomingMessage;
+    io: ChannelIO;
+    executionConsumer: { runId: string; gen: string; admissionHash: string };
+  },
+): MessageContextAccess {
+  return buildContextAccess(deps, input).message;
+}
+
 export function contextAccessForRun(deps: ContextAccessDeps): HandoffAccessFactory {
   return ({ consumer, msg, io }): HandoffAccess => {
     const access = buildContextAccess(deps, { msg, io });
@@ -123,7 +137,18 @@ export function contextAccessForRun(deps: ContextAccessDeps): HandoffAccessFacto
   };
 }
 
-function buildContextAccess(deps: ContextAccessDeps, { msg, io }: { msg: IncomingMessage; io: ChannelIO }) {
+function buildContextAccess(
+  deps: ContextAccessDeps,
+  {
+    msg,
+    io,
+    executionConsumer,
+  }: {
+    msg: IncomingMessage;
+    io: ChannelIO;
+    executionConsumer?: { runId: string; gen: string; admissionHash: string };
+  },
+) {
   const actor = () => chatActorOf(deps.config, msg);
   const load = async (id: string): Promise<StoredContextRun | undefined> => {
     const live = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === id);
@@ -335,6 +360,52 @@ function buildContextAccess(deps: ContextAccessDeps, { msg, io }: { msg: Incomin
     try {
       dependencies = structuredClone(dependencies);
       if (msg.threadKey.startsWith("worker:") && !(await destinationAudience())) return denied();
+      if (dependencies.executionGithub?.length) {
+        if (!executionConsumer) return denied();
+        const current = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === executionConsumer.runId);
+        if (
+          !current ||
+          current.ownerGen !== executionConsumer.gen ||
+          current.meta.agent === "orchestrator" ||
+          current.meta.userId !== msg.userId ||
+          current.meta.channelId !== msg.channelId ||
+          current.meta.threadKey !== msg.threadKey ||
+          current.meta.authenticatedAs !== msg.authenticatedAs ||
+          current.meta.postedBy !== msg.postedBy ||
+          (await executionAdmissionHash(current.meta)) !== executionConsumer.admissionHash ||
+          !current.meta.session?.key
+        )
+          return denied();
+        const retained = await deps.runLedger.readSession(current.meta.session.key, current.meta.session.seedFrom);
+        if (!retained.complete) return denied();
+        const receipts = Array.isArray(current.state.sourceResults)
+          ? current.state.sourceResults.filter(isSourceResultReceipt)
+          : [];
+        const github = githubCapabilityFor(deps, actor());
+        for (const ref of dependencies.executionGithub) {
+          if (ref.runId !== current.runId || ref.admissionHash !== executionConsumer.admissionHash) return denied();
+          const receipt = receipts.find(
+            (r) =>
+              r.version === 2 &&
+              r.runId === ref.runId &&
+              r.callId === ref.callId &&
+              r.resultHash === ref.resultHash &&
+              r.admissionHash === ref.admissionHash,
+          );
+          if (!receipt) return denied();
+          const original = await recordedGithubRead(retained.messages, receipt);
+          if (!original || !(await currentGithubReadCapability(receipt, original, github, current.meta.agent!)))
+            return denied();
+        }
+        const final = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === current.runId);
+        if (
+          !final ||
+          final.ownerGen !== executionConsumer.gen ||
+          (await executionAdmissionHash(final.meta)) !== executionConsumer.admissionHash
+        )
+          return denied();
+      }
+
       for (const status of dependencies.unitStatuses ?? []) if (!(await unitStatusAllowed(status))) return denied();
       for (const key of dependencies.memoryScopes ?? []) {
         const kind = key.slice(0, key.indexOf(":")) as MemoryScope;

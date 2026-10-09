@@ -570,82 +570,97 @@ describe("unified sessions — durable owner and retention lifecycle", () => {
     expect((await post("/runs/context-checkpoint", { storeKey, runId: "current" })).data.source).toBeNull();
   });
 
-  it("hash-verifies public repository results before committing their source coverage", async () => {
-    const id = unique();
-    const storeKey = `runs:unified-${id}`;
-    const threadKey = `slack:C1:${id}`;
-    const key = `${threadKey}:coding`;
-    await claim(storeKey, "writer", threadKey, { session: session(key, threadKey) });
-    await post("/runs/session/owner", { key, runId: "writer", gen: "g1" });
-    const sources = {
-      ...testSessionSources({ channelId: "slack:C1", userId: "slack:UALICE", threadKey }, []),
-      context: {
-        version: 1 as const,
-        status: "known" as const,
-        revision: 0,
-        origins: [],
-        slack: [],
-        mcp: [],
-        githubRepos: ["acme/api"],
-      },
-    };
-    await post("/runs/session/write", {
-      storeKey,
-      key,
-      gen: "g1",
-      sourceRunId: "writer",
-      sources,
-      rows: [],
-      attachments: [],
-    });
-    const receipt = {
-      version: 1,
-      runId: "writer",
-      callId: "read",
-      tool: "github_file",
-      repos: ["acme/api"],
-      resultHash: await sourceHash("actual source"),
-    };
-    const rows = (idx: number, callId: string, content: string) => [
-      {
-        idx,
-        part: 0,
-        json: JSON.stringify({
-          role: "assistant",
-          part: { type: "tool_use", id: callId, name: "github_file", input: {} },
-        }),
-      },
-      {
-        idx: idx + 1,
-        part: 0,
-        json: JSON.stringify({
-          role: "user",
-          part: { type: "tool_result", toolUseId: callId, content },
-          sourceResult: { ...receipt, callId },
-        }),
-      },
-    ];
-    await post("/runs/session/write", {
-      key,
-      gen: "g1",
-      runId: "writer",
-      rows: rows(0, "read", "actual source"),
-      attachments: [],
-    });
-    expect((await post("/runs/session/read-tail", { key, maxBytes: 100_000 })).data).toMatchObject({
-      sources: { context: { status: "known" } },
-    });
-    await post("/runs/session/write", {
-      key,
-      gen: "g1",
-      runId: "writer",
-      rows: rows(2, "changed", "different private bytes"),
-      attachments: [],
-    });
-    expect((await post("/runs/session/read-tail", { key, maxBytes: 100_000 })).data).toMatchObject({
-      sources: { context: { status: "unknown" } },
-    });
-  });
+  it.each([1, 2] as const)(
+    "hash-verifies repository results before committing their source coverage (v%s)",
+    async (version) => {
+      const id = unique();
+      const storeKey = `runs:unified-${id}`;
+      const threadKey = `slack:C1:${id}`;
+      const key = `${threadKey}:coding`;
+      await claim(storeKey, "writer", threadKey, { session: session(key, threadKey) });
+      await post("/runs/session/owner", { key, runId: "writer", gen: "g1" });
+      const sources = {
+        ...testSessionSources({ channelId: "slack:C1", userId: "slack:UALICE", threadKey }, []),
+        context: {
+          version,
+          status: "known" as const,
+          revision: 0,
+          origins: [],
+          slack: [],
+          mcp: [],
+          ...(version === 1
+            ? { githubRepos: ["acme/api"] }
+            : {
+                executionGithub: [
+                  {
+                    runId: "writer",
+                    callId: "read",
+                    resultHash: await sourceHash("actual source"),
+                    admissionHash: "a".repeat(64),
+                  },
+                ],
+              }),
+        },
+      };
+      await post("/runs/session/write", {
+        storeKey,
+        key,
+        gen: "g1",
+        sourceRunId: "writer",
+        sources,
+        rows: [],
+        attachments: [],
+      });
+      const receipt = {
+        version,
+        runId: "writer",
+        callId: "read",
+        tool: "github_file",
+        repos: ["acme/api"],
+        resultHash: await sourceHash("actual source"),
+        ...(version === 2 ? { admissionHash: "a".repeat(64), inputHash: await sourceHash({}) } : {}),
+      };
+      const rows = (idx: number, callId: string, content: string) => [
+        {
+          idx,
+          part: 0,
+          json: JSON.stringify({
+            role: "assistant",
+            part: { type: "tool_use", id: callId, name: "github_file", input: {} },
+          }),
+        },
+        {
+          idx: idx + 1,
+          part: 0,
+          json: JSON.stringify({
+            role: "user",
+            part: { type: "tool_result", toolUseId: callId, content },
+            sourceResult: { ...receipt, callId },
+          }),
+        },
+      ];
+      await post("/runs/session/write", {
+        key,
+        gen: "g1",
+        runId: "writer",
+        rows: rows(0, "read", "actual source"),
+        attachments: [],
+      });
+      expect((await post("/runs/session/read-tail", { key, maxBytes: 100_000 })).data).toMatchObject({
+        sources: { context: { status: "known" } },
+      });
+      await post("/runs/session/write", {
+        key,
+        gen: "g1",
+        runId: "writer",
+        rows: rows(2, "changed", "different private bytes"),
+        attachments: [],
+      });
+      expect((await post("/runs/session/read-tail", { key, maxBytes: 100_000 })).data).toMatchObject({
+        sources: { context: { status: "unknown" } },
+      });
+    },
+  );
 
   it("reads the exact keyed report after later appends and returns no bytes for a missing or trimmed entry", async () => {
     const key = contextThreadSessionKey(`slack:C1:${unique()}`);
