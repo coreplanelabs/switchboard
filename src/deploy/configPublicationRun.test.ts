@@ -339,6 +339,53 @@ describe("config publication inputs", () => {
 });
 
 describe("runDeployPlan config publication", () => {
+  it("waits for lagging native singleton inventory before confirming the published config", async () => {
+    const store = stateStore();
+    const h = runner(store);
+    const commit = "a".repeat(40);
+    let uploaded = false;
+    let newInventoryReads = 0;
+    let clock = 0;
+    processes.botCode = 0;
+    processes.onBot = () => {
+      uploaded = true;
+    };
+    const oldHealth = h.deps.readHealth;
+    h.deps.now = () => clock;
+    h.deps.sleep = async (ms) => {
+      clock += ms;
+    };
+    h.deps.readAppState = async () => ({
+      value: { version: uploaded ? 4 : 3, image: uploaded ? "registry.example/bot:new" : "registry.example/bot:old" },
+    });
+    h.deps.readHealth = async (...args) =>
+      uploaded
+        ? {
+            status: 200,
+            body: {
+              ok: true,
+              build: { commit },
+              draining: false,
+              loadedBase: {
+                schema: 1,
+                source: { kind: "state", key: `base-${commit}`, version: store.slotState.version },
+                sha256: store.slotState.document?.sha256,
+                process: { commit },
+              },
+            },
+          }
+        : oldHealth(...args);
+    h.deps.readInstances = async () => {
+      if (!uploaded) return { value: [{ name: "singleton", state: "running", version: 3 }] };
+      newInventoryReads++;
+      return { value: [{ name: "singleton", state: newInventoryReads < 3 ? "stopped" : "running", version: 4 }] };
+    };
+    const outcome = await runDeployPlan(h.plan, h.io, h.deps);
+    expect(outcome).toMatchObject({ kind: "ran", ok: true });
+    expect(store.slotState.document?.yaml).toBe(candidateText);
+    expect(store.state.document).toEqual(prior);
+    expect(store.slotState.version).toBe(1);
+  });
   it("cancellation during an informational wake preserves a completed Memory upload without later Bot work", async () => {
     const store = stateStore();
     const h = runner(store);

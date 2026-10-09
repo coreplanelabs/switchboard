@@ -1376,6 +1376,7 @@ export async function waitUntilBotLive(
       expectedImage: step.botImage ?? null,
       instances,
       expectedCommit,
+      ...(gate.requireRunningSingleton ? { requireRunningSingleton: true as const } : {}),
       elapsedMs: elapsed,
     });
     if (decision.kind === "live") return { live: true, detail: decision.summary, waitedMs: deps.now() - started };
@@ -2284,7 +2285,11 @@ async function runSelectedDeployPlan(
       }
       if (cancelled()) break;
       windowSettled = false;
-      let r = await deployStep(step, plan, expectedCommit, io, deps);
+      const acceptanceStep =
+        step.liveGate?.kind === "bot" && configPublication
+          ? { ...step, liveGate: { ...step.liveGate, requireRunningSingleton: true as const } }
+          : step;
+      let r = await deployStep(acceptanceStep, plan, expectedCommit, io, deps);
       windowSettled = r.noUpload === true || r.ok;
       if (r.ok && !deps.signal?.aborted && step.liveGate?.kind === "bot" && configPublication) {
         const client = new ConfigDocumentClient({
@@ -2309,8 +2314,17 @@ async function runSelectedDeployPlan(
             );
         if (cancelled())
           r = { ...r, ok: false, live: "deployed, not live: deployment cancelled", reason: "deployment cancelled" };
-        else if (!confirmed.ok)
+        else if (!confirmed.ok) {
+          const observed = {
+            applicationVersion: "value" in app ? app.value.version : "unreadable",
+            instances:
+              "value" in instances
+                ? instances.value.slice(0, 10).map(({ state, version }) => ({ state, version }))
+                : "unreadable",
+          };
+          io.log(`[deploy:all] bot: final readiness evidence ${JSON.stringify(observed)}`);
           r = { ...r, ok: false, live: `deployed, not live: ${confirmed.problem}`, reason: confirmed.problem };
+        }
       }
       // wrangler always prints `Current Version ID`; a deploy that exits 0 without one is odd enough to say so.
       results.push({

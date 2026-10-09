@@ -11,6 +11,7 @@ export interface BotLiveInput {
   expectedImage: string | null;
   instances: Read<ContainerInstance[]>;
   expectedCommit: string;
+  requireRunningSingleton?: true;
   elapsedMs: number;
 }
 
@@ -53,6 +54,14 @@ function judge(input: BotLiveInput): BotLiveDecision {
   )
     return waiting(
       `container application ${input.containerApp} singleton is not the only running instance on version ${app.version}`,
+    );
+
+  if (
+    input.requireRunningSingleton &&
+    (singleton[0].state.toLowerCase() !== "running" || singleton[0].version !== app.version)
+  )
+    return waiting(
+      `container application ${input.containerApp} needs a running singleton on version ${app.version} before config acceptance`,
     );
 
   if ("error" in input.health) return waiting(`health: GET /healthz failed: ${input.health.error}`);

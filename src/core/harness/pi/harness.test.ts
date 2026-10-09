@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createCheckExecution } from "../../checkExecution.js";
 import type { CheckExecutionState } from "../../checkExecutionTypes.js";
 import { runCheckTool } from "../../../tools/check.js";
@@ -7450,6 +7451,99 @@ describe("runPiHarness — the relaunch in the replacement container", () => {
 });
 
 describe("hosted Review originating lifecycle", () => {
+  it.each(["before", "during", "in the final poll"])(
+    "starts an observed check requested %s its originating turn's slow durable save",
+    async (when) => {
+      const checking = new AsyncLocalStorage<boolean>();
+      let observedMs = 0;
+      let lastPollDone!: () => void;
+      const finalPollReturned = new Promise<void>((resolve) => {
+        lastPollDone = resolve;
+      });
+      const w = world({
+        agent: { name: "review", identity: "read", maxMinutes: 20 },
+        sleep: async (ms) => {
+          if (when !== "in the final poll") return new Promise((resolve) => setTimeout(resolve, ms));
+          // Count only the request's observation sleeps, not the log reader's polls.
+          if (checking.getStore()) {
+            observedMs += ms;
+            if (observedMs === 3_000) {
+              emitCheck(w.container);
+              await saveStarted;
+              await new Promise<void>((resolve) => setImmediate(resolve));
+              lastPollDone();
+              return;
+            }
+          }
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        },
+      });
+      const input = { command: "npm test", purpose: "verification" };
+      let saving!: () => void;
+      const saveStarted = new Promise<void>((resolve) => {
+        saving = resolve;
+      });
+      let release!: () => void;
+      const durableSave = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      w.run.onStep = async (report) => {
+        if (report.inFlight.some((call) => call.callId === "slow-check")) {
+          saving();
+          await durableSave;
+        }
+      };
+      w.run.saveFacts = (_facts, control) => (control?.requireAcknowledgement ? true : undefined);
+      w.run.commandPolicy = "hosted-review";
+      w.run.tools = [
+        {
+          name: "run_check",
+          description: "Run a recorded check",
+          inputSchema: { type: "object" },
+          run: async () => "tests passed",
+        },
+      ];
+      let answer!: Promise<RelayedToolAnswer>;
+      const requestCheck = () =>
+        checking.run(true, () =>
+          runRelayedTool(w.registry.get("run-7")!, { toolCallId: "slow-check", tool: "run_check", input }),
+        );
+      const emitCheck = (c: FakeHarnessContainer) => {
+        c.emit(
+          {
+            type: "message_end",
+            message: assistant([{ type: "toolCall", id: "slow-check", name: "run_check", arguments: input }]),
+          },
+          { type: "tool_execution_start", toolCallId: "slow-check", toolName: "run_check", args: input },
+        );
+        w.registry.get("run-7")!.gateSaw("slow-check");
+      };
+      scriptedPi(w.container, (_n, c) => {
+        if (when !== "during") answer = requestCheck();
+        if (when !== "in the final poll") emitCheck(c);
+      });
+      const opened = w.open();
+      await saveStarted;
+      if (when === "during") answer = requestCheck();
+      if (when === "in the final poll") {
+        await finalPollReturned;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      } else await new Promise((resolve) => setTimeout(resolve, 3_300));
+      release();
+      const result = await answer;
+      w.container.emit({
+        type: "tool_execution_end",
+        toolCallId: "slow-check",
+        toolName: "run_check",
+        result: { content: result.content },
+        isError: result.isError,
+      });
+      finalTurn(w.container, "review finished");
+      const session = await opened;
+      await session.end();
+      expect(result).toEqual({ content: [{ type: "text", text: "tests passed" }], isError: false });
+    },
+  );
   it("cuts the original observed check before a late pending ACK permits dispatch", async () => {
     const w = world({ agent: { name: "review", identity: "read", maxMinutes: 20 } });
     const saved: CheckExecutionState[] = [];

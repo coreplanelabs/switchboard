@@ -617,8 +617,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   // takes counts every row the transcript holds, compaction rows included: the
   // ledger writes a step's rows from that index (`writeThrough`).
   const tail = ledgerTailOf(run.resume);
+  let stepSaved: Promise<void> | undefined;
   const mirror = new PiMirror({
-    onStep: run.onStep,
+    onStep: run.onStep ? (report) => (stepSaved = run.onStep!(report)) : undefined,
     seedLength: run.resume ? run.resume.messages.length + (run.resume.compactions?.length ?? 0) : run.messages.length,
     remainingMs: () => deadline - now(),
     ...(tail ? { mirroredTail: tail } : {}),
@@ -734,8 +735,16 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       return failure;
     },
     callSeen: async (callId) => {
-      for (let waited = 0; !bridge.callOpen(callId) && waited < CALL_SEEN_WAIT_MS; waited += seenTick)
+      // The next native start is behind this turn's durable save in the log.
+      // Storage latency must not spend the separate observation allowance.
+      for (let waited = 0; waited < CALL_SEEN_WAIT_MS;) {
+        const save = stepSaved;
+        await save;
+        if (bridge.callOpen(callId)) return;
         await deps.sleep(seenTick);
+        // A save that began during this poll must be awaited even on the last tick.
+        if (stepSaved === save) waited += seenTick;
+      }
     },
     callEnded: async (callId) => {
       for (let waited = 0; bridge.callOpen(callId) && waited < CALL_SEEN_WAIT_MS; waited += seenTick)
