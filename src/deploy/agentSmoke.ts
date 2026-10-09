@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { checkExecutionReceiptSchema } from "../core/checkExecution.js";
 import { leaseMinimum, minutesToMs } from "../core/budgets.js";
 import { answerOutcomeOf } from "../core/answerOutcome.js";
 import { unwrapUntrusted } from "../core/untrusted.js";
@@ -28,7 +29,13 @@ const configSchema = z
         answer: z.string().trim().min(1).max(128),
       })
       .strict(),
-    review: z.object({ number: z.number().int().positive(), head: sha }).strict(),
+    review: z
+      .object({
+        number: z.number().int().positive(),
+        head: sha,
+        expectedVerdict: z.enum(["approve", "request_changes"]).optional(),
+      })
+      .strict(),
     maxObservedUsd: z.number().finite().positive().max(10),
   })
   .strict();
@@ -62,6 +69,7 @@ const runSchema = z.object({
     z.object({
       type: z.string(),
       text: z.string().optional(),
+      output: z.string().optional(),
       tool: z.string().optional(),
       callId: z.string().optional(),
       ok: z.boolean().optional(),
@@ -73,11 +81,44 @@ const runSchema = z.object({
   reviewPost: z
     .object({
       posted: z.boolean(),
+      verdict: z.enum(["approve", "request_changes"]).optional(),
       target: z.object({ repo: z.string(), number: z.number().int().positive() }).optional(),
       head: z.string().optional(),
     })
     .optional(),
 });
+
+// Read the tool's fixed evidence frame, never its prose or metadata diagnostics.
+function recordedReviewCheck(
+  event: z.infer<typeof runSchema>["events"][number],
+  run: z.infer<typeof runSchema>,
+  head: string,
+): boolean {
+  const lines = unwrapUntrusted(event.output ?? "").split("\n");
+  if (lines.length !== 4 || lines[1] !== "<untrusted-check-evidence>" || lines[3] !== "</untrusted-check-evidence>")
+    return false;
+  try {
+    const parsed = checkExecutionReceiptSchema.safeParse(JSON.parse(lines[2]!));
+    if (!parsed.success) return false;
+    const receipt = parsed.data;
+    return (
+      receipt.callId === event.callId &&
+      receipt.owner.runId === run.id &&
+      receipt.owner.requester === run.userId &&
+      receipt.owner.threadKey === run.threadKey &&
+      receipt.owner.repo === run.repo &&
+      receipt.workspace.head === head &&
+      receipt.command.trim().length > 0 &&
+      receipt.completedAt !== undefined &&
+      receipt.completedAt >= receipt.startedAt &&
+      receipt.outcome.kind === "completed" &&
+      receipt.outcome.exitCode === 0 &&
+      receipt.outcome.truncated === false
+    );
+  } catch {
+    return false;
+  }
+}
 
 type Outcome = "passed" | "failed" | "incomplete" | "skipped";
 export interface SmokeScenario {
@@ -103,7 +144,7 @@ interface ScenarioReceipt {
   parentInstanceId?: string;
   idempotencyKey?: string;
   observedUsd?: number;
-  artifact?: { repo: string; number: number; head: string };
+  artifact?: { repo: string; number: number; head: string; verdict?: "approve" | "request_changes" };
 }
 export const PRODUCT_ACCEPTANCE_GAP = {
   outcome: "incomplete",
@@ -301,7 +342,10 @@ export async function runAgentSmoke(input: {
             !event.cut &&
             !event.infra &&
             event.callId &&
-            ["read", "bash"].includes(event.tool ?? "") &&
+            (["read", "bash"].includes(event.tool ?? "") ||
+              (scenario.id === "review" &&
+                event.tool === "run_check" &&
+                recordedReviewCheck(event, run, config.review.head))) &&
             run.events
               .slice(0, i)
               .some((call) => call.type === "tool_call" && call.tool === event.tool && call.callId === event.callId),
@@ -324,7 +368,17 @@ export async function runAgentSmoke(input: {
           row.reason = "review_publication_unproven";
           break;
         }
-        row.artifact = { repo: config.repo, number: post.target.number, head: post.head };
+        if (config.review.expectedVerdict && post.verdict !== config.review.expectedVerdict) {
+          row.outcome = "failed";
+          row.reason = "review_verdict_mismatch";
+          break;
+        }
+        row.artifact = {
+          repo: config.repo,
+          number: post.target.number,
+          head: post.head,
+          ...(post.verdict ? { verdict: post.verdict } : {}),
+        };
       }
       if (run.cost?.usd === undefined || run.cost.usd === null) {
         row.reason = "cost_unpriced";

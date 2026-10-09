@@ -129,7 +129,7 @@ describe("isolated staging deployment", () => {
 });
 
 describe("staging workflow isolation", () => {
-  it("executes the label gate: captures an authorized head and rejects a fork, reader or stale head", () => {
+  it("executes source gates: captures an origin head and refuses forks, unauthorized manual actors and stale heads", () => {
     const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
     const script = workflow.jobs.authorize.steps[0].run;
     const directory = mkdtempSync(join(tmpdir(), "staging-label-"));
@@ -142,6 +142,15 @@ describe("staging workflow isolation", () => {
     try {
       for (const scenario of [
         { permission: "write", repo: "example/service", head: commit, status: 0, message: "" },
+        { permission: "read", repo: "example/service", head: commit, automatic: "true", status: 0, message: "" },
+        {
+          permission: "read",
+          repo: "outside/service",
+          head: commit,
+          automatic: "true",
+          status: 1,
+          message: "Fork deployments are refused",
+        },
         {
           permission: "read",
           repo: "example/service",
@@ -175,6 +184,7 @@ describe("staging workflow isolation", () => {
             ...process.env,
             PATH: `${directory}:${process.env.PATH}`,
             GITHUB_ACTOR: "maintainer",
+            AUTOMATIC: scenario.automatic ?? "false",
             GITHUB_REPOSITORY: "example/service",
             GITHUB_EVENT_NAME: "pull_request_target",
             GITHUB_EVENT_PATH: join(directory, "event.json"),
@@ -196,6 +206,85 @@ describe("staging workflow isolation", () => {
     }
   });
 
+  it("waits for validation, rechecks through the base controller and holds the stack through live Review", () => {
+    const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
+    expect(workflow.on.pull_request_target.types).toEqual([
+      "opened",
+      "reopened",
+      "synchronize",
+      "ready_for_review",
+      "labeled",
+    ]);
+    expect(workflow.jobs.deploy.needs).toEqual(["authorize", "validate"]);
+    expect(workflow.jobs.validate.concurrency["cancel-in-progress"]).toBe(true);
+    expect(workflow.jobs.deploy.concurrency).toEqual({
+      group: "deploy-staging",
+      queue: "max",
+      "cancel-in-progress": false,
+    });
+    const steps = workflow.jobs.deploy.steps;
+    expect(steps[0].with).toMatchObject({
+      ref: "${{ github.workflow_sha }}",
+      path: "controller",
+      "persist-credentials": false,
+    });
+    expect(steps[1].with).toMatchObject({
+      ref: "${{ needs.authorize.outputs.commit }}",
+      path: "candidate",
+      "persist-credentials": false,
+    });
+    const recheck = steps.findIndex((step: { id?: string }) => step.id === "recheck");
+    expect(steps[recheck]).toMatchObject({
+      "working-directory": "controller",
+      run: "npm run staging:validate",
+      env: { STAGING_VALIDATE_MODE: "recheck" },
+    });
+    expect(steps.slice(0, recheck + 1).some((step: object) => JSON.stringify(step).includes("secrets."))).toBe(false);
+    const deploy = steps.findIndex((step: { id?: string }) => step.id === "deploy");
+    expect(steps[deploy].if).toContain("steps.recheck.outputs.eligible == 'true'");
+    expect(steps[deploy].env.TARGETS).toContain(
+      "github.event_name == 'pull_request_target' || inputs.pr != '' || inputs.review_e2e",
+    );
+    const e2e = steps.findIndex((step: { id?: string }) => step.id === "e2e");
+    expect(e2e).toBeGreaterThan(deploy);
+    expect(steps[e2e].if).toContain("steps.deploy.outcome == 'success'");
+    expect(steps[e2e].run).toContain("npm run --silent smoke:ingress");
+    expect(steps[e2e].env.SMOKE_EXPECTED_COMMIT).toBe("${{ needs.authorize.outputs.commit }}");
+    expect(steps[e2e].env.SMOKE_INGRESS_TOKEN).toBe("${{ secrets.STAGING_SMOKE_TOKEN }}");
+    expect(steps[e2e].if).toContain("inputs.pr != ''");
+    expect(workflow.jobs.acceptance.name).toBe(
+      "${{ github.event.action == 'labeled' && github.event.label.name != 'deploy:staging' && 'staging / ignored label' || 'staging / Review E2E' }}",
+    );
+    expect(workflow.jobs.acceptance.if).toContain(
+      "github.event.action != 'labeled' || github.event.label.name == 'deploy:staging'",
+    );
+    expect(workflow.jobs.acceptance.if).toContain("always()");
+    expect(workflow.jobs.acceptance.needs).toEqual(["authorize", "validate", "deploy"]);
+    const gate = workflow.jobs.acceptance.steps[0];
+    for (const scenario of [
+      { result: "success", accepted: "true", status: 0 },
+      { result: "success", accepted: "", status: 1 },
+      { result: "skipped", accepted: "", status: 1 },
+      { result: "failure", accepted: "true", status: 1 },
+    ]) {
+      const directory = mkdtempSync(join(tmpdir(), "staging-acceptance-"));
+      try {
+        const result = spawnSync("bash", ["-c", gate.run], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            DEPLOY_RESULT: scenario.result,
+            ACCEPTED: scenario.accepted,
+            GITHUB_STEP_SUMMARY: join(directory, "summary"),
+          },
+        });
+        expect(result.status).toBe(scenario.status);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("uses separate deployment credentials without inheriting production secrets", () => {
     const text = readFileSync(".github/workflows/deploy-staging.yml", "utf8");
     const workflow = parse(text);
@@ -206,7 +295,11 @@ describe("staging workflow isolation", () => {
     expect(step.env.MEMORY_TOKEN).toBe("${{ secrets.STAGING_MEMORY_TOKEN }}");
     expect(step.env.RESIDENT_DRAIN_TOKEN).toBe("${{ secrets.STAGING_RESIDENT_DRAIN_TOKEN }}");
     expect(workflow.jobs.deploy.environment).toBe("staging");
-    expect(workflow.jobs.deploy.concurrency).toEqual({ group: "deploy-staging", "cancel-in-progress": false });
+    expect(workflow.jobs.deploy.concurrency).toEqual({
+      group: "deploy-staging",
+      queue: "max",
+      "cancel-in-progress": false,
+    });
     expect(text).not.toMatch(
       /secrets\.(CLOUDFLARE_DEPLOY_TOKEN|CLOUDFLARE_API_TOKEN|MEMORY_TOKEN|RESIDENT_READ_TOKEN|RESIDENT_DRAIN_TOKEN|SANDBOX_TOKEN)\b/,
     );

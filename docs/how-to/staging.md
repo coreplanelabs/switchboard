@@ -29,6 +29,13 @@ npm run staging:deploy -- --only bot
 
 ## GitHub
 
+Trusted same-repository pull requests start staging automatically after their current head passes CI, CodeQL, the title check and package smoke. The controller waits without staging credentials. Forks cannot deploy. Origin branches are writable only by repository writers and installed write Apps, so automatic runs also support App-created PRs. Label and manual requests require the initiating actor to have repository write access. The head is checked again after waiting for the shared staging stack.
+
+The automatic job deploys all four runtime Workers, then runs bounded answer, workspace-read and exact-head Review scenarios on the disposable test repository. The shared staging lock stays held through those scenarios. GitHub queues pending deployments instead of replacing a different PR’s request. Each job retains deployment and acceptance receipts; a healthy response alone is not Review acceptance. A changed head or closed request stops before candidate credentials. Unrelated label events do not deploy or replace the real acceptance check.
+
+Configure `STAGING_SMOKE_ORIGIN`, `STAGING_SMOKE_CONFIG` and the existing staging-only bearer as `STAGING_SMOKE_TOKEN` in the staging Environment. The config must declare the disposable repository, known workspace contents and open fixture PR/head. Set `review.expectedVerdict` to `request_changes` for a known-defect fixture or `approve` for a clean fixture; the posted result must match. Model, harness and budgets come from the deployed configuration; the runner's bounded smoke allowance remains. Never use a production bearer or a real repository as the fixture.
+
+
 Create the `staging` GitHub Environment. Store the following staging secrets under their distinct names; there is no production-token fallback:
 
 - `STAGING_CLOUDFLARE_DEPLOY_TOKEN`
@@ -41,15 +48,15 @@ Create the `staging` GitHub Environment. Store the following staging secrets und
 
 Set `SWITCHBOARD_STAGING_PROFILE`, `SWITCHBOARD_STAGING_ACCOUNT`, and `SWITCHBOARD_PRODUCTION_ACCOUNT` as environment variables. The profile/config must use `github://` or local paths for this workflow. Use a dedicated staging config-reader App with only `contents:read` on the private configuration repository; never supply the production App private key to a candidate runner. `CONFIG_REPO_OWNER` and `CONFIG_REPO_NAME` name that repository. Runtime/provider/Slack secrets already live on the staging Workers; this workflow does not copy production secrets to them.
 
-After the workflow lands on `main`, a maintainer can apply `deploy:staging` to a same-repository PR. The workflow captures that head and checks it again after waiting for the shared staging stack. A new push does not deploy automatically: remove and reapply the label. Forks and actors without repository write access are refused. The candidate runs with staging deployment credentials, so label only trusted candidate code. Keep the staging Cloudflare token restricted to its account and the runtime GitHub App restricted to fixture repositories.
+A maintainer can also apply `deploy:staging` to a same-repository PR. The workflow captures that head and checks it again after waiting for the shared staging stack. Every new push starts a fresh validation request. Removing a manually applied label withdraws that label request. Forks and actors without repository write access are refused. The candidate runs with staging deployment credentials, so label only trusted candidate code. Keep the staging Cloudflare token restricted to its account and the runtime GitHub App restricted to fixture repositories.
 
 Manual dispatch from `main` also accepts an exact source commit:
 
 ```bash
-gh workflow run deploy-staging.yml --ref main -f commit=<40-character-commit> -f targets=all
+gh workflow run deploy-staging.yml --ref main -f commit=<40-character-commit> -f targets=all -f review_e2e=true
 ```
 
-Deploy logs are retained as an artifact. Upload and readiness are separate from end-to-end acceptance.
+To test a workflow change before merge, dispatch its branch with `pr=<number>` and `commit=<current-PR-head>`. The workflow refuses a different branch or commit. Deployment logs and E2E receipts are retained as artifacts. Upload and readiness are separate from end-to-end acceptance.
 
 ## Prove the product paths
 

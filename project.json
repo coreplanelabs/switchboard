@@ -258,6 +258,10 @@
     "staging:deploy": {
       "when": "Manual staging candidates; requires separate staging and production account pins.",
       "does": "Validates staging isolation, freezes deployment inputs, and deploys the selected candidate Workers. --check validates without upload."
+    },
+    "staging:validate": {
+      "does": "Checks PR eligibility before staging.",
+      "when": "Staging CI and queued-head recheck."
     }
   }
 }

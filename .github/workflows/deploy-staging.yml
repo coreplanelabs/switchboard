@@ -1,12 +1,12 @@
 name: deploy staging
 
-# The workflow comes from the base branch. A maintainer explicitly authorizes
-# one same-repository candidate to execute with staging-only credentials.
+# The controller comes from the base branch. Current same-repository PR heads
+# owned by repository writers or installed write Apps deploy after validation.
 # This explicitly authorizes candidate execution, after the writer/head gates,
 # with staging-only secrets. No fork or production credential reaches deploy.
 on: # zizmor: ignore[dangerous-triggers]
   pull_request_target:
-    types: [labeled]
+    types: [opened, reopened, synchronize, ready_for_review, labeled]
   workflow_dispatch:
     inputs:
       commit:
@@ -17,14 +17,22 @@ on: # zizmor: ignore[dangerous-triggers]
         description: all, affected, or comma-separated Worker names
         type: string
         default: all
+      pr:
+        description: Pull request to validate before a branch test deployment
+        type: string
+      review_e2e:
+        description: Run bounded live Review acceptance after full-stack deployment
+        type: boolean
+        default: false
 
 permissions:
   contents: read
   pull-requests: read
+  checks: read
 
 jobs:
   authorize:
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'deploy:staging'
+    if: github.event_name == 'workflow_dispatch' || github.event.action != 'labeled' || github.event.label.name == 'deploy:staging'
     runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 5
     outputs:
@@ -35,53 +43,111 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_COMMIT: ${{ inputs.commit }}
+          VALIDATE_PR: ${{ inputs.pr }}
+          AUTOMATIC: ${{ github.event_name == 'pull_request_target' && github.event.action != 'labeled' }}
         run: |
-          permission=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$GITHUB_ACTOR/permission" --jq .permission)
-          case "$permission" in admin|maintain|write) ;; *) echo '::error::Staging deployment requires repository write access'; exit 1 ;; esac
+          if [ "$AUTOMATIC" != true ]; then
+            permission=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$GITHUB_ACTOR/permission" --jq .permission)
+            case "$permission" in admin|maintain|write) ;; *) echo '::error::Staging deployment requires repository write access'; exit 1 ;; esac
+          fi
           if [ "$GITHUB_EVENT_NAME" = pull_request_target ]; then
             head_repo=$(jq -r '.pull_request.head.repo.full_name' "$GITHUB_EVENT_PATH")
             [ "$head_repo" = "$GITHUB_REPOSITORY" ] || { echo '::error::Fork deployments are refused'; exit 1; }
             commit=$(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH")
             number=$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")
             current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$number" --jq '.head.sha')
-            [ "$current" = "$commit" ] || { echo '::error::PR head changed; remove and reapply deploy:staging'; exit 1; }
+            [ "$current" = "$commit" ] || { echo '::error::PR head changed; this request cannot deploy'; exit 1; }
           else
-            [ "$GITHUB_REF" = refs/heads/main ] || { echo '::error::Dispatch staging from main'; exit 1; }
+            if [ "$GITHUB_REF" != refs/heads/main ]; then
+              [[ "$VALIDATE_PR" =~ ^[1-9][0-9]*$ ]] || { echo '::error::Branch testing requires its pull request'; exit 1; }
+              current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$VALIDATE_PR" --jq 'select(.state == "open" and .head.repo.full_name == .base.repo.full_name) | .head.sha')
+              [ "$current" = "$REQUESTED_COMMIT" ] && [ "$GITHUB_SHA" = "$REQUESTED_COMMIT" ] || { echo '::error::Branch test does not match its current PR head'; exit 1; }
+            fi
             commit="$REQUESTED_COMMIT"
           fi
           [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::An exact source commit is required'; exit 1; }
           gh api "repos/$GITHUB_REPOSITORY/commits/$commit" --jq .sha | { read -r actual; [ "$actual" = "$commit" ]; }
           echo "commit=$commit" >> "$GITHUB_OUTPUT"
 
-  deploy:
+  validate:
     needs: authorize
+    if: github.event_name == 'pull_request_target' || inputs.pr != ''
     runs-on: depot-ubuntu-24.04-4
-    timeout-minutes: 90
-    environment: staging
+    timeout-minutes: 40
     concurrency:
-      group: deploy-staging
-      cancel-in-progress: false
+      group: staging-validation-${{ github.event.pull_request.number || inputs.pr }}
+      cancel-in-progress: true
+    outputs:
+      eligible: ${{ steps.validate.outputs.eligible }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - id: validate
+        run: npm run staging:validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_COMMIT: ${{ needs.authorize.outputs.commit }}
+          STAGING_PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
+          STAGING_REQUIRE_LABEL: ${{ github.event.action == 'labeled' }}
+          STAGING_AUTOMATIC: ${{ github.event_name == 'pull_request_target' && github.event.action != 'labeled' }}
+          STAGING_ACTOR: ${{ github.actor }}
+
+  deploy:
+    name: staging / full stack
+    outputs:
+      accepted: ${{ steps.e2e.outputs.accepted }}
+    needs: [authorize, validate]
+    if: always() && needs.authorize.result == 'success' && (needs.validate.result == 'skipped' || (needs.validate.result == 'success' && needs.validate.outputs.eligible == 'true'))
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 60
+    environment: staging
+    concurrency:
+      group: deploy-staging
+      queue: max
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: candidate
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: controller
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: candidate
           ref: ${{ needs.authorize.outputs.commit }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24
+          node-version-file: candidate/.nvmrc
+      - run: npm ci
+        working-directory: controller
       # Candidate scripts receive no deploy credentials during installation.
       - run: npm ci
-      - name: recheck a labeled head before giving the candidate credentials
-        if: github.event_name == 'pull_request_target'
+      - name: recheck the validated head before giving the candidate credentials
+        id: recheck
+        if: github.event_name == 'pull_request_target' || inputs.pr != ''
+        working-directory: controller
+        run: npm run staging:validate
         env:
           GH_TOKEN: ${{ github.token }}
-          COMMIT: ${{ needs.authorize.outputs.commit }}
-        run: |
-          number=$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")
-          current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$number" --jq 'select(.state == "open" and any(.labels[]; .name == "deploy:staging")) | .head.sha')
-          [ "$current" = "$COMMIT" ] || { echo '::error::Staging request is stale or withdrawn; reapply the label'; exit 1; }
+          STAGING_COMMIT: ${{ needs.authorize.outputs.commit }}
+          STAGING_PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
+          STAGING_REQUIRE_LABEL: ${{ github.event.action == 'labeled' }}
+          STAGING_AUTOMATIC: ${{ github.event_name == 'pull_request_target' && github.event.action != 'labeled' }}
+          STAGING_ACTOR: ${{ github.actor }}
+          STAGING_VALIDATE_MODE: recheck
       - name: staging inputs are complete
+        if: steps.recheck.outputs.eligible == 'true' || (github.event_name == 'workflow_dispatch' && inputs.pr == '')
         env:
           PROFILE: ${{ vars.SWITCHBOARD_STAGING_PROFILE }}
           STAGING_ACCOUNT: ${{ vars.SWITCHBOARD_STAGING_ACCOUNT }}
@@ -96,6 +162,7 @@ jobs:
             [ -n "${!name}" ] || { echo "::error::Missing staging input: $name. Nothing deployed."; exit 1; }
           done
       - name: read the private staging configuration
+        if: steps.recheck.outputs.eligible == 'true' || (github.event_name == 'workflow_dispatch' && inputs.pr == '')
         id: config-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -105,6 +172,8 @@ jobs:
           repositories: ${{ vars.CONFIG_REPO_NAME }}
           permission-contents: read
       - name: deploy the captured commit to staging
+        id: deploy
+        if: steps.recheck.outputs.eligible == 'true' || (github.event_name == 'workflow_dispatch' && inputs.pr == '')
         env:
           SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_STAGING_PROFILE }}
           SWITCHBOARD_STAGING_ACCOUNT: ${{ vars.SWITCHBOARD_STAGING_ACCOUNT }}
@@ -115,7 +184,7 @@ jobs:
           RESIDENT_DRAIN_TOKEN: ${{ secrets.STAGING_RESIDENT_DRAIN_TOKEN }}
           SANDBOX_TOKEN: ${{ secrets.STAGING_SANDBOX_TOKEN }}
           CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
-          TARGETS: ${{ inputs.targets || 'all' }}
+          TARGETS: ${{ (github.event_name == 'pull_request_target' || inputs.pr != '' || inputs.review_e2e) && 'all' || inputs.targets || 'all' }}
           CI: "1"
           WRANGLER_SEND_METRICS: "false"
         run: |
@@ -128,16 +197,49 @@ jobs:
           esac
           set -o pipefail
           npm run --silent staging:deploy -- "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/staging-deploy.log"
+      - name: run live Review acceptance on the deployed stack
+        id: e2e
+        if: steps.deploy.outcome == 'success' && (github.event_name == 'pull_request_target' || inputs.pr != '' || inputs.review_e2e)
+        env:
+          SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_STAGING_PROFILE }}
+          CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
+          SMOKE_INGRESS_CONFIG: ${{ vars.STAGING_SMOKE_CONFIG }}
+          SMOKE_INGRESS_ORIGIN: ${{ vars.STAGING_SMOKE_ORIGIN }}
+          SMOKE_INGRESS_TOKEN: ${{ secrets.STAGING_SMOKE_TOKEN }}
+          SMOKE_INGRESS_THREAD: staging-${{ github.run_id }}-${{ github.run_attempt }}
+          SMOKE_EXPECTED_COMMIT: ${{ needs.authorize.outputs.commit }}
+        run: |
+          npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/staging-fleet.json"
+          npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-e2e.json"
+          echo "accepted=true" >> "$GITHUB_OUTPUT"
       - name: staging deployment receipt
         if: always()
         env:
           COMMIT: ${{ needs.authorize.outputs.commit }}
         run: |
           printf 'Staging source: `%s`\n\n' "$COMMIT" >> "$GITHUB_STEP_SUMMARY"
-          echo 'Readiness: see deploy runner live gates. End-to-end acceptance: requires separate scenario receipts.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Readiness and live Review acceptance: see deployment and E2E receipts.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: staging-deploy-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/staging-deploy.log
+          path: |
+            ${{ runner.temp }}/staging-deploy.log
+            ${{ runner.temp }}/staging-fleet.json
+            ${{ runner.temp }}/staging-e2e.json
           if-no-files-found: ignore
+
+  acceptance:
+    name: ${{ github.event.action == 'labeled' && github.event.label.name != 'deploy:staging' && 'staging / ignored label' || 'staging / Review E2E' }}
+    needs: [authorize, validate, deploy]
+    if: always() && (github.event_name == 'pull_request_target' || inputs.pr != '') && (github.event.action != 'labeled' || github.event.label.name == 'deploy:staging')
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 5
+    steps:
+      - name: require deployment and a real posted Review
+        env:
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          ACCEPTED: ${{ needs.deploy.outputs.accepted }}
+        run: |
+          [ "$DEPLOY_RESULT" = success ] && [ "$ACCEPTED" = true ] || { echo '::error::Full-stack staging Review acceptance did not pass. See the deployment and E2E receipts.'; exit 1; }
+          echo 'Full-stack staging deployment and live Review passed.' >> "$GITHUB_STEP_SUMMARY"

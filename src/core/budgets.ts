@@ -36,6 +36,8 @@ export const SOURCE_REVALIDATE_MAX_MS = 30 * SECOND_MS;
 export const secondsToMs = (seconds: number): number => seconds * SECOND_MS;
 
 export const MINUTE_MS = 60_000;
+/** PR validation finishes before the staging job receives deployment credentials. */
+export const STAGING_VALIDATION_WAIT_MS = 35 * MINUTE_MS;
 /** Slack reconnect reads enough history to cover the longest drain and cold start. */
 export const DEFAULT_CATCH_UP_WINDOW_MS = 30 * MINUTE_MS;
 export const HOSTED_MCP_CONNECT_POLL_MS = 2 * SECOND_MS;
