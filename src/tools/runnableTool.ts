@@ -47,6 +47,8 @@ export interface ToolContext {
   /** Durable read actions bound by dispatch, never authority supplied by tool arguments. */
   sourceReads?: SourceReads;
   executor: Executor;
+  /** Trusted checkout binding; may differ from the executor's default cwd. */
+  checkout?: () => string | undefined;
   /** Run-bound command recording; the model supplies intent, never receipt facts. */
   checkExecution?: CheckExecutionCapability;
   /** The tool call's id (the provider's `tool_use` id; pi's `toolCallId`),
