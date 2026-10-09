@@ -177,3 +177,30 @@ describe("decideBotLive rollback fence", () => {
     });
   });
 });
+
+describe("config publication readiness", () => {
+  it.each([
+    { name: "singleton", state: "stopped", version: 18 },
+    { name: "singleton", state: "inactive", version: null },
+  ])("waits for native running evidence without extending the deadline: %j", (instance) => {
+    const world = newerWorld();
+    world.app = { version: 18, image: PRIOR_IMAGE };
+    world.healthCommit = PRIOR_COMMIT;
+    const evidence: BotLiveInput = {
+      ...input(world, 0),
+      requireRunningSingleton: true,
+      instances: { value: [instance] },
+    };
+    expect(decideBotLive(evidence)).toMatchObject({
+      kind: "waiting",
+      reason: expect.stringContaining("before config acceptance"),
+    });
+    expect(decideBotLive({ ...evidence, elapsedMs: LIVE_GATE_DEADLINE_MS })).toMatchObject({
+      kind: "failed",
+      reason: expect.stringContaining("deadline"),
+    });
+    expect(
+      decideBotLive({ ...evidence, instances: { value: [{ name: "singleton", state: "running", version: 18 }] } }),
+    ).toMatchObject({ kind: "live" });
+  });
+});

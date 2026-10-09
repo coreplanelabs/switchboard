@@ -123,7 +123,7 @@ export type LiveGateSpec =
 
 /** A live gate bound to an installation: the spec plus the URL (and application) the profile gives it. */
 export type LiveGate =
-  | { kind: "bot"; healthUrl: string; containerApp: string }
+  | { kind: "bot"; healthUrl: string; containerApp: string; requireRunningSingleton?: true }
   | { kind: "sandbox"; healthUrl: string; bearerEnv: string; containerApp: string };
 
 export type BotLiveGate = Extract<LiveGate, { kind: "bot" }>;
