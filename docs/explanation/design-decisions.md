@@ -103,6 +103,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0092 | [Consumers read configuration owned by their immutable image identity](../decisions/0092-consumers-read-configuration-owned-by-their-immutable-image-identity.md) | Immutable identity, explicit input witnesses and conditional publication | proposed | 2026-10-05 |
 | 0093 | [An inferred command needs a semantic fulfillment verdict](../decisions/0093-an-inferred-command-needs-a-semantic-fulfillment-verdict.md) | One bounded interpreter with a separate admissibility judgment | accepted | 2026-10-07 |
 | 0094 | [Hard stop is a negative resolution independent of startup confirmation](../decisions/0094-hard-stop-is-a-negative-resolution-independent-of-startup-confirmation.md) | Fenced cancellation and retained evidence | accepted | 2026-10-08 |
+| 0095 | [Identity allocation is separate from active work](../decisions/0095-identity-allocation-is-separate-from-active-work.md) | Separate identity and resource budgets | accepted | 2026-10-08 |
 
 <!-- /generated:decision-records -->
 

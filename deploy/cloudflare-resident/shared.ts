@@ -34,6 +34,9 @@ export const IDLE_REFRESH_INTERVAL_S = 6 * 60 * 60;
  *  generation for thread owners and disposable operations. */
 export const THREAD_POOL_SIZE = 32;
 
+/** Active owners share the measured VM budget; historical identities do not. */
+export const RESIDENT_WORKLOAD_LIMIT = 16;
+
 /** Each sweep processes a bounded page; its durable cursor reaches later bindings. */
 export const WORKTREE_SWEEP_BATCH_SIZE = 16;
 
