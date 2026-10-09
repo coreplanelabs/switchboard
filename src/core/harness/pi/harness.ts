@@ -47,7 +47,7 @@ import {
   abortReaskedNote,
   abortUnheardAtEndNote,
   abortWriteFailedNote,
-  CONTINUE_PROMPT,
+  continuePrompt,
   finaleTimedOutNote,
   wrapUpUndeliveredNote,
   wrapUpWriteFailedNote,
@@ -1214,8 +1214,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // idle pi (a model call failed while the bot was away, the loop ended)
       // takes the same command as the prompt it is. The row cannot tell the
       // two apart — its calls in flight name both — so pi decides.
-      sends.send({ id: ids.prompt, type: "prompt", message: CONTINUE_PROMPT, streamingBehavior: "steer" });
-    else if (run.resume) sends.send({ id: ids.prompt, type: "prompt", message: CONTINUE_PROMPT });
+      sends.send({
+        id: ids.prompt,
+        type: "prompt",
+        message: continuePrompt(run.toolContext.reviewHistory?.target),
+        streamingBehavior: "steer",
+      });
+    else if (run.resume)
+      sends.send({ id: ids.prompt, type: "prompt", message: continuePrompt(run.toolContext.reviewHistory?.target) });
     else sends.send({ id: ids.prompt, type: "prompt", ...promptOf(run.messages) });
 
     let warned = false;

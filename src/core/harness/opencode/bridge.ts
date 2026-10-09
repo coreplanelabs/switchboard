@@ -88,7 +88,7 @@ import {
   type ToolRuleContext,
 } from "../pi/toolRules.js";
 import {
-  CONTINUE_PROMPT,
+  continuePrompt,
   finaleAbortReason,
   finaleTimedOutNote,
   finaleWaitNote,
@@ -3025,7 +3025,10 @@ export async function driveOpenCode(
     const delivery = conn.reattach?.delivery ?? "queue";
     const promptName = `the ${promptPhase}`;
     const promptBody = {
-      text: run.resume !== undefined ? CONTINUE_PROMPT : openCodePromptText(run.messages),
+      text:
+        run.resume !== undefined
+          ? continuePrompt(run.toolContext.reviewHistory?.target)
+          : openCodePromptText(run.messages),
       delivery,
     };
     // What the store held before this prompt, for a reset's resolution to stop at.

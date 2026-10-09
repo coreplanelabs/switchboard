@@ -19,6 +19,15 @@ export const HARD_STOP_MESSAGE =
 export const CONTINUE_PROMPT =
   "Continue where you left off: the bot restarted mid-run, so re-check the effects of your last command before relying on them.";
 
+export function continuePrompt(reviewTarget?: { repo: string; number: number }): string {
+  if (!reviewTarget) return CONTINUE_PROMPT;
+  return (
+    `${CONTINUE_PROMPT} This PR review needs a fresh history read: the restart cleared its history snapshot. ` +
+    `Call github_pull_get with ${JSON.stringify({ ...reviewTarget, includeReviewHistory: true })} and read every returned historyPage before submitting a verdict. The complete snapshot must match the commit you reviewed. ` +
+    "Only current outstandingFindings IDs can be re-raised or resolved. Closed historical findings need no outcome; a new defect uses a fresh local F1, F2, … ID."
+  );
+}
+
 /** The wrap-up warning's card and note text, at `minutesLeft`. */
 export const wrapUpNote = (minutesLeft: number): string => `~${minutesLeft} min left — signaling wrap-up`;
 /** The wrap-up warning as the model reads it, steered into the run once as the deadline nears. */
