@@ -226,6 +226,18 @@ describe("projectStore — the store's messages as pi-shaped turns, the seed ski
 });
 
 describe("openCodeToolNameWord and judgeOpenCodeAsk — the gate in pi's words", () => {
+  it("allows source searches but refuses environment dumps through the shared shell gate", () => {
+    const rules: ToolRuleContext = { identity: "read", checkout: "/workspace/repo" };
+    expect(judgeOpenCodeAsk("shell", ["rg '(set|update|patch)' src"], rules, new Set())).toEqual({
+      reply: "once",
+      tool: "bash",
+    });
+    expect(judgeOpenCodeAsk("shell", ["rg '(set|update)' src; set"], rules, new Set())).toEqual({
+      reply: "reject",
+      tool: "bash",
+      message: "credential — dumps the process environment",
+    });
+  });
   it("maps the tool name for the record and the action for the gate", () => {
     expect(openCodeToolNameWord("shell")).toBe("bash");
     expect(openCodeToolNameWord("glob")).toBe("find");

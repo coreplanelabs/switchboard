@@ -149,7 +149,8 @@ const CREDENTIAL_FILE = /(^|[\s/'"`])(\.git\/)?(github-credentials|\.git-credent
  *  `env VAR=x cmd` runs a command and `process.env.NAME` reads one variable;
  *  neither is a dump. */
 const ENV_DUMP =
-  /(^|[;&|(]\s*)((printenv|env)(\s+-[A-Za-z0-9-]+)*|export\s+-p|declare\s+-[a-zA-Z]*[px][a-zA-Z]*|set)\s*($|[|;&>)])|\/proc\/(self|\d+)\/environ|process\.env(?![.[\w])/;
+  /(^|[;&|(]\s*)((printenv|env)(\s+-[A-Za-z0-9-]+)*|export\s+-p|declare\s+-[a-zA-Z]*[px][a-zA-Z]*|set)\s*($|[|;&>)])/;
+const ENV_ACCESS = /\/proc\/(self|\d+)\/environ|process\.env(?![.[\w])/;
 /** A variable named like a credential, expanded or printed. This lexical
  *  guard is defense in depth; the model can already hold its revocable run
  *  bearer, while no App token enters the workspace. */
@@ -242,9 +243,40 @@ function judgeBash(command: unknown, timeout: unknown, ctx: ToolRuleContext): To
 
 const LITERAL_DATA_COMMANDS = new Set(["echo", "printf", "grep", "rg"]);
 
+/** Mask quoted searches only in known static source-read pipelines. Complex
+ * shell syntax and executable consumers retain the original lexical guard.
+ * This view never changes the command sent to the executor. */
+function withoutLiteralDataArguments(command: string): string {
+  if (/[\r\n$`]|<</.test(command)) return command;
+  const quoted = /'[^']*'|"(?:\\.|[^"\\])*"/g;
+  if (/[#()<>]/.test(command.replace(quoted, "''"))) return command;
+  let qualified = true;
+  const view = command.replace(/(?:'[^']*'|"(?:\\.|[^"\\])*"|[^;&|])+/g, (segment) => {
+    const shell = pushShellWords(segment.trim());
+    const head = shell?.words[0] ?? "";
+    if (
+      !shell ||
+      shell.compound ||
+      shell.dynamic ||
+      !["rg", "grep", "ls", "cat", "head", "printf", "echo", "sed"].includes(head) ||
+      shell.words.some((word) => word === "--pre" || word.startsWith("--pre=")) ||
+      (head === "sed" &&
+        (shell.words[1] !== "-n" ||
+          !/^\d+(,\d+)?p$/.test(shell.words[2] ?? "") ||
+          shell.words.slice(3).some((word) => word.startsWith("-"))))
+    ) {
+      qualified = false;
+      return segment;
+    }
+    return head === "rg" || head === "grep" ? segment.replace(quoted, "''") : segment;
+  });
+  return qualified ? view : command;
+}
+
 function judgeBashCommand(command: string, ctx: ToolRuleContext): ToolVerdict {
   if (CREDENTIAL_FILE.test(command)) return refused("credential — reads the executor's credential store");
-  if (ENV_DUMP.test(command)) return refused("credential — dumps the process environment");
+  if (ENV_DUMP.test(withoutLiteralDataArguments(command)) || ENV_ACCESS.test(command))
+    return refused("credential — dumps the process environment");
   if (CREDENTIAL_VAR.test(command)) return refused("credential — expands a credential variable");
   if (
     GH_PR_MERGE_OR_REVIEW.test(command) ||
