@@ -113,6 +113,9 @@ export interface PublicationTransport extends ExecTraceOptions {
 }
 
 export interface ExecOptions extends ExecTraceOptions {
+  /** Controller-only delivery policy for the fixed harness log reader. This
+   * permits waiting only on a fresh, qualified refusal before execution. */
+  busyObservation?: "harness_log";
   /** Aborted when the run is hard-stopped; cancel the command if you can. */
   signal?: AbortSignal;
   /** Extra environment for this one command, handed to the process by the

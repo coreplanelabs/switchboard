@@ -26,6 +26,7 @@ import {
   infraMayClear,
   type Executor,
   type ExecResult,
+  type ExecOptions,
 } from "../../execution/executor.js";
 import { BASH_TIMEOUT_MIN_MS } from "../../execution/bashTimeout.js";
 import { STOPPED_CONTAINER_WORDING } from "../../execution/residentRefresh.js";
@@ -1162,6 +1163,7 @@ export class ExecHarnessContainer implements HarnessContainer {
     remaining: number,
     env?: Record<string, string>,
     stop?: AbortSignal,
+    busyObservation?: ExecOptions["busyObservation"],
   ): Promise<ExecResult> {
     if (!this.executor.execResult)
       throw new HarnessContainerError("execute", "structured command outcomes are unavailable");
@@ -1173,14 +1175,20 @@ export class ExecHarnessContainer implements HarnessContainer {
     timer.unref?.();
     const signal = stop === undefined ? bounded.signal : AbortSignal.any([bounded.signal, stop]);
     try {
-      return await this.executor.execResult(script, { timeoutMs: remaining, signal, ...(env ? { env } : {}) });
+      return await this.executor.execResult(script, {
+        timeoutMs: remaining,
+        signal,
+        ...(env ? { env } : {}),
+        ...(busyObservation ? { busyObservation } : {}),
+      });
     } finally {
       clearTimeout(timer);
     }
   }
 
   private async control(input: HarnessControlOperation): Promise<ExecResult> {
-    const deadlineAt = this.clock() + OP_TIMEOUT_MS;
+    const logObservation = input.kind === "log";
+    const deadlineAt = logObservation ? this.operationDeadline() : this.clock() + OP_TIMEOUT_MS;
     let script: string;
     let env: Record<string, string> | undefined;
     let idempotent = true;
@@ -1222,10 +1230,18 @@ export class ExecHarnessContainer implements HarnessContainer {
         break;
     }
     const send = () => {
+      if (logObservation && this.scope?.signal?.aborted)
+        throw new HarnessOperationEndedError("log", this.scope.runId, "cancelled");
       const remaining = deadlineAt - this.clock();
       if (remaining < BASH_TIMEOUT_MIN_MS)
         throw new HarnessOperationEndedError(input.kind, this.scope?.runId, "deadline");
-      return this.executeBounded(script, remaining, env);
+      return this.executeBounded(
+        script,
+        remaining,
+        env,
+        logObservation ? this.scope?.signal : undefined,
+        logObservation ? "harness_log" : undefined,
+      );
     };
     try {
       return await send();

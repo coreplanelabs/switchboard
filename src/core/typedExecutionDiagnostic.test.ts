@@ -116,7 +116,9 @@ describe("closed typed execution refusal observations", () => {
       ["remove", (c) => c.remove(paths)],
     ];
     for (const [operation, run] of cases) {
-      const fetch = vi.fn(async () => response(busy));
+      // Only qualified runtime-busy log reads have a bounded wait policy.
+      const reason = operation === "log" ? "fleet-busy" : "runtime-busy";
+      const fetch = vi.fn(async () => response({ ...busy, reason }));
       vi.stubGlobal("fetch", fetch);
       const executor = new CloudflareSandboxExecutor(options);
       const native = executor.execResult.bind(executor);
@@ -134,7 +136,7 @@ describe("closed typed execution refusal observations", () => {
       else expect(result).toBe(captured);
       const error = captured as ExecCapacityError;
       expect(error).toBeInstanceOf(ExecCapacityError);
-      expect(error.executionDiagnostic).toEqual({ ...diagnostic, caller: "harness", operation });
+      expect(error.executionDiagnostic).toEqual({ ...diagnostic, reason, caller: "harness", operation });
       expect(fetch).toHaveBeenCalledTimes(1);
       expect(JSON.stringify(error.executionDiagnostic)).not.toContain("private");
     }

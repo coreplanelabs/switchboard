@@ -18,7 +18,11 @@ import {
   residentWakeBudgetStrike,
   residentWakeStrike,
 } from "../../execution/resident.js";
-import { sandboxEmptyFailureMessage, sandboxNoAnswerMessage } from "../../execution/cloudflareSandbox.js";
+import {
+  CloudflareSandboxExecutor,
+  sandboxEmptyFailureMessage,
+  sandboxNoAnswerMessage,
+} from "../../execution/cloudflareSandbox.js";
 import { SANDBOX_START_BACKOFF_MS, SANDBOX_START_WAIT_MAX_MS } from "../../execution/sandboxErrors.js";
 import {
   CONTAINER_DOWN_WORDING,
@@ -1343,6 +1347,193 @@ describe("ExecHarnessContainer — typed execution authority", () => {
 });
 
 describe("ExecHarnessContainer — original operation deadline", () => {
+  it.each(["write", "fleet-busy", "sandbox-starting", "malformed", "transport", "http5xx", "stale"])(
+    "does not repeat a log observation's %s failure or widen the write policy",
+    async (failure) => {
+      vi.useFakeTimers();
+      try {
+        const requests: string[] = [];
+        vi.stubGlobal("fetch", async (_url: unknown, init: RequestInit) => {
+          requests.push(String(init.body));
+          if (failure === "transport") throw new Error("unknown transport outcome");
+          const body = {
+            error: "Not executed",
+            reason: failure === "fleet-busy" || failure === "sandbox-starting" ? failure : "runtime-busy",
+            exitCode: 127,
+            stdout: failure === "malformed" ? "unverified bytes" : "",
+            stderr: "Not executed",
+          };
+          return Response.json(
+            failure === "http5xx"
+              ? { error: "unavailable" }
+              : failure === "stale"
+                ? {
+                    error: "unknown outcome",
+                    executionDiagnostic: { phase: "pre_execution_busy", reason: "runtime-busy" },
+                  }
+                : body,
+            { status: failure === "http5xx" ? 503 : 200 },
+          );
+        });
+        const container = new ExecHarnessContainer(
+          new CloudflareSandboxExecutor({
+            url: "https://sandbox.example",
+            token: "test-token",
+            threadKey: "original",
+            resolveEnvs: async () => ({}),
+          }),
+        );
+        const pending = (
+          failure === "write" ? container.writeLine(paths, "original prompt") : container.readLog(paths.log, 17, 128)
+        ).then(
+          (value) => ({ value, error: undefined }),
+          (error) => ({ value: undefined, error }),
+        );
+        await vi.advanceTimersByTimeAsync(6000);
+        expect((await pending).error).toBeInstanceOf(Error);
+        expect(requests).toHaveLength(1);
+      } finally {
+        vi.clearAllTimers();
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it.each(["stop", "fence"])("does not send another log observation after the original %s", async (ending) => {
+    vi.useFakeTimers();
+    try {
+      let sends = 0;
+      vi.stubGlobal("fetch", async () => {
+        sends++;
+        return Response.json({
+          error: "Not executed",
+          reason: "runtime-busy",
+          stdout: "",
+          stderr: "Not executed",
+          exitCode: 127,
+        });
+      });
+      const stop = new AbortController();
+      const container = new ExecHarnessContainer(
+        new CloudflareSandboxExecutor({
+          url: "https://sandbox.example",
+          token: "test-token",
+          threadKey: "original",
+          resolveEnvs: async () => ({}),
+        }),
+        { runId: "original", signal: stop.signal, clock: () => Date.now() },
+      );
+      const pending = container.readLog(paths.log, 17, 128).then(
+        (value) => ({ value, error: undefined }),
+        (error) => ({ value: undefined, error }),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      stop.abort(new Error(ending === "fence" ? "original owner fenced" : "original run stopped"));
+      await vi.advanceTimersByTimeAsync(6000);
+      expect((await pending).error).toMatchObject({ reason: "aborted" });
+      expect(sends).toBe(1);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("bounds repeated log busy refusals by the original run deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const requests: Record<string, unknown>[] = [];
+      vi.stubGlobal("fetch", async (_url: unknown, init: RequestInit) => {
+        requests.push(JSON.parse(String(init.body)));
+        return Response.json({
+          error: "Not executed",
+          reason: "runtime-busy",
+          stdout: "",
+          stderr: "Not executed",
+          exitCode: 127,
+        });
+      });
+      const container = new ExecHarnessContainer(
+        new CloudflareSandboxExecutor({
+          url: "https://sandbox.example",
+          token: "test-token",
+          threadKey: "original",
+          resolveEnvs: async () => ({}),
+        }),
+        { runId: "original", deadlineAt: Date.now() + 6000, clock: () => Date.now() },
+      );
+      const pending = container.readLog("/run/pi/log", 17, 128).then(
+        (value) => ({ value, error: undefined }),
+        (error) => ({ value: undefined, error }),
+      );
+      await vi.advanceTimersByTimeAsync(6000);
+      expect((await pending).error).toMatchObject({ reason: "aborted" });
+      expect(requests.map((request) => request.timeoutMs)).toEqual([6000, 6000]);
+      expect(requests.map((request) => request.command)).toEqual([
+        "tail -c +18 '/run/pi/log' | head -c 128 | base64 | tr -d '\\n'",
+        "tail -c +18 '/run/pi/log' | head -c 128 | base64 | tr -d '\\n'",
+      ]);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("observes the original log offset after a qualified busy refusal without changing the request", async () => {
+    vi.useFakeTimers();
+    try {
+      const requests: Array<{ body: Record<string, unknown>; headers: Record<string, string> }> = [];
+      let envReads = 0;
+      vi.stubGlobal("fetch", async (_url: unknown, init: RequestInit) => {
+        requests.push({ body: JSON.parse(String(init.body)), headers: init.headers as Record<string, string> });
+        return Response.json(
+          requests.length === 1
+            ? { error: "Not executed", reason: "runtime-busy", exitCode: 127, stdout: "", stderr: "Not executed" }
+            : {
+                stdout: Buffer.from("original log bytes").toString("base64"),
+                stderr: "",
+                exitCode: 0,
+                truncated: false,
+              },
+        );
+      });
+      const executor = new CloudflareSandboxExecutor({
+        url: "https://sandbox.example",
+        token: "test-token",
+        threadKey: "thread-original",
+        resolveEnvs: async () => ({ READ_CONTEXT: ++envReads === 1 ? "original" : "changed" }),
+      });
+      const container = new ExecHarnessContainer(executor);
+      const result = container.readLog("/run/pi/log", 17, 128).then(
+        (value) => ({ value, error: undefined }),
+        (error) => ({ value: undefined, error }),
+      );
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(await result).toEqual({ value: new Uint8Array(Buffer.from("original log bytes")), error: undefined });
+      expect(requests).toEqual(
+        [0, 1].map(() => ({
+          body: {
+            command: "tail -c +18 '/run/pi/log' | head -c 128 | base64 | tr -d '\\n'",
+            timeoutMs: 60000,
+            env: { READ_CONTEXT: "original" },
+          },
+          headers: {
+            "content-type": "application/json",
+            authorization: "Bearer test-token",
+            "x-thread-key": "thread-original",
+          },
+        })),
+      );
+      expect(envReads).toBe(1);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("reduces a retry's timeout by the time spent awaiting its first acknowledgement", async () => {
     let now = 1000;
     const h = recordingExecutor([new ExecControlResetError("lost read"), "HTTP/1.1 204 No Content\r\n\r\n"]);
