@@ -43,18 +43,12 @@ export function responsesFixtureProtocol(port: MessagePort) {
       }
       return false;
     },
-    event(request: Extract<ResponsesWorkerRequest, { op: "consume" }>): unknown {
-      return unpackResponsesValue(request.payload, "frame");
-    },
-    accepted(request: ResponsesWorkerRequest, accepted: boolean): void {
-      port.postMessage({
-        id: request.id,
-        op: request.op,
-        target: "frame",
-        permit: request.permit,
-        phase: "reply",
-        accepted,
-      });
+    event(request: Extract<ResponsesWorkerRequest, { op: "parse" }>): unknown {
+      const text =
+        request.encoding === "utf8"
+          ? new TextDecoder("utf8", { ignoreBOM: request.target === "request" }).decode(request.payload)
+          : unpackResponsesValue(request.payload, request.target);
+      return JSON.parse(String(text));
     },
   };
 }

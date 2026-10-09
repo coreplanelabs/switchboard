@@ -367,10 +367,8 @@ export class ResponsesFailureBoundary {
         if (this.interrupted) return;
         try {
           await consume(new Uint8Array(), controller, true);
-          if (!(await this.consumer.close()) && this.terminal !== "failed") {
-            this.terminal = "failed";
-            this.failure = undefined;
-          }
+          if (this.terminal === "failed") await this.consumer.dispose();
+          else await this.consumer.finish();
         } catch (error) {
           if (sourceFailed) return;
           if (!(error instanceof ResponsesValidationInterrupted)) throw error;
@@ -379,7 +377,7 @@ export class ResponsesFailureBoundary {
       },
     });
     // Cancellation does not invoke TransformStream.flush. Release the validator
-    // independently of SDK completion, including an unfinished frame or event.
+    // independently of model completion, including an unfinished frame or event.
     const reader = transform.readable.getReader();
     const writer = transform.writable.getWriter();
     return {
@@ -470,9 +468,9 @@ export class ResponsesFailureBoundary {
     this.failure = undefined;
     this.dataEnded = true;
     if (this.interrupted) await this.dispose();
-    else await this.consumer.close();
-    // Preserve the consumer's fatal ending, including for malformed thread
-    // wrappers. Its replacement must not inherit the wrapper's event name.
+    else await this.consumer.dispose();
+    // Preserve the first wire failure. Its signed replacement must not inherit
+    // a provider-controlled wrapper event name.
     this.authenticatedEnding = `data: ${JSON.stringify({ type: "error", code: "unclassified_stream_failure", message: JSON.stringify(authenticateProxyUnknownTerminal(reason, rejection)), param: null })}\n\n`;
     return this.authenticatedEnding;
   }
@@ -498,8 +496,7 @@ export class ResponsesFailureBoundary {
     // The preceding data-line binding is already cleared at a complete
     // delimiter. Keep both remaining strings, including a BOM-only EOF line.
     this.frameStorage?.resize(responsesTextCharge(this.buffer) + responsesTextCharge(this.line));
-    // Complete-frame output is admitted before fields, parsing or any SDK,
-    // terminal or usage witness. Another owner cannot spend its delivery credit.
+    // Complete-frame output is admitted before fields, parsing, terminal or usage witness. Another owner cannot spend its delivery credit.
     const outputPermit = this.storageOwner.reserveStorage(
       3 * RESPONSES_VALIDATION_LIMITS.pendingOutputBytes + RESPONSES_VALIDATION_LIMITS.stringHeaderBytes,
       "frame-output-admission",
@@ -545,15 +542,10 @@ export class ResponsesFailureBoundary {
     try {
       const value = parsed.value;
       const event = record(value);
-      // Valid thread wrappers are ignored by pi; malformed JSON still fails in
-      // the SDK before it creates that wrapper.
+      // Thread wrappers are not model events; malformed JSON still fails before
+      // any wire fact is admitted for forwarding.
       if (eventName?.startsWith("thread.")) return this.checkFrameOutput(frame);
-      if (!event) {
-        this.checkFrameOutput(frame);
-        return (await this.consumer.consume(value))
-          ? frame
-          : this.unknown("consumer_rejected", { phase: "sdk_consume", kind: "rejected" });
-      }
+      if (!event || typeof event.type !== "string") return this.unknown("unverified_terminal");
       const response = record(event.response);
       const terminalOutputValid =
         response?.output === undefined ||
@@ -562,17 +554,15 @@ export class ResponsesFailureBoundary {
       if (event.type === "response.output_item.added" || event.type === "response.output_item.done") {
         if (!localOutputItem(event.item)) this.hostedOutputSeen = true;
       }
-      const sdkError = Boolean(event.error);
+      const wireError = Boolean(event.error);
       if (
-        !sdkError &&
+        !wireError &&
         event.type === "response.completed" &&
         response?.status === "completed" &&
         terminalOutputValid &&
         this.terminal === undefined
       ) {
         this.checkFrameOutput(frame);
-        if (!(await this.consumer.consume(event)))
-          return this.unknown("consumer_rejected", { phase: "sdk_consume", kind: "rejected" });
         this.terminal = "completed";
         this.observe(event);
         return frame;
@@ -583,19 +573,15 @@ export class ResponsesFailureBoundary {
         (response?.status !== "incomplete" ||
           !terminalOutputValid ||
           record(response?.incomplete_details)?.reason !== "max_output_tokens");
-      if (!sdkError && event.type === "response.incomplete" && !incomplete && this.terminal === undefined) {
+      if (!wireError && event.type === "response.incomplete" && !incomplete && this.terminal === undefined) {
         this.checkFrameOutput(frame);
-        if (!(await this.consumer.consume(event)))
-          return this.unknown("consumer_rejected", { phase: "sdk_consume", kind: "rejected" });
         this.terminal = "incomplete";
         this.observe(event);
         return frame;
       }
       const malformedCompletion = event.type === "response.completed";
-      if (!sdkError && !failed && !incomplete && !malformedCompletion && event.type !== "error") {
+      if (!wireError && !failed && !incomplete && !malformedCompletion && event.type !== "error") {
         this.checkFrameOutput(frame);
-        if (!(await this.consumer.consume(event)))
-          return this.unknown("consumer_rejected", { phase: "sdk_consume", kind: "rejected" });
         this.observe(event);
         return frame;
       }
@@ -607,7 +593,7 @@ export class ResponsesFailureBoundary {
       const localOutputOnly = output === undefined || (Array.isArray(output) && output.every(localOutputItem));
       const verified =
         firstTerminal &&
-        !sdkError &&
+        !wireError &&
         !malformedCompletion &&
         !this.hostedOutputSeen &&
         !incomplete &&
@@ -631,7 +617,7 @@ export class ResponsesFailureBoundary {
       // Never relay provider error prose here: it could replay an earlier signed
       // envelope, which authenticates its origin but not this particular call.
       const replacement =
-        failed && !sdkError
+        failed && !wireError
           ? {
               type: "response.failed",
               response: {
@@ -657,7 +643,6 @@ export class ResponsesFailureBoundary {
       this.authenticatedEnding = ending;
       this.terminal = "failed";
       this.failure = failure;
-      await this.consumer.consume(replacement);
       this.dataEnded = true;
       this.observe(replacement);
       this.authenticatedEnding = ending;

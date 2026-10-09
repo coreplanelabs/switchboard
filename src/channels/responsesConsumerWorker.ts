@@ -1,5 +1,4 @@
-import { parentPort, workerData } from "node:worker_threads";
-import { ResponsesConsumer as SdkConsumer } from "./responsesSdkConsumer.js";
+import { parentPort } from "node:worker_threads";
 import { RESPONSES_VALIDATION_LIMITS as limits } from "../core/budgets.js";
 import { ResponsesValidationInterrupted } from "./responsesValidationCapacity.js";
 import {
@@ -13,7 +12,6 @@ import {
 import type { ResponsesWorkerRequest } from "./responsesConsumer.js";
 const port = parentPort;
 if (!port) throw new Error("Responses validation requires a worker port");
-const consumer = new SdkConsumer((workerData as { modelId: string }).modelId);
 let prepared:
   { id: number; target: ResponsesJsonTarget; permit: number; value: unknown; stats: ResponsesGraphStats } | undefined;
 let busy = false;
@@ -36,9 +34,7 @@ port.on("message", async (message: ResponsesWorkerRequest) => {
     const keys =
       message.op === "parse"
         ? ["id", "permit", "op", "target", "encoding", "payload"]
-        : message.op === "consume"
-          ? ["id", "permit", "op", "target", "payload"]
-          : ["id", "permit", "op", "target"];
+        : ["id", "permit", "op", "target"];
     if (
       Object.keys(message).length !== keys.length ||
       Object.keys(message).some((key) => !keys.includes(key)) ||
@@ -121,31 +117,7 @@ port.on("message", async (message: ResponsesWorkerRequest) => {
       busy = false;
       return;
     }
-    if (message.op === "consume") {
-      if (message.target !== "frame") throw new ResponsesValidationInterrupted("protocol");
-      validateResponsesPayload(message.payload, "frame");
-      const event = unpackResponsesValue(message.payload, "frame");
-      const accepted = await consumer.consume(event);
-      port.postMessage({
-        id: message.id,
-        op: "consume",
-        target: "frame",
-        permit: message.permit,
-        phase: "reply",
-        accepted,
-      });
-    } else if (message.op === "close") {
-      if (message.target !== "frame") throw new ResponsesValidationInterrupted("protocol");
-      const accepted = await consumer.close();
-      port.postMessage({
-        id: message.id,
-        op: "close",
-        target: "frame",
-        permit: message.permit,
-        phase: "reply",
-        accepted,
-      });
-    } else throw new ResponsesValidationInterrupted("protocol");
+    throw new ResponsesValidationInterrupted("protocol");
     busy = false;
   } catch (error) {
     failed = true;

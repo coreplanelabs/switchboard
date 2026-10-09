@@ -22,7 +22,7 @@ import { execFileSync } from "node:child_process";
 import { closeSync, constants, openSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { coveringSpecs, parseHeaderPaths, type SpecCoverage } from "../src/docs/specCoverage.js";
+import { covers, coveringSpecs, isSourcePath, parseHeaderPaths, type SpecCoverage } from "../src/docs/specCoverage.js";
 import {
   countExpectCalls,
   formatTestGuard,
@@ -216,19 +216,20 @@ function main(): number {
   let specs: SpecCoverage[];
   let baseSpecs: SpecCoverage[] = [];
   let changedSpecs: string[] = [];
+  let entries: ChangedEntry[] = [];
   try {
     args = parseArgs(process.argv.slice(2));
     if (realpathSync(root) !== realpathSync(git("rev-parse", "--show-toplevel").trim()))
       throw new Error("specs:coverage: script package root must be the Git repository root");
     const ends = args.changed === undefined ? null : rangeEnds(args.changed);
-    const entries = ends === null ? [] : changedEntries(ends);
+    entries = ends === null ? [] : changedEntries(ends);
     changed = changedPaths(args, entries);
     if (ends?.head === null && git("ls-files", "--unmerged", "-z").length > 0)
       throw new Error("specs:coverage: unresolved working-tree index");
     specs = listSpecs(ends?.head ?? null);
-    if (args.changed !== undefined && args.testGuard && ends !== null) {
+    if (ends !== null && (args.testGuard || entries.some((entry) => entry.status === "D"))) {
       baseSpecs = listSpecs(ends.base);
-      testFiles = changedTestFiles(entries, ends);
+      if (args.testGuard) testFiles = changedTestFiles(entries, ends);
       // A spec rename preserves its base identity, but a move alone does not
       // revise the contract. Deletion counts as touch; retirement needs review.
       changedSpecs = entries.flatMap(({ status, oldPath, newPath }) => {
@@ -250,7 +251,39 @@ function main(): number {
     console.error(e instanceof Error ? e.message : String(e));
     return 1;
   }
-  const result = coveringSpecs(changed, specs);
+  const deleted = entries
+    .filter((entry) => entry.status === "D" && isSourcePath(entry.oldPath))
+    .map((entry) => entry.oldPath);
+  const current = coveringSpecs(
+    changed.filter((path) => !deleted.includes(path)),
+    specs,
+  );
+  // A deleted module has no current header. Its retained owner must revise the
+  // contract in this exact diff; a stale header or pure owner move is no proof.
+  const retiredSpecs = specs.map((spec) => {
+    const entry = entries.find((entry) => entry.newPath === spec.path && entry.status !== "D");
+    const base =
+      entry && changedSpecs.includes(entry.oldPath) ? baseSpecs.find((base) => base.path === entry.oldPath) : undefined;
+    const owned =
+      base && spec.headerPaths.length
+        ? deleted.filter((path) => base.headerPaths.some((header) => covers(header, path)))
+        : [];
+    return { path: spec.path, headerPaths: owned.filter((path) => !spec.headerPaths.includes(path)) };
+  });
+  const retired = coveringSpecs(deleted, retiredSpecs);
+  const uncovered = new Set([...current.uncovered, ...retired.uncovered]);
+  const result = {
+    touched: specs.flatMap((spec) => {
+      const because = [
+        ...new Set([
+          ...(current.touched.find((touch) => touch.spec === spec.path)?.because ?? []),
+          ...(retired.touched.find((touch) => touch.spec === spec.path)?.because ?? []),
+        ]),
+      ];
+      return because.length ? [{ spec: spec.path, because }] : [];
+    }),
+    uncovered: changed.filter((path) => uncovered.has(path)),
+  };
   if (args.json) {
     console.log(JSON.stringify(result, null, 2));
   } else {

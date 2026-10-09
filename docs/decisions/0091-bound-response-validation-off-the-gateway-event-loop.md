@@ -1,6 +1,7 @@
 ---
 title: Bound response validation off the gateway event loop
-status: accepted
+status: superseded
+superseded_by: 0096-keep-the-proxy-thin-and-decode-once-in-the-harness.md
 date: 2026-10-05
 pattern: Bulkhead isolation and backpressure
 ---

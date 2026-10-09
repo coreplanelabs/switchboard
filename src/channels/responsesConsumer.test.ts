@@ -173,31 +173,84 @@ describe("Responses validation isolation", () => {
     }
   });
 
-  it("honors the original caller abort while an expensive SDK event is pending", async () => {
-    const control = new AbortController();
-    const consumer = new ResponsesConsumer("test", { signal: control.signal });
-    const item = { type: "function_call", id: "item", call_id: "call", name: "bash", arguments: "" };
-    expect(await consumer.consume({ type: "response.output_item.added", output_index: 0, item })).toBe(true);
-    const timer = setTimeout(() => control.abort(), 5);
-    try {
-      await expect(
-        consumer.consume({
-          type: "response.function_call_arguments.delta",
-          output_index: 0,
-          delta: JSON.stringify({ command: "x".repeat(2 * 1024 * 1024) }).slice(0, -2),
-        }),
-      ).rejects.toMatchObject({ name: "ResponsesValidationInterrupted", kind: "aborted" });
-    } finally {
-      clearTimeout(timer);
-      await consumer.close().catch(() => {});
-    }
-  });
+  it.each([false, true])(
+    "honors original caller control after neutral parsing enters its worker, aborted=%s",
+    async (aborted) => {
+      const control = new AbortController();
+      const probe = new (await import("node:worker_threads")).MessageChannel();
+      const gate = new SharedArrayBuffer(4);
+      const entered = new Promise<void>((resolve) => probe.port1.once("message", () => resolve()));
+      const pool = new ResponsesValidationCapacity({ workers: 1, queued: 0 });
+      const consumer = new ResponsesConsumer("test", {
+        signal: control.signal,
+        capacity: pool,
+        createWorker: (_url, options) =>
+          new Worker(
+            `
+        const {parentPort,workerData}=require('node:worker_threads');
+        (async()=>{
+          const {responsesFixtureProtocol}=await require('tsx/esm/api').tsImport(workerData.protocol,__filename);
+          const rpc=responsesFixtureProtocol(parentPort);
+          parentPort.on('message',request=>{
+            if(request.op==='parse'){
+              workerData.probe.postMessage('entered');
+              Atomics.wait(new Int32Array(workerData.gate),0,0);
+            }
+            rpc.control(request);
+          });
+          parentPort.postMessage({ready:true});
+        })();`,
+            {
+              ...options,
+              eval: true,
+              workerData: {
+                gate,
+                probe: probe.port2,
+                protocol: new URL("./testing/responsesFixtureProtocol.ts", import.meta.url).href,
+              },
+              transferList: [probe.port2],
+            },
+          ),
+      });
+      const pending = consumer.parseJSON(JSON.stringify({ type: "large", text: "x".repeat(2 * 1024 * 1024) }));
+      try {
+        await entered;
+        expect(pool.activeCount).toBe(1);
+        if (aborted) {
+          const rejected = expect(pending).rejects.toMatchObject({
+            name: "ResponsesValidationInterrupted",
+            kind: "aborted",
+          });
+          control.abort();
+          await rejected;
+        } else {
+          Atomics.store(new Int32Array(gate), 0, 1);
+          Atomics.notify(new Int32Array(gate), 0);
+          const result = await pending;
+          expect(result.ok).toBe(true);
+          if (!result.ok) throw new Error("expected admitted JSON value");
+          expect(result.value).toMatchObject({ type: "large" });
+          expect((result.value as { text: string }).text.length).toBe(2_097_152);
+          result.release?.();
+        }
+        await consumer.dispose();
+        expect(pool.activeCount).toBe(0);
+        expect(pool.storageBytes).toBe(0);
+      } finally {
+        Atomics.store(new Int32Array(gate), 0, 1);
+        Atomics.notify(new Int32Array(gate), 0);
+        await consumer.dispose();
+        await pending.catch(() => {});
+        probe.port1.close();
+        probe.port2.close();
+      }
+    },
+  );
 });
 
 import { Worker } from "node:worker_threads";
 import { setImmediate as yieldToIo } from "node:timers/promises";
 import { ResponsesValidationCapacity } from "./responsesValidationCapacity.js";
-import { ResponsesConsumer as SdkConsumer } from "./responsesSdkConsumer.js";
 
 const created = { type: "response.created", response: { id: "response" } };
 
@@ -207,8 +260,10 @@ describe("Responses validation isolation", () => {
     const control = new AbortController();
     const first = new ResponsesConsumer("test", { capacity });
     const queued = new ResponsesConsumer("test", { capacity, signal: control.signal });
-    await first.consume(created);
-    const pending = queued.consume(created);
+    const graph = await first.parseJSON(JSON.stringify(created));
+    expect(graph).toMatchObject({ ok: true, value: { type: "response.created", response: { id: "response" } } });
+    if (graph.ok) graph.release?.();
+    const pending = queued.parseJSON(JSON.stringify(created));
     await yieldToIo();
     expect(capacity.activeCount).toBe(1);
     expect(capacity.queuedCount).toBe(1);
@@ -217,7 +272,7 @@ describe("Responses validation isolation", () => {
     await queued.dispose();
     expect(capacity.activeCount).toBe(1);
     expect(capacity.queuedCount).toBe(0);
-    await first.close();
+    await first.finish();
     expect(capacity.activeCount).toBe(0);
   });
 
@@ -238,42 +293,22 @@ describe("Responses validation isolation", () => {
     const first = new ResponsesConsumer("test", { capacity, createWorker });
     const second = new ResponsesConsumer("test", { capacity, createWorker });
     const excess = new ResponsesConsumer("test", { capacity, createWorker });
-    await first.consume(created);
-    const waiting = second.consume(created);
+    const graph = await first.parseJSON(JSON.stringify(created));
+    expect(graph).toMatchObject({ ok: true, value: { type: "response.created", response: { id: "response" } } });
+    if (graph.ok) graph.release?.();
+    const waiting = second.parseJSON(JSON.stringify(created));
     await yieldToIo();
-    await expect(excess.consume(created)).rejects.toMatchObject({ kind: "capacity" });
+    await expect(excess.parseJSON(JSON.stringify(created))).rejects.toMatchObject({ kind: "capacity" });
     expect(births).toBe(1);
     await excess.dispose();
-    await first.close();
-    expect(await waiting).toBe(true);
+    await first.finish();
+    const admitted = await waiting;
+    expect(admitted).toMatchObject({ ok: true, value: { type: "response.created", response: { id: "response" } } });
+    if (admitted.ok) admitted.release?.();
     expect(births).toBe(2);
-    await second.close();
+    await second.finish();
     expect(capacity.activeCount).toBe(0);
     expect(capacity.queuedCount).toBe(0);
-  });
-
-  it("retains the pinned SDK's consumption, fatal and unfinished-call results", async () => {
-    const item = { type: "function_call", id: "item", call_id: "call", name: "bash", arguments: "" };
-    for (const events of [
-      [created],
-      [null],
-      [{ type: "response.output_item.added", output_index: 0, item }],
-      [
-        { type: "response.output_item.added", output_index: 0, item },
-        { type: "response.function_call_arguments.delta", output_index: 0, delta: { malformed: true } },
-      ],
-      [
-        { type: "response.output_item.added", output_index: 0, item },
-        { type: "response.function_call_arguments.done", output_index: 0, arguments: '{"command":"é🧭\\n"}' },
-        { type: "response.output_item.done", output_index: 0, item: { ...item, arguments: '{"command":"é🧭\\n"}' } },
-        { type: "response.completed", response: { status: "completed", output: [] } },
-      ],
-    ]) {
-      const direct = new SdkConsumer("test");
-      const isolated = new ResponsesConsumer("test");
-      for (const event of events) expect(await isolated.consume(event)).toBe(await direct.consume(event));
-      expect(await isolated.close()).toBe(await direct.close());
-    }
   });
 
   it("settles an unexpected worker exit as local uncertainty and releases its slot", async () => {
@@ -282,7 +317,7 @@ describe("Responses validation isolation", () => {
       capacity,
       createWorker: () => new Worker("process.exit(1)", { eval: true, env: {} }),
     });
-    await expect(consumer.consume(created)).rejects.toMatchObject({
+    await expect(consumer.parseJSON(JSON.stringify(created))).rejects.toMatchObject({
       name: "ResponsesValidationInterrupted",
       kind: "worker-exit",
     });

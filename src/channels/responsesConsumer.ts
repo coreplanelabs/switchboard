@@ -31,31 +31,28 @@ export type ResponsesWorkerRequest =
       encoding: "utf8" | "string";
       payload: ArrayBuffer;
     }
-  | { id: number; permit: number; op: "serialize"; target: ResponsesJsonTarget }
-  | { id: number; permit: number; op: "consume"; target: "frame"; payload: ArrayBuffer }
-  | { id: number; permit: number; op: "close"; target: "frame" };
+  | { id: number; permit: number; op: "serialize"; target: ResponsesJsonTarget };
 export type ResponsesWorkerReply = {
   id: number;
   permit: number;
-  op: "parse" | "consume" | "close";
+  op: "parse";
   target: ResponsesJsonTarget;
   phase: "prepared" | "reply" | "failure";
   ok?: boolean;
-  accepted?: boolean;
   payload?: ArrayBuffer;
   stats?: ResponsesGraphStats;
   kind?: unknown;
 };
 interface Pending {
   id: number;
-  op: "parse" | "consume" | "close";
+  op: "parse";
   target: ResponsesJsonTarget;
   phase: "prepare" | "reply";
   stats?: ResponsesGraphStats;
   working: ResponsesStoragePermit;
   input?: ResponsesStoragePermit;
   decoderBytes: number;
-  resolve: (reply: ParsedResponsesFrame | boolean) => void;
+  resolve: (reply: ParsedResponsesFrame) => void;
   reject: (error: ResponsesValidationInterrupted) => void;
 }
 export interface ResponsesConsumerOptions {
@@ -65,7 +62,7 @@ export interface ResponsesConsumerOptions {
   createWorker?: (url: URL, options: WorkerOptions) => Worker;
 }
 
-/** One call's unchanged SDK state lives off the gateway's critical event loop. */
+/** Bounded JSON parsing stays off the gateway loop; SDK interpretation belongs to the harness. */
 export class ResponsesConsumer {
   private readonly stopControl = new AbortController();
   private readonly signal: AbortSignal;
@@ -78,13 +75,10 @@ export class ResponsesConsumer {
   private sequence = 0;
   private failure?: ResponsesValidationInterrupted;
   private shutdown?: Promise<void>;
-  private closed?: Promise<boolean>;
   private readonly storage = new Set<ResponsesStoragePermit>();
-  private readonly shadows = new Set<ResponsesStoragePermit>();
-  private shadow?: ResponsesStoragePermit;
   private readonly parentGraphs = new Set<ResponsesStoragePermit>();
   constructor(
-    private readonly modelId: string,
+    _modelId: string,
     private readonly options: ResponsesConsumerOptions = {},
   ) {
     this.signal = options.signal ? AbortSignal.any([options.signal, this.stopControl.signal]) : this.stopControl.signal;
@@ -117,7 +111,6 @@ export class ResponsesConsumer {
         {
           env: {},
           execArgv: source ? ["--import", "tsx"] : [],
-          workerData: { modelId: this.modelId },
           resourceLimits: {
             maxOldGenerationSizeMb: RESPONSES_VALIDATION_LIMITS.oldGenerationMb,
             maxYoungGenerationSizeMb: RESPONSES_VALIDATION_LIMITS.youngGenerationMb,
@@ -148,10 +141,7 @@ export class ResponsesConsumer {
             if (
               reply &&
               Object.keys(reply).some(
-                (key) =>
-                  !["id", "op", "target", "permit", "phase", "stats", "ok", "accepted", "payload", "kind"].includes(
-                    key,
-                  ),
+                (key) => !["id", "op", "target", "permit", "phase", "stats", "ok", "payload", "kind"].includes(key),
               )
             )
               throw new ResponsesValidationInterrupted("protocol");
@@ -215,7 +205,7 @@ export class ResponsesConsumer {
               (pending.phase !== "reply" && !(pending.op === "parse" && reply.ok === false))
             )
               throw new ResponsesValidationInterrupted("protocol");
-            if (pending.op === "parse") {
+            {
               if (typeof reply.ok !== "boolean") throw new ResponsesValidationInterrupted("protocol");
               if (!reply.ok) {
                 this.pending = undefined;
@@ -253,11 +243,6 @@ export class ResponsesConsumer {
               pending.resolve(parsed);
               return;
             }
-            if (typeof reply.accepted !== "boolean") throw new ResponsesValidationInterrupted("protocol");
-            this.pending = undefined;
-            this.drop(pending.input);
-            this.drop(pending.working);
-            pending.resolve(reply.accepted);
           } catch (error) {
             this.interrupt(
               error instanceof ResponsesValidationInterrupted ? error : new ResponsesValidationInterrupted("protocol"),
@@ -297,7 +282,6 @@ export class ResponsesConsumer {
     this.storage.add(permit);
     permit.onRelease(() => {
       this.storage.delete(permit);
-      this.shadows.delete(permit);
       this.parentGraphs.delete(permit);
     });
     return permit;
@@ -306,7 +290,6 @@ export class ResponsesConsumer {
     if (!permit) return;
     permit.release();
     this.storage.delete(permit);
-    this.shadows.delete(permit);
     this.parentGraphs.delete(permit);
   }
   private dropWorkerStorage(): void {
@@ -316,27 +299,27 @@ export class ResponsesConsumer {
     for (const permit of [...this.storage]) if (!this.parentGraphs.has(permit)) this.drop(permit);
   }
   private async operation(
-    op: "parse" | "consume" | "close",
+    op: "parse",
     target: ResponsesJsonTarget,
     payload?: ArrayBuffer,
     encoding?: "utf8" | "string",
     decoderBytes = 0,
     working?: ResponsesStoragePermit,
     input?: ResponsesStoragePermit,
-  ): Promise<ParsedResponsesFrame | boolean> {
+  ): Promise<ParsedResponsesFrame> {
     this.assertReady();
     this.ready ??= this.start();
     await this.ready;
     this.assertReady();
     if (this.pending) throw new ResponsesValidationInterrupted("protocol");
-    working ??= this.reserve(0, "worker-close");
+    working ??= this.reserve(0, "worker-parse");
     return new Promise((resolve, reject) => {
       const id = ++this.sequence;
       this.pending = {
         id,
         op,
         target,
-        phase: op === "parse" ? "prepare" : "reply",
+        phase: "prepare",
         working,
         input,
         decoderBytes,
@@ -420,40 +403,16 @@ export class ResponsesConsumer {
       throw error;
     }
   }
-  async consume(event: unknown): Promise<boolean> {
-    this.assertReady();
-    const stats = inspectResponsesGraph(event, "frame");
-    const charge = responsesGraphCharge(stats);
-    const shadow = (this.shadow ??= this.reserve(0, "worker-sdk-shadow"));
-    shadow.resize(shadow.bytes + charge);
-    this.shadows.add(shadow);
-    const working = this.reserve(responsesSerializationWorking("frame"), "parent-consume-serialization");
-    let input: ResponsesStoragePermit | undefined;
+  /** EOF checks the neutral parser's latched outcome before cleanup hides it. */
+  async finish(): Promise<void> {
     try {
-      const payload = packResponsesValue(event, "frame");
-      input = this.reserve(payload.byteLength, "parent-input");
-      working.resize(responsesGraphMaximum("frame"));
-      working.transfer("worker-consume");
-      return (await this.operation("consume", "frame", payload, undefined, 0, working, input)) as boolean;
-    } catch (error) {
-      if (!this.worker || this.exited) {
-        this.drop(working);
-        this.drop(input);
-        this.drop(shadow);
-      }
-      throw error;
+      this.assertReady();
+    } finally {
+      await this.dispose();
     }
+    if (this.options.signal?.aborted) throw new ResponsesValidationInterrupted("aborted");
   }
-  close(): Promise<boolean> {
-    this.closed ??= (async () => {
-      try {
-        return (await this.operation("close", "frame")) as boolean;
-      } finally {
-        await this.dispose();
-      }
-    })();
-    return this.closed;
-  }
+
   dispose(): Promise<void> {
     this.shutdown ??= (async () => {
       this.stopped = true;

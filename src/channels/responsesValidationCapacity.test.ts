@@ -192,11 +192,13 @@ describe("Responses transport reservation", () => {
       },
     });
     try {
-      expect(await consumer.consume({ type: "response.created", response: { id: "response" } })).toBe(true);
+      const parsed = await consumer.parseJSON('{"type":"response.created","response":{"id":"response"}}');
+      expect(parsed).toMatchObject({ ok: true, value: { type: "response.created", response: { id: "response" } } });
+      if (parsed.ok) parsed.release?.();
       expect(pool.activeCount).toBe(1);
       reservation.finishTransport();
       expect(pool.activeCount).toBe(1);
-      await consumer.close();
+      await consumer.finish();
       expect(exited).toBe(true);
       expect(activeAtExit).toBe(1);
       expect(pool.activeCount).toBe(0);
