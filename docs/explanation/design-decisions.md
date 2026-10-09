@@ -105,6 +105,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0094 | [Hard stop is a negative resolution independent of startup confirmation](../decisions/0094-hard-stop-is-a-negative-resolution-independent-of-startup-confirmation.md) | Fenced cancellation and retained evidence | accepted | 2026-10-08 |
 | 0095 | [Identity allocation is separate from active work](../decisions/0095-identity-allocation-is-separate-from-active-work.md) | Separate identity and resource budgets | accepted | 2026-10-08 |
 | 0096 | [Keep the proxy thin and decode once in the harness](../decisions/0096-keep-the-proxy-thin-and-decode-once-in-the-harness.md) | Thin streaming proxy and bounded full-response concurrency | proposed | 2026-10-09 |
+| 0097 | [Every run row carries its outcome and its workspace, and the review dashboard is six queries over them](../decisions/0097-every-run-row-carries-its-outcome-and-workspace-and-the-review-dashboard-is-six-queries-over-them.md) | Wide event (one fact row per run, every metric a query over it) with closed vocabularies named after the OpenTelemetry semantic conventions; classification as a report-side mapping, never a stored judgement | proposed | 2026-10-09 |
 
 <!-- /generated:decision-records -->
 
