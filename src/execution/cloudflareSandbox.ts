@@ -281,6 +281,7 @@ export class CloudflareSandboxExecutor implements Executor {
     span?: Span,
     skipScrub = false,
     singleSend = false,
+    logObservation = false,
   ): Promise<Record<string, unknown>> {
     if (signal?.aborted) throw sandboxStopped(route);
     if (this.opts.scrubLegacyCredentials && !skipScrub) {
@@ -320,7 +321,7 @@ export class CloudflareSandboxExecutor implements Executor {
     for (;;) {
       const answer = await this.send(route, sent, headers, budgetMs, signal, span, singleSend);
       if (answer.kind === "ok") return answer.data;
-      if (singleSend)
+      if (singleSend && !(logObservation && answer.knownRuntimeBusy === true))
         throw new ExecCapacityError(
           "The typed command was refused before execution.",
           undefined,
@@ -347,6 +348,7 @@ export class CloudflareSandboxExecutor implements Executor {
                 ...(answer.containerId !== undefined ? { containerId: answer.containerId } : {}),
               }
             : undefined,
+          singleSend ? answer.executionDiagnostic : undefined,
         );
       }
       if (answer.reason !== lastReason) {
@@ -381,6 +383,8 @@ export class CloudflareSandboxExecutor implements Executor {
         refusal: string;
         containerId?: string;
         executionDiagnostic?: TypedExecutionDiagnostic;
+        /** Fresh native refusal qualification, never a replayed diagnostic. */
+        knownRuntimeBusy?: true;
       }
   > {
     // Sandbox cold starts can 5xx on a thread's first command — retry briefly.
@@ -462,6 +466,7 @@ export class CloudflareSandboxExecutor implements Executor {
         return {
           kind: "busy",
           reason,
+          ...(qualified && reason === RUNTIME_BUSY_REASON ? { knownRuntimeBusy: true as const } : {}),
           ...(qualified
             ? {
                 executionDiagnostic: {
@@ -529,6 +534,7 @@ export class CloudflareSandboxExecutor implements Executor {
       opts?.span,
       false,
       true,
+      opts?.busyObservation === "harness_log",
     );
     if (
       typeof r.stdout !== "string" ||
