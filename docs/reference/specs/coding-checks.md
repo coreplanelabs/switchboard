@@ -40,6 +40,7 @@ Every coding workspace receives the same task-directed validation guidance. The 
 | A lost pending or result state acknowledgement grants neither command dispatch nor completion credit. The existing original-generation write-through reconciles only exact canonical state; an absent or different state stays held. Later reconciliation does not silently revive the failed capability or replay the command. | `[unit]` `src/core/checkExecution.test.ts::recorded checks with uncertain canonical ACK::*` |
 
 | Checkout metadata uses its own existing preflight allowance, clipped by the remaining run and originating call budget. A short command timeout cannot alone cut off metadata; the business command still uses its requested timeout. | `[unit]` `src/core/checkExecution.test.ts::recorded coding checks::records a short command after metadata takes longer than the command timeout`; `src/core/checkExecution.test.ts::recorded coding checks::distinguishes metadata deadline*` |
+| A selected process timeout does not cut off its remote response at the same instant. The existing executor response margin stays clipped to the original run and call allowance; process timeouts, run stops and call stops still record an unknown interrupted outcome. | `[unit]` `src/core/checkExecution.test.ts::recorded coding checks::keeps the process timeout while awaiting its*` |
 
 ## Evaluation procedure
 

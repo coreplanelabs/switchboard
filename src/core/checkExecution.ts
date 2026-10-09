@@ -8,7 +8,7 @@ import {
   type Executor,
   type ExecResult,
 } from "../execution/executor.js";
-import { bashBudgetWithinRun, clampBashTimeout } from "../execution/bashTimeout.js";
+import { bashBudgetWithinRun, clampBashTimeout, EXEC_CALL_MARGIN_MS } from "../execution/bashTimeout.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { FIRST_TEST_PREFLIGHT_MS } from "./budgets.js";
 import { typedExecutionDiagnosticOf, type TypedExecutionDiagnostic } from "../execution/typedExecutionDiagnostic.js";
@@ -331,7 +331,7 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
     if (!(await persist())) return unavailable("persistence_failed");
     const dispatchAllowed = await authorized(input.command, timeoutMs);
     let executionDiagnostic: TypedExecutionDiagnostic | undefined;
-    const dispatchBudget = budget();
+    const dispatchBudget = budget(receipt.timeoutMs + EXEC_CALL_MARGIN_MS);
     // A known pre-dispatch refusal is different from a command whose response
     // was lost. Recording that difference avoids an unnecessary recovery hold.
     if (signal.aborted || dispatchBudget.kind === "exhausted") {
@@ -343,7 +343,11 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
         timeoutMs,
         dispatchBudget.kind === "clipped" ? dispatchBudget.timeoutMs : requestedTimeout,
       );
-      const commandSignal = execDeadline(receipt.timeoutMs, signal);
+      // The executor enforces the process timeout; its response can arrive later.
+      const commandSignal = execDeadline(
+        dispatchBudget.kind === "clipped" ? dispatchBudget.timeoutMs : receipt.timeoutMs + EXEC_CALL_MARGIN_MS,
+        signal,
+      );
       try {
         const temporaryDirectory = binding.temporaryDirectory?.();
         const result = boundedResult(

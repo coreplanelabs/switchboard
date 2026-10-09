@@ -88,6 +88,12 @@ export class PiRpcTransport implements PiTransport {
   /** The last read was short — fewer than `LOG_READ_BYTES` — so the log held
    *  no more at that moment; a full read means more follows at once. */
   private lastReadShort = false;
+  private pendingRead: Promise<Uint8Array> | undefined;
+
+  /** The container's bounded read, distinct from waiting for the next record. */
+  get readInFlight(): Promise<Uint8Array> | undefined {
+    return this.pendingRead;
+  }
   /** Records read and not yet handed out: the rest of the chunk being consumed. */
   private unhanded = 0;
   readonly lines: AsyncIterable<string>;
@@ -278,7 +284,13 @@ export class PiRpcTransport implements PiTransport {
     let idle = 0;
     while (!this.closed) {
       if (this.sendError) throw this.sendError;
-      const chunk = await this.deps.container.readLog(this.deps.paths.log, this.offset, LOG_READ_BYTES);
+      this.pendingRead = this.deps.container.readLog(this.deps.paths.log, this.offset, LOG_READ_BYTES);
+      let chunk: Uint8Array;
+      try {
+        chunk = await this.pendingRead;
+      } finally {
+        this.pendingRead = undefined;
+      }
       this.lastReadShort = chunk.length < LOG_READ_BYTES;
       if (chunk.length > 0) {
         idle = 0;
