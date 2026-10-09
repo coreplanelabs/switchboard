@@ -27,7 +27,7 @@ describe("Responses unknown terminal diagnostics", () => {
         'private invalid JSON\n\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"private later transient"}}}',
         "malformed_json",
       ],
-      ["null", "consumer_rejected"],
+      ["null", "unverified_terminal"],
       [
         JSON.stringify({
           type: "response.failed",
@@ -142,7 +142,7 @@ describe("Responses byte budgets", () => {
     await expect.poll(() => capacity.storageBytes).toBe(0);
   });
 
-  it("refuses a maximal finite frame before SDK or usage acceptance and holds its prepared graph through exit", async () => {
+  it("refuses a maximal finite frame before wire or usage acceptance and holds its prepared graph through exit", async () => {
     const capacity = new ResponsesValidationCapacity({ workers: 1, queued: 0 });
     const reservation = await capacity.reserve();
     reservation.beginSource();
@@ -172,7 +172,6 @@ describe("Responses byte budgets", () => {
         return worker;
       },
     });
-    const consume = vi.spyOn(consumer, "consume");
     const seen: unknown[] = [];
     const kinds: string[] = [];
     const boundary = new ResponsesFailureBoundary({ model: "test" }, (value) => seen.push(value), {
@@ -188,7 +187,6 @@ describe("Responses byte budgets", () => {
       expect(text).toContain("consumer_rejected");
       expect(prepared).toBe(true);
       expect(kinds).toEqual(["storage"]);
-      expect(consume).not.toHaveBeenCalled();
       expect(seen).toEqual([]);
       expect(boundary.failure).toBeUndefined();
       expect(storageAtExit).toBeGreaterThan(pressure.bytes + raw.bytes + 4096);
@@ -199,7 +197,6 @@ describe("Responses byte budgets", () => {
       raw.release();
       pressure.release();
       reservation.finishTransport();
-      consume.mockRestore();
     }
     await expect.poll(() => capacity.storageBytes).toBe(0);
   });
@@ -210,8 +207,7 @@ describe("Responses byte budgets", () => {
     reservation.beginSource();
     const pressure = reservation.reserveStorage(416 * 1024 * 1024, "prior-owner-pressure");
     const consumer = new ResponsesConsumer("test", { reservation, capacity: reservation.capacity });
-    const parse = vi.spyOn(consumer, "parseJSON"),
-      consume = vi.spyOn(consumer, "consume");
+    const parse = vi.spyOn(consumer, "parseJSON");
     const seen: unknown[] = [];
     const boundary = new ResponsesFailureBoundary({ model: "test" }, (event) => seen.push(event), {
       consumer,
@@ -232,7 +228,6 @@ describe("Responses byte budgets", () => {
       expect(text).toContain("consumer_rejected");
       expect(text).not.toContain("provider_failure");
       expect(parse).not.toHaveBeenCalled();
-      expect(consume).not.toHaveBeenCalled();
       expect(seen).toEqual([]);
       expect(boundary.failure).toBeUndefined();
     } finally {
@@ -240,7 +235,6 @@ describe("Responses byte budgets", () => {
       pressure.release();
       reservation.finishTransport();
       parse.mockRestore();
-      consume.mockRestore();
     }
     await expect.poll(() => capacity.storageBytes).toBe(0);
   });
@@ -592,7 +586,7 @@ describe("Responses validator lifecycle", () => {
     }
   });
 
-  it("releases a validator on readable cancellation without flush or SDK completion", async () => {
+  it("releases a validator on readable cancellation without flush or model completion", async () => {
     for (const partial of [false, true]) {
       const capacity = new ResponsesValidationCapacity({ workers: 1, queued: 0 });
       const boundary = new ResponsesFailureBoundary({ model: "test" }, undefined, { capacity });
@@ -726,9 +720,8 @@ describe("Responses validator lifecycle", () => {
         const worker = new Worker(
           `
           const {parentPort,workerData}=require('node:worker_threads');
-          (async()=>{const {responsesFixtureProtocol}=await require('tsx/esm/api').tsImport(workerData.protocol, __filename);const rpc=responsesFixtureProtocol(parentPort);
-          parentPort.on('message',request=>{if(rpc.control(request))return;parentPort.postMessage({broken:true});});
-          parentPort.postMessage({ready:true});})();
+          parentPort.on('message',()=>parentPort.postMessage({broken:true}));
+          parentPort.postMessage({ready:true});
         `,
           { eval: true, env: {}, execArgv: ["--import", "tsx"], workerData: { protocol: fixtureProtocolUrl } },
         );
@@ -816,7 +809,9 @@ describe("Responses validator lifecycle", () => {
       (error: unknown) => error,
     );
     try {
-      await other.consume({ type: "response.created", response: { id: "other" } });
+      const parsed = await other.parseJSON('{"type":"response.created","response":{"id":"other"}}');
+      expect(parsed).toMatchObject({ ok: true, value: { type: "response.created", response: { id: "other" } } });
+      if (parsed.ok) parsed.release?.();
       source.enqueue(sseFrame({ type: "response.created", response: { id: "queued" } }));
       await expect.poll(() => capacity.queuedCount).toBe(1);
       source.error(original);
@@ -852,7 +847,7 @@ describe("Responses validator lifecycle", () => {
           const block=()=>{workerData.probe.postMessage('blocked');Atomics.wait(new Int32Array(workerData.gate),0,0);};
           if(workerData.phase==='startup') block();
           (async()=>{const {responsesFixtureProtocol}=await require('tsx/esm/api').tsImport(workerData.protocol, __filename);const rpc=responsesFixtureProtocol(parentPort);
-          parentPort.on('message',request=>{if(request.op==='parse')block();if(rpc.control(request))return;rpc.accepted(request,true);});
+          parentPort.on('message',request=>{if(request.op==='parse')block();rpc.control(request);});
           parentPort.postMessage({ready:true});})();
         `,
             {
@@ -979,7 +974,7 @@ describe("Responses validator lifecycle", () => {
     expect(source.locked).toBe(false);
   });
 
-  it("preserves an upstream source error while the pinned SDK write is blocked without caller abort", async () => {
+  it("preserves an upstream source error while neutral JSON parsing is blocked without caller abort", async () => {
     const capacity = new ResponsesValidationCapacity({ workers: 1, queued: 0 });
     const interruptions: string[] = [];
     const probe = new MessageChannel();
@@ -998,24 +993,13 @@ describe("Responses validator lifecycle", () => {
           `
           const {parentPort,workerData}=require('node:worker_threads');
           (async () => {
-            const {ResponsesConsumer}=await import(workerData.sdk);
-            const consumer=new ResponsesConsumer('test');
             const {responsesFixtureProtocol}=await require('tsx/esm/api').tsImport(workerData.protocol, __filename);const rpc=responsesFixtureProtocol(parentPort);
-            parentPort.on('message', async request => {
-              if(rpc.control(request))return;
-              const event=request.op==='consume'?rpc.event(request):undefined;
-              if(request.op==='consume' && event.type==='response.function_call_arguments.delta') {
-                const delta=event.delta;
-                // Block inside the unchanged SDK's access to this event. The
-                // getter returns the original bytes if cleanup releases it.
-                Object.defineProperty(event,'delta',{get() {
-                  workerData.probe.postMessage('sdk busy');
-                  Atomics.wait(new Int32Array(workerData.gate),0,0);
-                  return delta;
-                }});
+            parentPort.on('message', request => {
+              if(request.op==='parse' && request.target==='frame' && rpc.event(request).type==='response.function_call_arguments.delta') {
+                workerData.probe.postMessage('parser busy');
+                Atomics.wait(new Int32Array(workerData.gate),0,0);
               }
-              const accepted=request.op==='close' ? await consumer.close() : await consumer.consume(event);
-              rpc.accepted(request,accepted);
+              rpc.control(request);
             });
             parentPort.postMessage({ready:true});
           })();
@@ -1025,7 +1009,6 @@ describe("Responses validator lifecycle", () => {
             env: {},
             execArgv: ["--import", "tsx"],
             workerData: {
-              sdk: new URL("./responsesSdkConsumer.ts", import.meta.url).href,
               gate,
               probe: probe.port2,
               protocol: fixtureProtocolUrl,
@@ -1101,16 +1084,15 @@ describe("Responses validator lifecycle", () => {
       },
       createWorker: () => {
         // An independently blocked validator isolates the Web Streams abort
-        // ordering from whether a particular SDK input happens to finish.
+        // ordering from whether a particular parse happens to finish.
         const worker = new Worker(
           `
           const {parentPort,workerData}=require('node:worker_threads');
           (async()=>{const {responsesFixtureProtocol}=await require('tsx/esm/api').tsImport(workerData.protocol, __filename);const rpc=responsesFixtureProtocol(parentPort);
           parentPort.on('message',request=>{
-            if(rpc.control(request))return;
-            const event=request.op==='consume'?rpc.event(request):undefined;
-            if(request.op==='consume'&&event.type==='response.function_call_arguments.delta'){workerData.probe.postMessage('busy');while(true){}}
-            else rpc.accepted(request,true);
+            const event=request.op==='parse'&&request.target==='frame'?rpc.event(request):undefined;
+            if(event?.type==='response.function_call_arguments.delta'){workerData.probe.postMessage('busy');while(true){}}
+            rpc.control(request);
           });parentPort.postMessage({ready:true});})();
         `,
           {

@@ -2609,8 +2609,12 @@ describe("Responses stream failure boundary", () => {
     const created = { type: "response.created", response: { id: "private-provider-payload" } };
     let queued: Promise<unknown>[] = [];
     try {
-      await Promise.all(occupants.map((consumer) => consumer.consume(created)));
-      queued = waiters.map((consumer) => consumer.consume(created).catch(() => {}));
+      const graphs = await Promise.all(occupants.map((consumer) => consumer.parseJSON(JSON.stringify(created))));
+      for (const graph of graphs) {
+        expect(graph).toMatchObject({ ok: true, value: { type: "response.created" } });
+        if (graph.ok) graph.release?.();
+      }
+      queued = waiters.map((consumer) => consumer.parseJSON(JSON.stringify(created)).catch(() => {}));
       await expect.poll(() => responsesValidationCapacity.queuedCount).toBe(2);
       const h = harness({ answer: () => streamingResponse([frame(created)], h.clock, 1) });
       const levels: string[] = [];
@@ -2722,7 +2726,7 @@ describe("Responses stream failure boundary", () => {
     }).result();
   };
 
-  it.each(["admission", "request_validation", "response_validation", "sdk_consume"] as const)(
+  it.each(["admission", "request_validation", "response_validation"] as const)(
     "distinguishes authenticated %s rejection across pi without granting retry",
     async (phase) => {
       const abort = new AbortController();
@@ -2730,7 +2734,7 @@ describe("Responses stream failure boundary", () => {
       const signal = phase === "admission" ? abort.signal : undefined;
       const rejection = {
         phase,
-        kind: phase === "admission" ? "aborted" : phase === "sdk_consume" ? "rejected" : "graph",
+        kind: phase === "admission" ? "aborted" : "graph",
       };
       let extra: unknown = "leaf";
       for (let depth = 0; depth <= RESPONSES_VALIDATION_LIMITS.graphDepth; depth++) extra = { child: extra };
@@ -3157,41 +3161,13 @@ describe("Responses stream failure boundary", () => {
       }
   });
 
-  it("fatal SDK and pi consumer events prevent unread terminal tails from gaining authority", async () => {
+  it("actual wire fatal events prevent later terminal and usage credit", async () => {
     for (const bad of [
       "data: not-json\n\n",
       "data:\n\n",
       "event: response.created\n\n",
       "event: thread.example\ndata: not-json\n\n",
       "data: null\n\n",
-      frame({ type: "response.created" }),
-      frame({ type: "response.created", response: null }),
-      frame({
-        type: "response.output_item.added",
-        output_index: 0,
-        item: { type: "function_call", id: "item", call_id: "call", name: "bash", arguments: 1 },
-      }) +
-        frame({
-          type: "response.output_item.done",
-          output_index: 0,
-          item: { type: "function_call", id: "item", call_id: "call", name: "bash", arguments: "" },
-        }),
-      frame({
-        type: "response.output_item.added",
-        output_index: 0,
-        item: {
-          type: "function_call",
-          id: "item",
-          call_id: "call",
-          name: "bash",
-          arguments: { length: { toString: 0 } },
-        },
-      }) +
-        frame({
-          type: "response.function_call_arguments.done",
-          output_index: 0,
-          arguments: "[object Object]x",
-        }),
     ])
       for (const terminal of [
         {
@@ -3373,7 +3349,7 @@ describe("Responses stream failure boundary", () => {
     expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe("ok");
   });
 
-  it("admits two complete2MiB SDK streams with actual retained request and prior shadow charges", async () => {
+  it("admits two complete2MiB harness SDK streams without gateway output shadow state", async () => {
     const command = "x".repeat(2 * 1024 * 1024),
       args = JSON.stringify({ command });
     const item = { type: "function_call", id: "item", call_id: "call", name: "bash", arguments: "" };
@@ -3505,7 +3481,7 @@ describe("Responses stream failure boundary", () => {
       }
       expect(activeAtPeak).toBe(2);
       expect(peak).toBeLessThanOrEqual(512 * 1024 * 1024);
-      expect(peakOwners["worker-sdk-shadow"]).toBeGreaterThan(0);
+      expect(peakOwners["worker-sdk-shadow"]).toBeUndefined();
       expect(peakOwners["request-payload"]).toBeGreaterThan(0);
       expect(refused).toEqual([]);
       await expect.poll(() => responsesValidationCapacity.storageBytes).toBe(0);
@@ -3750,6 +3726,277 @@ describe("createModelProxyHandler — the node adapter", () => {
       ended: () => ended,
     };
   }
+
+  it.each([false, true])(
+    "checks latched neutral worker failure before EOF availability, workerDied=%s",
+    async (workerDied) => {
+      let source!: ReadableStreamDefaultController<Uint8Array>;
+      const wire =
+        'data: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":20,"output_tokens":10}}}\n\n';
+      const h = harness({
+        answer: () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                source = controller;
+                controller.enqueue(new TextEncoder().encode(wire));
+              },
+            }),
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+      });
+      const spy = vi.spyOn(Worker.prototype, "postMessage");
+      const levels: string[] = [];
+      h.deps.plane = {
+        level: (_p, side) => {
+          levels.push(side);
+        },
+        park: () => {},
+      };
+      const token = h.bearers.mint(h.responsesGrant("neutral-eof"));
+      const input = fakeReqRes("POST", OPENAI_RESPONSES_PATH, bearer(token), JSON.stringify(responsesRequest()));
+      try {
+        createModelProxyHandler(h.deps)(input.req, input.res);
+        await vi.waitFor(() => expect(input.text()).toBe(wire));
+        const frameCall = spy.mock.calls.findIndex(
+          ([message]) => message?.op === "parse" && message.target === "frame",
+        );
+        const parser = spy.mock.contexts[frameCall] as Worker | undefined;
+        if (!parser) throw new Error("owned parser was not created");
+        if (workerDied) await parser.terminate();
+        source.close();
+        await vi.waitFor(() => expect(input.ended()).toBe(true));
+        const turn = h.ends.find((row) => row.name === "model.turn")!;
+        expect(turn.status).toBe(workerDied ? "error" : "ok");
+        expect(turn.attrs.inputTokens).toBe(20);
+        expect(turn.attrs.outputTokens).toBe(10);
+        expect(turn.attrs.usageComplete).toBe(!workerDied);
+        expect(levels).toEqual(workerDied ? [] : ["up"]);
+        if (workerDied) {
+          const ending = JSON.parse(input.text().trim().split("\n\n").at(-1)!.slice(6));
+          expect(readProxyUnknownTerminal(responsesEndingEnvelope(ending))).toMatchObject({
+            reason: "consumer_rejected",
+            rejection: { phase: "response_validation", kind: "worker-exit" },
+          });
+        } else expect(input.text()).toBe(wire);
+        expect(h.calls).toHaveLength(1);
+        await vi.waitFor(() => expect(responsesValidationCapacity.activeCount).toBe(0));
+        expect(responsesValidationCapacity.storageBytes).toBe(0);
+      } finally {
+        input.resRaw.emit("close");
+        spy.mockRestore();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "settles concurrent stock-SDK transport without later terminal credit, rejected=%s",
+    async (rejected) => {
+      let settleCancel!: () => void;
+      const cancellation = new Promise<void>((resolve) => {
+        settleCancel = resolve;
+      });
+      let cancelled = 0;
+      const events = [
+        { type: "response.created", response: { id: "response" } },
+        {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "item",
+            call_id: "call",
+            name: "bash",
+            arguments: rejected ? { length: { toString: 0 } } : '{"command":"echo ok"}',
+          },
+        },
+        {
+          type: "response.function_call_arguments.done",
+          output_index: 0,
+          arguments: rejected ? "[object Object]x" : '{"command":"echo ok"}',
+        },
+        ...(!rejected
+          ? [
+              {
+                type: "response.completed",
+                response: { status: "completed", output: [], usage: { input_tokens: 20, output_tokens: 10 } },
+              },
+            ]
+          : []),
+      ];
+      const wire = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
+      const h = harness({
+        answer: () =>
+          new Response(
+            new ReadableStream<Uint8Array>(
+              {
+                start(controller) {
+                  controller.enqueue(new TextEncoder().encode(wire));
+                  if (!rejected) controller.close();
+                },
+                cancel() {
+                  cancelled++;
+                  return cancellation;
+                },
+              },
+              { highWaterMark: 0 },
+            ),
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+      });
+      const levels: string[] = [];
+      h.deps.plane = {
+        level: (_p, side) => {
+          levels.push(side);
+        },
+        park: () => {},
+      };
+      const token = h.bearers.mint(h.responsesGrant("concurrent-sdk"));
+      const server = createServer(createModelProxyHandler(h.deps));
+      const control = new AbortController();
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("owned HTTP server missing");
+      const model: Model<"openai-responses"> = {
+        id: "gpt-5.4",
+        name: "test",
+        api: "openai-responses",
+        provider: "openai",
+        baseUrl: `http://127.0.0.1:${address.port}/v1`,
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 1000,
+      };
+      try {
+        const message = await streamResponses(model, normalizeContext({ messages: [] }), {
+          apiKey: token,
+          maxRetries: 0,
+          signal: control.signal,
+        }).result();
+        if (rejected) {
+          expect(message.stopReason).toBe("error");
+          expect(
+            new PiBridge({ emit: () => {}, clock: () => START }).observe({ type: "message_end", message })
+              .providerFailure,
+          ).toBeUndefined();
+          // The original run control cancels its real fetch, not a replay or synthetic terminal.
+          control.abort();
+          await vi.waitFor(() => expect(cancelled).toBe(1));
+          expect(responsesValidationCapacity.activeCount).toBe(1);
+          await vi.waitFor(() => expect(h.ends.find((row) => row.name === "model.turn")?.status).toBe("error"));
+          const turn = h.ends.find((row) => row.name === "model.turn")!;
+          expect(turn.attrs.inputTokens).toBeUndefined();
+          expect(turn.attrs.stopReason).toBeUndefined();
+          expect(levels).toEqual([]);
+          settleCancel();
+        } else {
+          expect(message.stopReason).toBe("toolUse");
+          expect(message.content).toMatchObject([
+            { type: "toolCall", name: "bash", arguments: { command: "echo ok" } },
+          ]);
+          await vi.waitFor(() => expect(h.ends.find((row) => row.name === "model.turn")?.status).toBe("ok"));
+          expect(h.ends.find((row) => row.name === "model.turn")?.attrs).toMatchObject({
+            inputTokens: 20,
+            outputTokens: 10,
+            usageComplete: true,
+          });
+          expect(levels).toEqual(["up"]);
+        }
+        expect(h.calls).toHaveLength(1);
+        await vi.waitFor(() => expect(responsesValidationCapacity.activeCount).toBe(0));
+        expect(responsesValidationCapacity.storageBytes).toBe(0);
+      } finally {
+        control.abort();
+        settleCancel();
+        server.closeAllConnections();
+        await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+      }
+    },
+  );
+
+  it("assigns SDK argument rejection to the harness while keeping gateway wire usage independent", async () => {
+    const model: Model<"openai-responses"> = {
+      id: "gpt-5.4",
+      name: "test",
+      api: "openai-responses",
+      provider: "openai",
+      baseUrl: "https://proxy.test/v1",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200000,
+      maxTokens: 1000,
+    };
+    for (const accepted of [true, false]) {
+      const argument = accepted ? '{"command":"echo ok"}' : { length: { toString: 0 } };
+      const events = [
+        { type: "response.created", response: { id: "response" } },
+        {
+          type: "response.output_item.added",
+          output_index: 0,
+          item: { type: "function_call", id: "item", call_id: "call", name: "bash", arguments: argument },
+        },
+        {
+          type: "response.function_call_arguments.done",
+          output_index: 0,
+          arguments: accepted ? '{"command":"echo ok"}' : "[object Object]x",
+        },
+        {
+          type: "response.completed",
+          response: { status: "completed", output: [], usage: { input_tokens: 20, output_tokens: 10 } },
+        },
+      ];
+      const wire = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
+      const h = harness({ answer: () => new Response(wire, { headers: { "content-type": "text/event-stream" } }) });
+      const levels: string[] = [];
+      h.deps.plane = {
+        level: (_p, side) => {
+          levels.push(side);
+        },
+        park: () => {},
+      };
+      const token = h.bearers.mint(h.responsesGrant("wire-and-harness"));
+      const input = fakeReqRes("POST", OPENAI_RESPONSES_PATH, bearer(token), JSON.stringify(responsesRequest()));
+      try {
+        createModelProxyHandler(h.deps)(input.req, input.res);
+        await vi.waitFor(() => expect(input.ended()).toBe(true));
+        expect(input.status()).toBe(200);
+        expect(input.text()).toBe(wire);
+        const turn = h.ends.find((row) => row.name === "model.turn")!;
+        expect(turn.status).toBe("ok");
+        expect(turn.attrs.inputTokens).toBe(20);
+        expect(turn.attrs.usageComplete).toBe(true);
+        expect(levels).toEqual(["up"]);
+        const message = await streamResponses(model, normalizeContext({ messages: [] }), {
+          apiKey: "synthetic-harness-token",
+          maxRetries: 0,
+          fetch: (async () =>
+            new Response(input.text(), { headers: { "content-type": "text/event-stream" } })) as typeof fetch,
+        }).result();
+        if (accepted) {
+          expect(message.stopReason).toBe("toolUse");
+          expect(message.content).toMatchObject([
+            { type: "toolCall", id: "call|item", name: "bash", arguments: { command: "echo ok" } },
+          ]);
+        } else {
+          expect(message.stopReason).toBe("error");
+          const observed = new PiBridge({ emit: () => {}, clock: () => START }).observe({
+            type: "message_end",
+            message,
+          });
+          expect(observed.terminalFailure?.kind).toBe("unknown");
+          expect(observed.providerFailure).toBeUndefined();
+        }
+        expect(h.calls).toHaveLength(1);
+        await vi.waitFor(() => expect(responsesValidationCapacity.activeCount).toBe(0));
+        expect(responsesValidationCapacity.storageBytes).toBe(0);
+      } finally {
+        input.resRaw.emit("close");
+      }
+    }
+  });
 
   it.each(["finish", "close"] as const)(
     "keeps a raw-refused source through HTTP %s and deferred original cancellation",

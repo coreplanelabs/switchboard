@@ -66,10 +66,14 @@ const git = (...args: string[]) => {
   expect(result.status, result.stderr).toBe(0);
   return result.stdout.trim();
 };
-const guard = (range = "base", race?: { path: string; target: string; occurrence?: number; action?: string }) =>
+const guard = (
+  range = "base",
+  race?: { path: string; target: string; occurrence?: number; action?: string },
+  flags = ["--test-guard"],
+) =>
   spawnSync(
     process.execPath,
-    ["--require", "./race.cjs", "--import", "tsx", "scripts/specs-coverage.ts", "--changed", range, "--test-guard"],
+    ["--require", "./race.cjs", "--import", "tsx", "scripts/specs-coverage.ts", "--changed", range, ...flags],
     {
       cwd: fixture,
       encoding: "utf8",
@@ -112,6 +116,100 @@ beforeEach(() => {
 afterEach(() => rmSync(fixture, { recursive: true, force: true }));
 
 describe("specs:coverage working-tree blobs", () => {
+  it("covers a deleted module only through its revised retained base owner", () => {
+    write("src/removed.ts", "export const value = 1;\n");
+    write(owner, "- **Code**: `src/removed.ts`\n" + originalSpec);
+    git("add", ".");
+    git("commit", "-qm", "source owner");
+    git("tag", "-f", "base");
+    rmSync(join(fixture, "src/removed.ts"));
+    const unchanged = guard("base", undefined, ["--require", "--json"]);
+    expect(unchanged.status).toBe(1);
+    expect(JSON.parse(unchanged.stdout).uncovered).toEqual(["src/removed.ts"]);
+    write("src/replacement.ts", "export const value = 2;\n");
+    write(owner, "- **Code**: `src/replacement.ts`\n" + originalSpec + "Replacement owns the behavior.\n");
+    git("add", ".");
+    git("commit", "-qm", "replace owned source");
+    const revised = guard("base..HEAD", undefined, ["--require", "--json"]);
+    expect(revised.status, revised.stderr).toBe(0);
+    expect(JSON.parse(revised.stdout)).toEqual({
+      touched: [{ spec: owner, because: ["src/replacement.ts", "src/removed.ts"] }],
+      uncovered: [],
+    });
+    const plain = spawnSync(
+      process.execPath,
+      ["--import", "tsx", "scripts/specs-coverage.ts", "--paths", "src/removed.ts", "--require", "--json"],
+      { cwd: fixture, encoding: "utf8", timeout: 10_000 },
+    );
+    expect(plain.status).toBe(1);
+    expect(JSON.parse(plain.stdout)).toEqual({ touched: [], uncovered: ["src/removed.ts"] });
+    const stdin = spawnSync(process.execPath, ["--import", "tsx", "scripts/specs-coverage.ts", "--require", "--json"], {
+      cwd: fixture,
+      encoding: "utf8",
+      timeout: 10_000,
+      input: "src/removed.ts\n",
+    });
+    expect(stdin.status).toBe(1);
+    expect(JSON.parse(stdin.stdout)).toEqual({ touched: [], uncovered: ["src/removed.ts"] });
+    const unreadable = guard("missing-ref", undefined, ["--require"]);
+    expect(unreadable.status).toBe(1);
+    expect(unreadable.stderr).toContain("missing-ref");
+  });
+
+  it("does not attribute unowned deleted tests or docs to separately changed specs", () => {
+    write("src/a.ts", "export const a = 1;\n");
+    write("src/b.ts", "export const b = 1;\n");
+    const other = "docs/reference/specs/other.md";
+    write(owner, "- **Code**: `src/a.ts`\n" + originalSpec);
+    write(other, "- **Code**: `src/b.ts`\n");
+    write("src/unowned.test.ts", 'it("unowned", () => { expect(1).toBe(1); });\n');
+    write("notes.md", "unowned document\n");
+    git("add", ".");
+    git("commit", "-qm", "independent owners");
+    git("tag", "-f", "base");
+    rmSync(join(fixture, "src/unowned.test.ts"));
+    rmSync(join(fixture, "notes.md"));
+    write(owner, "- **Code**: `src/a.ts`\n" + originalSpec + "Revised a.\n");
+    write(other, "- **Code**: `src/b.ts`\nRevised b.\n");
+    git("add", ".");
+    git("commit", "-qm", "unowned removals");
+    const report = guard("base..HEAD", undefined, ["--require", "--json"]);
+    expect(report.status).toBe(0);
+    expect(JSON.parse(report.stdout)).toEqual({ touched: [], uncovered: [] });
+    const loss = guard("base..HEAD", undefined, ["--require", "--test-guard"]);
+    expect(loss.status).toBe(1);
+    expect(loss.stdout).toContain("no base spec covers it");
+  });
+
+  it.each(["missing-owner", "pure-owner-rename", "deleted-owner", "stale-owner", "new-unknown"] as const)(
+    "retains deletion ownership refusal for %s",
+    (kind) => {
+      write("src/removed.ts", "export const value = 1;\n");
+      if (kind !== "missing-owner") write(owner, "- **Code**: `src/removed.ts`\n" + originalSpec);
+      git("add", ".");
+      git("commit", "-qm", "source owner");
+      git("tag", "-f", "base");
+      rmSync(join(fixture, "src/removed.ts"));
+      if (kind === "pure-owner-rename") git("mv", owner, "docs/reference/specs/renamed.md");
+      else if (kind === "deleted-owner") rmSync(join(fixture, owner));
+      else
+        write(
+          owner,
+          (kind === "stale-owner" ? "- **Code**: `src/removed.ts`\n" : "") +
+            originalSpec +
+            "Updated unrelated criterion.\n",
+        );
+      if (kind === "new-unknown") write("src/unknown.ts", "export const unknown = 1;\n");
+      git("add", ".");
+      git("commit", "-qm", "source change");
+      const result = guard("base..HEAD", undefined, ["--require", "--json"]);
+      expect(result.status).toBe(1);
+      expect(JSON.parse(result.stdout).uncovered).toEqual(
+        kind === "new-unknown" ? ["src/unknown.ts"] : ["src/removed.ts"],
+      );
+    },
+  );
+
   it("checks large committed test snapshots without losing the proof-removal guard", () => {
     const padding = `/* ${"x".repeat(1024 * 1024)} */\n`;
     write(testFile, originalTest + padding);
