@@ -120,7 +120,13 @@ import {
 } from "./process.js";
 import { piApiFor } from "../piAi.js";
 import { parsePiLine } from "./protocol.js";
-import { RELAY_POLL_WINDOW_MS, stillRunningNote, type LiveHarness, type RelayedToolAnswer } from "./relay.js";
+import {
+  relayedToolDefinitions,
+  RELAY_POLL_WINDOW_MS,
+  stillRunningNote,
+  type LiveHarness,
+  type RelayedToolAnswer,
+} from "./relay.js";
 import { settlePushCall, type ToolRuleContext } from "./toolRules.js";
 import { PiRpcTransport } from "./transport.js";
 
@@ -1042,7 +1048,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         ...(run.commandPolicy ? { commandPolicy: run.commandPolicy } : {}),
         system: run.system,
         ...(run.environment !== undefined ? { environment: run.environment } : {}),
-        relayTools: run.tools.map((t) => t.name),
+        relayTools: relayedToolDefinitions(live),
         ...(deps.compaction ? { compaction: deps.compaction } : {}),
       };
       // What pi starts on. After a restart where pi died with its container

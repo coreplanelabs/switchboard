@@ -100,7 +100,7 @@ import {
 import { openCodeImportBody, openCodeSeedAndRequest, openCodeSessionId, openCodeSettlementNote } from "./session.js";
 import { OPENCODE_TAILER_SOURCE } from "./tailerSource.js";
 import { PROXY_PROVIDER } from "../pi/process.js";
-import type { LiveHarness } from "../pi/relay.js";
+import { relayedToolDefinitions, type LiveHarness } from "../pi/relay.js";
 
 /** What a deployment sets for every run on OpenCode: the compaction thresholds
  *  OpenCode's own words carry (`OpenCodeCompactionConfig`; harness.md item 12).
@@ -282,7 +282,7 @@ export async function openOpenCodeRun(
     ...(run.commandPolicy ? { commandPolicy: run.commandPolicy } : {}),
     system: run.system,
     ...(run.environment !== undefined ? { environment: run.environment } : {}),
-    relayTools: run.tools.map((t) => t.name),
+    relayTools: relayedToolDefinitions(live),
     ...(settings.compaction ? { compaction: settings.compaction } : {}),
   };
   // The tier's variant on the session's model ref, exactly when the run's
@@ -459,7 +459,7 @@ export async function openOpenCodeRun(
           // The rebuilt history names the session's own tools (the record's
           // `bash`/`find` back to `shell`/`glob`), so the first tool call after
           // the rebuild reaches for a tool the session's table holds.
-          relayedTools: new Set(spec.relayTools),
+          relayedTools: new Set(spec.relayTools.map((tool) => tool.name)),
           ...(run.resume.compactions ? { compactions: run.resume.compactions.map((c) => c.entry) } : {}),
           settlements,
         });
@@ -472,7 +472,7 @@ export async function openOpenCodeRun(
             model: modelRef(run, variant),
             agent: OPENCODE_AGENT,
             at,
-            relayedTools: new Set(spec.relayTools),
+            relayedTools: new Set(spec.relayTools.map((tool) => tool.name)),
           });
         } else {
           const res = await request(deps.container, started, auth, OPENCODE_ROUTES["session.create"], {
