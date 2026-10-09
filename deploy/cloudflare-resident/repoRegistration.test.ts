@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-import { registerRepository } from "../../src/execution/repoRegistration";
+import { registerRepository, residentRecords } from "../../src/execution/repoRegistration";
 import { effectiveLimits } from "./gc";
 import { methodOf, readSource } from "./testing/sourceScan";
 
@@ -13,15 +13,17 @@ const handler = (name: string) => {
 };
 
 describe("metadata-only repo routes", () => {
-  it("admits six residents, refuses a seventh, and still admits cold metadata", async () => {
+  it("admits five residents, refuses a sixth, accepts cold metadata, and preserves existing residents above the cap", async () => {
     const cap = source.match(/^const RESIDENT_CAP = [^;]+;/m)?.[0];
     if (!cap) throw new Error("resident cap declaration missing");
     const compiled = ts.transpileModule(
-      `${cap}\nclass Registry { ${methodOf(source, "onboard")} ${methodOf(source, "limits")} }`,
+      `${cap}\nclass Registry { ${["onboard", "limits", "list", "listRepositories"].map((name) => methodOf(source, name)).join("\n")} }`,
       { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
     ).outputText;
     const Registry = runInNewContext(`${compiled}\nRegistry`, {
       registerRepository,
+      residentRecords,
+      REGISTRY_KEY_PREFIX: "resident:",
       effectiveLimits,
       TEST_OVERRIDES_KEY: "overrides",
       BUILD_ID: "test-build",
@@ -36,19 +38,35 @@ describe("metadata-only repo routes", () => {
         list: async ({ prefix }: { prefix: string }) => new Map([...rows].filter(([key]) => key.startsWith(prefix))),
       },
     };
-    for (let i = 1; i <= 6; i++) {
+    for (let i = 1; i <= 5; i++) {
       const record = { resource: `repo:acme/repo-${i}` };
       expect(await instance.onboard(record)).toEqual({ ok: true, record });
     }
     expect(await instance.onboard({ resource: "repo:acme/overflow" })).toEqual({
       ok: false,
       status: 429,
-      error: "resident cap reached (6/6); offboard a resident first, or onboard with evictColdest:true to make room",
+      error: "resident cap reached (5/5); offboard a resident first, or onboard with evictColdest:true to make room",
     });
     expect(await instance.onboard({ resource: "repo:acme/cold", noResident: true })).toEqual({
       ok: true,
       record: { resource: "repo:acme/cold", noResident: true },
     });
+
+    // A previous build may have admitted more residents than the current cap.
+    rows.set("resident:repo:acme/repo-6", { resource: "repo:acme/repo-6" });
+    expect(await instance.onboard({ resource: "repo:acme/overflow-after-upgrade" })).toEqual({
+      ok: false,
+      status: 429,
+      error: "resident cap reached (6/5); offboard a resident first, or onboard with evictColdest:true to make room",
+    });
+    expect(await instance.list()).toEqual([
+      { resource: "repo:acme/repo-1" },
+      { resource: "repo:acme/repo-2" },
+      { resource: "repo:acme/repo-3" },
+      { resource: "repo:acme/repo-4" },
+      { resource: "repo:acme/repo-5" },
+      { resource: "repo:acme/repo-6" },
+    ]);
   });
 
   it("checks registration before status touches a resident and skips provisioning for cold onboarding", () => {

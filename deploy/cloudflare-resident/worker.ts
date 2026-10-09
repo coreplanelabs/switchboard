@@ -590,9 +590,9 @@ export interface Env {
 /** Hard cap on onboarded residents, enforced atomically by the registry DO.
  *  Deliberately BELOW wrangler.jsonc's containers max_instances (10) so an
  *  over-cap onboard is always refused by the registry, never by a platform
- *  scheduling failure. Bump the two together. */
+ *  scheduling failure. Keep the platform ceiling above this cap. */
 // Past the cap, `evictColdest:true` makes room (resident-repos item 46).
-const RESIDENT_CAP = 6;
+const RESIDENT_CAP = 5;
 
 /** R2 lifetime of snapshot objects. We delete replaced/offboarded snapshots
  *  explicitly (see deleteBackupObjects); the TTL is a leak backstop, and it
