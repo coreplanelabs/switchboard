@@ -344,6 +344,91 @@ describe("judgeToolCall — bash", () => {
       expect(bash(cmd), cmd).toEqual({ verdict: "allowed" });
     }
   });
+  it("allows quoted search patterns without treating their operators as environment commands", () => {
+    for (const identity of ["read", "write"] as const) {
+      const rules = { ...ctx, identity, noShellPush: true };
+      for (const command of [
+        "rg -n '(set|update|patch).*([Aa]nnotations|[Ee]nvironment)' src --glob '!*.test.ts'; ls src",
+        "printf 'routes\\n'; rg -n 'cloudAccounts\\.(put|patch|post|set|del)' src | head -100",
+        'grep -En "(env|printenv|set)" src/config.ts',
+        "rg '# (set|update)' src",
+      ]) {
+        expect(judgeToolCall("bash", { command }, rules), command).toEqual({ verdict: "allowed" });
+      }
+      for (const command of [
+        "rg '(set|update)' src; set",
+        "rg '(set|update)' src | env",
+        'rg "$(set)" src',
+        'rg "`(set)`" src',
+        "sh -c '(set)'",
+        "rg --pre '(set)' src",
+        "node -e 'console.log(process.env)'",
+      ]) {
+        expect(judgeToolCall("bash", { command }, rules), command).toEqual({
+          verdict: "refused",
+          reason: "credential — dumps the process environment",
+        });
+      }
+    }
+  });
+  it.each(["read", "write"] as const)("allows the complete recorded static source searches for %s", (identity) => {
+    for (const command of [
+      "rg -n '(set|update|patch).*([Aa]nnotations|[Ee]nvironment)|([Aa]nnotations|[Ee]nvironment).*([Ss]et|[Uu]pdate|[Pp]atch)' apps/apis/api-cloud-infra/src packages/durable-infra-graph apps/console/app --glob '!*.test.ts' --glob '!*.json'; rg -n '\\b(saveNode|upsertNode)\\(' packages/tools/src/tools --glob '!*.test.ts'; rg -n 'gcp|googleapis' packages/workflows/cloud-sync/hostname-map.ts packages/workflows/cloud-sync/hostname-patterns.ts packages/durable-infra-graph/hostname-resolution.ts; ls apps/apis/api-cloud-infra/src/routers; sed -n '530,630p' packages/durable-infra-graph/do.ts; cat apps/console/app/composables/cloud-infra/useUpdateCloudInfraNodeAnnotations.ts; cat apps/console/app/composables/cloud-infra/useUpdateCloudInfraNodeEnvironment.ts; sed -n '1,125p' packages/workflows/cloud-sync/cross-cloud.ts",
+      "printf '=== FULL ACCOUNT SHARED OWNER 2 ===\\n'; sed -n '571,1100p' packages/durable-workspaces/operations/cloud-accounts.ts; printf '\\n=== NODE-METADATA CLIENTS ===\\n'; rg -n 'cloud_infra.nodes.(put|patch|post)|upsertNode|addNodeTool|saveNode' packages/tools/src apps/console/app --glob '*.ts' --glob '*.vue' --glob '!*.generated.ts' | head -100; printf '\\n=== GCP STATUS/LIFECYCLE ROUTES ===\\n'; rg -n 'gcpConnections|cloudAccounts\\.(put|patch|post|set|del)' apps/apis/api-cloud-accounts/src/routers/cloud-accounts | head -100",
+    ]) {
+      expect(judgeToolCall("bash", { command }, { ...ctx, identity, noShellPush: true })).toEqual({
+        verdict: "allowed",
+      });
+    }
+  });
+  it.each(["read", "write"] as const)("interpreter pipelines retain environment dump refusals for %s", (identity) => {
+    for (const command of [
+      "echo '(set)' | sh",
+      "printf 'set\\n' | grep '(set)' | sh",
+      "printf 'set\\n' | grep '(set)' | sed -e e",
+    ]) {
+      expect(judgeToolCall("bash", { command }, { ...ctx, identity, noShellPush: true })).toEqual({
+        verdict: "refused",
+        reason: "credential — dumps the process environment",
+      });
+    }
+  });
+  it("comment quotes cannot hide an executable environment dump", () => {
+    for (const identity of ["read", "write"] as const) {
+      for (const command of ["echo ok # '\n(set)\n# '", 'echo ok # "\n(set)\n# "']) {
+        expect(judgeToolCall("bash", { command }, { ...ctx, identity, noShellPush: true })).toEqual({
+          verdict: "refused",
+          reason: "credential — dumps the process environment",
+        });
+      }
+    }
+  });
+  it.each(["read", "write"] as const)(
+    "quoted command substitutions cannot hide an executable environment dump for %s",
+    (identity) => {
+      expect(
+        judgeToolCall("bash", { command: 'echo "$(printf " # "; (set))"' }, { ...ctx, identity, noShellPush: true }),
+      ).toEqual({
+        verdict: "refused",
+        reason: "credential — dumps the process environment",
+      });
+    },
+  );
+  it.each(["read", "write"] as const)(
+    "heredoc quotes cannot hide an executable environment dump for %s",
+    (identity) => {
+      expect(
+        judgeToolCall(
+          "bash",
+          { command: "echo <<EOF\n'\nEOF\n(set)\necho '\n'" },
+          { ...ctx, identity, noShellPush: true },
+        ),
+      ).toEqual({
+        verdict: "refused",
+        reason: "credential — dumps the process environment",
+      });
+    },
+  );
   it("expanding or printing a credential-named variable is refused", () => {
     const expand = { verdict: "refused", reason: "credential — expands a credential variable" };
     expect(bash('curl -H "Authorization: Bearer $GITHUB_TOKEN" https://api.github.com/user')).toEqual(expand);
