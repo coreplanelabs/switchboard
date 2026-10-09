@@ -102,7 +102,7 @@ describe("AppNav", () => {
       "Threads",
       "Runs",
       "Plane",
-      "Residents",
+      "Repositories",
       "Costs",
       "Metrics",
       "Delivery",
@@ -150,7 +150,7 @@ describe("AppNav", () => {
       mountApp(AppNav, { props: { current: "runs" }, seed: island({ costs: false }) })
         .findAll("nav.site a")
         .map((a) => a.text()),
-    ).toEqual(["Threads", "Runs", "Plane", "Residents", "Metrics", "Delivery"]);
+    ).toEqual(["Threads", "Runs", "Plane", "Repositories", "Metrics", "Delivery"]);
     const minimal = mountApp(AppNav, { props: { current: "runs" }, seed: island(MINIMAL) });
     expect(minimal.findAll("nav.site a").map((a) => a.text())).toEqual(["Threads", "Runs"]);
     expect(minimal.find('nav.site a[aria-current="page"]').attributes("href")).toBe("/runs");
@@ -295,7 +295,7 @@ describe("AppShell", () => {
       "Threads",
       "Runs",
       "Plane",
-      "Residents",
+      "Repositories",
       "Costs",
       "Metrics",
       "Delivery",
@@ -313,14 +313,14 @@ describe("AppShell", () => {
       "Threads",
       "Runs",
       "Plane",
-      "Residents",
+      "Repositories",
       "Metrics",
       "Delivery",
     ]);
     const items = menuGroups(wrapper);
     expect(items).toHaveLength(3);
     expect(items[0].map((i) => i.label)).toEqual(["Docs", "Settings"]);
-    expect(items[1].map((i) => i.label)).toEqual(["Threads", "Runs", "Plane", "Residents", "Metrics", "Delivery"]);
+    expect(items[1].map((i) => i.label)).toEqual(["Threads", "Runs", "Plane", "Repositories", "Metrics", "Delivery"]);
     expect(items[2].map((i) => i.label)).toEqual(["Light", "Dark", "System"]);
   });
 

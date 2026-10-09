@@ -19,6 +19,7 @@ export const RESIDENT_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\/[a-z0-9]
  *  a display of whatever the resident reports, never a contract the bot
  *  enforces. `live` is `{error}` when the DO could not be reached. */
 export interface ResidentRecordView {
+  noResident?: unknown;
   resource?: unknown;
   commands?: unknown;
   effects?: unknown;
@@ -36,6 +37,7 @@ export interface ResidentListing {
   count?: unknown;
   draining?: unknown;
   residents: ResidentRecordView[];
+  repositories?: ResidentRecordView[];
 }
 
 export type ResidentTone = "green" | "amber" | "red" | "grey";
@@ -251,6 +253,7 @@ export interface ResidentsIndexState {
   count: unknown;
   draining: unknown;
   residents: unknown[];
+  repositories?: unknown[];
   runs: Map<string, RunIndexRowSeed>;
 }
 
@@ -273,5 +276,6 @@ export function applyResidentsFrame(state: ResidentsIndexState, frame: Residents
     state.count = frame.count;
     state.draining = frame.draining;
     state.residents = Array.isArray(frame.residents) ? frame.residents : [];
+    state.repositories = Array.isArray(frame.repositories) ? frame.repositories : [];
   }
 }

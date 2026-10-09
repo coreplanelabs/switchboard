@@ -28,6 +28,8 @@ import type { ChannelIO, IncomingMessage } from "../types.js";
 import { runChatCommand } from "./commandRun.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { redactedInput, ROUTED_RECEIPT_PREFIX } from "./route.js";
+import { parseDirectives } from "../../directives.js";
+import { shows } from "../verbosity.js";
 
 export const OFFER_EXPIRED_LINE =
   "this offer expired after ten minutes; nothing ran, and a later request may receive a fresh confirmation";
@@ -137,6 +139,11 @@ export async function consumeAndRun(
     return refused(consumed.refused, consumed.row && "derivation" in consumed.row ? undefined : consumed.row);
   const row = parseConfirmation(structuredClone(consumed.row));
   if (!row) return UNREADABLE;
+  const verbosity = deps.config.verbosityFor(
+    row.message.channelId,
+    row.message.userId,
+    parseDirectives(row.message.text).verbosity,
+  );
   // A question's Yes (record 0054): the row holds no bound command — it holds
   // the proposal, the person's message with the fix applied — so the click
   // hands it back to `dispatch()` whole, as the requester, through the
@@ -211,7 +218,9 @@ export async function consumeAndRun(
   return {
     kind: "ran",
     result,
-    text: `${ROUTED_RECEIPT_PREFIX} ${row.receipt}\n${result.text}`,
+    text: shows(verbosity, "verbose")
+      ? `${ROUTED_RECEIPT_PREFIX} ${row.receipt}\n${result.text}`
+      : (result.quietText ?? result.text),
     ...(derivation ? { publicationCheck } : {}),
   };
 }

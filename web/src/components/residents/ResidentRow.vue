@@ -67,11 +67,12 @@ function onToggle(ev: Event): void {
 const slug = computed(() => residentSlug(props.record));
 const display = computed(() => slug.value || str(props.record.resource) || "?");
 const live = computed(() => residentLive(props.record));
+const cold = computed(() => props.record.noResident === true);
 const imageReport = computed(() => residentImageReport(props.record));
 const tone = computed(() =>
   live.value.state === "warm" && imageReport.value === "pending" ? "amber" : residentStateTone(live.value.state),
 );
-const href = computed(() => (RESIDENT_SLUG_RE.test(slug.value) ? `/residents/${slug.value}` : null));
+const href = computed(() => (!cold.value && RESIDENT_SLUG_RE.test(slug.value) ? `/residents/${slug.value}` : null));
 const ghRepo = computed(() => (RESIDENT_SLUG_RE.test(slug.value) ? `https://github.com/${slug.value}` : undefined));
 const commitHref = (sha: string): string | undefined =>
   ghRepo.value && /^[0-9a-f]{7,40}$/.test(sha) ? `${ghRepo.value}/commit/${sha}` : undefined;
@@ -186,7 +187,12 @@ const idleCount = computed(() => rows.value.filter((r) => !r.run).length);
 </script>
 
 <template>
-  <li class="resident border-b border-muted first:border-t" :data-slug="slug" :data-running="runs.length">
+  <li
+    class="resident border-b border-muted first:border-t"
+    :class="live.state === 'warm' ? 'bg-ok/5' : undefined"
+    :data-slug="slug"
+    :data-running="runs.length"
+  >
     <details class="group/fold" :open="opened" @toggle="onToggle">
       <summary
         class="row flex cursor-pointer list-none flex-wrap items-baseline gap-x-2.5 gap-y-1 rounded-md px-2 py-2 hover:bg-elevated [&::-webkit-details-marker]:hidden"
@@ -198,8 +204,11 @@ const idleCount = computed(() => rows.value.filter((r) => !r.run).length);
         >
         <span class="self-center"><StatusDot :tone="tone" :label="live.state" :tip="live.state" /></span>
         <span class="font-mono text-[0.9375rem] font-medium text-highlighted">{{ display }}</span>
-        <span class="text-sm text-toned">{{ live.state }}</span>
+        <span class="text-sm" :class="live.state === 'warm' ? 'rounded bg-ok/10 px-1.5 text-ok' : 'text-toned'">{{
+          live.state
+        }}</span>
         <span
+          v-if="!cold"
           class="image-report text-xs"
           :class="imageReport === 'pending' ? 'font-medium text-warn' : 'text-muted'"
           :title="imageReport === 'pending' ? 'This container has not reported the deployed image yet' : undefined"
@@ -210,7 +219,7 @@ const idleCount = computed(() => rows.value.filter((r) => !r.run).length);
           class="running shrink-0 rounded border border-ok/25 bg-ok/8 px-1.5 font-mono text-[0.68rem] font-medium tabular-nums text-ok"
           >{{ runs.length }} running</span
         >
-        <ResidentUidGauge :record="record" />
+        <ResidentUidGauge v-if="!cold" :record="record" />
         <!-- The facts wrap to their own indented line on a phone instead of
              breaking mid-token at the left edge. -->
         <span
@@ -331,9 +340,11 @@ const idleCount = computed(() => rows.value.filter((r) => !r.run).length);
             </span>
           </li>
         </ul>
-        <p v-else class="py-1 text-xs text-dimmed">nothing on this resident — no run, no worktree</p>
+        <p v-else class="py-1 text-xs text-dimmed">
+          {{ cold ? "runs start in per-thread sandboxes" : "nothing on this resident — no run, no worktree" }}
+        </p>
 
-        <p class="disk mt-2 font-mono text-xs text-dimmed" :data-idle="idleCount">
+        <p v-if="!cold" class="disk mt-2 font-mono text-xs text-dimmed" :data-idle="idleCount">
           <template v-if="diskLine">{{ diskLine }}</template>
           <span v-else>disk not measured yet</span>
         </p>

@@ -130,7 +130,15 @@ export async function answerChatCommand(deps: FastPathDeps, ctx: RequestContext)
                 }),
               );
             }
-          : () => root.span("post.reply", () => replyCommandOutput(io, chatCmd, res.text, { verbosity, ok: res.ok }));
+          : () =>
+              root.span("post.reply", () =>
+                replyCommandOutput(io, chatCmd, res.text, {
+                  verbosity,
+                  ok: res.ok,
+                  quietText: res.quietText,
+                  cardShown: res.cardShown,
+                }),
+              );
       // The command run (if the command made one) seals after its reply.
       await ending.sealAfterReply(async () => {}, replyFn);
       if (res.followUp) postSettledOutcome(res.followUp, io, root);

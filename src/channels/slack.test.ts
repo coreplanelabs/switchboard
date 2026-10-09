@@ -526,6 +526,63 @@ describe("SlackIO.status — verbosity and shimmer lifecycle", () => {
   };
 
   afterEach(() => vi.useRealTimers());
+  it("terminal acknowledgement distinguishes delivered, failed, deferred and clipped outcomes", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const b = budget();
+    const open = () =>
+      new SlackIO(f.main, ev, { statusClient: f.statusClient, statusBudget: b }).status(
+        { title: "◐ repo" },
+        { verbosity: "quiet" },
+      );
+    expect(
+      await (
+        await open()
+      ).doneWithReceipt!({ title: "✅ repo", detail: "• Registered acme/api · cold." }),
+    ).toEqual({ delivered: true, complete: true });
+    f.update.mockRejectedValueOnce(new Error("message_not_found"));
+    expect(
+      await (
+        await open()
+      ).doneWithReceipt!({ title: "✅ repo", detail: "• Registered acme/api · cold." }),
+    ).toEqual({ delivered: false, complete: true });
+    f.update.mockRejectedValueOnce({ code: "slack_webapi_rate_limited_error", retryAfter: 2 });
+    expect(
+      await (
+        await open()
+      ).doneWithReceipt!({ title: "✅ repo", detail: "• Registered acme/api · cold." }),
+    ).toEqual({ delivered: false, complete: true });
+    b.takeTerminal.mockReturnValueOnce(1000);
+    expect(
+      await (
+        await open()
+      ).doneWithReceipt!({ title: "✅ repo", detail: "• Registered acme/api · cold." }),
+    ).toEqual({ delivered: false, complete: true });
+    vi.clearAllTimers();
+    expect(await (await open()).doneWithReceipt!({ title: "⚠️ repo", detail: "x".repeat(901) })).toEqual({
+      delivered: true,
+      complete: false,
+    });
+  });
+
+  it("quiet command progress replaces the accepted offer with one compact message", async () => {
+    const f = fixture();
+    const io = new SlackIO(f.main, ev, {
+      statusClient: f.statusClient,
+      statusBudget: budget(),
+      offerMessage: {
+        ts: "offer.1",
+        text: "long command and routing receipt",
+        blocks: [{ type: "section", text: { type: "mrkdwn", text: "long command and routing receipt" } }],
+      },
+    });
+    const handle = await io.status({ title: "◐ repo onboard", detail: "• working…" }, { verbosity: "quiet" });
+    await handle.done({ title: "✅ repo onboard", detail: "• Registered acme/api · cold." });
+    expect(f.update.mock.calls.at(-1)?.[0]).toMatchObject({ ts: "offer.1", text: "✅ repo onboard" });
+    expect(JSON.stringify(f.update.mock.calls.at(-1)?.[0])).toContain("Registered acme/api");
+    expect(JSON.stringify(f.update.mock.calls.at(-1)?.[0])).not.toContain("long command and routing receipt");
+    expect(f.postMessage).not.toHaveBeenCalled();
+  });
 
   it("quiet sets no shimmer or timer, while the card budget opens and closes and the terminal frame still lands", async () => {
     vi.useFakeTimers();

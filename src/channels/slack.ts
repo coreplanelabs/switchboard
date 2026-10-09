@@ -72,7 +72,14 @@ import {
   type SlackBlock,
   type SlackPoster,
 } from "./slack/requester.js";
-import { isLiveCard, liveCardKey, liveCards, refreshForeignLiveCards, render } from "./slack/statusCard.js";
+import {
+  completeFrame,
+  isLiveCard,
+  liveCardKey,
+  liveCards,
+  refreshForeignLiveCards,
+  render,
+} from "./slack/statusCard.js";
 import { ACK_EMOJI, catchUpMissedMentions, tsMs, type MissedMessage } from "./slackCatchUp.js";
 import { processSecrets, type Secret } from "../secrets.js";
 import { ARTIFACT_DEFAULTS } from "../artifacts/config.js";
@@ -1635,10 +1642,11 @@ export class SlackIO implements ChannelIO {
     // keeps the card the previous generation posted: edited in place, so the
     // thread shows one card whose frames carry on.
     let ts: string | undefined;
-    if (this.opts.existingCard) {
+    const offerCard = !shimmerVisible && !this.offerCompleted ? this.opts.offerMessage : undefined;
+    if (this.opts.existingCard || offerCard) {
       // A card the previous generation posted may have been deleted since; a
       // failed edit falls back to a fresh card rather than a run with none.
-      const existing = this.opts.existingCard.ts;
+      const existing = this.opts.existingCard?.ts ?? offerCard!.ts;
       const edited = await this.client.chat
         .update({ channel: this.ev.channel, ts: existing, ...render(initial) })
         .then(() => true)
@@ -1648,7 +1656,10 @@ export class SlackIO implements ChannelIO {
           );
           return false;
         });
-      if (edited) ts = existing;
+      if (edited) {
+        ts = existing;
+        if (offerCard) this.offerCompleted = true;
+      }
     }
     if (ts === undefined) {
       const posted = await this.client.chat.postMessage({
@@ -1684,19 +1695,46 @@ export class SlackIO implements ChannelIO {
     // a 429 is re-sent after Slack's Retry-After, up to TERMINAL_RESENDS times,
     // on unref'd timers off the reply's path (a process exiting first leaves the
     // card to the orphan sweep).
-    const sendTerminal = async (frame: StatusUpdate, attempt: number): Promise<void> => {
+    const sendTerminal = async (frame: StatusUpdate, attempt: number): Promise<boolean> => {
       try {
         await edit(frame);
+        return true;
       } catch (err) {
         const retryAfter = retryAfterSeconds(err);
         if (retryAfter === undefined || attempt >= TERMINAL_RESENDS) {
           console.warn(
             `[slack] card ${card}: terminal frame not painted (${describeError(err)}) after ${attempt + 1} attempts`,
           );
-          return;
+          return false;
         }
         setTimeout(() => void sendTerminal(frame, attempt + 1), retryAfter * 1000).unref();
+        return false;
       }
+    };
+    const finish = async (frame: StatusUpdate) => {
+      if (shimmerTimer !== undefined) clearInterval(shimmerTimer);
+      liveCards.delete(liveCardKey(this.ev.channel, ts));
+      budget.close(card);
+      // Funded now: one round trip before the reply, the common case. Not
+      // funded: the edit goes out when the budget says, and the reply does not wait.
+      const waitMs = budget.takeTerminal(this.ev.channel);
+      let delivered = false;
+      if (waitMs === 0) delivered = await sendTerminal(frame, 0);
+      else {
+        console.warn(`[slack] card ${card}: terminal frame waits ${waitMs} ms for the status budget`);
+        setTimeout(() => void sendTerminal(frame, 0), waitMs).unref();
+      }
+      if (dropped > 0) console.log(`[slack] card ${card}: ${dropped} progress frames dropped by the status budget`);
+      // The shimmer is thread-level, so only its current owner clears it: a
+      // run whose shimmer is its own stops the thread's "working" status the
+      // moment it is done (the reply auto-clears too; this covers error
+      // paths), while a run whose sibling started during its finish skips the
+      // clear — the live sibling's shimmer keeps speaking for the thread.
+      if (shimmerOwners.get(shimmerKey) === card) {
+        shimmerOwners.delete(shimmerKey);
+        await setShimmer("").catch(() => {});
+      }
+      return { delivered, complete: completeFrame(frame) };
     };
     return {
       handle: { channel: this.ev.channel, ts },
@@ -1708,27 +1746,9 @@ export class SlackIO implements ChannelIO {
         // A rate-limited or failed progress edit is dropped: the next frame repaints.
         void edit(frame).catch(() => {});
       },
+      doneWithReceipt: finish,
       done: async (frame) => {
-        if (shimmerTimer !== undefined) clearInterval(shimmerTimer);
-        liveCards.delete(liveCardKey(this.ev.channel, ts));
-        budget.close(card);
-        // Funded now: one round trip before the reply, the common case. Not
-        // funded: the edit goes out when the budget says, and the reply does not wait.
-        const waitMs = budget.takeTerminal(this.ev.channel);
-        if (waitMs === 0) await sendTerminal(frame, 0);
-        else {
-          console.warn(`[slack] card ${card}: terminal frame waits ${waitMs} ms for the status budget`);
-          setTimeout(() => void sendTerminal(frame, 0), waitMs).unref();
-        }
-        if (dropped > 0) console.log(`[slack] card ${card}: ${dropped} progress frames dropped by the status budget`);
-        // The shimmer is thread-level, so only its current owner clears it: a
-        // run whose shimmer is its own stops the thread's "working" status the
-        // moment it is done (the reply auto-clears too; this covers error
-        // paths), while a run whose sibling started during its finish skips the
-        // clear — the live sibling's shimmer keeps speaking for the thread.
-        if (shimmerOwners.get(shimmerKey) !== card) return;
-        shimmerOwners.delete(shimmerKey);
-        await setShimmer("").catch(() => {});
+        await finish(frame);
       },
     };
   }

@@ -36,6 +36,7 @@ const state = reactive<ResidentsIndexState>({
   count: seed?.count,
   draining: seed?.draining ?? null,
   residents: seed?.residents ?? [],
+  repositories: seed?.repositories ?? [],
   runs: new Map((seed?.runs ?? []).map((r) => [r.id, r])),
 });
 
@@ -46,7 +47,7 @@ const conn = ref<{ tone: "green" | "amber" | "red"; text: string }>({ tone: "amb
 const openSlug = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("open") : null;
 
 const rows = computed(() =>
-  state.residents.map((raw, i) => {
+  [...state.residents, ...(state.repositories ?? [])].map((raw, i) => {
     const record = raw as ResidentRecordView;
     const slug = residentSlug(record);
     return {
@@ -73,7 +74,7 @@ const running = computed(() => rows.value.reduce((n, r) => n + r.runs.length, 0)
 // The tab carries the count and the fleet's tone (live-view item 21): the
 // same worst-of rule the shell painted from the seed, repainted from each
 // listing frame — the page is no longer a snapshot.
-const title = "Resident repos";
+const title = "Repositories";
 watch(
   [running, () => state.residents],
   ([live, residents]) => {
@@ -139,7 +140,8 @@ onUnmounted(() => {
     </p>
     <template v-if="rows.length > 0">
       <p class="mb-2 text-xs text-muted">
-        {{ `${count}/${cap} resident slots in use · `
+        {{
+          `${count}/${cap} resident slots in use${state.repositories?.length ? ` · ${state.repositories.length} cold` : ""} · `
         }}<span id="running" class="font-mono tabular-nums">{{ running }} running</span>
       </p>
       <ul id="residents" class="m-0 list-none p-0">

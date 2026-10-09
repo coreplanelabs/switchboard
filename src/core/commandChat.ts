@@ -213,6 +213,12 @@ export function chatCallerFor(
  *  outcome from `ok`, never from the text. */
 export interface ChatCommandResult {
   text: string;
+  /** A concise chat projection; the full receipt remains on the run. */
+  quietText?: string;
+  /** A real progress message carries the quiet result instead of a second reply. */
+  cardShown?: boolean;
+  /** Close progress after the conversation receipt is stored. */
+  finishCard?: (error?: string) => Promise<boolean>;
   ok: boolean;
   /** The error code when the invocation failed — the registry's, or the
    *  grammar's `invalid_input` for a malformed tail (a help reply has none). */
@@ -292,11 +298,16 @@ export async function invokeChatCommand({
       surface: "chat",
       ...(now === undefined ? {} : { now }),
     });
+    const quietText = renderText(commands.get(parsed.id) ?? { id: parsed.id }, res.value, {
+      surface: "chat",
+      verbosity: "quiet",
+    });
     const { id } = parsed;
     const value = typeof res.value === "object" && res.value !== null && !Array.isArray(res.value) ? res.value : {};
     return {
       ok: true,
       text,
+      ...(quietText !== text ? { quietText } : {}),
       ...(commands.settles(id) ? { followUp: () => commands.settle(id, res.value, caller) } : {}),
       ...(Array.isArray(value.trace) ? { trace: value.trace } : {}),
       ...(typeof value.residentMs === "number" ? { residentMs: value.residentMs } : {}),

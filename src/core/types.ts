@@ -210,6 +210,8 @@ export interface StatusUpdate {
 export interface StatusHandle {
   update(frame: StatusUpdate): void;
   done(frame: StatusUpdate): Promise<void>;
+  /** Scheduled sends and no-op handles do not prove complete outcome delivery. */
+  doneWithReceipt?(frame: StatusUpdate): Promise<{ delivered: boolean; complete: boolean }>;
   /** Where the indicator lives, when it is a message another process could
    *  edit (Slack: channel + ts) — recorded on the run ledger so a resumed run
    *  closes the same card (docs/reference/specs/run-history.md item 35). Absent for a

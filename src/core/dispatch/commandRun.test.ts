@@ -1,7 +1,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { processSecrets } from "../../secrets.js";
 import { ConfigStore } from "../../config.js";
 import { buildCoreCommands } from "../commandCatalogue.js";
@@ -11,8 +11,9 @@ import { NullRunHistoryWriter } from "../runHistoryWriter.js";
 import { RunRegistry } from "../runRegistry.js";
 import { isSpanRecord, type RunEvent } from "../runEvents.js";
 import type { RunRecord } from "../runRecord.js";
-import type { ChannelIO, IncomingMessage } from "../types.js";
+import type { ChannelIO, IncomingMessage, StatusUpdate } from "../types.js";
 import type { FastPathDeps } from "./fastPath.js";
+import { answerChatCommand } from "./fastPath.js";
 import {
   isInlineRunCommand,
   recordRefusal,
@@ -32,6 +33,7 @@ import { contextThreadSessionKey } from "../runLedger/sessionLog.js";
 // decision on the command run's record, right after `run_meta`, redacted.
 
 const NOW = 10_000;
+afterEach(() => vi.unstubAllEnvs());
 
 const YAML = `
 organization: acme
@@ -93,6 +95,200 @@ const ROUTE: RouteEventFields = {
 };
 
 describe("runChatCommand — the machinery moved from the fast path", () => {
+  it("a quiet repository command shows linked bullet progress and retains its full receipt", async () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example.com");
+    const d = deps();
+    const s = request("repo onboard acme/api --no-resident", d);
+    vi.spyOn(d.commands!, "invoke").mockResolvedValue({
+      ok: true,
+      value: {
+        slug: "acme/api",
+        defaultRef: "main",
+        state: "cold",
+        commands: { install: "npm ci", build: "npm run build", test: "npm test" },
+      },
+    });
+    const frames: StatusUpdate[] = [];
+    s.io.status = async (frame) => {
+      frames.push(frame);
+      return {
+        handle: { channel: "CX", ts: "2.0" },
+        update: (next) => {
+          frames.push(next);
+        },
+        done: async () => {},
+        doneWithReceipt: async (next) => {
+          frames.push(next);
+          return { delivered: true, complete: true };
+        },
+      };
+    };
+    expect(await answerChatCommand(d, { msg: s.message, io: s.io, ending: s.ending, trace: s.trace })).toBe(true);
+    expect(frames[0]?.detail).toBe("• working…");
+    expect(frames.at(-1)?.detail).toBe("• Registered `acme/api` · cold.");
+    expect(frames.at(-1)?.link).toEqual({ url: "https://bot.example.com/runs/run-cmd?t=tok", label: "open run ↗" });
+    expect(s.replies).toEqual([]);
+    expect(d.runRegistry.snapshotById("run-cmd")?.events.find((e) => e.type === "answer")).toMatchObject({
+      text: expect.stringContaining("Commands:"),
+    });
+  });
+  it("quiet repository outcomes still reply when the channel has no progress message", async () => {
+    const d = deps();
+    const s = request("repo onboard acme/api --no-resident", d);
+    vi.spyOn(d.commands!, "invoke").mockResolvedValue({
+      ok: true,
+      value: { slug: "acme/api", defaultRef: "main", state: "cold", commands: { build: "true", test: "true" } },
+    });
+    expect(await answerChatCommand(d, { msg: s.message, io: s.io, ending: s.ending, trace: s.trace })).toBe(true);
+    expect(s.replies).toEqual(["Registered `acme/api` · cold."]);
+  });
+  it.each([undefined, { delivered: false, complete: true }, { delivered: true, complete: false }])(
+    "quiet outcomes still reply without complete terminal acknowledgement: %j",
+    async (delivery) => {
+      const d = deps();
+      const s = request("repo onboard acme/api --no-resident", d);
+      vi.spyOn(d.commands!, "invoke").mockResolvedValue({
+        ok: true,
+        value: { slug: "acme/api", state: "cold", defaultRef: "main", commands: { build: "true", test: "true" } },
+      });
+      s.io.status = async () => ({
+        handle: { channel: "CX", ts: "2.0" },
+        update() {},
+        async done() {},
+        async doneWithReceipt() {
+          return delivery ?? { delivered: false, complete: false };
+        },
+      });
+      await answerChatCommand(d, { msg: s.message, io: s.io, ending: s.ending, trace: s.trace });
+      expect(s.replies).toEqual(["Registered `acme/api` · cold."]);
+    },
+  );
+  it.each(["quiet", "verbose", "debug"] as const)(
+    "a rejecting legacy status close preserves the %s command reply",
+    async (verbosity) => {
+      const d = deps();
+      const s = request("repo onboard acme/api --no-resident", d);
+      await d.config.setChannelOverride(s.message.channelId, { verbosity });
+      vi.spyOn(d.commands!, "invoke").mockResolvedValue({
+        ok: true,
+        value: { slug: "acme/api", state: "cold", defaultRef: "main", commands: { build: "true", test: "true" } },
+      });
+      s.io.status = async () => ({
+        handle: { channel: "CX", ts: "2.0" },
+        update() {},
+        async done() {
+          throw new Error("status append failed");
+        },
+      });
+      expect(await answerChatCommand(d, { msg: s.message, io: s.io, ending: s.ending, trace: s.trace })).toBe(true);
+      expect(s.replies).toHaveLength(1);
+      if (verbosity === "quiet") expect(s.replies).toEqual(["Registered `acme/api` · cold."]);
+      else expect(s.replies[0]).toContain("Registered `acme/api` on `main`");
+    },
+  );
+  it("a clipped failure retains its complete reply including the final diagnosis", async () => {
+    const d = deps();
+    const s = request("repo offboard acme/api", d);
+    const message = "x".repeat(1000) + " FINAL_DIAGNOSIS";
+    vi.spyOn(d.commands!, "invoke").mockResolvedValue({
+      ok: false,
+      error: "unavailable",
+      status: 503,
+      message,
+      decidedBy: "handler",
+    });
+    s.io.status = async () => ({
+      handle: { channel: "CX", ts: "2.0" },
+      update() {},
+      async done() {},
+      async doneWithReceipt() {
+        return { delivered: true, complete: false };
+      },
+    });
+    await answerChatCommand(d, { msg: s.message, io: s.io, ending: s.ending, trace: s.trace });
+    expect(s.replies).toEqual([`⚠️ \`repo offboard\`: ${message}`]);
+  });
+  it("a clipped dry-run card retains every snapshot identifier and the no-change statement", async () => {
+    const d = deps();
+    const s = request("repo offboard acme/api --dry-run", d);
+    const ids = Array.from({ length: 32 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`);
+    vi.spyOn(d.commands!, "invoke").mockResolvedValue({
+      ok: true,
+      value: {
+        slug: "acme/api",
+        dryRun: true,
+        wouldRemove: {
+          schedules: 2,
+          snapshotBackupIds: ids,
+          backupObjects: 3,
+          r2Objects: 4,
+          threadBindings: 5,
+          container: "degraded",
+        },
+      },
+    });
+    s.io.status = async () => ({
+      handle: { channel: "CX", ts: "2.0" },
+      update() {},
+      async done() {},
+      async doneWithReceipt() {
+        return { delivered: true, complete: false };
+      },
+    });
+    await answerChatCommand(d, { msg: s.message, io: s.io, ending: s.ending, trace: s.trace });
+    expect(s.replies).toHaveLength(1);
+    expect(s.replies[0]).toContain(ids.join(", "));
+    expect(s.replies[0]).toContain(
+      "Nothing was changed. Without `--dry-run`, `repo offboard acme/api` performs this removal.",
+    );
+  });
+  it("keeps repository progress pending until its receipt is stored", async () => {
+    const ledger = new InMemoryRunLedger();
+    let writing!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      writing = resolve;
+    });
+    const paused = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const d = {
+      ...deps(),
+      runLedger: {
+        sessionPersistence: true,
+        appendSession: async (...args: Parameters<InMemoryRunLedger["appendSession"]>) => {
+          writing();
+          await paused;
+          return ledger.appendSession(...args);
+        },
+      },
+    };
+    const s = request("repo onboard acme/api --no-resident", d);
+    vi.spyOn(d.commands!, "invoke").mockResolvedValue({
+      ok: true,
+      value: { slug: "acme/api", defaultRef: "main", state: "cold", commands: { build: "true", test: "true" } },
+    });
+    const frames: StatusUpdate[] = [];
+    s.io.status = async (frame) => {
+      frames.push(frame);
+      return {
+        handle: { channel: "CX", ts: "2.0" },
+        update: () => {},
+        done: async (next) => {
+          frames.push(next);
+        },
+      };
+    };
+    const running = answerChatCommand(d, { msg: s.message, io: s.io, ending: s.ending, trace: s.trace });
+    await started;
+    try {
+      expect(frames.map((frame) => frame.detail)).toEqual(["• working…"]);
+    } finally {
+      release();
+    }
+    await running;
+    expect(frames.at(-1)?.detail).toBe("• Registered `acme/api` · cold.");
+  });
   it("durably stores a runless command's exact output with explicit unknown dependencies before returning", async () => {
     const ledger = new InMemoryRunLedger();
     const d = { ...deps(), runLedger: { sessionPersistence: true, appendSession: ledger.appendSession.bind(ledger) } };

@@ -58,10 +58,12 @@ grants:
 let now = 10_000;
 const tick = (ms: number) => void (now += ms);
 
-function deps(): FastPathDeps & { runRegistry: RunRegistry; audits: AuditEntry[]; store: InMemoryConfirmationStore } {
+function deps(
+  verbosity: "quiet" | "verbose" = "verbose",
+): FastPathDeps & { runRegistry: RunRegistry; audits: AuditEntry[]; store: InMemoryConfirmationStore } {
   const dir = mkdtempSync(join(tmpdir(), "swb-confirm-"));
   const path = join(dir, "config.yaml");
-  writeFileSync(path, YAML);
+  writeFileSync(path, YAML.replace("defaults:\n", `defaults:\n  verbosity: ${verbosity}\n`));
   const config = new ConfigStore(path, join(dir, "overrides.json"));
   let n = 0;
   const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => "tok" });
@@ -155,6 +157,17 @@ describe("the named lines and the clicker's ids", () => {
 });
 
 describe("consumeAndRun — the stored input runs once, as the requester, through the typed path (record 0044)", () => {
+  it("quiet confirmation shows the outcome without repeating the route receipt", async () => {
+    const d = deps("quiet");
+    await d.store.put(pending("quiet"), CONFIRMATION_TTL_MS);
+    const { io, ending, trace } = request(d);
+    const result = await consumeAndRun(d, { id: "quiet", actorIds: ["slack:UADMIN"] }, io, ending, trace, noRedispatch);
+    expect(result).toMatchObject({
+      kind: "ran",
+      text: "Updated channel scope: models `coding=anthropic/claude-opus-5`.",
+    });
+    expect(codingModelIn(d)).toBe("anthropic/claude-opus-5");
+  });
   it("revalidates operator context after consuming the saved bytes before any effect or decision event", async () => {
     const d = deps();
     const context = {

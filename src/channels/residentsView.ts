@@ -130,7 +130,8 @@ async function readListing(client: ResidentAdminClient): Promise<ListingResult> 
     return { status: 502, reason: `resident Worker answered ${r.status} to /residents: ${reason}` };
   }
   const residents = Array.isArray(r.data.residents) ? (r.data.residents as ResidentRecordView[]) : [];
-  return { listing: { cap: r.data.cap, count: r.data.count, draining: r.data.draining, residents } };
+  const repositories = Array.isArray(r.data.repositories) ? (r.data.repositories as ResidentRecordView[]) : [];
+  return { listing: { cap: r.data.cap, count: r.data.count, draining: r.data.draining, residents, repositories } };
 }
 
 /**
@@ -223,10 +224,11 @@ export function createResidentsViewHandler(
           count: listing.count,
           draining: listing.draining,
           residents: listing.residents,
+          repositories: listing.repositories,
           now: now(),
           runs: live,
         };
-        page(req, res, 200, ctx.actor, "Resident repos", seed);
+        page(req, res, 200, ctx.actor, "Repositories", seed);
         finish(200);
         return;
       }

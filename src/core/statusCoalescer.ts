@@ -49,6 +49,15 @@ export function coalesceStatus(
   };
 
   return {
+    ...(inner.doneWithReceipt
+      ? {
+          doneWithReceipt: async (frame: StatusUpdate) => {
+            closed = true;
+            pending = undefined;
+            return inner.doneWithReceipt!(frame);
+          },
+        }
+      : {}),
     ...(inner.handle ? { handle: inner.handle } : {}),
     update(frame) {
       if (closed) return;
@@ -67,7 +76,7 @@ export function coalesceStatus(
       pending = undefined;
       // The armed timer finds `closed` and does nothing; no clearTimeout needed
       // (and `schedule` may not hand back something clearable).
-      await inner.done(frame);
+      return inner.done(frame);
     },
   };
 }

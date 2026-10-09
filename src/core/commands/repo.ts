@@ -86,6 +86,36 @@ const defineCommand = commandDefiner<RepoCommandDeps>();
 export const DEFAULT_COMMANDS = NPM_FALLBACK_COMMANDS;
 export const DEFAULT_REF = "main";
 
+function quietRepoOutcome(action: string, output: JsonValue): string | undefined {
+  const o = output as JsonObject;
+  if (o.dryRun === true) return undefined;
+  const slug = str(o.slug);
+  const lines = [
+    action === "onboard"
+      ? o.state === "cold"
+        ? `Registered \`${slug}\` · cold.`
+        : `Provisioning \`${slug}\`.`
+      : action === "offboard"
+        ? `Offboarded \`${slug}\`.`
+        : action === "rebuild"
+          ? `Rebuilding \`${slug}\`.`
+          : `Updated \`${slug}\`.`,
+  ];
+  const detection = obj(o.detection);
+  const explicit = Array.isArray(o.explicit) ? o.explicit : [];
+  if (typeof detection.unavailable === "string" && explicit.length < COMMAND_KEYS.length)
+    lines.push("⚠️ Could not detect repo commands; npm defaults saved.");
+  if (typeof o.warning === "string" && o.warning) lines.push(`⚠️ ${o.warning}`);
+  const evicted = obj(o.evicted);
+  if (typeof evicted.resource === "string") {
+    lines.push(`Evicted \`${evicted.resource.replace(/^repo:/, "")}\`.`);
+    if (Array.isArray(evicted.errors))
+      for (const error of evicted.errors) lines.push(`⚠️ Eviction cleanup: ${String(error)}`);
+  }
+  if (Array.isArray(o.errors)) for (const error of o.errors) lines.push(`⚠️ ${String(error)}`);
+  return lines.join("\n");
+}
+
 /** The provisioning follow-up (`settle`, item 52): poll the resident's `/status`
  *  this often, and give up (still reporting) after this long — a step budget
  *  is 5 min and provisioning is two steps plus clone + snapshot. */
@@ -330,6 +360,7 @@ export const repoOnboard = defineCommand({
   },
   describe:
     "Register a repo, optionally without a resident (--no-resident); resident provisioning is billable and admin-gated.",
+  renderChat: (output, display) => (display?.verbosity === "quiet" ? quietRepoOutcome("onboard", output) : undefined),
   render: (output) => {
     const o = output as JsonObject;
     const commands = obj(o.commands);
@@ -545,6 +576,7 @@ export const repoOffboard = defineCommand({
     risk: (input) => (dryRunRequested(input) ? PLAN_ONLY_RISK : "tears down the resident and its snapshots"),
   },
   describe: "Remove a repo registration and tear down its resident when present (admin-gated; --dry-run plans only).",
+  renderChat: (output, display) => (display?.verbosity === "quiet" ? quietRepoOutcome("offboard", output) : undefined),
   render: (output) => {
     const o = output as JsonObject;
     const slug = str(o.slug);
@@ -592,6 +624,7 @@ export const repoRebuild = defineCommand({
     risk: (input) => (dryRunRequested(input) ? PLAN_ONLY_RISK : "discards the snapshot and reprovisions"),
   },
   describe: "Discard a resident's snapshot and reprovision it from scratch (admin-gated; --dry-run plans only).",
+  renderChat: (output, display) => (display?.verbosity === "quiet" ? quietRepoOutcome("rebuild", output) : undefined),
   render: (output) => {
     const o = output as JsonObject;
     const slug = str(o.slug);
@@ -648,6 +681,8 @@ export const repoReconfigure = defineCommand({
   annotations: { destructive: false, risk: () => "changes the resident's branch or commands" },
   describe:
     "Change a registered repo's default branch and/or command table (admin-gated; resident changes take effect on refresh/attach).",
+  renderChat: (output, display) =>
+    display?.verbosity === "quiet" ? quietRepoOutcome("reconfigure", output) : undefined,
   render: (output) => {
     const o = output as JsonObject;
     const changed = Object.entries(obj(o.changed)).map(([k, v]) => `${k} → \`${str(v)}\``);

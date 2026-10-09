@@ -26,7 +26,7 @@ const SECTIONS: ReadonlyArray<NavItem> = [
   { id: "runs", label: "Runs", href: "/runs", icon: "i-lucide-list" },
   // The plane's table (record 0064) grows out of the run ledger: the section exists where the ledger does.
   { id: "plane", label: "Plane", href: "/plane", icon: "i-lucide-radar", on: (c) => c.runLedger },
-  { id: "residents", label: "Residents", href: "/residents", icon: "i-lucide-server", on: (c) => c.residents },
+  { id: "residents", label: "Repositories", href: "/residents", icon: "i-lucide-server", on: (c) => c.residents },
   { id: "costs", label: "Costs", href: "/costs", icon: "i-lucide-circle-dollar-sign", on: (c) => c.costs },
   // The run trend over the metrics dataset (run-metrics.md item 10): the section exists where the reader does.
   { id: "metrics", label: "Metrics", href: "/metrics", icon: "i-lucide-trending-up", on: (c) => c.metrics },

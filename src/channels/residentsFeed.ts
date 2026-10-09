@@ -85,7 +85,16 @@ export function serveResidentsFeed(
     void source.listing().then((r) => {
       reading = false;
       if (!("error" in r))
-        send(frame({ type: "residents", cap: r.cap, count: r.count, draining: r.draining, residents: r.residents }));
+        send(
+          frame({
+            type: "residents",
+            cap: r.cap,
+            count: r.count,
+            draining: r.draining,
+            residents: r.residents,
+            repositories: r.repositories,
+          }),
+        );
       if (queued) {
         queued = false;
         reread();
