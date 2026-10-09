@@ -289,8 +289,8 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
 
   // ---- the content pass: what happened, in stream order -------------------
   const findings: FrictionFinding[] = [];
-  // Pending calls awaiting their result, FIFO per tool name (the runner emits
-  // call→result sequentially; pairing per tool is robust to interleaving).
+  // Calls finish out of order. Their IDs pair results and survive a replayed
+  // start after reattach; unkeyed legacy captures retain per-tool FIFO.
   const pending = new Map<string, PendingCall[]>();
   // `tool summary` keys that have failed at least once → a later identical call is a retry.
   const failedCalls = new Set<string>();
@@ -458,13 +458,17 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
         });
       }
       const queue = pending.get(ev.tool) ?? [];
-      queue.push({ index, event: ev });
+      const replay = ev.callId === undefined ? -1 : queue.findIndex((call) => call.event.callId === ev.callId);
+      if (replay >= 0) queue[replay] = { index, event: ev };
+      else queue.push({ index, event: ev });
       pending.set(ev.tool, queue);
       return;
     }
 
     if (ev.type === "tool_result") {
-      const callEntry = pending.get(ev.tool)?.shift();
+      const queue = pending.get(ev.tool);
+      const matched = queue?.findIndex((call) => call.event.callId === ev.callId) ?? -1;
+      const callEntry = matched >= 0 ? queue!.splice(matched, 1)[0] : undefined;
       const anchor = callEntry?.index ?? index;
       const callSummary = callEntry?.event.summary ?? ev.tool;
       const span = spanOfCall(callEntry, ev);

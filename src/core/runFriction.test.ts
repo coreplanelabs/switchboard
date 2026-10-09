@@ -163,6 +163,126 @@ describe("analyzeRunFriction — per-category classification", () => {
     expect(d.findings[1]).toMatchObject({ tool: "frobnicate", eventIndex: 2 });
   });
 
+  it("pairs concurrent reads by call ID when results finish out of order", () => {
+    const d = analyzeRunFriction([
+      { type: "tool_call", tool: "read", summary: "read AGENTS.md", callId: "root", at: T0 },
+      { type: "tool_call", tool: "read", summary: "read apps/AGENTS.md", callId: "missing", at: T0 + 100 },
+      {
+        type: "tool_result",
+        tool: "read",
+        ok: false,
+        summary: "ENOENT: apps/AGENTS.md",
+        callId: "missing",
+        at: T0 + 300,
+      },
+      { type: "tool_result", tool: "read", ok: true, summary: "instructions", callId: "root", at: T0 + 500 },
+      { type: "tool_call", tool: "read", summary: "read AGENTS.md", callId: "root-again", at: T0 + 600 },
+      { type: "tool_result", tool: "read", ok: true, summary: "instructions", callId: "root-again", at: T0 + 700 },
+      { type: "tool_call", tool: "read", summary: "read apps/AGENTS.md", callId: "missing-again", at: T0 + 800 },
+      {
+        type: "tool_result",
+        tool: "read",
+        ok: true,
+        summary: "added instructions",
+        callId: "missing-again",
+        at: T0 + 900,
+      },
+    ]);
+    expect(d.findings).toEqual([
+      {
+        category: "failed_tool",
+        severity: "medium",
+        tool: "read",
+        summary: "read apps/AGENTS.md → ENOENT: apps/AGENTS.md",
+        eventIndex: 1,
+        durationMs: 200,
+      },
+      {
+        category: "retry",
+        severity: "low",
+        tool: "read",
+        summary: "retried after failure: read apps/AGENTS.md",
+        eventIndex: 6,
+      },
+    ]);
+  });
+
+  it("a resumed start with the same call ID completes the original logical call", () => {
+    const d = analyzeRunFriction([
+      {
+        type: "tool_call",
+        tool: "read",
+        summary: "read githubDoor.ts",
+        callId: "read-source",
+        spanId: "before",
+        at: T0,
+      },
+      note("resumed", "resumed after a restart", T0 + 100),
+      {
+        type: "tool_call",
+        tool: "read",
+        summary: "read githubDoor.ts",
+        callId: "read-source",
+        spanId: "after",
+        at: T0 + 200,
+      },
+      {
+        type: "tool_result",
+        tool: "read",
+        ok: false,
+        summary: "Offset 510 is beyond end of file (506 lines total)",
+        callId: "read-source",
+        spanId: "after",
+        at: T0 + 300,
+      },
+    ]);
+    expect(d.findings).toEqual([
+      {
+        category: "failed_tool",
+        severity: "medium",
+        tool: "read",
+        summary: "read githubDoor.ts → Offset 510 is beyond end of file (506 lines total)",
+        eventIndex: 2,
+        durationMs: 100,
+      },
+    ]);
+  });
+
+  it("an orphan keyed result never consumes another call of the same tool", () => {
+    const d = analyzeRunFriction([
+      { type: "tool_call", tool: "read", summary: "read waiting.ts", callId: "waiting" },
+      { type: "tool_result", tool: "read", ok: false, summary: "ENOENT: gone.ts", callId: "orphan" },
+    ]);
+    expect(d.findings).toEqual([
+      { category: "failed_tool", severity: "medium", tool: "read", summary: "read → ENOENT: gone.ts", eventIndex: 1 },
+      {
+        category: "infra_failure",
+        severity: "high",
+        tool: "read",
+        summary: "no result for tool call (the run ended mid-tool): read waiting.ts",
+        eventIndex: 0,
+      },
+    ]);
+  });
+
+  it("unkeyed legacy results pair only with unkeyed calls", () => {
+    const d = analyzeRunFriction([
+      { type: "tool_call", tool: "read", summary: "read keyed.ts", callId: "keyed" },
+      { type: "tool_call", tool: "read", summary: "read legacy.ts" },
+      { type: "tool_result", tool: "read", ok: false, summary: "ENOENT: legacy.ts" },
+      { type: "tool_result", tool: "read", ok: true, summary: "source", callId: "keyed" },
+    ]);
+    expect(d.findings).toEqual([
+      {
+        category: "failed_tool",
+        severity: "medium",
+        tool: "read",
+        summary: "read legacy.ts → ENOENT: legacy.ts",
+        eventIndex: 1,
+      },
+    ]);
+  });
+
   it("retry: the same call re-issued after it failed (counted per re-issue, not for the first attempt)", () => {
     const d = analyzeRunFriction([
       ...bash("npm test", T0, 1_000, false, "fail"),
