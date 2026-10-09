@@ -227,21 +227,18 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
     if (signal.aborted) return unavailable("stopped");
     const executor = binding.executor();
     if (!executor.execResult) return unavailable("unsupported_executor");
-    const budget = () => {
+    const budget = (wantedMs = requestedTimeout) => {
       const remainingMs = Math.min(binding.remainingMs(), control.remainingMs?.() ?? Infinity);
-      return bashBudgetWithinRun(requestedTimeout, Number.isFinite(remainingMs) ? remainingMs : 0);
+      return bashBudgetWithinRun(wantedMs, Number.isFinite(remainingMs) ? remainingMs : 0);
     };
     const firstBudget = budget();
     if (firstBudget.kind === "exhausted") return unavailable("budget_exhausted");
     if (!(await authorized(input.command, firstBudget.kind === "clipped" ? firstBudget.timeoutMs : requestedTimeout)))
       return unavailable("command_refused");
     if (signal.aborted) return unavailable("stopped");
-    const metadataBudget = budget();
+    const metadataBudget = budget(FIRST_TEST_PREFLIGHT_MS);
     if (metadataBudget.kind === "exhausted") return unavailable("budget_exhausted");
-    const metadataTimeout = Math.min(
-      FIRST_TEST_PREFLIGHT_MS,
-      metadataBudget.kind === "clipped" ? metadataBudget.timeoutMs : requestedTimeout,
-    );
+    const metadataTimeout = metadataBudget.kind === "clipped" ? metadataBudget.timeoutMs : FIRST_TEST_PREFLIGHT_MS;
     let observed: ExecResult | undefined;
     let metadataSignal: AbortSignal | undefined;
     try {

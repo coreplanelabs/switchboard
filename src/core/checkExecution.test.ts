@@ -44,6 +44,41 @@ function setup(previous?: unknown) {
 }
 
 describe("recorded coding checks", () => {
+  it("records a short command after metadata takes longer than the command timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const s = setup();
+      s.execResult
+        .mockReset()
+        .mockImplementationOnce(async (_command, options) => {
+          return new Promise((resolve, reject) => {
+            options?.signal?.addEventListener(
+              "abort",
+              () => reject(new ExecInfraError("metadata aborted", "aborted")),
+              {
+                once: true,
+              },
+            );
+            setTimeout(() => resolve(metadata), 1500);
+          });
+        })
+        .mockResolvedValue({ ...ok, stdout: "short check passed" });
+      const result = s.capability().run({ ...input, timeoutMs: 1000 }, "short-check");
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(await result).toMatchObject({
+        kind: "recorded",
+        receipt: {
+          timeoutMs: 1000,
+          outcome: { kind: "completed", stdout: "short check passed", stderr: "", exitCode: 0, truncated: false },
+        },
+      });
+      expect(s.saved.map((state) => state.receipts[0]?.outcome.kind)).toEqual(["pending", "completed"]);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     ["resident", "metadata_deadline"],
     ["resident", "run_control"],
@@ -66,7 +101,7 @@ describe("recorded coding checks", () => {
         vi.useFakeTimers();
         const s = setup();
         if (source === "clipped") s.binding.remainingMs = () => RUN_DEADLINE_RESERVE_MS + 1500;
-        const effectiveTimeoutMs = source === "default" ? 10000 : source === "clipped" ? 1500 : 1000;
+        const effectiveTimeoutMs = source === "clipped" ? 1500 : 10000;
         const call = new AbortController();
         const wires: Array<{ command: string; timeoutMs: number }> = [];
         let pendingBody = false;
@@ -187,7 +222,7 @@ describe("recorded coding checks", () => {
         metadataFailure: {
           phase: "execute",
           kind: "thrown",
-          ...(typed ? { infrastructureReason: "aborted", abortSource: "unknown", effectiveTimeoutMs: 2000 } : {}),
+          ...(typed ? { infrastructureReason: "aborted", abortSource: "unknown", effectiveTimeoutMs: 10000 } : {}),
         },
       });
       expect(s.execResult).toHaveBeenCalledTimes(1);
