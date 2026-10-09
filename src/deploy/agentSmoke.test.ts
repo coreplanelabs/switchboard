@@ -24,6 +24,68 @@ describe("bounded agent smoke", () => {
     expect(transport.request).toHaveBeenCalledTimes(3);
   });
 
+  it("accepts only a completed bound Review command receipt and refuses metadata, cut, infrastructure and wrong-owner evidence", async () => {
+    const check = {
+      callId: "read-1",
+      inputHash: "d".repeat(64),
+      commandHash: "e".repeat(64),
+      command: "npm test",
+      purpose: "verification",
+      owner: {
+        runId: "run-review",
+        requester: "http:smoke",
+        threadKey: "http:smoke:release-1-review",
+        repo: "acme/smoke",
+      },
+      workspace: { cwd: "/workspace/review", head: "b".repeat(40), fingerprint: "f".repeat(40) },
+      timeoutMs: 1000,
+      startedAt: 10,
+      completedAt: 20,
+      outcome: { kind: "completed", stdout: "2 tests passed", stderr: "", exitCode: 0, truncated: false },
+    };
+    const frame = (value: unknown) =>
+      `Command completed.\n<untrusted-check-evidence>\n${JSON.stringify(value)}\n</untrusted-check-evidence>`;
+    const cases = [
+      { output: frame(check), passed: true },
+      { output: "error: metadata unavailable", passed: false },
+      { output: "<untrusted-check-evidence>metadata-only</untrusted-check-evidence>", passed: false },
+      { output: frame(check), callId: "other-call", passed: false },
+      { output: frame({ ...check, owner: { ...check.owner, requester: "http:other" } }), passed: false },
+      { output: frame({ ...check, owner: { ...check.owner, threadKey: "http:smoke:other" } }), passed: false },
+      { output: frame({ ...check, owner: { ...check.owner, repo: "acme/other" } }), passed: false },
+      { output: frame({ ...check, outcome: { kind: "pending" } }), passed: false },
+      { output: frame({ ...check, outcome: { kind: "not_started", reason: "command_refused" } }), passed: false },
+      { output: frame(check), cut: true, passed: false },
+      { output: frame(check), infra: true, passed: false },
+      { output: frame(check), ok: false, passed: false },
+      { output: frame({ ...check, callId: "other-call" }), passed: false },
+      { output: frame({ ...check, owner: { ...check.owner, runId: "other-run" } }), passed: false },
+      { output: frame({ ...check, workspace: { ...check.workspace, head: "c".repeat(40) } }), passed: false },
+      { output: frame({ ...check, outcome: { kind: "unknown", reason: "transport" } }), passed: false },
+      { output: frame({ ...check, outcome: { ...check.outcome, exitCode: 1 } }), passed: false },
+      { output: frame({ ...check, outcome: { ...check.outcome, truncated: true } }), passed: false },
+      { output: frame({ ...check, completedAt: undefined }), passed: false },
+    ];
+    for (const { passed, ...change } of cases) {
+      const { transport, records } = fixture();
+      transport.readRun = vi.fn(async (id) => {
+        const record = records.get(id) as { events: Array<{ type: string; tool?: string }> };
+        if (id !== "run-review") return record;
+        return {
+          ...record,
+          events: record.events.map((event) =>
+            event.tool === "read"
+              ? { ...event, tool: "run_check", ...(event.type === "tool_result" ? change : {}) }
+              : event,
+          ),
+        };
+      });
+      const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
+      expect(receipt.capabilityOutcome).toBe(passed ? "passed" : "failed");
+      if (!passed) expect(receipt.scenarios[2].reason).toBe("workspace_execution_unproven");
+    }
+  });
+
   it("refuses health-only, fallback output, missing execution and mismatched publication", async () => {
     for (const change of [
       { answerOutcome: undefined },
@@ -54,6 +116,23 @@ describe("bounded agent smoke", () => {
     const { transport } = fixture();
     transport.request = vi.fn(async () => ({ reply: "4" }));
     expect((await runAgentSmoke({ config, thread: "release-1", transport })).capabilityOutcome).toBe("failed");
+  });
+
+  it("requires the configured fixture verdict and refuses a missing or wrong posted verdict", async () => {
+    for (const verdict of [undefined, "approve", "request_changes"] as const) {
+      const { transport, records } = fixture();
+      transport.readRun = vi.fn(async (id) => {
+        const record = records.get(id) as { reviewPost?: object };
+        return id === "run-review" ? { ...record, reviewPost: { ...record.reviewPost, verdict } } : record;
+      });
+      const receipt = await runAgentSmoke({
+        config: { ...config, review: { ...config.review, expectedVerdict: "request_changes" } },
+        thread: "release-1",
+        transport,
+      });
+      expect(receipt.capabilityOutcome).toBe(verdict === "request_changes" ? "passed" : "failed");
+      if (verdict !== "request_changes") expect(receipt.scenarios[2].reason).toBe("review_verdict_mismatch");
+    }
   });
 
   it("retains an admitted identity on monitoring failure and never retries or rolls back", async () => {

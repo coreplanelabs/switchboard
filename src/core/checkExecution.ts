@@ -77,6 +77,8 @@ const receiptSchema = z
     ]),
   })
   .strict();
+export { receiptSchema as checkExecutionReceiptSchema };
+
 const stateSchema = z.object({ version: z.literal(1), receipts: z.array(receiptSchema).max(RECEIPT_CAP) }).strict();
 
 export interface CheckExecutionBinding {

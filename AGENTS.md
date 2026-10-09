@@ -29,7 +29,7 @@ The user's nouns: the [Vocabulary](docs/reference/vocabulary.md). Module by modu
 
 ## Commands
 
-The repo's whole interface: deterministic, non-interactive, no credential unless it says so, failing fast by name. CI calls nothing else.
+Deterministic, non-interactive commands. Credentials are named when required. CI uses these commands.
 
 <!-- generated:commands · npm run agents:gen — generated from package.json + project.json, do not edit by hand -->
 
@@ -92,6 +92,7 @@ The repo's whole interface: deterministic, non-interactive, no credential unless
 | `npm run load` | Load harness for infrastructure and route checks. | Capacity receipts. |
 | `npm run smoke:ingress` | Checks three deployment capability families and writes an acceptance receipt; --check validates setup without network. | Explicitly configured disposable smoke scope; release acceptance. |
 | `npm run staging:deploy` | Validates staging isolation, freezes deployment inputs, and deploys the selected candidate Workers. --check validates without upload. | Manual staging candidates; requires separate staging and production account pins. |
+| `npm run staging:validate` | Checks PR eligibility before staging. | Staging CI and queued-head recheck. |
 
 <!-- /generated:commands -->
 
@@ -99,7 +100,7 @@ Each workspace has its own `verify` (`-w web|docs|deploy/<worker>|packages/switc
 
 ## Rules for agents
 
-- **Comments are for the stranger.** A comment explains why, checkable against the code. No private trackers, people or incident retellings — provenance belongs in the changelog and the decision records; `hygiene:check` enforces it.
+- **Comments are for the stranger.** Explain why. Keep private trackers, people and incidents in changelogs or decision records; `hygiene:check` enforces this.
 - **Never hand-edit a generated file or region.** Generated regions, the vendored skills, the reference tables and each Worker's `wrangler.jsonc` come from `npm run fix`; change the source and regenerate.
 - **The spec follows the code, never the reverse.** Do not rename a test to satisfy a spec row; fix the row. A proof reference is exact or wildcarded (`title…`), never a truncation.
 - **Tidy first.** Structural change (rename, move, extract) and behavioral change are separate commits, each readable on its own.
