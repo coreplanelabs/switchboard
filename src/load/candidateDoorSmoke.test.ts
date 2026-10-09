@@ -18,6 +18,26 @@ const work = {
   input: { preset: "ship", shipEntry: "work_from_thread", repo: "acme/api", reason: "Fix the original issue." },
 };
 
+describe("fixed candidate smoke named command", () => {
+  it.each([
+    { text: "status show", command: "status_show", accepted: true },
+    { text: "status show", command: "plane_show", accepted: false },
+    { text: "statsu show", command: "status_show", accepted: true },
+    { text: "statsu show", command: "plane_show", accepted: false },
+  ])("scores $command for $text as $accepted", async ({ text, command, accepted }) => {
+    const entry = candidateDoorSmokeCases(projection).find((entry) => entry.text === text)!;
+    const model = vi.fn<RouteModel>(async (prompt) =>
+      prompt.tool.name === "verify"
+        ? { tool: "verify", input: { agrees: true, reason: "Scripted fixture verdict." } }
+        : { tool: command, input: { intent: "read", reason: "Scripted fixture selection." } },
+    );
+    const answer = await runOperator(candidateDoorSmokeInput(entry, projection, "openai"), model);
+    expect(answer.decision.kind).toBe("binds");
+    if (answer.decision.kind !== "binds") throw new Error("Expected a scored command binding");
+    expect(entry.expected(answer.decision.binds[0]!)).toBe(accepted);
+  });
+});
+
 describe("fixed candidate smoke repository dependency", () => {
   it("answers a valid connected fixture helper through the same input builder used by candidate smoke", async () => {
     const replies = [{ tool: OPERATOR_READ_TOOLS.repositoryBrief, input: { repo: "acme/api" } }, work];
