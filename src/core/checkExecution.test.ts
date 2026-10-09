@@ -44,6 +44,96 @@ function setup(previous?: unknown) {
 }
 
 describe("recorded coding checks", () => {
+  it.each(["resident", "sandbox"] as const)(
+    "keeps the process timeout while awaiting its %s response and honors the original controls",
+    async (backend) => {
+      for (const ending of ["delivered", "call_stop", "run_stop", "deadline", "process_timeout"] as const) {
+        vi.useFakeTimers();
+        try {
+          const s = setup();
+          const call = new AbortController();
+          const wires: Array<{ command: string; timeoutMs: number }> = [];
+          const result = {
+            ...ok,
+            stdout: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            exitCode: ending === "process_timeout" ? 124 : 0,
+          };
+          if (ending === "deadline") s.binding.remainingMs = () => RUN_DEADLINE_RESERVE_MS + 1200;
+          vi.stubGlobal(
+            "fetch",
+            vi.fn(async (_url, init: RequestInit) => {
+              wires.push(JSON.parse(String(init.body)));
+              if (wires.length === 1) return new Response(JSON.stringify(metadata));
+              return new Response(
+                new ReadableStream({
+                  start(controller) {
+                    const timer = setTimeout(() => {
+                      controller.enqueue(new TextEncoder().encode(JSON.stringify(result)));
+                      controller.close();
+                    }, 1500);
+                    init.signal?.addEventListener(
+                      "abort",
+                      () => {
+                        clearTimeout(timer);
+                        controller.error(new Error("response interrupted"));
+                      },
+                      { once: true },
+                    );
+                  },
+                }),
+              );
+            }),
+          );
+          const executor =
+            backend === "resident"
+              ? new ResidentExecutor({
+                  baseUrl: "https://resident.example",
+                  token: "private-token",
+                  resource: "repo:acme/repo",
+                  threadKey: "cli:private",
+                })
+              : new CloudflareSandboxExecutor({
+                  url: "https://sandbox.example",
+                  token: "private-token",
+                  threadKey: "cli:private",
+                  resolveEnvs: async () => ({}),
+                });
+          s.binding.executor = () => executor;
+          const capability = s.capability();
+          if (ending === "call_stop") setTimeout(() => call.abort(), 500);
+          if (ending === "run_stop") setTimeout(() => s.stop.abort(), 500);
+          const response = capability.run(
+            { command: "git rev-parse HEAD", purpose: "verification", timeoutMs: 1000 },
+            "original-call",
+            { signal: call.signal },
+          );
+          await vi.advanceTimersByTimeAsync(1500);
+          expect(await response).toMatchObject({
+            kind: "recorded",
+            receipt: {
+              callId: "original-call",
+              timeoutMs: 1000,
+              outcome:
+                ending === "delivered" ? { kind: "completed", ...result } : { kind: "unknown", reason: "interrupted" },
+            },
+          });
+          expect(wires[1]).toMatchObject({
+            command: "cd -- '/work/repo' && bash -c 'git rev-parse HEAD'",
+            timeoutMs: 1000,
+          });
+          expect(s.saved.map((state) => state.receipts[0]?.outcome.kind)).toEqual([
+            "pending",
+            ending === "delivered" ? "completed" : "unknown",
+          ]);
+        } finally {
+          vi.clearAllTimers();
+          vi.useRealTimers();
+          vi.unstubAllGlobals();
+        }
+      }
+    },
+  );
+
   it("records a short command after metadata takes longer than the command timeout", async () => {
     vi.useFakeTimers();
     try {

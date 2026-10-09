@@ -618,6 +618,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   // ledger writes a step's rows from that index (`writeThrough`).
   const tail = ledgerTailOf(run.resume);
   let stepSaved: Promise<void> | undefined;
+  let recoveringRead: Promise<unknown> | undefined;
   const mirror = new PiMirror({
     onStep: run.onStep ? (report) => (stepSaved = run.onStep!(report)) : undefined,
     seedLength: run.resume ? run.resume.messages.length + (run.resume.compactions?.length ?? 0) : run.messages.length,
@@ -735,15 +736,34 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       return failure;
     },
     callSeen: async (callId) => {
-      // The next native start is behind this turn's durable save in the log.
-      // Storage latency must not spend the separate observation allowance.
+      const originEndsIn = live.rules.loopEndsIn;
+      const stopped = () =>
+        run.control?.hardSignal.aborted ||
+        sessionEnded ||
+        toolsBlocked() !== undefined ||
+        now() >= deadline ||
+        (originEndsIn?.() ?? 0) <= 0;
+      // Save and remote read latency belong to their existing bounded operations,
+      // not the separate allowance for observing the native call.
       for (let waited = 0; waited < CALL_SEEN_WAIT_MS;) {
+        if (stopped()) return;
         const save = stepSaved;
         await save;
         if (bridge.callOpen(callId)) return;
+        const read = transport?.readInFlight ?? recoveringRead;
+        while (read && (transport?.readInFlight === read || recoveringRead === read)) {
+          if (
+            stopped() ||
+            !(await sleepUnlessStopped({ sleep: deps.sleep, now, signal: run.control?.hardSignal }, seenTick))
+          )
+            return;
+        }
+        // The main loop owns read-failure classification and same-producer recovery.
+        if (read) await read.catch(() => {});
         await deps.sleep(seenTick);
-        // A save that began during this poll must be awaited even on the last tick.
-        if (stepSaved === save) waited += seenTick;
+        // A save or read begun during the last tick still needs its own acknowledgement.
+        if (stepSaved === save && transport?.readInFlight === undefined && recoveringRead === undefined)
+          waited += seenTick;
       }
     },
     callEnded: async (callId) => {
@@ -1951,7 +1971,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // both, shared with every follow-up turn (`recoverInPlace`). The word
         // the process cannot refute is the verdict; past the bound the run
         // fails by name, whichever word it met.
-        const outcome = await recoverInPlace(err, deadline);
+        const recovery = recoverInPlace(err, deadline);
+        recoveringRead = recovery;
+        const outcome = await recovery.finally(() => {
+          recoveringRead = undefined;
+        });
         if (outcome.kind === "control-reset" || outcome.kind === "word-alive" || outcome.kind === "transport-alive")
           continue;
         if (outcome.kind === "run-ended") break; // the wait ended with the run's own stop: the loop ends as it
@@ -2541,7 +2565,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             // transport loss takes the one more command, and any other failure
             // is the turn's, as it always was — a control file lost among
             // them, noted once by the turn's own catch below.
-            const outcome = await recoverInPlace(err, turnEnd);
+            const recovery = recoverInPlace(err, turnEnd);
+            recoveringRead = recovery;
+            const outcome = await recovery.finally(() => {
+              recoveringRead = undefined;
+            });
             if (outcome.kind === "control-reset" || outcome.kind === "word-alive" || outcome.kind === "transport-alive")
               continue;
             if (outcome.kind === "run-ended") break; // the wait ended with the run's own stop: the turn ends as it

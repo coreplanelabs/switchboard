@@ -7457,6 +7457,183 @@ describe("runPiHarness — the relaunch in the replacement container", () => {
 });
 
 describe("hosted Review originating lifecycle", () => {
+  it("refuses an unobserved check when its original session ends", async () => {
+    const w = world({ agent: { name: "review", identity: "read", maxMinutes: 20 } });
+    w.run.commandPolicy = "hosted-review";
+    w.run.saveFacts = (_facts, control) => (control?.requireAcknowledgement ? true : undefined);
+    w.run.tools = [
+      { name: "run_check", description: "Check", inputSchema: { type: "object" }, run: async () => "head verified" },
+    ];
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "review finished"));
+    const session = await w.open();
+    const answer = runRelayedTool(w.registry.get("run-7")!, {
+      toolCallId: "unobserved-check",
+      tool: "run_check",
+      input: { command: "git rev-parse HEAD", purpose: "verification", timeoutMs: 1000 },
+    });
+    await session.end();
+    expect(await answer).toEqual({
+      content: [{ type: "text", text: "error: the originating check call is unavailable; command did not start" }],
+      isError: true,
+    });
+  });
+
+  it.each([
+    "delivered",
+    "last_poll",
+    "missing_start",
+    "hard_stop",
+    "deadline",
+    "recover_reset",
+    "recover_alive",
+    "recover_transport",
+    "changed_producer",
+    "failed_recovery",
+    "recover_stop",
+    "recover_deadline",
+  ] as const)("waits for the original bounded log read and preserves %s before native observation", async (ending) => {
+    const checking = new AsyncLocalStorage<boolean>();
+    const c = new FakeHarnessContainer();
+    const readLog = c.readLog.bind(c);
+    let release!: () => void;
+    const delayedRead = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let releaseProbe!: () => void;
+    const delayedProbe = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    let probing = false;
+    const alive = c.alive.bind(c);
+    c.alive = async (pid) => {
+      if (
+        held &&
+        !probing &&
+        [
+          "recover_alive",
+          "recover_transport",
+          "changed_producer",
+          "failed_recovery",
+          "recover_stop",
+          "recover_deadline",
+        ].includes(ending)
+      ) {
+        probing = true;
+        await delayedProbe;
+        if (ending === "changed_producer") return false;
+        if (ending === "failed_recovery") throw new Error("process observation unavailable");
+      }
+      return alive(pid);
+    };
+    let held = false;
+    c.readLog = async (...args) => {
+      const bytes = await readLog(...args);
+      if (!held && Buffer.from(bytes).toString().includes("delayed-check")) {
+        held = true;
+        await delayedRead;
+        if (ending === "recover_reset") throw new HarnessContainerControlResetError("read", "control reset");
+        if (ending === "recover_transport") throw new ExecInfraError(NETWORK_LOST_TEXT, "transport-lost");
+        if (
+          ["recover_alive", "changed_producer", "failed_recovery", "recover_stop", "recover_deadline"].includes(ending)
+        )
+          throw new HarnessContainerRuntimeReplacedError("read", "runtime-replaced");
+      }
+      return bytes;
+    };
+    let observationMs = 0;
+    const w = world({
+      container: c,
+      agent: { name: "review", identity: "read", maxMinutes: 20 },
+      sleep: async (ms) => {
+        if (checking.getStore()) {
+          observationMs += ms;
+          if (observationMs === 1000 && ending === "hard_stop") w.control.requestStop("hard");
+          if (observationMs === 1000 && ending === "deadline") w.clock.now = NOW + 20 * MINUTE_MS;
+          if (observationMs === 3000 && ending === "last_poll") {
+            emitStart();
+            while (!held) await new Promise<void>((resolve) => setImmediate(resolve));
+          }
+          if (observationMs > 3000) release();
+          if (probing && observationMs >= 4500 && ending === "recover_stop") w.control.requestStop("hard");
+          if (probing && observationMs >= 4500 && ending === "recover_deadline") w.clock.now = NOW + 20 * MINUTE_MS;
+          if (observationMs > 6500) releaseProbe();
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      },
+    });
+    w.run.commandPolicy = "hosted-review";
+    w.run.saveFacts = (_facts, control) => (control?.requireAcknowledgement ? true : undefined);
+    const executions: Array<string | undefined> = [];
+    w.run.tools = [
+      {
+        name: "run_check",
+        description: "Verify the checkout",
+        inputSchema: { type: "object" },
+        run: async (_input, ctx) => {
+          executions.push(ctx.callId);
+          return "head verified";
+        },
+      },
+    ];
+    const input = { command: "git rev-parse HEAD", purpose: "verification", timeoutMs: 1000 };
+    let answer!: Promise<RelayedToolAnswer>;
+    const emitStart = () => {
+      c.emit(
+        {
+          type: "message_end",
+          message: assistant([{ type: "toolCall", id: "delayed-check", name: "run_check", arguments: input }]),
+        },
+        ...(ending === "missing_start"
+          ? []
+          : [{ type: "tool_execution_start", toolCallId: "delayed-check", toolName: "run_check", args: input }]),
+      );
+    };
+    scriptedPi(c, () => {
+      if (ending !== "last_poll") emitStart();
+      w.registry.get("run-7")!.gateSaw("delayed-check");
+      answer = checking.run(true, () =>
+        runRelayedTool(w.registry.get("run-7")!, { toolCallId: "delayed-check", tool: "run_check", input }),
+      );
+    });
+    const opened = w.open().catch((error: unknown) => ({ error }));
+    while (!answer) await new Promise<void>((resolve) => setImmediate(resolve));
+    const result = await answer;
+    release();
+    releaseProbe();
+    c.emit({
+      type: "tool_execution_end",
+      toolCallId: "delayed-check",
+      toolName: "run_check",
+      result: { content: result.content },
+      isError: result.isError,
+    });
+    finalTurn(c, "review finished");
+    const session = await opened;
+    if ("error" in session) {
+      expect(["changed_producer", "failed_recovery"]).toContain(ending);
+      expect(session.error).toMatchObject({
+        name: ending === "changed_producer" ? "PiContainerReplacedError" : "Error",
+      });
+    } else await session.end();
+    expect(c.starts).toHaveLength(1);
+    expect({ executions, result }).toEqual(
+      ["delivered", "last_poll", "recover_reset", "recover_alive", "recover_transport"].includes(ending)
+        ? {
+            executions: ["delayed-check"],
+            result: { content: [{ type: "text", text: "head verified" }], isError: false },
+          }
+        : {
+            executions: [],
+            result: {
+              content: [
+                { type: "text", text: "error: the originating check call is unavailable; command did not start" },
+              ],
+              isError: true,
+            },
+          },
+    );
+  });
+
   it.each(["before", "during", "in the final poll"])(
     "starts an observed check requested %s its originating turn's slow durable save",
     async (when) => {
