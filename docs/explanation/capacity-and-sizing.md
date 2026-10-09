@@ -1,6 +1,6 @@
 # Capacity and sizing
 
-The bot uses one gateway event loop and bounded validation workers on a `standard-2` container; a resident has 32 UID slots sharing its vCPUs and disk; a cold sandbox is the largest predefined type.
+The bot uses one gateway event loop and bounded validation workers on a `standard-2` container; a resident creates workspace identities on demand and limits active owners sharing its vCPUs and disk; a cold sandbox is the largest predefined type.
 
 The discrete model-call path and its ownership rules are shown in [How model calls use capacity](model-call-flow.md).
 
@@ -57,7 +57,7 @@ An unused resident parks its refresh and sleeps. The fleet caps warm residents; 
 
 ## Identity slots and active work
 
-A resident has 32 UID slots and a separate limit of 16 active owners. The fleet cap is five repositories, with a platform ceiling of ten containers. Lowering the cap leaves existing residents registered; onboarding another resident fails at or above the cap. Cold repository registrations use no resident slots. Each repository still routes to one VM with four vCPUs, 12 GiB memory and 20 GB disk. Extra identities provide room for historical owners; they do not add compute or promise more concurrent work.
+A resident creates fresh unprivileged UID identities on demand and admits at most 16 active owners. Historical identities stay with their recorded owners and do not form a fixed work budget. The fleet cap is five repositories, with a platform ceiling of ten containers. Lowering the cap leaves existing residents registered; onboarding another resident fails at or above the cap. Cold repository registrations use no resident slots. Each repository still routes to one VM with four vCPUs, 12 GiB memory and 20 GB disk. Extra identities provide room for historical owners; they do not add compute or promise more concurrent work.
 
 An attach or operator command reserves capacity before cloning or executing. The exact existing owner may reattach at capacity. Live or uncertain owners, unacknowledged native operations and processes still running under old UIDs remain occupied. Verified finished owners can retain private files without using an active-work slot. Their disk use and preservation obligations remain subject to the existing checks.
 

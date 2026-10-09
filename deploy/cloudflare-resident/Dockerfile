@@ -1,7 +1,6 @@
 # Resident container image: the @cloudflare/sandbox base (Ubuntu 22.04; already
 # ships git, curl, jq, npm, cloudflared, and a Node 22 and a bun this image
-# replaces with pinned ones below) plus GitHub tooling and a pool of
-# unprivileged users.
+# replaces with pinned ones below) plus tooling for unprivileged accounts.
 
 # The Node this image ships (copied in below), at the exact tag every image in
 # this repository shares — its major is .nvmrc's, which is what CI runs and
@@ -247,15 +246,16 @@ RUN npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.18 \
 # thread — docs/reference/specs/resident-repos.md). The SDK's exec has no user/uid option
 # (verified against 0.13.0-next.751.1), so the container server itself runs as
 # root and per-command demotion is done with `su -s /bin/bash workerN -c ...`
-# (verified live: exec via su lands at uid 200N). Provision a pool of
-# unprivileged users for thread and operation owners, and shut the escalation
-# paths back up:
+# (verified live: exec via su lands at uid 200N). Only the build account is
+# baked in; the trusted Worker creates isolated owner accounts on demand.
+# Shut the escalation paths back up:
 #   - sudo: not installed in the base image; purge defensively in case a later
 #     base bump adds it.
 #   - su back to root: root's password is locked, so workerN -> root fails.
 # `su` itself must stay (it is the demotion mechanism, used only by root).
 RUN set -eux; \
-    for i in $(seq 1 33); do useradd -m -u "$((2000 + i))" -s /bin/bash "worker$i"; chmod 700 "/home/worker$i"; done; \
+    useradd -m -u 2001 -s /bin/bash worker1; chmod 700 /home/worker1; \
+    printf 'dynamic-uid-v1\n' > /etc/switchboard-uid-protocol; \
     if dpkg -s sudo >/dev/null 2>&1; then apt-get remove -y --purge sudo; fi; \
     passwd -l root
 

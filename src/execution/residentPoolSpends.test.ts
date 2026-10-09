@@ -13,6 +13,36 @@ import {
 
 const pool = ["worker2", "worker3", "worker4"];
 
+describe("dynamic resident UID ownership", () => {
+  it("accepts recorded identities beyond 250 owners without allowing cross-owner reuse", () => {
+    const history = Array.from({ length: 251 }, (_, i) => ({ user: `worker${i + 2}`, owner: `thread:t${i}` }));
+    expect(parseSpentPoolUsers(history, undefined)?.get("worker252")).toBe("thread:t250");
+    const next = spendPoolUser(history, undefined, "worker253", "thread:next");
+    expect(next?.at(-1)).toEqual({ user: "worker253", owner: "thread:next" });
+    expect(mayRunAsPoolUser(next, undefined, "worker253", ["next"], undefined)).toBe(true);
+    expect(mayRunAsPoolUser(next, undefined, "worker253", ["other"], undefined)).toBe(false);
+    expect(spendPoolUser(next, undefined, "worker253", "thread:other")).toBeNull();
+  });
+
+  it("rejects privileged, malformed or unrecorded identities in dynamic mode", () => {
+    const own = spendPoolUser([], undefined, "worker252", "thread:a");
+    expect(mayRunAsPoolUser(own, undefined, "worker252", ["a"], undefined)).toBe(true);
+    for (const user of [
+      "root",
+      "worker1",
+      "worker0",
+      "worker02",
+      "worker-2",
+      "worker2;id",
+      "worker99999999999999999",
+    ]) {
+      expect(spendPoolUser([], undefined, user, "thread:a")).toBeNull();
+      expect(mayRunAsPoolUser(own, undefined, user, ["a"], undefined)).toBe(false);
+    }
+    expect(mayRunAsPoolUser(own, undefined, "worker253", ["a"], undefined)).toBe(false);
+  });
+});
+
 describe("resident pool UID spends", () => {
   it("refuses a missing or malformed generation ledger", () => {
     for (const value of [

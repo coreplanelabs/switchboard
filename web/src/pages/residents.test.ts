@@ -180,6 +180,27 @@ describe("ResidentsIndexPage", () => {
     expect(w.text()).toContain("acme/infra");
     expect(w.text()).not.toContain("No repos onboarded");
   });
+  it("reports dynamic identities without a budget or exhaustion warning", async () => {
+    const { wrapper: w, es } = mountIndex(
+      indexSeed([
+        { ...WARM, live: { ...WARM.live, uidAllocation: "dynamic", poolUsersSpent: 251, poolUsersTotal: null } },
+      ]),
+    );
+    expect(w.find(".uid-count").text()).toBe("UIDs 251 issued");
+    expect(w.find(".uid-count").classes()).toContain("text-muted");
+    expect(w.find(".uid-count").attributes("aria-label")).toContain("does not limit active work");
+    es().emitMessage({
+      type: "residents",
+      cap: 6,
+      count: 1,
+      residents: [
+        { ...WARM, live: { ...WARM.live, uidAllocation: "dynamic", poolUsersSpent: 252, poolUsersTotal: null } },
+      ],
+    });
+    await nextTick();
+    expect(w.find(".uid-count").text()).toBe("UIDs 252 issued");
+  });
+
   it("shows spent UID slots, highlights exhaustion, and updates from the resident feed", async () => {
     const { wrapper: w, es } = mountIndex(
       indexSeed([{ ...WARM, live: { ...WARM.live, poolUsersSpent: 16, poolUsersTotal: 16 } }]),

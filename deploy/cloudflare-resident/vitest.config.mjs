@@ -59,6 +59,7 @@ export default defineConfig({
       "dependencyInspection.test.ts",
       "destroyFence.test.ts",
       "poolSpends.test.ts",
+      "uidOwnership.test.ts",
       "legacyCredentials.test.ts",
       "rebindAttach.test.ts",
       "releaseAtRunEnd.test.ts",

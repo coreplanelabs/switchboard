@@ -24,20 +24,20 @@ describe("resident model credential boundary", () => {
     expect(scan).toContain("[THREADS_DIR, OPS_DIR]");
     expect(scan).toContain("hasUnexpectedOwnedThreadDir(result.stdout, dir, dir === THREADS_DIR ? allowed : [])");
     const reserve = method("reserveSafePoolUser");
-    expect(method("findFreePoolUser")).toContain("if (user) this.poolUsersInspecting.add(user)");
+    expect(reserve).toContain("this.poolUsersInspecting.add(user)");
     expect(reserve).toContain("this.poolUserHasOldThreadDir(user, [])");
-    expect(reserve).toContain("if (!safe) this.poolUsersInspecting.delete(user)");
+    expect(reserve).toContain("if (!ready) this.poolUsersInspecting.delete(user)");
     expect(method("reserveSafePoolUser")).toContain("this.poolUserHasOldStageContent(user)");
-    expect(method("reserveSafePoolUser")).toContain("pool-user-contaminated: no clean pool user is available");
+    expect(method("reserveSafePoolUser")).toContain("pool-user-contaminated: workspace identity retains private files");
     expect(method("poolUserHasOldStageContent")).toContain("legacyStageContentScanCommand");
     expect(method("attachThreadTraced")).toContain("this.threadAttaches.run(threadKey, async () => {");
     expect(method("attachThreadTraced")).toContain("this.attachThreadBody(");
     expect(method("attachThreadBody")).not.toContain("withThreadAllocationLock");
     expect(method("claimRetainedThreadUser")).toContain("this.poolUserHasOldThreadDir(user");
-    expect(method("claimRetainedThreadUser")).toContain("!THREAD_USERS.includes(user)");
+    expect(method("claimRetainedThreadUser")).toContain("!isResidentPoolUser(user)");
     expect(method("allocateThreadUser")).toContain("this.reserveSafePoolUser(`thread:${threadKey}`, threadKey)");
     expect(method("allocateOpUser")).toContain("this.reserveSafePoolUser(owner)");
-    expect(method("residentLevels")).toContain("for (const u of this.poolUsersInspecting) used.add(u)");
+    expect(method("residentLevels")).toContain("this.activeWorkloadOwners(false, false)");
     expect(method("writeThreadFile")).toContain("this.threadWrites.run(threadKey");
     expect(method("writeThreadFileImpl")).toContain("legacyStageReuseScrubCommand(stageDir)");
   });
@@ -114,7 +114,7 @@ describe("resident model credential boundary", () => {
     expect(evict).toMatch(
       /if \(runtimeActive && !threadDir\.startsWith\(`\$\{THREADS_DIR\}\/`\)\) return "cleanup-failed";/,
     );
-    expect(method("findFreePoolUser")).toContain("!b.evicted && b.user");
+    expect(method("reserveSafePoolUser")).toContain("reserveUid(txn, owner)");
     expect(method("detachThread")).toContain('reason: "thread-cleanup-failed: pool user kept"');
     for (const caller of ["detachThread", "sweepWorktrees", "reclaimFinishedRefs"])
       expect(method(caller)).toContain("const activeNow = await this.isRuntimeActive().catch(() => true);");

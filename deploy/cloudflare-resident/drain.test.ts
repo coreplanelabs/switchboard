@@ -566,7 +566,7 @@ describe("the Worker's wiring (by scan)", () => {
     // The one pool-user probe left runs only with NO pending marker (the
     // current-image shortcut), while `doHydrate` reports only after an active
     // replacement reaches `warm`, so the active path cannot race the restore.
-    expect(reconcile.match(/this\.run\(\["id", "-u", last\]\)/g)).toHaveLength(1);
+    expect(reconcile.match(/this\.run\(capability\)/g)).toHaveLength(1);
     const hydrate = source.slice(source.indexOf("private async doHydrate()"), source.indexOf("// -- freshness"));
     expect(hydrate).toContain('reportPendingImageCurrent("hydrate")');
     // The attach route refuses a `stale` verdict only for a thread with no run
