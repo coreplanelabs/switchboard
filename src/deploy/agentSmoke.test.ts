@@ -186,11 +186,155 @@ describe("bounded agent smoke", () => {
     }
   });
 
+  it("waits for the original asynchronous runs to be saved without another admission", async () => {
+    vi.useFakeTimers();
+    try {
+      const original = fixture();
+      const polls = new Map<string, number>();
+      const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: { commit, version: "1.0.0" } });
+        const request = JSON.parse(String(init?.body));
+        if (String(url).endsWith("/ingress")) {
+          expect(request.async).toBe(true);
+          const id = request.thread.split("-").at(-1);
+          const agent = id === "answer" ? "general" : id === "workspace" ? "explore" : "review";
+          const result = (await original.transport.request(
+            { id, agent, text: request.text, minutes: id === "review" ? 7 : 4 },
+            request.thread,
+          )) as { run: { id: string }; build: unknown };
+          return Response.json(
+            { runId: result.run.id, threadKey: `http:smoke:${request.thread}`, build: result.build },
+            { status: 202 },
+          );
+        }
+        if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+        if (request.method === "initialize")
+          return Response.json({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: MCP_PROTOCOL_VERSION } });
+        const id = request.params.arguments.id;
+        const count = (polls.get(id) ?? 0) + 1;
+        polls.set(id, count);
+        const record =
+          count === 1
+            ? { id, finished: false, persisted: false }
+            : count === 2
+              ? { id, finished: true, persisted: false }
+              : original.records.get(id);
+        return Response.json({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: { content: [{ type: "text", text: `runs.get: ok\n${JSON.stringify(record)}` }] },
+        });
+      });
+      const transport = agentSmokeTransport({
+        origin: "https://bot.example.test",
+        healthUrl: "https://bot.example.test/healthz",
+        token: "fixture-only",
+        config,
+        fetch,
+      });
+      const pending = runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
+      await vi.runAllTimersAsync();
+      const receipt = await pending;
+      expect(receipt.capabilityOutcome).toBe("passed");
+      expect(receipt.scenarios.map((row) => [row.runId, row.outcome])).toEqual([
+        ["run-answer", "passed"],
+        ["run-workspace", "passed"],
+        ["run-review", "passed"],
+      ]);
+      expect(fetch.mock.calls.filter(([url]) => String(url).endsWith("/ingress"))).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains an asynchronous admission when its build or thread evidence is refused", async () => {
+    for (const change of [
+      { build: undefined },
+      { build: { commit: "wrong" } },
+      { build: { commit: head } },
+      { threadKey: "http:smoke:other" },
+      { threadKey: undefined },
+      { threadKey: 99 },
+    ]) {
+      const fetch = vi.fn(async (url: string | URL | Request) => {
+        if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: { commit } });
+        if (String(url).endsWith("/ingress"))
+          return Response.json(
+            { runId: "admitted-run", threadKey: "http:smoke:release-1-answer", build: { commit }, ...change },
+            { status: 202 },
+          );
+        throw new Error("refused admission must not be monitored");
+      });
+      const transport = agentSmokeTransport({
+        origin: "https://bot.example.test",
+        healthUrl: "https://bot.example.test/healthz",
+        token: "fixture-only",
+        config,
+        fetch,
+      });
+      const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
+      expect(receipt.scenarios[0]).toMatchObject({
+        runId: "admitted-run",
+        outcome: "incomplete",
+        reason: "threadKey" in change ? "run_identity_mismatch" : "served_build_mismatch",
+      });
+      expect(receipt.scenarios[1].outcome).toBe("skipped");
+      expect(fetch.mock.calls.filter(([url]) => String(url).endsWith("/ingress"))).toHaveLength(1);
+    }
+  });
+
+  it("keeps the admitted identity when asynchronous completion exceeds the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: { commit } });
+        if (String(url).endsWith("/ingress"))
+          return Response.json(
+            { runId: "slow-run", threadKey: "http:smoke:release-1-answer", build: { commit } },
+            { status: 202 },
+          );
+        const request = JSON.parse(String(init?.body));
+        if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+        if (request.method === "initialize")
+          return Response.json({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: MCP_PROTOCOL_VERSION } });
+        return Response.json({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            content: [{ type: "text", text: 'runs.get: ok\n{"id":"slow-run","finished":false,"persisted":false}' }],
+          },
+        });
+      });
+      const transport = agentSmokeTransport({
+        origin: "https://bot.example.test",
+        healthUrl: "https://bot.example.test/healthz",
+        token: "fixture-only",
+        config,
+        fetch,
+      });
+      const pending = runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
+      await vi.runAllTimersAsync();
+      const receipt = await pending;
+      expect(receipt.capabilityOutcome).toBe("incomplete");
+      expect(receipt.scenarios.map((row) => [row.runId, row.outcome, row.reason])).toEqual([
+        ["slow-run", "incomplete", "run_record_unproven"],
+        [undefined, "skipped", "prior_scenario_unproven"],
+        [undefined, "skipped", "prior_scenario_unproven"],
+      ]);
+      expect(fetch.mock.calls.filter(([url]) => String(url).endsWith("/ingress"))).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("uses bounded ingress and the existing MCP JSON envelope with redirects refused", async () => {
     const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: { commit } });
       if (String(url).endsWith("/ingress"))
-        return Response.json({ run: { id: "native-run", status: "completed" }, build: { commit } });
+        return Response.json(
+          { runId: "native-run", threadKey: "http:smoke:smoke-1", build: { commit } },
+          { status: 202 },
+        );
       const request = JSON.parse(String(init?.body));
       if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
       if (request.method === "initialize")
@@ -199,7 +343,9 @@ describe("bounded agent smoke", () => {
       return Response.json({
         jsonrpc: "2.0",
         id: request.id,
-        result: { content: [{ type: "text", text: 'runs.get: ok\n{"id":"native-run"}' }] },
+        result: {
+          content: [{ type: "text", text: 'runs.get: ok\n{"id":"native-run","finished":true,"persisted":true}' }],
+        },
       });
     });
     const transport = agentSmokeTransport({
@@ -210,13 +356,19 @@ describe("bounded agent smoke", () => {
       fetch,
     });
     expect(await transport.health()).toEqual({ commit });
-    await transport.request({ id: "answer", agent: "general", text: "question", minutes: 4 }, "smoke-1");
-    expect(await transport.readRun("native-run")).toEqual({ id: "native-run" });
+    expect(
+      await transport.request({ id: "answer", agent: "general", text: "question", minutes: 4 }, "smoke-1"),
+    ).toEqual({
+      run: { id: "native-run", status: "started" },
+      build: { commit },
+      threadKey: "http:smoke:smoke-1",
+    });
+    expect(await transport.readRun("native-run")).toEqual({ id: "native-run", finished: true, persisted: true });
     for (const [, init] of fetch.mock.calls) {
       expect(init?.redirect).toBe("error");
       expect(init?.signal).toBeInstanceOf(AbortSignal);
     }
     const body = JSON.parse(String(fetch.mock.calls[1]?.[1]?.body));
-    expect(body).toEqual({ text: "question", channel: "smoke", thread: "smoke-1" });
+    expect(body).toEqual({ text: "question", channel: "smoke", thread: "smoke-1", async: true });
   });
 });

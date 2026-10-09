@@ -308,7 +308,7 @@ async function handleAuthorized(
     logPrefix: "ingress",
   });
   return result.kind === "started"
-    ? { status: 202, body: result.receipt }
+    ? { status: 202, body: { ...result.receipt, ...(deps.build ? { build: deps.build } : {}) } }
     : {
         status: 200,
         body: {

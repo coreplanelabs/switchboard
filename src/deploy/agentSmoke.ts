@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { checkExecutionReceiptSchema } from "../core/checkExecution.js";
-import { leaseMinimum, minutesToMs } from "../core/budgets.js";
+import { AGENT_SMOKE_POLL_MS, leaseMinimum, minutesToMs } from "../core/budgets.js";
 import { answerOutcomeOf } from "../core/answerOutcome.js";
 import { unwrapUntrusted } from "../core/untrusted.js";
 import { StreamableHttpMcpClient } from "../mcp/client.js";
 import { assertSmokeOriginMatchesPlan } from "./ingressSmoke.js";
+import { systemClock } from "../core/trace/clock.js";
 
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const component = z
@@ -253,6 +254,7 @@ export async function runAgentSmoke(input: {
       const response = z
         .object({
           build: z.unknown().optional(),
+          threadKey: z.unknown().optional(),
           run: z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), status: z.string() }).optional(),
         })
         .parse(await input.transport.request(scenario, row.thread));
@@ -264,6 +266,13 @@ export async function runAgentSmoke(input: {
       if (!response.run) {
         row.outcome = "failed";
         row.reason = "no_agent_run";
+        break;
+      }
+      if (
+        (response.run.status === "started" || response.threadKey !== undefined) &&
+        response.threadKey !== `http:${config.channel}:${row.thread}`
+      ) {
+        row.reason = "run_identity_mismatch";
         break;
       }
       if (
@@ -306,7 +315,7 @@ export async function runAgentSmoke(input: {
         break;
       }
       if (!run.finished || run.persisted !== true || run.provisional || run.restarting) break;
-      if (response.run.status !== "completed" || run.status !== "completed") {
+      if (!["started", "completed"].includes(response.run.status) || run.status !== "completed") {
         row.outcome = "failed";
         row.reason = "run_not_completed";
         break;
@@ -429,6 +438,7 @@ export function agentSmokeTransport(input: {
     headers: { authorization: `Bearer ${input.token}` },
     fetch: boundedFetch,
   });
+  const deadlines = new Map<string, number>();
   return {
     async health() {
       const response = await boundedFetch(input.healthUrl, { signal: AbortSignal.timeout(minutesToMs(0.5)) });
@@ -437,24 +447,56 @@ export function agentSmokeTransport(input: {
       return body.build;
     },
     async request(scenario, thread) {
+      const deadline = systemClock() + minutesToMs(scenario.minutes + 1);
       const response = await boundedFetch(new URL("/ingress", input.origin), {
         method: "POST",
         headers: { authorization: `Bearer ${input.token}`, "content-type": "application/json" },
-        body: JSON.stringify({ text: scenario.text, channel: config.channel, thread }),
+        body: JSON.stringify({ text: scenario.text, channel: config.channel, thread, async: true }),
         signal: AbortSignal.timeout(minutesToMs(scenario.minutes + 1)),
       });
       if (!response.ok) throw new Error("ingress_unavailable");
-      return response.json();
+      const body = await response.json();
+      if (response.status !== 202) return body;
+      const admission = z
+        .object({
+          runId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+          threadKey: z.unknown().optional(),
+          build: z.unknown().optional(),
+        })
+        .parse(body);
+      deadlines.set(admission.runId, deadline);
+      return {
+        run: { id: admission.runId, status: "started" },
+        build: admission.build,
+        threadKey: admission.threadKey,
+      };
     },
     async readRun(id) {
-      const result = await mcp.callTool("runs_get", { id, include: "messages" });
-      if (result.isError || result.content.length !== 1) throw new Error("record_unavailable");
-      const block = result.content[0];
-      const prefix = "runs.get: ok\n";
-      if (block?.type !== "text" || typeof block.text !== "string" || !block.text.startsWith(prefix))
-        throw new Error("record_protocol_mismatch");
-      // Decode the registry's fixed JSON envelope; no output prose grants acceptance.
-      return JSON.parse(block.text.slice(prefix.length));
+      const deadline = deadlines.get(id);
+      if (deadline === undefined) throw new Error("admission_unproven");
+      while (systemClock() < deadline) {
+        const signal = AbortSignal.timeout(deadline - systemClock());
+        const result = await mcp.callTool("runs_get", { id, include: "messages" }, { signal });
+        if (result.isError || result.content.length !== 1) throw new Error("record_unavailable");
+        const block = result.content[0];
+        const prefix = "runs.get: ok\n";
+        if (block?.type !== "text" || typeof block.text !== "string" || !block.text.startsWith(prefix))
+          throw new Error("record_protocol_mismatch");
+        const record: unknown = JSON.parse(block.text.slice(prefix.length));
+        const state = z
+          .object({
+            id: z.literal(id),
+            finished: z.boolean(),
+            persisted: z.boolean().optional(),
+            provisional: z.boolean().optional(),
+            restarting: z.boolean().optional(),
+          })
+          .parse(record);
+        if (state.finished && state.persisted === true && !state.provisional && !state.restarting) return record;
+        const left = deadline - systemClock();
+        if (left > 0) await new Promise((resolve) => setTimeout(resolve, Math.min(AGENT_SMOKE_POLL_MS, left)));
+      }
+      throw new Error("run_deadline_exceeded");
     },
   };
 }
