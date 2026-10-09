@@ -10017,11 +10017,12 @@ export class ResidentDO extends Sandbox<Env> {
           return refuse("owner-workspace-mismatch");
         const observed = (await this.observeRunForEviction(registration, binding)) as {
           kind?: string;
+          owner?: unknown;
           record?: { id?: string; threadKey?: string; status?: string; provisional?: boolean; repo?: string };
           revision?: number;
         } | null;
         const saved = workspaceSettlementOf(binding.workspaceSettlement);
-        const record =
+        let record =
           observed?.kind === "terminal"
             ? observed.record
             : isAcknowledgedWorkspaceOwner(observed, owner) &&
@@ -10030,6 +10031,20 @@ export class ResidentDO extends Sandbox<Env> {
                 observed?.revision === saved.revision
               ? saved.record
               : undefined;
+        // Older final runs have no generation-scoped settlement. Only an
+        // explicit discard may consult their final history after the exact
+        // owner is absent; the canonical reader still gives live rows priority.
+        if (
+          observed?.kind === "absent" &&
+          isWorkspaceOwner(observed.owner) &&
+          workspaceOwnerKey(observed.owner) === workspaceOwnerKey(owner)
+        ) {
+          const legacy = (await this.observeRunForEviction(
+            { threadKey, registeredAt: registration.registeredAt, runId },
+            binding,
+          )) as typeof observed;
+          if (legacy?.kind === "terminal") record = legacy.record;
+        }
         if (
           record?.id !== runId ||
           record.threadKey !== threadKey ||

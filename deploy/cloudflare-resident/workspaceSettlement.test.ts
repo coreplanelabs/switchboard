@@ -124,6 +124,7 @@ function harness(
     liveReply?: unknown;
     successorEnded?: boolean;
     incomplete?: boolean;
+    legacyReply?: unknown;
   } = {},
 ) {
   const rows = new Map<string, any>([
@@ -151,6 +152,15 @@ function harness(
   let acknowledged = 0;
   const fetch = vi.fn(async (url: URL, init: RequestInit) => {
     const body = JSON.parse(init.body as string);
+    if (options.legacyReply && url.pathname === "/runs/preservation-owner") {
+      events.push("read");
+      if (body.ownerGen === undefined && body.ownerFence === undefined) {
+        expect(body).toEqual({ storeKey: "runs", runId: "run-old" });
+        return Response.json(options.legacyReply);
+      }
+      expect(body).toMatchObject(owner);
+      return Response.json({ kind: "absent", owner });
+    }
     const requested =
       options.successorEnded && body.ownerFence === 8
         ? { runId: owner.runId, ownerGen: "gen-next", ownerFence: 8 }
@@ -1161,6 +1171,72 @@ describe("explicit absent-workspace discard", () => {
     expect(await instance.discardAbsentBinding(input)).toMatchObject({ discarded: true, runId: "run-old" });
     expect(await instance.workspaceDiscarded(threadKey, owner.runId)).toBe(true);
     expect(await instance.workspaceDiscarded(threadKey, "run-next")).toBe(false);
+  });
+  it("retires a confirmed legacy terminal owner without inventing an exact settlement", async () => {
+    const { instance, rows, events } = setup({ legacyReply: { kind: "terminal", record: ending.record } });
+    delete rows.get("thread:" + threadKey).workspaceSettlement;
+    expect(await instance.workspaceRemovalDecision(rows.get("thread:" + threadKey))).toEqual({
+      removable: false,
+      reason: "workspace-settlement-unverified",
+    });
+    const { ownerGen: _gen, ownerFence: _fence, ...preview } = input;
+    expect(await instance.discardAbsentBinding(preview)).toEqual({
+      discarded: false,
+      reason: "owner-confirmation-required",
+      owner,
+    });
+    expect(rows.get("discarding:" + threadKey)).toBeUndefined();
+    expect(await instance.discardAbsentBinding(input)).toMatchObject({
+      discarded: true,
+      runId: "run-old",
+      disposition: "absent-workspace-retired",
+    });
+    expect(rows.get("runReg:" + threadKey)).toBeUndefined();
+    expect(rows.get("runFence:" + threadKey)).toEqual(owner);
+    expect(rows.get("thread:" + threadKey).workspaceSettlement).toBeUndefined();
+    expect(rows.get("pool-users-spent")).toEqual([{ user: "worker2", owner: "thread:" + threadKey }]);
+    expect(events).not.toContain("ack");
+    expect(rows.get("discarded:" + threadKey + ":run-old")).toMatchObject({ completed: true, owner });
+    expect(await instance.discardAbsentBinding(input)).toMatchObject({ discarded: true, owner, currentBoot: null });
+  });
+  it("keeps legacy files and ownership when full absence is unverified", async () => {
+    const { instance, rows } = setup({ legacyReply: { kind: "terminal", record: ending.record } });
+    instance.observeAbsentPrivateTree = async () => false;
+    expect(await instance.discardAbsentBinding(input)).toEqual({
+      discarded: false,
+      reason: "private-tree-absence-unverified",
+    });
+    expect(rows.get("runReg:" + threadKey)).toMatchObject(owner);
+    expect(rows.get("thread:" + threadKey)).toMatchObject({ user: "worker2" });
+    expect(rows.get("discarded:" + threadKey + ":run-old")).toMatchObject({ completed: false });
+  });
+  it.each([
+    { kind: "absent", owner: { ...owner, ownerFence: 8 } },
+    { kind: "absent" },
+    { kind: "live", row: { runId: "run-old" } },
+    { kind: "unknown" },
+    { kind: "acknowledged", owner, revision: 2 },
+  ])("does not read legacy history without matching exact absence: %j", async (liveReply) => {
+    const { instance, rows, fetch } = setup({ liveReply });
+    expect(await instance.discardAbsentBinding(input)).toEqual({ discarded: false, reason: "owner-not-terminal" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(rows.get("runReg:" + threadKey)).toMatchObject(owner);
+    expect(rows.get("discarded:" + threadKey + ":run-old")).toBeUndefined();
+  });
+  it.each([
+    { kind: "live", row: { runId: "run-old" } },
+    { kind: "unknown" },
+    { kind: "terminal", record: { ...ending.record, provisional: true } },
+    { kind: "terminal", record: { ...ending.record, repo: "other/repo" } },
+    { kind: "terminal", record: { ...ending.record, threadKey: "slack:OTHER:456" } },
+    { kind: "terminal", record: { ...ending.record, id: "run-other" } },
+    { kind: "terminal", record: { ...ending.record, status: "working" } },
+  ])("keeps a legacy binding when canonical final history is unsafe: %j", async (legacyReply) => {
+    const { instance, rows } = setup({ legacyReply });
+    expect(await instance.discardAbsentBinding(input)).toEqual({ discarded: false, reason: "owner-not-terminal" });
+    expect(rows.get("runReg:" + threadKey)).toMatchObject(owner);
+    expect(rows.get("thread:" + threadKey)).toMatchObject({ user: "worker2" });
+    expect(rows.get("discarded:" + threadKey + ":run-old")).toBeUndefined();
   });
   it.each([
     "confirmation",
