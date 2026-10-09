@@ -89,7 +89,7 @@ Deterministic, non-interactive commands. Credentials are named when required. CI
 | `npm run web:preview` | Serves the dashboard bundle over fixtures for a visual check. | After a `web/` change. |
 | `npm run screenshots:gen` | Renders changed dashboard captures in both themes and records input hashes. | After a `web/` or fixture change; needs Chromium. |
 | `npm run screenshots:check` | Each surface's inputs still hash to what its screenshots were rendered from — no browser. | Part of `check:consistency`. |
-| `npm run load` | Load harness for infrastructure and route checks. | Capacity receipts. |
+| `npm run load` | Load harness for infrastructure and route checks. | Model capacity receipts. |
 | `npm run smoke:ingress` | Checks three deployment capability families and writes an acceptance receipt; --check validates setup without network. | Explicitly configured disposable smoke scope; release acceptance. |
 | `npm run staging:deploy` | Validates staging isolation, freezes deployment inputs, and deploys the selected candidate Workers. --check validates without upload. | Manual staging candidates; requires separate staging and production account pins. |
 | `npm run staging:validate` | Checks PR eligibility before staging. | Staging CI and queued-head recheck. |

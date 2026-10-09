@@ -61,6 +61,7 @@ import {
 import {
   ResponsesValidationInterrupted,
   responsesValidationCapacity,
+  type ResponsesValidationCapacity,
   type ResponsesValidationReservation,
 } from "./responsesValidationCapacity.js";
 
@@ -132,6 +133,8 @@ export interface ModelProxyDeps {
   /** Call outcomes and validation diagnostics; verified run/turn context, never a body or credential. */
   log?: (line: string) => void;
   maxBodyBytes?: number;
+  /** Same admission boundary with a scoped pool for isolated qualification. */
+  responsesCapacity?: ResponsesValidationCapacity;
   /** The operator's `costs.prices` table (costs.md item 4b), read through the
    *  thunk at each call; the process wires the costs configuration it parsed
    *  at startup, so unlike `providers` a reload reaches it with the process,
@@ -860,10 +863,22 @@ export async function handleAdmitted(
       requestBodyDisposition: "unread",
     };
   if (shape !== "openai-responses") return handleAdmittedCall(door, req, deps);
+  const capacity = deps.responsesCapacity ?? responsesValidationCapacity;
+  const logCapacity = (action: "admitted" | "released") => {
+    try {
+      (deps.log ?? console.log)(
+        `[model-proxy] run=${grant.runId} capacity ${action} active=${capacity.activeCount} queued=${capacity.queuedCount}`,
+      );
+    } catch {
+      /* Diagnostics never change admission or disposal. */
+    }
+  };
   let reservation: ResponsesValidationReservation;
   let queuedAt: number | undefined;
+  let waiting: ReturnType<typeof grant.span.start> | undefined;
   const logAdmission = (kind: ResponsesValidationInterrupted["kind"] | "admitted") => {
     try {
+      waiting?.end(kind === "admitted" ? "ok" : "error", { outcome: kind });
       const wait = queuedAt === undefined ? "" : ` waitMs=${Math.max(0, deps.clock() - queuedAt)}`;
       (deps.log ?? console.log)(`[model-proxy] run=${grant.runId} ${shape} → validation ${kind}${wait} before body`);
     } catch {
@@ -871,9 +886,15 @@ export async function handleAdmitted(
     }
   };
   try {
-    reservation = await responsesValidationCapacity.reserve(req.signal, () => {
-      queuedAt = deps.clock();
-    });
+    reservation = await capacity.reserve(
+      req.signal,
+      () => {
+        queuedAt = deps.clock();
+        waiting = grant.span.start("model.capacity_wait");
+      },
+      () => logCapacity("released"),
+    );
+    logCapacity("admitted");
     if (req.signal?.aborted) {
       reservation.finishTransport();
       throw new ResponsesValidationInterrupted("aborted");
@@ -1048,6 +1069,43 @@ async function handleAdmittedCall(
     log(`[model-proxy] 503 ${upstream.code} run=${grant.runId} — ${failure.message}`);
     return providerFailureResponse(shape, 503, failure);
   }
+  const prepare = () => {
+    // What the run offered rides the span; what went upstream is shaped by the
+    // harness's marks (the checkpoint turn's none, a post-step's trimmed list)
+    // and then by the selected wire's schema vocabulary. Every schema loss is a
+    // typed degradation on the run, never a silent request rewrite.
+    const shapePermit = reservation?.reserveStorage(
+      RESPONSES_VALIDATION_LIMITS.shapeWorkingBytes,
+      "request-schema-shaping",
+    );
+    const shaped = shapeTools(shape, body, deps.bearers.marksOf(grant.runId));
+    const schemaShaped = shapeToolSchemasForWire(shape, shaped.body);
+    for (const degradation of schemaShaped.degradations) {
+      grant.publish({
+        type: "run_note",
+        kind: "control_degraded",
+        control: "tool_schema",
+        asked: `${degradation.tool}.${degradation.keyword}`,
+        applied: "removed",
+        vouched: true,
+        why: degradation.why,
+        summary: `tool "${degradation.tool}" schema keyword "${degradation.keyword}" removed for ${shape}: ${degradation.why}`,
+        at: deps.clock(),
+      });
+    }
+    if (shapePermit) shapePermit.resize(responsesGraphCharge(inspectResponsesGraph(schemaShaped.body, "request")));
+    const payloadPermit = reservation?.reserveStorage(
+      RESPONSES_VALIDATION_LIMITS.preparedPayloadBytes * 2 + RESPONSES_VALIDATION_LIMITS.stringHeaderBytes,
+      "request-payload",
+    );
+    const payload = JSON.stringify(pinRequest(shape, schemaShaped.body, grant));
+    if (reservation && Buffer.byteLength(payload, "utf8") > RESPONSES_VALIDATION_LIMITS.preparedPayloadBytes)
+      throw new ResponsesValidationInterrupted("storage");
+    payloadPermit?.resize(responsesTextCharge(payload));
+    const offered = { ...toolsOffered(shape, body), toolChoice: shaped.toolChoice };
+    return { schemaShaped, payload, offered };
+  };
+  const { schemaShaped, payload, offered } = consumer ? await consumer.withParsing(async () => prepare()) : prepare();
   const turn = deps.bearers.consumeTurn(grant.runId);
   if (!turn.ok && turn.reason === "ended") {
     // The run ended between the door and here: its bearer verified a moment
@@ -1075,39 +1133,6 @@ async function handleAdmittedCall(
       body: JSON.stringify(shape === "anthropic-messages" ? { type: "error", error } : { error }),
     };
   }
-  // What the run offered rides the span; what went upstream is shaped by the
-  // harness's marks (the checkpoint turn's none, a post-step's trimmed list)
-  // and then by the selected wire's schema vocabulary. Every schema loss is a
-  // typed degradation on the run, never a silent request rewrite.
-  const shapePermit = reservation?.reserveStorage(
-    RESPONSES_VALIDATION_LIMITS.shapeWorkingBytes,
-    "request-schema-shaping",
-  );
-  const shaped = shapeTools(shape, body, deps.bearers.marksOf(grant.runId));
-  const schemaShaped = shapeToolSchemasForWire(shape, shaped.body);
-  for (const degradation of schemaShaped.degradations) {
-    grant.publish({
-      type: "run_note",
-      kind: "control_degraded",
-      control: "tool_schema",
-      asked: `${degradation.tool}.${degradation.keyword}`,
-      applied: "removed",
-      vouched: true,
-      why: degradation.why,
-      summary: `tool "${degradation.tool}" schema keyword "${degradation.keyword}" removed for ${shape}: ${degradation.why}`,
-      at: deps.clock(),
-    });
-  }
-  if (shapePermit) shapePermit.resize(responsesGraphCharge(inspectResponsesGraph(schemaShaped.body, "request")));
-  const payloadPermit = reservation?.reserveStorage(
-    RESPONSES_VALIDATION_LIMITS.preparedPayloadBytes * 2 + RESPONSES_VALIDATION_LIMITS.stringHeaderBytes,
-    "request-payload",
-  );
-  const payload = JSON.stringify(pinRequest(shape, schemaShaped.body, grant));
-  if (reservation && Buffer.byteLength(payload, "utf8") > RESPONSES_VALIDATION_LIMITS.preparedPayloadBytes)
-    throw new ResponsesValidationInterrupted("storage");
-  payloadPermit?.resize(responsesTextCharge(payload));
-  const offered = { ...toolsOffered(shape, body), toolChoice: shaped.toolChoice };
   const startedAt = deps.clock();
   const span = grant.span.start("model.turn", {
     attrs: {

@@ -249,7 +249,7 @@
     },
     "load": {
       "does": "Load harness for infrastructure and route checks.",
-      "when": "Capacity receipts."
+      "when": "Model capacity receipts."
     },
     "smoke:ingress": {
       "does": "Checks three deployment capability families and writes an acceptance receipt; --check validates setup without network.",

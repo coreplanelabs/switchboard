@@ -3,7 +3,7 @@ import { RESPONSES_VALIDATION_LIMITS } from "../core/budgets.js";
 import {
   ResponsesValidationInterrupted,
   responsesValidationCapacity,
-  type ResponsesValidationCapacity,
+  ResponsesValidationCapacity,
   type ResponsesValidationReservation,
   type ResponsesStoragePermit,
 } from "./responsesValidationCapacity.js";
@@ -21,6 +21,13 @@ import {
   type ResponsesJsonTarget,
   type ResponsesGraphStats,
 } from "./responsesResources.js";
+// Network exchanges may wait on the provider; only short parsing steps take
+// these permits. The existing storage policy remains the allocation boundary.
+const parsingCapacity = new ResponsesValidationCapacity({
+  workers: RESPONSES_VALIDATION_LIMITS.parsers,
+  queued: RESPONSES_VALIDATION_LIMITS.queued,
+});
+
 export type ParsedResponsesFrame = { ok: true; value: unknown; release?: () => void } | { ok: false };
 export type ResponsesWorkerRequest =
   | {
@@ -67,6 +74,7 @@ export class ResponsesConsumer {
   private readonly stopControl = new AbortController();
   private readonly signal: AbortSignal;
   private ready?: Promise<void>;
+  private admission?: Promise<void>;
   private worker?: Worker;
   private pending?: Pending;
   private release?: () => void;
@@ -97,13 +105,20 @@ export class ResponsesConsumer {
     if (this.failure) throw this.failure;
     if (this.stopped || this.signal.aborted) throw new ResponsesValidationInterrupted("aborted");
   }
+  private admit(): Promise<void> {
+    return (this.admission ??= (async () => {
+      const release = await (this.options.capacity ?? responsesValidationCapacity).acquire(this.signal);
+      if (this.stopped || this.signal.aborted) {
+        release();
+        throw new ResponsesValidationInterrupted("aborted");
+      }
+      this.release = release;
+    })());
+  }
   private async start(): Promise<void> {
-    const release = await (this.options.capacity ?? responsesValidationCapacity).acquire(this.signal);
-    if (this.stopped || this.signal.aborted) {
-      release();
-      throw new ResponsesValidationInterrupted("aborted");
-    }
-    this.release = release;
+    await this.admit();
+    this.assertReady();
+    const release = this.release!;
     const source = import.meta.url.endsWith(".ts");
     try {
       const worker = (this.options.createWorker ?? ((url, options) => new Worker(url, options)))(
@@ -343,7 +358,28 @@ export class ResponsesConsumer {
       }
     });
   }
+  async withParsing<T>(
+    work: (parse: (data: string, target?: ResponsesJsonTarget) => Promise<ParsedResponsesFrame>) => Promise<T>,
+  ): Promise<T> {
+    this.assertReady();
+    // Never hold a parsing permit while waiting for a transport reservation.
+    await this.admit();
+    const release = await parsingCapacity.acquire(this.signal);
+    try {
+      this.assertReady();
+      return await work((data, target = "frame") => this.parseJSONOwned(data, target));
+    } catch (error) {
+      // Failed work may still own its temporary storage until the worker exits.
+      await this.dispose();
+      throw error;
+    } finally {
+      release();
+    }
+  }
   async parseJSON(data: string, target: ResponsesJsonTarget = "frame"): Promise<ParsedResponsesFrame> {
+    return this.withParsing((parse) => parse(data, target));
+  }
+  private async parseJSONOwned(data: string, target: ResponsesJsonTarget): Promise<ParsedResponsesFrame> {
     this.assertReady();
     const decoderBytes = responsesTextCharge(data);
     const encode = this.reserve(responsesSerializationWorking(target), "parent-input-serialization");
@@ -378,30 +414,32 @@ export class ResponsesConsumer {
     target: ResponsesJsonTarget,
     ownedInput?: ResponsesStoragePermit,
   ): Promise<ParsedResponsesFrame> {
-    this.assertReady();
-    validateResponsesPayload(payload, target);
-    const decoderBytes = payload.byteLength * 2 + RESPONSES_VALIDATION_LIMITS.stringHeaderBytes;
-    let working: ResponsesStoragePermit | undefined, input: ResponsesStoragePermit | undefined;
-    try {
-      working = this.reserve(RESPONSES_VALIDATION_LIMITS.parserWorkingBytes + decoderBytes, "worker-parse");
-      input = ownedInput ?? this.reserve(payload.byteLength, "parent-input");
-      this.storage.add(input);
-      return (await this.operation(
-        "parse",
-        target,
-        payload,
-        "utf8",
-        decoderBytes,
-        working,
-        input,
-      )) as ParsedResponsesFrame;
-    } catch (error) {
-      if (!this.worker || this.exited) {
-        this.drop(working);
-        this.drop(input);
+    return this.withParsing(async () => {
+      this.assertReady();
+      validateResponsesPayload(payload, target);
+      const decoderBytes = payload.byteLength * 2 + RESPONSES_VALIDATION_LIMITS.stringHeaderBytes;
+      let working: ResponsesStoragePermit | undefined, input: ResponsesStoragePermit | undefined;
+      try {
+        working = this.reserve(RESPONSES_VALIDATION_LIMITS.parserWorkingBytes + decoderBytes, "worker-parse");
+        input = ownedInput ?? this.reserve(payload.byteLength, "parent-input");
+        this.storage.add(input);
+        return (await this.operation(
+          "parse",
+          target,
+          payload,
+          "utf8",
+          decoderBytes,
+          working,
+          input,
+        )) as ParsedResponsesFrame;
+      } catch (error) {
+        if (!this.worker || this.exited) {
+          this.drop(working);
+          this.drop(input);
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
   /** EOF checks the neutral parser's latched outcome before cleanup hides it. */
   async finish(): Promise<void> {
@@ -420,9 +458,13 @@ export class ResponsesConsumer {
       this.stopControl.abort();
       this.interrupt(new ResponsesValidationInterrupted("aborted"));
       if (this.worker && !this.exited) await this.worker.terminate();
-      // A cancelled queue acquisition either owned no slot or releases it on start.
       await this.ready?.catch(() => {});
-      if (!this.worker) for (const permit of [...this.storage]) this.drop(permit);
+      await this.admission?.catch(() => {});
+      if (!this.worker) {
+        for (const permit of [...this.storage]) this.drop(permit);
+        this.release?.();
+        this.release = undefined;
+      }
     })();
     return this.shutdown;
   }

@@ -62,7 +62,7 @@
       // copied into this account's registry by `deploy images`.
       "image": "{{image}}",
       // Bounded Responses validation shares memory with the gateway state.
-      "instance_type": "standard-1",
+      "instance_type": "standard-2",
       "max_instances": 1
     }
   ],

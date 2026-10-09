@@ -51,6 +51,7 @@ export const STREAMED_SPANS = [
   "run.reading_diff_join",
   "run.pr_description_join",
   "model.turn",
+  "model.capacity_wait",
   "ship.round",
   "post.card_close",
   "post.reply",
@@ -101,6 +102,7 @@ const FINISHING_UP: ReadonlySet<string> = new Set([
   "run.pr_description_join",
 ]);
 const UNCOUNTED: ReadonlySet<string> = new Set([
+  "model.capacity_wait",
   "request",
   "run.agent",
   "ship.round",
@@ -162,6 +164,7 @@ export const PARENTS: Readonly<Record<string, readonly string[]>> = {
   "run.reading_diff_join": ["request", "ship.round"],
   "run.pr_description_join": ["request", "ship.round"],
   "model.turn": ["run.agent"],
+  "model.capacity_wait": ["request", "run.agent"],
   "ship.round": ["request"],
   "post.card_close": ["request"],
   "post.reply": ["request"],

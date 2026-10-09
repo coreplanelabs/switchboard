@@ -184,11 +184,18 @@ import { parseSeed, type SandboxSeed } from "../src/execution/seedPlan.js";
 import { ResidentExecutor } from "../src/execution/resident.js";
 import { systemClock } from "../src/core/trace/clock.js";
 
+import { modelCapacityCommand } from "./model-capacity.js";
+
 const RESULTS_DIR = process.env.SWITCHBOARD_LOAD_RESULTS ?? "load-results";
 
 const USAGE = `usage: tsx scripts/load.ts <command> [flags]
 
 commands
+  model-capacity --profile team|burst [--baseline <receipt.json>]
+             offline real HTTP through the compiled proxy; Docker CPU/memory quota
+             writes workload, current settings, source fingerprint and comparisons
+             optional --image <cached-node-image> --platform linux/amd64|linux/arm64
+             --cpu 0.5 --memory-mib 4096; no provider credentials or deployment
   history    peak concurrency and durations from the run store
              [--limit N]: stop after N runs have been read (default: unlimited, 0 = unlimited)
              env: SWITCHBOARD_STATE_WORKER_URL, MEMORY_TOKEN (or --state-url / --token-env)
@@ -268,6 +275,11 @@ function flags(argv: string[]): Flags {
     allowPositionals: false,
     strict: false,
     options: {
+      image: { type: "string" },
+      platform: { type: "string" },
+      cpu: { type: "string" },
+      "memory-mib": { type: "string" },
+      baseline: { type: "string" },
       resource: { type: "string" },
       threads: { type: "string" },
       cards: { type: "string" },
@@ -2090,6 +2102,7 @@ async function main(): Promise<number> {
     process.stdout.write(USAGE);
     return command ? 0 : 2;
   }
+  if (command === "model-capacity") return modelCapacityCommand(f, RESULTS_DIR);
   const commands: Record<string, (f: Flags) => Promise<boolean>> = {
     history,
     resident,

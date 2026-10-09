@@ -38,6 +38,7 @@ export const DISPLAY_NAMES = {
   "run.reading_diff_join": "waiting for the diff",
   "run.pr_description_join": "waiting for the PR description",
   "model.turn": "a model turn",
+  "model.capacity_wait": "waiting for model capacity",
   "ship.round": "a ship round",
   "post.card_close": "closing the card",
   "post.reply": "posting the reply",

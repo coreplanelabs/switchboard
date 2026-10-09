@@ -1,0 +1,1055 @@
+{
+  "schemaVersion": "model-capacity/1",
+  "scope": "offline real HTTP and compiled proxy; synthetic provider; no deployment",
+  "at": "2026-10-09T23:15:21.601Z",
+  "workload": {
+    "profile": "burst",
+    "clients": 64,
+    "turns": 2,
+    "requestKiB": 768,
+    "frameKiB": 128,
+    "baselineMiB": 960,
+    "providerDelayMs": 1000,
+    "minConcurrent": 32,
+    "noQueue": false
+  },
+  "settings": {
+    "workers": 32,
+    "queued": 128,
+    "parsers": 1,
+    "queueWaitMs": 30000,
+    "oldGenerationMb": 96,
+    "youngGenerationMb": 16,
+    "stackMb": 4,
+    "framingSliceChars": 4096,
+    "framingSliceBytes": 4096,
+    "retainedFrameBytes": 16777216,
+    "responseBytes": 67108864,
+    "sseFields": 1024,
+    "pendingOutputBytes": 33554432,
+    "managedStorageBytes": 536870912,
+    "graphEntries": 262144,
+    "graphDepth": 128,
+    "graphEntryBytes": 256,
+    "stringHeaderBytes": 64,
+    "requestStringBytes": 67108864,
+    "responseStringBytes": 33554432,
+    "requestIpcBytes": 67108864,
+    "responseIpcBytes": 33554432,
+    "parserWorkingBytes": 134217728,
+    "serializationSlackBytes": 1048576,
+    "preparedPayloadBytes": 67108864,
+    "shapeWorkingBytes": 134217728
+  },
+  "environment": {
+    "node": "v24.21.0",
+    "arch": "x64",
+    "cpuMax": "100000 100000",
+    "memoryMax": "6442450944",
+    "swapMax": "0",
+    "heldBaselineMiB": 960,
+    "imageId": "sha256:cb0381eca907082d8f8d112ca9442e34e2367d8deef875dae7bf5ade4546caf0",
+    "imageReference": "sb-pr2804-e46-amd64:runtime",
+    "hostArch": "arm64",
+    "hostCpu": "Apple M5 Max",
+    "emulated": true
+  },
+  "metrics": {
+    "calls": 128,
+    "exact": 128,
+    "attempts": 128,
+    "totalMs": 12211,
+    "callsPerSecond": 10.482351977725001,
+    "callMs": {
+      "p50": 3697,
+      "p95": 6399,
+      "max": 6408
+    },
+    "queueWaitMs": {
+      "p50": 2998,
+      "p95": 3167,
+      "max": 3202
+    },
+    "healthMs": {
+      "p50": 1.118417,
+      "p95": 19.653583,
+      "max": 380.076625
+    },
+    "healthSamples": 108,
+    "peakActive": 32,
+    "peakQueued": 32,
+    "peakStorageMiB": 388.0687847137451,
+    "peakRssMiB": 1933.53125,
+    "cgroupPeakMiB": 1923.796875,
+    "final": {
+      "active": 0,
+      "queued": 0,
+      "storageBytes": 0
+    }
+  },
+  "checks": [
+    {
+      "name": "baseline stays held",
+      "pass": true
+    },
+    {
+      "name": "every response matches",
+      "pass": true
+    },
+    {
+      "name": "one upstream attempt per call",
+      "pass": true
+    },
+    {
+      "name": "target concurrency reached",
+      "pass": true
+    },
+    {
+      "name": "team starts without header queuing",
+      "pass": true
+    },
+    {
+      "name": "health below limit",
+      "pass": true
+    },
+    {
+      "name": "cgroup telemetry available",
+      "pass": true
+    },
+    {
+      "name": "no OOM",
+      "pass": true
+    },
+    {
+      "name": "all credits returned",
+      "pass": true
+    },
+    {
+      "name": "measured source stayed unchanged",
+      "pass": true
+    }
+  ],
+  "passed": true,
+  "samples": [
+    {
+      "wave": 0,
+      "client": 1,
+      "ms": 3542,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 11,
+      "ms": 3518,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 4,
+      "ms": 3536,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 6,
+      "ms": 3533,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 12,
+      "ms": 3519,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 7,
+      "ms": 3533,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 8,
+      "ms": 3531,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 10,
+      "ms": 3523,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 5,
+      "ms": 3538,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 9,
+      "ms": 3530,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 2,
+      "ms": 3546,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 0,
+      "ms": 3623,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 3,
+      "ms": 3545,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 13,
+      "ms": 3528,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 14,
+      "ms": 3530,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 15,
+      "ms": 3569,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 16,
+      "ms": 3575,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 17,
+      "ms": 3579,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 18,
+      "ms": 3581,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 19,
+      "ms": 3585,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 20,
+      "ms": 3587,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 21,
+      "ms": 3590,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 22,
+      "ms": 3592,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 23,
+      "ms": 3596,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 25,
+      "ms": 3597,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 24,
+      "ms": 3600,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 26,
+      "ms": 3604,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 27,
+      "ms": 3609,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 29,
+      "ms": 3664,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 28,
+      "ms": 3668,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 30,
+      "ms": 3692,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 31,
+      "ms": 3697,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 32,
+      "ms": 6179,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 33,
+      "ms": 6187,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 34,
+      "ms": 6193,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 35,
+      "ms": 6196,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 36,
+      "ms": 6213,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 37,
+      "ms": 6258,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 38,
+      "ms": 6266,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 39,
+      "ms": 6293,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 40,
+      "ms": 6307,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 41,
+      "ms": 6307,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 42,
+      "ms": 6257,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 43,
+      "ms": 6258,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 44,
+      "ms": 6259,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 45,
+      "ms": 6304,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 46,
+      "ms": 6306,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 47,
+      "ms": 6320,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 48,
+      "ms": 6322,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 49,
+      "ms": 6325,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 50,
+      "ms": 6326,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 51,
+      "ms": 6328,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 52,
+      "ms": 6330,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 53,
+      "ms": 6393,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 54,
+      "ms": 6397,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 55,
+      "ms": 6397,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 56,
+      "ms": 6398,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 57,
+      "ms": 6399,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 58,
+      "ms": 6400,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 59,
+      "ms": 6402,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 60,
+      "ms": 6404,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 61,
+      "ms": 6404,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 63,
+      "ms": 6407,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 62,
+      "ms": 6408,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 5,
+      "ms": 2657,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 23,
+      "ms": 2657,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 0,
+      "ms": 2673,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 9,
+      "ms": 2673,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 24,
+      "ms": 2683,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 27,
+      "ms": 2688,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 30,
+      "ms": 2690,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 31,
+      "ms": 2691,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 6,
+      "ms": 2703,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 7,
+      "ms": 2704,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 8,
+      "ms": 2708,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 10,
+      "ms": 2709,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 14,
+      "ms": 2788,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 15,
+      "ms": 2790,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 16,
+      "ms": 2792,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 17,
+      "ms": 2897,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 19,
+      "ms": 2897,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 20,
+      "ms": 2901,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 21,
+      "ms": 2971,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 22,
+      "ms": 2972,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 25,
+      "ms": 2975,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 28,
+      "ms": 3011,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 29,
+      "ms": 3012,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 1,
+      "ms": 3022,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 2,
+      "ms": 3028,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 4,
+      "ms": 3031,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 11,
+      "ms": 3030,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 12,
+      "ms": 3033,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 13,
+      "ms": 3034,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 18,
+      "ms": 3071,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 26,
+      "ms": 3110,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 3,
+      "ms": 3121,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 32,
+      "ms": 4432,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 33,
+      "ms": 4549,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 34,
+      "ms": 4692,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 35,
+      "ms": 4829,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 36,
+      "ms": 5215,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 37,
+      "ms": 5320,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 38,
+      "ms": 5326,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 39,
+      "ms": 5331,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 40,
+      "ms": 5336,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 41,
+      "ms": 5341,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 42,
+      "ms": 5342,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 43,
+      "ms": 5344,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 45,
+      "ms": 5344,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 44,
+      "ms": 5368,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 46,
+      "ms": 5367,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 48,
+      "ms": 5386,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 47,
+      "ms": 5390,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 49,
+      "ms": 5460,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 51,
+      "ms": 5464,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 50,
+      "ms": 5474,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 52,
+      "ms": 5475,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 53,
+      "ms": 5478,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 54,
+      "ms": 5480,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 55,
+      "ms": 5480,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 56,
+      "ms": 5482,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 57,
+      "ms": 5483,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 58,
+      "ms": 5485,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 59,
+      "ms": 5487,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 60,
+      "ms": 5487,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 61,
+      "ms": 5490,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 62,
+      "ms": 5492,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 63,
+      "ms": 5493,
+      "status": 200,
+      "exact": true
+    }
+  ],
+  "limitations": [
+    "Finite fake-provider workload, not whole-bot startup or natural provider latency.",
+    "Compare hardware, runtime, workload and quota before comparing timings.",
+    "Byte and storage maxima still refuse overlapping maximal payloads."
+  ],
+  "source": {
+    "revision": "967f8748de16e07cb58061dde16a12973bae155e",
+    "dirty": true,
+    "fingerprint": "d1e111376a4506bd92137ad3e967676b5c7087e2b6d77ed365b99cc724017a23",
+    "files": {
+      "src/core/budgets.ts": "7c07193719eb15ee293184f55b100a483af7d0710014a7be3fc8f959a07c352a",
+      "src/channels/modelProxy.ts": "e6e522fb67f5942693432c73ab225cd43673cab063cc968b6f41cc4e3efeb49a",
+      "src/channels/modelProxyResponses.ts": "8a002669a60afcaf01968b30851fd673b5772a58ed0432f87a36ec71bd7fa421",
+      "src/channels/responsesConsumer.ts": "0a6f9d3a4861e057a620d0264e23c1bba03b97bba7f71b7d40b04950648511a0",
+      "src/channels/responsesConsumerWorker.ts": "c99b089424b00cfd7cb603b796510465b81522861250ff15282b50c43216b24d",
+      "src/channels/responsesResources.ts": "e8922e84dcf9ae8b1ebb6273907d4222c079076ab4ba900d1a60e9eb2e50e0b6",
+      "src/channels/responsesValidationCapacity.ts": "1e3afaeb1ca89c627a587e38d188b31bbb5302dfe95d58a40b0afa7a2b2ce72c",
+      "src/load/modelCapacity.ts": "cefc3b11d36d1795e11b693db8c9d67e8b4e045b9f798809a9fc7b64a4d226ab",
+      "scripts/model-capacity.ts": "19c6ef91d300959ad0b2a9851deaff00a10a7987514f75be1b3e73b0df7c3dfe",
+      "package-lock.json": "87fab5c4b0407d765fa87dee902d1543da15564398b7c6c8e94db849ee335e26",
+      "Dockerfile": "2c0200d8ffdaa0280ef5c6765b48a9da18626928afc31669e8d79a0502c292fe",
+      "deploy/cloudflare/wrangler.template.jsonc": "5705895596cfa0489cd8ddacdd0c9b1244ac8e4e2860932b6f00d06da987978e"
+    }
+  }
+}

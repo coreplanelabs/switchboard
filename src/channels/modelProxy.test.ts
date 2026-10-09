@@ -18,7 +18,8 @@ import { ResponsesConsumer } from "./responsesConsumer.js";
 import {
   ResponsesStoragePermit,
   ResponsesValidationReservation,
-  responsesValidationCapacity,
+  ResponsesValidationCapacity,
+  responsesValidationCapacity as productionCapacity,
 } from "./responsesValidationCapacity.js";
 import { secretsFrom } from "../secrets.js";
 import { createTracer } from "../core/trace/tracer.js";
@@ -63,6 +64,8 @@ import {
   type ProxyRequest,
   type ProxyResponse,
 } from "./modelProxy.js";
+
+const responsesValidationCapacity = new ResponsesValidationCapacity({ workers: 2, queued: 2 });
 
 const START = 1_700_000_000_000;
 const REAL_ANTHROPIC_KEY = "sk-ant-the-real-key";
@@ -121,6 +124,7 @@ function harness(
   });
   const deps: ModelProxyDeps = {
     bearers,
+    responsesCapacity: responsesValidationCapacity,
     providers: () => PROVIDERS,
     secrets: secretsFrom(
       opts.env ?? { ANTHROPIC_API_KEY: REAL_ANTHROPIC_KEY, LOCAL_KEY: REAL_LOCAL_KEY, OPENAI_API_KEY: REAL_OPENAI_KEY },
@@ -1931,6 +1935,69 @@ describe("upstream failures", () => {
 });
 
 describe("Responses transport admission", () => {
+  it.each([false, true])(
+    "admits five engineers with four simultaneous threads without waiting or rejecting, stream=%s",
+    async (streaming) => {
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const h = harness({
+        answer: async () => {
+          await hold;
+          return new Response(
+            streaming
+              ? 'data: {"type":"response.completed","response":{"id":"response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+              : '{"id":"response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}',
+            { headers: { "content-type": streaming ? "text/event-stream" : "application/json" } },
+          );
+        },
+      });
+      delete h.deps.responsesCapacity;
+      const control = new AbortController();
+      const tokens = Array.from({ length: 20 }, (_, id) =>
+        h.bearers.mint(h.responsesGrant(`engineer-${Math.floor(id / 4)}-thread-${id % 4}`)),
+      );
+      const calls = tokens.map((token) =>
+        handleModelProxyRequest(
+          request({
+            path: OPENAI_RESPONSES_PATH,
+            headers: bearer(token),
+            json: { ...responsesRequest(), stream: streaming },
+            signal: control.signal,
+          }).req,
+          h.deps,
+        ),
+      );
+      try {
+        await vi.waitFor(() => expect(h.calls).toHaveLength(20), { timeout: 10000 });
+        expect(productionCapacity.queuedCount).toBe(0);
+        release();
+        const responses = await Promise.all(calls);
+        expect(responses.map((response) => response.status)).toEqual(Array(20).fill(200));
+        const expected = streaming
+          ? 'data: {"type":"response.completed","response":{"id":"response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}\n\n'
+          : '{"id":"response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}';
+        expect(await Promise.all(responses.map((response) => new Response(response.body).text()))).toEqual(
+          Array(20).fill(expected),
+        );
+        expect(
+          tokens.map((token) => {
+            const grant = h.bearers.verify(token);
+            return grant.ok ? grant.turns : -1;
+          }),
+        ).toEqual(Array(20).fill(1));
+      } finally {
+        control.abort();
+        release();
+        await Promise.all(calls);
+      }
+      expect(productionCapacity.activeCount).toBe(0);
+      expect(productionCapacity.storageBytes).toBe(0);
+    },
+    30000,
+  );
+
   it.each([false, true])("publishes buffered provider-up only after graph admission, refused=%s", async (refused) => {
     let extra: unknown = "leaf";
     if (refused) for (let depth = 0; depth <= RESPONSES_VALIDATION_LIMITS.graphDepth; depth++) extra = { child: extra };
@@ -1979,6 +2046,7 @@ describe("Responses transport admission", () => {
       const lines: string[] = [];
       const bodyAtLog: boolean[] = [];
       h.deps.log = (line) => {
+        if (!line.includes(" → validation ")) return;
         lines.push(line);
         bodyAtLog.push(input.pulled());
         if (ending === "logger-failure") throw new Error("private diagnostic failure");
@@ -1987,6 +2055,7 @@ describe("Responses transport admission", () => {
       try {
         await expect.poll(() => responsesValidationCapacity.queuedCount).toBe(1);
         expect(input.pulled()).toBe(false);
+        expect(h.starts.filter((span) => span.name === "model.capacity_wait")).toHaveLength(1);
         expect(h.calls).toHaveLength(0);
         expect(h.starts.filter((span) => span.name === "model.turn")).toHaveLength(0);
         h.clock.now += 8000;
@@ -1997,6 +2066,11 @@ describe("Responses transport admission", () => {
         expect(lines).toEqual([
           `[model-proxy] run=queued-diagnostic openai-responses → validation ${ending === "aborted" ? "aborted" : "admitted"} waitMs=8000 before body`,
         ]);
+        expect(h.ends.find((span) => span.name === "model.capacity_wait")).toMatchObject({
+          durationMs: 8000,
+          status: ending === "aborted" ? "error" : "ok",
+          attrs: { outcome: ending === "aborted" ? "aborted" : "admitted" },
+        });
         expect(bodyAtLog).toEqual([false]);
         expect(input.pulled()).toBe(ending !== "aborted");
         expect(h.calls).toHaveLength(0);
@@ -2024,7 +2098,10 @@ describe("Responses transport admission", () => {
       h.deps,
     );
     expect(response.status).toBe(400);
-    expect(h.logs).toEqual([]);
+    expect(h.logs).toEqual([
+      "[model-proxy] run=immediate-diagnostic capacity admitted active=1 queued=0",
+      "[model-proxy] run=immediate-diagnostic capacity released active=0 queued=0",
+    ]);
     expect(h.calls).toHaveLength(0);
     expect(h.starts.filter((span) => span.name === "model.turn")).toHaveLength(0);
     expect(responsesValidationCapacity.activeCount).toBe(0);
@@ -2379,11 +2456,18 @@ describe("Responses transport admission", () => {
       deliver();
       await Promise.resolve();
       expect(responsesValidationCapacity.activeCount).toBe(1);
+      expect(h.logs.filter((line) => line.includes(" capacity "))).toEqual([
+        "[model-proxy] run=closed-work capacity admitted active=1 queued=0",
+      ]);
     } finally {
       respond();
       await pending;
     }
     expect(responsesValidationCapacity.activeCount).toBe(0);
+    expect(h.logs.filter((line) => line.includes(" capacity "))).toEqual([
+      "[model-proxy] run=closed-work capacity admitted active=1 queued=0",
+      "[model-proxy] run=closed-work capacity released active=0 queued=0",
+    ]);
   });
 
   it.each(["invalid", "too-large", "key", "cap", "buffered", "provider-error", "network"] as const)(
@@ -2604,8 +2688,14 @@ describe("Responses stream failure boundary", () => {
   const frame = (event: unknown) => `data: ${JSON.stringify(event)}\n\n`;
 
   it("logs one sanitized header-admission refusal without an upstream call or turn debit", async () => {
-    const occupants = [new ResponsesConsumer("test"), new ResponsesConsumer("test")];
-    const waiters = [new ResponsesConsumer("test"), new ResponsesConsumer("test")];
+    const occupants = [
+      new ResponsesConsumer("test", { capacity: responsesValidationCapacity }),
+      new ResponsesConsumer("test", { capacity: responsesValidationCapacity }),
+    ];
+    const waiters = [
+      new ResponsesConsumer("test", { capacity: responsesValidationCapacity }),
+      new ResponsesConsumer("test", { capacity: responsesValidationCapacity }),
+    ];
     const created = { type: "response.created", response: { id: "private-provider-payload" } };
     let queued: Promise<unknown>[] = [];
     try {

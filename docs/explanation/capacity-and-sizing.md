@@ -1,6 +1,8 @@
 # Capacity and sizing
 
-The bot uses one gateway event loop and bounded validation workers on a `standard-1` container; a resident has 32 UID slots sharing its vCPUs and disk; a cold sandbox is the largest predefined type.
+The bot uses one gateway event loop and bounded validation workers on a `standard-2` container; a resident has 32 UID slots sharing its vCPUs and disk; a cold sandbox is the largest predefined type.
+
+The discrete model-call path and its ownership rules are shown in [How model calls use capacity](model-call-flow.md).
 
 ## One event loop in the bot
 
@@ -11,13 +13,19 @@ Node is single-threaded, so "using the cores" means never serializing independen
 - status-card edits are coalesced;
 - the answer is sent before the resident is released.
 
-Responses validation uses at most two workers sharing the bot's CPU and memory. The bot template uses `standard-1` (0.5 vCPU, 4 GiB), the smallest supported predefined type that passed the bounded validation workload with retained gateway memory. It remains one container. See [Cloudflare container sizes](https://developers.cloudflare.com/containers/platform/limits/).
+The proxy admits 32 concurrent Responses exchanges and queues 128 unread requests for up to 30 seconds in FIFO order. The target covers five engineers with four simultaneous threads each plus twelve exchanges of headroom. One short parsing operation uses the bot's CPU and memory; a transport may retain an idle parser worker while waiting for the provider. The shared512MiB storage and per-worker heap guards still apply. See [decision0098](../decisions/0098-bound-stream-concurrency-separately-from-parsing.md). The bot template uses `standard-2` (one vCPU,6GiB), the smallest predefined type qualified by the repeatable team and burst profiles. Changing the template does not resize the live bot. It remains one container. See [Cloudflare container sizes](https://developers.cloudflare.com/containers/platform/limits/).
+
+The [recorded burst](../reference/benchmarks/model-capacity/burst.json) passed128 streaming calls from64 HTTP callers, using768KiB requests,128KiB frames and a held960MiB baseline. At one vCPU/6GiB/no-swap on emulated Linux AMD64 Node24.21, occupancy reached32 active and32 queued, cgroup peak1923.80MiB and largest health response380.08ms. All128 responses matched exactly, with zero OOM events and no remaining credits. The longest call was6.41s, including the fixed one-second fake-provider delay. The [half-vCPU team run](../reference/benchmarks/model-capacity/team-standard-1-failed.json) failed the one-second health guard. These are finite proxy benchmarks, not native-hardware, natural-provider or whole-bot acceptance.
+
+The earlier two-exchange qualification below is historical evidence for worker isolation.
 
 Paired Linux x64 Node24.21 tests on the same stock SDK completed two full2MiB streams at the normal baseline. Inline validation delayed the health response by6.24s; isolated validation's largest response was179ms. Both implementations OOMed on `basic` (0.25 vCPU,1GiB) with touched, held800,900 and960MiB baselines. This does not establish a fixed additive worker cost or the cause of an earlier outage.
 
 At a held960MiB baseline, the isolated pipeline passed on `standard-1`:1235.93MiB cgroup peak,100ms largest health response, two actual worker exits, zero OOM events and no remaining capacity credits. Source failure, native abort and maximal-frame refusal controls also passed. These are finite fake-upstream tests on emulated Linux AMD64 runtime components. They do not prove native-hardware performance, full image/whole-bot startup or live acceptance. A512MiB managed policy is not an RSS or native allocator limit.
 
 The sizing guard covers both build and registry profile rendering against that finite qualification footprint. It is a regression guard, not a universal memory bound. Applying the source template does not resize the running service; release, deployment and serving-capacity readback remain separate.
+
+Before changing model concurrency, read and rerun the [model-capacity benchmark](../reference/benchmarks/model-capacity/README.md). Its tracked baselines tie each result to the loaded settings, source hashes, runtime image and CPU/memory quota. New receipts are append-only, including failures.
 
 ## Shared resources in a resident
 

@@ -39,3 +39,5 @@ flowchart TB
 On the current private-work path, a verified requester in a direct Slack message can ask the orchestrator to start one unit in the configured repository. Code checks the latest delivered request, private audience, repository access and durable work ownership before it starts. The coding and review runs use the unit's saved task and context. Push, review, check and merge decisions use recorded facts at the current pull-request head; a model cannot waive those gates.
 
 The orchestrator run can answer while that unit continues. In a later verified private turn, it can read status and progress, steer or stop the linked work through checked tools; the result remains attached to the requester and thread. Its current work-start action creates this Ship unit. [What an agent is](agents-and-toolsets.md) explains the different roles.
+
+For the per-call queues, processing steps and release conditions, see [How model calls use capacity](model-call-flow.md).
