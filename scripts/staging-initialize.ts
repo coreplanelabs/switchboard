@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { ConfigDocumentClient } from "../src/configDocument.js";
@@ -24,16 +24,38 @@ import {
   waitUntilSandboxLive,
   type ConfigRead,
 } from "../src/deploy/run.js";
+import {
+  memoryResourcesHash,
+  memoryReceiptSelection,
+  memoryDomainId,
+  parseMemoryCreationReceipt,
+  validateMemoryReceipt,
+  type MemoryCreationReceipt,
+} from "../src/deploy/stagingMemoryReceipt.js";
 import { MINUTE_MS } from "../src/core/budgets.js";
 import { RUN_STORE_KEY } from "../src/core/runStoreConstants.js";
-import { LIVE_GATE_POLL_MS, servedCommit } from "../src/deploy/liveGate.js";
+import { LIVE_GATE_POLL_MS, LIVE_GATE_DEADLINE_MS, servedCommit } from "../src/deploy/liveGate.js";
 
 /** First installation only: native absence replaces update preconditions, never a failed health read. */
-export async function initializeOnHost(profile: DeploymentProfile, read: Extract<ConfigRead, { ok: true }>) {
-  const run = (cmd: string, args: string[], cwd = process.cwd(), env = process.env) => {
-    const result = spawnSync(cmd, args, { cwd, env, stdio: "inherit" });
-    if (result.status !== 0)
-      throw new Error(`${cmd} ${args[0]} failed; installation is partial, inspect before any retry`);
+export async function initializeOnHost(
+  profile: DeploymentProfile,
+  read: Extract<ConfigRead, { ok: true }>,
+  options: { receiptPath?: string; resumeMemory?: string } = {},
+) {
+  const run = (cmd: string, args: string[], cwd = process.cwd(), env = process.env, capture = false) => {
+    const result = spawnSync(cmd, args, {
+      cwd,
+      env,
+      stdio: capture ? "pipe" : "inherit",
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    if (capture) {
+      process.stdout.write(result.stdout ?? "");
+      process.stderr.write(result.stderr ?? "");
+    }
+    if (result.status !== 0) throw new Error(`${cmd} ${args[0]} failed; inspect the completed phases before any retry`);
+    return result.stdout ?? "";
   };
   const git = (args: string[]) => {
     const r = spawnSync("git", args, { encoding: "utf8" });
@@ -84,6 +106,17 @@ export async function initializeOnHost(profile: DeploymentProfile, read: Extract
   if (missing.length) throw new Error(`first installation missing credentials: ${missing.join(", ")}`);
   if (process.env.MEMORY_TOKEN !== values.MEMORY_TOKEN || process.env.SANDBOX_TOKEN !== values.SANDBOX_TOKEN)
     throw new Error("operator bearer values must match the staging secret directory");
+  const receiptPath = options.receiptPath ?? options.resumeMemory ?? join(source, "INITIALIZE_MEMORY_RECEIPT.json");
+  let memoryReceipt: MemoryCreationReceipt | undefined;
+  if (options.resumeMemory) {
+    try {
+      memoryReceipt = parseMemoryCreationReceipt(JSON.parse(readFileSync(options.resumeMemory, "utf8")));
+    } catch {
+      throw new Error("provisional Memory receipt is unreadable or invalid");
+    }
+  } else if (existsSync(receiptPath))
+    throw new Error("initialization receipt already exists; inspect it before further action");
+  let memoryUploadVersion: string | undefined;
   const memoryToken = process.env.MEMORY_TOKEN!;
   const ingress = JSON.parse(values.SWITCHBOARD_INGRESS_TOKENS) as Record<string, { subject?: string }>;
   const deployers = Object.entries(ingress).filter(([, actor]) => actor?.subject === profile.restart?.deployer);
@@ -111,6 +144,53 @@ export async function initializeOnHost(profile: DeploymentProfile, read: Extract
     readAppState: (dir: string, app: string) => defaultSandboxGateDeps.readAppState(dir, app, nativeConfig),
     readInstances: (dir: string, app: string) => defaultSandboxGateDeps.readInstances(dir, app, nativeConfig),
   };
+  interface MemoryNativeResult {
+    id?: string;
+    status?: string;
+    metadata?: { author_id?: string };
+    resources?: unknown;
+    deployments?: { id?: string; versions?: { version_id?: string; percentage?: number }[] }[];
+  }
+  const nativeResult = async (path: string): Promise<MemoryNativeResult> => {
+    const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${profile.account}/${path}`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(MINUTE_MS),
+    });
+    if (!response.ok) throw new Error("Memory receipt native read failed");
+    const body = (await response.json()) as { success?: boolean; result?: unknown };
+    if (body.success !== true || !body.result || typeof body.result !== "object")
+      throw new Error("Memory receipt native read is incomplete");
+    return body.result as MemoryNativeResult;
+  };
+  const memoryScriptPath = `workers/scripts/${profile.workers.memory!.script}`;
+  const memorySelection = memoryReceiptSelection(profile);
+  const waitBuild = async (kind: WorkerKind, expected: string) => {
+    const worker = workers.find((w) => w.name === kind)!;
+    const started = deps.now();
+    for (;;) {
+      const health = await deps.readHealth(
+        worker.healthUrl,
+        worker.healthBearerEnv ? values[worker.healthBearerEnv] : undefined,
+      );
+      if (!("error" in health) && health.status === 200 && health.body && servedCommit(health.body) === expected)
+        return;
+      if (deps.now() - started >= LIVE_GATE_DEADLINE_MS)
+        throw new Error(`${kind} has not served the exact initial commit; retain its receipt`);
+      await deps.sleep(LIVE_GATE_POLL_MS);
+    }
+  };
+  const checkMemory = async (receipt: MemoryCreationReceipt) => {
+    const writer = await nativeResult("tokens/verify");
+    if (writer.status !== "active" || writer.id !== receipt.authorId)
+      throw new Error("Memory receipt does not belong to the current deployment credential");
+    const history = await nativeResult(`${memoryScriptPath}/deployments`);
+    const [upload, active, domains] = await Promise.all([
+      nativeResult(`${memoryScriptPath}/versions/${receipt.uploadVersion}`),
+      nativeResult(`${memoryScriptPath}/versions/${receipt.activeVersion}`),
+      inventory("workers/domains"),
+    ]);
+    validateMemoryReceipt(receipt, memorySelection, history.deployments?.[0], upload, active, domains);
+  };
   const inventory = async (path: string) => {
     const response = await fetch(
       `https://api.cloudflare.com/client/v4/accounts/${profile.account}/${path}?per_page=100`,
@@ -135,6 +215,18 @@ export async function initializeOnHost(profile: DeploymentProfile, read: Extract
     const created: Partial<Record<WorkerKind, string>> = {};
     let fullMemory = false;
     const result = await initializeStaging(commit, {
+      ...(options.resumeMemory
+        ? {
+            resumeMemory: async () => {
+              if (!memoryReceipt) throw new Error("Memory receipt unavailable");
+              await checkMemory(memoryReceipt);
+              await waitBuild("memory", memoryReceipt.commit);
+              const [legacy, target] = await Promise.all([client.readBase("base"), client.readBase(key)]);
+              if (!legacy.ok || !target.ok || legacy.version !== 0 || target.version !== 0)
+                throw new Error("Memory continuation requires empty legacy and candidate config slots");
+            },
+          }
+        : {}),
       absent: async (kinds) => {
         const lists = await Promise.all([
           inventory("workers/scripts"),
@@ -176,6 +268,7 @@ export async function initializeOnHost(profile: DeploymentProfile, read: Extract
       upload: async (kind, temporary) => {
         if (git(["rev-parse", "HEAD"]) !== commit || git(["status", "--porcelain"]))
           throw new Error("publishing checkout changed");
+        if (kind === "memory" && !temporary && memoryReceipt) await checkMemory(memoryReceipt);
         const config = temporary ? provisionalPath : configs[kind]!;
         const cwd = join(process.cwd(), WORKER_DIRS[kind]);
         const env: NodeJS.ProcessEnv = { ...process.env, SWITCHBOARD_DEPLOY_CONFIG: join(process.cwd(), config) };
@@ -186,7 +279,17 @@ export async function initializeOnHost(profile: DeploymentProfile, read: Extract
           run("node", ["write-build.mjs"], cwd, env);
           run("npx", ["wrangler", "deploy", "--config", env.SWITCHBOARD_DEPLOY_CONFIG!], cwd, env);
         } else {
-          run("node", ["../bin/build-stamp.mjs", "--config", env.SWITCHBOARD_DEPLOY_CONFIG!], cwd, env);
+          const output = run(
+            "node",
+            ["../bin/build-stamp.mjs", "--config", env.SWITCHBOARD_DEPLOY_CONFIG!],
+            cwd,
+            env,
+            kind === "memory",
+          );
+          if (kind === "memory" && temporary) {
+            memoryUploadVersion = output.match(/Current Version ID:\s*([a-f0-9-]{36})/)?.[1];
+            if (!memoryUploadVersion) throw new Error("Memory upload receipt is unavailable; do not replay");
+          }
         }
         created[kind] = config;
         if (kind === "memory" && !temporary) fullMemory = true;
@@ -205,6 +308,33 @@ export async function initializeOnHost(profile: DeploymentProfile, read: Extract
           join(process.cwd(), WORKER_DIRS[kind]),
         );
         rmSync(path);
+        if (kind === "memory") {
+          if (!memoryUploadVersion) throw new Error("Memory accepted upload identity is unavailable");
+          const history = await nativeResult(`${memoryScriptPath}/deployments`);
+          const activeVersion = history.deployments?.[0]?.versions?.[0]?.version_id;
+          if (typeof activeVersion !== "string") throw new Error("Memory active version unavailable");
+          const [upload, active, domains] = await Promise.all([
+            nativeResult(`${memoryScriptPath}/versions/${memoryUploadVersion}`),
+            nativeResult(`${memoryScriptPath}/versions/${activeVersion}`),
+            inventory("workers/domains"),
+          ]);
+          memoryReceipt = {
+            schema: 1,
+            ...memorySelection,
+            commit,
+            uploadVersion: memoryUploadVersion,
+            activeVersion,
+            deploymentId: history.deployments?.[0]?.id ?? "",
+            domainId: memoryDomainId(memorySelection, domains),
+            authorId: upload.metadata?.author_id ?? "",
+            resourcesHash: memoryResourcesHash(upload.resources),
+          };
+          memoryReceipt = parseMemoryCreationReceipt(memoryReceipt);
+          validateMemoryReceipt(memoryReceipt, memorySelection, history.deployments?.[0], upload, active, domains);
+          await checkMemory(memoryReceipt);
+          writeFileSync(receiptPath, JSON.stringify(memoryReceipt), { flag: "wx", mode: 0o600 });
+          console.log(`Private provisional Memory receipt: ${receiptPath}`);
+        }
       },
       restartBot: async () => {
         // A cron or request may have started the new container before bulk secrets arrived.
@@ -225,6 +355,8 @@ export async function initializeOnHost(profile: DeploymentProfile, read: Extract
           throw new Error("initial Bot secret activation restart is unconfirmed; inspect before retry");
       },
       prepare: async () => {
+        if (!memoryReceipt) throw new Error("Memory receipt unavailable before config publication");
+        await checkMemory(memoryReceipt);
         const legacy = await client.readBase("base");
         if (!legacy.ok) throw new Error(legacy.problem);
         if (legacy.version !== 0 || legacy.document) throw new Error("legacy configuration is not empty");
@@ -297,20 +429,23 @@ export async function initializeOnHost(profile: DeploymentProfile, read: Extract
           );
           if (!ready.live) throw new Error(ready.reason);
         } else {
-          const started = deps.now();
-          for (;;) {
-            const health = await deps.readHealth(
-              worker.healthUrl,
-              worker.healthBearerEnv ? values[worker.healthBearerEnv] : undefined,
-            );
-            if (!("error" in health) && health.status === 200 && health.body && servedCommit(health.body) === commit)
-              break;
-            if (deps.now() - started >= MINUTE_MS) throw new Error(`${kind} has not served the exact initial commit`);
-            await deps.sleep(LIVE_GATE_POLL_MS);
-          }
+          await waitBuild(kind, kind === "memory" && !fullMemory && memoryReceipt ? memoryReceipt.commit : commit);
         }
         console.log(`Initial ${kind}: exact commit ${commit} verified`);
         if (kind === "memory" && fullMemory) {
+          if (
+            !memoryReceipt ||
+            memoryDomainId(memorySelection, await inventory("workers/domains")) !== memoryReceipt.domainId
+          )
+            throw new Error("final Memory hostname ownership changed");
+          const canonical = await client.readBase(key);
+          if (
+            !publication?.ok ||
+            !canonical.ok ||
+            canonical.version !== 1 ||
+            canonical.document?.sha256 !== publication.publication.candidate.sha256
+          )
+            throw new Error("final Memory does not retain the exact candidate configuration");
           const response = await fetch(
             `https://api.cloudflare.com/client/v4/accounts/${profile.account}/workers/scripts/${profile.workers.memory!.script}/settings`,
             {

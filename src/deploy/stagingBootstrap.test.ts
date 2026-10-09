@@ -12,7 +12,9 @@ function fixture() {
   const state = { workers: [] as string[], publication: false, ready: [] as string[] };
   const io: BootstrapIO = {
     absent: async (workers) => {
-      for (const worker of workers) if (state.workers.includes(worker)) throw new Error(`${worker} already exists`);
+      for (const worker of workers)
+        if (state.workers.includes(worker) || (worker === "memory" && state.workers.includes("memory-provisional")))
+          throw new Error(`${worker} already exists`);
     },
     upload: async (worker, provisional) => {
       state.workers.push(provisional ? "memory-provisional" : worker);
@@ -179,5 +181,22 @@ describe("first Bot secret activation", () => {
     } satisfies BootstrapIO;
     expect(await initializeStaging(commit, io)).toEqual({ status: "installed", commit });
     expect(process).toBe("ready");
+  });
+});
+
+describe("recorded provisional Memory continuation", () => {
+  it("continues after an owned Memory receipt without replaying its creation or secret provisioning", async () => {
+    const f = fixture();
+    f.state.workers.push("memory-provisional");
+    let checked = false;
+    const io = {
+      ...f.io,
+      resumeMemory: async () => {
+        checked = true;
+      },
+    };
+    expect(await initializeStaging(commit, io)).toEqual({ status: "installed", commit });
+    expect(checked).toBe(true);
+    expect(f.state.workers).toEqual(["memory-provisional", "resident", "sandbox", "bot", "memory"]);
   });
 });
