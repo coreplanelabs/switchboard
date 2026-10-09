@@ -28,6 +28,13 @@ import { visibilityOf } from "../authz/channelDirectory.js";
 import { getAgent } from "../../agents/registry.js";
 import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
+import { githubPullGetTool } from "../../tools/github.js";
+import { submitVerdictTool } from "../../tools/submit.js";
+import type { ToolContext } from "../../tools/runnableTool.js";
+import { githubRepositoryDependencies, mergeContextDependencies } from "../references/contextDependencies.js";
+import { githubReadWithContext } from "./githubReadContext.js";
+import { contextAccessForExecution, contextAccessForMessage } from "./contextAccess.js";
+import { executionAdmissionHash } from "./executionGithubContext.js";
 import { TEST_GITHUB_CREDENTIALS } from "../../execution/testing/githubCredentials.js";
 import type { Provider } from "../provider.js";
 import { ExecSandboxRestartedError, LocalExecutor, type Executor } from "../../execution/executor.js";
@@ -491,6 +498,7 @@ function setup(
     },
     admitted: new ThreadAdmission<DispatchFollowUp>().claim(message.threadKey, { agent: agentName }).live,
     ledgerRun: undefined,
+    validateExecutionContext: undefined as RunLoopContext["validateExecutionContext"],
     resume: undefined,
     repoCtx: opts.repoCtx ?? {},
     ...(opts.bearer === null
@@ -9313,6 +9321,400 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     };
   }
 
+  it("refuses retained native execution sources before a non-review resume without current proof", async () => {
+    const s = setup("unused", { agent: "general", provider: neverCalled() });
+    const resume = reentering(
+      {
+        contextDependencies: {
+          version: 2,
+          status: "known",
+          revision: 0,
+          origins: [],
+          slack: [],
+          mcp: [],
+          executionGithub: [
+            { runId: "run-l", callId: "private-file", resultHash: "a".repeat(64), admissionHash: "b".repeat(64) },
+          ],
+        },
+      },
+      "general",
+    );
+    await expect(runLoop(s.deps, { ...s.ctx, resume, messages: resume.plan.messages })).rejects.toThrow(
+      "The original execution context could not be revalidated.",
+    );
+  });
+
+  it.each([
+    { name: "pi", base: piHarness, mode: "complete" },
+    { name: "opencode", base: openCodeHarness, mode: "complete" },
+    { name: "pi", base: piHarness, mode: "private complete" },
+    { name: "opencode", base: openCodeHarness, mode: "private complete" },
+    ...[
+      "actor changed",
+      "target changed",
+      "other run",
+      "main reader",
+      "scope revoked",
+      "fence during probe",
+      "altered input",
+      "duplicate call",
+    ].map((gap) => ({ name: "pi", base: piHarness, mode: `private ${gap}` })),
+    { name: "pi", base: piHarness, mode: "pin unacknowledged" },
+    { name: "pi", base: piHarness, mode: "validation unacknowledged" },
+    { name: "opencode", base: openCodeHarness, mode: "validation fenced" },
+    { name: "pi", base: piHarness, mode: "changed history with cached approval" },
+  ])("restores canonical history before resumed $name review ($mode)", async ({ name, base, mode }) => {
+    const PIN = "b".repeat(40);
+    const target = { repo: "o/r", number: 42 };
+    const posts: ReviewCommentTarget[] = [];
+    const bodies: string[] = [];
+    const observed = watched(base);
+    const s = setup("unused", {
+      agent: "review",
+      ...prThread,
+      executor: {
+        exec: async () => PIN + "\n",
+        execResult: async () => ({ exitCode: 0, stdout: PIN + "\n", stderr: "", truncated: false }),
+      },
+      review: {
+        head: HEAD,
+        currentHead: PIN,
+        post: async (target, body) => {
+          posts.push(target);
+          bodies.push(body);
+          return { state: "accepted" };
+        },
+      },
+      yaml: YAML + `harness:\n  review: ${name}\n`,
+      harness: {
+        harnesses: roster(
+          name === "pi" ? observed.harness : piHarness,
+          name === "opencode" ? observed.harness : openCodeHarness,
+        ),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    const api = new InMemoryGithubApi({
+      "o/r": {
+        private: mode.startsWith("private"),
+        pulls: [
+          {
+            number: 42,
+            title: "fix",
+            body: "",
+            state: "open",
+            draft: false,
+            url: "https://github.com/o/r/pull/42",
+            author: "author",
+            updatedAt: "2026-01-01T00:00:00Z",
+            head: { repo: "o/r", ref: "fix/the-pr-head", sha: PIN },
+            base: { repo: "o/r", ref: "main" },
+          },
+        ],
+      },
+    });
+    s.deps.githubApi = api;
+    const inner = new InMemoryRunLedger(() => NOW);
+    const ledger = createLedgerWriteThrough({ ledger: inner, gen: "gen-T", fallback: s.store, warn: () => {} });
+    s.deps.runLedger = ledger;
+    const context = githubRepositoryDependencies(mode.startsWith("private") ? [] : [target.repo]);
+    const opened = await ledger.open({
+      runId: s.run.id,
+      threadKey: s.ctx.msg.threadKey,
+      startedAt: NOW,
+      meta: {
+        agent: "review",
+        channelId: s.ctx.msg.channelId,
+        userId: s.ctx.msg.userId,
+        threadKey: s.ctx.msg.threadKey,
+        repo: "o/r",
+        pr: 42,
+        readonly: true,
+        profile: s.ctx.profile,
+        channelVisibility: "public",
+      },
+      card: null,
+      system: s.ctx.system,
+      tools: [],
+      state: { reviewHistory: { target, requiredHead: PIN } },
+      seed: {
+        messages: [{ role: "user", content: [{ type: "text", text: "review o/r#42" }] }],
+        budgetMs: 240_000,
+        context,
+      },
+    });
+    if (opened.kind !== "tracked") throw new Error("missing canonical review owner");
+    const input = { ...target, includeReviewHistory: true };
+    await opened.run.step({
+      firstIdx: 1,
+      turns: [
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "history-before-restart",
+              name: "github_pull_get",
+              input,
+            },
+          ],
+        },
+      ],
+      inFlight: [{ callId: "history-before-restart", tool: "github_pull_get" }],
+      turn: 1,
+      iteration: 1,
+      remainingMs: 240_000,
+      inboxConsumedSeq: 0,
+    });
+    const sourceCtx: ToolContext = {
+      executor: s.ctx.round.selection.executor,
+      callId: "history-before-restart",
+      agentName: "review",
+      repo: target.repo,
+      github: {
+        api,
+        canWrite: () => false,
+        readableRepos: async () => (mode.startsWith("private") ? [] : api.listRepos()),
+      },
+      reviewHistory: { target },
+    };
+    const output = await githubReadWithContext(githubPullGetTool, {
+      runId: s.run.id,
+      execution: { gen: ledger.gen, owner: async () => (await ledger.readLiveRuns())[0] },
+      commit: async (receipt, dependencies) => {
+        const sources = (await ledger.readSessionTail(opened.run.session!.key, 1)).sources!;
+        return (
+          (await opened.run.writeSources({
+            ...sources,
+            context: mergeContextDependencies(sources.context, dependencies),
+          })) && (await opened.run.recordSourceResult(receipt))
+        );
+      },
+    }).run(input, sourceCtx);
+    await opened.run.step({
+      firstIdx: 2,
+      turns: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              toolUseId: "history-before-restart",
+              content: output,
+            },
+          ],
+        },
+      ],
+      inFlight: [],
+      turn: 2,
+      iteration: 1,
+      remainingMs: 240_000,
+      inboxConsumedSeq: 0,
+    });
+    if (mode === "changed history with cached approval") {
+      const old = { verdict: "approve", summary: "old accepted review", head: PIN, findings: [] };
+      await opened.run.step({
+        firstIdx: 3,
+        turns: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "old-verdict",
+                name: "submit_verdict",
+                input: old,
+              },
+            ],
+          },
+        ],
+        inFlight: [{ callId: "old-verdict", tool: "submit_verdict" }],
+        turn: 3,
+        iteration: 2,
+        remainingMs: 240_000,
+        inboxConsumedSeq: 0,
+      });
+      const accepted = await submitVerdictTool.run(old, {
+        ...sourceCtx,
+        onVerdict: (value) => opened.run.setState({ verdict: value }),
+      });
+      expect(accepted).toBe("verdict recorded: approve (0 findings)");
+      await opened.run.step({
+        firstIdx: 4,
+        turns: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                toolUseId: "old-verdict",
+                content: accepted,
+              },
+            ],
+          },
+        ],
+        inFlight: [],
+        turn: 4,
+        iteration: 2,
+        remainingMs: 240_000,
+        inboxConsumedSeq: 0,
+      });
+    }
+    const saved = (await ledger.readLiveRuns())[0]!;
+    const tail = await ledger.readSessionTail(opened.run.session!.key, 1_000_000);
+    const resume = reentering(saved.state, "review");
+    resume.row = saved;
+    if (mode.startsWith("private"))
+      s.ctx.validateExecutionContext = async (dependencies) => {
+        const current = (await ledger.readLiveRuns())[0]!;
+        const hash = await executionAdmissionHash(current.meta);
+        if (!hash) return { ok: false, code: "saved-context-unproved" };
+        const accessDeps = {
+          ...s.deps,
+          runs: undefined,
+          mcp: undefined,
+          slackContextForRun: (_actor: unknown, message: IncomingMessage) =>
+            testSlackCapability(message, async () => ""),
+        };
+        if (mode === "private main reader")
+          return contextAccessForMessage(accessDeps as never, { msg: s.ctx.msg, io: s.ctx.io }).validateDependencies(
+            dependencies,
+          );
+        return contextAccessForExecution(accessDeps as never, {
+          msg: s.ctx.msg,
+          io: s.ctx.io,
+          executionConsumer: {
+            runId: mode === "private other run" ? "other" : s.run.id,
+            gen: ledger.gen,
+            admissionHash: hash,
+          },
+        }).validateDependencies(dependencies);
+      };
+    const lastStep = inner.steps.get(s.run.id)!.at(-1)!;
+    const plan = planResume({ transcript: tail.transcript, lastStep, tools: [githubPullGetTool, submitVerdictTool] });
+    if (plan.kind !== "resume") throw new Error("canonical results did not produce a resume plan");
+    resume.plan = plan;
+    resume.lastStep = lastStep;
+    if (mode === "private actor changed") inner.live.get(s.run.id)!.meta.userId = "slack:OTHER";
+    if (mode === "private target changed") inner.live.get(s.run.id)!.meta.pr = 43;
+    if (mode === "private scope revoked")
+      api.getPullRequestFeedback = async () => {
+        throw new Error("revoked");
+      };
+    if (mode === "private fence during probe") {
+      const read = api.getPullRequestFeedback.bind(api);
+      api.getPullRequestFeedback = async (...args) => {
+        const feedback = await read(...args);
+        inner.live.get(s.run.id)!.ownerGen = "successor";
+        return feedback;
+      };
+    }
+    if (mode === "private altered input" || mode === "private duplicate call") {
+      const use = resume.plan.messages.flatMap((message) => message.content).find((part) => part.type === "tool_use")!;
+      if (use.type !== "tool_use") throw new Error("missing original input");
+      if (mode === "private altered input") use.input = { ...target, number: 43, includeReviewHistory: true };
+      else resume.plan.messages.push({ role: "assistant", content: [structuredClone(use)] });
+    }
+    if (mode === "private altered input" || mode === "private duplicate call") {
+      const read = ledger.readSession.bind(ledger);
+      ledger.readSession = async (...args) => {
+        const saved = structuredClone(await read(...args));
+        const use = saved.messages.flatMap((message) => message.content).find((part) => part.type === "tool_use")!;
+        if (use.type !== "tool_use") throw new Error("missing recorded input");
+        if (mode === "private altered input") use.input = { ...target, number: 43, includeReviewHistory: true };
+        else saved.messages.push({ role: "assistant", content: [structuredClone(use)] });
+        return saved;
+      };
+    }
+    if (mode === "changed history with cached approval")
+      api.repos.get("o/r")!.feedback = {
+        42: {
+          reviews: [],
+          comments: [{ id: 1, author: "author", createdAt: "2026-01-01T00:00:00Z", body: "new evidence" }],
+        },
+      };
+    const commit = opened.run.setStateAndFlush.bind(opened.run);
+    opened.run.setStateAndFlush = async (patch) => {
+      const history = patch.reviewHistory as { validation?: unknown } | undefined;
+      if (history && mode === "pin unacknowledged" && !history.validation) return false;
+      if (history?.validation && mode === "validation unacknowledged") return false;
+      if (history?.validation && mode === "validation fenced") inner.live.get(s.run.id)!.ownerGen = "successor";
+      return commit(patch);
+    };
+    let validation: unknown;
+    let openedModel = false;
+    observed.harness.open = async (_deps, run) => {
+      openedModel = true;
+      validation = (await ledger.readLiveRuns())[0]!.state.reviewHistory;
+      if (mode === "changed history with cached approval")
+        return {
+          answer: "Old approval cannot settle the refreshed source",
+          followUp: async () => "",
+          remainingMs: () => 240_000,
+          end: async () => {},
+        };
+      expect(
+        await run.tools
+          .find((tool) => tool.name === "submit_verdict")!
+          .run(
+            {
+              verdict: "approve",
+              summary: "old",
+              head: HEAD,
+              findings: [],
+            },
+            run.toolContext,
+          ),
+      ).toContain("required review head");
+      expect(
+        await run.tools
+          .find((tool) => tool.name === "submit_verdict")!
+          .run(
+            {
+              verdict: "approve",
+              summary: "verified",
+              head: PIN,
+              findings: [],
+            },
+            run.toolContext,
+          ),
+      ).toBe("verdict recorded: approve (0 findings)");
+      return { answer: "Resumed review", followUp: async () => "", remainingMs: () => 240_000, end: async () => {} };
+    };
+    const result = runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run, resume, messages: resume.plan.messages });
+    if (mode.startsWith("private") && mode !== "private complete") {
+      await expect(result).rejects.toThrow("original execution context could not be revalidated");
+      expect(openedModel).toBe(false);
+      expect(posts).toEqual([]);
+      return;
+    }
+    if (mode.includes("unacknowledged") || mode.includes("fenced")) {
+      await expect(result).rejects.toThrow(
+        mode === "pin unacknowledged"
+          ? "review target could not be committed"
+          : "review history validation could not be committed",
+      );
+      expect(openedModel).toBe(false);
+      expect(posts).toEqual([]);
+      return;
+    }
+    const out = answered(await result);
+    if (mode === "changed history with cached approval") {
+      expect(bodies[0]?.split("\n")[0]).toBe("No verdict submitted — not approving.");
+      expect(validation).toMatchObject({ validation: { head: PIN, matched: false } });
+      return;
+    }
+    expect(out.answer).toBe("Resumed review");
+    expect(validation).toMatchObject({
+      target,
+      requiredHead: PIN,
+      validation: { runId: "run-l", generation: "gen-T", head: PIN, matched: true },
+    });
+    expect(posts).toEqual([{ repo: "o/r", number: 42, commitId: PIN }]);
+  });
+
   function finishing(
     answer: string,
     opts: { agent?: string; events?: AppendableEvent[]; state?: Record<string, unknown>; repoCtx?: RepoContext } = {},
@@ -10318,15 +10720,17 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         },
       },
     });
+    const feedback = vi.spyOn(s.deps.githubApi!, "getPullRequestFeedback");
     const resume = finishing("The review: one nit, F1.", {
       agent: "review",
-      state: { verdict: VERDICT },
+      state: { verdict: VERDICT, reviewHistory: { target: { repo: "o/r", number: 42 }, requiredHead: HEAD } },
       repoCtx: prThread.repoCtx,
     });
     const out = answered(
       await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
     );
     expect(out.answer).toBe("The review: one nit, F1.");
+    expect(feedback).not.toHaveBeenCalled();
     expect(posts).toEqual([
       {
         target: { repo: "o/r", number: 42, commitId: HEAD },

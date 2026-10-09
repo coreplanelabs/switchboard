@@ -1,11 +1,18 @@
 import { runSessionIdentity } from "./dispatch/sessionIdentity.js";
 import { resumedPilotBindingFor } from "./dispatch/readyBinding.js";
 import { appendThreadTurn } from "./runLedger/threadSession.js";
-import { contextAccessForMessage, contextAccessForRun, revalidateAdmittedContext } from "./dispatch/contextAccess.js";
+import {
+  contextAccessForMessage,
+  contextAccessForRun,
+  contextAccessForExecution,
+  revalidateAdmittedContext,
+} from "./dispatch/contextAccess.js";
+import { executionAdmissionHash } from "./dispatch/executionGithubContext.js";
 import { contextForReferences, contextForSourceReads, freshContext } from "./dispatch/contextSeed.js";
 import { applyContextCheckpoint, type ContextCheckpointReceipt } from "./references/contextCheckpoint.js";
 import {
   contextDependenciesOf,
+  isContextDependencies,
   mergeContextDependencies,
   UNKNOWN_CONTEXT_DEPENDENCIES,
   type ContextDependencies,
@@ -3841,14 +3848,31 @@ export async function dispatch(
       ...artifactContexts,
       ...(boundHandoff?.dependencies?.value ? [boundHandoff.dependencies.value] : []),
     );
+    const resumedContext = resume?.row.state.contextDependencies;
+    if (isContextDependencies(resumedContext) && resumedContext.executionGithub?.length)
+      seedContext = mergeContextDependencies(seedContext, resumedContext);
     const contextValidation =
       agent.name === "orchestrator" ? await contextReader.validateDependencies(seedContext) : undefined;
     let admittedContext = structuredClone(seedContext);
     let committedContextCheckpoint: ContextCheckpointReceipt | undefined;
     const normalizeAdmittedOrigins = (context: ContextDependencies) =>
       committedContextCheckpoint ? applyContextCheckpoint(context, committedContextCheckpoint) : context;
-    const revalidateAdmitted = () =>
-      revalidateAdmittedContext(() => admittedContext, contextReader.validateDependencies);
+    const validateExecutionContext = async (context: ContextDependencies): Promise<AudienceCheck> => {
+      if (!context.executionGithub?.length) return contextReader.validateDependencies(context);
+      const current = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === run.id);
+      const hash = current && current.ownerGen === deps.runLedger.gen && (await executionAdmissionHash(current.meta));
+      if (!hash) return { ok: false, code: "saved-context-unproved" };
+      return contextAccessForExecution(deps, {
+        msg,
+        io,
+        executionConsumer: {
+          runId: run.id,
+          gen: deps.runLedger.gen,
+          admissionHash: hash,
+        },
+      }).validateDependencies(context);
+    };
+    const revalidateAdmitted = () => revalidateAdmittedContext(() => admittedContext, validateExecutionContext);
     seedContext = mergeContextDependencies(seedContext, {
       ...freshContext(),
       origins: [{ runId: run.id, requester: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey }],
@@ -4348,6 +4372,7 @@ export async function dispatch(
       captureParentContext,
       captureUnitContext,
       admitSourceContext,
+      validateExecutionContext,
       ...(route !== undefined ? { route } : {}),
       parentRunId,
       coordinator,

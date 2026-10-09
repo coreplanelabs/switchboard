@@ -31,6 +31,21 @@ const known = (refs: SourceReadReference[] = [], revision = 0): ContextDependenc
 const sources = () => testSessionSources({ channelId: "slack:C1", threadKey: "slack:C1:1.0", userId: "slack:U11" });
 
 describe("whole-context dependencies", () => {
+  it("keeps same-run native references in a versioned envelope and rejects downgrade or equivocation", async () => {
+    const ref = { runId: "review", callId: "private-read", resultHash: "a".repeat(64), admissionHash: "b".repeat(64) };
+    const scoped: ContextDependencies = { ...known(), version: 2, executionGithub: [ref] };
+    expect(isContextDependencies(scoped)).toBe(true);
+    expect(isContextDependencies({ ...scoped, version: 1 })).toBe(false);
+    const merged = mergeContextDependencies(known(), scoped);
+    expect(merged.version).toBe(2);
+    expect(merged.executionGithub).toEqual([ref]);
+    expect(contextDependenciesContain(merged, scoped)).toBe(true);
+    expect(contextDependenciesContain(known(), scoped)).toBe(false);
+    expect(
+      mergeContextDependencies(scoped, { ...scoped, executionGithub: [{ ...ref, resultHash: "c".repeat(64) }] }).status,
+    ).toBe("unknown");
+    expect(await contextDependenciesHash(scoped)).not.toBe(await contextDependenciesHash(known()));
+  });
   it("binds immutable coordinator status identities without treating their latest unit as the old observation", async () => {
     const ref = {
       instanceId: "plan-status",

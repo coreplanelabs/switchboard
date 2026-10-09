@@ -1226,11 +1226,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       sends.send({
         id: ids.prompt,
         type: "prompt",
-        message: continuePrompt(run.toolContext.reviewHistory?.target),
+        message: continuePrompt(run.toolContext.reviewHistory),
         streamingBehavior: "steer",
       });
     else if (run.resume)
-      sends.send({ id: ids.prompt, type: "prompt", message: continuePrompt(run.toolContext.reviewHistory?.target) });
+      sends.send({ id: ids.prompt, type: "prompt", message: continuePrompt(run.toolContext.reviewHistory) });
     else sends.send({ id: ids.prompt, type: "prompt", ...promptOf(run.messages) });
 
     let warned = false;

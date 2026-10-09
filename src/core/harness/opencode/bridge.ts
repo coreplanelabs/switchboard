@@ -3025,10 +3025,7 @@ export async function driveOpenCode(
     const delivery = conn.reattach?.delivery ?? "queue";
     const promptName = `the ${promptPhase}`;
     const promptBody = {
-      text:
-        run.resume !== undefined
-          ? continuePrompt(run.toolContext.reviewHistory?.target)
-          : openCodePromptText(run.messages),
+      text: run.resume !== undefined ? continuePrompt(run.toolContext.reviewHistory) : openCodePromptText(run.messages),
       delivery,
     };
     // What the store held before this prompt, for a reset's resolution to stop at.

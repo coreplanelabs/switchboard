@@ -1036,6 +1036,44 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
 // first, head re-probed after). A round with no session left (a `finish` plan)
 // keeps the verdict for the head it reviewed and says so.
 describe("settleReviewedHead — the head-move re-review", () => {
+  it.each([true, false])(
+    "requires an acknowledged durable head pin before moving or re-reviewing (ack %s)",
+    async (ack) => {
+      let durableHead: string | undefined;
+      let reviewedAt: string | undefined;
+      const history: ReviewHistoryContext = {
+        target: { repo: "acme/api", number: 42 },
+        requiredHead: HEAD,
+        commitRequiredHead: async (head) => {
+          if (ack) durableHead = head;
+          return ack;
+        },
+      };
+      const w = moved({
+        followUp: async (input) => {
+          reviewedAt = durableHead;
+          history.snapshot = { head: OTHER, findings: [] };
+          expect(
+            await submitVerdictTool.run(
+              { verdict: "approve", summary: "fresh", head: OTHER, findings: [] },
+              input.toolContext,
+            ),
+          ).toBe("verdict recorded: approve (0 findings)");
+          return "New review";
+        },
+      });
+      w.input.turn.toolContext.reviewHistory = history;
+      if (ack) {
+        expect(await settleReviewedHead(w.input)).toMatchObject({ reviewHead: OTHER, verdict: { head: OTHER } });
+        expect(reviewedAt).toBe(OTHER);
+      } else {
+        await expect(settleReviewedHead(w.input)).rejects.toThrow("review target could not be committed");
+        expect(w.moves).toEqual([]);
+        expect(history.requiredHead).toBe(HEAD);
+      }
+    },
+  );
+
   it("a hard stop during confirmation prevents another prompt after substantive review began", async () => {
     const followUp = vi.fn(async () => "must not run");
     const w = moved({ followUp });
