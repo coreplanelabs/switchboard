@@ -91,7 +91,7 @@
       // reached from the other side: one cold thread must be able to typecheck
       // a large monorepo alone — and it is awake only for one run.)
       "instance_type": { "vcpu": 4, "memory_mib": 12288, "disk_mb": 20000 },
-      // Platform ceiling only. The enforced cap is RESIDENT_CAP (6) in
+      // Platform ceiling only. The enforced cap is RESIDENT_CAP (5) in
       // worker.ts — deliberately below this so an onboard is always refused
       // atomically by the registry, never by a platform scheduling failure.
       "max_instances": 10
