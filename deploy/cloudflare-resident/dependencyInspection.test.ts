@@ -26,7 +26,7 @@ const method = methodOf(
   "inspectThreadDependencies",
 )!;
 const compiled = ts.transpileModule(
-  `class Probe { ${method} ${methodOf(readSource("worker.ts"), "withThreadBusy")} }; Probe`,
+  `class Probe { ${method} ${methodOf(readSource("worker.ts"), "withThreadBusy")} ${methodOf(readSource("worker.ts"), "workspaceDiscarded")} }; Probe`,
   {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   },
@@ -208,6 +208,7 @@ describe("retained resident preservation inspection", () => {
     `class Probe {
 ${methodOf(source, "inspectThreadPreservation")}
 ${methodOf(source, "withThreadBusy")}
+${methodOf(source, "workspaceDiscarded")}
 }; Probe`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
   ).outputText;

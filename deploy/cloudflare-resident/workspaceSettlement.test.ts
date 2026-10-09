@@ -1,4 +1,5 @@
-import { registeredRunOwnsRelease } from "./runRegistration";
+import { releasePoolBinding, claimPoolBinding } from "../../src/execution/residentPoolSpends";
+import { registeredRunOwnsRelease, registeredRunAllowsClaim } from "./runRegistration";
 import { runInNewContext } from "node:vm";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { webcrypto } from "node:crypto";
@@ -35,6 +36,9 @@ const resident = source.statements.find(
   (s): s is ts.ClassDeclaration => ts.isClassDeclaration(s) && s.name?.text === "ResidentDO",
 )!;
 const names = [
+  "discardAbsentBinding",
+  "debugBackdateThread",
+  "workspaceDiscarded",
   "cancelRun",
   "detachThread",
   "killThreadUserProcesses",
@@ -43,6 +47,7 @@ const names = [
   "assertThreadOperationAllowed",
   "beginThreadNativeOperation",
   "execThread",
+  "execThreadBody",
   "run",
   "waitForThreadDrain",
   "publishThread",
@@ -282,6 +287,11 @@ function harness(
     WORKSPACE_SETTLEMENT_CURSOR_KEY: "settlement-cursor",
     systemClock: () => 1000,
     validRunOwner: () => true,
+    releasePoolBinding,
+    claimPoolBinding,
+    registeredRunAllowsClaim,
+    poolBindingKey: (s: string) => "pool-binding:" + s,
+    parseThreadKey: (s: string) => ({ threadKey: s }),
     threadBindingKey: (s: string) => "thread:" + s,
     runRegKey: (s: string) => "runReg:" + s,
     runFenceKey: (s: string) => "runFence:" + s,
@@ -1072,5 +1082,323 @@ describe("resident terminal metadata reconciliation", () => {
     expect(h.rows.get("thread:" + threadKey).workspacePredecessors).toEqual([{ owner, binding: physical }]);
     expect(h.rows.get("runReg:" + threadKey)).toMatchObject({ runId: "run-new", ownerFence: 8 });
     expect(h.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("explicit absent-workspace discard", () => {
+  const input = {
+    confirmDiscard: true,
+    threadKey,
+    runId: owner.runId,
+    ownerGen: owner.ownerGen,
+    ownerFence: owner.ownerFence,
+    ref: physical.ref,
+    user: physical.user,
+    container: physical.container,
+    lastAttachAt: "today",
+  };
+  function setup(options: Parameters<typeof harness>[0] = {}) {
+    const h = harness(options);
+    h.rows.set("pool-binding:worker2", [threadKey]);
+    h.rows.set("pool-users-spent", [{ user: "worker2", owner: "thread:" + threadKey }]);
+    h.rows.get("thread:" + threadKey).workspaceSettlement = {
+      ...ending,
+      publication: { ...ending.publication, complete: false },
+    };
+    Object.assign(h.instance, {
+      opUsersInUse: new Map(),
+      hydration: null,
+      destroying: null,
+      getStatus: async () => ({ state: "warm" }),
+      recreateAdmission: { blocked: async () => false },
+      isRuntimeActive: async () => true,
+      containerIdentity: async () => "vm-new",
+      run: async () => ({ stdout: "vm-new\n", stderr: "", exitCode: 0 }),
+      observeAbsentPrivateTree: async () => true,
+      withMirrorLock: async (fn: () => Promise<unknown>) => ({ value: await fn(), waitedMs: 0 }),
+    });
+    return h;
+  }
+  it("rejects extra caller data before storing a loss receipt", async () => {
+    const { instance, rows } = setup();
+    expect(await instance.discardAbsentBinding({ ...input, extra: "private caller data" })).toEqual({
+      discarded: false,
+      reason: "invalid-input",
+    });
+    expect(rows.get("thread:" + threadKey)).toMatchObject({ user: "worker2" });
+    expect(rows.get("discarded:" + threadKey + ":" + owner.runId)).toBeUndefined();
+    expect(await instance.discardAbsentBinding(input)).toMatchObject({ discarded: true });
+  });
+  it("reports exact terminal owner for confirmation before writing a loss fence", async () => {
+    const { instance, rows } = setup();
+    const { ownerGen: _gen, ownerFence: _fence, ...request } = input;
+    expect(await instance.discardAbsentBinding(request)).toEqual({
+      discarded: false,
+      reason: "owner-confirmation-required",
+      owner,
+    });
+    expect(rows.get("thread:" + threadKey)).toMatchObject({ user: "worker2" });
+    expect(rows.get("discarding:" + threadKey)).toBeUndefined();
+  });
+  it("retires an exact terminal absent binding without claiming publication or resetting UID ownership", async () => {
+    const { instance, rows } = setup({ incomplete: true });
+    expect(await instance.discardAbsentBinding(input)).toMatchObject({
+      discarded: true,
+      runId: "run-old",
+      user: "worker2",
+      disposition: "absent-workspace-retired",
+    });
+    expect(rows.get("thread:" + threadKey)).toMatchObject({
+      evicted: true,
+      user: "",
+      evictedWhy: "operator-discard",
+      workspaceSettlement: { publication: { complete: false } },
+    });
+    expect(rows.get("runReg:" + threadKey)).toBeUndefined();
+    expect(rows.get("runFence:" + threadKey)).toEqual(owner);
+    expect(rows.get("pool-users-spent")).toEqual([{ user: "worker2", owner: "thread:" + threadKey }]);
+    expect(rows.get("pool-binding:worker2")).toEqual([]);
+    expect(await instance.discardAbsentBinding(input)).toMatchObject({ discarded: true, runId: "run-old" });
+    expect(await instance.workspaceDiscarded(threadKey, owner.runId)).toBe(true);
+    expect(await instance.workspaceDiscarded(threadKey, "run-next")).toBe(false);
+  });
+  it.each([
+    "confirmation",
+    "target",
+    "workspace",
+    "live",
+    "unknown",
+    "fence",
+    "busy",
+    "native",
+    "claimant",
+    "cold",
+    "present",
+    "boot-change",
+  ])("keeps registration and ownership when %s proof fails", async (failure) => {
+    const { instance, rows } = setup(
+      failure === "live" ? { live: true } : failure === "unknown" ? { corruptLive: true } : {},
+    );
+    const request = { ...input };
+    if (failure === "confirmation") request.confirmDiscard = false;
+    if (failure === "target") request.lastAttachAt = "newer";
+    if (failure === "workspace") rows.get("runReg:" + threadKey).workspace = { ...physical, container: "vm-other" };
+    if (failure === "fence") rows.set("runFence:" + threadKey, { ...owner, ownerFence: 8 });
+    if (failure === "busy") instance.threadOpsInFlight.set(threadKey, 1);
+    if (failure === "native") rows.set("native-operation:" + threadKey + ":run-old:pending", owner);
+    if (failure === "claimant") rows.set("pool-binding:worker2", [threadKey, "slack:OTHER:456"]);
+    if (failure === "cold") instance.isRuntimeActive = async () => false;
+    if (failure === "present") instance.observeAbsentPrivateTree = async () => false;
+    if (failure === "boot-change") {
+      let n = 0;
+      instance.run = async () => ({ stdout: ++n === 1 ? "vm-new\n" : "vm-other\n", stderr: "", exitCode: 0 });
+    }
+    expect(await instance.discardAbsentBinding(request)).toMatchObject({
+      discarded: false,
+      reason: expect.any(String),
+    });
+    expect(rows.get("thread:" + threadKey)).toMatchObject({ user: "worker2", container: "vm-a" });
+    expect(rows.get("runReg:" + threadKey)).toMatchObject(owner);
+  });
+  it.each(["earlier-review", "missing-owner"])(
+    "rejects a delayed %s binding callback after retirement without restoring its claimant",
+    async (kind) => {
+      const { instance, rows } = setup();
+      const stale = {
+        ...structuredClone(rows.get("thread:" + threadKey)),
+        ...(kind === "earlier-review"
+          ? { lastRunOwner: { runId: "earlier-review", ownerGen: "gen-review", ownerFence: 6 } }
+          : {}),
+      };
+      expect(await instance.discardAbsentBinding(input)).toMatchObject({ discarded: true });
+      await expect(Object.getPrototypeOf(instance).putThreadBinding.call(instance, stale)).rejects.toThrow(
+        "workspace discarded",
+      );
+      expect(rows.get("thread:" + threadKey)).toMatchObject({ evicted: true, user: "" });
+      expect(rows.get("pool-binding:worker2")).toEqual([]);
+    },
+  );
+  it("admits only a higher-fence active attachment as the successor", async () => {
+    const { instance, rows } = setup();
+    const unrelated = { owner: { runId: "other-private", ownerGen: "gen-other", ownerFence: 6 }, binding: null };
+    rows.get("thread:" + threadKey).workspacePredecessors = [unrelated];
+    expect(await instance.discardAbsentBinding(input)).toMatchObject({ discarded: true });
+    const retired = structuredClone(rows.get("thread:" + threadKey));
+    rows.set("pool-binding:worker3", []);
+    const next = {
+      ...rows.get("thread:" + threadKey),
+      evicted: false,
+      user: "worker3",
+      lastAttachAt: "tomorrow",
+      container: "vm-new",
+      readonly: true,
+    };
+    const write = () => Object.getPrototypeOf(instance).putThreadBinding.call(instance, next);
+    const scope = {
+      threadKey,
+      owner: { runId: "run-next", ownerGen: "gen-next", ownerFence: 8 },
+      active: true,
+      attachment: true,
+    };
+    await instance.threadOperationScope.run(scope, write);
+    expect(rows.get("thread:" + threadKey)).toMatchObject({
+      evicted: false,
+      user: "worker3",
+      lastAttachAt: "tomorrow",
+    });
+    expect(rows.get("pool-binding:worker3")).toEqual([threadKey]);
+    expect(rows.get("thread:" + threadKey).workspaceSettlement).toBeUndefined();
+    expect(rows.get("discarded:" + threadKey + ":run-old").binding.workspaceSettlement).toMatchObject({
+      publication: { complete: false },
+    });
+    await instance.threadOperationScope.run(scope, () =>
+      instance.registerRun(threadKey, undefined, "run-next", "gen-next", 8, {
+        ref: "main",
+        workspace: physical.workspace,
+        user: "worker3",
+        container: "vm-new",
+      }),
+    );
+    expect(rows.get("runReg:" + threadKey)).toMatchObject({ runId: "run-next", ownerFence: 8 });
+    expect(rows.get("thread:" + threadKey).workspacePredecessors).toEqual([unrelated]);
+    instance.putThreadBinding = Object.getPrototypeOf(instance).putThreadBinding;
+    instance.execThreadImpl = Object.getPrototypeOf(instance).execThreadBody;
+    instance.threadPreflight = async () => ({ binding: rows.get("thread:" + threadKey) });
+    instance.threadRunCapped = async () => ({ stdout: "successor-ran", stderr: "", exitCode: 0, truncated: false });
+    expect(await instance.execThread(threadKey, "work", 1000, undefined, undefined, scope.owner)).toEqual({
+      stdout: "successor-ran",
+      stderr: "",
+      exitCode: 0,
+      truncated: false,
+    });
+    expect(await instance.execThread(threadKey, "legacy work", 1000)).toEqual({
+      stdout: "successor-ran",
+      stderr: "",
+      exitCode: 0,
+      truncated: false,
+    });
+    const ticket = {
+      version: 1,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      runId: "run-next",
+      threadKey,
+      ownerGen: "gen-next",
+      startedAt: 1,
+      actor: { kind: "chat", id: "slack:operator" },
+    };
+    expect(
+      await instance.cancelRun(ticket, {
+        user: "worker3",
+        workspace: physical.workspace,
+        container: "vm-new",
+        ownerGen: "gen-next",
+        ownerFence: 8,
+      }),
+    ).toMatchObject({ stopped: true, cancellationId: ticket.id });
+    expect(rows.get("thread:" + threadKey).lastRunOwner).toMatchObject({ runId: "run-next", ownerFence: 8 });
+
+    await Object.getPrototypeOf(instance).putThreadBinding.call(
+      instance,
+      { ...rows.get("thread:" + threadKey), ownBranches: [{ ref: "codex/next", pr: 9, at: "today" }] },
+      true,
+    );
+    expect(rows.get("thread:" + threadKey).ownBranches).toEqual([{ ref: "codex/next", pr: 9, at: "today" }]);
+    await expect(Object.getPrototypeOf(instance).putThreadBinding.call(instance, retired, true)).rejects.toThrow(
+      "workspace discarded",
+    );
+    expect(rows.get("thread:" + threadKey)).toMatchObject({ user: "worker3", evicted: false });
+    await expect(instance.threadOperationScope.run({ ...scope, active: false }, write)).rejects.toThrow(
+      "workspace discarded",
+    );
+    await expect(instance.threadOperationScope.run({ ...scope, owner }, write)).rejects.toThrow("workspace discarded");
+    expect(await instance.debugBackdateThread(threadKey, 1)).toEqual({
+      ok: true,
+      lastAttachAt: "1969-12-31T00:00:01.000Z",
+    });
+    expect(rows.get("thread:" + threadKey)).toMatchObject({ user: "worker3", evicted: false });
+    expect(rows.get("pool-binding:worker3")).toEqual([threadKey]);
+    expect(rows.get("discarded-thread:" + threadKey)).toEqual(owner);
+    rows.set("discarding:" + threadKey, owner);
+    expect(await instance.debugBackdateThread(threadKey, 1)).toEqual({ ok: false });
+    rows.delete("discarding:" + threadKey);
+    expect(rows.get("runFence:" + threadKey)).toEqual({ runId: "run-next", ownerGen: "gen-next", ownerFence: 8 });
+  });
+  it("reads back the durable retirement and high-water fence instead of trusting a receipt alone", async () => {
+    const { instance, rows } = setup();
+    expect(await instance.discardAbsentBinding(input)).toMatchObject({ discarded: true, currentBoot: "vm-new" });
+    expect(await instance.discardAbsentBinding(input)).toMatchObject({ discarded: true, owner, fence: owner });
+    instance.run = async () => {
+      instance.ctx.container.running = true;
+      return { stdout: "vm-manufactured\n", stderr: "", exitCode: 0 };
+    };
+    expect(await instance.discardAbsentBinding(input)).toMatchObject({
+      discarded: true,
+      owner,
+      fence: owner,
+      currentBoot: null,
+    });
+    const get = instance.ctx.storage.get;
+    instance.ctx.storage.get = async (key: string) => {
+      if (key === "runFence:" + threadKey) instance.ctx.container.running = false;
+      return get(key);
+    };
+    expect(await instance.discardAbsentBinding(input)).toMatchObject({
+      discarded: true,
+      owner,
+      fence: owner,
+      currentBoot: null,
+    });
+    expect(instance.ctx.container.running).toBe(false);
+    rows.delete("discarded-thread:" + threadKey);
+    expect(await instance.discardAbsentBinding(input)).toEqual({
+      discarded: false,
+      reason: "discard-receipt-unverified",
+    });
+    rows.set("discarded-thread:" + threadKey, owner);
+    rows.delete("runFence:" + threadKey);
+    expect(await instance.discardAbsentBinding(input)).toEqual({
+      discarded: false,
+      reason: "discard-receipt-unverified",
+    });
+  });
+  it("blocks old data requests and publication without touching a successor on an idempotent retry", async () => {
+    const { instance, rows } = setup();
+    expect(await instance.discardAbsentBinding(input)).toMatchObject({ discarded: true });
+    rows.set("thread:" + threadKey, {
+      ...rows.get("thread:" + threadKey),
+      evicted: false,
+      user: "worker3",
+      lastAttachAt: "tomorrow",
+    });
+    rows.set("runReg:" + threadKey, { threadKey, runId: "run-next", ownerGen: "gen-next", ownerFence: 8 });
+    rows.set("runFence:" + threadKey, { runId: "run-next", ownerGen: "gen-next", ownerFence: 8 });
+    expect(await instance.execThread(threadKey, "touch private", 1000, undefined, undefined, owner)).toMatchObject({
+      error: "run cancelled",
+      status: 409,
+    });
+    expect(await instance.discardAbsentBinding(input)).toMatchObject({ discarded: true, runId: "run-old" });
+    expect(rows.get("thread:" + threadKey)).toMatchObject({
+      user: "worker3",
+      evicted: false,
+      lastAttachAt: "tomorrow",
+    });
+    expect(rows.get("runFence:" + threadKey)).toEqual({ runId: "run-next", ownerGen: "gen-next", ownerFence: 8 });
+  });
+  it("keeps a durable fence across a lost observation and permits only the same target retry", async () => {
+    const { instance, rows } = setup();
+    instance.observeAbsentPrivateTree = async () => {
+      throw new Error("lost response");
+    };
+    expect(await instance.discardAbsentBinding(input)).toMatchObject({
+      discarded: false,
+      reason: "observation-unconfirmed",
+    });
+    expect(await instance.workspaceDiscarded(threadKey, "run-next")).toBe(true);
+    await expect(
+      instance.registerRun(threadKey, undefined, owner.runId, owner.ownerGen, owner.ownerFence),
+    ).rejects.toThrow("workspace discarded");
+    instance.observeAbsentPrivateTree = async () => true;
+    expect(await instance.discardAbsentBinding(input)).toMatchObject({ discarded: true });
+    expect(rows.get("runFence:" + threadKey)).toEqual(owner);
   });
 });
