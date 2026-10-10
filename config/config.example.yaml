@@ -149,6 +149,7 @@ providers:
   #   baseUrl: http://localhost:11434/v1   # Ollama
 
 # Shipped profiles: standard = openai/gpt-6.1-sol, high; light = openai/gpt-6-luna, medium.
+# Review selects review = anthropic/claude-opus-5-5, inheriting Standard's effort and harness.
 # agentDefaults.profile is standard; operator and intake select light. Memory selects standard.
 # Override once per profile, or override one agent. Missing nested fields inherit; null clears effort.
 # profiles:
@@ -158,8 +159,11 @@ providers:
 #   light:
 #     model: openai/gpt-6-luna
 #     modelSettings: { reasoning: { effort: medium } }
+#   review:
+#     model: anthropic/claude-opus-5-5
 # agentDefaults: { profile: standard }
 # agents:
+#   review: { profile: review }
 #   coding:
 #     instructions: builtin:coding
 #     tools: full
@@ -245,7 +249,7 @@ defaults:
 #     repo: acme/api                # default repository for repo-bound asks in this channel
 #     agent: review
 #     models:
-#       review: anthropic/claude-opus-5
+#       review: anthropic/claude-opus-5-5
 #     efforts:
 #       coding: medium
 #     # Cap this channel's runs (see defaults.boundary): here every run acts

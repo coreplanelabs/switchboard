@@ -1763,11 +1763,13 @@ describe("the example config's provider blocks", () => {
 
   // Feature: docs/reference/specs/harness-pi.md item 13 — the block is the one
   // the router and reflection reach OpenRouter through, on pi's library.
-  it("the OpenRouter block ships live: the example loads as shipped with it, every default model on the openai block, and pi's library builds one openai-completions provider from it — a trailing slash on baseUrl kept by the loader and stripped by the reader", () => {
+  it("the OpenRouter block ships live: the example loads with its configured review and work providers, and pi's library builds one openai-completions provider from it — a trailing slash on baseUrl kept by the loader and stripped by the reader", () => {
     const store = storeFrom(EXAMPLE);
     expect(store.config.providers.openrouter).toEqual(OPENROUTER);
     expect(Object.keys(store.config.providers)).toEqual(["anthropic", "openai", "openrouter"]);
-    for (const ref of Object.values(store.config.defaults.models)) expect(ref).toMatch(/^openai\//);
+    expect(store.config.defaults.models.review).toBe("anthropic/claude-opus-5-5");
+    for (const [agent, ref] of Object.entries(store.config.defaults.models))
+      if (agent !== "review") expect(ref).toMatch(/^openai\//);
     const provider = new PiAiProviders(store.config.providers, { secrets: secretsFrom({}) }).get("openrouter");
     expect(provider).toMatchObject({
       name: "openrouter",

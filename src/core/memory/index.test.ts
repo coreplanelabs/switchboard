@@ -21,7 +21,7 @@ memory: { enabled: true }`,
     {
       installation: `extends: builtin
 organization: acme
-providers: { openai: { wire: openai-responses } }
+providers: { openai: { wire: openai-responses }, anthropic: { wire: anthropic-messages } }
 memory: { enabled: true }`,
       runModel: "openai/gpt-6-luna",
       expectedModel: "gpt-6.1-sol",
@@ -31,7 +31,7 @@ memory: { enabled: true }`,
       installation: `extends: builtin
 organization: acme
 providers: { openai: { wire: openai-responses } }
-agents: { memory: { model: openai/gpt-6-luna } }
+agents: { memory: { model: openai/gpt-6-luna }, review: { profile: standard } }
 memory: { enabled: true }`,
       runModel: "openai/gpt-6.1-sol",
       expectedModel: "gpt-6-luna",
@@ -85,6 +85,7 @@ providers:
         levels: { high: deep }
 profiles:
   standard: { model: acme/reflect }
+  review: { model: acme/reflect }
   light: { model: acme/fast }
 memory:
   enabled: true

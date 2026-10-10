@@ -299,6 +299,7 @@ function configFile(a: InitAnswers, template: string): PlannedFile {
     if (a.modelKey === undefined) doc.deleteIn(["providers", OPENAI_PROVIDER, "apiKeyEnv"]);
   }
   if (a.model !== undefined) {
+    doc.setIn(["agents", "review", "profile"], "standard");
     for (const name of ["standard", "light"]) {
       doc.setIn(["profiles", name, "model"], `${OPENAI_PROVIDER}/${a.model}`);
       // A compatible endpoint may not expose reasoning; leave its own default.

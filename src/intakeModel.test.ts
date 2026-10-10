@@ -247,6 +247,7 @@ providers:
       gate: { capField: max_output_tokens, levels: { low: quick } }
 profiles:
   standard: { model: acme/work }
+  review: { model: acme/work }
   light: { model: acme/gate, modelSettings: { reasoning: { effort: low } } }
 `);
     const wired = intakeCompletion(config, configured.completions, () => undefined)!;

@@ -48,6 +48,7 @@ describe("operatorCompletion", () => {
 extends: builtin
 profiles:
   standard: { model: acme/work }
+  review: { model: acme/work }
   light: { model: acme/door, modelSettings: { reasoning: { effort: medium } } }
 agents:
   general: { model: acme/general-only }
@@ -72,6 +73,7 @@ defaults:
 extends: builtin
 profiles:
   standard: { model: acme/work }
+  review: { model: acme/work }
   light: { model: acme/door, modelSettings: { reasoning: { effort: null } } }
 `);
     expect(result.sent.effort).toBeUndefined();

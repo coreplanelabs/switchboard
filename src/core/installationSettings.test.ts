@@ -66,6 +66,7 @@ describe("installationSettings", () => {
 extends: builtin
 organization: acme
 providers:
+  anthropic: { wire: anthropic-messages }
   openai: { wire: openai-responses, apiKeyEnv: SECRET_API_KEY }
 agents:
   general: { model: openai/general-only, instructions: SECRET_PROMPT }
