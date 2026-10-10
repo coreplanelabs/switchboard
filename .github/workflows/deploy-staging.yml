@@ -24,6 +24,9 @@ on: # zizmor: ignore[dangerous-triggers]
         description: Run bounded live Review acceptance after full-stack deployment
         type: boolean
         default: false
+      model:
+        description: Optional per-request full model ref for acceptance (provider/model)
+        type: string
 
 permissions:
   contents: read
@@ -212,11 +215,14 @@ jobs:
           SMOKE_INGRESS_ORIGIN: ${{ vars.STAGING_SMOKE_ORIGIN }}
           SMOKE_INGRESS_TOKEN: ${{ secrets.STAGING_SMOKE_TOKEN }}
           SMOKE_EXPECTED_COMMIT: ${{ needs.authorize.outputs.commit }}
+          SMOKE_MODEL: ${{ inputs.model }}
           SMOKE_SLACK_CONFIG: ${{ vars.STAGING_SLACK_SMOKE_CONFIG }}
           SMOKE_SLACK_USER_TOKEN: ${{ secrets.STAGING_SLACK_TEST_USER_TOKEN }}
         run: |
           npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/staging-fleet.json"
-          npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-setup.json" --check
+          smoke_args=()
+          if [ -n "$SMOKE_MODEL" ]; then smoke_args=(--model "$SMOKE_MODEL"); fi
+          npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-setup.json" --check "${smoke_args[@]}"
       - name: deploy the captured commit to staging
         id: deploy
         if: steps.recheck.outputs.eligible == 'true' || (github.event_name == 'workflow_dispatch' && inputs.pr == '')
@@ -255,11 +261,14 @@ jobs:
           SMOKE_INGRESS_THREAD: staging-${{ github.run_id }}-${{ github.run_attempt }}
           SMOKE_EXPECTED_COMMIT: ${{ needs.authorize.outputs.commit }}
           SMOKE_REQUIRE_SLACK_CONNECTION: "true"
+          SMOKE_MODEL: ${{ inputs.model }}
           SMOKE_SLACK_CONFIG: ${{ vars.STAGING_SLACK_SMOKE_CONFIG }}
           SMOKE_SLACK_USER_TOKEN: ${{ secrets.STAGING_SLACK_TEST_USER_TOKEN }}
         run: |
           npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/staging-fleet.json"
-          npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-e2e.json"
+          smoke_args=()
+          if [ -n "$SMOKE_MODEL" ]; then smoke_args=(--model "$SMOKE_MODEL"); fi
+          npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-e2e.json" "${smoke_args[@]}"
           jq -e '.slackConnection.required == true and .slackConnection.connected == true and .slackConnection.checks == ((.scenarios | length) * 2)' "$RUNNER_TEMP/staging-e2e.json" > /dev/null
           if [ -n "$SMOKE_SLACK_CONFIG" ]; then
             jq -e '.slackCommand.outcome == "passed"' "$RUNNER_TEMP/staging-e2e.json" > /dev/null

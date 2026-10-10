@@ -1,4 +1,5 @@
 import { readFile, rename, writeFile } from "node:fs/promises";
+import { parseArgs } from "node:util";
 import { parseSlackSmokeConfig, runSlackCommandSmoke, type SlackSmokeReceipt } from "../src/deploy/slackSmoke.js";
 import {
   agentSmokeTransport,
@@ -7,9 +8,13 @@ import {
   runAgentSmoke,
 } from "../src/deploy/agentSmoke.js";
 
-const [planPath, receiptPath, mode] = process.argv.slice(2);
-if (!planPath || !receiptPath || (mode !== undefined && mode !== "--check")) {
-  throw new Error("usage: smoke:ingress <deploy-plan.json> <receipt.json> [--check]");
+const { positionals, values } = parseArgs({
+  allowPositionals: true,
+  options: { check: { type: "boolean" }, model: { type: "string" } },
+});
+const [planPath, receiptPath] = positionals;
+if (!planPath || !receiptPath || positionals.length !== 2) {
+  throw new Error("usage: smoke:ingress <deploy-plan.json> <receipt.json> [--check] [--model provider/model]");
 }
 // Outside the tree, written atomically before admission and after each known phase.
 const save = async (value: unknown) => {
@@ -29,7 +34,10 @@ try {
   const bot = steps?.find((step) => step.name === "bot");
   const healthUrl = bot?.healthUrl ?? bot?.liveGate?.healthUrl;
   if (!healthUrl) throw new Error("deploy plan has no bot health URL");
-  const config = parseSmokeConfig(JSON.parse(process.env.SMOKE_INGRESS_CONFIG ?? "null"));
+  const config = parseSmokeConfig({
+    ...JSON.parse(process.env.SMOKE_INGRESS_CONFIG ?? "null"),
+    ...(values.model === undefined ? {} : { model: values.model }),
+  });
   const transport = agentSmokeTransport({
     origin: process.env.SMOKE_INGRESS_ORIGIN ?? "",
     healthUrl,
@@ -42,13 +50,14 @@ try {
   if (slackConfig && !process.env.SMOKE_SLACK_USER_TOKEN) throw new Error("SMOKE_SLACK_USER_TOKEN is not set");
   if (slackConfig && !process.env.SMOKE_EXPECTED_COMMIT)
     throw new Error("Slack acceptance requires an exact candidate commit");
-  if (mode === "--check") {
+  if (values.check) {
     await save({
       version: 1,
       scope: "deployment-capability-smoke",
       capabilityOutcome: "incomplete",
       productAcceptance: PRODUCT_ACCEPTANCE_GAP,
       reason: "configured_not_executed",
+      ...(config.model ? { requestedModel: config.model } : {}),
     });
     process.stdout.write("Smoke configured; acceptance not executed.\n");
   } else {
