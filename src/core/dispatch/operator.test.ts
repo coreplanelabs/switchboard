@@ -5563,6 +5563,37 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     expect(turn.decision.binds[0]).toMatchObject({ line: `agent:general ${requestText}`, model: ASTRA });
   });
 
+  it.each([
+    "`model:openai/gpt-6.1-sol` answer this",
+    "Use `openai/gpt-6.1-sol` to answer this.",
+    "Answer this using ``model:openai/gpt-6.1-sol``.",
+  ])("a complete backticked model ref binds without changing the request: %s", (requestText) => {
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "general", model: "openai/gpt-6.1-sol", reason: "requested model" },
+      },
+      ctxOf({ requestText, providers: ["openai"], presets: ["general"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0]).toMatchObject({ line: `agent:general ${requestText}`, model: "openai/gpt-6.1-sol" });
+  });
+
+  it.each([
+    "Use `model:openai/o3-pro` to answer this.",
+    "Inspect `cache:openai/o3` to answer this.",
+    "Use `model:openai/o3 to answer this.",
+    "Use ``model:openai/o3` to answer this.",
+  ])("backticks do not authorize a partial or malformed model token: %s", (requestText) => {
+    const turn = parseOperatorTurn(
+      { tool: OPERATOR_BIND_TOOL, input: { preset: "general", model: "openai/o3", reason: "requested model" } },
+      ctxOf({ requestText, providers: ["openai"], presets: ["general"] }),
+    );
+    if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
+    expect(turn.decision.binds[0]).toMatchObject({ line: `agent:general ${requestText}` });
+    expect(turn.decision.binds[0].model).toBeUndefined();
+  });
+
   it("a prefix of a longer authored model ref cannot select another model", () => {
     const turn = parseOperatorTurn(
       { tool: OPERATOR_BIND_TOOL, input: { preset: "general", model: "openai/o3", reason: "requested model" } },

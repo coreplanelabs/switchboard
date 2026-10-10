@@ -26684,15 +26684,29 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     });
   });
 
-  it("on: an exact requested model ref reaches the run with its text intact", async () => {
+  it.each(["Use model:anthropic/coding-model to answer this.", "`model:anthropic/coding-model` answer this."])(
+    "on: an exact requested model ref reaches the run with its text intact: %s",
+    async (request) => {
+      const { deps, provider } = operatorDeps(ON_YAML);
+      deps.operatorModel = vi.fn<RouteModel>(async () => ({
+        tool: "bind_preset",
+        input: { preset: "general", model: "anthropic/coding-model", reason: "requested model" },
+      }));
+      await dispatch(deps, msg(request, "slack:UADMIN"), fakeIO().io);
+      expect(provider.requests[0]?.model).toBe("coding-model");
+      expect(JSON.stringify(provider.requests[0]?.messages.at(-1)?.content)).toContain(request);
+    },
+  );
+
+  it("on: a backticked model example does not override the model when the operator selects no model", async () => {
     const { deps, provider } = operatorDeps(ON_YAML);
-    const request = "Use model:anthropic/coding-model to answer this.";
+    const request = "Explain what `model:anthropic/coding-model` means.";
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
       tool: "bind_preset",
-      input: { preset: "general", model: "anthropic/coding-model", reason: "requested model" },
+      input: { preset: "general", reason: "explain the example" },
     }));
     await dispatch(deps, msg(request, "slack:UADMIN"), fakeIO().io);
-    expect(provider.requests[0]?.model).toBe("coding-model");
+    expect(provider.requests[0]?.model).toBe("general-model");
     expect(JSON.stringify(provider.requests[0]?.messages.at(-1)?.content)).toContain(request);
   });
 

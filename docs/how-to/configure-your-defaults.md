@@ -150,6 +150,8 @@ Directives in the message always win and persist nothing:
 @switchboard agent:ship model:<provider>/<model> effort:high in acme/api: fix issue #42
 ```
 
+In chat with the interpreter enabled, inline backticks around the requested model also work: `` `model:openai/gpt-6.1-sol` review https://github.com/acme/api/pull/42 ``. The run uses that model and keeps your message intact. Asking what a model example means does not select it.
+
 `budget:<minutes>` caps that one run's wall clock (whole minutes, at least 2) and only ever narrows: `agent:explore budget:30 …` runs thirty minutes instead of the agent's two hours, and the card says so; a `budget:` above the agent's own budget or a boundary's cap changes nothing, and the card says that too.
 
 ## Undo
