@@ -457,12 +457,26 @@ export const PROVIDER_ROWS: readonly ProviderScenarioRow[] = [
     },
   },
   {
+    id: "anthropic-messages-cap",
+    control: "cap",
+    title: "a known Messages card vouches for max_tokens without a compatibility override",
+    ref: "anthropic/claude-opus-5-5",
+    asked: {},
+    expect: { outcome: "native", applied: "max_tokens", vouched: true },
+    payload: (body) => {
+      if (body.max_tokens !== 4096) throw new Error("the Messages payload lost its output cap");
+    },
+  },
+  {
     id: "openai-responses-cap",
     control: "cap",
-    title: "an openai-responses block spells the cap with max_output_tokens, unvouched until a layer names it",
+    title: "a known Responses card vouches for max_output_tokens without a compatibility override",
     ref: "openai/gpt-5.4",
     asked: {},
-    expect: { outcome: "degraded", applied: "max_output_tokens", vouched: false },
+    expect: { outcome: "native", applied: "max_output_tokens", vouched: true },
+    payload: (body) => {
+      if (body.max_output_tokens !== 4096) throw new Error("the Responses payload lost its output cap");
+    },
   },
   {
     id: "cache-markers",

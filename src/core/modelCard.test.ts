@@ -265,6 +265,63 @@ describe("resolveModelCard — operator over registry over wire", () => {
 });
 
 describe("decideControls — native, degraded or refused before the first call", () => {
+  it.each([
+    ["anthropic/claude-opus-5-5", "max_tokens"],
+    ["openai/gpt-5.3-codex", "max_output_tokens"],
+  ])("vouches for %s's fixed protocol cap without a registry compatibility override", (ref, applied) => {
+    const card = resolveModelCard(ref, blocks, installedModelRegistry);
+    expect(card.provenance.capField).toBe("registry");
+    expect(decideControls(card, {}).find((d) => d.control === "cap")).toEqual({
+      control: "cap",
+      outcome: "native",
+      applied,
+      vouched: true,
+      why: "",
+    });
+  });
+
+  it.each([
+    ["anthropic-messages", "openai-chat", "max_completion_tokens"],
+    ["openai-responses", "anthropic-messages", "max_tokens"],
+    ["openai-completions", "openai-chat", "max_completion_tokens"],
+    [undefined, "anthropic-messages", "max_tokens"],
+    [undefined, "openai-responses", "max_output_tokens"],
+  ] as const)("keeps an unspecified cap unvouched for registry API %s on wire %s", (api, wire, applied) => {
+    const card = resolveModelCard(
+      "local/known-model",
+      { local: block({ wire, catalog: "test" }) },
+      { card: () => ({ api, contextWindow: 200_000 }) },
+    );
+    expect(card.provenance.capField).toBe("wire");
+    expect(decideControls(card, {}).find((d) => d.control === "cap")).toMatchObject({
+      outcome: "degraded",
+      applied,
+      vouched: false,
+    });
+  });
+
+  it("explicit registry and operator cap fields take precedence over a fixed protocol default", () => {
+    const registry = { card: () => ({ api: "anthropic-messages", compat: { maxTokensField: "registry_cap" } }) };
+    const local = block({ wire: "anthropic-messages", catalog: "test" });
+    const registered = resolveModelCard("local/known-model", { local }, registry);
+    expect(decideControls(registered, {}).find((d) => d.control === "cap")).toMatchObject({
+      outcome: "native",
+      applied: "registry_cap",
+      vouched: true,
+    });
+    const pinned = resolveModelCard(
+      "local/known-model",
+      { local: { ...local, models: { "known-model": { capField: "operator_cap" } } } },
+      registry,
+    );
+    expect(pinned.provenance.capField).toBe("operator");
+    expect(decideControls(pinned, {}).find((d) => d.control === "cap")).toMatchObject({
+      outcome: "native",
+      applied: "operator_cap",
+      vouched: true,
+    });
+  });
+
   it("an unknown card sends the asked effort unvouched, the cap unvouched, the window degraded and the document as a stub", () => {
     const card = resolveModelCard("openrouter/deepseek/deepseek-v4.1-flash", blocks, REGISTRY);
     const decisions = decideControls(card, { effort: "xhigh", documents: 1 });

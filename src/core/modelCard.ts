@@ -74,7 +74,7 @@ export interface CardRegistry {
   card(catalog: string | undefined, wire: Wire, model: string): RegistryCard | undefined;
 }
 
-/** The output-cap field each wire spells the cap with, unvouched. */
+/** The fallback output-cap field each wire spells the cap with. */
 const WIRE_CAP_FIELD: Readonly<Record<Wire, string>> = {
   "anthropic-messages": "max_tokens",
   "openai-chat": "max_completion_tokens",
@@ -194,9 +194,15 @@ export function resolveModelCard(
   const levelsProvenance: Provenance =
     override?.levels !== undefined ? "operator" : levels === "unknown" ? "wire" : "registry";
 
-  const capField = override?.capField ?? (card?.compat?.maxTokensField as string | undefined) ?? WIRE_CAP_FIELD[wire];
+  // Messages and Responses each have one cap field. A card on that exact
+  // API names it without a redundant compat entry; a card from another API
+  // and Chat Completions' two spellings still need an explicit field.
+  const registryCapField =
+    (card?.compat?.maxTokensField as string | undefined) ??
+    (wire !== "openai-chat" && card?.api === wire ? WIRE_CAP_FIELD[wire] : undefined);
+  const capField = override?.capField ?? registryCapField ?? WIRE_CAP_FIELD[wire];
   const capProvenance: Provenance =
-    override?.capField !== undefined ? "operator" : card?.compat?.maxTokensField !== undefined ? "registry" : "wire";
+    override?.capField !== undefined ? "operator" : registryCapField !== undefined ? "registry" : "wire";
 
   const window = override?.window ?? card?.contextWindow ?? UNKNOWN_WINDOW;
   const windowProvenance: Provenance =
