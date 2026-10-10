@@ -17,6 +17,7 @@
     // scope's rows live in one SQLite database and cross-scope reads are
     // impossible by construction.
     "bindings": [
+      { "name": "ORGANIZATIONS", "class_name": "OrganizationDO" },
       { "name": "MEMORY", "class_name": "MemoryDO" },
       // ONE ScheduleDO (named "schedules"): every cron firing the bot's Worker
       // shim makes, for the /runs Scheduled panel (docs/reference/specs/live-view.md).
@@ -105,6 +106,7 @@
     { "tag": "v7", "deleted_classes": ["FrictionDO"] },
     { "tag": "v8", "new_sqlite_classes": ["DeliveryDO"] },
     { "tag": "v9", "new_sqlite_classes": ["SessionLogDO"] },
-    { "tag": "v10", "new_sqlite_classes": ["CostsSnapshotDO"] }
+    { "tag": "v10", "new_sqlite_classes": ["CostsSnapshotDO"] },
+    { "tag": "v11", "new_sqlite_classes": ["OrganizationDO"] }
   ]
 }

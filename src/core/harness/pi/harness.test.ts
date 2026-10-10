@@ -417,7 +417,7 @@ function tickingWorld(opts: Parameters<typeof world>[0] = {}) {
 }
 
 describe("runPiHarness — a run on pi from the first file to the answer", () => {
-  // This local store projects the real runtime exports, including all eight
+  // This local store projects the real runtime exports, including all
   // Durable Objects. It proves producer/SQLite/HTTP behavior, not the unfiltered
   // production entry or native pi persistence: the pi endpoint below is a fake.
   let memoryWorker: import("node:child_process").ChildProcess | undefined;
@@ -450,7 +450,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       const entry = join(memoryDir, "worker-entry.ts");
       writeFileSync(
         entry,
-        `export { default, MemoryDO, ScheduleDO, ConfigDO, DeliveryDO, CostsSnapshotDO, RunHistoryDO, RunTranscriptDO, SessionLogDO } from ${JSON.stringify(join(root, "deploy/cloudflare-memory/worker.ts"))};`,
+        `export { default, MemoryDO, ScheduleDO, ConfigDO, DeliveryDO, CostsSnapshotDO, RunHistoryDO, RunTranscriptDO, SessionLogDO, OrganizationDO } from ${JSON.stringify(join(root, "deploy/cloudflare-memory/worker.ts"))};`,
       );
       memoryWorker = spawn(
         "npm",

@@ -38,6 +38,7 @@ export default defineConfig({
       "config.test.ts",
       "runLedger.test.ts",
       "inventory.test.ts",
+      "organization.test.ts",
       "harnessLaunch.test.ts",
       "runTranscript.test.ts",
       "sessionLog.test.ts",
