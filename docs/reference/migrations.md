@@ -4,7 +4,7 @@ What an operator changes when a release breaks something: one section per such r
 
 A section says, in this order: what no longer works as it did, what replaces it, and the smallest edit that gets an installation from one to the other — a config key to rename, a command to re-run, a secret to add. Nothing else: history and reasons live in the changelog and the [decision records](../explanation/design-decisions.md).
 
-## 2.0.0
+## 1.295.0
 
 - Installations extending `builtin` now default Review to `anthropic/claude-opus-5-5`, with Standard's effort and harness. Declare the `anthropic` provider and supply its API key. To keep Review on the installation's existing work model, set `agents.review.profile: standard` before upgrading, including installations written by an older `switchboard init --model <name>`. Explicit Review model/profile overrides keep their selections. Configs written by this release's `init --model` include the Review pin.
 
