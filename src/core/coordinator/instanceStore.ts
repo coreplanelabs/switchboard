@@ -4,6 +4,13 @@ import {
   pullOwnerQualificationFrom,
 } from "./pullOwnerQualification.js";
 import { sourceHash } from "../references/receipts.js";
+import {
+  inventoryCursor,
+  inventoryPosition,
+  readInventoryPage,
+  type PipelineInventoryPage,
+  type PipelineInventoryQuery,
+} from "./inventory.js";
 // The parent ship records (docs/reference/specs/run-history.md item 49): one
 // seam, two implementations (docs/decisions/0001-seams-with-two-implementations.md).
 // A coordinator instance's record — the requester, channel, thread, repository
@@ -753,6 +760,27 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     const text = this.rows.get(id);
     return text === undefined ? null : (JSON.parse(text) as CoordinatorInstance);
   }
+  async listInstances(query: PipelineInventoryQuery): Promise<PipelineInventoryPage> {
+    const rows = [...this.rows.values()];
+    const { after, through } = inventoryPosition(query, rows.length);
+    if (query.order === "key") {
+      const census = rows.slice(0, through).map((text) => JSON.parse(text) as CoordinatorInstance);
+      census.sort((a, b) => (`${a.id}:` < `${b.id}:` ? -1 : `${a.id}:` > `${b.id}:` ? 1 : 0));
+      const items = census.slice(after, after + query.limit);
+      const cursor =
+        after + items.length < census.length ? inventoryCursor(after + items.length, through, "key") : undefined;
+      const resumeCursor = inventoryCursor(after, through, "key");
+      return { items, ...(cursor ? { cursor } : {}), ...(resumeCursor ? { resumeCursor } : {}) };
+    }
+    const end = Math.min(through, after + query.limit);
+    const cursor = inventoryCursor(end, through);
+    const resumeCursor = inventoryCursor(after, through);
+    return {
+      items: rows.slice(after, end).map((text) => JSON.parse(text) as CoordinatorInstance),
+      ...(cursor ? { cursor } : {}),
+      ...(resumeCursor ? { resumeCursor } : {}),
+    };
+  }
   async putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
     const pending = new Map<string, CoordinatorUnit>();
     for (const u of units) {
@@ -1365,6 +1393,12 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     if (!isCoordinatorInstance(d.instance))
       throw new Error("coordinator store /runs/coordinator/get: the answer is not a coordinator instance");
     return d.instance;
+  }
+  async listInstances(query: PipelineInventoryQuery): Promise<PipelineInventoryPage> {
+    inventoryPosition({ limit: query.limit, ...(query.order ? { order: query.order } : {}) }, 0);
+    const result = await this.post("/runs/coordinator/list", { ...query });
+    if (result.status !== 200) throw new Error("pipeline inventory unavailable");
+    return readInventoryPage(result.data);
   }
 
   async putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
