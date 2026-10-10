@@ -11,6 +11,8 @@ const installation = (extra = "") => `
 extends: builtin
 organization: acme
 providers:
+  anthropic:
+    wire: anthropic-messages
   openai:
     wire: openai-responses
     baseUrl: https://api.openai.com/v1
@@ -95,8 +97,9 @@ describe("agent configuration DSL", () => {
   });
   it("extends the shipped DSL and resolves every agent and internal caller explicitly", () => {
     const config = parseAppConfigText(installation());
-    for (const name of ["general", "coding", "review", "research", "explore", "conductor", "orchestrator", "memory"])
+    for (const name of ["general", "coding", "research", "explore", "conductor", "orchestrator", "memory"])
       expect(settingsForAgent(config, name)).toMatchObject({ model: "openai/gpt-6.1-sol", effort: "high" });
+    expect(settingsForAgent(config, "review")).toEqual({ model: "anthropic/claude-opus-5-5", effort: "high" });
     for (const name of ["operator", "intake"])
       expect(settingsForAgent(config, name)).toMatchObject({ model: "openai/gpt-6-luna", effort: "medium" });
   });

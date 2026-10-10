@@ -8,7 +8,7 @@ Shipped defaults and installation settings use one declarative agent configurati
 
 ## Behavior
 
-1. An installation declaring `extends: builtin` extends the shipped document. Named profiles hold model, model settings and harness settings. Agent definitions hold instructions, tools and limits using the same fields in both documents.
+1. An installation declaring `extends: builtin` extends the shipped document. Named profiles hold model, model settings and harness settings. Agent definitions hold instructions, tools and limits using the same fields in both documents. Review selects its own profile with `anthropic/claude-opus-5-5`; other work agents retain Standard. An explicitly selected setup model applies to Review too.
 2. Profile inheritance is explicit and acyclic. Agent settings override their profile. Installation fields override shipped fields. An omitted effort inherits with its model settings; explicit null clears it. Unknown fields, agents, profiles and provider references fail at load.
 3. Agents and internal model callers use the same settings resolver. Operator and intake have independent profiles; neither is coupled to General. Memory reflection uses its own profile. Ship remains a deterministic workflow over configured coding/review agents.
 4. Existing YAML retains its resolution and background fallbacks through a compatibility reader. Mixing legacy model/effort/harness keys with the new DSL fails rather than silently selecting a value. Existing request, thread, user and channel overrides retain their precedence.

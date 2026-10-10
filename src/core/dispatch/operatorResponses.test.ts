@@ -103,7 +103,7 @@ function configStore(dsl = false): ConfigStore {
   const path = join(dir, "config.yaml");
   writeFileSync(
     path,
-    `${dsl ? "extends: builtin\nprofiles:\n  standard: { model: openai/work, modelSettings: { reasoning: { effort: low } } }\n  light: { model: openai/front-door, modelSettings: { reasoning: { effort: high } } }\n" : ""}organization: acme
+    `${dsl ? "extends: builtin\nprofiles:\n  standard: { model: openai/work, modelSettings: { reasoning: { effort: low } } }\n  review: { model: openai/work }\n  light: { model: openai/front-door, modelSettings: { reasoning: { effort: high } } }\n" : ""}organization: acme
 providers:
   openai:
     wire: openai-responses

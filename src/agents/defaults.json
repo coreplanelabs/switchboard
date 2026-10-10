@@ -9,6 +9,10 @@
       },
       "harness": "pi"
     },
+    "review": {
+      "extends": "standard",
+      "model": "anthropic/claude-opus-5-5"
+    },
     "light": {
       "model": "openai/gpt-6-luna",
       "modelSettings": {
@@ -77,6 +81,7 @@
       }
     },
     "review": {
+      "profile": "review",
       "description": "Reviews PRs and produces high-quality findings. Read-only.",
       "instructions": "builtin:review",
       "tools": "readonly",

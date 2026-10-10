@@ -26,6 +26,9 @@ The repository's [shipped document](../../src/agents/defaults.json) and `config.
 extends: builtin
 organization: acme
 providers:
+  anthropic:
+    wire: anthropic-messages
+    apiKeyEnv: ANTHROPIC_API_KEY
   openai:
     wire: openai-responses
     baseUrl: https://api.openai.com/v1
@@ -41,11 +44,14 @@ profiles:
       reasoning: { effort: medium }
 agentDefaults: { profile: standard }
 agents:
+  review: { profile: review }
   operator: { profile: light }
   memory: { profile: standard }
 ```
 
-These are the shipped selections: General, coding, review, research, explore, conductor, orchestrator and memory use Standard. The front door and thread-reply classifier use Light. Changing a profile changes every caller that selects it. Changing General alone leaves Operator unchanged. Provider capabilities and prices stay under `providers`; copy the pinned cards from `config/config.example.yaml` when the installed catalog does not know a model yet.
+These are the shipped selections: Review uses the Review profile with `anthropic/claude-opus-5-5`. That profile inherits Standard's effort and harness. General, coding, research, explore, conductor, orchestrator and memory use Standard. The front door and thread-reply classifier use Light. Changing a profile changes every caller that selects it. Changing General alone leaves Operator unchanged. Provider capabilities and prices stay under `providers`; copy the pinned cards from `config/config.example.yaml` when the installed catalog does not know a model yet.
+
+Review requires the Anthropic provider and its API key. An installation using another provider can set `agents.review.profile: standard`, or select its own Review profile. `switchboard init --model <name>` keeps every agent on that explicitly selected endpoint model, including Review.
 
 `light` names a model profile. OpenAI Fast mode is configured independently.
 
