@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.295.0](https://github.com/coreplanelabs/switchboard/compare/v1.294.0...v1.295.0) (2026-10-10)
+
+
+### Features
+
+* **core:** accept the twenty-column run metrics point ([#2912](https://github.com/coreplanelabs/switchboard/issues/2912)) ([3214cf9](https://github.com/coreplanelabs/switchboard/commit/3214cf959df33d8909679d46eacbc9d9d529d4a4))
+* **core:** share command confirmation across every surface ([#2910](https://github.com/coreplanelabs/switchboard/issues/2910)) ([69d3b75](https://github.com/coreplanelabs/switchboard/commit/69d3b75c887d2d26510e21ef6b0f2d263c652cd7))
+* **deploy:** test Slack replies in a configured channel ([#2895](https://github.com/coreplanelabs/switchboard/issues/2895)) ([28a6cd5](https://github.com/coreplanelabs/switchboard/commit/28a6cd586a82fe8338e916fb66baec0673276900))
+* **resident:** allocate fresh workspace identities on demand ([#2904](https://github.com/coreplanelabs/switchboard/issues/2904)) ([5a0436d](https://github.com/coreplanelabs/switchboard/commit/5a0436d7e5f78391ba244bac2adf33ad7fb3cad9))
+* **review:** default reviews to Claude Opus 5.5 ([7125f7e](https://github.com/coreplanelabs/switchboard/commit/7125f7e4fa16023058ea78ece147e72c0b54b0f5))
+
+
+### Bug fixes
+
+* **deploy:** bound Sandbox readiness reads to the deadline ([#2907](https://github.com/coreplanelabs/switchboard/issues/2907)) ([86c4d28](https://github.com/coreplanelabs/switchboard/commit/86c4d28d444df9f5ee41f57fabd3b22d737333c8))
+* **dispatcher:** respect named commands in fulfillment checks ([#2901](https://github.com/coreplanelabs/switchboard/issues/2901)) ([6a38c42](https://github.com/coreplanelabs/switchboard/commit/6a38c42f8d4ebe74cc8ae11de27a1f9d9a0aceda))
+* **harness:** preserve launch intent across restarts ([#2911](https://github.com/coreplanelabs/switchboard/issues/2911)) ([0386aa2](https://github.com/coreplanelabs/switchboard/commit/0386aa2c28a82a27d22164e93de44edd0a0db7ac))
+* **harness:** register run tools without startup discovery ([#2889](https://github.com/coreplanelabs/switchboard/issues/2889)) ([2764d82](https://github.com/coreplanelabs/switchboard/commit/2764d82746c3d922c065ec24e3cb13adceb1e0f6))
+* **providers:** keep model calls moving within measured capacity ([#2903](https://github.com/coreplanelabs/switchboard/issues/2903)) ([2678286](https://github.com/coreplanelabs/switchboard/commit/2678286ebc13563d803ccbbae17602c00afbab16))
+* **providers:** known protocol caps no longer warn ([#2908](https://github.com/coreplanelabs/switchboard/issues/2908)) ([e30cf08](https://github.com/coreplanelabs/switchboard/commit/e30cf08a0d150f7e45aa1ab06896c09072ebd37a))
+* **resident:** limit the repository fleet to five residents ([#2893](https://github.com/coreplanelabs/switchboard/issues/2893)) ([6ffb107](https://github.com/coreplanelabs/switchboard/commit/6ffb1079748cbb21dbec14bc514dce3d24b0fafb))
+* **resident:** retire absent legacy workspaces on explicit discard ([#2890](https://github.com/coreplanelabs/switchboard/issues/2890)) ([967f874](https://github.com/coreplanelabs/switchboard/commit/967f8748de16e07cb58061dde16a12973bae155e))
+* **review:** preserve checks across remote delivery delays ([#2892](https://github.com/coreplanelabs/switchboard/issues/2892)) ([ef72de8](https://github.com/coreplanelabs/switchboard/commit/ef72de8c16b3a5075f04d24ae0b58f6e8ccdb647))
+* **runs:** confirm shutdown after runtime replacement ([#2897](https://github.com/coreplanelabs/switchboard/issues/2897)) ([b520493](https://github.com/coreplanelabs/switchboard/commit/b52049366e77f8525f1b977ab1f1feae1d3d44ba))
+* **web:** keep remote runs live and show their activity ([#2909](https://github.com/coreplanelabs/switchboard/issues/2909)) ([542ccad](https://github.com/coreplanelabs/switchboard/commit/542ccadcc10cfbc7567e833076927ef2e0a82dbd))
+* **web:** show cold repos and quiet command progress ([#2896](https://github.com/coreplanelabs/switchboard/issues/2896)) ([9a4741e](https://github.com/coreplanelabs/switchboard/commit/9a4741e484ee940c4379106cd3dcae7a67433498))
+
+
+### Documentation
+
+* **docs:** correct record 0097 after its correctness review ([#2902](https://github.com/coreplanelabs/switchboard/issues/2902)) ([7ebf8ec](https://github.com/coreplanelabs/switchboard/commit/7ebf8ec00a3d91e6ec2d329a9c88d32b19e39a0a))
+* **docs:** record the review dashboard's run outcome and workspace rows ([#2900](https://github.com/coreplanelabs/switchboard/issues/2900)) ([7dd42fa](https://github.com/coreplanelabs/switchboard/commit/7dd42fabc055816b0a3832256239b195dc78a861))
+* **review:** align the migration note with the 1.x release ([#2906](https://github.com/coreplanelabs/switchboard/issues/2906)) ([a81d795](https://github.com/coreplanelabs/switchboard/commit/a81d795906fcd688b97ac337d3b4cc2f2b5025c8))
+
 ## [1.294.0](https://github.com/coreplanelabs/switchboard/compare/v1.293.0...v1.294.0) (2026-10-09)
 
 
