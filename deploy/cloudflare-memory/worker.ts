@@ -133,6 +133,8 @@ import {
   inventoryPosition,
   type PipelineInventoryQuery,
 } from "../../src/core/coordinator/inventory.js";
+import { organizationRoute, type OrganizationDO } from "./organization.js";
+export { OrganizationDO } from "./organization.js";
 import { isPersonalToken } from "../../src/core/personalToken.js";
 import { preserveCheckpointState } from "../../src/core/runLedger/checkpointState.js";
 import {
@@ -527,6 +529,7 @@ const traceSinks = [workerLogSink((line) => console.log(line))];
 // is validated with size caps before it reaches storage.
 
 export interface Env {
+  ORGANIZATIONS: DurableObjectNamespace<OrganizationDO>;
   MEMORY: DurableObjectNamespace<MemoryDO>;
   /** Scheduled firings: ONE ScheduleDO (named "schedules") — the record behind the /runs Scheduled panel. */
   SCHEDULES: DurableObjectNamespace<ScheduleDO>;
@@ -12735,6 +12738,8 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
 }
 
 const ROUTES = new Set([
+  "/organization/execute",
+  "/organization/directory",
   ...CONFIG_ROUTES,
   ...DELIVERY_ROUTES,
   ...COSTS_ROUTES,
@@ -12805,6 +12810,8 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
     return json({ error: `body must be at most ${maxBodyBytes} bytes` }, 413);
   }
 
+  const organizationResponse = await organizationRoute(request, env.ORGANIZATIONS);
+  if (organizationResponse) return organizationResponse;
   let body: unknown;
   if (url.pathname === "/runs/promotion/prepare" || url.pathname === "/runs/claim" || url.pathname === "/runs/state") {
     const header = url.pathname === "/runs/state" ? null : request.headers.get(EXPECTED_SEED_HEADER);

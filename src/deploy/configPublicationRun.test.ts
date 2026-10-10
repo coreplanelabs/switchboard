@@ -1150,7 +1150,7 @@ describe("config publication process survival", () => {
     const entry = join(dir, "worker-entry.ts");
     writeFileSync(
       entry,
-      `export { default, MemoryDO, ScheduleDO, ConfigDO, DeliveryDO, CostsSnapshotDO, RunHistoryDO, RunTranscriptDO, SessionLogDO } from ${JSON.stringify(join(root, "deploy/cloudflare-memory/worker.ts"))};`,
+      `export { default, MemoryDO, ScheduleDO, ConfigDO, DeliveryDO, CostsSnapshotDO, RunHistoryDO, RunTranscriptDO, SessionLogDO, OrganizationDO } from ${JSON.stringify(join(root, "deploy/cloudflare-memory/worker.ts"))};`,
     );
     let worker: ReturnType<typeof spawn> | undefined;
     const stop = async () => {

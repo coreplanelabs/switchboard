@@ -35,6 +35,7 @@ Rename a test and the build is red until the spec changes with it. Adopting the 
 | Feature | What it covers |
 |---|---|
 | [Browser Home](browser-home.md) | Complete authorized durable work discovery and the replacement browser presentation |
+| [Organization orchestration](organization-orchestration.md) | Durable source-attributed admission, private streams and reconciliation contracts |
 | [routing-and-config.md](routing-and-config.md) | Directives, config layers, [thread](../vocabulary.md#thread) stickiness, permission gates, config commands, config awareness, custom instructions, durable runtime overrides (the `OverridesBacking` seam → the state Worker's `ConfigDO` in prod) |
 | [slack-channel.md](slack-channel.md) | Triggers (mention/DM/[follow-up](../vocabulary.md#follow-up)), ack reaction, status [cards](../vocabulary.md#card), formatting, attachments |
 | [slack-context-tools.md](slack-context-tools.md) | Bounded, requester-scoped Slack thread, channel, permalink and attached-file reads for the main agent |
