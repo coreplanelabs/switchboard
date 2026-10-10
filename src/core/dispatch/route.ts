@@ -4,7 +4,6 @@
 // readers' classifier, its prompt, parse and dispatch stage are retired.
 import { AGENTS, type Identity, type MachineClass } from "../../agents/registry.js";
 import { HAND_BACK_PREFIX } from "./handBack.js";
-import { CONFIRM_ORDER, type ConfirmClass } from "../../config/profile.js";
 import type { StructuredAnswerMode } from "../../config/validate.js";
 import type { Provider, ToolDef } from "../provider.js";
 import type { ChatMessage } from "../chatMessage.js";
@@ -20,8 +19,6 @@ import type {
 } from "../runEvents.js";
 import type { ChannelIO, ConfirmationOffer, IncomingMessage } from "../types.js";
 import {
-  blastRadius,
-  boundBlastRadius,
   CommandRegistry,
   type Caller,
   type CommandDef,
@@ -93,42 +90,10 @@ export const ROUTE_RECEIPT_CAP = 300;
  *  route line uses for a preset. */
 export const ROUTED_RECEIPT_PREFIX = "routed:";
 /** The typed-form refusal's prefix for a state-changing write command (record
- *  0039 as amended; the rule is `routedRunsAtOnce`): on a typed surface the
+ *  0039 as amended): on a typed surface the
  *  refusal names the line to type, and nothing runs. Chat surfaces are offered
  *  the click instead and never see it (record 0069). */
 export { HAND_BACK_PREFIX };
-
-/**
- * Whether a command the router bound runs at once or is handed back as the
- * line to type (record 0039 as amended; record 0044). Two pure inputs decide:
- * the command's blast radius — `blastRadius(def)`, derived from the
- * definition, never a list in code — and the path's confirm class, the first
- * class on the ladder `read < exec < write < destructive` that asks
- * (`effectiveConfirm` over the request's boundary layers; the built-in `write`
- * when no scope set one). A `read` never asks. Every other command runs when
- * its class is before the confirm class and is handed back at or after it,
- * because a write bound from prose is a write nobody typed. Under the
- * built-in: an `exec` runs (`repo:exec` — `repo test`, `repo build`: a run of
- * the repository's own checks that changes nothing of Switchboard's own, so a
- * misread sentence costs one wasted run and nothing to undo), a `write` or a
- * `destructive` command is handed back — the door exactly as it was. Under
- * `destructive`, the one other settable class, a `write` runs too.
- *
- * With the bound `input` (record 0057: the door always passes it) the class is
- * read over the PARSED input — `boundBlastRadius` parses with the command's
- * own schemas before it classes, so a definition whose `destructive` is a
- * predicate answers per input (`config set me` write, `config set channel`
- * destructive) and an input the schema refuses classes as destructive, fail
- * closed. Without an input the definition alone decides, as before.
- */
-export function routedRunsAtOnce(
-  def: Pick<CommandDef<unknown>, "effect" | "action" | "annotations" | "args" | "options">,
-  confirm: ConfirmClass,
-  input?: CommandInput,
-): boolean {
-  const radius = input === undefined ? blastRadius(def) : boundBlastRadius(def, input);
-  return radius === "read" || CONFIRM_ORDER[radius] < CONFIRM_ORDER[confirm];
-}
 
 /** The receipt of a bound command as the reply leads with it and the record
  *  keeps it: the chat form, redacted and cut at `ROUTE_RECEIPT_CAP` — one
@@ -171,8 +136,7 @@ export function routablePresets(agents = AGENTS): RoutablePreset[] {
 }
 
 /** One command the router may call instead of routing (record 0036, unit 2):
- *  the registry's def (the stage decides on its `effect` and `action` through
- *  `routedRunsAtOnce`), its effect, and the tool the model is shown, derived
+ *  the registry's def, its effect, and the tool the model is shown, derived
  *  from the def exactly as the MCP adapter derives its listing (`mcpToolName`,
  *  `describe`, `jsonSchemaFor`). */
 export interface RoutableCommand {
@@ -615,6 +579,9 @@ export async function mintConfirmationOffer(
     input: CommandInput;
     receipt: string;
     model: string;
+    originRepo?: string | null;
+    parsedInput?: CommandInput;
+    caller?: Pick<Caller, "kind" | "id" | "email"> & { origin?: Omit<NonNullable<Caller["origin"]>, "repo"> };
   } & ({ source: "operator"; context: ContextDependencies } | { source?: "route"; context?: never }),
 ): Promise<ConfirmationMint> {
   const { io, store, msg, origin, def, input, receipt, model } = args;
@@ -635,9 +602,12 @@ export async function mintConfirmationOffer(
         message: confirmationMessageOf(msg),
         command: def.id,
         input,
+        ...(args.parsedInput ? { parsedInput: args.parsedInput } : {}),
+        ...(args.caller ? { caller: args.caller } : {}),
         receipt,
         risk,
         model,
+        ...(args.originRepo !== undefined ? { originRepo: args.originRepo } : {}),
         ...(derivation ? { derivation } : {}),
       },
       CONFIRMATION_TTL_MS,

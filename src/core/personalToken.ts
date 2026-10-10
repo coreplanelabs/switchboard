@@ -3,6 +3,8 @@ export interface PersonalToken {
   digest: string;
   subject: string;
   email: string;
+  /** Immutable verified person selected by the browser, never supplied by the client. */
+  userId?: string;
   createdAt: number;
 }
 
@@ -21,6 +23,7 @@ export function isPersonalToken(value: unknown): value is PersonalToken {
     v.subject.length <= 265 &&
     typeof v.email === "string" &&
     v.email.includes("@") &&
+    (v.userId === undefined || (typeof v.userId === "string" && /^(slack|access):[^:]+$/.test(v.userId))) &&
     typeof v.createdAt === "number" &&
     Number.isFinite(v.createdAt)
   );

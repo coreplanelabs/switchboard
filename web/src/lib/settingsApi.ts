@@ -1,3 +1,4 @@
+import type { ConfirmationOffer } from "@core/core/types.js";
 // The settings page's one way to write: `POST /api/<group>.<verb>` with the
 // command's named input as JSON (src/channels/commandHttp.ts maps it onto the
 // definition's args and options by name). The page carries no rule about who
@@ -20,21 +21,55 @@ export async function postCommand(
   fetchFn: FetchLike,
   id: string,
   body: Record<string, unknown>,
+  confirm: (offer: ConfirmationOffer) => boolean | Promise<boolean> = (offer) =>
+    globalThis.confirm([offer.question?.text, offer.line, offer.risk].filter(Boolean).join("\n\n")),
 ): Promise<CommandAnswer> {
   try {
     const res = await fetchFn(`/api/${id}`, {
       method: "POST",
       credentials: "same-origin",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-switchboard-client": "dashboard" },
       body: JSON.stringify(body),
     });
-    const parsed = (await res.json().catch(() => null)) as { error?: unknown; message?: unknown } | null;
+    const parsed = (await res.json().catch(() => null)) as {
+      error?: unknown;
+      code?: unknown;
+      message?: unknown;
+      confirmation?: ConfirmationOffer;
+    } | null;
+    if (
+      res.status === 409 &&
+      parsed?.error === "confirmation_required" &&
+      typeof parsed.confirmation?.id === "string" &&
+      typeof parsed.confirmation.line === "string"
+    ) {
+      const choice = (await confirm(parsed.confirmation)) ? "confirm" : "cancel";
+      const result = await postCommand(
+        fetchFn,
+        id,
+        { _confirmation: { kind: choice, id: parsed.confirmation.id } },
+        confirm,
+      );
+      return choice === "cancel" && result.ok
+        ? { ok: false, failure: { error: "cancelled", message: "Cancelled; nothing ran." } }
+        : result;
+    }
     if (!res.ok) {
       return {
         ok: false,
         failure: {
-          error: typeof parsed?.error === "string" ? parsed.error : `HTTP ${res.status}`,
-          message: typeof parsed?.message === "string" ? parsed.message : `HTTP ${res.status}`,
+          error:
+            typeof parsed?.code === "string"
+              ? parsed.code
+              : typeof parsed?.error === "string"
+                ? parsed.error
+                : `HTTP ${res.status}`,
+          message:
+            typeof parsed?.message === "string"
+              ? parsed.message
+              : typeof parsed?.error === "string"
+                ? parsed.error
+                : `HTTP ${res.status}`,
         },
       };
     }
@@ -55,13 +90,27 @@ export async function getCommand(
   const suffix = q.size > 0 ? `?${q.toString()}` : "";
   try {
     const res = await fetchFn(`/api/${id}${suffix}`, { credentials: "same-origin" });
-    const parsed = (await res.json().catch(() => null)) as { error?: unknown; message?: unknown } | null;
+    const parsed = (await res.json().catch(() => null)) as {
+      error?: unknown;
+      code?: unknown;
+      message?: unknown;
+    } | null;
     if (!res.ok) {
       return {
         ok: false,
         failure: {
-          error: typeof parsed?.error === "string" ? parsed.error : `HTTP ${res.status}`,
-          message: typeof parsed?.message === "string" ? parsed.message : `HTTP ${res.status}`,
+          error:
+            typeof parsed?.code === "string"
+              ? parsed.code
+              : typeof parsed?.error === "string"
+                ? parsed.error
+                : `HTTP ${res.status}`,
+          message:
+            typeof parsed?.message === "string"
+              ? parsed.message
+              : typeof parsed?.error === "string"
+                ? parsed.error
+                : `HTTP ${res.status}`,
         },
       };
     }

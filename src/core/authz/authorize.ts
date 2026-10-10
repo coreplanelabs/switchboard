@@ -164,10 +164,23 @@ export function evaluateRule(rule: Rule, actor: Actor, resource: Resource): bool
   return rule.when.every((condition) => evaluateCondition(condition, grants, selfIds, attributes, memberOf));
 }
 
+/** A verified credential acts within both its own policy and the person's policy.
+ * Grant intersection alone cannot represent native user-only conditional rights. */
+export function credentialPolicyActor(actor: Actor): Actor | undefined {
+  if (actor.kind !== "service" || actor.onBehalfOf?.kind !== "user") return undefined;
+  const { onBehalfOf: _principal, ...credential } = actor;
+  return { ...credential, self: selfIdsOf(actor) };
+}
+
 /** `authorize` over an explicit (validated) table. Tests use it to drive
  *  alternative tables; production code calls `authorize`. */
 export function authorizeWith(rules: readonly Rule[], actor: Actor, action: Action, resource: Resource): Decision {
   if (!isKnownActorKind(actor.kind)) return deny("unknown-actor-kind");
+  const credential = credentialPolicyActor(actor);
+  if (credential) {
+    const delegated = authorizeWith(rules, credential, action, resource);
+    return delegated.allow ? authorizeWith(rules, actor.onBehalfOf!, action, resource) : delegated;
+  }
   const target = targetOfResource(resource);
   const named = rules.filter((rule) => rule.action === action && ruleTarget(rule) === target);
   if (named.length === 0) return deny("no-rule");

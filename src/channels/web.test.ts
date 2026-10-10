@@ -596,7 +596,9 @@ describe("POST /threads/<id>/send — the body into dispatch() as this session (
         await recordRoutedDecision(fastPath, msg, io, { id: "config.set" }, route, offerText, ending, trace);
         await ending.sealAfterReply(
           async () => {},
-          () => io.offer!({ id: "c-1", line: offerText, risk: "changes your agent", expiresAt: NOW + 600_000 }),
+          async () => {
+            await io.offer!({ id: "c-1", line: offerText, risk: "changes your agent", expiresAt: NOW + 600_000 });
+          },
         );
       },
     });
@@ -606,7 +608,10 @@ describe("POST /threads/<id>/send — the body into dispatch() as this session (
       body: JSON.stringify({ text: "use the review agent for me" }),
     });
     expect(res.status).toBe(200);
-    expect(JSON.parse(res.body)).toEqual({ reply: "", offer: { line: offerText, risk: "changes your agent" } });
+    expect(JSON.parse(res.body)).toEqual({
+      reply: "",
+      offer: { id: "c-1", expiresAt: NOW + 600_000, line: offerText, risk: "changes your agent" },
+    });
     expect(registry.getById("id-1")).toMatchObject({ finished: true, status: "completed", agent: "command" });
   });
 

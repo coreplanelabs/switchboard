@@ -1,3 +1,4 @@
+import { DEFAULT_NEGOTIATED_PROTOCOL_VERSION } from "@modelcontextprotocol/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingHttpHeaders } from "node:http";
 import { createMcpHandler, handleMcpRequest, McpIO, toCaller } from "./mcp.js";
@@ -67,7 +68,11 @@ function rpc(
 ) {
   const message: Record<string, unknown> = { jsonrpc: "2.0", method };
   if (id !== undefined) message.id = id;
-  if (params !== undefined) message.params = params;
+  if (params !== undefined)
+    message.params =
+      method === "initialize"
+        ? { capabilities: {}, clientInfo: { name: "test", version: "1" }, ...(params as object) }
+        : params;
   return { method: "POST", headers, body: JSON.stringify(message) };
 }
 
@@ -89,7 +94,7 @@ describe("handleMcpRequest — initialize", () => {
 });
 
 describe("handleMcpRequest — tools/list", () => {
-  it("advertises exactly one tool with a text/thread/channel/async input schema", async () => {
+  it("advertises dispatch and approval controls with strict schemas", async () => {
     const res = await handleMcpRequest(rpc("tools/list", {}), deps, { auth: good });
     expect(res.status).toBe(200);
     const tools = (res.body as RpcResult).result.tools as Array<{
@@ -97,7 +102,7 @@ describe("handleMcpRequest — tools/list", () => {
       description: string;
       inputSchema: { type: string; properties: Record<string, unknown>; required: string[] };
     }>;
-    expect(tools).toHaveLength(1);
+    expect(tools.map((tool) => tool.name)).toEqual(["dispatch", "approval_resume", "approval_cancel"]);
     expect(tools[0].name).toBe("dispatch");
     expect(tools[0].description).toBeTruthy();
     expect(tools[0].inputSchema.type).toBe("object");
@@ -119,7 +124,7 @@ describe("handleMcpRequest — tools/call", () => {
     expect(body.id).toBe(7);
     expect(body.result).toEqual({ content: [{ type: "text", text: "hello from agent" }] });
     expect(d.calls).toHaveLength(1);
-    expect(d.calls[0].msg).toEqual({
+    expect(d.calls[0].msg).toMatchObject({
       userId: "mcp:alice",
       channelId: "mcp:ops",
       threadKey: "mcp:ops:t1",
@@ -229,7 +234,7 @@ describe("handleMcpRequest — tools/call", () => {
   });
 
   // authorization.md item 15: the same binding the HTTP ingress applies, in the mcp: namespace.
-  it("a token bound to a person by email sends as the person with the mcp: credential as authenticatedAs; an unfound person → the credential alone", async () => {
+  it("a token bound to a verified person sends as that person; an unfound declared person is refused", async () => {
     const bound = authConfig({ tok: { subject: "alice-mcp", email: "alice@example.com" } });
     const d = fakeDispatch();
     await handleMcpRequest(rpc("tools/call", { name: "dispatch", arguments: { text: "hi" } }), deps, {
@@ -237,7 +242,7 @@ describe("handleMcpRequest — tools/call", () => {
       dispatch: d.fn,
       personByEmail: async () => ({ id: "slack:U0ALICE", name: "alice" }),
     });
-    expect(d.calls[0].msg).toEqual({
+    expect(d.calls[0].msg).toMatchObject({
       userId: "slack:U0ALICE",
       userName: "alice",
       authenticatedAs: "mcp:alice-mcp",
@@ -248,19 +253,13 @@ describe("handleMcpRequest — tools/call", () => {
       receivedAt: expect.any(Number),
     });
     const miss = fakeDispatch();
-    await handleMcpRequest(rpc("tools/call", { name: "dispatch", arguments: { text: "hi" } }), deps, {
+    const refused = await handleMcpRequest(rpc("tools/call", { name: "dispatch", arguments: { text: "hi" } }), deps, {
       auth: bound,
       dispatch: miss.fn,
       personByEmail: async () => undefined,
     });
-    expect(miss.calls[0].msg).toEqual({
-      userId: "mcp:alice-mcp",
-      channelId: "mcp:default",
-      threadKey: "mcp:default:default",
-      messageId: expect.stringMatching(/^mcp:[0-9a-f-]{36}$/),
-      text: "hi",
-      receivedAt: expect.any(Number),
-    });
+    expect(refused.body).toMatchObject({ error: { code: -32001, data: { code: "unauthorized" } } });
+    expect(miss.calls).toEqual([]);
   });
 
   it("defaults channel/thread when the arguments omit them", async () => {
@@ -527,15 +526,25 @@ describe("createMcpHandler (node:http wrapper)", () => {
     async function* iter() {
       yield Buffer.from(body, "utf8");
     }
-    const req = Object.assign(iter(), { method, headers, destroy: vi.fn() });
+    const req = Object.assign(iter(), {
+      method,
+      url: "/mcp",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...headers },
+      destroy: vi.fn(),
+    });
     let statusCode = 0;
     let payload = "";
     const res = {
       writeHead: (code: number) => {
         statusCode = code;
       },
+      on: () => {},
+      write: (chunk: string | Uint8Array) => {
+        payload += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+        return true;
+      },
       end: (chunk?: string) => {
-        payload = chunk ?? "";
+        payload += chunk ?? "";
       },
     };
     return {
@@ -543,7 +552,16 @@ describe("createMcpHandler (node:http wrapper)", () => {
       res: res as unknown as Parameters<ReturnType<typeof createMcpHandler>>[1],
       status: () => statusCode,
       raw: () => payload,
-      json: () => JSON.parse(payload),
+      json: () =>
+        JSON.parse(
+          payload.includes("data: ")
+            ? payload
+                .split("\n")
+                .filter((line) => line.startsWith("data: "))
+                .at(-1)!
+                .slice(6)
+            : payload,
+        ),
       reqRaw: req,
     };
   }
@@ -576,7 +594,20 @@ describe("createMcpHandler (node:http wrapper)", () => {
       email: "person@example.com",
       createdAt: 1,
     });
-    const t = fakeReqRes("POST", bearer(token), JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }));
+    const t = fakeReqRes(
+      "POST",
+      bearer(token),
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: DEFAULT_NEGOTIATED_PROTOCOL_VERSION,
+          capabilities: {},
+          clientInfo: { name: "test", version: "1" },
+        },
+      }),
+    );
     createMcpHandler(deps, { auth: { tokens: {} }, personalTokens: store })(t.req, t.res);
     await vi.waitFor(() => expect(t.status()).toBe(200));
     expect(t.json().result.serverInfo.name).toBe("switchboard");
@@ -755,6 +786,7 @@ describe("handleMcpRequest — registry commands as tools", () => {
     });
     const auth = scoped(["steer:write"]);
     auth.tokens.tok.email = "alice@example.com";
+    GRANTS.set("slack:UREQ", { ...NO_GRANTS, actions: new Set(["steer:write"]) });
     const options = {
       auth,
       commands,
@@ -799,6 +831,8 @@ describe("handleMcpRequest — registry commands as tools", () => {
       "runs_children",
       "runs_findings",
       "runs_search",
+      "approval_resume",
+      "approval_cancel",
     ]);
     const list = tools.find((t) => t.name === "runs_list")!;
     expect(list.description).toBeTruthy();
@@ -824,7 +858,11 @@ describe("handleMcpRequest — registry commands as tools", () => {
       auth: good,
       commands: bindCommands(registry, undefined),
     });
-    expect(((res.body as RpcResult).result.tools as { name: string }[]).map((t) => t.name)).toEqual(["dispatch"]);
+    expect(((res.body as RpcResult).result.tools as { name: string }[]).map((t) => t.name)).toEqual([
+      "dispatch",
+      "approval_resume",
+      "approval_cancel",
+    ]);
   });
 
   it("tools/list carries each command's blast radius in MCP's own hint names: a read is readOnlyHint, an exec-class write and a read are destructiveHint false, a reversible write is destructiveHint false, a destructive write is destructiveHint true; idempotent and open-world ride the definition", async () => {
@@ -942,25 +980,16 @@ describe("handleMcpRequest — registry commands as tools", () => {
     expect(reg.getById(live.id)?.stop).toBeUndefined();
   });
 
-  it("a runs:write token stops a live run as actor mcp:<subject>; a finished run → data.code 'conflict'", async () => {
+  it("a destructive stop from a credential without a consent surface is refused without changing the run", async () => {
     const { commands, live, reg } = await commandFixture();
-    const auth = scoped(["runs:write"]);
-    const res = await handleMcpRequest(
+    const result = await handleMcpRequest(
       rpc("tools/call", { name: "runs_stop", arguments: { id: live.id, mode: "soft" } }),
       deps,
-      { auth, commands },
+      { auth: scoped(["runs:write"]), commands },
     );
-    expect((res.body as RpcResult).result).toBeTruthy();
-    const note = reg
-      .snapshotById(live.id)!
-      .events.find((e) => e.type === "run_note" && e.kind === "stop_requested") as { actor?: unknown };
-    expect(note.actor).toEqual({ kind: "mcp", id: "mcp:alice" });
-    const fin = await handleMcpRequest(
-      rpc("tools/call", { name: "runs_stop", arguments: { id: "fin-1", mode: "soft" } }),
-      deps,
-      { auth, commands },
-    );
-    expect((fin.body as RpcError & { error: { data?: { code: string } } }).error.data?.code).toBe("conflict");
+    expect(result.body).toMatchObject({ error: { code: -32004, data: { code: "unavailable" } } });
+    expect(reg.getById(live.id)).toMatchObject({ id: live.id, finished: false });
+    expect(reg.getById(live.id)?.stop).toBeUndefined();
   });
 
   it("a token's `channel` is its one channel grant (`mcp:<channel>`): it lists that channel's runs plus the public ones, never another machine channel's; a token with no `channel` lists the public runs only", async () => {

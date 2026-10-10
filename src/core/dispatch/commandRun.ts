@@ -1,3 +1,4 @@
+import { withCommandConfirmation } from "../commandConfirmations.js";
 import type { AudienceRefusalReceipt } from "../audienceDecision.js";
 import { appendThreadTurn } from "../runLedger/threadSession.js";
 import {
@@ -83,6 +84,8 @@ export interface InlineRunOptions extends CommandRunOptions {
   /** Repository management uses the same progress message as agent work. */
   progress?: string;
   announce?: boolean;
+  /** Start receipts are sent when the registry reaches the handler, after approval. */
+  startWhenInvoked?: (start: () => void) => void;
 }
 
 /** Registry commands the dispatcher records as inline runs: the ones
@@ -166,17 +169,29 @@ export async function runChatCommand(
   };
   const resolveRepo = async (): Promise<string | undefined> =>
     (await resolveRepoForCommand(deps, msg, await io.history())).repo;
+  let startCommand: (() => void) | undefined;
   const invoke = async (span: Span) => {
     await opts.beforePublish?.();
-    return invokeChatCommand({
-      commands,
-      parsed,
-      msg,
-      config: deps.config,
-      resolveRepo,
-      span,
-      ...(opts.source ? { source: opts.source } : {}),
-    });
+    return withCommandConfirmation(
+      {
+        message: msg,
+        io,
+        store: deps.confirmations,
+        beforePublish: opts.beforePublish,
+        contextDependencies: opts.contextDependencies,
+        onExecute: () => startCommand?.(),
+      },
+      () =>
+        invokeChatCommand({
+          commands,
+          parsed,
+          msg,
+          config: deps.config,
+          resolveRepo,
+          span,
+          ...(opts.source ? { source: opts.source } : {}),
+        }),
+    );
   };
   if (parsed.kind === "invoke") {
     const inline = isInlineRunCommand(parsed.id);
@@ -188,6 +203,9 @@ export async function runChatCommand(
         await runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke, ending, trace, {
           ...opts,
           announce: inline,
+          startWhenInvoked: (start) => {
+            startCommand = start;
+          },
           ...(/^repo\.(onboard|offboard|rebuild|reconfigure)$/.test(parsed.id)
             ? { progress: cliWords(parsed.id).join(" ") }
             : {}),
@@ -454,7 +472,11 @@ export async function runInlineCommandRun<
   // spans so far backfill, then `run.command` and the reply follow live. A
   // natural-language fall-through rebinds the same root to the agent run next.
   trace.bindRun(run.id, (e) => registry.publish(run.id, e));
-  if (announce) io.runStarted?.({ id: run.id });
+  if (announce) {
+    const start = () => io.runStarted?.({ id: run.id });
+    if (opts.startWhenInvoked) opts.startWhenInvoked(start);
+    else start();
+  }
   registry.publish(run.id, {
     type: "input",
     text: redactSecrets(msg.text),

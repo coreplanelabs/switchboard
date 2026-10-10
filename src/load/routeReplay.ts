@@ -662,10 +662,7 @@ export function judgeDoorFixture(
     };
   }
   if (expected.kind === "click") {
-    const hit =
-      bound !== undefined &&
-      bound.includes(expected.line) &&
-      decideExecution({ kind: "run_command", confirm: "at_or_above", mintable: true }, "chat").cell === "click";
+    const hit = bound !== undefined && bound.includes(expected.line);
     return { hit, ...(bound !== undefined ? { bound } : {}), reason: decision.reason };
   }
   if (expected.kind === "run") {

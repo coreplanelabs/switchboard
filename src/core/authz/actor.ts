@@ -1,3 +1,4 @@
+import { SCHEDULES, isRunSchedule } from "../schedules.js";
 import { ALL_GRANTS } from "./grants.js";
 import type { Actor, Grants } from "./types.js";
 
@@ -26,7 +27,12 @@ export interface ActorInput {
 export type GrantsLookup = (actorId: string) => Grants;
 
 /** The local CLI: one operator at a keyboard, every grant, no config consulted. */
-export const CLI_ACTOR: Actor = Object.freeze({ kind: "user", id: "cli:local", grants: ALL_GRANTS });
+export const CLI_ACTOR: Actor = Object.freeze({
+  kind: "user",
+  id: "cli:local",
+  grants: ALL_GRANTS,
+  standingConsent: ALL_GRANTS.actions,
+});
 
 /** The one id form per surface. */
 export function actorIdFor(surface: ActorSurface, subjectId: string): string {
@@ -73,7 +79,28 @@ export function resolveActor(input: ActorInput, grantsFor: GrantsLookup): Actor 
     input.channelId !== undefined && input.threadKey !== undefined
       ? { channelId: input.channelId, threadKey: input.threadKey }
       : undefined;
-  return { kind: kindFor(input.surface), id, grants: grantsFor(id), ...(origin ? { origin } : {}) };
+  const grants = grantsFor(id);
+  // The ingress cron bearer has consent only for declared schedule actions.
+  // Configured grants still decide authorization before the confirmation gate.
+  const scheduledActions =
+    input.surface === "http"
+      ? SCHEDULES.filter(isRunSchedule).filter((s) => s.action.identity === input.subjectId)
+      : [];
+  const standingConsent =
+    input.surface === "schedule"
+      ? grants.actions
+      : scheduledActions.some((s) => s.action.actor.grants.actions === "all")
+        ? ("all" as const)
+        : scheduledActions.length
+          ? new Set(scheduledActions.flatMap((s) => [...s.action.actor.grants.actions]))
+          : undefined;
+  return {
+    kind: kindFor(input.surface),
+    id,
+    grants,
+    ...(standingConsent ? { standingConsent } : {}),
+    ...(origin ? { origin } : {}),
+  };
 }
 
 /** The identity fields a bound credential's message carries (`IncomingMessage`). */
@@ -88,8 +115,8 @@ interface BoundFields {
  *  `canUseRepo` / `canManageRepos` / `canEditChannelConfig` question asks
  *  about THIS actor, never `msg.userId`: a relayed message (`postedBy`,
  *  authorization.md item 14) decides on the app ∩ the person, a bound
- *  credential (`authenticatedAs`, item 15) on the credential alone — naming
- *  a person on a run never lends the run the person's grants. */
+ *  MCP credential (`authenticatedAs`, item 15) on both credential and verified person.
+ *  Other bound ingress credentials retain their existing credential policy. */
 export function chatActorOf(
   config: { grantsFor: GrantsLookup },
   msg: { userId: string; channelId: string; threadKey: string; postedBy?: string } & BoundFields,
@@ -125,10 +152,14 @@ export function resolveChatActor(
     // proved the credential and config bound it to the person, so the actor IS
     // the credential — its kind, its id, its grants, exactly as an unbound
     // token's — and the person is its `self` and `asUser`, the same
-    // identity-not-authority link a dashboard session carries (record 0042).
+    // identity link a dashboard session carries (record 0042). MCP additionally
+    // retains the verified principal so the policy can require both decisions.
     const credential = resolveNamespacedActor(msg.authenticatedAs, msg, grantsFor);
     return {
       ...credential,
+      ...(msg.authenticatedAs.startsWith("mcp:")
+        ? { onBehalfOf: { ...person, self: [credential.id, person.id] } }
+        : {}),
       self: [credential.id, msg.userId],
       asUser: { id: msg.userId, ...(msg.userName !== undefined ? { name: msg.userName } : {}) },
     };

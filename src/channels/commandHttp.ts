@@ -1,3 +1,8 @@
+import { actorIdsOf, cancelPending, claimConfirmation } from "../core/dispatch/confirm.js";
+import { withConsumedCommand, withCommandConfirmation } from "../core/commandConfirmations.js";
+import type { CoreDeps } from "../core/dispatcher.js";
+import type { IncomingMessage as CoreMessage, ConfirmationOffer } from "../core/types.js";
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolveActor, type GrantsLookup } from "../core/authz/actor.js";
 import type { Actor } from "../core/authz/types.js";
@@ -44,6 +49,9 @@ import type { PersonLookup } from "./requester.js";
 export type { PersonLookup };
 
 export interface CommandHttpOptions {
+  /** Shared command context and a browser display capability, never a policy override. */
+  core?: CoreDeps;
+  browserApprovals?: boolean;
   /** Grants by actor id (`ConfigStore.grantsFor`) for the `Caller.actor` every
    *  `/api` call carries — `access:<sub>` (a browser session: every group's
    *  read implicitly, plus whatever its `grants` entry adds) or
@@ -400,13 +408,91 @@ export function createCommandHttpHandler(commands: CommandInvoker, opts: Command
       named = body as Record<string, unknown>;
       keys = "camel";
     }
+    if (method === "POST" && "_confirmation" in named) {
+      const choice = named._confirmation as { kind?: unknown; id?: unknown } | null;
+      if (
+        Object.keys(named).length !== 1 ||
+        !choice ||
+        typeof choice !== "object" ||
+        Object.keys(choice).some((key) => key !== "kind" && key !== "id") ||
+        (choice.kind !== "confirm" && choice.kind !== "cancel") ||
+        typeof choice.id !== "string"
+      ) {
+        refuse(res, 400, "invalid_input", "Only the saved confirmation id and choice are accepted.");
+        return;
+      }
+      const store = opts.core?.confirmations;
+      const row = await store?.get?.(choice.id);
+      if (
+        !row ||
+        row.kind !== "run" ||
+        row.command !== cmd.id ||
+        row.message.approvalConnection ||
+        row.caller?.kind !== "access" ||
+        row.message.authenticatedAs !== caller.actor.id
+      ) {
+        refuse(res, 404, "not_found", "This saved action is unavailable; nothing ran.");
+        return;
+      }
+      const click = { id: choice.id, actorIds: actorIdsOf(caller.actor) };
+      if (choice.kind === "cancel") {
+        const result = await cancelPending(opts.core!, click);
+        if (result.kind === "cancelled") send(res, 200, { cancelled: true });
+        else refuse(res, 409, "conflict", result.text);
+        return;
+      }
+      const claimed = await claimConfirmation(store, click);
+      if (claimed.kind === "refused") {
+        refuse(res, 409, "conflict", claimed.text);
+        return;
+      }
+      if (claimed.row.kind !== "run") {
+        refuse(res, 404, "not_found", "This saved action is unavailable; nothing ran.");
+        return;
+      }
+      const saved = claimed.row;
+      const result = await withConsumedCommand(saved, () =>
+        commands.invoke(saved.command, saved.input, caller, { source: "confirm" }),
+      );
+      if (result.ok) send(res, 200, result.value);
+      else refuse(res, result.status, result.error, result.message);
+      return;
+    }
     const input = namedToInput(cmd, named, keys);
     if ("error" in input) {
       refuse(res, ERROR_STATUS.invalid_input, "invalid_input", input.error);
       return;
     }
 
-    const result = await commands.invoke(cmd.id, input, caller);
+    let offer: ConfirmationOffer | undefined;
+    const message: CoreMessage = {
+      userId: caller.actor.asUser?.id ?? caller.id,
+      authenticatedAs: caller.id,
+      channelId: `access:${identity.sub}`,
+      threadKey: `access:${identity.sub}:${randomUUID()}`,
+      text: "",
+    };
+    const inlineApproval = req.headers["x-switchboard-client"] === "dashboard";
+    const io = {
+      ...(!isServiceToken(identity) &&
+      (inlineApproval || (opts.browserApprovals && identity.email && opts.publicBaseUrl))
+        ? {
+            offer: async (value: ConfirmationOffer) => {
+              offer = value;
+              return inlineApproval
+                ? "Approval is pending; nothing ran."
+                : `Approval is pending; nothing ran. Review ${new URL(`/settings/approve?id=${encodeURIComponent(value.id)}`, opts.publicBaseUrl!).href}`;
+            },
+          }
+        : {}),
+    };
+    const result = await withCommandConfirmation({ message, io, store: opts.core?.confirmations }, () =>
+      commands.invoke(cmd.id, input, caller),
+    );
+    if (offer) {
+      send(res, 409, { error: "confirmation_required", message: result.ok ? "" : result.message, confirmation: offer });
+      return;
+    }
     if (!result.ok) {
       refuse(res, result.status, result.error, result.message);
       return;

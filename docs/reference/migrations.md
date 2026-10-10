@@ -6,6 +6,10 @@ A section says, in this order: what no longer works as it did, what replaces it,
 
 ## 1.295.0
 
+- Remote command writes now honor the same confirmation policy as chat. An action at or above `boundary.confirm` returns HTTP `409 confirmation_required` or an MCP approval continuation instead of executing. The dashboard displays the saved action and submits Confirm or Cancel by id, including token and loopback installations. MCP uses authenticated browser approval, then the original credential resumes by saved id. Model-supplied confirmation flags have no authority. Routine writes can use an authorized `boundary.confirm: destructive` scope; destructive actions still require consent. Existing local CLI operator and named schedule authority remain bounded by normal authorization. A command declaring fresh consent always requires a supported approval surface.
+- Deploy the state Worker with its existing-table approval routes before the bot that uses them. Missing approval support refuses before execution. Personal credentials keep an immutable verified user and must satisfy both user and credential policy; a broader token cannot override a revoked user right. Legacy personal credentials retain their verified Access subject when no Slack identity exists, so reads continue without reconnecting.
+
+
 - Installations extending `builtin` now default Review to `anthropic/claude-opus-5-5`, with Standard's effort and harness. Declare the `anthropic` provider and supply its API key. To keep Review on the installation's existing work model, set `agents.review.profile: standard` before upgrading, including installations written by an older `switchboard init --model <name>`. Explicit Review model/profile overrides keep their selections. Configs written by this release's `init --model` include the Review pin.
 
 ## 1.260.0

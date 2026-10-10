@@ -1505,7 +1505,7 @@ export class SlackIO implements ChannelIO {
     const posted = await this.client.chat.postMessage({
       channel: this.ev.channel,
       thread_ts: this.ev.threadTs,
-      text: escapeMrkdwn(renderOffer(offer)),
+      text: escapeMrkdwn(`${renderOffer(offer)}\n${offerTextContinuation(offer)}`),
       blocks: offerBlocks(offer),
     });
     markPostedSource(this.ev.channel, posted);
@@ -1854,9 +1854,14 @@ function chunkText(text: string, limit: number): string[] {
  *  the risk (when the command declares one) as context, and the two buttons,
  *  each carrying the id the core consumes. Every text is escaped
  *  for mrkdwn: `&`, `<`, `>` are structural even inside code. */
+function offerTextContinuation(offer: ConfirmationOffer): string {
+  return `Or type \`confirm ${offer.id}\` or \`cancel ${offer.id}\` in this thread.`;
+}
+
 function offerBlocks(offer: ConfirmationOffer): slackTypes.KnownBlock[] {
   const line = escapeMrkdwn(offer.line);
   const code = line.includes("`") ? `\`\`\`\n${line}\n\`\`\`` : `\`${line}\``;
+  const continuation = offerTextContinuation(offer);
   // A question's offer (record 0054): the refusal's sentence above the line —
   // the marker's `Did you mean:` leading the code — the evidence as context,
   // and Yes and No on the same two actions the confirmation uses, so one
@@ -1864,7 +1869,7 @@ function offerBlocks(offer: ConfirmationOffer): slackTypes.KnownBlock[] {
   if (offer.question) {
     return [
       { type: "section", text: { type: "mrkdwn", text: escapeMrkdwn(offer.question.text) } },
-      { type: "section", text: { type: "mrkdwn", text: `Did you mean:\n${code}` } },
+      { type: "section", text: { type: "mrkdwn", text: `Did you mean:\n${code}\n${continuation}` } },
       { type: "context", elements: [{ type: "mrkdwn", text: escapeMrkdwn(offer.question.evidence) }] },
       {
         type: "actions",
@@ -1888,7 +1893,7 @@ function offerBlocks(offer: ConfirmationOffer): slackTypes.KnownBlock[] {
     ? [{ type: "context", elements: [{ type: "mrkdwn", text: escapeMrkdwn(offer.risk) }] }]
     : [];
   return [
-    { type: "section", text: { type: "mrkdwn", text: code } },
+    { type: "section", text: { type: "mrkdwn", text: `${code}\n${continuation}` } },
     ...context,
     {
       type: "actions",

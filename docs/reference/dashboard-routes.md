@@ -69,6 +69,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/runs.search` | `GET`, `POST` | `runs:read` | Search one session's log — a thread's conversation on one agent, every run of it — for words: the matching turns in relevance order, each with its run; snippets wrapped as untrusted content. |
 | `/api/steer.run` | `POST` | `steer:write` | Fold words into a live run at its next step boundary, by run id. |
 | `/api/review.abridge` | `POST` | `review:write` | Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed. |
+| `/api/review.status` | `GET`, `POST` | `runs:read` | Read the progress of an abridged review diff without starting or recomputing it. |
 | `/api/friction.report` | `GET`, `POST` | `friction:read` | Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted. |
 | `/api/friction.propose` | `POST` | `friction:write` | Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues. |
 | `/api/repo.list` | `GET`, `POST` | `repo:read` | Every registered repo, including cold entries; resident state, ref, sha, last refresh, and disk gauge. |

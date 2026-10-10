@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  offerFill,
   clampRailWidth,
   classifyReply,
   compactAge,
@@ -44,27 +43,6 @@ describe("classifyReply — what a run-less reply means", () => {
     expect(classifyReply("🚫 You're not on the allowlist for the `coding` agent.")).toEqual({
       kind: "inline",
       text: "🚫 You're not on the allowlist for the `coding` agent.",
-    });
-  });
-});
-
-describe("offerFill — the composer fills from a click row (record 0069)", () => {
-  it("the row's line is the command and the hint says Enter runs it", () => {
-    expect(offerFill({ line: "config set me --agent review" })).toEqual({
-      command: "config set me --agent review",
-      hint: "Enter runs it",
-    });
-  });
-  it("the risk line is the hint when the command declares one", () => {
-    expect(offerFill({ line: "repo offboard acme/api", risk: "tears the resident down" })).toEqual({
-      command: "repo offboard acme/api",
-      hint: "tears the resident down",
-    });
-  });
-  it("a question's sentence outranks the risk on a did-you-mean offer (record 0054)", () => {
-    expect(offerFill({ line: "mcp remove linear", risk: "disconnects it", question: "Did you mean:" })).toEqual({
-      command: "mcp remove linear",
-      hint: "Did you mean:",
     });
   });
 });

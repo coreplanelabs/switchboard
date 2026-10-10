@@ -1,3 +1,4 @@
+import { preapprovedCaller } from "../testing/callers.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -82,6 +83,8 @@ async function setup() {
   const runs = createRunsService({ registry: reg, store });
   const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
   registerRunsCommands(registry);
+  const invoke = registry.invoke.bind(registry);
+  registry.invoke = (id, input, caller, deps, trace) => invoke(id, input, preapprovedCaller(caller), deps, trace);
   const denied: RunReadDenied[] = [];
   const deps: RunsCommandDeps = { runs: async () => runs, denied: (e) => denied.push(e) };
   return { reg, store, registry, deps, denied };

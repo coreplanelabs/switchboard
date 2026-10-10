@@ -1,3 +1,4 @@
+import { withConsumedCommand } from "../commandConfirmations.js";
 // The click on a confirmation (docs/decisions/0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md;
 // docs/reference/specs/routing-and-config.md item 25): the pure pieces
 // `dispatchClick` (dispatcher.ts) runs. A click is a credential presented
@@ -16,6 +17,7 @@ import {
   parseConfirmation,
   type Confirmation,
   type ConfirmationRefusal,
+  type ConfirmationStore,
   type RedispatchConfirmation,
 } from "../confirmations.js";
 import type { ContextDependencies } from "../references/contextDependencies.js";
@@ -95,6 +97,7 @@ export type CancelResult =
 export interface Click {
   id: string;
   actorIds: readonly string[];
+  connectionId?: string;
 }
 
 function refused(
@@ -115,20 +118,15 @@ const UNREADABLE = { kind: "refused", refusal: "confirmation_unreadable", text: 
  * confirmed run's failure), recorded because its route carries an outcome,
  * and announced to the channel only when the command was a run anyway.
  */
-export async function consumeAndRun(
-  deps: FastPathDeps,
+/** Atomic saved-id claim shared by chat and machine command continuations. */
+export async function claimConfirmation(
+  store: ConfirmationStore | undefined,
   click: Click,
-  io: ChannelIO,
-  ending: RunEnding,
-  trace: RequestTrace,
-  redispatch: (row: RedispatchConfirmation) => Promise<DispatchOutcome>,
-  validateContext?: (context: ContextDependencies, message: IncomingMessage) => Promise<AudienceCheck>,
-): Promise<ClickResult> {
-  const store = deps.confirmations;
+): Promise<Extract<ClickResult, { kind: "refused" }> | { kind: "claimed"; row: Confirmation }> {
   if (!store) return UNREADABLE;
   let consumed;
   try {
-    consumed = await store.consume(click.id, click.actorIds);
+    consumed = await store.consume(click.id, click.actorIds, click.connectionId);
   } catch (err) {
     console.warn(
       `[confirm] ${click.id}: the store could not be read — ${err instanceof Error ? err.message : String(err)}`,
@@ -138,7 +136,21 @@ export async function consumeAndRun(
   if (!consumed.ok)
     return refused(consumed.refused, consumed.row && "derivation" in consumed.row ? undefined : consumed.row);
   const row = parseConfirmation(structuredClone(consumed.row));
-  if (!row) return UNREADABLE;
+  return row ? { kind: "claimed", row } : UNREADABLE;
+}
+
+export async function consumeAndRun(
+  deps: FastPathDeps,
+  click: Click,
+  io: ChannelIO,
+  ending: RunEnding,
+  trace: RequestTrace,
+  redispatch: (row: RedispatchConfirmation) => Promise<DispatchOutcome>,
+  validateContext?: (context: ContextDependencies, message: IncomingMessage) => Promise<AudienceCheck>,
+): Promise<ClickResult> {
+  const claimed = await claimConfirmation(deps.confirmations, click);
+  if (claimed.kind === "refused") return claimed;
+  const row = claimed.row;
   const verbosity = deps.config.verbosityFor(
     row.message.channelId,
     row.message.userId,
@@ -173,14 +185,8 @@ export async function consumeAndRun(
   if (!(await publicationCheck()).ok) return contextUnavailable;
   let result: ChatCommandResult;
   try {
-    result = await runChatCommand(
-      deps,
-      row.message,
-      io,
-      { kind: "invoke", id: row.command, input: row.input },
-      ending,
-      trace,
-      {
+    result = await withConsumedCommand(row, () =>
+      runChatCommand(deps, row.message, io, { kind: "invoke", id: row.command, input: row.input }, ending, trace, {
         source: "confirm",
         ...(derivation ? { beforePublish, contextDependencies: derivation.context } : {}),
         route: {
@@ -192,7 +198,7 @@ export async function consumeAndRun(
           receipt: row.receipt,
           outcome: "confirmed",
         },
-      },
+      }),
     );
   } catch (error) {
     if (denied || error === withheld) return contextUnavailable;
@@ -231,7 +237,7 @@ export async function cancelPending(deps: FastPathDeps, click: Click): Promise<C
   if (!store) return UNREADABLE;
   let cancelled;
   try {
-    cancelled = await store.cancel(click.id, click.actorIds);
+    cancelled = await store.cancel(click.id, click.actorIds, click.connectionId);
   } catch (err) {
     console.warn(
       `[confirm] ${click.id}: the store could not be read — ${err instanceof Error ? err.message : String(err)}`,

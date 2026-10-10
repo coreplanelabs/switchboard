@@ -1,4 +1,4 @@
-import { enableAutoUnmount } from "@vue/test-utils";
+import { enableAutoUnmount, flushPromises } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import type { HomeParentTurnSeed, HomeSeed, HomeTurnSeed } from "@core/channels/webSeed.js";
@@ -596,34 +596,43 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
     expect(es.closed).toBe(true);
   });
 
-  it("a click row fills the composer with the offered line and paints no turn (record 0069)", async () => {
+  it("an offer shows the saved action and confirms its id without pasting or retargeting it", async () => {
     fakeFetch({
       status: 200,
-      body: { reply: "", offer: { line: "config set me --models.coding anthropic/claude-opus-5" } },
+      body: { reply: "", offer: { id: "offer-1", line: "config set me --agent review", risk: "changes your agent" } },
     });
     const wrapper = mountApp(HomePage, { seed: seed() });
-    await send(wrapper, "use opus for my coding runs");
-    expect((wrapper.find("textarea.box").element as HTMLTextAreaElement).value).toBe(
-      "config set me --models.coding anthropic/claude-opus-5",
-    );
-    expect(wrapper.find("p.hint").text()).toBe("Enter runs it");
-    expect(wrapper.findAll(".turn.assistant")).toHaveLength(0);
-    expect(wrapper.findAll("[data-testid=inline]")).toHaveLength(0);
-    // The person's line stands: they said it.
-    expect(wrapper.findAll(".turn.person")).toHaveLength(1);
+    await send(wrapper, "switch my agent");
+    const offer = wrapper.find("[data-testid=confirmation-offer]");
+    expect(offer.text()).toContain("config set me --agent review");
+    expect(offer.text()).toContain("changes your agent");
+    expect(wrapper.find("textarea.box").exists()).toBe(false);
+    const calls = fakeFetch({ status: 200, body: { reply: "Saved; your agent is review" } });
+    await offer.findAll("button")[0].trigger("click");
+    await flushPromises();
+    expect(calls[0]).toEqual({
+      url: "/threads/conv-1/send",
+      body: { confirmation: { kind: "confirm", id: "offer-1" } },
+    });
+    expect(wrapper.find("[data-testid=confirmation-offer]").exists()).toBe(false);
+    expect(wrapper.text()).toContain("your agent is review");
   });
 
-  it("a click row's risk shows beside the composer, never inside the box", async () => {
-    const risk = "tears the resident down";
+  it("cancelling an offer sends only the saved id and shows that nothing ran", async () => {
     fakeFetch({
       status: 200,
-      body: { reply: "", offer: { line: "config set me --agent review", risk } },
+      body: { reply: "", offer: { id: "offer-2", line: "repo offboard acme/api", risk: "removes the repository" } },
     });
     const wrapper = mountApp(HomePage, { seed: seed() });
-    await send(wrapper, "switch me to the review agent");
-    expect((wrapper.find("textarea.box").element as HTMLTextAreaElement).value).toBe("config set me --agent review");
-    expect(wrapper.find("p.hint").text()).toBe(risk);
-    expect(wrapper.findAll(".turn.assistant")).toHaveLength(0);
+    await send(wrapper, "remove that repository");
+    const calls = fakeFetch({ status: 200, body: { reply: "Cancelled; nothing ran" } });
+    await wrapper.find("[data-testid=confirmation-offer]").findAll("button")[1].trigger("click");
+    await flushPromises();
+    expect(calls[0]).toEqual({
+      url: "/threads/conv-1/send",
+      body: { confirmation: { kind: "cancel", id: "offer-2" } },
+    });
+    expect(wrapper.text()).toContain("Cancelled; nothing ran");
   });
 
   it("an inline reply is painted once as an inline turn", async () => {

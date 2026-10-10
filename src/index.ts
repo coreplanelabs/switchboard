@@ -22,6 +22,7 @@ import { createSlackReadAccess } from "./channels/slack/readAccess.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
 import { FilePersonalTokenStore, WorkerPersonalTokenStore } from "./mcp/personalTokens.js";
+import { createMcpApprovalView } from "./channels/mcpApprovalView.js";
 import { createPersonalMcpSetupHandler } from "./channels/personalMcpSetup.js";
 import { FAVICON_ICO_SVG, createLiveViewHandler } from "./channels/liveView.js";
 import { loadWebAssets, webDistDir } from "./channels/webAssets.js";
@@ -1179,6 +1180,7 @@ export async function runBot(): Promise<void> {
     const mcp = createMcpHandler(deps, {
       auth,
       personalTokens: personalTokenStore,
+      approvalsEnabled: capabilities.dashboardAuth === "access",
       commands,
       grantsFor: (id) => config.grantsFor(id),
       personByEmail,
@@ -1697,6 +1699,8 @@ export async function runBot(): Promise<void> {
     // SAME gate as /runs* (gated on `isCommandPath`). The handler claims
     // all of /api/* and answers its own 404. ---
     const commandHttp = createCommandHttpHandler(commands, {
+      core: deps,
+      browserApprovals: capabilities.dashboardAuth === "access",
       grantsFor: (id) => config.grantsFor(id),
       personByEmail,
       channelsOf,
@@ -1710,9 +1714,19 @@ export async function runBot(): Promise<void> {
       registry: () => mcpWiring.service,
       publicOrigin: publicBaseUrl ? new URL(publicBaseUrl).origin : undefined,
     });
+    const mcpApproval = createMcpApprovalView(deps, {
+      auth,
+      personalTokens: personalTokenStore,
+      commands,
+      grantsFor: (id) => config.grantsFor(id),
+      personByEmail,
+      publicBaseUrl,
+      approvalsEnabled: capabilities.dashboardAuth === "access",
+    });
     const personalMcpSetup = createPersonalMcpSetupHandler({
       store: personalTokenStore,
       grantsFor: (id) => config.grantsFor(id),
+      personByEmail,
       publicOrigin: publicBaseUrl ? new URL(publicBaseUrl).origin : undefined,
     });
     // --- end command registry over HTTP ---
@@ -1926,6 +1940,7 @@ export async function runBot(): Promise<void> {
             // --- /mcp/connect/<nonce>: the credential page, identity-bound. ---
             if (mcpConnectView(req, res, gate.identity)) return;
             if (personalMcpSetup(req, res, gate.identity)) return;
+            if (mcpApproval(req, res, gate.identity)) return;
             if (residentsView(req, res, { actor })) return;
             if (costsView(req, res, { identity, actor })) return;
             if (metricsView(req, res, { actor })) return;

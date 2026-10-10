@@ -1,3 +1,6 @@
+import type { ConfirmationOffer } from "./types.js";
+import { BUILT_IN_CONFIRM, type ConfirmClass } from "../config/profile.js";
+import { commandConfirmationGate, commandExecutionStarted, commandExecutionCaller } from "./commandConfirmations.js";
 import { z } from "zod";
 import { runDurationMs } from "./runDuration.js";
 import { systemClock } from "./trace/clock.js";
@@ -82,6 +85,8 @@ export type CommandSurfaces = Partial<Record<SurfaceName, false>>;
  *  a parse failure or a thrown predicate reads as `destructive`
  *  (`boundBlastRadius`). */
 export interface CommandAnnotations {
+  /** Tightens the shared confirmation policy, including routine writes. */
+  confirmation?: "always" | "scoped";
   destructive: boolean | ((input: ParsedCommandInput) => boolean);
   idempotent?: boolean;
   openWorld?: boolean;
@@ -455,6 +460,7 @@ export type InvokeResult =
       message: string;
       decidedBy: "registry" | "door" | "handler";
       guess?: CommandGuessHint;
+      confirmation?: ConfirmationOffer;
     };
 
 /** The one structured line per invocation — identity and outcome, never the payload. */
@@ -484,6 +490,8 @@ export interface AuditEntry {
 }
 
 export interface CommandRegistryOptions {
+  /** One process binding resolves the configured approval class for every surface. */
+  confirmationClass?: (caller: Caller) => ConfirmClass | Promise<ConfirmClass>;
   /** Defaults to one JSON line on console.log. */
   audit?: (entry: AuditEntry) => void;
   /** Where an unexpected handler throw is logged. Defaults to console.error. */
@@ -504,12 +512,14 @@ const SURFACE_FOR_KIND: Readonly<Record<Caller["kind"], SurfaceName>> = {
 };
 
 export class CommandRegistry<D> {
+  private readonly confirmationClass: NonNullable<CommandRegistryOptions["confirmationClass"]>;
   private readonly commands = new Map<string, CommandDef<D>>();
   private readonly audit: (entry: AuditEntry) => void;
   private readonly logError: (commandId: string, err: unknown) => void;
   private readonly capabilities: Capabilities;
 
   constructor(opts: CommandRegistryOptions = {}) {
+    this.confirmationClass = opts.confirmationClass ?? (() => BUILT_IN_CONFIRM);
     this.audit = opts.audit ?? ((entry) => console.log(JSON.stringify({ audit: "command", ...entry })));
     this.logError = opts.logError ?? ((commandId, err) => console.error(`[command] ${commandId} failed:`, err));
     this.capabilities = opts.capabilities ?? ALL_CAPABILITIES;
@@ -553,6 +563,7 @@ export class CommandRegistry<D> {
   }
 
   async invoke(id: string, input: CommandInput, caller: Caller, deps: D, trace?: TraceOptions): Promise<InvokeResult> {
+    caller = commandExecutionCaller(caller);
     const cmd = this.get(id);
     // A command that is not exposed on the caller's surface — or whose
     // capability is off in this process (`get`) — does not exist there.
@@ -612,10 +623,13 @@ export class CommandRegistry<D> {
     if (!parsed.ok) return done(fail("invalid_input", parsed.message));
 
     try {
+      const held = await commandConfirmationGate(cmd, input, parsed, caller, () => this.confirmationClass(caller));
+      if (held) return done(held, "confirmation");
+      commandExecutionStarted();
       const value = await cmd.handler({
         args: parsed.args as ArgValues<readonly ArgDef[]>,
         options: parsed.options,
-        caller,
+        caller: commandExecutionCaller(caller),
         deps,
         ...(trace?.span ? { span: trace.span } : {}),
       });

@@ -1,3 +1,4 @@
+import { preapprovedCaller } from "../testing/callers.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -71,11 +72,15 @@ function bind(
 ): CommandInvoker {
   const registry = new CommandRegistry<ConfigCommandDeps>({ audit: () => {} });
   registerConfigCommands(registry);
-  return bindCommands(registry, {
+  const commands = bindCommands(registry, {
     config: { ...configDeps(config), agentNames: () => ["general", "review", "coding"] },
     ...(channelVisibility ? { channelVisibility } : {}),
     ...more,
   });
+  return {
+    ...commands,
+    invoke: (id, input, caller, trace) => commands.invoke(id, input, preapprovedCaller(caller), trace),
+  };
 }
 
 function configDeps(config: ConfigStore) {
@@ -1237,7 +1242,18 @@ describe("config set user / config clear user — the author binding (record 006
       config: { ...configDeps(config), agentNames: () => ["general", "review", "coding"] },
       ...(resolveLogin ? { identity: resolveLogin } : {}),
     });
-    return { commands, audits };
+    return {
+      commands: {
+        ...commands,
+        invoke: (
+          id: string,
+          input: import("../commandRegistry.js").CommandInput,
+          caller: Caller,
+          trace?: Parameters<import("../commandRegistry.js").CommandInvoker["invoke"]>[3],
+        ) => commands.invoke(id, input, preapprovedCaller(caller), trace),
+      },
+      audits,
+    };
   }
 
   it("`config set me --github <login>` is refused at the door on every surface — Slack, the CLI, the dashboard chat, an admin included — with the one sentence and reason `identity` on the audit line; the handler never runs", async () => {

@@ -1139,9 +1139,13 @@ describe("SlackIO.offer (docs/reference/specs/slack-channel.md item 14)", () => 
     const call = postMessage.mock.calls[0]![0];
     expect(call).toMatchObject({ channel: "C1", thread_ts: "1.0" });
     expect(String(call.text)).toContain(LINE);
+    expect(String(call.text)).toContain("Or type `confirm c-1` or `cancel c-1` in this thread.");
     const blocks = blocksOf(call);
     expect(blocks.map((b) => b.type)).toEqual(["section", "context", "actions"]);
-    expect(blocks[0]!.text).toEqual({ type: "mrkdwn", text: `\`${LINE}\`` });
+    expect(blocks[0]!.text).toEqual({
+      type: "mrkdwn",
+      text: `\`${LINE}\`\nOr type \`confirm c-1\` or \`cancel c-1\` in this thread.`,
+    });
     expect(blocks[1]!.elements).toEqual([{ type: "mrkdwn", text: RISK }]);
     expect(blocks[2]!.elements).toEqual([
       {
@@ -1163,7 +1167,7 @@ describe("SlackIO.offer (docs/reference/specs/slack-channel.md item 14)", () => 
     await new SlackIO(c, ev).offer({ id: "c-3", line: tricky, risk: RISK, expiresAt: 600_000 });
     const call = postMessage.mock.calls[1]![0];
     expect(blocksOf(call)[0]!.text!.text).toBe(
-      '```\nconfig instructions channel "use `npm` &amp; &lt;nothing&gt; else"\n```',
+      '```\nconfig instructions channel "use `npm` &amp; &lt;nothing&gt; else"\n```\nOr type `confirm c-3` or `cancel c-3` in this thread.',
     );
     expect(String(call.text)).toContain('"use `npm` &amp; &lt;nothing&gt; else"');
     // The buttons still carry the id whatever the line looks like.
@@ -1190,7 +1194,10 @@ describe("SlackIO.offer (docs/reference/specs/slack-channel.md item 14)", () => 
     const blocks = blocksOf(call);
     expect(blocks.map((b) => b.type)).toEqual(["section", "section", "context", "actions"]);
     expect(blocks[0]!.text).toEqual({ type: "mrkdwn", text: "acme/api is not onboarded here." });
-    expect(blocks[1]!.text).toEqual({ type: "mrkdwn", text: "Did you mean:\n`agent:ship repo:acme/api fix it`" });
+    expect(blocks[1]!.text).toEqual({
+      type: "mrkdwn",
+      text: "Did you mean:\n`agent:ship repo:acme/api fix it`\nOr type `confirm q-1` or `cancel q-1` in this thread.",
+    });
     expect(blocks[2]!.elements).toEqual([
       { type: "mrkdwn", text: "acme/api is one edit away from acme/apj, which is onboarded" },
     ]);

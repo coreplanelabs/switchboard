@@ -1,3 +1,5 @@
+import { commandConfirmationMessage } from "./commandConfirmations.js";
+import { effectiveConfirm } from "../config/profile.js";
 import { createRunStop } from "../execution/runStop.js";
 import type { CredentialsCommandDeps } from "./commands/credentials.js";
 import { existsSync, readFileSync } from "node:fs";
@@ -257,6 +259,16 @@ export function buildCoreCommands(
   wiring: CoreCommandWiring,
 ): CommandInvoker {
   const registry = new CommandRegistry<CoreCommandDeps>({
+    confirmationClass: async (caller) => {
+      const current = await cfg();
+      const message = commandConfirmationMessage();
+      return effectiveConfirm(
+        current.boundaryLayers(
+          message?.channelId ?? caller.origin?.channelId ?? "",
+          message?.userId ?? caller.actor.asUser?.id ?? caller.id,
+        ),
+      ).value;
+    },
     ...(wiring.audit ? { audit: wiring.audit } : {}),
     ...(wiring.capabilities ? { capabilities: wiring.capabilities } : {}),
   });

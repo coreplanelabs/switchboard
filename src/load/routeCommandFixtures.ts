@@ -125,6 +125,8 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
   }),
   f("c12h", "happy", "list the children of run r-42", "runs.children", { args: ["r-42"], options: {} }),
   f("c12p", "paraphrase", "which runs did run r-7 spawn?", "runs.children", { args: ["r-7"], options: {} }),
+  f("abridge-status-h", "happy", "show the abridgement status of run r-11", "review.status", { args: ["r-11"] }),
+  f("abridge-status-p", "paraphrase", "has run r-12 finished abridging yet", "review.status", { args: ["r-12"] }),
   f("c13h", "happy", "abridge the review of run r-11", "review.abridge", { args: ["r-11"], options: {} }),
   f("c13p", "paraphrase", "shorten run r-12's review diff for reading", "review.abridge", {
     args: ["r-12"],
@@ -305,6 +307,7 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c11d", "how is the plan's second unit going overall?", "runs.unit"),
   d("c12d", "did the conductor's children do a good job?", "runs.children"),
   d("c44d", "how do run credentials stay isolated?", "credentials.inspect"),
+  d("abridge-status-d", "would shortening that review help", "review.status"),
   d("c13d", "was that review too long to be useful?", "review.abridge"),
   d("c14d", "this process feels slow, what should we change?", "friction.report"),
   d("c15d", "do we have too many open issues already?", "friction.propose"),

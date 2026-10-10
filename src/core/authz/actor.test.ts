@@ -172,7 +172,7 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
 
   it("cli → user `cli:local` with every grant, whatever config says", () => {
     const a = resolveActor({ surface: "cli", subjectId: "local" }, () => NO_GRANTS);
-    expect(a).toEqual({ kind: "user", id: "cli:local", grants: ALL_GRANTS });
+    expect(a).toEqual({ kind: "user", id: "cli:local", grants: ALL_GRANTS, standingConsent: "all" });
     expect(CLI_ACTOR).toEqual(a);
   });
 
@@ -181,6 +181,7 @@ describe("resolveActor — kind, id, grants, origin per surface", () => {
     expect(a).toEqual({
       kind: "schedule",
       id: "schedule:self-improvement",
+      standingConsent: set("friction:write"),
       grants: grants({ actions: set("friction:write"), channels: "all" }),
     });
     expect(resolveActor({ surface: "schedule", subjectId: "unknown-job" }, lookup).grants).toBe(NO_GRANTS);

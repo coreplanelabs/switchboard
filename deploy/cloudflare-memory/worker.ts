@@ -1094,6 +1094,13 @@ interface ConfirmationRow extends ConfirmationInput {
   expiresAt: number;
 }
 /** Why a consume or a cancel refused: the row is gone (`used`), past its expiry (`expired`), or someone else's (`foreign`). */
+/** The opaque connection binding belongs to the bot's saved message. */
+function confirmationConnection(row: ConfirmationRow): string | undefined {
+  const message = row.body.message;
+  if (!isJsonObject(message) || !isJsonObject(message.approvalConnection)) return undefined;
+  return typeof message.approvalConnection.id === "string" ? message.approvalConnection.id : undefined;
+}
+
 type ConfirmationRefusal = "used" | "expired" | "foreign";
 /** A refusal names the row where one still exists — `expired` (deleted here)
  *  and `foreign` (kept) — so the bot can record the click's refusal against
@@ -1183,7 +1190,12 @@ export class ConfigDO extends DurableObject<Env> {
    *  row is `used`, a row past its expiry is deleted and `expired`, a requester
    *  none of `actorIds` names is `foreign` (the row stays for its requester),
    *  and otherwise the row is deleted and returned. */
-  async consumeConfirmation(id: string, actorIds: readonly string[], now: number): Promise<ConfirmationOutcome> {
+  async consumeConfirmation(
+    id: string,
+    actorIds: readonly string[],
+    now: number,
+    connectionId?: string,
+  ): Promise<ConfirmationOutcome> {
     return this.ctx.storage.transactionSync(() => {
       const stored = this.readConfirmation(id);
       if (!stored) return { refused: "used" };
@@ -1192,7 +1204,34 @@ export class ConfigDO extends DurableObject<Env> {
         return { refused: "expired", row: stored };
       }
       if (!actorIds.includes(stored.requester)) return { refused: "foreign", row: stored };
+      const binding = confirmationConnection(stored);
+      if (binding && (binding !== connectionId || stored.body.browserApproved !== true)) return { refused: "foreign" };
       this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, id);
+      return { row: stored };
+    });
+  }
+
+  async getConfirmation(id: string): Promise<ConfirmationRow | null> {
+    return this.readConfirmation(id) ?? null;
+  }
+
+  async approveConfirmation(
+    id: string,
+    actorIds: readonly string[],
+    connectionId: string,
+    now: number,
+  ): Promise<ConfirmationOutcome> {
+    return this.ctx.storage.transactionSync(() => {
+      const stored = this.readConfirmation(id);
+      if (!stored) return { refused: "used" };
+      if (stored.expiresAt <= now) {
+        this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, id);
+        return { refused: "expired" };
+      }
+      if (!actorIds.includes(stored.requester) || confirmationConnection(stored) !== connectionId)
+        return { refused: "foreign" };
+      stored.body.browserApproved = true;
+      this.sql.exec(`UPDATE confirmations SET body = ? WHERE id = ?`, JSON.stringify(stored.body), id);
       return { row: stored };
     });
   }
@@ -1200,11 +1239,17 @@ export class ConfigDO extends DurableObject<Env> {
   /** Delete the row under the same requester check as a consume; a missing row
    *  is `used`. Expiry plays no part: cancelling an expired offer still leaves
    *  nothing pending, which is what the click asked for. */
-  async cancelConfirmation(id: string, actorIds: readonly string[]): Promise<ConfirmationCancelOutcome> {
+  async cancelConfirmation(
+    id: string,
+    actorIds: readonly string[],
+    connectionId?: string,
+  ): Promise<ConfirmationCancelOutcome> {
     return this.ctx.storage.transactionSync(() => {
       const stored = this.readConfirmation(id);
       if (!stored) return { refused: "used" };
       if (!actorIds.includes(stored.requester)) return { refused: "foreign" };
+      const binding = confirmationConnection(stored);
+      if (binding && binding !== connectionId) return { refused: "foreign" };
       this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, id);
       return { ok: true };
     });
@@ -1754,6 +1799,8 @@ const CONFIG_ROUTES = new Set([
   "/config/personal-tokens/delete",
   "/config/confirmations/put",
   "/config/confirmations/consume",
+  "/config/confirmations/get",
+  "/config/confirmations/approve",
   "/config/confirmations/cancel",
   "/config/confirmations/cancel-by-thread",
   "/config/confirmations/pending-by-thread",
@@ -1763,11 +1810,19 @@ const TICKET_STATES: ReadonlySet<string> = new Set<McpTicketState>(MCP_TICKET_ST
 const CONFIRMATION_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
 
 /** The `{ id, actorIds }` a consume or a cancel carries, or the 400 that refuses it. */
-function confirmationClickOf(b: Record<string, unknown>): { id: string; actorIds: string[] } | Response {
+function confirmationClickOf(
+  b: Record<string, unknown>,
+): { id: string; actorIds: string[]; connectionId?: string } | Response {
   if (typeof b.id !== "string" || !CONFIRMATION_ID_RE.test(b.id)) return json({ error: "id malformed" }, 400);
   if (!Array.isArray(b.actorIds) || !b.actorIds.every((a): a is string => typeof a === "string"))
     return json({ error: "actorIds must be a list of actor ids" }, 400);
-  return { id: b.id, actorIds: b.actorIds };
+  if (b.connectionId !== undefined && (typeof b.connectionId !== "string" || !/^[a-f0-9]{64}$/.test(b.connectionId)))
+    return json({ error: "connectionId malformed" }, 400);
+  return {
+    id: b.id,
+    actorIds: b.actorIds,
+    ...(typeof b.connectionId === "string" ? { connectionId: b.connectionId } : {}),
+  };
 }
 
 async function handleConfig(pathname: string, body: unknown, env: Env): Promise<Response> {
@@ -1853,17 +1908,27 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
       console.log(`[config/confirmations/put] ${b.threadKey} ${b.id} expires_at=${expiresAt}`);
       return json({ ok: true, expiresAt });
     }
+    case "/config/confirmations/get": {
+      if (typeof b.id !== "string" || !CONFIRMATION_ID_RE.test(b.id)) return json({ error: "id malformed" }, 400);
+      return json({ row: await dO.getConfirmation(b.id) });
+    }
+    case "/config/confirmations/approve": {
+      const click = confirmationClickOf(b);
+      if (click instanceof Response) return click;
+      if (!click.connectionId) return json({ error: "connectionId required" }, 400);
+      return json(await dO.approveConfirmation(click.id, click.actorIds, click.connectionId, systemClock()));
+    }
     case "/config/confirmations/consume": {
       const click = confirmationClickOf(b);
       if (click instanceof Response) return click;
-      const outcome = await dO.consumeConfirmation(click.id, click.actorIds, systemClock());
+      const outcome = await dO.consumeConfirmation(click.id, click.actorIds, systemClock(), click.connectionId);
       console.log(`[config/confirmations/consume] ${click.id} ${consumeWord(outcome)}`);
       return json(outcome);
     }
     case "/config/confirmations/cancel": {
       const click = confirmationClickOf(b);
       if (click instanceof Response) return click;
-      const outcome = await dO.cancelConfirmation(click.id, click.actorIds);
+      const outcome = await dO.cancelConfirmation(click.id, click.actorIds, click.connectionId);
       console.log(`[config/confirmations/cancel] ${click.id} ${"ok" in outcome ? "cancelled" : outcome.refused}`);
       return json(outcome);
     }

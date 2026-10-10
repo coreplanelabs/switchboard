@@ -89,7 +89,12 @@ describe("CLI_CALLER — the local operator", () => {
     expect(CLI_CALLER).toEqual({
       kind: "cli",
       id: "cli:local",
-      actor: { kind: "user", id: "cli:local", grants: { actions: "all", channels: "all", repos: "all" } },
+      actor: {
+        kind: "user",
+        id: "cli:local",
+        grants: { actions: "all", channels: "all", repos: "all" },
+        standingConsent: "all",
+      },
     });
   });
 });

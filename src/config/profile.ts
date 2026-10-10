@@ -109,7 +109,7 @@ export const CONFIRM_CLASSES: readonly ConfirmClass[] = ["write", "destructive"]
  *  spelled here rather than imported: a type import still drags the registry's
  *  whole graph into every program that compiles this near-leaf module, the
  *  Workers included. The door indexes the ladder with the registry's type
- *  (`routedRunsAtOnce`), so a class added there without a rung here fails to
+ *  (`commandConfirmationGate`), so a class added there without a rung here fails to
  *  compile at the one place the two vocabularies meet. */
 export type ConfirmLadderClass = "read" | "exec" | "write" | "destructive";
 

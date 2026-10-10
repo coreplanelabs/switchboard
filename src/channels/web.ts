@@ -6,7 +6,7 @@ import type { Capabilities } from "../core/capabilities.js";
 import { NO_NAMES, namesOf, type NameDirectory } from "../core/names.js";
 import { acceptsUndefined, type CommandDef, type CommandInvoker } from "../core/commandRegistry.js";
 import { chatForm, helpRows } from "../core/commandSurface.js";
-import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
+import { dispatch as realDispatch, dispatchClick, type CoreDeps } from "../core/dispatcher.js";
 import { startRequestRoot } from "../core/requestTrace.js";
 import type { RunRegistry } from "../core/runRegistry.js";
 import type { RunRecordView, RunsService, RunView } from "../core/runsService.js";
@@ -775,12 +775,30 @@ export function createWebChatHandler(
       req.destroy();
       return;
     }
-    let text: string;
+    let text = "";
+    let click: { kind: "confirm" | "cancel"; id: string } | undefined;
     try {
-      const parsed = JSON.parse(read.body) as { text?: unknown };
-      if (typeof parsed !== "object" || parsed === null || typeof parsed.text !== "string" || parsed.text.trim() === "")
-        throw new Error("shape");
-      text = parsed.text;
+      const parsed = JSON.parse(read.body) as { text?: unknown; confirmation?: unknown };
+      if (parsed && typeof parsed.confirmation === "object" && parsed.confirmation !== null) {
+        const value = parsed.confirmation as Record<string, unknown>;
+        if (
+          Object.keys(parsed).some((key) => key !== "confirmation") ||
+          Object.keys(value).some((key) => key !== "kind" && key !== "id") ||
+          (value.kind !== "confirm" && value.kind !== "cancel") ||
+          typeof value.id !== "string"
+        )
+          throw new Error("shape");
+        click = { kind: value.kind, id: value.id };
+      } else {
+        if (
+          typeof parsed !== "object" ||
+          parsed === null ||
+          typeof parsed.text !== "string" ||
+          parsed.text.trim() === ""
+        )
+          throw new Error("shape");
+        text = parsed.text;
+      }
     } catch {
       answer(400, { error: "`text` is required and must be a non-empty string" });
       return;
@@ -815,7 +833,20 @@ export function createWebChatHandler(
     );
     // Started, not awaited: the dispatcher counts the run from its first line,
     // so the shutdown drain waits for it like any run; its errors are its own.
-    const done = dispatchFn(deps.core, msg, io, { trace }).catch((err) => {
+    if (click) {
+      const row = await deps.core.confirmations?.get?.(click.id);
+      if (
+        !row ||
+        row.message.threadKey !== threadKey ||
+        (row.message.authenticatedAs ?? row.message.userId) !== ctx.actor.id
+      ) {
+        answer(404, { error: "offer unavailable" });
+        return;
+      }
+    }
+    const done = (
+      click ? dispatchClick(deps.core, { ...click, actor: ctx.actor, io }) : dispatchFn(deps.core, msg, io, { trace })
+    ).catch((err) => {
       warn(`dispatch: ${err instanceof Error ? err.message : String(err)}`);
     });
     // The run's creation raced against completion: a request the pipeline
@@ -844,6 +875,8 @@ export function createWebChatHandler(
       ...(offer
         ? {
             offer: {
+              id: offer.id,
+              expiresAt: offer.expiresAt,
               line: offer.line,
               ...(offer.risk ? { risk: offer.risk } : {}),
               ...(offer.question ? { question: offer.question.text } : {}),

@@ -1,3 +1,4 @@
+import { preapprovedCaller } from "../testing/callers.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -62,7 +63,16 @@ function deps(): FastPathDeps & { runRegistry: RunRegistry } {
     warn: () => {},
     audit: () => {},
   });
-  return { config, runRegistry: registry, runHistoryWriter: new NullRunHistoryWriter(), clock: () => NOW, commands };
+  return {
+    config,
+    runRegistry: registry,
+    runHistoryWriter: new NullRunHistoryWriter(),
+    clock: () => NOW,
+    commands: {
+      ...commands,
+      invoke: (id, input, caller, trace) => commands.invoke(id, input, preapprovedCaller(caller), trace),
+    },
+  };
 }
 
 const msg = (text: string, user = "slack:UADMIN"): IncomingMessage => ({
@@ -512,22 +522,22 @@ describe("runChatCommand — the recording rule widens to a routed decision with
   it("an inline-run command is still announced to the channel when it carries an outcome — the confirmed `mcp add` is the run it always was", async () => {
     expect(isInlineRunCommand("mcp.add")).toBe(true);
     const d = deps();
-    const { message, io, ending, trace } = request("mcp add acme https://mcp.example.test/sse", d);
+    const { message, io, ending, trace } = request("mcp add acme --url https://mcp.example.test/sse", d);
     const started = vi.fn();
     io.runStarted = started;
     await runChatCommand(
       d,
       message,
       io,
-      { kind: "invoke", id: "mcp.add", input: { args: ["acme", "https://mcp.example.test/sse"], options: {} } },
+      { kind: "invoke", id: "mcp.add", input: { args: ["acme"], options: { url: "https://mcp.example.test/sse" } } },
       ending,
       trace,
       {
         route: {
           ...HAND_BACK,
           command: "mcp.add",
-          input: { args: ["acme", "https://mcp.example.test/sse"], options: {} },
-          receipt: "mcp add acme https://mcp.example.test/sse",
+          input: { args: ["acme"], options: { url: "https://mcp.example.test/sse" } },
+          receipt: "mcp add acme --url https://mcp.example.test/sse",
           reason: "confirmed after offer",
           outcome: "confirmed",
         },

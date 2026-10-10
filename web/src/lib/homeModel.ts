@@ -32,23 +32,6 @@ export function classifyReply(reply: string): InlineReply {
   return { kind: "inline", text };
 }
 
-/** The click row as the send response carries it (record 0044's offer): the
- *  full bound line, the command's risk line when it declares one, and a
- *  question's sentence on a did-you-mean offer (record 0054). */
-export interface OfferReply {
-  line: string;
-  risk?: string;
-  question?: string;
-}
-
-/** What the composer does with a click row (record 0069: no chat surface is
- *  handed a line to retype — the row's line FILLS the box, ready to send):
- *  the line is the command, and the hint beside the box is the question's
- *  sentence, else the risk line, else `Enter runs it`. */
-export function offerFill(offer: OfferReply): { command: string; hint: string } {
-  return { command: offer.line, hint: offer.question ?? (offer.risk || "Enter runs it") };
-}
-
 /** The run's stream and stop routes from the view path a `202` carries
  *  (`/runs/<id>?t=<token>`): the same two URLs a live run seed carries. */
 export function liveUrls(viewPath: string): { id: string; eventsUrl: string; stopUrl: string } | null {

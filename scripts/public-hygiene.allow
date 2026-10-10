@@ -105,7 +105,6 @@ src/deploy/wranglerTemplate.test.ts	'{ "name": "switchboard", "account_id": "123
 
 # The MCP protocol's own version identifier is a date string.
 src/channels/mcp.test.ts	const res = await handleMcpRequest(rpc("initialize", { protocolVersion: "2025-06-18" }), deps, { auth: good });
-src/channels/mcp.ts	const PROTOCOL_VERSION = "2025-06-18";
 src/mcp/client.ts	export const MCP_PROTOCOL_VERSION = "2025-06-18";
 
 # The published npm package name is required in the local Codex MCP command and the browser's setup hint.
@@ -228,3 +227,4 @@ docs/decisions/0062-the-requester-authors-the-commits-the-bot-commits-and-opens-
 src/channels/adminCoordinator.test.ts	issues: [issue(9, "U1: anything (unit)")],
 src/channels/adminCoordinator.test.ts	{ instanceId: INSTANCE.id, unit: "U1", slug: "u1", branch: generated.branch, dependsOn: [], rounds: [] },
 src/channels/adminCoordinator.test.ts	expect(await call(gen, "unit-start", { parentInstanceId: INSTANCE.id, unit: "U1" })).toEqual({
+src/channels/mcpApprovals.test.ts	const APPROVAL_PROTOCOL_VERSION = "2026-07-28";

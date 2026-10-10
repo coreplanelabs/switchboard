@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import type { HomeParentTurnSeed, HomeTurnSeed, PlaneChatSeed } from "@core/channels/webSeed.js";
+import ConfirmationPrompt from "../home/ConfirmationPrompt.vue";
 import ChatComposer from "../home/ChatComposer.vue";
 import PersonTurn from "../home/PersonTurn.vue";
 import AssistantTurn from "../home/AssistantTurn.vue";
@@ -8,14 +9,14 @@ import ParentTurn from "../home/ParentTurn.vue";
 import SilentTurn from "../home/SilentTurn.vue";
 import MarkdownText from "../MarkdownText.vue";
 import { stripSlash } from "../../lib/slashCompleter";
-import { classifyReply, composerMode, liveUrls, matchSteer, offerFill, shouldFollow } from "../../lib/homeModel";
+import { classifyReply, composerMode, liveUrls, matchSteer, shouldFollow } from "../../lib/homeModel";
 import { formatDuration } from "../../lib/format";
 
 // The plane's chat column (record 0070; orchestration-plane.md item 11): the
 // existing web chat — the same composer, turns and cards `/threads` mounts —
 // bound to the viewer's orchestrator thread. The column holds no rule the home
 // page does not: a `202` mounts a live turn on the run's stream, a `200` is a
-// click row's offer (fills the composer), a steer acknowledgement or an
+// saved click row's offer, a steer acknowledgement or an
 // inline turn.
 // The clock is the page's: both halves read the seed's one `at`, so a row the
 // chat cites is the row the panel paints.
@@ -78,13 +79,18 @@ const text = ref("");
 const hint = ref<string | undefined>(undefined);
 const mode = computed(() => composerMode(liveItem.value !== null, text.value));
 const sending = ref(false);
+const pendingOffer = ref<{ id: string; line: string; risk?: string; question?: string }>();
 watch(text, () => {
   if (hint.value && text.value === "") hint.value = undefined;
 });
 
-async function submit(): Promise<void> {
+async function submit(confirmation?: { kind: "confirm" | "cancel"; id: string }): Promise<void> {
   if (sending.value) return;
-  const body = stripSlash(text.value.trim(), props.chat.commands);
+  const body = confirmation
+    ? confirmation.kind === "confirm"
+      ? "Confirm saved action"
+      : "Cancel saved action"
+    : stripSlash(text.value.trim(), props.chat.commands);
   if (body === "") return;
   const person = reactive<Item & { kind: "person" }>({
     key: key("p"),
@@ -102,19 +108,20 @@ async function submit(): Promise<void> {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: body }),
+      body: JSON.stringify(confirmation ? { confirmation } : { text: body }),
     });
     const payload = (await res.json().catch(() => ({}))) as {
       runId?: string;
       viewPath?: string;
       reply?: string;
-      offer?: { line?: string; risk?: string; question?: string };
+      offer?: { id?: string; line?: string; risk?: string; question?: string };
       error?: string;
     };
     if (res.status === 202 && typeof payload.viewPath === "string" && typeof payload.runId === "string") {
       const urls = liveUrls(payload.viewPath);
       if (!urls) throw new Error("the run's view path was not one");
       person.pending = false;
+      pendingOffer.value = undefined;
       items.push({
         key: key("a"),
         kind: "assistant",
@@ -131,17 +138,14 @@ async function submit(): Promise<void> {
       });
       return;
     }
-    if (res.ok && payload.offer && typeof payload.offer.line === "string") {
-      // The click row (record 0044): the offered line fills the composer —
-      // the box is the affordance, and sending the line runs it as typed.
+    if (res.ok && payload.offer && typeof payload.offer.id === "string" && typeof payload.offer.line === "string") {
       person.pending = false;
-      const fill = offerFill({ line: payload.offer.line, ...payload.offer });
-      text.value = fill.command;
-      hint.value = fill.hint;
+      pendingOffer.value = { ...payload.offer, id: payload.offer.id, line: payload.offer.line };
       return;
     }
     if (res.ok && typeof payload.reply === "string") {
       person.pending = false;
+      pendingOffer.value = undefined;
       const reply = classifyReply(payload.reply);
       if (reply.kind === "inline") {
         items.push({ key: key("i"), kind: "inline", text: reply.text });
@@ -232,7 +236,16 @@ watch(
       </ol>
     </div>
     <div class="pt-2">
-      <ChatComposer v-model="text" :mode="mode" :hint="hint" :commands="chat.commands" @submit="submit" @stop="stop" />
+      <ConfirmationPrompt v-if="pendingOffer" :offer="pendingOffer" :busy="sending" @choose="submit" />
+      <ChatComposer
+        v-else
+        v-model="text"
+        :mode="mode"
+        :hint="hint"
+        :commands="chat.commands"
+        @submit="submit"
+        @stop="stop"
+      />
     </div>
   </div>
 </template>

@@ -1,3 +1,4 @@
+import { preapprovedCaller } from "../testing/callers.js";
 import { describe, expect, it, vi } from "vitest";
 import { ALL_GRANTS } from "../authz/grants.js";
 import type { Actor } from "../authz/types.js";
@@ -46,7 +47,7 @@ async function setup(over: Partial<ReviewCommandDeps["review"]> = {}) {
   registerReviewCommands(registry);
   const deps: ReviewCommandDeps = { review: { abridger: async () => abridger, runs: async () => runs, ...over } };
   const invoke = (input: { args?: unknown[]; options?: Record<string, unknown> }, as: Actor = admin) =>
-    registry.invoke("review.abridge", input, caller(as), deps);
+    registry.invoke("review.abridge", input, preapprovedCaller(caller(as)), deps);
   return { store, abridger, invoke, registry, deps };
 }
 
@@ -221,5 +222,12 @@ describe("review.abridge", () => {
     expect(under({ readingDiffAbridge: false })).toBeUndefined();
     expect(under({})).toBeDefined();
     expect(ReviewAbridger).toBeDefined();
+  });
+  it("review.status reads progress without starting or recomputing the abridgement", async () => {
+    const f = await setup();
+    const starting = vi.spyOn(f.abridger, "abridge");
+    const result = await f.registry.invoke("review.status", { args: ["rev-1"] }, caller(admin), f.deps);
+    expect(result).toMatchObject({ ok: true, value: { id: "rev-1", state: "absent" } });
+    expect(starting).not.toHaveBeenCalled();
   });
 });

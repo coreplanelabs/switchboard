@@ -4,6 +4,7 @@ import type { HomeParentTurnSeed, HomeTurnSeed } from "@core/channels/webSeed.js
 import { retentionSentence } from "@core/channels/webSeed.js";
 import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 import AppShell from "../components/AppShell.vue";
+import ConfirmationPrompt from "../components/home/ConfirmationPrompt.vue";
 import ChatComposer from "../components/home/ChatComposer.vue";
 import ConversationRail from "../components/home/ConversationRail.vue";
 import EmptyState from "../components/home/EmptyState.vue";
@@ -23,7 +24,6 @@ import {
   conversationTitle,
   liveUrls,
   matchSteer,
-  offerFill,
   RAIL_PREF,
   RAIL_WIDTH,
   railPrefs,
@@ -119,12 +119,24 @@ function pick(s: string): void {
   void submit();
 }
 
+const pendingOffer = ref<{ id: string; line: string; risk?: string; question?: string; expiresAt?: number }>();
+
+type ConfirmationChoice = { kind: "confirm" | "cancel"; id: string };
+
 async function submit(): Promise<void> {
-  if (!seed || sending.value) return;
-  // A command typed through the palette keeps its slash while it is being
-  // completed; the bot reads `<group> <verb>` at the start of a message.
+  if (!seed) return;
+  // The palette keeps its slash while completing; the bot reads the command words.
   const body = stripSlash(text.value.trim(), seed.commands);
-  if (body === "") return;
+  await send(body, { text: body });
+}
+
+async function submitConfirmation(confirmation: ConfirmationChoice): Promise<void> {
+  const body = confirmation.kind === "confirm" ? "Confirm saved action" : "Cancel saved action";
+  await send(body, { confirmation });
+}
+
+async function send(body: string, request: { text: string } | { confirmation: ConfirmationChoice }): Promise<void> {
+  if (!seed || sending.value || body === "") return;
   // The reactive proxy, not the raw object: the turn is mutated after the POST answers.
   const person = reactive<Item & { kind: "person" }>({
     key: key("p"),
@@ -143,19 +155,20 @@ async function submit(): Promise<void> {
       method: "POST",
       credentials: "same-origin",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: body }),
+      body: JSON.stringify(request),
     });
     const payload = (await res.json().catch(() => ({}))) as {
       runId?: string;
       viewPath?: string;
       reply?: string;
-      offer?: { line?: string; risk?: string; question?: string };
+      offer?: { id?: string; line?: string; risk?: string; question?: string; expiresAt?: number };
       error?: string;
     };
     if (res.status === 202 && typeof payload.viewPath === "string" && typeof payload.runId === "string") {
       const urls = liveUrls(payload.viewPath);
       if (!urls) throw new Error("the run's view path was not one");
       person.pending = false;
+      pendingOffer.value = undefined;
       // A fresh conversation exists on the server now: the address names it,
       // so a reload finds it, without a load or a history entry (rule 3).
       if (browser.pathname() === "/threads") browser.replaceUrl(`/threads/${encodeURIComponent(conversation)}`);
@@ -175,17 +188,14 @@ async function submit(): Promise<void> {
       });
       return;
     }
-    if (res.ok && payload.offer && typeof payload.offer.line === "string") {
-      // The click row (record 0044): the offered line fills the composer —
-      // the box is the affordance, and sending the line runs it as typed.
+    if (res.ok && payload.offer && typeof payload.offer.id === "string" && typeof payload.offer.line === "string") {
       person.pending = false;
-      const fill = offerFill({ line: payload.offer.line, ...payload.offer });
-      text.value = fill.command;
-      hint.value = fill.hint;
+      pendingOffer.value = { ...payload.offer, id: payload.offer.id, line: payload.offer.line };
       return;
     }
     if (res.ok && typeof payload.reply === "string") {
       person.pending = false;
+      pendingOffer.value = undefined;
       const reply = classifyReply(payload.reply);
       if (reply.kind === "inline") {
         items.push({ key: key("i"), kind: "inline", text: reply.text });
@@ -499,7 +509,7 @@ const elsewhereLine = !elsewhere
             :commands="seed.commands"
             autofocus
             sweep-on-mount
-            @submit="submit"
+            @submit="submit()"
             @stop="stop"
           />
         </EmptyState>
@@ -552,9 +562,15 @@ const elsewhereLine = !elsewhere
           >
           <template v-else-if="elsewhere.surface !== 'web'">Reply there.</template>
         </p>
+        <ConfirmationPrompt
+          v-if="pendingOffer && !elsewhere"
+          :offer="pendingOffer"
+          :busy="sending"
+          @choose="submitConfirmation"
+        />
         <!-- With a transcript, the composer stays at the foot; the page scrolls under it. -->
         <div
-          v-else-if="!empty"
+          v-if="!empty && !elsewhere && !pendingOffer"
           class="composer-dock sticky bottom-0 z-10 -mx-3 mt-auto bg-default/85 px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur sm:-mx-5 sm:px-5"
         >
           <Transition name="sb-rise">
@@ -573,7 +589,7 @@ const elsewhereLine = !elsewhere
             :hint="hint"
             :commands="seed.commands"
             autofocus
-            @submit="submit"
+            @submit="submit()"
             @stop="stop"
           />
         </div>
