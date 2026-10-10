@@ -9,6 +9,8 @@ pattern: Wide event (one fact row per terminal run, every metric a query over it
 
 > **Amended 2026-10-09, while proposed, after a correctness review (one blocking and nine major findings, recorded on #2899).** The changes, each at the section it touches: a run row is written at the run's **terminal close**, so a same-id restart no longer freezes an intermediate result (amends 0063's emission rule); the workspace facts are a typed setup result beside the existing `WorkspaceBinding` and cover every executor path, including a same-id reallocation; the seed attempt is recorded, so "seed failed" is countable; the setup reason has its own column, so a cancellation keeps it; the outcome order puts the terminal status first and decides every answer ending; the reader is eight queries, not six; emission is promised as at-most-once and best effort, with the store's failed writes counted; the row widens in two deploy steps; the review row takes its target from the run, not from the post; every aggregate filters on finish time. A second review of this correction (three major, one minor) added the emission latch, the guard against a late `restarting` write, the store sweep that closes an unclaimed restart (fenced on the deadline and on no live claim for the id, after a third review), the setup result in place of binding fields, and the failed-write count in place of a completeness ratio. The title changed because it said "six queries"; the file keeps its path, which is the record's identity.
 
+> **Amended 2026-10-10, while proposed, after mapping every executor path in the code before the setup-result unit.** The UID refusal named below was replaced in #2904: UID exhaustion now answers `UID reservation could not be verified` (`reason: workload-unverified`) and capacity answers `resident workload is full` (`workload-full`), so the fallback words follow the resident Worker's current refusal classes. `uid_exhausted` is dropped: no current code path produces it, and the hand-built week's UID rows map to `workload_unverified`. `WorkspaceBinding` lives on the ledger row (`state.binding`), not on the record. `restored` comes from the bot's own restore wait, not a Worker field. The setup result's seed field is named `seeding`, because `RunRecord.seed` already means the run's channel, parent or session seed.
+
 **The ask.** Decide (the maintainer, before any build unit is seeded): adopt this data model and vocabulary as an amendment to [0063](0063-every-finished-run-writes-one-metrics-point-and-a-metrics-page-reads-the-trend.md), so a review dashboard with a Usage tab and a System health tab can be built on `/metrics`. Written for an engineer who knows the run record and the dispatcher and has not read 0063. The tracker is #2899; the target layout and the numbers below are recorded there.
 
 Success is judged on:
@@ -25,7 +27,7 @@ The hand-built version of this dashboard for one week (594 review runs) needed a
 ## Today at `b52049366`
 
 - **A run id can close twice, and today's metrics rule keeps the first close.** When a run loses its workspace mid-flight, `closeResumedRow` (`src/core/dispatch/admission.ts`) writes a non-provisional `interrupted` record with `restarting: true`; the successor keeps the same id and finishes it (`src/core/dispatch/reattach.ts`). `pointTurnsFinal` (`src/core/runMetrics.ts`) ignores `restarting`, so the intermediate close writes the run's metrics row and the eventual result writes none.
-- **The workspace is typed, but not what was asked for or why it differs.** `WorkspaceBinding` (`src/execution/factory.ts`) is persisted on the record with the `backend` (`resident`, `sandbox`, `local`, `e2b`), the ref and a sandbox's seed identity. Why a sandbox was used exists only as free text: the dispatcher's `cold_sandbox` run note (`src/core/dispatcher.ts`), the resident Worker's refusal sentence (`"pool-recycle-required: all UIDs spent …"`, `deploy/cloudflare-resident/worker.ts`) and `seed failed (…)` (`src/execution/factory.ts`).
+- **The workspace is typed, but not what was asked for or why it differs.** `WorkspaceBinding` (`src/execution/factory.ts`) holds the `backend` (`resident`, `sandbox`, `local`, `e2b`), the ref and a sandbox's seed identity; it is ledger-row state (`state.binding`, written at the claim in `src/core/dispatch/run.ts`), not a field of the run record. Why a sandbox was used reaches the dispatcher only as `ExecutorSelection.note`, a sentence (`src/execution/factory.ts`), published as the `cold_sandbox` run note (`src/core/dispatcher.ts`). The resident Worker's refusals carry a typed `reason` for some classes (`workload-full`, `workload-unverified`, `workspace-preserved`, `draining`, `image-stale`), but the bot's `attachRefusal` (`src/execution/resident.ts`) keeps only the sentence.
 - **The row is 16 of 20 text columns and 20 of 20 numbers, and its validator requires the exact width.** `POINT_COLUMNS` names 16 blobs and 20 doubles; `isRunMetricsPoint` rejects any other tuple length, and the record store refuses the whole put when the point is invalid (`deploy/cloudflare-memory/worker.ts`).
 - **"failed" mixes a refusal, an infrastructure error, a lost workspace and a failed delivery.** `RunStatus` is `completed | stopped_soft | stopped_hard | failed | interrupted` (`src/core/runRecord.ts`), and `RUN_FAILURE_KINDS` names four failures. An ordinary time budget is a `completed` run with answer ending `time_budget` (`src/core/answerOutcome.ts`: `answered`, `time_budget`, `turn_budget`, `interrupted`, `hard_stop`, `soft_stop`, `unknown`).
 - **Emission is at most once and best effort.** The store writes the point after the commit, catches any error and never retries (`writeMetricsPoint`, `deploy/cloudflare-memory/worker.ts`; `runMetricsSink.ts`).
@@ -61,7 +63,7 @@ A review run on a resident during the week the resident fleet was being replaced
 1. The dispatcher attaches the run to a warm resident. The binding records `backend: resident`; the setup result records `requested: resident` and no reason.
 2. A deploy replaces the resident while the run is in its third model turn. The run cannot reattach; `closeResumedRow` writes `interrupted`, `restarting: true`.
 3. The record store commits that close. Under this design `pointTurnsFinal` sees `restarting` and writes no row; under today's rule this is the row that would be kept.
-4. The next generation claims the run under the same id. Reattach is refused, so it allocates a sandbox seeded from the resident snapshot. It replaces the binding (`backend: sandbox`) and the setup result (`requested: resident`, `seed: snapshot`, `reason: reattach_refused`, `reallocated: true`).
+4. The next generation claims the run under the same id. Reattach is refused, so it allocates a sandbox seeded from the resident snapshot. Its claim carries `restartOf`, so it writes a fresh binding (`backend: sandbox`) and setup result (`requested: resident`, `seeding: snapshot`, `reason: reattach_refused`, `reallocated: true`).
 5. The review submits `request_changes` with one `major` finding. The run ends `completed`, answer ending `answered`, at 00:06 UTC on Friday.
 6. The terminal close commits. `pointOf` writes the run row: `outcome = success`, `workspace = sandbox_snapshot`, `setup reason = reattach_refused`, `surface = slack`, `finished at = 00:06 Friday`. `reviewRowOf` writes the review row from the record's own target: repository, pull request number, verified head, `changes_requested`, findings 1, major 1.
 7. A later abridged-diff re-put of the same record writes nothing: the run's emission latch is set.
@@ -106,20 +108,20 @@ Delivery stays at most once and best effort: the sink write follows the commit a
 | Field | Values | Set when |
 |---|---|---|
 | `requested` | `resident`, `cold`, `blank` | always: what the run's repository and profile asked for |
-| `seed` | `snapshot`, `fresh_no_snapshot`, `fresh_after_seed_failure` | the binding's `backend` is `sandbox` and `requested` is `resident` |
-| `restored` | boolean | the binding's `backend` is `resident` and the resident's attach answer says it restored a snapshot |
+| `seeding` | `snapshot`, `fresh_no_snapshot`, `fresh_after_seed_failure` | the binding's `backend` is `sandbox` and `requested` is `resident` |
+| `restored` | boolean | the binding's `backend` is `resident` and the bot held the resident's restore wait before attaching (`selectExecutor`'s restore branch in `src/execution/factory.ts`) |
 | `reason` | a fallback word or a lost word, below | the run did not get what it requested |
 | `reallocated` | boolean | a same-id successor replaced the binding after reattach was refused |
 
 A run with a lost word has a setup result and no binding, so nothing claims a reattachable executor. An agent that asks for no workspace has neither, which keeps "asked for nothing" distinct from "lost its workspace".
 
-**Fallback words** say why a sandbox was used when a resident was requested: `uid_exhausted`, `fleet_draining`, `deploy_fence`, `workspace_preserved`, `settlement_pending`, `not_resident` (cold registration or not onboarded), `resident_unreachable` (probe failed or the outage breaker is open), `restore_failed`, `resident_not_serviceable`, `reattach_refused`, `fallback_other`. **Lost words** say why there was no workspace: `sandbox_start_timeout`, `stopped_in_drain`, `resident_claim_error`, `ref_unresolved` (needs a ref and the repository has no default), `registration_mismatch`, `seed_claim_refused` (a claimed seed refused a fresh start), `lost_other`. The two sets are disjoint, each with its own unknown word.
+**Fallback words** say why a sandbox was used when a resident was requested, one per resident refusal class or bot-side decision: `workload_full`, `workload_unverified` (including an unverifiable UID reservation, how UID exhaustion answers today), `fleet_draining`, `deploy_fence`, `workspace_preserved`, `settlement_pending`, `recreate_in_progress`, `image_stale`, `memory_pressure`, `owner_unverified` (the workspace or pool owner could not be verified), `attach_failed`, `not_resident` (cold registration or not onboarded), `resident_unreachable` (probe failed or the outage breaker is open), `restore_failed`, `resident_not_serviceable`, `reattach_refused`, `fallback_other`. **Lost words** say why there was no workspace: `sandbox_start_timeout`, `stopped_in_drain`, `resident_claim_error`, `ref_unresolved` (needs a ref and the repository has no default), `registration_mismatch`, `seed_claim_refused` (a claimed seed refused a fresh start), `lost_other`. The two sets are disjoint, each with its own unknown word.
 
-The resident Worker's refusal answer gains `code`, one of the fallback words, beside the sentence it sends today; its attach answer gains `restored`. The dispatcher maps the code; an absent or unknown code is `fallback_other`, never a guess from the sentence, so the Worker and the bot deploy in either order. A same-id reallocation replaces both the binding and the setup result, with `reallocated: true` and the reason for the newest allocation. **Cold start** is derived (the binding's `backend` is `sandbox` while `requested` is `resident`), after OpenTelemetry's `faas.coldstart`; it is not stored. Whether `restored` counts as warm is a report-side mapping.
+The resident Worker's refusal answer gains `code`, one of the fallback words, beside the sentence and `reason` it sends today; `code` is what separates `settlement_pending` from `workspace_preserved` and `deploy_fence` from `fleet_draining`, which today share a `reason`. `attachRefusal` carries the code onto the error it throws, `ExecutorSelection` carries the setup result beside its `note`, and two failures that are plain `Error`s today (a refused resident claim and a claimed seed's refusal) become typed errors. The dispatcher maps the code; an absent or unknown code is `fallback_other`, never a guess from the sentence, so the Worker and the bot deploy in either order. A same-id reallocation is a successor claim with `restartOf` set: it writes a fresh binding and a fresh setup result with `reallocated: true` and the reason for the newest allocation. **Cold start** is derived (the binding's `backend` is `sandbox` while `requested` is `resident`), after OpenTelemetry's `faas.coldstart`; it is not stored. Whether `restored` counts as warm is a report-side mapping.
 
 Every executor path, with mutually exclusive counts from the hand-built week where it had them, is in [the appendix](#appendix-every-executor-path).
 
-**Invariants.** A run that asked for a workspace has a setup result with `requested` set. `reason` is a fallback word only when the binding's `backend` is `sandbox` and `requested` is `resident`; it is a lost word only when there is no binding. `seed` is set only with a fallback word; `restored` only with a resident binding. No code path reads note text to fill a field. The setup result and the binding are persisted before the run's first model turn; if that write fails, the run ends through the existing failed-record path with a setup result carrying `lost_other` and no binding.
+**Invariants.** A run that asked for a workspace has a setup result with `requested` set. `reason` is a fallback word only when the binding's `backend` is `sandbox` and `requested` is `resident`; it is a lost word only when there is no binding. `seeding` is set only with a fallback word; `restored` only with a resident binding. No code path reads note text to fill a field. The setup result and the binding are persisted before the run's first model turn; if that write fails, the run ends through the existing failed-record path with a setup result carrying `lost_other` and no binding.
 
 **Failure modes.** A new refusal without a code shows as `fallback_other`, its own bar, so growth is visible rather than misfiled. A run that dies after attach and before the setup write has neither field; its row shows an empty workspace and counts under "workspace not recorded".
 
@@ -165,9 +167,9 @@ A **failure** is work that ran and said no; an **error** is the system breaking.
 |---|---|
 | `resident` | `resident` |
 | `resident`, `restored` | `resident_restored` |
-| `sandbox`, seed `snapshot` | `sandbox_snapshot` |
-| `sandbox`, seed `fresh_no_snapshot` | `sandbox_fresh` |
-| `sandbox`, seed `fresh_after_seed_failure` | `sandbox_seed_failed` |
+| `sandbox`, seeding `snapshot` | `sandbox_snapshot` |
+| `sandbox`, seeding `fresh_no_snapshot` | `sandbox_fresh` |
+| `sandbox`, seeding `fresh_after_seed_failure` | `sandbox_seed_failed` |
 | `sandbox`, requested `cold` or `blank` | `sandbox_cold` or `sandbox_blank` |
 | `local`, `e2b` | `local`, `e2b` |
 | no binding, a lost word | `none` |
@@ -202,7 +204,7 @@ One command, `metrics.reviews` with `from` and `to` (at most 90 days), answers o
 
 Quantiles cannot be merged across groups, which is why 2 to 4 are separate. The report states the largest `_sample_interval` it saw; when it is above 1, the reviews-per-pull-request distribution is suppressed, because sampled rows cannot say how many distinct pull requests there were.
 
-The by-design, defect and failure grouping is a constant map in the report: `uid_exhausted`, `resident_unreachable`, `restore_failed`, `resident_not_serviceable` and `fallback_other` map to defect; `fleet_draining`, `deploy_fence`, `workspace_preserved`, `settlement_pending`, `not_resident` and `reattach_refused` to design; every lost word to failure. Requester ids become names at render through the existing directory (`names.person`). The bot caches each answer for five minutes, and for 24 hours when the range ended before today.
+The by-design, defect and failure grouping is a constant map in the report: `workload_full`, `workload_unverified`, `image_stale`, `memory_pressure`, `owner_unverified`, `attach_failed`, `resident_unreachable`, `restore_failed`, `resident_not_serviceable` and `fallback_other` map to defect; `fleet_draining`, `deploy_fence`, `workspace_preserved`, `settlement_pending`, `recreate_in_progress`, `not_resident` and `reattach_refused` to design; every lost word to failure. Requester ids become names at render through the existing directory (`names.person`). The bot caches each answer for five minutes, and for 24 hours when the range ended before today.
 
 Every tile is **good events over total events**:
 
@@ -278,13 +280,14 @@ Counts are the hand-built week's 594 review runs, mutually exclusive; "none seen
 |---|---|---|
 | Warm resident, checkout ready (including a resident serviceable while refreshing, and a ref retried once on the default branch) | 180 | `resident` |
 | Resident restored a snapshot, then attached | 27 | `resident`, `restored` |
-| UIDs spent: sandbox seeded from the snapshot | 262 | `sandbox`, seed `snapshot`, `uid_exhausted` |
-| UIDs spent: seed failed, fresh clone | 46 | `sandbox`, seed `fresh_after_seed_failure`, `uid_exhausted` |
+| UIDs spent (the removed `pool-recycle-required`; today `workload_unverified`): sandbox seeded from the snapshot | 262 | `sandbox`, seeding `snapshot`, `workload_unverified` |
+| UIDs spent, as above: seed failed, fresh clone | 46 | `sandbox`, seeding `fresh_after_seed_failure`, `workload_unverified` |
+| Resident workload full, image stale, memory pressure, recreate in progress, owner unverified, attach failed | none seen | `sandbox`, its fallback word |
 | Fleet drained or fenced: seeded / seed failed | 13 / 3 | `sandbox`, `fleet_draining` or `deploy_fence` |
 | Workspace preserved or settling: seeded / seed failed | 8 / 1 | `sandbox`, `workspace_preserved` or `settlement_pending` |
 | Fell back with no reason recorded | 3 | `sandbox`, `fallback_other` |
-| Cold registration or not onboarded | none seen | `sandbox`, `not_resident` |
-| Probe unreachable or outage breaker open | none seen | `sandbox`, seed `fresh_no_snapshot`, `resident_unreachable` |
+| Cold registration or not onboarded | none seen | `sandbox`, seeding `fresh_no_snapshot`, `not_resident` |
+| Probe unreachable or outage breaker open | none seen | `sandbox`, seeding `fresh_no_snapshot`, `resident_unreachable` |
 | Restore unsupported or failed in transport | none seen | `sandbox`, `restore_failed` |
 | Lifecycle not serviceable, or a degraded build | none seen | `sandbox`, `resident_not_serviceable` |
 | Reattach refused, same id reallocated | not separable that week | newest binding, `reattach_refused`, `reallocated` |
