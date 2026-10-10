@@ -375,12 +375,12 @@ describe("chatCallerFor", () => {
 
   it("carries the message's user as the Actor the table decides on: admin → everything, a plain user → the open chat commands + the unrestricted agents, a machine channel's user → a service actor", async () => {
     const { chatCallerFor } = await import("./commandChat.js");
-    const { ALL_GRANTS, CHAT_OPEN_ACTIONS } = await import("./authz/grants.js");
+    const { CHAT_OPEN_ACTIONS } = await import("./authz/grants.js");
     const config = configStore(ADMIN_YAML);
     expect(chatCallerFor(msg("x", "slack:UADMIN"), config).actor).toEqual({
       kind: "user",
       id: "slack:UADMIN",
-      grants: ALL_GRANTS,
+      grants: { actions: "all", channels: "all", repos: "all" },
       origin: { channelId: "slack:CX", threadKey: "slack:CX:1.0" },
     });
     const plain = chatCallerFor(msg("x", "slack:UX"), config).actor;

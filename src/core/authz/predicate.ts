@@ -27,7 +27,7 @@ import {
 } from "./authorize.js";
 import { holdsRepo, normalizedRepos, repoAccessOf } from "./grantSets.js";
 import { POLICY, resolveGrant, ruleTarget } from "./policy.js";
-import { RESOURCE_KINDS, targetOf, type ResourceAttributes } from "./resource.js";
+import { RESOURCE_KINDS, isOrganizationId, targetOf, type ResourceAttributes } from "./resource.js";
 import type {
   Action,
   Actor,
@@ -98,8 +98,21 @@ function compileCondition(
   grants: Grants,
   selfIds: readonly string[],
   memberOf: ReadonlySet<string>,
+  actor: Actor,
 ): Predicate {
   switch (condition.kind) {
+    case "organization-member":
+      return actor.memberOfOrganizations?.size
+        ? { kind: "organizations-in", organizationIds: actor.memberOfOrganizations }
+        : NONE;
+    case "organization-grant":
+      return grants.organizations === "all" || grants.organizations?.size
+        ? { kind: "organizations-in", organizationIds: grants.organizations }
+        : NONE;
+    case "is-actor":
+      return !actor.viewingAs && !actor.onBehalfOf ? { kind: "user-is", userId: actor.id } : NONE;
+    case "not-viewing-as":
+      return actor.viewingAs ? NONE : ALL;
     case "has-grant": {
       if (grants.actions === "all") return ALL;
       // A placeholder grant depends on the record; without the record it is unknowable → none.
@@ -134,9 +147,15 @@ function compileCondition(
   return NONE;
 }
 
-function compileRule(rule: Rule, grants: Grants, selfIds: readonly string[], memberOf: ReadonlySet<string>): Predicate {
+function compileRule(
+  rule: Rule,
+  grants: Grants,
+  selfIds: readonly string[],
+  memberOf: ReadonlySet<string>,
+  actor: Actor,
+): Predicate {
   if (rule.originVisibility) return NONE;
-  return allOf(rule.when.map((condition) => compileCondition(condition, grants, selfIds, memberOf)));
+  return allOf(rule.when.map((condition) => compileCondition(condition, grants, selfIds, memberOf, actor)));
 }
 
 /** `predicateFor` over an explicit (validated) table; production code calls `predicateFor`. */
@@ -150,7 +169,7 @@ export function predicateWith(
   if (RESOURCE_KINDS[resourceType] && kind === undefined) {
     throw new TypeError(`authz predicate: ${resourceType} is kinded — pass the kind`);
   }
-  const credential = credentialPolicyActor(actor);
+  const credential = credentialPolicyActor(actor, resourceType);
   if (credential)
     return allOf([
       predicateWith(rules, credential, action, resourceType, kind),
@@ -166,7 +185,7 @@ export function predicateWith(
   for (const rule of rules) {
     if (rule.action !== action || ruleTarget(rule) !== target) continue;
     if (rule.actorKinds && !rule.actorKinds.includes(actor.kind)) continue;
-    alternatives.push(compileRule(rule, grants, selfIds, memberOf));
+    alternatives.push(compileRule(rule, grants, selfIds, memberOf, actor));
   }
   return anyOf(alternatives);
 }
@@ -180,11 +199,20 @@ export function predicateFor(actor: Actor, action: Action, resourceType: Resourc
 /** What `matchesPredicate` reads off one record: a `RunListItem`, a `RunView`,
  *  or `attributesOf(resource)` all qualify. A missing `channelVisibility` is
  *  `unknown` — never public. */
-export type PredicateRecord = Pick<ResourceAttributes, "channelId" | "userId" | "repo" | "channelVisibility">;
+export type PredicateRecord = Pick<
+  ResourceAttributes,
+  "channelId" | "userId" | "repo" | "channelVisibility" | "organizationId"
+>;
 
 /** The reference evaluation of a predicate over one record's attributes. */
 export function matchesPredicate(predicate: Predicate, record: PredicateRecord): boolean {
   switch (predicate.kind) {
+    case "organizations-in":
+      return (
+        record.organizationId !== undefined &&
+        isOrganizationId(record.organizationId) &&
+        holds(predicate.organizationIds, record.organizationId)
+      );
     case "none":
       return false;
     case "all":

@@ -746,7 +746,7 @@ describe("callerIdFor — one Access identity → caller id mapping for /api and
     expect((await callerFor({ sub: "op-1" }, opts)).actor).toEqual({
       kind: "user",
       id: "access:op-1",
-      grants: ALL_GRANTS,
+      grants: { actions: "all", channels: "all", repos: "all" },
     });
     // An unlisted browser session: its baseline (the reads and personal chat writes), nothing the adapter added.
     expect((await callerFor(browser, opts)).actor).toEqual({

@@ -299,8 +299,8 @@ defaults:
 # granted once instead of enumerated), `slack:*` every workspace member the bot
 # hears, `http:*` / `mcp:*` every ingress token. `mcp:personal:*` applies only
 # to credentials a signed-in person approved at /settings/connect. Each entry
-# has four axes (`actions`, `channels`, `repos`, `codeRepos`), each a list of names
-# or explicit `all`. Absent actions/channels/repos are empty; omitted codeRepos
+# has five axes (`actions`, `channels`, `repos`, `codeRepos`, `organizations`), each a list of names
+# or explicit `all`. Absent actions/channels/repos/organizations are empty; omitted codeRepos
 # inherits repos. Set codeRepos separately for code access without repo memory
 # ownership. A `slack:` user holds the open chat
 # commands and every unrestricted agent whether listed or not — an entry ADDS to
@@ -323,10 +323,12 @@ defaults:
 #     actions: all                    # holds everything — the org-wide pattern
 #     channels: all
 #     repos: all
+#     organizations: all
 #   slack:U0ADMIN:                    # an admin, spelled out
 #     actions: all
 #     channels: all
 #     repos: all
+#     organizations: all
 #   slack:U0456DEV:
 #     actions: [agent:run:coding, repo:write, friction:write]
 #     repos: [acme/api]                 # the repos this user may use

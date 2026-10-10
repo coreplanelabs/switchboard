@@ -48,6 +48,32 @@ const REPO_ACCESS: Condition = { kind: "repo-access" };
 const ALL_CHANNELS: Condition = { kind: "all-channels" };
 
 export const POLICY: readonly Rule[] = [
+  // Organization membership comes from the authenticated installation issuer.
+  // Credentials require both an action and an explicit organization scope.
+  {
+    action: "organization:read",
+    resource: "organization",
+    actorKinds: ["user"],
+    when: [{ kind: "organization-member" }],
+  },
+  {
+    action: "organization:send",
+    resource: "organization",
+    actorKinds: ["user"],
+    when: [{ kind: "organization-member" }, { kind: "not-viewing-as" }],
+  },
+  {
+    action: "organization:read",
+    resource: "organization",
+    when: [grant("organization:read"), { kind: "organization-grant" }],
+  },
+  {
+    action: "organization:send",
+    resource: "organization",
+    when: [grant("organization:send"), { kind: "organization-grant" }, { kind: "not-viewing-as" }],
+  },
+  // Provider proof and atomic consent remain the linking ceremony's responsibility.
+  { action: "identity:link", resource: "identity", actorKinds: ["user"], when: [{ kind: "is-actor" }] },
   // ── runs ─────────────────────────────────────────────────────────────────
   // A run is readable by a member of its channel, by anyone who sees every
   // channel, or by the user it belongs to.
@@ -303,6 +329,10 @@ export const POLICY: readonly Rule[] = [
 export const ACTOR_KINDS: readonly ActorKind[] = ["user", "service", "schedule", "agent"];
 
 export const CONDITION_KINDS: readonly Condition["kind"][] = [
+  "organization-member",
+  "organization-grant",
+  "is-actor",
+  "not-viewing-as",
   "has-grant",
   "member-of",
   "is-self",
@@ -313,6 +343,9 @@ export const CONDITION_KINDS: readonly Condition["kind"][] = [
 ];
 
 const REQUIRED_ATTRIBUTE: Readonly<Partial<Record<Condition["kind"], AttributeName>>> = {
+  "organization-member": "organizationId",
+  "organization-grant": "organizationId",
+  "is-actor": "userId",
   "member-of": "channelId",
   "is-self": "userId",
   "owner-of": "repo",

@@ -11,6 +11,7 @@ import type { ChannelVisibility, KindOf, Resource, ResourceType } from "./types.
 
 export interface ResourceAttributes {
   readonly channelId?: string;
+  readonly organizationId?: string;
   readonly userId?: string;
   /** `owner/name`. */
   readonly repo?: string;
@@ -41,6 +42,8 @@ export type Target =
   | `config-scope/${"channel" | "user" | "thread" | "org"}`;
 
 export const TARGET_ATTRIBUTES: Readonly<Record<Target, readonly AttributeName[]>> = {
+  organization: ["organizationId"],
+  identity: ["userId"],
   run: ["channelId", "userId", "repo"],
   channel: ["channelId"],
   "memory-scope/org": [],
@@ -59,6 +62,8 @@ export const TARGET_ATTRIBUTES: Readonly<Record<Target, readonly AttributeName[]
 };
 
 export const RESOURCE_TYPES: readonly ResourceType[] = [
+  "organization",
+  "identity",
   "run",
   "channel",
   "memory-scope",
@@ -95,8 +100,20 @@ function scopeId(key: string, prefix: "user" | "channel" | "repo"): string | und
   return key.startsWith(head) && key.length > head.length ? key.slice(head.length) : undefined;
 }
 
+/** Literal organization scope shared by configuration and both evaluators. */
+export function isOrganizationId(value: string): boolean {
+  return value.length > 0 && value.length <= 2048 && /^\P{Cc}+$/u.test(value);
+}
+
 export function attributesOf(resource: Resource): ResourceAttributes {
   switch (resource.type) {
+    case "organization":
+      return {
+        ...(isOrganizationId(resource.id) ? { organizationId: resource.id } : {}),
+        visibility: "unknown",
+      };
+    case "identity":
+      return { userId: resource.id, visibility: "unknown" };
     case "run": {
       const visibility = resource.channelVisibility ?? "unknown";
       return {

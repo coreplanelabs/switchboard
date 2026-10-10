@@ -392,3 +392,57 @@ describe('ownedBy — the "mine" filter is the self set, ANDed onto what the vie
     expect(allOf([])).toEqual({ kind: "all" });
   });
 });
+
+describe("organization and identity predicates", () => {
+  it("matches point decisions for current members, explicit credentials and delegation", () => {
+    const person: Actor = {
+      kind: "user",
+      id: "access:member",
+      grants: { actions: new Set(), channels: new Set(), repos: new Set() },
+      memberOfOrganizations: new Set(["acme"]),
+    };
+    const service: Actor = {
+      kind: "service",
+      id: "http:reader",
+      grants: {
+        actions: new Set(["organization:read"]),
+        channels: new Set(),
+        repos: new Set(),
+        organizations: new Set(["acme"]),
+      },
+    };
+    const actors: readonly Actor[] = [
+      person,
+      service,
+      { ...service, onBehalfOf: person },
+      { ...person, memberOfOrganizations: new Set() },
+      { ...service, grants: { ...service.grants, organizations: undefined } },
+    ];
+    for (const a of actors)
+      for (const action of ["organization:read", "organization:send"]) {
+        const ids = ["acme", "other"];
+        const visible = ids.filter((id) =>
+          matchesPredicate(predicateFor(a, action, "organization"), attributesOf({ type: "organization", id })),
+        );
+        const allowed = ids.filter((id) => authorize(a, action, { type: "organization", id }).allow);
+        expect(visible).toEqual(allowed);
+      }
+    expect(
+      matchesPredicate(predicateFor(person, "organization:send", "organization"), { organizationId: "acme" }),
+    ).toBe(true);
+    expect(matchesPredicate(predicateFor(service, "organization:read", "organization"), {})).toBe(false);
+    for (const a of [
+      person,
+      { ...person, self: [person.id, "slack:UALICE"] },
+      { ...person, viewingAs: { id: "slack:UALICE" } },
+      service,
+    ]) {
+      const ids = [person.id, "slack:UALICE", service.id];
+      expect(
+        ids.filter((id) =>
+          matchesPredicate(predicateFor(a, "identity:link", "identity"), attributesOf({ type: "identity", id })),
+        ),
+      ).toEqual(ids.filter((id) => authorize(a, "identity:link", { type: "identity", id }).allow));
+    }
+  });
+});

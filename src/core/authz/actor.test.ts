@@ -19,7 +19,7 @@ const set = (...names: string[]) => new Set(names);
 const grants = (g: Partial<Grants>): Grants => ({ actions: set(), channels: set(), repos: set(), ...g });
 
 const nativeGrants = parseGrantsConfig({
-  "slack:UADMIN": { actions: "all", channels: "all", repos: "all" },
+  "slack:UADMIN": { actions: "all", channels: "all", repos: "all", organizations: "all" },
   "slack:UMGR": { actions: ["repo:write", "friction:write"] },
   "slack:UDEV": { actions: ["agent:run:coding"] },
   "access:op-1": { actions: ["runs:read", "runs:write", "friction:read", "friction:write"], channels: "all" },

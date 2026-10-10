@@ -206,6 +206,10 @@ describe("authorize: fail-closed", () => {
   /** A resource of the row's target that belongs to someone else, in a channel the actor is not in. */
   function foreign(rule: Rule): Resource {
     switch (ruleTarget(rule)) {
+      case "organization":
+        return { type: "organization", id: "other" };
+      case "identity":
+        return { type: "identity", id: "access:other" };
       case "run":
         return run({ channel: "priv", userId: "slack:UALICE" });
       case "channel":
@@ -563,5 +567,102 @@ describe("issue 516 — memberOf is a directory fact beside the grants", () => {
     expect(authorize(agent, "runs:read", theirs).allow).toBe(true);
     expect(authorize({ ...agent, onBehalfOf: linked }, "runs:read", theirs).allow).toBe(false);
     expect(authorize(agent, "runs:write", theirs).allow).toBe(false);
+  });
+});
+
+describe("organization and identity policy", () => {
+  const resource = { type: "organization", id: "acme" } as const;
+  const person: Actor = {
+    kind: "user",
+    id: "access:person",
+    grants: grants(),
+    memberOfOrganizations: new Set(["acme"]),
+  };
+  const credential: Actor = {
+    kind: "service",
+    id: "mcp:personal:person",
+    grants: {
+      ...grants({ actions: new Set(["organization:read", "organization:send"]) }),
+      organizations: new Set(["acme"]),
+    },
+  };
+  it("admits current proved membership without borrowing linked identity", () => {
+    expect(authorize(person, "organization:send", resource)).toEqual({ allow: true });
+    expect(authorize({ ...person, viewingAs: { id: "slack:UALICE" } }, "organization:send", resource).allow).toBe(
+      false,
+    );
+    expect(authorize({ ...person, viewingAs: { id: "slack:UALICE" } }, "organization:read", resource)).toEqual({
+      allow: true,
+    });
+    expect(
+      authorize(
+        { ...person, memberOfOrganizations: undefined, self: [person.id, "slack:UALICE"] },
+        "organization:send",
+        resource,
+      ).allow,
+    ).toBe(false);
+    expect(authorize(person, "organization:read", { ...resource, id: "other" }).allow).toBe(false);
+    for (const id of ["", "acme\nother", "\u0085", "a".repeat(2049)])
+      expect(
+        authorize({ ...credential, grants: { ...credential.grants, organizations: "all" } }, "organization:read", {
+          ...resource,
+          id,
+        }).allow,
+      ).toBe(false);
+    expect(
+      authorize(
+        {
+          ...credential,
+          grants: grants({ actions: "all", channels: "all", repos: "all" }),
+          self: [credential.id, person.id],
+        },
+        "organization:read",
+        resource,
+      ).allow,
+    ).toBe(false);
+  });
+  it("requires the credential and current person policy on every delegation hop", () => {
+    const bound = { ...credential, onBehalfOf: person };
+    expect(authorize(bound, "organization:send", resource)).toEqual({ allow: true });
+    expect(authorize({ ...bound, grants: grants({ actions: "all" }) }, "organization:send", resource).allow).toBe(
+      false,
+    );
+    expect(
+      authorize(
+        { ...bound, onBehalfOf: { ...person, memberOfOrganizations: new Set() } },
+        "organization:send",
+        resource,
+      ).allow,
+    ).toBe(false);
+    const agent: Actor = {
+      kind: "agent",
+      id: "agent:general",
+      grants: { ...grants({ actions: "all" }), organizations: "all" },
+      onBehalfOf: bound,
+    };
+    expect(authorize(agent, "organization:send", resource)).toEqual({ allow: true });
+    expect(authorize({ ...agent, grants: grants({ actions: "all" }) }, "organization:send", resource).allow).toBe(
+      false,
+    );
+    expect(
+      intersectGrants(credential.grants, { ...grants({ actions: "all" }), organizations: "all" }).organizations,
+    ).toEqual(new Set(["acme"]));
+    expect(intersectGrants(credential.grants, grants({ actions: "all" })).organizations).toEqual(new Set());
+  });
+  it("allows account linking only for the exact authenticated human", () => {
+    const identity = { type: "identity", id: person.id } as const;
+    expect(authorize(person, "identity:link", identity)).toEqual({ allow: true });
+    expect(
+      authorize({ ...person, self: [person.id, "slack:UALICE"] }, "identity:link", { ...identity, id: "slack:UALICE" })
+        .allow,
+    ).toBe(false);
+    expect(authorize({ ...person, viewingAs: { id: "slack:UALICE" } }, "identity:link", identity).allow).toBe(false);
+    expect(authorize({ ...person, onBehalfOf: person }, "identity:link", identity).allow).toBe(false);
+    expect(
+      authorize({ ...credential, grants: { ...credential.grants, actions: "all" } }, "identity:link", {
+        ...identity,
+        id: credential.id,
+      }).allow,
+    ).toBe(false);
   });
 });

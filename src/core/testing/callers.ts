@@ -5,17 +5,18 @@ import type { Caller } from "../commandRegistry.js";
 // id, and an `Actor` holding exactly the grants given — what an adapter would
 // have resolved from config. No production code imports this module.
 
-/** `"all"`, a list of action names, or the full three axes. */
+/** `"all"`, a list of action names, or explicit grant axes. */
 export type CallerGrants = "all" | readonly string[] | Partial<Grants>;
 
 function toGrants(g: CallerGrants): Grants {
-  if (g === "all") return { actions: "all", channels: "all", repos: "all" };
+  if (g === "all") return { actions: "all", channels: "all", repos: "all", organizations: "all" };
   if (Array.isArray(g)) return { ...NO_GRANTS, actions: new Set(g as readonly string[]), channels: "all" };
   const over = g as Partial<Grants>;
   return {
     actions: over.actions ?? new Set(),
     channels: over.channels ?? new Set(),
     repos: over.repos ?? new Set(),
+    ...(over.organizations !== undefined ? { organizations: over.organizations } : {}),
     ...(over.repoAccess !== undefined ? { repoAccess: over.repoAccess } : {}),
   };
 }

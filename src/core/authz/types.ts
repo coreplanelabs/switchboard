@@ -27,6 +27,8 @@ export interface Grants {
   readonly channels: GrantSet;
   /** `owner/name` repos the actor explicitly owns, including repo memory, or every repo. */
   readonly repos: GrantSet;
+  /** Explicit installation organization scope. Absent is empty, including service credentials. */
+  readonly organizations?: GrantSet;
   /** Code access, distinct from memory ownership. Absent inherits the explicit repos axis. */
   readonly repoAccess?: RepoAccess;
 }
@@ -74,12 +76,15 @@ export interface Actor {
    * → nothing: fail-closed, exactly today's behaviour.
    */
   readonly memberOf?: ReadonlySet<string>;
+  /** Current membership proved by the authenticated ingress issuer, never by a linked person. */
+  readonly memberOfOrganizations?: ReadonlySet<string>;
   /**
    * The person an admin's dashboard session is viewing as (record 0053): set
    * beside `onBehalfOf` = that person's actor, so the effective grants are the
    * intersection (the person's) and `self`/`memberOf` are the person's, while
    * `id` stays the admin's. Identity for the audit line and the banner; the
-   * registry door refuses every non-read effect while it is set. No rule reads it.
+   * registry door refuses every non-read effect while it is set. Organization
+   * sends and account linking also refuse a viewing session in the policy table.
    */
   readonly viewingAs?: { readonly id: string; readonly name?: string };
 }
@@ -94,6 +99,8 @@ export type Action = string;
 export type ChannelVisibility = "public" | "private" | "dm" | "machine" | "unknown";
 
 export type Resource =
+  | { readonly type: "organization"; readonly id: string }
+  | { readonly type: "identity"; readonly id: string }
   | {
       readonly type: "run";
       readonly id: string;
@@ -135,6 +142,11 @@ export type ResourceType = Resource["type"];
  *  against one resource and compilable to a store predicate. Adding a member
  *  is a decision-record-level change, never a local convenience. */
 export type Condition =
+  | { readonly kind: "organization-member" }
+  | { readonly kind: "organization-grant" }
+  /** Exact authenticated human id, without delegation, linked aliases or view-as. */
+  | { readonly kind: "is-actor" }
+  | { readonly kind: "not-viewing-as" }
   | { readonly kind: "has-grant"; readonly grant: string }
   /** actor.grants.channels contains resource.channelId (or is "all"), OR the
    *  resource's channel is `public` (a run's stamped `channelVisibility`;
@@ -200,6 +212,7 @@ export type Decision = { readonly allow: true } | { readonly allow: false; reado
 /** What a list-shaped read may return, derived from the rules.
  *  Stores translate it to their own filter; handlers never see it. */
 export type Predicate =
+  | { readonly kind: "organizations-in"; readonly organizationIds: GrantSet }
   | { readonly kind: "none" } // nothing is visible
   | { readonly kind: "all" }
   | { readonly kind: "channels-in"; readonly channelIds: ReadonlySet<string> }

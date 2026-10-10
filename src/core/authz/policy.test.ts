@@ -68,7 +68,53 @@ const commandRow = (action: string, commandId: string, allow: readonly Actor[], 
   },
 });
 
+const organization: Resource = { type: "organization", id: "acme" };
+const orgMember: Actor = { ...A.browser, memberOfOrganizations: new Set(["acme"]) };
+const orgCredential: Actor = {
+  ...A.token,
+  grants: {
+    ...A.token.grants,
+    actions: new Set(["organization:read", "organization:send"]),
+    organizations: new Set(["acme"]),
+  },
+};
 const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> = {
+  "organization:read organization [organization-member] kinds=user": {
+    allow: [[orgMember, organization]],
+    deny: [
+      [A.browser, organization],
+      [orgMember, { type: "organization", id: "other" }],
+    ],
+  },
+  "organization:send organization [organization-member & not-viewing-as] kinds=user": {
+    allow: [[orgMember, organization]],
+    deny: [
+      [A.browser, organization],
+      [{ ...orgMember, viewingAs: { id: "slack:UALICE" } }, organization],
+    ],
+  },
+  "organization:read organization [has-grant(organization:read) & organization-grant]": {
+    allow: [[orgCredential, organization]],
+    deny: [
+      [A.token, organization],
+      [orgCredential, { type: "organization", id: "other" }],
+    ],
+  },
+  "organization:send organization [has-grant(organization:send) & organization-grant & not-viewing-as]": {
+    allow: [[orgCredential, organization]],
+    deny: [
+      [A.token, organization],
+      [{ ...orgCredential, viewingAs: { id: "slack:UALICE" } }, organization],
+    ],
+  },
+  "identity:link identity [is-actor] kinds=user": {
+    allow: [[A.browser, { type: "identity", id: A.browser.id }]],
+    deny: [
+      [A.browser, { type: "identity", id: "slack:UALICE" }],
+      [A.token, { type: "identity", id: A.token.id }],
+      [A.viewingAsIvy, { type: "identity", id: A.viewingAsIvy.id }],
+    ],
+  },
   "credentials:exec command [has-grant(credentials:exec)] kinds=user|service": {
     allow: [
       [A.admin, command("credentials.inspect")],

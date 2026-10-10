@@ -1174,6 +1174,16 @@ describe("run visibility filter — the wire form of an authz Predicate (authori
   const privRow = row("slack:G1", "slack:UBOB", "private", "acme/api");
   const machineRow = row("http:ops", "http:ci", "machine");
 
+  it("refuses organization predicates at the run boundary", () => {
+    expect(toVisibilityFilter({ kind: "organizations-in", organizationIds: new Set(["acme"]) })).toEqual({
+      kind: "none",
+    });
+    expect(toVisibilityFilter({ kind: "user-is", userId: "access:member" })).toEqual({
+      kind: "user-is",
+      userId: "access:member",
+    });
+  });
+
   it("toVisibilityFilter turns sets into sorted arrays and keeps the tree shape", () => {
     const predicate: Predicate = {
       kind: "or",
