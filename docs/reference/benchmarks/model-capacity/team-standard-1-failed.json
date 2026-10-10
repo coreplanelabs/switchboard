@@ -1,0 +1,433 @@
+{
+  "schemaVersion": "model-capacity/1",
+  "scope": "offline real HTTP and compiled proxy; synthetic provider; no deployment",
+  "at": "2026-10-09T23:01:21.807Z",
+  "workload": {
+    "profile": "team",
+    "clients": 20,
+    "turns": 2,
+    "requestKiB": 768,
+    "frameKiB": 128,
+    "baselineMiB": 960,
+    "providerDelayMs": 1000,
+    "minConcurrent": 20,
+    "noQueue": true
+  },
+  "settings": {
+    "workers": 32,
+    "queued": 128,
+    "parsers": 1,
+    "queueWaitMs": 30000,
+    "oldGenerationMb": 96,
+    "youngGenerationMb": 16,
+    "stackMb": 4,
+    "framingSliceChars": 4096,
+    "framingSliceBytes": 4096,
+    "retainedFrameBytes": 16777216,
+    "responseBytes": 67108864,
+    "sseFields": 1024,
+    "pendingOutputBytes": 33554432,
+    "managedStorageBytes": 536870912,
+    "graphEntries": 262144,
+    "graphDepth": 128,
+    "graphEntryBytes": 256,
+    "stringHeaderBytes": 64,
+    "requestStringBytes": 67108864,
+    "responseStringBytes": 33554432,
+    "requestIpcBytes": 67108864,
+    "responseIpcBytes": 33554432,
+    "parserWorkingBytes": 134217728,
+    "serializationSlackBytes": 1048576,
+    "preparedPayloadBytes": 67108864,
+    "shapeWorkingBytes": 134217728
+  },
+  "environment": {
+    "node": "v24.21.0",
+    "arch": "x64",
+    "cpuMax": "50000 100000",
+    "memoryMax": "4294967296",
+    "heldBaselineMiB": 960,
+    "imageId": "sha256:cb0381eca907082d8f8d112ca9442e34e2367d8deef875dae7bf5ade4546caf0",
+    "hostArch": "arm64",
+    "hostCpu": "Apple M5 Max",
+    "emulated": true
+  },
+  "metrics": {
+    "calls": 40,
+    "exact": 40,
+    "attempts": 40,
+    "totalMs": 14827,
+    "callsPerSecond": 2.6977810750657585,
+    "callMs": {
+      "p50": 6382,
+      "p95": 8079,
+      "max": 8110
+    },
+    "queueWaitMs": {
+      "p50": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "healthMs": {
+      "p50": 1.690958,
+      "p95": 95.944667,
+      "max": 1078.41675
+    },
+    "healthSamples": 109,
+    "peakActive": 20,
+    "peakQueued": 0,
+    "peakStorageMiB": 327.0725383758545,
+    "peakRssMiB": 1628.1328125,
+    "cgroupPeakMiB": 1716.8515625,
+    "final": {
+      "active": 0,
+      "queued": 0,
+      "storageBytes": 0
+    }
+  },
+  "checks": [
+    {
+      "name": "baseline stays held",
+      "pass": true
+    },
+    {
+      "name": "every response matches",
+      "pass": true
+    },
+    {
+      "name": "one upstream attempt per call",
+      "pass": true
+    },
+    {
+      "name": "target concurrency reached",
+      "pass": true
+    },
+    {
+      "name": "team starts without header queuing",
+      "pass": true
+    },
+    {
+      "name": "health below limit",
+      "pass": false
+    },
+    {
+      "name": "cgroup telemetry available",
+      "pass": true
+    },
+    {
+      "name": "no OOM",
+      "pass": true
+    },
+    {
+      "name": "all credits returned",
+      "pass": true
+    }
+  ],
+  "passed": false,
+  "samples": [
+    {
+      "wave": 0,
+      "client": 5,
+      "ms": 7993,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 3,
+      "ms": 7998,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 0,
+      "ms": 8110,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 7,
+      "ms": 7915,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 1,
+      "ms": 8009,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 2,
+      "ms": 8003,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 4,
+      "ms": 7999,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 8,
+      "ms": 7914,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 6,
+      "ms": 7923,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 10,
+      "ms": 7980,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 9,
+      "ms": 7994,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 11,
+      "ms": 7988,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 13,
+      "ms": 7992,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 12,
+      "ms": 7995,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 14,
+      "ms": 8079,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 15,
+      "ms": 8078,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 16,
+      "ms": 8079,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 17,
+      "ms": 8014,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 18,
+      "ms": 8013,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 0,
+      "client": 19,
+      "ms": 8015,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 8,
+      "ms": 5892,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 13,
+      "ms": 5981,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 7,
+      "ms": 5987,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 0,
+      "ms": 6002,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 4,
+      "ms": 6001,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 5,
+      "ms": 6004,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 6,
+      "ms": 6082,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 11,
+      "ms": 6188,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 14,
+      "ms": 6270,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 15,
+      "ms": 6204,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 16,
+      "ms": 6207,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 17,
+      "ms": 6209,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 18,
+      "ms": 6210,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 1,
+      "ms": 6298,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 2,
+      "ms": 6380,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 3,
+      "ms": 6382,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 9,
+      "ms": 6379,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 10,
+      "ms": 6381,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 12,
+      "ms": 6381,
+      "status": 200,
+      "exact": true
+    },
+    {
+      "wave": 1,
+      "client": 19,
+      "ms": 6307,
+      "status": 200,
+      "exact": true
+    }
+  ],
+  "limitations": [
+    "Finite fake-provider workload, not whole-bot startup or natural provider latency.",
+    "Compare hardware, runtime, workload and quota before comparing timings.",
+    "Byte and storage maxima still refuse overlapping maximal payloads."
+  ],
+  "source": {
+    "revision": "967f8748de16e07cb58061dde16a12973bae155e",
+    "dirty": true,
+    "fingerprint": "df1f8c53f3874f9a375d849bd2e86a377e2e47861c1f43a93ae6f316cd0ddc0e",
+    "files": {
+      "src/core/budgets.ts": "7c07193719eb15ee293184f55b100a483af7d0710014a7be3fc8f959a07c352a",
+      "src/channels/modelProxy.ts": "e6e522fb67f5942693432c73ab225cd43673cab063cc968b6f41cc4e3efeb49a",
+      "src/channels/modelProxyResponses.ts": "8a002669a60afcaf01968b30851fd673b5772a58ed0432f87a36ec71bd7fa421",
+      "src/channels/responsesConsumer.ts": "0a6f9d3a4861e057a620d0264e23c1bba03b97bba7f71b7d40b04950648511a0",
+      "src/channels/responsesConsumerWorker.ts": "c99b089424b00cfd7cb603b796510465b81522861250ff15282b50c43216b24d",
+      "src/channels/responsesResources.ts": "e8922e84dcf9ae8b1ebb6273907d4222c079076ab4ba900d1a60e9eb2e50e0b6",
+      "src/channels/responsesValidationCapacity.ts": "1e3afaeb1ca89c627a587e38d188b31bbb5302dfe95d58a40b0afa7a2b2ce72c",
+      "src/load/modelCapacity.ts": "3e81d115e161a52e6eef1b5dfc6468590496b36011b5871b0d654a76c36c1891",
+      "scripts/model-capacity.ts": "f4c58a1091d43f3026a612dee9175977cc39ffc7916e47cc95a7828cc65e7feb",
+      "package-lock.json": "87fab5c4b0407d765fa87dee902d1543da15564398b7c6c8e94db849ee335e26",
+      "Dockerfile": "2c0200d8ffdaa0280ef5c6765b48a9da18626928afc31669e8d79a0502c292fe",
+      "deploy/cloudflare/wrangler.template.jsonc": "f947ae8c28ae772cb0d64dd301e2c4ce0aa844da85115ac77efbcb8a75eb1aed"
+    }
+  }
+}

@@ -1,6 +1,7 @@
 ---
 title: Keep the proxy thin and decode once in the harness
-status: proposed
+status: superseded
+superseded_by: 0098-bound-stream-concurrency-separately-from-parsing.md
 date: 2026-10-09
 pattern: Thin streaming proxy and bounded full-response concurrency
 ---

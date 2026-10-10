@@ -2628,6 +2628,30 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(String(prompts[1].id)).toContain(":reissue");
   });
 
+  it("names authenticated local admission capacity without provider recovery or replay", async () => {
+    const w = world({ providerPark: true });
+    scriptedPi(w.container, (_n, c) =>
+      c.emit(
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: JSON.stringify({
+              error: authenticateProxyUnknownTerminal("consumer_rejected", { phase: "admission", kind: "capacity" }),
+            }),
+          },
+        },
+        { type: "agent_settled" },
+      ),
+    );
+    await expect(w.start()).rejects.toThrow(
+      "Switchboard's model-call capacity is full. This request ended before a model call started.",
+    );
+    expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(1);
+  });
+
   it("a refused reissue prompt is a failed release: the hold stands and the next settle re-sends it, never a cleared hold no steer would release", async () => {
     const w = world({ providerPark: true });
     const c = w.container;

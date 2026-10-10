@@ -448,7 +448,12 @@ const terminalFailureText = (terminal: PiTerminalFailure): string => {
     case "local_stream":
       return LOCAL_MODEL_STREAM_MESSAGE;
     case "unknown":
-      return UNKNOWN_MODEL_TERMINAL_MESSAGE;
+      return terminal.diagnostic.source === "proxy" &&
+        terminal.diagnostic.reason === "consumer_rejected" &&
+        terminal.diagnostic.rejection?.phase === "admission" &&
+        terminal.diagnostic.rejection.kind === "capacity"
+        ? "Switchboard's model-call capacity is full. This request ended before a model call started."
+        : UNKNOWN_MODEL_TERMINAL_MESSAGE;
     case "provider_refusal":
       return POLICY_REFUSAL_REPLY;
     case "provider_failure":
@@ -2359,7 +2364,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           throw new ModelTurnBudgetExhaustedError(terminalFailure.turns, terminalFailure.maxTurns);
         if (terminalFailure.kind === "local_abort") throw new Error(LOCAL_MODEL_ABORT_MESSAGE);
         if (terminalFailure.kind === "local_stream") throw new ModelStreamIncompleteError();
-        throw new Error(UNKNOWN_MODEL_TERMINAL_MESSAGE);
+        throw new Error(terminalFailureText(terminalFailure));
       }
       const text = bridge.answer() ?? "";
       // The ending the run loop composes the thread's answer from once its
@@ -2794,7 +2799,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             throw new ModelTurnBudgetExhaustedError(turnFailure.turns, turnFailure.maxTurns);
           if (turnFailure.kind === "local_abort") throw new Error(LOCAL_MODEL_ABORT_MESSAGE);
           if (turnFailure.kind === "local_stream") throw new ModelStreamIncompleteError();
-          throw new Error(UNKNOWN_MODEL_TERMINAL_MESSAGE);
+          throw new Error(terminalFailureText(turnFailure));
         }
         const text = bridge.answer() ?? "";
         const turnEnding = windDownEndingOf(writeUp, text, writeUpFailed);

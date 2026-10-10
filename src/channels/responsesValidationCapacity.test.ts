@@ -1,9 +1,33 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Worker } from "node:worker_threads";
 import { ResponsesValidationCapacity } from "./responsesValidationCapacity.js";
 import { ResponsesConsumer } from "./responsesConsumer.js";
 
 describe("Responses transport reservation", () => {
+  it("bounds queue waiting without freeing the active owner's unfinished work", async () => {
+    vi.useFakeTimers();
+    const pool = new ResponsesValidationCapacity({ workers: 1, queued: 1 });
+    const first = await pool.reserve();
+    const waiting = pool.reserve();
+    const outcome = waiting.then(
+      () => "admitted",
+      (error: { kind: string }) => error.kind,
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(30000);
+      expect(pool.queuedCount).toBe(0);
+      expect(pool.activeCount).toBe(1);
+      expect(await outcome).toBe("capacity");
+    } finally {
+      first.finishTransport();
+      (await waiting.catch(() => undefined))?.finishTransport();
+      vi.useRealTimers();
+    }
+    const next = await pool.reserve();
+    next.finishTransport();
+    expect(pool.activeCount).toBe(0);
+  });
+
   it("observes only actual queue entry without changing immediate admission or full-queue refusal", async () => {
     const pool = new ResponsesValidationCapacity({ workers: 1, queued: 1 });
     let entries = 0;

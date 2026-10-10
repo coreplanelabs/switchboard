@@ -362,7 +362,17 @@ describe("bot container validation capacity", () => {
         { name: "standard-3", cpu: 2, memory: 8192 },
         { name: "standard-4", cpu: 4, memory: 12288 },
       ];
-      const qualified = types.find((type) => type.cpu >= 0.5 && type.memory > 1236)!;
+      const receipt = JSON.parse(
+        readFileSync(new URL("../../docs/reference/benchmarks/model-capacity/team.json", import.meta.url), "utf8"),
+      ) as {
+        passed: boolean;
+        environment: { cpuMax: string; memoryMax: string };
+      };
+      if (!receipt.passed) throw new Error("the recorded model-capacity workload did not pass");
+      const [quota, period] = receipt.environment.cpuMax.split(" ").map(Number);
+      const qualified = types.find(
+        (type) => type.cpu >= quota / period && type.memory >= Number(receipt.environment.memoryMax) / 1048576,
+      )!;
       const template = readFileSync(new URL(`../../deploy/cloudflare/${TEMPLATE_FILE}`, import.meta.url), "utf8");
       const rendered = renderTemplate(template, templateView(profile, "bot", TEST_PUBLISHED_IMAGES)!);
       expect(rendered.ok).toBe(true);

@@ -7,6 +7,7 @@ The contract is elsewhere: [`docs/reference/specs/`](../reference/specs/README.m
 ## The system
 
 - [Architecture](architecture.md) — the request path and where the parts run.
+- [How model calls use capacity](model-call-flow.md) — the queues, permit lifetimes, follow-ups and benchmark proof.
 - [How a request flows](how-a-request-flows.md) — text, model turns and code checks.
 - [Data model](what-holds-what.md) — threads, runs, pipelines and their durable records.
 - [What an agent is](agents-and-toolsets.md) — the eight work profiles and when to add one.

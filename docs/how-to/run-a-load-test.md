@@ -8,6 +8,10 @@ A receipt per surface, before and after a capacity change.
 - A quiet window: the resident command refuses to start while the resident has work in flight.
 - The bearer per target (`MEMORY_TOKEN`, `RESIDENT_OPERATOR_TOKEN`, `RESIDENT_ADMIN_TOKEN`, `SANDBOX_TOKEN`, an ingress token).
 
+## Offline model-call capacity
+
+The [model-capacity benchmark guide](../reference/benchmarks/model-capacity/README.md) has fixed team/burst workloads, tracked baselines and settings-aware comparisons. Run both before changing model concurrency or bot sizing. It needs Docker and dependencies, but no credentials or quiet production window.
+
 ## Measure the baseline
 
 ```

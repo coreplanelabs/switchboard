@@ -20,9 +20,9 @@ export class ResponsesValidationInterrupted extends Error {
   }
 }
 
-type Waiter = { grant: (release: () => void) => void; cancel: () => void; signal?: AbortSignal };
+type Waiter = { grant: (release: () => void) => void; cancel: () => void; signal?: AbortSignal; cleanup: () => void };
 
-/** Ephemeral CPU resources. A lease buys no run, time, turn or retry authority. */
+/** Temporary concurrency permits. A lease buys no run, time, turn or retry authority. */
 export class ResponsesValidationCapacity {
   private active = 0;
   private readonly waiting: Waiter[] = [];
@@ -53,10 +53,21 @@ export class ResponsesValidationCapacity {
     return new ResponsesStoragePermit(++this.storageSequence, bytes, owner, change);
   }
 
-  async reserve(signal?: AbortSignal, onQueued?: () => void): Promise<ResponsesValidationReservation> {
+  async reserve(
+    signal?: AbortSignal,
+    onQueued?: () => void,
+    onReleased?: () => void,
+  ): Promise<ResponsesValidationReservation> {
     const release = await this.acquire(signal, onQueued);
     try {
-      return new ResponsesValidationReservation(this, release);
+      return new ResponsesValidationReservation(this, () => {
+        release();
+        try {
+          onReleased?.();
+        } catch {
+          /* Diagnostics never change release. */
+        }
+      });
     } catch (error) {
       release();
       throw error;
@@ -72,15 +83,22 @@ export class ResponsesValidationCapacity {
     if (this.waiting.length >= this.limits.queued)
       return Promise.reject(new ResponsesValidationInterrupted("capacity"));
     return new Promise((resolve, reject) => {
+      const rejectWaiter = (kind: "aborted" | "capacity") => {
+        const at = this.waiting.indexOf(waiter);
+        if (at < 0) return;
+        this.waiting.splice(at, 1);
+        waiter.cleanup();
+        reject(new ResponsesValidationInterrupted(kind));
+      };
+      const timer = setTimeout(() => rejectWaiter("capacity"), RESPONSES_VALIDATION_LIMITS.queueWaitMs);
+      timer.unref();
       const waiter: Waiter = {
         signal,
         grant: resolve,
-        cancel: () => {
-          const at = this.waiting.indexOf(waiter);
-          if (at < 0) return;
-          this.waiting.splice(at, 1);
+        cancel: () => rejectWaiter("aborted"),
+        cleanup: () => {
+          clearTimeout(timer);
           signal?.removeEventListener("abort", waiter.cancel);
-          reject(new ResponsesValidationInterrupted("aborted"));
         },
       };
       this.waiting.push(waiter);
@@ -100,7 +118,7 @@ export class ResponsesValidationCapacity {
       released = true;
       const next = this.waiting.shift();
       if (next) {
-        next.signal?.removeEventListener("abort", next.cancel);
+        next.cleanup();
         next.grant(this.releaseOnce());
       } else this.active--;
     };

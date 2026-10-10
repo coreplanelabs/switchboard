@@ -9,7 +9,7 @@ import {
 import { ProviderFailure, renderProviderFailure, type ProviderFailureCause } from "../core/provider.js";
 import { setImmediate as yieldToIo } from "node:timers/promises";
 import { RESPONSES_VALIDATION_LIMITS } from "../core/budgets.js";
-import { ResponsesConsumer, type ResponsesConsumerOptions } from "./responsesConsumer.js";
+import { type ParsedResponsesFrame, ResponsesConsumer, type ResponsesConsumerOptions } from "./responsesConsumer.js";
 import { responsesTextCharge } from "./responsesResources.js";
 import {
   ResponsesValidationInterrupted,
@@ -493,35 +493,41 @@ export class ResponsesFailureBoundary {
   }
 
   private async frame(frame: string): Promise<{ text: string; permit: ResponsesStoragePermit }> {
-    // The preceding data-line binding is already cleared at a complete
-    // delimiter. Keep both remaining strings, including a BOM-only EOF line.
-    this.frameStorage?.resize(responsesTextCharge(this.buffer) + responsesTextCharge(this.line));
-    // Complete-frame output is admitted before fields, parsing, terminal or usage witness. Another owner cannot spend its delivery credit.
-    const outputPermit = this.storageOwner.reserveStorage(
-      3 * RESPONSES_VALIDATION_LIMITS.pendingOutputBytes + RESPONSES_VALIDATION_LIMITS.stringHeaderBytes,
-      "frame-output-admission",
-    );
-    this.trackOutput(outputPermit);
-    let fieldsPermit: ResponsesStoragePermit | undefined,
-      delivered = false;
-    try {
-      fieldsPermit = this.storageOwner.reserveStorage(
-        (this.fieldCount + 3) * RESPONSES_VALIDATION_LIMITS.graphEntryBytes + this.retainedBytes * 2,
-        "frame-fields-and-data",
+    return this.consumer.withParsing(async (parse) => {
+      // The preceding data-line binding is already cleared at a complete
+      // delimiter. Keep both remaining strings, including a BOM-only EOF line.
+      this.frameStorage?.resize(responsesTextCharge(this.buffer) + responsesTextCharge(this.line));
+      // Complete-frame output is admitted before fields, parsing, terminal or usage witness. Another owner cannot spend its delivery credit.
+      const outputPermit = this.storageOwner.reserveStorage(
+        3 * RESPONSES_VALIDATION_LIMITS.pendingOutputBytes + RESPONSES_VALIDATION_LIMITS.stringHeaderBytes,
+        "frame-output-admission",
       );
-      const text = this.checkFrameOutput(await this.frameOwned(frame, outputPermit));
-      outputPermit.resize(responsesTextCharge(text) + Buffer.byteLength(text, "utf8"));
-      outputPermit.transfer("validated-frame-output");
-      if (text === this.authenticatedEnding) this.endingStorage = outputPermit;
-      delivered = true;
-      return { text, permit: outputPermit };
-    } finally {
-      fieldsPermit?.release();
-      if (!delivered && this.endingStorage !== outputPermit) outputPermit.release();
-    }
+      this.trackOutput(outputPermit);
+      let fieldsPermit: ResponsesStoragePermit | undefined,
+        delivered = false;
+      try {
+        fieldsPermit = this.storageOwner.reserveStorage(
+          (this.fieldCount + 3) * RESPONSES_VALIDATION_LIMITS.graphEntryBytes + this.retainedBytes * 2,
+          "frame-fields-and-data",
+        );
+        const text = this.checkFrameOutput(await this.frameOwned(frame, outputPermit, parse));
+        outputPermit.resize(responsesTextCharge(text) + Buffer.byteLength(text, "utf8"));
+        outputPermit.transfer("validated-frame-output");
+        if (text === this.authenticatedEnding) this.endingStorage = outputPermit;
+        delivered = true;
+        return { text, permit: outputPermit };
+      } finally {
+        fieldsPermit?.release();
+        if (!delivered && this.endingStorage !== outputPermit) outputPermit.release();
+      }
+    });
   }
 
-  private async frameOwned(frame: string, outputPermit: ResponsesStoragePermit): Promise<string> {
+  private async frameOwned(
+    frame: string,
+    outputPermit: ResponsesStoragePermit,
+    parse: (data: string) => Promise<ParsedResponsesFrame>,
+  ): Promise<string> {
     const lines = frame.split(/\r\n|\r|\n/);
     const fields = lines.map(fieldOf);
     const data = fields
@@ -537,7 +543,7 @@ export class ResponsesFailureBoundary {
     const eventName = fields.filter((field) => field.name === "event").at(-1)?.value;
     const hasData = fields.some((field) => field.name === "data");
     if (!hasData && !eventName) return this.checkFrameOutput(frame);
-    const parsed = await this.consumer.parseJSON(data);
+    const parsed = await parse(data);
     if (!parsed.ok) return this.unknown("malformed_json");
     try {
       const value = parsed.value;

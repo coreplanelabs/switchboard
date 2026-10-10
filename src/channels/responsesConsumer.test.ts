@@ -1,7 +1,57 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ResponsesConsumer } from "./responsesConsumer.js";
 
 describe("Responses validation isolation", () => {
+  it("cancels queued parsing before worker startup and returns its permit for a later call", async () => {
+    const pool = new ResponsesValidationCapacity({ workers: 3, queued: 0 });
+    const blockers = Array.from(
+      { length: 1 },
+      () =>
+        new ResponsesConsumer("test", {
+          capacity: pool,
+          createWorker: () =>
+            new Worker(
+              "const { parentPort } = require('node:worker_threads'); parentPort.on('message', () => {}); parentPort.postMessage({ ready: true });",
+              { eval: true, env: {} },
+            ),
+        }),
+    );
+    const pending = blockers.map((consumer) => consumer.parseJSON("{}").catch((error) => error));
+    const control = new AbortController();
+    let started = 0;
+    const waiting = new ResponsesConsumer("test", {
+      capacity: pool,
+      signal: control.signal,
+      createWorker: (url, options) => {
+        started++;
+        return new Worker(url, options);
+      },
+    });
+    try {
+      await vi.waitFor(() => expect(pool.activeCount).toBe(1));
+      const outcome = waiting.parseJSON('{"answer":"unexpected"}').catch((error: { kind: string }) => error.kind);
+      await vi.waitFor(() => expect(pool.activeCount).toBe(2));
+      expect(started).toBe(0);
+      control.abort();
+      expect(await outcome).toBe("aborted");
+      expect(started).toBe(0);
+    } finally {
+      await waiting.dispose();
+      await Promise.all(blockers.map((consumer) => consumer.dispose()));
+      await Promise.all(pending);
+    }
+    const fresh = new ResponsesConsumer("test", { capacity: pool });
+    try {
+      const result = await fresh.parseJSON('{"answer":"ready"}');
+      expect(result).toMatchObject({ ok: true, value: { answer: "ready" } });
+      if (result.ok) result.release?.();
+    } finally {
+      await fresh.dispose();
+    }
+    expect(pool.activeCount).toBe(0);
+    expect(pool.storageBytes).toBe(0);
+  });
+
   it("admits two simultaneous2MiB NativeJSON graphs without projection or leaked storage", async () => {
     const pool = new ResponsesValidationCapacity({ workers: 2, queued: 0 });
     const clients = [
