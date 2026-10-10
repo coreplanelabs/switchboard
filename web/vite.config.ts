@@ -46,7 +46,10 @@ export default defineConfig({
     manifest: true,
     outDir: "dist",
     rollupOptions: {
-      input: fileURLToPath(new URL("./src/main.ts", import.meta.url)),
+      input: {
+        legacy: fileURLToPath(new URL("./src/main.ts", import.meta.url)),
+        green: fileURLToPath(new URL("./green/main.ts", import.meta.url)),
+      },
     },
   },
   test: {

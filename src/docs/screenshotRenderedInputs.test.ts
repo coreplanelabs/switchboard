@@ -1,9 +1,17 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import vm from "node:vm";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { renderManifest, type RenderedRequest, type Surface } from "./screenshotManifest.js";
-import { captureRequired, renderedAssets, renderedInputs, renderedMechanics } from "./screenshotRenderedInputs.js";
+import {
+  captureRequired,
+  renderedAssets,
+  renderedInputs,
+  renderedMechanics,
+  loadRenderedAssets,
+} from "./screenshotRenderedInputs.js";
 
 const surface: Surface = {
   name: "sample",
@@ -71,6 +79,38 @@ const snapshot = (state = bundle(), fetchResponse = fixtureFetch(), mechanics = 
   });
 
 describe("rendered screenshot inputs", () => {
+  it("keeps same-name chunks from different frontend entries distinct", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rendered-entries-"));
+    try {
+      mkdirSync(join(root, "web/dist/assets"), { recursive: true });
+      mkdirSync(join(root, "web/dist/.vite"), { recursive: true });
+      writeFileSync(join(root, "web/dist/assets/delivery-abcdefgh.js"), "legacy delivery");
+      writeFileSync(join(root, "web/dist/assets/delivery-ijklmnop.js"), "replacement delivery");
+      writeFileSync(
+        join(root, "web/dist/.vite/manifest.json"),
+        JSON.stringify({
+          "_delivery-abcdefgh.js": { file: "assets/delivery-abcdefgh.js" },
+          "_delivery-ijklmnop.js": { file: "assets/delivery-ijklmnop.js" },
+        }),
+      );
+      const assets = loadRenderedAssets(root);
+      const first = assets.request({ path: "/assets/delivery-abcdefgh.js", accept: "*/*" });
+      const second = assets.request({ path: "/assets/delivery-ijklmnop.js", accept: "*/*" });
+      expect(readFileSync(join(root, "web/dist", assets.resolve(first.path)), "utf8")).toBe("legacy delivery");
+      expect(readFileSync(join(root, "web/dist", assets.resolve(second.path)), "utf8")).toBe("replacement delivery");
+      const loaded = await renderedInputs("http://127.0.0.1:8791", [first, second], assets, {}, async (input) => {
+        const path = new URL(String(input)).pathname;
+        return new Response(readFileSync(join(root, "web/dist", path), "utf8"), {
+          headers: { "content-type": "text/javascript", "x-switchboard-preview-snapshot": "1" },
+        });
+      });
+      expect(loaded.requests).toHaveLength(2);
+      expect(Object.keys(loaded.inputs).filter((key) => key.startsWith("response:"))).toHaveLength(2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("skips capture after source-only changes and unrelated asset filename changes", async () => {
     const prior = await snapshot();
     const recorded = renderManifest({ "src/backend.ts": "old source" }, surface, prior);

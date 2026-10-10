@@ -61,8 +61,9 @@
     "package.json": "9497d3f3b7a7a2e14f2b99f3eacc085a4c9e965673b877569c5e6328f82c12d3",
     "scripts/screenshot-output-worker.mts": "4183d9c7909ebb82903a8caa715b4facc48076eb2d9238c8706cacf35862003b",
     "scripts/screenshots.mts": "f62f9806ba5d836ff6a5f789dc2b348ed5526763dbba3f95333b66a0eda34044",
+    "scripts/web-green-fixtures.ts": "7869ae6a694e63c01a8d8248b8f824bbe54fcf8025d4c2f82d9f1dd42a623cb9",
     "scripts/web-preview-reading-diff.ts": "24dea75cb4b61c011fa75878b138dde75e8a260d3c5b06c05c1e6fe2f2a58649",
-    "scripts/web-preview.ts": "37f015fb84d87406495bef5986464794135debd87d0afc420e8d3169aa5cab47",
+    "scripts/web-preview.ts": "d0afc4c773ec05c0540f52318780ea5f9b559ae6913e1128eab768471c8fad9e",
     "src/agents/defaults.json": "f6fbe3d390a8aca3edf622d7494658145dca9590642183294d36e004c64760d8",
     "src/agents/registry.ts": "dbf74ae200eaf6903728f9536c144b04eb4c779abb1131d147cada8f85cb34fa",
     "src/agents/resourceLifetime.ts": "3e1394c21439e9c53b4d13aa23b0f2e3fd67365dfc0ab4bcf1fa28e3494f5847",
@@ -75,7 +76,7 @@
     "src/channels/localIso.ts": "687e1df62300d25412bcd540853b1cd66301bacb326b0ab169f63c3cf267ed19",
     "src/channels/pageFavicon.ts": "d89605850fbd135e1d729807be7375b6e66dbd6becae9d329001a40b040adeb0",
     "src/channels/residentsModel.ts": "9993779d45c0f938ab1dbb4e63031b08a3f729fb5f7d6c31916a7e58cdfe0d58",
-    "src/channels/webAssets.ts": "402b7a1bdb2c1967960dfc06673dca3e6dbaeb25718d1bdcb1f0c59302d19471",
+    "src/channels/webAssets.ts": "bd5beadae745814691fbb54e16b9346180d6d419da2531f48a0ac1948d8a176e",
     "src/channels/webSeed.ts": "0d5b07dbb53257dfb502f0df42b1548169d74c5f273d18a55ff2f93a8facc6a6",
     "src/channels/webShell.ts": "c3f74aeb04010dd88204b86e7a782f5a45f6731bf6f0f29cc8a4b5039df8f090",
     "src/config.ts": "bee7fc0eaa693a9cbaef60ddbdcdaec1630e44a6d1a57ac4912d89545756754c",
@@ -200,10 +201,10 @@
     "src/core/untrusted.ts": "807d80c0b651e25259d83a2f81825275d2f2e0d1e5ea3d5c8fe3f739e70a6e1d",
     "src/core/verbosity.ts": "99768cb56250361938f269e1a0d221f63abb8971aa9e42a61ccdbdb420f2ca08",
     "src/core/workerError.ts": "04df9712c2e46335123e441c064a0316a561e763410e8fb6d2c9b33ab49a54ac",
-    "src/docs/screenshotManifest.ts": "ff9aa7f7fb11bb879249d5def8737dac0d4a86c27fcb584b1977cda77ba8728e",
+    "src/docs/screenshotManifest.ts": "03576415e1701d5a2ca9a052333f70056260d7dd8f1d2b784e4db21092e1e8f1",
     "src/docs/screenshotOutput.ts": "0a16490bef62adf909cec5542b03c1353615b76753f27539e4633b5334e62401",
     "src/docs/screenshotOutputPinned.ts": "04e1db195ce43da688c0e79b39d5e6edbc312189cf7d2e6634883a3d9a481fbf",
-    "src/docs/screenshotRenderedInputs.ts": "7a142d49bffdde577b4decbe7e1118f31fd58c6033757380a95e487aaedec8c6",
+    "src/docs/screenshotRenderedInputs.ts": "a627f9403db71d8e54634068ef519e31343763759b6281ab79fba6a246413c39",
     "src/effort.ts": "5b334328c92b198af783e841f0ebf64f042c4e2d00261e9b4d5db3a6a20a6539",
     "src/execution/bashTimeout.ts": "f727f3e2810426901fa7bfe0fda228b846a2cdec0ea2d473e6a76e0c84209608",
     "src/execution/installRepairPolicy.ts": "ed11dabebd8eaa986bd58683845d2d8e6576e0a0561fd9d06d362ef93137d0c5",
@@ -252,7 +253,7 @@
     "web/src/main.ts": "84ca021b55e606fcfd533c2612e66dc777af04760e2153ed1ecfe483810e0827",
     "web/src/pages/SettingsPage.vue": "653226f294d7cb5717bef2c4c7f7b64f2f68d3da5b1ae59c1c001b4313777631",
     "web/src/routes.ts": "0c0ce42eec94dd818944b640ac2157294abf0826f71c3ec3bf2c8ac5253a6693",
-    "web/vite.config.ts": "5e063995a338022fc2d8d4d51b1187489886d1f3975f06a7e22ed3e9ff4d08a4"
+    "web/vite.config.ts": "f8aeea5d7b3859aff35aa8c277a7f13848b9f566f8b7c57e830b0e01ee8a3d83"
   },
   "rendered": {
     "requests": [
@@ -262,6 +263,18 @@
       },
       {
         "path": "/assets/30519f187e29203c.js",
+        "accept": "*/*"
+      },
+      {
+        "path": "/assets/426422a72deaeac3.js",
+        "accept": "*/*"
+      },
+      {
+        "path": "/assets/42bdcd94558a92d4.css",
+        "accept": "*/*"
+      },
+      {
+        "path": "/assets/444409e028e282d3.js",
         "accept": "*/*"
       },
       {
@@ -281,6 +294,10 @@
         "accept": "*/*"
       },
       {
+        "path": "/assets/5bc3e0df03e8e3ef.js",
+        "accept": "*/*"
+      },
+      {
         "path": "/assets/5fd1e101e29ae073.js",
         "accept": "*/*"
       },
@@ -289,11 +306,27 @@
         "accept": "*/*"
       },
       {
-        "path": "/assets/8c63b478a250d0ad.js",
+        "path": "/assets/77e8d60e12e0acf1.js",
         "accept": "*/*"
       },
       {
         "path": "/assets/9825f6c791051da3.woff2",
+        "accept": "*/*"
+      },
+      {
+        "path": "/assets/aa341bed00f113c1.js",
+        "accept": "*/*"
+      },
+      {
+        "path": "/assets/af6f01ed9b657ee6.js",
+        "accept": "*/*"
+      },
+      {
+        "path": "/assets/c4d2243260d2c2d7.js",
+        "accept": "*/*"
+      },
+      {
+        "path": "/assets/dc65e09154ff2612.js",
         "accept": "*/*"
       },
       {
@@ -309,7 +342,15 @@
         "accept": "*/*"
       },
       {
-        "path": "/assets/main.css",
+        "path": "/assets/ead3ee672b12489d.js",
+        "accept": "*/*"
+      },
+      {
+        "path": "/assets/fa9648c65d44afab.js",
+        "accept": "*/*"
+      },
+      {
+        "path": "/assets/legacy.css",
         "accept": "*/*"
       },
       {
@@ -321,25 +362,35 @@
       "node_modules/playwright-core": "a5e0494ab21bf4f0d4991366c913ea8ffb66798ae0d3d31543e1c80aac3c7d01",
       "scripts/screenshot-output-worker.mts": "62711bb332b84c75620494a110292bd2a67f150838af519a6933eafbdcde2667",
       "scripts/screenshots.mts": "79de46873595f2e6f03f441f15660092b05134340a0998e96ced4ab22c5f39bc",
-      "src/docs/screenshotManifest.ts": "d60a777cbcf545128fc0b7a703081274016c9083e3d68af10de6accd05174a3e",
+      "src/docs/screenshotManifest.ts": "4ecebd732d17cfff08b43b3fc8ec581ea1f1664e33bf321d39bea19c30b5d72d",
       "src/docs/screenshotOutput.ts": "e33c1a9d0b2664f3f6e21e7fc1d2b02e80f9411e0eddd8b3ec31bd17f25a19f4",
       "src/docs/screenshotOutputPinned.ts": "be4be6869229593070c35867166a8fd60928504178f0c0f028a64759f82b0992",
-      "src/docs/screenshotRenderedInputs.ts": "5b474d753207f6a2f72622cc9f872e99d1f6526252de2b981b883b4bd8f2259f",
-      "response:*/*:/assets/28904c3f6575692b.js": "6f1edda275858aed583e5aa864d49fb6efaca4579eda16231388915022ff9401",
+      "src/docs/screenshotRenderedInputs.ts": "afdfe75d771fec6d32008dcd0d619dd6cb611ed06b74d82840a7a7e59e79cc8b",
+      "response:*/*:/assets/28904c3f6575692b.js": "ef785dcca39d0d808c6c552bc94b44f8f2f53de69cd7bebdb2e3b1932d6d15e6",
       "response:*/*:/assets/30519f187e29203c.js": "18bc674a3374f99d4583f0516ac016b733be6a252d7d226e12c0b08261f8c284",
+      "response:*/*:/assets/426422a72deaeac3.js": "e8521b57777b412a2d74743b9367637a1cd7dda9589bfe6d45019750c3d5b73e",
+      "response:*/*:/assets/42bdcd94558a92d4.css": "238c46f845009a79eed92e19504ccec5f2d25b40e72fd2f57fd91e2d752e0595",
+      "response:*/*:/assets/444409e028e282d3.js": "673bb597b286016d115151a6d4c23bc30d814170ac0b4ab7067b8d9894a9c1e6",
       "response:*/*:/assets/4bc9835edd11b53c.woff2": "117a54f5e0a35fa3c994d46f9f3596c4029817f06b45b546594c6671d68f1149",
-      "response:*/*:/assets/4fab5baaca5c14d2.js": "cf7a6177398dac9b86c3f27612933b39b379211902234cababf3055e0a8c20f6",
-      "response:*/*:/assets/4ff3282cc72f2ec6.js": "64c65e3726d63d26f3b5b97f5f25c3629663209796c05268a820dba7fa0ca745",
+      "response:*/*:/assets/4fab5baaca5c14d2.js": "8d156c8724c95f4e9ba5557ca1ae640a5884468c95ecdca4b174bd1d748dc8d4",
+      "response:*/*:/assets/4ff3282cc72f2ec6.js": "96aefa17aae739923afdd7f6a275898968a672039bf7a1eb58c8219a70d109f5",
       "response:*/*:/assets/536024deca28e1ce.js": "2c8faa55777b3bd108e1917eada2b5201f7798b2b8b1bdc7c1b7a642f2660c44",
-      "response:*/*:/assets/5fd1e101e29ae073.js": "684922d286cbc3a1c5fc6d313421e6f262d0d379a9767aec686d3dc6c9a68d06",
-      "response:*/*:/assets/7704038c40f6cb06.js": "ae484740ab91178fcc191a46ce5f421099994a23a037e268f225e510697b466e",
-      "response:*/*:/assets/8c63b478a250d0ad.js": "0bb63afe412092021f6e45906fddafea37f4b7f365d04622b8845323139db66f",
+      "response:*/*:/assets/5bc3e0df03e8e3ef.js": "e113433a850e4cc62d6933f912bff27e7ca074f4fd13d5a85fc837eb037483bc",
+      "response:*/*:/assets/5fd1e101e29ae073.js": "aadef1f274cc219cb9d468f83d18db573e2dda58662a19beea8f3acf29532f0d",
+      "response:*/*:/assets/7704038c40f6cb06.js": "846a969e6775bc472a83dc9a28433e47f9626987179acf5f164716cbf582f2aa",
+      "response:*/*:/assets/77e8d60e12e0acf1.js": "dd1fef2f4888b46c294a03d6248642e59653220995149c0be7ca6d183d9f8ea4",
       "response:*/*:/assets/9825f6c791051da3.woff2": "8242759635f72b65d7a1eae10ef8a97fe59a8b60d3d7f5a6f65e67d72693540e",
+      "response:*/*:/assets/aa341bed00f113c1.js": "e639cd4a3b8021300eeaefe093b4de2219291c9bb5bc9d791501b7e6c871f521",
+      "response:*/*:/assets/af6f01ed9b657ee6.js": "93f0679151fe777325d88551b3c23ac590009d74aa68318334b2a58a75ffb3d8",
+      "response:*/*:/assets/c4d2243260d2c2d7.js": "5d3a302a940ebf35d43fe3467d351031ef6334e3288374b838c82b3deeb6ffbe",
+      "response:*/*:/assets/dc65e09154ff2612.js": "3dfd890d7b720239ba7256b16e20dc42bca64cedf85fff18e209a1a34902711a",
       "response:*/*:/assets/e2d5b96b99e916ef.js": "12a21290b18c32e8acad52f209ba85cce7b954ae5dc97ea5ac12a1d230690352",
-      "response:*/*:/assets/e87d52e570baa2d6.js": "24e4ca3eb48ca0d05747443e02e3b7151d9341e214756a79f959ee370a033e8f",
-      "response:*/*:/assets/e9ff939360af94d8.js": "52e63722a9018d097a0da4ccd629ba3b5d9f4cc0d3fc58fde2321fc8950891b4",
-      "response:*/*:/assets/main.css": "0b134c80e6499c9ff92afc53b922917ea640de78e6cdccb240c08e254048bb0c",
-      "response:*/*:/settings/installation": "0fa4091fcc00a5ba7b8b1db3e5bb8735152646dcd73516127bd37be6e0db7529"
+      "response:*/*:/assets/e87d52e570baa2d6.js": "2f2d4eb5386f363d0eb64dd228421f0fc157f87faf6e477dfbd3e310aed39255",
+      "response:*/*:/assets/e9ff939360af94d8.js": "aab4e3c4eff7bb2743cd8afeee77d80682675c9a8f59b1e1f9b2737d903d9c9f",
+      "response:*/*:/assets/ead3ee672b12489d.js": "691671916fe8f60cf77b7abc838ef13662e02fd2ed789317ce8ce89e2b1ee4d3",
+      "response:*/*:/assets/fa9648c65d44afab.js": "0acf1742dbccd27be00ef3f3f33668035271573c1aa83eb205ae74fce20da07a",
+      "response:*/*:/assets/legacy.css": "8e38d4c1742837212773a11e771009caef78b7a63617c3429680979f98bb5bdf",
+      "response:*/*:/settings/installation": "68529275bef2a152d6ee084a2a007d20c202b6d79cbe60cd4e5662941b7fba17"
     }
   }
 }

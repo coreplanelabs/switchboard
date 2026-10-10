@@ -48,6 +48,33 @@ function fakeRes(): FakeRes {
 const req = (url: string, method = "GET") => ({ url, method }) as import("node:http").IncomingMessage;
 
 describe("loadWebAssets", () => {
+  it("selects the requested frontend and includes its shared static styles", () => {
+    const dir = fixtureDist();
+    writeFileSync(
+      join(dir, ".vite", "manifest.json"),
+      JSON.stringify({
+        "green/main.ts": { file: "assets/green.js", isEntry: true, css: ["assets/green.css"], imports: ["_shared.js"] },
+        "src/main.ts": {
+          file: "assets/main-AbC123.js",
+          isEntry: true,
+          css: ["assets/main-DeF456.css"],
+          imports: ["_shared.js"],
+        },
+        "_shared.js": { file: "assets/shared.js", css: ["assets/shared.css"] },
+      }),
+    );
+    expect(loadWebAssets(dir).entry).toEqual({
+      js: "/assets/main-AbC123.js",
+      css: ["/assets/shared.css", "/assets/main-DeF456.css"],
+    });
+    expect(loadWebAssets(dir, "green/main.ts").entry).toEqual({
+      js: "/assets/green.js",
+      css: ["/assets/shared.css", "/assets/green.css"],
+    });
+  });
+  it("refuses a missing frontend entry instead of switching the viewer to another build", () => {
+    expect(() => loadWebAssets(fixtureDist(), "green/main.ts")).toThrow("entry");
+  });
   it("exposes the entry's hashed js and css paths from the manifest", () => {
     const assets = loadWebAssets(fixtureDist());
     expect(assets.entry.js).toBe("/assets/main-AbC123.js");

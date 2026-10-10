@@ -1,0 +1,30 @@
+import type { RouteRecordRaw } from "vue-router";
+export const routes: RouteRecordRaw[] = [
+  { path: "/", redirect: "/home" },
+  { path: "/home/history", component: () => import("./pages/History.vue") },
+  { path: "/pipelines/:id", component: () => import("./pages/Pipeline.vue") },
+  { path: "/home", component: () => import("./pages/Home.vue") },
+  { path: "/plane", redirect: "/home" },
+  { path: "/threads", redirect: "/home/threads" },
+  { path: "/home/threads", component: () => import("./pages/ThreadBrowser.vue") },
+  { path: "/threads/:id", component: () => import("./pages/Thread.vue") },
+  { path: "/runs", component: () => import("./pages/Runs.vue") },
+  { path: "/runs/scheduled", component: () => import("./pages/Scheduled.vue") },
+  { path: "/runs/unit/:key", component: () => import("./pages/Unit.vue") },
+  { path: "/runs/:id", component: () => import("./pages/RunRoute.vue") },
+  { path: "/delivery/:owner?/:name?", component: () => import("./pages/Delivery.vue") },
+  { path: "/costs/:group?", component: () => import("./pages/Costs.vue") },
+  { path: "/metrics", component: () => import("./pages/Metrics.vue") },
+  { path: "/metrics/health", component: () => import("./pages/SystemHealth.vue") },
+  { path: "/settings/runtime", component: () => import("./pages/Runtime.vue") },
+  { path: "/settings/runtime/:owner/:name", component: () => import("./pages/RuntimeDetail.vue") },
+  { path: "/residents", redirect: "/settings/runtime" },
+  {
+    path: "/residents/:owner/:name",
+    redirect: (route) =>
+      `/settings/runtime/${encodeURIComponent(String(route.params.owner))}/${encodeURIComponent(String(route.params.name))}`,
+  },
+  { path: "/settings/identities", component: () => import("./pages/Identities.vue") },
+  { path: "/settings/:tab?/:channel?", component: () => import("./pages/Settings.vue") },
+  { path: "/:pathMatch(.*)*", component: () => import("./pages/NotFound.vue") },
+];

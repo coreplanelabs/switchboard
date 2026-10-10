@@ -40,6 +40,7 @@ import type { RunEvent } from "../src/core/runEvents.js";
 import { buildPlaneTable } from "../src/core/plane/table.js";
 import { systemClock } from "../src/core/trace/clock.js";
 import { READING_DIFF_GIT, READING_DIFF_MEAT, READING_DIFF_SUMMARY } from "./web-preview-reading-diff.js";
+import { createGreenPreview } from "./web-green-fixtures.js";
 
 // Local visual preview of the web app (web/) with fixture data — no Slack, no
 // config.yaml, no credentials. Build the app first (`npm run build` in web/),
@@ -72,7 +73,11 @@ import { READING_DIFF_GIT, READING_DIFF_MEAT, READING_DIFF_SUMMARY } from "./web
 const PORT = Number(process.env.PORT ?? 8788);
 const NOW = process.env.SWITCHBOARD_PREVIEW_NOW ? Number(process.env.SWITCHBOARD_PREVIEW_NOW) : systemClock();
 
-const assets = loadWebAssets(process.env.SWITCHBOARD_WEB_DIST ?? join(process.cwd(), "web", "dist"));
+const GREEN = process.argv.includes("--green");
+const assets = loadWebAssets(
+  process.env.SWITCHBOARD_WEB_DIST ?? join(process.cwd(), "web", "dist"),
+  GREEN ? "green/main.ts" : "src/main.ts",
+);
 // The shell stamps the capabilities the nav paints from: every one on by
 // default (every surface reachable); SWITCHBOARD_PREVIEW_CAPABILITIES=minimal
 // paints the smallest installation instead — Runs alone, no Scheduled tab, no
@@ -2534,6 +2539,9 @@ const VIEWING_AS_ALICE: Actor = {
   grants: { actions: "all", channels: "all", repos: "all" },
   viewingAs: { id: "slack:UALICE", name: "alice" },
 };
+const greenPreview = GREEN
+  ? createGreenPreview({ now: NOW, unit: UNIT_U3, thread: homeSeed("conv-1", HOME_TURNS) })
+  : null;
 
 function page(
   pathname: string,
@@ -2854,6 +2862,23 @@ createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://localhost");
   const snapshot = req.headers["x-switchboard-preview-snapshot"] === "1";
   if (snapshot) res.setHeader("x-switchboard-preview-snapshot", "1");
+  if (
+    greenPreview &&
+    (url.pathname === "/" ||
+      url.pathname === "/plane" ||
+      ["/home/session", "/home/key", "/home/snapshot", "/home/events", "/home/focus", "/home/send"].includes(
+        url.pathname,
+      ))
+  ) {
+    void greenPreview.handle(req, res, url).catch(() => {
+      res.writeHead(500);
+      res.end("fixture unavailable");
+    });
+    return;
+  }
+  if (greenPreview && url.pathname.startsWith("/settings/runtime"))
+    url.pathname = url.pathname.replace("/settings/runtime", "/residents");
+  if (greenPreview && url.pathname === "/home/threads") url.pathname = "/threads";
   if (assets.serve(req, res)) return;
   if (url.pathname === "/favicon.ico") {
     res.writeHead(200, { "content-type": "image/svg+xml" });
@@ -3019,7 +3044,7 @@ createServer((req, res) => {
     res.end(`<!doctype html><html><body style="background:#3a3a3a;margin:0">${frames}</body></html>`);
     return;
   }
-  const p = page(url.pathname, url.searchParams.get("all") === "1", url.search);
+  const p = greenPreview?.page(url) ?? page(url.pathname, url.searchParams.get("all") === "1", url.search);
   if (!p) {
     res.writeHead(404, { "content-type": "text/plain" });
     res.end("not a preview route");
@@ -3039,5 +3064,8 @@ createServer((req, res) => {
     });
     return res;
   }) as typeof res.writeHead;
-  sendPage(req, res, p.status ?? 200, p.viewer, p.title, p.seed);
-}).listen(PORT, "127.0.0.1", () => console.log(`web preview on http://localhost:${PORT}/runs (fixtures only, no bot)`));
+  const output = greenPreview ? greenPreview.marked(p) : p;
+  sendPage(req, res, p.status ?? 200, p.viewer, output.title, output.seed);
+}).listen(PORT, "127.0.0.1", () =>
+  console.log(`web preview on http://localhost:${PORT}/${GREEN ? "home" : "runs"} (fixtures only, no bot)`),
+);
