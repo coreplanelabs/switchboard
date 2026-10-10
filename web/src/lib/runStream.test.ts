@@ -22,7 +22,7 @@ describe("attachRunStream", () => {
     const handle = vi.fn();
     const stream = attachRunStream({ url: "/runs/r/events?t=x", factory, model: m, handle });
     const es = created[0];
-    expect(es.url).toBe("/runs/r/events?t=x");
+    expect(es.url).toBe("/runs/r/events?t=x&follow=1");
     expect(stream.phase.value).toBe("connecting");
     es.emitOpen();
     expect(stream.phase.value).toBe("running");

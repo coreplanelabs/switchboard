@@ -91,8 +91,8 @@ export interface ArtifactsSeed {
   token?: string;
 }
 
-/** The live run page: the client follows the token-scoped SSE stream; the two
- *  URLs carry the capability token exactly like the old inline script did. */
+/** The live run page follows SSE from its local registry or durable ledger.
+ *  Registry URLs carry a capability; ledger URLs use the viewer decision. */
 export interface RunLiveSeed {
   page: "run";
   mode: "live";
@@ -101,6 +101,8 @@ export interface RunLiveSeed {
    *  it on `/threads/<key>` (web-chat.md item 4); absent when the registry row is gone. */
   threadKey?: string;
   eventsUrl: string;
+  /** A stop already accepted by the run owner or ledger. */
+  stop?: { mode: "soft" | "hard"; state: "stopping" | "stopped" };
   /** The stop control's route with the same token. Absent on a hosted ship
    *  parent (record 0060): the token stops nothing on it, so the page draws no
    *  stop control. */

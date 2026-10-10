@@ -36,7 +36,9 @@ export interface RunStream {
 
 export function attachRunStream(opts: RunStreamOptions): RunStream {
   const phase = ref<StreamPhase>("connecting");
-  const es: EventSourceLike = opts.factory(opts.url);
+  // Replay readers consume a finite body. Only EventSource opts into follow,
+  // including after a restart refuses the original registry token.
+  const es: EventSourceLike = opts.factory(`${opts.url}${opts.url.includes("?") ? "&" : "?"}follow=1`);
   es.onopen = () => {
     if (phase.value === "connecting" && !opts.model.state.stopMode) phase.value = "running";
   };
@@ -73,6 +75,11 @@ export function attachRunStream(opts: RunStreamOptions): RunStream {
     phase.value = "ended";
     es.close();
     opts.onEnd?.(parseEndFrame(data));
+  });
+  es.addEventListener("unavailable", () => {
+    phase.value = "disconnected";
+    es.close();
+    opts.onDisconnected?.();
   });
   es.onerror = () => {
     if (es.readyState === EVENT_SOURCE_CLOSED) {
