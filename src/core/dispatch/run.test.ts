@@ -418,6 +418,151 @@ describe("original admission identity at promotion", () => {
 });
 
 describe("claimRun — the ledger claim once the prompt exists", () => {
+  it("a same-ID reservation preserves an unknown begun launch instead of minting a prepared one", async () => {
+    const { deps, base } = setup();
+    const store = new InMemoryRunLedger(() => NOW);
+    const through = createLedgerWriteThrough({
+      ledger: store,
+      gen: "gen-T",
+      fallback: new NullRunStore(),
+      warn: () => {},
+      setInterval: () => ({ unref: () => {} }),
+    });
+    const meta = {
+      agent: base.agent.name,
+      model: base.resolved.modelRef,
+      channelId: base.msg.channelId,
+      userId: base.msg.userId,
+      threadKey: THREAD,
+      repo: "acme/api",
+      ref: "main",
+      readonly: false,
+      profile: base.profile,
+      request: base.requestRow,
+    };
+    const intent = {
+      version: 1,
+      harness: "pi",
+      phase: "prepared",
+      ordinal: 0,
+      sessionPolicy: { version: 1, commandRoute: "native", identity: "write" },
+    };
+    expect(
+      await store.claim({
+        runId: base.run.id,
+        threadKey: THREAD,
+        gen: "gen-T",
+        startedAt: NOW,
+        leaseMs: 30000,
+        meta,
+        system: "original",
+        tools: [],
+        state: { harnessLaunch: intent },
+      }),
+    ).toMatchObject({ ok: true });
+    const begun = { ...intent, phase: "begun" };
+    expect(await store.setState(base.run.id, "gen-T", { harnessLaunch: begun })).toEqual({ ok: true });
+    const reservation = await through.reserve({
+      runId: base.run.id,
+      threadKey: THREAD,
+      startedAt: NOW,
+      meta: { ...meta, restartOf: base.run.id },
+    });
+    if (reservation.kind !== "tracked") throw new Error("original reservation required");
+    try {
+      const claimed = await claimRun(
+        { ...deps, runLedger: through, harness: { harnesses: {} as never, registry: {} as never } },
+        {
+          ...base,
+          messages: [{ role: "user", content: [{ type: "text", text: "fix it" }] }],
+          restartOf: base.run.id,
+          reserved: reservation.run,
+          resume: undefined,
+          ledgerRun: undefined,
+        },
+      );
+      expect(claimed?.harnessLaunch).toEqual({
+        version: 1,
+        harness: "pi",
+        phase: "begun",
+        ordinal: 0,
+        sessionPolicy: { version: 1, commandRoute: "native", identity: "write" },
+      });
+      expect(store.live.get(base.run.id)?.state.harnessLaunch).toEqual(begun);
+    } finally {
+      await reservation.run.close();
+    }
+  });
+  it.each(["pi", "opencode"] as const)(
+    "records original %s launch intent in the resumable seed before a producer exists",
+    async (harness) => {
+      const { deps, base } = setup();
+      const store = new InMemoryRunLedger(() => NOW);
+      const warnings: string[] = [];
+      const through = createLedgerWriteThrough({
+        ledger: store,
+        gen: "gen-T",
+        fallback: new NullRunStore(),
+        warn: (note) => {
+          warnings.push(note);
+        },
+        setInterval: () => ({ unref: () => {} }),
+      });
+      const review = getAgent("review");
+      const reservation = await through.reserve({
+        runId: base.run.id,
+        threadKey: THREAD,
+        startedAt: NOW,
+        meta: {
+          agent: review.name,
+          model: base.resolved.modelRef,
+          channelId: base.msg.channelId,
+          userId: base.msg.userId,
+          threadKey: THREAD,
+          repo: "acme/api",
+          ref: "main",
+          readonly: true,
+          profile: declaredProfile(review),
+          request: base.requestRow,
+        },
+      });
+      if (reservation.kind !== "tracked") throw new Error("original reservation required");
+      const claimed = await claimRun(
+        { ...deps, runLedger: through, harness: { harnesses: {} as never, registry: {} as never } },
+        {
+          ...base,
+          agent: review,
+          profile: declaredProfile(review),
+          resolved: { ...base.resolved, harness: { name: harness, scope: "defaults" } },
+          messages: [{ role: "user", content: [{ type: "text", text: "review the original head" }] }],
+          reserved: reservation.run,
+          resume: undefined,
+          ledgerRun: undefined,
+        },
+      );
+      try {
+        expect(claimed?.tracked(), warnings.join("; ")).toBe(true);
+        expect(store.live.get(base.run.id)?.state.harnessLaunch).toEqual({
+          version: 1,
+          harness,
+          phase: "prepared",
+          ordinal: 0,
+          sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+        });
+        expect(claimed?.harnessLaunch).toEqual({
+          version: 1,
+          harness,
+          phase: "prepared",
+          ordinal: 0,
+          sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+        });
+        expect(claimed?.resumable).toBe(true);
+        expect(store.live.get(base.run.id)?.state).not.toHaveProperty("harness");
+      } finally {
+        await claimed?.close();
+      }
+    },
+  );
   it("promotes a same-ID segment with its raw original baseline, prior push and PR base before writable execution", async () => {
     const { deps, ledger, base } = setup();
     const raw = { version: 1, original: true };

@@ -2651,6 +2651,8 @@ async function runOpenCode(script: RunScript, options: FakeServeOptions = {}): P
           },
         }),
     ...(script.commandPolicy ? { commandPolicy: script.commandPolicy } : {}),
+    ...(script.launchIntent === undefined ? {} : { launchIntent: script.launchIntent }),
+    ...(script.onLaunchIntent ? { saveLaunchIntent: script.onLaunchIntent } : {}),
     ...(script.resume ? { resume: script.resume } : {}),
   };
   // The credential clause switched off: a provider key rides the server's

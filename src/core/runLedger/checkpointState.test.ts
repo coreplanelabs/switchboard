@@ -51,6 +51,61 @@ describe("original session policy custody", () => {
 });
 
 import { InMemoryRunLedger } from "./inMemory.js";
+describe("durable launch state transaction", () => {
+  it.each(["pi", "opencode"] as const)(
+    "preserves %s intent and rejects phase or permission rollback",
+    async (harness) => {
+      const ledger = new InMemoryRunLedger(() => 1000);
+      const intent = { version: 1, harness, phase: "prepared", ordinal: 0, sessionPolicy: policy };
+      expect(
+        await ledger.claim({
+          runId: "launch",
+          threadKey: "mcp:fixture:launch",
+          gen: "g1",
+          startedAt: 1,
+          leaseMs: 10000,
+          system: "original",
+          tools: [],
+          meta: { channelId: "mcp:fixture", userId: "slack:fixture", threadKey: "mcp:fixture:launch" },
+          state: { harnessLaunch: intent },
+        }),
+      ).toMatchObject({ ok: true });
+      expect(await ledger.setState("launch", "g1", { binding: "original workspace" })).toEqual({ ok: true });
+      expect(ledger.live.get("launch")?.state).toEqual({ binding: "original workspace", harnessLaunch: intent });
+      const begun = { ...intent, phase: "begun" };
+      expect(await ledger.setState("launch", "g1", { harnessLaunch: begun })).toEqual({ ok: true });
+      expect(await ledger.setState("launch", "g1", { harnessLaunch: { ...intent, ordinal: 1 } })).toEqual({
+        ok: false,
+        reason: "fenced",
+      });
+      expect(ledger.live.get("launch")?.state).toEqual({ harnessLaunch: begun });
+      for (const replacement of [
+        intent,
+        { ...begun, sessionPolicy: { version: 1, commandRoute: "native", identity: "read" } },
+        { ...begun, harness: "other" },
+      ]) {
+        expect(await ledger.setState("launch", "g1", { harnessLaunch: replacement })).toEqual({
+          ok: false,
+          reason: "fenced",
+        });
+        expect(ledger.live.get("launch")?.state).toEqual({ harnessLaunch: begun });
+      }
+      const producer = { harness, pid: 42, logOffset: 0, launchOrdinal: 0, sessionPolicy: policy };
+      expect(await ledger.setState("launch", "g1", { harness: producer })).toEqual({ ok: true });
+      const next = { ...intent, ordinal: 1 };
+      expect(await ledger.setState("launch", "g1", { harnessLaunch: next })).toEqual({ ok: true });
+      expect(ledger.live.get("launch")?.state).toEqual({ harness: producer, harnessLaunch: next });
+      expect(await ledger.setState("launch", "g1", { harnessLaunch: begun })).toEqual({ ok: false, reason: "fenced" });
+      expect(await ledger.setState("launch", "g1", { harnessLaunch: { ...next, phase: "begun" } })).toEqual({
+        ok: true,
+      });
+      expect(ledger.live.get("launch")?.state).toEqual({
+        harness: producer,
+        harnessLaunch: { ...next, phase: "begun" },
+      });
+    },
+  );
+});
 describe("original policy owning state transaction", () => {
   it.each([
     "omitted-harness",

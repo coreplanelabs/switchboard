@@ -64,6 +64,8 @@ import { RefusalError, refusalOf } from "../refusal.js";
 import { allocationAckOf } from "../runLedger/allocationAck.js";
 import type { LiveRunMeta, LiveRunRow } from "../runLedger/types.js";
 import type { HarnessRoster } from "../harness/roster.js";
+import { DEFAULT_HARNESS } from "../harness/roster.js";
+import { commandRouteForLaunch, preparedHarnessLaunch } from "../harness/sessionPolicy.js";
 import type { HarnessContainer, HarnessOperationScope } from "../harness/container.js";
 import type { HarnessRegistry } from "../harness/pi/relay.js";
 import type { Executor } from "../../execution/executor.js";
@@ -554,6 +556,16 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         meta,
         card: card.handle ?? null,
         state: {
+          ...(reserved?.harnessLaunchState ??
+            (deps.harness
+              ? {
+                  harnessLaunch: preparedHarnessLaunch(
+                    resolved.harness?.name ?? DEFAULT_HARNESS,
+                    profile.identity,
+                    commandRouteForLaunch(agent.name, profile.identity, repoCtx.repo, checkout),
+                  ),
+                }
+              : {})),
           ...(workspaceBinding !== undefined ? { binding: workspaceBinding } : {}),
           ...(ctx.restartBranchIdentityBaseline !== undefined
             ? { branchIdentityBaseline: ctx.restartBranchIdentityBaseline }

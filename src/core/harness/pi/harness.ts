@@ -1,4 +1,5 @@
-import { sessionPolicyFor, confirmSessionFacts } from "../contract.js";
+import { beginHarnessLaunch, sessionPolicyFor, confirmSessionFacts } from "../contract.js";
+import { harnessLaunchIntentOf } from "../sessionPolicy.js";
 import { RUN_DEADLINE_RESERVE_MS } from "../../../execution/bashTimeout.js";
 import { HarnessEndingUnconfirmedError } from "../container.js";
 // The pi harness (docs/reference/specs/harness-pi.md): what drives every run.
@@ -518,7 +519,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     run.onEvent?.({ type: "run_note", kind: "harness_error", summary: mismatch.message, at: now() });
     throw mismatch;
   }
-  const sessionPolicy = sessionPolicyFor(run);
+  const sessionPolicy = sessionPolicyFor(run, "pi");
   const agentSpan = run.span?.start("run.agent");
   if (agentSpan) deps.bearers?.reparent(run.runId, agentSpan);
   /** The session-log row a tool event's turn lands on (run-history item 53):
@@ -1163,6 +1164,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       }
       const launch = sessionPath ? { ...spec, sessionPath } : spec;
       for (const file of piLaunchFiles(launch)) await container.writeFile(file.path, file.content);
+      await beginHarnessLaunch(run);
       openingCustodyUnknown = true;
       const started = await container.start({
         paths,
@@ -1182,6 +1184,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       const bearerHash = bearerHashOf(deps.bearer);
       facts = {
         harness: "pi",
+        ...(run.launchIntent === undefined ? {} : { launchOrdinal: harnessLaunchIntentOf(run.launchIntent)?.ordinal }),
         ...(sessionPolicy ? { sessionPolicy } : {}),
         pid,
         ...(started.processBirth === undefined ? {} : { processBirth: started.processBirth }),

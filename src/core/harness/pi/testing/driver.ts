@@ -329,6 +329,8 @@ export function piDriver(): HarnessDriver {
       });
       const run: HarnessRun = {
         runId: RUN_ID,
+        ...(script.launchIntent === undefined ? {} : { launchIntent: script.launchIntent }),
+        ...(script.onLaunchIntent ? { saveLaunchIntent: script.onLaunchIntent } : {}),
         agent,
         model: { id: "claude-fable-5", provider: "anthropic", providerType: "anthropic" },
         system: "You are the conformance run.",

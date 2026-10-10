@@ -398,6 +398,10 @@ export function writeBoundaryDiagnosticSummary(failure: WriteBoundaryFailure | u
 export interface LedgerRun {
   /** Canonical acknowledged original identity only; no disposal eligibility. */
   readonly allocationAck?: WorkspaceAllocationAck;
+  /** Original launch intent in this owner-fenced state; callers cannot mutate it. */
+  readonly harnessLaunch?: unknown;
+  /** Original launch state read under this reservation's owner fence. */
+  readonly harnessLaunchState?: RunState;
   readonly runId: string;
   /** False once a write was refused or failed for good: the ledger no longer
    *  mirrors this run (it is not resumable); the finish still lands. */
@@ -1109,6 +1113,17 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
   /** The per-run state machine behind `LedgerRun`. */
   class TrackedRun implements LedgerRun {
+    get harnessLaunch(): unknown {
+      return structuredClone(this.state.harnessLaunch);
+    }
+    get harnessLaunchState(): RunState | undefined {
+      return this.state.harnessLaunch === undefined
+        ? undefined
+        : structuredClone({
+            harnessLaunch: this.state.harnessLaunch,
+            ...(this.state.harness === undefined ? {} : { harness: this.state.harness }),
+          });
+    }
     private readonly originalReservation?: ReserveRunRequest;
     validatePromotion(req: OpenRunRequest): WorkspaceAllocationAck | undefined {
       const original = this.originalReservation;
@@ -2692,7 +2707,26 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           !sameWorkspaceAllocation(req.meta.workspaceAllocation, claimed.allocationAck.allocation))
       )
         throw new UnknownAllocationClaimError("original v2 allocation acknowledgment unavailable");
-      const run = new TrackedRun(req, { stepNo: 0, lastSeq: 0, originalReservation: req });
+      let state: RunState | undefined;
+      if (req.meta.restartOf === req.runId) {
+        // This selects a read, not restart authority. Only the original
+        // replacement owner can have recorded a new prepared attempt.
+        const observed = await ledger.peekInbox(req.runId, gen, 0);
+        if (
+          !observed.ok ||
+          observed.runId !== req.runId ||
+          observed.gen !== gen ||
+          typeof observed.boundary.state !== "object" ||
+          observed.boundary.state === null ||
+          Array.isArray(observed.boundary.state)
+        )
+          throw new RefusalError(refusalOf("setup_failed", "The original launch state could not be verified."));
+        state = observed.boundary.state as RunState;
+      }
+      const run = new TrackedRun(
+        { ...req, ...(state ? { state } : {}) },
+        { stepNo: 0, lastSeq: 0, originalReservation: req },
+      );
       run.bindAllocationAck(claimed.allocationAck);
       run.startHeartbeat();
       live.add(run);
