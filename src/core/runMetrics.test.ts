@@ -276,6 +276,20 @@ describe("isRunMetricsPoint", () => {
     expect(isRunMetricsPoint(null)).toBe(false);
     expect(isRunMetricsPoint({ ...good(), doubles: good().doubles.slice(1) })).toBe(false);
   });
+
+  it("accepts the sixteen-column row and the twenty-column row, so a rolling deploy can widen it; any other width is refused", () => {
+    const widened = { ...good(), blobs: [...good().blobs, "slack", "resident", "", "success"] };
+    expect(widened.blobs).toHaveLength(20);
+    expect(isRunMetricsPoint(widened)).toBe(true);
+    expect(isRunMetricsPoint({ ...good(), blobs: good().blobs.slice(0, 16) })).toBe(true);
+    for (const width of [15, 17, 19, 21]) {
+      const blobs = Array.from({ length: width }, (_, i) => good().blobs[i] ?? "");
+      expect(isRunMetricsPoint({ ...good(), blobs })).toBe(false);
+    }
+    const overCap = { ...widened, blobs: [...widened.blobs] };
+    overCap.blobs[19] = "x".repeat(MAX_POINT_BLOB_BYTES + 1);
+    expect(isRunMetricsPoint(overCap)).toBe(false);
+  });
 });
 
 describe("pointTurnsFinal — the six combinations", () => {

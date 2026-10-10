@@ -2197,6 +2197,23 @@ describe("run metrics — the point, the guard and the emission rule", () => {
     expect(metricWarns[0]).toContain("TypeError");
   });
 
+  it("a twenty-column point from a newer writer is stored and written beside a sixteen-column one", async () => {
+    const key = storeKey();
+    const written = await metricsDouble(key);
+    const narrowRecord = record("r1", Date.now() - 2_000);
+    const narrow = pointOf(narrowRecord)!;
+    expect(narrow.blobs).toHaveLength(16);
+    const wideRecord = record("r2", Date.now() - 1_000);
+    const wide = {
+      ...pointOf(wideRecord)!,
+      blobs: [...pointOf(wideRecord)!.blobs, "slack", "resident", "", "success"],
+    };
+    expect((await post("/runs/put", { storeKey: key, record: narrowRecord, point: narrow })).status).toBe(200);
+    expect((await post("/runs/put", { storeKey: key, record: wideRecord, point: wide })).status).toBe(200);
+    expect(written.map((p) => p.blobs.length)).toEqual([16, 20]);
+    expect(written.map((p) => blobOf(p, "run id"))).toEqual(["r1", "r2"]);
+  });
+
   it("a malformed point is refused by name on put and finish, before any write", async () => {
     const key = storeKey();
     const bad = await post("/runs/put", {
