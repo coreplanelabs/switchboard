@@ -1,3 +1,4 @@
+import { isResidentPoolUser } from "../../src/execution/residentPoolSpends.js";
 import {
   isWorkspaceOwner,
   isAcknowledgedWorkspaceOwner,
@@ -72,6 +73,7 @@ function fixture() {
     validRunOwner,
     shellQuote,
     TextDecoder,
+    isResidentPoolUser,
     THREAD_USERS: ["worker2"],
     DESTROY_UNCONFIRMED_KEY: "destroy",
     CREDENTIAL_INSPECTION_MAX_MS: 20_000,
@@ -260,6 +262,7 @@ ${methodOf(source, "workspaceDiscarded")}
       isAcknowledgedWorkspaceOwner,
       workspaceOwnerKey,
       workspaceSettlementOf,
+      isResidentPoolUser,
       THREAD_USERS: ["worker2"],
       DESTROY_UNCONFIRMED_KEY: "destroy",
       CREDENTIAL_INSPECTION_MAX_MS: 20_000,

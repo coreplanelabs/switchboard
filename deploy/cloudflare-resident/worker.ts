@@ -238,22 +238,17 @@ import { shellQuote } from "../../src/execution/shellQuote.js";
 import { envFromRequest } from "../../src/execution/sandboxEnv.js";
 import { CREDENTIAL_EXPIRY_MARGIN_MS } from "../../src/execution/residentCredentials.js";
 import { destroyWithPersistentFence } from "../../src/execution/residentDestroyGate.js";
-import {
-  ResidentRecreateAdmission,
-  idleForPoolRecycle,
-  retryPoolRecycleAfterRefresh,
-} from "../../src/execution/residentRecreateAdmission.js";
+import { ResidentRecreateAdmission } from "../../src/execution/residentRecreateAdmission.js";
 import {
   claimPoolBinding,
+  isResidentPoolUser,
   mayRunAsPoolUser,
-  ownedPoolUsers,
   parsePoolBindings,
-  parseSpentPoolUsers,
   rebuildPoolBindingIndex,
   releasePoolBinding,
-  spendPoolUser,
-  unavailablePoolUsers,
 } from "../../src/execution/residentPoolSpends.js";
+import { reserveUid, uidOwner, uidLedger, issuedUidCount, resetUidGeneration, claimUid } from "./uidOwnership";
+import { provisionUidCommand } from "./uidProvision";
 import {
   recordFiring,
   scheduleForCron,
@@ -477,7 +472,6 @@ import {
   DEPS_STEP_OVERHEAD_MS,
   errMsg,
   GIT_NETWORK_TIMEOUT_MS,
-  THREAD_POOL_SIZE,
   RESIDENT_WORKLOAD_LIMIT,
   WORKTREE_SWEEP_BATCH_SIZE,
   R2_TRANSFER_TIMEOUT_MS,
@@ -670,12 +664,6 @@ const THREADS_DIR = "/workspace/threads";
  *  worktree. An orphan from a mid-op DO restart dies with the container disk
  *  at the latest (disk is cache). */
 const OPS_DIR = "/workspace/ops";
-
-/** Pool of OS users for thread worktrees and disposable ops. A UID stays with
- *  its first owner for this VM generation; detach releases the live binding,
- *  not the UID spend. Exhaustion may recycle a proven-idle VM. Must match the
- *  useradd loop in the Dockerfile. */
-const THREAD_USERS = Array.from({ length: THREAD_POOL_SIZE }, (_, i) => `worker${i + 2}`);
 
 /** Force-detach: after killing the thread user's processes, how long
  *  to wait for the in-flight op counter to drain (polled every
@@ -1983,9 +1971,6 @@ const RUNTIME_UNREACHABLE_KEY = "resident:runtimeUnreachable";
 /** A failed or interrupted VM destroy forbids another process on an unconfirmed disk. */
 const DESTROY_UNCONFIRMED_KEY = "resident:destroyUnconfirmed";
 const RECREATE_ADMISSION_KEY = "resident:recreateAdmission";
-/** UIDs that have run untrusted code on this VM. Missing means an unknown old generation. */
-const SPENT_POOL_USERS_KEY = "resident:spentPoolUsers";
-
 /** The row under RUNTIME_UNREACHABLE_KEY: the count and both instants, so the
  *  fleet watch sees how long the runtime has been silent. Cleared by any exec
  *  whose process spawned. */
@@ -3558,7 +3543,12 @@ export class ResidentDO extends Sandbox<Env> {
       // An older image could have deleted every DO key after a failed
       // offboard destroy. No prior row is evidence of a fresh VM; confirm
       // destruction here, after onboard returned, before any provision step.
-      if (!parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY), THREAD_USERS)) {
+      if (
+        !(await this.currentUidLedger().then(
+          () => true,
+          () => false,
+        ))
+      ) {
         if (
           !(await this.automaticContainerLoss("provisioning VM reset", async () => {
             this.swapIncarnation();
@@ -4526,7 +4516,7 @@ export class ResidentDO extends Sandbox<Env> {
           await this.destroy();
           // Only confirmed destruction creates an empty generation. If this
           // write fails, the uncertainty fence remains and no UID is reused.
-          await this.ctx.storage.put(SPENT_POOL_USERS_KEY, []);
+          await this.ctx.storage.transaction((txn) => resetUidGeneration(txn));
         },
       );
     this.destroying = pending;
@@ -5189,7 +5179,10 @@ export class ResidentDO extends Sandbox<Env> {
       depsStoreDir: DEPS_STORE_DIR,
       checkoutDir: CHECKOUT_DIR,
       threads: live.map((b) => ({ threadKey: b.threadKey, dir: parentDir(b.worktreePath) })),
-      homes: [BUILD_USER, ...THREAD_USERS].map((user) => ({ user, dir: `/home/${user}` })),
+      homes: [BUILD_USER, ...(await this.currentUidLedger()).map((row) => row.user)].map((user) => ({
+        user,
+        dir: `/home/${user}`,
+      })),
     };
     const du = await this.run(duArgv(layout), { timeoutMs: DU_TIMEOUT_MS });
     const sample = assembleDiskSample({
@@ -5264,19 +5257,22 @@ export class ResidentDO extends Sandbox<Env> {
    *  generation and re-states both levels. A crossing lands in the outbox
    *  and is re-offered on every answer until a newer crossing of the same
    *  name supersedes it; the bot forwards posts to `POST /plane/level`.
-   *  Storage reads and one storage write only — never a container touch, so
+   *  Storage reads only — cached owner observations never grant custody, so
    *  every `/attach`, `/exec` and `/status` answer can carry the document. */
   async residentLevels(): Promise<ResidentLevelsDoc> {
     const at = new Date(systemClock()).toISOString();
-    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
-    const used = new Set([...all.values()].filter((b) => !b.evicted && b.user).map((b) => b.user));
-    const spent = parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY), THREAD_USERS);
-    for (const user of spent?.keys() ?? THREAD_USERS) used.add(user);
-    for (const u of this.opUsersInUse.keys()) used.add(u);
-    for (const u of this.poolUsersInspecting) used.add(u);
+    // Status never starts a VM. Count cached canonical owners and durable native
+    // holds; request admission independently observes actual UID processes.
+    const used = await this.activeWorkloadOwners(false, false).catch(
+      () => new Set(Array.from({ length: RESIDENT_WORKLOAD_LIMIT }, (_, i) => `unknown:${i}`)),
+    );
     const reading = await this.memoryGauge();
     const generation = this.containerIdMemo ?? this.incarnation;
-    const seat = { side: seatSide(used.size, THREAD_USERS.length), used: used.size, total: THREAD_USERS.length };
+    const seat = {
+      side: seatSide(used.size, RESIDENT_WORKLOAD_LIMIT),
+      used: used.size,
+      total: RESIDENT_WORKLOAD_LIMIT,
+    };
     const memory = { side: memorySide(reading?.percent ?? null), percent: reading?.percent ?? null };
     const next: LevelSample = { seat: seat.side, memory: memory.side, generation };
     const prev = (await this.ctx.storage.get<LevelSample>(LEVELS_LAST_KEY)) ?? null;
@@ -5526,21 +5522,10 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
-  /** Pool users live in the IMAGE (Dockerfile useradd loop) while THREAD_USERS
-   *  lives in the Worker. After a deploy that grows the pool, a still-running
-   *  container lacks the new users and `install -o workerN` fails. Check the
-   *  last pool user exists; if not and nothing is in flight — the in-memory
-   *  counters AND the durable run registrations (item 44): a harness run's
-   *  process lives in the container between the bot's operator calls, so a
-   *  restart decided on the op counters alone stops the container under a live
-   *  run — stop the container so it restarts on the current image (state is DO
-   *  storage + R2 — the disk is a cache). A deferred restart re-checks on
-   *  every later refresh cycle until the resident is quiet; a registration
-   *  whose release never came defers it only through the clean-idle window;
-   *  a later sweep removes its binding. The attach path never stops the container (issue 2101,
-   *  the `stale` answer below); the stop is the refresh cycle's or the
-   *  deploy's alone. Answers `restarted` when a stop was issued, else why
-   *  not. */
+  /** A running VM can predate its Worker. Probe the account-provisioning
+   * protocol, but never let that capability clear a pending deployment report.
+   * Attach does not replace a VM; refresh/deploy use the existing activity and
+   * preservation gates before a confirmed destroy and restore. */
   private async reconcileImage(where: "attach" | "refresh" | "deploy", force = false): Promise<ImageReconcileResult> {
     const active = await this.isRuntimeActive().catch((err) => {
       console.log(`image-reconcile (${where}): activity probe failed — preserving the pending report: ${errMsg(err)}`);
@@ -5570,22 +5555,30 @@ export class ResidentDO extends Sandbox<Env> {
       await this.reportPendingImageCurrent(where);
       return "inactive";
     }
-    const last = THREAD_USERS[THREAD_USERS.length - 1];
+
     // A pending report marker (issue 1931) means a deploy could not verify this
-    // container on its image: the probe shortcut below is a POOL-USER check the
-    // pre-deploy image passes when the pool did not change, so it can never
+    // container on its image: the protocol probe below is a capability check the
+    // pre-deploy image can pass when the protocol did not change, so it can never
     // satisfy the marker — the container is treated as stale until it is
     // cycled post-deploy.
     const pending = await this.ctx.storage.get<{ resource: string }>(IMAGE_REPORT_PENDING_KEY);
     if (!force && pending === undefined) {
-      const probe = await this.run(["id", "-u", last]);
-      if (probe.exitCode === 0) return "current";
+      const capability = ["cat", "/etc/switchboard-uid-protocol"];
+      const probe = await this.run(capability);
+      if (
+        probe.exitCode === 0 &&
+        probe.stdout === "dynamic-uid-v1\n" &&
+        probe.stderr === "" &&
+        !probe.timedOut &&
+        !probe.truncated
+      )
+        return "current";
     }
     const stale = force
       ? "the container predates the deploy"
       : pending !== undefined
         ? "a deploy's new-image report is pending, so the running container cannot be trusted current"
-        : `${last} missing in the running container`;
+        : "dynamic identity provisioning is unavailable on this image";
     if (where === "attach") {
       // An attach is never what restarts the container (issue 2101): the
       // post-deploy restart loop was exactly this — each attach stopped the
@@ -5907,7 +5900,7 @@ export class ResidentDO extends Sandbox<Env> {
     capFiles?: { out: string; err: string },
     env?: Record<string, string>,
   ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean; truncated?: boolean }> {
-    if (THREAD_USERS.includes(user) && !(await this.poolUserOwnerMatches(user)))
+    if (user !== BUILD_USER && (!isResidentPoolUser(user) || !(await this.poolUserOwnerMatches(user))))
       throw new Error("pool-owner-mismatch: model command refused before UID ownership");
     // The caller's variables (an /exec body's `env`, docs/reference/specs/
     // harness-pi.md item 4) under the Worker's own: a caller never overrides
@@ -5972,19 +5965,26 @@ export class ResidentDO extends Sandbox<Env> {
    * transaction prevents concurrent admissions from losing each other's
    * marks. An old resident without this row is an unknown generation. */
   private async markPoolUserSpent(user: string, owner: string): Promise<boolean> {
-    return this.ctx.storage.transaction(async (txn) => {
-      const current = await txn.get<unknown>(SPENT_POOL_USERS_KEY);
-      const next = spendPoolUser(current, THREAD_USERS, user, owner);
-      if (!next) return false;
-      await txn.put(SPENT_POOL_USERS_KEY, next);
-      return true;
-    });
+    return this.ctx.storage.transaction((txn) => claimUid(txn, user, owner));
+  }
+
+  private async currentUidLedger() {
+    const ledger = await this.ctx.storage.transaction((txn) => uidLedger(txn));
+    return [...ledger].map(([user, owner]) => ({ user, owner }));
   }
 
   private async rebuildPoolBindingIndex(): Promise<void> {
     await this.ctx.storage.transaction(async (txn) => {
       const bindings = await txn.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
-      const byUser = rebuildPoolBindingIndex(bindings.values(), THREAD_USERS);
+      const users = [
+        ...new Set([
+          ...(await uidLedger(txn).catch(() => new Map<string, string>())).keys(),
+          ...[...bindings.values()]
+            .filter((binding) => !binding.evicted && binding.user)
+            .map((binding) => binding.user),
+        ]),
+      ];
+      const byUser = rebuildPoolBindingIndex(bindings.values(), users);
       if (!byUser) throw new Error("pool-binding-index: malformed live binding; refusing resident work");
       for (const [user, keys] of byUser) await txn.put(poolBindingKey(user), keys);
     });
@@ -6070,8 +6070,8 @@ export class ResidentDO extends Sandbox<Env> {
         : prior?.workspacePredecessors;
       const oldUser = prior && !prior.evicted ? prior.user : "";
       const newUser = !next.evicted ? next.user : "";
-      if (oldUser && !THREAD_USERS.includes(oldUser)) throw new Error("pool-binding-index: unknown old UID");
-      if (newUser && !THREAD_USERS.includes(newUser)) throw new Error("pool-binding-index: unknown new UID");
+      if (oldUser && !isResidentPoolUser(oldUser)) throw new Error("pool-binding-index: unknown old UID");
+      if (newUser && !isResidentPoolUser(newUser)) throw new Error("pool-binding-index: unknown new UID");
       if (oldUser !== newUser) {
         if (oldUser) {
           const keys = releasePoolBinding(await txn.get<unknown>(poolBindingKey(oldUser)), next.threadKey);
@@ -6117,34 +6117,21 @@ export class ResidentDO extends Sandbox<Env> {
    * bindings. Two retained bindings naming one UID fail closed, even when one
    * is the ledger owner. Ops have a separate exact in-flight owner. */
   private async poolUserOwnerMatches(user: string, expectedOwner?: string): Promise<boolean> {
-    if (!THREAD_USERS.includes(user)) return false;
-    const [spent, bindings] = await Promise.all([
-      this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY),
+    if (!isResidentPoolUser(user)) return false;
+    const [owner, bindings] = await Promise.all([
+      this.ctx.storage.transaction((txn) => uidOwner(txn, user)),
       this.ctx.storage.get<unknown>(poolBindingKey(user)),
     ]);
     const liveThreadKeys = parsePoolBindings(bindings);
     if (!liveThreadKeys) return false;
-    return mayRunAsPoolUser(spent, THREAD_USERS, user, liveThreadKeys, this.opUsersInUse.get(user), expectedOwner);
-  }
-
-  /** Storage bindings, active ops and inspections all reserve a pool user.
-   * Claim inside this method, before its promise resolves: two concurrent
-   * callers must not each read the same free UID before either can claim it. */
-  private async findFreePoolUser(
-    excludeThreadKey?: string,
-    excluded = new Set<string>(),
-    preferred: readonly string[] = [],
-  ): Promise<string | undefined> {
-    const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
-    const used = new Set(
-      [...all.values()].filter((b) => !b.evicted && b.user && b.threadKey !== excludeThreadKey).map((b) => b.user),
+    return mayRunAsPoolUser(
+      owner ? [{ user, owner }] : [],
+      undefined,
+      user,
+      liveThreadKeys,
+      this.opUsersInUse.get(user),
+      expectedOwner,
     );
-    for (const u of this.opUsersInUse.keys()) used.add(u);
-    for (const u of this.poolUsersInspecting) used.add(u);
-    for (const u of excluded) used.add(u);
-    const user = [...preferred, ...THREAD_USERS].find((u) => !used.has(u));
-    if (user) this.poolUsersInspecting.add(user);
-    return user;
   }
 
   /** Root-side inspection fails closed on a missing/partial answer. A former
@@ -6155,10 +6142,10 @@ export class ResidentDO extends Sandbox<Env> {
       const result = await this.run([
         "sh",
         "-c",
-        'if test -L "$1"; then exit 42; fi; if test -d "$1"; then find "$1" -mindepth 1 -maxdepth 1 -type d -user "$2" -print; fi',
+        'if test -L "$1"; then exit 42; fi; if test -d "$1"; then find "$1" -mindepth 1 -maxdepth 1 -type d -uid "$2" -print; fi',
         "_",
         dir,
-        user,
+        String(Number(user.slice(6)) + 2000),
       ]);
       if (result.exitCode !== 0 || result.timedOut || result.truncated)
         throw new Error("pool-user-disk-scan-incomplete");
@@ -6178,106 +6165,69 @@ export class ResidentDO extends Sandbox<Env> {
     if (result.stdout === "clean\n") return false;
     throw new Error("pool-user-stage-scan-invalid");
   }
-
-  /** A full one-use pool can serve the next request by destroying its VM,
-   * never by assigning another owner's UID. The admission mark closes every
-   * other entry before the idle read and stays held through the restore. */
-  private async recycleSpentPoolForAdmission(): Promise<true | ThreadErr> {
+  /** The same verified account may be recreated after the VM's disk is
+   * lost. This touches no workspace and grants no new ownership. */
+  private async ensurePoolAccount(user: string): Promise<ThreadErr | null> {
     try {
-      const admission = await this.recreateAdmission.run(async (): Promise<true | ThreadErr> => {
-        const spent = parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY), THREAD_USERS);
-        if (!spent) return { error: "pool-generation-unknown: fresh VM required before UID assignment", status: 503 };
-        if (spent.size < THREAD_USERS.length) return true; // another checked recreate already cleared the generation
-        const [status, drain, imagePending, snapshot, registeredRuns, bindings] = await Promise.all([
-          this.getStatus(),
-          this.registry().getDrain(),
-          this.ctx.storage.get(IMAGE_REPORT_PENDING_KEY),
-          this.ctx.storage.get(SNAPSHOT_KEY),
-          this.registeredRunsBeyondOps(),
-          this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX }),
-        ]);
-        const idle = {
-          state: status.state,
-          draining: liveDrain(drain, systemClock()) !== null,
-          imagePending: imagePending !== undefined,
-          inFlight: this.inFlightCount(),
-          refreshAdmissions: this.refreshAdmissionsInFlight,
-          refreshes: this.refreshesInFlight,
-          adminWork: this.adminWorkInFlight,
-          hydrating: this.hydration !== null,
-          registeredRuns,
-          liveBindings: [...bindings.values()].filter((binding) => !binding.evicted).length,
-          inspecting: this.poolUsersInspecting.size,
-        };
-        if (!snapshot || !idleForPoolRecycle(idle)) {
-          if (snapshot && retryPoolRecycleAfterRefresh(idle))
-            return {
-              error: "pool-recycle-wait: scheduled refresh is still using the resident",
-              status: 503,
-              transient: true,
-              reason: "pool-recycle-wait",
-              cause: "system",
-            };
-          return {
-            error: "pool-recycle-required: all UIDs spent and the resident is not idle for checked VM recycle",
-            status: 503,
-          };
-        }
-        await this.recreateContainer("pool-recycle: all UIDs spent; no other resident work owns this VM", true, true);
-        await this.ensureHydrated();
-        const fresh = parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY), THREAD_USERS);
-        const ready = await this.getStatus();
-        const imageStillPending = (await this.ctx.storage.get(IMAGE_REPORT_PENDING_KEY)) !== undefined;
-        if (!fresh || fresh.size !== 0 || ready.state !== "warm" || imageStillPending)
-          return { error: "pool-recycle-failed: the restored VM is not warm, current and empty", status: 503 };
-        return true;
-      });
-      return admission.busy ? this.recreateRefusal() : admission.value;
-    } catch (err) {
-      console.log(`pool-recycle: checked VM recycle failed (${errMsg(err)})`);
-      return { error: "pool-recycle-failed: the checked VM restore did not complete", status: 503 };
+      const result = await this.run(provisionUidCommand(user));
+      if (
+        result.exitCode === 0 &&
+        !result.timedOut &&
+        !result.truncated &&
+        result.stderr === "" &&
+        result.stdout === "account-ready\n"
+      )
+        return null;
+    } catch {
+      // The admitted native journal retains any unknown outcome.
     }
+    return {
+      error: "workspace account creation could not be verified",
+      status: 503,
+      reason: "workload-unverified",
+      cause: "system",
+    };
   }
 
-  private async reserveSafePoolUser(owner: string, excludeThreadKey?: string): Promise<string | ThreadErr> {
-    let spent = parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY), THREAD_USERS);
-    if (!spent) return { error: "pool-generation-unknown: fresh VM required before UID assignment", status: 503 };
-    let excluded = unavailablePoolUsers(spent, owner);
-    let contaminated = false;
-    let recycled = false;
-    for (;;) {
-      const user = await this.findFreePoolUser(excludeThreadKey, excluded, ownedPoolUsers(spent, owner));
-      if (!user) {
-        if (!contaminated && excluded.size === THREAD_USERS.length && !recycled) {
-          recycled = true;
-          const result = await this.recycleSpentPoolForAdmission();
-          if (result !== true) return result;
-          spent = parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY), THREAD_USERS);
-          if (!spent) return { error: "pool-generation-unknown: fresh VM required before UID assignment", status: 503 };
-          excluded = unavailablePoolUsers(spent, owner);
-          continue;
-        }
-        return contaminated
-          ? { error: "pool-user-contaminated: no clean pool user is available", status: 503 }
-          : excluded.size === THREAD_USERS.length
-            ? { error: "pool-recycle-required: all UIDs spent on this VM; confirm idle and recreate it", status: 503 }
-            : { error: "user-pool-exhausted: no safe pool user is available", status: 429 };
-      }
-      let safe = false;
-      try {
-        const clean = !(await this.poolUserHasOldThreadDir(user, [])) && !(await this.poolUserHasOldStageContent(user));
-        if (clean) {
-          safe = await this.markPoolUserSpent(user, owner);
-          if (safe) return user;
-        } else contaminated = true;
-        excluded.add(user);
-      } catch {
-        return { error: "pool-user-inspection-failed: allocation refused", status: 503 };
-      } finally {
-        if (!safe) this.poolUsersInspecting.delete(user);
-      }
-      // A rejected UID may still own a private tree. It stays unavailable to
-      // this request, and every later allocation checks disk again.
+  /** Durable reservation precedes native creation. The existing native
+   * admission tracks creation until its result is observed. */
+  private async reserveSafePoolUser(owner: string, _excludeThreadKey?: string): Promise<string | ThreadErr> {
+    let user: string;
+    try {
+      user = await this.ctx.storage.transaction(async (txn) => {
+        const reserved = await reserveUid(txn, owner);
+        const key = poolBindingKey(reserved);
+        if ((await txn.get(key)) === undefined) await txn.put(key, []);
+        return reserved;
+      });
+    } catch {
+      return {
+        error: "UID reservation could not be verified",
+        status: 503,
+        reason: "workload-unverified",
+        cause: "system",
+      };
+    }
+    if (this.poolUsersInspecting.has(user) || this.opUsersInUse.has(user))
+      return { error: "workspace identity is busy", status: 409, reason: "busy", cause: "system" };
+    this.poolUsersInspecting.add(user);
+    let ready = false;
+    try {
+      const refused = await this.ensurePoolAccount(user);
+      if (refused) return refused;
+      if ((await this.poolUserHasOldThreadDir(user, [])) || (await this.poolUserHasOldStageContent(user)))
+        return { error: "pool-user-contaminated: workspace identity retains private files", status: 503 };
+      ready = true;
+      return user;
+    } catch {
+      return {
+        error: "workspace account creation could not be verified",
+        status: 503,
+        reason: "workload-unverified",
+        cause: "system",
+      };
+    } finally {
+      if (!ready) this.poolUsersInspecting.delete(user);
     }
   }
 
@@ -6289,26 +6239,42 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Count active owners, not historical UID spends or retained private files.
    * Native operations and current UID processes remain occupied after a reset. */
-  private async activeWorkloadOwners(): Promise<Set<string>> {
+  private async activeWorkloadOwners(probeProcesses = true, observeCanonical = true): Promise<Set<string>> {
     const owners = new Set([...this.workloadReservations, ...this.opUsersInUse.values()]);
-    const [bindings, registrations, ledger, native] = await Promise.all([
+    const [bindings, registrations, native] = await Promise.all([
       this.liveBindings(),
       this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX }),
-      this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY),
       this.ctx.storage.list<Partial<WorkspaceOwner> & { opOwner?: string }>({ prefix: "native-operation:" }),
     ]);
-    const spent = parseSpentPoolUsers(ledger, THREAD_USERS);
-    if (!spent) throw new Error("UID ownership is unverified");
+    // Validate the generation once. Each current owner then uses an indexed
+    // read, independent of the number of historical identities.
+    await this.ctx.storage.transaction((txn) => issuedUidCount(txn));
     const now = systemClock();
     await Promise.all(
       bindings.map(async (binding) => {
         const key = `thread:${binding.threadKey}`;
         if (owners.has(key)) return;
         const registration = registrations.get(runRegKey(binding.threadKey));
-        const [fence, owner, claimants] = await Promise.all([
+        const [fence, owner, claimants, recordedOwner] = await Promise.all([
           this.ctx.storage.get(runFenceKey(binding.threadKey)),
-          registration?.runId ? this.observeRunForEviction(registration, binding) : Promise.resolve(null),
+          registration?.runId
+            ? observeCanonical
+              ? this.observeRunForEviction(registration, binding)
+              : this.ctx.storage
+                  .get<{ runId: string; ownerGen: string; ownerFence: number; observation: unknown }>(
+                    `resident:workloadOwner:${binding.threadKey}`,
+                  )
+                  .then((cached) =>
+                    cached &&
+                    cached.runId === registration.runId &&
+                    cached.ownerGen === registration.ownerGen &&
+                    cached.ownerFence === registration.ownerFence
+                      ? cached.observation
+                      : null,
+                  )
+            : Promise.resolve(null),
           this.ctx.storage.get(poolBindingKey(binding.user)),
+          this.ctx.storage.transaction((txn) => uidOwner(txn, binding.user)),
         ]);
         const { state, category } = classifyDeployRegistrationWithLedger({
           threadKey: binding.threadKey,
@@ -6321,10 +6287,10 @@ export class ResidentDO extends Sandbox<Env> {
           now,
           graceMs: RUN_REGISTRATION_GRACE_MS,
           opInFlight: this.threadOpsInFlight.get(binding.threadKey) ?? 0,
-          ledger,
+          ledger: recordedOwner === null ? [] : [{ user: binding.user, owner: recordedOwner }],
           claimants,
           user: binding.user,
-          pool: THREAD_USERS,
+          pool: undefined,
         });
         // Only positively terminal ownership removes a held tree from this
         // workload count. A binding without a run registration is still unknown.
@@ -6342,24 +6308,29 @@ export class ResidentDO extends Sandbox<Env> {
       const thread = end > "native-operation:".length ? key.slice("native-operation:".length, end) : "";
       owners.add(THREAD_KEY_RE.test(thread) ? `thread:${thread}` : `native:${key}`);
     }
-    if (await this.isRuntimeActive()) {
+    if (probeProcesses && (await this.isRuntimeActive())) {
       const processes = await this.run(["ps", "-eo", "user="]);
       if (processes.exitCode !== 0 || processes.timedOut || processes.truncated || processes.stderr !== "")
         throw new Error("resident process observation is incomplete");
-      for (const name of processes.stdout
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean)) {
+      for (const name of new Set(
+        processes.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean),
+      )) {
         if (!/^(?:[A-Za-z_][A-Za-z0-9_.+-]*\$?|\d+)$/.test(name))
           throw new Error("resident process observation is invalid");
         const user =
-          /^\d+$/.test(name) && Number(name) >= 2002 && Number(name) <= 2000 + THREAD_USERS.length + 1
+          /^\d+$/.test(name) && Number(name) >= 2002 && Number(name) <= 2_147_483_647
             ? `worker${Number(name) - 2000}`
             : name;
         if (user === BUILD_USER) continue;
-        if (user.startsWith("worker") && !THREAD_USERS.includes(user))
+        if (user.startsWith("worker") && !isResidentPoolUser(user))
           throw new Error("resident process identity is unverified");
-        if (THREAD_USERS.includes(user)) owners.add(spent.get(user) ?? `uid:${user}`);
+        if (isResidentPoolUser(user)) {
+          const recorded = await this.ctx.storage.transaction((txn) => uidOwner(txn, user));
+          owners.add(recorded ?? `uid:${user}`);
+        }
       }
     }
     return owners;
@@ -6397,7 +6368,7 @@ export class ResidentDO extends Sandbox<Env> {
    * legacy binding may name the same UID, but only its ledger owner proceeds. */
   private async claimRetainedThreadUser(binding: ThreadBinding): Promise<ThreadErr | null> {
     const user = binding.user;
-    if (!THREAD_USERS.includes(user)) return { error: "pool-user-invalid: binding names a non-pool user", status: 409 };
+    if (!isResidentPoolUser(user)) return { error: "pool-user-invalid: binding names a non-pool user", status: 409 };
     try {
       if (await this.poolUserHasOldThreadDir(user, [parentDir(binding.worktreePath)]))
         return { error: "pool-user-contaminated: another thread directory has this user", status: 409 };
@@ -6412,7 +6383,7 @@ export class ResidentDO extends Sandbox<Env> {
     }
     if (!(await this.poolUserOwnerMatches(user, `thread:${binding.threadKey}`)))
       return { error: "pool-owner-mismatch: conflicting retained binding names this UID", status: 503 };
-    return null;
+    return this.ensurePoolAccount(user);
   }
 
   /** Allocation stays provisional until attach finishes. A hint that names no branch
@@ -8508,7 +8479,7 @@ export class ResidentDO extends Sandbox<Env> {
             binding.evicted ||
             binding.threadKey !== threadKey ||
             binding.ref !== ref ||
-            !THREAD_USERS.includes(binding.user)
+            !isResidentPoolUser(binding.user)
           )
             return unknown("binding-unverified");
           if (
@@ -8677,7 +8648,7 @@ export class ResidentDO extends Sandbox<Env> {
             binding.evicted ||
             binding.threadKey !== threadKey ||
             binding.ref !== ref ||
-            !THREAD_USERS.includes(binding.user) ||
+            !isResidentPoolUser(binding.user) ||
             this.workspaceExclusiveOpsInFlight.has(threadKey) ||
             (this.threadOpsInFlight.get(threadKey) ?? 0) > 0 ||
             this.opUsersInUse.has(binding.user)
@@ -8794,7 +8765,7 @@ export class ResidentDO extends Sandbox<Env> {
           if (
             !binding ||
             binding.evicted ||
-            !THREAD_USERS.includes(binding.user) ||
+            !isResidentPoolUser(binding.user) ||
             binding.ref !== parsed.data.ref ||
             !(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`))
           )
@@ -9396,7 +9367,39 @@ export class ResidentDO extends Sandbox<Env> {
         }),
         signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
       });
-      return res.ok ? await res.json() : null;
+      const observed = res.ok ? await res.json() : null;
+      // Passive response levels reuse the last canonical observation. This
+      // cache is only a capacity hint; admission and custody still read fresh.
+      const view = observed as {
+        kind?: unknown;
+        record?: Record<string, unknown>;
+        owner?: unknown;
+        revision?: unknown;
+      } | null;
+      const observation =
+        view?.kind === "terminal" && view.record && typeof view.record === "object"
+          ? {
+              kind: view.kind,
+              record: {
+                id: view.record.id,
+                threadKey: view.record.threadKey,
+                status: view.record.status,
+                provisional: view.record.provisional,
+              },
+            }
+          : view?.kind === "acknowledged"
+            ? { kind: view.kind, owner: view.owner, revision: view.revision }
+            : null;
+      if (validRunOwner(registration.runId, registration.ownerGen, registration.ownerFence))
+        await this.ctx.storage
+          .put(`resident:workloadOwner:${registration.threadKey}`, {
+            runId: registration.runId,
+            ownerGen: registration.ownerGen,
+            ownerFence: registration.ownerFence,
+            observation,
+          })
+          .catch(() => {});
+      return observed;
     } catch {
       return null;
     }
@@ -9741,7 +9744,7 @@ export class ResidentDO extends Sandbox<Env> {
         // the tree lived, all of them now), npm/yarn/bun caches — goes with it.
         // Pool users only, never the build user (its store backs the warm checkout).
         // A missing-tree eviction leaves this spent UID's home for VM recycle.
-        if (!decision.missingTree && (THREAD_USERS as readonly string[]).includes(binding.user)) {
+        if (!decision.missingTree && isResidentPoolUser(binding.user)) {
           if (!(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`))) return "cleanup-failed";
           await this.run(threadUserCacheCleanArgv(`/home/${binding.user}`)).catch((err) =>
             console.log(`${logCtx}: home cache rm failed for ${binding.user}: ${errMsg(err)}`),
@@ -9827,7 +9830,7 @@ export class ResidentDO extends Sandbox<Env> {
           force,
           inFlight: this.threadOpsInFlight.get(threadKey) ?? 0,
           user: binding.user,
-          poolUsers: THREAD_USERS,
+          poolUsers: undefined,
         });
         if (plan.action === "refuse") return { released: false, reason: plan.reason, user: binding.user };
         if (plan.action === "kill") {
@@ -9995,7 +9998,7 @@ export class ResidentDO extends Sandbox<Env> {
           ["ref", "user", "container", "lastAttachAt"].some(
             (field) => binding[field as keyof ThreadBinding] !== request[field],
           ) ||
-          !THREAD_USERS.includes(binding.user)
+          !isResidentPoolUser(binding.user)
         )
           return refuse("binding-mismatch");
         if (
@@ -10163,7 +10166,7 @@ export class ResidentDO extends Sandbox<Env> {
           binding.user !== expected.user ||
           binding.container !== expected.container ||
           binding.worktreePath !== expected.workspace ||
-          !THREAD_USERS.includes(binding.user) ||
+          !isResidentPoolUser(binding.user) ||
           !registeredRunOwnsRelease(registration, cancellation.runId, expected.ownerGen, expected.ownerFence) ||
           !isWorkspaceOwner(fence) ||
           !isWorkspaceOwner(registration) ||
@@ -10330,7 +10333,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  not acknowledge a kill. Callers still drain and apply their own ending
    *  or workspace-preservation policy after this physical operation. */
   private async killThreadUserProcesses(user: string, threadKey: string, container?: string): Promise<boolean> {
-    if (!container || !THREAD_USERS.includes(user) || !(await this.poolUserOwnerMatches(user, `thread:${threadKey}`)))
+    if (!container || !isResidentPoolUser(user) || !(await this.poolUserOwnerMatches(user, `thread:${threadKey}`)))
       return false;
     try {
       const result = await this.run(
@@ -10515,7 +10518,7 @@ export class ResidentDO extends Sandbox<Env> {
             this.opUsersInUse.has(binding.user)
           )
             return refuse("owner-changed");
-          const ledger = await txn.get<unknown>(SPENT_POOL_USERS_KEY);
+          const ledger = [...(await uidLedger(txn))].map(([user, owner]) => ({ user, owner }));
           const claimants = await txn.get<unknown>(poolBindingKey(binding.user));
           const decision = decideOwnerReconciliation({
             binding,
@@ -10525,7 +10528,7 @@ export class ResidentDO extends Sandbox<Env> {
             owner,
             ledger,
             claimants,
-            pool: THREAD_USERS,
+            pool: undefined,
             now,
             cutoff: now - CLEAN_IDLE_RELEASE_S * 1000,
             graceMs: RUN_REGISTRATION_GRACE_MS,
@@ -10533,9 +10536,9 @@ export class ResidentDO extends Sandbox<Env> {
           });
           if (decision.action === "refuse") return refuse(decision.reason);
           if (decision.spend) {
-            const next = spendPoolUser(ledger, THREAD_USERS, binding.user, `thread:${threadKey}`);
+            const next = await claimUid(txn, binding.user, `thread:${threadKey}`);
             if (!next) return refuse("ledger-conflict");
-            await txn.put(SPENT_POOL_USERS_KEY, next);
+            // The indexed claim was committed in this transaction.
           }
           if (decision.legacy) await txn.put(runRegKey(threadKey), { ...row, legacyRetainedAt: now });
           return {
@@ -10678,7 +10681,7 @@ export class ResidentDO extends Sandbox<Env> {
   async getResidentDeployInfo(): Promise<Record<string, unknown>> {
     const bindings = await this.liveBindings();
     const regs = await this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX });
-    const ledger = await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY);
+    const ledger = await this.currentUidLedger();
     let executingRuns = 0;
     let retainedRuns = 0;
     let unknownRuns = 0;
@@ -10703,7 +10706,7 @@ export class ResidentDO extends Sandbox<Env> {
         ledger,
         claimants: await this.ctx.storage.get<unknown>(poolBindingKey(binding.user)),
         user: binding.user,
-        pool: THREAD_USERS,
+        pool: undefined,
       });
       if (state !== "none") {
         const key = `${category}:${reason}`;
@@ -10726,18 +10729,25 @@ export class ResidentDO extends Sandbox<Env> {
       registrationReadback: [...readback.values()],
     };
   }
-
-  /** Independent container read for an operator's targeted permit recovery.
-   * A dormant container has no processes; an active one must answer the probe. */
+  /** Native process observation includes every generated identity, including
+   * background work whose original run has ended. Unknown user data refuses. */
   async getResidentRecoveryProbe(): Promise<{ activeProcesses: number }> {
     if (!(await this.isRuntimeActive())) return { activeProcesses: 0 };
-    const users = [BUILD_USER, ...THREAD_USERS].join(",");
-    const probe = await this.run(["pgrep", "-u", users]);
-    if (probe.exitCode === 1 && probe.stdout.trim() === "") return { activeProcesses: 0 };
-    if (probe.exitCode !== 0) throw new Error("resident process probe failed");
-    const pids = probe.stdout.trim().split(/\s+/);
-    if (!pids.every((pid) => /^\d+$/.test(pid))) throw new Error("resident process probe returned invalid PIDs");
-    return { activeProcesses: pids.length };
+    const probe = await this.run(["ps", "-eo", "pid=,user="]);
+    if (probe.exitCode !== 0 || probe.timedOut || probe.truncated || probe.stderr !== "")
+      throw new Error("resident process probe failed");
+    let activeProcesses = 0;
+    for (const line of probe.stdout.split("\n").filter((line) => line.trim())) {
+      const match = /^\s*(\d+)\s+(\S+)\s*$/.exec(line);
+      if (!match) throw new Error("resident process probe returned invalid data");
+      const raw = match[2]!;
+      if (!/^(?:[A-Za-z_][A-Za-z0-9_.+-]*\$?|\d+)$/.test(raw))
+        throw new Error("resident process identity is unverified");
+      const user = /^\d+$/.test(raw) && Number(raw) >= 2001 ? `worker${Number(raw) - 2000}` : raw;
+      if (user === BUILD_USER || isResidentPoolUser(user)) activeProcesses++;
+      else if (user.startsWith("worker")) throw new Error("resident process identity is unverified");
+    }
+    return { activeProcesses };
   }
   private attachesInFlight = 0;
   /** Entry-to-answer admissions include hydration before attachesInFlight starts. */
@@ -11440,7 +11450,6 @@ export class ResidentDO extends Sandbox<Env> {
       IMAGE_REPORT_PENDING_KEY,
       DESTROY_UNCONFIRMED_KEY,
       RECREATE_ADMISSION_KEY,
-      SPENT_POOL_USERS_KEY,
     ]);
     const facts = map.get(FACTS_KEY) as RepoFacts | undefined;
     const snap = map.get(SNAPSHOT_KEY) as SnapshotRecord | undefined;
@@ -11498,7 +11507,12 @@ export class ResidentDO extends Sandbox<Env> {
     // The runs whose process lives in the container between operator calls
     // (item 44): what the deploy preflight must see, added to both counts.
     const registeredRuns = await this.registeredRunsBeyondOps();
-    const poolSpends = parseSpentPoolUsers(map.get(SPENT_POOL_USERS_KEY), THREAD_USERS);
+    const uidReport = await this.ctx.storage
+      .transaction(async (txn) => ({
+        issued: await issuedUidCount(txn),
+        preview: [...(await uidLedger(txn, 128))].map(([user, owner]) => ({ user, owner })),
+      }))
+      .catch(() => null);
     return {
       resource: map.get(RESOURCE_KEY) ?? null,
       state: this.destroying || map.get(DESTROY_UNCONFIRMED_KEY) ? "down" : (map.get(STATE_KEY) ?? "down"),
@@ -11530,12 +11544,14 @@ export class ResidentDO extends Sandbox<Env> {
       // running container the last deploy could not verify.
       imageReport: map.get(IMAGE_REPORT_PENDING_KEY) !== undefined ? "pending" : "current",
       recreateAdmissionHeld: this.recreateAdmission.pending || map.get(RECREATE_ADMISSION_KEY) === true,
-      poolUsersSpent: poolSpends?.size ?? null,
-      poolUsersTotal: THREAD_USERS.length,
+      poolUsersSpent: uidReport?.issued ?? null,
+      poolUsersTotal: null,
+      uidAllocation: "dynamic",
       workloadLimit: RESIDENT_WORKLOAD_LIMIT,
       // Read-scoped owner receipts explain historical occupancy even after
       // every live binding and disposable op has ended.
-      poolUserSpends: poolSpends ? [...poolSpends].map(([user, owner]) => ({ user, owner })) : null,
+      poolUserSpends: uidReport?.preview ?? null,
+      poolUserSpendsComplete: uidReport !== null && uidReport.preview.length === uidReport.issued,
       // Item 22: who holds what, as the rows say — the mirror mutex and the
       // cycle/hydration leases, each judged against this incarnation.
       incarnation: this.incarnation,

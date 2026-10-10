@@ -107,7 +107,7 @@ describe("the installed pi packages", () => {
 describe("the resident image proves pi as a thread user", () => {
   it("runs the version proof once more as worker1 after the pool exists — exactly how a run's pi is started", () => {
     const lines = instructions(read(RESIDENT));
-    const pool = lines.findIndex((l) => /useradd -m -u "\$\(\(2000 \+ i\)\)"/.test(l));
+    const pool = lines.findIndex((l) => /useradd -m -u 2001 -s \/bin\/bash worker1/.test(l));
     const asWorker = lines.findIndex((l) => /^RUN su -s \/bin\/bash worker1 -c ".*pi --version \| grep -qx/.test(l));
     expect(pool).toBeGreaterThan(-1);
     expect(asWorker).toBeGreaterThan(pool);

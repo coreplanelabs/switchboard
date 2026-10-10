@@ -1,3 +1,4 @@
+import { isResidentPoolUser } from "../../src/execution/residentPoolSpends.js";
 import { releasePoolBinding, claimPoolBinding } from "../../src/execution/residentPoolSpends";
 import { registeredRunOwnsRelease, registeredRunAllowsClaim } from "./runRegistration";
 import { runInNewContext } from "node:vm";
@@ -295,6 +296,8 @@ function harness(
     RUN_STORE_KEY: "runs",
     RUN_STORE_TIMEOUT_MS: 1000,
     THREAD_KEY_PREFIX: "thread:",
+    BUILD_USER: "worker1",
+    isResidentPoolUser,
     THREAD_USERS: ["worker2", "worker3"],
     RESOURCE_KEY: "resource",
     WORKSPACE_PREDECESSORS_MAX: 20,

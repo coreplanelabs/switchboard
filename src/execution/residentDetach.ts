@@ -10,6 +10,8 @@
  *  detach keeps the plain busy guard (never yank a tree from under a live
  *  command a concurrent run still cares about). */
 
+import { isResidentPoolUser } from "./residentPoolSpends.js";
+
 export type ForceDetachPlan =
   /** Nothing in flight — go straight to the eviction path. */
   | { action: "proceed" }
@@ -24,7 +26,7 @@ export function planForceDetach(input: {
   /** The binding's pool user. */
   user: string;
   /** The Worker's pool (`THREAD_USERS`): the only users a kill may target. */
-  poolUsers: readonly string[];
+  poolUsers: readonly string[] | undefined;
 }): ForceDetachPlan {
   const { force, inFlight, user, poolUsers } = input;
   if (inFlight <= 0) return { action: "proceed" };
@@ -32,7 +34,7 @@ export function planForceDetach(input: {
   // The kill runs `kill -9 -1` as this user — it must be a pool user and
   // nothing else (never root, never empty, never the build user), or the
   // blast radius is the whole container.
-  if (!user || !poolUsers.includes(user)) {
+  if (!user || !(poolUsers ? poolUsers.includes(user) : isResidentPoolUser(user))) {
     return { action: "refuse", reason: `${busyReason(inFlight)}; refusing to kill: "${user}" is not a pool user` };
   }
   return { action: "kill", user, inFlight };

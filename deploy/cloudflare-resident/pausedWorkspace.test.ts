@@ -1,3 +1,4 @@
+import { isResidentPoolUser } from "../../src/execution/residentPoolSpends.js";
 import {
   isWorkspaceOwner,
   isAcknowledgedWorkspaceOwner,
@@ -226,6 +227,7 @@ function probe(
     WORKTREE_TTL_DAYS_DEFAULT: 7,
     THREAD_KEY_PREFIX: "thread:",
     THREADS_DIR: "/workspace/threads",
+    isResidentPoolUser,
     THREAD_USERS: options.cacheEligible ? [original.user] : [],
     threadUserCacheCleanArgv: () => ["cache-clean"],
     systemClock: () => NOW,

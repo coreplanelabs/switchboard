@@ -24,3 +24,13 @@ Keep disk, memory, publication and cleanup checks independent. A workload refusa
 ## Consequences
 
 Historical identities do not silently increase the VM workload budget. Owner uncertainty and unacknowledged commands can still refuse new work; they require evidence rather than an expiry guess. This first change retains a finite image-provisioned UID pool. Dynamic user provisioning and ownership storage need separate qualification before identity allocation can grow without this fixed pool boundary. No clustering or larger VM is introduced.
+
+## Amended 2026-10-09
+
+*Re-evaluation.* The separate active-owner limit remains sixteen. A fixed thirty-two-identity roster can still refuse new work after completed owners consume it, even when the VM has spare workload capacity. Raising that roster only delays the failure.
+
+Provision unprivileged accounts on demand instead. Reserve a monotonic numeric identity and its exact owner in a storage transaction before native account creation. Indexed ownership reads avoid scanning historical accounts at each shell authorization or admission. Upgrading skips every precreated legacy account for new owners, even if its spend row is absent; confirmed VM destruction resets usage while preserving allocation high-water and surviving binding identities. Preserve legacy ownership, launch fences, cancellation and publication evidence. Unknown creation outcomes keep their native-operation holds and cannot transfer an identity.
+
+The new image declares its provisioning protocol; that capability alone cannot clear a pending image-deployment report. Linux UID bounds, actual disk and memory pressure and lifecycle preservation still apply. This removes the small historical-owner admission cap; it does not increase concurrent work or authorize resetting a busy VM.
+
+Once indexed identities have been issued, an old Worker cannot read their ownership. Prefer a forward fix. A downgrade requires a coordinated, guarded VM reset after preserving or discarding each workspace under its existing owner; changing the image alone cannot make old allocation safe.

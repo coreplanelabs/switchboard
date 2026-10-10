@@ -18,7 +18,7 @@ const sample = (over: Partial<LevelSample> = {}): LevelSample => ({
 });
 
 describe("the sides", () => {
-  it("seat is above exactly when no pool user is free — the next attach would be refused user-pool-exhausted", () => {
+  it("seat is above when the active work limit is reached", () => {
     expect(seatSide(15, 16)).toBe("below");
     expect(seatSide(16, 16)).toBe("above");
   });

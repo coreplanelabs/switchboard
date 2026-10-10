@@ -149,7 +149,7 @@ describe("OpenCode's schema decoder pin", () => {
 describe("the resident image proves OpenCode as a thread user", () => {
   it("runs the version proof once more as worker1 after the pool exists — exactly how a run's server is started", () => {
     const lines = instructions(read(RESIDENT));
-    const pool = lines.findIndex((l) => /useradd -m -u "\$\(\(2000 \+ i\)\)"/.test(l));
+    const pool = lines.findIndex((l) => /useradd -m -u 2001 -s \/bin\/bash worker1/.test(l));
     const asWorker = lines.findIndex((l) =>
       new RegExp(`^RUN su -s /bin/bash worker1 -c ".*${escapeRegExp(OPENCODE_PROOF)}`).test(l),
     );

@@ -144,7 +144,7 @@ describe("the execution images' bun", () => {
   it("the resident image proves it once more as worker1 after the pool exists — a thread's install runs through the same su", () => {
     const resident = EXECUTION_IMAGES.indexOf(RESIDENT);
     const lines = instructions(sources[resident]);
-    const pool = lines.findIndex((l) => /useradd -m -u "\$\(\(2000 \+ i\)\)"/.test(l));
+    const pool = lines.findIndex((l) => /useradd -m -u 2001 -s \/bin\/bash worker1/.test(l));
     const asWorker = lines.findIndex((l) => /^RUN su -s \/bin\/bash worker1 -c ".*bun --version \| grep -qx/.test(l));
     expect(pool, "the user pool layer").toBeGreaterThan(-1);
     expect(asWorker, "a bun version proof run through su as worker1").toBeGreaterThan(pool);

@@ -176,14 +176,8 @@ describe("resident instance type (deploy/cloudflare-resident/wrangler.jsonc)", (
     expect(usable).toBeLessThan(requiredDiskMb(LARGE_MONOREPO, 16, 1, usable) * 1.25);
   });
 
-  it("the UID pool matches the image and exceeds measured disk capacity, so admission remains mandatory", () => {
-    const shared = readFileSync(fileURLToPath(new URL("./shared.ts", import.meta.url)), "utf8");
-    const image = readFileSync(fileURLToPath(new URL("./Dockerfile", import.meta.url)), "utf8");
-    const pool = Number(shared.match(/THREAD_POOL_SIZE = (\d+)/)?.[1]);
-    const users = Number(image.match(/seq 1 (\d+)/)?.[1]);
-    expect(users).toBe(pool + 1);
-    expect(it_.disk_mb).toBe(MAX_DISK_MB);
-    expect(requiredDiskMb(LARGE_MONOREPO, pool, 0, usable)).toBeGreaterThan(usable);
+  it("identity history does not enlarge measured disk capacity, so admission remains mandatory", () => {
+    expect(requiredDiskMb(LARGE_MONOREPO, 32, 0, usable)).toBeGreaterThan(usable);
     expect(requiredDiskMb(LARGE_MONOREPO, 16, 2, usable)).toBeGreaterThan(usable);
   });
 

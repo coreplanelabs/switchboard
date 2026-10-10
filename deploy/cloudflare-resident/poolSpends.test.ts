@@ -10,30 +10,8 @@ describe("resident pool UID generation fence", () => {
     expect(method("initResident")).not.toContain("[SPENT_POOL_USERS_KEY]: []");
     expect(method("runProvisioning")).toContain("await this.destroyConfirmed()");
     const destroy = method("destroyConfirmed");
-    expect(destroy.indexOf("await this.destroy()")).toBeLessThan(
-      destroy.indexOf("this.ctx.storage.put(SPENT_POOL_USERS_KEY, [])"),
-    );
-    expect(destroy.indexOf("this.ctx.storage.put(SPENT_POOL_USERS_KEY, [])")).toBeLessThan(
-      destroy.indexOf("this.destroying = pending"),
-    );
-  });
-
-  it("durably spends a fresh UID before giving it to a thread or op", () => {
-    const reserve = method("reserveSafePoolUser");
-    expect(reserve).toContain("parseSpentPoolUsers(await this.ctx.storage.get<unknown>(SPENT_POOL_USERS_KEY)");
-    expect(reserve.indexOf("this.markPoolUserSpent(user, owner)")).toBeLessThan(reserve.indexOf("return user"));
-    expect(reserve).toContain("pool-recycle-required: all UIDs spent");
-    expect(method("markPoolUserSpent")).toContain("this.ctx.storage.transaction");
-    expect(method("allocateOpUser")).toContain("this.reserveSafePoolUser(owner)");
-    expect(method("allocateThreadUser")).toContain("this.reserveSafePoolUser(`thread:${threadKey}`, threadKey)");
-  });
-
-  it("types a refresh-only recycle conflict for the attach wait", () => {
-    const recycle = method("recycleSpentPoolForAdmission");
-    expect(recycle).toContain("retryPoolRecycleAfterRefresh(");
-    expect(recycle).toContain("transient: true");
-    expect(recycle).toContain("pool-recycle-wait:");
-    expect(recycle).toContain("pool-recycle-required:");
+    expect(destroy.indexOf("await this.destroy()")).toBeLessThan(destroy.indexOf("resetUidGeneration(txn)"));
+    expect(destroy.indexOf("resetUidGeneration(txn)")).toBeLessThan(destroy.indexOf("this.destroying = pending"));
   });
 
   it("refuses old or unrecorded UIDs at the model-command boundary", () => {
@@ -53,7 +31,6 @@ describe("resident pool UID generation fence", () => {
     expect(evict.indexOf("this.poolUserOwnerMatches(binding.user")).toBeLessThan(
       evict.indexOf("threadUserCacheCleanArgv"),
     );
-    expect(method("residentLevels")).toContain("for (const user of spent?.keys() ?? THREAD_USERS) used.add(user)");
     expect(method("debugRecreateContainerChecked")).toContain("this.registeredRunsBeyondOps()");
   });
 });
@@ -64,7 +41,7 @@ describe("resident pool UID binding index", () => {
     expect(method("initResident")).toContain("await this.rebuildPoolBindingIndex()");
     const rebuild = method("rebuildPoolBindingIndex");
     expect(rebuild).toContain("txn.list<ThreadBinding>");
-    expect(rebuild).toContain("rebuildPoolBindingIndex(bindings.values(), THREAD_USERS)");
+    expect(rebuild).toContain("rebuildPoolBindingIndex(bindings.values(), users)");
     const guard = method("poolUserOwnerMatches");
     expect(guard).toContain("this.ctx.storage.get<unknown>(poolBindingKey(user))");
     expect(guard).not.toContain("this.ctx.storage.list<ThreadBinding>");

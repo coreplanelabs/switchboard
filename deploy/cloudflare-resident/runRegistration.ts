@@ -1,4 +1,4 @@
-import { parsePoolBindings, parseSpentPoolUsers } from "../../src/execution/residentPoolSpends.js";
+import { isResidentPoolUser, parsePoolBindings, parseSpentPoolUsers } from "../../src/execution/residentPoolSpends.js";
 import { isAcknowledgedWorkspaceOwner } from "../../src/core/workspaceSettlement.js";
 
 export function validRunOwner(runId: unknown, ownerGen: unknown, ownerFence: unknown): boolean {
@@ -199,7 +199,7 @@ export function classifyDeployRegistrationWithLedger(
     user: string;
     claimants: unknown;
     ledger: unknown;
-    pool: readonly string[];
+    pool: readonly string[] | undefined;
   },
 ): ReturnType<typeof classifyDeployRegistration> {
   const result = classifyDeployRegistration(input);
@@ -224,7 +224,7 @@ export function decideOwnerReconciliation(input: {
   owner: unknown;
   ledger: unknown;
   claimants: unknown;
-  pool: readonly string[];
+  pool: readonly string[] | undefined;
   now: number;
   cutoff: number;
   graceMs: number;
@@ -232,7 +232,8 @@ export function decideOwnerReconciliation(input: {
 }): { action: "migrate" | "current"; legacy: boolean; spend: boolean } | { action: "refuse"; reason: string } {
   const refuse = (reason: string) => ({ action: "refuse" as const, reason });
   const { binding, registration } = input;
-  if (!binding.threadKey || !input.pool.includes(binding.user)) return refuse("binding-invalid");
+  if (!binding.threadKey || !(input.pool ? input.pool.includes(binding.user) : isResidentPoolUser(binding.user)))
+    return refuse("binding-invalid");
   const claimants = parsePoolBindings(input.claimants);
   if (!claimants || claimants.length !== 1 || claimants[0] !== binding.threadKey) return refuse("binding-conflict");
   const ledger = parseSpentPoolUsers(input.ledger, input.pool);

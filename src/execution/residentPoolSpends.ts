@@ -5,6 +5,18 @@ export interface SpentPoolUser {
   owner: string;
 }
 
+/** Reserved unprivileged account names. Numeric bounds protect native UID
+ * conversion; ownership, not the name alone, grants execution authority. */
+export function isResidentPoolUser(user: string): boolean {
+  const suffix = /^worker([1-9]\d*)$/.exec(user)?.[1];
+  if (!suffix) return false;
+  const number = Number(suffix);
+  return Number.isSafeInteger(number) && number >= 2 && number <= 2_147_481_647;
+}
+
+const allowedUser = (user: string, pool: readonly string[] | undefined) =>
+  pool ? pool.includes(user) : isResidentPoolUser(user);
+
 /** An owner may reclaim its own UID; only a different owner needs a fresh one. */
 export function unavailablePoolUsers(spent: ReadonlyMap<string, string>, owner: string): Set<string> {
   return new Set([...spent].filter(([, prior]) => prior !== owner).map(([user]) => user));
@@ -14,7 +26,7 @@ export function ownedPoolUsers(spent: ReadonlyMap<string, string>, owner: string
   return [...spent].filter(([, prior]) => prior === owner).map(([user]) => user);
 }
 
-export function parseSpentPoolUsers(value: unknown, pool: readonly string[]): ReadonlyMap<string, string> | null {
+export function parseSpentPoolUsers(value: unknown, pool?: readonly string[]): ReadonlyMap<string, string> | null {
   if (
     !Array.isArray(value) ||
     !value.every(
@@ -30,7 +42,7 @@ export function parseSpentPoolUsers(value: unknown, pool: readonly string[]): Re
   )
     return null;
   const spent = new Map(value.map(({ user, owner }) => [user, owner]));
-  if (spent.size !== value.length || [...spent.keys()].some((user) => !pool.includes(user))) return null;
+  if (spent.size !== value.length || [...spent.keys()].some((user) => !allowedUser(user, pool))) return null;
   return spent;
 }
 
@@ -38,12 +50,12 @@ export function parseSpentPoolUsers(value: unknown, pool: readonly string[]): Re
  * reclaim its UID. Both paths record ownership before untrusted work. */
 export function spendPoolUser(
   value: unknown,
-  pool: readonly string[],
+  pool: readonly string[] | undefined,
   user: string,
   owner: string,
 ): SpentPoolUser[] | null {
   const spent = parseSpentPoolUsers(value, pool);
-  if (!spent || !pool.includes(user) || !/^(thread|op):\S+$/.test(owner)) return null;
+  if (!spent || !allowedUser(user, pool) || !/^(thread|op):\S+$/.test(owner)) return null;
   const prior = spent.get(user);
   if (prior && prior !== owner) return null;
   const rows = [...spent].map(([user, owner]) => ({ user, owner }));
@@ -54,7 +66,7 @@ export function spendPoolUser(
  * binding never gains authority merely because its UID is spent. */
 export function mayRunAsPoolUser(
   value: unknown,
-  pool: readonly string[],
+  pool: readonly string[] | undefined,
   user: string,
   liveThreadKeys: readonly string[],
   activeOpOwner: string | undefined,

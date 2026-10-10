@@ -30,10 +30,6 @@ export const REFRESH_INTERVAL_S = 600;
  *  ten-minute buckets since the last instance. */
 export const IDLE_REFRESH_INTERVAL_S = 6 * 60 * 60;
 
-/** The image's `worker2`..`worker33` pool: 32 one-use identities per VM
- *  generation for thread owners and disposable operations. */
-export const THREAD_POOL_SIZE = 32;
-
 /** Active owners share the measured VM budget; historical identities do not. */
 export const RESIDENT_WORKLOAD_LIMIT = 16;
 
