@@ -6,6 +6,7 @@ import { unwrapUntrusted } from "../core/untrusted.js";
 import { StreamableHttpMcpClient } from "../mcp/client.js";
 import { assertSmokeOriginMatchesPlan } from "./ingressSmoke.js";
 import { systemClock } from "../core/trace/clock.js";
+import { parseModelRef } from "../core/provider.js";
 
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const component = z
@@ -19,6 +20,19 @@ const configSchema = z
     channel: component,
     subject: component,
     repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+    model: z
+      .string()
+      .max(200)
+      .regex(/^\S+$/)
+      .refine((value) => {
+        try {
+          const ref = parseModelRef(value);
+          return ref.provider.length > 0 && ref.model.length > 0;
+        } catch {
+          return false;
+        }
+      }, "model must be a full provider/model reference")
+      .optional(),
     workspace: z
       .object({
         path: z
@@ -50,6 +64,7 @@ const runSchema = z.object({
   channelId: z.string(),
   threadKey: z.string(),
   agent: z.string(),
+  model: z.string().optional(),
   repo: z.string().optional(),
   profile: z.object({
     minutes: z.number().finite().positive(),
@@ -145,6 +160,8 @@ interface ScenarioReceipt {
   parentInstanceId?: string;
   idempotencyKey?: string;
   observedUsd?: number;
+  requestedModel?: string;
+  actualModel?: string;
   artifact?: { repo: string; number: number; head: string; verdict?: "approve" | "request_changes" };
 }
 export const PRODUCT_ACCEPTANCE_GAP = {
@@ -174,7 +191,7 @@ function scenarios(config: SmokeConfig): SmokeScenario[] {
   const general = leaseMinimum("general"),
     explore = leaseMinimum("explore"),
     review = leaseMinimum("review");
-  return [
+  const selected: SmokeScenario[] = [
     {
       id: "answer",
       agent: "general",
@@ -194,6 +211,7 @@ function scenarios(config: SmokeConfig): SmokeScenario[] {
       text: `agent:review budget:${review} Review https://github.com/${config.repo}/pull/${config.review.number} at head ${config.review.head}. Publish the review; do not change files or merge.`,
     },
   ];
+  return config.model ? selected.map((s) => ({ ...s, text: `${s.text} model:${config.model}` })) : selected;
 }
 
 /** Unknown acknowledgements stop admissions. Observation never retries, cancels or rolls back work. */
@@ -229,6 +247,7 @@ export async function runAgentSmoke(input: {
       outcome: "skipped",
       reason: "prior_scenario_unproven",
       thread: `${input.thread}-${s.id}`,
+      ...(config.model ? { requestedModel: config.model } : {}),
     })),
     liveGaps: ["private-question-fix-draft-pr"],
     productAcceptance: PRODUCT_ACCEPTANCE_GAP,
@@ -307,6 +326,7 @@ export async function runAgentSmoke(input: {
       row.threadKey = run.threadKey;
       row.parentInstanceId = run.parentInstanceId;
       row.idempotencyKey = run.idempotencyKey;
+      if (run.model !== undefined) row.actualModel = run.model;
       if (run.cost?.usd !== undefined && run.cost.usd !== null) {
         row.observedUsd = run.cost.usd;
         receipt.observedUsd += run.cost.usd;
@@ -326,6 +346,11 @@ export async function runAgentSmoke(input: {
       if (run.profile.minutes !== scenario.minutes) {
         row.outcome = "failed";
         row.reason = "run_budget_mismatch";
+        break;
+      }
+      if (config.model && run.model !== config.model) {
+        row.outcome = "failed";
+        row.reason = "run_model_mismatch";
         break;
       }
       if (scenario.id !== "answer" && !["repo-cold", "repo-resident"].includes(run.profile.machine)) {

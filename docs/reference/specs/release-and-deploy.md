@@ -72,6 +72,8 @@ Runner validation `[agent]`: after a PR push, run `gh run list --branch <branch>
 
 ## Validation criteria
 
+The ingress smoke command accepts optional `--model provider/model`, and a manual staging workflow accepts optional `model`. Both apply the existing `model:` directive to each new acceptance request. Receipts record the requested and actual model; a missing or different actual model fails acceptance and skips dependent scenarios. Omitting the override retains configured behavior and all existing actor, build, head, workspace, publication, cost and budget gates. Model overrides do not change persistent configuration or replay prior runs.
+
 | Criterion | Evidence |
 |-----------|----------|
 | 34: a manual CI bot rollback selects an exact published CLI using `cli=package`, `version=<prior-version>`, `targets=bot`, `force=true` and `copy-images=never`; it uses the existing serialized deployment runner and its application/image/exact-health gates. State and private workspace custody are not reset by rollback. | `[unit]` `src/ciWorkflow.test.ts::the production deploy is one reusable workflow::a manual rollback selects an exact published CLI through the existing package deploy path`; `[agent]` dispatch the pinned prior version and require only the bot in the frozen plan, the selected application image and unique singleton identity without a conflicting running instance, and the prior full commit in ready, non-draining `/healthz`. |

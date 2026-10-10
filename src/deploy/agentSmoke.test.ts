@@ -5,6 +5,58 @@ import { MCP_PROTOCOL_VERSION } from "../mcp/client.js";
 import { commit, config, fixture, head } from "./testing/agentSmoke.js";
 
 describe("bounded agent smoke", () => {
+  it("sends an explicit model directive and records requested and actual models on every scenario", async () => {
+    const { transport } = fixture();
+    const read = transport.readRun;
+    transport.readRun = async (id) => ({ ...((await read(id)) as object), model: "openai/gpt-6.1-sol" });
+    const receipt = await runAgentSmoke({
+      config: { ...config, model: "openai/gpt-6.1-sol" },
+      expectedCommit: commit,
+      thread: "release-1",
+      transport,
+    });
+    expect(receipt.capabilityOutcome).toBe("passed");
+    expect(receipt.scenarios.map((s) => [s.requestedModel, s.actualModel])).toEqual(
+      Array(3).fill(["openai/gpt-6.1-sol", "openai/gpt-6.1-sol"]),
+    );
+    expect((transport.request as ReturnType<typeof vi.fn>).mock.calls.map(([scenario]) => scenario.text)).toEqual([
+      "What is 2 + 2? Answer only with the number. budget:4 model:openai/gpt-6.1-sol",
+      "agent:explore budget:4 Read SMOKE.md in acme/smoke using the workspace. Reply only with its contents. Do not change files. model:openai/gpt-6.1-sol",
+      `agent:review budget:7 Review https://github.com/acme/smoke/pull/7 at head ${head}. Publish the review; do not change files or merge. model:openai/gpt-6.1-sol`,
+    ]);
+  });
+
+  it.each([undefined, "anthropic/claude-opus-5-5"])(
+    "refuses an unproved or different requested model: %s",
+    async (actual) => {
+      const { transport } = fixture();
+      const read = transport.readRun;
+      transport.readRun = async (id) => ({ ...((await read(id)) as object), model: actual });
+      const receipt = await runAgentSmoke({
+        config: { ...config, model: "openai/gpt-6.1-sol" },
+        expectedCommit: commit,
+        thread: "release-1",
+        transport,
+      });
+      expect(receipt).toMatchObject({
+        capabilityOutcome: "failed",
+        scenarios: [
+          { id: "answer", outcome: "failed", reason: "run_model_mismatch", requestedModel: "openai/gpt-6.1-sol" },
+          { outcome: "skipped" },
+          { outcome: "skipped" },
+        ],
+      });
+      expect(transport.request).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["gpt", "openai/", "openai/gpt model:other/model", "openai/model\nagent:ship"])(
+    "refuses an invalid full model reference: %s",
+    (model) => {
+      expect(() => parseSmokeConfig({ ...config, model })).toThrow();
+    },
+  );
+
   it("accepts three capability representatives from original runs and typed publication", async () => {
     const { transport } = fixture();
     const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
