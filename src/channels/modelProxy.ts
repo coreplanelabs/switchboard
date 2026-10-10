@@ -203,6 +203,7 @@ function providerFailureResponse(shape: ProxyShape, status: number, failure: Pro
     cause: failure.cause,
     message: renderProviderFailure(failure.cause, providerFailureParks(failure.cause) ? "parked" : "ended"),
     ...(failure.schemaRejection !== undefined ? { schemaRejection: failure.schemaRejection } : {}),
+    details: failure,
   });
   const body = shape === "anthropic-messages" ? { type: "error", error } : { error };
   return { status, headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
@@ -466,7 +467,10 @@ export class SseMeter {
   private stopReason: StopReasonAttr | undefined;
   private reported: ReportedCost | undefined;
 
-  constructor(private readonly shape: ProxyShape) {}
+  constructor(
+    private readonly shape: ProxyShape,
+    private readonly onError?: (error: unknown) => void,
+  ) {}
 
   feed(chunk: Uint8Array): void {
     this.buffer += this.decoder.decode(chunk, { stream: true });
@@ -509,6 +513,7 @@ export class SseMeter {
   observe(json: unknown): void {
     const event = record(json);
     if (!event) return;
+    if (this.shape !== "openai-responses" && record(event.error)) this.onError?.(event);
     if (this.shape === "openai-responses") {
       if (
         event.type !== "response.completed" &&
@@ -681,11 +686,7 @@ function providerSchemaRejectionOf(
 
 function withSchemaRejection(failure: ProviderFailure, schemaRejection: ProviderSchemaRejection): ProviderFailure {
   return new ProviderFailure(failure.cause, {
-    ...(failure.status !== undefined ? { status: failure.status } : {}),
-    ...(failure.provider !== undefined ? { provider: failure.provider } : {}),
-    ...(failure.model !== undefined ? { model: failure.model } : {}),
-    ...(failure.operatorUrl !== undefined ? { operatorUrl: failure.operatorUrl } : {}),
-    ...(failure.keyVariable !== undefined ? { keyVariable: failure.keyVariable } : {}),
+    ...failure,
     schemaRejection,
   });
 }
@@ -1329,9 +1330,15 @@ async function handleAdmittedCall(
     deps.plane?.park(grant.runId, grant.providerName);
   };
   const aborted = () => req.signal?.aborted === true;
+  const failureContext = (answer?: Response) => ({
+    provider: grant.providerName,
+    model: grant.model,
+    secretValues: [upstream.headers["x-api-key"] ?? "", (upstream.headers.authorization ?? "").replace(/^Bearer /, "")],
+    ...(answer ? { status: answer.status, headers: Object.fromEntries(answer.headers) } : {}),
+  });
   const failureOf = async (answer: Response | undefined, thrown?: unknown): Promise<ProviderFailure | undefined> => {
     if (answer === undefined)
-      return classifyProviderFailure({ error: thrown ?? new Error("fetch failed"), provider: grant.providerName });
+      return classifyProviderFailure({ ...failureContext(), error: thrown ?? new Error("fetch failed") });
     const contentType = (answer.headers.get("content-type") ?? "").toLowerCase();
     if (answer.ok && !contentType.includes("text/html")) return undefined;
     const failureBody = reservation
@@ -1351,10 +1358,8 @@ async function handleAdmittedCall(
       }
     }
     const failure = classifyProviderFailure({
-      status: answer.status,
+      ...failureContext(answer),
       body: failureValue,
-      provider: grant.providerName,
-      model: grant.model,
     });
     const schemaRejection =
       answer.status === 400 && failure.cause === "request-rejected"
@@ -1391,6 +1396,26 @@ async function handleAdmittedCall(
     };
   };
   let providerFailure = await failureOf(res, thrown);
+  const recordFailure = (failure: ProviderFailure) => {
+    try {
+      grant.publish({
+        type: "run_note",
+        kind: "provider_failure",
+        providerFailure: { ...failure },
+        summary: `${grant.providerName}: ${failure.diagnostic?.type ?? failure.cause}${failure.diagnostic?.message ? ` — ${failure.diagnostic.message}` : ""}`,
+        spanId: span.id,
+        at: deps.clock(),
+      });
+    } catch {
+      /* Diagnostics cannot replace the original failure. */
+    }
+    try {
+      log(`[model-proxy] run=${grant.runId} failure ${JSON.stringify(failure)}`);
+    } catch {
+      /* Diagnostics cannot replace the original failure. */
+    }
+  };
+  if (providerFailure) recordFailure(providerFailure);
   if (reservation?.responseInterruption && (!providerFailure || providerFailureParks(providerFailure.cause)))
     return localResponseStop(res);
   if (providerFailure !== undefined && providerFailureParks(providerFailure.cause) && !aborted()) {
@@ -1405,6 +1430,7 @@ async function handleAdmittedCall(
     // was one, but its typed cause still decides the provider's level.
     if (retried !== undefined) res = retried;
     providerFailure = await failureOf(retried ?? res, retryThrown ?? thrown);
+    if (providerFailure) recordFailure(providerFailure);
   }
   if (reservation?.responseInterruption && (!providerFailure || providerFailureParks(providerFailure.cause)))
     return localResponseStop(res);
@@ -1437,11 +1463,22 @@ async function handleAdmittedCall(
   const responsesStream = shape === "openai-responses" && contentType.includes("text/event-stream") && res.body;
   if (!responsesStream && shape !== "openai-responses") deps.plane?.level(grant.providerName, "up");
   if (contentType.includes("text/event-stream") && res.body) {
-    const meter = new SseMeter(shape);
+    let streamedError = false;
+    const meter = new SseMeter(shape, (body) => {
+      if (streamedError) return;
+      streamedError = true;
+      recordFailure(
+        classifyProviderFailure({
+          ...failureContext(res),
+          body,
+        }),
+      );
+    });
     const boundary = responsesStream
       ? new ResponsesFailureBoundary(schemaShaped.body, (event) => meter.observe(event), {
           signal: req.signal,
           ...(consumer ? { consumer } : {}),
+          failureContext: failureContext(res),
           ...(reservation ? { capacity: reservation.capacity, reservation } : {}),
           onSourceSettled: () => reservation?.finishSource(),
           ...(reservation ? { responseInterruption: () => reservation.responseInterruption } : {}),
@@ -1462,6 +1499,7 @@ async function handleAdmittedCall(
         : {};
     const terminalFailure = () => {
       if (boundary?.terminal !== "failed") return false;
+      if (boundary.observedFailure) recordFailure(boundary.observedFailure);
       if (boundary.failure) {
         span.fail(boundary.failure);
         if (providerFailureParks(boundary.failure.cause) && !aborted()) providerDown(boundary.failure);
@@ -1500,7 +1538,7 @@ async function handleAdmittedCall(
         });
         if (!terminalFailure()) {
           if (boundary?.terminal === "completed" && !aborted()) deps.plane?.level(grant.providerName, "up");
-          span.end(boundary && boundary.terminal === undefined ? "error" : "ok");
+          span.end(streamedError || (boundary && boundary.terminal === undefined) ? "error" : "ok");
         }
         log(outcome(res.status, outBytes));
       },
@@ -1548,12 +1586,22 @@ async function handleAdmittedCall(
     throw error;
   }
   let meter: TurnMeter = {};
+  let bufferedError = false;
   try {
     const result = consumer
       ? await parseDocument(res, "buffered")
       : { ok: true as const, value: JSON.parse(text) as unknown };
     if (!result.ok) throw new SyntaxError("buffered response is not JSON");
     const json: unknown = result.value;
+    if (record(record(json)?.error)) {
+      bufferedError = true;
+      recordFailure(
+        classifyProviderFailure({
+          ...failureContext(res),
+          body: json,
+        }),
+      );
+    }
     meter =
       shape === "anthropic-messages"
         ? meterAnthropicMessage(json)
@@ -1568,9 +1616,9 @@ async function handleAdmittedCall(
     // not JSON: forwarded as it came, metered as nothing
   }
   span.setAttrs(turnAttrs(grant, meter, undefined, offered, priceOf(meter)));
-  span.end("ok");
+  span.end(bufferedError ? "error" : "ok");
   log(outcome(res.status, text.length));
-  if (shape === "openai-responses") deps.plane?.level(grant.providerName, "up");
+  if (shape === "openai-responses" && !bufferedError) deps.plane?.level(grant.providerName, "up");
   return { status: res.status, headers, body: text };
 }
 

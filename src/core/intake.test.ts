@@ -203,6 +203,10 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
       verdict: "silent",
       source: "error",
       providerFailure: "credit-or-quota-exhausted",
+      providerFailureDetails: {
+        status: 402,
+        diagnostic: { message: "More credits are required; visit https://provider.example/keys/secret-key" },
+      },
       reason: "The model provider's credit or quota is exhausted; this request did not start.",
     });
     expect(decision.reason).not.toMatch(/[{}]|https?:\/\/|limit_source/);

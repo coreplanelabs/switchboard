@@ -6,7 +6,13 @@ import {
   type ProxyUnknownTerminalReason,
   type ProxyRejectionObservation,
 } from "../core/modelProxy/providerFailureAuth.js";
-import { ProviderFailure, renderProviderFailure, type ProviderFailureCause } from "../core/provider.js";
+import {
+  classifyProviderFailure,
+  ProviderFailure,
+  renderProviderFailure,
+  type ProviderFailureCause,
+  type ProviderFailureAnswer,
+} from "../core/provider.js";
 import { setImmediate as yieldToIo } from "node:timers/promises";
 import { RESPONSES_VALIDATION_LIMITS } from "../core/budgets.js";
 import { type ParsedResponsesFrame, ResponsesConsumer, type ResponsesConsumerOptions } from "./responsesConsumer.js";
@@ -19,6 +25,7 @@ import {
 } from "./responsesValidationCapacity.js";
 
 interface ResponsesFailureBoundaryOptions extends ResponsesConsumerOptions {
+  failureContext?: Omit<ProviderFailureAnswer, "body" | "error" | "trustedEnvelope">;
   consumer?: ResponsesConsumer;
   onValidationInterruption?: (kind: ValidationInterruption) => void;
   onSourceSettled?: () => void;
@@ -52,6 +59,8 @@ const fieldOf = (raw: string): { name: string; value: string } => {
  * a typed failure to the harness's existing retry window; hosted effects may
  * already have happened even when pi has executed no tool. */
 export class ResponsesFailureBoundary {
+  observedFailure?: ProviderFailure;
+  private readonly failureContext: ResponsesFailureBoundaryOptions["failureContext"];
   private buffer = "";
   private line = "";
   private afterCarriageReturn = false;
@@ -87,6 +96,7 @@ export class ResponsesFailureBoundary {
     private readonly observe: (event: Record<string, unknown>) => void = () => {},
     options: ResponsesFailureBoundaryOptions = {},
   ) {
+    this.failureContext = options.failureContext;
     this.consumer =
       options.consumer ?? new ResponsesConsumer(typeof request.model === "string" ? request.model : "", options);
     this.signal = options.signal;
@@ -609,7 +619,9 @@ export class ResponsesFailureBoundary {
         (!failed || response?.status === "failed");
       let replacementCode = "unclassified_stream_failure";
       let message = JSON.stringify(authenticateProxyUnknownTerminal("unverified_terminal"));
-      const failure = verified ? new ProviderFailure(cause) : undefined;
+      const observation = classifyProviderFailure({ ...this.failureContext, body: error });
+      const failure = verified ? new ProviderFailure(cause, { ...observation }) : undefined;
+      if (firstTerminal) this.observedFailure = failure ?? observation;
       if (verified) {
         replacementCode = "provider_failure";
         message = JSON.stringify(
@@ -617,6 +629,7 @@ export class ResponsesFailureBoundary {
             type: "provider_failure",
             cause,
             message: renderProviderFailure(cause, "parked"),
+            details: failure,
           }),
         );
       }

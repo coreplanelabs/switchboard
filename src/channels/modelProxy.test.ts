@@ -1859,6 +1859,186 @@ describe("the turn guard — a run that ended between the door and the turn", ()
 });
 
 describe("upstream failures", () => {
+  it("redacts the configured credential from native transport failures", async () => {
+    const h = harness({
+      answer: () => {
+        throw new TypeError(`fetch failed ${REAL_LOCAL_KEY}`);
+      },
+    });
+    const res = await handleModelProxyRequest(
+      request({ path: OPENAI_CHAT_COMPLETIONS_PATH, headers: bearer(h.bearers.mint(h.localGrant("run-1"))) }).req,
+      h.deps,
+    );
+    expect(classifyProviderFailure({ error: res.body, trustedEnvelope: true })).toMatchObject({
+      cause: "transient",
+      diagnostic: { errorClass: "TypeError", message: "fetch failed «redacted»" },
+    });
+    expect(JSON.stringify([res.body, h.published, h.logs])).not.toContain(REAL_LOCAL_KEY);
+  });
+
+  it("records a buffered Responses failure without reporting successful provider availability", async () => {
+    const h = harness({
+      answer: () =>
+        new Response(
+          JSON.stringify({
+            status: "failed",
+            error: { code: "unknown_error", message: "Invalid response state", param: null },
+          }),
+          { headers: { "content-type": "application/json", "x-request-id": "req_buffered" } },
+        ),
+    });
+    const levels: string[] = [];
+    h.deps.plane = { level: (_provider, side) => void levels.push(side), park: () => {} };
+    const res = await handleModelProxyRequest(
+      request({
+        path: OPENAI_RESPONSES_PATH,
+        headers: bearer(h.bearers.mint(h.responsesGrant("run-1"))),
+        json: responsesRequest({ stream: false }),
+      }).req,
+      h.deps,
+    );
+    expect(h.published).toContainEqual(
+      expect.objectContaining({
+        kind: "provider_failure",
+        providerFailure: expect.objectContaining({
+          diagnostic: expect.objectContaining({ code: "unknown_error", param: null, requestId: "req_buffered" }),
+        }),
+      }),
+    );
+    expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe("error");
+    expect(levels).toEqual([]);
+    expect(res.status).toBe(200);
+  });
+
+  it.each(["anthropic-messages", "openai-chat", "openai-responses"] as const)(
+    "%s records streamed error details without granting new recovery authority",
+    async (wire) => {
+      const error = {
+        type: "invalid_request_error",
+        code: "unknown_error",
+        message: "The provider rejected messages.2",
+        param: "messages.2",
+      };
+      const event = wire === "openai-responses" ? { ...error, type: "error" } : { type: "error", error };
+      const h = harness({
+        answer: () => {
+          const response = streamingResponse([`data: ${JSON.stringify(event)}\n\n`], h.clock, 1);
+          response.headers.set("request-id", "req_stream");
+          return response;
+        },
+      });
+      const grant =
+        wire === "anthropic-messages"
+          ? h.grant("run-1")
+          : wire === "openai-chat"
+            ? h.localGrant("run-1")
+            : h.responsesGrant("run-1");
+      const path =
+        wire === "anthropic-messages"
+          ? ANTHROPIC_MESSAGES_PATH
+          : wire === "openai-chat"
+            ? OPENAI_CHAT_COMPLETIONS_PATH
+            : OPENAI_RESPONSES_PATH;
+      const res = await handleModelProxyRequest(
+        request({
+          path,
+          headers: bearer(h.bearers.mint(grant)),
+          ...(wire === "openai-responses" ? { json: responsesRequest() } : {}),
+        }).req,
+        h.deps,
+      );
+      const body = (await drain(res.body)).join("");
+      expect(h.published).toContainEqual(
+        expect.objectContaining({
+          type: "run_note",
+          kind: "provider_failure",
+          providerFailure: expect.objectContaining({
+            diagnostic: expect.objectContaining({
+              code: "unknown_error",
+              param: "messages.2",
+              message: "The provider rejected messages.2",
+              requestId: "req_stream",
+            }),
+          }),
+        }),
+      );
+      expect(proxyProviderFailureIsAuthenticated(body)).toBe(false);
+      expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe("error");
+    },
+  );
+
+  it.each(["anthropic-messages", "openai-chat", "openai-responses"] as const)(
+    "%s keeps complete redacted error details in the signed reply and run record",
+    async (wire) => {
+      const error = {
+        type: "invalid_request_error",
+        code: "invalid_value",
+        param: "temperature",
+        message: "Unsupported temperature. sk-ant-sensitive-credential-123456789",
+        details: { allowed: [1] },
+      };
+      const h = harness({
+        answer: () =>
+          new Response(JSON.stringify({ error }), {
+            status: 400,
+            headers: {
+              "content-type": "application/json",
+              "request-id": "req_original",
+              "retry-after": "30",
+              "set-cookie": "private-cookie",
+            },
+          }),
+      });
+      const grant =
+        wire === "anthropic-messages"
+          ? h.grant("run-1")
+          : wire === "openai-chat"
+            ? h.localGrant("run-1")
+            : h.responsesGrant("run-1");
+      const token = h.bearers.mint(grant);
+      const path =
+        wire === "anthropic-messages"
+          ? ANTHROPIC_MESSAGES_PATH
+          : wire === "openai-chat"
+            ? OPENAI_CHAT_COMPLETIONS_PATH
+            : OPENAI_RESPONSES_PATH;
+      const res = await handleModelProxyRequest(
+        request({ path, headers: bearer(token), ...(wire === "openai-responses" ? { json: responsesRequest() } : {}) })
+          .req,
+        h.deps,
+      );
+      const failure = classifyProviderFailure({
+        error: res.body,
+        trustedEnvelope: proxyProviderFailureIsAuthenticated(res.body),
+      });
+      expect(failure).toMatchObject({
+        status: 400,
+        provider: grant.providerName,
+        model: grant.model,
+        diagnostic: {
+          type: "invalid_request_error",
+          code: "invalid_value",
+          param: "temperature",
+          message: "Unsupported temperature. «redacted-anthropic-key»",
+          requestId: "req_original",
+          headers: { "request-id": "req_original", "retry-after": "30" },
+        },
+      });
+      expect(h.published).toContainEqual(
+        expect.objectContaining({
+          type: "run_note",
+          kind: "provider_failure",
+          providerFailure: expect.objectContaining({
+            cause: "request-rejected",
+            status: 400,
+            diagnostic: expect.objectContaining({ requestId: "req_original" }),
+          }),
+        }),
+      );
+      expect(JSON.stringify([res.body, h.published, h.logs])).not.toMatch(/sk-ant-sensitive|private-cookie/);
+    },
+  );
+
   it("an upstream 4xx/5xx keeps its status but crosses as a typed safe sentence; the span ends error and the turn is spent", async () => {
     const h = harness({
       answer: () =>
@@ -2906,7 +3086,10 @@ describe("Responses stream failure boundary", () => {
         const obs = bridge.observe({ type: "message_end", message });
         expect(message.stopReason).toBe("error");
         expect(obs.terminalFailure).toMatchObject({ kind: "provider_failure", failure: { cause } });
-        expect(message.errorMessage).not.toContain("private provider body");
+        expect(obs.providerFailure?.diagnostic).toMatchObject({
+          code,
+          message: "private provider body HTTP 429 retry me",
+        });
         expect(h.calls).toHaveLength(1);
         expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe("error");
         expect(levels).toEqual(cause === "request-rejected" ? [] : ["down"]);
@@ -4470,7 +4653,7 @@ describe("createModelProxyHandler — the node adapter", () => {
     expect(page.headers()["content-type"]).toBe("application/json; charset=utf-8");
     expect(page.headers()["x-content-type-options"]).toBe("nosniff");
     expect(page.text()).toContain("The model provider is temporarily unavailable");
-    expect(page.text()).not.toContain("<script>");
+    expect(JSON.parse(page.text()).error.message).not.toContain("<script>");
     expect(bodyKindOf("application/json")).toBe("json");
     expect(bodyKindOf("text/event-stream; charset=utf-8")).toBe("sse");
     expect(bodyKindOf("text/html")).toBe("text");
@@ -4771,8 +4954,10 @@ describe("the provider level and the park (record 0064)", () => {
     expect(p.levels).toEqual([{ provider: "anthropic", side: "down", cause: "credit-or-quota-exhausted" }]);
     expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
     expect(String(res.body)).toContain("The model provider's credit or quota is exhausted");
-    expect(String(res.body)).not.toContain("limit_source");
-    expect(String(res.body)).not.toContain("https://");
+    expect((json(res).error as { message: string }).message).not.toMatch(/limit_source|https:\/\//);
+    expect(classifyProviderFailure({ error: res.body, trustedEnvelope: true }).diagnostic?.response).toContain(
+      '"limit_source":"openrouter_key_limit"',
+    );
   });
 
   it("a transport failure gets one retry; past it the provider is reported down and the run parked, and the error is still relayed", async () => {
@@ -4825,7 +5010,10 @@ describe("the provider level and the park (record 0064)", () => {
     const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, { ...h.deps, plane: p.plane });
     expect(res.status).toBe(502);
     expect(String(res.body)).toContain("The model provider is temporarily unavailable");
-    expect(String(res.body)).not.toContain("cloudflare");
+    expect((json(res).error as { message: string }).message).not.toContain("cloudflare");
+    expect(classifyProviderFailure({ error: res.body, trustedEnvelope: true }).diagnostic?.response).toContain(
+      "cloudflare",
+    );
     expect(h.calls).toHaveLength(2);
     expect(p.levels).toEqual([{ provider: "anthropic", side: "down", cause: "transient" }]);
     expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);

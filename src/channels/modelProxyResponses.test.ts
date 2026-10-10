@@ -517,7 +517,7 @@ describe("Responses byte budgets", () => {
     expect(body).toContain("provider_failure");
     expect(body).not.toContain("consumer_rejected");
     expect(boundary.failure?.cause).toBe("transient");
-    expect(body).not.toContain("private error");
+    expect(boundary.failure?.diagnostic).toMatchObject({ code: "server_error", message: "private error" });
     expect(kinds).toEqual(["frame-bytes"]);
     expect(body.length).toBeLessThan(2048);
   });

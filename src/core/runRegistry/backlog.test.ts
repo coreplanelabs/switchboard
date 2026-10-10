@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { RunEvent } from "../runEvents.js";
 import { MAX_EVENT_BYTES } from "../runRecord.js";
+import { assembleRunRecord } from "../dispatch/record.js";
+import { analyzeRunFriction } from "../runFriction.js";
 import { SPAN_SCHEMA } from "../normalizeSpans.js";
 import { REPLAY_EVERYTHING } from "../runRegistry.js";
 import { DEFAULT_BACKLOG_LIMIT } from "./backlog.js";
@@ -10,6 +12,91 @@ import { call, result, seq, spanEnd, testRegistry } from "./testing.js";
 // subscriber is replayed, the replay budget (item 5), the count and byte bounds
 // and the protected head (item 2; docs/reference/specs/tracing.md), proven through
 // the registry that owns the buffer.
+
+describe("provider diagnostic retention", () => {
+  it("retains a post-start provider failure through backlog trimming and final record assembly", () => {
+    const { reg } = testRegistry();
+    const run = reg.create();
+    reg.publish(run.id, { type: "input", messageId: "m1", text: "go" });
+    reg.publish(run.id, { type: "span_start", spanId: "model-1", name: "model.turn", at: 1 });
+    reg.publish(run.id, {
+      type: "run_note",
+      kind: "provider_failure",
+      summary: "recovered provider error",
+      providerFailure: {
+        cause: "transient",
+        status: 503,
+        diagnostic: { requestId: "req_recovered", message: "unavailable" },
+      },
+    });
+    for (let i = 0; i < 5; i++) reg.publish(run.id, result(true, "x".repeat(1024 * 1024)));
+    reg.publish(run.id, { type: "answer", text: "recovered" });
+    const snap = reg.snapshot(run.id, run.token)!;
+    const saved = assembleRunRecord({
+      run,
+      snap,
+      msg: { channelId: "mcp:test", userId: "mcp:reader", threadKey: "mcp:test:t" },
+      channelVisibility: "machine",
+      finishedAt: 10,
+      status: "completed",
+      diagnosis: analyzeRunFriction(snap.events),
+    });
+    expect(saved.events.find((event) => event.type === "run_note" && event.kind === "provider_failure")).toMatchObject({
+      seq: 3,
+      providerFailure: {
+        cause: "transient",
+        status: 503,
+        diagnostic: { requestId: "req_recovered", message: "unavailable" },
+      },
+    });
+    expect(saved.truncated).toBe(true);
+    expect(saved.events.at(-1)).toMatchObject({ type: "answer", text: "recovered" });
+  });
+
+  it("protects recent diagnostics without exceeding the configured count bound", () => {
+    const { reg } = testRegistry({ backlogLimit: 3 });
+    const run = reg.create();
+    reg.publish(run.id, { type: "input", messageId: "m1", text: "go" });
+    reg.publish(run.id, call("start"));
+    for (let i = 0; i < 20; i++)
+      reg.publish(run.id, {
+        type: "run_note",
+        kind: "provider_failure",
+        summary: "failure",
+        providerFailure: {
+          cause: "transient",
+          diagnostic: { requestId: `req_${i}` },
+        },
+      });
+    reg.publish(run.id, { type: "answer", text: "recovered" });
+    const events = reg.snapshot(run.id, run.token)!.events;
+    expect(events.map((event) => event.seq)).toEqual([1, 22, 23]);
+    expect(events[1]).toMatchObject({ type: "run_note", providerFailure: { diagnostic: { requestId: "req_19" } } });
+  });
+
+  it("keeps recent diagnostics within the configured backlog byte bound", () => {
+    const { reg } = testRegistry({ backlogBytes: 32 * 1024 });
+    const run = reg.create();
+    reg.publish(run.id, { type: "input", messageId: "m1", text: "go" });
+    for (let i = 0; i < 20; i++)
+      reg.publish(run.id, {
+        type: "run_note",
+        kind: "provider_failure",
+        summary: "failure",
+        providerFailure: {
+          cause: "transient",
+          diagnostic: { requestId: `req_${i}`, response: "x".repeat(16_000) },
+        },
+      });
+    reg.publish(run.id, { type: "answer", text: "x".repeat(1024) });
+    const events = reg.snapshot(run.id, run.token)!.events;
+    expect(
+      events.find((event) => event.type === "run_note" && event.providerFailure?.diagnostic?.requestId === "req_19"),
+    ).toMatchObject({ type: "run_note", kind: "provider_failure" });
+    expect(events.reduce((n, event) => n + Buffer.byteLength(JSON.stringify(event)), 0)).toBeLessThanOrEqual(32 * 1024);
+    expect(events.map((event) => event.seq)).toEqual([1, 21, 22]);
+  });
+});
 
 describe("RunRegistry — backlog replay for a late subscriber", () => {
   it("replays already-published events, in order, then live-forwards new ones", () => {

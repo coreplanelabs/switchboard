@@ -20,7 +20,7 @@ import { audienceRefusalOf, type AudienceRefusalReceipt } from "./audienceDecisi
 import type { ChannelVisibility, Predicate } from "./authz/types.js";
 import { isRunProfile, type RunProfile } from "../config/profile.js";
 import type { RunEvent } from "./runEvents.js";
-import type { ProviderFailureCause } from "./provider.js";
+import type { ProviderFailureCause, ProviderFailureDetails } from "./provider.js";
 import type { Effort } from "../effort.js";
 import type { AddressSeverity } from "./reviewVerdict.js";
 import type { Verbosity } from "./verbosity.js";
@@ -619,6 +619,7 @@ export interface RunOperatorDecision {
   refusalCause?: string;
   refusalText?: string;
   providerFailure?: ProviderFailureCause;
+  providerFailureDetails?: ProviderFailureDetails;
   /** The structured seam's attempts (record 0067): what each answer violated,
    *  or that it was accepted. */
   attempts?: { outcome: "accepted" | "violation"; violation?: string }[];
@@ -686,6 +687,9 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
     ...(e.refusalCause !== undefined ? { refusalCause: e.refusalCause } : {}),
     ...(e.refusalText !== undefined ? { refusalText: e.refusalText } : {}),
     ...(e.providerFailure !== undefined ? { providerFailure: e.providerFailure } : {}),
+    ...(e.providerFailureDetails !== undefined
+      ? { providerFailureDetails: structuredClone(e.providerFailureDetails) }
+      : {}),
     ...(e.attempts
       ? {
           attempts: e.attempts.map((a) => ({
@@ -1674,6 +1678,26 @@ export function isRunWorkEvidence(value: {
 /** The JSON size of one event, after which its `text`/`summary` is truncated. */
 export const MAX_EVENT_BYTES = 64 * KIB;
 
+/** The newest provider notes retain at most one event budget of diagnostics,
+ * independently of the setup head. Live and stored trimming share this rule. */
+export function protectedProviderFailureNoteIndices(
+  events: readonly RunEvent[],
+  sizes: readonly number[],
+  budget = MAX_EVENT_BYTES,
+): Set<number> {
+  const kept = new Set<number>();
+  let remaining = Math.min(MAX_EVENT_BYTES, Math.max(0, budget));
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event.type !== "run_note" || event.kind !== "provider_failure") continue;
+    const bytes = sizes[i] ?? utf8ByteLength(JSON.stringify(event));
+    if (bytes > remaining) break;
+    remaining -= bytes;
+    kept.add(i);
+  }
+  return kept;
+}
+
 const ELLIPSIS = "…";
 const encoder = new TextEncoder();
 
@@ -1720,7 +1744,8 @@ export function capEvent(event: RunEvent, maxBytes: number): { event: RunEvent; 
  * dropped from the MIDDLE: the kept set is a head and a tail grown alternately
  * (head first) from the two ends until the next event would not fit, so the
  * request/context/first tool steps and the terminal notes survive and the
- * oldest middle steps go. `truncated` is set when any event was dropped,
+ * oldest middle steps go. Recent provider diagnostic notes get a bounded
+ * reservation before ordinary head/tail selection. `truncated` is set when any event was dropped,
  * `eventCount` is left as published, `storedEventCount` is the kept length.
  * Never mutates `record`.
  */
@@ -1744,23 +1769,31 @@ export function fitRecordToBudget(record: RunRecord, maxBytes: number = MAX_RECO
   // Budget the events by their own JSON sizes (plus one separator each) against
   // what the record costs with no events, then verify the real serialization.
   const sizes = capped.map((c) => c.bytes + 1);
-  let remaining = maxBytes - measure([]);
+  const protectedNotes = protectedProviderFailureNoteIndices(events, sizes, maxBytes - measure([]));
+  const keptSet = new Set(protectedNotes);
+  let remaining = maxBytes - measure(events.filter((_, index) => protectedNotes.has(index)));
   let head = 0;
   let tail = 0;
   while (head + tail < events.length) {
     const takeHead = head <= tail;
     const next = takeHead ? sizes[head] : sizes[events.length - 1 - tail];
-    if (next > remaining) break;
-    remaining -= next;
+    const index = takeHead ? head : events.length - 1 - tail;
+    if (!keptSet.has(index)) {
+      if (next > remaining) break;
+      remaining -= next;
+      keptSet.add(index);
+    }
     if (takeHead) head++;
     else tail++;
   }
-  const kept = [...events.slice(0, head), ...events.slice(events.length - tail)];
-  while (kept.length > 0 && measure(kept) > maxBytes) {
-    // Estimate was optimistic (should not happen; defensive): drop from the center.
-    kept.splice(Math.floor(kept.length / 2), 1);
+  const kept = [...keptSet].sort((a, b) => a - b);
+  while (kept.length > 0 && measure(kept.map((index) => events[index])) > maxBytes) {
+    // Prefer ordinary middle steps; the hard record bound still wins if only notes remain.
+    const ordinary = kept.filter((index) => !protectedNotes.has(index));
+    const drop = ordinary.length ? ordinary[Math.floor(ordinary.length / 2)] : kept[0];
+    kept.splice(kept.indexOf(drop), 1);
   }
-  return { ...record, events: kept, storedEventCount: kept.length, truncated: true };
+  return { ...record, events: kept.map((index) => events[index]), storedEventCount: kept.length, truncated: true };
 }
 
 type Sized = { event: RunEvent; bytes: number };

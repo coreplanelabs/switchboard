@@ -3766,12 +3766,20 @@ describe("runOperator — the loop over a scripted model", () => {
       kind: "refusal",
       cause: "provider",
       providerFailure: "request-rejected",
+      providerFailureDetails: expect.objectContaining({
+        status: 400,
+        diagnostic: expect.objectContaining({ type: "invalid_request_error", code: "invalid_json_schema" }),
+      }),
       reason: "request-rejected",
       text: renderProviderFailure("request-rejected", "ended"),
     });
     expect(answer.decision.kind === "refusal" ? answer.decision.text : "").not.toMatch(
       /[{}]|https?:\/\/|lookaround|send another/i,
     );
+    expect(operatorEventOf("on", answer).providerFailureDetails).toMatchObject({
+      status: 400,
+      diagnostic: { type: "invalid_request_error", code: "invalid_json_schema" },
+    });
   });
 
   it("a park-capable failure at the no-lease operator door says the request did not start", async () => {

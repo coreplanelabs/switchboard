@@ -34,6 +34,41 @@ import { planContextCheckpoint } from "./references/contextCheckpoint.js";
 import { contextDependenciesHash } from "./references/contextDependencies.js";
 import type { ChildHandoff } from "./dispatch/handoff.js";
 
+it("stored operator failures retain provider diagnostics after serialization", () => {
+  const event: RunEvent = {
+    type: "operator",
+    mode: "on",
+    outcome: "refusal",
+    reason: "request-rejected",
+    providerFailure: "request-rejected",
+    providerFailureDetails: {
+      status: 400,
+      provider: "anthropic",
+      model: "example-model",
+      diagnostic: {
+        type: "invalid_request_error",
+        message: "Invalid value",
+        requestId: "req_stored",
+        param: "messages.2",
+      },
+    },
+  };
+  const stored = JSON.parse(JSON.stringify(record({ events: [event], operator: operatorOfEvents([event]) })));
+  expect(stored.operator).toMatchObject({
+    providerFailure: "request-rejected",
+    providerFailureDetails: {
+      status: 400,
+      provider: "anthropic",
+      diagnostic: {
+        type: "invalid_request_error",
+        message: "Invalid value",
+        requestId: "req_stored",
+        param: "messages.2",
+      },
+    },
+  });
+});
+
 // Feature: docs/reference/specs/run-history.md — the node-free run-record contract shared
 // by the bot and the state Worker: the record shape + structural validator,
 // the retention helper both sides run, and the byte-budget helper that keeps a
@@ -368,6 +403,46 @@ function bigEvents(count: number, summaryChars: number): RunEvent[] {
 }
 
 describe("fitRecordToBudget", () => {
+  it("keeps the record byte bound when a caller reuses the same provider note object", () => {
+    const note: RunEvent = {
+      type: "run_note",
+      kind: "provider_failure",
+      summary: "failure",
+      providerFailure: {
+        cause: "transient",
+        diagnostic: { requestId: "req_repeated", response: "x".repeat(1000) },
+      },
+    };
+    const fitted = fitRecordToBudget(record({ events: Array(100).fill(note), eventCount: 100 }), 12_000);
+    expect(fitted.events.at(-1)).toMatchObject({
+      type: "run_note",
+      providerFailure: { diagnostic: { requestId: "req_repeated" } },
+    });
+    expect(utf8ByteLength(JSON.stringify(fitted))).toBeLessThanOrEqual(12_000);
+    expect(fitted.eventCount).toBe(100);
+    expect(fitted.truncated).toBe(true);
+  });
+
+  it("retains provider diagnostics in the middle when fitting the final record budget", () => {
+    const events = bigEvents(80, 1200);
+    const note: RunEvent = {
+      type: "run_note",
+      kind: "provider_failure",
+      summary: "recovered",
+      providerFailure: {
+        cause: "transient",
+        status: 503,
+        diagnostic: { requestId: "req_middle", message: "unavailable" },
+      },
+    };
+    events.splice(40, 0, note);
+    const fitted = fitRecordToBudget(record({ events, eventCount: events.length }), 12_000);
+    expect(fitted.events.find((event) => event.type === "run_note" && event.kind === "provider_failure")).toEqual(note);
+    expect(utf8ByteLength(JSON.stringify(fitted))).toBeLessThanOrEqual(12_000);
+    expect(fitted.truncated).toBe(true);
+    expect(fitted.eventCount).toBe(81);
+  });
+
   it("fits a 4 MB event list under 1.5 MB, keeping the first and last events, marking truncated, preserving eventCount", () => {
     const events = bigEvents(4000, 1000); // ~4 MB of JSON
     const rec = record({ events, eventCount: events.length, storedEventCount: events.length });

@@ -59,6 +59,7 @@ import {
   typedProviderFailureOf,
   renderProviderFailure,
   type ProviderFailureCause,
+  type ProviderFailureDetails,
   type ToolDef,
 } from "../provider.js";
 import { parseDirectives } from "../../directives.js";
@@ -273,6 +274,7 @@ export type OperatorDecision =
       kind: "refusal";
       cause: "provider";
       providerFailure: ProviderFailureCause;
+      providerFailureDetails?: ProviderFailureDetails;
       text: string;
       reason: string;
     }
@@ -2594,6 +2596,7 @@ export async function runOperator(
               kind: "refusal",
               cause: "provider",
               providerFailure: failure.cause,
+              providerFailureDetails: { ...failure },
               reason: failure.cause,
               text: renderProviderFailure(failure.cause, "ended"),
             },
@@ -2796,6 +2799,7 @@ export function operatorEventOf(
   refusalCause?: string;
   refusalText?: string;
   providerFailure?: ProviderFailureCause;
+  providerFailureDetails?: ProviderFailureDetails;
   attempts?: StructuredAttempt[];
   intake?: { verdict: string; reason: string };
   latencyMs: number;
@@ -2835,7 +2839,9 @@ export function operatorEventOf(
     ...(d.kind === "question" && d.proposalSettings !== undefined ? { proposalSettings: d.proposalSettings } : {}),
     ...(d.kind === "question" && d.confirmablePreset === true ? { confirmablePreset: true as const } : {}),
     ...(d.kind === "refusal" ? { refusalCause: d.cause, refusalText: d.text } : {}),
-    ...(d.kind === "refusal" && d.cause === "provider" ? { providerFailure: d.providerFailure } : {}),
+    ...(d.kind === "refusal" && d.cause === "provider"
+      ? { providerFailure: d.providerFailure, providerFailureDetails: d.providerFailureDetails }
+      : {}),
     ...(answer.attempts ? { attempts: answer.attempts } : {}),
     ...(intake ? { intake: { verdict: intake.verdict, reason: intake.reason } } : {}),
     latencyMs: answer.latencyMs,
