@@ -2,8 +2,8 @@
 
 Home presents durable work independently of the process that most recently worked on it. The organization is fixed by the installation; browser input cannot select another organization's inventory or grant authority.
 
-- **Code**: `src/core/home/service.ts`, `src/core/coordinator/inventory.ts`.
-- **Tests**: `src/core/home/service.test.ts`, `src/core/coordinator/inventory.test.ts`, `deploy/cloudflare-memory/inventory.test.ts`.
+- **Code**: `src/core/home/service.ts`, `src/core/coordinator/inventory.ts`, `src/channels/homeSeed.ts`, `web/green/components/`, `web/green/lib/`.
+- **Tests**: `src/core/home/service.test.ts`, `src/core/coordinator/inventory.test.ts`, `deploy/cloudflare-memory/inventory.test.ts`, `web/green/lib/homeSession.test.ts`, `web/green/lib/virtualRows.test.ts`, `web/green/lib/pullRequest.test.ts`, `web/green/components/threadSearch.test.ts`, `web/green/components/conversationDock.test.ts`, `web/green/components/confirmationPrompt.test.ts`, `web/green/components/unitList.test.ts`.
 
 ## Behavior
 
@@ -38,3 +38,19 @@ Home presents durable work independently of the process that most recently worke
 | Personal attention names the assigned question's next action ahead of an unrelated external wait | `[unit]` `src/core/home/service.test.ts::Home durable fleet::shows the assigned question's next action ahead of another wait on the same unit` |
 | Restricted reads disclose their scope even when every authorized row loaded | `[unit]` `src/core/home/service.test.ts::Home durable fleet::labels a restricted fleet view without claiming the whole organization is caught up` |
 | Actual adapters, unfocused target-access revocation, identity ceremonies, original-owner effects and staging acceptance | `[gap]` Source and fixture proofs do not establish these live outcomes. The execution-model scope decision precedes cutover. |
+| Thread search preserves the protected API and rejects late results from an earlier thread | `[unit]` `web/green/components/threadSearch.test.ts::*` |
+| Saved actions require an explicit Confirm or Cancel; retries retain the issued key and offers cannot cross destination or identity scope | `[unit]` `web/green/components/confirmationPrompt.test.ts::*`, `web/green/lib/homeSession.test.ts::Home conversation destination::*` |
+| Actual transcript scrolling is captured and restored for each authorized destination | `[unit]` `web/green/components/conversationDock.test.ts::Conversation dock scroll::captures actual transcript scrolling and restores broad 420 and local 80 independently` |
+| Every attempted submission key stays reserved for its original intent, including uncertain results and later edited sends | `[unit]` `web/green/lib/homeSession.test.ts::Home conversation destination::reserves an uncertain key after an edited intent succeeds before a third message` |
+| Revocation clears the active transcript during a pending focus and its late response cannot restore access | `[unit]` `web/green/lib/homeSession.test.ts::Home conversation destination::clears the active transcript when access is revoked during a pending focus and refuses its late response` |
+| Display entries preserve proved authorship without requiring private storage fields or inferring authors from roles | `[unit]` `web/green/lib/homeSession.test.ts::Home conversation destination::accepts display entries without private storage fields and refuses malformed attribution frames`, `web/green/components/conversationDock.test.ts::Conversation dock scroll::uses proved authorship for You and preserves other people, unknown authors and service labels` |
+| Transient confirmation failures preserve the offer and the original issued choice for retry | `[unit]` `web/green/components/confirmationPrompt.test.ts::Scoped saved action confirmation::preserves confirm after a transient server response and retries its exact issued choice`, `web/green/components/confirmationPrompt.test.ts::Scoped saved action confirmation::preserves cancel after a transient server response and retries its exact issued choice` |
+| Moving pipeline rows use projected evidence while unknown states and explicit waits stay honest | `[unit]` `web/green/components/unitList.test.ts::Home condition ownership::shows Working only for a projected moving row while retaining unknown state and explicit waits` |
+| A multi-owner urgent row identifies only the proved attention recipient as You | `[unit]` `web/green/components/unitList.test.ts::Home condition ownership::labels only the exact proved attention recipient as You in a multi-owner urgent row` |
+| Measured rows preserve keyboard navigation without clipping variable-height work | `[unit]` `web/green/lib/virtualRows.test.ts::*` |
+| A contextual pull request destination requires matching recorded provenance | `[unit]` `web/green/lib/pullRequest.test.ts::*` |
+
+
+| Criterion | Proof |
+|---|---|
+| A reply accepted after navigation clears only its sent text and attachments, preserves its saved scroll, and leaves the broad draft and position unchanged. | `[unit]` `web/green/lib/homeSession.test.ts::Home conversation destination::keeps the saved reply scroll when acceptance arrives after leaving its thread` |
