@@ -18,6 +18,7 @@ import {
   harnessFactsOf,
   isPiFacts,
   openThroughSeam,
+  nextHarnessLaunch,
   type HarnessDeps,
   type Harness,
   type HarnessFacts,
@@ -177,6 +178,251 @@ const piFactsIn = (container?: string): PiHarnessFacts => ({
   root: paths.dir,
   relaunches: 0,
   ...(container ? { container } : {}),
+});
+
+describe("durable launch intent", () => {
+  it.each(["pi", "opencode"] as const)("binds the next %s intent to the vouched original producer", (harness) => {
+    const driver = harness === "pi" ? piDriver() : openCodeDriver();
+    const policy = { version: 1, commandRoute: "hosted-review", identity: "read" } as const;
+    const intent = { version: 1, harness, phase: "begun", ordinal: 0, sessionPolicy: policy };
+    const facts = { ...driver.facts({ pid: 999, container: "vm-original" }), sessionPolicy: policy, launchOrdinal: 0 };
+    const replaced = new HarnessContainerReplacedError("replaced", "runtime-replaced", "vm-original", "vm-next", {
+      messages: [],
+      compactions: [],
+      settlements: [],
+      turn: 1,
+      inboxConsumedSeq: 0,
+      deadline: NOW + 300000,
+    });
+    expect(nextHarnessLaunch("run-c", intent, facts, replaced)).toEqual({
+      version: 1,
+      harness,
+      phase: "prepared",
+      ordinal: 1,
+      sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+    });
+    for (const unknown of [undefined, { ...facts, launchOrdinal: 1 }, { ...facts, container: "foreign" }]) {
+      expect(() => nextHarnessLaunch("run-c", intent, unknown, replaced)).toThrow(HarnessEndingUnconfirmedError);
+    }
+    expect(intent.phase).toBe("begun");
+    expect(facts.launchOrdinal).toBe(0);
+  });
+  it.each(["pi", "opencode"] as const)(
+    "admits no %s process after a stop during launch acknowledgement",
+    async (harness) => {
+      const driver = harness === "pi" ? piDriver() : openCodeDriver();
+      const control = new RunControl();
+      const result = await driver.run({
+        control,
+        identity: "read",
+        commandPolicy: "hosted-review",
+        launchIntent: {
+          version: 1,
+          harness,
+          phase: "prepared",
+          ordinal: 0,
+          sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+        },
+        onLaunchIntent: async () => {
+          control.requestStop("hard");
+          return true;
+        },
+        turns: [{ content: [{ type: "text", text: "must not enter model" }], stopReason: "end_turn" }],
+      });
+      expect(result.outcome).toMatchObject({
+        kind: "failed",
+        error: { name: "HarnessOperationEndedError", reason: "cancelled" },
+      });
+      expect(result.starts).toEqual([]);
+      expect(result.modelCalls).toEqual([]);
+    },
+  );
+  it.each(["pi", "opencode"] as const)(
+    "retains a lost %s start response and refuses to launch it again",
+    async (name) => {
+      const w = world({ provider: textOnlyProvider() });
+      const start = w.container.start.bind(w.container);
+      w.container.start = async (spec) => {
+        await start(spec);
+        throw new Error("start reply lost");
+      };
+      const prepared = {
+        version: 1,
+        harness: name,
+        phase: "prepared",
+        ordinal: 0,
+        sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+      };
+      let saved: unknown = prepared;
+      Object.assign(w.run, {
+        agent: { ...agent, name: "review", identity: "read", toolset: "readonly" },
+        commandPolicy: "hosted-review",
+        launchIntent: prepared,
+        saveLaunchIntent: async (intent: unknown) => {
+          saved = structuredClone(intent);
+          return true;
+        },
+      });
+      const harness = name === "pi" ? new PiHarness() : new OpenCodeHarness();
+      await expect(harness.open(w.deps, w.run)).rejects.toMatchObject({ name: "HarnessEndingUnconfirmedError" });
+      expect(saved).toEqual({
+        version: 1,
+        harness: name,
+        phase: "begun",
+        ordinal: 0,
+        sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+      });
+      expect(w.container.starts).toHaveLength(1);
+      expect(w.container.removed).toEqual([]);
+      expect(w.container.killed).toEqual([]);
+      const resumed = world({
+        resume: { messages: [], settlements: [], remainingMs: 300000, turn: 0, inboxConsumedSeq: 0 },
+      });
+      Object.assign(resumed.run, { agent: w.run.agent, commandPolicy: "hosted-review", launchIntent: saved });
+      await expect(harness.open(resumed.deps, resumed.run)).rejects.toMatchObject({
+        openingError: { operation: "resume" },
+      });
+      expect(resumed.container.starts).toEqual([]);
+      expect(resumed.facts).toEqual([]);
+    },
+  );
+  it.each(["pi", "opencode"] as const)(
+    "continues an acknowledged never-begun %s launch after restart",
+    async (harness) => {
+      const driver = harness === "pi" ? piDriver() : openCodeDriver();
+      const launchIntent = {
+        version: 1,
+        harness,
+        phase: "prepared",
+        ordinal: 0,
+        sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+      };
+      const checkpoints: unknown[] = [];
+      const result = await driver.run({
+        identity: "read",
+        commandPolicy: "hosted-review",
+        launchIntent,
+        onLaunchIntent: async (intent) => {
+          checkpoints.push(structuredClone(intent));
+          return true;
+        },
+        onFacts: async (facts) => {
+          checkpoints.push({ producer: facts.harness, sessionPolicy: facts.sessionPolicy });
+          return true;
+        },
+        resume: { messages: [], settlements: [], remainingMs: 300000, turn: 0, inboxConsumedSeq: 0 },
+        turns: [{ content: [{ type: "text", text: "original review completed" }], stopReason: "end_turn" }],
+      });
+      expect(result.outcome).toEqual({ kind: "answered", answer: "original review completed" });
+      expect(checkpoints.slice(0, 2)).toEqual([
+        {
+          version: 1,
+          harness,
+          phase: "begun",
+          ordinal: 0,
+          sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+        },
+        { producer: harness, sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" } },
+      ]);
+      expect(result.modelCalls).toHaveLength(1);
+      expect(launchIntent.phase).toBe("prepared");
+    },
+  );
+  it.each(["pi", "opencode"] as const)(
+    "holds a begun %s launch without its producer receipt after restart",
+    async (harness) => {
+      const driver = harness === "pi" ? piDriver() : openCodeDriver();
+      const result = await driver.run({
+        identity: "read",
+        commandPolicy: "hosted-review",
+        launchIntent: {
+          version: 1,
+          harness,
+          phase: "begun",
+          ordinal: 0,
+          sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+        },
+        resume: { messages: [], settlements: [], remainingMs: 60000, turn: 0, inboxConsumedSeq: 0 },
+        turns: [{ content: [{ type: "text", text: "must not start" }], stopReason: "end_turn" }],
+      });
+      expect(result.outcome).toMatchObject({
+        kind: "failed",
+        error: {
+          name: "HarnessEndingUnconfirmedError",
+          openingError: {
+            operation: "resume",
+            message:
+              "harness container: resume failed — The original launch intent or process start cannot be verified for this continuation.",
+          },
+        },
+      });
+      expect(result.starts).toEqual([]);
+      expect(result.modelCalls).toEqual([]);
+      expect(result.facts).toEqual([]);
+    },
+  );
+  it.each(["pi", "opencode"] as const)(
+    "holds an unknown later %s start even when an older producer receipt exists",
+    async (harness) => {
+      const driver = harness === "pi" ? piDriver() : openCodeDriver();
+      const policy = { version: 1, commandRoute: "hosted-review", identity: "read" } as const;
+      const original = {
+        ...driver.facts({ pid: 999, container: driver.containerWord }),
+        sessionPolicy: policy,
+        launchOrdinal: 0,
+      };
+      const result = await driver.run({
+        identity: "read",
+        commandPolicy: "hosted-review",
+        launchIntent: { version: 1, harness, phase: "begun", ordinal: 1, sessionPolicy: policy },
+        resume: { facts: original, messages: [], settlements: [], remainingMs: 300000, turn: 1, inboxConsumedSeq: 0 },
+        turns: [{ content: [{ type: "text", text: "must not enter model" }], stopReason: "end_turn" }],
+      });
+      expect(result.outcome).toMatchObject({
+        kind: "failed",
+        error: { name: "HarnessEndingUnconfirmedError", openingError: { operation: "resume" } },
+      });
+      expect(result.starts).toEqual([]);
+      expect(result.modelCalls).toEqual([]);
+      expect(result.facts).toEqual([]);
+    },
+  );
+  it.each(["pi", "opencode"] as const)(
+    "holds %s before process start when the launch checkpoint is unknown",
+    async (name) => {
+      const w = world({ provider: textOnlyProvider() });
+      w.container.request = async () => {
+        throw new Error("process started before launch checkpoint");
+      };
+      let at = NOW;
+      w.deps.clock = () => at;
+      w.deps.sleep = async () => {
+        at += 1000;
+      };
+      const intent = {
+        version: 1,
+        harness: name,
+        phase: "prepared",
+        ordinal: 0,
+        sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+      };
+      Object.assign(w.run, {
+        agent: { ...agent, name: "review", identity: "read", toolset: "readonly" },
+        commandPolicy: "hosted-review",
+        launchIntent: intent,
+        saveLaunchIntent: async () => false,
+      });
+      const harness = name === "pi" ? new PiHarness() : new OpenCodeHarness();
+      await expect(harness.open(w.deps, w.run)).rejects.toMatchObject({
+        openingError: {
+          message: "harness container: checkpoint failed — The original launch checkpoint was not acknowledged.",
+        },
+      });
+      expect(w.container.starts).toEqual([]);
+      expect(w.facts).toEqual([]);
+      expect(intent.phase).toBe("prepared");
+    },
+  );
 });
 
 // Feature: docs/reference/specs/harness.md item 6 — the replaced verdict's

@@ -77,6 +77,8 @@ export interface RunScript {
   commandPolicy?: import("../contract.js").HarnessCommandPolicy;
   /** Explicit facts transport for policy ACK/uncertainty fixtures. */
   onFacts?: import("../contract.js").HarnessRun["saveFacts"];
+  launchIntent?: import("../contract.js").HarnessRun["launchIntent"];
+  onLaunchIntent?: import("../contract.js").HarnessRun["saveLaunchIntent"];
   /** Original run control, for admission-boundary fixtures. */
   control?: import("../../runRegistry/runControl.js").RunControl;
   /** The thread's earlier turns before the request (the seed rule). */

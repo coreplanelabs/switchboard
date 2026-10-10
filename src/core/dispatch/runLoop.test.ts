@@ -7404,6 +7404,98 @@ describe("the pi harness — the container replaced under a living bot: the rela
     expect(s.registry.getById("run-l")).toBeNull();
   });
 
+  it.each(["ceiling", "bearer rotation"] as const)(
+    "a %s refusal leaves a prepared same-ID restart after the predecessor finish fails",
+    async (reason) => {
+      const registry = new HarnessRegistry();
+      const container = new FakeHarnessContainer();
+      container.onStdin = piThatMeetsTheRoll(registry);
+      const s = setup("unused", {
+        agent: "coding",
+        yaml: yamlWithWorkspace(),
+        harness: harnessOver(registry, () => container),
+      });
+      const inner = new InMemoryRunLedger(() => NOW);
+      let finishAttempts = 0;
+      const ledger = createLedgerWriteThrough({
+        ledger: new Proxy(inner, {
+          get(target, prop) {
+            if (prop === "finish")
+              return async () => {
+                finishAttempts++;
+                throw new TransientStoreError("finish timed out");
+              };
+            const value = Reflect.get(target, prop);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        }),
+        gen: "gen-T",
+        fallback: s.store,
+        warn: () => {},
+        sleep: async () => {},
+      });
+      s.deps.runLedger = ledger;
+      const meta = {
+        agent: "coding",
+        channelId: s.ctx.msg.channelId,
+        userId: s.ctx.msg.userId,
+        threadKey: THREAD,
+        profile: s.ctx.profile,
+      };
+      const opened = await ledger.open({
+        runId: s.run.id,
+        threadKey: THREAD,
+        startedAt: NOW,
+        meta,
+        card: null,
+        system: s.ctx.system,
+        tools: [],
+        state: {
+          harnessLaunch: {
+            version: 1,
+            harness: "pi",
+            phase: "prepared",
+            ordinal: 0,
+            sessionPolicy: { version: 1, commandRoute: "native", identity: "write" },
+          },
+        },
+      });
+      if (opened.kind !== "tracked") throw new Error("tracked original required");
+      if (reason === "bearer rotation") {
+        s.deps.runBearers = new RunBearerStore({ clock: () => NOW });
+        vi.spyOn(s.deps.runBearers, "rotate").mockReturnValue({ ok: false, reason: "unknown_run" });
+      }
+      const out = await runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run });
+      expect(out).toMatchObject({
+        kind: "interrupted",
+        refusal: "container_replaced",
+        restart: { restartOf: "run-l" },
+      });
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      expect(finishAttempts).toBe(3);
+      expect((await s.store.get(s.run.id))?.status).toBe("interrupted");
+      const reserved = await ledger.reserve({
+        runId: s.run.id,
+        threadKey: THREAD,
+        startedAt: NOW,
+        meta: { ...meta, restartOf: s.run.id },
+      });
+      if (reserved.kind !== "tracked") throw new Error("same-ID reservation required");
+      try {
+        expect(reserved.run.harnessLaunch).toEqual({
+          version: 1,
+          harness: "pi",
+          phase: "prepared",
+          ordinal: reason === "ceiling" ? 3 : 1,
+          sessionPolicy: { version: 1, commandRoute: "native", identity: "write" },
+        });
+      } finally {
+        await reserved.run.close();
+      }
+    },
+  );
+
   it("the third finding closes the run interrupted naming the bound: two relaunches in a container that keeps dying under the run, no fourth start, the row counting each, the record carrying each verdict and relaunch, the relay forgotten, the card 🔁 — and the request runs again", async () => {
     const registry = new HarnessRegistry();
     const container = new FakeHarnessContainer();
@@ -13444,6 +13536,87 @@ describe("runLoop adaptive coding checks", () => {
 });
 
 describe("tracked Review command receipt binding", () => {
+  it.each(["pi", "opencode"] as const)(
+    "recovers prepared %s permissions and allowance without producer facts",
+    async (name) => {
+      const observed = watched(name === "pi" ? piHarness : openCodeHarness);
+      const intent = {
+        version: 1,
+        harness: name,
+        phase: "prepared",
+        ordinal: 0,
+        sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+      } as const;
+      const s = setup("unused", {
+        agent: "review",
+        repoCtx: { repo: "acme/api", ref: "work" },
+        binding: {
+          ref: "work",
+          sha: "a".repeat(40),
+          workspace: "/workspace/threads/t/work",
+          user: "worker1",
+          container: "vm1",
+          depsKey: "deps1",
+        },
+        harness: {
+          harnesses: name === "pi" ? roster(observed.harness) : roster(piHarness, observed.harness),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example",
+          loopbackUrl: "http://127.0.0.1:8080",
+        },
+      });
+      const canonical = await canonicalOwner(s);
+      expect(await canonical.ledgerRun.setStateAndFlush({ harnessLaunch: intent })).toBe(true);
+      const row = structuredClone(canonical.inner.live.get(s.run.id)!);
+      const messages: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "original review" }] }];
+      const resume: ResumeContext = {
+        row,
+        lastSeq: 0,
+        events: [],
+        inbox: [],
+        repoCtx: s.ctx.repoCtx,
+        lastStep: {
+          step: 0,
+          seq: 0,
+          turnIndex: 1,
+          inFlight: [],
+          inboxConsumedSeq: 0,
+          remainingMs: 240000,
+          turn: 0,
+          iteration: 0,
+        },
+        plan: {
+          kind: "resume",
+          messages,
+          compactions: [],
+          settlements: [],
+          stepRecorded: true,
+          inboxConsumedSeq: 0,
+          step: 0,
+          turn: 0,
+          iteration: 0,
+          remainingMs: 240000,
+        },
+      };
+      observed.harness.open = async (_deps, request) => {
+        expect(request.launchIntent).toEqual(intent);
+        expect(request.commandPolicy).toBe("hosted-review");
+        expect(request.resume?.remainingMs).toBe(240000);
+        expect(await request.saveLaunchIntent?.({ ...intent, phase: "begun" })).toBe(true);
+        expect(canonical.inner.live.get(s.run.id)?.state.harnessLaunch).toEqual({ ...intent, phase: "begun" });
+        return {
+          answer: "original launch resumed",
+          followUp: async () => "",
+          remainingMs: () => 240000,
+          end: async () => {},
+        };
+      };
+      expect(
+        answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: canonical.ledgerRun, resume, messages })).answer,
+      ).toBe("original launch resumed");
+      expect(row.state.harnessLaunch).toEqual(intent);
+    },
+  );
   async function canonicalOwner(s: ReturnType<typeof setup>, adopt = false) {
     let now = NOW;
     const inner = new InMemoryRunLedger(() => now);

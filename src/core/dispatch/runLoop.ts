@@ -1,4 +1,9 @@
-import { originalSessionPolicyOf } from "../harness/sessionPolicy.js";
+import {
+  commandRouteForLaunch,
+  harnessLaunchIntentOf,
+  originalSessionPolicyOf,
+  type HarnessLaunchIntent,
+} from "../harness/sessionPolicy.js";
 import { runCheckTool } from "../../tools/check.js";
 import { PUSHED_MAX } from "../../execution/residentRebind.js";
 import {
@@ -75,6 +80,7 @@ import {
   HarnessInterruptedError,
   harnessFactsOf,
   openThroughSeam,
+  nextHarnessLaunch,
   type HarnessFacts,
   type HarnessRun,
   type HarnessResume,
@@ -94,7 +100,7 @@ import type { ReadyEnvironmentRequirement } from "../../execution/seedPlan.js";
 import type { BranchStartState } from "../../execution/identityRewrite.js";
 import { branchIdentityBaselineFor, type BranchIdentityBaseline } from "../branchIdentityBaseline.js";
 import { branchIdentityCaptureBlocked } from "../branchIdentityHistory.js";
-import { HarnessEndingUnconfirmedError, isContainerGone } from "../harness/container.js";
+import { HarnessContainerError, HarnessEndingUnconfirmedError, isContainerGone } from "../harness/container.js";
 import {
   ModelPolicyRefusedError,
   ModelStreamIncompleteError,
@@ -2061,15 +2067,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         ...(coordinator?.idempotencyKey !== undefined ? { unit: coordinator.idempotencyKey } : {}),
       }
     : undefined;
+  let launchIntent = resume ? restored.harnessLaunch : ledgerRun?.harnessLaunch;
+  const originalLaunch = harnessLaunchIntentOf(launchIntent);
   const canRecordReview =
-    agent.name === "review" &&
-    profile.identity === "read" &&
     ledgerRun?.tracked() === true &&
-    checkOwner !== undefined &&
-    currentCheckout !== undefined &&
-    currentCheckout.startsWith("/") &&
-    currentCheckout.length <= 4096 &&
-    !/[\r\n\0]/.test(currentCheckout);
+    commandRouteForLaunch(agent.name, profile.identity, repoCtx.repo, currentCheckout) === "hosted-review";
   const reviewOwner = canRecordReview ? await originalPublicationOwner().catch(() => undefined) : undefined;
   const reviewCheckReady =
     canRecordReview &&
@@ -2085,7 +2087,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     typeof executor.execResult === "function" &&
     checkOwner !== undefined &&
     Object.values(checkOwner).every((value) => typeof value === "string" && value.length > 0);
-  const originalSessionPolicy = originalSessionPolicyOf(harnessFactsOf(ctx.resume?.row.state.harness)?.sessionPolicy);
+  const originalSessionPolicy =
+    originalLaunch?.sessionPolicy ??
+    originalSessionPolicyOf(harnessFactsOf(ctx.resume?.row.state.harness)?.sessionPolicy);
   const commandPolicy = originalSessionPolicy
     ? originalSessionPolicy.commandRoute === "hosted-review"
       ? ("hosted-review" as const)
@@ -2226,7 +2230,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // deployment's block), pi when none named it.
   const facts = resume ? harnessFactsOf(resume.row.state.harness) : undefined;
   const harnessOf = (roster: NonNullable<RunDeps["harness"]>) =>
-    facts ? roster.harnesses[facts.harness] : harnessNamed(roster.harnesses, resolved.harness?.name);
+    facts
+      ? roster.harnesses[facts.harness]
+      : originalLaunch
+        ? roster.harnesses[originalLaunch.harness]
+        : harnessNamed(roster.harnesses, resolved.harness?.name);
   // A row that names a harness this build does not know (a rollback under a
   // newer build's row, a harness removed) is no facts, so the run is rebuilt on
   // the preset's harness — the survival clause working — but the process the
@@ -2990,6 +2998,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           },
           {
             runId: run.id,
+            ...(launchIntent === undefined
+              ? {}
+              : {
+                  launchIntent,
+                  saveLaunchIntent: async (intent: HarnessLaunchIntent) => {
+                    const acknowledged =
+                      ledgerRun?.tracked() === true && (await ledgerRun.setStateAndFlush({ harnessLaunch: intent }));
+                    if (acknowledged) launchIntent = structuredClone(intent);
+                    return acknowledged;
+                  },
+                }),
             agent,
             ...(ctx.admissionDeadlineAt !== undefined ? { deadlineAt: ctx.admissionDeadlineAt } : {}),
             ...(resolved.effort !== undefined ? { effort: resolved.effort } : {}),
@@ -3122,6 +3141,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           break;
         } catch (err) {
           if (!(err instanceof HarnessContainerReplacedError)) throw err;
+          const previousProducer = lastFacts === undefined ? undefined : structuredClone(lastFacts);
           let decision: Awaited<ReturnType<typeof prepareRelaunch>>;
           try {
             decision = await prepareRelaunch(deps, {
@@ -3155,6 +3175,26 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             // registration left for the relaunch goes with it.
             harnessDeps.registry.forget(run.id);
             throw failed;
+          }
+          if (launchIntent !== undefined && (decision.kind === "relaunch" || decision.kind === "refused")) {
+            const next = nextHarnessLaunch(run.id, launchIntent, previousProducer, err);
+            const retained = previousProducer && {
+              ...previousProducer,
+              relaunches: lastFacts?.relaunches ?? previousProducer.relaunches,
+            };
+            if (
+              ledgerRun?.tracked() !== true ||
+              !(await ledgerRun.setStateAndFlush({ harnessLaunch: next, ...(retained ? { harness: retained } : {}) }))
+            ) {
+              const held = new HarnessContainerError(
+                "checkpoint",
+                "The replacement launch intent was not acknowledged.",
+              );
+              throw new HarnessEndingUnconfirmedError(run.id, held, held);
+            }
+            launchIntent = next;
+            lastFacts = retained;
+            if (decision.kind === "relaunch") decision.resume.facts = retained;
           }
           if (decision.kind === "refused") {
             // The floor's own note kind carries the outcome, starting at the

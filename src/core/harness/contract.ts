@@ -1,4 +1,10 @@
-import { originalSessionPolicyOf, type OriginalSessionPolicy } from "./sessionPolicy.js";
+import {
+  harnessLaunchIntentOf,
+  originalSessionPolicyOf,
+  sameOriginalSessionPolicy,
+  type HarnessLaunchIntent,
+  type OriginalSessionPolicy,
+} from "./sessionPolicy.js";
 // The harness contract (docs/reference/specs/harness.md; record 0038): the
 // seam between the run loop and any process that runs a model loop for a run.
 // Six clauses — credential, gate, relay, record, conversation, survival — held
@@ -30,11 +36,13 @@ import type { Clock, Span } from "../trace/types.js";
 import {
   HarnessContainerError,
   HarnessEndingUnconfirmedError,
+  HarnessOperationEndedError,
   type HarnessContainer,
   type ReplacedCondition,
 } from "./container.js";
 import type { HarnessRegistry } from "./pi/relay.js";
 import type { ToolRuleContext } from "./pi/toolRules.js";
+import type { HARNESS_NAMES } from "./names.js";
 
 /** Where an event kind a harness emits lands on the record (the record clause):
  *  `mapped` (a RunEvent, a span or a progress note), `structure` (the run's own
@@ -55,6 +63,8 @@ export const SAID_ONCE_SUFFIX = " (said once: later events of this kind are not 
 /** What a run's row remembers about its pi (harness-pi.md item 8), so the next
  *  bot generation finds it: read by `harnessFactsOf`, written by pi's loop. */
 export interface PiHarnessFacts {
+  /** The accepted launch this producer receipt belongs to, not a custody grant. */
+  launchOrdinal?: number;
   /** Original logical launch policy, acknowledged with this producer's facts. */
   sessionPolicy?: OriginalSessionPolicy;
   harness: "pi";
@@ -116,6 +126,7 @@ export interface PiHarnessFacts {
  *  hash, the container and the relaunch count. Nothing in this tree writes one
  *  yet; the union carries it so the seam is read against two shapes, not one. */
 export interface OpenCodeHarnessFacts {
+  launchOrdinal?: number;
   workspaceScratch?: true;
   /** Original logical launch policy; never an effective native-table attestation. */
   sessionPolicy?: OriginalSessionPolicy;
@@ -156,7 +167,7 @@ export interface OpenCodeHarnessFacts {
 export type HarnessFacts = PiHarnessFacts | OpenCodeHarnessFacts;
 
 /** The roster key and the facts' discriminator. */
-export type HarnessName = HarnessFacts["harness"];
+export type HarnessName = (typeof HARNESS_NAMES)[number];
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
@@ -495,8 +506,30 @@ export async function confirmSessionFacts<T extends HarnessFacts>(run: HarnessRu
   throw new HarnessEndingUnconfirmedError(run.runId, held, held);
 }
 
-export function sessionPolicyFor(run: HarnessRun): OriginalSessionPolicy | undefined {
+export function sessionPolicyFor(run: HarnessRun, harness?: HarnessName): OriginalSessionPolicy | undefined {
   const requested = run.commandPolicy ?? "native";
+  if (run.launchIntent !== undefined) {
+    const intent = harnessLaunchIntentOf(run.launchIntent);
+    const facts = run.resume?.facts;
+    const compatible =
+      intent &&
+      intent.sessionPolicy.commandRoute === requested &&
+      intent.sessionPolicy.identity === run.agent.identity &&
+      (harness === undefined || intent.harness === harness) &&
+      (facts === undefined ||
+        (((intent.phase === "begun" && facts.launchOrdinal === intent.ordinal) ||
+          (intent.phase === "prepared" &&
+            run.resume?.relaunch !== undefined &&
+            facts.launchOrdinal === intent.ordinal - 1)) &&
+          facts.harness === intent.harness &&
+          sameOriginalSessionPolicy(facts.sessionPolicy, intent.sessionPolicy)));
+    if (compatible && (intent.phase === "prepared" || facts !== undefined)) return intent.sessionPolicy;
+    const held = new HarnessContainerError(
+      "resume",
+      "The original launch intent or process start cannot be verified for this continuation.",
+    );
+    throw new HarnessEndingUnconfirmedError(run.runId, held, held);
+  }
   if (run.resume === undefined) return { version: 1, commandRoute: requested, identity: run.agent.identity };
   const raw = run.resume.facts?.sessionPolicy;
   const original = originalSessionPolicyOf(raw);
@@ -509,12 +542,70 @@ export function sessionPolicyFor(run: HarnessRun): OriginalSessionPolicy | undef
   throw new HarnessEndingUnconfirmedError(run.runId, held, held);
 }
 
+/** Both adapters cross the same durable boundary before their first process
+ * start. The original row, rather than an inferred pid or current labels,
+ * decides whether an attempt has already begun. */
+export async function beginHarnessLaunch(run: HarnessRun): Promise<void> {
+  if (run.launchIntent === undefined) return;
+  const intent = harnessLaunchIntentOf(run.launchIntent);
+  if (!intent || intent.phase !== "prepared") {
+    const held = new HarnessContainerError(
+      "start",
+      "The original process start remains unconfirmed; another launch is held.",
+    );
+    throw new HarnessEndingUnconfirmedError(run.runId, held, held);
+  }
+  const begun: HarnessLaunchIntent = { ...intent, phase: "begun" };
+  let acknowledged: boolean | undefined;
+  try {
+    acknowledged = await run.saveLaunchIntent?.(begun);
+  } catch (error) {
+    throw new HarnessEndingUnconfirmedError(run.runId, error, error);
+  }
+  if (acknowledged !== true) {
+    const held = new HarnessContainerError("checkpoint", "The original launch checkpoint was not acknowledged.");
+    throw new HarnessEndingUnconfirmedError(run.runId, held, held);
+  }
+  run.launchIntent = begun;
+  if (run.control?.hardSignal.aborted) throw new HarnessOperationEndedError("start", run.runId, "cancelled");
+  if ((run.control?.remainingMs() ?? Infinity) <= 0)
+    throw new HarnessOperationEndedError("start", run.runId, "deadline");
+}
+
+/** Representation of the replacement the existing owner already admitted.
+ * The ordinal alone never authorizes replacement or clears an unknown start. */
+export function nextHarnessLaunch(
+  runId: string,
+  raw: unknown,
+  facts: HarnessFacts | undefined,
+  replaced: HarnessContainerReplacedError,
+): HarnessLaunchIntent {
+  const intent = harnessLaunchIntentOf(raw);
+  if (
+    !intent ||
+    intent.phase !== "begun" ||
+    !facts ||
+    facts.launchOrdinal !== intent.ordinal ||
+    facts.harness !== intent.harness ||
+    !sameOriginalSessionPolicy(facts.sessionPolicy, intent.sessionPolicy) ||
+    (replaced.was !== undefined && facts.container !== replaced.was) ||
+    !Number.isSafeInteger(intent.ordinal + 1)
+  ) {
+    const held = new HarnessContainerError("resume", "The original producer cannot qualify another launch attempt.");
+    throw new HarnessEndingUnconfirmedError(runId, held, held);
+  }
+  return { ...intent, phase: "prepared", ordinal: intent.ordinal + 1 };
+}
+
 /** One run as the loop hands it to a harness: the preset and its budget, the
  *  model, the seed, the relayed tools and their context, the gate's rules, the
  *  sinks the record is written through, and a resume. Nothing here names a
  *  harness. */
 export interface HarnessRun {
   runId: string;
+  /** Raw original row evidence, validated before any producer effect. */
+  launchIntent?: unknown;
+  saveLaunchIntent?: (intent: HarnessLaunchIntent) => Promise<boolean>;
   /** Native shell is unavailable; commands use the original receipt capability. */
   commandPolicy?: HarnessCommandPolicy;
   /** The preset with its effective budget (`budgetedAgent`). */

@@ -1,4 +1,5 @@
-import { sessionPolicyFor, confirmSessionFacts } from "../contract.js";
+import { beginHarnessLaunch, sessionPolicyFor, confirmSessionFacts } from "../contract.js";
+import { harnessLaunchIntentOf } from "../sessionPolicy.js";
 import { HarnessEndingUnconfirmedError } from "../container.js";
 // The OpenCode harness (docs/reference/specs/harness.md item 7): OpenCode as the
 // contract's second object. `open` is the run — the server started and the
@@ -228,7 +229,7 @@ export async function openOpenCodeRun(
     run.onProgress?.(summary);
     emit({ type: "run_note", kind, summary });
   };
-  const sessionPolicy = sessionPolicyFor(run);
+  const sessionPolicy = sessionPolicyFor(run, "opencode");
   const identity = run.agent.identity;
 
   // The run on the relay, so the plugin's `/harness/tools`, `/harness/authorize`
@@ -407,6 +408,7 @@ export async function openOpenCodeRun(
     if (server === undefined) {
       const started = await launchOpenCode(
         {
+          beforeStart: () => beginHarnessLaunch(run),
           container: deps.container,
           clock: deps.clock,
           sleep: deps.sleep,
@@ -508,6 +510,9 @@ export async function openOpenCodeRun(
             ...(here !== undefined ? { container: here } : {}),
             relaunches: resumeFacts?.relaunches ?? 0,
             ...(sessionPolicy ? { sessionPolicy } : {}),
+            ...(run.launchIntent === undefined
+              ? {}
+              : { launchOrdinal: harnessLaunchIntentOf(run.launchIntent)?.ordinal }),
           },
         ),
       );

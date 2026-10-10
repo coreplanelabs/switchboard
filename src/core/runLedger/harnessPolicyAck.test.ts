@@ -107,4 +107,25 @@ describe("canonical original harness policy ACK", () => {
       await w.run.close();
     }
   });
+
+  it.each([true, false])("reconciles only the original unknown launch write: committed=%s", async (committed) => {
+    const w = await world(committed);
+    const prepared = { version: 1, harness: "pi", phase: "prepared", ordinal: 0, sessionPolicy: policy };
+    const begun = { ...prepared, phase: "begun" };
+    try {
+      expect(await w.run.setStateAndFlush({ harnessLaunch: prepared })).toBe(true);
+      w.lose();
+      expect(await w.run.setStateAndFlush({ harnessLaunch: begun })).toBe(false);
+      const original = w.run.writeBoundaryFailure;
+      expect(original).toMatchObject({ kind: "state", runId: "r1", gen: "policy-current" });
+      expect(await w.run.commitState({ checklist: "after original launch readback" })).toBe(
+        committed ? "ok" : "unavailable",
+      );
+      expect(w.inner.live.get("r1")?.state.harnessLaunch).toEqual(committed ? begun : prepared);
+      expect(w.writes()).toBe(committed ? 3 : 2);
+      if (!committed) expect(w.run.writeBoundaryFailure).toEqual(original);
+    } finally {
+      await w.run.close();
+    }
+  });
 });

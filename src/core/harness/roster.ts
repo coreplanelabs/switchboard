@@ -9,12 +9,14 @@
 // light enough for the configuration validator to import.
 
 import type { Harness, HarnessName } from "./contract.js";
+import { HARNESS_NAMES as NAMES } from "./names.js";
+export { isHarnessName } from "./names.js";
 
 /** The roster's words, in the order the documentation lists them. `satisfies`
  *  holds every word to the facts' discriminator; the roster test holds the
  *  discriminator to this list, so a facts shape without a word, or a word
  *  without a shape, fails to build. */
-export const HARNESS_NAMES = ["pi", "opencode"] as const satisfies readonly HarnessName[];
+export const HARNESS_NAMES = NAMES satisfies readonly HarnessName[];
 
 /** The harness a preset runs on when the configuration names none: pi. Nothing
  *  defaults to OpenCode — a deployment puts a preset on it by name. */
@@ -23,12 +25,6 @@ export const DEFAULT_HARNESS = "pi" satisfies HarnessName;
 /** Every harness the process wires, by name — exhaustive by type, so the wiring
  *  cannot miss one the words admit. */
 export type HarnessRoster = Readonly<Record<HarnessName, Harness>>;
-
-/** Whether a configuration value is one of the roster's words: the validator's
- *  test, and the type guard the word's readers narrow on. */
-export function isHarnessName(word: unknown): word is HarnessName {
-  return typeof word === "string" && (HARNESS_NAMES as readonly string[]).includes(word);
-}
 
 /** Where a preset's word is set — `user`, `channel`, `defaults` — defined in a
  *  module of its own (`scope.ts`) because the run record and the timeline fold

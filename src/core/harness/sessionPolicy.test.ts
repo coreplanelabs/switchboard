@@ -1,5 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { originalSessionPolicyOf, sameOriginalSessionPolicy } from "./sessionPolicy.js";
+import { harnessLaunchIntentOf, originalSessionPolicyOf, sameOriginalSessionPolicy } from "./sessionPolicy.js";
+
+describe("durable launch intent closed contract", () => {
+  it("accepts declared intent and refuses malformed or inherited authority", () => {
+    const intent = {
+      version: 1,
+      harness: "opencode",
+      phase: "prepared",
+      ordinal: 0,
+      sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+    };
+    expect(harnessLaunchIntentOf(intent)).toEqual(intent);
+    for (const invalid of [
+      undefined,
+      { ...intent, phase: "finished" },
+      { ...intent, harness: "other" },
+      { ...intent, extra: true },
+      { ...intent, sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "write" } },
+      Object.create(intent),
+    ]) {
+      expect(harnessLaunchIntentOf(invalid)).toBeUndefined();
+    }
+  });
+});
 
 describe("original session policy closed contract", () => {
   it.each(["none", "read", "write"] as const)("accepts original native %s without changing its route", (identity) => {

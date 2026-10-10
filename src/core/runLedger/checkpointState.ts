@@ -1,4 +1,4 @@
-import { originalSessionPolicyOf, sameOriginalSessionPolicy } from "../harness/sessionPolicy.js";
+import { harnessLaunchIntentOf, originalSessionPolicyOf, sameOriginalSessionPolicy } from "../harness/sessionPolicy.js";
 import type { RunState } from "./types.js";
 import { isRunWorkEvidence } from "../runRecord.js";
 import { isBranchIdentityBaseline } from "../branchIdentityBaseline.js";
@@ -6,10 +6,55 @@ import { isBranchIdentityBaseline } from "../branchIdentityBaseline.js";
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+/** Permission intent survives independently of the producer receipt. A
+ * state snapshot cannot erase it, backfill a legacy producer or undo start. */
+function preserveLaunchIntent(prior: RunState, incoming: RunState): RunState | undefined {
+  const raw = prior.harnessLaunch;
+  const replacementRaw = incoming.harnessLaunch;
+  if (raw === undefined && replacementRaw === undefined) return { ...incoming };
+  const original = harnessLaunchIntentOf(raw);
+  const replacement = harnessLaunchIntentOf(replacementRaw);
+  if (raw === undefined) {
+    if (!replacement || replacement.phase !== "prepared" || prior.harness !== undefined) return undefined;
+  } else if (
+    !original ||
+    (replacementRaw !== undefined &&
+      (!replacement ||
+        replacement.harness !== original.harness ||
+        !sameOriginalSessionPolicy(original.sessionPolicy, replacement.sessionPolicy) ||
+        (replacement.ordinal === original.ordinal
+          ? original.phase === "begun" && replacement.phase !== "begun"
+          : replacement.ordinal !== original.ordinal + 1 ||
+            replacement.phase !== "prepared" ||
+            original.phase !== "begun" ||
+            !record(prior.harness) ||
+            prior.harness.launchOrdinal !== original.ordinal)))
+  )
+    return undefined;
+  const intent = replacement ?? original!;
+  const facts = incoming.harness ?? prior.harness;
+  if (
+    facts !== undefined &&
+    (!record(facts) ||
+      !Number.isSafeInteger(facts.launchOrdinal) ||
+      (facts.launchOrdinal as number) < 0 ||
+      (facts.launchOrdinal as number) > intent.ordinal ||
+      (facts.launchOrdinal === intent.ordinal && intent.phase !== "begun") ||
+      facts.harness !== intent.harness ||
+      !sameOriginalSessionPolicy(
+        facts.sessionPolicy ?? (record(prior.harness) ? prior.harness.sessionPolicy : undefined),
+        intent.sessionPolicy,
+      ))
+  )
+    return undefined;
+  return { ...incoming, harnessLaunch: structuredClone(intent) };
+}
+
 /** Preserve only original session policy so caller snapshots and owning stores
  * share the same wire state without granting checkpoint or unit-seed authority. */
 export function preserveHarnessPolicy(prior: RunState, incoming: RunState): RunState | undefined {
-  const next = { ...incoming };
+  const next = preserveLaunchIntent(prior, incoming);
+  if (!next) return undefined;
   const before = Object.hasOwn(prior, "harness") ? prior.harness : undefined;
   const after = Object.hasOwn(incoming, "harness") ? incoming.harness : undefined;
   const originalRaw = record(before) && Object.hasOwn(before, "sessionPolicy") ? before.sessionPolicy : undefined;

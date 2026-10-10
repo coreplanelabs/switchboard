@@ -650,6 +650,7 @@ export class OpenCodeNotReadyError extends Error {
 
 export interface OpenCodeLaunchDeps {
   container: HarnessContainer;
+  beforeStart?: () => Promise<void>;
   clock: Clock;
   sleep: (ms: number) => Promise<void>;
   /** Between two readiness probes; the seam's default otherwise. */
@@ -735,6 +736,7 @@ export async function launchOpenCode(
   let serverPid: number | undefined;
   let tailerPid: number | undefined;
   try {
+    await deps.beforeStart?.();
     const started = await perform(() => {
       launchPending = true;
       return container.start({
@@ -916,6 +918,7 @@ export function openCodeFacts(
     container?: string;
     relaunches: number;
     sessionPolicy?: OriginalSessionPolicy;
+    launchOrdinal?: number;
   },
 ): OpenCodeHarnessFacts {
   const bearerHash = run.bearer === undefined ? undefined : bearerHashOf(run.bearer);
@@ -923,6 +926,7 @@ export function openCodeFacts(
     harness: "opencode",
     ...(started.workspaceScratch === true ? { workspaceScratch: true as const } : {}),
     ...(run.sessionPolicy ? { sessionPolicy: run.sessionPolicy } : {}),
+    ...(run.launchOrdinal === undefined ? {} : { launchOrdinal: run.launchOrdinal }),
     pid: started.pid,
     ...(started.processBirth === undefined ? {} : { processBirth: started.processBirth }),
     port: started.port,
