@@ -45,6 +45,7 @@ import {
   preflightGaveUpLine,
   RESTART_GAVE_UP_WORDS,
   LIVE_GATE_POLL_MS,
+  LIVE_GATE_DEADLINE_MS,
   parseHealthz,
   type HealthzBody,
 } from "./liveGate.js";
@@ -156,6 +157,8 @@ export interface RunResult {
   code: number;
   output: string;
   cancelled?: true;
+  /** No claim about escaped descendants or any remote/native operation. */
+  cleanup?: "unconfirmed";
 }
 
 export interface DeployStepResult {
@@ -192,17 +195,48 @@ export function run(
     set?: Record<string, string>;
     stream?: (chunk: string) => void;
     signal?: AbortSignal;
+    /** Read-only readiness commands may own a POSIX group; other commands keep SIGTERM semantics. */
+    ownedReadGroup?: true;
   },
 ): Promise<RunResult> {
   if (opts.signal?.aborted) return Promise.resolve({ code: 130, output: "", cancelled: true });
+  const grouped = opts.ownedReadGroup === true;
+  if (grouped && process.platform === "win32")
+    return Promise.resolve({
+      code: 127,
+      output: "bounded readiness read process groups are unsupported on this host",
+      cleanup: "unconfirmed",
+    });
   const env: NodeJS.ProcessEnv = { ...process.env, ...(opts.set ?? {}) };
   for (const k of opts.unset ?? []) delete env[k];
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd: opts.cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(cmd, args, {
+      cwd: opts.cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      ...(grouped ? { detached: true } : {}),
+    });
     let output = "";
     let spawnError: Error | undefined;
+    let groupUnconfirmed = false;
     const stop = () => {
-      child.kill("SIGTERM");
+      if (!grouped) {
+        child.kill("SIGTERM");
+        return;
+      }
+      // detached creates this child's group. Never use a caller PID or target a
+      // group after its leader's exit has made ownership uncertain.
+      if (!Number.isSafeInteger(child.pid) || child.pid! <= 0 || child.exitCode !== null || child.signalCode !== null) {
+        groupUnconfirmed = true;
+        child.kill("SIGKILL");
+        return;
+      }
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") groupUnconfirmed = true;
+        child.kill("SIGKILL");
+      }
     };
     opts.signal?.addEventListener("abort", stop, { once: true });
     if (opts.signal?.aborted) stop();
@@ -220,7 +254,7 @@ export function run(
       opts.signal?.removeEventListener("abort", stop);
       resolve(
         opts.signal?.aborted
-          ? { code: 130, output, cancelled: true }
+          ? { code: 130, output, cancelled: true, ...(groupUnconfirmed ? { cleanup: "unconfirmed" as const } : {}) }
           : spawnError
             ? { code: 127, output: output + `\n${spawnError.message}` }
             : { code: code ?? 1, output },
@@ -1168,13 +1202,18 @@ export interface SandboxGateDeps {
   env: Record<string, string | undefined>;
   readHealth(url: string, bearer?: string, timeoutMs?: number, signal?: AbortSignal): Promise<HealthRead>;
   /** `wrangler containers info <app> --json` → the application's version and image, run in `dir`. */
-  readAppState(dir: string, containerApp: string, config?: string): Promise<Read<AppState>>;
+  readAppState(dir: string, containerApp: string, config?: string, signal?: AbortSignal): Promise<Read<AppState>>;
   /** `wrangler containers instances <app> --json`, every page, run in `dir`. */
-  readInstances(dir: string, containerApp: string, config?: string): Promise<Read<ContainerInstance[]>>;
+  readInstances(
+    dir: string,
+    containerApp: string,
+    config?: string,
+    signal?: AbortSignal,
+  ): Promise<Read<ContainerInstance[]>>;
   /** The application list Wrangler uses to compute its deploy diff. */
   readListedAppState?(dir: string, containerApp: string, account: string): Promise<Read<AppState>>;
   /** `POST /exec` `echo ok` on the probe thread; the streamed body parsed. */
-  probeExec(execUrl: string, bearer: string, threadKey: string): Promise<ProbeResult>;
+  probeExec(execUrl: string, bearer: string, threadKey: string, signal?: AbortSignal): Promise<ProbeResult>;
   now(): number;
   sleep(ms: number, signal?: AbortSignal): Promise<void>;
   /** One authenticated JSON POST (the fleet drain's `/drain` and `/undrain`, release-and-deploy
@@ -1184,11 +1223,20 @@ export interface SandboxGateDeps {
 
 /** One read-only wrangler command in a Worker's dir, its `--json` payload parsed;
  *  `CLOUDFLARE_ACCOUNT_ID` stripped like every other wrangler call here. */
-async function wranglerJson(dir: string, args: string[], config?: string): Promise<Read<unknown>> {
+async function wranglerJson(
+  dir: string,
+  args: string[],
+  config?: string,
+  signal?: AbortSignal,
+): Promise<Read<unknown>> {
   const r = await run("npx", ["wrangler", ...args, ...(config ? ["--config", config] : [])], {
     cwd: workerDir(dir),
     unset: UNSET_ENV,
+    signal,
+    ...(signal ? { ownedReadGroup: true as const } : {}),
   });
+  if (r.cancelled || r.cleanup === "unconfirmed")
+    return { error: "readiness command interrupted; readiness and native outcome unverified" };
   if (r.code !== 0)
     return { error: `wrangler ${args.join(" ")} failed: ${lastErrorLines(r.output) || `exit ${r.code}, no output`}` };
   const parsed = parseWranglerJson(r.output);
@@ -1198,11 +1246,17 @@ async function wranglerJson(dir: string, args: string[], config?: string): Promi
 /** The application id behind a Containers application name — stable, so a
  *  success is remembered for the process; a failure is retried next poll. */
 const containerAppIds = new Map<string, string>();
-async function resolveContainerAppId(dir: string, containerApp: string, config?: string): Promise<Read<string>> {
+async function resolveContainerAppId(
+  dir: string,
+  containerApp: string,
+  config?: string,
+  signal?: AbortSignal,
+): Promise<Read<string>> {
+  if (signal?.aborted) return { error: "readiness read interrupted" };
   const cacheKey = `${workerDir(dir)}:${config ?? ""}:${containerApp}`;
   const known = containerAppIds.get(cacheKey);
   if (known) return { value: known };
-  const listing = await wranglerJson(dir, ["containers", "list", "--json"], config);
+  const listing = await wranglerJson(dir, ["containers", "list", "--json"], config, signal);
   if ("error" in listing) return listing;
   const id = containerAppId(listing.value, containerApp);
   if (!id)
@@ -1227,41 +1281,48 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
     if (auth.code !== 0) return { error: "Wrangler credentials unavailable for the raw application list" };
     return readRawBotApplication(account, containerApp, parseWranglerJson(auth.output));
   },
-  readAppState: async (dir, containerApp, config) => {
-    const id = await resolveContainerAppId(dir, containerApp, config);
+  readAppState: async (dir, containerApp, config, signal) => {
+    const id = await resolveContainerAppId(dir, containerApp, config, signal);
     if ("error" in id) return id;
-    const info = await wranglerJson(dir, ["containers", "info", id.value, "--json"], config);
+    const info = await wranglerJson(dir, ["containers", "info", id.value, "--json"], config, signal);
     if ("error" in info) return info;
     const state = parseAppState(info.value);
     return state === null
       ? { error: `wrangler containers info ${id.value}: no numeric version in the output` }
       : { value: state };
   },
-  readInstances: async (dir, containerApp, config) => {
-    const id = await resolveContainerAppId(dir, containerApp, config);
+  readInstances: async (dir, containerApp, config, signal) => {
+    const id = await resolveContainerAppId(dir, containerApp, config, signal);
     if ("error" in id) return id;
     const rows: ContainerInstance[] = [];
     let pageToken: string | null = null;
+    const seen = new Set<string>();
     do {
+      if (signal?.aborted) return { error: "instance inventory interrupted; completeness unverified" };
       const args = ["containers", "instances", id.value, "--json", "--per-page", String(INSTANCES_PER_PAGE)];
       if (pageToken) args.push("--page-token", pageToken);
-      const page = await wranglerJson(dir, args, config);
+      const page = await wranglerJson(dir, args, config, signal);
       if ("error" in page) return page;
       const parsed = parseInstancesPage(page.value);
       if (!parsed) return { error: `wrangler containers instances ${id.value}: unexpected JSON shape` };
+      if (signal?.aborted) return { error: "instance inventory interrupted; completeness unverified" };
       rows.push(...parsed.rows);
       pageToken = parsed.nextPageToken;
+      if (pageToken && seen.has(pageToken))
+        return { error: "instance inventory repeated a page token; completeness unverified" };
+      if (pageToken) seen.add(pageToken);
     } while (pageToken);
     return { value: rows };
   },
-  probeExec: async (execUrl, bearer, threadKey) => {
+  probeExec: async (execUrl, bearer, threadKey, signal) => {
     try {
+      const timeout = AbortSignal.timeout(PROBE_TIMEOUT_MS + 60_000);
       const res = await fetch(execUrl, {
         method: "POST",
         headers: { authorization: `Bearer ${bearer}`, "x-thread-key": threadKey, "content-type": "application/json" },
         body: JSON.stringify({ command: PROBE_COMMAND, timeoutMs: PROBE_TIMEOUT_MS }),
         // The command's own budget plus a cold container start; the body streams heartbeats meanwhile.
-        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS + 60_000),
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       });
       const text = await res.text();
       if (!res.ok) return { error: `POST /exec → HTTP ${res.status}: ${text.trim().slice(0, 200)}` };
@@ -1420,42 +1481,63 @@ export async function waitUntilSandboxLive(
   const threadKey = probeThreadKey(expectedCommit);
   const execUrl = new URL("/exec", gate.healthUrl).toString();
   const started = deps.now();
+  const deadline = AbortSignal.timeout(LIVE_GATE_DEADLINE_MS);
+  const signal = deps.signal ? AbortSignal.any([deps.signal, deadline]) : deadline;
+  let stage = "health";
+  let lastReason: string | undefined;
+  const stopped = (readIncomplete = false): GateOutcome | undefined => {
+    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
+    if (deadline.aborted || deps.now() - started >= LIVE_GATE_DEADLINE_MS)
+      return {
+        live: false,
+        reason: `${readIncomplete ? `${stage} read incomplete` : (lastReason ?? `${stage} read incomplete`)} — still not live after ${LIVE_GATE_DEADLINE_MS / MINUTE_MS} min (deadline ${LIVE_GATE_DEADLINE_MS / MINUTE_MS} min)${readIncomplete ? "; readiness and native outcome unverified" : ""}`,
+      };
+    return undefined;
+  };
   for (;;) {
-    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
-    const elapsed = deps.now() - started;
-    const health = deps.signal
-      ? await deps.readHealth(gate.healthUrl, bearer, undefined, deps.signal)
-      : await deps.readHealth(gate.healthUrl, bearer);
-    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
-    const app = decideWorker(health, expectedCommit).ok ? await deps.readAppState(step.dir, gate.containerApp) : null;
-    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
+    const beforeRead = stopped();
+    if (beforeRead) return beforeRead;
+    stage = "health";
+    const health = await deps.readHealth(gate.healthUrl, bearer, undefined, signal);
+    const afterHealth = stopped(true);
+    if (afterHealth) return afterHealth;
+    stage = "application";
+    const app = decideWorker(health, expectedCommit).ok
+      ? await deps.readAppState(step.dir, gate.containerApp, undefined, signal)
+      : null;
+    const afterApp = stopped(true);
+    if (afterApp) return afterApp;
     const registered =
       app !== null &&
       "value" in app &&
       (rollout.target === null || rolloutAdvanced(app.value, rollout.before, rollout.target).ok);
-    const probe = registered ? await deps.probeExec(execUrl, bearer, threadKey) : null;
-    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
-    const rest = {
-      app,
-      probe,
-      instances: registered ? await deps.readInstances(step.dir, gate.containerApp) : null,
-    };
-    if (deps.signal?.aborted) return { live: false, reason: "deployment cancelled" };
+    stage = "probe";
+    const probe = registered ? await deps.probeExec(execUrl, bearer, threadKey, signal) : null;
+    const afterProbe = stopped(true);
+    if (afterProbe) return afterProbe;
+    stage = "instances";
+    const instances = registered ? await deps.readInstances(step.dir, gate.containerApp, undefined, signal) : null;
+    const afterInstances = stopped(true);
+    if (afterInstances) return afterInstances;
+    const elapsed = deps.now() - started;
     const d = decideSandboxLive({
       health,
-      ...rest,
+      app,
+      probe,
+      instances,
       probeThreadKey: threadKey,
       deployedCommit: expectedCommit,
       before: rollout.before,
       target: rollout.target,
       elapsedMs: elapsed,
     });
-    if (d.kind === "live") return { live: true, detail: d.summary, waitedMs: deps.now() - started };
+    if (d.kind === "live") return { live: true, detail: d.summary, waitedMs: elapsed };
     if (d.kind === "failed") return { live: false, reason: d.reason };
+    lastReason = d.reason;
     io.log(
       `[deploy:all] ${step.name}: deployed, not live yet — ${d.reason} (${Math.floor(elapsed / 60_000)}m ${Math.floor((elapsed % 60_000) / 1000)}s)`,
     );
-    await deps.sleep(LIVE_GATE_POLL_MS, deps.signal);
+    await deps.sleep(LIVE_GATE_POLL_MS, signal);
   }
 }
 
@@ -2045,8 +2127,10 @@ export async function runDeployPlan(
     writeFileSync(config, JSON.stringify({ account_id: plan.checks.account }));
     const deps: SandboxGateDeps = {
       ...originalDeps,
-      readAppState: (dir, app) => originalDeps.readAppState(dir, app, config),
-      readInstances: (dir, app) => originalDeps.readInstances(dir, app, config),
+      readAppState: (dir, app, _config, signal) =>
+        originalDeps.readAppState(dir, app, config, signal ?? originalDeps.signal),
+      readInstances: (dir, app, _config, signal) =>
+        originalDeps.readInstances(dir, app, config, signal ?? originalDeps.signal),
     };
     return await runSelectedDeployPlan(plan, io, deps, uploadConfigs);
   } finally {
