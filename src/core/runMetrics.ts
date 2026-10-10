@@ -203,8 +203,15 @@ export function pointOf(record: RunRecord, prices?: ModelPriceTable): RunMetrics
   };
 }
 
+/** The run point widths a store accepts: the sixteen columns record 0063
+ *  defined and the twenty record 0097 widens it to, which is also the platform's
+ *  blob cap. Both stay accepted while two generations write during a deploy, so
+ *  the store never refuses an older or a newer writer's put; any other width is
+ *  a malformed point. */
+export const RUN_POINT_BLOB_WIDTHS: readonly number[] = [16, 20];
+
 /** Structural check on a point from outside the process (the `/runs/put` and
- *  `/runs/finish` bodies): exactly one index, exactly `POINT_COLUMNS.blobs.length`
+ *  `/runs/finish` bodies): exactly one index, a `RUN_POINT_BLOB_WIDTHS` count of
  *  strings each at most `MAX_POINT_BLOB_BYTES` bytes, exactly
  *  `POINT_COLUMNS.doubles.length` finite numbers — and nothing else. */
 export function isRunMetricsPoint(v: unknown): v is RunMetricsPoint {
@@ -213,7 +220,7 @@ export function isRunMetricsPoint(v: unknown): v is RunMetricsPoint {
   if (!Array.isArray(p.indexes) || p.indexes.length !== 1) return false;
   const index = p.indexes[0];
   if (typeof index !== "string" || utf8ByteLength(index) > MAX_POINT_BLOB_BYTES) return false;
-  if (!Array.isArray(p.blobs) || p.blobs.length !== POINT_COLUMNS.blobs.length) return false;
+  if (!Array.isArray(p.blobs) || !RUN_POINT_BLOB_WIDTHS.includes(p.blobs.length)) return false;
   if (!p.blobs.every((b) => typeof b === "string" && utf8ByteLength(b) <= MAX_POINT_BLOB_BYTES)) return false;
   if (!Array.isArray(p.doubles) || p.doubles.length !== POINT_COLUMNS.doubles.length) return false;
   return p.doubles.every(isFinite_);
