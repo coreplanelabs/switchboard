@@ -504,4 +504,182 @@ describe("Home durable fleet", () => {
       expect(await home.history(viewer)).toMatchObject({ status: "partial", units: [] });
     },
   );
+  it("reads a completed runless pipeline directly after it leaves Home", async () => {
+    const store = new InMemoryCoordinatorInstanceStore();
+    await store.put(instance);
+    await store.putUnits([
+      unit("merged", { ending: { kind: "merged", at: 2, report: "Done" } }),
+      unit("landed", { ending: { kind: "already_landed", at: 3, report: "Done" } }),
+    ]);
+    const home = createHomeService({ organizationId: "organization:example", instances: store });
+    expect((await home.snapshot(viewer)).pipelines).toEqual([]);
+    expect(await home.pipeline(viewer, instance.id)).toMatchObject({
+      status: "complete",
+      organizationId: "organization:example",
+      pipeline: {
+        instance: { id: "old-work" },
+        unresolved: 0,
+        units: [{ unit: { unit: "old-work:merged" } }, { unit: { unit: "old-work:landed" } }],
+      },
+      movingUnitKeys: [],
+    });
+  });
+  it("keeps a directly found pipeline readable when its unit bound is incomplete", async () => {
+    const home = createHomeService({
+      organizationId: "organization:example",
+      maxUnits: 2,
+      instances: {
+        ...inventory([unit("first"), unit("second"), unit("third")]),
+        get: async (id) => (id === instance.id ? instance : null),
+      },
+    });
+    expect(await home.pipeline(viewer, instance.id)).toMatchObject({
+      status: "partial",
+      pipeline: { unresolved: 2, units: [{ unit: { unit: "old-work:first" } }, { unit: { unit: "old-work:second" } }] },
+    });
+  });
+  it("returns no pipeline metadata for unknown or currently denied entities", async () => {
+    const home = createHomeService({
+      organizationId: "organization:example",
+      instances: { ...inventory([unit("work-01")]), get: async (id) => (id === instance.id ? instance : null) },
+    });
+    expect(await home.pipeline(viewer, "missing")).toEqual({ status: "not_found" });
+    expect(await home.pipeline({ ...viewer, visibleTo: { kind: "user-is", userId: "another" } }, instance.id)).toEqual({
+      status: "not_found",
+    });
+    expect(await home.pipeline(viewer, instance.id)).toMatchObject({
+      status: "complete",
+      pipeline: { instance: { id: "old-work" }, units: [{ unit: { unit: "old-work:work-01" } }] },
+    });
+  });
+  it("does not turn an incomplete fallback census into a missing pipeline", async () => {
+    const bounded = createHomeService({
+      organizationId: "organization:example",
+      maxPages: 1,
+      instances: { listInstances: async () => ({ items: [instance], cursor: "later" }), listUnits: async () => [] },
+    });
+    expect(await bounded.pipeline(viewer, "later-work")).toEqual({ status: "unavailable" });
+    const failed = createHomeService({
+      organizationId: "organization:example",
+      instances: {
+        listInstances: async () => {
+          throw new Error("private upstream details");
+        },
+        listUnits: async () => [],
+      },
+    });
+    expect(await failed.pipeline(viewer, "later-work")).toEqual({ status: "unavailable" });
+    const complete = createHomeService({
+      organizationId: "organization:example",
+      instances: inventory([unit("work-01")]),
+    });
+    expect(await complete.pipeline(viewer, "missing")).toEqual({ status: "not_found" });
+    expect(await complete.pipeline(viewer, instance.id)).toMatchObject({
+      status: "complete",
+      pipeline: { units: [{ unit: { unit: "old-work:work-01" } }] },
+    });
+  });
+  it("keeps uncertain completed-looking units unresolved while preserving known moving facts", async () => {
+    const home = createHomeService({
+      organizationId: "organization:example",
+      instances: {
+        ...inventory([unit("work-01", { ending: { kind: "merged", at: 2, report: "Merged" } }), unit("work-02")]),
+        get: async () => instance,
+      },
+      conditions: {
+        list: async () => {
+          throw new Error("private condition failure");
+        },
+      },
+      liveUnitKeys: async () => new Set(["old-work:work-02", "foreign:work"]),
+    });
+    const result = await home.pipeline(viewer, instance.id);
+    expect(result).toMatchObject({
+      status: "partial",
+      pipeline: {
+        unresolved: 2,
+        moving: 1,
+        waiting: 1,
+        units: [
+          { unit: { unit: "old-work:work-01" }, conditions: [], nextAction: { kind: "unknown" } },
+          { unit: { unit: "old-work:work-02" }, nextAction: { kind: "unknown" } },
+        ],
+      },
+      movingUnitKeys: ["old-work:work-02"],
+    });
+    expect(JSON.stringify(result)).not.toContain("private condition failure");
+    expect(JSON.stringify(result)).not.toContain("foreign:work");
+  });
+  it("redacts private worker metadata from the direct pipeline and its units", async () => {
+    const privateUnit = unit("private", {
+      title: "secret task",
+      threadKey: "private-worker:secret",
+      sourceUrl: "https://example.test/private",
+      ending: { kind: "held", at: 2, report: "secret report" },
+      workBrief: {} as CoordinatorUnit["workBrief"],
+    });
+    const home = createHomeService({
+      organizationId: "organization:example",
+      instances: {
+        ...inventory([unit("ordinary"), privateUnit]),
+        get: async () => ({ ...instance, label: "secret source request", sourceUrl: "https://example.test/secret" }),
+      },
+    });
+    const result = await home.pipeline(viewer, instance.id);
+    expect(result).toMatchObject({
+      status: "complete",
+      pipeline: {
+        instance: { id: "old-work", repo: "example/app" },
+        units: [
+          { unit: { unit: "old-work:ordinary" } },
+          { unit: { unit: "old-work:private", branch: "work/private" } },
+        ],
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("secret");
+  });
+  it("reads a known pipeline beyond the global Home scan without inheriting another pipeline's bound", async () => {
+    const later = { ...instance, id: "later-work" };
+    const home = createHomeService({
+      organizationId: "organization:example",
+      maxUnits: 1,
+      instances: {
+        get: async (id) => (id === later.id ? later : null),
+        listInstances: async () => ({ items: [instance, later] }),
+        listUnits: async (id) =>
+          id === instance.id ? [unit("first"), unit("second")] : [unit("own", { instanceId: later.id })],
+      },
+    });
+    expect((await home.snapshot(viewer)).pipelines.map((row) => row.instance.id)).toEqual(["old-work"]);
+    expect(await home.pipeline(viewer, later.id)).toMatchObject({
+      status: "complete",
+      pipeline: { instance: { id: "later-work" }, unresolved: 1, units: [{ unit: { unit: "later-work:own" } }] },
+    });
+  });
+  it("keeps pipeline lookup and live-source failures distinct from missing entities", async () => {
+    const failed = createHomeService({
+      organizationId: "organization:example",
+      instances: {
+        ...inventory([]),
+        get: async () => {
+          throw new Error("private lookup failure");
+        },
+      },
+    });
+    expect(await failed.pipeline(viewer, instance.id)).toEqual({ status: "unavailable" });
+    const liveUnknown = createHomeService({
+      organizationId: "organization:example",
+      instances: { ...inventory([unit("work-01")]), get: async () => instance },
+      liveUnitKeys: async () => {
+        throw new Error("private live failure");
+      },
+    });
+    const view = await liveUnknown.pipeline(viewer, instance.id);
+    expect(view).toMatchObject({
+      status: "partial",
+      pipeline: { unresolved: 1, moving: 0, waiting: 1, units: [{ unit: { unit: "old-work:work-01" } }] },
+      movingUnitKeys: [],
+    });
+    expect(JSON.stringify(view)).not.toContain("private live failure");
+  });
 });
