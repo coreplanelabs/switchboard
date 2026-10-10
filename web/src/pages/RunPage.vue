@@ -226,7 +226,9 @@ const timeline = computed(() => {
   if (!runClock) return null;
   const tlPhase: TimelinePhase = phase.value === "ended" ? "ended" : phase.value === "finished" ? "delivering" : "live";
   const totalMs =
-    tlPhase === "live" ? runClock.elapsedMs(nowWall.value) : (frozenMs.value ?? runClock.elapsedMs(nowWall.value));
+    tlPhase === "live" && phase.value !== "disconnected"
+      ? runClock.elapsedMs(nowWall.value)
+      : (frozenMs.value ?? runClock.elapsedMs(nowWall.value));
   return buildTimeline({
     spans: model.spanSet(),
     losses: model.losses(start),
@@ -267,7 +269,10 @@ function requestStop(mode: "soft" | "hard"): void {
   if (seed?.mode !== "live" || seed.stopUrl === undefined) return;
   if (mode === "hard" && !browser.confirm("Hard stop: abort the run now with no summary and free its sandbox?")) return;
   stopDisabled.value = true;
-  fetch(`${seed.stopUrl}&mode=${encodeURIComponent(mode)}`, { method: "POST", credentials: "same-origin" })
+  fetch(`${seed.stopUrl}${seed.stopUrl.includes("?") ? "&" : "?"}mode=${encodeURIComponent(mode)}`, {
+    method: "POST",
+    credentials: "same-origin",
+  })
     .then(async (r) => {
       if (!r.ok) {
         // A refusal carries its reason (a view-as session is told the writes are its own to make,
@@ -288,6 +293,8 @@ function markStopping(mode: "soft" | "hard"): void {
   actionsHidden.value = true; // one request is enough; the stream shows the outcome
   if (phase.value === "connecting" || phase.value === "running") phase.value = "stopping";
 }
+
+if (seed?.mode === "live" && seed.stop) markStopping(seed.stop.mode);
 
 // A stop can arrive from the stream too (a viewer who didn't click sees it).
 watch(
@@ -421,6 +428,10 @@ onMounted(() => {
       if (!frame) return;
       if (runClock) frozenMs.value = runClock.elapsedAt(frame.finishedAt);
       liveStamps.value = { ...liveStamps.value, finishedAt: frame.finishedAt };
+    },
+    onDisconnected: () => {
+      actionsHidden.value = true;
+      frozenMs.value ??= runClock?.elapsedMs(nowWall.value);
     },
     onEnd: (frame) => {
       actionsHidden.value = true;

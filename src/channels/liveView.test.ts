@@ -7,6 +7,7 @@ import {
   pipeToResponse,
   retentionSentence,
   serveEvents,
+  serveLedgerEvents,
   serveIndexEvents,
   withOmittedMarkers,
   type IndexRow,
@@ -287,6 +288,122 @@ describe("escapeHtml", () => {
   it("escapes & before the entity-introducing characters (no double-escaping order bug)", () => {
     expect(escapeHtml("a<b")).toBe("a&lt;b");
     expect(escapeHtml("&amp;")).toBe("&amp;amp;");
+  });
+});
+
+describe("serveLedgerEvents", () => {
+  const live = () => ({
+    id: "remote",
+    channelId: "mcp:default",
+    userId: "u",
+    threadKey: "t",
+    ownerGen: "other",
+    startedAt: 1000,
+    finished: false,
+    eventCount: 2,
+    events: [
+      { type: "input" as const, text: "request", messageId: "m1", at: 1000, seq: 1 },
+      { type: "tool_call" as const, tool: "run_check", summary: "checking", at: 2000, seq: 2 },
+    ],
+  });
+
+  it("resumes by sequence, keeps an active replay open and ends only on a terminal receipt", async () => {
+    vi.useFakeTimers();
+    const sink = recordingSink();
+    let view: import("../core/runsService.js").RunRecordView = live();
+    const read = vi.fn(async () => view);
+    try {
+      serveLedgerEvents(view, read, sink.sink, 1);
+      expect(sink.body()).toContain("id: 2");
+      expect(sink.body()).not.toContain("request");
+      view = {
+        ...view,
+        events: [
+          ...(view.events ?? []),
+          { type: "tool_result", tool: "run_check", summary: "result", ok: true, at: 3000, seq: 3 },
+        ],
+      };
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(sink.body()).toContain("result");
+      expect(sink.body().match(/checking/g)).toHaveLength(1);
+      expect(sink.ended).toBe(false);
+      view = { ...view, finished: true, finishedAt: 4000, sealedAt: 4500, persisted: true, replyOk: true };
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(sink.body()).toContain('event: finished\ndata: {"finishedAt":4000}');
+      expect(sink.body()).toContain('event: end\ndata: {"sealedAt":4500,"replyOk":true}');
+      expect(sink.ended).toBe(true);
+    } finally {
+      sink.fireClose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("a provisional tombstone ends follow as unavailable without polling or a terminal claim", async () => {
+    vi.useFakeTimers();
+    const sink = recordingSink();
+    const tombstone = { ...live(), finished: true, persisted: true, provisional: true as const, finishedAt: 1000 };
+    try {
+      const read = vi.fn(async () => tombstone);
+      serveLedgerEvents(tombstone, read, sink.sink);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(sink.body()).toContain("checking");
+      expect(sink.body()).not.toContain("event: finished");
+      expect(sink.body()).not.toContain("event: end");
+      expect(sink.body()).toContain("event: unavailable");
+      expect(sink.ended).toBe(true);
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      sink.fireClose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("a missing read or read failure closes transport without reporting the run ended", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const read of [
+        async () => null,
+        async () => {
+          throw new Error("unavailable");
+        },
+      ]) {
+        const sink = recordingSink();
+        serveLedgerEvents(live(), read, sink.sink);
+        await vi.advanceTimersByTimeAsync(3_000);
+        expect(sink.body()).toContain("checking");
+        expect(sink.ended).toBe(true);
+        expect(sink.body()).not.toContain("event: end");
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("disconnect during a pending read writes no late event and schedules no further read", async () => {
+    vi.useFakeTimers();
+    const sink = recordingSink();
+    let resolve!: (v: ReturnType<typeof live>) => void;
+    const read = vi.fn(
+      () =>
+        new Promise<ReturnType<typeof live>>((r) => {
+          resolve = r;
+        }),
+    );
+    try {
+      serveLedgerEvents(live(), read, sink.sink);
+      await vi.advanceTimersByTimeAsync(3_000);
+      sink.fireClose();
+      resolve({ ...live(), events: [{ type: "input", text: "late", messageId: "m2", at: 3000, seq: 3 }] } as ReturnType<
+        typeof live
+      >);
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(sink.body()).toContain("checking");
+      expect(sink.body()).not.toContain("late");
+      expect(read).toHaveBeenCalledTimes(1);
+    } finally {
+      sink.fireClose();
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1910,7 +2027,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
   });
 
   describe("index: active by default, everything with ?all=1", () => {
-    it("a run live on the ledger under another generation opens tokenless (item 41): the page in history mode with the ledger's events and no token, the events route a replay that ends, friction a live diagnosis, and the tokenless stop goes to the ledger", async () => {
+    it("a run live on the ledger under another generation stays live tokenless with a clock, an updating stream and ledger stop controls", async () => {
       const ledger = new InMemoryRunLedger(() => NOW);
       const h = harness({ ledger });
       await ledger.claim({
@@ -1932,19 +2049,37 @@ describe("live view on RunsService: history pages + index toggle", () => {
       h.handler(page.req, page.res);
       await done(page);
       expect(page.status).toBe(200);
-      const seed = runSeedOf(page.body()) as RunHistorySeed;
-      expect(seed.mode).toBe("history");
-      expect(seed.threadKey).toBe("slack:C9:far"); // the ledger's view names the thread (web-chat.md item 4)
-      expect(seed.events.some((e) => "text" in e && e.text === "far away")).toBe(true);
-      expect(seed.eventCount).toBe(2);
-      expect(seed.finishedAt).toBeUndefined(); // live: no finish stamp, no duration
-      expect(page.body()).not.toMatch(/\?t=/); // no token anywhere: the page token is the other generation's
-      const events = fakeReqRes("GET", "/runs/far-1/events");
+      const seed = runSeedOf(page.body()) as RunLiveSeed;
+      expect(seed.mode).toBe("live");
+      expect(seed.threadKey).toBe("slack:C9:far");
+      expect(seed.serverNow).toBe(NOW);
+      expect(seed.startedAt).toBe(NOW - 5_000);
+      expect(seed.eventsUrl).toBe("/runs/far-1/events");
+      expect(seed.stopUrl).toBe("/runs/far-1/stop");
+      expect(page.body()).not.toMatch(/\?t=/);
+      const replay = fakeReqRes("GET", "/runs/far-1/events");
+      h.handler(replay.req, replay.res);
+      await vi.waitFor(() => expect(replay.body()).toContain("far away"));
+      expect(replay.ended).toBe(true);
+      expect(replay.body()).toContain("event: end");
+      replay.fireClose();
+      vi.useFakeTimers();
+      const events = fakeReqRes("GET", "/runs/far-1/events?follow=1");
       h.handler(events.req, events.res);
-      await done(events);
-      expect(events.status).toBe(200);
-      expect(events.body()).toContain("far away");
-      expect(events.body()).toContain("event: end");
+      try {
+        await vi.waitFor(() => expect(events.body()).toContain("far away"));
+        expect(events.body()).not.toContain("event: end");
+        expect(events.ended).toBe(false);
+        await ledger.append("far-1", "g-OTHER", [
+          { type: "tool_result", tool: "bash", ok: true, summary: "new result", at: NOW, seq: 3 },
+        ]);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(events.body()).toContain("new result");
+        expect(events.body().match(/far away/g)).toHaveLength(1);
+      } finally {
+        events.fireClose();
+        vi.useRealTimers();
+      }
       const friction = fakeReqRes("GET", "/runs/far-1/friction");
       h.handler(friction.req, friction.res);
       await done(friction);
@@ -1956,6 +2091,37 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect(stop.status).toBe(200);
       expect(JSON.parse(stop.body())).toEqual({ id: "far-1", mode: "soft", state: "stopping" });
       expect(ledger.live.get("far-1")!.stop).toBe("soft");
+    });
+
+    it("a provisional replay ends for work folds and its reconnecting follow stops as unavailable", async () => {
+      vi.useFakeTimers();
+      const h = harness();
+      const events = fakeReqRes("GET", "/runs/provisional/events");
+      const follow = fakeReqRes("GET", "/runs/provisional/events?follow=1&t=old", { "last-event-id": "0" });
+      try {
+        await h.store!.put(
+          record("provisional", {
+            status: "interrupted",
+            startedAt: NOW - 1000,
+            finishedAt: NOW - 1000,
+            provisional: true,
+          }),
+        );
+        h.handler(events.req, events.res);
+        await vi.waitFor(() => expect(events.body()).toContain("please run it"));
+        expect(events.status).toBe(200);
+        expect(events.body()).toContain("event: end");
+        expect(events.ended).toBe(true);
+        h.handler(follow.req, follow.res);
+        await vi.waitFor(() => expect(follow.body()).toContain("please run it"));
+        expect(follow.body()).toContain("event: unavailable");
+        expect(follow.body()).not.toContain("event: end");
+        expect(follow.ended).toBe(true);
+      } finally {
+        events.fireClose();
+        follow.fireClose();
+        vi.useRealTimers();
+      }
     });
 
     it("the default view also seeds the runs live on the ledger under another generation (run-history item 41): tokenless, live, after this process's rows; still never a store call", async () => {

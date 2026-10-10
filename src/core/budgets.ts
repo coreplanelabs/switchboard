@@ -690,3 +690,6 @@ export const MODEL_CAPACITY_BENCHMARK = {
   settleMs: 5000,
   maxHealthMs: 1000,
 } as const;
+
+/** Refresh a run served from the durable ledger rather than the local registry. */
+export const RUN_VIEW_POLL_MS = 3 * SECOND_MS;

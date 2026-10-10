@@ -34,6 +34,20 @@ afterEach(() => {
 });
 
 describe("RunRow", () => {
+  it("preserves the public agent label when structured metadata names an internal preset", () => {
+    const w = mountRow(row({ label: "main · private conversation", agent: "orchestrator" }));
+    expect(w.find(".agent").text()).toBe("main");
+    expect(w.find(".scope").text()).toBe("private conversation");
+  });
+
+  it("shows a labelless remote run's agent and current work from structured metadata", () => {
+    const w = mountRow(row({ label: undefined, agent: "review", repo: "acme/web", activity: "run_check" }));
+    expect(w.find(".agent").text()).toBe("review");
+    expect(w.find(".snippet").text()).toBe("run_check");
+    expect(w.find("a.row").attributes("href")).toBe("/runs/run-1");
+    expect(w.find(".elapsed").text()).toBe("4m 12s");
+  });
+
   it("is a stretched link: the anchor covers the row, live rows carry the token, finished rows never do", () => {
     const live = mountRow(row({ token: "tok-1" }));
     const a = live.find("a.row");

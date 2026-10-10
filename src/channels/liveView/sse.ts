@@ -1,3 +1,5 @@
+import { RUN_VIEW_POLL_MS } from "../../core/budgets.js";
+import type { RunRecordView } from "../../core/runsService.js";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { isSpanRecord, serializedOnce, type RunEvent } from "../../core/runEvents.js";
 import type { Subscribed } from "../../core/runRegistry.js";
@@ -198,6 +200,82 @@ export function serveEvents(
   }
   sink.onClose(subscribed.unsubscribe);
   onLive?.(); // stream stays open → safe to start the keepalive heartbeat
+}
+
+/** Follow the ledger while the owner runs elsewhere. A completed replay is
+ *  not a completed run. Terminal receipts end the run; a provisional-only
+ *  record stops follow as unavailable without a terminal claim. */
+export function serveLedgerEvents(
+  initial: RunRecordView,
+  read: () => Promise<RunRecordView | null>,
+  sink: SseSink,
+  afterSeq = 0,
+): void {
+  let closed = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let cursor = afterSeq;
+  let finishSent = false;
+  const close = () => {
+    closed = true;
+    clearTimeout(timer);
+  };
+  sink.onClose(close);
+  sink.writeHead(200, SSE_HEADERS);
+  sink.write(SSE_PRELUDE);
+  const send = (view: RunRecordView) => {
+    for (const e of view.events ?? []) {
+      if (e.seq !== undefined && e.seq > cursor) {
+        if (e.seq > cursor + 1) sink.write(sseElided({ fromSeq: cursor + 1, toSeq: e.seq - 1 }));
+        sink.write(sseData(e, e.seq));
+        cursor = e.seq;
+      }
+    }
+    if (view.provisional === true) {
+      // A start marker can remain forever: it does not prove a live owner or
+      // a final outcome. Stop following without inventing a finish receipt.
+      sink.write("event: unavailable\ndata: {}\n\n");
+      close();
+      sink.end();
+      return;
+    }
+    const terminal = view.finished;
+    if (terminal && view.finishedAt !== undefined && !finishSent) {
+      sink.write(sseFinished({ finishedAt: view.finishedAt }));
+      finishSent = true;
+    }
+    if (terminal && (view.persisted || view.sealedAt !== undefined)) {
+      sink.write(sseEnd(view.sealedAt !== undefined ? { sealedAt: view.sealedAt, replyOk: view.replyOk } : undefined));
+      close();
+      sink.end();
+    }
+  };
+  const poll = async () => {
+    try {
+      const view = await read();
+      if (closed) return;
+      // Missing/denied/unavailable is not a finish receipt. Close transport
+      // without an end frame so EventSource reconnects through authorization.
+      if (!view) {
+        close();
+        sink.end();
+        return;
+      }
+      send(view);
+      schedule();
+    } catch {
+      if (!closed) {
+        close();
+        sink.end();
+      }
+    }
+  };
+  const schedule = () => {
+    if (closed) return;
+    timer = setTimeout(() => void poll(), RUN_VIEW_POLL_MS);
+    timer.unref?.();
+  };
+  send(initial);
+  schedule();
 }
 
 /** One SSE `data:` frame for an index event (upsert/removed). No `id:` — the

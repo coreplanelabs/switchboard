@@ -1153,9 +1153,67 @@ describe("RunPage — history mode", () => {
 });
 
 describe("RunPage — live mode", () => {
+  it("an unavailable follow stops a reconnecting clock without claiming the run ended", async () => {
+    vi.useFakeTimers();
+    const { wrapper, es } = mountLive();
+    try {
+      es().emitOpen();
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find(".conn").text()).toContain("running · 3s");
+      es().emitNamed("unavailable", "{}");
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find("#state").text()).toBe("disconnected");
+      expect(es().closed).toBe(true);
+      expect(wrapper.find("#actions").exists()).toBe(false);
+      vi.advanceTimersByTime(60_000);
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find("#timeline .lede .shape").text()).toBe("3s");
+    } finally {
+      wrapper.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("a tokenless remote run allocates live tool time, freezes at its finish receipt and posts a ledger stop", async () => {
+    vi.useFakeTimers();
+    const { created, factory } = fakeEventSourceFactory();
+    const wrapper = mountApp(RunPage, {
+      seed: { ...liveSeed, serverNow: 61_000, eventsUrl: "/runs/run-1/events", stopUrl: "/runs/run-1/stop" },
+      eventSource: factory,
+    });
+    try {
+      const es = created[0];
+      es.emitOpen();
+      es.emitMessage({ type: "span_start", spanId: "root", name: "request", at: 1000 }, "1");
+      es.emitMessage({ type: "span_start", spanId: "agent", parentSpanId: "root", name: "run.agent", at: 1000 }, "2");
+      es.emitMessage(
+        { type: "span_start", spanId: "tool", parentSpanId: "agent", name: "tool.run_check", at: 1000 },
+        "3",
+      );
+      es.emitMessage(call("c1", "run_check", 1000, "run_check"), "4");
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find(".conn").text()).toContain("running · 1m 00s");
+      expect(wrapper.find("#timeline .lede .shape").text()).toBe("1m 00s — in tools");
+      await wrapper.find("#actions button").trigger("click");
+      await flushPromises();
+      expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?mode=soft", { method: "POST", credentials: "same-origin" });
+      expect(wrapper.find(".conn").text()).toContain("stopping (soft)");
+      es.emitNamed("finished", '{"finishedAt":61000}');
+      es.emitNamed("end", '{"sealedAt":62000,"replyOk":true}');
+      vi.advanceTimersByTime(10_000);
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find(".conn").text()).toContain("stopped early");
+      expect(wrapper.find(".conn .dur").text()).toBe("1m 00s");
+      expect(es.closed).toBe(true);
+    } finally {
+      wrapper.unmount();
+      vi.useRealTimers();
+    }
+  });
+
   it("opens the token-scoped stream, reads `running` once connected, and folds live frames through the same path", async () => {
     const { wrapper, es } = mountLive();
-    expect(es().url).toBe("/runs/run-1/events?t=tok-1");
+    expect(es().url).toBe("/runs/run-1/events?t=tok-1&follow=1");
     expect(wrapper.find("#state").text()).toBe("connecting…");
     es().emitOpen();
     await wrapper.vm.$nextTick();

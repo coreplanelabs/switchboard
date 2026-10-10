@@ -51,6 +51,7 @@ import {
   parseLastEventId,
   serveEvents,
   serveHistoryEvents,
+  serveLedgerEvents,
   serveIndexEvents,
   startSseHeartbeat,
   withOmittedMarkers,
@@ -342,7 +343,7 @@ const JSON_NO_STORE = { "content-type": "application/json; charset=utf-8", "cach
  *   GET  /runs?stream=1[&all=1] → the live runs-index SSE feed
  *   GET  /runs/:id[?t=…]       → the HTML page: a valid token → the live page; no/wrong token →
  *        history mode for a finished or persisted run (tokenless, Access-gated), 404 for a live run
- *   GET  /runs/:id/events[?t=…] → the SSE stream: live with a token; the stored replay + `end` otherwise
+ *   GET  /runs/:id/events[?t=…&follow=1] → token live stream, explicit ledger follow, or a finite snapshot replay
  *   GET  /runs/:id/friction[?t=…] → the friction diagnosis JSON (live diagnosis-so-far, or the stored one)
  *   POST /runs/:id/stop?t=…&mode=soft|hard → ask the run to stop: 200 JSON, 400 bad
  *        mode, 404 bad/missing token on a live run or unknown run, 409 finished/persisted
@@ -861,9 +862,8 @@ export function createLiveViewHandler(
     // through the service. So is a run LIVE ELSEWHERE (run-history item 41 —
     // the ledger's row under another generation, `ownerGen` set): its token is
     // the other generation's, so the attribute decision is the only gate it can
-    // have, and it renders in history mode with the ledger's events — no
-    // stream to follow, no stop controls on the page; the tokenless stop route
-    // stops it through the ledger.
+    // have. It renders live and follows the ledger until a terminal receipt;
+    // the tokenless stop route stops it through the ledger.
     const actor = ctx.actor;
     // A QUEUED ask (record 0064, "The queue") is servable here too: the plane
     // holds the request under the id the queued reply named, there is no
@@ -1015,6 +1015,24 @@ export function createLiveViewHandler(
             ? { unit: ledger.value.unit, rows: ledger.value.findings.length }
             : undefined;
         const tokens = liveTokens();
+        if (!view.finished && view.ownerGen !== undefined) {
+          deps.page(req, res, 200, ctx.actor, "Live run", {
+            page: "run",
+            mode: "live",
+            id: route.id,
+            threadKey: view.threadKey,
+            serverNow: now(),
+            startedAt: view.startedAt,
+            ...(view.receivedAt !== undefined ? { receivedAt: view.receivedAt } : {}),
+            eventsUrl: `/runs/${encodeURIComponent(route.id)}/events`,
+            ...(view.stop ? { stop: view.stop } : {}),
+            ...(view.hosted ? {} : { stopUrl: `/runs/${encodeURIComponent(route.id)}/stop` }),
+            ...(children.length > 0 ? { children: children.map((c) => withLiveToken(c, tokens)) } : {}),
+            ...(lineage.parent !== undefined || lineage.unit !== undefined ? { lineage } : {}),
+            ...artifactsSeed(route.id),
+          });
+          return;
+        }
         deps.page(req, res, 200, ctx.actor, "Run", {
           page: "run",
           mode: "history",
@@ -1052,7 +1070,18 @@ export function createLiveViewHandler(
         });
         return;
       }
-      serveHistoryEvents(view.events ?? [], view.eventCount, nodeSseSink(req, res));
+      if (url.searchParams.get("follow") === "1") {
+        serveLedgerEvents(
+          view,
+          async () => {
+            const next = await service.getRun(route.id, { include: "messages" });
+            return next.ok && servable(next.value) && readable(actor, next.value, "events") ? next.value : null;
+          },
+          nodeSseSink(req, res),
+          parseLastEventId(req.headers["last-event-id"]),
+        );
+        if (!view.finished) startSseHeartbeat(req, res);
+      } else serveHistoryEvents(view.events ?? [], view.eventCount, nodeSseSink(req, res));
     });
     return true;
   };

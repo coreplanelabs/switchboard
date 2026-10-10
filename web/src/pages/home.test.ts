@@ -539,7 +539,7 @@ describe("HomePage — sending (rules 3, 5; items 2, 3)", () => {
     const turn = wrapper.find(".turn.assistant");
     expect(turn.attributes("data-live")).toBe("1");
     expect(turn.attributes("data-run-id")).toBe("r-9");
-    expect(streams(created)).toEqual(["/runs/r-9/events?t=tok9"]);
+    expect(streams(created)).toEqual(["/runs/r-9/events?t=tok9&follow=1"]);
     // One control, two states: the box is empty and a run is live → stop.
     expect(wrapper.find("form.composer").attributes("data-mode")).toBe("stop");
   });
@@ -859,7 +859,7 @@ describe("HomePage — a live turn from the seed", () => {
       }),
       eventSource: factory,
     });
-    expect(streams(created)).toEqual(["/runs/r-2/events?t=tok2"]);
+    expect(streams(created)).toEqual(["/runs/r-2/events?t=tok2&follow=1"]);
     expect(wrapper.find("form.composer").attributes("data-mode")).toBe("stop");
     expect(wrapper.find(".turn.assistant [data-testid=elapsed]").exists()).toBe(true);
   });
@@ -886,7 +886,7 @@ describe("HomePage — a live turn from the seed", () => {
       }),
       eventSource: factory,
     });
-    expect(streams(created)).toEqual(["/runs/r-host/events?t=tokh"]);
+    expect(streams(created)).toEqual(["/runs/r-host/events?t=tokh&follow=1"]);
     expect(wrapper.find("form.composer").attributes("data-mode")).toBe("send");
     expect(wrapper.find(".turn.assistant [data-testid=elapsed]").exists()).toBe(true);
     await type(wrapper, "more words");

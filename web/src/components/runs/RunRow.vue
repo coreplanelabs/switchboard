@@ -56,7 +56,14 @@ const props = defineProps<{
   children?: IndexRow[];
 }>();
 
-const parts = computed(() => splitRunLabel(props.run.label || shortId(props.run.id)));
+const parts = computed(() => {
+  const label = splitRunLabel(props.run.label || shortId(props.run.id));
+  return {
+    ...label,
+    agent: label.agent ?? props.run.agent,
+    snippet: label.snippet ?? props.run.activity,
+  };
+});
 const repo = computed(() => repoOf(props.run, parts.value.scope));
 const tone = computed(() => statusDot(props.run));
 const href = computed(() => runHref(props.run));
