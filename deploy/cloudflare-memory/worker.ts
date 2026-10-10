@@ -128,6 +128,11 @@ import { coordinatorReportCanReconcile } from "../../src/core/coordinator/report
 import { isCoordinatorReportAdmission } from "../../src/core/coordinator/reportAdmission.js";
 import { privateWorkerThreadKey } from "../../src/core/privateWorkerLog.js";
 import { isInstanceNotFound } from "../../src/core/coordinator/instancesRoute.js";
+import {
+  inventoryCursor,
+  inventoryPosition,
+  type PipelineInventoryQuery,
+} from "../../src/core/coordinator/inventory.js";
 import { isPersonalToken } from "../../src/core/personalToken.js";
 import { preserveCheckpointState } from "../../src/core/runLedger/checkpointState.js";
 import {
@@ -4074,6 +4079,42 @@ export class RunHistoryDO extends DurableObject<Env> {
       .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, id)
       .toArray()[0];
     return row ? (JSON.parse(row.json) as CoordinatorInstance) : null;
+  }
+
+  async listInstances(query: PipelineInventoryQuery) {
+    const watermark = this.sql
+      .exec<{ last: number }>("SELECT COALESCE(MAX(rowid), 0) AS last FROM coordinator_instances")
+      .toArray()[0].last;
+    const { after, through } = inventoryPosition(query, watermark);
+    if (query.order === "key") {
+      const rows = this.sql
+        .exec<{ json: string }>(
+          "SELECT json FROM coordinator_instances WHERE rowid <= ? ORDER BY instance_id || ':' COLLATE BINARY LIMIT ? OFFSET ?",
+          through,
+          query.limit + 1,
+          after,
+        )
+        .toArray();
+      const items = rows.slice(0, query.limit).map((row) => JSON.parse(row.json) as CoordinatorInstance);
+      if (!items.every(isCoordinatorInstance)) throw new Error("pipeline inventory corrupt");
+      const cursor = rows.length > query.limit ? inventoryCursor(after + items.length, through, "key") : undefined;
+      const resumeCursor = inventoryCursor(after, through, "key");
+      return { items, ...(cursor ? { cursor } : {}), ...(resumeCursor ? { resumeCursor } : {}) };
+    }
+    const rows = this.sql
+      .exec<{ position: number; json: string }>(
+        "SELECT rowid AS position, json FROM coordinator_instances WHERE rowid > ? AND rowid <= ? ORDER BY rowid LIMIT ?",
+        after,
+        through,
+        query.limit,
+      )
+      .toArray();
+    const items = rows.map((row) => JSON.parse(row.json) as CoordinatorInstance);
+    if (!items.every(isCoordinatorInstance)) throw new Error("pipeline inventory corrupt");
+    const position = rows.at(-1)?.position ?? through;
+    const cursor = inventoryCursor(position, through);
+    const resumeCursor = inventoryCursor(after, through);
+    return { items, ...(cursor ? { cursor } : {}), ...(resumeCursor ? { resumeCursor } : {}) };
   }
 
   /** The hard stop's mark on the instance row (record 0060; issue 1924).
@@ -11164,6 +11205,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/requester-turn/record",
   "/runs/coordinator/requester-turn/latest",
   "/runs/coordinator/get",
+  "/runs/coordinator/list",
   "/runs/coordinator/stop",
   "/runs/coordinator/units/put",
   "/runs/coordinator/units/claim-legacy-continuation",
@@ -12221,6 +12263,27 @@ async function handleLedger(
     if (typeof b.id !== "string" || !INSTANCE_ID_PATTERN.test(b.id))
       return json({ error: "id must be a Workflow instance id" }, 400);
     return json({ instance: await stub.getInstance(b.id) });
+  }
+  if (pathname === "/runs/coordinator/list") {
+    if (
+      !Number.isInteger(b.limit) ||
+      (b.limit as number) < 1 ||
+      (b.limit as number) > 200 ||
+      (b.cursor !== undefined && typeof b.cursor !== "string") ||
+      (b.order !== undefined && b.order !== "key")
+    )
+      return json({ error: "pipeline inventory query invalid" }, 400);
+    try {
+      return json(
+        await stub.listInstances({
+          limit: b.limit as number,
+          ...(typeof b.cursor === "string" ? { cursor: b.cursor } : {}),
+          ...(b.order === "key" ? { order: "key" as const } : {}),
+        }),
+      );
+    } catch {
+      return json({ error: "pipeline inventory unavailable" }, 503);
+    }
   }
   // The hard stop's mark on the instance row (record 0060; issue 1924): the
   // bot writes it when the hosted parent is sealed; the runner reads it back.
