@@ -555,7 +555,10 @@ export async function replyOutcome(io: ChannelIO, text: string): Promise<void> {
  * record's `answer` carries (`renderOffer`).
  */
 export async function renderConfirmationOffer(io: ChannelIO, offer: ConfirmationOffer): Promise<void> {
-  if (io.offer) return io.offer(offer);
+  if (io.offer) {
+    await io.offer(offer);
+    return;
+  }
   return io.reply(renderOffer(offer));
 }
 /**

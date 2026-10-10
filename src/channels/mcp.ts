@@ -1,6 +1,6 @@
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { resolveActor, type GrantsLookup } from "../core/authz/actor.js";
+import { resolveChatActor, type GrantsLookup } from "../core/authz/actor.js";
 import {
   blastRadius,
   CommandRegistry,
@@ -14,8 +14,31 @@ import type { McpToolInfo } from "../mcp/types.js";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
 import { startRequestRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
-import type { IncomingMessage } from "../core/types.js";
-import { boundRequester, type PersonLookup, type Requester } from "./requester.js";
+import type { IncomingMessage, ConfirmationOffer } from "../core/types.js";
+import { withCommandConfirmation } from "../core/commandConfirmations.js";
+import {
+  mcpRequester,
+  type McpIdentity,
+  approvalUrl,
+  ownApproval,
+  resumeApproval,
+  requestHash,
+} from "./mcpApproval.js";
+import {
+  Server,
+  WebStandardStreamableHTTPServerTransport,
+  isLegacyRequest,
+  createMcpHandler as createSdkHandler,
+  ProtocolError,
+  inputRequired,
+  type ServerContext,
+  type CallToolResult,
+  type ListToolsResult,
+  type ClientCapabilities,
+  CLIENT_CAPABILITIES_META_KEY,
+} from "@modelcontextprotocol/server";
+import { toNodeHandler } from "@modelcontextprotocol/node";
+import { type PersonLookup, type Requester } from "./requester.js";
 import { digestBearer, type PersonalTokenStore } from "../mcp/personalTokens.js";
 import { dispatchSingleShot, SingleShotIO } from "./singleShotDispatch.js";
 import {
@@ -35,12 +58,8 @@ import {
 // calls the channel-agnostic core dispatch(), and provides a ChannelIO to reply
 // through. Nothing about routing, config, permissions, or agents lives here.
 //
-// Transport: a MINIMAL MCP server over streamable-HTTP — JSON-RPC 2.0 over a
-// single POST /mcp with one JSON response per request (no SSE; request/response
-// tool calls don't need it). We hand-implement the small JSON-RPC subset rather
-// than take the MCP SDK as a dependency. Methods handled: initialize,
-// tools/list, tools/call, and JSON-RPC notifications (accepted, no response).
-// Anything else is a proper JSON-RPC error.
+// The official SDK owns modern and legacy Streamable HTTP protocol handling.
+// Authentication and body limits are checked before SDK request processing.
 //
 // Tools: the hand-written `dispatch` (starts an agent run through dispatch())
 // PLUS every command registry entry exposed to MCP: tool
@@ -63,8 +82,6 @@ const PLATFORM = "mcp";
 const DEFAULT_CHANNEL = "default";
 const DEFAULT_THREAD = "default";
 
-/** Protocol version we speak. Advertised at initialize. */
-const PROTOCOL_VERSION = "2025-06-18";
 const SERVER_INFO = { name: "switchboard", version: "0.1.0" } as const;
 
 /** The one hand-written tool; every other tool is a registry command. */
@@ -94,6 +111,8 @@ const AUTH_ERROR = -32001;
 
 export interface McpOptions {
   auth: IngressConfig;
+  /** True only when the authenticated browser approval route is wired. */
+  approvalsEnabled?: boolean;
   /** Browser-approved personal credentials, stored by digest outside the static ingress map. */
   personalTokens?: PersonalTokenStore;
   /** Defaults to the real core dispatch(); overridden in tests. */
@@ -154,20 +173,18 @@ function mcpExposed(commands: CommandInvoker | undefined): CommandDef<unknown>[]
  *  (authorization.md item 9). Nothing here decides what it may do
  *  (docs/decisions/0007-authorization-policy-table.md). */
 export function toCaller(identity: IngressIdentity, lookup: GrantsLookup, requester?: Requester): Caller {
-  const actor = resolveActor({ surface: "mcp", subjectId: identity.subject }, lookup);
-  const personId = requester?.userId;
-  return {
-    kind: "mcp",
-    id: actor.id,
-    actor:
-      personId && personId !== actor.id
-        ? {
-            ...actor,
-            self: [actor.id, personId],
-            asUser: { id: personId, ...(requester?.userName ? { name: requester.userName } : {}) },
-          }
-        : actor,
-  };
+  const credentialId = `${PLATFORM}:${identity.subject}`;
+  const actor = resolveChatActor(
+    {
+      channelId: "mcp:default",
+      threadKey: "mcp:default:default",
+      ...requester,
+      userId: requester?.userId ?? credentialId,
+    },
+    lookup,
+  );
+  const { origin: _origin, ...withoutOrigin } = actor;
+  return { kind: "mcp", id: credentialId, actor: withoutOrigin, ...(identity.email ? { email: identity.email } : {}) };
 }
 
 /** Registry error codes → JSON-RPC codes; the registry code itself rides in `data.code`. */
@@ -206,7 +223,25 @@ interface JsonRpcRequest {
 /** ChannelIO for a single-shot MCP tool call: reply() collects, status() is a
  *  no-op (no live surface to edit in one shot), history() is empty (a tool call
  *  carries no prior turns — conversation state, if any, rides on threadKey). */
-export class McpIO extends SingleShotIO {}
+export class McpIO extends SingleShotIO {
+  private shown?: ConfirmationOffer;
+  offer?: (offer: ConfirmationOffer) => Promise<void | string>;
+  constructor(
+    priorTurns: ConstructorParameters<typeof SingleShotIO>[0] = [],
+    threadKey?: string,
+    display?: (offer: ConfirmationOffer) => string,
+  ) {
+    super(priorTurns, threadKey);
+    if (display)
+      this.offer = async (offer) => {
+        this.shown = offer;
+        return display(offer);
+      };
+  }
+  offered(): ConfirmationOffer | undefined {
+    return this.shown;
+  }
+}
 
 /** Build the `mcp:`-namespaced IncomingMessage from an authed identity + the
  *  tool arguments. Mirrors http.ts's namespacing (invariant 4) but with the
@@ -216,7 +251,7 @@ export class McpIO extends SingleShotIO {}
 async function toIncomingMessage(
   identity: IngressIdentity,
   args: { text: string; channel?: string; thread?: string },
-  personByEmail: PersonLookup | undefined,
+  requester: Requester,
 ): Promise<IncomingMessage> {
   const channel = identity.channel ?? args.channel ?? DEFAULT_CHANNEL;
   const thread = args.thread ?? DEFAULT_THREAD;
@@ -224,7 +259,7 @@ async function toIncomingMessage(
     // The requester is the person the entry's `email` names when the lookup
     // finds one (`userId` the person, `authenticatedAs` the credential), else
     // the credential itself — the HTTP ingress's rule (authorization.md item 15).
-    ...(await boundRequester(`${PLATFORM}:${identity.subject}`, identity.email, personByEmail)),
+    ...requester,
     channelId: `${PLATFORM}:${channel}`,
     threadKey: `${PLATFORM}:${channel}:${thread}`,
     text: args.text,
@@ -257,11 +292,6 @@ export interface McpResponse {
 }
 
 /** Extract the JSON-RPC id from a parsed message if it is a valid id type. */
-function readId(msg: Record<string, unknown>): JsonRpcId {
-  const id = msg.id;
-  if (typeof id === "string" || typeof id === "number" || id === null) return id;
-  return null;
-}
 
 /**
  * Route one validated JSON-RPC request to its handler. Transport-free (no
@@ -271,27 +301,70 @@ function readId(msg: Record<string, unknown>): JsonRpcId {
  */
 async function route(
   req: JsonRpcRequest,
-  identity: IngressIdentity,
+  identity: McpIdentity,
   deps: CoreDeps,
   options: McpOptions,
   lookup: GrantsLookup,
+  connectionId: string,
+  ctx?: ServerContext,
 ): Promise<JsonRpcResultBody | JsonRpcErrorBody> {
   const id = req.id ?? null;
   switch (req.method) {
-    case "initialize":
-      return ok(id, {
-        protocolVersion: PROTOCOL_VERSION,
-        capabilities: { tools: {} },
-        serverInfo: SERVER_INFO,
-      });
-
     case "tools/list":
-      return ok(id, { tools: [DISPATCH_TOOL, ...mcpExposed(options.commands).map(toMcpTool)] });
+      return ok(id, {
+        tools: [
+          DISPATCH_TOOL,
+          ...mcpExposed(options.commands).map(toMcpTool),
+          ...(["approval_resume", "approval_cancel"] as const).map((name) => ({
+            name,
+            description:
+              name === "approval_resume"
+                ? "Execute an offer already approved in the authenticated browser, once. The saved action cannot be changed."
+                : "Cancel your connection's pending offer; nothing runs.",
+            inputSchema: {
+              type: "object",
+              properties: { id: { type: "string" } },
+              required: ["id"],
+              additionalProperties: false,
+            },
+            annotations: {
+              readOnlyHint: false,
+              destructiveHint: false,
+              idempotentHint: name === "approval_cancel",
+              openWorldHint: false,
+            },
+          })),
+        ],
+      });
 
     case "tools/call": {
       const name = req.params.name;
       const rawArgs = req.params.arguments;
       const args = typeof rawArgs === "object" && rawArgs !== null ? (rawArgs as Record<string, unknown>) : {};
+      const requester = await mcpRequester(identity, options);
+      if (!requester)
+        return err(id, AUTH_ERROR, "The verified person for this connection is unavailable; nothing ran", {
+          code: "unauthorized",
+        });
+      const caller = toCaller(identity, lookup, requester);
+      if (name === "approval_resume" || name === "approval_cancel") {
+        if (typeof args.id !== "string" || Object.keys(args).some((key) => key !== "id"))
+          return err(id, INVALID_PARAMS, "Only the saved offer id is accepted");
+        return approvalResult(id, args.id, deps, options, caller.actor, connectionId, name === "approval_cancel");
+      }
+      const state = ctx?.mcpReq.requestState<string>();
+      if (typeof state === "string") {
+        const row = deps.confirmations && (await ownApproval(deps.confirmations, state, caller.actor, connectionId));
+        if (!row || row.message.approvalConnection?.requestHash !== requestHash(String(name), args))
+          return err(id, AUTH_ERROR, "The offer is used, expired, or does not match this request; nothing ran");
+        const response = ctx?.mcpReq.inputResponses?.approval;
+        const cancel =
+          response &&
+          typeof response === "object" &&
+          "action" in response &&
+          (response.action === "decline" || response.action === "cancel");
+        return approvalResult(id, state, deps, options, caller.actor, connectionId, !!cancel);
+      }
       const command = options.commands && mcpExposed(options.commands).find((c) => mcpToolName(c.id) === name);
       if (command) {
         // Registry tool: the by-name arguments split onto the definition's
@@ -299,12 +372,29 @@ async function route(
         // schemas live there), the returned object straight back out.
         const input = namedToInput(command, args, "camel");
         if ("error" in input) return err(id, INVALID_PARAMS, input.error, { code: "invalid_input" });
-        const requester = await boundRequester(
-          `${PLATFORM}:${identity.subject}`,
-          identity.email,
-          options.personByEmail,
+        const msg = await toIncomingMessage(identity, { text: "" }, requester);
+        // A direct command is a separate request, not the shared prose thread.
+        msg.threadKey = `${msg.channelId}:command:${randomUUID()}`;
+        msg.approvalConnection = {
+          id: connectionId,
+          credentialId: caller.id,
+          requestHash: requestHash(String(name), args),
+        };
+        const io = new McpIO(
+          [],
+          msg.threadKey,
+          !!msg.authenticatedAs &&
+            !!approvalUrl(options, "offer") &&
+            !!deps.confirmations?.approve &&
+            !!deps.confirmations.get
+            ? (offer) =>
+                `Nothing ran. Review ${offer.line} at ${approvalUrl(options, offer.id)}, then call approval_resume with id ${offer.id}.`
+            : undefined,
         );
-        const result = await options.commands!.invoke(command.id, input, toCaller(identity, lookup, requester));
+        const result = await withCommandConfirmation({ message: msg, io, store: deps.confirmations }, () =>
+          options.commands!.invoke(command.id, input, caller),
+        );
+        if (io.offered()) return offeredResult(id, io.offered()!, options, ctx);
         if (!result.ok) return err(id, RPC_CODE_FOR[result.error], result.message, { code: result.error });
         return ok(id, { content: [{ type: "text", text: `${command.id}: ok\n${JSON.stringify(result.value)}` }] });
       }
@@ -348,7 +438,7 @@ async function route(
           channel: args.channel as string | undefined,
           thread: args.thread as string | undefined,
         },
-        options.personByEmail,
+        requester,
       );
       const keyError = ingressThreadKeyError(incoming.threadKey);
       if (keyError) return err(id, INVALID_PARAMS, keyError);
@@ -356,8 +446,23 @@ async function route(
       const trace = startRequestRoot(deps, { channel: "mcp", receivedAt });
       // One bounded identity per admitted call, retained by the in-flight async
       // dispatch. Neither mutable text/thread nor a reusable JSON-RPC id names it.
-      const msg: IncomingMessage = { ...incoming, messageId: `${PLATFORM}:${randomUUID()}`, receivedAt };
-      const io = new McpIO([], msg.threadKey);
+      const msg: IncomingMessage = {
+        ...incoming,
+        approvalConnection: { id: connectionId, credentialId: caller.id, requestHash: requestHash(String(name), args) },
+        messageId: `${PLATFORM}:${randomUUID()}`,
+        receivedAt,
+      };
+      const io = new McpIO(
+        [],
+        msg.threadKey,
+        !!msg.authenticatedAs &&
+          !!approvalUrl(options, "offer") &&
+          !!deps.confirmations?.approve &&
+          !!deps.confirmations.get
+          ? (offer) =>
+              `Nothing ran. Review ${offer.line} at ${approvalUrl(options, offer.id)}, then call approval_resume with id ${offer.id}.`
+          : undefined,
+      );
       const dispatchFn = options.dispatch ?? realDispatch;
       const result = await dispatchSingleShot({
         deps,
@@ -369,6 +474,7 @@ async function route(
         publicBaseUrl: options.publicBaseUrl,
         logPrefix: "mcp",
       });
+      if (io.offered()) return offeredResult(id, io.offered()!, options, ctx);
       if (result.kind === "started")
         return ok(id, {
           content: [{ type: "text", text: `Started run ${result.receipt.runId}. Progress is available via runs_get.` }],
@@ -403,7 +509,8 @@ export async function handleMcpRequest(req: McpRequest, deps: CoreDeps, options:
   // constant-time gate with no duplicated logic; map its rejection to the
   // MCP-shaped JSON-RPC error.
   const gate = await authorizeMcpRequest(req.method, req.headers, options);
-  if (!("status" in gate)) return handleMcpMessage(gate.identity, req.body, deps, options);
+  if (!("status" in gate))
+    return handleMcpMessage(gate.identity, req.body, deps, options, digestBearer(bearerFrom(req.headers)), req.headers);
   return mcpErrorForStatus(gate.status);
 }
 
@@ -411,9 +518,11 @@ async function authorizeMcpRequest(
   method: string | undefined,
   headers: IncomingHttpHeaders,
   options: McpOptions,
-): Promise<{ identity: IngressIdentity } | { status: number }> {
+): Promise<{ identity: McpIdentity } | { status: number }> {
   const gate = authorizeRequest(method, headers, options);
-  if (!("status" in gate) || gate.status === 405 || !options.personalTokens) return gate;
+  if (!("status" in gate) && !gate.identity.subject.startsWith("personal:")) return gate;
+  if ("status" in gate && gate.status === 405) return gate;
+  if (!options.personalTokens) return "status" in gate ? gate : { status: 401 };
   const raw = headers.authorization;
   const header = Array.isArray(raw) ? raw[0] : raw;
   const bearer = typeof header === "string" ? /^Bearer ([a-f0-9]{64})$/.exec(header)?.[1] : undefined;
@@ -421,7 +530,7 @@ async function authorizeMcpRequest(
   try {
     const token = await options.personalTokens.get(digestBearer(bearer));
     if (!token) return { status: 401 };
-    return { identity: { subject: token.subject, email: token.email } };
+    return { identity: { subject: token.subject, email: token.email, verifiedUserId: token.userId } };
   } catch {
     return { status: 503 };
   }
@@ -436,51 +545,157 @@ function mcpErrorForStatus(status: number): McpResponse {
 }
 
 /** Parse and route one JSON-RPC message from an already-authed caller. */
+function bearerFrom(headers: IncomingHttpHeaders): string {
+  const value = Array.isArray(headers.authorization) ? headers.authorization[0] : headers.authorization;
+  return value?.replace(/^Bearer /, "") ?? "";
+}
+
 async function handleMcpMessage(
-  identity: IngressIdentity,
+  identity: McpIdentity,
   rawBody: string,
   deps: CoreDeps,
   options: McpOptions,
+  connectionId: string,
+  incomingHeaders: IncomingHttpHeaders,
 ): Promise<McpResponse> {
-  // What this token's bearer holds: config's grants for `mcp:<subject>` (the
-  // bot's store, or a test's lookup). Both the `dispatch` gate and every
-  // registry tool's Caller read from it.
-  const lookup: GrantsLookup = options.grantsFor ?? ((id) => deps.config.grantsFor(id));
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawBody);
-  } catch {
-    return { status: 200, body: err(null, PARSE_ERROR, "parse error: invalid JSON") };
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return { status: 200, body: err(null, INVALID_REQUEST, "invalid request: expected a JSON-RPC object") };
-  }
-  const msg = parsed as Record<string, unknown>;
-  // Strict JSON-RPC 2.0: the version field is required and must be exactly "2.0".
-  if (msg.jsonrpc !== "2.0") {
-    return { status: 200, body: err(readId(msg), INVALID_REQUEST, 'invalid request: `jsonrpc` must be "2.0"') };
-  }
-  // An `id`, when present, must be a string, number, or null — a malformed id
-  // (object/boolean) is itself an invalid request, not silently coerced to null.
-  if ("id" in msg && typeof msg.id !== "string" && typeof msg.id !== "number" && msg.id !== null) {
-    return { status: 200, body: err(null, INVALID_REQUEST, "invalid request: `id` must be a string, number, or null") };
-  }
-  if (typeof msg.method !== "string") {
-    return { status: 200, body: err(readId(msg), INVALID_REQUEST, "invalid request: `method` is required") };
-  }
+  const handler = sdkHandler(identity, deps, options, connectionId);
+  const mirrored = Object.fromEntries(
+    ["mcp-protocol-version", "mcp-method", "mcp-name"].flatMap((name) =>
+      typeof incomingHeaders[name] === "string" ? [[name, incomingHeaders[name] as string]] : [],
+    ),
+  );
+  const response = await handler.fetch(
+    new Request("http://localhost/mcp", {
+      method: "POST",
+      body: rawBody,
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...mirrored },
+    }),
+  );
+  const raw = await response.text();
+  await handler.close();
+  return { status: response.status, ...(raw ? { body: JSON.parse(raw) } : {}) };
+}
 
-  // A JSON-RPC notification (no `id`) is never answered; accept it (202).
-  if (!("id" in msg)) {
-    return { status: 202 };
-  }
+function sdkHandler(identity: McpIdentity, deps: CoreDeps, options: McpOptions, connectionId: string) {
+  const makeServer = () => {
+    const server = new Server(SERVER_INFO, { capabilities: { tools: {} }, inputRequired: { legacyShim: false } });
+    const lookup = options.grantsFor ?? ((actorId: string) => deps.config.grantsFor(actorId));
+    server.setRequestHandler("tools/list", async () => {
+      const body = await route({ method: "tools/list", params: {} }, identity, deps, options, lookup, connectionId);
+      return (body as JsonRpcResultBody).result as ListToolsResult;
+    });
+    server.setRequestHandler("tools/call", async (request, ctx) => {
+      const body = await route(
+        { id: ctx.mcpReq.id, method: "tools/call", params: request.params ?? {} },
+        identity,
+        deps,
+        options,
+        lookup,
+        connectionId,
+        ctx,
+      );
+      if ("error" in body) throw new ProtocolError(body.error.code, body.error.message, body.error.data);
+      return body.result as CallToolResult;
+    });
+    return server;
+  };
+  const modern = createSdkHandler(makeServer, {
+    legacy: "reject",
+    maxRequestBodySize: options.maxBodyBytes ?? MAX_BODY_BYTES,
+  });
+  return {
+    close: modern.close,
+    fetch: async (request: Request, requestOptions?: { parsedBody?: unknown }) => {
+      if (!(await isLegacyRequest(request))) return modern.fetch(request, requestOptions);
+      // The maintained transport keeps the established JSON-only legacy wire.
+      const server = makeServer();
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        enableJsonResponse: true,
+      });
+      await server.connect(transport);
+      try {
+        return await transport.handleRequest(request, requestOptions);
+      } finally {
+        await server.close();
+      }
+    },
+  };
+}
 
-  const params =
-    typeof msg.params === "object" && msg.params !== null && !Array.isArray(msg.params)
-      ? (msg.params as Record<string, unknown>)
-      : {};
-  const request: JsonRpcRequest = { id: readId(msg), method: msg.method, params };
-  const body = await route(request, identity, deps, options, lookup);
-  return { status: 200, body };
+function offeredResult(
+  id: JsonRpcId,
+  offer: ConfirmationOffer,
+  options: McpOptions,
+  ctx?: ServerContext,
+): JsonRpcResultBody | JsonRpcErrorBody {
+  const url = approvalUrl(options, offer.id);
+  if (!url) return err(id, -32004, "Browser approval is unavailable; nothing ran");
+  const capabilities = (ctx?.mcpReq.envelope as { [CLIENT_CAPABILITIES_META_KEY]?: ClientCapabilities } | undefined)?.[
+    CLIENT_CAPABILITIES_META_KEY
+  ];
+  if (capabilities?.elicitation?.url)
+    return ok(
+      id,
+      inputRequired({
+        requestState: offer.id,
+        inputRequests: {
+          approval: inputRequired.elicitUrl({
+            url,
+            message: "Review and approve the saved Switchboard action in your signed-in browser.",
+          }),
+        },
+      }),
+    );
+  return ok(id, {
+    content: [
+      {
+        type: "text",
+        text: `Nothing ran. Review the saved action at ${url}, then call approval_resume with id ${offer.id}. To decline, call approval_cancel with that id.`,
+      },
+    ],
+    structuredContent: { approval: { id: offer.id, url, expiresAt: offer.expiresAt } },
+  });
+}
+
+async function approvalResult(
+  id: JsonRpcId,
+  offerId: string,
+  deps: CoreDeps,
+  options: McpOptions,
+  actor: Caller["actor"],
+  connectionId: string,
+  cancel: boolean,
+): Promise<JsonRpcResultBody | JsonRpcErrorBody> {
+  const store = deps.confirmations;
+  const row = store && (await ownApproval(store, offerId, actor, connectionId));
+  if (!store || !row)
+    return err(
+      id,
+      -32003,
+      "This offer is unavailable or already used. Check its original run history before requesting another action.",
+    );
+  if (cancel) {
+    const result = await store.cancel(offerId, [row.message.userId], connectionId);
+    return ok(id, {
+      content: [
+        { type: "text", text: result.ok ? "Cancelled; nothing ran" : "This offer is already used; nothing ran" },
+      ],
+    });
+  }
+  const io = new McpIO(
+    [],
+    row.message.threadKey,
+    approvalUrl(options, "offer") && store.approve && store.get
+      ? (offer) =>
+          `Nothing ran. Review ${offer.line} at ${approvalUrl(options, offer.id)}, then call approval_resume with id ${offer.id}.`
+      : undefined,
+  );
+  const refusal = await resumeApproval(deps, store, row, actor, io, connectionId, options);
+  return ok(id, {
+    content: [{ type: "text", text: refusal || io.collected() }],
+    ...(io.run() ? { structuredContent: io.run() } : {}),
+  });
 }
 
 /**
@@ -519,8 +734,19 @@ export function createMcpHandler(deps: CoreDeps, options: McpOptions): (req: Htt
           req.destroy();
           return;
         }
-        const result = await handleMcpMessage(gate.identity, read.body, deps, options);
-        write(res, result.status, result.body);
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(read.body);
+        } catch {
+          write(res, 200, err(null, PARSE_ERROR, "parse error: invalid JSON"));
+          return;
+        }
+        const handler = sdkHandler(gate.identity, deps, options, digestBearer(bearerFrom(req.headers)));
+        try {
+          await toNodeHandler(handler)(req, res, parsed);
+        } finally {
+          await handler.close();
+        }
       } catch (e) {
         // dispatch() catches its own errors and replies, so reaching here means
         // a transport fault. Answer honestly; never leak internals.

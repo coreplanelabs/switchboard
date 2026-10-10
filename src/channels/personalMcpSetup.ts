@@ -3,6 +3,7 @@ import type { AccessIdentity } from "./accessAuth.js";
 import { hasAction } from "../core/authz/authorize.js";
 import type { GrantsLookup } from "../core/authz/actor.js";
 import { PERSONAL_TOKEN_DIGEST, personalSubject } from "../core/personalToken.js";
+import type { PersonLookup } from "./requester.js";
 import type { PersonalTokenStore } from "../mcp/personalTokens.js";
 import { readBody } from "./http.js";
 import { FORM_PAGE_CSP, WEB_HTML_HEADERS } from "./webShell.js";
@@ -15,6 +16,7 @@ export function createPersonalMcpSetupHandler(deps: {
   store: PersonalTokenStore;
   grantsFor: GrantsLookup;
   publicOrigin?: string;
+  personByEmail?: PersonLookup;
 }): (req: IncomingMessage, res: ServerResponse, identity: AccessIdentity) => boolean {
   return (req, res, identity) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -35,7 +37,7 @@ async function handle(
   req: IncomingMessage,
   res: ServerResponse,
   identity: AccessIdentity,
-  deps: { store: PersonalTokenStore; grantsFor: GrantsLookup; publicOrigin?: string },
+  deps: { store: PersonalTokenStore; grantsFor: GrantsLookup; publicOrigin?: string; personByEmail?: PersonLookup },
   url: URL,
 ): Promise<void> {
   if (!identity.sub || !identity.email)
@@ -91,7 +93,9 @@ async function handle(
     const prior = await deps.store.get(challenge);
     if (prior && prior.subject !== subject)
       return page(res, 409, "Connection already used", "<p>Start a new connection from your terminal.</p>");
-    await deps.store.put({ digest: challenge, subject, email: identity.email, createdAt: systemClock() });
+    const person = await deps.personByEmail?.(identity.email);
+    const userId = person?.id ?? `access:${identity.sub}`;
+    await deps.store.put({ digest: challenge, subject, email: identity.email, userId, createdAt: systemClock() });
     return page(
       res,
       200,

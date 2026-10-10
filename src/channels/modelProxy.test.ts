@@ -1094,7 +1094,8 @@ describe("tool-schema conformance on each wire", () => {
 
   it("the operator catalogue is clean of every construct known to be refused on each wire", async () => {
     const catalogue = operatorCatalogue();
-    expect(catalogue).toHaveLength(55);
+    expect(catalogue).toHaveLength(56);
+    expect(catalogue.map((tool) => tool.name)).toContain("review_status");
     expect(catalogue.filter((tool) => tool.name === OPERATOR_READ_TOOLS.repositoryBrief)).toHaveLength(1);
     expect(catalogue.map((tool) => tool.name)).toContain(OPERATOR_ASK_REPO_TOOL);
     expect(

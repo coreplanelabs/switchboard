@@ -339,4 +339,30 @@ describe("PlanePage — the chat column (record 0070)", () => {
     vi.unstubAllGlobals();
     w.unmount();
   });
+  it("confirms a saved offer by id through the same send route", async () => {
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            offer: { id: "offer-one", line: "repo offboard acme/api", risk: "removes the repository" },
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ reply: "Removed acme/api" }), { status: 200 }));
+    vi.stubGlobal("fetch", send);
+    const w = mountApp(PlaneChat, { props: { chat: chat(), at: NOW, now: NOW } });
+    await w.find("textarea").setValue("remove acme/api");
+    await w.find("textarea").trigger("keydown", { key: "Enter", shiftKey: false });
+    await vi.waitFor(() =>
+      expect(w.find("[data-testid=confirmation-offer]").text()).toContain("repo offboard acme/api"),
+    );
+    expect(w.find("textarea").exists()).toBe(false);
+    await w.find("[data-testid=confirmation-offer]").findAll("button")[0].trigger("click");
+    await vi.waitFor(() => expect(w.text()).toContain("Removed acme/api"));
+    expect(JSON.parse(send.mock.calls[1]![1].body)).toEqual({ confirmation: { kind: "confirm", id: "offer-one" } });
+    expect(w.find("[data-testid=confirmation-offer]").exists()).toBe(false);
+    w.unmount();
+  });
 });

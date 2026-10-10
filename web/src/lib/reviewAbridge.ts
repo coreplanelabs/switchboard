@@ -1,11 +1,12 @@
+import { postCommand, getCommand } from "./settingsApi";
 import { reactive } from "vue";
 import type { AbridgeControl, AbridgeState } from "../modules/pr-review/types";
 
 // The host's half of the panel's "Abridge with meat" control
 // (docs/reference/specs/reading-diff.md item 12): the pr-review module renders the
 // state and calls `start`; this drives the command surface. `POST
-// /api/review.abridge` starts the abridging and is also the poll — the same
-// call answers `running` until the artifact is stored, then `done` (or
+// /api/review.abridge` starts the abridging; the read-only status command polls. The
+// status answers `running` until the artifact is stored, then `done` (or
 // `failed`). `done` says nothing about the diff itself: it sits on the run's
 // record as a second `review_artifact`, so the record is read back
 // (`GET /api/runs.events`, paged) and every event is handed to the sink — the
@@ -51,15 +52,9 @@ export function createReviewAbridge(
   let serverFailed = false;
 
   async function post(force: boolean): Promise<Answer> {
-    const res = await fetch("/api/review.abridge", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: runId, ...(force ? { force: true } : {}) }),
-    });
-    const body = (await res.json().catch(() => null)) as Answer | null;
-    if (!res.ok) throw new Error(typeof body?.error === "string" ? body.error : `HTTP ${res.status}`);
-    return body ?? {};
+    const answer = await postCommand(fetch, "review.abridge", { id: runId, ...(force ? { force: true } : {}) });
+    if (!answer.ok) throw new Error(answer.failure.message);
+    return (answer.value ?? {}) as Answer;
   }
 
   /** Read the record page by page into the sink. `found` once a meat diff went
@@ -98,7 +93,9 @@ export function createReviewAbridge(
         }
         await delay(POLL_INTERVAL_MS);
         if (disposed) return;
-        answer = await post(false);
+        const status = await getCommand(fetch, "review.status", { id: runId });
+        if (!status.ok) throw new Error(status.failure.message);
+        answer = (status.value ?? {}) as Answer;
       }
       if (disposed) return;
       if (answer.state === "failed") {

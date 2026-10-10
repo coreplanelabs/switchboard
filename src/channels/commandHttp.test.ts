@@ -1,3 +1,4 @@
+import { preapprovedCaller } from "../core/testing/callers.js";
 import { describe, expect, it } from "vitest";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import { CommandRegistry, bindCommands, type CommandInvoker } from "../core/commandRegistry.js";
@@ -96,7 +97,11 @@ async function fixture(over: Partial<CommandHttpOptions> = {}) {
   const runs = createRunsService({ registry: reg, store });
   const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
   registerRunsCommands(registry);
-  const commands: CommandInvoker = bindCommands(registry, { runs: async () => runs });
+  const bound = bindCommands(registry, { runs: async () => runs });
+  const commands: CommandInvoker = {
+    ...bound,
+    invoke: (id, input, caller, trace) => bound.invoke(id, input, preapprovedCaller(caller), trace),
+  };
   const opts: CommandHttpOptions = {
     // Config's grants as `ConfigStore.grantsFor` resolves them: an operator (every read + write over every channel), one service token; every other browser session holds the reads.
     grantsFor: (id) => grantsFor(id, { grants: native(OPERATOR_AND_READER), commandGroups: ["runs"] }),

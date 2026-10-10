@@ -34,7 +34,7 @@ const meatArtifact = {
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe("createReviewAbridge", () => {
-  it("start: POSTs the run id as JSON same-origin, reads running, polls with the same POST after a delay, and on done pages the record and hands every event to the sink", async () => {
+  it("start: POSTs the run id as JSON same-origin, reads running, polls read-only status after a delay, and on done pages the record and hands every event to the sink", async () => {
     const { fetch, calls } = fakeFetch([
       json({ id: "run-1", state: "running", startedAt: 1 }),
       json({ id: "run-1", state: "done", reused: false, artifact: { model: "m" } }),
@@ -57,7 +57,8 @@ describe("createReviewAbridge", () => {
     });
     expect(JSON.parse(String(calls[0].init?.body))).toEqual({ id: "run-1" });
     expect(delay).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(String(calls[1].init?.body))).toEqual({ id: "run-1" });
+    expect(calls[1].url).toBe("/api/review.status?id=run-1");
+    expect(calls[1].init?.body).toBeUndefined();
     expect(calls[2].url).toBe("/api/runs.events?id=run-1");
     expect(calls[2].init).toMatchObject({ credentials: "same-origin" });
     expect(calls[3].url).toBe("/api/runs.events?id=run-1&after-seq=5");

@@ -484,6 +484,36 @@ describe("ConfigDO confirmations (docs/reference/specs/routing-and-config.md ite
     ttlMs: TTL,
   });
 
+  it("browser approval updates only the existing bound offer and single-use consumption requires that connection", async () => {
+    const id = `c-${key()}`;
+    const connectionId = "a".repeat(64);
+    const message = { userId: requester, approvalConnection: { id: connectionId } };
+    await post("/config/confirmations/put", row(id, `mcp:default:${key()}`, { command: "repo.offboard", message }));
+    expect((await post("/config/confirmations/consume", { id, actorIds: [requester], connectionId })).data).toEqual({
+      refused: "foreign",
+    });
+    expect(
+      (await post("/config/confirmations/approve", { id, actorIds: [requester], connectionId: "b".repeat(64) })).data,
+    ).toEqual({ refused: "foreign" });
+    const approval = await post("/config/confirmations/approve", { id, actorIds: [requester], connectionId });
+    expect(approval.data.row).toMatchObject({ id, body: { browserApproved: true, command: "repo.offboard" } });
+    expect((await post("/config/confirmations/consume", { id, actorIds: [requester] })).data).toEqual({
+      refused: "foreign",
+    });
+    const results = await Promise.all(
+      [1, 2].map(() => post("/config/confirmations/consume", { id, actorIds: [requester], connectionId })),
+    );
+    expect(results.filter((result) => "row" in result.data)).toHaveLength(1);
+    expect(results.find((result) => "row" in result.data)?.data.row).toMatchObject({
+      id,
+      body: { browserApproved: true, command: "repo.offboard" },
+    });
+    expect(results.find((result) => "refused" in result.data)?.data).toEqual({ refused: "used" });
+    expect((await post("/config/confirmations/approve", { id, actorIds: [requester], connectionId })).data).toEqual({
+      refused: "used",
+    });
+  });
+
   it("put stamps expiresAt on the object's clock from the ttl; consume returns the row once for the requester and deletes it; a second consume is `used`", async () => {
     const id = `c-${key()}`;
     const thread = `slack:CX:${key()}`;

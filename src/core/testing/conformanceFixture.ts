@@ -1,3 +1,4 @@
+import { preapprovedCaller } from "./callers.js";
 // The conformance suite's world, shared. `src/core/commandConformance.test.ts`
 // (docs/reference/specs/command-registry.md item 25) drives every command × variant ×
 // surface against ONE generic in-memory fixture — `fixture()` here: a
@@ -428,7 +429,9 @@ export function recording(inner: CommandInvoker, recorded: Recorded[]): CommandI
     list: () => inner.list(),
     get: (id) => inner.get(id),
     invoke: async (id, input, caller) => {
-      const result = await inner.invoke(id, input, caller);
+      // This fixture isolates authorization and handler contracts. Consent has
+      // already been granted synthetically; real consent uses the adapter tests.
+      const result = await inner.invoke(id, input, preapprovedCaller(caller));
       recorded.push({ id, input, caller, result });
       return result;
     },

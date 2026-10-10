@@ -84,6 +84,7 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 | Command | What it does | Who can run it |
 |---|---|---|
 | `review abridge <id> [--model <string>] [--force] [--wait]` | Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed. | admins |
+| `review status <id>` | Read the progress of an abridged review diff without starting or recomputing it. | admins |
 
 ### `friction`
 

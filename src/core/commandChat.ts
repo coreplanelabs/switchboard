@@ -220,6 +220,7 @@ export interface ChatCommandResult {
   /** Close progress after the conversation receipt is stored. */
   finishCard?: (error?: string) => Promise<boolean>;
   ok: boolean;
+  confirmation?: import("./types.js").ConfirmationOffer;
   /** The error code when the invocation failed — the registry's, or the
    *  grammar's `invalid_input` for a malformed tail (a help reply has none). */
   error?: InvokeErrorCode;
@@ -293,6 +294,7 @@ export async function invokeChatCommand({
   const caller = chatCallerFor(msg, config, resolveRepo);
   const trace = span || source ? { ...(span ? { span } : {}), ...(source ? { source } : {}) } : undefined;
   const res = await commands.invoke(parsed.id, parsed.input, caller, trace);
+  if (!res.ok && res.confirmation) return { ok: true, text: res.message, confirmation: res.confirmation };
   if (res.ok) {
     const text = renderText(commands.get(parsed.id) ?? { id: parsed.id }, res.value, {
       surface: "chat",

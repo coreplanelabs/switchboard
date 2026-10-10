@@ -44,6 +44,8 @@ export const NO_GRANTS: Grants = Object.freeze({
 });
 
 export interface Actor {
+  /** Server-attested standing consent, bounded by normal authorization; never read from request arguments. */
+  readonly standingConsent?: GrantSet;
   readonly kind: ActorKind;
   /** Platform-namespaced (invariant 4): `slack:U…`, `http:<subject>`, `mcp:<subject>`,
    *  `access:<sub>`, `access:svc:<common_name>`, `cli:local`, `schedule:<name>`, `agent:<name>`. */

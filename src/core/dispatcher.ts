@@ -75,7 +75,15 @@ import {
   type ResumeContext,
 } from "./dispatch/admission.js";
 import { answerChatCommand, type FastPathDeps } from "./dispatch/fastPath.js";
-import { actorIdsOf, cancelPending, consumeAndRun, OFFER_CONTEXT_LINE, REFUSED_REASON } from "./dispatch/confirm.js";
+import {
+  actorIdsOf,
+  cancelPending,
+  consumeAndRun,
+  OFFER_CONTEXT_LINE,
+  OFFER_FOREIGN_LINE,
+  OFFER_UNREADABLE_LINE,
+  REFUSED_REASON,
+} from "./dispatch/confirm.js";
 import type { PrWorkBinding } from "./ship/prWorkBinding.js";
 import {
   postSettledOutcome,
@@ -633,6 +641,22 @@ export async function dispatch(
   io: ChannelIO,
   opts: DispatchOptions = {},
 ): Promise<DispatchOutcome> {
+  const confirmation =
+    !opts.resume && !opts.restart && !opts.redispatch
+      ? /^(confirm|cancel) ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(msg.text.trim())
+      : null;
+  if (confirmation)
+    return dispatchClick(
+      deps,
+      {
+        kind: confirmation[1] as "confirm" | "cancel",
+        id: confirmation[2]!,
+        actor: chatActorOf(deps.config, msg),
+        io,
+        connectionId: msg.approvalConnection?.id,
+      },
+      { trace: opts.trace, threadKey: msg.threadKey },
+    );
   // How this request ends, for the caller: every exit below returns this one
   // object and the outer finally stamps its status before the promise settles,
   // so the function resolves exactly when it did before it answered anything.
@@ -5005,6 +5029,8 @@ export async function dispatch(
 export interface ClickRequest {
   kind: "confirm" | "cancel";
   id: string;
+  /** An authenticated connection fingerprint, supplied by its adapter. */
+  connectionId?: string;
   actor: Actor;
   io: ChannelIO;
 }
@@ -5024,13 +5050,19 @@ export interface ClickRequest {
  * named line and a `refused` outcome, nothing run. A throw is answered the way
  * `dispatch()` answers one: the redacted error line, the request `failed`.
  */
-export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promise<DispatchOutcome> {
+export async function dispatchClick(
+  deps: CoreDeps,
+  click: ClickRequest,
+  opts: { trace?: RequestTrace; threadKey?: string } = {},
+): Promise<DispatchOutcome> {
   const ended: DispatchOutcome = { status: "completed" };
   const clock = deps.clock ?? systemClock;
-  const trace = startRequestRoot(deps, {
-    channel: click.actor.origin ? channelOf(click.actor.origin.channelId) : undefined,
-    receivedAt: clock(),
-  });
+  const trace =
+    opts.trace ??
+    startRequestRoot(deps, {
+      channel: click.actor.origin ? channelOf(click.actor.origin.channelId) : undefined,
+      receivedAt: clock(),
+    });
   const root = trace.root;
   const io = click.io;
   const actorIds = actorIdsOf(click.actor);
@@ -5058,8 +5090,28 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
     });
   };
   try {
+    // Text names only a saved id and must stay in the thread that received it.
+    // Atomic consumption still checks identity, expiry and connection consent.
+    if (opts.threadKey !== undefined) {
+      const store = deps.confirmations;
+      if (!store?.get) {
+        await refuse(refusalOf("confirmation_unreadable", OFFER_UNREADABLE_LINE));
+        return ended;
+      }
+      let row;
+      try {
+        row = await store.get(click.id);
+      } catch {
+        await refuse(refusalOf("confirmation_unreadable", OFFER_UNREADABLE_LINE));
+        return ended;
+      }
+      if (row && row.message.threadKey !== opts.threadKey) {
+        await refuse(refusalOf("confirmation_foreign", OFFER_FOREIGN_LINE));
+        return ended;
+      }
+    }
     if (click.kind === "cancel") {
-      const res = await cancelPending(deps, { id: click.id, actorIds });
+      const res = await cancelPending(deps, { id: click.id, actorIds, connectionId: click.connectionId });
       if (res.kind === "refused")
         await ending.sealAfterReply(
           async () => {},
@@ -5077,7 +5129,7 @@ export async function dispatchClick(deps: CoreDeps, click: ClickRequest): Promis
     // the click's drain slot handed over, the question's code on the record.
     const res = await consumeAndRun(
       deps,
-      { id: click.id, actorIds },
+      { id: click.id, actorIds, connectionId: click.connectionId },
       io,
       ending,
       trace,

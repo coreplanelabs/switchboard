@@ -17,6 +17,7 @@
 
 import {
   actsAsPerson,
+  credentialPolicyActor,
   effectiveGrants,
   hasAction,
   holds,
@@ -149,6 +150,12 @@ export function predicateWith(
   if (RESOURCE_KINDS[resourceType] && kind === undefined) {
     throw new TypeError(`authz predicate: ${resourceType} is kinded — pass the kind`);
   }
+  const credential = credentialPolicyActor(actor);
+  if (credential)
+    return allOf([
+      predicateWith(rules, credential, action, resourceType, kind),
+      predicateWith(rules, actor.onBehalfOf!, action, resourceType, kind),
+    ]);
   const target = targetOf(resourceType, kind);
   if (!target) throw new TypeError(`authz predicate: no target for ${resourceType}${kind ? `/${kind}` : ""}`);
   if (!isKnownActorKind(actor.kind)) return NONE;

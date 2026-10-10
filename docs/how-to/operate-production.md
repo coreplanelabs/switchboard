@@ -247,3 +247,15 @@ verified exact head before review resumes.
 An operator with `credentials:exec` and visibility of the run can use `credentials inspect <run-id> --backend resident --repo owner/repo --ref branch --head <40-character-sha>` through the service's existing command interface. Select the actual backend (`resident` or `sandbox`) and exact live checkout first. The command never starts a run, mints a credential, or publishes a branch. The resident Worker validates the count receipt before transport and compares the process against its recorded launch identity. Older live runs without that identity remain incomplete. A standalone CLI process has no live harness registry and returns an incomplete inspection.
 
 The result contains counts and booleans only. `completed: true` means the bounded observation finished with a stable process and checkout; check `appTokenMatches` separately. `completed: false` or `unknownCount > 0` leaves the evidence incomplete. The probe reads both process environments, known credential-file locations, and Git helper configuration. It never executes a helper. The current cold executor refuses in the trusted bot before any remote command because its root model could replace the inspector. Unknown helper configuration on a supported runtime also leaves the inspection incomplete. These counts do not prove whole-container absence, helper execution, revoked-bearer refusal, or publication. Keep those receipts separate.
+
+## Confirm an MCP command
+
+Connect through the existing browser-approved personal flow. The connection acts within your current user permissions and its configured delegated scope. A read-only token cannot borrow your admin rights.
+
+When Switchboard holds an action, open its authenticated browser link and review the full action and target. Confirm there, then let a supporting client retry with the saved state. On older clients, call `approval_resume` with the displayed id. `approval_cancel` or the browser's Cancel button declines it. A confirmation boolean in a tool call has no authority.
+
+The default confirmation class is `write`. A permitted `boundary.confirm: destructive` scope allows authorized routine writes without repeated clicks; destructive actions still need confirmation. CLI operator and named schedule scopes retain their existing standing authority through the same gate. Unsupported surfaces refuse before effects.
+
+An expired, cancelled or consumed id cannot execute again. If a result was lost, inspect the original run history before asking for a new action. A deployed build and a finished request alone do not prove its effect.
+
+For rollout, deploy the state Worker approval routes before the bot. The routes extend the existing confirmation table and keep older saved rows readable. Missing support refuses before an action runs.

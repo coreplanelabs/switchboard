@@ -45,8 +45,76 @@ const pending = (id: string, over: Partial<Omit<RunConfirmation, "expiresAt">> =
 const TTL = 600_000;
 
 /** The contract every store answers: the clock is the store's own, advanced by the test. */
-function contract(name: string, make: () => { store: ConfirmationStore; tick: (ms: number) => void }) {
+function contract(
+  name: string,
+  make: () => { store: ConfirmationStore; tick: (ms: number) => void },
+  browserApproval = true,
+) {
   describe(name, () => {
+    if (browserApproval) {
+      it("browser approval preserves the expiry and permits only the requester and originating connection to consume once", async () => {
+        const { store } = make();
+        const connectionId = "a".repeat(64);
+        const row = await store.put(
+          pending("browser-1", {
+            message: {
+              ...message,
+              authenticatedAs: "mcp:alice",
+              approvalConnection: { id: connectionId, credentialId: "mcp:alice", requestHash: "b".repeat(64) },
+            },
+          }),
+          TTL,
+        );
+        expect(await store.consume(row.id, [message.userId], connectionId)).toEqual({ ok: false, refused: "foreign" });
+        expect(await store.approve!(row.id, [message.userId], "c".repeat(64))).toEqual({
+          ok: false,
+          refused: "foreign",
+        });
+        expect(await store.approve!(row.id, ["slack:UOTHER"], connectionId)).toMatchObject({
+          ok: false,
+          refused: "foreign",
+        });
+        expect(await store.approve!(row.id, [message.userId], connectionId)).toMatchObject({
+          ok: true,
+          row: { id: "browser-1", expiresAt: row.expiresAt, browserApproved: true },
+        });
+        expect(await store.consume(row.id, [message.userId])).toEqual({ ok: false, refused: "foreign" });
+        const outcomes = await Promise.all([1, 2].map(() => store.consume(row.id, [message.userId], connectionId)));
+        expect(outcomes.find((x) => x.ok)).toMatchObject({
+          ok: true,
+          row: { id: "browser-1", command: "config.set", browserApproved: true },
+        });
+        expect(outcomes.find((x) => !x.ok)).toEqual({ ok: false, refused: "used" });
+        expect(await store.approve!(row.id, [message.userId], connectionId)).toEqual({ ok: false, refused: "used" });
+      });
+
+      it("an approved browser offer still expires and cancellation prevents later approval", async () => {
+        const { store, tick } = make();
+        const connectionId = "a".repeat(64);
+        const value = pending("browser-2", {
+          message: {
+            ...message,
+            approvalConnection: { id: connectionId, credentialId: "mcp:alice", requestHash: "b".repeat(64) },
+          },
+        });
+        await store.put(value, TTL);
+        expect(await store.approve!(value.id, [message.userId], connectionId)).toMatchObject({
+          ok: true,
+          row: { browserApproved: true },
+        });
+        tick(TTL);
+        expect(await store.consume(value.id, [message.userId], connectionId)).toMatchObject({
+          ok: false,
+          refused: "expired",
+        });
+        await store.put({ ...value, id: "browser-3" }, TTL);
+        expect(await store.cancel("browser-3", [message.userId], connectionId)).toEqual({ ok: true });
+        expect(await store.approve!("browser-3", [message.userId], connectionId)).toEqual({
+          ok: false,
+          refused: "used",
+        });
+      });
+    }
     it("put stamps the expiry from the ttl on the store's clock and answers the row; consume returns it once for the requester, then `used`", async () => {
       const { store } = make();
       const row = await store.put(pending("c1"), TTL);
@@ -162,56 +230,60 @@ contract("FileConfirmationStore", () => {
 
 /** The config object's client over a scripted fetch that plays the object: the
  *  same contract, with the Worker's answers shaped as the routes answer them. */
-contract("WorkerConfirmationStore over a scripted object", () => {
-  const { clock, tick } = withClock();
-  const rows = new Map<string, { threadKey: string; requester: string; expiresAt: number; body: unknown }>();
-  const fetchImpl: typeof fetch = async (input, init) => {
-    const path = new URL(String(input)).pathname;
-    const b = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    const answer = (data: unknown) =>
-      new Response(JSON.stringify(data), { status: 200, headers: { "content-type": "application/json" } });
-    if (path === "/config/confirmations/put") {
-      for (const [id, r] of rows) if (r.threadKey === b.threadKey) rows.delete(id);
-      const expiresAt = clock() + (b.ttlMs as number);
-      rows.set(b.id as string, {
-        threadKey: b.threadKey as string,
-        requester: b.requester as string,
-        expiresAt,
-        body: b.body,
-      });
-      return answer({ ok: true, expiresAt });
-    }
-    if (path === "/config/confirmations/pending-by-thread") {
-      const found = [...rows.entries()].find(([, r]) => r.threadKey === b.threadKey);
-      if (!found || found[1].expiresAt <= clock()) return answer({ row: null });
-      return answer({ row: { id: found[0], ...found[1] } });
-    }
-    const actorIds = b.actorIds as string[];
-    // The cancel-by-thread route: the thread's row under the same requester check.
-    const id =
-      path === "/config/confirmations/cancel-by-thread"
-        ? [...rows.entries()].find(([, r]) => r.threadKey === b.threadKey)?.[0]
-        : (b.id as string);
-    const stored = id === undefined ? undefined : rows.get(id);
-    if (id === undefined || !stored) return answer({ refused: "used" });
-    if (path === "/config/confirmations/consume" && stored.expiresAt <= clock()) {
+contract(
+  "WorkerConfirmationStore over a scripted object",
+  () => {
+    const { clock, tick } = withClock();
+    const rows = new Map<string, { threadKey: string; requester: string; expiresAt: number; body: unknown }>();
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const b = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const answer = (data: unknown) =>
+        new Response(JSON.stringify(data), { status: 200, headers: { "content-type": "application/json" } });
+      if (path === "/config/confirmations/put") {
+        for (const [id, r] of rows) if (r.threadKey === b.threadKey) rows.delete(id);
+        const expiresAt = clock() + (b.ttlMs as number);
+        rows.set(b.id as string, {
+          threadKey: b.threadKey as string,
+          requester: b.requester as string,
+          expiresAt,
+          body: b.body,
+        });
+        return answer({ ok: true, expiresAt });
+      }
+      if (path === "/config/confirmations/pending-by-thread") {
+        const found = [...rows.entries()].find(([, r]) => r.threadKey === b.threadKey);
+        if (!found || found[1].expiresAt <= clock()) return answer({ row: null });
+        return answer({ row: { id: found[0], ...found[1] } });
+      }
+      const actorIds = b.actorIds as string[];
+      // The cancel-by-thread route: the thread's row under the same requester check.
+      const id =
+        path === "/config/confirmations/cancel-by-thread"
+          ? [...rows.entries()].find(([, r]) => r.threadKey === b.threadKey)?.[0]
+          : (b.id as string);
+      const stored = id === undefined ? undefined : rows.get(id);
+      if (id === undefined || !stored) return answer({ refused: "used" });
+      if (path === "/config/confirmations/consume" && stored.expiresAt <= clock()) {
+        rows.delete(id);
+        return answer({ refused: "expired", row: { id, ...stored } });
+      }
+      if (!actorIds.includes(stored.requester))
+        return answer(
+          path === "/config/confirmations/consume"
+            ? { refused: "foreign", row: { id, ...stored } }
+            : { refused: "foreign" },
+        );
       rows.delete(id);
-      return answer({ refused: "expired", row: { id, ...stored } });
-    }
-    if (!actorIds.includes(stored.requester))
-      return answer(
-        path === "/config/confirmations/consume"
-          ? { refused: "foreign", row: { id, ...stored } }
-          : { refused: "foreign" },
-      );
-    rows.delete(id);
-    return answer(path === "/config/confirmations/consume" ? { row: { id, ...stored } } : { ok: true });
-  };
-  return {
-    store: new WorkerConfirmationStore({ baseUrl: "https://memory.test/", token: "tok", fetch: fetchImpl }),
-    tick,
-  };
-});
+      return answer(path === "/config/confirmations/consume" ? { row: { id, ...stored } } : { ok: true });
+    };
+    return {
+      store: new WorkerConfirmationStore({ baseUrl: "https://memory.test/", token: "tok", fetch: fetchImpl }),
+      tick,
+    };
+  },
+  false,
+);
 
 describe("WorkerConfirmationStore (the ConfigDO confirmations client)", () => {
   function fake(routes: Record<string, (body: Record<string, unknown>) => unknown>, status = 200) {

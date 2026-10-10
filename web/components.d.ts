@@ -19,6 +19,7 @@ declare module 'vue' {
     ChannelPicker: typeof import('./src/components/ChannelPicker.vue')['default']
     ChannelsPanel: typeof import('./src/components/settings/ChannelsPanel.vue')['default']
     ChatComposer: typeof import('./src/components/home/ChatComposer.vue')['default']
+    ConfirmationPrompt: typeof import('./src/components/home/ConfirmationPrompt.vue')['default']
     ConversationRail: typeof import('./src/components/home/ConversationRail.vue')['default']
     CostChart: typeof import('./src/components/costs/CostChart.vue')['default']
     CostsByDimension: typeof import('./src/components/costs/CostsByDimension.vue')['default']

@@ -383,6 +383,7 @@ describe("CommandRegistry.invoke — auth before parse", () => {
       kind: "user",
       id: "slack:UIVY",
       grants: { actions: new Set(["runs:read", "runs:write"]), channels: "all", repos: new Set() },
+      standingConsent: new Set(["runs:write"]),
       self: ["slack:UIVY"],
     };
     const admin = callerWith("access", "access:admin", "all");

@@ -4,10 +4,8 @@ import {
   type SmokeReadResult,
 } from "./operatorSmokeDiagnostic.js";
 import { configuredAgent, settingsForAgent } from "../../config/agents.js";
-import { OFFER_CONTEXT_LINE } from "./confirm.js";
 import { audienceRefusalText, type AudienceCheck } from "../audienceDecision.js";
 import {
-  UNKNOWN_CONTEXT_DEPENDENCIES,
   githubRepositoryDependencies,
   isContextDependencies,
   mergeContextDependencies,
@@ -99,21 +97,19 @@ import { prBatchBindingOf, type PrBatchBinding } from "../prBatchBinding.js";
 import { residentSlugsLister } from "../../execution/factory.js";
 import type { ProviderModelsReader } from "./providerModels.js";
 import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
-import { effectiveConfirm } from "../../config/profile.js";
 import { boundBlastRadius, type CommandDef, type CommandInput } from "../commandRegistry.js";
 import { chatInvocation, cliWords, namedToInput, tokenize } from "../commandSurface.js";
 import { GRANT_RENEWALS_MAX, MINUTE_MS, STRUCTURED_RETRIES_MAX } from "../budgets.js";
-import { chatCallerFor, parseChatCommand, type ChatCommands, type ParsedChatCommand } from "../commandChat.js";
+import { parseChatCommand, type ChatCommands, type ParsedChatCommand } from "../commandChat.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { RunEnding } from "../runEnding.js";
 import type { RequestTrace } from "../requestTrace.js";
 import { renderHandBackLine } from "./handBack.js";
-import { STORE_UNREACHABLE_LINE, UNSHOWABLE_LINE } from "../confirmations.js";
-import { decideExecution, type Surface } from "./execution.js";
+import { type Surface } from "./execution.js";
 import { attemptsOfThrow, reAskTurn, type StructuredAttempt } from "./structured.js";
 import type { FastPathDeps } from "./fastPath.js";
 import { recordOperatorDecision, runChatCommand, type OperatorEventFields } from "./commandRun.js";
-import { renderConfirmationOffer, renderOperatorReceipt, replyCommandOutput } from "./reply.js";
+import { renderOperatorReceipt, replyCommandOutput } from "./reply.js";
 import { OPERATOR_TAIL_BYTES, operatorTail, type OperatorTailTurn } from "./seed.js";
 import { operatorCompletion } from "./operatorCompletion.js";
 import { newestFinishedRunOf, type NewestFinishedRun } from "./thread.js";
@@ -127,12 +123,9 @@ import {
   renderPresetTable,
   routableCommands,
   routablePresets,
-  routedRunsAtOnce,
   ROUTE_REASON_CAP,
   ROUTE_RECEIPT_CAP,
-  mintConfirmationOffer,
   MultiToolCallError,
-  routeReceipt,
   type RoutableCommand,
   type RoutablePreset,
   type RouteModel,
@@ -3659,7 +3652,6 @@ export async function executeOperatorDecision(
     const actor = chatActorOf(deps.config, msg);
     const presets = operatorPresets().filter((p) => deps.config.canRunAgent(actor, p.name));
     const presetNames = presets.map((p) => p.name);
-    const confirm = effectiveConfirm(deps.config.boundaryLayers(msg.channelId, msg.userId));
     let carried = false;
     const bind = (event.binds ?? [])[0];
     if (bind !== undefined) {
@@ -3736,66 +3728,7 @@ export async function executeOperatorDecision(
         };
       }
       const radius = boundBlastRadius(def as CommandDef<unknown>, invocation.input);
-      // A bind of `steer` is admission's, not the paste ladder's (the one-door
-      // plan's admission unit; thread-admission item 1): the fold is the act a
-      // thread reply performs with no confirmation, and its fence is the owner
-      // rule the wired sender asks (`authorizeSteerOwner`, authorization item
-      // 16a) plus the live agent's allowlist.
-      const runsNow =
-        def.id === "steer.run" || routedRunsAtOnce(def as CommandDef<unknown>, confirm.value, invocation.input);
       const receipt = renderOperatorReceipt(executedBind.line, radius, executedBind.reason);
-      if (!runsNow) {
-        // The `run_command at_or_above` row. On chat, record 0044's one click
-        // (routing-and-config item 25): the same row, the same Yes handler, the
-        // same ten-minute expiry as a routed write. The cell decides what a
-        // failure names — the mint's failure on chat, the typed form elsewhere.
-        await checkContext();
-        const mint =
-          surface === "chat"
-            ? await mintConfirmationOffer({
-                source: "operator",
-                context: ctx.contextDependencies ?? UNKNOWN_CONTEXT_DEPENDENCIES,
-                io,
-                store: deps.confirmations,
-                msg,
-                origin: chatCallerFor(msg, deps.config).origin,
-                def: bound.def,
-                input: invocation.input,
-                receipt: routeReceipt(bound.def, invocation.input),
-                // The row's model is the decider's, as the routed offer stores
-                // the router's: the operator has its own resolved settings.
-                model: settingsForAgent(deps.config.config, "operator").model ?? "",
-              })
-            : undefined;
-        if (mint !== undefined && mint.kind === "offered") {
-          try {
-            await checkContext();
-            if (verbose) await reply(receipt);
-            await checkContext();
-          } catch (err) {
-            // A row whose offer never reached the reader must not remain clickable.
-            await deps.confirmations?.cancel(mint.shown.id, [msg.userId]).catch(() => undefined);
-            throw err;
-          }
-          await renderConfirmationOffer(io, mint.shown);
-          await recordDecision();
-          return answered;
-        }
-        // The mint failed or this is a typed surface: the cell names what the
-        // refusal must say — the mint's failure on chat, the typed form elsewhere.
-        const cell = decideExecution({ kind: "run_command", confirm: "at_or_above", mintable: false }, surface);
-        const text =
-          cell.cell === "refuse" && cell.names === "typed_form"
-            ? renderHandBackLine(bind.line)
-            : mint !== undefined && mint.kind === "unshowable"
-              ? UNSHOWABLE_LINE
-              : mint?.kind === "context_unavailable"
-                ? OFFER_CONTEXT_LINE
-                : STORE_UNREACHABLE_LINE;
-        await reply(`${verbose ? `${receipt}\n` : ""}${text}`);
-        await recordDecision();
-        return answered;
-      }
       // The `run_command below` row: the run cell, through the class ladder.
       if (verbose) await reply(receipt);
       await checkContext();

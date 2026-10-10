@@ -561,7 +561,7 @@ describe("migrated commands over MCP — grants (AE12)", () => {
     return res.body as { result?: unknown; error?: { code: number; data?: { code: string } } };
   }
 
-  it("a dispatch-only token is refused on friction_report, repo_list, and friction_propose; runs:write is refused on friction_propose; friction:write runs it", async () => {
+  it("a dispatch-only token is refused on friction_report, repo_list, and friction_propose; runs:write is refused on friction_propose; friction:write still requires approval", async () => {
     const f = await fixture();
     for (const name of ["friction_report", "repo_list", "friction_propose"]) {
       const body = await callAs(f.commands, ["dispatch"], name);
@@ -571,7 +571,8 @@ describe("migrated commands over MCP — grants (AE12)", () => {
     // friction:write passes the gate; with no `selfImprovement.repo` and no `repo` arg the step is `unavailable`, not unauthorized
     expect((await callAs(f.commands, ["friction:write"], "friction_propose")).error?.data?.code).toBe("unavailable");
     expect(
-      (await callAs(f.commands, ["friction:write"], "friction_propose", { dryRun: "true", repo: "acme/api" })).result,
-    ).toBeTruthy();
+      (await callAs(f.commands, ["friction:write"], "friction_propose", { dryRun: "true", repo: "acme/api" })).error
+        ?.data?.code,
+    ).toBe("unavailable");
   });
 });

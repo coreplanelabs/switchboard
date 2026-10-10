@@ -70,6 +70,7 @@ const GATES: Record<string, (c: Capabilities) => boolean> = {
   "friction.propose": (c) => c.runHistory,
   "runs.findings": (c) => c.runHistory,
   "review.abridge": (c) => c.runHistory && c.readingDiffAbridge,
+  "review.status": (c) => c.runHistory && c.readingDiffAbridge,
   "repo.list": (c) => c.residents,
   "repo.onboard": (c) => c.residents,
   "repo.offboard": (c) => c.residents,

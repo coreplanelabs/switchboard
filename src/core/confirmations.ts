@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { Secrets } from "../secrets.js";
-import type { CommandInput } from "./commandRegistry.js";
+import type { Caller, CommandInput } from "./commandRegistry.js";
 import { systemClock } from "./trace/clock.js";
 import type { Clock } from "./trace/types.js";
 import type { ConfirmationOffer, IncomingMessage } from "./types.js";
@@ -44,11 +44,18 @@ export interface RunConfirmation {
   message: IncomingMessage;
   command: string;
   input: CommandInput;
+  /** Canonical parsed values freeze schema defaults without reapplying transforms. */
+  parsedInput?: CommandInput;
+  /** Verified originating caller; permissions are resolved fresh at execution. */
+  caller?: Pick<Caller, "kind" | "id" | "email"> & { origin?: Omit<NonNullable<Caller["origin"]>, "repo"> };
   receipt: string;
   risk: string;
   model: string;
   /** Original operator inputs travel with the exact command they derived. */
   derivation?: { kind: "operator"; context: ContextDependencies };
+  browserApproved?: true;
+  /** null means no repository context existed when this action was offered. */
+  originRepo?: string | null;
   expiresAt: number;
 }
 
@@ -68,6 +75,7 @@ export interface RedispatchConfirmation {
   code: string;
   /** Exact PR and objective shown by a Ship work question. */
   binding?: PrWorkBinding;
+  browserApproved?: true;
   expiresAt: number;
 }
 
@@ -100,10 +108,14 @@ export interface ConfirmationStore {
   /** The click: read, judge and delete in one transaction — `used` when the
    *  row is gone, `expired` (and deleted) when past its expiry, `foreign` (and
    *  kept) when none of `actorIds` is the requester, else the row, deleted. */
-  consume(id: string, actorIds: readonly string[]): Promise<ConsumeOutcome>;
+  consume(id: string, actorIds: readonly string[], connectionId?: string): Promise<ConsumeOutcome>;
+  /** Read an exact offer without changing its expiry or consuming it. */
+  get?(id: string): Promise<Confirmation | undefined>;
+  /** Verified browser consent: update an existing row atomically, never recreate one. */
+  approve?(id: string, actorIds: readonly string[], connectionId: string): Promise<ConsumeOutcome>;
   /** Delete under the same requester check; a cancel and a consume on one id
    *  cannot both succeed. */
-  cancel(id: string, actorIds: readonly string[]): Promise<CancelOutcome>;
+  cancel(id: string, actorIds: readonly string[], connectionId?: string): Promise<CancelOutcome>;
   /** Delete the thread's pending row under the same requester check — a typed
    *  answer supersedes the button (record 0054), so a click cannot follow it.
    *  A thread with no row is `used`. */
@@ -224,6 +236,35 @@ function isRedispatchShape(v: Record<string, unknown>): boolean {
 export function parsePendingConfirmation(v: unknown): PendingConfirmation | undefined {
   if (!isRecord(v)) return undefined;
   if (
+    v.caller !== undefined &&
+    (!isRecord(v.caller) ||
+      !["chat", "mcp", "access", "cli"].includes(String(v.caller.kind)) ||
+      typeof v.caller.id !== "string" ||
+      (v.caller.email !== undefined && typeof v.caller.email !== "string"))
+  )
+    return undefined;
+  if (
+    isRecord(v.caller) &&
+    v.caller.origin !== undefined &&
+    (!isRecord(v.caller.origin) ||
+      typeof v.caller.origin.channelId !== "string" ||
+      typeof v.caller.origin.threadKey !== "string")
+  )
+    return undefined;
+  if (v.parsedInput !== undefined && !isRecord(v.parsedInput)) return undefined;
+  if (v.originRepo !== undefined && v.originRepo !== null && typeof v.originRepo !== "string") return undefined;
+  if (v.browserApproved !== undefined && v.browserApproved !== true) return undefined;
+  if (isRecord(v.message) && v.message.approvalConnection !== undefined) {
+    const c = v.message.approvalConnection;
+    if (
+      !isRecord(c) ||
+      typeof c.id !== "string" ||
+      typeof c.credentialId !== "string" ||
+      typeof c.requestHash !== "string"
+    )
+      return undefined;
+  }
+  if (
     "derivation" in v &&
     (v.kind === "redispatch" ||
       !isRecord(v.derivation) ||
@@ -262,16 +303,25 @@ function judge(
   id: string,
   actorIds: readonly string[],
   now: number,
-  kind: "consume" | "cancel",
+  kind: "consume" | "cancel" | "approve",
+  connectionId?: string,
 ): ConsumeOutcome | CancelOutcome {
   const row = rows.get(id);
   if (!row) return { ok: false, refused: "used" };
-  if (kind === "consume" && row.expiresAt <= now) {
+  if (kind !== "cancel" && row.expiresAt <= now) {
     rows.delete(id);
     return { ok: false, refused: "expired", row };
   }
+  const connection = row.message.approvalConnection;
+  if (connection && (connection.id !== connectionId || (kind === "consume" && row.browserApproved !== true)))
+    return { ok: false, refused: "foreign" };
   if (!actorIds.includes(row.message.userId))
     return kind === "consume" ? { ok: false, refused: "foreign", row } : { ok: false, refused: "foreign" };
+  if (kind === "approve") {
+    if (!connection) return { ok: false, refused: "foreign" };
+    row.browserApproved = true;
+    return { ok: true, row };
+  }
   rows.delete(id);
   return kind === "consume" ? { ok: true, row } : { ok: true };
 }
@@ -299,13 +349,20 @@ export class InMemoryConfirmationStore implements ConfirmationStore {
     replaceThreadRow(this.rows, stored);
     return structuredClone(stored);
   }
-  async consume(id: string, actorIds: readonly string[]): Promise<ConsumeOutcome> {
-    const out = judge(this.rows, id, actorIds, this.clock(), "consume") as ConsumeOutcome;
+  async get(id: string): Promise<Confirmation | undefined> {
+    const row = this.rows.get(id);
+    return row ? structuredClone(row) : undefined;
+  }
+  async approve(id: string, actorIds: readonly string[], connectionId: string): Promise<ConsumeOutcome> {
+    return structuredClone(judge(this.rows, id, actorIds, this.clock(), "approve", connectionId)) as ConsumeOutcome;
+  }
+  async consume(id: string, actorIds: readonly string[], connectionId?: string): Promise<ConsumeOutcome> {
+    const out = judge(this.rows, id, actorIds, this.clock(), "consume", connectionId) as ConsumeOutcome;
     if (out.ok) return { ok: true, row: structuredClone(out.row) };
     return out.row ? { ...out, row: structuredClone(out.row) } : out;
   }
-  async cancel(id: string, actorIds: readonly string[]): Promise<CancelOutcome> {
-    return judge(this.rows, id, actorIds, this.clock(), "cancel") as CancelOutcome;
+  async cancel(id: string, actorIds: readonly string[], connectionId?: string): Promise<CancelOutcome> {
+    return judge(this.rows, id, actorIds, this.clock(), "cancel", connectionId) as CancelOutcome;
   }
   async cancelByThread(threadKey: string, actorIds: readonly string[]): Promise<CancelOutcome> {
     const id = threadRowId(this.rows, threadKey);
@@ -354,15 +411,24 @@ export class FileConfirmationStore implements ConfirmationStore {
     this.write(rows);
     return stored;
   }
-  async consume(id: string, actorIds: readonly string[]): Promise<ConsumeOutcome> {
+  async get(id: string): Promise<Confirmation | undefined> {
+    return this.read().get(id);
+  }
+  async approve(id: string, actorIds: readonly string[], connectionId: string): Promise<ConsumeOutcome> {
     const rows = this.read();
-    const out = judge(rows, id, actorIds, this.clock(), "consume") as ConsumeOutcome;
+    const result = judge(rows, id, actorIds, this.clock(), "approve", connectionId) as ConsumeOutcome;
+    this.write(rows);
+    return result;
+  }
+  async consume(id: string, actorIds: readonly string[], connectionId?: string): Promise<ConsumeOutcome> {
+    const rows = this.read();
+    const out = judge(rows, id, actorIds, this.clock(), "consume", connectionId) as ConsumeOutcome;
     this.write(rows);
     return out;
   }
-  async cancel(id: string, actorIds: readonly string[]): Promise<CancelOutcome> {
+  async cancel(id: string, actorIds: readonly string[], connectionId?: string): Promise<CancelOutcome> {
     const rows = this.read();
-    const out = judge(rows, id, actorIds, this.clock(), "cancel") as CancelOutcome;
+    const out = judge(rows, id, actorIds, this.clock(), "cancel", connectionId) as CancelOutcome;
     this.write(rows);
     return out;
   }
@@ -413,8 +479,28 @@ export class WorkerConfirmationStore implements ConfirmationStore {
       throw new Error("confirmation store answered a put without the expiry it stamped");
     return { ...row, expiresAt: body.expiresAt };
   }
-  async consume(id: string, actorIds: readonly string[]): Promise<ConsumeOutcome> {
-    const body = await this.post("/config/confirmations/consume", { id, actorIds });
+  async get(id: string): Promise<Confirmation | undefined> {
+    const body = await this.post("/config/confirmations/get", { id });
+    if (body.row === null) return undefined;
+    return this.readRow(body.row);
+  }
+  async approve(id: string, actorIds: readonly string[], connectionId: string): Promise<ConsumeOutcome> {
+    const body = await this.post("/config/confirmations/approve", { id, actorIds, connectionId });
+    if (isRefusal(body.refused)) return { ok: false, refused: body.refused };
+    const row = this.readRow(body.row);
+    if (!row) throw new Error("confirmation store returned no approved row");
+    return { ok: true, row };
+  }
+  private readRow(value: unknown): Confirmation | undefined {
+    if (!isRecord(value) || !isRecord(value.body)) return undefined;
+    return parseConfirmation({ ...value.body, expiresAt: value.expiresAt });
+  }
+  async consume(id: string, actorIds: readonly string[], connectionId?: string): Promise<ConsumeOutcome> {
+    const body = await this.post("/config/confirmations/consume", {
+      id,
+      actorIds,
+      ...(connectionId ? { connectionId } : {}),
+    });
     const stored = isRecord(body.row) ? body.row : undefined;
     const row = parseConfirmation(
       stored && isRecord(stored.body) ? { ...stored.body, expiresAt: stored.expiresAt } : undefined,
@@ -426,8 +512,12 @@ export class WorkerConfirmationStore implements ConfirmationStore {
     if (!row) throw new Error("confirmation store answered a consume outside its contract");
     return { ok: true, row };
   }
-  async cancel(id: string, actorIds: readonly string[]): Promise<CancelOutcome> {
-    const body = await this.post("/config/confirmations/cancel", { id, actorIds });
+  async cancel(id: string, actorIds: readonly string[], connectionId?: string): Promise<CancelOutcome> {
+    const body = await this.post("/config/confirmations/cancel", {
+      id,
+      actorIds,
+      ...(connectionId ? { connectionId } : {}),
+    });
     if (body.ok === true) return { ok: true };
     if (body.refused === "used" || body.refused === "foreign") return { ok: false, refused: body.refused };
     throw new Error("confirmation store answered a cancel outside its contract");

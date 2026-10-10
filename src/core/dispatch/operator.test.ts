@@ -288,7 +288,7 @@ describe("publication of an operator decision", () => {
     expect(f.put).toHaveBeenCalledOnce();
     expect(f.offer).not.toHaveBeenCalled();
     expect(await f.deps.confirmations.pendingByThread(f.ctx.msg.threadKey)).toBeUndefined();
-    expect(f.registry.snapshotById("operator-run")).toBeNull();
+    expect(f.registry.getById("operator-run")).toMatchObject({ status: "failed", finished: true });
   });
 
   it("fails closed when the current-reader check is unavailable", async () => {

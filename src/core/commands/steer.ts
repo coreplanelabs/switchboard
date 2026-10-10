@@ -53,7 +53,11 @@ export const steerRun = defineCommand({
   action: "steer:write",
   effect: "write",
   // Changes a live run's course; the words fold in and cannot be unsaid.
-  annotations: { destructive: false, risk: () => "folds words into someone's live run at its next boundary" },
+  annotations: {
+    destructive: false,
+    confirmation: "scoped",
+    risk: () => "folds words into someone's live run at its next boundary",
+  },
   describe: "Fold words into a live run at its next step boundary, by run id.",
   render: (o) => String((o as { text?: unknown }).text ?? ""),
   handler: async ({ args, caller, deps }) => {

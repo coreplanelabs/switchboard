@@ -10,24 +10,9 @@ describe("the turn-outcome table is total and owns every outcome", () => {
   const surfaces: Surface[] = ["chat", "typed"];
   const rows: Array<{ name: string; outcome: TurnOutcome; expect: Record<Surface, ExecutionCell> }> = [
     {
-      name: "run_command below the effective confirm class runs on both surfaces",
-      outcome: { kind: "run_command", confirm: "below", mintable: true },
+      name: "every registry command reaches common admission on both surfaces",
+      outcome: { kind: "run_command" },
       expect: { chat: { cell: "run" }, typed: { cell: "run" } },
-    },
-    {
-      name: "run_command below the confirm class runs even where no click could mint — the ladder never asked for one",
-      outcome: { kind: "run_command", confirm: "below", mintable: false },
-      expect: { chat: { cell: "run" }, typed: { cell: "run" } },
-    },
-    {
-      name: "run_command at or above the confirm class clicks on chat and refuses naming the typed form on a typed surface",
-      outcome: { kind: "run_command", confirm: "at_or_above", mintable: true },
-      expect: { chat: { cell: "click" }, typed: { cell: "refuse", names: "typed_form" } },
-    },
-    {
-      name: "run_command at or above the confirm class with no mintable click refuses naming why — never a line to retype on chat",
-      outcome: { kind: "run_command", confirm: "at_or_above", mintable: false },
-      expect: { chat: { cell: "refuse", names: "mint_failure" }, typed: { cell: "refuse", names: "typed_form" } },
     },
     {
       name: "bind_preset runs the person's own request through preset resolution",
@@ -71,10 +56,7 @@ describe("the turn-outcome table is total and owns every outcome", () => {
 
   it("every turn outcome × surface pair returns a cell — the table is total", () => {
     const outcomes: TurnOutcome[] = [
-      { kind: "run_command", confirm: "below", mintable: true },
-      { kind: "run_command", confirm: "below", mintable: false },
-      { kind: "run_command", confirm: "at_or_above", mintable: true },
-      { kind: "run_command", confirm: "at_or_above", mintable: false },
+      { kind: "run_command" },
       { kind: "bind_preset" },
       { kind: "ask" },
       { kind: "unresolvable_write" },
@@ -86,12 +68,12 @@ describe("the turn-outcome table is total and owns every outcome", () => {
     for (const outcome of outcomes) {
       for (const surface of surfaces) {
         const cell = decideExecution(outcome, surface);
-        expect(["run", "click", "route", "question", "refuse"]).toContain(cell.cell);
+        expect(["run", "route", "question", "refuse"]).toContain(cell.cell);
         cells.add(cell.cell);
       }
     }
-    // The table reaches all five cells: no cell is dead vocabulary.
-    expect([...cells].sort()).toEqual(["click", "question", "refuse", "route", "run"]);
+    // The table reaches all four cells: no cell is dead vocabulary.
+    expect([...cells].sort()).toEqual(["question", "refuse", "route", "run"]);
   });
 
   it("an unknown turn outcome refuses to compile — and throws at the runtime boundary", () => {
@@ -140,7 +122,7 @@ describe("no chat render emits the hand-back prefix", () => {
     }
   });
 
-  it("the web bundle no longer parses the prefix — the composer fills from the click row", () => {
+  it("the web bundle no longer parses the prefix — the browser submits the saved click id", () => {
     const web = sources(join("web", "src"));
     expect(web.length).toBeGreaterThan(5);
     for (const f of web) {

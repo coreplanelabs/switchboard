@@ -1,3 +1,4 @@
+import { preapprovedCaller } from "./testing/callers.js";
 import { runShipBranch } from "./dispatch/ship.js";
 import { TerminalCommitmentUnknownError, terminalCommitmentUnknown } from "./runLedger/writeThrough.js";
 import { UncertainStoreError } from "./storeFailure.js";
@@ -173,6 +174,8 @@ type TestDeps = CoreDeps & {
  *  again) — plus an invoke spy, so a test can assert which registry command a
  *  message reached. Every `makeDeps` wires it once: there is no chat command
  *  outside the registry. */
+let preapprovedHandlerFixture = false;
+
 function wireCommands(deps: TestDeps, capabilities?: TestDeps["capabilities"]): { invoked: string[] } {
   const bound = buildCoreCommands(deps.config, null, {
     ...(capabilities ? { capabilities } : {}),
@@ -205,7 +208,7 @@ function wireCommands(deps: TestDeps, capabilities?: TestDeps["capabilities"]): 
     ...bound,
     invoke: (id, raw, caller, trace) => {
       invoked.push(id);
-      return bound.invoke(id, raw, caller, trace);
+      return bound.invoke(id, raw, preapprovedHandlerFixture ? preapprovedCaller(caller) : caller, trace);
     },
   };
   return { invoked };
@@ -3542,9 +3545,22 @@ describe("repo management commands", () => {
     }));
     deps.residentAdmin = admin;
     const { io, replies } = fakeIO();
+    const store = new InMemoryConfirmationStore();
+    deps.confirmations = store;
+    let offerId = "";
+    io.offer = async (offer) => {
+      offerId = offer.id;
+    };
     await dispatch(deps, msg("repo offboard acme/api --dry-run", "slack:UADMIN"), io);
+    expect(admin.offboard).not.toHaveBeenCalled();
+    await dispatchClick(deps, {
+      kind: "confirm",
+      id: offerId,
+      actor: { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS },
+      io,
+    });
     expect(admin.offboard).toHaveBeenCalledWith("repo:acme/api", true);
-    expect(replies[0]).toContain("Nothing was changed");
+    expect(replies.join("\n")).toContain("Nothing was changed");
     expect(provider.requests).toHaveLength(0);
   });
 });
@@ -9590,6 +9606,12 @@ describe("self-description in the system prompt (routing-and-config behavior 11)
 });
 
 describe("config awareness in the system prompt", () => {
+  beforeEach(() => {
+    preapprovedHandlerFixture = true;
+  });
+  afterEach(() => {
+    preapprovedHandlerFixture = false;
+  });
   const CHANNEL_FORCED_YAML =
     YAML_FIXTURE +
     `
@@ -9790,6 +9812,12 @@ channels:
 });
 
 describe("self-improvement wiring", () => {
+  beforeEach(() => {
+    preapprovedHandlerFixture = true;
+  });
+  afterEach(() => {
+    preapprovedHandlerFixture = false;
+  });
   afterEach(() => {
     vi.mocked(makeExecutor).mockClear();
   });
@@ -9916,6 +9944,12 @@ describe("self-improvement wiring", () => {
 // instructions folded into the system prompt at the same seam
 // as memory/skills/config-awareness. Advisory only.
 describe("custom instructions in the system prompt", () => {
+  beforeEach(() => {
+    preapprovedHandlerFixture = true;
+  });
+  afterEach(() => {
+    preapprovedHandlerFixture = false;
+  });
   // Pinned to the renderer's own header so a wording change in the
   // awareness block (which mentions "custom instructions" too) cannot make
   // these negative matches pass or fail by accident.
@@ -10278,7 +10312,7 @@ describe("inline command runs + run receipts", () => {
     });
   });
 
-  it("`http:cron` granted friction:write may `friction propose` \u2014 the run completes", async () => {
+  it("`http:cron` granted friction:write may `friction propose` — the run completes", async () => {
     const deps = makeDeps(
       YAML_FIXTURE.replace(
         "grants:\n",
@@ -27103,8 +27137,10 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     });
     const heldIO = fakeIO();
     await dispatch(held.deps, msg("set my agent to review", "slack:UADMIN"), heldIO.io);
-    expect(held.deps.invoked).toEqual([]);
-    expect(heldIO.replies).toEqual([`${HAND_BACK_PREFIX}\n\`config set me --agent review\``]);
+    expect(held.deps.invoked).toEqual(["config.set"]);
+    expect(heldIO.replies).toEqual([
+      "⚠️ `config set`: This action requires verified human approval. This connection cannot show an approval; nothing ran.",
+    ]);
   });
 
   it("on at the untouched default — quiet: a preset bind posts nothing before the run's card; the card's preset word is the receipt (item 28)", async () => {
@@ -27840,7 +27876,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const { deps, store } = confirming();
     const { io, replies, offers } = offering();
     await dispatch(deps, msg("set my agent to review", "slack:UADMIN"), io);
-    expect(deps.invoked).toEqual([]);
+    expect(deps.invoked).toEqual(["config.set"]);
     expect(offers).toEqual([
       {
         id: expect.stringMatching(/^[0-9a-f-]{36}$/),
@@ -27855,7 +27891,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       command: "config.set",
       receipt: "config set me --agent review",
       message: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:1.0" },
-      model: "anthropic/general-model",
+      model: "",
     });
     // The bind's receipt still renders — and no reply carries the hand-back
     // text: the click is the affordance.
@@ -27906,6 +27942,122 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(store.rows.get(offers[0]!.id)).toMatchObject({ risk: offers[0]!.risk });
   });
 
+  it.each(["cancel deployment", "cancel everything", "confirm approval"])(
+    "on: ordinary reply %s reaches the live run instead of confirmation",
+    async (text) => {
+      const { deps, registry } = operatorDeps(ON_YAML);
+      wireCommands(deps);
+      const live = registry.create("live run", {
+        agent: "general",
+        channelId: "slack:CX",
+        userId: "slack:UADMIN",
+        threadKey: "slack:CX:1.0",
+      });
+      const slot = deps.admission!.claim("slack:CX:1.0", { agent: "general" });
+      slot.live.runId = live.id;
+      deps.operatorModel = decides({
+        reason: "continue the live run",
+        binds: [{ line: `agent:general ${text}`, reason: "the reply" }],
+      });
+      await dispatch(deps, msg(text, "slack:UADMIN"), fakeIO().io);
+      expect(slot.live.inbox.drain().map((item) => item.text)).toEqual([text]);
+    },
+  );
+
+  it("on: saved confirmation can be confirmed or cancelled by text without Slack interactivity", async () => {
+    const f = confirming();
+    const first = offering();
+    await dispatch(f.deps, msg("set my agent to review", "slack:UADMIN"), first.io);
+    expect((await f.deps.config.scopes("slack:CX", "slack:UADMIN")).user.agent).toBeUndefined();
+    await dispatch(f.deps, msg(`confirm ${first.offers[0]!.id}`, "slack:UADMIN"), fakeIO().io);
+    expect((await f.deps.config.scopes("slack:CX", "slack:UADMIN")).user.agent).toBe("review");
+    const second = offering();
+    await dispatch(f.deps, msg("set my agent to review", "slack:UADMIN"), second.io);
+    const cancelled = fakeIO();
+    await dispatch(f.deps, msg(`cancel ${second.offers[0]!.id}`, "slack:UADMIN"), cancelled.io);
+    expect(cancelled.replies).toContain("Cancelled; nothing ran");
+    expect(f.store.rows.size).toBe(0);
+  });
+
+  it("on: text confirmation rejects foreign users and threads, then executes once", async () => {
+    const f = confirming();
+    const o = offering();
+    await dispatch(f.deps, msg("set my agent to review", "slack:UADMIN"), o.io);
+    const id = o.offers[0]!.id;
+    for (const request of [
+      msg(`confirm ${id}`, "slack:UOTHER"),
+      { ...msg(`confirm ${id}`, "slack:UADMIN"), threadKey: "slack:CX:2.0" },
+    ]) {
+      const refused = fakeIO();
+      expect(await dispatch(f.deps, request, refused.io)).toMatchObject({
+        status: "refused",
+        refusal: "confirmation_foreign",
+      });
+      expect(refused.replies).toContain("only the requester can confirm this");
+      expect((await f.deps.config.scopes("slack:CX", "slack:UADMIN")).user.agent).toBeUndefined();
+    }
+    await dispatch(f.deps, msg(`confirm ${id}`, "slack:UADMIN"), fakeIO().io);
+    expect((await f.deps.config.scopes("slack:CX", "slack:UADMIN")).user.agent).toBe("review");
+    const duplicate = fakeIO();
+    expect(await dispatch(f.deps, msg(`confirm ${id}`, "slack:UADMIN"), duplicate.io)).toMatchObject({
+      status: "refused",
+      refusal: "confirmation_used",
+    });
+    expect(duplicate.replies).toContain("this offer was already used");
+  });
+
+  it("on: text confirmation rechecks permission after the offer", async () => {
+    const f = confirming("config set channel --agent review");
+    const o = offering();
+    await dispatch(f.deps, msg("set this channel's agent to review", "slack:UADMIN"), o.io);
+    expect(o.offers[0]!.line).toBe("config set channel --agent review");
+    vi.spyOn(f.deps.config, "grantsFor").mockReturnValue(NO_GRANTS);
+    const refused = fakeIO();
+    await dispatch(f.deps, msg(`confirm ${o.offers[0]!.id}`, "slack:UADMIN"), refused.io);
+    expect(refused.replies.join("\n")).toContain("Channel config changes are restricted. Ask an admin.");
+    expect((await f.deps.config.scopes("slack:CX", "slack:UADMIN")).channel.agent).toBeUndefined();
+  });
+
+  it("on: text confirmation cannot revive an expired offer", async () => {
+    const f = confirming();
+    const o = offering();
+    await dispatch(f.deps, msg("set my agent to review", "slack:UADMIN"), o.io);
+    f.tick(CONFIRMATION_TTL_MS + 1);
+    const refused = fakeIO();
+    expect(await dispatch(f.deps, msg(`confirm ${o.offers[0]!.id}`, "slack:UADMIN"), refused.io)).toMatchObject({
+      status: "refused",
+      refusal: "confirmation_expired",
+    });
+    expect(refused.replies).toContain(
+      "this offer expired after ten minutes; nothing ran, and a later request may receive a fresh confirmation",
+    );
+    expect((await f.deps.config.scopes("slack:CX", "slack:UADMIN")).user.agent).toBeUndefined();
+  });
+
+  it("on: text confirmation cannot replace browser approval or change the bound MCP connection", async () => {
+    const f = confirming();
+    const o = offering();
+    const approvalConnection = { id: "original-connection", credentialId: "credential", requestHash: "request" };
+    await dispatch(f.deps, { ...msg("set my agent to review", "slack:UADMIN"), approvalConnection }, o.io);
+    const id = o.offers[0]!.id;
+    const request = { ...msg(`confirm ${id}`, "slack:UADMIN"), approvalConnection };
+    expect(await dispatch(f.deps, request, fakeIO().io)).toMatchObject({
+      status: "refused",
+      refusal: "confirmation_foreign",
+    });
+    expect((await f.deps.config.scopes("slack:CX", "slack:UADMIN")).user.agent).toBeUndefined();
+    expect(await f.store.approve(id, ["slack:UADMIN"], approvalConnection.id)).toMatchObject({ ok: true });
+    expect(
+      await dispatch(
+        f.deps,
+        { ...request, approvalConnection: { ...approvalConnection, id: "other-connection" } },
+        fakeIO().io,
+      ),
+    ).toMatchObject({ status: "refused", refusal: "confirmation_foreign" });
+    await dispatch(f.deps, request, fakeIO().io);
+    expect((await f.deps.config.scopes("slack:CX", "slack:UADMIN")).user.agent).toBe("review");
+  });
+
   it("on: the offered bind's Yes runs it as the requester with source confirm — the routed write's own handler, one record with outcome confirmed", async () => {
     const { deps, registry, store, audits } = confirming();
     const o = offering();
@@ -27918,8 +28070,9 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       io: clickIO.io,
     });
     expect(outcome).toEqual({ status: "completed" });
-    expect(deps.invoked).toEqual(["config.set"]);
+    expect(deps.invoked).toEqual(["config.set", "config.set"]);
     expect(audits).toEqual([
+      expect.objectContaining({ commandId: "config.set", outcome: "conflict", reason: "confirmation" }),
       expect.objectContaining({ commandId: "config.set", callerId: "slack:UADMIN", outcome: "ok", source: "confirm" }),
     ]);
     expect(clickIO.replies[0]).toContain("routed: config set me --agent review");
@@ -27948,17 +28101,17 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(outcome).toEqual({ status: "refused", refusal: "confirmation_expired", cause: "request" });
     expect(clickIO.replies).toEqual([OFFER_EXPIRED_LINE]);
     expect(OFFER_EXPIRED_LINE).toContain("ten minutes");
-    expect(deps.invoked).toEqual([]);
+    expect(deps.invoked).toEqual(["config.set"]);
   });
 
-  it("on: the same bind on a channel without offer hands back the line as today, and no row is minted", async () => {
+  it("on: the same bind without approval display is refused and no row is minted", async () => {
     const { deps, store } = confirming();
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("set my agent to review", "slack:UADMIN"), io);
     expect(store.rows.size).toBe(0);
-    expect(deps.invoked).toEqual([]);
+    expect(deps.invoked).toEqual(["config.set"]);
     const receipt = replies.find((r) => r.includes("bound: `config set me --agent review`"));
-    expect(receipt).toContain(HAND_BACK_PREFIX);
+    expect(replies.join("\n")).toContain("cannot show an approval; nothing ran");
     expect(receipt).toContain("`config set me --agent review`");
   });
 
@@ -27978,7 +28131,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     try {
       const { io, replies, offers } = offering();
       await dispatch(deps, msg("set my agent to review", "slack:UADMIN"), io);
-      expect(deps.invoked).toEqual([]);
+      expect(deps.invoked).toEqual(["config.set"]);
       expect(offers).toEqual([]);
       expect(replies.some((r) => r.includes(STORE_UNREACHABLE_LINE))).toBe(true);
       expect(replies.some((r) => r.includes(HAND_BACK_PREFIX))).toBe(false);
@@ -28819,7 +28972,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const { io } = fakeIO();
     await dispatch(deps, msg(`runs stop ${runaway.id} --mode hard`, "slack:UADMIN"), io);
     expect(deps.operatorModel).toHaveBeenCalledTimes(2);
-    expect(deps.invoked).toEqual([]);
+    expect(deps.invoked).toEqual(["runs.stop"]);
     expect(registry.snapshotById("r2")?.events.find((e) => e.type === "operator")).toMatchObject({
       outcome: "binds",
       binds: [{ line: `runs stop ${runaway.id} --mode hard` }],

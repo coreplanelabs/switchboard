@@ -14,7 +14,7 @@ import { VERBOSITY_LEVELS } from "../verbosity.js";
 import type { HarnessName } from "../harness/contract.js";
 import { HARNESS_NAMES } from "../harness/roster.js";
 import { ADDRESS_SEVERITIES } from "../shipPipeline.js";
-import { authorize } from "../authz/authorize.js";
+import { authorize, principalOf } from "../authz/authorize.js";
 import { namesOf, type NameDirectory } from "../names.js";
 import { pointingActor } from "../authz/pointingActor.js";
 import type { ChannelVisibility, ListedChannel } from "../authz/types.js";
@@ -301,6 +301,8 @@ export const ME_ON_SERVICE_TOKEN_MESSAGE =
  * Exported for the surfaces that read a person's scope as the viewer.
  */
 export function meIdOf(caller: Caller): string | undefined {
+  const person = principalOf(caller.actor);
+  if (caller.actor.onBehalfOf && person.kind === "user") return person.asUser?.id ?? person.id;
   if (caller.kind !== "access") return caller.id;
   if (caller.actor.kind === "service") return undefined;
   return caller.actor.self?.find((id) => id.startsWith("slack:")) ?? caller.id;

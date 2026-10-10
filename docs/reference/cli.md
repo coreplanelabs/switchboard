@@ -89,6 +89,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 | Command | What it does | Surfaces |
 |---|---|---|
 | `review abridge <id> [--model <string>] [--force] [--wait]` | Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed. | every surface |
+| `review status <id>` | Read the progress of an abridged review diff without starting or recomputing it. | every surface |
 
 ### `friction`
 

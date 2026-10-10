@@ -685,7 +685,7 @@ describe("public command metadata", () => {
     );
     const tools = (result.body as { result: { tools: { name: string; description: string; inputSchema: unknown }[] } })
       .result.tools;
-    expect(tools.map((t) => t.name)).toEqual(["dispatch", "metadata_probe"]);
+    expect(tools.map((t) => t.name)).toEqual(["dispatch", "metadata_probe", "approval_resume", "approval_cancel"]);
     expect(tools[1].description).toBe("Inspect command metadata.");
     expect(tools[1].inputSchema).toEqual({
       type: "object",

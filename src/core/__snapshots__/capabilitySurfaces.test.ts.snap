@@ -80,6 +80,10 @@ exports[`capability axis — a capability turning on changes exactly the command
     "runHistory",
     "readingDiffAbridge",
   ],
+  "review.status": [
+    "runHistory",
+    "readingDiffAbridge",
+  ],
   "runs.findings": [
     "runHistory",
   ],
@@ -120,6 +124,7 @@ commands:
   runs search          — Search one session's log — a thread's conversation on one agent, every run of it — for words: the matching turns in relevance order, each with its run; snippets wrapped as untrusted content.
   steer run            — Fold words into a live run at its next step boundary, by run id.
   review abridge       — Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed.
+  review status        — Read the progress of an abridged review diff without starting or recomputing it.
   friction report      — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
   friction propose     — Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.
   friction analyze     — Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.
@@ -205,6 +210,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "repo.reconfigure",
   "repo.test",
   "review.abridge",
+  "review.status",
   "runs.children",
   "runs.events",
   "runs.findings",
@@ -222,6 +228,8 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
 
 exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
 [
+  "approval_cancel",
+  "approval_resume",
   "config_channels",
   "config_clear",
   "config_instructions",
@@ -262,6 +270,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "repo_reconfigure",
   "repo_test",
   "review_abridge",
+  "review_status",
   "runs_children",
   "runs_events",
   "runs_findings",
@@ -306,6 +315,7 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 • \`steer run\` — Fold words into a live run at its next step boundary, by run id.
 *review*
 • \`review abridge\` — Abridge a finished PR review's reading diff with meat.dev on the bot host (one Opus-class call) and store it on the run; idempotent — a stored one is answered, not recomputed.
+• \`review status\` — Read the progress of an abridged review diff without starting or recomputing it.
 *friction*
 • \`friction report\` — Ranked recurring friction patterns across recent runs — read-only, GitHub never consulted.
 • \`friction propose\` — Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.
@@ -503,6 +513,8 @@ exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> rout
 
 exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
 [
+  "approval_cancel",
+  "approval_resume",
   "config_channels",
   "config_clear",
   "config_instructions",
@@ -730,6 +742,8 @@ exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes 
 
 exports[`capability surfaces — minimal > MCP tools/list names 1`] = `
 [
+  "approval_cancel",
+  "approval_resume",
   "config_channels",
   "config_clear",
   "config_instructions",

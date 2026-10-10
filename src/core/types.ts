@@ -63,6 +63,8 @@ export interface SlackDirectAudience {
 }
 
 export interface IncomingMessage {
+  /** Server-verified connection and normalized request bound to a browser approval. */
+  approvalConnection?: { id: string; credentialId: string; requestHash: string };
   /**
    * Scope key for channel-level config. Must be globally unique across
    * platforms — adapters namespace with a platform prefix, e.g. "slack:C0123".
@@ -336,7 +338,7 @@ export interface ChannelIO {
    * seam names a channel. The channel shows the offer and holds nothing else:
    * the row lives in the config object until the click or the expiry.
    */
-  offer?(offer: ConfirmationOffer): Promise<void>;
+  offer?(offer: ConfirmationOffer): Promise<void | string>;
   /** Create a progress indicator. Adapters may return a no-op handle. The
    *  resolved verbosity reaches the transport so native lifecycle chrome can
    *  follow the same display contract as replies and cards. */

@@ -186,8 +186,25 @@ export const reviewAbridge = defineCommand({
   },
 });
 
+/** Polling is a read: it cannot start a model call or retry a failed one. */
+export const reviewStatus = defineCommand({
+  id: "review.status",
+  enabledWhen: (caps) => caps.runHistory && caps.readingDiffAbridge,
+  args: [{ name: "id", schema: runId, describe: "id of a PR review run" }],
+  action: "runs:read",
+  effect: "read",
+  annotations: { destructive: false, idempotent: true },
+  describe: "Read the progress of an abridged review diff without starting or recomputing it.",
+  render: renderAbridge,
+  handler: async ({ args, caller, deps }) => {
+    await assertVisible(deps, args.id, caller);
+    return abridgeOutput(args.id, await (await abridgerOf(deps)).status(args.id));
+  },
+});
+
 export const reviewCommands: readonly CommandDef<ReviewCommandDeps>[] = [
   reviewAbridge,
+  reviewStatus,
 ] as unknown as CommandDef<ReviewCommandDeps>[];
 
 export function registerReviewCommands<D extends ReviewCommandDeps>(registry: CommandRegistry<D>): void {

@@ -35,6 +35,24 @@ export function callerWith(
   extra: Partial<Pick<Caller, "origin">> = {},
 ): Caller {
   const origin = extra.origin ? { channelId: extra.origin.channelId, threadKey: extra.origin.threadKey } : undefined;
-  const actor: Actor = { kind: actorKindOf(id), id, grants: toGrants(grants), ...(origin ? { origin } : {}) };
+  // Handler/authorization fixtures have explicit synthetic standing consent.
+  // Real adapter and confirmation tests resolve their actors through the production seam.
+  const actor: Actor = {
+    standingConsent: "all",
+    kind: actorKindOf(id),
+    id,
+    grants: toGrants(grants),
+    ...(origin ? { origin } : {}),
+  };
   return { kind, id, actor, ...extra };
+}
+
+/** Synthetic consent for isolated handler tests; permissions are unchanged. */
+export function preapprovedCaller(caller: Caller): Caller {
+  const approved = (actor: Actor): Actor => ({
+    ...actor,
+    standingConsent: "all",
+    ...(actor.onBehalfOf ? { onBehalfOf: approved(actor.onBehalfOf) } : {}),
+  });
+  return { ...caller, actor: approved(caller.actor) };
 }
