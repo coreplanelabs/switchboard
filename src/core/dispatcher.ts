@@ -8,6 +8,7 @@ import { runSessionIdentity } from "./dispatch/sessionIdentity.js";
 import { markPrivateConversation } from "./dispatch/privateConversation.js";
 import {
   isOrganizationPrivateAudience,
+  copyPrivateSourceFacts,
   withOrganizationPrivateAudience,
   organizationPrivateAudienceOf,
   privateDestinationOf,
@@ -4392,6 +4393,7 @@ export async function dispatch(
     const seedNotepad = session?.notepad ?? boundHandoff?.notepad?.text;
     const prompt = await composePrompt(deps, {
       msg,
+      io,
       directAudienceVerified,
       agent,
       profile,
@@ -5193,14 +5195,21 @@ export async function dispatch(
                 const directAudienceStillValid =
                   directSlack || privateBrowser || mainAudience.audience.sources.length > 0;
                 checking = "mcp-check-unavailable";
-                const fresh = await deps.mcp.toolsFor("orchestrator", {
-                  userId: msg.userId,
-                  channelId: msg.channelId,
-                  ...(msg.directAudience ? { directAudience: msg.directAudience } : {}),
-                  ...(organizationPrivateAudienceOf(msg)
-                    ? { organizationPrivateAudience: organizationPrivateAudienceOf(msg) }
-                    : {}),
-                });
+                const fresh = await deps.mcp.toolsFor(
+                  "orchestrator",
+                  copyPrivateSourceFacts(
+                    msg,
+                    {
+                      userId: msg.userId,
+                      channelId: msg.channelId,
+                      ...(msg.directAudience ? { directAudience: msg.directAudience } : {}),
+                      ...(organizationPrivateAudienceOf(msg)
+                        ? { organizationPrivateAudience: organizationPrivateAudienceOf(msg) }
+                        : {}),
+                    },
+                    io,
+                  ),
+                );
                 checking = "github-check-unavailable";
                 const readable =
                   ran.githubReadRepos.length > 0 || ran.githubReadUnknown

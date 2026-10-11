@@ -1,4 +1,5 @@
 import type { AudienceCheck } from "../audienceDecision.js";
+import { copyChatActor } from "../authz/actor.js";
 import type { ChannelIO, IncomingMessage, SlackDirectAudience } from "../types.js";
 import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
 import { isOrganizationId } from "../authz/resource.js";
@@ -78,6 +79,43 @@ export function organizationPrivateAudienceOf(message: object): OrganizationPriv
   const value = (message as { [organizationAudience]?: OrganizationPrivateAudience })[organizationAudience];
   return isOrganizationPrivateAudience(value) ? value : undefined;
 }
+const privateSourceGuards = new WeakMap<object, () => Promise<boolean>>();
+/** Recheck only the original host-proved source; serialized callers lose this capability. */
+export async function verifyPrivateSourceFacts(source: object): Promise<boolean> {
+  const guard = privateSourceGuards.get(source);
+  if (!guard) return false;
+  try {
+    return await guard();
+  } catch {
+    return false;
+  }
+}
+/** Metadata-only copies retain their own source IO, never another queued message's address. */
+export function copyPrivateSourceFacts<T extends object>(
+  source: IncomingMessage,
+  target: T,
+  io?: Pick<ChannelIO, "organizationPrivateAudience" | "verifyOrganizationPrivateAudience">,
+): T {
+  const audience = organizationPrivateAudienceOf(source);
+  if (!audience) return target;
+  const captured = { ...audience };
+  const copied = copyChatActor(
+    source,
+    withOrganizationPrivateAudience(
+      {
+        ...target,
+        threadKey: source.threadKey,
+        authenticatedAs: source.authenticatedAs,
+        postedBy: source.postedBy,
+        relayedBy: source.relayedBy,
+      },
+      captured,
+    ),
+  );
+  if (io) privateSourceGuards.set(copied, async () => (await verifyPrivateDestination(io, captured)).ok);
+  return copied;
+}
+
 export function privateDestinationOf(message: IncomingMessage): PrivateDestination | undefined {
   return organizationPrivateAudienceOf(message) ?? directAudienceStampOf(message);
 }

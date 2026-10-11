@@ -1,5 +1,13 @@
 import { createHmac } from "node:crypto";
-import { isOrganizationPrivateAudience } from "../core/dispatch/privateDestination.js";
+import {
+  isOrganizationPrivateAudience,
+  organizationPrivateAudienceOf,
+  samePrivateDestination,
+  verifyPrivateSourceFacts,
+} from "../core/dispatch/privateDestination.js";
+import { boundChatActorOf } from "../core/authz/actor.js";
+import { authorize } from "../core/authz/authorize.js";
+import { isDelegatedMainRequester } from "../core/coordinator/mainStart.js";
 import type { RefusalCause } from "../core/refusal.js";
 import { AGENTS } from "../agents/registry.js";
 import type { ConfigStore, ResolvedMcpServer, Scope } from "../config.js";
@@ -798,11 +806,45 @@ export class McpService {
    *  agent, shadowed names reported as such, credentials opened for this run. */
   async resolveForRun(agentName: string, caller: McpRunCaller): Promise<ResolvedServer[]> {
     const out: ResolvedServer[] = [];
+    const proved = organizationPrivateAudienceOf(caller);
+    const actual = boundChatActorOf(this.opts.config, caller);
     const privateBrowser =
       isOrganizationPrivateAudience(caller.organizationPrivateAudience) &&
       caller.organizationPrivateAudience.actorId === caller.userId &&
       caller.organizationPrivateAudience.userId === caller.userId &&
-      caller.organizationPrivateAudience.channelId === caller.channelId;
+      caller.organizationPrivateAudience.channelId === caller.channelId &&
+      (!proved ||
+        (!!actual &&
+          actual.kind === "user" &&
+          actual.id === caller.userId &&
+          !actual.viewingAs &&
+          samePrivateDestination(proved, caller.organizationPrivateAudience) &&
+          proved.organization === this.opts.config.config.organization &&
+          this.opts.config.canRunAgent(actual, agentName) &&
+          authorize(actual, "organization:read", { type: "organization", id: proved.organization }).allow &&
+          (await verifyPrivateSourceFacts(caller))));
+    const delegatedPrivate =
+      !!actual &&
+      !!proved &&
+      isOrganizationPrivateAudience(caller.organizationPrivateAudience) &&
+      samePrivateDestination(proved, caller.organizationPrivateAudience) &&
+      proved.organization === this.opts.config.config.organization &&
+      isDelegatedMainRequester(
+        actual,
+        {
+          userId: caller.userId,
+          channelId: caller.channelId ?? "",
+          threadKey: caller.threadKey ?? "",
+          authenticatedAs: caller.authenticatedAs,
+          postedBy: caller.postedBy,
+          relayedBy: caller.relayedBy,
+          text: "",
+        },
+        proved,
+      ) &&
+      this.opts.config.canRunAgent(actual, agentName) &&
+      authorize(actual, "organization:read", { type: "organization", id: proved.organization }).allow &&
+      (await verifyPrivateSourceFacts(caller));
     for (const r of this.opts.config.mcpServersFor(caller.channelId ?? `none:${caller.userId}`, caller.userId)) {
       const agents = r.entry.agents ?? MCP_DEFAULT_AGENTS;
       if (!agents.includes(agentName)) continue;
@@ -812,6 +854,7 @@ export class McpService {
         agentName === "orchestrator" &&
         (r.kind !== "user" ||
           (!privateBrowser &&
+            !delegatedPrivate &&
             (!/^slack:D[A-Z0-9_]+$/.test(caller.channelId ?? "") ||
               caller.directAudience?.kind !== "slack-unshared-im" ||
               caller.directAudience.channelId !== caller.channelId ||

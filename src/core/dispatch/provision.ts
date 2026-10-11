@@ -1,4 +1,4 @@
-import { privateDestinationOf, organizationPrivateAudienceOf } from "./privateDestination.js";
+import { privateDestinationOf, organizationPrivateAudienceOf, copyPrivateSourceFacts } from "./privateDestination.js";
 import { TerminalCommitmentUnknownError } from "../runLedger/writeThrough.js";
 import { originalColdAllocation, sameWorkspaceAllocation } from "../runLedger/workspaceDurability.js";
 import { residentRouteOf } from "../../execution/residentRoute.js";
@@ -1554,6 +1554,8 @@ export interface ComposedPrompt {
 /** What `composePrompt` reads off the dispatch. */
 export interface PromptContext {
   msg: IncomingMessage;
+  /** Original per-message native source proof, retained only during this invocation. */
+  io?: ChannelIO;
   /** The one-person DM was checked against Slack before private MCP discovery. */
   directAudienceVerified?: boolean;
   agent: AgentDef;
@@ -1629,14 +1631,21 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
   // scoped — a process without MCP has the null source — → no tools, no
   // block, request unchanged.
   const mcpForRun = await root.span("dispatch.mcp_discovery", () =>
-    deps.mcp.toolsFor(agent.name, {
-      userId: msg.userId,
-      channelId: msg.channelId,
-      ...(ctx.directAudienceVerified && msg.directAudience ? { directAudience: msg.directAudience } : {}),
-      ...(ctx.directAudienceVerified && organizationPrivateAudienceOf(msg)
-        ? { organizationPrivateAudience: organizationPrivateAudienceOf(msg) }
-        : {}),
-    }),
+    deps.mcp.toolsFor(
+      agent.name,
+      copyPrivateSourceFacts(
+        msg,
+        {
+          userId: msg.userId,
+          channelId: msg.channelId,
+          ...(ctx.directAudienceVerified && msg.directAudience ? { directAudience: msg.directAudience } : {}),
+          ...(ctx.directAudienceVerified && organizationPrivateAudienceOf(msg)
+            ? { organizationPrivateAudience: organizationPrivateAudienceOf(msg) }
+            : {}),
+        },
+        ctx.io,
+      ),
+    ),
   );
   const mcpBlock = mcpGuidanceBlock(mcpForRun.servers);
 

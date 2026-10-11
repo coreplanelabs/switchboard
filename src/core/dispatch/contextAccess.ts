@@ -3,6 +3,7 @@ import {
   organizationPrivateAudienceOf,
   isOrganizationPrivateAudience,
   withOrganizationPrivateAudience,
+  copyPrivateSourceFacts,
   type PrivateDestination,
 } from "./privateDestination.js";
 import {
@@ -518,13 +519,20 @@ function buildContextAccess(
         if (!state) return denied("mcp_state_unproved");
         const audience = await destinationAudience();
         if (!audience) return denied("mcp_audience_unproved");
-        const tools = await deps.mcp.toolsFor(owner.agent, {
-          userId: msg.userId,
-          channelId: audience.channelId,
-          ...(audience.kind === "slack-unshared-im"
-            ? { directAudience: audience }
-            : { organizationPrivateAudience: audience }),
-        });
+        const tools = await deps.mcp.toolsFor(
+          owner.agent,
+          copyPrivateSourceFacts(
+            msg,
+            {
+              userId: msg.userId,
+              channelId: audience.channelId,
+              ...(audience.kind === "slack-unshared-im"
+                ? { directAudience: audience }
+                : { organizationPrivateAudience: audience }),
+            },
+            io,
+          ),
+        );
         const decision = await inspectStoredSourceRead({
           state,
           owner,
