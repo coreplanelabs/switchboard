@@ -1,3 +1,5 @@
+import { reviewReportFixture } from "./web-review-fixture.js";
+import { DAY_MS } from "../src/core/budgets.js";
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { HomeSession, HomeConversationEntry } from "../src/channels/homeSeed.js";
@@ -275,9 +277,16 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
           seed: { ...options.thread, conversation: thread, elsewhere: { surface: "slack" } },
         });
     }
+    if (url.pathname === "/metrics" || url.pathname === "/metrics/health")
+      return marked({
+        title: url.pathname === "/metrics" ? "Review usage preview" : "System health preview",
+        seed: {
+          page: "reviewsMetrics",
+          report: reviewReportFixture(options.now - (options.now % DAY_MS) - 6 * DAY_MS),
+          requesterNames: { [ACTOR]: "Your account" },
+        },
+      });
     // These source integrations are intentionally unavailable in the preview.
-    if (url.pathname === "/metrics/health")
-      return marked({ title: "System health preview", seed: { page: "runNotFound", retentionDays: 30 } });
     if (url.pathname === "/settings/identities")
       return marked({
         title: "Identities preview",
