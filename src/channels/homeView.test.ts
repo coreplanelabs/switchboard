@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { actor } from "../core/authz/testing.js";
 import { createHomeService } from "../core/home/service.js";
@@ -6,6 +6,12 @@ import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import { makePageSender } from "./webShell.js";
 import { createHomeViewHandler } from "./homeView.js";
 import { resolveWorkViewScope, withWorkViewScope } from "./workViewScope.js";
+import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
+import { seedCoordinatorUnit } from "../core/testing/coordinatorInstance.js";
+import { createHomeConditionReader } from "../core/home/conditions.js";
+import { CommandRegistry } from "../core/commandRegistry.js";
+import { registerMergeCommands, type MergeCommandDeps } from "../core/commands/merge.js";
+import { callerWith } from "../core/testing/callers.js";
 
 const viewer = actor("user", "access:alice", { actions: "all", channels: "all", repos: "all" });
 function response() {
@@ -45,6 +51,256 @@ const request = (url: string, method = "GET") =>
   ({ url, method, headers: { accept: "application/json" } }) as IncomingMessage;
 
 describe("authorized Home pages", () => {
+  it("observes a known registry merge through the existing targeted snapshot before direct History navigation", async () => {
+    const now = Date.parse("1970-01-10T12:00:00Z"),
+      head = "a".repeat(40);
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.put({
+      id: "merge-work",
+      kind: "ship",
+      userId: "access:alice",
+      channelId: "web:alice",
+      threadKey: "web:alice:original",
+      repo: "sample/api",
+      branch: "work",
+      createdAt: 1,
+    });
+    const pr = { number: 42, url: "https://github.com/sample/api/pull/42" };
+    const ready = {
+      instanceId: "merge-work",
+      unit: "task",
+      slug: "task",
+      branch: "work",
+      dependsOn: [],
+      rounds: [],
+      pr,
+      lastPush: head,
+      ending: { kind: "merge_ready", report: "Original reviewed head.", at: now - 60000 },
+      mergeAttention: { assignedTo: "access:alice", pr, headSha: head, at: now - 60000 },
+    };
+    seedCoordinatorUnit(instances, ready);
+    const service = createHomeService({
+      organizationId: "installation-a",
+      instances,
+      conditions: createHomeConditionReader(instances),
+    });
+    let merged = false;
+    let epoch = "current",
+      loseSource = false;
+    let phase = 0;
+    const phases: string[] = [];
+    const emittedKeys: Array<{ phase: number; keys: readonly string[] }> = [];
+    const observed: string[] = [];
+    const read = createHomeViewHandler(
+      service,
+      makePageSender({ js: "/assets/green.js", css: [] }, ALL_CAPABILITIES),
+      "installation-a",
+      {
+        now: () => now,
+        privateEpoch: async () => epoch,
+        privateRead: () => {
+          const id = ++phase,
+            captured = epoch;
+          return {
+            begin: async () => {
+              phases.push(`begin:${id}`);
+              return captured === "current";
+            },
+            readMany: async (groups) => {
+              phases.push(`read:${id}`);
+              return new Map(
+                groups.flatMap((group) =>
+                  group.units.map((row) => [`${group.instance.id}:${row.unit}`, true] as const),
+                ),
+              );
+            },
+            include: (keys) => {
+              emittedKeys.push({ phase: id, keys });
+            },
+            canEmit: async () => captured === epoch,
+          };
+        },
+        observeUnit: async (_context, key) => {
+          observed.push(key);
+          if (!merged) return "held";
+          if (loseSource) epoch = "changed";
+          const row = (await instances.listUnits("merge-work"))[0]!;
+          await instances.compareAndReplaceUnit(row, {
+            ...row,
+            mergeAttention: {
+              ...row.mergeAttention!,
+              resolved: { sha: "b".repeat(40), at: now },
+            },
+          });
+          return "observed";
+        },
+      },
+    );
+    async function get(url: string, person = viewer) {
+      const out = response();
+      read(request(url), out.res, { actor: person, organization: "installation-a" });
+      await out.ended;
+      return { ...out.value(), body: out.value().status === 200 ? JSON.parse(out.value().body) : null };
+    }
+    expect((await get("/home")).body.snapshot.needsYou[0].unit.unit).toBe("merge-work:task");
+    expect((await get("/home/snapshot?observe=invalid")).status).toBe(400);
+    expect((await get("/home/snapshot?observe=unknown%3Atask")).status).toBe(404);
+    expect((await get("/home/snapshot?observe=merge-work%3Atask&observe=unknown%3Atask")).status).toBe(400);
+    expect(
+      (await get("/home/snapshot?observe=merge-work%3Atask", { ...viewer, viewingAs: { id: "access:alice" } })).status,
+    ).toBe(404);
+    seedCoordinatorUnit(instances, { ...ready, mergeAttention: { ...ready.mergeAttention, assignedTo: "access:bob" } });
+    expect((await get("/home/snapshot?observe=merge-work%3Atask")).status).toBe(404);
+    expect(observed).toEqual([]);
+    seedCoordinatorUnit(instances, ready);
+    const registry = new CommandRegistry<MergeCommandDeps>({ audit: () => {} });
+    registerMergeCommands(registry);
+    const result = await registry.invoke(
+      "pulls.merge",
+      { args: ["sample/api#42"], options: { head } },
+      callerWith("access", "access:alice", ["merge:write"]),
+      {
+        merge: {
+          service: async () => ({
+            facts: async () => ({ state: "open", headSha: head, title: "Reviewed work" }),
+            reviews: async () => [{ state: "APPROVED", commitId: head }],
+            checks: async () => ({ total: 1, pending: [], failed: [] }),
+            githubLogin: async () => "alice",
+            merge: async () => {
+              merged = true;
+              return { ok: true, sha: "b".repeat(40) };
+            },
+            enqueue: async () => ({ ok: true }),
+          }),
+        },
+      },
+    );
+    expect(result).toMatchObject({ ok: true, value: { kind: "merged", by: { user: "access:alice", login: "alice" } } });
+    const phaseStart = phase,
+      readStart = phases.length;
+    expect((await get("/home/snapshot?observe=merge-work%3Atask")).body.needsYou).toEqual([]);
+    expect(phases.slice(readStart)).toEqual([
+      `begin:${phaseStart + 1}`,
+      `read:${phaseStart + 1}`,
+      `begin:${phaseStart + 2}`,
+      `read:${phaseStart + 2}`,
+    ]);
+    expect(emittedKeys.slice(-2)).toEqual([
+      { phase: phaseStart + 1, keys: ["merge-work:task"] },
+      { phase: phaseStart + 2, keys: [] },
+    ]);
+    const history = await get("/home/history?tz=UTC");
+    expect(history.body.history.units[0].unit).toMatchObject({
+      unit: "merge-work:task",
+      mergeCompletion: { at: now, sha: "b".repeat(40) },
+      ending: { kind: "merge_ready", report: "Original reviewed head." },
+    });
+    expect(observed).toEqual(["merge-work:task"]);
+    const repeated = await get("/home/snapshot?observe=merge-work%3Atask");
+    expect(repeated.status).toBe(200);
+    expect(repeated.body.observation).toBe("observed");
+    expect(observed).toEqual(["merge-work:task"]);
+    seedCoordinatorUnit(instances, ready);
+    loseSource = true;
+    const denied = await get("/home/snapshot?observe=merge-work%3Atask");
+    expect(denied.status).toBe(404);
+    expect(denied.body).toBeNull();
+  });
+  it("reads a background-completed merge for its saved assignee rather than only its creator", async () => {
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.put({
+      id: "assigned-work",
+      kind: "ship",
+      userId: "access:bob",
+      channelId: "web:bob",
+      threadKey: "web:bob:original",
+      repo: "sample/api",
+      branch: "work",
+      createdAt: 1,
+    });
+    const pr = { number: 42, url: "https://github.com/sample/api/pull/42" };
+    const unit = {
+      instanceId: "assigned-work",
+      unit: "task",
+      slug: "task",
+      branch: "work",
+      dependsOn: [],
+      rounds: [],
+      pr,
+      lastPush: "a".repeat(40),
+      ending: { kind: "merge_ready", report: "Original reviewed head.", at: 2 },
+      mergeAttention: {
+        assignedTo: "access:alice",
+        pr,
+        headSha: "a".repeat(40),
+        at: 2,
+        resolved: { sha: "b".repeat(40), at: 3 },
+      },
+    };
+    seedCoordinatorUnit(instances, unit);
+    const observe = vi.fn(async () => "held" as const);
+    const read = createHomeViewHandler(
+      createHomeService({
+        organizationId: "installation-a",
+        instances,
+        conditions: createHomeConditionReader(instances),
+      }),
+      makePageSender({ js: "/assets/green.js", css: [] }, ALL_CAPABILITIES),
+      "installation-a",
+      { observeUnit: observe },
+    );
+    async function get(person = viewer) {
+      const out = response();
+      read(request("/home/snapshot?observe=assigned-work%3Atask"), out.res, {
+        actor: person,
+        organization: "installation-a",
+      });
+      await out.ended;
+      return out.value();
+    }
+    const assigned = await get();
+    expect(assigned.status).toBe(200);
+    expect(JSON.parse(assigned.body)).toMatchObject({ observation: "observed", needsYou: [] });
+    expect(await get(actor("user", "access:foreign", { actions: "all", channels: "all", repos: "all" }))).toEqual({
+      status: 404,
+      body: "not found",
+    });
+    expect(await get({ ...viewer, viewingAs: { id: "access:alice" } })).toEqual({ status: 404, body: "not found" });
+    expect(await get(actor("user", "access:alice", { actions: new Set() }))).toEqual({
+      status: 404,
+      body: "not found",
+    });
+    expect(observe).not.toHaveBeenCalled();
+  });
+  it("schedules merge observation only after sending the current Home response", async () => {
+    const service = createHomeService({
+      organizationId: "installation-a",
+      instances: { listInstances: async () => ({ items: [] }), listUnits: async () => [] },
+    });
+    const events: string[] = [];
+    const read = createHomeViewHandler(
+      service,
+      makePageSender({ js: "/assets/green.js", css: [] }, ALL_CAPABILITIES),
+      "installation-a",
+      {
+        observe: () => {
+          events.push("observe");
+        },
+      },
+    );
+    for (const path of ["/home", "/home/snapshot"]) {
+      const out = response();
+      const end = out.res.end.bind(out.res);
+      out.res.end = ((body: string) => {
+        events.push("response");
+        return end(body);
+      }) as ServerResponse["end"];
+      read(request(path), out.res, { actor: viewer, organization: "installation-a" });
+      await out.ended;
+      expect(out.value().status).toBe(200);
+    }
+    expect(events).toEqual(["response", "observe", "response", "observe"]);
+  });
   it("selects only serialized unresolved private rows for the final request guard", async () => {
     const instance = {
       id: "owned",
@@ -113,35 +369,6 @@ describe("authorized Home pages", () => {
     ).toEqual(["Private task 0"]);
     expect(selected).toEqual(["owned:task-0"]);
     expect(output.value().body).not.toContain("Private task 999");
-  });
-  it("schedules merge observation only after sending the current Home response", async () => {
-    const service = createHomeService({
-      organizationId: "installation-a",
-      instances: { listInstances: async () => ({ items: [] }), listUnits: async () => [] },
-    });
-    const events: string[] = [];
-    const read = createHomeViewHandler(
-      service,
-      makePageSender({ js: "/assets/green.js", css: [] }, ALL_CAPABILITIES),
-      "installation-a",
-      {
-        observe: () => {
-          events.push("observe");
-        },
-      },
-    );
-    for (const path of ["/home", "/home/snapshot"]) {
-      const out = response();
-      const end = out.res.end.bind(out.res);
-      out.res.end = ((body: string) => {
-        events.push("response");
-        return end(body);
-      }) as ServerResponse["end"];
-      read(request(path), out.res, { actor: viewer, organization: "installation-a" });
-      await out.ended;
-      expect(out.value().status).toBe(200);
-    }
-    expect(events).toEqual(["response", "observe", "response", "observe"]);
   });
   it("includes server-proved own answers in All people while Person cannot acquire an answer", async () => {
     const service = createHomeService({

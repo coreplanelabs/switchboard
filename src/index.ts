@@ -1772,6 +1772,10 @@ export async function runBot(): Promise<void> {
       observe: (context, snapshot) => {
         if (context.home) browserWiring?.current()?.queueMergeObservations(context.home, snapshot.needsYou);
       },
+      observeUnit: (context, key) =>
+        context.home && browserWiring?.current()
+          ? browserWiring.current()!.observeMerge(context.home, key)
+          : Promise.resolve("held"),
     });
     // Residents dash: GET /residents (index) + /residents/:owner/:name (detail),
     // the browser twin of `repo list`. Reads the resident Worker's admin

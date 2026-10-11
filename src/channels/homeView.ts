@@ -9,6 +9,7 @@ import { workReadPredicate, workViewScopeOf } from "./workViewScope.js";
 import type { HomeFleetSeed, HomeAnswerTarget, HomeMergeAction } from "./homeSeed.js";
 import type { HomeRuntimeContext, HomeThreadProjection } from "./homeRuntime.js";
 import { parsePrivateWorkerThreadKey } from "../core/privateWorkerLog.js";
+import { parseUnitKey } from "../core/coordinator/contract.js";
 
 type HomeService = ReturnType<typeof createHomeService>;
 export interface HomePrivateReadGuard {
@@ -76,6 +77,8 @@ export function createHomeViewHandler(
     ) => Promise<Record<string, HomeMergeAction>>;
     /** Schedules a bounded supervised read after the initial attention frame. */
     observe?: (context: HomeViewContext, snapshot: HomeFleetSeed["snapshot"]) => void;
+    /** One explicit read after a known command result, under the same bounded observer. */
+    observeUnit?: (context: HomeViewContext, key: string) => Promise<"observed" | "held" | "unchanged">;
   } = {},
 ) {
   return (req: IncomingMessage, res: ServerResponse, context: HomeViewContext = {}): boolean => {
@@ -93,6 +96,15 @@ export function createHomeViewHandler(
     }
     const actor = context.actor;
     const scope = workViewScopeOf(actor);
+    const observeKey = url.searchParams.get("observe");
+    if (observeKey !== null && (selected.kind !== "snapshot" || actor.viewingAs || scope.mode === "person")) {
+      plain(res, 404, "not found");
+      return true;
+    }
+    if (observeKey !== null && (url.searchParams.getAll("observe").length !== 1 || !parseUnitKey(observeKey))) {
+      plain(res, 400, "The work key is invalid.");
+      return true;
+    }
     const privateReads: Parameters<PrivateUnitReader>[] = [];
     let guard: HomePrivateReadGuard | undefined;
     const beginReadPhase = async () => {
@@ -234,7 +246,53 @@ export function createHomeViewHandler(
         });
         return;
       }
-      const snapshot = await service.snapshot(reader);
+      let snapshot = await service.snapshot(reader);
+      let observation: "observed" | "held" | "unchanged" | undefined;
+      if (observeKey !== null) {
+        const needsObservation = snapshot.needsYou.some(
+          (row) =>
+            row.unit.unit === observeKey && row.conditions.some((condition) => condition.id === `${observeKey}:merge`),
+        );
+        if (!needsObservation) {
+          // A background read can finish this unit before the explicit read.
+          // Confirm current readable metadata without another native lookup.
+          const key = parseUnitKey(observeKey)!;
+          const found = await service.pipeline({ ...reader, visibleTo: reader.readableTo }, key.instanceId);
+          if (
+            (found.status === "complete" || found.status === "partial") &&
+            found.pipeline.units.some(
+              (row) => row.unit.unit === observeKey && row.unit.mergeCompletion && row.mergeCompletionForReader,
+            )
+          ) {
+            observation = "observed";
+          } else {
+            plain(
+              res,
+              snapshot.status === "complete" ? 404 : 503,
+              snapshot.status === "complete" ? "not found" : "Work is unavailable.",
+            );
+            return;
+          }
+        }
+        if (
+          !(await canEmit([
+            ...new Set([
+              observeKey,
+              ...[...snapshot.needsYou, ...snapshot.moving, ...snapshot.waiting].map((row) => row.unit.unit),
+            ]),
+          ]))
+        )
+          return;
+        if (needsObservation)
+          observation = (await options.observeUnit?.(context, observeKey).catch(() => "held" as const)) ?? "held";
+        // This is a second current read. No response or private bytes from the
+        // pre-observation phase are used as completion evidence.
+        if (!(await beginReadPhase())) {
+          plain(res, 404, "not found");
+          return;
+        }
+        snapshot = await service.snapshot(reader);
+      }
       if (snapshot.organizationId !== organizationId) {
         plain(res, 404, "not found");
         return;
@@ -250,6 +308,7 @@ export function createHomeViewHandler(
             ...snapshot,
             attentionRecipient: reader.actorId,
             attentionRecipients: reader.attentionRecipients,
+            ...(observation ? { observation } : {}),
           }),
         );
       } else {
