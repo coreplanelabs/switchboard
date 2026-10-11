@@ -859,6 +859,7 @@ export async function runBot(): Promise<void> {
       ? createReviewsService(
           metricsCfg,
           new AnalyticsEngineSqlSource({ accountId: costsCfg.cloudflareAccountId, token: metricsToken.reveal() }),
+          { feedback: reviewFeedbackStore },
         )
       : new NullReviewsService();
   const dispatchSweepChild = (

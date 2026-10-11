@@ -189,7 +189,7 @@ function renderReviews(output: JsonValue): string {
 }
 
 /** `--from`/`--to` as a half-open millisecond range: whole UTC days, both included. */
-function reviewsRangeOf(options: { from?: string; to?: string }, now: number): { fromMs: number; toMs: number } {
+export function reviewsRangeOf(options: { from?: string; to?: string }, now: number): { fromMs: number; toMs: number } {
   // A real calendar day only: `Date.parse` rolls a day the month lacks
   // forward (February 29 of a common year reads as March 1), so the parsed
   // day must spell the same date back.
