@@ -106,6 +106,12 @@ export class OrganizationService {
     },
   ) {}
   async resolve(authentication: OrganizationAuthentication): Promise<ResolvedOrganization | undefined> {
+    return this.resolveCurrent(authentication, false);
+  }
+  private async resolveCurrent(
+    authentication: OrganizationAuthentication,
+    requireProof: boolean,
+  ): Promise<ResolvedOrganization | undefined> {
     const parsed = identitySchema.safeParse(authentication.identity);
     if (!parsed.success) return undefined;
     const matches = this.options.mappings.filter(
@@ -134,8 +140,11 @@ export class OrganizationService {
       try {
         binding = await this.options.directory.resolve(authentication.onBehalfOf ?? parsed.data);
       } catch {
+        if (requireProof) throw new Error("Current organization identity proof is unavailable.");
         return undefined;
       }
+      if (requireProof && binding.status === "unavailable")
+        throw new Error("Current organization identity proof is unavailable.");
       if (binding.status === "bound") {
         actor.stream = binding.binding.personId;
         actor.bindingRevision = binding.binding.revision;
@@ -407,13 +416,16 @@ export class OrganizationService {
     });
   }
   private async authorizePreserved(envelope: OrganizationEnvelope, action: "read" | "effect"): Promise<boolean> {
-    const current = await this.resolve({
-      source: envelope.source,
-      identity: envelope.actor.identity,
-      kind: envelope.actor.kind,
-      organizations: [envelope.organization],
-      ...(envelope.actor.onBehalfOf ? { onBehalfOf: envelope.actor.onBehalfOf } : {}),
-    });
+    const current = await this.resolveCurrent(
+      {
+        source: envelope.source,
+        identity: envelope.actor.identity,
+        kind: envelope.actor.kind,
+        organizations: [envelope.organization],
+        ...(envelope.actor.onBehalfOf ? { onBehalfOf: envelope.actor.onBehalfOf } : {}),
+      },
+      true,
+    );
     return (
       !!current &&
       current.organization === envelope.organization &&
@@ -444,13 +456,16 @@ export class OrganizationService {
     envelope: OrganizationEnvelope,
     lease: { owner: string; generation: number },
   ): Promise<boolean> {
-    const current = await this.resolve({
-      source: envelope.source,
-      identity: envelope.actor.identity,
-      kind: envelope.actor.kind,
-      organizations: [envelope.organization],
-      ...(envelope.actor.onBehalfOf ? { onBehalfOf: envelope.actor.onBehalfOf } : {}),
-    });
+    const current = await this.resolveCurrent(
+      {
+        source: envelope.source,
+        identity: envelope.actor.identity,
+        kind: envelope.actor.kind,
+        organizations: [envelope.organization],
+        ...(envelope.actor.onBehalfOf ? { onBehalfOf: envelope.actor.onBehalfOf } : {}),
+      },
+      true,
+    );
     if (
       !current ||
       current.organization !== envelope.organization ||
@@ -480,6 +495,7 @@ export class OrganizationService {
       actor: envelope.actor,
       ...lease,
     });
+    if (result.status === "unavailable") throw new Error("Current organization effect proof is unavailable.");
     return result.status === "receipt" && result.receipt.status === "pending" && result.receipt.effectKey !== null;
   }
 }

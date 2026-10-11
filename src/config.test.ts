@@ -7,6 +7,7 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { secretsFrom, type Secrets } from "./secrets.js";
 import { sha256Hex } from "./configDocument.js";
 import {
+  conversationRetentionFor,
   ConfigStore,
   defaultIntakeMode,
   FileOverridesBacking,
@@ -967,6 +968,41 @@ describe("install repair policy config", () => {
     ]) {
       expect(() => store(YAML_FIXTURE + invalid).config, invalid).toThrow(/installRepairRepos/);
     }
+  });
+});
+
+// Feature: docs/reference/specs/browser-home.md — separate conversation retention.
+describe("conversation retention config", () => {
+  it("loads explicit retention and keeps the default private content snapshot and receipt periods", () => {
+    expect(conversationRetentionFor(store().config)).toEqual({
+      privateContentDays: 90,
+      sourceSnapshotDays: 30,
+      receiptDays: 365,
+    });
+    expect(
+      conversationRetentionFor(store(`${YAML_FIXTURE}\nconversationRetention:\n  sourceSnapshotDays: 14\n`).config),
+    ).toEqual({ privateContentDays: 90, sourceSnapshotDays: 14, receiptDays: 365 });
+    expect(
+      conversationRetentionFor(
+        store(
+          `${YAML_FIXTURE}\nconversationRetention:\n  privateContentDays: 120\n  sourceSnapshotDays: 14\n  receiptDays: 400\n`,
+        ).config,
+      ),
+    ).toEqual({ privateContentDays: 120, sourceSnapshotDays: 14, receiptDays: 400 });
+  });
+  it("rejects invalid or unknown retention fields at load instead of ignoring them", () => {
+    for (const field of ["privateContentDays", "sourceSnapshotDays", "receiptDays"]) {
+      for (const value of ["0", "-1", "1.5", "'30'", "9007199254740991"])
+        expect(() => store(`${YAML_FIXTURE}\nconversationRetention:\n  ${field}: ${value}\n`)).toThrow(
+          `conversationRetention.${field}`,
+        );
+    }
+    expect(() => store(`${YAML_FIXTURE}\nconversationRetention: []\n`)).toThrow(
+      "conversationRetention must be a mapping",
+    );
+    expect(() => store(`${YAML_FIXTURE}\nconversationRetention:\n  unknown: 30\n`)).toThrow(
+      "conversationRetention.unknown",
+    );
   });
 });
 

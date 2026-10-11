@@ -18,6 +18,7 @@ import {
   type ShipConfig,
 } from "../core/shipPipeline.js";
 import {
+  DAY_MS,
   affordableShipRounds,
   ALLOWANCES,
   ASKS,
@@ -75,6 +76,7 @@ const CONFIG_KEYS: Record<keyof AppConfig, true> = {
   agentDefaults: true,
   agents: true,
   organization: true,
+  conversationRetention: true,
   providers: true,
   defaults: true,
   channels: true,
@@ -367,6 +369,7 @@ export function validateConfig(cfg: AppConfig): void {
   // field at load, like the costs block its credential rides with.
   parseMetricsConfig(cfg.metrics);
   if (cfg.runHistory !== undefined) validateRunHistory(cfg.runHistory);
+  validateConversationRetention(cfg.conversationRetention);
   if (cfg.tracing !== undefined) validateTracing(cfg.tracing);
   validateRuntimeOverrides(cfg.runtimeOverrides);
   if (cfg.review !== undefined) validateReview(cfg.review);
@@ -1334,6 +1337,20 @@ function validateTracing(t: TracingConfig): void {
   if (typeof t !== "object" || t === null) throw new Error("config.yaml: tracing must be a mapping");
   if (t.log !== undefined && !TRACING_LOG_LEVELS.includes(t.log)) {
     throw new Error(`config.yaml: tracing.log must be one of ${TRACING_LOG_LEVELS.join(", ")}`);
+  }
+}
+
+function validateConversationRetention(value: AppConfig["conversationRetention"]): void {
+  if (value === undefined) return;
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("config.yaml: conversationRetention must be a mapping");
+  const known = new Set(["privateContentDays", "sourceSnapshotDays", "receiptDays"]);
+  for (const [key, days] of Object.entries(value)) {
+    if (!known.has(key)) throw new Error(`config.yaml: conversationRetention.${key} is not a known key`);
+    if (!Number.isSafeInteger(days) || days < 1 || days > Math.floor(Number.MAX_SAFE_INTEGER / DAY_MS))
+      throw new Error(
+        `config.yaml: conversationRetention.${key} must be a positive integer day count within the safe duration range`,
+      );
   }
 }
 

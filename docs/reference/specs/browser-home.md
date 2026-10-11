@@ -2,8 +2,8 @@
 
 Home presents durable work independently of the process that most recently worked on it. The organization is fixed by the installation; browser input cannot select another organization's inventory or grant authority.
 
-- **Code**: `src/channels/homeRuntime.ts`, `src/channels/homeRepositories.ts`, `src/core/home/service.ts`, `src/core/coordinator/inventory.ts`, `src/channels/homeView.ts`, `src/channels/homeSeed.ts`, `src/channels/webAssets.ts`, `web/green/`.
-- **Tests**: `src/channels/homeRuntime.test.ts`, `src/channels/homeRepositories.test.ts`, `web/green/app.test.ts` (actual app hash navigation), `src/core/home/service.test.ts`, `src/core/coordinator/inventory.test.ts`, `deploy/cloudflare-memory/inventory.test.ts`, `src/channels/homeView.test.ts`, `src/channels/webAssets.test.ts`, `web/green/frontend.test.ts`, `web/green/pages/workViews.test.ts`, `web/green/pages/reportStates.test.ts`, `web/green/lib/homeSession.test.ts`, `web/green/lib/virtualRows.test.ts`, `web/green/components/threadSearch.test.ts`, `web/green/components/confirmationPrompt.test.ts`, `web/green/components/conversationDock.test.ts`, `web/green/components/unitList.test.ts`, `web/green/pages/pullRequest.test.ts`, `web/green/pages/discovery.test.ts`, `web/green/lib/pullRequest.test.ts`.
+- **Code**: `src/config.ts`, `src/config/validate.ts`, `src/channels/homeRuntime.ts`, `src/channels/homeRepositories.ts`, `src/core/home/service.ts`, `src/core/coordinator/inventory.ts`, `src/channels/homeView.ts`, `src/channels/homeSeed.ts`, `src/channels/webAssets.ts`, `web/green/`.
+- **Tests**: `src/config.test.ts`, `src/channels/homeRuntime.test.ts`, `src/channels/homeRepositories.test.ts`, `web/green/app.test.ts` (actual app hash navigation), `src/core/home/service.test.ts`, `src/core/coordinator/inventory.test.ts`, `deploy/cloudflare-memory/inventory.test.ts`, `src/channels/homeView.test.ts`, `src/channels/webAssets.test.ts`, `web/green/frontend.test.ts`, `web/green/pages/workViews.test.ts`, `web/green/pages/reportStates.test.ts`, `web/green/lib/homeSession.test.ts`, `web/green/lib/virtualRows.test.ts`, `web/green/components/threadSearch.test.ts`, `web/green/components/confirmationPrompt.test.ts`, `web/green/components/conversationDock.test.ts`, `web/green/components/unitList.test.ts`, `web/green/pages/pullRequest.test.ts`, `web/green/pages/discovery.test.ts`, `web/green/lib/pullRequest.test.ts`.
 
 ## Behavior
 
@@ -95,3 +95,17 @@ This support layer supplies the protected HTTP and live conversation contract. T
 | Server-issued thread event URLs preserve authorized read-only and explicit observer mode; writable focus still revokes on write loss, observers revoke on read or privacy loss, and broad streams retain read-only access | `[unit]` `src/channels/homeRuntime.test.ts::authenticated browser organization runtime::follows server event URLs for authorized read-only threads and view-as`; `::keeps explicit observation in every emitted session and reopened stream`; `::revokes a writable focused stream when write permission is lost`; `::preserves broad event URLs and reads when key issuance is unavailable`; `::revokes observer streams on current thread read or privacy loss` |
 | Browser sessions, sends, issued keys, history windows, protected deletion, exact question retries and source revocation obey the authenticated conversation contract | `[unit]` `src/channels/homeRuntime.test.ts::authenticated browser organization runtime::*` |
 | Repository choices and selected source use only current public capability and code policy; attachment context does not retarget the selected repository | `[unit]` `src/channels/homeRepositories.test.ts::Home repository selection::*` |
+
+
+## Conversation retention
+
+The additive runtime remains unregistered until the production host supplies
+current-source policy and original-owner effect callbacks.
+
+`conversationRetention` configures private message content, bounded original source snapshots, and noncontent receipts independently. Defaults are 90, 30 and 365 days. The loader refuses unknown fields and day counts that are not positive safe durations. Source snapshot expiry is anchored to the original admission time, not the time an owner consumes or resumes it. Private history keeps its 90-day content period and receipts keep their 365-day replay and attribution period. The dispatcher rereads the exact original retained ledger body before starting a delayed task; deletion or snapshot expiry refuses that task without a new model run. Bodyless original attribution does not restore deleted input bytes.
+
+| Criterion | Proof |
+|---|---|
+| Default and configured conversation retention remain separate; invalid or unknown fields refuse loading | `[unit]` `src/config.test.ts::conversation retention config::*` |
+| Snapshot expiry refuses original-owner consumption while private history and the original replay receipt remain retained | `[unit]` `src/core/organization/runtime.test.ts::organization runtime::expires the original source snapshot before consuming an owner while private history and replay receipts remain retained` |
+| A delayed launch after the original snapshot deadline, or after explicit body deletion, refuses before model execution | `[unit]` `src/core/organization/runtime.test.ts::organization runtime::refuses a delayed launch after its original snapshot deadline and refuses an explicitly cleared snapshot before executing` |
