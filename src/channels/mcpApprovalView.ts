@@ -8,14 +8,20 @@ import { dispatchClick, type CoreDeps } from "../core/dispatcher.js";
 import { isServiceToken, type AccessIdentity } from "./accessAuth.js";
 import { connectionIdentity, mcpRequester, MCP_APPROVAL_PATH } from "./mcpApproval.js";
 import type { McpOptions } from "./mcp.js";
+import type { Confirmation, ConfirmationSource } from "../core/confirmations.js";
 import { SingleShotIO } from "./singleShotDispatch.js";
 import { readBody } from "./http.js";
 import { callerIdFor, originAllowed } from "./commandHttp.js";
 import { FORM_PAGE_CSP, WEB_HTML_HEADERS } from "./webShell.js";
 import { escapeHtml } from "./liveView/html.js";
 
+export interface McpApprovalViewOptions extends McpOptions {
+  /** Trusted host lookup of the exact original source under current authority. */
+  resolveApprovalSource?(identity: AccessIdentity, row: Confirmation): Promise<ConfirmationSource | undefined>;
+}
+
 /** The existing dashboard verifier proves the browser; the core owns every execution. */
-export function createMcpApprovalView(core: CoreDeps, options: McpOptions) {
+export function createMcpApprovalView(core: CoreDeps, options: McpApprovalViewOptions) {
   return (req: IncomingMessage, res: ServerResponse, identity: AccessIdentity): boolean => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== MCP_APPROVAL_PATH) return false;
@@ -34,7 +40,7 @@ export function createMcpApprovalView(core: CoreDeps, options: McpOptions) {
       const id = url.searchParams.get("id");
       if (
         isServiceToken(identity) ||
-        !identity.email ||
+        (!identity.email && !options.resolveApprovalSource) ||
         !identity.sub ||
         !id ||
         !/^[a-zA-Z0-9_-]{8,128}$/.test(id) ||
@@ -43,33 +49,47 @@ export function createMcpApprovalView(core: CoreDeps, options: McpOptions) {
         return page(404, "This offer is unavailable; nothing ran.");
       const row = await store.get(id);
       const connection = row?.message.approvalConnection;
-      const userId = row?.message.userId.startsWith("access:")
-        ? `access:${identity.sub}`
-        : (await options.personByEmail?.(identity.email))?.id;
+      const originalSource =
+        row && options.resolveApprovalSource ? await options.resolveApprovalSource(identity, row) : undefined;
+      const sourceActorId = row?.message.postedBy ?? row?.message.authenticatedAs ?? row?.message.userId;
+      if (
+        row &&
+        ((options.resolveApprovalSource && !originalSource) ||
+          (row.originalOrganization && !originalSource) ||
+          (originalSource && originalSource.actor.id !== sourceActorId))
+      )
+        return page(404, "This offer is unavailable; nothing ran.");
+      const userId = originalSource
+        ? row?.message.userId
+        : row?.message.userId.startsWith("access:")
+          ? `access:${identity.sub}`
+          : identity.email
+            ? (await options.personByEmail?.(identity.email))?.id
+            : undefined;
       if (!row || !userId || userId !== row.message.userId) return page(404, "This offer is unavailable; nothing ran.");
-      if (connection) {
+      const connectionValid = async () => {
+        if (!connection) return true;
         if (connection.credentialId.startsWith("access:")) {
-          // The browser records consent only. The originating MCP request must
-          // still revalidate its own credential before consuming this action.
           const browserId = callerIdFor(identity);
-          if (
-            connection.mode !== undefined ||
-            connection.credentialId !== browserId ||
-            row.message.authenticatedAs !== browserId
-          )
-            return page(403, "This offer belongs to another connection; nothing ran.");
-        } else {
-          const credential = await connectionIdentity(connection.id, options);
-          const requester = credential && (await mcpRequester(credential, options));
-          if (
-            !credential ||
-            `mcp:${credential.subject}` !== connection.credentialId ||
-            requester?.userId !== userId ||
-            (credential.subject.startsWith("personal:") && credential.subject !== `personal:${identity.sub}`)
-          )
-            return page(403, "The connection or its verified identity was revoked; nothing ran.");
+          return (
+            connection.mode === undefined &&
+            connection.credentialId === browserId &&
+            row.message.authenticatedAs === browserId
+          );
         }
-      } else if (
+        const credential = await connectionIdentity(connection.id, options);
+        const requester = credential && (await mcpRequester(credential, options));
+        return (
+          !!credential &&
+          `mcp:${credential.subject}` === connection.credentialId &&
+          requester?.userId === userId &&
+          (!credential.subject.startsWith("personal:") || credential.subject === `personal:${identity.sub}`)
+        );
+      };
+      if (!(await connectionValid()))
+        return page(403, "The connection or its verified identity was revoked; nothing ran.");
+      if (
+        !connection &&
         row.message.authenticatedAs !== `access:${identity.sub}` &&
         !(
           row.message.authenticatedAs === undefined &&
@@ -78,7 +98,7 @@ export function createMcpApprovalView(core: CoreDeps, options: McpOptions) {
         )
       )
         return page(404, "This offer belongs to another connection; nothing ran.");
-      const actor = chatActorOf(core.config, row.message);
+      let actor = originalSource?.actor ?? chatActorOf(core.config, row.message);
       let line: string;
       let risk: string;
       if (row.kind === "run") {
@@ -113,6 +133,20 @@ export function createMcpApprovalView(core: CoreDeps, options: McpOptions) {
         return page(400, "Only the saved action can be confirmed.");
       const action = form.get("action");
       if (action !== "approve" && action !== "cancel") return page(400, "Unknown action.");
+      if (options.resolveApprovalSource) {
+        const current = await options.resolveApprovalSource(identity, row);
+        if (!current || current.actor.id !== sourceActorId) return page(403, "The saved source changed; nothing ran.");
+        actor = current.actor;
+      } else actor = chatActorOf(core.config, row.message);
+      if (!(await connectionValid()))
+        return page(403, "The connection or its verified identity was revoked; nothing ran.");
+      if (row.kind === "run") {
+        const def = options.commands?.get(row.command);
+        const caller = { kind: connection ? ("mcp" as const) : ("access" as const), id: actor.id, actor };
+        if (!def || !authorize(actor, def.action, resourceOf(def, row.input, caller)).allow)
+          return page(403, "Permission for this action was revoked; nothing ran.");
+      }
+
       if (connection) {
         if (action === "cancel") {
           const cancelled = await store.cancel(id, [userId], connection.id);
