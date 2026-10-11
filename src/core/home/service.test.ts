@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { CoordinatorInstance, CoordinatorUnit } from "../coordinator/contract.js";
 import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import { createHomeService, type HomeCondition, type HomeInventory } from "./service.js";
+import { homeWeek } from "./week.js";
 
 const instance: CoordinatorInstance = {
   id: "old-work",
@@ -30,6 +31,81 @@ function inventory(rows: CoordinatorUnit[], instances = [instance]): HomeInvento
 }
 
 describe("Home durable fleet", () => {
+  it("keeps a readable assigned question in Mine without including its requester's other work", async () => {
+    const home = createHomeService({
+      organizationId: "organization:example",
+      instances: inventory([unit("assigned"), unit("other")]),
+      conditions: {
+        list: async (key) =>
+          key.endsWith(":assigned")
+            ? [
+                {
+                  id: "question",
+                  unitKey: key,
+                  revision: 1,
+                  state: "open",
+                  owner: { kind: "person", id: "access:reader" },
+                  summary: "Choose the behavior",
+                  nextAction: "Answer here",
+                },
+              ]
+            : [],
+      },
+    });
+    const mine = {
+      actorId: "access:reader",
+      visibleTo: { kind: "user-is" as const, userId: "access:reader" },
+      readableTo: { kind: "all" as const },
+    };
+    const snapshot = await home.snapshot(mine);
+    expect(snapshot.needsYou.map((row) => row.unit.unit)).toEqual(["old-work:assigned"]);
+    expect(snapshot.waiting).toEqual([]);
+    expect(snapshot.pipelines.map((row) => row.unresolved)).toEqual([1]);
+    const pipeline = await home.pipeline(mine, instance.id);
+    expect(pipeline).toMatchObject({
+      status: "complete",
+      pipeline: { units: [{ unit: { unit: "old-work:assigned" } }] },
+    });
+    const denied = await home.snapshot({ ...mine, readableTo: { kind: "none" } });
+    expect(denied.needsYou).toEqual([]);
+    expect(denied.pipelines).toEqual([]);
+  });
+  it("pages a weekly completion timeline by saved ending time across inventory order", async () => {
+    const other = { ...instance, id: "new-work", createdAt: 0 };
+    const home = createHomeService({
+      organizationId: "organization:example",
+      historyCursorKey: HISTORY_KEY,
+      instances: {
+        listInstances: async ({ cursor }) => (cursor ? { items: [other] } : { items: [instance], cursor: "next" }),
+        listUnits: async (id) =>
+          id === instance.id
+            ? [
+                unit("old", { ending: { kind: "merged", at: Date.parse("1970-01-05T12:00:00Z"), report: "" } }),
+                unit("outside", { ending: { kind: "merged", at: Date.parse("1970-01-11T00:00:00Z"), report: "" } }),
+              ]
+            : [
+                unit("latest", {
+                  instanceId: other.id,
+                  ending: { kind: "merged", at: Date.parse("1970-01-09T12:00:00Z"), report: "" },
+                }),
+              ],
+      },
+    });
+    const week = homeWeek(Date.parse("1970-01-10T12:00:00Z"));
+    const first = await home.history(viewer, { week, limit: 1 });
+    expect(first.units.map((row) => row.unit.unit)).toEqual(["new-work:latest"]);
+    expect(first.status).toBe("complete");
+    expect(first.cursor).toMatch(/^homew1\./);
+    const second = await home.history(viewer, { week, limit: 1, cursor: first.cursor });
+    expect(second.units.map((row) => row.unit.unit)).toEqual(["old-work:old"]);
+    expect(second.cursor).toBeUndefined();
+    await expect(
+      home.history({ ...viewer, actorId: "access:someone-else" }, { week, cursor: first.cursor }),
+    ).rejects.toThrow("invalid");
+    await expect(
+      home.history(viewer, { week: homeWeek(Date.parse("1970-01-17T12:00:00Z")), cursor: first.cursor }),
+    ).rejects.toThrow("invalid");
+  });
   it("keeps old unanswered work visible without any recent or live run", async () => {
     const home = createHomeService({
       organizationId: "organization:example",

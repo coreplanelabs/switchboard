@@ -90,20 +90,28 @@ export function unitSessionKeys(view: {
 
 /** The row's readable facts (`UnitFacts`), each optional field present only when the row has it. */
 export function unitFactsOf(unit: CoordinatorUnit): UnitFacts {
+  return readableUnitFacts(unit, false);
+}
+/** Only the host's current original-source recipient proof may select these fields. */
+export function unitFactsForPrivateRecipient(unit: CoordinatorUnit): UnitFacts {
+  return readableUnitFacts(unit, true);
+}
+function readableUnitFacts(unit: CoordinatorUnit, privateContent: boolean): UnitFacts {
   const privateWorker = unit.workBrief !== undefined;
+  const readableContent = !privateWorker || privateContent;
   return {
     unit: unitKeyOf(unit),
     instanceId: unit.instanceId,
     id: unit.unit,
-    ...(!privateWorker && unit.title !== undefined ? { title: unit.title } : {}),
+    ...(readableContent && unit.title !== undefined ? { title: unit.title } : {}),
     branch: unit.branch,
     threads: {
-      ...(!privateWorker && unit.threadKey !== undefined ? { coding: unit.threadKey } : {}),
-      ...(!privateWorker && unit.reviewThread !== undefined ? { review: unit.reviewThread.threadKey } : {}),
+      ...(readableContent && unit.threadKey !== undefined ? { coding: unit.threadKey } : {}),
+      ...(readableContent && unit.reviewThread !== undefined ? { review: unit.reviewThread.threadKey } : {}),
     },
     sourceUrls: {
-      ...(!privateWorker && unit.sourceUrl !== undefined ? { coding: unit.sourceUrl } : {}),
-      ...(!privateWorker && unit.reviewThread?.sourceUrl !== undefined ? { review: unit.reviewThread.sourceUrl } : {}),
+      ...(readableContent && unit.sourceUrl !== undefined ? { coding: unit.sourceUrl } : {}),
+      ...(readableContent && unit.reviewThread?.sourceUrl !== undefined ? { review: unit.reviewThread.sourceUrl } : {}),
     },
     ...(unit.pr !== undefined ? { pr: unit.pr } : {}),
     ...(unit.issue !== undefined ? { issue: unit.issue } : {}),
