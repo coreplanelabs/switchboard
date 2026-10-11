@@ -2,6 +2,7 @@
 defineOptions({ name: "GreenCostsPage" });
 import { MINUTE_MS } from "@core/core/budgets.js";
 import { computed, onMounted, onUnmounted, ref } from "vue";
+import type { CostWorkReport } from "@core/core/costsService.js";
 import type { CostReport } from "@core/core/costs.js";
 import type { CostsByReport } from "@core/core/costsBy.js";
 import type { CostsSnapshotStatus } from "@core/core/costsSnapshot.js";
@@ -44,6 +45,37 @@ import {
 const seed = useSeed("costs");
 /** The report and the open dimension's report start as the seed's and are replaced when a new snapshot lands (below). */
 const report = ref<CostReport | null>(seed?.report ?? null);
+const work = ref<CostWorkReport | null>(seed?.work ?? null);
+const workRows = computed(() => (work.value?.completeness === "unavailable" ? [] : (work.value?.rows ?? [])));
+const workDays = computed(() =>
+  work.value?.completeness === "unavailable"
+    ? []
+    : [...(work.value?.days ?? [])].sort((a, b) => b.day.localeCompare(a.day) || a.key.localeCompare(b.key)),
+);
+const knownModelSpend = computed(() => workRows.value.reduce((sum, row) => sum + row.llmUsd, 0));
+const unpricedWorkTokens = computed(() => workRows.value.reduce((sum, row) => sum + row.unpricedTokens, 0));
+const workTiles = computed(() =>
+  !work.value || work.value.completeness === "unavailable"
+    ? []
+    : [
+        {
+          label: "Known model spend",
+          value:
+            knownModelSpend.value > 0 || (work.value.completeness === "complete" && !unpricedWorkTokens.value)
+              ? usd(knownModelSpend.value)
+              : "—",
+          note: "Recorded model usage only. Unpriced tokens are excluded.",
+        },
+      ],
+);
+const workUnits = computed(() =>
+  work.value?.unitSpendStatus === "unavailable" ? [] : (work.value?.shipSpend?.units ?? []),
+);
+const workUnitKey = ref("");
+const selectedWorkUnit = computed(
+  () => workUnits.value.find((unit) => unit.key === workUnitKey.value) ?? workUnits.value[0],
+);
+const selectedRange = computed(() => work.value?.range.days ?? report.value?.range.days ?? 7);
 const selectedShipKey = ref("");
 const shipUnits = computed(() => report.value?.shipSpend?.units ?? []);
 const shipKey = computed({
@@ -103,7 +135,7 @@ const currentView = computed(() => VIEWS.find((v) => v.view === view.value) ?? V
 // sees the line move without reloading. When a new snapshot lands (its
 // `takenAt` differs from the one the figures came from) the page re-reads its
 // JSON twins for the range it shows and repaints; the tiles never go blank.
-const canSnapshot = computed(() => seed?.canSnapshot === true);
+const canSnapshot = computed(() => !work.value && seed?.canSnapshot === true);
 const daysParam = computed(() =>
   typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("days"),
 );
@@ -156,7 +188,7 @@ function onStatus(next: CostsSnapshotStatus): void {
 const makeEventSource = useEventSourceFactory();
 let es: EventSourceLike | null = null;
 onMounted(() => {
-  if (!group.value) return;
+  if (!group.value || work.value) return;
   es = makeEventSource(`/costs/${group.value}?stream=1`);
   es.onmessage = (m) => {
     const frame = parseStatusFrame(m.data);
@@ -184,7 +216,7 @@ function hrefOf(group: string, days: number, v: CostsView): string {
 }
 const downloadHref = computed(
   () =>
-    `/costs/${group.value}${view.value === "daily" ? ".json" : `/${view.value}.json`}${report.value ? `?days=${report.value.range.days}` : ""}`,
+    `/costs/${group.value}${view.value === "daily" ? ".json" : `/${view.value}.json`}${work.value || report.value ? `?days=${selectedRange.value}` : ""}`,
 );
 const series = computed(() => (report.value ? seriesOf(report.value) : []));
 const chartModel = computed(() => (report.value ? chartModelOf(report.value, series.value) : null));
@@ -310,7 +342,13 @@ const summaryTiles = computed(() =>
 );
 </script>
 <template>
-  <PageHeading title="Costs" description="Understand cloud and model spend from one billing snapshot."
+  <PageHeading
+    title="Costs"
+    :description="
+      work
+        ? 'See recorded model and unit spend for the selected work.'
+        : 'Understand cloud and model spend from one billing snapshot.'
+    "
     ><button v-if="canSnapshot" class="green-button" :disabled="taking || !!status?.inFlight" @click="takeSnapshot">
       <UIcon name="i-lucide-refresh-cw" />{{ taking || status?.inFlight ? "Taking snapshot…" : "Snapshot now" }}
     </button></PageHeading
@@ -321,7 +359,7 @@ const summaryTiles = computed(() =>
         v-for="g in groups"
         :key="g"
         class="green-button"
-        :to="hrefOf(g, report?.range.days ?? 7, view)"
+        :to="hrefOf(g, selectedRange, view)"
         :aria-current="g === group ? 'page' : undefined"
         >{{ g }}</RouterLink
       >
@@ -332,9 +370,181 @@ const summaryTiles = computed(() =>
       }}</RouterLink>
     </nav>
   </div>
-  <p class="text-xs text-muted mb-5" data-snapshot-status>{{ snapshotLine }}</p>
+  <p v-if="!work" class="text-xs text-muted mb-5" data-snapshot-status>{{ snapshotLine }}</p>
   <p v-if="takeError" class="green-notice green-error" role="alert">{{ takeError }}</p>
-  <template v-if="report">
+  <template v-if="work">
+    <p class="green-notice" role="status">Shared cloud bills cannot be attributed to this selected work.</p>
+    <p v-if="work.completeness === 'partial'" class="green-notice green-warning" role="status">
+      Personal usage is incomplete. Shown figures include recorded usage only.
+    </p>
+    <StatTiles :tiles="workTiles" />
+    <p v-if="unpricedWorkTokens" class="green-notice green-warning" role="status">
+      {{ unpricedWorkTokens.toLocaleString("en-US") }} unpriced tokens are excluded from the known spend.
+    </p>
+    <nav class="green-tabs" aria-label="Cost breakdown">
+      <RouterLink
+        v-for="v in VIEWS"
+        :key="v.view"
+        :to="hrefOf(group, selectedRange, v.view)"
+        :aria-current="v.view === view ? 'page' : undefined"
+        >{{ v.tab }}</RouterLink
+      >
+    </nav>
+    <section class="green-section">
+      <div class="green-section-heading"><h2>Recorded model usage</h2></div>
+      <EmptyState
+        v-if="work.completeness === 'unavailable'"
+        title="Personal usage unavailable"
+        description="Recorded usage could not be confirmed. No total is shown."
+      />
+      <EmptyState
+        v-else-if="!workRows.length"
+        :title="work.completeness === 'complete' ? 'No recorded model usage' : 'Personal usage is incomplete'"
+        :description="
+          work.completeness === 'complete'
+            ? 'The covered range has no recorded model usage.'
+            : 'Missing data prevents a complete usage total.'
+        "
+      />
+      <div v-else class="green-table-scroll">
+        <table class="green-table">
+          <thead>
+            <tr>
+              <th>{{ view === "daily" ? "Model" : currentView.tab }}</th>
+              <th>Runs</th>
+              <th>Turns</th>
+              <th>Known model spend</th>
+              <th>Unpriced tokens</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in workRows" :key="row.key">
+              <td>{{ row.label ?? row.key }}</td>
+              <td>{{ row.runs }}</td>
+              <td>{{ row.turns }}</td>
+              <td>{{ row.llmUsd === 0 && row.unpricedTokens > 0 ? "Unknown" : usd(row.llmUsd) }}</td>
+              <td>{{ row.unpricedTokens }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section v-if="workDays.length" class="green-section">
+      <div class="green-section-heading">
+        <h2>Recorded usage by day</h2>
+        <p>UTC days · known model spend only</p>
+      </div>
+      <div class="green-table-scroll">
+        <table class="green-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Work</th>
+              <th>Turns</th>
+              <th>Known model spend</th>
+              <th>Unpriced tokens</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="day in workDays" :key="`${day.day}:${day.key}`">
+              <td>
+                {{ monthDay(day.day)
+                }}<span v-if="day.day === work.range.to && work.range.partialLastDay" class="block text-muted"
+                  >Partial day</span
+                >
+              </td>
+              <td>{{ day.label ?? day.key }}</td>
+              <td>{{ day.turns }}</td>
+              <td>{{ day.llmUsd === 0 && day.unpricedTokens > 0 ? "Unknown" : usd(day.llmUsd) }}</td>
+              <td>{{ day.unpricedTokens }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section class="green-section">
+      <div class="green-section-heading"><h2>Retained-range spend by unit</h2></div>
+      <div class="green-section-content">
+        <p v-if="work.unitSpendStatus === 'partial'" class="green-notice green-warning" role="status">
+          Unit spend is incomplete. Missing ownership or retained runs prevents a full total.
+        </p>
+        <template v-if="selectedWorkUnit">
+          <p class="text-xs text-muted mb-3" data-unit-spend-coverage>
+            Only currently readable, attributed child runs kept in this range are included. Earlier runs and runs
+            removed by retention are excluded. Original caps do not show remaining budget.
+          </p>
+          <label class="text-xs"
+            >Unit<select v-model="workUnitKey" class="green-input w-full mt-2 mb-4">
+              <option v-for="unit in workUnits" :key="unit.key" :value="unit.key">{{ unit.key }}</option>
+            </select></label
+          >
+          <ShipSpendChart v-if="selectedWorkUnit.runs.length" :unit="selectedWorkUnit" />
+          <p class="text-xs text-muted mb-3" data-unit-spend-summary>
+            {{
+              selectedWorkUnit.totalUsd === null
+                ? "Unknown retained-range total: unpriced usage"
+                : work.unitSpendStatus === "partial"
+                  ? selectedWorkUnit.totalUsd > 0
+                    ? `Known retained-range subtotal: ${usd(selectedWorkUnit.totalUsd)}`
+                    : "Retained-range total unknown"
+                  : `Retained-range total: ${usd(selectedWorkUnit.totalUsd)}`
+            }}
+            ·
+            {{ selectedWorkUnit.capUsd === null ? "No recorded cap" : `Original cap ${usd(selectedWorkUnit.capUsd)}` }}
+          </p>
+          <div class="green-table-scroll">
+            <table class="green-table">
+              <thead>
+                <tr>
+                  <th>Run details</th>
+                  <th>Cost</th>
+                  <th>Cumulative</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="run in selectedWorkUnit.runs" :key="run.id">
+                  <td>
+                    <RouterLink :to="`/runs/${encodeURIComponent(run.id)}`">{{ run.id.slice(0, 8) }}</RouterLink>
+                  </td>
+                  <td>{{ run.usd === null ? "Unknown" : usd(run.usd) }}</td>
+                  <td>{{ run.cumulativeUsd === null ? "Unknown" : usd(run.cumulativeUsd) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+        <EmptyState
+          v-else
+          :title="
+            work.unitSpendStatus === 'unavailable'
+              ? 'Unit spend unavailable'
+              : work.unitSpendStatus === 'partial'
+                ? 'Unit spend is incomplete'
+                : 'No retained unit spend'
+          "
+          :description="
+            work.unitSpendStatus === 'complete'
+              ? 'This covered range has no retained child runs with unit attribution.'
+              : 'Retained child-run spending cannot be confirmed.'
+          "
+        />
+      </div>
+    </section>
+    <details class="text-xs text-muted">
+      <summary>Data and method</summary>
+      <p class="mt-3">
+        Model spend uses recorded run usage and known prices. Unpriced tokens remain unknown. Shared invoices, cloud
+        account totals, and infrastructure allocations are excluded.
+      </p>
+      <p class="mt-2">
+        Coverage starts {{ monthDay(work.coverage.from) }} · {{ work.coverage.retentionDays }} days of retention{{
+          work.coverage.clamped ? " · requested range exceeds retained coverage" : ""
+        }}.
+      </p>
+      <a class="block mt-2 text-primary" :href="downloadHref">Download report as JSON</a>
+    </details>
+  </template>
+  <template v-else-if="report">
     <StatTiles :tiles="summaryTiles" />
     <p v-if="unpricedModelTokens" class="green-notice green-warning" role="status" data-unpriced-model-usage>
       {{ unpricedModelTokens.toLocaleString("en-US") }} tokens ran under models with no price and are excluded from the

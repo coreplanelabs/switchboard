@@ -18,7 +18,7 @@ const session: HomeSession = {
   actor: "access:alice",
   stream: "person:alice",
   bindingRevision: 0,
-  accessEpoch: "fixture:current-source",
+  accessEpoch: "fixture:policy",
   revision: 4,
   entries: [],
   sendUrl: "/home/send",

@@ -4,13 +4,19 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } fr
 import { useRoute } from "vue-router";
 import { useColorMode, useMediaQuery } from "@vueuse/core";
 import { SeedKey } from "../../src/lib/seed";
+import { useHomeSession } from "../lib/homeSession";
+import { watchSlackEmoji } from "../lib/emoji";
+import UserMenu from "./UserMenu.vue";
 import { primaryNavigation, pageTitle } from "../lib/navigation";
 
 const route = useRoute();
 const seed = inject(SeedKey, null);
+const home = useHomeSession();
 const navigation = computed(() => primaryNavigation(seed?.capabilities));
 const menuOpen = ref(false);
 const wide = useMediaQuery("(min-width: 768px)");
+const shell = ref<HTMLElement | null>(null);
+let stopEmoji: (() => void) | undefined;
 const sidebar = ref<HTMLElement | null>(null);
 const menuButton = ref<HTMLButtonElement | null>(null);
 let previousOverflow = "";
@@ -60,8 +66,12 @@ const theme = computed<"system" | "light" | "dark">({
     mode.value = value === "system" ? "auto" : value;
   },
 });
-onMounted(() => window.addEventListener("keydown", onKeydown));
+onMounted(() => {
+  window.addEventListener("keydown", onKeydown);
+  if (shell.value && seed?.emoji) stopEmoji = watchSlackEmoji(shell.value, seed.emoji);
+});
 onBeforeUnmount(() => {
+  stopEmoji?.();
   window.removeEventListener("keydown", onKeydown);
   if (menuOpen.value) document.body.style.overflow = previousOverflow;
 });
@@ -74,7 +84,7 @@ watch(
 </script>
 
 <template>
-  <div class="green-shell">
+  <div ref="shell" class="green-shell">
     <a href="#main-content" class="green-skip">Skip to content</a>
     <aside
       ref="sidebar"
@@ -145,15 +155,25 @@ watch(
           <UIcon name="i-lucide-menu" />
         </button>
         <span class="green-breadcrumb"
-          >Workspace <UIcon name="i-lucide-chevron-right" /><strong>{{ pageTitle(route.path) }}</strong></span
+          ><span class="green-breadcrumb-label">Workspace</span> <UIcon name="i-lucide-chevron-right" /><strong>{{
+            pageTitle(route.path)
+          }}</strong></span
         >
-        <slot name="status" />
+        <slot name="status" /><UserMenu />
       </header>
-      <p v-if="seed?.preview" class="green-notice green-warning" role="status">{{ seed.preview }}</p>
+      <p v-if="seed?.preview" class="green-notice green-warning" role="status">Test data</p>
+      <p v-if="seed?.dataView?.mode === 'everyone'" class="green-notice" role="status">
+        <UIcon name="i-lucide-users" /> All people · data permitted by your access
+      </p>
       <p v-if="seed?.viewingAs" class="green-notice" role="status">
         Viewing as {{ seed.viewingAs.name ?? seed.viewingAs.id }}. This view is read-only.
       </p>
-      <main id="main-content" class="green-main" tabindex="-1"><slot /></main>
+      <main id="main-content" class="green-main" tabindex="-1">
+        <p v-if="home?.scopeChanging.value" class="green-notice" role="status">
+          Changing dashboard view. Previous page data is hidden until the new view loads.
+        </p>
+        <slot v-else />
+      </main>
     </div>
   </div>
 </template>

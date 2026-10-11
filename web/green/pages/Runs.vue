@@ -5,7 +5,6 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import PageHeading from "../components/PageHeading.vue";
 import EmptyState from "../components/EmptyState.vue";
 import RunRow from "../../src/components/runs/RunRow.vue";
-import ViewAsPicker from "../../src/components/runs/ViewAsPicker.vue";
 import StatusDot from "../../src/components/StatusDot.vue";
 import { useSeed } from "../../src/lib/seed";
 import { useWallClock } from "../../src/lib/wallClock";
@@ -31,28 +30,10 @@ import { FAVICON_IDLE, FAVICON_LIVE } from "@core/channels/favicon.js";
 
 const seed = useSeed("runs");
 const showAll = seed?.all ?? false;
-// `?mine=1` is a server view like `?all=1`: the viewer's predicate is narrowed
-// to their own runs before anything is loaded. Every session has runs of its
-// own to show: a linked session's are its Slack person's on every channel
-// (record 0042); an unlinked session's are the ones it requested from the
-// Threads chat, recorded under its own `access:<sub>` (record 0043).
-const showMine = seed?.mine ?? false;
-// The two toggles are remembered by this browser (item 29): a URL that names
-// neither opens the remembered view — one navigation, before the feed opens —
-// and a URL that names one wins, so a shared link shows what it says.
 const params = new URLSearchParams(browser.search());
-if (!params.has("mine") && !params.has("all") && seed) {
-  const wantMine = browser.readPref(RUNS_PREF.mine) === "1";
-  const wantAll = browser.readPref(RUNS_PREF.all) === "1";
-  if (wantMine || wantAll) browser.navigate(viewHref(wantAll, wantMine));
-}
-const mineHint = seed?.asUser
-  ? `Only the runs ${seed.asUser.name ?? "you"} requested`
-  : "Only the runs requested by this authenticated session. Explicit identity links can join future activity across surfaces.";
-/** The index href for a view: `/runs`, `?all=1`, `?mine=1`, or both. */
-function viewHref(all: boolean, mine: boolean): string {
-  const q = [all ? "all=1" : "", mine ? "mine=1" : ""].filter(Boolean).join("&");
-  return q ? `/runs?${q}` : "/runs";
+if (!params.has("all") && seed && browser.readPref(RUNS_PREF.all) === "1") browser.navigate("/runs?all=1");
+function viewHref(all: boolean): string {
+  return all ? "/runs?all=1" : "/runs";
 }
 const paged = seed?.olderThan !== undefined;
 const retentionDays = seed?.retentionDays ?? null;
@@ -109,14 +90,8 @@ function onToggleCompleted(ev: Event): void {
   // The toggles switch the server view: a change is remembered and navigates, keeping the other toggle.
   const on = (ev.target as HTMLInputElement).checked;
   browser.writePref(RUNS_PREF.all, on ? "1" : "0");
-  browser.navigate(viewHref(on, showMine));
+  browser.navigate(viewHref(on));
 }
-function onToggleMine(ev: Event): void {
-  const on = (ev.target as HTMLInputElement).checked;
-  browser.writePref(RUNS_PREF.mine, on ? "1" : "0");
-  browser.navigate(viewHref(showAll, on));
-}
-
 const olderThanLabel = computed(() => (seed?.olderThan !== undefined ? formatDateTime(seed.olderThan, now.value) : ""));
 
 const makeEventSource = useEventSourceFactory();
@@ -124,7 +99,7 @@ let es: EventSourceLike | null = null;
 
 onMounted(() => {
   if (!seed) return;
-  es = makeEventSource(`/runs?stream=1${showAll ? "&all=1" : ""}${showMine ? "&mine=1" : ""}`);
+  es = makeEventSource(`/runs?stream=1${showAll ? "&all=1" : ""}`);
   // A RE-connect means the backend may have restarted: rows this page holds
   // may no longer exist there, and nothing will ever send their `removed`
   // events. Reload for a fresh server snapshot instead of drifting.
@@ -169,11 +144,8 @@ onUnmounted(() => {
   >
   <div class="green-toolbar">
     <span class="text-xs text-muted">{{ liveCount }} running</span
-    ><ViewAsPicker v-if="seed?.viewAs" :people="seed.viewAs.people" /><label
-      class="text-xs flex items-center gap-2 min-h-10"
+    ><label class="text-xs flex items-center gap-2 min-h-10"
       ><input type="checkbox" :checked="showAll" @change="onToggleCompleted" />Include completed</label
-    ><label class="text-xs flex items-center gap-2 min-h-10" :title="mineHint"
-      ><input type="checkbox" :checked="showMine" @change="onToggleMine" />Only mine</label
     ><label class="text-xs flex items-center gap-2 min-h-10"
       ><input v-model="showBookkeeping" type="checkbox" />Include system runs</label
     >

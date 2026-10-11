@@ -80,7 +80,7 @@ const title = "Repositories";
 watch(
   [running, () => state.residents],
   ([live, residents]) => {
-    if (!seed) return;
+    if (!seed || seed.scopeUnavailable) return;
     browser.setTitle((live > 0 ? `(${live}) ` : "") + title);
     browser.setFavicon(FAVICON_BY_TONE[residentsFleetTone(residents as ResidentRecordView[])]);
   },
@@ -91,7 +91,7 @@ const makeEventSource = useEventSourceFactory();
 let es: EventSourceLike | null = null;
 
 onMounted(() => {
-  if (!seed) return;
+  if (!seed || seed.scopeUnavailable) return;
   es = makeEventSource("/residents?stream=1");
   // A RE-connect means the backend may have restarted: run rows this page
   // holds may no longer exist there, and nothing will ever send their
@@ -126,7 +126,7 @@ onUnmounted(() => {
 </script>
 <template>
   <PageHeading title="Runtime" description="Inspect repository environments, active worktrees, and recovery state."
-    ><span v-if="seed" class="green-badge"
+    ><span v-if="seed && !seed.scopeUnavailable" class="green-badge"
       ><StatusDot :tone="conn.tone" :label="conn.text" />{{ conn.text }}</span
     ></PageHeading
   >
@@ -136,7 +136,10 @@ onUnmounted(() => {
     ><RouterLink to="/settings/runtime" aria-current="page">Runtime</RouterLink
     ><RouterLink to="/settings/installation">Installation</RouterLink>
   </nav>
-  <template v-if="seed">
+  <section v-if="seed?.scopeUnavailable" class="green-section">
+    <EmptyState title="Shared runtime" :description="seed.scopeUnavailable" />
+  </section>
+  <template v-else-if="seed">
     <p v-if="drain" class="green-notice green-warning" role="status">
       Deployment drain · {{ str(drain.reason) || "New work waits until the runtime reopens."
       }}<span v-if="drainHolds.length"> · Waiting for images: {{ drainHolds.join(", ") }}</span
