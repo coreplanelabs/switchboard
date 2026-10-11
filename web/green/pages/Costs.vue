@@ -365,9 +365,14 @@ const summaryTiles = computed(() =>
       >
     </nav>
     <nav class="flex gap-1" aria-label="Cost range">
-      <RouterLink v-for="n in ranges" :key="n" class="green-button" :to="hrefOf(group, n, view)">{{
-        rangeLabel(n)
-      }}</RouterLink>
+      <RouterLink
+        v-for="n in ranges"
+        :key="n"
+        class="green-button"
+        :to="hrefOf(group, n, view)"
+        :aria-current="n === selectedRange ? 'page' : undefined"
+        >{{ rangeLabel(n) }}</RouterLink
+      >
     </nav>
   </div>
   <p v-if="!work" class="text-xs text-muted mb-5" data-snapshot-status>{{ snapshotLine }}</p>
@@ -545,7 +550,14 @@ const summaryTiles = computed(() =>
     </details>
   </template>
   <template v-else-if="report">
+    <p class="text-xs text-muted mb-3">{{ report.label }}</p>
     <StatTiles :tiles="summaryTiles" />
+    <p class="text-xs text-muted mb-3">
+      {{ usd(report.totals.cloudUsd) }} of {{ usd(report.account.cloudUsd) }} on
+      <a v-if="links" :href="links.account" target="_blank" rel="noopener noreferrer">{{ accountLabel }}</a>
+      <span v-else>{{ accountLabel }}</span> · cloud spend in range ·
+      <a v-if="links" :href="links.billing" target="_blank" rel="noopener noreferrer">Billing</a>
+    </p>
     <p v-if="unpricedModelTokens" class="green-notice green-warning" role="status" data-unpriced-model-usage>
       {{ unpricedModelTokens.toLocaleString("en-US") }} tokens ran under models with no price and are excluded from the
       estimate. Shown totals do not include that usage.
@@ -567,8 +579,12 @@ const summaryTiles = computed(() =>
         </div>
       </div>
       <div class="green-section-content">
+        <p v-if="!report.llmAvailable" class="text-xs text-warn">Model spend not configured.</p>
+        <p v-else-if="report.days.some((day) => day.llmEstimated)" class="text-xs text-muted">
+          Open-day model usage uses the hourly usage report priced at list. Closed days use the provider cost report.
+        </p>
         <CostChart v-if="chartModel" :model="chartModel" label="Daily cost, stacked by component" />
-        <div class="flex flex-wrap gap-3 text-xs text-muted mt-3">
+        <div class="flex flex-wrap gap-3 text-xs text-muted mt-3" aria-label="Cost components">
           <a
             v-for="(name, index) in series"
             :key="name"
@@ -610,7 +626,7 @@ const summaryTiles = computed(() =>
       <section class="green-section">
         <div class="green-section-heading"><h2>Daily table</h2></div>
         <div class="green-table-scroll">
-          <table class="green-table">
+          <table class="green-table" aria-label="Daily costs">
             <thead>
               <tr>
                 <th>Date</th>
@@ -620,7 +636,7 @@ const summaryTiles = computed(() =>
             </thead>
             <tbody>
               <tr v-for="day in daysNewestFirst" :key="day.date">
-                <td>
+                <td :title="day.date">
                   {{ monthDay(day.date)
                   }}<span v-if="day.date === report.range.to && report.range.partialLastDay" class="block text-muted"
                     >Partial day</span
@@ -635,30 +651,41 @@ const summaryTiles = computed(() =>
       </section>
       <section v-if="billers.length" class="green-section">
         <div class="green-section-heading"><h2>Invoice comparison</h2></div>
+        <p class="text-xs text-muted px-5">
+          Attributed is the meter's charged figure from each turn, never the price table's repricing on the dimension
+          tabs. Fee and upstream amounts compare the invoice with the recorded rows.
+        </p>
         <div class="green-section-content">
-          <div v-for="biller in billers" :key="biller.biller" class="mb-4">
+          <div v-for="biller in billers" :key="biller.biller" class="mb-4" :data-biller="biller.biller">
             <h3 class="text-sm font-medium">{{ biller.biller }}</h3>
             <p class="text-xs text-muted my-2">
-              Attributed {{ usd(biller.totals.attributedUsd, 4) }} ·
-              {{ biller.invoice ? `Invoice ${usd(biller.totals.invoiceUsd, 4)}` : "No invoice source" }} ·
-              {{ biller.unpricedTokens }} unpriced tokens
+              attributed {{ usd(biller.totals.attributedUsd, 4) }} ·
+              {{
+                biller.invoice
+                  ? `invoice ${usd(biller.totals.invoiceUsd, 4)}`
+                  : "no invoice — the block names no invoice source"
+              }}
+              <span v-if="biller.unpricedTokens">
+                · {{ biller.unpricedTokens.toLocaleString("en-US") }} tokens unpriced — not in the attributed
+                figure</span
+              >
             </p>
             <div class="green-table-scroll">
               <table class="green-table">
                 <thead>
                   <tr>
                     <th>Date</th>
-                    <th>Invoice</th>
+                    <th v-if="biller.invoice">Invoice</th>
                     <th>Attributed</th>
                     <th>Fee · invoice / rows</th>
                     <th>Upstream · invoice / remainder</th>
-                    <th>Unpriced tokens</th>
+                    <th v-if="biller.unpricedTokens">Unpriced tokens</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr v-for="day in biller.days" :key="day.date">
                     <td>{{ day.date }}</td>
-                    <td>{{ day.invoiceUsd === undefined ? "—" : usd(day.invoiceUsd, 4) }}</td>
+                    <td v-if="biller.invoice">{{ day.invoiceUsd === undefined ? "—" : usd(day.invoiceUsd, 4) }}</td>
                     <td>{{ usd(day.attributedUsd, 4) }}</td>
                     <td>
                       {{ day.invoiceFeeUsd === undefined ? "—" : usd(day.invoiceFeeUsd, 4) }} /
@@ -668,7 +695,7 @@ const summaryTiles = computed(() =>
                       {{ day.invoiceByokUsd === undefined ? "—" : usd(day.invoiceByokUsd, 4) }} /
                       {{ day.attributedUpstreamUsd === undefined ? "—" : usd(day.attributedUpstreamUsd, 4) }}
                     </td>
-                    <td>{{ day.unpricedTokens ?? 0 }}</td>
+                    <td v-if="biller.unpricedTokens">{{ (day.unpricedTokens ?? 0).toLocaleString("en-US") }}</td>
                   </tr>
                 </tbody>
               </table>
@@ -685,10 +712,13 @@ const summaryTiles = computed(() =>
         </div>
       </div>
       <div class="green-section-content">
-        <CostsByDimension v-if="by" :report="by" /><EmptyState v-else title="This breakdown is unavailable" />
+        <CostsByDimension v-if="by" :report="by" :show-mine="false" /><EmptyState
+          v-else
+          title="This breakdown is unavailable"
+        />
       </div>
     </section>
-    <section class="green-section">
+    <section class="green-section" aria-label="Unit spend">
       <div class="green-section-heading"><h2>Retained-range spend by unit</h2></div>
       <div class="green-section-content">
         <p v-if="report.shipSpend" class="text-xs text-muted mb-3" data-unit-spend-coverage>
@@ -712,7 +742,7 @@ const summaryTiles = computed(() =>
             {{ selectedShipUnit.capUsd === null ? "No recorded cap" : `Original cap ${usd(selectedShipUnit.capUsd)}` }}
           </p>
           <div class="green-table-scroll">
-            <table class="green-table">
+            <table class="green-table" aria-label="Unit run costs">
               <thead>
                 <tr>
                   <th>Run details</th>
@@ -745,15 +775,77 @@ const summaryTiles = computed(() =>
     </section>
     <details class="text-xs text-muted">
       <summary>Data and method</summary>
-      <p class="mt-3">
-        The stored snapshot covers cloud billing and model invoices. Cloud prices use provisioned resources and usage.
-        Model usage uses provider invoices where available; open-day usage is estimated. Attributed spend keeps the
-        recorded price of each model turn. Missing prices stay unknown.
-      </p>
-      <p class="mt-2">
-        Group: {{ report.group }} · Cloud account: {{ accountLabel }}. Plan fees and included allowances are not
-        subtracted.
-      </p>
+      <div class="mt-2 grid gap-1.5">
+        <div>
+          <b>Snapshot.</b> Both billing sources and the run history are read once over the widest range this page offers
+          and kept as a snapshot; every figure here, the JSON twins and the dimension tabs are arithmetic over it, with
+          <em>today</em> the day it was taken. The line under the range says when that was, how old it is and when the
+          next one is due (<code>costs.snapshot.everyHours</code>, daily by default); <code>costs snapshot</code> takes
+          one now. Cloudflare bills vCPU on active use only; memory and disk bill on the provisioned size for every
+          second a container is awake. LLM spend is the Anthropic Admin API cost report for this group's workspace
+          (gross, USD); a day the cost report has not closed is the Admin API usage report, hourly, priced at Anthropic
+          list per model (input, output, cache writes, cache reads) and marked as an estimate. The invoice tie-out's
+          attributed side is different money: the meter's charged figure from each turn's own <code>usd</code>, never
+          the price table's repricing the dimension tabs show, with the tokens no turn priced counted beside it as
+          unpriced.
+        </div>
+        <div>
+          <b>Method.</b> Cloudflare GraphQL Analytics, every meter a Workers deployment is billed on:
+          <code>containersUsageAdaptiveGroups</code> (cpuTimeSec, allocatedMemory, allocatedDisk per app per UTC day),
+          <code>durableObjectsPeriodicGroups</code> (billable <code>duration</code> GB-s and SQLite rows read and
+          written per namespace), <code>durableObjectsInvocationsAdaptiveGroups</code> (requests per namespace),
+          <code>durableObjectsSqlStorageGroups</code> (bytes stored), <code>workersInvocationsAdaptive</code> (requests,
+          CPU time), <code>r2StorageAdaptiveGroups</code> and
+          <code>r2OperationsAdaptiveGroups</code>
+          (bytes stored, class A/B operations). Prices: vCPU $0.000020/s, memory $0.0000025/GiB-s, disk
+          $0.00000007/GB-s, DO duration $12.50 per million GB-s, DO requests $0.15/M, SQLite rows $0.001/M read and
+          $1.00/M written, DO storage $0.20/GB-month, Workers $0.30/M requests and $0.02/M CPU-ms, R2 $0.015/GB-month,
+          $4.50/M class A and $0.36/M class B (deletes free). Storage is the day's peak, prorated over a 30.44-day
+          month. Gross list price — plan fees and included allowances are not subtracted; Workers Logs volume has no
+          analytics dataset and is not priced.
+        </div>
+        <div>
+          <b>Scope.</b> Attributed to this group: the Workers
+          <template v-for="(w, i) in report.attribution.workers" :key="w"
+            ><template v-if="i > 0">, </template
+            ><a
+              v-if="links"
+              class="font-mono hover:underline"
+              :href="links.worker(w)"
+              target="_blank"
+              rel="noopener noreferrer"
+              >{{ w }}</a
+            ><code v-else>{{ w }}</code></template
+          >, every Durable Object namespace they host ({{
+            Object.keys(report.attribution.durableObjectNamespaces).length
+          }}), the R2 buckets named after them (<template
+            v-for="(b, i) in Object.keys(report.attribution.r2Buckets)"
+            :key="b"
+            ><template v-if="i > 0">, </template
+            ><a
+              v-if="links"
+              class="font-mono hover:underline"
+              :href="links.bucket(b)"
+              target="_blank"
+              rel="noopener noreferrer"
+              >{{ b }}</a
+            ><code v-else>{{ b }}</code></template
+          ><template v-if="Object.keys(report.attribution.r2Buckets).length === 0">none</template>), and the container
+          apps mapped in <code>costs.groups.{{ report.group }}</code> ({{
+            Object.keys(report.attribution.containerApps).length
+          }}). Everything else in the account is priced the same way into the account total, which is what "share of
+          account" divides by. Every figure above links to where it is billed: the
+          <a v-if="links" class="hover:underline" :href="links.account" target="_blank" rel="noopener noreferrer"
+            >Cloudflare dashboard</a
+          >
+          for the account <code>{{ report.account.id }}</code
+          >{{ report.account.name ? ` (${report.account.name})` : "" }}, and
+          <a v-if="links" class="hover:underline" :href="links.anthropic" target="_blank" rel="noopener noreferrer"
+            >Anthropic's cost page</a
+          >
+          for the LLM line.
+        </div>
+      </div>
       <a class="block mt-2 text-primary" :href="downloadHref">Download report as JSON</a>
     </details>
   </template>

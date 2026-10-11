@@ -190,6 +190,7 @@ onUnmounted(() => {
       description="Durable unresolved work remains visible on Home even when its latest run has ended."
     />
   </section>
+  <RouterLink v-if="paged" class="green-button mr-2" :to="viewHref(showAll)">Newest runs</RouterLink>
   <RouterLink v-if="seed?.olderHref" class="green-button" :to="seed.olderHref"
     >Older runs <UIcon name="i-lucide-arrow-right"
   /></RouterLink>

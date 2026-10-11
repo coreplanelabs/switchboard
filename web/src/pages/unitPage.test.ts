@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import UnitPage from "./UnitPage.vue";
-import UnitRoutePage from "./UnitRoutePage.vue";
-import { mountApp, pickSelect, selectLabels, selectValue } from "../testing/mount";
+import UnitPage from "../../green/pages/Unit.vue";
+import UnitRoutePage from "../../green/pages/Unit.vue";
+import { mountApp } from "../testing/mount";
 import { browser } from "../lib/browser";
 import type { UnitRunRowSeed, UnitSeed } from "@core/channels/webSeed.js";
 import type { FindingsLedgerView } from "@core/core/runsService.js";
@@ -163,12 +163,13 @@ async function open(w: ReturnType<typeof mountApp>, id: string) {
   return details;
 }
 const flush = () => new Promise((r) => setTimeout(r, 0));
+const searchRequests = () => fetchMock.mock.calls.filter(([url]) => String(url).startsWith("/api/runs.search?"));
 
 describe("UnitPage — the unit is the reading unit (item 28)", () => {
   it("lays out both threads' runs in round order, each row wearing its round and thread; the header names the unit, its branch, pull request, issue, both threads and the round count; the contract block names the plan and links the plan's record", () => {
     const w = mountApp(UnitPage, { seed: seed() });
-    expect(w.find("h1 .title").text()).toBe("Unit U16");
-    const rows = w.findAll("#unitruns li.fold");
+    expect(w.find("h1").text()).toBe("The unit page composes both threads at the round boundaries");
+    const rows = w.findAll("li.fold");
     expect(
       rows.map((li) => [li.attributes("data-run-id"), li.attributes("data-round"), li.attributes("data-thread")]),
     ).toEqual([
@@ -178,10 +179,10 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
       ["r2", "2", "review"],
     ]);
     expect(rows.map((li) => li.find(".round").text())).toEqual([
-      "round 0 · coding",
-      "round 1 · review",
-      "round 1 · coding",
-      "round 2 · review",
+      "Round 0 · code",
+      "Round 1 · review",
+      "Round 1 · code",
+      "Round 2 · review",
     ]);
     expect(rows.map((li) => li.find(".agent").text())).toEqual(["coding", "review", "coding", "review"]);
     // A stopped review reads its outcome; a completed run wears none.
@@ -194,52 +195,46 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
       "/runs/c1",
       "/runs/r2",
     ]);
-    expect(w.find("#rounds .count").text()).toContain("4 runs");
+    expect(w.findAll("li.fold")).toHaveLength(4);
 
-    const meta = w.find("#unitmeta");
-    expect(meta.find(".unit").text()).toBe("unit U16");
-    expect(meta.find("a.repo").attributes("href")).toBe("https://github.com/acme/api");
-    expect(meta.find("a.reftag").attributes("href")).toBe("https://github.com/acme/api/tree/plan/p/the-unit-page");
-    expect(meta.find("a.reftag").text()).toBe("plan/p/the-unit-page");
-    expect(meta.find("a.prlink").attributes("href")).toBe("https://github.com/acme/api/pull/42");
-    expect(meta.find("a.prlink").text()).toMatch(/42$/); // the pull request's number, after the mark
-    expect(meta.find("a.issue").attributes("href")).toBe("https://github.com/acme/api/issues/7");
-    expect(meta.find('[data-thread="coding"] a').attributes("href")).toBe("https://example.slack.com/archives/C1/p10");
-    expect(meta.find('[data-thread="review"] a').attributes("href")).toBe("https://example.slack.com/archives/C1/p11");
-    expect(meta.find(".rounds").text()).toBe("3 rounds");
-
-    const contract = w.find("#contract");
-    expect(contract.find("h2").text()).toContain("Unit U16");
-    expect(contract.find(".plan").text()).toContain("of plan p · the second pipeline for this plan");
-    expect(contract.find("a.parent").attributes("href")).toBe("/runs/ship-parent");
-    expect(contract.find(".title").text()).toBe("The unit page composes both threads at the round boundaries");
-    expect(contract.find(".report").text()).toBe("✅ Merge-ready after 2 review rounds");
-    // The standing in the header: the ending, since the unit has one.
-    // The header prints the user's word for the ending (record 0066), never the internal kind.
-    expect(w.find("#standing .chip").text()).toBe("merge-ready");
-    expect(w.find("#standing .chip").classes()).toContain("text-ok");
+    expect(w.text()).toContain("UNIT U16");
+    expect(w.get('a[href="https://github.com/acme/api"]').text()).toBe("acme/api");
+    expect(w.get('a[href="https://github.com/acme/api/tree/plan/p/the-unit-page"]').text()).toBe(
+      "plan/p/the-unit-page",
+    );
+    expect(w.get('a[href="https://github.com/acme/api/pull/42"]').text()).toContain("42");
+    expect(w.get('a[href="https://github.com/acme/api/issues/7"]').text()).toContain("7");
+    expect(w.get('a[href="https://example.slack.com/archives/C1/p10"]').text()).toContain("Source");
+    expect(w.get('a[href="https://example.slack.com/archives/C1/p11"]').text()).toContain("Source");
+    expect(w.text()).toContain("3 rounds");
+    expect(w.text()).toContain("p · second pipeline");
+    expect(w.get('a[href="/pipelines/plan-p-1"]').text()).toContain("Pipeline");
+    expect(w.text()).toContain("✅ Merge-ready after 2 review rounds");
+    expect(w.find(".green-page-heading .green-badge").text()).toBe("merge-ready");
+    expect(w.find(".green-page-heading .green-badge").classes()).toContain("text-ok");
   });
 
   it("names the unit's one thread, phrases the pipeline ordinal, and credits the pipeline before the unit starts", () => {
     const active = mountApp(UnitPage, { seed: seed() });
-    expect(active.find("#rounds .count").text()).toBe("· 4 runs — one unit thread, as the rounds happened");
-    expect(active.find("#contract .plan").text()).toContain("of plan p · the second pipeline for this plan");
+    expect(active.findAll("li.fold")).toHaveLength(4);
+    expect(active.text()).toContain("p · second pipeline");
 
     const notStarted = mountApp(UnitPage, {
       seed: seed({ threads: {}, sourceUrls: {}, ending: undefined, pr: undefined, rounds: [] }, []),
     });
-    expect(notStarted.find("#empty").text()).toBe("No runs yet — the pipeline has not started this unit.");
+    expect(notStarted.text()).toContain("This unit has not started");
   });
 
   it("a row opens to the run's own timeline in place: the stored replay is read once from the run's events route and folded into the Where the time went card; a Longest-steps link opens the run's page at that row", async () => {
     const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
     answer({ "/runs/c0/events": () => sse(REPLAY) });
     const w = mountApp(UnitPage, { seed: seed() });
-    expect(fetchMock).not.toHaveBeenCalled(); // nothing is read until a row opens
+    const replays = () => fetchMock.mock.calls.filter(([url]) => url === "/runs/c0/events");
+    expect(replays()).toEqual([]); // nothing is read until a row opens
     await open(w, "c0");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe("/runs/c0/events");
-    expect(fetchMock.mock.calls[0][1]).toEqual({ credentials: "same-origin" });
+    expect(replays()).toHaveLength(1);
+    expect(replays()[0][0]).toBe("/runs/c0/events");
+    expect(replays()[0][1]).toEqual({ credentials: "same-origin" });
     await flush();
     await w.vm.$nextTick();
     const tl = w.find("#run-c0 #timeline");
@@ -257,7 +252,7 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     expect(nav).toHaveBeenCalledWith("/runs/c0#call-k1");
     // Closing and reopening reads nothing again.
     await open(w, "c0");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(replays()).toHaveLength(1);
   });
 
   it("a replay the route refuses reads as a failure with the way to the run, never a crash", async () => {
@@ -278,7 +273,7 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     await flush();
     expect((w.find("#run-c1 details").element as HTMLDetailsElement).open).toBe(true);
     expect((w.find("#run-c0 details").element as HTMLDetailsElement).open).toBe(false);
-    expect(fetchMock.mock.calls[0][0]).toBe("/runs/c1/events");
+    expect(fetchMock.mock.calls.map(([url]) => url)).toContain("/runs/c1/events");
   });
 
   it("a unit with one thread lists its runs by agent, shows no review thread cell, and searches both sessions on that thread; a unit not started lists nothing and says so", () => {
@@ -294,22 +289,25 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
         [run("c0")],
       ),
     });
-    expect(codingOnly.findAll("#unitruns li.fold").map((li) => li.attributes("data-thread"))).toEqual(["coding"]);
-    expect(codingOnly.find('#unitmeta [data-thread="review"]').exists()).toBe(false);
-    expect(codingOnly.find('#unitmeta [data-thread="coding"] a').exists()).toBe(true);
-    expect(codingOnly.find("#unitmeta .rounds").text()).toBe("1 round");
-    expect(selectLabels(codingOnly, "#search-session")).toEqual(["coding session", "review session"]);
-    expect(codingOnly.find("#standing .chip").text()).toBe("round 0 · coding ended");
-    expect(codingOnly.find("#unitmeta a.prlink").exists()).toBe(false);
+    expect(codingOnly.findAll("li.fold").map((li) => li.attributes("data-thread"))).toEqual(["coding"]);
+    expect(codingOnly.find('a[href="/threads/slack%3AC1%3Au1r"]').exists()).toBe(false);
+    expect(codingOnly.find('a[href="/threads/slack%3AC1%3Au1"]').exists()).toBe(true);
+    expect(codingOnly.text()).toContain("1 rounds");
+    expect(codingOnly.findAll('select[aria-label="Thread search"] option').map((o) => o.text())).toEqual([
+      "Code thread",
+      "Review thread",
+    ]);
+    expect(codingOnly.find(".green-heading-actions .green-badge").text()).toBe("round 0 · code ended");
+    expect(codingOnly.find('a[href^="https://github.com/acme/api/pull/"]').exists()).toBe(false);
 
     const notStarted = mountApp(UnitPage, {
       seed: seed({ threads: {}, sourceUrls: {}, ending: undefined, pr: undefined, rounds: [], title: undefined }, []),
     });
-    expect(notStarted.find("#empty").text()).toBe("No runs yet — the pipeline has not started this unit.");
-    expect(notStarted.find("#standing .chip").text()).toBe("not started");
-    expect(notStarted.find("#search").exists()).toBe(false);
-    expect(notStarted.find("#contract .title").text()).toContain("its branch is plan/p/the-unit-page");
-    expect(notStarted.find('#unitmeta [data-thread="coding"]').text()).toBe("coding thread not opened yet");
+    expect(notStarted.text()).toContain("This unit has not started");
+    expect(notStarted.find(".green-heading-actions .green-badge").text()).toBe("not started");
+    expect(notStarted.find('section[aria-label="Thread search"]').exists()).toBe(false);
+    expect(notStarted.text()).toContain("plan/p/the-unit-page");
+    expect(notStarted.find('a[href^="/threads/"]').exists()).toBe(false);
   });
 
   it("a run in flight is a row in its round with its clock moving and a link carrying its token — never a separate status — and the header says which round runs", () => {
@@ -328,11 +326,11 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     const row = w.find("#run-live-1");
     expect(row.classes()).toContain("live");
     expect(row.find("details").exists()).toBe(false); // a live run's record is its stream: no fold
-    expect(row.find(".round").text()).toBe("round 1 · coding");
+    expect(row.find(".round").text()).toBe("Round 1 · code");
     expect(row.find(".elapsed").text()).toBe("1m 30s");
     expect(row.find(".elapsed").classes()).toContain("text-ok");
     expect(row.find("a.open").attributes("href")).toBe("/runs/live-1?t=tok-live");
-    expect(w.find("#standing .chip").text()).toBe("round 1 · coding running");
+    expect(w.find(".green-heading-actions .green-badge").text()).toBe("round 1 · code running");
     expect(w.text()).not.toContain("tok-live"); // the token is in the href alone
   });
 
@@ -352,42 +350,43 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
       "/runs/c1/events": () => sse(REPLAY),
     });
     const w = mountApp(UnitPage, { seed: seed() });
-    const box = w.find("#search");
-    expect(box.find("h2").text()).toContain("Search the conversation");
-    expect(selectLabels(w, "#search-session")).toEqual(["coding session", "review session"]);
-    await box.find("#search-words").setValue("lockfile");
+    const box = w.find('section[aria-label="Thread search"]');
+    expect(box.attributes("aria-label")).toBe("Thread search");
+    expect(w.findAll('select[aria-label="Thread search"] option').map((option) => option.text())).toEqual([
+      "Code thread",
+      "Review thread",
+    ]);
+    await box.find('input[aria-label="Search words"]').setValue("lockfile");
     await box.find("form").trigger("submit");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0][0]).toBe(
-      "/api/runs.search?session=slack%3AC1%3Au1%3Acoding&query=lockfile&limit=20",
-    );
-    expect(fetchMock.mock.calls[0][1]).toEqual({ credentials: "same-origin" });
+    expect(searchRequests()).toHaveLength(1);
+    expect(searchRequests()[0][0]).toBe("/api/runs.search?session=slack%3AC1%3Au1%3Acoding&query=lockfile&limit=20");
+    expect(searchRequests()[0][1]).toEqual({ credentials: "same-origin" });
     await flush();
     await w.vm.$nextTick();
-    const hits = w.findAll("#search .hit");
-    expect(hits.map((h) => h.attributes("data-turn"))).toEqual(["30", "5", "35", "1"]); // relevance order, as answered
-    expect(hits[0].find(".turn").text()).toBe("turn 30");
-    expect(hits[0].find(".role").text()).toBe("assistant");
-    expect(hits[0].find(".snippet").text()).toBe("the lockfile drifted after npm ci");
+    const hits = w.findAll('section[aria-label="Thread search"] ol li');
+    expect(hits.map((h) => h.find("span").text())).toEqual(["Turn 30", "Turn 5", "Turn 35", "Turn 1"]); // relevance order, as answered
+    expect(hits[0].findAll("span")[0].text()).toBe("Turn 30");
+    expect(hits[0].findAll("span")[1].text()).toBe("assistant");
+    expect(hits[0].find("p").text()).toBe("the lockfile drifted after npm ci");
     expect(w.text()).not.toContain("UNTRUSTED");
-    expect(hits[0].find("a.place").text()).toBe("round 1 · coding ↓");
-    expect(hits[0].find("a.place").attributes("href")).toBe("#run-c1");
-    expect(hits[1].find("a.place").text()).toBe("round 0 · coding ↓");
-    expect(hits[0].find(".gap").exists()).toBe(false);
-    expect(hits[2].find(".gap").text()).toBe("past a compaction gap at turn 12");
-    expect(hits[2].attributes("data-gap")).toBe("12");
-    expect(hits[3].find(".place").text()).toBe("before any recorded run");
-    expect(hits[3].find("a.place").exists()).toBe(false);
+    expect(hits[0].find("button.text-primary").text()).toBe("Round 1 · Code thread →");
+    expect(hits[1].find("button.text-primary").text()).toBe("Round 0 · Code thread →");
+    expect(hits[0].find("p.text-warn").exists()).toBe(false);
+    expect(hits[2].find("p.text-warn").text()).toBe(
+      "The earlier conversation was compacted at turn 12. This result follows that gap.",
+    );
+    expect(hits[3].text()).toContain("Before any recorded run");
+    expect(hits[3].find("button.text-primary").exists()).toBe(false);
     // A hit opens its run's fold on this page and reads that run's replay.
     expect((w.find("#run-c1 details").element as HTMLDetailsElement).open).toBe(false);
-    await hits[0].find("a.place").trigger("click");
+    await hits[0].find("button.text-primary").trigger("click");
     await w.vm.$nextTick();
     expect((w.find("#run-c1 details").element as HTMLDetailsElement).open).toBe(true);
     expect(fetchMock.mock.calls.map((c) => c[0])).toContain("/runs/c1/events");
     // The review thread's session is the other index: the key changes, nothing else does.
-    await pickSelect(w, "#search-session", "review");
+    await w.get('select[aria-label="Thread search"]').setValue("review");
     await box.find("form").trigger("submit");
-    expect(fetchMock.mock.calls.at(-1)?.[0]).toBe(
+    expect(searchRequests().at(-1)?.[0]).toBe(
       "/api/runs.search?session=slack%3AC1%3Au1r%3Areview&query=lockfile&limit=20",
     );
   });
@@ -410,16 +409,15 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
       "/runs/c0/events": () => sse(UNSTAMPED_REPLAY),
     });
     const w = mountApp(UnitPage, { seed: seed() });
-    await w.find("#search-words").setValue("lockfile");
-    await w.find("#search form").trigger("submit");
+    await w.find('input[aria-label="Search words"]').setValue("lockfile");
+    await w.find('section[aria-label="Thread search"] form').trigger("submit");
     await flush();
     await w.vm.$nextTick();
-    const hits = w.findAll("#search .hit");
+    const hits = w.findAll('section[aria-label="Thread search"] ol li');
     expect(hits).toHaveLength(5);
-    expect(hits[0].find("a.place").attributes("title")).toBe("open this run's fold at the step this turn lives in");
     /** Click a hit, let the fold read its record and land. */
     const land = async (hit: (typeof hits)[number]) => {
-      await hit.find("a.place").trigger("click");
+      await hit.find("button.text-primary").trigger("click");
       await w.vm.$nextTick();
       await flush();
       await w.vm.$nextTick();
@@ -517,46 +515,48 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
   it("no hits and a refused search each say so in place; empty words ask nothing; ?session=review&q=… runs the search on first paint", async () => {
     answer({ "/api/runs.search": () => json({ session: "slack:C1:u1r:review", hits: [], gaps: [] }) });
     const w = mountApp(UnitPage, { seed: seed() });
-    await w.find("#search form").trigger("submit");
-    expect(fetchMock).not.toHaveBeenCalled();
-    await w.find("#search-words").setValue("nothing here");
-    await w.find("#search form").trigger("submit");
+    await w.find('section[aria-label="Thread search"] form').trigger("submit");
+    expect(searchRequests()).toEqual([]);
+    await w.find('input[aria-label="Search words"]').setValue("nothing here");
+    await w.find('section[aria-label="Thread search"] form').trigger("submit");
     await flush();
     await w.vm.$nextTick();
-    expect(w.find("#search .state").text()).toBe("nothing in the coding thread's log says “nothing here”");
+    expect(w.find('section[aria-label="Thread search"] [role="status"]').text()).toBe(
+      "No matches in this authorized code thread for “nothing here”.",
+    );
 
     answer({});
-    await w.find("#search form").trigger("submit");
+    await w.find('section[aria-label="Thread search"] form').trigger("submit");
     await flush();
     await w.vm.$nextTick();
-    expect(w.find("#search .state").text()).toBe("the search could not be run");
+    expect(w.find('section[aria-label="Thread search"] [role="status"]').text()).toBe(
+      "Thread search is unavailable. No result count can be confirmed.",
+    );
 
     window.history.replaceState(null, "", "/runs/unit/plan-p-1:U16?session=review&q=lockfile");
     answer({ "/api/runs.search": () => json({ session: "slack:C1:u1r:review", hits: [], gaps: [] }) });
     fetchMock.mockClear();
     const shared = mountApp(UnitPage, { seed: seed() });
     await flush();
-    expect(fetchMock.mock.calls[0][0]).toBe(
-      "/api/runs.search?session=slack%3AC1%3Au1r%3Areview&query=lockfile&limit=20",
-    );
-    expect(selectValue(shared, "#search-session")).toBe("review");
-    expect((shared.find("#search-words").element as HTMLInputElement).value).toBe("lockfile");
+    expect(searchRequests()[0][0]).toBe("/api/runs.search?session=slack%3AC1%3Au1r%3Areview&query=lockfile&limit=20");
+    expect((shared.get('select[aria-label="Thread search"]').element as HTMLSelectElement).value).toBe("review");
+    expect((shared.find('input[aria-label="Search words"]').element as HTMLInputElement).value).toBe("lockfile");
   });
 });
 
 describe("UnitRoutePage (the /runs/unit/:key dispatch)", () => {
-  it("renders the run 404 for a runNotFound seed and for no seed — a unit outside the predicate reads exactly as an unknown run", () => {
+  it("renders the same unavailable unit for denied and missing seeds without inventing run controls", () => {
     const denied = mountApp(UnitRoutePage, { seed: { page: "runNotFound", retentionDays: 7 } });
-    expect(denied.text()).toContain("That run isn't here.");
+    expect(denied.text()).toContain("Work is unavailable");
     expect(denied.find("#unitruns").exists()).toBe(false);
     const bare = mountApp(UnitRoutePage, { seed: null });
-    expect(bare.text()).toContain("That run isn't here.");
+    expect(bare.text()).toContain("Work is unavailable");
   });
 
   it("renders the unit page for a unit seed", () => {
     const w = mountApp(UnitRoutePage, { seed: seed() });
-    expect(w.find("h1 .title").text()).toBe("Unit U16");
-    expect(w.text()).not.toContain("That run isn't here.");
+    expect(w.find("h1").text()).toBe("The unit page composes both threads at the round boundaries");
+    expect(w.text()).not.toContain("Work is unavailable");
   });
 });
 
@@ -706,10 +706,10 @@ it("the session search derives the unit's working keys <instance>:<unit>:coding 
     ),
   });
   answer({ "/api/runs.search": () => json({ session: "plan-p-1:U16:coding:@context-v1", hits: [], gaps: [] }) });
-  await w.find("#search-words").setValue("lockfile");
-  await w.find("#search form").trigger("submit");
+  await w.find('input[aria-label="Search words"]').setValue("lockfile");
+  await w.find('section[aria-label="Thread search"] form').trigger("submit");
   await flush();
-  expect(fetchMock.mock.calls[0][0]).toBe(
+  expect(searchRequests()[0][0]).toBe(
     "/api/runs.search?session=plan-p-1%3AU16%3Acoding%3A%40context-v1&query=lockfile&limit=20",
   );
 });

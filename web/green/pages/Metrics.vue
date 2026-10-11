@@ -6,6 +6,7 @@ import StatTiles from "../components/StatTiles.vue";
 import EmptyState from "../components/EmptyState.vue";
 import CostChart from "../../src/components/costs/CostChart.vue";
 import TrendLineChart from "../../src/components/metrics/TrendLineChart.vue";
+import ReviewFeedback from "../../src/components/metrics/ReviewFeedback.vue";
 import { useSeed } from "../../src/lib/seed";
 import { monthDayOf, SERIES_SWATCH, usd } from "../../src/lib/costs";
 import {
@@ -82,7 +83,8 @@ const dayOf = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
     <p class="text-xs text-muted mb-4">
       {{ monthDayOf(dayOf(range.sinceMs)) }} – {{ monthDayOf(dayOf(range.untilMs - 1)) }} · {{ range.days }} days
     </p>
-    <StatTiles :tiles="tiles" />
+    <StatTiles :tiles="tiles" data-metrics-tiles />
+    <ReviewFeedback v-if="report.feedback" :report="report.feedback" />
     <div class="grid gap-5 xl:grid-cols-2">
       <section class="green-section">
         <div class="green-section-heading"><h2>Runs by outcome</h2></div>

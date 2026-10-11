@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CostReport } from "@core/core/costs.js";
 import { buildDeliveryReport } from "@core/core/delivery.js";
 import type { ScheduledRow } from "@core/channels/scheduledPanel.js";
+import { formatLocalIso } from "../../src/lib/format";
 import type { HomeSeed } from "@core/channels/webSeed.js";
 import { DAY_MS, MINUTE_MS } from "@core/core/budgets.js";
 import { mountApp } from "../../src/testing/mount";
@@ -70,6 +71,81 @@ const report: CostReport = {
 };
 
 describe("Green report states", () => {
+  it("retains the recorded schedule run without a live link and exposes exact next and last times", () => {
+    const next = 120_000,
+      last = 30_000;
+    const wrapper = mountApp(ScheduledPage, {
+      seed: {
+        page: "scheduled",
+        now: 60_000,
+        rows: [
+          {
+            ...schedule,
+            nextFireAt: next,
+            last: { firedAt: last, outcome: "completed", runId: "original-scheduled-run" },
+          },
+        ],
+      },
+    });
+    expect(wrapper.text()).toContain("Run original-scheduled-run");
+    expect(wrapper.text()).toContain("succeeded");
+    expect(wrapper.find('a[href*="original-scheduled-run"]').exists()).toBe(false);
+    expect(wrapper.findAll("time").map((time) => [time.attributes("datetime"), time.attributes("title")])).toEqual([
+      ["1970-01-01T00:02:00.000Z", formatLocalIso(next)],
+      ["1970-01-01T00:00:30.000Z", formatLocalIso(last)],
+    ]);
+  });
+  it("keeps the global owner selection on a user cost breakdown without a second me filter", () => {
+    const wrapper = mountApp(CostsPage, {
+      seed: {
+        page: "costs",
+        group: "demo",
+        groups: ["demo"],
+        view: "users",
+        report,
+        snapshot,
+        canSnapshot: false,
+        dataView: { mode: "everyone", canViewEveryone: true },
+        by: {
+          group: "demo",
+          dimension: "user",
+          range: report.range,
+          coverage: { from: day(0), retentionDays: 30, clamped: false, historyOn: true },
+          rows: ["access:own", "access:peer"].map((key) => ({
+            key,
+            runs: 1,
+            turns: 1,
+            wallMs: 1,
+            llmUsd: 2,
+            cloudUsd: 0,
+            totalUsd: 2,
+            unpricedTokens: 0,
+            byModel: {},
+          })),
+          days: [],
+          pending: 0,
+          cloudAllocated: false,
+          reconciliation: {
+            attributedLlmUsd: 4,
+            workspaceLlmUsd: 4,
+            unattributedLlmUsd: 0,
+            comparedDays: 1,
+            uncomparedDays: 0,
+            uncomparedLlmUsd: 0,
+            cloudAllocatedUsd: 0,
+            cloudUnallocatedUsd: 0,
+          },
+          viewer: { userIds: ["access:own"], matchedByEmail: false },
+          generatedAt: 0,
+        },
+      },
+      eventSource: fakeEventSourceFactory().factory,
+    });
+    expect(wrapper.text()).toContain("own");
+    expect(wrapper.text()).toContain("peer");
+    expect(wrapper.find('input[type="checkbox"]').exists()).toBe(false);
+  });
+
   it("keeps the daily comparisons and group trend visible on every cost breakdown", () => {
     for (const view of ["daily", "users", "threads", "channels", "agents", "models"] as const) {
       const wrapper = mountApp(CostsPage, {

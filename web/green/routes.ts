@@ -21,8 +21,11 @@ export const routes: RouteRecordRaw[] = [
   { path: "/residents", redirect: "/settings/runtime" },
   {
     path: "/residents/:owner/:name",
-    redirect: (route) =>
-      `/settings/runtime/${encodeURIComponent(String(route.params.owner))}/${encodeURIComponent(String(route.params.name))}`,
+    redirect: (route) => ({
+      path: `/settings/runtime/${encodeURIComponent(String(route.params.owner))}/${encodeURIComponent(String(route.params.name))}`,
+      query: route.query,
+      hash: route.hash,
+    }),
   },
   { path: "/settings/identities", component: () => import("./pages/Identities.vue") },
   { path: "/settings/:tab?/:channel?", component: () => import("./pages/Settings.vue") },

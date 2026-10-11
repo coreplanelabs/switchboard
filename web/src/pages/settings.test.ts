@@ -3,9 +3,8 @@ import type { SettingsSeed, WebSeed } from "@core/channels/webSeed.js";
 import type { McpServerView } from "@core/mcp/registry.js";
 import ChannelsPanel from "../components/settings/ChannelsPanel.vue";
 import McpServersPanel from "../components/settings/McpServersPanel.vue";
-import { settingsTabs } from "../lib/settingsTabs";
 import { browser } from "../lib/browser";
-import SettingsPage from "./SettingsPage.vue";
+import SettingsPage from "../../green/pages/Settings.vue";
 import { ALL_ON, mountApp, pickSelect, selectDisabled, selectItem, selectValue } from "../testing/mount";
 
 // Feature: docs/reference/specs/settings-page.md items 5–8 — the settings page
@@ -76,37 +75,34 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 
 afterEach(() => vi.restoreAllMocks());
 
-describe("settingsTabs", () => {
-  it("MCPs only where the capability is on (or the viewer is on it); Channels and Installation always", () => {
-    expect(settingsTabs(ALL_ON, "channels").map((t) => t.id)).toEqual(["mcps", "channels", "installation"]);
-    expect(settingsTabs({ ...ALL_ON, mcp: false }, "channels").map((t) => t.id)).toEqual(["channels", "installation"]);
-    expect(settingsTabs({ ...ALL_ON, mcp: false }, "mcps").map((t) => t.id)).toEqual([
-      "mcps",
-      "channels",
-      "installation",
-    ]);
-    expect(settingsTabs(null, "installation").map((t) => t.id)).toEqual(["channels", "installation"]);
+describe("Settings sections", () => {
+  it("offers MCP servers only when configured or already selected", () => {
+    const off = mountApp(SettingsPage, {
+      seed: island(base({ tab: "channels" }), { mcp: false }),
+    });
+    expect(off.find('nav a[href="/settings/mcps"]').exists()).toBe(false);
+    const selected = mountApp(SettingsPage, {
+      seed: island(base({ tab: "mcps" }), { mcp: false }),
+    });
+    expect(selected.find('nav a[href="/settings/mcps"][aria-current="page"]').text()).toBe("MCP servers");
+    expect(off.findAll("nav a").map((a) => a.attributes("href"))).toContain("/settings/installation");
   });
 });
 
 describe("SettingsPage", () => {
-  it("paints the tab the seed names, marks it current, and lights the header's settings cog", () => {
+  it("paints the tab the seed names and marks the settings section current", () => {
     const wrapper = mountApp(SettingsPage, {
       seed: island(base({ tab: "installation", installation: { settings: [], capabilities: [] } })),
     });
-    expect(wrapper.find("h1 .title").text()).toBe("Settings");
-    expect(wrapper.find('nav.tabs a[aria-current="page"]').text()).toBe("Installation");
-    // Settings is chrome, not a section: no nav entry is current, the header's cog is.
-    expect(wrapper.find('nav.site a[aria-current="page"]').exists()).toBe(false);
-    expect(wrapper.find('.settings-link[aria-current="page"]').attributes("href")).toBe("/settings");
+    expect(wrapper.find("h1").text()).toBe("Settings");
+    expect(wrapper.find('nav[aria-label="Settings sections"] a[aria-current="page"]').text()).toBe("Installation");
+    expect(wrapper.find('a[href="/settings/connect"]').text()).toBe("Connect a client");
   });
 
-  it("without a seed renders an application error with a reload, never a crash and never a 'no data' state", () => {
+  it("without a seed keeps settings unavailable and exposes no editable controls", () => {
     const wrapper = mountApp(SettingsPage, { seed: null });
-    expect(wrapper.find(".error").attributes("role")).toBe("alert");
-    expect(wrapper.find(".error").text()).toContain("could not be loaded");
-    expect(wrapper.find(".error button").text()).toBe("Reload");
-    expect(wrapper.find("p.empty").exists()).toBe(false);
+    expect(wrapper.text()).toContain("Settings could not be loaded");
+    expect(wrapper.find('input,textarea,button[type="submit"]').exists()).toBe(false);
   });
 
   it("Installation: one row per knob with its value and the default mark; capabilities with their state", () => {

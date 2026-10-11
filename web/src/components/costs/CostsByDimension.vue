@@ -16,7 +16,7 @@ import { monthDayOf, usd } from "../../lib/costs";
 // data begins, how many runs are still being priced, and how the attributed
 // total reconciles with the group's LLM figure.
 
-const props = defineProps<{ report: CostsByReport }>();
+const props = withDefaults(defineProps<{ report: CostsByReport; showMine?: boolean }>(), { showMine: true });
 
 /** What the key column is called, and what the filter narrows by. */
 const KEY_HEADING: Record<CostDimension, string> = {
@@ -31,7 +31,7 @@ const filter = ref("");
 const meOnly = ref(false);
 const dimension = computed(() => props.report.dimension);
 /** The **me** toggle exists on the user dimension alone; it is live when the viewer matched a run user. */
-const hasMe = computed(() => props.report.viewer !== undefined);
+const hasMe = computed(() => props.showMine !== false && props.report.viewer !== undefined);
 const canMe = computed(() => (props.report.viewer?.userIds.length ?? 0) > 0);
 /** Cloud is split along a dimension a run belongs to exactly once; the model dimension carries LLM alone. */
 const showCloud = computed(() => props.report.cloudAllocated);

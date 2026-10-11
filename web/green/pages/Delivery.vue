@@ -52,6 +52,9 @@ const freshHref = computed(() => {
   query.set("fresh", "1");
   return `${route.path}?${query}`;
 });
+const hasIncompleteWeek = computed(
+  () => !!report.value && visibleWeeks.value.some((week) => weekIncomplete(report.value!, week.week)),
+);
 const coverage = computed(() => (report.value && measuredWork.value ? coverageNote(report.value) : undefined));
 const downloadHref = computed(() => {
   if (!report.value) return undefined;
@@ -112,7 +115,7 @@ function href(repo: string, weeks: number) {
         </div>
       </div>
       <div class="green-table-scroll">
-        <table class="green-table">
+        <table class="green-table" aria-label="Weekly delivery">
           <thead>
             <tr>
               <th>Week</th>
@@ -144,6 +147,10 @@ function href(repo: string, weeks: number) {
           </tbody>
         </table>
       </div>
+      <p v-if="report.completeFrom && hasIncompleteWeek" class="text-xs text-muted px-5 pb-4">
+        Incomplete weeks hold the newest pull requests the read reached — complete from
+        {{ snapshotTime(report.completeFrom) }}. Their numbers are a floor on the merges, not the week's total.
+      </p>
     </section>
     <section class="green-section">
       <div class="green-section-heading">
@@ -160,7 +167,7 @@ function href(repo: string, weeks: number) {
         "
       />
       <div v-else class="green-table-scroll">
-        <table class="green-table">
+        <table class="green-table" aria-label="Unit delivery">
           <thead>
             <tr>
               <th>Unit</th>
@@ -206,17 +213,33 @@ function href(repo: string, weeks: number) {
     </p>
     <details class="text-xs text-muted">
       <summary>Data and method</summary>
-      <p class="mt-3">
-        Figures use GitHub pull requests, checks, review verdicts, and retained run records. Only merged pull requests
-        count. Unknown CI and lead time remain unknown.
-      </p>
-      <p class="mt-2">
-        Reviews count {{ report.identities.reviewers.join(", ") || "no configured reviewers" }}. Agent logins include
-        names ending in <code>[bot]</code
-        ><template v-if="report.identities.agentLogins.length">
-          and {{ report.identities.agentLogins.join(", ") }}</template
-        >. Agent coauthors: {{ report.identities.agentCoauthors.join(", ") || "none configured" }}.
-      </p>
+      <div class="mt-2 grid gap-1.5">
+        <div>
+          <b>Snapshot.</b> GitHub's record of the merged pull requests (each one's timeline and its branch's workflow
+          runs, the board issue its body links) is read on an interval and kept as a snapshot the page, its JSON twin
+          and <code>delivery report</code> serve; <code>?fresh=1</code> reads GitHub now. The run history you may see
+          joins on every load.
+        </div>
+        <div>
+          <b>Issue → merge</b> runs from the linked board issue's opening (a closing keyword or a
+          <code>board item</code> reference in the body) to the merge; a pull request that links no issue counts from
+          its own opening. <b>First-pass CI</b> is green when every pull-request-triggered workflow run
+          (<code>pull_request</code>, <code>pull_request_target</code>) on the first head succeeded at its first attempt
+          — a rerun or a red run fails it; a head with no such run is not counted. <b>Review rounds</b> are the review
+          agent's verdicts; a <i>fix round</i> is a verdict that followed a push. <b>No human edit</b> is the share of
+          the agent's findings on pull requests where every push after the first verdict was an agent's: a bot login, or
+          a commit co-authored by an agent. <b>Agent run minutes</b> are the finished runs of this repository that named
+          a pull request.
+        </div>
+        <div>
+          <b>Identities.</b> Verdicts by <code>{{ report.identities.reviewers.join(", ") || "(none configured)" }}</code
+          >; agent logins end in <code>[bot]</code
+          ><template v-if="report.identities.agentLogins.length"
+            >, plus <code>{{ report.identities.agentLogins.join(", ") }}</code></template
+          >; agent co-authors named <code>{{ report.identities.agentCoauthors.join(", ") || "(none)" }}</code
+          >.
+        </div>
+      </div>
       <a :href="downloadHref" class="block mt-2 text-primary">Download this report as JSON</a>
     </details>
   </template>

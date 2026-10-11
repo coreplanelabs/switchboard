@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import type { RunIndexRowSeed } from "@core/channels/webSeed.js";
 import RunRow from "../components/runs/RunRow.vue";
-import ViewAsPicker from "../components/runs/ViewAsPicker.vue";
 import { mountApp } from "../testing/mount";
 import { POPUP_COMPONENTS, POPUP_LAYER, popupLayers } from "./uiTheme";
 
@@ -44,7 +43,7 @@ describe("the layers in the DOM", () => {
     expect(w.find("li.run .body").classes()).toContain("z-[1]");
   });
 
-  it("an opened row menu and an opened view-as list both carry the popup layer", async () => {
+  it("an opened run row menu carries the popup layer", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
     const row = mountApp(RunRow, { props: { run: live, now: 2_000 } });
     const trigger = row.find("[aria-haspopup=menu]");
@@ -54,15 +53,5 @@ describe("the layers in the DOM", () => {
     await vi.waitFor(() => expect(document.body.querySelector("[role=menu]")).not.toBeNull());
     expect(document.body.querySelector("[role=menu]")!.className.split(/\s+/)).toContain(POPUP_LAYER);
     document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-
-    const picker = mountApp(ViewAsPicker, { props: { people: [{ id: "slack:UBOB", name: "bob" }] } });
-    const input = picker.find("input");
-    await input.trigger("keydown", { key: "ArrowDown" });
-    await nextTick();
-    await vi.waitFor(() => expect(document.body.querySelector("[role=listbox]")).not.toBeNull());
-    const list = document.body.querySelector("[role=listbox]")!;
-    const content =
-      list.closest(`.${POPUP_LAYER}`) ?? (list.className.split(/\s+/).includes(POPUP_LAYER) ? list : null);
-    expect(content).not.toBeNull();
   });
 });

@@ -14,7 +14,8 @@ import {
   rec,
   residentSlug,
   residentsFleetTone,
-  runsOnResident,
+  runsOnResidentMember,
+  residentIdentity,
   str,
   type ResidentRecordView,
   type ResidentsIndexState,
@@ -36,6 +37,8 @@ const seed = useSeed("residents");
 const state = reactive<ResidentsIndexState>({
   cap: seed?.cap,
   count: seed?.count,
+  pendingReplicas: seed?.pendingReplicas,
+  reservedCount: seed?.reservedCount,
   draining: seed?.draining ?? null,
   residents: seed?.residents ?? [],
   repositories: seed?.repositories ?? [],
@@ -48,20 +51,41 @@ const conn = ref<{ tone: "green" | "amber" | "red"; text: string }>({ tone: "amb
 // `?open=<slug>` opens that resident's fold on first paint.
 const openSlug = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("open") : null;
 
+const members = computed(() => [...state.residents, ...(state.repositories ?? [])].map(rec));
 const rows = computed(() =>
-  [...state.residents, ...(state.repositories ?? [])].map((raw, i) => {
-    const record = raw as ResidentRecordView;
+  members.value.map((record: ResidentRecordView, i) => {
     const slug = residentSlug(record);
     return {
-      key: `${slug || "?"}-${i}`,
+      key: residentIdentity(record) || `unknown-${i}`,
       record,
       slug,
-      runs: runsOnResident(state.runs.values(), slug),
+      runs: runsOnResidentMember(state.runs.values(), record, members.value),
     };
   }),
 );
 const cap = computed(() => str(state.cap) || "?");
-const count = computed(() => str(state.count) || String(rows.value.length));
+const count = computed(() => str(state.count) || String(state.residents.length));
+const reservations = computed(() => {
+  const pending =
+    typeof state.pendingReplicas === "number" &&
+    Number.isSafeInteger(state.pendingReplicas) &&
+    state.pendingReplicas >= 0
+      ? state.pendingReplicas
+      : null;
+  const reserved =
+    typeof state.reservedCount === "number" && Number.isSafeInteger(state.reservedCount) && state.reservedCount >= 0
+      ? state.reservedCount
+      : typeof state.count === "number" && Number.isSafeInteger(state.count) && state.count >= 0 && pending !== null
+        ? state.count + pending
+        : null;
+  return { pending, reserved };
+});
+const capacity = computed(() => {
+  const { pending, reserved } = reservations.value;
+  return reserved !== null
+    ? `${reserved}/${cap.value} resident slots reserved · ${count.value} active${pending !== null ? ` · ${pending} pending` : ""}`
+    : `${count.value}/${cap.value} resident slots in use`;
+});
 const drain = computed(() => (state.draining && typeof state.draining === "object" ? rec(state.draining) : null));
 const drainHolds = computed(() =>
   Array.isArray(drain.value?.holds)
@@ -148,7 +172,7 @@ onUnmounted(() => {
     <div class="green-stat-grid">
       <div class="green-stat">
         <span class="text-xs text-muted">Environment slots</span>
-        <p class="text-2xl text-highlighted mt-2">{{ count }} / {{ cap }}</p>
+        <p class="text-2xl text-highlighted mt-2">{{ reservations.reserved ?? count }} / {{ cap }}</p>
       </div>
       <div class="green-stat">
         <span class="text-xs text-muted">Active runs</span>
@@ -159,6 +183,9 @@ onUnmounted(() => {
         <p class="text-2xl text-highlighted mt-2">{{ state.repositories?.length ?? 0 }}</p>
       </div>
     </div>
+    <p class="text-xs text-muted mb-3">
+      {{ capacity }}{{ state.repositories?.length ? ` · ${state.repositories.length} cold` : "" }}
+    </p>
     <section class="green-section">
       <div class="green-section-heading"><h2>Repository environments</h2></div>
       <ul v-if="rows.length" class="list-none p-0 m-0">

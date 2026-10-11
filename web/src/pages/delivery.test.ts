@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import DeliveryPage from "./DeliveryPage.vue";
+import DeliveryPage from "../../green/pages/Delivery.vue";
 import { mountApp } from "../testing/mount";
 import type { DeliveryReport, PullRequestFacts } from "@core/core/delivery.js";
 import { buildDeliveryReport } from "@core/core/delivery.js";
@@ -85,10 +85,10 @@ const seed = (r: DeliveryReport = report(), repos: string[] = ["acme/api", "acme
 describe("DeliveryPage", () => {
   it("renders hostile titles as text, never as markup", () => {
     const w = mountApp(DeliveryPage, { seed: seed() });
-    expect(w.find("h1 .title").text()).toBe("acme/api delivery");
+    expect(w.find("h1").text()).toBe("Delivery");
     expect(w.html()).not.toContain("<script>alert");
-    expect(w.find("table.units").text()).toContain("OpenRouter as a documented example <b>");
-    expect(w.find("table.units b").exists()).toBe(false);
+    expect(w.find('table[aria-label="Unit delivery"]').text()).toContain("OpenRouter as a documented example <b>");
+    expect(w.find('table[aria-label="Unit delivery"] b').exists()).toBe(false);
   });
 
   it("leads with the six tiles: merged, issue → merge, first-pass CI, review rounds, no human edit, blocking caught", () => {
@@ -111,22 +111,26 @@ describe("DeliveryPage", () => {
 
   it("draws one row per week with the indicators, and one row per unit with its issue and pull request links", () => {
     const w = mountApp(DeliveryPage, { seed: seed() });
-    const weeks = w.findAll("table.weeks tbody tr");
+    const weeks = w.findAll('table[aria-label="Weekly delivery"] tbody tr');
     expect(weeks).toHaveLength(2);
     expect(weeks[0].text()).toContain("Aug 31 – Sep 6");
     expect(weeks[0].findAll("td")[1].text()).toBe("1");
     expect(weeks[1].text()).toContain("Sep 7 – Sep 13");
     expect(weeks[1].findAll("td")[1].text()).toBe("2");
     // The mutex unit: one pull request, two verdicts, one blocking finding, resolved by an agent, ten agent-run minutes in its week.
-    const units = w.findAll("table.units tbody tr");
-    expect(w.findAll("table.units thead th")[0].text()).toBe("Issue");
-    expect(units.map((r) => r.findAll("td")[0].text())).toEqual([hash(825), hash(830), "—"]);
+    const units = w.findAll('table[aria-label="Unit delivery"] tbody tr');
+    expect(w.findAll('table[aria-label="Unit delivery"] thead th')[0].text()).toBe("Unit");
+    expect(units.map((r) => r.findAll("td")[0].text())).toEqual([
+      `${hash(825)} · The durable mutex`,
+      `${hash(830)} · OpenRouter as a documented example <b>`,
+      "(no issue)",
+    ]);
     const mutex = units[0];
     expect(mutex.find('a[href="https://github.com/acme/api/issues/825"]').exists()).toBe(true);
     expect(mutex.find('a[href="https://github.com/acme/api/pull/917"]').exists()).toBe(true);
-    expect(mutex.findAll("td")[5].text()).toBe("2");
-    expect(mutex.findAll("td")[6].text()).toBe("2 (1 blocking)");
-    expect(mutex.findAll("td")[7].text()).toBe("100%");
+    expect(mutex.findAll("td")[4].text()).toBe("2");
+    expect(mutex.findAll("td")[5].text()).toBe("2 (1 blocking)");
+    expect(mutex.findAll("td")[6].text()).toBe("100%");
     expect(weeks[1].findAll("td")[8].text()).toBe("10");
     // The unlinked row groups the pull requests no issue claims.
     expect(units[2].text()).toContain("(no issue)");
@@ -136,8 +140,8 @@ describe("DeliveryPage", () => {
   it("says a week or a range with nothing merged is empty, without an error", () => {
     const r = report({ prs: [] });
     const w = mountApp(DeliveryPage, { seed: seed(r) });
-    expect(w.findAll("table.weeks tbody tr")).toHaveLength(2);
-    expect(w.text()).toContain("Nothing merged in range.");
+    expect(w.findAll('table[aria-label="Weekly delivery"] tbody tr')).toHaveLength(2);
+    expect(w.text()).toContain("No merges in this range");
     expect(w.text()).toContain("no merges in range");
     expect(tilesOf(r).map((x) => x.value)).toEqual(["0", "—", "—", "—", "—", "0"]);
   });
@@ -151,13 +155,13 @@ describe("DeliveryPage", () => {
       "The tiles cover the newest 3 pull requests only — the read is complete from Sep 3, 02:41 UTC; the weeks before that hold what it reached, not the week.",
     );
     expect(w.text()).toContain("The tiles cover the newest 3 pull requests only");
-    const weeks = w.findAll("table.weeks tbody tr");
-    expect(weeks[0].classes()).toContain("text-dimmed");
+    const weeks = w.findAll('table[aria-label="Weekly delivery"] tbody tr');
+    expect(weeks[0].find(".text-warn").text()).toBe("Incomplete");
     expect(weeks[0].text()).toContain("Aug 31 – Sep 6");
-    expect(weeks[0].text()).toContain("(incomplete)");
-    expect(weeks[1].classes()).not.toContain("text-dimmed");
+    expect(weeks[0].text()).toContain("Incomplete");
+    expect(weeks[1].find(".text-warn").exists()).toBe(false);
     expect(weeks[1].text()).not.toContain("incomplete");
-    expect(w.find("table.weeks").element.parentElement?.parentElement?.textContent).toContain(
+    expect(w.find('table[aria-label="Weekly delivery"]').element.parentElement?.parentElement?.textContent).toContain(
       "Incomplete weeks hold the newest pull requests the read reached",
     );
     // A truncated report that names no instant says what the tiles cover and marks no week.
@@ -172,20 +176,17 @@ describe("DeliveryPage", () => {
     expect(whole.text()).not.toContain("incomplete");
   });
 
-  it("carries the shared site nav with Delivery current", () => {
-    const w = mountApp(DeliveryPage, { seed: seed() });
-    expect(w.find('nav.site a[aria-current="page"]').attributes("href")).toBe("/delivery");
-  });
-
-  it("offers the range switch with the current range as text, the others as links, and the sibling repositories", () => {
+  it("offers the range switch with the current range marked and the sibling repository selector", () => {
     const w = mountApp(DeliveryPage, { seed: seed() });
     const hrefs = w.findAll("a").map((a) => a.attributes("href"));
     expect(hrefs).toContain("/delivery/acme/api?weeks=1");
     expect(hrefs).toContain("/delivery/acme/api?weeks=13");
-    expect(hrefs).not.toContain("/delivery/acme/api?weeks=2");
-    expect(hrefs).toContain("/delivery/acme/web");
+    expect(w.find('nav[aria-label="Delivery range"] [aria-current="page"]').attributes("href")).toBe(
+      "/delivery/acme/api?weeks=2",
+    );
+    expect(w.findAll("select option").map((o) => o.text())).toEqual(["acme/api", "acme/web"]);
     const single = mountApp(DeliveryPage, { seed: seed(report(), ["acme/api"]) });
-    expect(single.findAll("a").map((a) => a.attributes("href"))).not.toContain("/delivery/acme/web");
+    expect(single.findAll("select option").map((o) => o.text())).toEqual(["acme/api"]);
   });
 
   it("states the method and the identities it judged by, and names the JSON twin", () => {
@@ -194,21 +195,22 @@ describe("DeliveryPage", () => {
     expect(t).toContain("first attempt");
     expect(t).toContain(REVIEWER);
     expect(t).toContain("Claude");
-    expect(t).toContain("GET /delivery/acme/api.json");
+    expect(w.find('a[href="/delivery/acme/api.json"]').text()).toBe("Download this report as JSON");
   });
 
-  it("the footer says when the facts were read and how long ago, and offers a live read that keeps the range", () => {
+  it("the footer says when the facts were read and how long ago, and offers a live read that keeps the range", async () => {
     vi.useFakeTimers({ now: Date.parse("2026-09-11T14:03:30Z") });
     try {
       const w = mountApp(DeliveryPage, { seed: seed({ ...report(), snapshotAt: "2026-09-11T13:51:00Z" }) });
-      const footer = w.find("footer").text();
+      await w.findComponent(DeliveryPage).vm.$router.push("/delivery/acme/api?weeks=2");
+      const footer = w.find("[data-delivery-snapshot]").text();
       expect(footer).toContain("As of Sep 11, 13:51 UTC, 12 minutes ago");
-      expect(w.find('footer a[href="/delivery/acme/api?fresh=1"]').text()).toContain("read GitHub now");
-      expect(footer).toContain("snapshot");
+      expect(w.find('a[href="/delivery/acme/api?weeks=2&fresh=1"]').text()).toContain("Refresh from GitHub");
+      expect(w.text()).toContain("snapshot");
       expect(footer).not.toContain("nothing stored");
       // A report with no read time (a bare source) says nothing about one.
       const bare = mountApp(DeliveryPage, { seed: seed() });
-      expect(bare.find("footer").text()).not.toContain("As of");
+      expect(bare.find("[data-delivery-snapshot]").exists()).toBe(false);
     } finally {
       vi.useRealTimers();
     }
