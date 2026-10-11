@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { HomeSession, HomeConversationEntry } from "../src/channels/homeSeed.js";
-import type { HomeSeed, PageSeed, UnitSeed } from "../src/channels/webSeed.js";
+import type { WebSeed, HomeSeed, PageSeed, UnitSeed } from "../src/channels/webSeed.js";
 import type { HomeSnapshot, HomeUnit } from "../src/core/home/service.js";
 import type { Actor } from "../src/core/authz/types.js";
 import { homeWeek } from "../src/core/home/week.js";
@@ -10,7 +10,12 @@ import { homeWeek } from "../src/core/home/week.js";
 export const GREEN_PREVIEW_NOTICE = "Preview data · Fictional local fixtures. No agents or external actions run.";
 const ORGANIZATION = "organization:preview";
 const ACTOR = "access:preview";
-type PreviewPage = { title: string; seed: PageSeed & { preview?: string }; status?: number; viewer?: Actor };
+type PreviewPage = {
+  title: string;
+  seed: PageSeed & Pick<WebSeed, "asUser"> & { preview?: string };
+  status?: number;
+  viewer?: Actor;
+};
 export function createGreenPreview(options: { now: number; unit: UnitSeed["view"]; thread: HomeSeed }) {
   let revision = 1;
   let sequence = 0;
@@ -178,7 +183,7 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
   };
   const marked = (page: PreviewPage): PreviewPage => ({
     ...page,
-    seed: { ...page.seed, preview: GREEN_PREVIEW_NOTICE },
+    seed: { ...page.seed, asUser: { id: ACTOR, name: "Your account" }, preview: GREEN_PREVIEW_NOTICE },
   });
   function page(url: URL): PreviewPage | null {
     if (url.pathname === "/home" || url.pathname === "/plane")

@@ -7,6 +7,7 @@ import { defineComponent, h, nextTick } from "vue";
 import type { HomeSeed, UnitSeed } from "@core/channels/webSeed.js";
 import type { HomeSession } from "@core/channels/homeSeed.js";
 import PipelinePage from "./pages/Pipeline.vue";
+import HomePage from "./pages/Home.vue";
 import UnitPage from "./pages/Unit.vue";
 import ReadonlyThread from "./components/ReadonlyThread.vue";
 import ThreadPage from "./pages/Thread.vue";
@@ -55,6 +56,58 @@ const thread: HomeSeed = {
 };
 
 describe("Green browser frontend", () => {
+  it.each([false, true])(
+    "keeps marked preview Home work visible with its real fixture session loaded before mount: %s",
+    async (loaded) => {
+      const preview = createGreenPreview({
+        now: 1000,
+        thread,
+        unit: {
+          unit: "pipeline:U13",
+          instanceId: "pipeline",
+          id: "U13",
+          title: "Preview unit",
+          branch: "codex/u13",
+          threads: { coding: "slack:C1:1" },
+          sourceUrls: {},
+          rounds: [],
+          instance: { id: "pipeline", repo: "sample/api", createdAt: 1 },
+          runs: [],
+        },
+      });
+      const page = preview.page(new URL("/home", "http://preview.test"));
+      if (!page) throw new Error("Preview page missing");
+      const fetcher = async (address: string) => {
+        let status = 0,
+          payload = "";
+        await preview.handle(
+          { url: address, method: "GET" } as IncomingMessage,
+          {
+            writeHead(code: number) {
+              status = code;
+            },
+            end(body: string) {
+              payload = body;
+            },
+          } as unknown as ServerResponse,
+          new URL(address, "http://preview.test"),
+        );
+        return new Response(payload, { status, headers: { "content-type": "application/json" } });
+      };
+      const stream = fakeEventSourceFactory();
+      const home = createHomeSession(fetcher as typeof fetch, stream.factory);
+      if (loaded) await home.load();
+      const wrapper = mountApp(HomePage, { seed: page.seed, provides: [[HomeSessionKey, home]] });
+      if (!loaded) await home.load();
+      await flushPromises();
+      expect(home.session.value?.actor).toBe("access:preview");
+      expect(home.session.value?.organization).toBe("organization:preview");
+      expect(wrapper.get('[data-unit="pipeline:U13"]').text()).toContain("Confirm the review before merging");
+      expect(wrapper.text()).toContain("Needs you 1");
+      expect(wrapper.text()).not.toContain("Work access changed");
+      expect(page.seed.preview).toContain("Fictional local fixtures");
+    },
+  );
   it("renders recorded private worker and unit entries without fake run controls and clears them on revocation", async () => {
     for (const component of [ThreadPage, ReadonlyThread]) {
       const stream = fakeEventSourceFactory();
