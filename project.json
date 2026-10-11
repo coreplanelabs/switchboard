@@ -120,8 +120,8 @@
       "when": "Part of `check:consistency`."
     },
     "check:dist": {
-      "does": "Builds, then proves the compiled entry points and the web bundle the image needs exist.",
-      "when": "Part of `verify:root`."
+      "does": "Builds the bot, rejects test files in dist/, and checks required runtime files.",
+      "when": "Local checks and the CI image build."
     },
     "check:site": {
       "does": "Every page the dashboard links to is in the built site, and its home page reads `displayName`.",

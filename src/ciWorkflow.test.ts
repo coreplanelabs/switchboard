@@ -449,8 +449,8 @@ describe("the verify scripts", () => {
   });
 
   it("CI's bot legs together run exactly what `verify:root` runs locally", () => {
-    // The fan-out is a split of verify:root, never a subset of it or a superset
-    // with checks that only CI runs.
+    // The bot legs and the distribution check inside the bot image cover the
+    // same checks as verify:root. Moving a check must not remove its coverage.
     const local = rootPkg.scripts["verify:root"]
       .split("&&")
       .map((s) =>
@@ -470,6 +470,17 @@ describe("the verify scripts", () => {
           if (m) ran.push(m[1] ?? m[2]);
         }
       }
+    }
+    const imageGate = Object.values(ci.jobs).find((j) => j.name === "image")!;
+    const botImage = needsOf(imageGate)
+      .map((id) => ci.jobs[id])
+      .find((job) =>
+        job?.steps.some((step) => runLines(step, job).includes("npm run check:image -w deploy/cloudflare")),
+      );
+    expect(botImage, "CI must build the bot image to cover its distribution check").toBeDefined();
+    const buildStage = read("Dockerfile").split(/\nFROM /)[1];
+    for (const match of buildStage.matchAll(/^RUN npm run ([a-z:-]+)$/gm)) {
+      if (local.includes(match[1])) ran.push(match[1]);
     }
     expect([...new Set(ran)].sort()).toEqual(local);
   });

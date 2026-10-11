@@ -57,6 +57,7 @@ export const ROOT_ASSETS = [
   "config/config.example.yaml",
   "project.json",
   "Dockerfile",
+  "scripts/check-dist.mjs",
   "docker-entrypoint.sh",
   ".dockerignore",
   "package.json",

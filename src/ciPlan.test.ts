@@ -48,6 +48,14 @@ describe("selective CI", () => {
     expect(planForPaths([".prettierignore"]).botChecks).toContain("format:check");
   });
 
+  it("checks bot output in the image build without a duplicate CI build", () => {
+    for (const path of ["src/index.ts", "tsconfig.build.json", "scripts/check-dist.mjs"]) {
+      const plan = planForPaths([path]);
+      expect(plan.images, path).toEqual(["deploy/cloudflare"]);
+      expect(plan.botChecks, path).toEqual(["check:consistency", "typecheck", "lint", "format:check"]);
+    }
+  });
+
   it("selects the changed Worker and its image without building unrelated Workers", () => {
     const plan = planForPaths(["deploy/cloudflare-resident/Dockerfile"]);
     expect(plan.workers).toEqual(["deploy/cloudflare-resident"]);
@@ -170,7 +178,7 @@ describe("selective CI", () => {
   it("runs every leg for unknown paths and shared dependency changes", () => {
     for (const path of ["new-surface/file.ts", "package-lock.json", ".depot/workflows/ci.yml", "scripts/ci-plan.mjs"]) {
       const plan = planForPaths([path]);
-      expect(plan.botChecks).toHaveLength(5);
+      expect(plan.botChecks).toEqual(["check:consistency", "typecheck", "lint", "format:check"]);
       expect(plan.botTests && plan.web && plan.docs && plan.package).toBe(true);
       expect(plan.workers).toHaveLength(4);
       expect(plan.images).toHaveLength(3);

@@ -6,7 +6,7 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-export const BOT_CHECKS = ["check:consistency", "typecheck", "lint", "format:check", "check:dist"];
+export const BOT_CHECKS = ["check:consistency", "typecheck", "lint", "format:check"];
 export const WORKERS = [
   "deploy/cloudflare",
   "deploy/cloudflare-memory",
@@ -158,7 +158,6 @@ export function planForPaths(paths, { fixtureRegistrationOnly: fixtureRootOnly =
     plan.botTests = true;
   };
   const botArtifact = () => {
-    checks.add("check:dist");
     plan.package = true;
     images.add("deploy/cloudflare");
   };
@@ -206,7 +205,7 @@ export function planForPaths(paths, { fixtureRegistrationOnly: fixtureRootOnly =
       }
     } else if (path.startsWith("scripts/")) {
       source();
-      if (path === "scripts/check-dist.mjs") checks.add("check:dist");
+      if (path === "scripts/check-dist.mjs") images.add("deploy/cloudflare");
       if (/^scripts\/(?:docs-gen|check-site)/.test(path)) plan.docs = true;
     } else if (path.startsWith(`${ACCEPTANCE_SOURCE}/`)) {
       // CI's existing workers matrix calls `verify -w` only for this workspace.
