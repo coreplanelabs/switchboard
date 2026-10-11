@@ -2211,15 +2211,16 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
     directives.agent === undefined &&
     /^ship\s+\S/i.test(openingLine) &&
     (laterLines.trim() === "" || /^App notification from App\b/.test(laterLines.trimStart()));
-  const naturalPr = naturalReview || naturalShip;
-  const preset = naturalReview ? "review" : naturalShip ? "ship" : directives.agent;
+  const repeatReview = directives.agent === undefined && /^re-review\s+\S/i.test(openingLine) && !laterLines.trim();
+  const naturalPr = naturalReview || naturalShip || repeatReview;
+  const preset = naturalReview || repeatReview ? "review" : naturalShip ? "ship" : directives.agent;
   if (preset !== "review" && preset !== "ship") return undefined;
   if (!input.projection.presets.some((offered) => offered.name === preset)) return undefined;
   if (input.owner && input.owner.kind !== "pipeline") return undefined;
   if (input.owner?.kind === "pipeline" && preset === "review" && !input.owner.allowReview) return undefined;
   // A setting needs the operator's typed evidence and cannot be silently
   // projected away by this narrow PR-only path.
-  if (Object.keys(directives).some((key) => key !== "agent" && key !== "text")) return undefined;
+  if (!repeatReview && Object.keys(directives).some((key) => key !== "agent" && key !== "text")) return undefined;
   // Keep newlines and indentation: parseDirectives normalizes whitespace,
   // which would erase the requesterTargetText quote/code boundary.
   const words = naturalPr ? openingLine : stripDirectiveHead(input.text, preset);
@@ -2253,6 +2254,29 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
     before = before.slice(0, -1).trim();
     after = after.slice(1).trim();
   }
+  let settings: OperatorRequestSettings = {};
+  let settingsEvidence: Record<string, { quote: string; intent: "requested" }> = {};
+  if (repeatReview) {
+    // Only this literal control segment is authority. A pushed-head receipt is
+    // context carried by the original request, never prose to classify here.
+    const header = /^(?:(?:model|effort|budget|severity|renewals|verbosity)[:=]\S+(?:\s+|$))+/.exec(after)?.[0];
+    if (!header) return undefined;
+    const { agent: _agent, text, ...parsed } = parseDirectives(`agent:review ${header}`);
+    if (text || Object.keys(parsed).length === 0) return undefined;
+    settings = parsed;
+    settingsEvidence = Object.fromEntries(
+      header
+        .trim()
+        .split(/\s+/)
+        .map((quote) => [quote.split(/[:=]/, 1)[0]!, { quote, intent: "requested" as const }]),
+    );
+    // A later control must not be dropped or supersede the literal segment.
+    for (const key of ["model", ...OPERATOR_SETTING_NAMES] as const)
+      if (directives[key] !== settings[key]) return undefined;
+    const receipt = after.slice(header.length).trim();
+    if (receipt && !/^— pushed [0-9a-f]{7,40}:\s+\S/.test(receipt)) return undefined;
+    after = "";
+  }
   const front = tokenize(before);
   const tail = tokenize(after);
   if (!front.ok || !tail.ok) return undefined;
@@ -2263,7 +2287,13 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
   // alternative phrasings of a task. Every other word stays with the model.
   if (intent.length !== 0 && !(intent.length === 2 && intent[0] === "pull" && intent[1] === "request"))
     return undefined;
-  if (action !== undefined && action !== "review" && action !== preset && !(preset === "ship" && action === "continue"))
+  if (
+    action !== undefined &&
+    action !== "review" &&
+    !(repeatReview && action === "re-review") &&
+    action !== preset &&
+    !(preset === "ship" && action === "continue")
+  )
     return undefined;
   // Only retrospective context may ride an automatic repeat review; a
   // competing or ambiguous follow-up belongs to the ordinary operator path.
@@ -2322,6 +2352,8 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
       input: {
         preset,
         repo,
+        ...settings,
+        settingsEvidence,
         ...(shipEntry ? { shipEntry } : {}),
         ...(shipEntry !== "continue" ? { prTarget } : {}),
         reason,
@@ -2333,9 +2365,14 @@ function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined
       tail: input.tail,
       presets: input.projection.presets.map((offered) => offered.name),
       commands: input.projection.commands,
+      providers: input.providers,
     },
   );
-  return turn.kind === "decision" && turn.decision.kind === "binds" ? turn.decision : undefined;
+  if (turn.kind !== "decision" || turn.decision.kind !== "binds") return undefined;
+  const bind = turn.decision.binds[0];
+  return Object.entries(settings).every(([key, value]) => bind?.[key as keyof OperatorRequestSettings] === value)
+    ? turn.decision
+    : undefined;
 }
 
 export async function runOperator(
@@ -2352,16 +2389,31 @@ export async function runOperator(
   const now = opts.now ?? Date.now;
   const started = now();
   const smokeDiagnostic = candidateSmokeDiagnostic(opts.smokeDiagnosticScope);
+  const timeoutMs = opts.timeoutMs ?? OPERATOR_TIMEOUT_MS;
+  const signal = AbortSignal.timeout(timeoutMs);
+  const expired = () => signal.aborted || now() - started >= timeoutMs;
   // An unambiguous, current requester directive is already a typed target.
   // Do not make the model reconstruct its repo and PR before the review door.
   const direct = explicitPrDirective(input);
-  if (direct)
-    return {
-      decision: direct,
-      latencyMs: now() - started,
-      outputTokens: 0,
-      ...(smokeDiagnostic ? { smokeDiagnostic: smokeDiagnostic.snapshot() } : {}),
-    };
+  if (direct) {
+    let onTimeout = () => {};
+    const deadline = new Promise<string>((resolve) => {
+      onTimeout = () => resolve("operator_timeout");
+      signal.addEventListener("abort", onTimeout, { once: true });
+    });
+    try {
+      const violation = await Promise.race([decisionModelRefViolation(direct, input.providerModels), deadline]);
+      if (expired() || violation === undefined)
+        return {
+          decision: expired() ? { kind: "non_decision", reason: "operator_timeout" } : direct,
+          latencyMs: now() - started,
+          outputTokens: 0,
+          ...(smokeDiagnostic ? { smokeDiagnostic: smokeDiagnostic.snapshot() } : {}),
+        };
+    } finally {
+      signal.removeEventListener("abort", onTimeout);
+    }
+  }
   let prompt = buildOperatorPrompt(input);
   // The turn parse reads the author's FULL projection even on an owned thread
   // (issue 2027): a call naming a tool the owned turn was not offered is a
@@ -2435,9 +2487,6 @@ export async function runOperator(
   let noCallTurns = 0;
   let outputCapCuts = 0;
   let maxOutputTokens = opts.maxOutputTokens ?? operatorMaxOutputTokens();
-  const timeoutMs = opts.timeoutMs ?? OPERATOR_TIMEOUT_MS;
-  const signal = AbortSignal.timeout(timeoutMs);
-  const expired = () => signal.aborted || now() - started >= timeoutMs;
   const reAskAction = (answer: string, violation: string, noun = "a decision") => {
     if (expired() || violations >= STRUCTURED_RETRIES_MAX) return false;
     violations++;
@@ -3026,26 +3075,29 @@ export async function operatorStage(
   // review's source results or notes and then refuse an independent re-review
   // when one of those optional sources can no longer be revalidated.
   if (!msg.documents?.length && !msg.images?.length && !msg.staged?.length) {
-    const direct = explicitPrDirective({
+    const input: OperatorInput = {
       text: msg.text,
       projection,
       tail: [],
       requesterId: msg.userId,
       ...(ctx.owner ? { owner: ctx.owner } : {}),
-    });
-    if (direct) {
-      ctx.onContext?.(freshContext());
-      const event: OperatorEventFields = operatorEventOf(
-        mode,
-        { decision: direct, latencyMs: 0, outputTokens: 0 },
-        ctx.intake,
+    };
+    if (explicitPrDirective(input)) {
+      const answer = await runOperator(
+        { ...input, providers: Object.keys(cfg.providers ?? {}), providerModels: deps.providerModels },
+        model,
+        maxOutputTokens !== undefined ? { maxOutputTokens } : {},
       );
+      ctx.onContext?.(freshContext());
+      const event: OperatorEventFields = operatorEventOf(mode, answer, ctx.intake);
       event.repoContext = {
         organization: cfg.organization,
         candidateStatus: "skipped",
         candidateCount: 0,
       };
-      return event;
+      return event.outcome === "question"
+        ? { ...event, request: redactAndCap(oneLine(msg.text), OPERATOR_REQUEST_CAP) }
+        : event;
     }
   }
   const newestFinishedRun = ctx.thread ? newestFinishedRunOf(ctx.thread) : undefined;
