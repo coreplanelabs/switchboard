@@ -240,7 +240,7 @@ describe("createDeliveryViewHandler", () => {
   });
 
   it("hands the service the viewer's OWN runs: the runs predicate is the policy's for that actor, on the report's repository", async () => {
-    const store = new InMemoryRunStore();
+    const store = new InMemoryRunStore({ now: () => NOW });
     const record = (id: string, repo: string, visibility: RunRecord["channelVisibility"]): RunRecord => ({
       id,
       label: `review · ${repo} · "review https://github.com/${repo}/pull/42"`,
