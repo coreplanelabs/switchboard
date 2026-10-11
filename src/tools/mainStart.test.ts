@@ -54,6 +54,71 @@ const resolveSource = (sources: MainSourceTracker, quote: string, repo: string, 
 };
 
 describe("work_start — plain-language private worker handoff", () => {
+  it("offers a delegated device only through its exact sealed private source and current verifier", async () => {
+    const plain: IncomingMessage = {
+      channelId: "mcp:default",
+      threadKey: "mcp:default:1",
+      userId: "access:alice",
+      authenticatedAs: "mcp:personal:alice",
+      messageId: "mcp:once",
+      text: "fix it",
+    };
+    const service: Actor = {
+      kind: "service",
+      id: "mcp:personal:alice",
+      self: ["mcp:personal:alice"],
+      grants: ALL_GRANTS,
+      onBehalfOf: { ...actor, id: plain.userId },
+      origin: { channelId: plain.channelId, threadKey: plain.threadKey },
+    };
+    const audience = {
+      kind: "organization-private" as const,
+      organization: "acme",
+      stream: "mcp:personal:alice",
+      actorId: service.id,
+      userId: plain.userId,
+      channelId: plain.channelId,
+      threadKey: plain.threadKey,
+    };
+    const message = withOrganizationPrivateAudience(plain, audience, 1);
+    let currentPrivate = true;
+    const starts: MainStartInput[] = [];
+    const capability = mainStartForRun({
+      agentName: "orchestrator",
+      channelVisibility: "machine",
+      initial: { actor: service, msg: message },
+      source: () => ({ kind: "ready", actor: service, msg: message, authorizedRepo: input.repo }),
+      live: () => true,
+      runId: "device-run",
+      recordDecision: async () => () => true,
+      verifyOrganizationPrivateAudience: async () =>
+        currentPrivate ? { ok: true } : { ok: false, code: "direct-audience-denied" },
+      start: async (value) => {
+        starts.push(value);
+        return { kind: "accepted", actId: "once", instanceId: "one-unit", reply: "Started" };
+      },
+    });
+    expect(await workStartTool.run(input, context(capability))).toBe(
+      "Started one private worker. Work id: once. The main conversation stays here while it works.",
+    );
+    expect(starts[0]).toMatchObject({
+      actor: { kind: "service", id: "mcp:personal:alice", self: ["mcp:personal:alice"] },
+      msg: { userId: "access:alice", authenticatedAs: "mcp:personal:alice" },
+    });
+    currentPrivate = false;
+    expect(await workStartTool.run(input, context(capability))).toContain("no longer a private conversation");
+    expect(starts).toHaveLength(1);
+    for (const [currentMessage, currentActor] of [
+      [JSON.parse(JSON.stringify(message)), service],
+      [withOrganizationPrivateAudience(plain, { ...audience, actorId: "mcp:other" }, 1), service],
+      [{ ...message, userId: "access:other" }, service],
+      [{ ...message, authenticatedAs: undefined }, service],
+      [{ ...message, postedBy: "mcp:relay" }, service],
+      [message, { ...service, onBehalfOf: undefined }],
+    ] as [IncomingMessage, Actor][])
+      expect(canOfferMainStart("orchestrator", "machine", currentMessage, currentActor, true)).toBe(false);
+  });
+
   it("starts from a proved browser destination and refuses lost proof or forged JSON audience", async () => {
     const plain: IncomingMessage = {
       channelId: "http:home",

@@ -168,6 +168,51 @@ describe("the named lines and the clicker's ids", () => {
 });
 
 describe("consumeAndRun — the stored input runs once, as the requester, through the typed path (record 0044)", () => {
+  it("keeps choice B current rights instead of borrowing saved source A grants", async () => {
+    const d = deps();
+    const sourceActor = chatActorOf(d.config, message());
+    const choiceActor = { ...sourceActor, grants: { ...sourceActor.grants, actions: new Set(["runs:read"]) } };
+    const { io, ending, trace } = request(d);
+    await d.store.put(
+      {
+        ...pending("choice-B"),
+        message: withOriginalOrganizationDispatch(message(), { ingressRunId: "source-A", organizationSequence: 7 }),
+      },
+      CONFIRMATION_TTL_MS,
+    );
+    d.guardOrganizationConfirmation = async () => ({ actor: sourceActor, io });
+    const outcome = await consumeAndRun(
+      d,
+      { id: "choice-B", actorIds: [choiceActor.id], actor: choiceActor },
+      io,
+      ending,
+      trace,
+      noRedispatch,
+      undefined,
+      {
+        actor: choiceActor,
+        ingressRunId: "choice-B",
+        message: withOriginalOrganizationDispatch(
+          { ...message(), messageId: "native-choice-B" },
+          { ingressRunId: "choice-B", organizationSequence: 8 },
+        ),
+      },
+    );
+    expect(outcome).toMatchObject({ kind: "ran", result: { ok: false } });
+    expect(codingModelIn(d)).toBe("anthropic/coding-model");
+    await d.store.put(pending("allowed"), CONFIRMATION_TTL_MS);
+    expect(
+      await consumeAndRun(
+        d,
+        { id: "allowed", actorIds: [sourceActor.id], actor: sourceActor },
+        io,
+        ending,
+        trace,
+        noRedispatch,
+      ),
+    ).toMatchObject({ kind: "ran", result: { ok: true } });
+    expect(codingModelIn(d)).toBe("anthropic/claude-opus-5");
+  });
   it.each([
     ["repo offboard acme/api", "• Offboarded `acme/api`."],
     ["repo onboard acme/api --no-resident", "• Registered `acme/api` · cold."],

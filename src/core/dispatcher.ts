@@ -2,6 +2,7 @@ import { bindConversationRead } from "./dispatch/conversationRead.js";
 import { wrapUntrusted } from "./untrusted.js";
 import { isResearchBrief, renderResearchBrief } from "./research/brief.js";
 import { researchFromRun, researchInputAnswers } from "./research/source.js";
+import { isDelegatedMainRequester } from "./coordinator/mainStart.js";
 import { envelopeSchema } from "./organization/contract.js";
 import { runSessionIdentity } from "./dispatch/sessionIdentity.js";
 import { markPrivateConversation } from "./dispatch/privateConversation.js";
@@ -784,7 +785,7 @@ export async function dispatch(
     if (
       !isOrganizationPrivateAudience(audience) ||
       audience.actorId !== actor.id ||
-      actor.kind !== "user" ||
+      (actor.kind !== "user" && !isDelegatedMainRequester(actor, msg, audience)) ||
       actor.viewingAs ||
       audience.channelId !== msg.channelId ||
       audience.userId !== msg.userId ||
@@ -5813,7 +5814,7 @@ export async function dispatchClick(
     | "organizationSequence"
     | "organizationRepo"
     | "seed"
-  > & { threadKey?: string } = {},
+  > & { threadKey?: string; choiceMessage?: IncomingMessage } = {},
 ): Promise<DispatchOutcome> {
   const ended: DispatchOutcome = { status: "completed" };
   const clock = deps.clock ?? systemClock;
@@ -5876,9 +5877,20 @@ export async function dispatchClick(
           await refuse(refusalOf("confirmation_unreadable", OFFER_CONTEXT_LINE));
           return ended;
         }
-        if (source) {
+        if (source && !opts.ingressRunId) {
           io = source.io;
           executionActor = source.actor;
+        }
+        if (
+          opts.choiceMessage &&
+          (!opts.ingressRunId ||
+            originalOrganizationDispatchOf(opts.choiceMessage)?.ingressRunId !== opts.ingressRunId ||
+            opts.choiceMessage.channelId !== row.message.channelId ||
+            opts.choiceMessage.threadKey !== row.message.threadKey ||
+            opts.choiceMessage.userId !== row.message.userId)
+        ) {
+          await refuse(refusalOf("confirmation_foreign", OFFER_FOREIGN_LINE));
+          return ended;
         }
       }
     }
@@ -5935,7 +5947,12 @@ export async function dispatchClick(
           contextAccessForMessage(deps, { msg: message, io }).validateDependencies,
         ),
       opts.ingressRunId
-        ? { actor: executionActor, ingressRunId: opts.ingressRunId, authoritativeHistory: opts.authoritativeHistory }
+        ? {
+            actor: executionActor,
+            ingressRunId: opts.ingressRunId,
+            authoritativeHistory: opts.authoritativeHistory,
+            ...(opts.choiceMessage ? { message: opts.choiceMessage } : {}),
+          }
         : undefined,
     );
     if (res.kind === "redispatched") {
