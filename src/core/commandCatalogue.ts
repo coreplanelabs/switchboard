@@ -11,6 +11,7 @@ import type { SteerCommandDeps } from "./commands/steer.js";
 import type { PullsCommandDeps } from "./commands/pulls.js";
 import type { AffectedReport } from "../deploy/affected.js";
 import { cliVersionOnHost } from "../deploy/host.js";
+import { verifySandboxOnHost } from "../deploy/sandboxVerification.js";
 import { systemClock } from "./trace/clock.js";
 import type { LoadedProfile } from "../deploy/profile.js";
 import {
@@ -463,6 +464,8 @@ export function buildCoreCommands(
     mcp: { service: async () => (await wiring.mcp?.()) ?? { unavailable: MCP_OFF_MESSAGE } },
     schedule: { schedules: SCHEDULES, store: wiring.scheduleStore, now: wiring.now ?? Date.now },
     deploy: {
+      inspect: (profile, options) => verifySandboxOnHost(profile, options, (line) => console.error(line)),
+      verify: (profile, options) => verifySandboxOnHost(profile, options, (line) => console.error(line)),
       run: (plan) =>
         runDeployPlanOnHost(plan, {
           log: (l) => console.log(l),

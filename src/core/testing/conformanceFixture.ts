@@ -826,6 +826,26 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
     mcp: { service: async () => fakeMcpService() },
     schedule: { schedules: SCHEDULES, store: s.schedules, now: () => NOW },
     deploy: {
+      inspect: async (_profile, options) => ({
+        ok: true,
+        live: false,
+        targetVerified: false,
+        inventoryComplete: true,
+        source: "c".repeat(40),
+        expectedCommit: options.expectedCommit,
+        appVersion: 12,
+        imageDigest: "sha256:" + "b".repeat(64),
+        reason: "observation fixture",
+      }),
+      verify: async (_profile, options) =>
+        exec("deploy.verify", {
+          ok: true,
+          live: !options.inventoryOnly,
+          inventoryVerified: true,
+          source: "c".repeat(40),
+          expectedCommit: options.expectedCommit,
+          reason: "verification fixture",
+        }),
       run: async (plan: DeployPlan): Promise<DeployRunResult> =>
         exec(`deploy.run ${plan.steps.map((st) => st.name).join(",")}`, {
           kind: "ran",
