@@ -765,6 +765,9 @@ export const RUN_FAILURE_KINDS = [
   "provider_transient",
   "model_stream_incomplete",
   "sandbox_fleet_busy",
+  // A `restarting` close whose claim deadline passed with no successor holding
+  // the id: the store's sweep closes it as `interrupted` (record 0097).
+  "restart_unclaimed",
 ] as const;
 export type RunFailureKind = (typeof RUN_FAILURE_KINDS)[number];
 export interface RunFailure {

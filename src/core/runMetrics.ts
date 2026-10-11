@@ -8,7 +8,7 @@ import { utf8ByteLength, type RunRecord } from "./runRecord.js";
 // dataset beside the record's commit. This file is the point's contract, shared
 // by both sides of the wire — the bot's store/ledger clients compute the point
 // (`pointOf`), the state Worker validates it (`isRunMetricsPoint`) and decides
-// whether the row turned final (`pointTurnsFinal`) — so it is node-free like
+// whether the write emits (`pointEmits`, record 0097's terminal close) — so it is node-free like
 // `runRecord.ts`: no Node built-ins, no I/O, no clock.
 
 /** A point as the platform's `writeDataPoint` takes it: one index (the
@@ -226,19 +226,22 @@ export function isRunMetricsPoint(v: unknown): v is RunMetricsPoint {
   return p.doubles.every(isFinite_);
 }
 
+/** A run's **terminal close** (record 0097): a record that is neither
+ *  provisional (the start tombstone) nor `restarting` (a close a same-id
+ *  successor replaces). Only a terminal close is the run's end. */
+export function isTerminalClose(record: Pick<RunRecord, "provisional" | "restarting">): boolean {
+  return record.provisional !== true && record.restarting !== true;
+}
+
 /**
- * The emission rule's one question, answered inside the store's transaction:
- * did this write turn the run's row final? True exactly when the stored record
- * is final (`provisional` absent) and the existing row was absent or itself
- * provisional. There is deliberately no `finishedAt > startedAt` term: a plain
- * `put` of an `interrupted` record over no row is a run counted once, and a
- * final rewrite over a final row (the review artifact, an identical retry) is
- * false however its stamps compare.
+ * The emission rule's one question, answered inside the store's transaction
+ * (record 0097, amending 0063): does this write emit the run's point? True
+ * exactly when the stored record is a terminal close and the run's emission
+ * latch is unset; the store sets the latch in the same transaction. A
+ * provisional or `restarting` close emits nothing, a terminal rewrite after
+ * the latch (the review artifact, an identical retry) emits nothing, and a
+ * plain `put` of an `interrupted` record over no row is a run counted once.
  */
-export function pointTurnsFinal(
-  existing: { provisional?: boolean } | undefined,
-  stored: Pick<RunRecord, "provisional">,
-): boolean {
-  if (stored.provisional === true) return false;
-  return existing === undefined || existing.provisional === true;
+export function pointEmits(latched: boolean, stored: Pick<RunRecord, "provisional" | "restarting">): boolean {
+  return !latched && isTerminalClose(stored);
 }
