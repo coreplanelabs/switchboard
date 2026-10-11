@@ -63,6 +63,9 @@ import {
   MAX_BODY_BYTES,
   readBody,
   type DispatchFn,
+  admissionResponse,
+  nativeMessageId,
+  idempotencyKeyError,
   type IngressConfig,
   type IngressIdentity,
 } from "./http.js";
@@ -105,6 +108,12 @@ const DISPATCH_TOOL = {
       text: { type: "string", description: "the request to send to Switchboard" },
       thread: { type: "string", description: "conversation thread key (optional; defaults to a single thread)" },
       channel: { type: "string", description: "config/permission scope (optional; a token may pin this)" },
+      idempotencyKey: {
+        type: "string",
+        description: "retain this key with the exact same request when retrying an uncertain admission",
+        minLength: 1,
+        maxLength: 128,
+      },
       async: { type: "boolean", description: "return a run id now and read progress with runs_get/runs_events" },
     },
     required: ["text"],
@@ -380,7 +389,9 @@ async function route(
         : undefined;
       const requester = sessionCaller
         ? { ...requesterOf(sessionCaller.actor, identity.session!), authenticatedAs: sessionCaller.id }
-        : await mcpRequester(identity, options);
+        : options.admit && name === "dispatch" && !identity.verifiedUserId
+          ? { userId: `mcp:${identity.subject}` }
+          : await mcpRequester(identity, options);
       if (!requester)
         return err(id, AUTH_ERROR, "The verified person for this connection is unavailable; nothing ran", {
           code: "unauthorized",
@@ -466,6 +477,8 @@ async function route(
         const error = ingressComponentError("channel", identity.channel);
         if (error) return err(id, INVALID_PARAMS, error);
       }
+      const keyErrorInput = idempotencyKeyError(args.idempotencyKey);
+      if (keyErrorInput) return err(id, INVALID_PARAMS, keyErrorInput);
       const receivedAt = systemClock();
       const incoming = await toIncomingMessage(
         identity,
@@ -490,7 +503,9 @@ async function route(
           requestHash: requestHash(String(name), args),
           ...(supportsForm(ctx) ? { mode: "form" as const } : {}),
         },
-        messageId: `${PLATFORM}:${randomUUID()}`,
+        messageId: options.admit
+          ? nativeMessageId("mcp", args.idempotencyKey as string | undefined)
+          : `${PLATFORM}:${randomUUID()}`,
         receivedAt,
       };
       const io = new McpIO(
@@ -503,6 +518,29 @@ async function route(
           ? (offer) => `Nothing ran. Confirm the saved action ${offer.line} in your MCP client.`
           : undefined,
       );
+      if (options.admit) {
+        try {
+          const admitted = admissionResponse(
+            await options.admit(msg, io, { source: "mcp", identity, credentialDigest: connectionId }),
+          );
+          const admission = (admitted.body as { admission: { status: string } }).admission;
+          return ok(id, {
+            content: [
+              {
+                type: "text",
+                text:
+                  admission.status === "accepted" || admission.status === "pending"
+                    ? "Request admitted. Its receipt identifies the original owner; completion is recorded separately."
+                    : `Request not admitted: ${admission.status}.`,
+              },
+            ],
+            structuredContent: admitted.body,
+            ...(admitted.status >= 400 ? { isError: true } : {}),
+          });
+        } finally {
+          trace.root.end("ok");
+        }
+      }
       const dispatchFn = options.dispatch ?? realDispatch;
       const result = await dispatchSingleShot({
         deps,
