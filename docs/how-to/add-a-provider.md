@@ -46,6 +46,10 @@ Nothing is required beyond `wire` (or its `type` alias) and, for a keyed provide
 
 ## Keep wire aliases separate from catalog identities
 
+On the public OpenRouter API, use the exact vendor-prefixed model id: `openrouter/openai/gpt-5.3-codex`, for example. A bare short name that uniquely matches a catalog model is refused before workspace setup with the exact ref. The request is never rewritten. Explicit operator aliases keep their declared identity; custom gateways and unknown or ambiguous catalog names keep their existing fallback behavior.
+
+For a catalog Chat Completions card whose endpoint matches the selected public OpenRouter API, the gateway contract vouches `max_completion_tokens`. OpenRouter translates this field to each upstream's spelling. This does not vouch a custom gateway or unknown card, and explicit operator or registry cap fields still win. See the [OpenRouter API contract](https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request).
+
 A display name or gateway alias may differ from the catalog's exact id. No alias is inferred: without an exact match the card's unknown fields remain unvouched. After independently verifying which catalog model an alias actually serves, an operator may bind that metadata without changing the outbound model id:
 
 ```yaml

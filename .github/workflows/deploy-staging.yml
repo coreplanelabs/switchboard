@@ -27,9 +27,14 @@ on: # zizmor: ignore[dangerous-triggers]
       model:
         description: Optional per-request full model ref for acceptance (provider/model)
         type: string
+      require_vouched_controls:
+        description: Require recorded model controls without fallback warnings
+        type: boolean
+        default: false
 
 env:
   STAGING_ACCEPTANCE_MODEL: ${{ inputs.model }}
+  STAGING_REQUIRE_VOUCHED_CONTROLS: ${{ inputs.require_vouched_controls }}
 
 permissions:
   contents: read
@@ -225,6 +230,7 @@ jobs:
           npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/staging-fleet.json"
           smoke_args=()
           if [ -n "$SMOKE_MODEL" ]; then smoke_args=(--model "$SMOKE_MODEL"); fi
+          if [ "$STAGING_REQUIRE_VOUCHED_CONTROLS" = true ]; then smoke_args+=(--require-vouched-controls); fi
           npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-setup.json" --check "${smoke_args[@]}"
       - name: deploy the captured commit to staging
         id: deploy
@@ -271,6 +277,7 @@ jobs:
           npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/staging-fleet.json"
           smoke_args=()
           if [ -n "$SMOKE_MODEL" ]; then smoke_args=(--model "$SMOKE_MODEL"); fi
+          if [ "$STAGING_REQUIRE_VOUCHED_CONTROLS" = true ]; then smoke_args+=(--require-vouched-controls); fi
           npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-e2e.json" "${smoke_args[@]}"
           jq -e '.slackConnection.required == true and .slackConnection.connected == true and .slackConnection.checks == ((.scenarios | length) * 2)' "$RUNNER_TEMP/staging-e2e.json" > /dev/null
           if [ -n "$SMOKE_SLACK_CONFIG" ]; then

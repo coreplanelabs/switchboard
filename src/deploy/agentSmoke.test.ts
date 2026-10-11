@@ -5,6 +5,55 @@ import { MCP_PROTOCOL_VERSION } from "../mcp/client.js";
 import { commit, config, fixture, head } from "./testing/agentSmoke.js";
 
 describe("bounded agent smoke", () => {
+  it("requires recorded model controls when requested, rejecting degraded or missing evidence", async () => {
+    const card = {
+      ref: "openrouter/openai/gpt-5.3-codex",
+      levels: { high: { word: "high", named: true } },
+      capField: "max_completion_tokens",
+      window: 400000,
+      cache: "automatic",
+      provenance: { levels: "registry", capField: "registry", window: "registry" },
+    };
+    const run = async (events: unknown[]) => {
+      const { transport } = fixture();
+      const read = transport.readRun;
+      transport.readRun = async (id) => ({
+        ...((await read(id)) as object),
+        model: "openrouter/openai/gpt-5.3-codex",
+        events: [...((await read(id)) as { events: unknown[] }).events, ...events],
+      });
+      return runAgentSmoke({
+        config: { ...config, model: "openrouter/openai/gpt-5.3-codex", requireVouchedControls: true },
+        expectedCommit: commit,
+        thread: "controls",
+        transport,
+      });
+    };
+    const passed = await run([{ type: "run_meta", effort: "high", card }]);
+    expect(passed.scenarios.map((row) => [row.outcome, row.modelControls])).toEqual(
+      Array(3).fill([
+        "passed",
+        { effort: "high", capField: "max_completion_tokens", window: 400000, cache: "automatic" },
+      ]),
+    );
+    for (const events of [
+      [],
+      [
+        { type: "run_meta", effort: "high", card },
+        { type: "run_note", kind: "control_degraded", control: "cap", vouched: false },
+      ],
+      [{ type: "run_meta", effort: "high", card: { ...card, cache: "unknown" } }],
+      [{ type: "run_meta", effort: "high", card: { ...card, levels: "unknown" } }],
+      [{ type: "run_meta", effort: "high", card: { ...card, provenance: { ...card.provenance, capField: "wire" } } }],
+      [{ type: "run_meta", effort: "high", card: { ...card, provenance: { ...card.provenance, window: "wire" } } }],
+    ]) {
+      expect(await run(events)).toMatchObject({
+        capabilityOutcome: "failed",
+        scenarios: [{ reason: "model_controls_unproven" }, { outcome: "skipped" }, { outcome: "skipped" }],
+      });
+    }
+  });
+
   it("sends an explicit model directive and records requested and actual models on every scenario", async () => {
     const { transport } = fixture();
     const read = transport.readRun;

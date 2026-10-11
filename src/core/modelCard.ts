@@ -10,7 +10,14 @@
 // catalog lives in ./modelRegistry.ts.
 
 import { EFFORT_LEVELS, type Effort } from "../effort.js";
-import { billerHarnessProvider, vendorOf, wireOf, type ProviderConfig, type Wire } from "./provider.js";
+import {
+  billerHarnessProvider,
+  isPublicOpenRouterChat,
+  vendorOf,
+  wireOf,
+  type ProviderConfig,
+  type Wire,
+} from "./provider.js";
 import type { RegistryCard } from "./modelRegistry.js";
 
 /** Which layer named a field: the operator's block, the registry card, or the
@@ -196,10 +203,18 @@ export function resolveModelCard(
 
   // Messages and Responses each have one cap field. A card on that exact
   // API names it without a redundant compat entry; a card from another API
-  // and Chat Completions' two spellings still need an explicit field.
+  // and generic Chat Completions' two spellings still need an explicit field.
   const registryCapField =
     (card?.compat?.maxTokensField as string | undefined) ??
-    (wire !== "openai-chat" && card?.api === wire ? WIRE_CAP_FIELD[wire] : undefined);
+    (wire !== "openai-chat" && card?.api === wire ? WIRE_CAP_FIELD[wire] : undefined) ??
+    // OpenRouter translates this gateway field to each upstream's spelling.
+    // The exact catalog endpoint must agree with the operator's endpoint;
+    // an unknown model or a custom proxy still has no protocol evidence.
+    (isPublicOpenRouterChat(block) &&
+    card?.api === "openai-completions" &&
+    card.baseUrl === "https://openrouter.ai/api/v1"
+      ? "max_completion_tokens"
+      : undefined);
   const capField = override?.capField ?? registryCapField ?? WIRE_CAP_FIELD[wire];
   const capProvenance: Provenance =
     override?.capField !== undefined ? "operator" : registryCapField !== undefined ? "registry" : "wire";

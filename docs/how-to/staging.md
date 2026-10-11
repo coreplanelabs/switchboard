@@ -60,6 +60,8 @@ Manual dispatch from `main` also accepts an exact source commit:
 gh workflow run deploy-staging.yml --ref main -f commit=<40-character-commit> -f targets=all -f review_e2e=true
 ```
 
+For a model-control repair, add `-f model=openrouter/openai/gpt-5.3-codex -f require_vouched_controls=true`. The existing scenarios use that exact model and require its recorded effort, cap, window and cache controls without fallback warnings. The receipt retains these controls. The CLI equivalent adds `--model <provider/model> --require-vouched-controls` to `smoke:ingress`.
+
 To test a workflow change before merge, dispatch its branch with `pr=<number>` and `commit=<current-PR-head>`. The workflow refuses a different branch or commit. Deployment logs and E2E receipts are retained as artifacts. Upload and readiness are separate from end-to-end acceptance.
 
 ## Prove the product paths
