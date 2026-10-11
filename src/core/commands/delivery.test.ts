@@ -98,7 +98,7 @@ function bound(
         source,
         { identities: async () => ({ reviewers: [REVIEWER] }), now: () => new Date(NOW) },
       );
-  const store = new InMemoryRunStore();
+  const store = new InMemoryRunStore({ now: () => NOW });
   const puts = (opts.runs ?? []).map((r) => store.put(r));
   const registry = new CommandRegistry<DeliveryCommandDeps>({ audit: () => {} });
   registerDeliveryCommands(registry);
