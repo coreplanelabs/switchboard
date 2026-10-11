@@ -1,8 +1,12 @@
 import { personalTokenApprovalMatchesPin, type PersonalTokenApprovalPin } from "../core/personalToken.js";
+import type { OrganizationNativeEvidence } from "./organizationAuthentication.js";
+import type { OrganizationAdmissionInput } from "../core/organization/service.js";
+import type { OrganizationResult } from "../core/organization/contract.js";
+import { authorize } from "../core/authz/authorize.js";
 import { z } from "zod";
 import { hasConfirmationConsent } from "../core/confirmationConsent.js";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { resolveChatActor, type GrantsLookup } from "../core/authz/actor.js";
 import {
   blastRadius,
@@ -11,16 +15,18 @@ import {
   type CommandDef,
   type CommandInvoker,
   type InvokeErrorCode,
+  resourceOf,
 } from "../core/commandRegistry.js";
 import { jsonSchemaFor, mcpToolName, namedToInput } from "../core/commandSurface.js";
 import type { McpToolInfo } from "../mcp/types.js";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
 import { startRequestRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
-import type { IncomingMessage, ConfirmationOffer } from "../core/types.js";
+import type { IncomingMessage, ConfirmationOffer, ChannelIO } from "../core/types.js";
 import { withCommandConfirmation } from "../core/commandConfirmations.js";
 import {
   approvalUrl,
+  connectionIdentity,
   mcpRequester,
   type McpIdentity,
   ownApproval,
@@ -129,6 +135,18 @@ export interface McpOptions {
   personalApprovalPin?: () => PersonalTokenApprovalPin | undefined;
   /** Defaults to the real core dispatch(); overridden in tests. */
   dispatch?: DispatchFn;
+  /** Host-only original-owner admission for a protected saved choice. */
+  admit?: (
+    msg: IncomingMessage,
+    io: ChannelIO,
+    evidence: OrganizationNativeEvidence,
+    choice?: OrganizationAdmissionInput["continuation"],
+  ) => Promise<OrganizationResult>;
+  replayChoice?: (
+    msg: IncomingMessage,
+    evidence: OrganizationNativeEvidence,
+    choice: NonNullable<OrganizationAdmissionInput["continuation"]>,
+  ) => Promise<OrganizationResult | undefined>;
   /** Max body size in bytes (node wrapper enforces at read time). */
   maxBodyBytes?: number;
   /** The command registry (deps bound) whose MCP-exposed commands become tools
@@ -378,7 +396,10 @@ async function route(
       const state = ctx?.mcpReq.requestState<string>();
       if (typeof state === "string") {
         const row = deps.confirmations && (await ownApproval(deps.confirmations, state, caller.actor, connectionId));
-        if (!row || row.message.approvalConnection?.requestHash !== requestHash(String(name), args))
+        if (
+          (!row && !options.replayChoice) ||
+          (row && row.message.approvalConnection?.requestHash !== requestHash(String(name), args))
+        )
           return err(id, AUTH_ERROR, "The offer is used, expired, or does not match this request; nothing ran");
         return approvalResult(id, state, deps, options, caller.actor, connectionId, false, ctx);
       }
@@ -764,6 +785,29 @@ function offeredResult(
   );
 }
 
+function nativeChoiceMessageId(id: string, kind: "confirm" | "cancel"): string {
+  return `mcp:${createHash("sha256").update(`choice:${id}:${kind}`).digest("hex")}`;
+}
+function nativeChoiceResponse(id: JsonRpcId, result: OrganizationResult): JsonRpcResultBody {
+  const receipt = result.status === "receipt" ? result.receipt : undefined;
+  const accepted = receipt?.status === "accepted" || receipt?.status === "pending";
+  return ok(id, {
+    content: [{ type: "text", text: accepted ? "Choice received." : "This saved choice is unavailable; nothing ran." }],
+    structuredContent: {
+      admission: receipt
+        ? {
+            status: receipt.status,
+            receiptId: receipt.id,
+            duplicate: result.status === "receipt" && result.duplicate,
+            ...(receipt.ownerRunId ? { runId: receipt.ownerRunId } : {}),
+            ...(receipt.reason ? { reason: receipt.reason } : {}),
+          }
+        : { status: result.status },
+    },
+    ...(!accepted ? { isError: true } : {}),
+  });
+}
+
 async function approvalResult(
   id: JsonRpcId,
   offerId: string,
@@ -776,12 +820,6 @@ async function approvalResult(
 ): Promise<JsonRpcResultBody | JsonRpcErrorBody> {
   const store = deps.confirmations;
   const row = store && (await ownApproval(store, offerId, actor, connectionId));
-  if (!store || !row)
-    return err(
-      id,
-      -32003,
-      "This offer is unavailable or already used. Check its original run history before requesting another action.",
-    );
   const response = ctx?.mcpReq.inputResponses?.approval;
   const decision = acceptedContent(ctx?.mcpReq.inputResponses, "approval", approvalDecision);
   const declined =
@@ -789,7 +827,97 @@ async function approvalResult(
     response !== null &&
     "action" in response &&
     (response.action === "decline" || response.action === "cancel");
+  const kind = cancel || declined || decision?.decision === "cancel" ? ("cancel" as const) : ("confirm" as const);
+  const identity = await connectionIdentity(connectionId, options);
+  const requester = identity ? await mcpRequester(identity, options) : undefined;
+  if (!row && identity && requester && options.replayChoice) {
+    const channelId = `mcp:${identity.channel ?? DEFAULT_CHANNEL}`;
+    const prior = await options.replayChoice(
+      {
+        ...requester,
+        channelId,
+        threadKey: `${channelId}:${DEFAULT_THREAD}`,
+        text: "",
+        messageId: nativeChoiceMessageId(offerId, kind),
+      },
+      { source: "mcp", identity, credentialDigest: connectionId },
+      { kind, id: offerId },
+    );
+    if (prior) return nativeChoiceResponse(id, prior);
+  }
+  if (!row && ctx?.mcpReq.requestState<string>() === offerId)
+    return err(id, AUTH_ERROR, "The offer is used, expired, or does not match this request; nothing ran");
+  if (!store || !row)
+    return err(
+      id,
+      -32003,
+      "This offer is unavailable or already used. Check its original run history before requesting another action.",
+    );
+  const allowedChoice = (saved: typeof row, caller: Caller): boolean => {
+    if (saved.kind !== "run") return hasDispatch(caller.actor.grants);
+    const command = options.commands?.list().find((command) => command.id === saved.command);
+    if (!command) return false;
+    const bound = {
+      ...caller,
+      origin: saved.caller?.origin
+        ? { ...saved.caller.origin, repo: async () => saved.originRepo ?? undefined }
+        : undefined,
+    };
+    try {
+      return authorize(caller.actor, command.action, resourceOf(command, saved.parsedInput ?? saved.input, bound))
+        .allow;
+    } catch {
+      return false;
+    }
+  };
+  const nativeAdmission = async (saved: typeof row): Promise<JsonRpcResultBody | JsonRpcErrorBody> => {
+    if (!options.admit) return err(id, AUTH_ERROR, "The original choice owner is unavailable; nothing ran");
+    const current = await connectionIdentity(connectionId, options);
+    const currentRequester = current ? await mcpRequester(current, options) : undefined;
+    if (
+      !current ||
+      !currentRequester ||
+      currentRequester.userId !== saved.message.userId ||
+      `mcp:${current.subject}` !== actor.id ||
+      (saved.message.authenticatedAs ?? saved.message.userId) !== actor.id
+    )
+      return err(id, AUTH_ERROR, "This connection or its verified identity was revoked; nothing ran");
+    const caller = toCaller(
+      current,
+      options.grantsFor ?? ((id: string) => deps.config.grantsFor(id)),
+      currentRequester,
+    );
+    if (!allowedChoice(saved, caller))
+      return err(id, AUTH_ERROR, "Current permissions do not allow this saved action; nothing ran");
+    return nativeChoiceResponse(
+      id,
+      await options.admit(
+        {
+          userId: saved.message.userId,
+          channelId: saved.message.channelId,
+          threadKey: saved.message.threadKey,
+          ...(saved.message.authenticatedAs ? { authenticatedAs: saved.message.authenticatedAs } : {}),
+          ...(saved.message.postedBy ? { postedBy: saved.message.postedBy } : {}),
+          ...(saved.message.approvalConnection ? { approvalConnection: { ...saved.message.approvalConnection } } : {}),
+          text: "",
+          messageId: nativeChoiceMessageId(offerId, kind),
+        },
+        new McpIO([], saved.message.threadKey),
+        { source: "mcp", identity: current, credentialDigest: connectionId },
+        { kind, id: offerId },
+      ),
+    );
+  };
+  if (row.originalOrganization) {
+    if (!identity || requester?.userId !== row.message.userId)
+      return err(id, AUTH_ERROR, "This connection or its verified identity was revoked; nothing ran");
+    // Refuse current command loss before recording a new consent or consuming the saved id.
+    const caller = toCaller(identity, options.grantsFor ?? ((id: string) => deps.config.grantsFor(id)), requester);
+    if (!allowedChoice(row, caller))
+      return err(id, AUTH_ERROR, "Current permissions do not allow this saved action; nothing ran");
+  }
   if (cancel || declined || decision?.decision === "cancel") {
+    if (row.originalOrganization) return nativeAdmission(row);
     const result = await store.cancel(offerId, [row.message.userId], connectionId);
     return ok(id, {
       content: [
@@ -830,6 +958,11 @@ async function approvalResult(
   }
   const approvedRow = await ownApproval(store, row.id, actor, connectionId);
   if (!approvedRow) return err(id, AUTH_ERROR, "The saved confirmation is unavailable; nothing ran");
+  if (approvedRow.originalOrganization) {
+    if (!hasConfirmationConsent(approvedRow))
+      return err(id, AUTH_ERROR, "Client confirmation is still required; nothing ran");
+    return nativeAdmission(approvedRow);
+  }
   const io = new McpIO([], row.message.threadKey);
   const refusal = await resumeApproval(deps, store, approvedRow, actor, io, connectionId, options);
   return ok(id, {

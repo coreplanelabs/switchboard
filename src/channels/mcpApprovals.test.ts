@@ -2,6 +2,11 @@ import { z } from "zod";
 import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/runs.js";
 import { createRunsService } from "../core/runsService.js";
 import { InMemoryRunStore } from "../core/runStore.js";
+import {
+  withOriginalOrganizationDispatch,
+  originalOrganizationDispatchOf,
+} from "../core/dispatch/originalOrganizationInput.js";
+import { receiptSchema, type OrganizationResult } from "../core/organization/contract.js";
 import { withCommandConfirmation } from "../core/commandConfirmations.js";
 import { resolveChatActor } from "../core/authz/actor.js";
 import type { Caller } from "../core/commandRegistry.js";
@@ -29,6 +34,7 @@ import type { CoreDeps } from "../core/dispatcher.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import { NullRunHistoryWriter } from "../core/runHistoryWriter.js";
 import { handleMcpRequest, type McpOptions } from "./mcp.js";
+import { requestHash } from "./mcpApproval.js";
 import { createMcpApprovalView } from "./mcpApprovalView.js";
 import { tokenVerifier } from "./dashboardAuth.js";
 import type { AccessIdentity } from "./accessAuth.js";
@@ -712,6 +718,303 @@ describe("MCP approval parity", () => {
     expect(f.removed()).toBe(1);
     expect((await f.call("repo_offboard", {}, token, choice)).body).toMatchObject({ error: { code: -32001 } });
     expect(f.removed()).toBe(1);
+  });
+  async function nativeFixture() {
+    const f = fixture(ALL_GRANTS, false, true);
+    const token = "b".repeat(64);
+    const personal = new InMemoryPersonalTokenStore();
+    const approval = {
+      version: 1 as const,
+      issuer: "https://access.test",
+      audience: "application",
+      organization: "acme",
+      subject: "alice",
+    };
+    await personal.put({
+      digest: digestBearer(token),
+      subject: "personal:alice",
+      email: "unused@example.test",
+      userId: "access:alice",
+      createdAt: 1,
+      approval,
+    });
+    f.options.personalTokens = personal;
+    f.options.personalApprovalPin = () => approval;
+    const originalGrants = f.options.grantsFor!;
+    let personAllowed = true;
+    const currentGrants = (id: string) =>
+      id === "access:alice" && !personAllowed
+        ? NO_GRANTS
+        : originalGrants(id === "mcp:personal:alice" ? "mcp:device" : id === "access:alice" ? "slack:UALICE" : id);
+    f.options.grantsFor = currentGrants;
+    f.deps.config.grantsFor = currentGrants;
+    const store = f.deps.confirmations!;
+    const put = store.put.bind(store);
+    store.put = (row, ttl) =>
+      put(
+        {
+          ...row,
+          message: withOriginalOrganizationDispatch(row.message, {
+            ingressRunId: "original-offer",
+            organizationSequence: 1,
+          }),
+        },
+        ttl,
+      );
+    const observed: {
+      id: string;
+      kind: string;
+      user: string;
+      credential?: string;
+      mode?: string;
+      approvedBy?: string;
+      messageId?: string;
+    }[] = [];
+    const receipts = new Map<string, OrganizationResult>();
+    f.options.admit = async (msg, _io, _evidence, choice) => {
+      if (!choice || !msg.messageId) throw new Error("Missing native choice");
+      expect(originalOrganizationDispatchOf(msg)).toBeUndefined();
+      const row = await f.deps.confirmations!.get!(choice.id);
+      if (!row) throw new Error("Missing saved row");
+      observed.push({
+        id: choice.id,
+        kind: choice.kind,
+        user: msg.userId,
+        credential: msg.authenticatedAs,
+        mode: msg.approvalConnection?.mode,
+        approvedBy: row.approvedBy,
+        messageId: msg.messageId,
+      });
+      const consumed =
+        choice.kind === "cancel"
+          ? await f.deps.confirmations!.cancel(choice.id, [msg.userId], msg.approvalConnection?.id)
+          : await f.deps.confirmations!.consume(choice.id, [msg.userId], msg.approvalConnection?.id);
+      if (!consumed.ok) throw new Error("Original saved owner did not consume once");
+      const result: OrganizationResult = {
+        status: "receipt",
+        duplicate: false,
+        receipt: receiptSchema.parse({
+          version: 1,
+          id: "native-choice-receipt",
+          organization: "acme",
+          source: "mcp",
+          sourceEvent: msg.messageId,
+          actor: {
+            identity: { issuer: "installation:acme:mcp", tenant: null, subject: "personal:alice" },
+            kind: "service",
+            principal: 'mcp:["installation:acme:mcp",null,"personal:alice"]',
+            stream: 'mcp:["installation:acme:mcp",null,"personal:alice"]',
+            bindingRevision: 0,
+            onBehalfOf: { issuer: "https://access.test", tenant: null, subject: "alice" },
+          },
+          key: msg.messageId,
+          digest: "a".repeat(64),
+          status: "accepted",
+          reason: null,
+          revision: 1,
+          target: null,
+          currentRevision: null,
+          effectKey: "native-choice-effect",
+          ownerRunId: "native-choice-owner",
+          createdAt: 1,
+          settledAt: 2,
+          expiresAt: 1000000,
+        }),
+      };
+      receipts.set(msg.messageId, result);
+      return result;
+    };
+    f.options.replayChoice = async (msg) => {
+      const result = msg.messageId ? receipts.get(msg.messageId) : undefined;
+      return result?.status === "receipt" ? { ...result, duplicate: true } : undefined;
+    };
+    return {
+      ...f,
+      observed,
+      token,
+      revoke: () => {
+        personAllowed = false;
+      },
+      restore: () => {
+        personAllowed = true;
+      },
+    };
+  }
+  it("records form consent before native choice admission and replays a lost acknowledgement after restart", async () => {
+    const f = await nativeFixture();
+    const first = await f.call("repo_offboard", {}, f.token, { _meta: FORM_META });
+    const id = (first.body as { result: { requestState: string } }).result.requestState;
+    expect(first.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "form" } } } } });
+    expect(f.observed).toEqual([]);
+    const response = await f.call("repo_offboard", {}, f.token, {
+      _meta: FORM_META,
+      requestState: id,
+      inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+    });
+    expect(response.body).toMatchObject({
+      result: {
+        structuredContent: {
+          admission: {
+            status: "accepted",
+            receiptId: "native-choice-receipt",
+            runId: "native-choice-owner",
+            duplicate: false,
+          },
+        },
+      },
+    });
+    expect(f.observed).toMatchObject([
+      {
+        id,
+        kind: "confirm",
+        user: "access:alice",
+        credential: "mcp:personal:alice",
+        mode: "form",
+        approvedBy: "mcp-form",
+      },
+    ]);
+    const messageId = f.observed[0]!.messageId;
+    expect(messageId).toMatch(/^mcp:[0-9a-f]{64}$/);
+    f.restart();
+    expect(
+      (
+        await f.call("repo_offboard", {}, f.token, {
+          _meta: FORM_META,
+          requestState: id,
+          inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+        })
+      ).body,
+    ).toMatchObject({
+      result: { structuredContent: { admission: { receiptId: "native-choice-receipt", duplicate: true } } },
+    });
+    expect((await f.call("approval_resume", { id }, f.token, { _meta: FORM_META })).body).toMatchObject({
+      result: { structuredContent: { admission: { receiptId: "native-choice-receipt", duplicate: true } } },
+    });
+    expect(f.observed).toHaveLength(1);
+    expect(f.removed()).toBe(0);
+  });
+  it("routes native cancellation through its distinct choice and refuses unsupported fresh consent and current grant loss", async () => {
+    const f = await nativeFixture();
+    expect((await f.call("repo_offboard", {}, f.token)).body).toMatchObject({ error: { code: -32004 } });
+    expect(f.observed).toEqual([]);
+    expect(f.removed()).toBe(0);
+    const first = await f.call("repo_offboard", {}, f.token, { _meta: FORM_META });
+    const id = (first.body as { result: { requestState: string } }).result.requestState;
+    f.revoke();
+    const response = await f.call("repo_offboard", {}, f.token, {
+      _meta: FORM_META,
+      requestState: id,
+      inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+    });
+    expect(response.body).toMatchObject({ error: { code: -32001 } });
+    expect(await f.deps.confirmations!.get!(id)).toMatchObject({ id });
+    expect(f.observed).toEqual([]);
+    f.restore();
+    expect((await f.call("approval_cancel", { id }, f.token, { _meta: FORM_META })).body).toMatchObject({
+      result: { structuredContent: { admission: { status: "accepted" } } },
+    });
+    expect(f.observed).toMatchObject([{ id, kind: "cancel", approvedBy: undefined }]);
+    expect(f.removed()).toBe(0);
+  });
+  it("keeps a native saved id unconsumed when the exact device realm is lost after form consent", async () => {
+    for (const customVerifier of [false, true]) {
+      const f = await nativeFixture();
+      if (customVerifier)
+        f.options.revalidateConnection = async () => ({
+          subject: "personal:alice",
+          email: "unused@example.test",
+          verifiedUserId: "access:alice",
+        });
+      const first = await f.call("repo_offboard", {}, f.token, { _meta: FORM_META });
+      const id = (first.body as { result: { requestState: string } }).result.requestState;
+      expect(first.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "form" } } } } });
+      const store = f.deps.confirmations!;
+      const approve = store.approve!.bind(store);
+      store.approve = async (...args) => {
+        const result = await approve(...args);
+        f.options.personalApprovalPin = () => undefined;
+        return result;
+      };
+      expect(
+        (
+          await f.call("repo_offboard", {}, f.token, {
+            _meta: FORM_META,
+            requestState: id,
+            inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+          })
+        ).body,
+      ).toMatchObject({ error: { code: -32001 } });
+      expect(await store.get!(id)).toMatchObject({ id, approvedBy: "mcp-form" });
+      expect(f.observed).toEqual([]);
+      expect(f.removed()).toBe(0);
+    }
+  });
+  it("resumes a preapproved service-only native offer with its exact credential and no human alias", async () => {
+    const f = await nativeFixture();
+    f.options.auth.tokens.service = { subject: "device" };
+    const id = "service-offer";
+    const connectionId = digestBearer("service");
+    await f.deps.confirmations!.put(
+      {
+        kind: "run",
+        id,
+        message: {
+          userId: "mcp:device",
+          channelId: "mcp:default",
+          threadKey: "mcp:default:service-offer",
+          text: "",
+          approvalConnection: {
+            id: connectionId,
+            credentialId: "mcp:device",
+            requestHash: requestHash("repo_offboard", {}),
+            mode: "form",
+          },
+        },
+        command: "repo.offboard",
+        input: { args: [], options: {} },
+        receipt: "repo offboard",
+        risk: "Remove repository",
+        model: "anthropic/general-model",
+      },
+      600_000,
+    );
+    // Consent is an existing protected owner fact, not newly minted for an unbound service by this adapter.
+    expect(await f.deps.confirmations!.approve!(id, ["mcp:device"], connectionId, "mcp-form")).toMatchObject({
+      ok: true,
+      row: { approvedBy: "mcp-form" },
+    });
+    expect((await f.call("approval_resume", { id }, "service", { _meta: FORM_META })).body).toMatchObject({
+      result: { structuredContent: { admission: { status: "accepted" } } },
+    });
+    expect(f.observed).toMatchObject([
+      { id, user: "mcp:device", credential: undefined, kind: "confirm", approvedBy: "mcp-form" },
+    ]);
+    expect(f.removed()).toBe(0);
+  });
+  it("refuses an unstamped delegated human row instead of treating its requester as the service credential", async () => {
+    const f = await nativeFixture();
+    const first = await f.call("repo_offboard", {}, f.token, { _meta: FORM_META });
+    expect(first.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "form" } } } } });
+    const id = (first.body as { result: { requestState: string } }).result.requestState;
+    const store = f.deps.confirmations!;
+    const get = store.get!.bind(store);
+    store.get = async (id) => {
+      const row = await get(id);
+      if (!row) return row;
+      const { authenticatedAs: _credential, ...message } = row.message;
+      return { ...row, message };
+    };
+    expect(
+      (
+        await f.call("repo_offboard", {}, f.token, {
+          _meta: FORM_META,
+          requestState: id,
+          inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+        })
+      ).body,
+    ).toMatchObject({ error: { code: -32001 } });
+    expect(f.observed).toEqual([]);
+    expect(await get(id)).toMatchObject({ id, message: { authenticatedAs: "mcp:personal:alice" } });
   });
   it("regenerated forms retain the frozen implicit repository and execute that repository", async () => {
     const f = fixture();
