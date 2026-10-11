@@ -58,6 +58,12 @@ export class SqliteOrganizationStore implements OrganizationStore {
       storage.sql.exec(
         "CREATE INDEX IF NOT EXISTS organization_row_expiry ON organization_rows (organization, kind, expires_at)",
       );
+      storage.sql.exec(
+        "CREATE INDEX IF NOT EXISTS organization_source_message ON organization_rows (organization, kind, json_extract(body, '$.source'), json_extract(body, '$.actor.identity.issuer'), json_extract(body, '$.actor.identity.tenant'), json_extract(body, '$.sourceReference.channelId'), json_extract(body, '$.sourceReference.messageId'), row_key)",
+      );
+      storage.sql.exec(
+        "CREATE INDEX IF NOT EXISTS organization_source_clear ON organization_rows (organization, kind, json_extract(body, '$.address.source'), json_extract(body, '$.address.issuer'), json_extract(body, '$.address.tenant'), json_extract(body, '$.address.channelId'), json_extract(body, '$.address.messageId'), ordinal)",
+      );
     });
   }
   private currentBinding(identity: ExternalIdentity) {
@@ -111,6 +117,14 @@ export class SqliteOrganizationStore implements OrganizationStore {
           list: (kind, org, options = {}) => {
             let query = "SELECT body FROM organization_rows WHERE organization = ? AND kind = ?";
             const params: (string | number | null)[] = [org, kind];
+            if (options.sourceMessage !== undefined) {
+              query +=
+                kind === "owner-clear"
+                  ? " AND json_extract(body, '$.address.source') = ? AND json_extract(body, '$.address.issuer') = ? AND json_extract(body, '$.address.tenant') IS ? AND json_extract(body, '$.address.channelId') = ? AND json_extract(body, '$.address.messageId') = ?"
+                  : " AND json_extract(body, '$.source') = ? AND json_extract(body, '$.actor.identity.issuer') = ? AND json_extract(body, '$.actor.identity.tenant') IS ? AND json_extract(body, '$.sourceReference.channelId') = ? AND json_extract(body, '$.sourceReference.messageId') = ?";
+              const address = options.sourceMessage;
+              params.push(address.source, address.issuer, address.tenant, address.channelId, address.messageId);
+            }
             if (options.sourceIdentity !== undefined) {
               query += ` AND json_extract(body, '${kind === "stream" ? "$.identity" : "$.actor.identity"}') = ?`;
               params.push(JSON.stringify(options.sourceIdentity));

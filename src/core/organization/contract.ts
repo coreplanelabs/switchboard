@@ -58,6 +58,40 @@ export const sourceReferenceSchema = z
   })
   .strict();
 export type OrganizationSourceReference = z.infer<typeof sourceReferenceSchema>;
+/** A verified provider deletion names a source address, never a claimed user. */
+export const sourceDeletionAddressSchema = z
+  .object({
+    source: sourceSchema,
+    issuer: text,
+    tenant: text.nullable(),
+    channelId: text,
+    messageId: text,
+  })
+  .strict();
+export type SourceDeletionAddress = z.infer<typeof sourceDeletionAddressSchema>;
+export const sourceDeletionSchema = z
+  .object({
+    address: sourceDeletionAddressSchema,
+    deletedAt: instant,
+    expiresAt: instant,
+    complete: z.boolean(),
+    after: text.optional(),
+  })
+  .strict();
+export function sourceDeletionAddressOf(
+  value: Pick<OrganizationEnvelope, "source" | "actor" | "sourceReference">,
+): SourceDeletionAddress | undefined {
+  const parsed = sourceDeletionAddressSchema.safeParse({
+    source: value.source,
+    issuer: value.actor.identity.issuer,
+    tenant: value.actor.identity.tenant,
+    channelId: value.sourceReference?.channelId,
+    messageId: value.sourceReference?.messageId,
+  });
+  return parsed.success ? parsed.data : undefined;
+}
+export const sourceDeletionKey = (address: SourceDeletionAddress): string =>
+  JSON.stringify([address.source, address.issuer, address.tenant, address.channelId, address.messageId]);
 export const envelopeSchema = z
   .object({
     version: z.literal(1),
@@ -234,7 +268,14 @@ export const commandSchema = z.discriminatedUnion("action", [
         .max(200),
     })
     .strict(),
-  z.object({ action: z.literal("owner-clears"), ...addressed, limit: z.number().int().positive().max(100) }).strict(),
+  z
+    .object({
+      action: z.literal("owner-clears"),
+      ...addressed,
+      limit: z.number().int().positive().max(100),
+      sourceMessage: sourceDeletionAddressSchema.optional(),
+    })
+    .strict(),
   z.object({ action: z.literal("owner-cleared"), ...addressed, receiptId: text, effectKey: text }).strict(),
   z
     .object({
@@ -311,10 +352,20 @@ export const commandSchema = z.discriminatedUnion("action", [
     })
     .strict(),
   z.object({ action: z.literal("delete"), ...addressed, stream: text, actor: actorSchema, receiptId: text }).strict(),
+  z
+    .object({
+      action: z.literal("delete-source"),
+      ...addressed,
+      address: sourceDeletionAddressSchema,
+      ttlMs: z.number().int().positive(),
+    })
+    .strict(),
+  z.object({ action: z.literal("source-deletes"), ...addressed, limit: z.number().int().positive().max(100) }).strict(),
   z.object({ action: z.literal("expire"), ...addressed }).strict(),
 ]);
 export type OrganizationCommand = z.infer<typeof commandSchema>;
 export const resultSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("source-deletes"), addresses: z.array(sourceDeletionAddressSchema).max(100) }).strict(),
   z.object({ status: z.literal("source-policies-observed"), revision, accessRevision: revision }).strict(),
   z.object({ status: z.literal("submission"), envelope: envelopeSchema, receipt: receiptSchema }).strict(),
   z.object({ status: z.literal("provenance"), provenance: sourceProvenanceSchema }).strict(),

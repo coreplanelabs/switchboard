@@ -4,7 +4,13 @@ import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { RunLedger } from "../runLedger/ledger.js";
 import type { IngressResult } from "../runLedger/ingress.js";
 import { envelopeSchema } from "./contract.js";
-import type { OrganizationEnvelope, OrganizationReceipt, OrganizationResult, OrganizationStore } from "./contract.js";
+import type {
+  OrganizationEnvelope,
+  OrganizationReceipt,
+  OrganizationResult,
+  OrganizationStore,
+  SourceDeletionAddress,
+} from "./contract.js";
 import type { OrganizationService, OrganizationAuthentication } from "./service.js";
 
 export interface OrganizationExecutionRequest {
@@ -156,8 +162,13 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
       outcome: evidence.outcome ?? "Original run completed.",
     });
   };
-  const clearOwners = async (organization: string): Promise<boolean> => {
-    const pending = await options.store.execute({ action: "owner-clears", organization, limit: options.batchSize });
+  const clearOwners = async (organization: string, sourceMessage?: SourceDeletionAddress): Promise<boolean> => {
+    const pending = await options.store.execute({
+      action: "owner-clears",
+      organization,
+      limit: options.batchSize,
+      ...(sourceMessage ? { sourceMessage } : {}),
+    });
     if (pending.status !== "owner-clears") return false;
     for (const item of pending.items) {
       try {
@@ -168,6 +179,10 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
       } catch {
         return false;
       }
+    }
+    if (sourceMessage) {
+      const remaining = await options.store.execute({ action: "owner-clears", organization, sourceMessage, limit: 1 });
+      return remaining.status === "owner-clears" && remaining.items.length === 0;
     }
     return true;
   };
@@ -210,6 +225,29 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
     if (!resolved || !(await clearOwners(resolved.organization))) return { status: "unavailable" };
     invalidate(resolved.organization);
     return deleted;
+  };
+  /** Called only by the verified provider adapter, never by a caller body. */
+  const deleteSource = async (
+    organization: string,
+    address: SourceDeletionAddress,
+    ttlMs: number,
+  ): Promise<OrganizationResult> => {
+    const deleted = await options.store.execute({ action: "delete-source", organization, address, ttlMs });
+    if (deleted.status !== "ok" && deleted.status !== "busy") return deleted;
+    invalidate(organization);
+    if (!(await clearOwners(organization, address))) return { status: "unavailable" };
+    return deleted;
+  };
+  const clearSources = async (organization: string): Promise<boolean> => {
+    const pending = await options.store.execute({ action: "source-deletes", organization, limit: options.batchSize });
+    if (pending.status !== "source-deletes") return false;
+    for (const address of pending.addresses) {
+      // A pending tombstone keeps its original horizon and cursor. TTL is used
+      // only for a new event, never to renew an already verified deletion.
+      const erased = await deleteSource(organization, address, options.contentTtlMs);
+      if (erased.status !== "ok" && erased.status !== "busy") return false;
+    }
+    return true;
   };
   const reply = async (
     request: Omit<OrganizationExecutionRequest, "io">,
@@ -341,6 +379,7 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
     return true;
   };
   const reconcile = async (organization: string): Promise<OrganizationResult> => {
+    if (!(await clearSources(organization))) return { status: "unavailable" };
     if (!(await clearOwners(organization))) return { status: "unavailable" };
     if (!(await repairRefusals(organization))) return { status: "unavailable" };
     if (!(await repairUnread(organization))) return { status: "unavailable" };
@@ -511,6 +550,7 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
     reply,
     readOwner,
     deleteContent,
+    deleteSource,
     invalidate,
     subscribe(listener: (organization: string) => void) {
       listeners.add(listener);
