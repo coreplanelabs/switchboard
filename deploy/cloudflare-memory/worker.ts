@@ -448,7 +448,13 @@ import {
   type McpTicketState,
   type SealedCredential,
 } from "../../src/mcp/registry.ts";
-import { isRunMetricsPoint, pointTurnsFinal, type RunMetricsPoint } from "../../src/core/runMetrics.ts";
+import {
+  isRunMetricsPoint,
+  isTerminalClose,
+  pointEmits,
+  POINT_COLUMNS,
+  type RunMetricsPoint,
+} from "../../src/core/runMetrics.ts";
 import { AnalyticsEngineSink, NullSink, type RunMetricsSink } from "./runMetricsSink.ts";
 import { injectedBuildStamp } from "../../src/deploy/buildStamp.ts";
 import {
@@ -5725,6 +5731,21 @@ export class RunHistoryDO extends DurableObject<Env> {
          )`,
       );
     }
+    // The emission latch (record 0097, "The terminal close"): set in the same
+    // transaction as the write that emits the run's point, so a run is counted
+    // at most once. Every row a store kept before the latch was counted under
+    // 0063's rule at its first non-provisional close — `restarting` included —
+    // so those rows start latched and a later close never counts them again.
+    if (!columns.has("metrics_emitted")) {
+      this.sql.exec(`ALTER TABLE runs ADD COLUMN metrics_emitted INTEGER NOT NULL DEFAULT 0`);
+      this.sql.exec(
+        `UPDATE runs SET metrics_emitted = 1
+         WHERE NOT (json_valid(summary_json) AND COALESCE(json_extract(summary_json, '$.provisional'), 0) = 1)`,
+      );
+    }
+    // A `restarting` close's point, kept for the sweep that closes the restart
+    // if no successor claims it: the client priced it, the store cannot.
+    if (!columns.has("restart_point_json")) this.sql.exec(`ALTER TABLE runs ADD COLUMN restart_point_json TEXT`);
   }
 
   private liveByThread(threadKey: string): LiveRunRow | undefined {
@@ -7246,7 +7267,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const confirmed =
       custody?.session && custody.threadReport && confirming ? await this.workspaceCustody(confirming) : custody;
     let out: FenceResult & { stored?: boolean } = { ok: true };
-    let turnedFinal = false;
+    let emits = false;
     this.ctx.storage.transactionSync(() => {
       const row = this.liveRow(runId);
       if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
@@ -7283,7 +7304,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         out = { ok: false, reason: "fenced" };
         return;
       }
-      const put = this.upsertInTransaction(record, proposal);
+      const put = this.upsertInTransaction(record, proposal, point);
       if (allocation?.allocation && row && confirmed)
         this.retainAllocation({
           ...allocation,
@@ -7310,7 +7331,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         record.finishedAt,
         true,
       );
-      turnedFinal = put.turnedFinal;
+      emits = put.emits;
       out = { ok: true, stored: put.stored };
     });
     if (!out.ok) return out;
@@ -7320,7 +7341,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     // The point after the commit, never inside it (`sendRunFinished`'s placement):
     // the finish usually replaces the start tombstone, so this is where most
     // runs are counted (run-metrics.md item 2).
-    this.writeMetricsPoint(runId, point, turnedFinal && out.stored === true);
+    this.writeMetricsPoint(runId, point, emits && out.stored === true);
     if ((await this.ctx.storage.getAlarm()) === null)
       await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
     await this.refreshSessionBytes(record.session?.key);
@@ -7570,13 +7591,13 @@ export class RunHistoryDO extends DurableObject<Env> {
       ok: boolean;
       reason?: "fenced";
       stored?: boolean;
-      turnedFinal?: boolean;
+      emits?: boolean;
     };
     this.ctx.storage.transactionSync(() => {
       const current = this.liveRow(cancellation.runId);
       if (!current || !cancellationMatches(current, cancellation)) return;
       this.checkWorkspaceFinishCapacity(current, record);
-      const put = this.upsertInTransaction(record);
+      const put = this.upsertInTransaction(record, undefined, point);
       if (!put.stored) return;
       const obligation = terminalWorkspaceSettlement(current, record);
       if (obligation) {
@@ -7597,11 +7618,11 @@ export class RunHistoryDO extends DurableObject<Env> {
         record.finishedAt,
         true,
       );
-      result = { ok: true, stored: true, turnedFinal: put.turnedFinal };
+      result = { ok: true, stored: true, emits: put.emits };
     });
     if (result.ok) {
       this.planeSealed(record.id, record.threadKey, systemClock());
-      this.writeMetricsPoint(record.id, point, result.turnedFinal === true);
+      this.writeMetricsPoint(record.id, point, result.emits === true);
       const transportWorkflowId =
         record.parentInstanceId === undefined
           ? undefined
@@ -8286,23 +8307,24 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  record itself fell outside the (possibly just-updated) policy: it was
    *  written and deleted in the same transaction, so nothing of it remains.
    *  `point` is the record's metrics point, computed by the client
-   *  (run-metrics.md): written to the sink AFTER the commit, only when the row
-   *  turned final and the record was stored — `turnedFinal` stays internal (the
-   *  route strips it), so the wire answer is exactly the shape it always was. */
+   *  (run-metrics.md): written to the sink AFTER the commit, only when the
+   *  write emits (a terminal close on an unlatched run, record 0097) and the
+   *  record was stored — `emits` stays internal (the route strips it), so the
+   *  wire answer is exactly the shape it always was. */
   async put(
     record: RunRecord,
     proposal?: RunPolicyProposal,
     point?: RunMetricsPoint,
-  ): Promise<{ ok: true; retained: number; stored: boolean; rewritten: boolean; turnedFinal: boolean }> {
+  ): Promise<{ ok: true; retained: number; stored: boolean; rewritten: boolean; emits: boolean }> {
     if (this.promotionHeld(record.id)) throw new PromotionPendingError(record.id);
     record = await this.archiveCheckpoint(record);
     return this.withRangePins([{ id: record.id, handoff: record.childHandoff }], async () => {
-      let result = { ok: true as const, retained: 0, stored: false, rewritten: false, turnedFinal: false };
+      let result = { ok: true as const, retained: 0, stored: false, rewritten: false, emits: false };
       this.ctx.storage.transactionSync(() => {
         if (this.promotionHeld(record.id)) throw new PromotionPendingError(record.id);
-        result = this.upsertInTransaction(record, proposal);
+        result = this.upsertInTransaction(record, proposal, point);
       });
-      this.writeMetricsPoint(record.id, point, result.turnedFinal && result.stored);
+      this.writeMetricsPoint(record.id, point, result.emits && result.stored);
       // A coordinator child closed OUTSIDE the ledger's finish — the run loop or
       // a reclaim writing an `interrupted` record, the pi harness's typed restart,
       // a resume abandoning a lost workspace — still wakes its parent's wait at
@@ -8333,7 +8355,9 @@ export class RunHistoryDO extends DurableObject<Env> {
   private upsertInTransaction(
     record: RunRecord,
     proposal?: RunPolicyProposal,
-  ): { ok: true; retained: number; stored: boolean; rewritten: boolean; turnedFinal: boolean } {
+    /** The record's point: kept beside a `restarting` row for the sweep (record 0097). */
+    point?: RunMetricsPoint,
+  ): { ok: true; retained: number; stored: boolean; rewritten: boolean; emits: boolean } {
     if (workspaceAuthorityFieldsPresent(record))
       throw new Error("workspace allocation authority cannot be written through a run record");
     {
@@ -8482,28 +8506,39 @@ export class RunHistoryDO extends DurableObject<Env> {
         }),
       );
       const existing = this.sql
-        .exec<{ event_count: number; finished_at: number; bytes: number; summary_json: string }>(
-          `SELECT event_count, finished_at, bytes, summary_json FROM runs WHERE run_id = ?`,
+        .exec<{
+          event_count: number;
+          finished_at: number;
+          bytes: number;
+          summary_json: string;
+          metrics_emitted: number;
+        }>(
+          `SELECT event_count, finished_at, bytes, summary_json, metrics_emitted FROM runs WHERE run_id = ?`,
           record.id,
         )
         .toArray()[0];
-      // The one field of the stored summary the emission rule reads (run-metrics.md
-      // item 2): the row's `provisional`, parsed alone — never deserialized whole.
-      const existingProvisional = existing !== undefined && summaryIsProvisional(existing.summary_json);
-      const turnedFinal = pointTurnsFinal(
-        existing !== undefined ? { provisional: existingProvisional } : undefined,
-        stored,
-      );
-      // A provisional record never overwrites a final row (run-history.md item 27;
-      // run-metrics.md item 3): a start tombstone sitting in retry backoff or a
-      // drain upgrade racing a fast finish would otherwise land after the finish
-      // record, overwrite it with `interrupted` — and let the run's point be
-      // written twice when a later final write turned the row "final" again.
-      // Answered as stored, with nothing written: the row, its events and the
-      // sessions table stay exactly as the final write left them.
-      if (stored.provisional === true && existing !== undefined && !existingProvisional) {
+      // The fields of the stored summary the emission rule reads (run-metrics.md
+      // item 2): the row's `provisional` and `restarting`, parsed alone — never
+      // deserialized whole.
+      const existingTerminal = existing !== undefined && isTerminalClose(summaryCloseOf(existing.summary_json));
+      const latched = existing !== undefined && existing.metrics_emitted === 1;
+      const emits = pointEmits(latched, stored);
+      // A provisional record never overwrites a non-provisional row, and a
+      // `restarting` record never overwrites a terminal one (run-history.md
+      // item 27; run-metrics.md item 3; record 0097): a start tombstone in
+      // retry backoff or a drain upgrade racing a close would otherwise replace
+      // the run's end — or erase a `restarting` row's deadline and kept point,
+      // so the sweep could never count it — and a `restarting` close the
+      // store's fallback put lands after the successor's finish would replace
+      // the run's terminal close. Answered as stored, with nothing written: the
+      // row, its events and the sessions table stay exactly as they were.
+      const existingProvisional = existing !== undefined && summaryCloseOf(existing.summary_json).provisional === true;
+      if (
+        (stored.provisional === true && existing !== undefined && !existingProvisional) ||
+        (!isTerminalClose(stored) && existingTerminal)
+      ) {
         const retained = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM runs`).one().n;
-        return { ok: true as const, retained, stored: true, rewritten: false, turnedFinal: false };
+        return { ok: true as const, retained, stored: true, rewritten: false, emits: false };
       }
       const unchanged =
         existing !== undefined &&
@@ -8513,8 +8548,9 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
       this.sql.exec(
         `INSERT INTO runs (run_id, label, agent, model, channel_id, user_id, thread_key, channel_visibility, repo, started_at, finished_at, stored_at, status,
-                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json, session_key, usage_json, parent_run_id, pr_number, source_reads_json, context_checkpoint_json, direct_audience_json, work_evidence_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           event_count, stored_event_count, truncated, bytes, diagnosis_json, summary_json, session_key, usage_json, parent_run_id, pr_number, source_reads_json, context_checkpoint_json, direct_audience_json, work_evidence_json,
+                           metrics_emitted, restart_point_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id) DO UPDATE SET
            label = excluded.label, agent = excluded.agent, model = excluded.model, channel_id = excluded.channel_id,
            user_id = excluded.user_id, thread_key = excluded.thread_key, channel_visibility = excluded.channel_visibility,
@@ -8525,7 +8561,8 @@ export class RunHistoryDO extends DurableObject<Env> {
            session_key = excluded.session_key,
            usage_json = COALESCE(excluded.usage_json, runs.usage_json),
            parent_run_id = excluded.parent_run_id,
-           pr_number = excluded.pr_number, source_reads_json = excluded.source_reads_json, context_checkpoint_json = excluded.context_checkpoint_json, direct_audience_json = excluded.direct_audience_json, work_evidence_json = excluded.work_evidence_json`,
+           pr_number = excluded.pr_number, source_reads_json = excluded.source_reads_json, context_checkpoint_json = excluded.context_checkpoint_json, direct_audience_json = excluded.direct_audience_json, work_evidence_json = excluded.work_evidence_json,
+           metrics_emitted = MAX(runs.metrics_emitted, excluded.metrics_emitted), restart_point_json = excluded.restart_point_json`,
         stored.id,
         stored.label ?? null,
         stored.agent ?? null,
@@ -8572,6 +8609,8 @@ export class RunHistoryDO extends DurableObject<Env> {
                 ? { branchPublication: canonicalWork.branchPublication }
                 : {}),
             }),
+        latched || emits ? 1 : 0,
+        stored.restarting === true && point !== undefined ? JSON.stringify(point) : null,
       );
       // The session's registry row learns its newest finish (session-log item
       // 7); a record that reaches the store without a claim (the plain put
@@ -8607,17 +8646,70 @@ export class RunHistoryDO extends DurableObject<Env> {
         retained: kept.size,
         stored: kept.has(record.id),
         rewritten: existing !== undefined && !unchanged,
-        turnedFinal,
+        emits,
       };
     }
   }
 
-  /** One point per run whose row turned final, AFTER the commit (run-metrics.md
-   *  item 2) — advisory: a throwing sink leaves the answer exactly as a
-   *  recording one would, and says so in one warn line with the run id and the
-   *  error's constructor name, never the point's contents. */
-  private writeMetricsPoint(runId: string, point: RunMetricsPoint | undefined, turnedFinal: boolean): void {
-    if (point === undefined || !turnedFinal) return;
+  /** Close every `restarting` row whose claim deadline passed while no
+   *  successor holds the id (record 0097, "The terminal close", rule 3): one
+   *  transaction per row rewrites it as an `interrupted` terminal close with
+   *  `restart_unclaimed`, latched, only if it still carries the same deadline
+   *  and no `live_runs` row exists for the id — a successor's claim inserts
+   *  one and never touches `runs` while it works, so the live row is the
+   *  evidence, never the deadline alone. The point the `restarting` close
+   *  carried is written after the commit with that failure kind; the store
+   *  never prices a record itself. */
+  private closeUnclaimedRestarts(now: number): void {
+    const due = this.sql
+      .exec<{ run_id: string; restart_until: number }>(
+        `SELECT run_id, json_extract(summary_json, '$.restartUntil') AS restart_until FROM runs
+         WHERE metrics_emitted = 0 AND json_valid(summary_json)
+           AND json_extract(summary_json, '$.restarting') = 1
+           AND json_extract(summary_json, '$.restartUntil') < ?
+           AND NOT EXISTS (SELECT 1 FROM live_runs WHERE live_runs.run_id = runs.run_id)`,
+        now,
+      )
+      .toArray();
+    for (const { run_id: runId, restart_until: restartUntil } of due) {
+      let point: RunMetricsPoint | undefined;
+      let closed = false;
+      this.ctx.storage.transactionSync(() => {
+        const row = this.sql
+          .exec<{ restart_point_json: string | null }>(
+            `SELECT restart_point_json FROM runs
+             WHERE run_id = ? AND metrics_emitted = 0 AND json_valid(summary_json)
+               AND json_extract(summary_json, '$.restarting') = 1
+               AND json_extract(summary_json, '$.restartUntil') = ?
+               AND NOT EXISTS (SELECT 1 FROM live_runs WHERE live_runs.run_id = runs.run_id)`,
+            runId,
+            restartUntil,
+          )
+          .toArray()[0];
+        if (row === undefined) return;
+        this.sql.exec(
+          `UPDATE runs SET
+             summary_json = json_set(json_remove(summary_json, '$.restarting', '$.restartUntil'),
+                                     '$.failure', json('{"kind":"restart_unclaimed"}')),
+             status = 'interrupted', metrics_emitted = 1, restart_point_json = NULL
+           WHERE run_id = ?`,
+          runId,
+        );
+        closed = true;
+        const kept = row.restart_point_json === null ? undefined : (JSON.parse(row.restart_point_json) as unknown);
+        point = isRunMetricsPoint(kept) ? unclaimedRestartPoint(kept) : undefined;
+      });
+      if (closed) console.log(`[runs/sweep] ${runId}: restart unclaimed past its deadline — closed interrupted`);
+      this.writeMetricsPoint(runId, point, closed);
+    }
+  }
+
+  /** One point per run at its terminal close, AFTER the commit (run-metrics.md
+   *  item 2; record 0097) — advisory: a throwing sink leaves the answer exactly
+   *  as a recording one would, and says so in one warn line with the run id and
+   *  the error's constructor name, never the point's contents. */
+  private writeMetricsPoint(runId: string, point: RunMetricsPoint | undefined, emits: boolean): void {
+    if (point === undefined || !emits) return;
     try {
       this.metrics.write(point);
     } catch (err) {
@@ -8710,6 +8802,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         const probes = this.planeApply({ kind: "reask", at: now, cadenceMs: this.planeReaskMs() }).effects;
         if (probes.length > 0) console.log(`[plane/reask] ${probes.map((e) => e.id).join(", ")}`);
       }
+      // An unclaimed restart is closed by the store (record 0097, rule 3).
+      this.closeUnclaimedRestarts(now);
       // A lease end offers the row to a generation other than its owner and
       // never ends a run (record 0064): the row stays exactly as it is —
       // any reclaim can take it now — and the open effects are re-pushed so a
@@ -9370,11 +9464,26 @@ function parseSummary(row: Pick<RunRow, "summary_json">): RunListItem | null {
 /** The one field of a stored row's summary the emission rule reads: whether the
  *  row is a provisional tombstone. Deliberately not a full `RunRecord` parse
  *  (run-metrics.md item 2) — this runs inside every upsert's transaction. */
-function summaryIsProvisional(summaryJson: string): boolean {
+/** The `restarting` close's point as the sweep's terminal close writes it:
+ *  `interrupted`, with `restart_unclaimed` as its failure kind. */
+function unclaimedRestartPoint(point: RunMetricsPoint): RunMetricsPoint {
+  const blobs = [...point.blobs];
+  blobs[POINT_COLUMNS.blobs.indexOf("status")] = "interrupted";
+  blobs[POINT_COLUMNS.blobs.indexOf("failure kind")] = "restart_unclaimed";
+  return { indexes: point.indexes, blobs, doubles: point.doubles };
+}
+
+/** A stored summary's close fields — `provisional` and `restarting` — read
+ *  alone; an unreadable summary reads as a terminal close, as it always did. */
+function summaryCloseOf(summaryJson: string): { provisional?: true; restarting?: true } {
   try {
-    return (JSON.parse(summaryJson) as { provisional?: unknown }).provisional === true;
+    const s = JSON.parse(summaryJson) as { provisional?: unknown; restarting?: unknown };
+    return {
+      ...(s.provisional === true ? { provisional: true as const } : {}),
+      ...(s.restarting === true ? { restarting: true as const } : {}),
+    };
   } catch {
-    return false;
+    return {};
   }
 }
 
@@ -12625,9 +12734,9 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
     const { storeKey, record, proposal, point } = parsed.value;
     const pendingPromotion = await stub(storeKey).promotionHold(record.id);
     if (pendingPromotion) return json(pendingPromotion, 423);
-    // `turnedFinal` stays internal: the wire answer is exactly the shape it
+    // `emits` stays internal: the wire answer is exactly the shape it
     // always was, binding or no binding (run-metrics.md item 4).
-    const { turnedFinal: _turnedFinal, ...result } = await stub(storeKey).put(record, proposal, point);
+    const { emits: _emits, ...result } = await stub(storeKey).put(record, proposal, point);
     console.log(
       `[runs/put] ${storeKey} <- ${record.id} (${record.storedEventCount} events, stored=${result.stored}, ${result.retained} retained)`,
     );

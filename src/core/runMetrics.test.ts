@@ -10,7 +10,8 @@ import {
   MAX_POINT_BLOB_BYTES,
   POINT_COLUMNS,
   pointOf,
-  pointTurnsFinal,
+  isTerminalClose,
+  pointEmits,
   type RunMetricsPoint,
 } from "./runMetrics.js";
 import { FRICTION_CATEGORIES, type FrictionCategory } from "./runFriction.js";
@@ -18,7 +19,7 @@ import type { RunRecord } from "./runRecord.js";
 import type { RunUsage } from "./runUsage.js";
 
 // Feature: docs/reference/specs/run-metrics.md — the point every finished run
-// writes: `POINT_COLUMNS`, `pointOf`, `isRunMetricsPoint`, `pointTurnsFinal`.
+// writes: `POINT_COLUMNS`, `pointOf`, `isRunMetricsPoint`, `isTerminalClose`, `pointEmits`.
 
 const NOW = 1_800_000_000_000;
 
@@ -292,15 +293,21 @@ describe("isRunMetricsPoint", () => {
   });
 });
 
-describe("pointTurnsFinal — the six combinations", () => {
-  const final = {};
+describe("the terminal close and the emission latch (record 0097)", () => {
+  const terminal = {};
   const provisional = { provisional: true as const };
-  it("is true exactly when a final record lands where no final row stands", () => {
-    expect(pointTurnsFinal(undefined, final)).toBe(true);
-    expect(pointTurnsFinal({ provisional: true }, final)).toBe(true);
-    expect(pointTurnsFinal({ provisional: false }, final)).toBe(false);
-    expect(pointTurnsFinal(undefined, provisional)).toBe(false);
-    expect(pointTurnsFinal({ provisional: true }, provisional)).toBe(false);
-    expect(pointTurnsFinal({ provisional: false }, provisional)).toBe(false);
+  const restarting = { restarting: true as const };
+  it("a close is terminal when it is neither provisional nor restarting", () => {
+    expect(isTerminalClose(terminal)).toBe(true);
+    expect(isTerminalClose(provisional)).toBe(false);
+    expect(isTerminalClose(restarting)).toBe(false);
+  });
+  it("emits exactly when a terminal close lands on a run whose latch is unset", () => {
+    expect(pointEmits(false, terminal)).toBe(true);
+    expect(pointEmits(true, terminal)).toBe(false);
+    for (const latched of [false, true]) {
+      expect(pointEmits(latched, provisional)).toBe(false);
+      expect(pointEmits(latched, restarting)).toBe(false);
+    }
   });
 });

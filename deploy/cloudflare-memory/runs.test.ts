@@ -791,10 +791,10 @@ describe("run history routes", () => {
     expect(await rowCount(key, "run_events")).toBe(8);
     expect((await post("/runs/get", { storeKey: key, id: "a" })).data).toEqual({ record: null });
     const again = await putDirect(key, record("c", now - 1000, { events: events(3) }));
-    expect(again).toEqual({ ok: true, retained: 2, stored: true, rewritten: true, turnedFinal: false });
+    expect(again).toEqual({ ok: true, retained: 2, stored: true, rewritten: true, emits: false });
     expect(await rowCount(key, "run_events")).toBe(7);
     const outside = await putDirect(key, record("older", now - 40 * DAY, { events: events(2) }));
-    expect(outside).toEqual({ ok: true, retained: 2, stored: false, rewritten: false, turnedFinal: true });
+    expect(outside).toEqual({ ok: true, retained: 2, stored: false, rewritten: false, emits: true });
     expect(await rowCount(key, "runs")).toBe(2);
   });
 
@@ -2104,13 +2104,13 @@ describe("run metrics — the point, the guard and the emission rule", () => {
     expect(await putDirectWithPoint(key, grown, pointOf(grown))).toMatchObject({
       stored: true,
       rewritten: true,
-      turnedFinal: false,
+      emits: false,
     });
     // The retry's landing: the same record again, still no second point.
     expect(await putDirectWithPoint(key, grown, pointOf(grown))).toMatchObject({
       stored: true,
       rewritten: false,
-      turnedFinal: false,
+      emits: false,
     });
     expect(written).toHaveLength(1);
   });
@@ -2121,14 +2121,14 @@ describe("run metrics — the point, the guard and the emission rule", () => {
     const interrupted = record("lost", Date.now() - 1_000, { status: "interrupted" });
     expect(await putDirectWithPoint(key, interrupted, pointOf(interrupted))).toMatchObject({
       stored: true,
-      turnedFinal: true,
+      emits: true,
     });
     expect(written).toHaveLength(1);
     // A record outside the 30-day window is written and trimmed in its own put: no point.
     const expired = record("expired", Date.now() - 40 * DAY);
     expect(await putDirectWithPoint(key, expired, pointOf(expired))).toMatchObject({
       stored: false,
-      turnedFinal: true,
+      emits: true,
     });
     expect(written).toHaveLength(1);
   });
@@ -2139,7 +2139,7 @@ describe("run metrics — the point, the guard and the emission rule", () => {
     const final = record("r1", Date.now() - 1_000, {
       session: { key: "slack:C1:1:review", seedFrom: 0, request: 0, range: { from: 1, to: 3 } },
     });
-    expect(await putDirectWithPoint(key, final, pointOf(final))).toMatchObject({ stored: true, turnedFinal: true });
+    expect(await putDirectWithPoint(key, final, pointOf(final))).toMatchObject({ stored: true, emits: true });
     expect(written).toHaveLength(1);
     const before = (await post("/runs/get", { storeKey: key, id: "r1" })).data.record;
     const sessionsBefore = await rowCount(key, "sessions");
@@ -2159,7 +2159,7 @@ describe("run metrics — the point, the guard and the emission rule", () => {
       retained: 1,
       stored: true,
       rewritten: false,
-      turnedFinal: false,
+      emits: false,
     });
     expect((await post("/runs/get", { storeKey: key, id: "r1" })).data.record).toEqual(before);
     expect(await rowCount(key, "run_events")).toBe(final.events.length);
@@ -2239,6 +2239,128 @@ describe("run metrics — the point, the guard and the emission rule", () => {
     expect(
       featuresOf({ RUN_METRICS: { writeDataPoint() {} } as AnalyticsEngineDataset, RUN_METRICS_DATASET: "swb_runs" }),
     ).toEqual(["memory", "schedules", "runs", "config", "delivery", "costs", "plane", "runMetrics:swb_runs"]);
+  });
+
+  // Record 0097, "The terminal close": a run's rows describe its terminal
+  // close, written at most once, guarded by the emission latch.
+  describe("the terminal close (record 0097)", () => {
+    const restartingAt = (id: string, finishedAt: number, restartUntil: number) =>
+      record(id, finishedAt, { status: "interrupted", restarting: true, restartUntil });
+
+    it("a restarting close writes no point; the successor's terminal close under the same id writes the run's only one", async () => {
+      const key = storeKey();
+      const written = await metricsDouble(key);
+      const closedAt = Date.now() - 60_000;
+      const restarting = restartingAt("r1", closedAt, closedAt + 30_000);
+      expect(await putDirectWithPoint(key, restarting, pointOf(restarting))).toMatchObject({
+        stored: true,
+        emits: false,
+      });
+      expect(written).toHaveLength(0);
+      const terminal = record("r1", Date.now() - 1_000);
+      expect(await putDirectWithPoint(key, terminal, pointOf(terminal))).toMatchObject({ stored: true, emits: true });
+      expect(written).toHaveLength(1);
+      expect(blobOf(written[0], "status")).toBe("completed");
+      // A terminal retry, or a re-put after the latch, writes nothing more.
+      expect(await putDirectWithPoint(key, terminal, pointOf(terminal))).toMatchObject({ emits: false });
+      expect(written).toHaveLength(1);
+    });
+
+    it("a late restarting write never replaces a terminal row, and writes no point", async () => {
+      const key = storeKey();
+      const written = await metricsDouble(key);
+      const terminal = record("r2", Date.now() - 1_000);
+      await putDirectWithPoint(key, terminal, pointOf(terminal));
+      const late = restartingAt("r2", Date.now() - 2_000, Date.now() + 60_000);
+      expect(await putDirectWithPoint(key, late, pointOf(late))).toMatchObject({
+        stored: true,
+        rewritten: false,
+        emits: false,
+      });
+      const got = (await post("/runs/get", { storeKey: key, id: "r2" })).data.record as RunRecord;
+      expect(got.status).toBe("completed");
+      expect(got.restarting).toBeUndefined();
+      expect(written).toHaveLength(1);
+    });
+
+    it("the sweep closes an unclaimed restart past its deadline as interrupted with restart_unclaimed, writing the run's one point", async () => {
+      const key = storeKey();
+      const written = await metricsDouble(key);
+      const closedAt = Date.now() - 120_000;
+      const restarting = restartingAt("r3", closedAt, closedAt + 60_000);
+      await putDirectWithPoint(key, restarting, pointOf(restarting));
+      expect(written).toHaveLength(0);
+      expect(await runDurableObjectAlarm(stubOf(key))).toBe(true);
+      expect(written).toHaveLength(1);
+      expect(blobOf(written[0], "run id")).toBe("r3");
+      expect(blobOf(written[0], "status")).toBe("interrupted");
+      expect(blobOf(written[0], "failure kind")).toBe("restart_unclaimed");
+      const got = (await post("/runs/get", { storeKey: key, id: "r3" })).data.record as RunRecord;
+      expect(got).toMatchObject({ status: "interrupted", failure: { kind: "restart_unclaimed" } });
+      expect(got.restarting).toBeUndefined();
+      expect(got.restartUntil).toBeUndefined();
+      // The latch holds: a later sweep or a terminal re-put writes nothing more.
+      await runDurableObjectAlarm(stubOf(key));
+      await putDirectWithPoint(key, got, pointOf(got));
+      expect(written).toHaveLength(1);
+    });
+
+    it("a late tombstone over a restarting row writes nothing, so the sweep still closes the orphaned restart", async () => {
+      const key = storeKey();
+      const written = await metricsDouble(key);
+      const closedAt = Date.now() - 120_000;
+      const restarting = restartingAt("r8", closedAt, closedAt + 60_000);
+      await putDirectWithPoint(key, restarting, pointOf(restarting));
+      const started = closedAt - 60_000;
+      const late = record("r8", started, { status: "interrupted", provisional: true, startedAt: started });
+      expect(await putDirectWithPoint(key, late)).toMatchObject({ stored: true, rewritten: false, emits: false });
+      const kept = (await post("/runs/get", { storeKey: key, id: "r8" })).data.record as RunRecord;
+      expect(kept).toMatchObject({ restarting: true, restartUntil: closedAt + 60_000 });
+      await runDurableObjectAlarm(stubOf(key));
+      expect(written).toHaveLength(1);
+      expect(blobOf(written[0], "failure kind")).toBe("restart_unclaimed");
+    });
+
+    it("the sweep leaves a restart alone before its deadline, and while a successor's live row holds the id", async () => {
+      const key = storeKey();
+      const written = await metricsDouble(key);
+      const recent = restartingAt("r4", Date.now() - 1_000, Date.now() + 60_000);
+      await putDirectWithPoint(key, recent, pointOf(recent));
+      const closedAt = Date.now() - 120_000;
+      const claimed = restartingAt("r5", closedAt, closedAt + 60_000);
+      await putDirectWithPoint(key, claimed, pointOf(claimed));
+      expect((await post("/runs/claim", claimBody(key, "r5", "slack:C1:5.0", "g2"))).status).toBe(200);
+      await runDurableObjectAlarm(stubOf(key));
+      expect(written).toHaveLength(0);
+      for (const id of ["r4", "r5"])
+        expect(((await post("/runs/get", { storeKey: key, id })).data.record as RunRecord).restarting).toBe(true);
+    });
+
+    it("rows a store wrote before the latch existed count as emitted unless provisional, so a later terminal rewrite writes no second point", async () => {
+      const key = storeKey();
+      const written = await metricsDouble(key);
+      const terminal = record("r6", Date.now() - 1_000);
+      await putDirectWithPoint(key, terminal, pointOf(terminal));
+      expect(written).toHaveLength(1);
+      const started = Date.now() - 60_000;
+      await putDirectWithPoint(
+        key,
+        record("r7", started, { status: "interrupted", provisional: true, startedAt: started }),
+      );
+      await runInDurableObject(stubOf(key), (inst: RunHistoryDO) => {
+        const sql = (inst as unknown as { sql: SqlStorage }).sql;
+        sql.exec(`ALTER TABLE runs DROP COLUMN metrics_emitted`);
+        sql.exec(`ALTER TABLE runs DROP COLUMN restart_point_json`);
+        inst.migrateRunsTable();
+      });
+      const grown = { ...terminal, events: events(3), eventCount: 3, storedEventCount: 3 };
+      expect(await putDirectWithPoint(key, grown, pointOf(grown))).toMatchObject({ stored: true, emits: false });
+      expect(written).toHaveLength(1);
+      // A tombstone kept before the latch was never counted: its finish still is.
+      const finished = record("r7", Date.now() - 500);
+      expect(await putDirectWithPoint(key, finished, pointOf(finished))).toMatchObject({ emits: true });
+      expect(written).toHaveLength(2);
+    });
   });
 });
 
