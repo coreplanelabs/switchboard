@@ -319,6 +319,8 @@ export interface HomeSeed {
    *  interleaved by `decidedAt` (item 12) and the hosted parent's word by `at` (item 2). */
   turns: (HomeTurnSeed | HomeReceiptTurnSeed | HomeParentTurnSeed)[];
   conversations: HomeConversationRowSeed[];
+  /** Bounded recent discovery, under the viewer's current predicate. Never a full-history census. */
+  discovery?: { status: "available" | "partial" | "unavailable"; coverage: "recent"; filtered: true };
   viewer: { name: string };
   /** Where the composer POSTs (`/threads/<conversation>/send`). */
   sendUrl: string;

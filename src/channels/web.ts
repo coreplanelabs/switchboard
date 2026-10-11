@@ -646,13 +646,25 @@ export function createWebChatHandler(
     turnsOf(conv, threadKey, actor, opts);
 
   /** The rail: the viewer's own threads across every channel, titled by each first request. */
-  async function railOf(actor: Actor, sub: string): Promise<{ rows: HomeConversationRowSeed[]; runs: RunView[] }> {
+  async function railOf(
+    actor: Actor,
+    sub: string,
+  ): Promise<{ rows: HomeConversationRowSeed[]; runs: RunView[]; discovery: NonNullable<HomeSeed["discovery"]> }> {
     const listed = await deps.service.listRuns({
       status: "all",
       visibleTo: hasWorkViewScope(actor) ? readableRuns(actor) : allOf([readableRuns(actor), ownedBy(actor)]),
       limit: RAIL_RUNS,
     });
-    const groups = threadsOf(listed.runs);
+    const allGroups = threadsOf(listed.runs, RAIL_RUNS);
+    const groups = allGroups.slice(0, RAIL_THREADS);
+    const unavailable = listed.storeUnavailable || listed.ledgerUnavailable;
+    const partial =
+      unavailable || !!listed.nextBefore || listed.runs.length >= RAIL_RUNS || allGroups.length > RAIL_THREADS;
+    const discovery: NonNullable<HomeSeed["discovery"]> = {
+      status: unavailable && groups.length === 0 ? "unavailable" : partial ? "partial" : "available",
+      coverage: "recent",
+      filtered: true,
+    };
     // The channel behind a thread from another surface, named when the directory knows it
     // (record 0042, the dashboard reads names): one ask per distinct channel, concurrent.
     const channelOf = (g: ThreadGroup): string | undefined =>
@@ -689,7 +701,7 @@ export function createWebChatHandler(
         };
       }),
     );
-    return { rows, runs: listed.runs };
+    return { rows, runs: listed.runs, discovery };
   }
 
   async function seedFor(
@@ -708,6 +720,7 @@ export function createWebChatHandler(
       conversation,
       turns: open.turns,
       conversations: rail.rows,
+      discovery: rail.discovery,
       viewer: { name: ctx.actor.asUser?.name ?? ctx.identity.email ?? sub },
       sendUrl: `/threads/${encodeURIComponent(conversation)}/send`,
       lane: `${PLATFORM}:${sub}`,

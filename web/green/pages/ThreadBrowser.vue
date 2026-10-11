@@ -18,8 +18,18 @@ const rows = computed(() =>
     ><RouterLink class="green-button" to="/home"><UIcon name="i-lucide-arrow-left" />Home</RouterLink></PageHeading
   >
   <p v-if="seed" class="green-notice" role="status">
-    This list contains conversations from recent authorized runs. Coverage is unknown; the full retained history cannot
-    be confirmed.
+    <template v-if="seed.discovery?.status === 'unavailable'"
+      >Thread discovery is unavailable. An empty list cannot confirm that no threads exist.</template
+    >
+    <template v-else-if="seed.discovery?.status === 'partial'"
+      >Thread discovery is incomplete. Only the loaded conversations are shown.</template
+    >
+    <template v-else-if="seed.discovery?.status === 'available'"
+      >Recent authorized conversations are available.</template
+    >
+    <template v-else>Coverage is unknown; the full retained history cannot be confirmed.</template>
+    <template v-if="seed.discovery?.filtered"> Only conversations allowed by your current access are listed.</template>
+    <template v-if="seed.discovery"> This is a bounded recent window, not the full retained history.</template>
   </p>
   <div v-if="seed" class="green-toolbar">
     <label class="w-full max-w-md"
@@ -47,7 +57,15 @@ const rows = computed(() =>
     </ul>
     <EmptyState
       v-else
-      :title="query ? 'No matches in the loaded browser list' : 'No threads in the loaded browser list'"
+      :title="
+        seed.discovery?.status === 'unavailable'
+          ? 'Threads unavailable'
+          : seed.discovery?.status === 'partial'
+            ? 'No threads in the incomplete loaded list'
+            : query
+              ? 'No matches in the loaded browser list'
+              : 'No threads in the loaded browser list'
+      "
       description="This result covers only the loaded list. Full retained history cannot be confirmed."
     />
   </section>

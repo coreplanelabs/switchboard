@@ -777,6 +777,32 @@ describe("orchestratorChatSeed — the plane's chat half (record 0070; orchestra
 });
 
 describe("GET /threads and /threads/<id> — the seed from the runs service (items 2, 7, 8, 11)", () => {
+  it("preserves unavailable and partial thread discovery separately from an empty authorized recent window", async () => {
+    const { handler, store, registry } = setup();
+    const empty = seedOf<HomeSeed>((await request(handler, { url: "/threads" })).body);
+    expect(empty.discovery).toEqual({ status: "available", coverage: "recent", filtered: true });
+    expect(empty.conversations).toEqual([]);
+    vi.spyOn(store, "list").mockRejectedValue(new Error("history unavailable: private upstream detail"));
+    const failed = await request(handler, { url: "/threads" });
+    expect(seedOf<HomeSeed>(failed.body).discovery).toEqual({
+      status: "unavailable",
+      coverage: "recent",
+      filtered: true,
+    });
+    expect(failed.body).not.toContain("private upstream detail");
+    registry.create("Live owned work", { userId: "access:a1", channelId: "web:a1", threadKey: "web:a1:live" });
+    const partial = seedOf<HomeSeed>((await request(handler, { url: "/threads" })).body);
+    expect(partial.discovery).toEqual({ status: "partial", coverage: "recent", filtered: true });
+    expect(partial.conversations.map((row) => row.id)).toEqual(["live"]);
+  });
+  it("marks the bounded thread rail partial when additional authorized conversations are omitted", async () => {
+    const { handler, store } = setup();
+    for (let n = 0; n < 21; n++) await store.put(record(`recent-${n}`, NOW - n, { threadKey: `web:a1:thread-${n}` }));
+    const seed = seedOf<HomeSeed>((await request(handler, { url: "/threads" })).body);
+    expect(seed.discovery).toEqual({ status: "partial", coverage: "recent", filtered: true });
+    expect(seed.conversations.map((row) => row.id)).toEqual(Array.from({ length: 20 }, (_, n) => `thread-${n}`));
+  });
+
   it("uses current proved owner scope in the loaded thread list without lending private source read authority", async () => {
     const { handler, store } = setup();
     await store.put(record("own-browser", NOW - 1000));
