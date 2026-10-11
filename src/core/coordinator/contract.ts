@@ -475,6 +475,14 @@ export interface ThreadEvent {
   /** The sender (platform-namespaced) and the display name the channel knew. */
   sender: string;
   senderName?: string;
+  /** Credential and relay provenance, stamped by the trusted source adapter. */
+  authenticatedAs?: string;
+  postedBy?: string;
+  /** Original ingress action owner; an answer is a unit event, not a new model run. */
+  organizationIngressRunId?: string;
+  /** The complete canonical question reserved by this accepted answer. Only
+   * guarded append derives it; consumption and later question updates retain it. */
+  questionDigest?: string;
   text: string;
   attachments?: ThreadEventAttachment[];
   /** How many attachments were dropped because the event was over the cap. */
@@ -559,6 +567,13 @@ export function isThreadEvent(v: unknown): v is ThreadEvent {
   if (!isOptionalText(r.id)) return false;
   if (!isText(r.sender)) return false;
   if (!isOptionalText(r.senderName)) return false;
+  if (!isOptionalText(r.authenticatedAs) || !isOptionalText(r.postedBy)) return false;
+  if (!isOptionalText(r.organizationIngressRunId)) return false;
+  if (
+    r.questionDigest !== undefined &&
+    (typeof r.questionDigest !== "string" || !/^[a-f0-9]{64}$/.test(r.questionDigest))
+  )
+    return false;
   if (typeof r.text !== "string") return false;
   if (r.attachments !== undefined && (!Array.isArray(r.attachments) || !r.attachments.every(isThreadEventAttachment)))
     return false;
@@ -1518,6 +1533,7 @@ const isRoundGate = (v: unknown): boolean =>
   v.findings.every((f) => typeof f === "string");
 export const isHumanGatePending = (v: unknown): v is HumanGatePending =>
   isObject(v) &&
+  (v.assignedTo === undefined || (isText(v.assignedTo) && /^[a-z][a-z0-9-]*:[^\s]+$/i.test(v.assignedTo))) &&
   isObject(v.pr) &&
   typeof v.pr.number === "number" &&
   Number.isInteger(v.pr.number) &&

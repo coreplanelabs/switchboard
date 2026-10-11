@@ -141,6 +141,19 @@ export interface RunLedger {
     selector: import("../checkInspection.js").CheckSelector,
   ): Promise<import("../checkInspection.js").CheckSourceRead>;
 
+  holdUnreadIngress(proof: import("./ingress.js").UnreadIngressProof): Promise<import("./ingress.js").IngressResult>;
+  claimUnreadIngress(runId: string): Promise<import("./ingress.js").IngressResult>;
+  pendingUnreadIngress(organization: string, limit: number): Promise<import("./ingress.js").IngressResult>;
+  /** Original ingress ownership, before routing or any command effect. */
+  consumeIngress(request: import("./ingress.js").IngressRequest): Promise<import("./ingress.js").IngressResult>;
+  readIngress(effectKey: string): Promise<import("./ingress.js").IngressResult>;
+  readIngressByRun(runId: string): Promise<import("./ingress.js").IngressResult>;
+  pendingIngressRefusals(organization: string, limit: number): Promise<import("./ingress.js").IngressResult>;
+  ackIngressRefusal(
+    request: Pick<import("./ingress.js").IngressSettlement, "effectKey" | "digest" | "runId">,
+  ): Promise<import("./ingress.js").IngressResult>;
+  clearIngressContent(effectKey: string): Promise<import("./ingress.js").IngressResult>;
+  finishIngress(request: import("./ingress.js").IngressSettlement): Promise<import("./ingress.js").IngressResult>;
   prepareCancellation?(
     runId: string,
     actor: import("./cancellation.js").CancellationActor,

@@ -112,7 +112,8 @@ export function selectReclaim<
 export function unreadInbox(lastStep: Pick<StepRecord, "inboxConsumedSeq" | "inboxDeferredSeqs"> | null) {
   const consumed = lastStep?.inboxConsumedSeq ?? 0;
   const deferred = new Set(lastStep?.inboxDeferredSeqs ?? []);
-  return (item: { seq: number }): boolean => item.seq > consumed || deferred.has(item.seq);
+  return (item: { seq: number; message?: Record<string, unknown> }): boolean =>
+    item.message?.organizationUnreadReleased !== true && (item.seq > consumed || deferred.has(item.seq));
 }
 
 /** The compare-and-swap table for a run's phase. `attaching → live` (the

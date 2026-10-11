@@ -96,6 +96,53 @@ export function inboxSegmentFloor(value: unknown, row: LiveRunRow): number | und
   return archive.heldThrough;
 }
 
+/** A terminal receiver's positive unread proof comes from its archived
+ * closure, never from the absence of the retired active-step row. */
+export function closedInboxUnreadStep(
+  value: unknown,
+  expected: {
+    runId: string;
+    gen: string;
+    channelId: string;
+    threadKey: string;
+    requester: string;
+    startedAt: number;
+    inboxSeq: number;
+  },
+): { lastStep: StepRecord | null } | undefined {
+  const archive = archiveOf(value);
+  if (!archive) return;
+  try {
+    if (new TextEncoder().encode(JSON.stringify(archive)).byteLength > MAX_RECORD_BYTES) return;
+  } catch {
+    return;
+  }
+  if (!Number.isSafeInteger(expected.inboxSeq) || expected.inboxSeq < 1) return;
+  for (const closure of [archive.first, archive.latest]) {
+    const owner = closure.owner;
+    if (
+      owner.runId !== expected.runId ||
+      owner.channelId !== expected.channelId ||
+      owner.threadKey !== expected.threadKey ||
+      owner.requester !== expected.requester ||
+      owner.startedAt !== expected.startedAt
+    )
+      return;
+  }
+  const closed = archive.latest;
+  if (closed.owner.gen !== expected.gen || closed.highWater < expected.inboxSeq) return;
+  const step = closed.lastStep;
+  if (step === null) return closed.undelivered ? { lastStep: null } : undefined;
+  if (
+    !Number.isSafeInteger(step.inboxConsumedSeq) ||
+    step.inboxConsumedSeq < 0 ||
+    step.inboxConsumedSeq > closed.highWater ||
+    step.inboxDeferredSeqs?.some((seq) => seq > step.inboxConsumedSeq || seq > closed.highWater)
+  )
+    return;
+  return { lastStep: structuredClone(step) };
+}
+
 /** The first boundary stays original; the latest and floor fold subsequent
  * closures without nesting an execution history or claiming consumption. */
 export function closeInboxSegment(

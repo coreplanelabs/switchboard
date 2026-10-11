@@ -167,6 +167,7 @@ import type {
   PlaneReclaimWord,
 } from "./plane/decide.js";
 import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./runLedger/ledger.js";
+import type { UnreadIngressProof, IngressRequest, IngressSettlement, IngressResult } from "./runLedger/ingress.js";
 import { DEFAULT_SESSION_LOG_MAX_BYTES } from "./runLedger/sessionLog.js";
 import { assembleTranscript, chunkRows, turnRows, type AssembledTranscript } from "./runLedger/transcript.js";
 import {
@@ -1144,6 +1145,46 @@ export class WorkerRunLedger implements RunLedger {
   async planeAdmit(post: PlaneAdmitPost): Promise<PlaneAskAnswer> {
     const r = await this.post("/plane/admit", { storeKey: this.opts.storeKey, ...post });
     return r.data as unknown as PlaneAskAnswer;
+  }
+  async holdUnreadIngress(proof: UnreadIngressProof): Promise<IngressResult> {
+    const result = await this.post("/runs/ingress/unread-hold", { storeKey: this.opts.storeKey, proof });
+    return result.data as unknown as IngressResult;
+  }
+  async claimUnreadIngress(runId: string): Promise<IngressResult> {
+    const result = await this.post("/runs/ingress/unread-claim", { storeKey: this.opts.storeKey, runId });
+    return result.data as unknown as IngressResult;
+  }
+  async pendingUnreadIngress(organization: string, limit: number): Promise<IngressResult> {
+    const result = await this.post("/runs/ingress/unread", { storeKey: this.opts.storeKey, organization, limit });
+    return result.data as unknown as IngressResult;
+  }
+  async consumeIngress(request: IngressRequest): Promise<IngressResult> {
+    const result = await this.post("/runs/ingress/consume", { storeKey: this.opts.storeKey, request });
+    return result.data as unknown as IngressResult;
+  }
+  async readIngress(effectKey: string): Promise<IngressResult> {
+    const result = await this.post("/runs/ingress/read", { storeKey: this.opts.storeKey, effectKey });
+    return result.data as unknown as IngressResult;
+  }
+  async readIngressByRun(runId: string): Promise<IngressResult> {
+    const result = await this.post("/runs/ingress/by-run", { storeKey: this.opts.storeKey, runId });
+    return result.data as unknown as IngressResult;
+  }
+  async pendingIngressRefusals(organization: string, limit: number): Promise<IngressResult> {
+    const result = await this.post("/runs/ingress/refusals", { storeKey: this.opts.storeKey, organization, limit });
+    return result.data as unknown as IngressResult;
+  }
+  async ackIngressRefusal(request: Pick<IngressSettlement, "effectKey" | "digest" | "runId">): Promise<IngressResult> {
+    const result = await this.post("/runs/ingress/refusal-ack", { storeKey: this.opts.storeKey, request });
+    return result.data as unknown as IngressResult;
+  }
+  async clearIngressContent(effectKey: string): Promise<IngressResult> {
+    const result = await this.post("/runs/ingress/clear", { storeKey: this.opts.storeKey, effectKey });
+    return result.data as unknown as IngressResult;
+  }
+  async finishIngress(request: IngressSettlement): Promise<IngressResult> {
+    const result = await this.post("/runs/ingress/finish", { storeKey: this.opts.storeKey, request });
+    return result.data as unknown as IngressResult;
   }
 
   async planeWithdraw(runId: string): Promise<{ withdrawn: boolean }> {

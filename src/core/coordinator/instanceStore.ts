@@ -1,3 +1,4 @@
+import { admitQuestionAnswer, type QuestionAnswerGuard } from "./questionAnswer.js";
 import {
   qualifyPullOwnerSnapshot,
   pullOwnerTargetProjection,
@@ -158,7 +159,7 @@ export interface UnitEventKey {
 
 /** What a caller appends: everything but the sequence the store assigns and
  *  the consumer a later step marks. */
-export type ThreadEventInput = Omit<ThreadEvent, "seq" | "consumedBy">;
+export type ThreadEventInput = Omit<ThreadEvent, "seq" | "consumedBy" | "questionDigest">;
 
 /** Requester status alone may classify an unreadable brief. The rest of the unit
  * remains strictly decoded; this snapshot cannot serve as a coding contract. */
@@ -178,6 +179,8 @@ function mainTaskUnitSnapshot(rows: unknown, key: UnitEventKey): MainTaskUnitSna
 }
 
 export interface CoordinatorInstanceStore {
+  /** Durable census independent of recent or active runs. */
+  listInstances(query: PipelineInventoryQuery): Promise<PipelineInventoryPage>;
   /** Reserve the same unit cell from an already authorized command or native watch intent. */
   admitMaintenance(input: MaintenanceAdmissionInput): Promise<MaintenanceAdmissionResult>;
   /** Complete canonical owner snapshot; reservation must share this owner transaction. */
@@ -261,6 +264,7 @@ export interface CoordinatorInstanceStore {
     requireActive?: boolean,
     binding?: MainTaskBinding,
     expectedRecovery?: { actionId: string; workflowId: string },
+    question?: QuestionAnswerGuard,
   ): Promise<AppendEventResult>;
   /** The unit's events in sequence order; `unconsumedOnly` filters to the rows no spawn or run has consumed. */
   listEvents(key: UnitEventKey, unconsumedOnly?: boolean): Promise<ThreadEvent[]>;
@@ -965,12 +969,24 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     requireActive = false,
     binding?: MainTaskBinding,
     expectedRecovery?: { actionId: string; workflowId: string },
+    question?: QuestionAnswerGuard,
   ): Promise<AppendEventResult> {
-    if (requireActive || binding !== undefined || expectedRecovery !== undefined) {
+    const { questionDigest: _untrustedClaim, ...input } = event as Omit<ThreadEvent, "seq" | "consumedBy">;
+    event = input;
+    let questionDigest: string | undefined;
+    let humanHold = false;
+    if (requireActive || binding !== undefined || expectedRecovery !== undefined || question !== undefined) {
       const instanceText = this.rows.get(key.instanceId);
       const unitText = this.units.get(unitKey(key));
       const instance = instanceText ? (JSON.parse(instanceText) as CoordinatorInstance) : undefined;
       const unit = unitText ? (JSON.parse(unitText) as CoordinatorUnit) : undefined;
+      if (question !== undefined) {
+        const admission = admitQuestionAnswer(instance, unit, event, question, this.events.get(unitKey(key)) ?? []);
+        if (admission.kind === "refused") return { ok: false, reason: admission.reason };
+        if (admission.kind === "replay") return { ok: true, seq: admission.event.seq };
+        humanHold = admission.humanHold;
+        questionDigest = admission.questionDigest;
+      }
       if (
         binding !== undefined &&
         (binding.instanceId !== key.instanceId ||
@@ -1002,9 +1018,9 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
         !instance ||
         !unit ||
         instance.stop ||
-        unit.ending ||
+        (unit.ending && !humanHold) ||
         (unit.recovery && !expectedRecovery) ||
-        unit.recoveryHold
+        (unit.recoveryHold && !humanHold)
       )
         return { ok: false, reason: "ended" };
     }
@@ -1016,7 +1032,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
     if (existing !== undefined)
       return binding === undefined ? { ok: true, seq: existing.seq } : { ok: true, seq: existing.seq, event: existing };
     const seq = (list[list.length - 1]?.seq ?? 0) + 1;
-    const stored = capThreadEvent({ ...event, seq });
+    const stored = capThreadEvent({ ...event, ...(questionDigest ? { questionDigest } : {}), seq });
     list.push(stored);
     this.events.set(unitKey(key), list);
     return binding === undefined ? { ok: true, seq } : { ok: true, seq, event: stored };
@@ -1053,6 +1069,9 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
 /** Without a durable state Worker, writes refuse and unit-owner reads are
  *  unavailable rather than evidence that the instance has no units. */
 export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
+  async listInstances(_query: PipelineInventoryQuery): Promise<PipelineInventoryPage> {
+    throw new Error("The durable pipeline inventory is unavailable.");
+  }
   async prepareAdoptionAudit(_expected: CoordinatorUnit, _runId: string): Promise<HistoricalNativeAudit | undefined> {
     return undefined;
   }
@@ -1141,6 +1160,7 @@ export class NullCoordinatorInstanceStore implements CoordinatorInstanceStore {
     _requireActive = false,
     _binding?: MainTaskBinding,
     _expectedRecovery?: { actionId: string; workflowId: string },
+    _question?: QuestionAnswerGuard,
   ): Promise<AppendEventResult> {
     return { ok: false, reason: "unavailable" };
   }
@@ -1529,6 +1549,7 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
     requireActive = false,
     binding?: MainTaskBinding,
     expectedRecovery?: { actionId: string; workflowId: string },
+    question?: QuestionAnswerGuard,
   ): Promise<AppendEventResult> {
     // The state Worker caps again after assigning the sequence, but its HTTP
     // request-body fence runs first. Cap here too so an accepted 5–10 MB file
@@ -1541,6 +1562,7 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
       requireActive,
       binding,
       expectedRecovery,
+      question,
     });
     const d = r.data as { ok?: unknown; seq?: unknown; event?: unknown; reason?: unknown };
     if (d.ok === true && typeof d.seq === "number" && (d.event === undefined || isThreadEvent(d.event)))
