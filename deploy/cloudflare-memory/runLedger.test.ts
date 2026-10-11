@@ -13139,13 +13139,15 @@ describe("state-write holds across Durable Object RPC", () => {
     const key = "runs:rpc-state-unknown",
       stub = env.RUNS.get(env.RUNS.idFromName(key));
     expect((await stub.claim(claim(), 1)).ok).toBe(true);
+    let remoteFailure: unknown;
     const routed = routedEnv(stub, (name) =>
       name === "setState"
         ? async (...args: unknown[]) => {
             expect(await Reflect.apply(stub.setState, stub, args)).toEqual({ ok: true });
             try {
-              await Reflect.apply(Reflect.get(stub, "undefinedFixtureMethod"), stub, []);
+              await Reflect.get(stub, "undefinedFixtureMethod");
             } catch (error) {
+              remoteFailure = error;
               expect(error).toMatchObject({ remote: true });
               Object.assign(error as object, { name: "PromotionPendingError", kind: "promotion-pending", runId: id });
               throw error;
@@ -13155,6 +13157,7 @@ describe("state-write holds across Durable Object RPC", () => {
         : undefined,
     );
     const response = await memoryWorker.fetch(request(key), routed);
+    expect(remoteFailure).toMatchObject({ remote: true });
     expect(response.status).toBe(500);
     expect(JSON.parse(response.headers.get(STATE_WRITE_DIAGNOSTIC_HEADER)!)).toMatchObject({
       failure: { stage: "state-rpc", errorKind: "error" },
