@@ -153,7 +153,7 @@ import {
   WorkspaceFiles,
   type StagedOutcome,
 } from "./dispatch/staging.js";
-import { RUN_LIST_MAX_LIMIT, type RunFailure, type RunRecord, type RunSeed } from "./runRecord.js";
+import { RUN_LIST_MAX_LIMIT, isRunSession, type RunFailure, type RunRecord, type RunSeed } from "./runRecord.js";
 import {
   attachWorkspace,
   budgetClipLabel,
@@ -229,6 +229,7 @@ import {
   ownerOf,
   readThread,
   readPrOwnerThread,
+  THREAD_READ_LIMIT,
   releasedPrOf,
   requesterOf,
   stickyAgentOf,
@@ -2481,13 +2482,72 @@ export async function dispatch(
     // their source audience cannot be proven from those records, so it must
     // check the source itself before using or sharing a specialist result.
     // When both reads apply, they are independent reads of the same thread.
-    const sessionIdentity = runSessionIdentity(
-      msg.threadKey,
-      agent.name,
-      coordinator,
-      resume?.row.meta.session ?? restart?.row.meta.session,
-    );
-    const runSessionKey = sessionIdentity.key;
+    const recovered = resume !== undefined || restart !== undefined || opts.restartOf !== undefined;
+    // Recovery cannot prove whether an indirect source was consumed before the
+    // crash. Refuse before a saved plan or session can reach the model.
+    if (recovered && privateAudienceRequired(msg)) {
+      noteAudienceRefusal(audienceTrace, "recovered-provenance-unproved", "recovery", "prompt");
+      await refuse(refusalOf("setup_failed", "This run restarted, so please ask again in a private DM."));
+      return ended;
+    }
+    let originalSession = resume?.row.meta.session ?? restart?.row.meta.session ?? opts.restartCarried?.session;
+    if (opts.restartOf !== undefined && !originalSession && deps.runLedger.sessionPersistence) {
+      const original = await deps.runStore.get(opts.restartOf).catch(() => undefined);
+      if (!original && !opts.restartCarried)
+        throw new RefusalError(
+          refusalOf("setup_failed", "I couldn't verify the original conversation, so no recovery started."),
+        );
+      if (
+        original &&
+        (original.id !== opts.restartOf ||
+          original.agent !== agent.name ||
+          original.userId !== msg.userId ||
+          original.channelId !== msg.channelId ||
+          original.threadKey !== msg.threadKey ||
+          original.authenticatedAs !== msg.authenticatedAs ||
+          original.postedBy !== msg.postedBy ||
+          (original.session !== undefined && !isRunSession(original.session)))
+      )
+        throw new RefusalError(
+          refusalOf("setup_failed", "I couldn't verify the original conversation, so no recovery started."),
+        );
+      originalSession = original?.session;
+      if (!originalSession) {
+        const base = runSessionIdentity(msg.threadKey, agent.name, coordinator).key;
+        const retained = await deps.runLedger.readSessionTail(base, 1);
+        if (contextDependenciesOf(retained.sources).executionGithub?.some((ref) => ref.runId !== opts.restartOf))
+          throw new RefusalError(
+            refusalOf("setup_failed", "I couldn't verify the original conversation, so no recovery started."),
+          );
+      }
+    }
+    if (originalSession && !isRunSession(originalSession))
+      throw new RefusalError(
+        refusalOf("setup_failed", "I couldn't verify the original conversation, so no recovery started."),
+      );
+    const sessionIdentity = runSessionIdentity(msg.threadKey, agent.name, coordinator, originalSession);
+    const sameSessionScope = (view: RunView) =>
+      view.agent === agent.name &&
+      (view.session?.key === sessionIdentity.key || view.session?.key.startsWith(`${sessionIdentity.key}:run:`));
+    let sessionHistory = thread;
+    if (
+      !resume &&
+      !restart &&
+      opts.restartOf === undefined &&
+      thread &&
+      thread.length >= THREAD_READ_LIMIT &&
+      !thread.some(sameSessionScope)
+    ) {
+      // The recent page is not proof that this scope has no earlier isolated log.
+      sessionHistory = await readPrOwnerThread(runsService, msg.threadKey);
+      if (!sessionHistory)
+        throw new RefusalError(
+          refusalOf("setup_failed", "I couldn't verify this conversation's earlier work, so nothing started."),
+        );
+    }
+    const previousSession =
+      !resume && !restart && opts.restartOf === undefined ? sessionHistory?.find(sameSessionScope)?.session : undefined;
+    let runSessionKey = previousSession?.key ?? sessionIdentity.key;
     const [fromSession, threadArtifacts] = await Promise.all([
       !resume && !opts.seed && !hasHandoff && thread
         ? sessionSeedFor({
@@ -2496,7 +2556,7 @@ export async function dispatch(
             agent: agent.name,
             sessionKey: runSessionKey,
             ...(sessionIdentity.legacyKey ? { legacySessionKey: sessionIdentity.legacyKey } : {}),
-            thread,
+            thread: sessionHistory ?? thread,
             history,
             request: {
               text: requestText,
@@ -2623,6 +2683,17 @@ export async function dispatch(
     const candidateContext = contextDependenciesOf(fromSession?.seed?.sources);
     const savedContextValid =
       fromSession?.seed !== undefined && (await contextReader.validateDependencies(candidateContext)).ok;
+    let isolateExecutionSession = false;
+    if (!resume && !restart && opts.restartOf === undefined && !savedContextValid) {
+      const retainedSources =
+        fromSession?.seed?.sources ??
+        (await deps.runLedger.readSessionTail(runSessionKey, 1).catch(() => undefined))?.sources;
+      if (contextDependenciesOf(retainedSources).executionGithub?.length) {
+        // A rejected execution receipt cannot enter the new run through the log's
+        // cumulative sources or notepad. Keep the old log under its original key.
+        isolateExecutionSession = true;
+      }
+    }
     const sourceSession = savedContextValid ? fromSession?.seed : undefined;
     const session = sourceContinuation !== undefined ? undefined : sourceSession;
     const mainHistory = history.filter(
@@ -2643,7 +2714,6 @@ export async function dispatch(
         ? ["Earlier saved context could not be verified; this request starts from the available conversation."]
         : []),
     ];
-    const recovered = resume !== undefined || restart !== undefined || opts.restartOf !== undefined;
     const sourceReadOwnerOf = (runId: string) => ({
       runId,
       requester: msg.userId,
@@ -2651,13 +2721,6 @@ export async function dispatch(
       channelId: msg.channelId,
       threadKey: msg.threadKey,
     });
-    // Recovery cannot prove whether an indirect source was consumed before the
-    // crash. Refuse before a saved plan or session can reach the model.
-    if (recovered && privateAudienceRequired(msg)) {
-      noteAudienceRefusal(audienceTrace, "recovered-provenance-unproved", "recovery", "prompt");
-      await refuse(refusalOf("setup_failed", "This run restarted, so please ask again in a private DM."));
-      return ended;
-    }
     const needsSavedSlackRecheck =
       agent.name === "orchestrator" &&
       /^slack:D[A-Z0-9_]+$/.test(msg.channelId) &&
@@ -3002,6 +3065,7 @@ export async function dispatch(
     });
     const { run, runId, channelVisibility, liveUrl, events, publishText, publishMeta } = registration;
     registered = run;
+    if (isolateExecutionSession) runSessionKey = `${sessionIdentity.key}:run:${runId}`;
     if (pendingStop) {
       run.control.requestStop(pendingStop);
       pendingStop = undefined;
@@ -4181,7 +4245,7 @@ export async function dispatch(
     // claim set it; a run without a session (untracked, a ship pipeline, no
     // ledger) has none and the tools say so.
     const sessionTools =
-      fromSession?.seed !== undefined && !savedContextValid
+      fromSession?.seed !== undefined && !savedContextValid && !isolateExecutionSession
         ? undefined
         : sessionCapabilityFor(
             ledgerRun,
@@ -4853,6 +4917,7 @@ export async function dispatch(
             pushedBranch: restartRequest.pushedBranch,
             identityUncertain: restartRequest.identityUncertain || restartRequest.closed?.truncated,
             repoCtx: restartRequest.repoCtx,
+            session: ledgerRun?.session ?? resume?.row.meta.session ?? restartRequest.closed?.session,
           })
         : undefined;
     // A finalized setup run keeps its frame and record under the original id.

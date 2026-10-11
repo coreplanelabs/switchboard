@@ -688,24 +688,29 @@ describe("prepareRestartTurn: the request runs again as its own dispatch", () =>
     registry.publish(run.id, { type: "pushed_head", ref: "unit/original", sha: "a".repeat(40), by: "push" });
     registry.publish(run.id, { type: "pushed_head", ref: "auxiliary", sha: "b".repeat(40), by: "push" });
     const original = { version: 1, malformed: true };
+    const session = { key: "slack:C1:1.0:review:@context-v1:run:run-old", seedFrom: 0, request: 0, range: { from: 0 } };
     const repoCtx = { repo: "acme/api", ref: "unit/original", baseRef: "release" };
     const carried = carriedRunIdentity(registry, run.id, "restart", {
       branchIdentityBaseline: original,
       repoCtx,
       pushedBranch: "auxiliary",
+      session,
     });
     expect(carried).toMatchObject({
       branchIdentityBaseline: original,
       pushedBranch: "unit/original",
       repoCtx,
       identityUncertain: false,
+      session,
     });
     expect(carried!.branchIdentityBaseline).not.toBe(original);
+    expect(carried!.session).not.toBe(session);
     const turn = prepareRestartTurn(
       { clock: () => NOW },
       { request: REQUEST, pending: [], clock: () => NOW, restartOf: run.id, carried },
     );
     expect(turn.opts.restartCarried).toBe(carried);
+    expect(turn.opts.restartCarried?.session?.key).toBe("slack:C1:1.0:review:@context-v1:run:run-old");
     expect(
       carriedRunIdentity(registry, run.id, "restart", { branchIdentityBaseline: null })!.branchIdentityBaseline,
     ).toBeNull();
