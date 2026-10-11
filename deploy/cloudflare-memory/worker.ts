@@ -207,7 +207,12 @@ import {
 } from "../../src/core/coordinator/inventory.js";
 import { organizationRoute, type OrganizationDO } from "./organization.js";
 export { OrganizationDO } from "./organization.js";
-import { isPersonalToken } from "../../src/core/personalToken.js";
+import {
+  isPersonalToken,
+  personalTokenCanReplace,
+  type PersonalToken,
+  type PersonalTokenApproval,
+} from "../../src/core/personalToken.js";
 import { preserveCheckpointState } from "../../src/core/runLedger/checkpointState.js";
 import {
   checkpointMembersOf,
@@ -1241,6 +1246,8 @@ export class ConfigDO extends DurableObject<Env> {
         digest TEXT PRIMARY KEY,
         subject TEXT NOT NULL,
         email TEXT NOT NULL,
+        user_id TEXT,
+        approval TEXT,
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS personal_tokens_subject ON personal_tokens(subject);
@@ -1252,6 +1259,20 @@ export class ConfigDO extends DurableObject<Env> {
         body TEXT NOT NULL
       );
     `);
+    if (
+      !this.sql
+        .exec<{ name: string }>(`PRAGMA table_info(personal_tokens)`)
+        .toArray()
+        .some((column) => column.name === "user_id")
+    )
+      this.sql.exec(`ALTER TABLE personal_tokens ADD COLUMN user_id TEXT`);
+    if (
+      !this.sql
+        .exec<{ name: string }>(`PRAGMA table_info(personal_tokens)`)
+        .toArray()
+        .some((column) => column.name === "approval")
+    )
+      this.sql.exec(`ALTER TABLE personal_tokens ADD COLUMN approval TEXT`);
   }
 
   // ---- Confirmations (docs/reference/specs/routing-and-config.md item 25): the
@@ -1437,38 +1458,73 @@ export class ConfigDO extends DurableObject<Env> {
     return had > 0;
   }
 
-  async putPersonalToken(token: { digest: string; subject: string; email: string; createdAt: number }): Promise<void> {
-    this.sql.exec(
-      `INSERT OR REPLACE INTO personal_tokens (digest, subject, email, created_at) VALUES (?, ?, ?, ?)`,
-      token.digest,
-      token.subject,
-      token.email,
-      token.createdAt,
-    );
+  async putPersonalToken(token: PersonalToken): Promise<boolean> {
+    return this.ctx.storage.transactionSync(() => {
+      const prior = this.personalToken(token.digest);
+      if (!personalTokenCanReplace(prior ?? undefined, token)) return false;
+      if (prior) return true;
+      this.sql.exec(
+        `INSERT INTO personal_tokens (digest, subject, email, user_id, approval, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        token.digest,
+        token.subject,
+        token.email,
+        token.userId ?? null,
+        token.approval ? JSON.stringify(token.approval) : null,
+        token.createdAt,
+      );
+      return true;
+    });
   }
 
-  async getPersonalToken(
-    digest: string,
-  ): Promise<{ digest: string; subject: string; email: string; createdAt: number } | null> {
+  private personalToken(digest: string): PersonalToken | null {
     const row = this.sql
-      .exec<{ digest: string; subject: string; email: string; created_at: number }>(
-        `SELECT digest, subject, email, created_at FROM personal_tokens WHERE digest = ?`,
-        digest,
-      )
+      .exec<{
+        digest: string;
+        subject: string;
+        email: string;
+        user_id: string | null;
+        approval: string | null;
+        created_at: number;
+      }>(`SELECT digest, subject, email, user_id, approval, created_at FROM personal_tokens WHERE digest = ?`, digest)
       .toArray()[0];
-    return row ? { digest: row.digest, subject: row.subject, email: row.email, createdAt: row.created_at } : null;
+    return row
+      ? {
+          digest: row.digest,
+          subject: row.subject,
+          email: row.email,
+          ...(row.user_id !== null ? { userId: row.user_id } : {}),
+          ...(row.approval !== null ? { approval: JSON.parse(row.approval) as PersonalTokenApproval } : {}),
+          createdAt: row.created_at,
+        }
+      : null;
   }
 
-  async listPersonalTokens(
-    subject: string,
-  ): Promise<{ digest: string; subject: string; email: string; createdAt: number }[]> {
+  async getPersonalToken(digest: string): Promise<PersonalToken | null> {
+    return this.personalToken(digest);
+  }
+
+  async listPersonalTokens(subject: string): Promise<PersonalToken[]> {
     return this.sql
-      .exec<{ digest: string; subject: string; email: string; created_at: number }>(
-        `SELECT digest, subject, email, created_at FROM personal_tokens WHERE subject = ? ORDER BY created_at DESC`,
+      .exec<{
+        digest: string;
+        subject: string;
+        email: string;
+        user_id: string | null;
+        approval: string | null;
+        created_at: number;
+      }>(
+        `SELECT digest, subject, email, user_id, approval, created_at FROM personal_tokens WHERE subject = ? ORDER BY created_at DESC`,
         subject,
       )
       .toArray()
-      .map((row) => ({ digest: row.digest, subject: row.subject, email: row.email, createdAt: row.created_at }));
+      .map((row) => ({
+        digest: row.digest,
+        subject: row.subject,
+        email: row.email,
+        ...(row.user_id !== null ? { userId: row.user_id } : {}),
+        ...(row.approval !== null ? { approval: JSON.parse(row.approval) as PersonalTokenApproval } : {}),
+        createdAt: row.created_at,
+      }));
   }
 
   async deletePersonalToken(digest: string, subject: string): Promise<boolean> {
@@ -1931,7 +1987,7 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
   switch (pathname) {
     case "/config/personal-tokens/put": {
       if (!isPersonalToken(b.token)) return json({ error: "token malformed" }, 400);
-      await dO.putPersonalToken(b.token);
+      if (!(await dO.putPersonalToken(b.token))) return json({ error: "binding_conflict" }, 409);
       return json({ ok: true });
     }
     case "/config/personal-tokens/get": {

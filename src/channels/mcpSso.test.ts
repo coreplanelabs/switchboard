@@ -215,7 +215,7 @@ describe("MCP SSO", () => {
       digest: digestBearer(bearer),
       subject: "personal:device",
       email: "alice@example.com",
-      userId: "slack:UALICE",
+      userId: "access:device",
       createdAt: 1,
     });
     f.deps.config.grantsFor = (id) =>
@@ -351,7 +351,7 @@ describe("MCP SSO", () => {
       digest: digestBearer(bearer),
       subject: "personal:device",
       email: "alice@example.com",
-      userId: "slack:UALICE",
+      userId: "access:device",
       createdAt: 1,
     });
     for (const authorization of headers) {

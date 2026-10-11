@@ -75,4 +75,101 @@ describe("personal MCP setup", () => {
     handler(unlinked.req, unlinked.res, { sub: "one" });
     await vi.waitFor(() => expect(unlinked.status()).toBe(403));
   });
+
+  it("binds the exact authenticated Access subject even when its email matches a Slack account", async () => {
+    const store = new InMemoryPersonalTokenStore();
+    const options = {
+      store,
+      grantsFor,
+      publicOrigin: "https://bot.example",
+      personByEmail: async () => ({ id: "slack:UALICE" }),
+    };
+    const handler = createPersonalMcpSetupHandler(options);
+    const approve = request("POST", "/settings/connect", `action=approve&challenge=${challenge}`);
+    handler(approve.req, approve.res, identity);
+    await vi.waitFor(() => expect(approve.status()).toBe(200));
+    expect(await store.get(challenge)).toMatchObject({ subject: "personal:one", userId: "access:one" });
+  });
+
+  it("pins only the host Access realm and organization at approval and requires a new code after a realm change", async () => {
+    const store = new InMemoryPersonalTokenStore();
+    const options = {
+      store,
+      grantsFor,
+      publicOrigin: "https://bot.example",
+      approval: { access: { teamDomain: "team.example", aud: "app-one" }, organization: "org-one" },
+    };
+    const handler = createPersonalMcpSetupHandler(options);
+    const approve = request(
+      "POST",
+      "/settings/connect",
+      `action=approve&challenge=${challenge}&issuer=https://evil.example&audience=evil&organization=evil&subject=two`,
+    );
+    handler(approve.req, approve.res, identity);
+    await vi.waitFor(() => expect(approve.status()).toBe(200));
+    expect((await store.get(challenge))?.approval).toEqual({
+      version: 1,
+      issuer: "https://team.example",
+      audience: "app-one",
+      organization: "org-one",
+      subject: "one",
+    });
+    const original = await store.get(challenge);
+    const exact = request("POST", "/settings/connect", `action=approve&challenge=${challenge}`);
+    handler(exact.req, exact.res, { ...identity, email: "changed@example.com" });
+    await vi.waitFor(() => expect(exact.status()).toBe(200));
+    expect(await store.get(challenge)).toEqual(original);
+    for (const approval of [
+      { ...options.approval, access: { ...options.approval.access, teamDomain: "other.example" } },
+      { ...options.approval, access: { ...options.approval.access, aud: "app-two" } },
+      { ...options.approval, organization: "org-two" },
+    ]) {
+      const changed = request("POST", "/settings/connect", `action=approve&challenge=${challenge}`);
+      createPersonalMcpSetupHandler({ ...options, approval })(changed.req, changed.res, identity);
+      await vi.waitFor(() => expect(changed.status()).toBe(409));
+      expect(await store.get(challenge)).toEqual(original);
+    }
+    const legacyDigest = "b".repeat(64);
+    await store.put({ digest: legacyDigest, subject: "personal:one", email: identity.email, createdAt: 1 });
+    const legacy = request("POST", "/settings/connect", `action=approve&challenge=${legacyDigest}`);
+    handler(legacy.req, legacy.res, identity);
+    await vi.waitFor(() => expect(legacy.status()).toBe(409));
+    expect((await store.get(legacyDigest))?.approval).toBeUndefined();
+    const page = request("GET", "/settings/connect");
+    handler(page.req, page.res, identity);
+    await vi.waitFor(() => expect(page.status()).toBe(200));
+    expect(page.payload()).toContain("Reissue required: revoke this device and connect again.");
+    const revoke = request("POST", "/settings/connect", `action=revoke&challenge=${legacyDigest}`);
+    handler(revoke.req, revoke.res, identity);
+    await vi.waitFor(() => expect(revoke.status()).toBe(303));
+    expect(await store.get(legacyDigest)).toBeNull();
+  });
+
+  it("refuses absent or literal null POST Origin and does not rewrite an existing email-derived binding", async () => {
+    const store = new InMemoryPersonalTokenStore();
+    const handler = createPersonalMcpSetupHandler({ store, grantsFor, publicOrigin: "https://bot.example" });
+    for (const origin of [undefined, "null"]) {
+      const approve = request("POST", "/settings/connect", `action=approve&challenge=${challenge}`);
+      (approve.req as { headers: Record<string, unknown> }).headers.origin = origin;
+      handler(approve.req, approve.res, identity);
+      await vi.waitFor(() => expect(approve.status()).toBe(403));
+      expect(await store.get(challenge)).toBeNull();
+    }
+    await store.put({
+      digest: challenge,
+      subject: "personal:one",
+      userId: "slack:UALICE",
+      email: identity.email,
+      createdAt: 1,
+    });
+    const approve = request("POST", "/settings/connect", `action=approve&challenge=${challenge}`);
+    handler(approve.req, approve.res, identity);
+    await vi.waitFor(() => expect(approve.status()).toBe(409));
+    expect(await store.get(challenge)).toBeNull();
+    expect(await store.list("personal:one")).toEqual([expect.objectContaining({ userId: "slack:UALICE" })]);
+    const page = request("GET", "/settings/connect");
+    handler(page.req, page.res, identity);
+    await vi.waitFor(() => expect(page.status()).toBe(200));
+    expect(page.payload()).toContain("Reissue required: revoke this device and connect again.");
+  });
 });

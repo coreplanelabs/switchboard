@@ -649,7 +649,7 @@ describe("createMcpHandler (node:http wrapper)", () => {
       digest: digestBearer(token),
       subject: "personal:sub-1",
       email: "person@example.com",
-      userId: "access:person",
+      userId: "access:sub-1",
       createdAt: 1,
     });
     grant("personal:sub-1", ["dispatch"]);
@@ -674,7 +674,7 @@ describe("createMcpHandler (node:http wrapper)", () => {
       handler(accepted.req, accepted.res);
       await vi.waitFor(() => expect(accepted.status()).toBe(200));
       expect(accepted.json().result).toEqual({ content: [{ type: "text", text: "personal wrapped" }] });
-      expect(d.calls.at(-1)?.msg).toMatchObject({ userId: "access:person", authenticatedAs: "mcp:personal:sub-1" });
+      expect(d.calls.at(-1)?.msg).toMatchObject({ userId: "access:sub-1", authenticatedAs: "mcp:personal:sub-1" });
     }
     await store.delete(digestBearer(token), "personal:sub-1");
     for (const authorization of spellings) {
