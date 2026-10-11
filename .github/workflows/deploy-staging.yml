@@ -162,7 +162,7 @@ jobs:
     outputs:
       accepted: ${{ steps.e2e.outputs.accepted }}
     needs: [authorize, validate]
-    if: always() && needs.authorize.result == 'success' && needs.authorize.outputs.requested == 'true' && (needs.validate.result == 'skipped' || (needs.validate.result == 'success' && needs.validate.outputs.eligible == 'true'))
+    if: always() && !cancelled() && needs.authorize.result == 'success' && needs.authorize.outputs.requested == 'true' && (needs.validate.result == 'skipped' || (needs.validate.result == 'success' && needs.validate.outputs.eligible == 'true'))
     runs-on: depot-ubuntu-24.04-4
     timeout-minutes: 60
     environment: staging
