@@ -1263,6 +1263,24 @@ export interface SandboxGateDeps {
   postJson?(url: string, bearer: string, body: Record<string, unknown>): Promise<PostAnswer>;
 }
 
+/** Read only a bounded regular file owned by this command. */
+function readProducerLog(file: string | undefined): string | undefined {
+  if (!file) return undefined;
+  try {
+    const fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    try {
+      if (!fstatSync(fd).isFile()) return undefined;
+      const bytes = Buffer.alloc(65_537);
+      const length = readSync(fd, bytes, 0, bytes.length, 0);
+      return length <= 65_536 ? bytes.subarray(0, length).toString("utf8") : undefined;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return undefined;
+  }
+}
+
 /** One read-only wrangler command in a Worker's dir, its `--json` payload parsed;
  *  `CLOUDFLARE_ACCOUNT_ID` stripped like every other wrangler call here. */
 async function wranglerJson(
@@ -1400,22 +1418,7 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
       let producerLog: string | undefined;
       try {
         page = await wranglerJson(dir, args, config, signal, log);
-        try {
-          if (log) {
-            const fd = openSync(log, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
-            try {
-              if (fstatSync(fd).isFile()) {
-                const bytes = Buffer.alloc(65_537);
-                const length = readSync(fd, bytes, 0, bytes.length, 0);
-                if (length <= 65_536) producerLog = bytes.subarray(0, length).toString("utf8");
-              }
-            } finally {
-              closeSync(fd);
-            }
-          }
-        } catch {
-          /* HTTP facts remain unavailable. */
-        }
+        producerLog = readProducerLog(log);
       } catch (error) {
         emit({
           phase: "failure",
