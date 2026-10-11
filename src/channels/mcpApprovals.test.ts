@@ -112,7 +112,7 @@ describe("MCP approval parity", () => {
       id: string,
       action?: string,
       email = "alice@example.com",
-      origin = "https://bot.example",
+      origin: string | null = "https://bot.example",
     ) => {
       async function* chunks() {
         yield Buffer.from(action ? `action=${action}` : "");
@@ -120,13 +120,19 @@ describe("MCP approval parity", () => {
       const req = Object.assign(chunks(), {
         url: `/settings/approve?id=${id}`,
         method: action ? "POST" : "GET",
-        headers: { origin, "sec-fetch-site": "same-origin", "content-type": "application/x-www-form-urlencoded" },
+        headers: {
+          ...(origin === null ? {} : { origin }),
+          "sec-fetch-site": "same-origin",
+          "content-type": "application/x-www-form-urlencoded",
+        },
       });
       let status = 0;
       let text = "";
+      let headers: Record<string, string> = {};
       const res = {
-        writeHead: (s: number) => {
+        writeHead: (s: number, h: Record<string, string>) => {
           status = s;
+          headers = h;
         },
         end: (s: string) => {
           text = s;
@@ -134,7 +140,7 @@ describe("MCP approval parity", () => {
       };
       createMcpApprovalView(deps, options)(req as never, res as never, { sub: "signed-in", email });
       await vi.waitFor(() => expect(status).not.toBe(0));
-      return { status, text };
+      return { status, text, headers };
     };
     const offeredId = async () => {
       const result = await call();
@@ -319,6 +325,50 @@ describe("MCP approval parity", () => {
     f.readOnly();
     expect((await f.call("repo_reconfigure")).body).toMatchObject({ error: { code: -32001 } });
   });
+  it("the rendered approval form preserves its origin and approves the saved action once", async () => {
+    const f = fixture(ALL_GRANTS, true);
+    const id = await f.offeredId();
+    const page = await f.browserCall(id);
+    expect(page.status).toBe(200);
+    expect(page.text).toContain("Confirm saved action");
+    // Fetch serializes a navigation POST's Origin as null under no-referrer.
+    // Model that browser boundary from the policy the actual page returned.
+    const browserOrigin = page.headers["referrer-policy"] === "no-referrer" ? "null" : "https://bot.example";
+    const approved = await f.browserCall(id, "approve", "alice@example.com", browserOrigin);
+    expect(approved.status).toBe(200);
+    expect(approved.text).toContain("Approved. Return to your MCP client to complete the saved action once.");
+    expect(f.removed()).toBe(0);
+    expect((await f.call("approval_resume", { id })).body).toHaveProperty("result");
+    expect(f.removed()).toBe(1);
+    expect((await f.call("approval_resume", { id })).body).toMatchObject({ error: { code: -32003 } });
+    expect(f.removed()).toBe(1);
+  });
+  it.each(["https://foreign.example", "null", "not-an-origin", null])(
+    "browser approval refuses a foreign, opaque, malformed or missing origin: %s",
+    async (origin) => {
+      const f = fixture(ALL_GRANTS, true);
+      const id = await f.offeredId();
+      const denied = await f.browserCall(id, "approve", "alice@example.com", origin);
+      expect(denied.status).toBe(403);
+      expect(denied.text).toContain("This form must be submitted from Switchboard.");
+      expect((await f.call("approval_resume", { id })).body).toMatchObject({
+        result: { content: [{ type: "text", text: "Browser approval is still required; nothing ran." }] },
+      });
+      expect(f.removed()).toBe(0);
+    },
+  );
+  it.each(["approve&runId=foreign", "approve&csrf=wrong"])(
+    "browser approval cannot add arguments to its saved action: %s",
+    async (action) => {
+      const f = fixture(ALL_GRANTS, true);
+      const id = await f.offeredId();
+      expect((await f.browserCall(id, action)).status).toBe(400);
+      expect((await f.call("approval_resume", { id })).body).toMatchObject({
+        result: { content: [{ type: "text", text: "Browser approval is still required; nothing ran." }] },
+      });
+      expect(f.removed()).toBe(0);
+    },
+  );
   it("the supported MCP entry completes the browser-approved saved action once and records its outcome", async () => {
     const f = fixture(ALL_GRANTS, true);
     const id = await f.offeredId();

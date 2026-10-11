@@ -23,7 +23,7 @@ export function createMcpApprovalView(core: CoreDeps, options: McpOptions) {
       res.writeHead(status, {
         ...WEB_HTML_HEADERS,
         "content-security-policy": FORM_PAGE_CSP,
-        "referrer-policy": "no-referrer",
+        "referrer-policy": "same-origin",
       });
       res.end(
         `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Approve action · Switchboard</title><body><h1>Approve action</h1><pre>${escapeHtml(text)}</pre>${form}</body></html>`,
