@@ -186,6 +186,7 @@ One table per group, in registration order. "Surfaces" is where that command can
 | Command | What it does | Surfaces |
 |---|---|---|
 | `metrics trend [--days <integer>] [--agent <string>]` | The run trend from the metrics dataset: runs, failure rate, p50/p95 wall and dollars per day and per agent over the range, weighted for sampling — the /metrics page's report as text or JSON; nothing written. | every surface |
+| `metrics reviews [--from <string>] [--to <string>]` | The review dashboard's report from the metrics dataset: review runs by requester and surface, time spent, reviews per pull request, verdicts and findings, and the system tiles (run success, warm starts, setup losses), weighted for sampling; nothing written. | every surface |
 
 ### `providers`
 

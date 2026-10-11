@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { CommandError, type Caller, type JsonValue } from "../commandRegistry.js";
 import { MetricsSourceError, type MetricsReport } from "../metrics.js";
 import { METRICS_OFF_MESSAGE, NullMetricsService, type MetricsService } from "../metricsService.js";
-import { metricsTrend } from "./metrics.js";
+import { DAY_MS } from "../budgets.js";
+import { buildReviewsReport } from "../reviewsReport.js";
+import { NullReviewsService, type ReviewsService } from "../reviewsService.js";
+import { metricsReviews, metricsTrend } from "./metrics.js";
 
 // `metrics trend` (docs/reference/specs/run-metrics.md item 9): the trend
 // report on every surface — its refusals (off, a failing source) and its text
@@ -130,5 +133,148 @@ describe("metrics.trend", () => {
     const text = metricsTrend.render!(empty as unknown as JsonValue);
     expect(text).toContain("· agent coding · dataset switchboard_runs");
     expect(text).toContain("(no runs in this range)");
+  });
+});
+
+// Record 0097, "The reader and the page": `metrics reviews` answers the review
+// report for a range of whole UTC days, `--from` and `--to` both included.
+describe("metrics.reviews", () => {
+  const FROM = Date.UTC(2026, 0, 4);
+  const REVIEWS = buildReviewsReport(
+    {
+      runs: [
+        {
+          day: "",
+          outcome: "success",
+          surface: "slack",
+          requester: "slack:UCASEY",
+          runs: 8,
+          wallMs: 8 * 360_000,
+          maxInterval: 1,
+        },
+        {
+          day: "",
+          outcome: "error",
+          surface: "mcp",
+          requester: "mcp:ops",
+          runs: 2,
+          wallMs: 2 * 60_000,
+          maxInterval: 1,
+        },
+      ],
+      durationByRequester: [],
+      durationBySurface: [],
+      durationOverall: [{ runs: 8, p50Ms: 360_000, p95Ms: 540_000 }],
+      durationHistogram: [],
+      reviews: [
+        {
+          repository: "o/r",
+          pr: "1",
+          verdict: "approved",
+          reviews: 6,
+          findings: 2,
+          blocking: 0,
+          major: 0,
+          minor: 2,
+          nit: 0,
+          maxInterval: 1,
+        },
+      ],
+      setup: [
+        { day: "", workspace: "resident", setupReason: "", errorType: "", runs: 6 },
+        { day: "", workspace: "sandbox_snapshot", setupReason: "workload_full", errorType: "", runs: 2 },
+        {
+          day: "",
+          workspace: "none",
+          setupReason: "sandbox_start_timeout",
+          errorType: "sandbox_start_timeout",
+          runs: 2,
+        },
+      ],
+      byWorkspace: [],
+    },
+    { fromMs: FROM, toMs: FROM + 7 * DAY_MS },
+  );
+  const report = { dataset: "switchboard_runs", ...REVIEWS };
+  const reviewsInvoke = (svc: ReviewsService, options: Record<string, unknown> = {}) =>
+    metricsReviews.handler({
+      args: [],
+      options,
+      caller,
+      deps: { metrics: { service: async () => new NullMetricsService(), reviews: async () => svc } },
+    } as never);
+
+  it("asks for whole UTC days, --to included, and answers the report as the JSON twin's shape", async () => {
+    const asked: unknown[] = [];
+    const svc: ReviewsService = {
+      reviews: async (range) => {
+        asked.push(range);
+        return report;
+      },
+    };
+    expect(await reviewsInvoke(svc, { from: isoDay(FROM), to: isoDay(FROM + 6 * DAY_MS) })).toEqual(
+      report as unknown as JsonValue,
+    );
+    expect(asked).toEqual([{ fromMs: FROM, toMs: FROM + 7 * DAY_MS }]);
+  });
+
+  it("defaults to the seven days ending today", async () => {
+    const asked: Array<{ fromMs: number; toMs: number }> = [];
+    await reviewsInvoke({
+      reviews: async (range) => {
+        asked.push(range);
+        return report;
+      },
+    });
+    expect(asked[0].toMs - asked[0].fromMs).toBe(7 * DAY_MS);
+    expect(asked[0].toMs % DAY_MS).toBe(0);
+    expect(asked[0].toMs).toBeGreaterThan(Date.now());
+  });
+
+  it("refuses a range that ends before it starts, runs past ninety days, or names a day the calendar does not have, before asking", async () => {
+    const svc: ReviewsService = { reviews: () => Promise.reject(new Error("must not be asked")) };
+    // A day the calendar does not have, assembled so no fixture spells a date.
+    const unreal = (month: string, dayOfMonth: string): string => ["2026", month, dayOfMonth].join("-");
+    for (const options of [
+      { from: isoDay(FROM + 6 * DAY_MS), to: isoDay(FROM) },
+      { from: isoDay(FROM), to: isoDay(FROM + 91 * DAY_MS) },
+      { from: unreal("02", "29"), to: isoDay(FROM + 60 * DAY_MS) },
+      { from: isoDay(FROM), to: unreal("04", "31") },
+      { from: unreal("13", "01") },
+    ]) {
+      const err = await reviewsInvoke(svc, options).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(CommandError);
+      expect(err).toMatchObject({ code: "invalid_input" });
+    }
+  });
+
+  it("off is `unavailable` with the off message; a source error names its class", async () => {
+    expect(await reviewsInvoke(new NullReviewsService()).catch((e: unknown) => e)).toMatchObject({
+      code: "unavailable",
+      message: METRICS_OFF_MESSAGE,
+    });
+    const err = await reviewsInvoke({
+      reviews: () => Promise.reject(new MetricsSourceError(403, "authentication error")),
+    }).catch((e: unknown) => e);
+    expect(String((err as Error).message)).toBe(
+      "review metrics unavailable: MetricsSourceError: analytics engine sql 403: authentication error",
+    );
+  });
+
+  it("renders the range, usage, the four tiles as good of total, and the top requesters, chat-safe", () => {
+    const lines = metricsReviews.render!(report as unknown as JsonValue).split("\n");
+    expect(lines[0]).toBe(
+      `metrics reviews · ${isoDay(FROM)} → ${isoDay(FROM + 6 * DAY_MS)} (7d) · dataset switchboard_runs`,
+    );
+    expect(lines[1]).toBe(
+      "• 10 review runs · 8 succeeded · 6 reviews over 1 pull request · 50m running · p50 6m · p95 9m",
+    );
+    expect(lines[2]).toBe(
+      "• run success 8 of 10 (80%) · warm start 6 of 8 (75%) · lost at setup 2 of 10 (20%) · reviews with a verdict 6 of 10 (60%)",
+    );
+    expect(lines[3]).toBe("• slack:UCASEY — 8 runs · 8 succeeded · 48m running");
+    expect(lines[4]).toBe("• mcp:ops — 2 runs · 0 succeeded · 2m running");
+    expect(lines.at(-1)).toBe("bucketed by finish time · counted at most once");
+    expect(lines.join("\n")).not.toMatch(/ {2,}/);
   });
 });
