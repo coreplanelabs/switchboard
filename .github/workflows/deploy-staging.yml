@@ -29,8 +29,7 @@ on: # zizmor: ignore[dangerous-triggers]
         type: string
 
 env:
-  # Temporary staging acceptance default; explicit model inputs take precedence.
-  STAGING_ACCEPTANCE_MODEL: ${{ inputs.model || 'openai/gpt-6.1-sol' }}
+  STAGING_ACCEPTANCE_MODEL: ${{ inputs.model }}
 
 permissions:
   contents: read

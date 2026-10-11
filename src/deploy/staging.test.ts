@@ -392,8 +392,8 @@ describe("staging workflow isolation", () => {
   });
 
   it.each([
-    { event: "pull_request_target", inputs: {}, expected: "openai/gpt-6.1-sol" },
-    { event: "workflow_dispatch", inputs: { model: "" }, expected: "openai/gpt-6.1-sol" },
+    { event: "pull_request_target", inputs: {}, expected: "" },
+    { event: "workflow_dispatch", inputs: { model: "" }, expected: "" },
     {
       event: "workflow_dispatch",
       inputs: { model: "anthropic/claude-sonnet-4-5" },
@@ -403,8 +403,7 @@ describe("staging workflow isolation", () => {
     "uses the same staging acceptance model for check and execution on $event with $inputs",
     ({ inputs, expected }) => {
       const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
-      // This workflow's model expressions use input/env properties and ||, whose
-      // string/empty semantics are the same in the Actions expression language.
+      // Missing Actions inputs resolve to empty strings for the shell steps.
       const evaluate = (value: string, env: Record<string, string>) =>
         Function("inputs", "env", `return (${value.slice(3, -2)});`)(inputs, env) ?? "";
       const env = Object.fromEntries(
@@ -455,8 +454,7 @@ describe("staging workflow isolation", () => {
             join(directory, "staging-fleet.json"),
             join(directory, "staging-setup.json"),
             "--check",
-            "--model",
-            expected,
+            ...(expected ? ["--model", expected] : []),
           ],
           [
             "run",
@@ -465,8 +463,7 @@ describe("staging workflow isolation", () => {
             "--",
             join(directory, "staging-fleet.json"),
             join(directory, "staging-e2e.json"),
-            "--model",
-            expected,
+            ...(expected ? ["--model", expected] : []),
           ],
         ]);
       } finally {
