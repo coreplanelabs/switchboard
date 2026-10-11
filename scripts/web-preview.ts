@@ -997,11 +997,34 @@ const VERDICT_STREAM = normalizeSpans([
 
 /** The script's last command — the one the live stream holds out for a while. */
 const LAST_CALL_INDEX = HIST_EVENTS.map((e) => e.type).lastIndexOf("tool_call");
+const LIVE_TIMING = { tick: 500, delay: 1500, hold: 30_000 };
+const LIVE_RETRY = "retry: 3000\n\n";
+const liveFrame = (event: (typeof HIST_EVENTS)[number], at: number) =>
+  `id: ${event.seq}\ndata: ${JSON.stringify({ ...event, at })}\n\n`;
 
 /** The live stream: replays the history script slowly, then keeps the run open. */
-function serveLiveStream(res: import("node:http").ServerResponse): void {
+function serveLiveStream(res: import("node:http").ServerResponse, snapshot: boolean): void {
+  // The capture cache reads the finite script and its pacing, while browsers
+  // keep receiving the historical timed stream. Both use the same inputs.
+  if (snapshot) {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        script:
+          LIVE_RETRY +
+          HIST_EVENTS.slice(0, -1)
+            .map((event) => liveFrame(event, event.at ?? NOW))
+            .join(""),
+        timing: LIVE_TIMING,
+        lastCall: LAST_CALL_INDEX,
+        replay: serveLiveStream.toString(),
+        clock: systemClock.toString(),
+      }),
+    );
+    return;
+  }
   res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" });
-  res.write("retry: 3000\n\n");
+  res.write(LIVE_RETRY);
   let i = 0;
   let nextAt = systemClock();
   const timer = setInterval(() => {
@@ -1010,13 +1033,12 @@ function serveLiveStream(res: import("node:http").ServerResponse): void {
       return;
     }
     if (systemClock() < nextAt) return;
-    const e = { ...HIST_EVENTS[i], at: systemClock() };
-    res.write(`id: ${e.seq}\ndata: ${JSON.stringify(e)}\n\n`);
+    res.write(liveFrame(HIST_EVENTS[i], systemClock()));
     i++;
     // The last command stays out for half a minute so a ticking running card
     // can be seen; then the model "thinks" forever (the pending-turn row).
-    nextAt = systemClock() + (i === LAST_CALL_INDEX + 1 ? 30_000 : 1500);
-  }, 500);
+    nextAt = systemClock() + (i === LAST_CALL_INDEX + 1 ? LIVE_TIMING.hold : LIVE_TIMING.delay);
+  }, LIVE_TIMING.tick);
   res.on("close", () => clearInterval(timer));
 }
 
@@ -2734,13 +2756,15 @@ function page(
 
 createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://localhost");
+  const snapshot = req.headers["x-switchboard-preview-snapshot"] === "1";
+  if (snapshot) res.setHeader("x-switchboard-preview-snapshot", "1");
   if (assets.serve(req, res)) return;
   if (url.pathname === "/favicon.ico") {
     res.writeHead(200, { "content-type": "image/svg+xml" });
     res.end(FAVICON_ICO_SVG);
     return;
   }
-  if (url.pathname === "/runs/live-1/events") return serveLiveStream(res);
+  if (url.pathname === "/runs/live-1/events") return serveLiveStream(res, snapshot);
   // A listed run's stored replay (live-view item 28), as the bot's tokenless
   // events route writes a finished record: what a row's timeline folds.
   const replay = /^\/runs\/([^/]+)\/events$/.exec(url.pathname);
@@ -2817,6 +2841,7 @@ createServer((req, res) => {
         res.write(`data: ${JSON.stringify({ type: "upsert", run })}\n\n`);
       }
     }
+    if (snapshot) return res.end();
     const hb = setInterval(() => res.write(": hb\n\n"), 15_000);
     res.on("close", () => clearInterval(hb));
     return;
