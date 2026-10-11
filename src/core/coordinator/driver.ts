@@ -124,6 +124,7 @@ export interface StepRunner {
 export type CoordinatorStepRoute =
   | "recover-unit"
   | "plan"
+  | "unit-progress"
   | "unit-start"
   | "branch"
   | "spawn"
@@ -841,7 +842,7 @@ async function perform(
   instanceId: string,
   unit: string,
   action: Exclude<CoordinatorAction, { type: "end" }>,
-  cursor: { ordinal: number },
+  cursor: { ordinal: number; progressRevision: number },
 ): Promise<StepReturn> {
   const tag = { parentInstanceId: instanceId, unit, effectId: action.step, effectOrdinal: cursor.ordinal + 1 };
   const receipt = (
@@ -866,6 +867,39 @@ async function perform(
     )
       throw new UnreadableAnswer(route, answer, "effect ordinal");
     return answer;
+  };
+  const reportWait = async (clear = false) => {
+    const waiting =
+      action.type === "wait"
+        ? { kind: "child", runId: action.runId }
+        : action.type === "wait-checks"
+          ? { kind: "checks", headSha: action.headSha }
+          : action.type === "sleep"
+            ? { kind: "retry" }
+            : undefined;
+    if (!waiting) return;
+    try {
+      const reply = await step.do(`${action.step}/progress/${clear ? "clear" : "wait"}`, STEP_CONFIG, () =>
+        call(bot, "unit-progress", {
+          ...tag,
+          progress: {
+            expectedRevision: cursor.progressRevision,
+            step: action.step,
+            ...(clear ? { clear: true } : { waiting }),
+          },
+        }),
+      );
+      const answer = answerOf("unit-progress", reply);
+      if (
+        answer.body.ok === true &&
+        Number.isSafeInteger(answer.body.revision) &&
+        answer.body.revision === cursor.progressRevision + 1
+      )
+        cursor.progressRevision = answer.body.revision as number;
+    } catch {
+      // Read-only progress cannot turn a running original unit into a failed one.
+      // Its last marker is invalidated by the next canonical round or ending.
+    }
   };
   switch (action.type) {
     case "branch":
@@ -892,8 +926,12 @@ async function perform(
           "spawn",
         ),
       );
-    case "wait":
-      return { type: "wait", step: action.step, outcome: await waitForRun(step, action) };
+    case "wait": {
+      await reportWait();
+      const outcome = await waitForRun(step, action);
+      await reportWait(true);
+      return { type: "wait", step: action.step, outcome };
+    }
     case "read-record":
       return readRecordReturn(
         action.step,
@@ -939,9 +977,12 @@ async function perform(
         ),
       );
     case "sleep":
+      await reportWait();
       await step.sleep(action.step, action.ms);
+      await reportWait(true);
       return { type: "sleep", step: action.step };
     case "wait-checks": {
+      await reportWait();
       // The intake's checks-settled event at the approved head (http-ingress.md
       // item 12), with the machine's bounded timeout as the fallback: either
       // way the machine re-asks the merge door, which is the guard.
@@ -955,6 +996,7 @@ async function perform(
       } catch {
         outcome = "timeout";
       }
+      await reportWait(true);
       return { type: "wait-checks", step: action.step, outcome };
     }
     case "checks":
@@ -1196,7 +1238,7 @@ async function runUnit(
   instanceId: string,
   node: PlanUnitNode,
   plan: PlanFacts,
-  cursor: { ordinal: number },
+  cursor: { ordinal: number; progressRevision: number },
   session?: LeaseSegmentProgress,
 ): Promise<DrivenEnding> {
   const unit = node.id;
@@ -1765,7 +1807,10 @@ async function runUnitLifetime(
     }
     let session: LeaseSegmentProgress | undefined;
     // Rebuilt from the cached initial row and exact step receipts on Workflow replay, across every segment.
-    const cursor = { ordinal: row?.currentEffect?.ordinal ?? 0 };
+    const cursor = {
+      ordinal: row?.currentEffect?.ordinal ?? 0,
+      progressRevision: row?.recordedProgress?.revision ?? 0,
+    };
     let ending: DrivenEnding | { kind: "stopped" } = await runUnit(step, bot, instanceId, node, plan, cursor);
     if (row?.recovery !== undefined) {
       if (ending.kind === "idle" && ending.humanGate !== undefined)

@@ -40,6 +40,51 @@ const row = (unit: string, assignedTo?: string): CoordinatorUnit => ({
   },
 });
 describe("Home recorded condition projection", () => {
+  it("shows a recorded runtime failure with its work and keeps the next act unknown when no inspection thread exists", async () => {
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.put(instance);
+    await instances.putUnits([
+      {
+        ...row("failure"),
+        idle: undefined,
+        ending: { kind: "failed", cause: "step_threw", step: "failure/start", report: "untrusted retry prose", at: 5 },
+      },
+    ]);
+    const home = createHomeService({
+      organizationId: "example",
+      instances,
+      conditions: createHomeConditionReader(instances),
+    });
+    const snapshot = await home.snapshot({ actorId: instance.userId, visibleTo: { kind: "all" } });
+    expect(snapshot.needsYou).toEqual([]);
+    expect(snapshot.waiting[0]?.conditions[0]?.summary).toBe(
+      "The original work stopped because a recorded operation failed.",
+    );
+    expect(snapshot.waiting[0]?.conditions[0]?.owner).toEqual({ kind: "unknown" });
+    expect(snapshot.waiting[0]?.nextAction).toEqual({ kind: "unknown" });
+    await instances.putUnits([
+      {
+        ...row("inspect"),
+        idle: undefined,
+        threadKey: "slack:private:inspection",
+        ending: {
+          kind: "interrupted",
+          report: "Do not infer this recovery instruction",
+          at: 6,
+          outcome: { schemaVersion: 1, kind: "interrupted", reviewRounds: 1 },
+        },
+      },
+    ]);
+    const recorded = (await home.snapshot({ actorId: instance.userId, visibleTo: { kind: "all" } })).waiting.find(
+      (item) => item.unit.id === "inspect",
+    );
+    expect(recorded?.unit.threads.coding).toBe("slack:private:inspection");
+    expect(recorded?.nextAction).toEqual({
+      kind: "recorded",
+      text: "Inspect the recorded failure in its existing work thread.",
+    });
+  });
+
   it("reads a thousand canonical questions once per pipeline and observes a changed assignment on the next snapshot", async () => {
     class CountingInstances extends InMemoryCoordinatorInstanceStore {
       reads = 0;

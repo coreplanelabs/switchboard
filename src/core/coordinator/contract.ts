@@ -9,6 +9,7 @@ import type { ResearchGatePending } from "../research/brief.js";
 // parent record the spawn route reads the requester from, and the names the
 // routes decide on.
 //
+import { isUnitProgress, type UnitProgress } from "./unitProgress.js";
 import { IDLE_DAYS_MAX, type Grant, type GrantSource } from "../budgets.js";
 import { isVerbosity, type Verbosity } from "../verbosity.js";
 import { isFindingShape } from "../reviewVerdict.js";
@@ -1110,6 +1111,8 @@ export interface CoordinatorUnit {
   idle?: UnitIdle;
   /** Current action and per-call outcomes; only the owner effect transition may change it. */
   currentEffect?: UnitCurrentEffect;
+  /** Current owner-issued wait facts; never permission to act. */
+  recordedProgress?: UnitProgress;
   /** Exact display proposal admitted with the latest settlement CAS. */
   reportDelivery?: CoordinatorReportAdmission;
   /** Answers to indexed idle waits, keyed by the wait step's durable identity. */
@@ -1730,6 +1733,7 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   )
     return false;
   if (r.currentEffect !== undefined && !isUnitCurrentEffect(r.currentEffect)) return false;
+  if (r.recordedProgress !== undefined && !isUnitProgress(r.recordedProgress)) return false;
   if (
     r.history !== undefined &&
     (!isObject(r.history) ||

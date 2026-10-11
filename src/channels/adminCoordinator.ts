@@ -43,6 +43,7 @@
 // The handler here is pure over a parsed request (`handleCoordinatorRequest`),
 // like the ingress; `createAdminCoordinatorHandler` is the node:http adapter.
 
+import { isUnitProgressInput, nextUnitProgress } from "../core/coordinator/unitProgress.js";
 import { assignHumanGate } from "../core/coordinator/humanGate.js";
 import { findRunnerPullOwner } from "../core/runnerOwnership.js";
 import { createSweepEffectJournal } from "../core/coordinator/sweepEffectJournal.js";
@@ -7342,6 +7343,34 @@ function parseGate(raw: unknown): { level: AddressSeverity; findings: string[] }
 }
 
 /** A round boundary: appended to the unit's row and drawn on the card. */
+async function unitProgress(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
+  const id = parseInstanceId(body.parentInstanceId);
+  if (
+    !id.ok ||
+    typeof body.unit !== "string" ||
+    !UNIT_ID.test(body.unit) ||
+    typeof body.executionWorkflowId !== "string" ||
+    !isUnitProgressInput(body.progress)
+  )
+    return json(400, { ok: false, error: "invalid_progress" });
+  const at = (deps.clock ?? systemClock)();
+  const instance = await deps.instances.get(id.value);
+  if (!instance || namesForeignRun(instance, body)) return json(404, { ok: false, error: "not_found", at });
+  const matches = (await deps.instances.listUnits(instance.id)).filter((row) => row.unit === body.unit);
+  if (matches.length !== 1) return json(404, { ok: false, error: "not_found", at });
+  const row = matches[0]!;
+  const host = row.recovery ? undefined : await hostRunOf(deps, instance);
+  if (host?.kind === "not_host") return json(409, { ok: false, error: "not_host", at });
+  const next = nextUnitProgress(instance, row, body.executionWorkflowId, body.progress, at);
+  if (!next.ok) return json(409, { ok: false, error: `progress_${next.reason}`, at });
+  if (!next.replay) {
+    const written = await deps.instances.compareAndReplaceUnit(row, { ...row, recordedProgress: next.progress });
+    if (!written.ok)
+      return json(written.reason === "unavailable" ? 503 : 409, { ok: false, error: "progress_not_committed", at });
+  }
+  return json(200, { ok: true, revision: next.progress.revision, at: next.progress.at });
+}
+
 async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps): Promise<IngressResponse> {
   const id = parseInstanceId(body.parentInstanceId);
   if (!id.ok) return json(400, { ok: false, error: id.error });
@@ -9585,6 +9614,7 @@ function briefReaders(deps: AdminCoordinatorDeps, instance: CoordinatorInstance,
 type Step =
   | "authorize"
   | "plan"
+  | "unit-progress"
   | "unit-start"
   | "branch"
   | "spawn"
@@ -9602,6 +9632,7 @@ type Step =
 const STEPS: readonly Step[] = [
   "authorize",
   "plan",
+  "unit-progress",
   "unit-start",
   "branch",
   "spawn",
@@ -9679,6 +9710,8 @@ export async function answerCoordinatorStep(
     switch (door.step) {
       case "plan":
         return plan(parsed.value, deps);
+      case "unit-progress":
+        return unitProgress(parsed.value, deps);
       case "unit-start":
         return unitStart(parsed.value, deps);
       case "branch":

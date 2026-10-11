@@ -1,3 +1,5 @@
+import { nextUnitProgress, currentUnitProgress } from "../../src/core/coordinator/unitProgress.ts";
+import type { CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
 import { describe, expect, it } from "vitest";
 import { fetchMemoryTest } from "./testFetch.ts";
 import type { CoordinatorInstance } from "../../src/core/coordinator/contract.ts";
@@ -27,6 +29,58 @@ async function post(path: string, body: unknown, token = "test-token") {
 }
 
 describe("durable pipeline census", () => {
+  it("persists only the winning original progress CAS and refuses malformed progress rows", async () => {
+    const storeKey = `runs:census-${crypto.randomUUID()}`;
+    const parent = instance("progress");
+    const unit: CoordinatorUnit = {
+      instanceId: parent.id,
+      unit: "original",
+      slug: "original",
+      branch: "work",
+      dependsOn: [],
+      rounds: [],
+    };
+    expect((await post("/runs/coordinator/put", { storeKey, instance: parent })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/put", { storeKey, units: [unit] })).status).toBe(200);
+    const next = nextUnitProgress(
+      parent,
+      unit,
+      parent.id,
+      { expectedRevision: 0, step: "original/checks/wait", waiting: { kind: "checks", headSha: "a".repeat(40) } },
+      7,
+    );
+    if (!next.ok) throw new Error("fixture progress must be valid");
+    const updated = { ...unit, recordedProgress: next.progress };
+    const writes = await Promise.all(
+      [updated, { ...updated, recordedProgress: { ...next.progress, step: "other/checks/wait" } }].map((recovered) =>
+        post("/runs/coordinator/units/claim-legacy-continuation", { storeKey, expected: unit, recovered }),
+      ),
+    );
+    expect(writes.map((result) => result.status).sort()).toEqual([200, 409]);
+    const rows = await post("/runs/coordinator/units/list", { storeKey, instanceId: parent.id });
+    const stored = (rows.body.units as CoordinatorUnit[])[0]!;
+    expect(currentUnitProgress(stored)?.revision).toBe(1);
+    expect(currentUnitProgress(stored)?.waiting).toEqual({ kind: "checks", headSha: "a".repeat(40) });
+    expect(
+      (
+        await post("/runs/coordinator/units/put", {
+          storeKey,
+          units: [{ ...stored, recordedProgress: { ...stored.recordedProgress, revision: -1 } }],
+        })
+      ).status,
+    ).toBe(400);
+    const changed = { ...stored, rounds: [{ index: 1, agent: "review", outcome: "approve", at: 9 }] };
+    expect(
+      (
+        await post("/runs/coordinator/units/claim-legacy-continuation", {
+          storeKey,
+          expected: stored,
+          recovered: changed,
+        })
+      ).status,
+    ).toBe(200);
+    expect(currentUnitProgress(changed)).toBeUndefined();
+  });
   it("pages old runless pipelines through SQLite without admitting later insertions", async () => {
     const storeKey = `runs:census-${crypto.randomUUID()}`;
     for (const id of ["first", "middle", "last"])
