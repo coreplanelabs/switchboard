@@ -58,6 +58,8 @@ export function createGithubWebhookHandler(
               ownerOf: deps.ownerOf,
               instances: deps.instances,
               commenterAuthorized: deps.commenterAuthorized,
+              verifyQuestionAnswer: deps.verifyQuestionAnswer,
+              replayOwnerOf: deps.replayOwnerOf,
               workflow: deps.workflow,
               now: deps.now,
             })
