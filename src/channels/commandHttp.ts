@@ -58,6 +58,9 @@ export interface CommandHttpOptions {
    *  `access:svc:<common_name>` (exactly its `grants` entry, nothing implicit).
    *  The table is config's; the adapter only names the id. */
   grantsFor: GrantsLookup;
+  /** Trusted host lookup of this already-verified credential and read projection.
+   * Missing current proof refuses without the legacy email resolver. */
+  resolveCaller?: (identity: AccessIdentity) => Promise<Caller | undefined>;
   /** The dashboard link (record 0042): a browser session whose email names a
    *  Slack person carries that person as a second `self` id. Absent (no Slack
    *  app up, the `token`/`none` strategies' identities have no email) → every
@@ -262,13 +265,34 @@ async function boundedChannels(
 
 /** The `/api` Caller for an Access identity: its caller id and the `Actor`
  *  the policy table decides on (`resolveAccessActor`: linked to its person when the email names one). */
-export async function callerFor(
+type CallerResolutionOptions = Pick<
+  CommandHttpOptions,
+  "grantsFor" | "personByEmail" | "channelsOf" | "channelsOfTimeoutMs" | "personName" | "knownPerson" | "resolveCaller"
+>;
+export function callerFor(
   identity: AccessIdentity,
-  opts: Pick<
-    CommandHttpOptions,
-    "grantsFor" | "personByEmail" | "channelsOf" | "channelsOfTimeoutMs" | "personName" | "knownPerson"
-  >,
-): Promise<Caller> {
+  opts: Omit<CallerResolutionOptions, "resolveCaller"> & { resolveCaller?: never },
+): Promise<Caller>;
+export function callerFor(identity: AccessIdentity, opts: CallerResolutionOptions): Promise<Caller | undefined>;
+export async function callerFor(identity: AccessIdentity, opts: CallerResolutionOptions): Promise<Caller | undefined> {
+  if (opts.resolveCaller) {
+    try {
+      const current = await opts.resolveCaller(identity);
+      const id = callerIdFor(identity);
+      if (
+        !current ||
+        current.kind !== "access" ||
+        current.id !== id ||
+        current.actor.id !== id ||
+        (current.actor.kind !== "user" && current.actor.kind !== "service") ||
+        (isServiceToken(identity) && current.actor.kind !== "service")
+      )
+        return undefined;
+      return current;
+    } catch {
+      return undefined;
+    }
+  }
   return {
     kind: "access",
     id: callerIdFor(identity),
@@ -381,6 +405,10 @@ export function createCommandHttpHandler(commands: CommandInvoker, opts: Command
     // (write safety). `invoke` re-checks in every case; this only spares an
     // unauthorized caller's body from being read.
     const caller = await callerFor(identity, opts);
+    if (!caller) {
+      refuse(res, ERROR_STATUS.unauthorized, "unauthorized", "Current authentication is unavailable.");
+      return;
+    }
     // A session viewing as a person (record 0053) is told why in the one sentence every surface
     // shows, whatever the person's own grants would have said about the write; the registry
     // door would refuse the same way, this only spares the body.

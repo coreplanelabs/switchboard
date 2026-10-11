@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createPersonalMcpSetupHandler } from "./personalMcpSetup.js";
 import { InMemoryPersonalTokenStore } from "../mcp/personalTokens.js";
+import { withWorkViewScope } from "./workViewScope.js";
 import { NO_GRANTS } from "../core/authz/types.js";
 
 describe("personal MCP setup", () => {
@@ -37,6 +38,47 @@ describe("personal MCP setup", () => {
     };
     return { req: req as never, res: res as never, status: () => status, payload: () => payload };
   }
+
+  it("refuses device writes in a trusted Person view before reading the form, while own and All views still approve", async () => {
+    const store = new InMemoryPersonalTokenStore();
+    const handler = createPersonalMcpSetupHandler({ store, grantsFor, publicOrigin: "https://bot.example" });
+    const actor = { kind: "user" as const, id: "access:one", grants: NO_GRANTS };
+    let read = false;
+    async function* chunks() {
+      read = true;
+      yield Buffer.from(`action=approve&challenge=${challenge}`);
+    }
+    const blocked = request("POST", "/settings/connect");
+    handler(Object.assign(chunks(), blocked.req) as never, blocked.res, identity, {
+      ...actor,
+      viewingAs: { id: "access:two" },
+    });
+    await vi.waitFor(() => expect(blocked.status()).toBe(403));
+    expect(read).toBe(false);
+    expect(await store.get(challenge)).toBeNull();
+    await store.put({
+      digest: challenge,
+      subject: "personal:one",
+      userId: "access:one",
+      email: identity.email,
+      createdAt: 1,
+    });
+    const revoke = request("POST", "/settings/connect", `action=revoke&challenge=${challenge}`);
+    handler(revoke.req, revoke.res, identity, { ...actor, viewingAs: { id: "access:two" } });
+    await vi.waitFor(() => expect(revoke.status()).toBe(403));
+    expect((await store.get(challenge))?.userId).toBe("access:one");
+    await store.delete(challenge, "personal:one");
+    for (const viewer of [
+      actor,
+      withWorkViewScope({ ...actor }, { mode: "everyone", ownerIds: [], canEveryone: true }),
+    ]) {
+      const own = request("POST", "/settings/connect", `action=approve&challenge=${challenge}`);
+      handler(own.req, own.res, identity, viewer);
+      await vi.waitFor(() => expect(own.status()).toBe(200));
+      expect((await store.get(challenge))?.userId).toBe("access:one");
+      await store.delete(challenge, "personal:one");
+    }
+  });
 
   it("approves a digest after sign-in and the matching same-origin form, then revokes only that owner's device", async () => {
     const store = new InMemoryPersonalTokenStore();

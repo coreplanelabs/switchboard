@@ -1,3 +1,4 @@
+import type { Actor } from "../core/authz/types.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { refusalMessage } from "../mcp/connect.js";
 import { nonceOfState } from "../mcp/oauth.js";
@@ -51,10 +52,17 @@ export interface ConnectViewDeps {
 /** Returns true when the request was for this view (handled), false to fall through. */
 export function createMcpConnectViewHandler(
   deps: ConnectViewDeps,
-): (req: IncomingMessage, res: ServerResponse, identity: AccessIdentity) => boolean {
-  return (req, res, identity) => {
+): (req: IncomingMessage, res: ServerResponse, identity: AccessIdentity, viewer?: Actor) => boolean {
+  return (req, res, identity, viewer) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (!isConnectPath(url.pathname)) return false;
+    if (
+      viewer?.viewingAs &&
+      (url.pathname === MCP_OAUTH_CALLBACK_PATH || (req.method ?? "GET").toUpperCase() !== "GET")
+    ) {
+      page(res, 403, "Read-only view", "<p>Leave Person view before changing a connection.</p>");
+      return true;
+    }
     const svc = deps.registry();
     if (!svc) {
       page(

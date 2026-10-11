@@ -1,3 +1,5 @@
+import { canRestoreOrganizationRun, organizationResumeIo } from "../channels/browserHomeWiring.js";
+import { NO_GRANTS } from "./authz/types.js";
 import { describe, expect, it } from "vitest";
 import { parseDirectives, reviewHeadOf } from "../directives.js";
 import type { AgentDef } from "../agents/registry.js";
@@ -711,6 +713,77 @@ describe("launchResumes — the rehost branch (record 0060)", () => {
       expect(displays).toEqual([{ verbosity: level }]);
     },
   );
+
+  it("rehosts a completed organization admission under its original hosted owner through the guarded sink without redispatch", async () => {
+    const registry = new RunRegistry();
+    const adopts: AdoptRunRequest[] = [],
+      cards: StatusUpdate[] = [];
+    let dispatches = 0;
+    const io: ChannelIO = {
+      reply: async () => {},
+      history: async () => [],
+      authoritativePrivateHistory: async () => [],
+      status: async (update) => {
+        cards.push(update);
+        return { update: () => {}, done: async () => {} };
+      },
+    };
+    const source = {
+      originalStatus: "completed",
+      runId: "r-ship",
+      io,
+      actor: { kind: "user", id: "access:u1", grants: NO_GRANTS },
+      receipt: { revision: 1 },
+      envelope: {},
+    } as unknown as NonNullable<
+      Awaited<
+        ReturnType<
+          ReturnType<typeof import("../channels/browserHomeWiring.js").createBrowserHomeWiring>["originalBinding"]
+        >
+      >
+    >;
+    const rehost: ResumableRun = {
+      kind: "rehost",
+      row: {
+        ...hostedRow(),
+        meta: { ...hostedRow().meta, organizationIngressRunId: "r-ship", verbosity: "quiet" },
+        card: { channel: "C9", ts: "1.1" },
+      },
+      reclaimedFrom: "handoff",
+      hosting,
+      events,
+      children: [],
+    };
+    const deps = {
+      runRegistry: registry,
+      runLedger: {
+        adopt: (request: AdoptRunRequest) => {
+          adopts.push(request);
+          return { event: () => {} };
+        },
+      },
+    } as unknown as CoreDeps;
+    const result = await launchResumes(deps, canRestoreOrganizationRun(rehost, source) ? [rehost] : [], {
+      ioFor: (_row, request) => organizationResumeIo(source, request),
+      agentFor: () => undefined,
+      close: async () => {
+        throw new Error("a hosted owner must not close");
+      },
+      dispatchFn: async () => {
+        dispatches++;
+      },
+    });
+    expect(result).toEqual({ launched: ["r-ship"], closed: [] });
+    expect(adopts.map((request) => request.runId)).toEqual(["r-ship"]);
+    expect(registry.getById("r-ship")?.finished).toBe(false);
+    expect(cards).toHaveLength(1);
+    expect(dispatches).toBe(0);
+    expect(canRestoreOrganizationRun({ ...rehost, kind: "restart" } as unknown as ResumableRun, source)).toBe(false);
+    expect(canRestoreOrganizationRun({ ...rehost, row: { ...rehost.row, runId: "another-owner" } }, source)).toBe(
+      false,
+    );
+    expect(canRestoreOrganizationRun(rehost, undefined)).toBe(false);
+  });
 
   it("recreates the registry row under the run's id — the original start, the label, a fresh live token, the events replayed — adopts the ledger row with the row's state and the highest replayed seq, mirrors only this generation's publishes, dispatches nothing, and onDone fires at once", async () => {
     const registry = new RunRegistry();

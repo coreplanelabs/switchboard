@@ -1,3 +1,4 @@
+import type { Actor } from "../core/authz/types.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AccessIdentity, AccessConfig } from "./accessAuth.js";
 import { hasAction } from "../core/authz/authorize.js";
@@ -31,10 +32,14 @@ interface PersonalMcpSetupOptions {
 
 export function createPersonalMcpSetupHandler(
   deps: PersonalMcpSetupOptions,
-): (req: IncomingMessage, res: ServerResponse, identity: AccessIdentity) => boolean {
-  return (req, res, identity) => {
+): (req: IncomingMessage, res: ServerResponse, identity: AccessIdentity, viewer?: Actor) => boolean {
+  return (req, res, identity, viewer) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== PERSONAL_MCP_SETUP_PATH) return false;
+    if (viewer?.viewingAs && (req.method ?? "GET").toUpperCase() !== "GET") {
+      page(res, 403, "Read-only view", "<p>Leave Person view before changing a connection.</p>");
+      return true;
+    }
     void handle(req, res, identity, deps, url).catch(() =>
       page(
         res,

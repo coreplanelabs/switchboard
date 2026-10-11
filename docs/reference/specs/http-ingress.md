@@ -120,7 +120,7 @@ A pending or accepted receipt returns 202, throttling returns 429, and rejected 
 
 ## Native GitHub question answers
 
-The host injects current GitHub account binding and native requester proof. A human question cannot fall back to a message-body actor, email correlation or old source permissions. Missing current proof or incomplete retained ownership returns unavailable without appending. The final installation must wire this verifier before activating the new question path. This preserves the existing execution engine and original unit owner.
+The host injects current GitHub account binding and native requester proof. A human question cannot fall back to a message-body actor, email correlation or old source permissions. Missing current proof or incomplete retained ownership returns unavailable without appending. The server supplies this verifier before routing the signed webhook question path; missing configuration still holds intake. This preserves the existing execution engine and original unit owner.
 
 | Criterion | Proof |
 |---|---|
