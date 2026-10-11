@@ -105,6 +105,131 @@ function setup(authorize = async () => true, clock = () => 1) {
   return { ...options, runtime, send, tasks, effects, authentication };
 }
 describe("organization runtime", () => {
+  it("lets another source reconcile the next bounded batch while the first original model remains unfinished", async () => {
+    const s = setup();
+    const peer = { actorId: "mcp:peer", userId: "mcp:peer", channelId: "mcp:home", threadKey: "mcp:home:peer" };
+    const service = new OrganizationService({
+      store: s.store,
+      directory: s.store.directory,
+      mappings: [
+        { source: "http", issuer: "http:test", tenant: null, organization: "org:test" },
+        { source: "mcp", issuer: "mcp:test", tenant: null, organization: "org:test" },
+      ],
+      authorize: async () => true,
+      limits: {
+        pendingPerActor: 10,
+        pendingPerSource: 10,
+        pendingPerOrganization: 20,
+        reservedReconciliation: 1,
+        contentTtlMs: 90,
+        receiptTtlMs: 365,
+      },
+    });
+    expect(await s.send("alice-first")).toMatchObject({ status: "receipt", receipt: { status: "pending" } });
+    expect(await s.send("alice-next")).toMatchObject({ status: "receipt", receipt: { status: "pending" } });
+    expect(
+      await service.admit(
+        {
+          source: "mcp",
+          identity: { issuer: "mcp:test", tenant: null, subject: "peer" },
+          kind: "service",
+          organizations: ["org:test"],
+          sourceReference: peer,
+        },
+        {
+          sourceEvent: "peer-first",
+          key: "peer-first",
+          content: "Peer work",
+          workload: "message",
+          destination: { kind: "broad" },
+          target: null,
+          context: [],
+        },
+      ),
+    ).toMatchObject({ status: "receipt", receipt: { status: "pending" } });
+    let release!: () => void, firstStarted!: () => void, peerStarted!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = new Promise<void>((resolve) => {
+      firstStarted = resolve;
+    });
+    const second = new Promise<void>((resolve) => {
+      peerStarted = resolve;
+    });
+    const started: string[] = [],
+      finished: string[] = [],
+      tasks: Promise<void>[] = [];
+    const runtime = createOrganizationRuntime({
+      ...s,
+      service,
+      batchSize: 1,
+      resolveActor: async (envelope) =>
+        envelope.source === "mcp"
+          ? {
+              actor: { id: "mcp:peer", kind: "service" as const, grants: actor.grants },
+              msg: { ...peer, text: envelope.content },
+            }
+          : s.resolveActor(envelope),
+      launch: (task) => {
+        tasks.push(task());
+      },
+      dispatchOwned: async (request) => {
+        started.push(request.msg.userId);
+        if (request.envelope.source === "http") {
+          firstStarted();
+          await blocked;
+        } else peerStarted();
+        finished.push(request.msg.userId);
+        return { status: "completed" };
+      },
+    });
+    try {
+      const batch = await runtime.reconcile("org:test");
+      await first;
+      expect(batch.status).toBe("state");
+      expect((await runtime.reconcile("org:test")).status).toBe("state");
+      await second;
+      expect(started).toEqual(["http:alice", "mcp:peer"]);
+      expect(finished).toEqual(["mcp:peer"]);
+      expect(await s.store.execute({ action: "get", organization: "org:test" })).toMatchObject({
+        status: "state",
+        state: { lease: { generation: 2, expiresAt: 1 } },
+      });
+    } finally {
+      release();
+      await Promise.all(tasks);
+    }
+  });
+
+  it("cannot release a replacement process lease after a finished batch loses its generation", async () => {
+    let now = 1;
+    const s = setup(
+      async () => true,
+      () => now,
+    );
+    await s.send("first-batch");
+    await s.send("remaining-batch");
+    const execute = s.store.execute.bind(s.store);
+    s.store.execute = async (command) => {
+      const result = await execute(command);
+      if (command.action === "complete" && result.status === "busy") {
+        now = 31;
+        expect(
+          await execute({ action: "claim", organization: "org:test", owner: "replacement", leaseMs: 30 }),
+        ).toMatchObject({ status: "state", state: { lease: { generation: 2, owner: "replacement" } } });
+      }
+      return result;
+    };
+    const runtime = createOrganizationRuntime({ ...s, batchSize: 1 });
+    expect(await runtime.reconcile("org:test")).toEqual({ status: "fenced" });
+    expect(await execute({ action: "get", organization: "org:test" })).toMatchObject({
+      status: "state",
+      state: { lease: { owner: "replacement", generation: 2, expiresAt: 61 } },
+    });
+    expect(s.effects).toEqual([]);
+  });
+
   it.each(["message", "answer", "confirm"] as const)(
     "keeps %s pending across unavailable directory effect checks and executes once after fresh proof",
     async (workload) => {

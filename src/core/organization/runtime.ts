@@ -496,9 +496,15 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
         await finish({ status: "uncertain", reason: "The original owner could not be scheduled." });
       }
     }
-    return unavailableProof
-      ? options.store.execute({ action: "yield", ...lease })
-      : options.store.execute({ action: "complete", ...lease, through: claimed.state.lease.through });
+    if (unavailableProof) return options.store.execute({ action: "yield", ...lease });
+    const completed = await options.store.execute({
+      action: "complete",
+      ...lease,
+      through: claimed.state.lease.through,
+    });
+    // A bounded batch does not own the unscheduled remainder. Release only this
+    // lease generation so the next lane can proceed while original runs continue.
+    return completed.status === "busy" ? options.store.execute({ action: "yield", ...lease }) : completed;
   };
   return {
     reconcile,
