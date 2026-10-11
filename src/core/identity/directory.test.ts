@@ -241,6 +241,7 @@ describe("person directory contract", () => {
 });
 
 describe("SQLite person directory", () => {
+  // Two tsx child processes start before SQLite arbitrates; cold starts under a loaded CI runner exceed the 5 s default.
   it("arbitrates independent processes contending for one identity", async () => {
     const path = dbPath();
     const { db, directory } = database(path);
@@ -305,7 +306,7 @@ describe("SQLite person directory", () => {
       if (db.isTransaction) db.exec("ROLLBACK");
       for (const child of children) child.kill();
     }
-  });
+  }, 30_000);
 
   it("preserves binding and revocation across database reopen", async () => {
     const path = dbPath();
