@@ -28,6 +28,40 @@ describe("paging failure artifact", () => {
 });
 
 describe("Sandbox verification workflow", () => {
+  it("failed inner inspection fails the step after retaining its report", () => {
+    const workflow = parse(readFileSync(".github/workflows/verify-sandbox.yml", "utf8"));
+    const script = workflow.jobs.verify.steps.find((step: any) => step.name === "verify without uploading").run;
+    const dir = mkdtempSync(path.join(tmpdir(), "inspection-status-"));
+    try {
+      writeFileSync(path.join(dir, "npm"), `#!${process.execPath}\nconsole.log(process.env.FIXTURE_OBSERVATION);`, {
+        mode: 0o755,
+      });
+      writeFileSync(path.join(dir, "node"), `#!/bin/sh\nexec "${process.execPath}" "$@"`, { mode: 0o755 });
+      for (const [observation, status] of [
+        [{ ok: false, live: false, targetVerified: false, inventoryComplete: false }, 1],
+        [{ ok: true, live: false, targetVerified: false, inventoryComplete: true }, 0],
+        [{ live: false, targetVerified: false }, 1],
+        [{ ok: true, inventoryComplete: true, live: true, targetVerified: true }, 1],
+        [null, 1],
+      ] as const) {
+        const result = spawnSync("bash", ["-c", script], {
+          env: {
+            PATH: `${dir}:/usr/bin:/bin`,
+            RUNNER_TEMP: dir,
+            MODE: "inspect",
+            EXPECTED_COMMIT: "a".repeat(40),
+            FIXTURE_OBSERVATION: JSON.stringify(observation),
+          },
+        });
+        expect(result.status).toBe(status);
+        expect(JSON.parse(readFileSync(path.join(dir, "sandbox-observation.json"), "utf8"))).toEqual(observation);
+      }
+      const artifact = workflow.jobs.verify.steps.find((step: any) => step.name === "bounded verification receipt");
+      expect(artifact.if).toBe("always()");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it("binds verifier and Worker separately and executes only the requested inspection or verification", () => {
     const workflow = parse(readFileSync(".github/workflows/verify-sandbox.yml", "utf8"));
     const job = workflow.jobs.verify;
@@ -36,9 +70,10 @@ describe("Sandbox verification workflow", () => {
     const dir = mkdtempSync(path.join(tmpdir(), "sandbox-workflow-"));
     const calls = path.join(dir, "calls");
     try {
+      writeFileSync(path.join(dir, "node"), `#!/bin/sh\nexec "${process.execPath}" "$@"`, { mode: 0o755 });
       writeFileSync(
         path.join(dir, "npm"),
-        `#!${process.execPath}\nconst fs=require('node:fs');fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify(process.argv.slice(2))+'\\n');console.log('{}');`,
+        `#!${process.execPath}\nconst fs=require('node:fs');fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify(process.argv.slice(2))+'\\n');console.log(process.env.FIXTURE_OBSERVATION || '{"ok":true,"inventoryComplete":true,"live":false,"targetVerified":false}');`,
         { mode: 0o755 },
       );
       const env = {

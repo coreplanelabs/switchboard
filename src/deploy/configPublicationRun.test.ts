@@ -7,6 +7,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { baseConfigDocument, ConfigDocumentClient, sameConfigPublicationSnapshot } from "../configDocument.js";
 import { planDeploy, type WorkerName } from "./plan.js";
 import {
+  defaultRestartRunnerDeps,
+  defaultSandboxGateDeps,
+  pushConfigForServedConsumer,
   prepareConfigPublication,
   eligibleConfigPublicationConsumer,
   configSourceObservation,
@@ -1330,5 +1333,123 @@ describe("actual consumer config publication", () => {
         instances,
       ),
     ).toMatchObject({ ok: false });
+  });
+});
+
+describe("consumer read diagnostics", () => {
+  const target = {
+    account: "private-account",
+    dir: "deploy/cloudflare",
+    containerApp: "private-app",
+    healthUrl: "https://private.example/healthz",
+    adminUrl: "https://private.example/admin/restart",
+  };
+  const good = {
+    health: { status: 200, body: { private: "private-body" } },
+    application: { value: { version: 3, image: "private-image" } },
+    instances: { value: [] },
+  };
+  it("retains successful read predicates without changing eligible consumer identity", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "consumer-success-"));
+    const commit = "a".repeat(40);
+    const reads = {
+      health: {
+        status: 200,
+        body: {
+          ok: true,
+          draining: false,
+          loadedBase: {
+            schema: 1,
+            source: { kind: "state", key: `base-${commit}`, version: 3 },
+            sha256: "c".repeat(64),
+            process: { commit },
+          },
+        },
+      },
+      application: { value: { version: 3, image: "private-image" } },
+      instances: { value: [{ name: "singleton", state: "running", version: 3 }] },
+    };
+    vi.stubEnv("RUNNER_TEMP", dir);
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    vi.spyOn(defaultSandboxGateDeps, "readHealth").mockResolvedValue(reads.health);
+    vi.spyOn(defaultSandboxGateDeps, "readAppState").mockResolvedValue(reads.application);
+    vi.spyOn(defaultSandboxGateDeps, "readInstances").mockResolvedValue(reads.instances);
+    try {
+      const binding = await defaultRestartRunnerDeps.actualConsumer(target);
+      expect(
+        eligibleConfigPublicationConsumer({ commit }, binding.health, binding.application, binding.instances),
+      ).toMatchObject({
+        ok: true,
+        consumer: {
+          identity: { commit: "a".repeat(40) },
+          key: `base-${"a".repeat(40)}`,
+          version: 3,
+          sha256: "c".repeat(64),
+        },
+      });
+      expect(JSON.parse(readFileSync(join(dir, "config-read-diagnostic.json"), "utf8")).consumerReads).toEqual({
+        health: "available",
+        healthStatus: 200,
+        application: "available",
+        instances: "complete",
+      });
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it.each([
+    [
+      "health-error",
+      { ...good, health: { error: "private-error" } },
+      { health: "read-error", healthStatus: null, application: "available", instances: "complete" },
+    ],
+    [
+      "health-non200",
+      { ...good, health: { status: 503, body: { private: "private-body" } } },
+      { health: "non-200", healthStatus: 503, application: "available", instances: "complete" },
+    ],
+    [
+      "app-error",
+      { ...good, application: { error: "private-error" } },
+      { health: "available", healthStatus: 200, application: "read-error", instances: "complete" },
+    ],
+    [
+      "instances-error",
+      { ...good, instances: { error: "private-error" } },
+      { health: "available", healthStatus: 200, application: "available", instances: "read-error" },
+    ],
+  ])("%s retains the failed predicate and the exact not-written public outcome", async (_name, reads, expected) => {
+    const dir = mkdtempSync(join(tmpdir(), "consumer-diagnostic-"));
+    vi.stubEnv("RUNNER_TEMP", dir);
+    const log = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    vi.spyOn(defaultSandboxGateDeps, "readHealth").mockResolvedValue(reads.health as any);
+    vi.spyOn(defaultSandboxGateDeps, "readAppState").mockResolvedValue(reads.application as any);
+    vi.spyOn(defaultSandboxGateDeps, "readInstances").mockResolvedValue(reads.instances as any);
+    try {
+      const binding = await defaultRestartRunnerDeps.actualConsumer(target);
+      expect(
+        await pushConfigForServedConsumer(
+          { ok: true, text: "private-yaml", how: "fixture" },
+          { stateWorkerUrl: "https://private.example", key: "private-slot", env: {} },
+          { commit: "a".repeat(40) },
+          binding.health,
+          binding.application,
+          binding.instances,
+        ),
+      ).toEqual({
+        ok: false,
+        problem: "actual config consumer or application target is unavailable",
+        write: "not-written",
+      });
+      const text = readFileSync(join(dir, "config-read-diagnostic.json"), "utf8");
+      expect(JSON.parse(text).consumerReads).toEqual(expected);
+      expect(text + log.mock.calls.map((call) => call[0]).join("")).not.toContain("private-");
+    } finally {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

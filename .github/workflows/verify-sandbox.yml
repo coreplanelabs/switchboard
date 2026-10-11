@@ -91,6 +91,7 @@ jobs:
           set -euo pipefail
           if [ "$MODE" = inspect ]; then
             npm run --silent cli -- deploy inspect --expected-commit "$EXPECTED_COMMIT" --json | tee "$RUNNER_TEMP/sandbox-observation.json"
+            node -e 'try { const r = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (r.ok !== true || r.inventoryComplete !== true || r.live !== false || r.targetVerified !== false) process.exit(1); } catch { process.exit(1); }' "$RUNNER_TEMP/sandbox-observation.json"
           else
             args=(deploy verify --expected-commit "$EXPECTED_COMMIT" --expected-app-version "$EXPECTED_APP_VERSION" --expected-image "$EXPECTED_IMAGE" --json)
             if [ "$MODE" = inventory ]; then args+=(--inventory-only); fi
