@@ -464,6 +464,8 @@ import {
   runtimeReplacedErr,
   selfAndCauses,
   threadErrBuilders,
+  attachRefusalCode,
+  preservedWorkspaceCode,
   type ThreadErr,
 } from "./threadErr";
 import { refusalOutcome, rootStatusForOutcome } from "./rootOutcome";
@@ -2055,6 +2057,17 @@ class StepError extends Error {
     message: string,
   ) {
     super(message);
+  }
+}
+
+/** A preserved workspace refused a worktree step's replacement: the
+ *  refusal's setup word rides the step error, so the attach's answer keeps
+ *  `settlement_pending` apart from `workspace_preserved` (record 0097). */
+class PreservedWorkspaceStepError extends StepError {
+  readonly code: ThreadErr["code"];
+  constructor(refusal: ThreadErr) {
+    super("workspace-preserved", refusal.error);
+    this.code = refusal.code;
   }
 }
 
@@ -6377,12 +6390,20 @@ export class ResidentDO extends Sandbox<Env> {
     }
     try {
       if (!(await this.markPoolUserSpent(user, `thread:${binding.threadKey}`)))
-        return { error: "pool-owner-mismatch: existing binding cannot share a UID", status: 503 };
+        return {
+          error: "pool-owner-mismatch: existing binding cannot share a UID",
+          status: 503,
+          code: "owner_unverified",
+        };
     } catch {
       return { error: "pool-generation-write-failed: existing binding cannot run", status: 503 };
     }
     if (!(await this.poolUserOwnerMatches(user, `thread:${binding.threadKey}`)))
-      return { error: "pool-owner-mismatch: conflicting retained binding names this UID", status: 503 };
+      return {
+        error: "pool-owner-mismatch: conflicting retained binding names this UID",
+        status: 503,
+        code: "owner_unverified",
+      };
     return this.ensurePoolAccount(user);
   }
 
@@ -6406,7 +6427,11 @@ export class ResidentDO extends Sandbox<Env> {
     const existingUser = existing && !existing.evicted && existing.user ? existing.user : undefined;
     if (existing && existingUser) {
       if (existing.threadKey !== threadKey)
-        return { error: "pool-owner-mismatch: retained binding belongs to another thread", status: 503 };
+        return {
+          error: "pool-owner-mismatch: retained binding belongs to another thread",
+          status: 503,
+          code: "owner_unverified",
+        };
       const refusal = await this.claimRetainedThreadUser(existing);
       if (refusal) return refusal;
     }
@@ -6525,8 +6550,11 @@ export class ResidentDO extends Sandbox<Env> {
     }
     // The same steps as the resident's own `resident.attach` root (item 22).
     emitStepRoot("resident.attach", t0, trace.steps(), traceparent, "error" in res ? refusalOutcome(res) : "ok");
-    // A refusal carries the steps that led to it; a success already does.
-    return "error" in res ? { ...res, trace: trace.steps() } : res;
+    // A refusal carries the steps that led to it, and its class as a setup
+    // word where one names it (record 0097); a success carries its steps already.
+    if (!("error" in res)) return res;
+    const code = attachRefusalCode(res);
+    return { ...res, trace: trace.steps(), ...(code !== undefined ? { code } : {}) };
   }
 
   private async attachThreadTraced(
@@ -6707,12 +6735,13 @@ export class ResidentDO extends Sandbox<Env> {
    *  instance's entry gate (the cron's, within one bucket) — an attach never
    *  stops the container itself: it is in flight. */
   private async attachFailed(err: unknown): Promise<ThreadErr> {
-    if (!(err instanceof StepError)) return catchAllErr(err, "attach-failed");
+    if (!(err instanceof StepError)) return { ...catchAllErr(err, "attach-failed"), code: "attach_failed" };
     const failure = await this.classifyFailure(err.step, err.message);
-    if (!failure.diskFull) return { error: `attach-failed at ${err.step}: ${err.message}`, status: 500 };
+    if (!failure.diskFull)
+      return { error: `attach-failed at ${err.step}: ${err.message}`, status: 500, code: "attach_failed" };
     console.log(`attach: ${failure.reason}`);
     await this.setResidentState("degraded", failure.reason);
-    return { error: `attach-failed: ${failure.reason}`, status: 500 };
+    return { error: `attach-failed: ${failure.reason}`, status: 500, code: "attach_failed" };
   }
 
   private async attachThreadBody(
@@ -6782,7 +6811,11 @@ export class ResidentDO extends Sandbox<Env> {
     // allocation. Establish exact ownership first on a recycled VM.
     if (!namedRef && storedPrior && !storedPrior.evicted && storedPrior.user) {
       if (storedPrior.threadKey !== threadKey)
-        return { error: "pool-owner-mismatch: retained binding belongs to another thread", status: 503 };
+        return {
+          error: "pool-owner-mismatch: retained binding belongs to another thread",
+          status: 503,
+          code: "owner_unverified",
+        };
       const refusal = await this.claimRetainedThreadUser(storedPrior);
       if (refusal) return refusal;
       // The own-PR fallback may inspect a local branch as this pool user.
@@ -7079,7 +7112,7 @@ export class ResidentDO extends Sandbox<Env> {
     if (back === undefined) return { binding: current };
     if (!current.evicted && current.user) {
       const preserved = await this.guardWorkspaceReplacement(current);
-      if (preserved) throw new StepError("workspace-preserved", preserved.error);
+      if (preserved) throw new PreservedWorkspaceStepError(preserved);
     }
     await this.putThreadBinding(back.binding);
     console.log(
@@ -7321,7 +7354,12 @@ export class ResidentDO extends Sandbox<Env> {
         };
       }
       if (err instanceof StepError && err.step === "workspace-preserved")
-        return { error: err.message, status: 409, reason: "workspace-preserved" };
+        return {
+          error: err.message,
+          status: 409,
+          reason: "workspace-preserved",
+          ...(err instanceof PreservedWorkspaceStepError && err.code !== undefined ? { code: err.code } : {}),
+        };
       return this.attachFailed(err);
     }
 
@@ -7532,7 +7570,7 @@ export class ResidentDO extends Sandbox<Env> {
       opts.priorBinding.worktreePath === wt
     ) {
       const preserved = await this.guardWorkspaceReplacement(opts.priorBinding);
-      if (preserved) throw new StepError("workspace-preserved", preserved.error);
+      if (preserved) throw new PreservedWorkspaceStepError(preserved);
     }
 
     await this.runOk(["rm", "-rf", wt], "worktree-clean");
@@ -8292,6 +8330,7 @@ export class ResidentDO extends Sandbox<Env> {
         error: "deploy-fence: resident Worker upload is in progress",
         status: 503,
         reason: "draining",
+        code: "deploy_fence",
         cause: "system",
       };
     try {
@@ -9100,8 +9139,10 @@ export class ResidentDO extends Sandbox<Env> {
       const prior = await txn.get<RunRegistration>(runRegKey(threadKey));
       const previous = prior ?? binding?.lastRunOwner;
       if (!binding || !previous || !hasRunOwnerField(previous)) return;
-      if (binding.threadKey !== threadKey) return { error: "workspace-owner-unverified", status: 409 };
-      if (!isWorkspaceOwner(previous)) return { error: "workspace-owner-unverified", status: 409 };
+      if (binding.threadKey !== threadKey)
+        return { error: "workspace-owner-unverified", status: 409, code: "owner_unverified" };
+      if (!isWorkspaceOwner(previous))
+        return { error: "workspace-owner-unverified", status: 409, code: "owner_unverified" };
       const loss = await txn.get<{ completed?: boolean; owner?: unknown }>(`discarded:${threadKey}:${previous.runId}`);
       if (
         loss?.completed &&
@@ -9113,9 +9154,10 @@ export class ResidentDO extends Sandbox<Env> {
       if (key === workspaceOwnerKey(owner)) return;
       const pending = binding.workspacePredecessors ?? [];
       if (!Array.isArray(pending) || pending.some((p) => !isWorkspaceOwner(p?.owner)))
-        return { error: "workspace-owner-unverified", status: 409 };
+        return { error: "workspace-owner-unverified", status: 409, code: "owner_unverified" };
       if (pending.some((p) => workspaceOwnerKey(p.owner) === key)) return;
-      if (pending.length >= WORKSPACE_PREDECESSORS_MAX) return { error: "workspace-settlement-capacity", status: 409 };
+      if (pending.length >= WORKSPACE_PREDECESSORS_MAX)
+        return { error: "workspace-settlement-capacity", status: 409, code: "settlement_pending" };
       await txn.put(threadBindingKey(threadKey), {
         ...binding,
         workspacePredecessors: [
@@ -9569,7 +9611,12 @@ export class ResidentDO extends Sandbox<Env> {
     const decision = await this.workspaceRemovalDecision(binding, await this.isRuntimeActive());
     if (decision.removable) return null;
     await this.reportBlockedWorkspace({ binding, reason: decision.reason });
-    return { error: `workspace-preserved: ${decision.reason}`, status: 409, reason: "workspace-preserved" };
+    return {
+      error: `workspace-preserved: ${decision.reason}`,
+      status: 409,
+      reason: "workspace-preserved",
+      code: preservedWorkspaceCode(decision.reason),
+    };
   }
 
   /** One decision for every automatic loss path. A true legacy cache needs

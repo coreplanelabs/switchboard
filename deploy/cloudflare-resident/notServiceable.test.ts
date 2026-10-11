@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { readSource } from "./testing/sourceScan";
+import { methodOf, readSource } from "./testing/sourceScan";
 
 // Feature: docs/reference/specs/execution.md item 9 — the resident client
 // types an answer by the fields the resident puts on it, never by its words:
@@ -122,5 +122,40 @@ describe("the resident's not-serviceable answers name what the client cannot wai
     const mapping = stream.slice(0, stream.indexOf("\n}\n"));
     expect(mapping).toMatch(/"error" in result\s*\?\s*execFailureDocument\(result\)/);
     expect(mapping).toContain('(err) => execFailureDocument(threadRejectionErr(err, "/exec"))');
+  });
+});
+
+describe("an attach refusal names its class as a setup word (record 0097)", () => {
+  it("the one attach exit fills `code` from the refusal's typed fields, so every refusal the attach answers is classified in one place", () => {
+    const attach = methodOf(source, "attachThread");
+    expect(attach).not.toBeNull();
+    expect(attach).toMatch(/const code = attachRefusalCode\(res\);/);
+    expect(attach).toMatch(/\.\.\.\(code !== undefined \? \{ code \} : \{\}\)/);
+  });
+
+  it("the sites whose `reason` two classes share set the code themselves: the deploy fence, a pending settlement beside a preserved workspace, an unverified workspace owner, and a failed attach step", () => {
+    expect(source).toMatch(
+      /"deploy-fence: resident Worker upload is in progress",\s*status: 503,\s*reason: "draining",\s*code: "deploy_fence",/,
+    );
+    expect(source).toMatch(/reason: "workspace-preserved",\s*code: preservedWorkspaceCode\(decision\.reason\),/);
+    expect(
+      source.match(/error: "workspace-owner-unverified", status: 409, code: "owner_unverified"/g) ?? [],
+    ).toHaveLength(3);
+    expect(source).toMatch(/error: "workspace-settlement-capacity", status: 409, code: "settlement_pending"/);
+    // A UID held by another owner is an unverified owner too.
+    expect(
+      source.match(/error: "pool-owner-mismatch: [^"]+",\s*status: 503,\s*code: "owner_unverified"/g) ?? [],
+    ).toHaveLength(4);
+    const failed = methodOf(source, "attachFailed");
+    expect(failed).not.toBeNull();
+    expect(failed!.match(/code: "attach_failed"/g) ?? []).toHaveLength(3);
+  });
+
+  it("a preserved workspace refused inside a worktree step keeps its code through the step error, so a pending settlement is never relabeled", () => {
+    expect(source.match(/if \(preserved\) throw new PreservedWorkspaceStepError\(preserved\);/g) ?? []).toHaveLength(2);
+    expect(source).not.toMatch(/if \(preserved\) throw new StepError\("workspace-preserved"/);
+    expect(source).toMatch(
+      /reason: "workspace-preserved",\s*\.\.\.\(err instanceof PreservedWorkspaceStepError && err\.code !== undefined \? \{ code: err\.code \} : \{\}\),/,
+    );
   });
 });

@@ -20,6 +20,7 @@ import {
   DRAIN_POLL_MS,
   DRAIN_FALLBACK_WAIT_MS,
   drainWaitOf,
+  attachRefusalCodeOf,
   ResidentDrainingError,
   isDrainingRefusal,
   type ResidentExecutorOptions,
@@ -3344,5 +3345,111 @@ describe("ResidentExecutor.attach during a fleet drain (item 69)", () => {
       status: "error",
       errorKind: "transport",
     });
+  });
+});
+
+// Record 0097, "The workspace facts": a failed attach carries the resident's
+// refusal class as a setup word, read from the answer's `code` field only.
+describe("ResidentExecutor.attach carries the resident's refusal code (record 0097)", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const status = (state: string, reason = "") => ({ body: { state, reason, inFlight: 0 } });
+
+  it("a deterministic refusal carries the code the resident answered", async () => {
+    stubFetch({
+      body: {
+        error: "resident workload is full (4/4 active owners)",
+        status: 503,
+        reason: "workload-full",
+        code: "workload_full",
+      },
+    });
+    const err = await new ResidentExecutor(OPTS).attach().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(attachRefusalCodeOf(err)).toBe("workload_full");
+  });
+
+  it("an absent or unknown code is fallback_other, never a guess from the sentence or the reason", async () => {
+    for (const body of [
+      { error: "resident workload is full (4/4 active owners)", status: 503, reason: "workload-full" },
+      { error: "attach-failed at clone: exit 128", status: 500, code: "a_word_from_a_newer_worker" },
+    ]) {
+      stubFetch({ body });
+      const err = await new ResidentExecutor(OPTS).attach().catch((e: unknown) => e);
+      expect(attachRefusalCodeOf(err)).toBe("fallback_other");
+    }
+    expect(attachRefusalCodeOf(new Error("fetch failed"))).toBe("fallback_other");
+    expect(attachRefusalCodeOf(undefined)).toBe("fallback_other");
+  });
+
+  it("a definitive re-attach refusal names its own class, never the transient refusal that began the wait", async () => {
+    const recreating = {
+      status: 503,
+      body: {
+        error: "recreate-in-progress: new resident work is paused during the operator's checked VM recycle",
+        status: 503,
+        reason: "recreate-in-progress",
+        code: "recreate_in_progress",
+        transient: true,
+      },
+    };
+    for (const [refusal, expected] of [
+      [{ error: "mirror busy", status: 503, reason: "mirror-busy" }, "fallback_other"],
+      [{ error: "mirror busy", status: 503, reason: "mirror-busy", code: "not_resident" }, "fallback_other"],
+      [
+        { error: "resident workload is full", status: 503, reason: "workload-full", code: "workload_full" },
+        "workload_full",
+      ],
+    ] as const) {
+      stubFetch(recreating, status("warm"), { status: 503, body: refusal });
+      const p = new ResidentExecutor(OPTS).attach(undefined, { budgetMs: 60_000 }).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(attachRefusalCodeOf(await p), JSON.stringify(refusal)).toBe(expected);
+    }
+  });
+
+  it("a drained fleet that never reopens within the wait is fleet_draining", async () => {
+    const draining = {
+      status: 503,
+      body: {
+        error: "draining: the resident fleet is closed to new runs",
+        status: 503,
+        draining: {
+          since: new Date(0).toISOString(),
+          until: new Date(3_600_000).toISOString(),
+          by: "deploy",
+          reason: "deploy",
+        },
+      },
+    };
+    const polls = DRAIN_FALLBACK_WAIT_MS / DRAIN_POLL_MS;
+    stubFetch(...Array.from({ length: polls + 2 }, () => draining));
+    const p = new ResidentExecutor(OPTS)
+      .attach(undefined, { drainBoundMs: DRAIN_FALLBACK_WAIT_MS })
+      .catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(DRAIN_FALLBACK_WAIT_MS + 1_000);
+    const err = await p;
+    expect(err).toBeInstanceOf(ResidentDrainingError);
+    expect(attachRefusalCodeOf(err)).toBe("fleet_draining");
+  });
+
+  it("a transient refusal whose wait never clears carries the code of the refusal that began it", async () => {
+    const recreating = {
+      status: 503,
+      body: {
+        error: "recreate-in-progress: new resident work is paused during the operator's checked VM recycle",
+        status: 503,
+        reason: "recreate-in-progress",
+        code: "recreate_in_progress",
+        transient: true,
+      },
+    };
+    stubFetch(recreating, ...Array.from({ length: 40 }, () => status("restoring", "rehydrating")));
+    const p = new ResidentExecutor(OPTS).attach(undefined, { budgetMs: 5_000 }).catch((e: unknown) => e);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const err = await p;
+    expect(err).toBeInstanceOf(Error);
+    expect(attachRefusalCodeOf(err)).toBe("recreate_in_progress");
   });
 });
