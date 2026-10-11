@@ -12,5 +12,19 @@ export interface IdentitySeed {
   page: "identities";
   view: LinkConsentView | null;
   canWrite: boolean;
+  canAcknowledge?: boolean;
+  accounts?: {
+    identity: import("../core/identity/contract.js").ExternalIdentity;
+    state: "active" | "revoked" | "unknown";
+    revision: number;
+  }[];
+  pendingNotices?: number;
+  notices?: {
+    id: string;
+    outcome: import("../core/identity/linkContract.js").LinkAudit["outcome"];
+    operation?: import("../core/identity/linkContract.js").IdentityOperation;
+    at: number;
+    csrf: string;
+  }[];
   unavailable?: string;
 }

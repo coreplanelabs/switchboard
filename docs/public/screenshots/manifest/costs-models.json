@@ -76,7 +76,7 @@
     "src/channels/pageFavicon.ts": "d89605850fbd135e1d729807be7375b6e66dbd6becae9d329001a40b040adeb0",
     "src/channels/residentsModel.ts": "9993779d45c0f938ab1dbb4e63031b08a3f729fb5f7d6c31916a7e58cdfe0d58",
     "src/channels/webAssets.ts": "bd5beadae745814691fbb54e16b9346180d6d419da2531f48a0ac1948d8a176e",
-    "src/channels/webSeed.ts": "520e0f68b443152b6af43c9ed1f70b3a5fb8aed18c4d36713cf79a4474f1c92e",
+    "src/channels/webSeed.ts": "21a3e09ef7728be7d7103c8881c07c717e7141393a2cf7ecde60c369c15c4f5f",
     "src/channels/webShell.ts": "0223816a56ba4bb07d22e44157056890d58fb84b2dbe78c83cbb335b2b09b393",
     "src/channels/workViewScope.ts": "0b9843deb0349263777b553de9f3b1810fbc2c46ed090985660bc1bb9b26d891",
     "src/config.ts": "209b960fb2b8f1a95d3de8026038d3737c78b94ad7e72d9059869f1b2328505a",
