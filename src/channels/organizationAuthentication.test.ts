@@ -106,6 +106,61 @@ function setup() {
   };
 }
 describe("current organization authentication", () => {
+  it("keeps metadata phase credential and native address proofs separate and rebuilds current policy", async () => {
+    const s = setup();
+    const first = digestBearer("first-personal-device"),
+      second = digestBearer("second-personal-device");
+    for (const digest of [first, second])
+      await s.tokens.put({
+        digest,
+        subject: "personal:alice",
+        userId: "access:alice",
+        email: "display@example.test",
+        createdAt: 1,
+        approval: { version: 1, issuer: accessIdentity.issuer, audience: "access-app", organization, subject: "alice" },
+      });
+    s.lookup.set("access:alice", ALL_GRANTS);
+    const native = await s.resolver.resolveNative(
+      { ...s.msg("access:alice"), authenticatedAs: "mcp:personal:alice" },
+      {
+        source: "mcp",
+        identity: { subject: "personal:alice" },
+        credentialDigest: first,
+      },
+    );
+    if (native.status !== "resolved") throw new Error("No native credential");
+    const input = {
+      organization,
+      source: "mcp" as const,
+      sourceReference: native.authentication.sourceReference!,
+      actor: {
+        identity: native.authentication.identity,
+        kind: "service" as const,
+        principal: "mcp:personal:alice",
+        stream: null,
+        bindingRevision: 0,
+        onBehalfOf: null,
+      },
+      action: "read" as const,
+      destination: { kind: "broad" as const },
+      target: null,
+      context: [],
+    };
+    const phase = s.resolver.metadataPhase();
+    expect((await phase.resolveAuthorization(input)).status).toBe("resolved");
+    await s.tokens.delete(second, "personal:alice");
+    expect(
+      await phase.resolveAuthorization({
+        ...input,
+        sourceReference: { ...input.sourceReference, credentialDigest: second },
+      }),
+    ).toEqual({ status: "fenced" });
+    s.lookup.set("mcp:personal:alice", NO_GRANTS);
+    expect(await phase.resolveAuthorization(input)).toEqual({ status: "fenced" });
+    s.lookup.set("mcp:personal:alice", grants);
+    await s.tokens.delete(first, "personal:alice");
+    expect(await s.resolver.metadataPhase().resolveAuthorization(input)).toEqual({ status: "fenced" });
+  });
   it("uses an active pinned personal delegation after browser proof expires and fences changed realms and revoked rights", async () => {
     const s = setup();
     const digest = digestBearer("pinned-device");

@@ -1,3 +1,6 @@
+import { mapLimit } from "../core/mapLimit.js";
+import { HOME_PRIVATE_READ_CONCURRENCY } from "../core/budgets.js";
+import type { HomePrivateReadGroup } from "../core/home/service.js";
 import { authorize } from "../core/authz/authorize.js";
 import { matchesPredicate, predicateFor } from "../core/authz/predicate.js";
 import { mainTaskClaimMatches } from "../core/coordinator/contract.js";
@@ -12,7 +15,10 @@ import type { UnitEventKey, CoordinatorInstanceStore } from "../core/coordinator
 import type { RunLedger } from "../core/runLedger/ledger.js";
 import type { OrganizationStore } from "../core/organization/contract.js";
 import type { OrganizationService } from "../core/organization/service.js";
-import type { createOrganizationAuthentication } from "./organizationAuthentication.js";
+import type {
+  OrganizationMetadataAuthentication,
+  createOrganizationAuthentication,
+} from "./organizationAuthentication.js";
 
 export interface OriginalUnitRecipient {
   actor: Actor;
@@ -29,7 +35,8 @@ export interface OriginalUnitRecipientOptions {
   store: OrganizationStore;
   organization: Pick<OrganizationService, "resolve">;
   coordinator: Pick<CoordinatorInstanceStore, "get" | "listUnits" | "getMainTask">;
-  authentication: Pick<ReturnType<typeof createOrganizationAuthentication>, "resolveEnvelope">;
+  authentication: Pick<ReturnType<typeof createOrganizationAuthentication>, "resolveEnvelope"> &
+    Partial<Pick<ReturnType<typeof createOrganizationAuthentication>, "metadataPhase">>;
   now(): number;
 }
 /** Read-only proof for an existing unit's ownership metadata.
@@ -196,5 +203,78 @@ export function createOriginalUnitRecipient(options: OriginalUnitRecipientOption
       return;
     }
   }
-  return { read };
+  return {
+    read,
+    /** Disposable metadata phase. Canonical rows come from this page's read;
+     * emission must use a new phase seeded from fresh canonical rows. */
+    metadataPhase(groups: readonly HomePrivateReadGroup[], authentication?: OrganizationMetadataAuthentication) {
+      function memo<A extends unknown[], R>(key: (...args: A) => string, run: (...args: A) => Promise<R>) {
+        const reads = new Map<string, Promise<R>>();
+        return (...args: A): Promise<R> => {
+          const id = key(...args);
+          let result = reads.get(id);
+          if (!result) {
+            result = run(...args);
+            reads.set(id, result);
+          }
+          return result;
+        };
+      }
+      const canonical = new Map(groups.map((group) => [group.instance.id, group]));
+      const claims = new Map<
+        string,
+        {
+          key: Parameters<OriginalUnitRecipientOptions["coordinator"]["getMainTask"]>[0];
+          value: ReturnType<OriginalUnitRecipientOptions["coordinator"]["getMainTask"]>;
+        }
+      >();
+      const phase = createOriginalUnitRecipient({
+        ...options,
+        coordinator: {
+          get: async (id) => canonical.get(id)?.instance ?? null,
+          listUnits: async (id) => [...(canonical.get(id)?.units ?? [])],
+          getMainTask: (key) => {
+            const id = JSON.stringify(key);
+            let claim = claims.get(id);
+            if (!claim) {
+              claim = { key, value: options.coordinator.getMainTask(key) };
+              claims.set(id, claim);
+            }
+            return claim.value;
+          },
+        },
+        ledger: {
+          readIngressByRun: memo(
+            (id) => id,
+            (id) => options.ledger.readIngressByRun(id),
+          ),
+        },
+        organization: {
+          resolve: memo(
+            (auth) => JSON.stringify(auth),
+            (auth) => options.organization.resolve(auth),
+          ),
+        },
+        store: {
+          execute: memo(
+            (command) => JSON.stringify(command),
+            (command) => options.store.execute(command),
+          ),
+        },
+        authentication: authentication ?? options.authentication.metadataPhase?.() ?? options.authentication,
+      });
+      return {
+        read: phase.read,
+        async canEmit() {
+          const current = await mapLimit(
+            [...claims.values()],
+            HOME_PRIVATE_READ_CONCURRENCY,
+            async ({ key, value }) =>
+              JSON.stringify(await value) === JSON.stringify(await options.coordinator.getMainTask(key)),
+          );
+          return current.every(Boolean);
+        },
+      };
+    },
+  };
 }

@@ -45,6 +45,75 @@ const request = (url: string, method = "GET") =>
   ({ url, method, headers: { accept: "application/json" } }) as IncomingMessage;
 
 describe("authorized Home pages", () => {
+  it("selects only serialized unresolved private rows for the final request guard", async () => {
+    const instance = {
+      id: "owned",
+      kind: "ship" as const,
+      userId: "access:alice",
+      channelId: "web:alice",
+      threadKey: "web:alice:1",
+      repo: "sample/api",
+      branch: "work",
+      createdAt: 1,
+    };
+    const units = Array.from({ length: 1000 }, (_, index) => ({
+      instanceId: instance.id,
+      unit: `task-${index}`,
+      slug: "task",
+      branch: "work",
+      dependsOn: [],
+      rounds: [],
+      title: `Private task ${index}`,
+      workBrief: {
+        requesterId: instance.userId,
+        mainThreadKey: instance.threadKey,
+        actId: `act-${index}`,
+        repo: instance.repo,
+        base: "main",
+        question: "Private source",
+        findings: [],
+        requestedChange: "Fix it",
+      },
+      ...(index ? { ending: { kind: "merged", report: "Private report", at: 1 } } : {}),
+    }));
+    const service = createHomeService({
+      organizationId: "installation-a",
+      instances: {
+        listInstances: async () => ({ items: [instance] }),
+        listUnits: async () => units,
+      },
+    });
+    let selected: readonly string[] = [];
+    const read = createHomeViewHandler(
+      service,
+      makePageSender({ js: "/assets/green.js", css: [] }, ALL_CAPABILITIES),
+      "installation-a",
+      {
+        privateRead: () => ({
+          begin: async () => true,
+          readMany: async (groups) =>
+            new Map(
+              groups.flatMap(({ instance, units }) =>
+                units.map((unit) => [`${instance.id}:${unit.unit}`, true] as const),
+              ),
+            ),
+          include: (keys) => {
+            selected = keys;
+          },
+          canEmit: async () => true,
+        }),
+      },
+    );
+    const output = response();
+    read(request("/home"), output.res, { actor: viewer, organization: "installation-a" });
+    await output.ended;
+    expect(output.value().status).toBe(200);
+    expect(
+      JSON.parse(output.value().body).snapshot.waiting.map((row: { unit: { title: string } }) => row.unit.title),
+    ).toEqual(["Private task 0"]);
+    expect(selected).toEqual(["owned:task-0"]);
+    expect(output.value().body).not.toContain("Private task 999");
+  });
   it("schedules merge observation only after sending the current Home response", async () => {
     const service = createHomeService({
       organizationId: "installation-a",

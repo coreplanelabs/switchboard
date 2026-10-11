@@ -1,3 +1,5 @@
+import { mapLimit } from "../core/mapLimit.js";
+import { HOME_PRIVATE_READ_CONCURRENCY } from "../core/budgets.js";
 import { createHash } from "node:crypto";
 import { authorize } from "../core/authz/authorize.js";
 import type { createOrganizationAuthentication } from "./organizationAuthentication.js";
@@ -53,7 +55,7 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
         snapshotRevision ??= catalogue.revision;
         accessRevision ??= catalogue.accessRevision;
         if (catalogue.revision !== snapshotRevision || catalogue.accessRevision !== accessRevision) return;
-        for (const source of catalogue.entries) {
+        const decisions = await mapLimit(catalogue.entries, HOME_PRIVATE_READ_CONCURRENCY, async (source) => {
           const decision = source.allowed
             ? await options.authentication.evaluateSourceIdentity(
                 source.actor.identity,
@@ -61,6 +63,9 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
                 source.actor.onBehalfOf,
               )
             : { status: "denied" as const };
+          return { source, decision };
+        });
+        for (const { source, decision } of decisions) {
           if (decision.status === "unavailable") return;
           observations.set(source.authority, decision.status === "allowed" ? decision.policyFingerprint : null);
         }

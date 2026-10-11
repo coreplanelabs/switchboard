@@ -1,3 +1,5 @@
+import { mapLimit } from "../mapLimit.js";
+import { HOME_PRIVATE_READ_CONCURRENCY } from "../budgets.js";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import type { Predicate } from "../authz/types.js";
 import { matchesPredicate } from "../authz/predicate.js";
@@ -106,6 +108,10 @@ export interface HomeHistory {
   week?: HomeWeek;
   now?: number;
 }
+export interface HomePrivateReadGroup {
+  instance: CoordinatorInstance;
+  units: readonly CoordinatorUnit[];
+}
 export interface HomeReader {
   actorId: string;
   visibleTo: Predicate;
@@ -116,6 +122,8 @@ export interface HomeReader {
   scopeKey?: string;
   /** The authenticated host rechecks this exact private source and recipient. */
   readPrivateUnit?(instance: CoordinatorInstance, unit: CoordinatorUnit): Promise<boolean>;
+  /** Metadata only: canonical groups read by this page, with full unit keys. */
+  readPrivateUnits?(groups: readonly HomePrivateReadGroup[]): Promise<ReadonlyMap<string, boolean>>;
 }
 export interface HomeServiceDeps {
   /** Fixed by the installation wiring; no browser-selected tenant enters here. */
@@ -219,6 +227,27 @@ export function createHomeService(deps: HomeServiceDeps): {
     }
   }
 
+  async function privateReader(input: HomeReader, groups: readonly HomePrivateReadGroup[]): Promise<HomeReader> {
+    if (!input.readPrivateUnits) return input;
+    try {
+      const reads = await input.readPrivateUnits(groups);
+      return {
+        ...input,
+        readPrivateUnit: async (instance, unit) => {
+          const key = `${instance.id}:${unit.unit}`;
+          if (!reads.has(key)) throw new Error("Current private metadata proof is unavailable.");
+          return reads.get(key)!;
+        },
+      };
+    } catch {
+      return {
+        ...input,
+        readPrivateUnit: async () => {
+          throw new Error("Current private metadata proof is unavailable.");
+        },
+      };
+    }
+  }
   async function project(instance: CoordinatorInstance, unit: CoordinatorUnit, input: HomeReader) {
     let privateRead = false,
       privateAvailable = true;
@@ -313,28 +342,29 @@ export function createHomeService(deps: HomeServiceDeps): {
         fail();
         break;
       }
-      for (const instance of page.items) {
+      const candidates = page.items.filter((instance) => {
         if (seenInstances.has(instance.id)) {
           fail();
-          continue;
+          return false;
         }
         seenInstances.add(instance.id);
-        if (
-          !matchesPredicate(input.readableTo ?? input.visibleTo, {
-            userId: instance.userId,
-            channelId: instance.channelId,
-            repo: instance.repo,
-            channelVisibility: "unknown",
-          })
-        )
-          continue;
-        let units: CoordinatorUnit[];
+        return matchesPredicate(input.readableTo ?? input.visibleTo, {
+          userId: instance.userId,
+          channelId: instance.channelId,
+          repo: instance.repo,
+          channelVisibility: "unknown",
+        });
+      });
+      const groups = await mapLimit(candidates, HOME_PRIVATE_READ_CONCURRENCY, async (instance) => {
         try {
-          units = await deps.instances.listUnits(instance.id);
+          return { instance, units: await deps.instances.listUnits(instance.id) };
         } catch {
           fail();
-          continue;
+          return { instance, units: [] };
         }
+      });
+      const pending: { instance: CoordinatorInstance; unit: CoordinatorUnit }[] = [];
+      for (const { instance, units } of groups) {
         for (const unit of units) {
           if (rowsRead >= maxUnits) {
             fail();
@@ -351,11 +381,26 @@ export function createHomeService(deps: HomeServiceDeps): {
             continue;
           }
           seenUnits.add(facts.unit);
-          const projected = await project(instance, unit, input);
-          if (!projected.conditionsComplete) fail();
-          if (!inSelectedWork(input, instance, projected.row.conditions)) continue;
-          (projected.terminal ? ended : unresolved).push(projected.row);
+          pending.push({ instance, unit });
         }
+      }
+      // Only selected bounded rows need private proof, but the canonical group
+      // keeps duplicate unit detection and original ownership intact.
+      const bounded = new Set(pending.filter(({ unit }) => !!unit.workBrief).map(({ unit }) => unitFactsOf(unit).unit));
+      const reader = await privateReader(
+        input,
+        groups
+          .map((group) => ({ ...group, units: group.units.filter((unit) => bounded.has(unitFactsOf(unit).unit)) }))
+          .filter((group) => group.units.length),
+      );
+      const projected = await mapLimit(pending, HOME_PRIVATE_READ_CONCURRENCY, async ({ instance, unit }) => ({
+        instance,
+        value: await project(instance, unit, reader),
+      }));
+      for (const { instance, value } of projected) {
+        if (!value.conditionsComplete) fail();
+        if (!inSelectedWork(input, instance, value.row.conditions)) continue;
+        (value.terminal ? ended : unresolved).push(value.row);
       }
       if (rowsRead >= maxUnits && page.cursor !== undefined) {
         fail();
@@ -422,6 +467,7 @@ export function createHomeService(deps: HomeServiceDeps): {
       } catch {
         return { status: "unavailable" };
       }
+      input = await privateReader(input, [{ instance, units: units.slice(0, maxUnits) }]);
       let status: "complete" | "partial" = "complete";
       let live: ReadonlySet<string> = new Set();
       if (deps.liveUnitKeys) {
@@ -662,24 +708,32 @@ export function createHomeService(deps: HomeServiceDeps): {
             return finish(position(), true);
           }
           units.sort((a, b) => (a.unit < b.unit ? -1 : a.unit > b.unit ? 1 : 0));
-          for (const unit of units) {
-            if (afterUnit !== undefined && unit.unit <= afterUnit) continue;
+          units = units.filter((unit) => afterUnit === undefined || unit.unit > afterUnit);
+          for (let offset = 0; offset < units.length;) {
             if (scanned >= maxUnits) return finish(position(), true);
-            scanned++;
-            if (unit.instanceId !== instance.id) {
+            // A terminal lookahead is needed to retain the first unreturned row
+            // in the cursor. Do not prove the skipped prefix or later rows that
+            // this page cannot scan, even when the retained pipeline is large.
+            const batch = units.slice(offset, offset + Math.min(maxUnits - scanned, limit - result.units.length + 1));
+            const reader = await privateReader(input, [{ instance, units: batch }]);
+            for (const unit of batch) {
+              scanned++;
+              if (unit.instanceId !== instance.id) {
+                afterUnit = unit.unit;
+                result.status = "partial";
+                continue;
+              }
+              const projected = await project(instance, unit, reader);
+              if (!projected.conditionsComplete) result.status = "partial";
+              if (projected.terminal && result.units.length >= limit) {
+                const next = position();
+                if (!next) result.status = "partial";
+                return finish(next);
+              }
               afterUnit = unit.unit;
-              result.status = "partial";
-              continue;
+              if (projected.terminal) result.units.push(projected.row);
             }
-            const projected = await project(instance, unit, input);
-            if (!projected.conditionsComplete) result.status = "partial";
-            if (projected.terminal && result.units.length >= limit) {
-              const next = position();
-              if (!next) result.status = "partial";
-              return finish(next);
-            }
-            afterUnit = unit.unit;
-            if (projected.terminal) result.units.push(projected.row);
+            offset += batch.length;
           }
           afterUnit = undefined;
         }
