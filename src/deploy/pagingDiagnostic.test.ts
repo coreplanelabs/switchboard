@@ -14,6 +14,85 @@ const page = (next: unknown = null) => ({
 const event = { app, pageIndex: 2, requestedCursor: "private-cursor", cumulativeCount: 2 };
 
 describe("bounded paging evidence", () => {
+  it("consumer failure details stay closed and bounded after a paging failure", () => {
+    const directory = mkdtempSync(join(tmpdir(), "consumer-facts-"));
+    const file = join(directory, "capture.json"),
+      logs: string[] = [];
+    const capture = createPagingObserver({
+      log: (line) => logs.push(line),
+      source,
+      expectedCommit: source,
+      env,
+      artifactFile: file,
+    });
+    try {
+      for (let pageIndex = 1; pageIndex <= 100; pageIndex++) {
+        capture.observe({ ...event, pageIndex, phase: "before" });
+        capture.observe({ ...event, pageIndex, phase: "after", page: page("private-cursor") });
+      }
+      capture.observe({ ...event, phase: "failure", reason: "repeated-cursor" });
+      capture.recordConsumerReads({
+        health: { status: 200 },
+        application: {
+          error: "private-error",
+          diagnostic: {
+            stage: "private-stage",
+            reason: "private-reason",
+            commandExit: "private-exit",
+            httpStatus: 700,
+            errorClass: "private-class",
+            responseFormat: "private-format",
+            providerCodes: [10000, "private-code", -1, 10000, ...Array.from({ length: 100 }, (_, n) => n)],
+            body: "private-body",
+          },
+        },
+        instances: {
+          error: "private-error",
+          diagnostic: {
+            stage: "instances",
+            reason: "command-error",
+            commandExit: 1,
+            httpStatus: 403,
+            errorClass: "api-error",
+            responseFormat: "json",
+            providerCodes: [10000],
+          },
+        },
+      });
+      const text = readFileSync(file, "utf8"),
+        saved = JSON.parse(text);
+      expect(saved.originalError).toBe("repeated-cursor");
+      expect(saved.consumerFailures).toEqual({
+        application: {
+          stage: "unknown",
+          reason: "unknown",
+          commandExit: null,
+          httpStatus: null,
+          errorClass: "unknown",
+          responseFormat: "unknown",
+          providerCodes: [10000, 0, 1, 2, 3, 4, 5, 6],
+        },
+        instances: {
+          stage: "instances",
+          reason: "command-error",
+          commandExit: 1,
+          httpStatus: 403,
+          errorClass: "api-error",
+          responseFormat: "json",
+          providerCodes: [10000],
+        },
+      });
+      expect(JSON.parse(logs.at(-1)!.replace("[paging-diagnostic] ", "")).failures).toEqual(saved.consumerFailures);
+      expect(Buffer.byteLength(logs.join("\n")) + 1).toBeLessThanOrEqual(16384);
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(16384);
+      expect(text + logs.join("\n")).not.toContain("private-");
+      capture.recordConsumerReads({ health: null, application: null, instances: null });
+      expect(readFileSync(file, "utf8")).toBe(text);
+    } finally {
+      capture.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
   it("consumer predicates stay structural, preserve interruption and cannot overwrite the first read", () => {
     const directory = mkdtempSync(join(tmpdir(), "consumer-predicates-"));
     const file = join(directory, "capture.json");

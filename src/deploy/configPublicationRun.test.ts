@@ -35,6 +35,8 @@ const processes = vi.hoisted(() => ({
   memoryCode: 0,
   botCode: 1,
   botOutput: undefined as string | undefined,
+  wrangler: undefined as
+    ((args: string[], env: Record<string, string>) => { output: string; code: number }) | undefined,
 }));
 vi.mock("./operatorRoot.js", async (original) => ({
   ...(await original<typeof import("./operatorRoot.js")>()),
@@ -50,7 +52,9 @@ vi.mock("node:child_process", () => ({
     queueMicrotask(() => {
       let output = "";
       let code = 0;
-      if (cmd === "git") output = "a".repeat(40);
+      if (cmd === "npx" && args[0] === "wrangler" && processes.wrangler) {
+        ({ output, code } = processes.wrangler(args, opts.env));
+      } else if (cmd === "git") output = "a".repeat(40);
       else if (args.includes("whoami")) output = TEST_PROFILE.account;
       else if (cmd === "npm" && args.includes("ci")) {
         processes.calls.push("install");
@@ -176,6 +180,7 @@ afterEach(() => {
   processes.memoryCode = 0;
   processes.botCode = 1;
   processes.botOutput = undefined;
+  processes.wrangler = undefined;
   processes.onBot = () => {};
   processes.onInstall = () => {};
 });
@@ -1349,6 +1354,134 @@ describe("consumer read diagnostics", () => {
     application: { value: { version: 3, image: "private-image" } },
     instances: { value: [] },
   };
+  it.each([
+    [
+      "list",
+      1,
+      JSON.stringify({
+        error:
+          'There has been an unknown error listing containers.\n{"errors":[{"code":10000,"message":"private-secret"}]}',
+      }),
+      403,
+      "command-error",
+      "api-error",
+      "json",
+      [10000],
+    ],
+    [
+      "list",
+      1,
+      JSON.stringify({
+        error: 'There has been an unknown error listing containers.\n"<!DOCTYPE html><html>private-secret</html>"',
+      }),
+      403,
+      "command-error",
+      "api-error",
+      "html",
+      [],
+    ],
+    ["list", 0, "private-invalid-json", undefined, "invalid-json", "unknown", "unknown", []],
+    ["list", 1, "", 403, "command-error", "unknown", "unknown", []],
+    [
+      "list",
+      1,
+      JSON.stringify({ error: "There has been an internal error listing containers.\nprivate-exception" }),
+      undefined,
+      "command-error",
+      "producer-internal",
+      "unknown",
+      [],
+    ],
+    ["list", 0, '{"private-shape":true}', 200, "application-list-shape", "unknown", "unknown", []],
+    ["list", 0, "[]", 200, "application-not-found", "unknown", "unknown", []],
+    ["info", 0, '{"version":"private-invalid-version"}', 200, "application-shape", "unknown", "unknown", []],
+    [
+      "instances",
+      1,
+      JSON.stringify({
+        error:
+          'There has been an unknown error fetching instances.\n{"errors":[{"code":10000,"message":"private-secret"}]}',
+      }),
+      403,
+      "command-error",
+      "api-error",
+      "json",
+      [10000],
+    ],
+  ] as const)(
+    "retains %s failure evidence (%s) before the not-written refusal",
+    async (command, code, output, status, reason, errorClass, responseFormat, codes) => {
+      const dir = mkdtempSync(join(tmpdir(), "consumer-command-"));
+      vi.stubEnv("RUNNER_TEMP", dir);
+      const logs = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      vi.spyOn(defaultSandboxGateDeps, "readHealth").mockResolvedValue({ status: 200, body: { ok: true } });
+      const producerLogs: string[] = [];
+      processes.wrangler = (args, env) => {
+        if (env.WRANGLER_LOG_PATH) producerLogs.push(env.WRANGLER_LOG_PATH);
+        const selected = args[2] === command;
+        if (selected && env.WRANGLER_LOG_PATH && status !== undefined) {
+          const suffix = command === "list" ? "" : command === "info" ? "/private-id" : "/private-id/instances";
+          writeFileSync(
+            env.WRANGLER_LOG_PATH,
+            `-- START CF API REQUEST: https://api.cloudflare.com/client/v4/accounts/private-account/containers/dash/applications${suffix}\nAuthorization: Bearer private-secret\n-- START CF API RESPONSE: Status ${status}\nRESPONSE: private-body`,
+          );
+        }
+        return selected
+          ? { output, code }
+          : {
+              output:
+                args[2] === "list"
+                  ? '[{"id":"private-id","name":"private-app"}]'
+                  : args[2] === "info"
+                    ? '{"version":3,"configuration":{"image":"private-image"}}'
+                    : '{"instances":[],"result_info":{}}',
+              code: 0,
+            };
+      };
+      try {
+        const binding = await defaultRestartRunnerDeps.actualConsumer(target);
+        expect(
+          await pushConfigForServedConsumer(
+            { ok: true, text: "private-yaml", how: "fixture" },
+            { stateWorkerUrl: "https://private.example", key: "private-slot", env: {} },
+            { commit: "a".repeat(40) },
+            binding.health,
+            binding.application,
+            binding.instances,
+          ),
+        ).toEqual({
+          ok: false,
+          problem: "actual config consumer or application target is unavailable",
+          write: "not-written",
+        });
+        const text = readFileSync(join(dir, "config-read-diagnostic.json"), "utf8");
+        const saved = JSON.parse(text);
+        const expected = {
+          stage: command === "list" ? "application-list" : command === "info" ? "application-info" : "instances",
+          reason,
+          commandExit: code,
+          httpStatus: status ?? null,
+          errorClass,
+          responseFormat,
+          providerCodes: codes,
+        };
+        expect(saved.consumerFailures[command === "instances" ? "instances" : "application"]).toEqual(expected);
+        if (command === "list") {
+          expect(saved.consumerFailures.instances).toEqual(expected);
+          expect(saved.frames).toEqual([]);
+        }
+        expect(saved.consumerReads).toMatchObject({ health: "available", healthStatus: 200 });
+        expect(Buffer.byteLength(text)).toBeLessThanOrEqual(16384);
+        expect(text + logs.mock.calls.map((c) => c[0]).join("\n")).not.toContain("private-");
+        expect(new Set(producerLogs).size).toBe(producerLogs.length);
+        for (const file of producerLogs) expect(() => readFileSync(file)).toThrow();
+      } finally {
+        vi.restoreAllMocks();
+        vi.unstubAllEnvs();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
   it("retains successful read predicates without changing eligible consumer identity", async () => {
     const dir = mkdtempSync(join(tmpdir(), "consumer-success-"));
     const commit = "a".repeat(40);
