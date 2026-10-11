@@ -1,5 +1,8 @@
 import { computed, inject, ref, shallowReactive, watch, type InjectionKey } from "vue";
 import type { OrganizationEnvelope } from "@core/core/organization/contract.js";
+import { ORG_RECEIPT_TTL_MS, ORG_RECONCILE_BATCH_MAX } from "@core/core/budgets.js";
+import { browser } from "../../src/lib/browser";
+import { wallNow } from "../../src/lib/wallClock";
 import { stripSlash } from "../../src/lib/slashCompleter";
 import { EVENT_SOURCE_CLOSED, type EventSourceFactory, type EventSourceLike } from "../../src/lib/eventSource";
 
@@ -12,6 +15,7 @@ import type {
   HomePrimaryAction,
 } from "@core/channels/homeSeed.js";
 export type AttachedContext = OrganizationEnvelope["context"][number] & { label: string };
+type EarlierRequest = { key: string; expiresAt: number; message?: string; checking?: boolean };
 export type HomeSessionStatus = "loading" | "ready" | "unavailable";
 function isPrimaryAction(value: unknown): value is HomePrimaryAction {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -90,6 +94,7 @@ export function isHomeSession(value: unknown): value is HomeSession {
         [s.history.previousUrl, s.history.latestUrl].every(
           (url) => url === undefined || (typeof url === "string" && /^\/home\/session(?:\?[^#]*)?$/.test(url)),
         ))) &&
+    (s.receiptRetentionMs === undefined || (Number.isSafeInteger(s.receiptRetentionMs) && s.receiptRetentionMs > 0)) &&
     typeof s.sendUrl === "string" &&
     s.sendUrl.startsWith("/home/") &&
     typeof s.eventsUrl === "string" &&
@@ -122,6 +127,101 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
   const historyLoading = ref(false);
   const removing = ref<string | null>(null);
   const notice = ref("");
+  const earlierRequests = ref<EarlierRequest[]>([]);
+  const earlierPersistent = ref(true);
+  let volatileEarlier: { scope: string; items: EarlierRequest[] } | null = null;
+  const earlierStorage = (s: HomeSession) => `switchboard:earlier:${JSON.stringify([s.organization, s.actor])}`;
+  function readEarlier(s: HomeSession): EarlierRequest[] {
+    const raw = browser.readPref(earlierStorage(s));
+    if (!raw)
+      return volatileEarlier?.scope === earlierStorage(s)
+        ? volatileEarlier.items.filter((item) => item.expiresAt > wallNow())
+        : [];
+    if (raw.length > ORG_RECONCILE_BATCH_MAX * 4096) return [];
+    try {
+      const value: unknown = JSON.parse(raw);
+      if (!Array.isArray(value) || value.length > ORG_RECONCILE_BATCH_MAX) return [];
+      return value.filter(
+        (item): item is EarlierRequest =>
+          !!item &&
+          typeof item === "object" &&
+          Object.keys(item).every((key) => key === "key" || key === "expiresAt") &&
+          typeof item.key === "string" &&
+          item.key.length > 0 &&
+          item.key.length <= 2048 &&
+          Number.isSafeInteger(item.expiresAt) &&
+          item.expiresAt > wallNow(),
+      );
+    } catch {
+      return [];
+    }
+  }
+  function writeEarlier(s: HomeSession, items: EarlierRequest[]) {
+    const stored = items.map(({ key, expiresAt }) => ({ key, expiresAt }));
+    const raw = JSON.stringify(stored);
+    volatileEarlier = { scope: earlierStorage(s), items: stored };
+    browser.writePref(earlierStorage(s), raw);
+    earlierPersistent.value = browser.readPref(earlierStorage(s)) === raw;
+    if (session.value?.organization === s.organization && session.value.actor === s.actor)
+      earlierRequests.value = items;
+  }
+  function rememberEarlier(s: HomeSession, key: string) {
+    const items = readEarlier(s);
+    if (items.some((item) => item.key === key)) return true;
+    if (items.length >= ORG_RECONCILE_BATCH_MAX || key.length > 2048) return false;
+    writeEarlier(s, [
+      ...items,
+      { key, expiresAt: Math.min(Number.MAX_SAFE_INTEGER, wallNow() + (s.receiptRetentionMs ?? ORG_RECEIPT_TTL_MS)) },
+    ]);
+    return true;
+  }
+  function forgetEarlierRequest(key: string) {
+    const current = session.value;
+    if (current)
+      writeEarlier(
+        current,
+        readEarlier(current).filter((item) => item.key !== key),
+      );
+  }
+  async function checkEarlierRequest(key: string) {
+    const current = session.value;
+    const item = earlierRequests.value.find((item) => item.key === key);
+    if (!current || !item || item.checking || status.value !== "ready") return;
+    const scope = privacyKey(current);
+    item.checking = true;
+    try {
+      const response = await fetchFn(`/home/submissions/${encodeURIComponent(key)}`, {
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      const result = (await response.json()) as {
+        status?: string;
+        admission?: string;
+        dispatch?: string;
+        nativeEffect?: string;
+      };
+      if (!session.value || privacyKey(session.value) !== scope || status.value !== "ready") return;
+      const target = earlierRequests.value.find((row) => row.key === key);
+      if (!target) return;
+      target.message =
+        !response.ok || result.status !== "known"
+          ? "The original request status is unknown. No action was retried."
+          : result.admission === "accepted"
+            ? result.dispatch === "handler_returned"
+              ? "The original request was accepted. Its processing step returned; action and work results are not confirmed here."
+              : "The original request was accepted. Its processing result is not confirmed here."
+            : result.admission === "pending"
+              ? "The original request was recorded. Processing is pending. No action was retried."
+              : ["rejected", "stale", "throttled"].includes(result.admission ?? "")
+                ? "The original request was refused. No action was retried."
+                : "The original request status is unknown. No action was retried.";
+    } catch {
+      if (session.value && privacyKey(session.value) === scope)
+        item.message = "The original request status is unknown. No action was retried.";
+    } finally {
+      item.checking = false;
+    }
+  }
   const offer = ref<HomeConfirmationOffer | null>(null);
   const inlineAnswer = ref<(HomeAnswerTarget & { unit: string; title: string }) | null>(null);
   const focused = computed(() => session.value?.destination.kind === "thread");
@@ -197,6 +297,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
     activePrivacy = privacyKey(next);
     restoringDraft = true;
     session.value = next;
+    earlierRequests.value = readEarlier(next);
     const draft = drafts.get(destinationKey(next));
     observedRevision.value = draft?.revision ?? null;
     text.value = draft?.text ?? "";
@@ -221,6 +322,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
     source?.close();
     source = null;
     session.value = null;
+    earlierRequests.value = [];
     broad = null;
     drafts.clear();
     text.value = "";
@@ -623,6 +725,10 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
       return;
     }
     try {
+      if (!rememberEarlier(s, retry.key)) {
+        notice.value = "Earlier request tracking is full. Check or forget a saved request identifier before sending.";
+        return;
+      }
       // An uncertain attempt still owns its key; a different intent needs a fresh one.
       attempted.add(retry.key);
       const response = await fetchFn(s.sendUrl, {
@@ -642,6 +748,11 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
       const incomingOffer = response.ok && isOffer(receipt.offer) ? receipt.offer : null;
       const accepted =
         response.ok && (["accepted", "pending"].includes(receipt.status ?? "") || incomingOffer !== null);
+      if (response.ok && ["pending", "accepted"].includes(receipt.status ?? ""))
+        writeEarlier(
+          s,
+          readEarlier(s).filter((item) => item.key !== retry.key),
+        );
       if (accepted && ownPrivacy === activePrivacy && retries.get(draftKey)?.key === retry.key) {
         const stored = drafts.get(draftKey);
         const matchesContext = (refs: AttachedContext[]) =>
@@ -716,6 +827,10 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
     removing,
     draftStale,
     notice,
+    earlierRequests,
+    earlierPersistent,
+    checkEarlierRequest,
+    forgetEarlierRequest,
     offer,
     pendingChoice,
     pendingSubmission,

@@ -105,6 +105,9 @@ export class OrganizationService {
       >;
     },
   ) {}
+  get receiptRetentionMs(): number {
+    return this.options.limits.receiptTtlMs;
+  }
   async resolve(
     authentication: OrganizationAuthentication,
     requireProof = false,
@@ -226,6 +229,47 @@ export class OrganizationService {
     // Identity-link changes never alter this retry scope or the historical actor.
     envelope.digest = await payloadDigest(parsed.data);
     return this.options.store.execute({ action: "admit", envelope, limits: this.options.limits });
+  }
+  /** Browser receipt lookup for its exact credential identity, never person aliases or a replay. */
+  async receiptStatus(authentication: OrganizationAuthentication, key: string): Promise<OrganizationResult> {
+    if (authentication.source !== "browser" || authentication.kind !== "human" || authentication.onBehalfOf)
+      return { status: "not_found" };
+    if (!envelopeSchema.shape.key.safeParse(key).success) return { status: "invalid" };
+    const resolved = await this.resolve(authentication, true);
+    const canRead = (value: ResolvedOrganization) =>
+      this.options.authorize({
+        ...value,
+        ...sourceFacts(authentication),
+        destination: { kind: "broad" },
+        target: null,
+        context: [],
+        action: "read",
+      });
+    if (!resolved || !(await canRead(resolved))) return { status: "not_found" };
+    const original = await this.options.store.execute({
+      action: "submission",
+      ...resolved,
+      source: authentication.source,
+      key,
+    });
+    if (original.status !== "submission") return original;
+    if (
+      original.receipt.organization !== resolved.organization ||
+      original.receipt.source !== authentication.source ||
+      identityKey(original.receipt.actor.identity) !== identityKey(authentication.identity) ||
+      original.receipt.actor.kind !== authentication.kind ||
+      JSON.stringify(original.receipt.actor.onBehalfOf) !== JSON.stringify(authentication.onBehalfOf ?? null)
+    )
+      return { status: "not_found" };
+    const fresh = await this.resolve(authentication, true);
+    if (
+      !fresh ||
+      fresh.organization !== resolved.organization ||
+      fresh.actor.principal !== resolved.actor.principal ||
+      !(await canRead(fresh))
+    )
+      return { status: "not_found" };
+    return { status: "receipt", receipt: original.receipt, duplicate: true };
   }
   /** Replay is a read of the original disposition, not a new question admission. */
   async replay(

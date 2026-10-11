@@ -32,6 +32,51 @@ function session(thread: string | null): HomeSession {
   };
 }
 describe("Conversation dock scroll", () => {
+  it("checks an earlier uncertain choice after a real reload without restoring its offer or sending it again", async () => {
+    localStorage.clear();
+    const stream = fakeEventSourceFactory(),
+      calls: Array<{ url: string; method?: string }> = [];
+    const offer = { id: "saved:old", line: "private obsolete proposal", question: "Private question" };
+    let first = true;
+    const fetcher = (async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method });
+      if (init?.method === "POST") throw new Error("lost action acknowledgment");
+      if (url.includes("/submissions/"))
+        return new Response(
+          JSON.stringify({ status: "known", admission: "accepted", dispatch: "uncertain", nativeEffect: "unknown" }),
+        );
+      return new Response(JSON.stringify({ ...session(null), ...(first ? { offer } : {}) }));
+    }) as typeof fetch;
+    const original = createHomeSession(fetcher, stream.factory);
+    await original.load();
+    const page = mountApp(ConversationDock, { provides: [[HomeSessionKey, original]] });
+    await page
+      .findAll("button")
+      .find((button) => button.text() === "Confirm")!
+      .trigger("click");
+    await flushPromises();
+    stream.created.at(-1)!.emitNamed("revoked");
+    await flushPromises();
+    expect(page.text()).not.toContain("private obsolete proposal");
+    page.unmount();
+    original.dispose();
+    first = false;
+    const restored = createHomeSession(fetcher, stream.factory);
+    await restored.load();
+    const loaded = mountApp(ConversationDock, { provides: [[HomeSessionKey, restored]] });
+    await loaded
+      .findAll("button")
+      .find((button) => button.text() === "Check earlier request")!
+      .trigger("click");
+    await flushPromises();
+    expect(loaded.text()).toContain("The original request was accepted. Its processing result is not confirmed here.");
+    expect(loaded.text()).not.toContain("private obsolete proposal");
+    expect(calls.filter((call) => call.method === "POST")).toEqual([{ url: "/home/send", method: "POST" }]);
+    expect(calls.at(-1)?.url).toBe("/home/submissions/issued%3Afirst");
+    restored.dispose();
+    localStorage.clear();
+  });
+
   it("attaches the viewed pipeline and recorded pull request without changing the reply destination", async () => {
     const stream = fakeEventSourceFactory();
     const home = createHomeSession(

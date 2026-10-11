@@ -1,5 +1,5 @@
 // Feature: docs/reference/specs/browser-home.md — one authorized destination and retry identity.
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HomeSession } from "@core/channels/homeSeed.js";
 import { createHomeSession, isHomeSession } from "./homeSession";
 import { fakeEventSourceFactory } from "../../src/testing/fakeEventSource";
@@ -709,5 +709,118 @@ describe("Home conversation destination", () => {
     expect(home.notice.value).toBe("Conversation is unavailable with your current access.");
     expect(home.session.value).toBe(null);
     home.dispose();
+  });
+});
+
+describe("Opaque earlier request recovery", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    localStorage.clear();
+  });
+  it("bounds opaque tracking before sending and expires identifiers without claiming no effect", async () => {
+    localStorage.clear();
+    vi.useFakeTimers();
+    vi.setSystemTime(1000);
+    const namespace = 'switchboard:earlier:["org:a","access:alice"]';
+    localStorage.setItem(
+      namespace,
+      JSON.stringify(Array.from({ length: 100 }, (_, n) => ({ key: `old-${n}`, expiresAt: 2000 }))),
+    );
+    const { home, fetcher } = harness([json(session()), json({ status: "accepted" })]);
+    await home.load();
+    home.text.value = "New private request";
+    await home.submit();
+    expect(home.notice.value).toBe(
+      "Earlier request tracking is full. Check or forget a saved request identifier before sending.",
+    );
+    home.forgetEarlierRequest("old-0");
+    await home.submit();
+    expect(fetcher.mock.calls.map(([url, init]) => ({ url, method: init?.method }))).toEqual([
+      { url: "/home/session", method: undefined },
+      { url: "/home/send", method: "POST" },
+    ]);
+    expect(body(fetcher, 1)).toEqual({
+      key: "issued:one",
+      revision: 4,
+      destination: { kind: "broad" },
+      text: "New private request",
+      context: [],
+    });
+    home.dispose();
+    vi.setSystemTime(2001);
+    const expired = createHomeSession((async () => json(session())) as typeof fetch, fakeEventSourceFactory().factory);
+    await expired.load();
+    expect(expired.session.value?.destination.label).toBe("Your messages to Switchboard");
+    expect(expired.earlierRequests.value).toEqual([]);
+    expired.dispose();
+    localStorage.clear();
+    vi.useRealTimers();
+  });
+
+  it("keeps missing and unavailable status unknown without dropping the original key or retrying", async () => {
+    localStorage.clear();
+    const { home, stream, fetcher } = harness([
+      json(session()),
+      new Error("lost acknowledgment"),
+      json(session()),
+      json({ status: "unknown" }, 404),
+      json({ status: "unavailable" }, 503),
+    ]);
+    await home.load();
+    home.text.value = "unconfirmed private input";
+    await home.submit();
+    stream.created.at(-1)!.emitNamed("revoked");
+    await home.load();
+    for (let n = 0; n < 2; n++) {
+      await home.checkEarlierRequest("issued:one");
+      expect(home.earlierRequests.value.map((item) => [item.key, item.message])).toEqual([
+        ["issued:one", "The original request status is unknown. No action was retried."],
+      ]);
+    }
+    expect(fetcher.mock.calls.filter((call) => call[1]?.method === "POST")).toHaveLength(1);
+    home.dispose();
+    localStorage.clear();
+  });
+
+  it("restores only the original opaque key after revocation and reload and checks status without replay", async () => {
+    localStorage.clear();
+    const offer = { id: "saved:private", line: "private old offer", question: "private old question" };
+    const stream = fakeEventSourceFactory();
+    const calls: Array<{ url: string; method?: string }> = [];
+    const fetcher = (async (url: string, init?: RequestInit) => {
+      calls.push({ url, method: init?.method });
+      if (init?.method === "POST") throw new Error("lost acknowledgment");
+      if (url.startsWith("/home/submissions/"))
+        return json({ status: "known", admission: "accepted", dispatch: "handler_returned", nativeEffect: "unknown" });
+      return json(session({ offer }));
+    }) as typeof fetch;
+    const first = createHomeSession(fetcher, stream.factory);
+    await first.load();
+    await first.submitConfirmation({ kind: "confirm", id: offer.id });
+    stream.created.at(-1)!.emitNamed("revoked");
+    expect(first.offer.value).toBe(null);
+    first.dispose();
+    const saved = JSON.stringify(Object.entries(localStorage));
+    expect(saved).toContain("issued:one");
+    expect(saved).not.toContain("private old");
+    expect(saved).not.toContain("saved:private");
+    const restored = createHomeSession(fetcher, stream.factory);
+    await restored.load();
+    expect(restored.earlierRequests.value.map((item) => item.key)).toEqual(["issued:one"]);
+    await restored.checkEarlierRequest("issued:one");
+    expect(restored.earlierRequests.value[0]?.message).toBe(
+      "The original request was accepted. Its processing step returned; action and work results are not confirmed here.",
+    );
+    expect(calls.filter((call) => call.method === "POST")).toEqual([{ url: "/home/send", method: "POST" }]);
+    expect(calls.at(-1)).toEqual({ url: "/home/submissions/issued%3Aone", method: undefined });
+    restored.dispose();
+    const foreign = createHomeSession(
+      (async () => json(session({ actor: "access:bob" }))) as typeof fetch,
+      stream.factory,
+    );
+    await foreign.load();
+    expect(foreign.earlierRequests.value).toEqual([]);
+    foreign.dispose();
+    localStorage.clear();
   });
 });

@@ -35,7 +35,7 @@ export interface HomeHostOptions {
   directory: PersonDirectory;
   authentication: ReturnType<typeof createOrganizationAuthentication>;
   runtime: ReturnType<typeof createOrganizationRuntime>;
-  ledger?: Pick<RunLedger, "readIngressByRun">;
+  ledger?: Pick<RunLedger, "readIngressByRun"> & Partial<Pick<RunLedger, "readIngress">>;
   confirmations?: ConfirmationStore;
   now(): number;
   /** Current configuration and native membership facts; content changes do not enter this epoch. */
@@ -404,6 +404,7 @@ export function createHomeHost(options: HomeHostOptions) {
   const handler = createHomeRuntimeHandler({
     organization: options.organization,
     directory: options.directory,
+    ...(options.ledger?.readIngress ? { readIngress: options.ledger.readIngress.bind(options.ledger) } : {}),
     now: options.now,
     refresh,
     currentEpoch,

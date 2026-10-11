@@ -77,6 +77,37 @@ async function sendBrowser(service: OrganizationService, authentication = browse
 }
 
 describe("organization authenticated service", () => {
+  it("reads only the exact current source's original receipt without replaying or returning its private body", async () => {
+    let allowed = true;
+    const { store, service } = setup(async () => allowed);
+    const admitted = await sendBrowser(service, browser, { ...input(), content: "private request never recovered" });
+    if (admitted.status !== "receipt") throw new Error("admission missing");
+    const key = admitted.receipt.key;
+    expect(await service.receiptStatus(browser, key)).toMatchObject({
+      status: "receipt",
+      duplicate: true,
+      receipt: { id: admitted.receipt.id, status: "pending" },
+    });
+    const bob = { ...browser, identity: { ...identity, subject: "bob" } };
+    await bind(store, [identity, bob.identity]);
+    expect(await service.receiptStatus(bob, key)).toEqual({ status: "not_found" });
+    expect(
+      await service.receiptStatus({ ...browser, identity: { ...identity, issuer: "foreign:issuer" } }, key),
+    ).toEqual({ status: "not_found" });
+    expect(JSON.stringify(await service.receiptStatus(browser, key))).not.toContain("private request never recovered");
+    allowed = false;
+    expect(await service.receiptStatus(browser, key)).toEqual({ status: "not_found" });
+  });
+  it("holds receipt status when current source authorization changes during the read", async () => {
+    let reading = false,
+      calls = 0;
+    const { service } = setup(async () => !reading || ++calls === 1);
+    const admitted = await sendBrowser(service);
+    if (admitted.status !== "receipt") throw new Error("admission missing");
+    reading = true;
+    expect(await service.receiptStatus(browser, admitted.receipt.key)).toEqual({ status: "not_found" });
+  });
+
   it("projects only protected source authors and discards supplied read author stamps", async () => {
     const { service, store } = setup();
     const slack = { issuer: "https://slack.com", tenant: "workspace", subject: "UBOB" };

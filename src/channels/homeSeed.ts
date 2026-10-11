@@ -38,6 +38,8 @@ export interface HomeConversationEntry {
   deleteUrl?: string;
 }
 export interface HomeSession {
+  /** Existing server receipt retention; bounds opaque client request tracking only. */
+  receiptRetentionMs?: number;
   version: 1;
   organization: string;
   actor: string;
