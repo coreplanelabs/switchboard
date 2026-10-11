@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.295.1](https://github.com/coreplanelabs/switchboard/compare/v1.295.0...v1.295.1) (2026-10-11)
+
+
+### Bug fixes
+
+* **deploy:** reject incomplete instance inventory pages ([#2933](https://github.com/coreplanelabs/switchboard/issues/2933)) ([b6ceb3f](https://github.com/coreplanelabs/switchboard/commit/b6ceb3ff5e09859470d9b79efb1f47b4fe9e979e))
+* **mcp:** approve saved actions in the browser ([#2931](https://github.com/coreplanelabs/switchboard/issues/2931)) ([4e3d1c0](https://github.com/coreplanelabs/switchboard/commit/4e3d1c049b8538550d35bd3535a35447201a3857))
+
 ## [1.295.0](https://github.com/coreplanelabs/switchboard/compare/v1.294.0...v1.295.0) (2026-10-11)
 
 
