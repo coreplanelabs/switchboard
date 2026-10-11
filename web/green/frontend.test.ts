@@ -56,6 +56,100 @@ const thread: HomeSeed = {
 };
 
 describe("Green browser frontend", () => {
+  it("keeps the marked review preview page and its JSON twin identical", async () => {
+    const preview = createGreenPreview({
+      now: 1000,
+      thread,
+      unit: {
+        unit: "pipeline:U13",
+        instanceId: "pipeline",
+        id: "U13",
+        title: "Preview unit",
+        branch: "codex/u13",
+        threads: { coding: "slack:C1:1" },
+        sourceUrls: {},
+        rounds: [],
+        instance: { id: "pipeline", repo: "sample/api", createdAt: 1 },
+        runs: [],
+      },
+    });
+    const usage = preview.page(new URL("/metrics", "http://preview.test"));
+    const health = preview.page(new URL("/metrics/health", "http://preview.test"));
+    if (usage?.seed.page !== "reviewsMetrics" || health?.seed.page !== "reviewsMetrics")
+      throw new Error("review fixture missing");
+    let status = 0,
+      payload = "";
+    const address = new URL("/metrics.json?from=1969-12-26&to=1970-01-01", "http://preview.test");
+    const handled = await preview.handle(
+      { method: "GET", url: address.pathname + address.search } as IncomingMessage,
+      {
+        writeHead(code: number) {
+          status = code;
+        },
+        end(body: string) {
+          payload = body;
+        },
+      } as unknown as ServerResponse,
+      address,
+    );
+    expect(handled).toBe(true);
+    expect(status).toBe(200);
+    const report = JSON.parse(payload);
+    expect(report.usage.runs).toBe(21);
+    expect(report.dataset).toBe("fixture_reviews");
+    expect(report).toEqual(usage.seed.report);
+    expect(report).toEqual(health.seed.report);
+    expect(report.tiles).toBeUndefined();
+  });
+  it("ends only snapshot preview event reads after their real initial session frame", async () => {
+    const preview = createGreenPreview({
+      now: 1000,
+      thread,
+      unit: {
+        unit: "pipeline:U13",
+        instanceId: "pipeline",
+        id: "U13",
+        title: "Preview unit",
+        branch: "codex/u13",
+        threads: { coding: "slack:C1:1" },
+        sourceUrls: {},
+        rounds: [],
+        instance: { id: "pipeline", repo: "sample/api", createdAt: 1 },
+        runs: [],
+      },
+    });
+    for (const snapshot of [true, false]) {
+      let ended = false,
+        frame = "",
+        close: (() => void) | undefined;
+      const response = {
+        writeHead() {},
+        write(value: string) {
+          frame += value;
+        },
+        end() {
+          ended = true;
+        },
+        on(event: string, callback: () => void) {
+          if (event === "close") close = callback;
+        },
+      } as unknown as ServerResponse;
+      await preview.handle(
+        { method: "GET", headers: snapshot ? { "x-switchboard-preview-snapshot": "1" } : {} } as IncomingMessage,
+        response,
+        new URL("/home/events", "http://preview.test"),
+      );
+      try {
+        expect(ended).toBe(snapshot);
+        const payload = JSON.parse(frame.slice("data: ".length).trim());
+        expect(payload.actor).toBe("access:preview");
+        expect(payload.entries[0].content).toBe("What needs my attention?");
+        expect(payload.destination.kind).toBe("broad");
+      } finally {
+        close?.();
+      }
+    }
+  });
   it.each([false, true])(
     "keeps marked preview Home work visible with its real fixture session loaded before mount: %s",
     async (loaded) => {
