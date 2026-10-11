@@ -1,8 +1,15 @@
 <script setup lang="ts">
 defineOptions({ name: "GreenHomePage" });
-import { computed, inject } from "vue";
+import { computed, inject, onBeforeUnmount, ref, watch } from "vue";
+import type { HomeSnapshot } from "@core/core/home/service.js";
 import type { HomeUnit } from "@core/core/home/service.js";
-import type { HomeFleetSeed } from "@core/channels/homeSeed.js";
+import type {
+  HomeFleetSeed,
+  HomeMergeAction,
+  HomeConfirmationOffer,
+  HomeConfirmationChoice,
+} from "@core/channels/homeSeed.js";
+import MergeAction from "../components/MergeAction.vue";
 import { SeedKey } from "../../src/lib/seed";
 import PageHeading from "../components/PageHeading.vue";
 import { useHomeSession } from "../lib/homeSession";
@@ -22,17 +29,168 @@ const historyHref = (() => {
 })();
 const home = useHomeSession();
 const viewingAs = useViewingAs();
+const refreshed = ref<HomeSnapshot | null>(null);
+const refreshNotice = ref("");
+type SavedAction = {
+  action: HomeMergeAction;
+  offer: HomeConfirmationOffer;
+  pending: HomeConfirmationChoice;
+  label: string;
+};
+const savedActions = ref<Record<string, SavedAction>>({});
+let active = true,
+  refreshGeneration = 0;
+const privacy = () => {
+  const session = home?.session.value;
+  return session
+    ? JSON.stringify([
+        session.actor,
+        session.organization,
+        session.stream,
+        session.bindingRevision,
+        session.accessEpoch,
+      ])
+    : null;
+};
+const sourceGeneration = ref(0);
+const actionScope = computed(() =>
+  JSON.stringify([
+    globalSeed?.asUser?.id,
+    globalSeed?.dataView?.mode,
+    globalSeed?.viewingAs?.id,
+    sourceGeneration.value,
+    home?.scopeChanging.value,
+  ]),
+);
+const workInvalidated = ref(false);
+function hideWork() {
+  workInvalidated.value = true;
+  savedActions.value = {};
+  const previous = refreshed.value ?? seed?.snapshot;
+  if (previous)
+    refreshed.value = { ...previous, status: "unavailable", needsYou: [], moving: [], waiting: [], pipelines: [] };
+}
+watch(actionScope, () => {
+  refreshGeneration++;
+  hideWork();
+  refreshNotice.value = "Work access changed. This page's data is hidden.";
+});
+let hasSession = false;
+watch(
+  privacy,
+  (next, previous) => {
+    const session = home?.session.value;
+    if (
+      session &&
+      (session.actor !== globalSeed?.asUser?.id || session.organization !== seed?.snapshot.organizationId)
+    ) {
+      sourceGeneration.value++;
+      hideWork();
+      refreshNotice.value = "Work access changed. This page's data is hidden.";
+      return;
+    }
+    // The first matching frame initializes this page's source scope. It cannot
+    // authorize work from a page served to a different account or organization.
+    if (previous === undefined || (!hasSession && next !== null && !home?.scopeChanging.value)) {
+      hasSession = !!session;
+      return;
+    }
+    sourceGeneration.value++;
+  },
+  { immediate: true },
+);
+function saveAction(
+  unit: string,
+  saved: { offer: HomeConfirmationOffer; pending: HomeConfirmationChoice },
+  scope: string | null | undefined,
+) {
+  const action = seed?.actions?.[unit];
+  if (
+    workInvalidated.value ||
+    !active ||
+    !action ||
+    scope !== actionScope.value ||
+    viewingAs ||
+    home?.scopeChanging.value
+  )
+    return;
+  savedActions.value = {
+    ...savedActions.value,
+    [unit]: {
+      ...saved,
+      action,
+      label:
+        savedActions.value[unit]?.label ??
+        snapshot.value?.needsYou.find((row) => row.unit.unit === unit)?.unit.title ??
+        unit,
+    },
+  };
+}
+function settleAction(unit: string) {
+  const next = { ...savedActions.value };
+  delete next[unit];
+  savedActions.value = next;
+}
+const savedOutsideList = computed(() =>
+  Object.entries(savedActions.value).filter(([key]) => !snapshot.value?.needsYou.some((row) => row.unit.unit === key)),
+);
+onBeforeUnmount(() => {
+  active = false;
+  refreshGeneration++;
+});
+async function refreshWork(unit: string) {
+  if (workInvalidated.value || viewingAs || globalSeed?.dataView?.mode === "person" || home?.scopeChanging.value)
+    return;
+  const request = ++refreshGeneration,
+    scope = actionScope.value;
+  const current = () =>
+    active && request === refreshGeneration && !home?.scopeChanging.value && actionScope.value === scope;
+  try {
+    const response = await fetch(`/home/snapshot?observe=${encodeURIComponent(unit)}`, {
+      credentials: "same-origin",
+      headers: { accept: "application/json" },
+    });
+    if (!current()) return;
+    if (response.status === 403 || response.status === 404) {
+      hideWork();
+      refreshNotice.value = "Work access changed. This page's data is hidden.";
+      return;
+    }
+    const value = await response.json();
+    if (!current()) return;
+    if (
+      !response.ok ||
+      value.organizationId !== seed?.snapshot.organizationId ||
+      !["complete", "partial"].includes(value.status) ||
+      !Array.isArray(value.needsYou) ||
+      !Array.isArray(value.moving) ||
+      !Array.isArray(value.waiting) ||
+      !Array.isArray(value.pipelines)
+    ) {
+      refreshNotice.value = "Merge recorded. Completion could not be verified.";
+      return;
+    }
+    refreshed.value = value;
+    refreshNotice.value =
+      value.observation === "observed"
+        ? "Completed work updated."
+        : "Merge recorded. Completion has not been verified.";
+  } catch {
+    if (current()) refreshNotice.value = "Merge recorded. Completion could not be verified.";
+  }
+}
 const savedReplyOutsideList = computed(
   () =>
+    !workInvalidated.value &&
     home?.inlineAnswer.value &&
     (home.pendingSubmission.value || !!home.notice.value) &&
     !viewingAs &&
     (!globalSeed?.dataView || globalSeed.dataView.mode !== "person") &&
-    ![...(seed?.snapshot?.needsYou ?? []), ...(seed?.snapshot?.moving ?? []), ...(seed?.snapshot?.waiting ?? [])].some(
+    ![...(snapshot.value?.needsYou ?? []), ...(snapshot.value?.moving ?? []), ...(snapshot.value?.waiting ?? [])].some(
       (row) => row.unit.unit === home.inlineAnswer.value?.unit,
     ),
 );
-const snapshot = computed(() => seed?.snapshot ?? null);
+const snapshot = computed(() => refreshed.value ?? seed?.snapshot ?? null);
 const count = computed(() =>
   snapshot.value ? snapshot.value.needsYou.length + snapshot.value.moving.length + snapshot.value.waiting.length : 0,
 );
@@ -61,6 +219,21 @@ const replyThread = (row: HomeUnit) => seed?.answers?.[row.unit.unit]?.thread ??
       ><UIcon name="i-lucide-search" />Find a thread</RouterLink
     ></PageHeading
   >
+  <p v-if="refreshNotice" class="green-notice" role="status">{{ refreshNotice }}</p>
+  <section v-if="savedOutsideList.length" class="green-section" aria-label="Saved actions with unknown results">
+    <h2>Saved actions with unknown results</h2>
+    <div v-for="[unit, saved] in savedOutsideList" :key="unit" class="mt-3">
+      <RouterLink :to="`/runs/unit/${encodeURIComponent(unit)}`">{{ saved.label }}</RouterLink>
+      <MergeAction
+        :action="saved.action"
+        :scope="actionScope"
+        :saved="saved"
+        @merged="refreshWork(unit)"
+        @settled="settleAction(unit)"
+        @unknown="(value, scope) => saveAction(unit, value, scope)"
+      />
+    </div>
+  </section>
   <template v-if="snapshot">
     <p v-if="snapshot.status === 'partial'" class="green-notice green-warning" role="status">
       Some work could not be loaded. These rows do not prove that all work is accounted for.
@@ -76,10 +249,15 @@ const replyThread = (row: HomeUnit) => seed?.answers?.[row.unit.unit]?.thread ??
         :rows="snapshot.needsYou"
         :answers="seed?.answers"
         :actions="seed?.actions"
+        :action-scope="actionScope"
+        :saved-actions="savedActions"
         label="Needs you"
         urgent
         :attention-recipient="seed?.attentionRecipient"
-        :attention-recipients="seed?.attentionRecipients" /><UnitList
+        :attention-recipients="seed?.attentionRecipients"
+        @merged="refreshWork"
+        @settled="settleAction"
+        @unknown="saveAction" /><UnitList
         :rows="snapshot.moving"
         label="Moving"
         :attention-recipient="seed?.attentionRecipient"

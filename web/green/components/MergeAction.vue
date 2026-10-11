@@ -1,18 +1,38 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
 import type { HomeMergeAction, HomeConfirmationChoice, HomeConfirmationOffer } from "@core/channels/homeSeed.js";
 import ConfirmationPrompt from "./ConfirmationPrompt.vue";
-const props = defineProps<{ action: HomeMergeAction }>();
+type SavedChoice = { offer: HomeConfirmationOffer; pending: HomeConfirmationChoice };
+const props = defineProps<{ action: HomeMergeAction; scope?: string | null; saved?: SavedChoice }>();
+const emit = defineEmits<{
+  merged: [];
+  settled: [];
+  unknown: [saved: SavedChoice, scope: string | null | undefined];
+}>();
 const busy = ref(false);
-const offer = ref<HomeConfirmationOffer | null>(null);
-const pending = ref<HomeConfirmationChoice | null>(null);
+const offer = ref<HomeConfirmationOffer | null>(props.saved?.offer ?? null);
+const pending = ref<HomeConfirmationChoice | null>(props.saved?.pending ?? null);
 const message = ref("");
 const finished = ref(false);
+let active = true;
+onBeforeUnmount(() => {
+  active = false;
+});
+watch(
+  () => props.scope,
+  () => {
+    offer.value = null;
+    pending.value = null;
+    message.value = "";
+    finished.value = false;
+  },
+);
 async function send(choice?: HomeConfirmationChoice) {
   if (busy.value || finished.value || (pending.value && !choice)) return;
   busy.value = true;
   message.value = "";
   if (choice) pending.value = { ...choice };
+  const scope = props.scope;
   try {
     const response = await fetch("/api/pulls.merge", {
       method: "POST",
@@ -23,6 +43,7 @@ async function send(choice?: HomeConfirmationChoice) {
       ),
     });
     const value = await response.json();
+    if (!active || scope !== props.scope) return;
     if (
       response.status === 409 &&
       value.error === "confirmation_required" &&
@@ -40,17 +61,22 @@ async function send(choice?: HomeConfirmationChoice) {
           : choice?.kind === "cancel"
             ? "Cancelled; nothing ran."
             : "The merge command returned. Open the pull request for its current state.";
+      if (value.kind === "merged") emit("merged");
+      emit("settled");
     } else {
       message.value = typeof value.message === "string" ? value.message : "The merge was refused.";
       // A consumed saved id can follow a lost acknowledgement. Never turn it
       // into a fresh merge request; retain its exact choice for inspection.
     }
   } catch {
+    if (!active || scope !== props.scope) return;
     message.value = choice
       ? "The result is unknown. Check the same saved action."
       : "The command response is unavailable. Open the pull request before trying again.";
   } finally {
     busy.value = false;
+    if (active && scope === props.scope && offer.value && pending.value)
+      emit("unknown", { offer: { ...offer.value }, pending: { ...pending.value } }, scope);
   }
 }
 </script>
