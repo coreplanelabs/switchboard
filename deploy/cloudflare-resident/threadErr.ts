@@ -15,6 +15,8 @@ import { isRuntimeBusyError, RUNTIME_BUSY_REASON } from "../../src/execution/san
 import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
 import type { ResidentStep } from "../../src/execution/residentStepTrace.js";
 import type { RefusalCause } from "../../src/core/refusal.js";
+import type { ResidentRefusalCode } from "../../src/core/runSetup.js";
+import { MEMORY_PRESSURE_REASON } from "../../src/execution/sandboxErrors.js";
 
 // The cause-chain walker has one home, beside the wording lists; the Worker
 // takes it from here with the rest of the thread data plane's shapes.
@@ -60,6 +62,47 @@ export interface ThreadErr {
    *  machinery's own failure is `system`. The words stay for the person; the
    *  cause is what the bot's command surfaces render by. */
   cause?: RefusalCause;
+  /** An attach refusal's class as a run's setup word (record 0097): set at
+   *  the refusal where `reason` is shared by two classes (the deploy fence
+   *  and the fleet drain, a preserved workspace and a pending settlement),
+   *  otherwise filled from the typed fields by `attachRefusalCode` where the
+   *  attach answers. Absent when no word names the refusal. */
+  code?: ResidentRefusalCode;
+}
+
+/** The refusal classes whose `reason` names exactly one setup word. */
+const CODE_BY_REASON: Readonly<Record<string, ResidentRefusalCode>> = {
+  "workload-full": "workload_full",
+  "workload-unverified": "workload_unverified",
+  "recreate-in-progress": "recreate_in_progress",
+  "image-stale": "image_stale",
+  [MEMORY_PRESSURE_REASON]: "memory_pressure",
+  "workspace-preserved": "workspace_preserved",
+  unregistered: "resident_not_serviceable",
+};
+
+/** A preserved workspace's setup word, by the removal decision's reason: a
+ *  predecessor's settlement still pending or unverified is `settlement_pending`;
+ *  every other kept tree (a live owner, private work not yet observed) is
+ *  `workspace_preserved`. The two share the refusal's `reason`. */
+export function preservedWorkspaceCode(decisionReason: string): "settlement_pending" | "workspace_preserved" {
+  return decisionReason === "workspace-settlement-pending" || decisionReason === "workspace-settlement-unverified"
+    ? "settlement_pending"
+    : "workspace_preserved";
+}
+
+/** The setup word of an attach refusal, read from its typed fields only:
+ *  the code its site set, the fleet drain's record, or a `reason` that names
+ *  one class. Undefined for a refusal no word names, which the bot records as
+ *  `fallback_other`; never read from the sentence. */
+export function attachRefusalCode(err: {
+  code?: ResidentRefusalCode;
+  reason?: string;
+  draining?: unknown;
+}): ResidentRefusalCode | undefined {
+  if (err.code !== undefined) return err.code;
+  if (err.draining !== undefined) return "fleet_draining";
+  return err.reason !== undefined && Object.hasOwn(CODE_BY_REASON, err.reason) ? CODE_BY_REASON[err.reason] : undefined;
 }
 
 /** Where a replacement or a reset was met: the command's spawn or its collect

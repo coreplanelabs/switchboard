@@ -16,10 +16,13 @@ import {
   runtimeBusyErr,
   runtimeReplacedErr,
   threadErrBuilders,
+  attachRefusalCode,
+  preservedWorkspaceCode,
   type ThreadDataRoute,
   type ThrowPredicates,
 } from "./threadErr";
-import { SandboxRuntimeBusyError } from "../../src/execution/sandboxErrors";
+import { MEMORY_PRESSURE_REASON, SandboxRuntimeBusyError } from "../../src/execution/sandboxErrors";
+import { drainRefusal } from "./drain";
 
 // Feature: docs/reference/specs/execution.md item 9 — a throw no route named is
 // one typed 500 wherever the resident catches it, and a thread data-plane call
@@ -427,5 +430,55 @@ describe("a refused connect (runtime-busy)", () => {
       cause: "system",
     });
     expect(isTransientPlatformThrow(bare)).toBe(false);
+  });
+});
+
+// Feature: record 0097, "The workspace facts" — the resident names an attach
+// refusal's class as a setup word beside its sentence, from typed fields only.
+
+describe("attachRefusalCode", () => {
+  it("names each refusal class whose reason is its own", () => {
+    expect(attachRefusalCode({ reason: "workload-full" })).toBe("workload_full");
+    expect(attachRefusalCode({ reason: "workload-unverified" })).toBe("workload_unverified");
+    expect(attachRefusalCode({ reason: "recreate-in-progress" })).toBe("recreate_in_progress");
+    expect(attachRefusalCode({ reason: "image-stale" })).toBe("image_stale");
+    expect(attachRefusalCode({ reason: MEMORY_PRESSURE_REASON })).toBe("memory_pressure");
+    expect(attachRefusalCode({ reason: "workspace-preserved" })).toBe("workspace_preserved");
+    expect(attachRefusalCode({ reason: "unregistered" })).toBe("resident_not_serviceable");
+  });
+
+  it("names the fleet drain by its record, not its words", () => {
+    const at = new Date(0);
+    const drain = drainRefusal({
+      reason: "deploy",
+      by: "operator",
+      since: at.toISOString(),
+      until: new Date(at.getTime() + 30 * 60_000).toISOString(),
+    });
+    expect(attachRefusalCode(drain)).toBe("fleet_draining");
+  });
+
+  it("keeps the code a site set where a reason is shared by two classes", () => {
+    expect(attachRefusalCode({ reason: "draining", code: "deploy_fence" })).toBe("deploy_fence");
+    expect(attachRefusalCode({ reason: "workspace-preserved", code: "settlement_pending" })).toBe("settlement_pending");
+  });
+
+  it("names nothing for a refusal no word covers, a shared reason without its code, or a prototype key", () => {
+    for (const reason of [undefined, "draining", "mirror-busy", "stale-tip", "busy", "disk-pressure", "toString"])
+      expect(attachRefusalCode({ reason })).toBeUndefined();
+  });
+});
+
+describe("preservedWorkspaceCode", () => {
+  it("separates a pending settlement from every other preserved tree", () => {
+    expect(preservedWorkspaceCode("workspace-settlement-pending")).toBe("settlement_pending");
+    expect(preservedWorkspaceCode("workspace-settlement-unverified")).toBe("settlement_pending");
+    for (const reason of [
+      "owner-live",
+      "private-tree-unverified",
+      "workspace-incarnation-mismatch",
+      "owner-unverified",
+    ])
+      expect(preservedWorkspaceCode(reason)).toBe("workspace_preserved");
   });
 });

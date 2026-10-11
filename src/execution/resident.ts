@@ -6,6 +6,7 @@ import {
 } from "./credentialInspection.js";
 import { CREDENTIAL_INSPECTION_MAX_MS, DRAIN } from "../core/budgets.js";
 import { refusalOf, residentErrorCause, RefusalError } from "../core/refusal.js";
+import { residentRefusalCodeOf, type ResidentRefusalCode } from "../core/runSetup.js";
 import type { OperationResult, Operations, OpName } from "../core/operations.js";
 import { classifyError } from "../core/trace/classify.js";
 import { tracedFetch } from "../core/trace/tracedFetch.js";
@@ -230,6 +231,28 @@ export function drainWaitOf(err: unknown): number | undefined {
   return typeof stamped === "number" && stamped > 0 ? stamped : undefined;
 }
 
+/** Stamp the resident's refusal class (record 0097) on an attach error, read
+ *  from the answer's `code` field; an absent or unknown code stamps
+ *  `fallback_other`, so a definitive refusal always establishes its own class.
+ *  The first stamp stands, so the refusal nearest the failure names it: the
+ *  wake wait's own re-attach refusal (or a drain that never reopened) before
+ *  the transient refusal that began the wait. */
+function stampResidentCode<E>(err: E, code: unknown): E {
+  if (err !== null && typeof err === "object") {
+    const stamped = err as { residentCode?: ResidentRefusalCode | "fallback_other" };
+    stamped.residentCode ??= residentRefusalCodeOf(code);
+  }
+  return err;
+}
+
+/** The setup word of a failed attach (record 0097): the resident's code its
+ *  error carries, or `fallback_other` for an error no resident answer named
+ *  (a transport failure, an older Worker, a code this build does not know). */
+export function attachRefusalCodeOf(err: unknown): ResidentRefusalCode | "fallback_other" {
+  if (err === null || typeof err !== "object") return "fallback_other";
+  return residentRefusalCodeOf((err as { residentCode?: unknown }).residentCode);
+}
+
 export function isDrainingRefusal(answer: { status: number; data: Record<string, unknown> }): boolean {
   const d = answer.data.draining;
   return (
@@ -260,6 +283,7 @@ export class ResidentDrainingError extends ExecInfraError {
     );
     this.name = "ResidentDrainingError";
     classifyError(this, { kind: "infra", code: "attach" });
+    stampResidentCode(this, "fleet_draining");
   }
 }
 
@@ -1268,6 +1292,8 @@ export class ResidentExecutor implements Executor {
         budgetMs: opts.budgetMs,
         drainBoundMs: opts.drainBoundMs,
         span,
+      }).catch((err: unknown) => {
+        throw stampResidentCode(err, answer.data.code);
       });
       // The spread keeps a `drainWaitMs` the wake path stamped when its
       // re-attach met the drain (item 69): the transient-then-draining
@@ -1356,7 +1382,7 @@ export class ResidentExecutor implements Executor {
             });
             return { binding: woke.binding, waitedMs: systemClock() - t0 };
           } catch (err) {
-            throw stampDrainWait(err, drainShareMs + (drainWaitOf(err) ?? 0));
+            throw stampResidentCode(stampDrainWait(err, drainShareMs + (drainWaitOf(err) ?? 0)), answer.data.code);
           }
         }
         throw this.attachRefusal(answer);
@@ -1497,7 +1523,8 @@ export class ResidentExecutor implements Executor {
     const { status, data } = answer;
     const err = refusalWords(answer);
     const failedTrace = sanitizeGraftedSteps(data.trace);
-    const traced = (e: Error): Error => (failedTrace.length > 0 ? withResidentTrace(e, { steps: failedTrace }) : e);
+    const traced = (e: Error): Error =>
+      stampResidentCode(failedTrace.length > 0 ? withResidentTrace(e, { steps: failedTrace }) : e, data.code);
     if (status === 409 && data.needs === "ref") {
       const defaultRef = typeof data.defaultRef === "string" && data.defaultRef ? data.defaultRef : undefined;
       return traced(new ResidentNeedsRefError(this.opts.resource, defaultRef));
