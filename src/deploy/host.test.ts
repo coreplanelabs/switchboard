@@ -280,9 +280,9 @@ console.log('terminal:'+result.kind+':'+(result.kind==='ran'?result.ok+':'+resul
     },
   );
 
-  it("readiness inventory refuses repeated cursors instead of returning a partial fleet", async () => {
+  it("readiness inventory follows cursor arguments and refuses incomplete pages", async () => {
     const savedEnv = process.env;
-    for (const repeat of [false, true]) {
+    for (const mode of ["complete", "repeated", "cyclic", "malformed", "unpaginated"]) {
       const dir = mkdtempSync(join(tmpdir(), "readiness-pages-"));
       const calls = join(dir, "calls");
       const app = `fixture-app-${randomUUID()}`;
@@ -293,8 +293,15 @@ console.log('terminal:'+result.kind+':'+(result.kind==='ran'?result.ok+':'+resul
 const fs=require('node:fs');const a=process.argv.slice(2);const file=process.env.FIXTURE_CALLS;
 if(a.slice(0,3).join(' ')==='wrangler containers list'){console.log(JSON.stringify([{name:process.env.FIXTURE_APP,id:'owned-fixture-app'}]));}
 else if(a.slice(0,3).join(' ')==='wrangler containers instances'){
-const at=fs.existsSync(file)?fs.readFileSync(file,'utf8').trim().split('\\n').length:0;fs.appendFileSync(file,'page\\n');
-console.log(JSON.stringify({instances:[{name:at===0?'first':'second',state:'running',version:12}],result_info:{next_page_token:at===0||process.env.FIXTURE_REPEAT==='yes'?'private-cursor':null}}));
+fs.appendFileSync(file,JSON.stringify(a)+'\\n');
+const cursor=a.includes('--page-token')?a[a.indexOf('--page-token')+1]:null;
+let name,next;
+if(cursor===null){name='first';next='opaque+/=&%';}
+else if(cursor==='opaque+/=&%'){name='second';next=process.env.FIXTURE_MODE==='repeated'?'opaque+/=&%':process.env.FIXTURE_MODE==='cyclic'?'last-token':process.env.FIXTURE_MODE==='malformed'?42:null;}
+else if(cursor==='last-token'){name='third';next='opaque+/=&%';}
+else process.exit(96);
+const instances=[{name,state:'running',version:12}];
+console.log(JSON.stringify(cursor!==null&&process.env.FIXTURE_MODE==='unpaginated'?instances:{instances,result_info:{next_page_token:next}}));
 }else process.exit(98);`,
           { mode: 0o755 },
         );
@@ -304,7 +311,7 @@ console.log(JSON.stringify({instances:[{name:at===0?'first':'second',state:'runn
           CLOUDFLARE_API_TOKEN: "synthetic-no-access",
           FIXTURE_CALLS: calls,
           FIXTURE_APP: app,
-          FIXTURE_REPEAT: repeat ? "yes" : "no",
+          FIXTURE_MODE: mode,
         };
         const result = await defaultSandboxGateDeps.readInstances(
           "deploy/cloudflare-sandbox",
@@ -312,17 +319,37 @@ console.log(JSON.stringify({instances:[{name:at===0?'first':'second',state:'runn
           undefined,
           new AbortController().signal,
         );
-        if (repeat)
-          expect(result).toEqual({ error: "instance inventory repeated a page token; completeness unverified" });
-        else
+        if (mode === "complete")
           expect(result).toEqual({
             value: [
               { name: "first", state: "running", version: 12 },
               { name: "second", state: "running", version: 12 },
             ],
           });
-        expect(readFileSync(calls, "utf8")).toBe("page\npage\n");
-        expect(JSON.stringify(result)).not.toContain("private-cursor");
+        else if (mode === "malformed" || mode === "unpaginated")
+          expect(result).toEqual({ error: "wrangler containers instances owned-fixture-app: unexpected JSON shape" });
+        else expect(result).toEqual({ error: "instance inventory repeated a page token; completeness unverified" });
+        const argv = readFileSync(calls, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        const expected = [
+          ["wrangler", "containers", "instances", "owned-fixture-app", "--json", "--per-page", "100"],
+          [
+            "wrangler",
+            "containers",
+            "instances",
+            "owned-fixture-app",
+            "--json",
+            "--per-page",
+            "100",
+            "--page-token",
+            "opaque+/=&%",
+          ],
+        ];
+        if (mode === "cyclic") expected.push([...expected[1].slice(0, -1), "last-token"]);
+        expect(argv).toEqual(expected);
+        expect(JSON.stringify(result)).not.toContain("opaque+/=&%");
       } finally {
         process.env = savedEnv;
         rmSync(dir, { recursive: true, force: true });
