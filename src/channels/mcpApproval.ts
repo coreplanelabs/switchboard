@@ -1,3 +1,4 @@
+import { personalTokenApprovalMatchesPin } from "../core/personalToken.js";
 import { hasConfirmationConsent } from "../core/confirmationConsent.js";
 import { createHash } from "node:crypto";
 import type { Actor } from "../core/authz/types.js";
@@ -64,10 +65,21 @@ export function requestHash(name: string, args: unknown): string {
 
 /** This lookup revalidates the exact credential, including durable revocation. */
 export async function connectionIdentity(connectionId: string, options: McpOptions): Promise<McpIdentity | undefined> {
-  if (options.revalidateConnection) return options.revalidateConnection(connectionId);
+  const refreshed = options.revalidateConnection ? await options.revalidateConnection(connectionId) : undefined;
+  if (options.revalidateConnection && !refreshed) return undefined;
+  if (refreshed && (refreshed.session || !refreshed.subject.startsWith("personal:"))) return refreshed;
   for (const [bearer, identity] of Object.entries(options.auth.tokens))
     if (!identity.subject.startsWith("personal:") && digestBearer(bearer) === connectionId) return identity;
   const token = await options.personalTokens?.get(connectionId);
+  if (token && token.digest !== connectionId) return undefined;
+  if (
+    token &&
+    options.personalApprovalPin &&
+    !personalTokenApprovalMatchesPin(token.approval, options.personalApprovalPin())
+  )
+    return undefined;
+  if (refreshed && (token?.subject !== refreshed.subject || token.userId !== refreshed.verifiedUserId))
+    return undefined;
   return token ? { subject: token.subject, email: token.email, verifiedUserId: token.userId } : undefined;
 }
 

@@ -1,3 +1,4 @@
+import { personalTokenApprovalMatchesPin, type PersonalTokenApprovalPin } from "../core/personalToken.js";
 import { z } from "zod";
 import { hasConfirmationConsent } from "../core/confirmationConsent.js";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
@@ -124,6 +125,8 @@ export interface McpOptions {
   approvalsEnabled?: boolean;
   /** Browser-approved personal credentials, stored by digest outside the static ingress map. */
   personalTokens?: PersonalTokenStore;
+  /** When configured, current host realm proof is required for every personal credential. */
+  personalApprovalPin?: () => PersonalTokenApprovalPin | undefined;
   /** Defaults to the real core dispatch(); overridden in tests. */
   dispatch?: DispatchFn;
   /** Max body size in bytes (node wrapper enforces at read time). */
@@ -526,7 +529,13 @@ export async function handleMcpRequest(req: McpRequest, deps: CoreDeps, options:
       gate.identity,
       req.body,
       deps,
-      { ...options, revalidateConnection: gate.revalidateConnection },
+      {
+        ...options,
+        get personalApprovalPin() {
+          return options.personalApprovalPin;
+        },
+        revalidateConnection: gate.revalidateConnection ?? options.revalidateConnection,
+      },
       gate.connectionId ?? digestBearer(bearerFrom(req.headers)),
       req.headers,
     );
@@ -552,7 +561,14 @@ async function authorizeMcpRequest(
   if (personalBearer && options.personalTokens) {
     try {
       const token = await options.personalTokens.get(digestBearer(personalBearer));
-      if (token) return { identity: { subject: token.subject, email: token.email, verifiedUserId: token.userId } };
+      if (token) {
+        if (
+          options.personalApprovalPin &&
+          !personalTokenApprovalMatchesPin(token.approval, options.personalApprovalPin())
+        )
+          return { status: 401 };
+        return { identity: { subject: token.subject, email: token.email, verifiedUserId: token.userId } };
+      }
       // A configured dashboard bearer can itself be 64 hex characters. Only
       // its token verifier may prove that same bearer; Access cannot replace it.
       if (sso?.mode !== "token") return { status: 401 };
@@ -867,7 +883,13 @@ export function createMcpHandler(deps: CoreDeps, options: McpOptions): (req: Htt
         const handler = sdkHandler(
           gate.identity,
           deps,
-          { ...options, revalidateConnection: gate.revalidateConnection },
+          {
+            ...options,
+            get personalApprovalPin() {
+              return options.personalApprovalPin;
+            },
+            revalidateConnection: gate.revalidateConnection ?? options.revalidateConnection,
+          },
           gate.connectionId ?? digestBearer(bearerFrom(req.headers)),
         );
         try {
