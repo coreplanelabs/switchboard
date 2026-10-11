@@ -64,6 +64,7 @@ export default defineConfig({
       "rebindAttach.test.ts",
       "releaseAtRunEnd.test.ts",
       "pausedWorkspace.test.ts",
+      "nativeOperation.test.ts",
       "runRegistration.test.ts",
       "workspaceSettlement.test.ts",
       "workspaceAdvance.test.ts",

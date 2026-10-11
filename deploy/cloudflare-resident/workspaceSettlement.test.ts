@@ -1,3 +1,4 @@
+import { NativeOperationJournal, unstartedNativeOperator } from "./nativeOperation.js";
 import { isResidentPoolUser } from "../../src/execution/residentPoolSpends.js";
 import { releasePoolBinding, claimPoolBinding } from "../../src/execution/residentPoolSpends";
 import { registeredRunOwnsRelease, registeredRunAllowsClaim } from "./runRegistration";
@@ -47,6 +48,7 @@ const names = [
   "observeRetiredThreadRuntime",
   "withThreadBusy",
   "withOwnedNativeOperation",
+  "withNativeOperationScope",
   "assertThreadOperationAllowed",
   "beginThreadNativeOperation",
   "execThread",
@@ -236,8 +238,21 @@ function harness(
     fetch,
     AsyncLocalStorage,
     crypto: webcrypto,
+    NativeOperationJournal,
+    unstartedNativeOperator,
     RunCancelledError: class RunCancelledError extends Error {},
-    createExtensionProcessSandbox: (instance: any) => instance.processSandbox,
+    createExtensionProcessSandbox: (instance: any) => ({
+      ...instance.processSandbox,
+      exec: async (...args: unknown[]) => ({
+        status: async () => ({
+          id: "original-process",
+          pid: 42,
+          startedAt: "2026-10-11T00:00:00.000Z",
+          state: "running",
+        }),
+        ...(await instance.processSandbox.exec(...args)),
+      }),
+    }),
     residentPublicationCommand,
     capBytesFor,
     capWrappedCommand,
