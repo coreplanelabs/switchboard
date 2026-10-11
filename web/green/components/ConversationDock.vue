@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
-import { useSeed, useViewingAs } from "../../src/lib/seed";
-import ConfirmationPrompt from "./ConfirmationPrompt.vue";
+import { SeedKey, useSeed, useViewingAs } from "../../src/lib/seed";
+import ConversationComposer from "./ConversationComposer.vue";
 import MarkdownText from "../../src/components/MarkdownText.vue";
 import AssistantTurn from "../../src/components/home/AssistantTurn.vue";
-import type { HomeTurnSeed } from "@core/channels/webSeed.js";
 import { useWallClock } from "../../src/lib/wallClock";
 import { useHomeSession, type AttachedContext } from "../lib/homeSession";
+import type { HomeTurnSeed } from "@core/channels/webSeed.js";
 const home = useHomeSession();
 const now = useWallClock();
 const historyLine = computed(() => {
@@ -22,23 +22,16 @@ const historyLine = computed(() => {
 const liveTurns = computed(
   () => home?.session.value?.turns?.filter((turn): turn is HomeTurnSeed => !("kind" in turn) && !turn.finished) ?? [],
 );
-const commands = computed(() =>
-  home?.text.value.startsWith("/")
-    ? (home.session.value?.commands
-        .filter((command) => command.chat.startsWith(home.text.value.slice(1)))
-        .slice(0, 6) ?? [])
-    : [],
-);
 const route = useRoute();
 const seed = useSeed("unit");
 const viewingAs = useViewingAs();
-const composer = ref<HTMLTextAreaElement | null>(null);
+const globalSeed = inject(SeedKey, null);
 const transcript = ref<HTMLElement | null>(null);
 const expanded = ref(false);
 const destinationKey = computed(() => {
   const session = home?.session.value;
   return session
-    ? `${session.actor}\u0000${session.organization}\u0000${session.stream}\u0000${session.bindingRevision}\u0000${session.destination.kind}\u0000${session.destination.thread ?? ""}`
+    ? `${session.actor}\u0000${session.organization}\u0000${session.stream}\u0000${session.bindingRevision}\u0000${session.accessEpoch}\u0000${session.destination.kind}\u0000${session.destination.thread ?? ""}`
     : null;
 });
 const currentContext = computed<AttachedContext | null>(() => {
@@ -54,13 +47,6 @@ const currentContext = computed<AttachedContext | null>(() => {
     return { kind: "thread", key: String(route.params.id), label: "This thread" };
   return null;
 });
-watch(
-  () => home?.session.value?.destination.thread,
-  async () => {
-    await nextTick();
-    composer.value?.focus();
-  },
-);
 watch(
   () => home?.session.value?.entries.length,
   async () => {
@@ -90,21 +76,31 @@ onMounted(() => {
 watch([destinationKey, transcript], () => {
   void restoreScroll();
 });
-function keydown(event: KeyboardEvent) {
-  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-    event.preventDefault();
-    void home?.submit();
-  }
-}
 </script>
 <template>
-  <aside v-if="home" class="green-dock" :class="{ 'is-expanded': expanded }" aria-label="Conversation">
+  <aside v-if="home?.scopeChanging.value" class="green-dock p-5" aria-label="Conversation">
+    <p class="text-xs text-muted" role="status">
+      Changing dashboard view. Personal messages are hidden until the new view loads.
+    </p>
+  </aside>
+  <aside
+    v-else-if="home && (viewingAs || globalSeed?.dataView?.mode === 'person')"
+    class="green-dock p-5"
+    aria-label="Conversation"
+  >
+    <p class="text-xs text-muted" role="status">Private chat is unavailable in this read-only view.</p>
+    <p v-if="viewingAs" class="text-xs text-muted mt-2">This view is read-only.</p>
+  </aside>
+  <aside
+    v-else-if="home"
+    class="green-dock"
+    :class="{ 'is-expanded': expanded, 'is-inline-answer': !!home.inlineAnswer.value }"
+    aria-label="Conversation"
+  >
     <div class="green-dock-heading">
       <div>
-        <h2>{{ home.focused.value ? "Thread reply" : "Switchboard" }}</h2>
-        <p>
-          {{ home.focused.value ? "Only this thread receives your reply" : "Your private organization conversation" }}
-        </p>
+        <h2>{{ home.focused.value ? home.session.value?.destination.label : "Messages" }}</h2>
+        <p v-if="home.focused.value">Replies go to this thread.</p>
       </div>
       <button
         class="green-dock-expand green-icon-button"
@@ -144,7 +140,7 @@ function keydown(event: KeyboardEvent) {
                   : "No messages in this loaded page"
             }}
           </h3>
-          <p>Ask about the fleet, start work, or attach the page you are viewing as context.</p>
+          <p>Ask about your work, start work, or attach this page.</p>
         </div>
         <ol v-else class="list-none m-0 p-0">
           <li
@@ -161,6 +157,16 @@ function keydown(event: KeyboardEvent) {
               }}<span class="text-muted">{{ entry.source }}</span>
             </div>
             <MarkdownText :text="entry.content" />
+            <button
+              v-if="entry.deleteUrl && !home.focused.value && !viewingAs && home.session.value.destination.canWrite"
+              class="text-xs text-muted min-h-10"
+              type="button"
+              aria-label="Remove private request content"
+              :disabled="!!home.removing.value"
+              @click="home.removePrivate(entry.id)"
+            >
+              Remove request content
+            </button>
           </li>
         </ol>
         <AssistantTurn
@@ -174,11 +180,44 @@ function keydown(event: KeyboardEvent) {
           }"
         />
       </div>
-      <div class="green-dock-composer">
-        <p class="green-destination" aria-live="polite" aria-atomic="true">
-          <UIcon :name="home.focused.value ? 'i-lucide-message-square' : 'i-lucide-lock-keyhole'" />{{
-            home.session.value.destination.label
-          }}
+      <div
+        v-if="home.session.value.history?.previousUrl || home.session.value.history?.latestUrl"
+        class="flex flex-wrap gap-2 px-4 pb-2"
+        aria-label="Conversation history controls"
+      >
+        <button
+          v-if="home.session.value.history.previousUrl"
+          class="green-button"
+          type="button"
+          :disabled="home.historyLoading.value || home.sending.value"
+          @click="home.loadHistory(home.session.value.history.previousUrl)"
+        >
+          Older messages
+        </button>
+        <button
+          v-if="home.session.value.history.latestUrl"
+          class="green-button"
+          type="button"
+          :disabled="home.historyLoading.value || home.sending.value"
+          @click="home.loadHistory(home.session.value.history.latestUrl)"
+        >
+          Latest messages
+        </button>
+      </div>
+      <p v-if="home.inlineAnswer.value" class="p-4 text-xs text-muted" role="status">
+        Answering {{ home.inlineAnswer.value.title }} on Home. This conversation uses the same destination.
+      </p>
+      <div v-if="!home.inlineAnswer.value" class="green-dock-composer">
+        <p
+          class="green-destination"
+          aria-live="polite"
+          aria-atomic="true"
+          :title="home.focused.value ? home.session.value.destination.label : 'Private messages'"
+        >
+          <UIcon :name="home.focused.value ? 'i-lucide-message-square' : 'i-lucide-lock-keyhole'" /><span
+            class="sr-only"
+            >{{ home.focused.value ? home.session.value.destination.label : "Messages" }}</span
+          >
         </p>
         <button
           v-if="home.focused.value && !viewingAs"
@@ -215,60 +254,7 @@ function keydown(event: KeyboardEvent) {
         >
           <UIcon name="i-lucide-paperclip" />Attach this {{ currentContext.kind }}
         </button>
-        <ul v-if="commands.length && !viewingAs" class="list-none m-0 p-0 mb-2" aria-label="Command suggestions">
-          <li v-for="command in commands" :key="command.chat">
-            <button
-              class="w-full text-left p-2 text-xs min-h-10 rounded hover:bg-elevated"
-              type="button"
-              @click="
-                home.text.value = command.chat + ' ';
-                composer?.focus();
-              "
-            >
-              <strong>{{ command.chat }}</strong
-              ><span class="block text-muted">{{ command.describe }}</span>
-            </button>
-          </li>
-        </ul>
-        <ConfirmationPrompt
-          v-if="home.offer.value && home.session.value.destination.canWrite && !viewingAs"
-          :key="home.offer.value?.id"
-          :offer="home.offer.value"
-          :busy="home.sending.value"
-          @choose="home.submitConfirmation"
-        />
-        <form
-          v-if="home.session.value.destination.canWrite && !viewingAs"
-          class="green-composer-box"
-          @submit.prevent="home.submit()"
-        >
-          <label for="green-message" class="sr-only">Message to {{ home.session.value.destination.label }}</label
-          ><textarea
-            id="green-message"
-            ref="composer"
-            v-model="home.text.value"
-            rows="3"
-            :disabled="home.sending.value"
-            placeholder="Ask Switchboard…"
-            maxlength="32768"
-            @keydown="keydown"
-          />
-          <div class="green-composer-actions">
-            <span>Enter to send · Shift Enter for a new line</span
-            ><button
-              class="green-send"
-              type="submit"
-              aria-label="Send message"
-              :disabled="!home.text.value.trim() || home.sending.value"
-            >
-              <UIcon :name="home.sending.value ? 'i-lucide-loader-circle' : 'i-lucide-arrow-up'" />
-            </button>
-          </div>
-        </form>
-        <p v-else class="text-xs text-muted py-3">
-          {{ viewingAs ? "This view is read-only." : "This destination is read-only with your current permissions." }}
-        </p>
-        <p v-if="home.notice.value" class="text-xs text-muted mt-2" role="status">{{ home.notice.value }}</p>
+        <ConversationComposer />
       </div>
     </template>
   </aside>
@@ -370,45 +356,6 @@ function keydown(event: KeyboardEvent) {
   color: var(--ui-text-toned);
   margin-bottom: 8px;
 }
-.green-composer-box {
-  border: 1px solid var(--ui-border-accented);
-  border-radius: 8px;
-  background: var(--ui-bg);
-  padding: 10px;
-}
-.green-composer-box:focus-within {
-  border-color: var(--ui-primary);
-}
-.green-composer-box textarea {
-  width: 100%;
-  border: 0;
-  outline: 0;
-  resize: vertical;
-  max-height: 180px;
-  min-height: 60px;
-  font-size: 13px;
-  background: transparent;
-  color: var(--ui-text);
-}
-.green-composer-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.green-composer-actions span {
-  font-size: 9px;
-  color: var(--ui-text-muted);
-}
-.green-send {
-  width: 36px;
-  height: 36px;
-  border-radius: 7px;
-  background: #a8e840;
-  color: #212c12;
-  display: grid;
-  place-items: center;
-}
 .green-context-attach {
   min-height: 36px;
   display: flex;
@@ -438,6 +385,9 @@ function keydown(event: KeyboardEvent) {
   display: none;
 }
 @media (max-width: 1100px) {
+  .green-dock.is-inline-answer {
+    display: none;
+  }
   .green-dock {
     position: fixed;
     inset: auto 12px 12px 236px;
@@ -465,21 +415,6 @@ function keydown(event: KeyboardEvent) {
   }
   .green-dock-composer {
     padding: 8px 12px;
-  }
-  .green-composer-box textarea {
-    min-height: 40px;
-    height: 40px;
-  }
-  .green-composer-actions span {
-    display: none;
-  }
-  .green-composer-box {
-    display: flex;
-    gap: 8px;
-    align-items: flex-end;
-  }
-  .green-composer-actions {
-    flex: none;
   }
   .green-destination {
     margin-bottom: 4px;

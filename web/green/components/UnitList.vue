@@ -1,8 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useMediaQuery } from "@vueuse/core";
+import type { HomeAnswerTarget } from "@core/channels/homeSeed.js";
+import { SeedKey, useViewingAs } from "../../src/lib/seed";
+import { useHomeSession } from "../lib/homeSession";
+import InlineAnswer from "./InlineAnswer.vue";
 import type { HomeUnit } from "@core/core/home/service.js";
-import { githubPrUrl } from "../../src/lib/githubLinks";
+import { githubPrUrl, githubRepoUrl, githubTreeUrl } from "../../src/lib/githubLinks";
 import { endingWordOf } from "@core/core/pipelineStanding.js";
 import { rowOffsets, visibleWindow } from "../lib/virtualRows";
 const props = defineProps<{
@@ -11,14 +15,24 @@ const props = defineProps<{
   urgent?: boolean;
   activity?: "moving";
   attentionRecipient?: string;
+  attentionRecipients?: string[];
+  answers?: Record<string, HomeAnswerTarget>;
 }>();
 const query = ref("");
+const home = useHomeSession();
+const viewingAs = useViewingAs();
+const globalSeed = inject(SeedKey, null);
+const canReply = !viewingAs && (!globalSeed?.dataView || globalSeed.dataView.mode !== "person");
+const answerHere = (row: HomeUnit) => canReply && home?.inlineAnswer.value?.unit === row.unit.unit;
+const safeUrl = (url: string | undefined) => (url && /^https?:\/\//.test(url) ? url : undefined);
 const narrow = useMediaQuery("(max-width: 639px)");
 const filtered = computed(() =>
-  props.rows.filter((row) =>
-    `${row.unit.title ?? ""} ${row.unit.id} ${row.instance.repo} ${row.unit.branch} ${row.conditions.map((c) => c.summary).join(" ")}`
-      .toLowerCase()
-      .includes(query.value.toLowerCase()),
+  props.rows.filter(
+    (row) =>
+      answerHere(row) ||
+      `${row.unit.title ?? ""} ${row.unit.id} ${row.instance.repo} ${row.unit.branch} ${row.conditions.map((c) => c.summary).join(" ")}`
+        .toLowerCase()
+        .includes(query.value.toLowerCase()),
   ),
 );
 const viewport = ref<HTMLElement | null>(null);
@@ -97,14 +111,16 @@ const owner = (row: HomeUnit) =>
   row.conditions
     .map((condition) =>
       condition.owner.kind === "person"
-        ? condition.owner.id === props.attentionRecipient
+        ? (props.attentionRecipients ?? (props.attentionRecipient ? [props.attentionRecipient] : [])).includes(
+            condition.owner.id,
+          )
           ? "You"
           : `Assigned to: ${condition.owner.id}`
         : condition.owner.kind === "automation"
-          ? `Us · ${condition.owner.class}`
+          ? condition.owner.class
           : condition.owner.kind === "external"
-            ? `The world · ${condition.owner.label}`
-            : "Who acts is not recorded",
+            ? condition.owner.label
+            : "Assignment unknown",
     )
     .join(" · ");
 const state = (row: (typeof props.rows)[number]) => {
@@ -154,33 +170,94 @@ const state = (row: (typeof props.rows)[number]) => {
             :aria-posinset="item.index + 1"
             :aria-setsize="filtered.length"
             class="green-unit-row"
+            :class="{ 'green-unit-row-answering': answerHere(item.data) }"
             :data-unit="item.data.unit.unit"
           >
             <div class="green-unit-row-head">
               <RouterLink :to="`/runs/unit/${encodeURIComponent(item.data.unit.unit)}`" class="green-unit-title">{{
                 item.data.unit.title ?? `Unit ${item.data.unit.id}`
               }}</RouterLink
-              ><span class="green-badge">{{ state(item.data) }}</span>
+              ><span class="green-badge" :data-state="state(item.data)">{{ state(item.data) }}</span>
             </div>
             <p class="green-unit-meta">
-              {{ item.data.instance.repo }} · {{ item.data.unit.branch
-              }}<a
+              <a
+                v-if="githubRepoUrl(item.data.instance.repo)"
+                :href="githubRepoUrl(item.data.instance.repo)"
+                target="_blank"
+                rel="noopener noreferrer"
+                ><UIcon name="i-lucide-folder-git-2" aria-hidden="true" /> {{ item.data.instance.repo }}</a
+              ><span v-else>{{ item.data.instance.repo }}</span> ·
+              <a
+                v-if="githubTreeUrl(item.data.instance.repo, item.data.unit.branch)"
+                :href="githubTreeUrl(item.data.instance.repo, item.data.unit.branch)"
+                target="_blank"
+                rel="noopener noreferrer"
+                ><UIcon name="i-lucide-git-branch" aria-hidden="true" /> {{ item.data.unit.branch }}</a
+              ><span v-else>{{ item.data.unit.branch }}</span
+              ><a
                 v-if="item.data.unit.pr"
                 :href="githubPrUrl(item.data.instance.repo, item.data.unit.pr.number) ?? undefined"
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                · #{{ item.data.unit.pr.number }} ↗</a
+                · <UIcon name="i-lucide-git-pull-request" aria-hidden="true" /> #{{ item.data.unit.pr.number }}</a
               >
             </p>
-            <p v-if="item.data.conditions.length" class="green-unit-condition">
+            <InlineAnswer v-if="answerHere(item.data)" />
+            <p v-else-if="item.data.conditions.length" class="green-unit-condition">
               {{ item.data.conditions.map((c) => c.summary).join(" · ") }}
             </p>
             <div class="green-unit-row-footer">
               <span class="green-unit-owner">{{ owner(item.data) || "No condition details available" }}</span
-              ><span class="green-unit-next">{{
+              ><span v-if="!answerHere(item.data)" class="green-unit-next">{{
                 item.data.nextAction.kind === "recorded" ? item.data.nextAction.text : "Next action not recorded"
               }}</span>
+            </div>
+            <div class="green-unit-links" aria-label="Original work links">
+              <button
+                v-if="urgent && answers?.[item.data.unit.unit] && home && canReply && !home.inlineAnswer.value"
+                type="button"
+                class="green-button green-button-primary"
+                :aria-label="`Answer: ${item.data.unit.title ?? item.data.unit.id}`"
+                :disabled="home.sending.value || home.status.value !== 'ready'"
+                @click="
+                  home.beginInlineAnswer(
+                    item.data.unit.unit,
+                    item.data.unit.title ?? item.data.unit.id,
+                    answers[item.data.unit.unit],
+                  )
+                "
+              >
+                <UIcon name="i-lucide-reply" />Answer
+              </button>
+              <RouterLink
+                v-if="item.data.unit.threads.coding"
+                :to="`/threads/${encodeURIComponent(item.data.unit.threads.coding)}`"
+                aria-label="Original unit thread"
+                title="Original unit thread"
+                ><UIcon name="i-lucide-messages-square" /><span class="sr-only">Thread</span></RouterLink
+              >
+              <RouterLink
+                v-if="item.data.unit.threads.review"
+                :to="`/threads/${encodeURIComponent(item.data.unit.threads.review)}`"
+                aria-label="Review thread"
+                title="Review thread"
+                ><UIcon name="i-lucide-message-square-check" /><span class="sr-only">Review thread</span></RouterLink
+              >
+              <RouterLink
+                v-if="item.data.unit.pr"
+                :to="`/runs/unit/${encodeURIComponent(item.data.unit.unit)}#changes`"
+                aria-label="Changes"
+                title="Changes"
+                ><UIcon name="i-lucide-git-compare" /><span class="sr-only">Changes</span></RouterLink
+              >
+              <a
+                v-if="safeUrl(item.data.instance.sourceUrl)"
+                :href="safeUrl(item.data.instance.sourceUrl)"
+                target="_blank"
+                rel="noopener noreferrer"
+                >Asking thread ↗</a
+              >
             </div>
           </article>
           <div :style="{ height: `${offsets[offsets.length - 1] - offsets[window.end]}px` }" aria-hidden="true" />
@@ -196,6 +273,24 @@ const state = (row: (typeof props.rows)[number]) => {
 .green-unit-row {
   padding: 16px 20px;
   border-bottom: 1px solid var(--ui-border-muted);
+}
+.green-unit-row-answering {
+  background: var(--green-selected);
+}
+.green-unit-links {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--ui-primary);
+}
+.green-unit-links a {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 .green-unit-row-head {
   display: flex;
