@@ -4,13 +4,25 @@ import type { LinkConsentView } from "@core/channels/linkBrowser.js";
 
 // A presentation module, not a route. The host owns the transport; this module
 // only emits the closed POST fields, never a person or identity to bind.
-const props = defineProps<{ view: LinkConsentView; busy?: boolean }>();
+const props = defineProps<{
+  view: LinkConsentView;
+  busy?: boolean;
+  live?: boolean;
+  native?: boolean;
+  readonly?: boolean;
+  path?: string;
+  embedded?: boolean;
+}>();
 const emit = defineEmits<{
   submit: [
     submission: { action: "begin" | "commit" | "cancel" | "interrupt" | "restart"; fields: Record<string, string> },
   ];
 }>();
 const consent = ref(false);
+const operationName = computed(() => ("operation" in props.view ? (props.view.operation?.kind ?? "link") : "link"));
+const operationLabel = computed(() =>
+  operationName.value === "unlink" ? "unlink" : operationName.value === "recover" ? "recover" : "link",
+);
 watch(
   () => props.view,
   () => {
@@ -22,9 +34,16 @@ const ending = computed(() => {
   switch (props.view.stage) {
     case "committed":
       return {
-        title: "Accounts verified in this fixture",
-        detail:
-          "The local transaction is complete. This does not enable live linking, change permissions or move history.",
+        title: props.live
+          ? operationName.value === "unlink"
+            ? "Account unlinked"
+            : operationName.value === "recover"
+              ? "Account link recovered"
+              : "Accounts linked"
+          : "Accounts verified in this fixture",
+        detail: props.live
+          ? "Both accounts were verified. Only future cross-surface activity changes. Each source keeps its own permissions and past attribution."
+          : "The local transaction is complete. This does not enable live linking, change permissions or move history.",
       };
     case "cancelled":
       return { title: "Link cancelled", detail: "Verification was cancelled. No account link was created." };
@@ -53,14 +72,21 @@ const ending = computed(() => {
       return null;
   }
 });
-function submit(action: "begin" | "commit" | "cancel" | "interrupt" | "restart") {
-  if (props.busy) return;
+function submit(event: Event, action: "begin" | "commit" | "cancel" | "interrupt" | "restart") {
+  if (!props.live || !props.native) event.preventDefault();
+  if (props.busy || props.readonly) {
+    event.preventDefault();
+    return;
+  }
   const v = props.view;
   if (action === "begin" && v.stage === "start") emit("submit", { action, fields: { csrf: v.csrf } });
   else if (action === "restart" && "restartCsrf" in v && v.restartCsrf)
     emit("submit", { action, fields: { csrf: v.restartCsrf } });
   else if ("revision" in v) {
-    if (action === "commit" && (v.stage !== "awaiting-consent" || !consent.value)) return;
+    if (action === "commit" && (v.stage !== "awaiting-consent" || !consent.value)) {
+      event.preventDefault();
+      return;
+    }
     const token = action === "cancel" ? v.cancelCsrf : action === "interrupt" ? v.interruptCsrf : v.csrf;
     if (token)
       emit("submit", {
@@ -72,15 +98,25 @@ function submit(action: "begin" | "commit" | "cancel" | "interrupt" | "restart")
 </script>
 
 <template>
-  <main class="mx-auto w-full max-w-2xl px-5 py-10 sm:py-16" aria-labelledby="link-heading">
+  <component
+    :is="embedded ? 'div' : 'main'"
+    class="mx-auto w-full max-w-2xl px-5 py-10 sm:py-16"
+    aria-labelledby="link-heading"
+  >
     <div class="mb-8 flex items-center gap-2 text-xs font-medium uppercase tracking-widest text-muted">
       <UIcon name="i-lucide-link" class="size-4" /> Account verification
     </div>
-    <p class="mb-3 text-sm font-medium text-warn">Local preview · Live linking is disabled</p>
-    <h1 id="link-heading" class="text-3xl font-semibold tracking-tight text-highlighted">Confirm your accounts</h1>
+    <p v-if="!live" class="mb-3 text-sm font-medium text-warn">Local preview · Live linking is disabled</p>
+    <p v-if="readonly" class="mb-3 text-sm font-medium text-warn">This view is read-only.</p>
+    <component
+      :is="embedded ? 'h2' : 'h1'"
+      id="link-heading"
+      class="text-3xl font-semibold tracking-tight text-highlighted"
+      >Confirm your accounts</component
+    >
     <p class="mt-3 text-sm leading-relaxed text-muted">
-      Prove that you control both accounts, then choose whether to link them. Matching names or email addresses are not
-      proof.
+      Prove that you control both accounts, then confirm the selected operation. Matching names or email addresses are
+      not proof.
     </p>
 
     <template v-if="view.stage === 'start'">
@@ -91,14 +127,36 @@ function submit(action: "begin" | "commit" | "cancel" | "interrupt" | "restart")
         </p>
         <form
           method="post"
-          action="/account-link/begin"
+          :action="`${path ?? '/account-link'}/begin`"
           data-action="begin"
           class="mt-5"
-          @submit.prevent="submit('begin')"
+          @submit="submit($event, 'begin')"
         >
           <input type="hidden" name="csrf" :value="view.csrf" />
-          <UButton type="submit" :disabled="busy" color="neutral">Continue to Slack</UButton>
+          <UButton type="submit" :disabled="busy || readonly" color="neutral">Continue to Slack</UButton>
         </form>
+        <div v-if="view.operations?.length" class="mt-5 grid gap-3">
+          <form
+            v-for="operation in view.operations"
+            :key="`${operation.kind}:${operation.target}`"
+            method="post"
+            :action="`${path ?? '/account-link'}/${operation.kind}`"
+            :data-action="operation.kind"
+          >
+            <input type="hidden" name="csrf" :value="operation.csrf" /><input
+              type="hidden"
+              name="target"
+              :value="operation.target"
+            />
+            <UButton type="submit" :disabled="busy || readonly || !live || !native" color="neutral" variant="outline">
+              {{ operation.kind === "unlink" ? "Unlink" : "Recover" }}
+              {{ operation.target === "access" ? "browser account" : "Slack account" }}
+            </UButton>
+          </form>
+          <p class="text-xs text-muted">
+            Every operation verifies both accounts again. Recovery also requires identity administrator permission.
+          </p>
+        </div>
       </section>
     </template>
 
@@ -145,10 +203,10 @@ function submit(action: "begin" | "commit" | "cancel" | "interrupt" | "restart")
       <form
         v-if="active.stage === 'awaiting-consent'"
         method="post"
-        action="/account-link/commit"
+        :action="`${path ?? '/account-link'}/commit`"
         data-action="commit"
         class="mt-7"
-        @submit.prevent="submit('commit')"
+        @submit="submit($event, 'commit')"
       >
         <input type="hidden" name="csrf" :value="active.csrf" />
         <input type="hidden" name="revision" :value="active.revision" />
@@ -159,38 +217,53 @@ function submit(action: "begin" | "commit" | "cancel" | "interrupt" | "restart")
             name="consent"
             value="yes"
             required
-            :disabled="busy"
+            :disabled="busy || readonly"
             class="mt-1 size-4 shrink-0 accent-current"
           />
-          <span>I control both accounts shown above and explicitly consent to linking them.</span>
+          <span
+            >I control both accounts shown above and explicitly consent to this {{ operationLabel }} operation.</span
+          >
         </label>
-        <p class="ml-7 mt-2 text-sm text-muted">This preview grants no permissions and claims no existing history.</p>
-        <UButton type="submit" :disabled="!consent || busy" color="neutral" class="mt-5"
-          >Confirm link in fixture</UButton
-        >
+        <p class="ml-7 mt-2 text-sm text-muted">
+          {{
+            live
+              ? "Linking grants no permissions. Existing history remains with its original owner."
+              : "This preview grants no permissions and claims no existing history."
+          }}
+        </p>
+        <UButton type="submit" :disabled="!consent || busy || readonly" color="neutral" class="mt-5">{{
+          live ? `Confirm ${operationLabel}` : "Confirm link in fixture"
+        }}</UButton>
       </form>
       <div class="mt-3 flex flex-wrap gap-3">
-        <form method="post" action="/account-link/cancel" data-action="cancel" @submit.prevent="submit('cancel')">
+        <form
+          method="post"
+          :action="`${path ?? '/account-link'}/cancel`"
+          data-action="cancel"
+          @submit="submit($event, 'cancel')"
+        >
           <input type="hidden" name="csrf" :value="active.cancelCsrf" /><input
             type="hidden"
             name="revision"
             :value="active.revision"
           />
-          <UButton type="submit" :disabled="busy" color="neutral" variant="ghost">Cancel verification</UButton>
+          <UButton type="submit" :disabled="busy || readonly" color="neutral" variant="ghost"
+            >Cancel verification</UButton
+          >
         </form>
         <form
           v-if="active.stage === 'exchanging'"
           method="post"
-          action="/account-link/interrupt"
+          :action="`${path ?? '/account-link'}/interrupt`"
           data-action="interrupt"
-          @submit.prevent="submit('interrupt')"
+          @submit="submit($event, 'interrupt')"
         >
           <input type="hidden" name="csrf" :value="active.interruptCsrf" /><input
             type="hidden"
             name="revision"
             :value="active.revision"
           />
-          <UButton type="submit" :disabled="busy" color="neutral" variant="outline"
+          <UButton type="submit" :disabled="busy || readonly" color="neutral" variant="outline"
             >End interrupted verification</UButton
           >
         </form>
@@ -202,18 +275,18 @@ function submit(action: "begin" | "commit" | "cancel" | "interrupt" | "restart")
       <form
         v-if="'restartCsrf' in view && view.restartCsrf"
         method="post"
-        action="/account-link/restart"
+        :action="`${path ?? '/account-link'}/restart`"
         data-action="restart"
         class="mt-5"
-        @submit.prevent="submit('restart')"
+        @submit="submit($event, 'restart')"
       >
         <input type="hidden" name="csrf" :value="view.restartCsrf" />
-        <UButton type="submit" :disabled="busy" color="neutral">Start fresh verification</UButton>
+        <UButton type="submit" :disabled="busy || readonly" color="neutral">Verify another operation</UButton>
       </form>
     </section>
-    <p class="mt-10 border-t border-default pt-5 text-xs leading-relaxed text-muted">
+    <p v-if="!live" class="mt-10 border-t border-default pt-5 text-xs leading-relaxed text-muted">
       Staged implementation only. Live linking requires a separate release decision, revocation safeguards and
       retirement of legacy email linking.
     </p>
-  </main>
+  </component>
 </template>
