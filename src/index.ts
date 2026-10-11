@@ -17,7 +17,7 @@ import {
   canRestoreOrganizationRun,
   organizationResumeIo,
 } from "./channels/browserHomeWiring.js";
-import type { HomeRuntimeContext } from "./channels/homeRuntime.js";
+import { isHomeRuntimePath, type HomeRuntimeContext } from "./channels/homeRuntime.js";
 import { workViewScopeOf } from "./channels/workViewScope.js";
 import { isIdentityPath } from "./channels/identityRuntime.js";
 import { originalOrganizationDispatchOf } from "./core/dispatch/privateDestination.js";
@@ -2280,7 +2280,7 @@ export async function runBot(): Promise<void> {
               });
               return;
             }
-            if (/^\/home\/(session|events|focus|key|send|messages)(?:\/|$)/.test(path)) {
+            if (isHomeRuntimePath(path)) {
               const query = new URL(req.url ?? "/", "http://localhost").searchParams;
               const scope = workViewScopeOf(actor);
               if (

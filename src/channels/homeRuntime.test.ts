@@ -10,7 +10,12 @@ import { InMemoryOrganizationStore } from "../core/organization/memory.js";
 import { OrganizationService } from "../core/organization/service.js";
 import { CONFIRMATION_TTL_MS, DAY_MS, RUN_VIEW_POLL_MS } from "../core/budgets.js";
 import type { HomeSession } from "./homeSeed.js";
-import { createHomeRuntimeHandler, type HomeRuntimeContext, type HomeThreadProjection } from "./homeRuntime.js";
+import {
+  createHomeRuntimeHandler,
+  isHomeRuntimePath,
+  type HomeRuntimeContext,
+  type HomeThreadProjection,
+} from "./homeRuntime.js";
 
 const credential = actor("user", "access:alice", { actions: "all", channels: "all", repos: "all" });
 const identity = { issuer: "access:test", tenant: null, subject: "alice" };
@@ -84,6 +89,7 @@ function response() {
 }
 function fixture(
   options: {
+    routeThroughGate?: boolean;
     maxBodyBytes?: number;
     currentOffer?: () => Promise<HomeSession["offer"]>;
     readIngress?: RunLedger["readIngress"];
@@ -158,7 +164,10 @@ function fixture(
     headers?: Record<string, string>,
   ) {
     const output = response();
-    expect(handler(request(url, body, headers), output.res, current)).toBe(true);
+    if (options.routeThroughGate && !isHomeRuntimePath(new URL(url, "http://localhost").pathname)) {
+      output.res.writeHead(404);
+      output.res.end(JSON.stringify({ status: "not_found" }));
+    } else expect(handler(request(url, body, headers), output.res, current)).toBe(true);
     await output.ended;
     return { ...output.value(), json: JSON.parse(output.value().body) as Record<string, unknown> };
   }
@@ -288,6 +297,49 @@ describe("authenticated browser organization runtime", () => {
     loseProof = true;
     expect((await app.read(url)).json).toEqual({ status: "unknown" });
     expect((await ledger.readIngress(original.receipt.effectKey)).status).toBe("record");
+    expect(app.submissions).toHaveLength(1);
+  });
+
+  it("routes an authenticated receipt through the production endpoint gate and refuses neighboring paths", async () => {
+    const app = fixture({ routeThroughGate: true });
+    const session = (await app.read("/home/session")).json as unknown as HomeSession;
+    const key = session.submissionKey;
+    expect(
+      (
+        await app.read("/home/send", {
+          key,
+          text: "private gate request",
+          revision: session.bindingRevision,
+          destination: { kind: "broad" },
+          context: [],
+        })
+      ).json.status,
+    ).toBe("pending");
+    const status = await app.read(`/home/submissions/${encodeURIComponent(key)}?ignored=value`);
+    expect(status.status).toBe(200);
+    expect(status.json).toEqual({
+      status: "known",
+      admission: "pending",
+      dispatch: "unknown",
+      nativeEffect: "unknown",
+    });
+    expect(status.body).not.toContain("private gate request");
+    for (const path of [
+      "/home/submissions",
+      "/home/submissions/",
+      `/home/submissions/${key}/extra`,
+      "/home/submissions-other/key",
+      "/home/session/extra",
+      "/home/messages",
+      "/home/send-more",
+    ]) {
+      expect((await app.read(path)).status).toBe(404);
+    }
+    const foreign = {
+      ...context,
+      authentication: { ...context.authentication, identity: { ...identity, issuer: "foreign:realm" } },
+    };
+    expect((await app.read(`/home/submissions/${key}`, undefined, foreign)).status).toBe(404);
     expect(app.submissions).toHaveLength(1);
   });
 

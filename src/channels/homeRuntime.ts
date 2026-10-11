@@ -23,6 +23,11 @@ import { originAllowed } from "./commandHttp.js";
 import { MAX_BODY_BYTES, readBody } from "./http.js";
 import { SSE_HEADERS, SSE_PRELUDE } from "./liveView/sse.js";
 
+/** The production gate and runtime share endpoint selection; authorization remains inside the runtime. */
+export function isHomeRuntimePath(pathname: string): boolean {
+  return /^\/home\/(session|key|focus|send|events|messages\/[^/]+|submissions\/[^/]+)$/.test(pathname);
+}
+
 /** The host verified this credential and resolved its current policy before routing. */
 export interface HomeRuntimeContext {
   actor: Actor;
@@ -639,8 +644,7 @@ export function createHomeRuntimeHandler(options: HomeRuntimeOptions) {
   }
   const handler = (req: IncomingMessage, res: ServerResponse, context?: HomeRuntimeContext): boolean => {
     const url = new URL(req.url ?? "/", "http://localhost");
-    if (!/^\/home\/(session|key|focus|send|events|messages\/[^/]+|submissions\/[^/]+)$/.test(url.pathname))
-      return false;
+    if (!isHomeRuntimePath(url.pathname)) return false;
     void serve(req, res, context, url).catch(() => {
       if (!res.headersSent) reply(res, 503, { status: "unavailable" });
       else res.end();
