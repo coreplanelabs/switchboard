@@ -28,6 +28,10 @@ on: # zizmor: ignore[dangerous-triggers]
         description: Optional per-request full model ref for acceptance (provider/model)
         type: string
 
+env:
+  # Temporary staging acceptance default; explicit model inputs take precedence.
+  STAGING_ACCEPTANCE_MODEL: ${{ inputs.model || 'openai/gpt-6.1-sol' }}
+
 permissions:
   contents: read
   pull-requests: read
@@ -215,7 +219,7 @@ jobs:
           SMOKE_INGRESS_ORIGIN: ${{ vars.STAGING_SMOKE_ORIGIN }}
           SMOKE_INGRESS_TOKEN: ${{ secrets.STAGING_SMOKE_TOKEN }}
           SMOKE_EXPECTED_COMMIT: ${{ needs.authorize.outputs.commit }}
-          SMOKE_MODEL: ${{ inputs.model }}
+          SMOKE_MODEL: ${{ env.STAGING_ACCEPTANCE_MODEL }}
           SMOKE_SLACK_CONFIG: ${{ vars.STAGING_SLACK_SMOKE_CONFIG }}
           SMOKE_SLACK_USER_TOKEN: ${{ secrets.STAGING_SLACK_TEST_USER_TOKEN }}
         run: |
@@ -261,7 +265,7 @@ jobs:
           SMOKE_INGRESS_THREAD: staging-${{ github.run_id }}-${{ github.run_attempt }}
           SMOKE_EXPECTED_COMMIT: ${{ needs.authorize.outputs.commit }}
           SMOKE_REQUIRE_SLACK_CONNECTION: "true"
-          SMOKE_MODEL: ${{ inputs.model }}
+          SMOKE_MODEL: ${{ env.STAGING_ACCEPTANCE_MODEL }}
           SMOKE_SLACK_CONFIG: ${{ vars.STAGING_SLACK_SMOKE_CONFIG }}
           SMOKE_SLACK_USER_TOKEN: ${{ secrets.STAGING_SLACK_TEST_USER_TOKEN }}
         run: |
