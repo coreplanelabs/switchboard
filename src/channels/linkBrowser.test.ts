@@ -164,7 +164,7 @@ function harness(kind = "memory") {
 }
 
 describe("staged browser linking", () => {
-  it("keeps the entry disabled and refuses nonlocal fixture origins", async () => {
+  it("keeps the entry disabled by default and refuses nonlocal fixture origins", async () => {
     const h = harness();
     const verify = vi.spyOn(h.access, "verify");
     const link = vi.spyOn(h.directory, "link");
@@ -174,8 +174,12 @@ describe("staged browser linking", () => {
     }
     expect(verify).not.toHaveBeenCalled();
     expect(link).not.toHaveBeenCalled();
-    // An enabling registration must deliberately change this release fence.
-    for (const file of globSync("src/**/*.ts").filter((f) => !f.endsWith(".test.ts") && !f.endsWith("linkBrowser.ts")))
+    // Only the explicitly configured browser runtime may activate this seam.
+    for (const file of globSync("src/**/*.ts").filter(
+      (f) =>
+        !f.endsWith(".test.ts") &&
+        !["linkBrowser.ts", "identityRuntime.ts", "identitySeed.ts"].some((name) => f.endsWith(name)),
+    ))
       expect(readFileSync(file, "utf8"), file).not.toMatch(/from ["'].*\/linkBrowser\.js["']/);
     expect(readFileSync("web/src/routes.ts", "utf8")).not.toContain("account-link");
     expect(readFileSync("web/src/main.ts", "utf8")).not.toContain("account-link");

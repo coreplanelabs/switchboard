@@ -98,9 +98,8 @@ export class JwksCache {
   /** Ms of the last SUCCESSFUL JWKS fetch, or null before the first one. Drives
    *  the negative-cache interval in `refresh`; a failed fetch does not set it. */
   private lastFetchAt: number | null = null;
-  /** The in-flight refresh shared by concurrent callers (single-flight); null
-   *  when no fetch is running. It never rejects — `runFetch` swallows failures to
-   *  fail closed — so both the owner and any joiners resolve cleanly. */
+  /** Shared refresh; each caller decides whether provider loss is returned
+   *  as a refusal or propagated as unavailable. No failed refresh caches keys. */
   private inFlight: Promise<void> | null = null;
 
   /** The fresh JWK for `kid`, or null if absent/expired (expired entries are
@@ -143,9 +142,14 @@ export class JwksCache {
     now: () => number,
     ttlMs: number,
     minRefetchIntervalMs: number,
+    throwOnUnavailable = false,
   ): Promise<void> {
     if (this.inFlight) {
-      await this.inFlight; // single-flight: share the in-progress fetch
+      try {
+        await this.inFlight;
+      } catch (error) {
+        if (throwOnUnavailable) throw error;
+      }
       return;
     }
     if (this.lastFetchAt !== null && now() - this.lastFetchAt < minRefetchIntervalMs) {
@@ -154,23 +158,19 @@ export class JwksCache {
     this.inFlight = this.runFetch(fetch, now, ttlMs);
     try {
       await this.inFlight;
+    } catch (error) {
+      if (throwOnUnavailable) throw error;
     } finally {
       this.inFlight = null;
     }
   }
 
-  /** Perform one JWKS fetch and fold the result into the store. Never rejects:
-   *  on any failure the store is left unchanged (fail closed) and `lastFetchAt`
-   *  is not advanced, so `resolveKey` returns null and a later verify may retry. */
+  /** Failed provider reads leave both the keys and successful-refresh clock unchanged. */
   private async runFetch(fetch: () => Promise<AccessJwk[]>, now: () => number, ttlMs: number): Promise<void> {
-    try {
-      const keys = await fetch();
-      const fetchedAt = now();
-      this.put(keys, fetchedAt + ttlMs);
-      this.lastFetchAt = fetchedAt;
-    } catch {
-      // fail closed: a JWKS fetch failure is not a valid identity.
-    }
+    const keys = await fetch();
+    const fetchedAt = now();
+    this.put(keys, fetchedAt + ttlMs);
+    this.lastFetchAt = fetchedAt;
   }
 }
 
@@ -182,6 +182,8 @@ export interface VerifyDeps {
   fetchJwks: JwksFetcher;
   now: () => number;
   cache?: JwksCache;
+  /** Current owner checks must retain work on provider loss rather than record denial. */
+  throwOnUnavailable?: boolean;
   /** Cached-key TTL in seconds. Default 3600. */
   ttlSeconds?: number;
   /** Min interval (ms) between JWKS refetches for unknown kids. Within this
@@ -224,7 +226,7 @@ async function resolveKey(kid: string, config: AccessConfig, deps: VerifyDeps): 
   const ttlMs = (deps.ttlSeconds ?? DEFAULT_JWKS_TTL_SECONDS) * 1000;
   const minRefetchIntervalMs = deps.minRefetchIntervalMs ?? DEFAULT_MIN_REFETCH_INTERVAL_MS;
   const certsUrl = `https://${config.teamDomain}${CERTS_PATH}`;
-  await cache.refresh(() => deps.fetchJwks(certsUrl), deps.now, ttlMs, minRefetchIntervalMs);
+  await cache.refresh(() => deps.fetchJwks(certsUrl), deps.now, ttlMs, minRefetchIntervalMs, deps.throwOnUnavailable);
 
   return cache.get(kid, deps.now());
 }
@@ -259,8 +261,9 @@ function hasSubject(claims: Record<string, unknown>): boolean {
 
 /**
  * Verify a Cloudflare Access compact-JWS token. Returns the identity on success,
- * or `null` for ANY failure — malformed input, wrong/absent alg, unknown kid,
- * bad signature, or an invalid claim. Never throws on caller-controlled input.
+ * or `null` for invalid input, signature or claims. Provider loss normally fails
+ * closed; current-proof callers can request an unavailable exception. Never
+ * throws on caller-controlled input.
  */
 export async function verifyAccessJwt(
   token: string,
@@ -284,6 +287,9 @@ export async function verifyAccessJwt(
 
   const signature = decodeBase64Url(rawSignature);
   if (!signature) return null;
+
+  // Known invalid claims need no provider read, even during a cert outage.
+  if (!claimsValid(payload, config, deps.now())) return null;
 
   const jwk = await resolveKey(header.kid, config, deps);
   if (!jwk) return null;

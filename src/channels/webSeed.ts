@@ -553,6 +553,7 @@ export interface SettingsSeed {
 /** One page's data, as its view builds it. */
 export type PageSeed = PageData & { preview?: string };
 type PageData =
+  | import("./identitySeed.js").IdentitySeed
   | import("./homeSeed.js").HomeFleetSeed
   | import("./homeSeed.js").HomeHistorySeed
   | import("./homeSeed.js").HomePipelineSeed

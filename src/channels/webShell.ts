@@ -27,6 +27,9 @@ import type { Actor } from "../core/authz/types.js";
 export const PAGE_CSP =
   "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
+/** Account verification permits only protected local forms and the pinned Slack provider. */
+export const GREEN_PAGE_CSP = PAGE_CSP.replace("form-action 'none'", "form-action 'self' https://slack.com");
+
 /** The same policy for a page that carries a same-origin form (the MCP connect
  *  page): `form-action 'self'` — a post anywhere else is still blocked. */
 export const FORM_PAGE_CSP = PAGE_CSP.replace("form-action 'none'", "form-action 'self'");
@@ -117,7 +120,11 @@ export type PageSender = (
   seed: PageSeed,
 ) => void;
 
-export function makePageSender(assets: ShellAssets, capabilities: Capabilities): PageSender {
+export function makePageSender(
+  assets: ShellAssets,
+  capabilities: Capabilities,
+  options: { csp?: string } = {},
+): PageSender {
   return (req, res, status, viewer, title, seed) => {
     const island: WebSeed = {
       ...seed,
@@ -132,7 +139,10 @@ export function makePageSender(assets: ShellAssets, capabilities: Capabilities):
       return;
     }
     const html = renderShell(island, assets);
-    res.writeHead(status, WEB_HTML_HEADERS);
+    res.writeHead(
+      status,
+      options.csp ? { ...WEB_HTML_HEADERS, "content-security-policy": options.csp } : WEB_HTML_HEADERS,
+    );
     res.end(html);
   };
 }

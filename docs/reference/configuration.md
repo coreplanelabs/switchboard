@@ -38,3 +38,7 @@ Every top-level block, what it's for, and what happens when it's absent. Copy `c
 ## Full annotated example
 
 `config/config.example.yaml` in the repo root is the living reference — every key, every default, every caveat, as a comment next to the setting it documents. This page is the map; that file is the terrain.
+
+## Optional account verification
+
+`dashboard.identityLink` supplies `slackClientId`, `slackTeamId` and `slackClientSecretEnv` to the separate account-verification handler. All three must be nonblank. The secret remains in the named environment variable. The flow requires human Cloudflare Access authentication and refuses an explicit `token` or `none` strategy. Its configured callback path is `/settings/identities/callback`; the installation must register the handler and provider redirect before use. These settings alone do not enable a production route.

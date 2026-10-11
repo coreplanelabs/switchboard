@@ -38,7 +38,7 @@ function object(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-/** Not installed at startup. No bot token, user-info/email fallback, logger,
+/** Registered only by an explicit account verification flow. No bot token, user-info/email fallback, logger,
  * credential cache or token-bearing error escapes this confidential-client seam. */
 export class SlackOidcProofAdapter implements SlackProofProvider {
   private readonly client: SlackClient;

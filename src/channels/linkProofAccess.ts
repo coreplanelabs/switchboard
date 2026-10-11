@@ -3,7 +3,7 @@ import type { AccessEvidence, AccessHumanProof, AccessProofProvider } from "../c
 import { JwksCache, verifyAccessJwt, type AccessConfig, type VerifyDeps } from "./accessAuth.js";
 import { audienceValid, jwtParts, signingKeys, tokenTimes } from "./linkProofJwt.js";
 
-/** Offline linking projection, deliberately not part of dashboard identity resolution.
+/** Human-only linking proof, separate from dashboard identity resolution.
  * Its private key-only cache cannot inherit keys from the less restrictive gate. */
 export class AccessHumanProofAdapter implements AccessProofProvider {
   private readonly config: AccessConfig;

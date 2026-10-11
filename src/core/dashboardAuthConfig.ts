@@ -15,6 +15,12 @@ export interface DashboardConfig {
   /** Which credential the gate checks. Absent → `access` when ACCESS_TEAM_DOMAIN
    *  and ACCESS_AUD are both set, else `none`. */
   auth?: DashboardAuthMode;
+  /** Optional two-sided account proof. Its secret is read only by the host. */
+  identityLink?: {
+    slackClientId: string;
+    slackTeamId: string;
+    slackClientSecretEnv: string;
+  };
   /** The `token` strategy's inputs. */
   token?: {
     /** The env var holding the bearer. Default `DASHBOARD_TOKEN`. */
@@ -64,7 +70,21 @@ export function validateDashboardConfig(raw: unknown): asserts raw is DashboardC
   }
   const block = raw as Record<string, unknown>;
   for (const key of Object.keys(block)) {
-    if (key !== "auth" && key !== "token") throw new Error(`config.yaml: dashboard.${key} is not a known key`);
+    if (!["auth", "token", "identityLink"].includes(key))
+      throw new Error(`config.yaml: dashboard.${key} is not a known key`);
+  }
+  if (block.identityLink !== undefined) {
+    if (typeof block.identityLink !== "object" || block.identityLink === null || Array.isArray(block.identityLink))
+      throw new Error("config.yaml: dashboard.identityLink must be a mapping");
+    const link = block.identityLink as Record<string, unknown>;
+    const fields = ["slackClientId", "slackTeamId", "slackClientSecretEnv"];
+    for (const key of Object.keys(link))
+      if (!fields.includes(key)) throw new Error(`config.yaml: dashboard.identityLink.${key} is not a known key`);
+    for (const key of fields)
+      if (typeof link[key] !== "string" || link[key].trim() === "")
+        throw new Error(`config.yaml: dashboard.identityLink.${key} must be a non-empty string`);
+    if (block.auth !== undefined && block.auth !== "access")
+      throw new Error("config.yaml: dashboard.identityLink requires Access human authentication");
   }
   if (block.auth !== undefined) {
     if (typeof block.auth !== "string" || !(DASHBOARD_AUTH_MODES as readonly string[]).includes(block.auth)) {

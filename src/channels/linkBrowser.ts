@@ -73,13 +73,22 @@ function terminal(result: LinkResult, value: string): LinkConsentView {
   };
 }
 
-/** Disabled entry point. No server/router imports this adapter. Even explicit
- * fixture mode is confined to one HTTPS loopback origin; activation requires a
- * later code/release gate, not an environment flag or a successful ceremony.
+/** The host explicitly registers production or an HTTPS-loopback fixture.
+ * Unregistered instances stay disabled; a successful ceremony is not authority.
  * Evidence is supplied by a trusted ingress/test harness, never parsed from the
  * form. There are intentionally no logger, cache, event or raw-error callbacks. */
 export class LinkBrowser {
-  constructor(private readonly deps: { ceremony: LinkCeremony; origin: string; mode?: "local-fixture" }) {}
+  private readonly path: string;
+  constructor(
+    private readonly deps: {
+      ceremony: LinkCeremony;
+      origin: string;
+      mode?: "local-fixture" | "production";
+      path?: string;
+    },
+  ) {
+    this.path = deps.path ?? PATH;
+  }
 
   private response(status: number, body: LinkConsentView | null = null, extra: Record<string, string> = {}): Response {
     return new Response(body ? JSON.stringify(body) : null, {
@@ -88,7 +97,7 @@ export class LinkBrowser {
     });
   }
   private redirect(): Response {
-    return this.response(303, null, { Location: `${this.deps.origin}${PATH}` });
+    return this.response(303, null, { Location: `${this.deps.origin}${this.path}` });
   }
   private async view(value: string, evidence: AccessEvidence): Promise<Response> {
     const bound = session(value);
@@ -129,14 +138,17 @@ export class LinkBrowser {
       const origin = new URL(this.deps.origin);
       const url = new URL(request.url);
       if (
-        this.deps.mode !== "local-fixture" ||
+        !["local-fixture", "production"].includes(this.deps.mode ?? "") ||
         origin.protocol !== "https:" ||
-        !["localhost", "127.0.0.1", "[::1]"].includes(origin.hostname) ||
+        (this.deps.mode === "local-fixture" && !["localhost", "127.0.0.1", "[::1]"].includes(origin.hostname)) ||
+        !/^\/[a-z][a-z0-9/-]*$/.test(this.path) ||
+        this.path.endsWith("/") ||
+        this.path.includes("//") ||
         origin.origin !== this.deps.origin ||
         url.origin !== origin.origin
       )
         return this.response(404);
-      callback = url.pathname === `${PATH}/callback`;
+      callback = url.pathname === `${this.path}/callback`;
       const value = cookieValue(request);
       const bound = session(value);
       if (callback) {
@@ -152,14 +164,14 @@ export class LinkBrowser {
         return this.redirect();
       }
       if (url.search || url.hash) return this.response(400);
-      if (request.method === "GET" && url.pathname === PATH) {
+      if (request.method === "GET" && url.pathname === this.path) {
         if (value) return await this.view(value, evidence);
         const fresh = `seed:${randomBytes(32).toString("base64url")}`;
         return this.response(200, { stage: "start", csrf: csrf(fresh, "begin") }, { "Set-Cookie": setCookie(fresh) });
       }
-      const action = url.pathname.slice(PATH.length + 1);
+      const action = url.pathname.slice(this.path.length + 1);
       if (
-        !url.pathname.startsWith(`${PATH}/`) ||
+        !url.pathname.startsWith(`${this.path}/`) ||
         !["begin", "commit", "cancel", "interrupt", "restart"].includes(action)
       )
         return this.response(404);
@@ -208,7 +220,7 @@ export class LinkBrowser {
           return this.response(409);
         const fresh = `seed:${randomBytes(32).toString("base64url")}`;
         return this.response(303, null, {
-          Location: `${this.deps.origin}${PATH}`,
+          Location: `${this.deps.origin}${this.path}`,
           "Set-Cookie": setCookie(fresh),
         });
       }
