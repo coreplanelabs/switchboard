@@ -36,7 +36,10 @@ vi.mock("node:child_process", () => ({
         ? [{ id: "app-id", name: "switchboard-switchboardserver" }]
         : args.includes("info")
           ? { version: 18, configuration: { image: "registry.example/actual" } }
-          : [{ name: "singleton", state: "running", version: 18 }];
+          : {
+              instances: [{ name: "singleton", state: "running", version: 18 }],
+              result_info: { next_page_token: null },
+            };
       child.stdout.emit("data", Buffer.from(JSON.stringify(result)));
       child.emit("close", 0);
     });

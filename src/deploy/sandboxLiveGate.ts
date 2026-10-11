@@ -346,20 +346,16 @@ export function rolloutTargetFromDeployOutput(output: string): RolloutTarget | n
   return added.length === 0 ? null : { image: imageOn(added) };
 }
 
-/** One page of `wrangler containers instances <id> --json`: a bare array
- *  (unpaginated) or `{ instances, result_info: { next_page_token } }` (with
- *  `--per-page`/`--page-token`). `undefined` when it is neither. */
+/** One explicitly paginated `wrangler containers instances` result. A bare
+ * array or malformed continuation cannot establish inventory completeness. */
 export function parseInstancesPage(
   page: unknown,
 ): { rows: ContainerInstance[]; nextPageToken: string | null } | undefined {
-  let rows: unknown;
-  let next: unknown = null;
-  if (Array.isArray(page)) rows = page;
-  else if (isRecord(page) && Array.isArray(page.instances)) {
-    rows = page.instances;
-    next = isRecord(page.result_info) ? page.result_info.next_page_token : null;
-  } else return undefined;
-  if (!(rows as unknown[]).every(isRecord)) return undefined;
+  if (!isRecord(page) || !Array.isArray(page.instances) || !isRecord(page.result_info)) return undefined;
+  const rows = page.instances;
+  const next = page.result_info.next_page_token;
+  if (next !== undefined && next !== null && typeof next !== "string") return undefined;
+  if (!rows.every(isRecord)) return undefined;
   return {
     rows: (rows as Record<string, unknown>[]).map((r) => ({
       name: typeof r.name === "string" ? r.name : null,

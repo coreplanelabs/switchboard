@@ -449,18 +449,22 @@ describe("wrangler and /exec parsers", () => {
 
   it("parseInstancesPage refuses malformed rows instead of hiding contradictory inventory", () => {
     const singleton = { name: "singleton", state: "running", version: 18 };
-    expect(parseInstancesPage([singleton, null])).toBeUndefined();
-    expect(parseInstancesPage({ instances: [singleton, "unknown row"] })).toBeUndefined();
-    expect(parseInstancesPage([singleton])).toBeDefined();
+    expect(
+      parseInstancesPage({ instances: [singleton, "unknown row"], result_info: { next_page_token: null } }),
+    ).toBeUndefined();
+    expect(parseInstancesPage({ instances: [singleton], result_info: { next_page_token: null } })).toEqual({
+      rows: [inst("singleton", "running", 18)],
+      nextPageToken: null,
+    });
   });
 
-  it("parseInstancesPage reads the bare array wrangler prints unpaginated AND the {instances, result_info} shape --per-page switches to, keeping name/state/version and the next page token", () => {
+  it("parseInstancesPage requires paginated metadata and keeps every row and continuation token", () => {
     const rows = [
       { id: "i1", name: KEY, state: "running", location: "sjc", version: 12, created: "2026-09-07T23:35:00Z" },
       { id: null, name: "slack:old", state: "inactive", location: null, version: null, created: null },
       { id: "i3", state: "provisioning", version: "12" }, // no DO name (a bare-instances listing)
     ];
-    expect(parseInstancesPage(rows)).toEqual({
+    expect(parseInstancesPage({ instances: rows, result_info: { next_page_token: null } })).toEqual({
       rows: [inst(KEY, "running", 12), inst("slack:old", "inactive", null), inst(null, "provisioning", 12)],
       nextPageToken: null,
     });
@@ -471,6 +475,14 @@ describe("wrangler and /exec parsers", () => {
       rows: [],
       nextPageToken: null,
     });
+    for (const malformed of [
+      rows,
+      { instances: rows },
+      { instances: rows, result_info: null },
+      { instances: rows, result_info: "unknown" },
+      ...[42, false, {}, []].map((next_page_token) => ({ instances: rows, result_info: { next_page_token } })),
+    ])
+      expect(parseInstancesPage(malformed)).toBeUndefined();
     expect(parseInstancesPage({ error: "nope" })).toBeUndefined();
     expect(parseInstancesPage(undefined)).toBeUndefined();
   });

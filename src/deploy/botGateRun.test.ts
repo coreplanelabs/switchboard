@@ -136,7 +136,10 @@ describe("deployment health cancellation", () => {
 describe("deployStep (bot rollback fence)", () => {
   it("uses fresh singleton health when Wrangler reports an inactive placement without a version", async () => {
     const h = harness({ app: [before, after], health: [serving(PRIOR_COMMIT)] });
-    const native = parseInstancesPage([{ name: "singleton", state: "inactive", version: null }]);
+    const native = parseInstancesPage({
+      instances: [{ name: "singleton", state: "inactive", version: null }],
+      result_info: { next_page_token: null },
+    });
     expect(native).toBeDefined();
     h.deps.readInstances = async () => ({ value: native!.rows });
     expect(await deployStep(botStep, plan, PRIOR_COMMIT, h.io, h.deps, h.exec)).toMatchObject({
