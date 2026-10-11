@@ -230,6 +230,7 @@ describe("closed candidate smoke loop diagnostic", () => {
   it.each(["provider-throw", "unknown-verdict", "catalog-throw", "brief-sync-throw"] as const)(
     "does not change the $mode answer, prompt, counters or call count",
     async (mode) => {
+      const providerError = new Error("PRIVATE_PROVIDER_ERROR");
       async function execute(enabled: boolean) {
         let count = 0;
         const model = vi.fn<RouteModel>(async () => {
@@ -239,7 +240,7 @@ describe("closed candidate smoke loop diagnostic", () => {
               tool: mode === "catalog-throw" ? "provider_models" : "repository_brief",
               input: { repo: "private/fixture" },
             };
-          if (mode === "provider-throw") throw new Error("PRIVATE_PROVIDER_ERROR");
+          if (mode === "provider-throw") throw providerError;
           if (mode === "unknown-verdict")
             return count === 2
               ? { tool: "repo_list", input: { intent: "read", reason: "inspect" } }

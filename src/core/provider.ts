@@ -16,6 +16,7 @@
 
 import type { Effort } from "../effort.js";
 import type { ChatMessage, ContentPart } from "./chatMessage.js";
+import { redactAndCap } from "./redact.js";
 
 /** How long a prompt-cache entry written by a request stays warm. `5m` is
  *  refreshed by every read (strictly cheaper while turns start < 5 min apart);
@@ -121,6 +122,8 @@ export interface ProviderFailureAnswer {
   error?: unknown;
   provider?: string;
   model?: string;
+  headers?: Headers | Record<string, string>;
+  secretValues?: readonly string[];
   /** Only adapters that verified the model proxy's response-specific HMAC
    * marker may set this. Provider response bodies are never trusted to name
    * their own disposition. */
@@ -133,6 +136,7 @@ export interface ProviderSchemaRejection {
 }
 
 export interface ProviderFailureDetails extends Pick<ProviderFailureAnswer, "status" | "provider" | "model"> {
+  diagnostic?: ProviderFailureDiagnostic;
   operatorUrl?: string;
   /** The configured variable involved in a key failure. It is operator-safe
    * diagnostic context, never part of the requester-facing renderer. */
@@ -141,6 +145,145 @@ export interface ProviderFailureDetails extends Pick<ProviderFailureAnswer, "sta
    * one offered tool and one schema keyword. Callers may repair only on
    * this pair, never on a generic 400 or provider-controlled prose. */
   schemaRejection?: ProviderSchemaRejection;
+}
+
+/** Provider evidence, not recovery authority. The bounded response retains
+ * fields added by providers without making their payload our control plane. */
+export interface ProviderFailureDiagnostic {
+  errorClass?: string;
+  type?: string;
+  code?: string | number;
+  param?: string | null;
+  message?: string;
+  requestId?: string;
+  headers?: Record<string, string>;
+  response?: string;
+  truncated?: true;
+}
+
+function redactProviderSecrets(text: string, secretValues: readonly string[] = []): string {
+  for (const secret of secretValues) {
+    if (!secret) continue;
+    // SDK prose may quote JSON values. Hide both forms before any lossy transform.
+    text = text.replaceAll(secret, "«redacted»").replaceAll(JSON.stringify(secret).slice(1, -1), "«redacted»");
+  }
+  return text;
+}
+
+function safeProviderDiagnostic(
+  value: unknown,
+  secretValues: readonly string[] = [],
+): ProviderFailureDiagnostic | undefined {
+  const row = providerFailureRecord(value);
+  if (!row) return undefined;
+  const result: ProviderFailureDiagnostic = {};
+  const hide = (text: string, cap: number) => redactAndCap(redactProviderSecrets(text, secretValues), cap);
+  for (const field of ["errorClass", "type", "code", "param", "message", "requestId", "response"] as const) {
+    const item = row[field];
+    if (typeof item === "string") {
+      const cap = field === "response" ? 16_384 : field === "message" ? 4_096 : 256;
+      const text = hide(item, cap);
+      Object.assign(result, { [field]: text });
+      if (text.length > cap) result.truncated = true;
+    }
+  }
+  if (typeof row.code === "number" && Number.isFinite(row.code)) result.code = row.code;
+  if (row.param === null) result.param = null;
+  if (row.truncated === true) result.truncated = true;
+  const headers = providerFailureRecord(row.headers);
+  if (headers) {
+    const safe: Record<string, string> = {};
+    for (const key of new Set(["request-id", "x-request-id", "retry-after", ...Object.keys(headers)])) {
+      const value = headers[key];
+      const name = key.toLowerCase();
+      if (
+        name.length <= 96 &&
+        /^(?:request-id|x-request-id|retry-after|(?:x-|anthropic-)?ratelimit-[a-z-]+)$/.test(name) &&
+        typeof value === "string"
+      ) {
+        if (Object.keys(safe).length >= 16) {
+          result.truncated = true;
+          continue;
+        }
+        safe[name] = hide(value, 128);
+        if (safe[name].length > 128) result.truncated = true;
+      }
+    }
+    if (Object.keys(safe).length) result.headers = safe;
+  }
+  const bytes = () => new TextEncoder().encode(JSON.stringify(result)).length;
+  for (const field of ["response", "message"] as const) {
+    while (bytes() > 16_384 && result[field] !== undefined) {
+      result.truncated = true;
+      const text = result[field]!;
+      if (text.length <= 1) delete result[field];
+      else result[field] = `${text.slice(0, Math.floor((text.length - 1) / 2))}…`;
+    }
+  }
+  while (bytes() > 16_384 && result.headers && Object.keys(result.headers).length) {
+    result.truncated = true;
+    delete result.headers[Object.keys(result.headers).at(-1)!];
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
+function providerDiagnostic(
+  input: ProviderFailureAnswer,
+  parsed: unknown,
+  text: string,
+): ProviderFailureDiagnostic | undefined {
+  const sdk = providerFailureRecord(input.error);
+  const body = providerFailureRecord(parsed);
+  const error = providerFailureRecord(body?.error) ?? body;
+  const originalHeaders = input.headers ?? sdk?.headers;
+  const headerValues =
+    originalHeaders instanceof Headers ? Object.fromEntries(originalHeaders) : providerFailureRecord(originalHeaders);
+  const headers = headerValues
+    ? Object.fromEntries(Object.entries(headerValues).map(([name, value]) => [name.toLowerCase(), value]))
+    : undefined;
+  const response = input.body ?? sdk?.error ?? (input.error instanceof Error ? input.error : parsed);
+  let serialized: string | undefined;
+  try {
+    const value = typeof response === "string" ? (providerFailureBody(response) ?? response) : response;
+    serialized =
+      typeof value === "string"
+        ? value
+        : value === undefined
+          ? undefined
+          : JSON.stringify(value, (field, value) => {
+              if (
+                /^(?:request|requestBody|request_body|messages|input|output|prompt|system|tools|content|headers|authorization|cookie|api[_-]?key|password|token|secret)$/i.test(
+                  field,
+                )
+              )
+                return "«redacted»";
+              if (typeof value === "string") return redactProviderSecrets(value, input.secretValues);
+              return value instanceof Error
+                ? { ...value, name: value.name, message: value.message, stack: value.stack, cause: value.cause }
+                : value;
+            });
+  } catch {
+    /* Non-JSON SDK errors still retain their class and message. */
+  }
+  const headerRow = providerFailureRecord(headers);
+  return safeProviderDiagnostic(
+    {
+      errorClass: sdk?.name,
+      type: error?.type,
+      code: error?.code ?? sdk?.code,
+      param: error?.param,
+      message: error?.message ?? (body || Array.isArray(parsed) ? undefined : (sdk?.message ?? text)),
+      requestId:
+        body?.request_id ??
+        sdk?.request_id ??
+        sdk?.requestID ??
+        headerRow?.["request-id"] ??
+        headerRow?.["x-request-id"],
+      headers,
+      response: serialized,
+    },
+    input.secretValues,
+  );
 }
 
 function providerFailureDiagnostic(cause: ProviderFailureCause, details: ProviderFailureDetails): string {
@@ -160,16 +303,24 @@ export class ProviderFailure extends Error {
   readonly operatorUrl: string | undefined;
   readonly keyVariable: string | undefined;
   readonly schemaRejection: ProviderSchemaRejection | undefined;
+  readonly diagnostic: ProviderFailureDiagnostic | undefined;
 
-  constructor(cause: ProviderFailureCause, details: ProviderFailureDetails = {}) {
+  constructor(
+    cause: ProviderFailureCause,
+    details: ProviderFailureDetails & Pick<ProviderFailureAnswer, "secretValues"> = {},
+  ) {
     super(providerFailureDiagnostic(cause, details));
     this.cause = cause;
     this.status = details.status;
     this.provider = details.provider;
     this.model = details.model;
-    this.operatorUrl = details.operatorUrl;
+    this.operatorUrl =
+      details.operatorUrl === undefined
+        ? undefined
+        : redactAndCap(redactProviderSecrets(details.operatorUrl, details.secretValues), 2_048);
     this.keyVariable = details.keyVariable;
     this.schemaRejection = details.schemaRejection;
+    this.diagnostic = safeProviderDiagnostic(details.diagnostic, details.secretValues);
   }
 }
 
@@ -200,7 +351,7 @@ export function renderProviderFailure(cause: ProviderFailureCause, surface: Prov
     case "model-unknown":
       return "The configured model is unavailable from its provider; this request cannot start until the service is restored.";
     case "request-rejected":
-      return "The model provider rejected the request shape; no work was started.";
+      return "The model provider rejected the request; this request ended.";
     case "permanent":
       return "The model provider refused the call; the request ended without exposing the provider's response.";
   }
@@ -254,6 +405,8 @@ function providerFailureSignals(value: unknown, into: string[] = []): string[] {
 
 function providerFailureStatus(input: ProviderFailureAnswer, text: string): number | undefined {
   if (input.status !== undefined) return input.status;
+  const status = providerFailureRecord(input.error)?.status;
+  if (typeof status === "number") return status;
   const match = /(?:^|\b(?:http|status(?: code)?|error|api error)[^0-9]{0,8})([1-5]\d\d)\b/i.exec(text);
   return match ? Number(match[1]) : undefined;
 }
@@ -344,7 +497,9 @@ function isProviderFailureCause(value: unknown): value is ProviderFailureCause {
 
 function trustedProviderFailureEnvelope(
   value: unknown,
-): { cause: ProviderFailureCause; schemaRejection?: ProviderSchemaRejection } | undefined {
+):
+  | { cause: ProviderFailureCause; details?: ProviderFailureDetails; schemaRejection?: ProviderSchemaRejection }
+  | undefined {
   if (Array.isArray(value)) {
     for (const item of value) {
       const envelope = trustedProviderFailureEnvelope(item);
@@ -356,7 +511,11 @@ function trustedProviderFailureEnvelope(
   if (!row) return undefined;
   if (row.type === "provider_failure" && isProviderFailureCause(row.cause)) {
     const schemaRejection = providerSchemaRejectionRecord(row.schemaRejection);
-    return { cause: row.cause, ...(schemaRejection !== undefined ? { schemaRejection } : {}) };
+    return {
+      cause: row.cause,
+      ...(providerFailureRecord(row.details) ? { details: row.details as ProviderFailureDetails } : {}),
+      ...(schemaRejection !== undefined ? { schemaRejection } : {}),
+    };
   }
   for (const item of Object.values(row)) {
     const envelope = trustedProviderFailureEnvelope(item);
@@ -373,10 +532,11 @@ function trustedProviderFailureEnvelope(
 export function classifyProviderFailure(input: ProviderFailureAnswer): ProviderFailure {
   if (input.error instanceof ProviderFailure) return input.error;
   const text = providerFailureText(input);
-  const parsed = providerFailureBody(input.body ?? providerFailureRecord(input.error) ?? text);
+  const sdk = providerFailureRecord(input.error);
+  const parsed = providerFailureBody(input.body ?? sdk?.error ?? sdk ?? text);
   const signals = providerFailureSignals(parsed);
   const trusted = input.trustedEnvelope === true ? trustedProviderFailureEnvelope(parsed) : undefined;
-  const status = providerFailureStatus(input, text);
+  const status = trusted?.details?.status ?? providerFailureStatus(input, text);
   // A parsed provider object contributes its structured signals and prose,
   // but never its untrusted `cause` value. That preserves message-only
   // adapters without re-reading `cause: rate-limited` through the regex.
@@ -402,7 +562,6 @@ export function classifyProviderFailure(input: ProviderFailureAnswer): ProviderF
   let cause: ProviderFailureCause;
   if (trusted !== undefined) cause = trusted.cause;
   else if (status === 402) cause = "credit-or-quota-exhausted";
-  else if (status === 429) cause = "rate-limited";
   else if (transientTransport) cause = "transient";
   else if (
     signalIncludes(signals, [
@@ -412,12 +571,20 @@ export function classifyProviderFailure(input: ProviderFailureAnswer): ProviderF
       "credit_limit",
       "billing_hard_limit",
       "payment_required",
+      "billing_error",
     ]) ||
     (providerFailureRecord(parsed)?.metadata !== undefined &&
-      providerFailureRecord(providerFailureRecord(parsed)?.metadata)?.limit_source !== undefined)
+      providerFailureRecord(providerFailureRecord(parsed)?.metadata)?.limit_source !== undefined) ||
+    ((status === 400 || status === 429) &&
+      /^(?:Your credit balance is too low to access the Anthropic API\b|You have reached your specified (?:workspace )?API usage limits\b)/i.test(
+        String(
+          (providerFailureRecord(providerFailureRecord(parsed)?.error) ?? providerFailureRecord(parsed))?.message ?? "",
+        ),
+      ))
   )
     cause = "credit-or-quota-exhausted";
   else if (
+    status === 429 ||
     signalIncludes(signals, ["rate_limit", "too_many_requests"]) ||
     /\brate[- ]limit(?:ed)?\b/i.test(unstructuredText)
   )
@@ -436,13 +603,16 @@ export function classifyProviderFailure(input: ProviderFailureAnswer): ProviderF
   )
     cause = "request-rejected";
   else cause = "permanent";
-  const operatorUrl = /https?:\/\/[^\s"'<>]+/.exec(text)?.[0];
+  const operatorUrl = /https?:\/\/[^\s"'<>]+/.exec(redactProviderSecrets(text, input.secretValues))?.[0];
   return new ProviderFailure(cause, {
+    ...trusted?.details,
+    secretValues: input.secretValues,
     ...(status !== undefined ? { status } : {}),
     ...(input.provider !== undefined ? { provider: input.provider } : {}),
     ...(input.model !== undefined ? { model: input.model } : {}),
     ...(operatorUrl !== undefined ? { operatorUrl } : {}),
     ...(trusted?.schemaRejection !== undefined ? { schemaRejection: trusted.schemaRejection } : {}),
+    diagnostic: trusted?.details?.diagnostic ?? providerDiagnostic(input, parsed, text),
   });
 }
 
@@ -458,6 +628,9 @@ export function typedProviderFailureOf(error: unknown, seen = new Set<object>())
       ...(typeof row.model === "string" ? { model: row.model } : {}),
       ...(typeof row.operatorUrl === "string" ? { operatorUrl: row.operatorUrl } : {}),
       ...(typeof row.keyVariable === "string" ? { keyVariable: row.keyVariable } : {}),
+      ...(safeProviderDiagnostic(row.diagnostic) !== undefined
+        ? { diagnostic: safeProviderDiagnostic(row.diagnostic) }
+        : {}),
       ...(providerSchemaRejectionRecord(row.schemaRejection) !== undefined
         ? { schemaRejection: providerSchemaRejectionRecord(row.schemaRejection)! }
         : {}),

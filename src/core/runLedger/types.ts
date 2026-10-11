@@ -5,7 +5,12 @@
 
 import type { ChatMessage } from "../chatMessage.js";
 import type { ChildHandoff } from "../dispatch/handoff.js";
-import { PROVIDER_FAILURE_CAUSES, type ProviderFailureCause, type ToolDef } from "../provider.js";
+import {
+  PROVIDER_FAILURE_CAUSES,
+  type ProviderFailureCause,
+  type ProviderFailureDetails,
+  type ToolDef,
+} from "../provider.js";
 import type { Verbosity } from "../verbosity.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { RunProfile } from "../../config/profile.js";
@@ -388,6 +393,7 @@ export interface IntakeReceipt {
   source: "model" | "mode" | "question" | "error" | "timeout";
   /** Present only when `source: error` is a failed provider call. */
   providerFailure?: ProviderFailureCause;
+  providerFailureDetails?: ProviderFailureDetails;
   /** The structured seam's attempts (docs/decisions/0067): what each answer
    *  violated, or that it was accepted; absent when no model was asked. */
   attempts?: ReadonlyArray<{ outcome: "accepted" | "violation"; violation?: string }>;

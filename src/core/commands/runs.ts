@@ -19,6 +19,7 @@ import {
 import { UNIT_KEY_PATTERN } from "../coordinator/contract.js";
 import { parsePullRequestRef, PULL_REQUEST_REF_PATTERN, type FindingRow } from "../findingsLedger.js";
 import { formatUsd } from "../modelPricing.js";
+import type { ProviderFailureDetails } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
 import { SEARCH_MAX_HITS } from "../runLedger/sessionLog.js";
 import { PROVISIONAL_LABEL, RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT, SESSION_KEY_PATTERN } from "../runRecord.js";
@@ -29,6 +30,7 @@ import {
   type FindingsLedgerView,
   type Result,
   type RunRecordView,
+  type RunView,
   type RunsService,
 } from "../runsService.js";
 import { systemClock } from "../trace/clock.js";
@@ -139,6 +141,29 @@ async function getVisibleRun(
   return view;
 }
 
+function wrapProviderFailure<T extends ProviderFailureDetails>(details: T): T {
+  if (!details.diagnostic) return details;
+  const { message, response } = details.diagnostic;
+  return {
+    ...details,
+    diagnostic: {
+      ...details.diagnostic,
+      ...(message === undefined ? {} : { message: wrapUntrusted(message) }),
+      ...(response === undefined ? {} : { response: wrapUntrusted(response) }),
+    },
+  };
+}
+
+function wrapOperator<T extends { providerFailureDetails?: ProviderFailureDetails }>(operator: T): T {
+  return operator.providerFailureDetails
+    ? { ...operator, providerFailureDetails: wrapProviderFailure(operator.providerFailureDetails) }
+    : operator;
+}
+
+function wrapRunView<T extends RunView>(view: T): T {
+  return view.operator ? { ...view, operator: wrapOperator(view.operator) } : view;
+}
+
 /** Every free-text field a JSON surface hands out is wrapped as untrusted: the
  *  narrative texts, the tool summaries and outputs, the notes, and the one
  *  free-text field a span record carries (`span_end.error`). */
@@ -158,7 +183,13 @@ export function wrapEvent(e: RunEvent): RunEvent {
         ...(e.output !== undefined ? { output: wrapUntrusted(e.output) } : {}),
       };
     case "run_note":
-      return { ...e, summary: wrapUntrusted(e.summary) };
+      return {
+        ...e,
+        summary: wrapUntrusted(e.summary),
+        ...(e.providerFailure ? { providerFailure: wrapProviderFailure(e.providerFailure) } : {}),
+      };
+    case "operator":
+      return wrapOperator(e);
     case "span_end":
       // The one free-text field a span record carries (docs/reference/specs/tracing.md).
       return e.error !== undefined ? { ...e, error: wrapUntrusted(e.error) } : e;
@@ -216,16 +247,15 @@ export const runsList = defineCommand({
     const { thread, parent, mine, ...rest } = options;
     const readable = predicateFor(caller.actor, "runs:read", "run");
     const visibleTo = mine ? allOf([readable, ownedBy(caller.actor)]) : readable;
-    return asJson(
-      await (
-        await deps.runs()
-      ).listRuns({
-        ...rest,
-        ...(thread !== undefined ? { threadKey: thread } : {}),
-        ...(parent !== undefined ? { parentRunId: parent } : {}),
-        visibleTo,
-      }),
-    );
+    const page = await (
+      await deps.runs()
+    ).listRuns({
+      ...rest,
+      ...(thread !== undefined ? { threadKey: thread } : {}),
+      ...(parent !== undefined ? { parentRunId: parent } : {}),
+      visibleTo,
+    });
+    return asJson({ ...page, runs: page.runs.map(wrapRunView) });
   },
 });
 
@@ -300,7 +330,7 @@ export const runsGet = defineCommand({
       options.include ? { include: options.include } : {},
     );
     if (view.events) view.events = view.events.map(wrapEvent);
-    return asJson(view);
+    return asJson(wrapRunView(view));
   },
   render: renderRunRecord,
 });
@@ -405,7 +435,8 @@ export const runsUnit = defineCommand({
   describe: "A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read.",
   handler: async ({ args, caller, deps }) => {
     const visibleTo = predicateFor(caller.actor, "runs:read", "run");
-    return asJson(unwrap(await (await deps.runs()).listUnitRuns(args.unit, visibleTo), "unit"));
+    const unit = unwrap(await (await deps.runs()).listUnitRuns(args.unit, visibleTo), "unit");
+    return asJson({ ...unit, runs: unit.runs.map(wrapRunView) });
   },
   render: (output) => renderRuns("runs.unit", output, "text", unitHeader),
   renderChat: (output) => renderRuns("runs.unit", output, "chat", unitHeader),
@@ -421,7 +452,7 @@ export const runsChildren = defineCommand({
     const runs = await deps.runs();
     await getVisibleRun(runs, args.id, caller, "runs:read", deps, "runs.children");
     const children = await runs.listChildren(args.id, predicateFor(caller.actor, "runs:read", "run"));
-    return asJson({ parentRunId: args.id, runs: children });
+    return asJson({ parentRunId: args.id, runs: children.map(wrapRunView) });
   },
   render: (output) => renderRuns("runs.children", output, "text", childrenHeader),
   renderChat: (output) => renderRuns("runs.children", output, "chat", childrenHeader),

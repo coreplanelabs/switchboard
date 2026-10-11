@@ -1,6 +1,6 @@
 import { pipelineStandingOf, summaryOfStanding } from "../pipelineStanding.js";
 import { isHeadMaterial, serializedOnce, type RunEvent } from "../runEvents.js";
-import { capEvent, MAX_EVENT_BYTES, utf8ByteLength } from "../runRecord.js";
+import { capEvent, MAX_EVENT_BYTES, protectedProviderFailureNoteIndices, utf8ByteLength } from "../runRecord.js";
 import { activityOf } from "./activity.js";
 import type { RunState } from "./state.js";
 
@@ -67,7 +67,8 @@ export function appendToBacklog(run: BacklogState, bounds: BacklogBounds, publis
     run.backlog.length === run.headLen && isHeadMaterial(published) && run.headBytes < HEAD_BUDGET_BYTES;
   // A head event is capped at publish (docs/reference/specs/tracing.md): the cap is the
   // record's per-event cap, so what the head holds is what a record would.
-  const stamped = headEligible ? capEvent(published, MAX_EVENT_BYTES).event : published;
+  const diagnostic = published.type === "run_note" && published.kind === "provider_failure";
+  const stamped = headEligible || diagnostic ? capEvent(published, MAX_EVENT_BYTES).event : published;
   const bytes = utf8ByteLength(serializedOnce(stamped)); // memoized: the SSE frame reuses this string
   run.backlog.push(stamped);
   run.backlogSizes.push(bytes);
@@ -96,12 +97,31 @@ export function appendToBacklog(run: BacklogState, bounds: BacklogBounds, publis
     (run.pipelineEvents ??= []).push(stamped);
     run.pipeline = summaryOfStanding(pipelineStandingOf(run.pipelineEvents));
   }
+  if (run.backlog.length <= bounds.limit && run.backlogBytes <= bounds.bytes) return;
+  // The head and newest event already own their bytes and count slots.
+  const noteBytes = Math.max(0, bounds.bytes - run.headBytes - (run.backlogSizes.at(-1) ?? 0));
+  const protectedIndices = new Set(
+    [
+      ...protectedProviderFailureNoteIndices(
+        run.backlog.slice(run.headLen, -1),
+        run.backlogSizes.slice(run.headLen, -1),
+        noteBytes,
+      ),
+    ].map((index) => index + run.headLen),
+  );
+  const noteSlots = Math.max(0, bounds.limit - run.headLen - 1);
+  for (const index of [...protectedIndices].slice(noteSlots)) protectedIndices.delete(index);
+  const protectedNotes = run.backlog.map((_, index) => protectedIndices.has(index));
   while (
     run.backlog.length > run.headLen + 1 &&
     (run.backlog.length > bounds.limit || run.backlogBytes > bounds.bytes)
   ) {
-    run.backlog.splice(run.headLen, 1);
-    run.backlogBytes -= run.backlogSizes.splice(run.headLen, 1)[0] ?? 0;
+    let index = run.headLen;
+    while (index < run.backlog.length - 1 && protectedNotes[index]) index++;
+    if (index === run.backlog.length - 1) break;
+    protectedNotes.splice(index, 1);
+    run.backlog.splice(index, 1);
+    run.backlogBytes -= run.backlogSizes.splice(index, 1)[0] ?? 0;
   }
 }
 

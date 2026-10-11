@@ -5,7 +5,7 @@ import type { FirstTestReceipt } from "./firstTestReceipt.js";
 import type { DescriptionIssue, PrDescription, RecordedJson, RenderedPointer } from "./prDescriptionTypes.js";
 import type { HarnessScope } from "./harness/scope.js";
 import type { ModelCard } from "./modelCard.js";
-import type { ProviderFailureCause } from "./provider.js";
+import type { ProviderFailureCause, ProviderFailureDetails } from "./provider.js";
 import type { RunStateEvent } from "./runLiveState.js";
 import type { Effort } from "../effort.js";
 import type { AddressSeverity } from "./reviewVerdict.js";
@@ -125,6 +125,7 @@ export type RunNoteKind =
    *  run failed even when the reply is never delivered (run-history.md).
    *  Published by the run loop's catch, before the finish. */
   | "run_failed"
+  | "provider_failure"
   /** The model answered, but the final context cursor could not be confirmed;
    * the live row stays recoverable and no answer or review was published. */
   | "checkpoint_deferred"
@@ -363,6 +364,7 @@ export const RUN_NOTE_KINDS = [
   "spans_dropped",
   "head_moved",
   "run_failed",
+  "provider_failure",
   "checkpoint_deferred",
   "mcp_unavailable",
   "follow_up",
@@ -669,6 +671,8 @@ export type RunEvent =
       type: "run_note";
       kind: RunNoteKind;
       summary: string;
+      /** Redacted provider evidence captured before a harness flattens its error. */
+      providerFailure?: ProviderFailureDetails & { cause: ProviderFailureCause };
       /** Closed observation only; never a command outcome or recovery receipt. */
       executionDiagnostic?: import("../execution/typedExecutionDiagnostic.js").TypedExecutionDiagnostic;
       /** A bounded private source decision; never includes a message, actor or repository. */
@@ -1244,6 +1248,7 @@ export type RunEvent =
       /** The typed cause when the operator model call failed at the provider
        * boundary. Its refusal text is always the cause-owned renderer. */
       providerFailure?: ProviderFailureCause;
+      providerFailureDetails?: ProviderFailureDetails;
       attempts?: ReadonlyArray<{ outcome: "accepted" | "violation"; violation?: string }>;
       /** Snapshot of the factual repository context the operator received. */
       repoContext?: {

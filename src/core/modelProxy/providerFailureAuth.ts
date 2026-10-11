@@ -5,7 +5,12 @@
 // may choose its own ProviderFailure cause.
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { PROVIDER_FAILURE_CAUSES, type ProviderFailureCause, type ProviderSchemaRejection } from "../provider.js";
+import {
+  PROVIDER_FAILURE_CAUSES,
+  type ProviderFailureCause,
+  type ProviderFailureDetails,
+  type ProviderSchemaRejection,
+} from "../provider.js";
 
 export const PROXY_PROVIDER_FAILURE_AUTH_FIELD = "_switchboard_proxy_auth";
 
@@ -18,6 +23,7 @@ export interface ProxyProviderFailureEnvelope {
   cause: ProviderFailureCause;
   message: string;
   schemaRejection?: ProviderSchemaRejection;
+  details?: ProviderFailureDetails;
 }
 
 export type AuthenticatedProxyProviderFailureEnvelope = ProxyProviderFailureEnvelope & {
@@ -38,6 +44,7 @@ function payload(envelope: ProxyProviderFailureEnvelope, nonce: string): string 
     envelope.cause,
     envelope.message,
     envelope.schemaRejection ?? null,
+    ...(envelope.details === undefined ? [] : [envelope.details]),
   ]);
 }
 
@@ -82,7 +89,11 @@ function candidates(
   const row = isRecord(value) ? value : undefined;
   if (!row) return into;
   if (row.type === type) into.push(row);
-  for (const item of Object.values(row)) candidates(item, into, type);
+  for (const [key, item] of Object.entries(row)) {
+    // Signed provider details are evidence, even when a provider uses our type name.
+    if (type === "provider_failure" && row.type === type && key === "details") continue;
+    candidates(item, into, type);
+  }
   return into;
 }
 
@@ -123,6 +134,7 @@ export function proxyProviderFailureIsAuthenticated(value: unknown): boolean {
       cause: row.cause,
       message: row.message,
       ...(schemaRejection !== undefined ? { schemaRejection } : {}),
+      ...(row.details === undefined ? {} : { details: row.details as ProviderFailureDetails }),
     },
     nonce,
   );

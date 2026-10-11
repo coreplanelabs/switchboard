@@ -101,7 +101,7 @@ interface Captured {
 }
 
 /** A fetch that answers every request with one stream and keeps what was sent. */
-function fakeFetch(stream: string, status = 200) {
+function fakeFetch(stream: string, status = 200, headers: Record<string, string> = {}) {
   const calls: Captured[] = [];
   const fetchImpl: typeof globalThis.fetch = async (input, init) => {
     calls.push({
@@ -111,13 +111,132 @@ function fakeFetch(stream: string, status = 200) {
     });
     return new Response(stream, {
       status,
-      headers: { "content-type": status === 200 ? "text/event-stream" : "application/json" },
+      headers: { "content-type": status === 200 ? "text/event-stream" : "application/json", ...headers },
     });
   };
   return { fetchImpl, calls };
 }
 
 describe("PiAiProviders — the provider table config.yaml names, built on pi's model library", () => {
+  it("redacts the configured key from direct HTTP 200 Responses stream errors", async () => {
+    const { fetchImpl } = fakeFetch(
+      'event: error\ndata: {"type":"error","code":"invalid_value","message":"Rejected custom-sensitive-provider-key https://provider.test/custom-sensitive-provider-key"}\n\n',
+      200,
+      { "x-request-id": "req_streamed", "retry-after": "9", authorization: "private response header" },
+    );
+    const provider = new PiAiProviders(
+      {
+        local: {
+          type: "openai-compatible",
+          wire: "openai-responses",
+          baseUrl: "https://provider.test/v1",
+          apiKeyEnv: "LOCAL_KEY",
+        },
+      },
+      { secrets: secretsFrom({ LOCAL_KEY: "custom-sensitive-provider-key" }), clock: CLOCK, fetch: fetchImpl },
+    ).get("local");
+    const failure = await provider
+      .complete({ ...routeRequest(), model: "local-model" })
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      name: "ProviderFailure",
+      provider: "local",
+      model: "local-model",
+      cause: "permanent",
+      diagnostic: {
+        message: expect.stringContaining("Rejected «redacted»"),
+        requestId: "req_streamed",
+        headers: { "x-request-id": "req_streamed", "retry-after": "9" },
+      },
+    });
+    expect(JSON.stringify(failure)).not.toContain("custom-sensitive-provider-key");
+    expect(failure).not.toHaveProperty("secretValues");
+    expect(JSON.stringify(failure)).not.toContain("private response header");
+  });
+
+  it("redacts the configured key before a streamed diagnostic can truncate it", async () => {
+    const { fetchImpl } = fakeFetch(
+      `event: error\ndata: ${JSON.stringify({
+        type: "error",
+        code: "invalid_value",
+        message: "x".repeat(4045) + "custom-sensitive-provider-key" + " suffix",
+      })}\n\n`,
+    );
+    const provider = new PiAiProviders(
+      {
+        local: {
+          type: "openai-compatible",
+          wire: "openai-responses",
+          baseUrl: "https://provider.test/v1",
+          apiKeyEnv: "LOCAL_KEY",
+        },
+      },
+      { secrets: secretsFrom({ LOCAL_KEY: "custom-sensitive-provider-key" }), clock: CLOCK, fetch: fetchImpl },
+    ).get("local");
+    const failure = await provider
+      .complete({ ...routeRequest(), model: "local-model" })
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      name: "ProviderFailure",
+      provider: "local",
+      model: "local-model",
+      diagnostic: {
+        message: expect.stringContaining("«redacted»"),
+      },
+    });
+    expect(JSON.stringify(failure)).not.toContain("custom-sensitive");
+  });
+
+  it("redacts the configured key before capping an SDK throw outside fetch", async () => {
+    const stream: ProviderStreams["stream"] = () => {
+      throw new TypeError("x".repeat(4084) + "custom-sensitive-provider-key" + " suffix");
+    };
+    const provider = new PiAiProviders(
+      {
+        local: {
+          type: "openai-compatible",
+          wire: "openai-responses",
+          baseUrl: "https://provider.test/v1",
+          apiKeyEnv: "LOCAL_KEY",
+        },
+      },
+      {
+        secrets: secretsFrom({ LOCAL_KEY: "custom-sensitive-provider-key" }),
+        clock: CLOCK,
+        apis: { "openai-responses": { stream, streamSimple: stream } },
+      },
+    ).get("local");
+    const failure = await provider
+      .complete({ ...routeRequest(), model: "local-model" })
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      name: "ProviderFailure",
+      diagnostic: {
+        errorClass: "TypeError",
+        message: expect.stringContaining("«redacted»"),
+        truncated: true,
+      },
+    });
+    expect(JSON.stringify(failure)).not.toContain("custom-sensitive");
+  });
+
+  it("retains redacted diagnostics when the direct SDK fetch fails before an HTTP response", async () => {
+    const provider = new PiAiProviders(
+      { local: { type: "openai-compatible", baseUrl: "https://provider.test/v1", apiKeyEnv: "LOCAL_KEY" } },
+      {
+        secrets: secretsFrom({ LOCAL_KEY: "custom-sensitive-provider-key" }),
+        clock: CLOCK,
+        fetch: async () => {
+          throw new TypeError("fetch failed custom-sensitive-provider-key");
+        },
+      },
+    ).get("local");
+    await expect(provider.complete({ ...routeRequest(), model: "local-model" })).rejects.toMatchObject({
+      cause: "transient",
+      diagnostic: { errorClass: "TypeError", message: "fetch failed «redacted»" },
+    });
+  });
+
   it("builds one provider per block in config order, and names an unknown provider with the configured ones — the registry's own words", () => {
     const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK });
     expect(table.names()).toEqual(["anthropic", "openrouter", "local"]);
@@ -346,6 +465,7 @@ describe("complete — one request through pi's own adapter, on the wire", () =>
         },
       }),
       400,
+      { "x-request-id": "req_direct", "retry-after": "10" },
     );
     const table = new PiAiProviders(
       {
@@ -384,7 +504,14 @@ describe("complete — one request through pi's own adapter, on the wire", () =>
       provider: "openai",
       model: "gpt-5.6-sol",
       schemaRejection: { tool: "route", keyword: "pattern" },
-      message: "The model provider rejected the request shape; no work was started.",
+      diagnostic: {
+        type: "invalid_request_error",
+        code: "invalid_json_schema",
+        message: "Invalid schema for function 'route': schema keyword 'pattern' is not supported.",
+        requestId: "req_direct",
+        headers: { "x-request-id": "req_direct", "retry-after": "10" },
+      },
+      message: "The model provider rejected the request; this request ended.",
     });
   });
 
@@ -438,7 +565,7 @@ describe("complete — one request through pi's own adapter, on the wire", () =>
       status: 400,
       provider: "openai",
       model: "gpt-5.6-sol",
-      message: "The model provider rejected the request shape; no work was started.",
+      message: "The model provider rejected the request; this request ended.",
     });
     expect(failure).toMatchObject({ schemaRejection: undefined });
   });

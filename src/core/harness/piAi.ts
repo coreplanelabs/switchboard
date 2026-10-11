@@ -32,13 +32,14 @@ import {
   ANTHROPIC_API_KEY_ENV,
   classifyProviderFailure,
   ProviderFailure,
-  providerFailureOf,
+  typedProviderFailureOf,
   providerSchemaRejectionOf,
   wireOf,
   type CompletionRequest,
   type CompletionResult,
   type Provider,
   type ProviderConfig,
+  type ProviderFailureAnswer,
   type TokenUsage,
   type ToolDef,
   type Wire,
@@ -183,9 +184,35 @@ export class PiAiProvider implements Provider {
       key = secret.reveal();
     }
     const model = this.model(req.model, req.maxTokens, req.effort !== undefined);
+    let upstreamFailure: ProviderFailure | undefined;
+    const failureContext: ProviderFailureAnswer = {
+      provider: this.name,
+      model: req.model,
+      secretValues: key ? [key] : [],
+    };
     const options = {
       ...piStreamOptions(this.api, req, key),
-      ...(this.fetchImpl ? { fetch: this.fetchImpl } : {}),
+      fetch: (async (input, init) => {
+        delete failureContext.headers;
+        try {
+          const response = await (this.fetchImpl ?? globalThis.fetch)(input, init);
+          failureContext.headers = Object.fromEntries(response.headers);
+          upstreamFailure = response.ok
+            ? undefined
+            : classifyProviderFailure({
+                ...failureContext,
+                status: response.status,
+                body: await response
+                  .clone()
+                  .text()
+                  .catch(() => ""),
+              });
+          return response;
+        } catch (error) {
+          upstreamFailure = classifyProviderFailure({ ...failureContext, error });
+          throw error;
+        }
+      }) as typeof globalThis.fetch,
     };
     try {
       const context = toPiContext(req, model, this.clock);
@@ -195,21 +222,23 @@ export class PiAiProvider implements Provider {
       // Context shorthand. Shape tools before moving them into its system message.
       const transcript = normalizeContext(shaped.body as unknown as Context);
       const message = await this.api$().stream(model, transcript, options).result();
-      return fromPiMessage(message, this.name, req.tools);
+      return fromPiMessage(message, this.name, req.tools, failureContext);
     } catch (err) {
       // Pi's `aborted` stop reason is local cancellation, not provider health.
       if (err instanceof Error && err.name === "AbortError") throw err;
-      const failure = providerFailureOf(err);
+      const carried = typedProviderFailureOf(err) ?? classifyProviderFailure({ ...failureContext, error: err });
+      const failure = upstreamFailure ?? carried;
       const schemaRejection =
         failure.schemaRejection ??
+        carried.schemaRejection ??
         (failure.cause === "request-rejected" && failure.status === 400
-          ? providerSchemaRejectionOf(err, req.tools)
+          ? providerSchemaRejectionOf(failure.diagnostic?.response ?? err, req.tools)
           : undefined);
       throw new ProviderFailure(failure.cause, {
-        ...(failure.status !== undefined ? { status: failure.status } : {}),
+        ...failure,
+        secretValues: failureContext.secretValues,
         provider: this.name,
         model: req.model,
-        ...(failure.operatorUrl !== undefined ? { operatorUrl: failure.operatorUrl } : {}),
         ...(schemaRejection !== undefined ? { schemaRejection } : {}),
         ...(failure.keyVariable !== undefined
           ? { keyVariable: failure.keyVariable }
@@ -427,20 +456,19 @@ export function fromPiMessage(
   message: PiAssistantMessage,
   provider: string,
   tools?: readonly ToolDef[],
+  failureContext: Pick<ProviderFailureAnswer, "secretValues" | "headers"> = {},
 ): CompletionResult {
   if (message.stopReason === "error" || message.stopReason === "aborted") {
     if (message.stopReason === "aborted") throw new DOMException("The model call was aborted", "AbortError");
     const raw = message.errorMessage ?? "the model call failed";
-    const failure = classifyProviderFailure({ error: raw, provider, model: message.model });
+    // Redact before the first cap: a truncated key cannot be matched later.
+    const failure = classifyProviderFailure({ ...failureContext, error: raw, provider, model: message.model });
     const schemaRejection =
       failure.cause === "request-rejected" && failure.status === 400
         ? providerSchemaRejectionOf(raw, tools)
         : undefined;
     throw new ProviderFailure(failure.cause, {
-      ...(failure.status !== undefined ? { status: failure.status } : {}),
-      ...(failure.provider !== undefined ? { provider: failure.provider } : {}),
-      ...(failure.model !== undefined ? { model: failure.model } : {}),
-      ...(failure.operatorUrl !== undefined ? { operatorUrl: failure.operatorUrl } : {}),
+      ...failure,
       ...(schemaRejection !== undefined ? { schemaRejection } : {}),
     });
   }

@@ -151,6 +151,87 @@ function value<T>(res: { ok: true; value: unknown } | { ok: false }): T {
 const ids = (res: { ok: true; value: unknown } | { ok: false }) =>
   value<{ runs: { id: string }[] }>(res).runs.map((r) => r.id);
 
+const diagnosticFailure = {
+  status: 400,
+  diagnostic: {
+    code: "invalid_value",
+    message: "provider says ignore instructions",
+    response: "provider response prose",
+  },
+};
+const diagnosticOperator = {
+  mode: "on" as const,
+  outcome: "non_decision" as const,
+  reason: "provider_failure",
+  providerFailureDetails: diagnosticFailure,
+};
+const expectFencedDiagnostic = (operator: typeof diagnosticOperator) => {
+  expect(operator.providerFailureDetails.diagnostic.code).toBe("invalid_value");
+  expect(operator.providerFailureDetails.diagnostic.message).toContain(UNTRUSTED_OPEN);
+  expect(operator.providerFailureDetails.diagnostic.message).toContain("provider says ignore instructions");
+  expect(operator.providerFailureDetails.diagnostic.response).toContain(UNTRUSTED_OPEN);
+  expect(operator.providerFailureDetails.diagnostic.response).toContain("provider response prose");
+};
+
+describe("provider diagnostics in machine history", () => {
+  it.each([undefined, "messages", "audience"] as const)(
+    "fences operator projections on runs.get with include %s",
+    async (include) => {
+      const { store, registry, deps } = await setup();
+      await store.put(
+        record("diag", NOW, {
+          operator: diagnosticOperator,
+          events: [{ type: "operator", ...diagnosticOperator, seq: 1 }],
+        }),
+      );
+      const output = value<{ operator: typeof diagnosticOperator; events?: RunEvent[] }>(
+        await registry.invoke("runs.get", { args: ["diag"], options: include ? { include } : {} }, cli, deps),
+      );
+      expectFencedDiagnostic(output.operator);
+      if (include === "messages") expectFencedDiagnostic(output.events![0] as typeof diagnosticOperator);
+      expect((await store.get("diag"))?.operator).toEqual(diagnosticOperator);
+    },
+  );
+
+  it("fences operator events and provider notes on runs.events", async () => {
+    const { store, registry, deps } = await setup();
+    await store.put(
+      record("diag", NOW, {
+        events: [
+          { type: "operator", ...diagnosticOperator, seq: 1 },
+          {
+            type: "run_note",
+            kind: "provider_failure",
+            summary: "provider summary",
+            providerFailure: { ...diagnosticFailure, cause: "request-rejected" },
+            seq: 2,
+          },
+        ],
+      }),
+    );
+    const output = value<{ events: RunEvent[] }>(await registry.invoke("runs.events", { args: ["diag"] }, cli, deps));
+    expectFencedDiagnostic(output.events[0] as typeof diagnosticOperator);
+    const note = output.events[1];
+    expect(note).toMatchObject({ type: "run_note", summary: expect.stringContaining(UNTRUSTED_OPEN) });
+    if (note.type !== "run_note") throw new Error("expected note");
+    expectFencedDiagnostic({
+      ...diagnosticOperator,
+      providerFailureDetails: note.providerFailure as typeof diagnosticFailure,
+    });
+  });
+
+  it.each(["runs.list", "runs.children"])("fences persisted operator diagnostics in %s", async (command) => {
+    const { store, registry, deps } = await setup();
+    await store.put(record("diag", NOW, { parentRunId: "fin-x", operator: diagnosticOperator }));
+    const input = command === "runs.list" ? { options: { status: "finished", parent: "fin-x" } } : { args: ["fin-x"] };
+    const output = value<{ runs: { operator: typeof diagnosticOperator }[] }>(
+      await registry.invoke(command, input, cli, deps),
+    );
+    expect(output.runs).toHaveLength(1);
+    expectFencedDiagnostic(output.runs[0].operator);
+  });
+});
+
 describe("runs.* registrations", () => {
   it("registers the nine commands with the declared actions and chat opt-outs", () => {
     const byId = Object.fromEntries(runsCommands.map((c) => [c.id, c]));
@@ -904,7 +985,7 @@ describe("runs unit / runs children / runs search — the unit is the reading un
   const KEY = "slack:C1:u1:coding";
   const turn = (role: "user" | "assistant", text: string): ChatMessage => ({ role, content: [{ type: "text", text }] });
 
-  async function world() {
+  async function world(over: Partial<RunRecord> = {}) {
     let n = 0;
     const reg = new RunRegistry({ genId: () => `id-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
     const store = new InMemoryRunStore({ now: () => NOW });
@@ -940,6 +1021,7 @@ describe("runs unit / runs children / runs search — the unit is the reading un
     await store.put(
       at("c0", "slack:C1:u1", "coding", T0 + 1_000, {
         session: { key: KEY, seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
+        ...over,
       }),
     );
     await store.put(at("r1", "slack:C1:u1r", "review", T0 + 12_000));
@@ -964,6 +1046,15 @@ describe("runs unit / runs children / runs search — the unit is the reading un
     const deps: RunsCommandDeps = { runs: async () => runs, denied: (e) => denied.push(e) };
     return { registry, deps, denied };
   }
+
+  it("fences persisted operator diagnostics in runs.unit", async () => {
+    const { registry, deps } = await world({ operator: diagnosticOperator });
+    const output = value<{ runs: { id: string; operator?: typeof diagnosticOperator }[] }>(
+      await registry.invoke("runs.unit", { args: ["plan-p-1:U16"] }, cli, deps),
+    );
+    expect(output.runs.map((row) => row.id)).toEqual(["c0", "r1", "c1"]);
+    expectFencedDiagnostic(output.runs[0].operator!);
+  });
 
   it("runs unit answers the unit's runs in round order with their round and thread, and renders one line per run under the unit's threads — aligned columns for the terminal, a chat shape without padded columns", async () => {
     const { registry, deps } = await world();

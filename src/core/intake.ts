@@ -25,6 +25,7 @@ import {
   renderProviderFailure,
   typedProviderFailureOf,
   type ProviderFailureCause,
+  type ProviderFailureDetails,
   type ToolDef,
 } from "./provider.js";
 import { oneLine, redactAndCap } from "./redact.js";
@@ -159,6 +160,7 @@ export interface IntakeDecision {
   /** A failed model call's typed cause. The channel renders this decision once
    * instead of treating it as an ordinary `silent` verdict. */
   providerFailure?: ProviderFailureCause;
+  providerFailureDetails?: ProviderFailureDetails;
   /** The structured seam's attempts (record 0067), when the model was asked:
    *  what each answer violated, or that it was accepted, kept on the receipt
    *  row so a flaky model is legible as re-asks, not as silent floors. */
@@ -188,6 +190,7 @@ export async function decideIntake(input: IntakeInput, deps: IntakeDeps): Promis
         source: row.source,
         receipt: "existing",
         ...(row.providerFailure !== undefined ? { providerFailure: row.providerFailure } : {}),
+        ...(row.providerFailureDetails ? { providerFailureDetails: row.providerFailureDetails } : {}),
         ...(row.experiment ? { experiment: row.experiment } : {}),
       };
   }
@@ -234,6 +237,7 @@ export async function decideIntake(input: IntakeInput, deps: IntakeDeps): Promis
       source: stored.source,
       receipt: "existing",
       ...(stored.providerFailure !== undefined ? { providerFailure: stored.providerFailure } : {}),
+      ...(stored.providerFailureDetails ? { providerFailureDetails: stored.providerFailureDetails } : {}),
       ...(stored.experiment ? { experiment: stored.experiment } : {}),
     };
   } catch (err) {
@@ -256,6 +260,7 @@ async function askModel(
   reason: string;
   source: IntakeSource;
   providerFailure?: ProviderFailureCause;
+  providerFailureDetails?: ProviderFailureDetails;
   attempts?: StructuredAttempt[];
 }> {
   type Parsed = { verdict: IntakeVerdict; reason: string; source: IntakeSource };
@@ -316,6 +321,7 @@ async function askModel(
       reason: renderProviderFailure(failure.cause, "ended"),
       source: "error",
       providerFailure: failure.cause,
+      providerFailureDetails: { ...failure },
       ...(attempts ? { attempts } : {}),
     };
   }

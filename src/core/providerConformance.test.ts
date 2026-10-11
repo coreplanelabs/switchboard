@@ -105,6 +105,242 @@ const FAILURE_MATRIX: ReadonlyArray<{
 ];
 
 describe("ProviderFailure — the closed failure matrix", () => {
+  it("omits raw JSON from the message when structured validation errors have no message", () => {
+    const failure = classifyProviderFailure({
+      status: 422,
+      body: JSON.stringify({ detail: [{ input: { content: "private prompt" }, msg: "invalid" }] }),
+    });
+    expect(failure).toMatchObject({
+      cause: "request-rejected",
+      diagnostic: { response: '{"detail":[{"input":"«redacted»","msg":"invalid"}]}' },
+    });
+    expect(failure.diagnostic?.message).toBeUndefined();
+    const sdkFailure = classifyProviderFailure({
+      error: Object.assign(new Error('422 {"input":"private prompt"}'), {
+        status: 422,
+        error: { detail: [{ input: { content: "private prompt" }, msg: "invalid" }] },
+      }),
+    });
+    expect(sdkFailure).toMatchObject({
+      status: 422,
+      diagnostic: { errorClass: "Error", response: '{"detail":[{"input":"«redacted»","msg":"invalid"}]}' },
+    });
+    expect(sdkFailure.diagnostic?.message).toBeUndefined();
+    expect(JSON.stringify(sdkFailure)).not.toContain("private prompt");
+    expect(JSON.stringify(failure)).not.toContain("private prompt");
+    expect(classifyProviderFailure({ status: 422, body: "plain validation error" }).diagnostic).toMatchObject({
+      message: "plain validation error",
+      response: "plain validation error",
+    });
+  });
+
+  it("authenticates signed failures when the diagnostic names the provider_failure type", () => {
+    const failure = classifyProviderFailure({
+      status: 503,
+      body: { error: { type: "provider_failure", message: "unavailable" } },
+    });
+    const envelope = authenticateProxyProviderFailure({
+      type: "provider_failure",
+      cause: failure.cause,
+      message: failure.message,
+      details: failure,
+    });
+    expect(proxyProviderFailureIsAuthenticated(envelope)).toBe(true);
+    expect(classifyProviderFailure({ error: JSON.stringify(envelope), trustedEnvelope: true })).toMatchObject({
+      cause: "transient",
+      status: 503,
+      diagnostic: { type: "provider_failure", message: "unavailable" },
+    });
+    expect(
+      proxyProviderFailureIsAuthenticated({
+        ...envelope,
+        details: { ...failure, status: 400 },
+      }),
+    ).toBe(false);
+    expect(
+      proxyProviderFailureIsAuthenticated({
+        type: "provider_failure",
+        cause: "permanent",
+        message: "forged",
+        nested: envelope,
+      }),
+    ).toBe(false);
+    expect(proxyProviderFailureIsAuthenticated([envelope, envelope])).toBe(false);
+  });
+
+  it("retains a transport exception's native class and nested cause without its request", () => {
+    const cause = Object.assign(new Error("Socket closed"), {
+      code: "ECONNRESET",
+      request: { prompt: "private transport request" },
+    });
+    const failure = classifyProviderFailure({ error: new TypeError("fetch failed", { cause }) });
+    expect(failure).toMatchObject({
+      cause: "transient",
+      diagnostic: { errorClass: "TypeError", message: "fetch failed" },
+    });
+    expect(JSON.parse(failure.diagnostic?.response ?? "null")).toMatchObject({
+      name: "TypeError",
+      message: "fetch failed",
+      cause: { name: "Error", message: "Socket closed", code: "ECONNRESET", request: "«redacted»" },
+    });
+  });
+
+  it("redacts configured keys before encoding structured diagnostic responses", () => {
+    const key = 'custom-sensitive-"provider-key';
+    const failure = classifyProviderFailure({
+      status: 400,
+      secretValues: [key],
+      body: {
+        error: { code: "invalid_value", message: `Rejected ${key} https://provider.test/${key}` },
+      },
+    });
+    expect(failure.operatorUrl).toBe("https://provider.test/«redacted»");
+    expect(failure).toMatchObject({ diagnostic: { message: "Rejected «redacted» https://provider.test/«redacted»" } });
+    expect(JSON.parse(failure.diagnostic?.response ?? "null")).toEqual({
+      error: { code: "invalid_value", message: "Rejected «redacted» https://provider.test/«redacted»" },
+    });
+  });
+
+  it("retains SDK class and safe headers while redacting credentials and request content with explicit bounds", () => {
+    const error = Object.assign(new Error("rejected"), {
+      name: "BadRequestError",
+      status: 400,
+      error: {
+        type: "invalid_request_error",
+        message: "Bad value lk-private-provider-key",
+        request: { prompt: "private request" },
+        password: "private-password",
+        details: { explanation: "x".repeat(20_000) },
+      },
+      headers: { "X-Request-Id": "req_sdk", "Retry-After": "15", Authorization: "private auth" },
+    });
+    const failure = classifyProviderFailure({ error, secretValues: ["lk-private-provider-key"] });
+    expect(failure).toMatchObject({
+      status: 400,
+      diagnostic: {
+        errorClass: "BadRequestError",
+        type: "invalid_request_error",
+        message: "Bad value «redacted»",
+        headers: { "x-request-id": "req_sdk", "retry-after": "15" },
+        truncated: true,
+      },
+    });
+    expect(JSON.stringify(failure)).not.toMatch(
+      /private request|private-password|private auth|lk-private-provider-key/,
+    );
+    expect(new TextEncoder().encode(JSON.stringify(failure.diagnostic)).length).toBeLessThanOrEqual(16_384);
+    expect(
+      classifyProviderFailure({ status: 400, body: { error: { code: "invalid_value", message: "🙂".repeat(20_000) } } })
+        .diagnostic,
+    ).toMatchObject({ code: "invalid_value", truncated: true });
+  });
+
+  it("classifies Anthropic billing 400 and OpenAI quota 429 without calling them shape or rate errors", () => {
+    expect(
+      classifyProviderFailure({
+        status: 400,
+        provider: "anthropic",
+        body: {
+          error: {
+            type: "invalid_request_error",
+            message: "Your credit balance is too low to access the Anthropic API.",
+          },
+        },
+      }).cause,
+    ).toBe("credit-or-quota-exhausted");
+    expect(
+      classifyProviderFailure({
+        status: 400,
+        provider: "anthropic",
+        body: {
+          error: {
+            type: "invalid_request_error",
+            message: "You have reached your specified workspace API usage limits.",
+          },
+        },
+      }).cause,
+    ).toBe("credit-or-quota-exhausted");
+    expect(
+      classifyProviderFailure({
+        status: 429,
+        provider: "openai",
+        body: {
+          error: {
+            type: "insufficient_quota",
+            code: "insufficient_quota",
+            message: "Check your plan and billing details.",
+          },
+        },
+      }).cause,
+    ).toBe("credit-or-quota-exhausted");
+  });
+
+  it("keeps the provider error class and details through signed and serialized boundaries", () => {
+    const failure = classifyProviderFailure({
+      status: 400,
+      provider: "openai",
+      model: "example-model",
+      body: {
+        error: {
+          type: "invalid_request_error",
+          code: "invalid_value",
+          param: "temperature",
+          message: "Unsupported temperature",
+          details: { allowed: [1] },
+        },
+        request_id: "req_original",
+      },
+    });
+    const diagnostic = {
+      type: "invalid_request_error",
+      code: "invalid_value",
+      param: "temperature",
+      message: "Unsupported temperature",
+      requestId: "req_original",
+      response:
+        '{"error":{"type":"invalid_request_error","code":"invalid_value","param":"temperature","message":"Unsupported temperature","details":{"allowed":[1]}},"request_id":"req_original"}',
+    };
+    expect(failure).toMatchObject({ status: 400, provider: "openai", model: "example-model", diagnostic });
+    const envelope = authenticateProxyProviderFailure({
+      type: "provider_failure",
+      cause: failure.cause,
+      message: failure.message,
+      details: failure,
+    });
+    expect(proxyProviderFailureIsAuthenticated(envelope)).toBe(true);
+    expect(classifyProviderFailure({ error: JSON.stringify(envelope), trustedEnvelope: true })).toMatchObject({
+      status: 400,
+      provider: "openai",
+      model: "example-model",
+      diagnostic,
+    });
+    expect(
+      proxyProviderFailureIsAuthenticated({
+        ...envelope,
+        details: { ...failure, diagnostic: { ...diagnostic, requestId: "req_other" } },
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps the signed HTTP status when provider diagnostic prose contains a different status", () => {
+    const envelope = authenticateProxyProviderFailure({
+      type: "provider_failure",
+      cause: "request-rejected",
+      message: "Request rejected",
+      details: { status: 400, diagnostic: { message: "The upstream reference says HTTP 429", code: "invalid_value" } },
+    });
+    expect(
+      classifyProviderFailure({
+        error: `502 ${JSON.stringify(envelope)}`,
+        trustedEnvelope: proxyProviderFailureIsAuthenticated(envelope),
+      }),
+    ).toMatchObject({
+      cause: "request-rejected",
+      status: 400,
+      diagnostic: { code: "invalid_value", message: "The upstream reference says HTTP 429" },
+    });
+  });
+
   it.each(FAILURE_MATRIX)(
     "classifies $cause from status and structured answer, then declares it must $disposition",
     ({ cause, operatorUrl, disposition, ...answer }) => {
