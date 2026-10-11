@@ -148,6 +148,11 @@ function completed(instance: CoordinatorInstance, unit: CoordinatorUnit, conditi
   return (
     unit.ending?.kind === "merged" ||
     unit.ending?.kind === "already_landed" ||
+    (unit.ending?.kind === "merge_ready" &&
+      !!unit.mergeAttention?.resolved &&
+      unit.pr?.number === unit.mergeAttention.pr.number &&
+      unit.pr.url === unit.mergeAttention.pr.url &&
+      unit.lastPush === unit.mergeAttention.headSha) ||
     (instance.stop !== undefined && unit.ending?.kind === "stopped")
   );
 }
@@ -558,7 +563,7 @@ export function createHomeService(deps: HomeServiceDeps): {
         const census = await read(input, false);
         const rows = census.ended
           .filter((row) => {
-            const at = row.unit.ending?.at;
+            const at = row.unit.mergeCompletion?.at ?? row.unit.ending?.at;
             return (
               at !== undefined &&
               Number.isSafeInteger(at) &&
@@ -569,7 +574,7 @@ export function createHomeService(deps: HomeServiceDeps): {
           })
           .sort(
             (a, b) =>
-              b.unit.ending!.at - a.unit.ending!.at ||
+              (b.unit.mergeCompletion?.at ?? b.unit.ending!.at) - (a.unit.mergeCompletion?.at ?? a.unit.ending!.at) ||
               (a.unit.unit < b.unit.unit ? 1 : a.unit.unit > b.unit.unit ? -1 : 0),
           );
         const result: HomeHistory = {
@@ -586,7 +591,10 @@ export function createHomeService(deps: HomeServiceDeps): {
             const cipher = createCipheriv("aes-256-gcm", historyKey, iv);
             cipher.setAAD(aad);
             const encoded = Buffer.concat([
-              cipher.update(JSON.stringify({ at: last.unit.ending!.at, key: last.unit.unit }), "utf8"),
+              cipher.update(
+                JSON.stringify({ at: last.unit.mergeCompletion?.at ?? last.unit.ending!.at, key: last.unit.unit }),
+                "utf8",
+              ),
               cipher.final(),
             ]);
             result.cursor = `homew1.${Buffer.concat([iv, encoded, cipher.getAuthTag()]).toString("base64url")}`;

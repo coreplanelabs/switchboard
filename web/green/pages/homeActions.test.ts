@@ -756,6 +756,33 @@ describe("Home actions", () => {
     expect(reload).toHaveBeenCalledTimes(1);
     home.dispose();
   });
+  it("shows a verified external merge at its actual completion time while preserving the finished review", () => {
+    const now = Date.parse("1970-01-10T12:00:00Z");
+    const page = mountApp(History, {
+      seed: {
+        page: "fleetHistory",
+        history: {
+          organizationId: "org",
+          status: "complete",
+          now,
+          units: [
+            {
+              ...need,
+              unit: {
+                ...need.unit,
+                ending: { kind: "merge_ready", at: now - 172800000 },
+                mergeCompletion: { at: now - 120000, sha: "b".repeat(40) },
+              },
+            },
+          ],
+        },
+      },
+    });
+    expect(page.text()).toContain("Merged");
+    expect(page.text()).toContain("2 minutes ago");
+    expect(page.text()).not.toContain("2 days ago");
+    expect(page.get("time").attributes("datetime")).toBe("1970-01-10T11:58:00.000Z");
+  });
   it("shows the selected Sun–Sat week with honest completion times and no future-week arrow", () => {
     const now = Date.parse("1970-01-10T12:00:00Z");
     const page = mountApp(History, {

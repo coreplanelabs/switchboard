@@ -66,7 +66,7 @@ import { analyzeRunFriction } from "../core/runFriction.js";
 import type { HomeSession } from "./homeSeed.js";
 import type { HomeRuntimeContext } from "./homeRuntime.js";
 import { createOrganizationAuthentication } from "./organizationAuthentication.js";
-import { createBrowserHomeInstallation } from "./browserHomeInstallation.js";
+import { createBrowserHomeInstallation, type BrowserHomeInstallationOptions } from "./browserHomeInstallation.js";
 // The SDK's legacy latest-version export differs from its modern form handler.
 const FORM_PROTOCOL_VERSION = ["2026", "07", "28"].join("-");
 const cleanups: (() => void)[] = [];
@@ -117,10 +117,12 @@ async function fixture(
   productionRetention = false,
   metadataRecipient = false,
   personalApproved = false,
+  observationBatchSize = 10,
   nativeMcp?: ReturnType<typeof createOrganizationNativeSources>,
 ) {
   let now = 1000,
     policy = "config";
+  let mergeRead: BrowserHomeInstallationOptions["mergeFacts"] = async () => undefined;
   const targetThread = linkedSlack ? "slack:D1:1" : thread;
   const path = mkdtempSync(join(tmpdir(), "browser-installation-"));
   cleanups.push(() => rmSync(path, { recursive: true, force: true }));
@@ -363,7 +365,7 @@ async function fixture(
     retention: { retentionDays: 30 },
     owner: "fixture-process",
     leaseMs: DAY_MS,
-    batchSize: 10,
+    batchSize: observationBatchSize,
     contentTtlMs: (productionRetention ? 90 : 1) * DAY_MS,
     ...(productionRetention ? { sourceSnapshotTtlMs: 30 * DAY_MS } : {}),
     now: () => now,
@@ -426,6 +428,7 @@ async function fixture(
     canWriteThread: async () => writable,
     provedActorIds: async () => ["access:alice", ...(linkedSlack ? ["slack:UALICE"] : [])],
     mergeLogin: async (id) => (id === "access:alice" ? "alice" : undefined),
+    mergeFacts: (...args) => mergeRead!(...args),
   });
   core.guardOrganizationConfirmation = (row, chooser) => installation.guardOrganizationConfirmation(row, chooser);
   const tasks: (() => Promise<void>)[] = [];
@@ -512,6 +515,9 @@ async function fixture(
   cleanups.push(() => installation.handler.dispose());
   return {
     installation,
+    setMergeRead: (read: NonNullable<BrowserHomeInstallationOptions["mergeFacts"]>) => {
+      mergeRead = read;
+    },
     authentication,
     runs,
     denyContext: () => {
@@ -1659,6 +1665,110 @@ describe("browser installation", () => {
     expect((await home.snapshot(reader)).needsYou).toEqual([]);
     expect(await s.installation.readThread(s.context, worker)).toBeUndefined();
   });
+  it("bounds simultaneous merge reads across refreshes and advances the next owned units after slots clear", async () => {
+    const s = await fixture(false, false, undefined, false, false, false, 2);
+    await s.seedQuestion();
+    const { idle: _question, ...base } = unit;
+    for (let i = 1; i <= 4; i++) {
+      const pr = { number: i, url: `https://github.com/sample/api/pull/${i}` };
+      seedCoordinatorUnit(s.coordinator, {
+        ...base,
+        unit: `task-${i}`,
+        slug: `u${i}`,
+        pr,
+        lastPush: "a".repeat(40),
+        ending: { kind: "merge_ready", report: `Reviewed ${i}.`, at: 900 },
+        mergeAttention: { assignedTo: "access:alice", pr, headSha: "a".repeat(40), at: 900 },
+      });
+    }
+    const home = createHomeService({
+      organizationId: "fixture",
+      instances: s.coordinator,
+      conditions: createHomeConditionReader(s.coordinator),
+    });
+    const reader = { actorId: "access:alice", visibleTo: { kind: "all" as const } };
+    const rows = (await home.snapshot(reader)).needsYou.filter((row) => row.unit.id.startsWith("task-"));
+    const blocked: Array<{ pr: number; release: () => void }> = [];
+    s.setMergeRead(
+      async (_context, _instance, row) =>
+        new Promise((resolve) =>
+          blocked.push({
+            pr: row.pr!.number,
+            release: () => resolve({ headSha: "a".repeat(40), mergeCommitSha: "b".repeat(40), mergedAt: 1000 }),
+          }),
+        ),
+    );
+    s.installation.queueMergeObservations(s.context, rows);
+    const first = s.tasks.splice(0).map((task) => task());
+    await vi.waitFor(() => expect(blocked.map((row) => row.pr)).toEqual([1, 2]));
+    s.installation.queueMergeObservations(s.context, rows);
+    s.installation.queueMergeObservations(s.context, rows);
+    expect(s.tasks).toEqual([]);
+    blocked.forEach((row) => row.release());
+    await Promise.all(first);
+    expect((await home.history(reader)).units.map((row) => row.unit.id)).toEqual(["task-1", "task-2"]);
+    s.installation.queueMergeObservations(s.context, rows);
+    const second = s.tasks.splice(0).map((task) => task());
+    await vi.waitFor(() => expect(blocked.map((row) => row.pr)).toEqual([1, 2, 3, 4]));
+    blocked.slice(2).forEach((row) => row.release());
+    await Promise.all(second);
+    expect((await home.history(reader)).units.map((row) => row.unit.id)).toEqual([
+      "task-1",
+      "task-2",
+      "task-3",
+      "task-4",
+    ]);
+  });
+  it("observes a manual merge with no watch or live driver and holds changed, revoked or raced source proof", async () => {
+    const s = await fixture();
+    await s.seedQuestion();
+    const { idle: _question, ...base } = unit;
+    const ready: CoordinatorUnit = {
+      ...base,
+      pr: unit.idle!.humanGate!.pr,
+      lastPush: "a".repeat(40),
+      ending: { kind: "merge_ready", report: "Original review report.", at: 900 },
+      mergeAttention: { assignedTo: "access:alice", pr: unit.idle!.humanGate!.pr, headSha: "a".repeat(40), at: 900 },
+    };
+    seedCoordinatorUnit(s.coordinator, ready);
+    const home = createHomeService({
+      organizationId: "fixture",
+      instances: s.coordinator,
+      conditions: createHomeConditionReader(s.coordinator),
+    });
+    const reader = { actorId: "access:alice", visibleTo: { kind: "all" as const } };
+    expect((await home.snapshot(reader)).needsYou.map((row) => row.unit.unit)).toEqual(["fixture:original"]);
+    const merged = { headSha: "a".repeat(40), mergeCommitSha: "b".repeat(40), mergedAt: 899 };
+    s.setMergeRead(async () => ({ ...merged, headSha: "c".repeat(40) }));
+    expect(await s.installation.observeMerge(s.context, "fixture:original")).toBe("held");
+    s.setMergeRead(async () => {
+      s.revoke();
+      return merged;
+    });
+    expect(await s.installation.observeMerge(s.context, "fixture:original")).toBe("held");
+    s.restoreSource();
+    s.setMergeRead(async () => {
+      seedCoordinatorUnit(s.coordinator, { ...ready, title: "A concurrent record change" });
+      return merged;
+    });
+    expect(await s.installation.observeMerge(s.context, "fixture:original")).toBe("held");
+    expect((await home.history(reader)).units).toEqual([]);
+    seedCoordinatorUnit(s.coordinator, ready);
+    s.setMergeRead(async () => merged);
+    const attention = await home.snapshot(reader);
+    s.installation.queueMergeObservations(s.context, attention.needsYou);
+    expect((await home.snapshot(reader)).needsYou).toHaveLength(1);
+    expect(s.tasks).toHaveLength(1);
+    await s.execute();
+    expect((await home.snapshot(reader)).needsYou).toEqual([]);
+    expect((await home.history(reader)).units[0]?.unit).toMatchObject({
+      mergeCompletion: { at: 899, sha: "b".repeat(40) },
+      ending: { kind: "merge_ready", report: "Original review report.", at: 900 },
+    });
+    expect(await s.installation.observeMerge(s.context, "fixture:original")).toBe("unchanged");
+    expect(s.created).toEqual([]);
+    expect(s.nudges).toEqual([]);
+  });
   it("projects a hundred owned merge actions from one current canonical pipeline read", async () => {
     const s = await fixture();
     await s.seedQuestion();
@@ -2352,7 +2462,7 @@ describe("browser installation", () => {
       },
     };
     const native = createOrganizationNativeSources(nativeOptions);
-    const s = await fixture(false, false, undefined, false, false, false, native);
+    const s = await fixture(false, false, undefined, false, false, false, 10, native);
     const options: McpOptions = {
       auth: { tokens: s.tokens },
       sso,

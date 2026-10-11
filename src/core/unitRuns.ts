@@ -38,6 +38,8 @@ export interface UnitFacts {
   issue?: number;
   rounds: CoordinatorUnit["rounds"];
   ending?: { kind: string; at: number; report?: string; cause?: string; step?: string; round?: number };
+  /** Observed merge time, separate from the finished review's ending. */
+  mergeCompletion?: { sha: string; at: number };
   /** The unit idles (record 0051): the old kind as `why`, when, what the grant
    *  still holds and the wakes answered — the page's `idle · <why>` fact. The
    *  row's continuation facts (`from`, `runId`, the handoff) stay machine
@@ -132,6 +134,13 @@ function readableUnitFacts(unit: CoordinatorUnit, privateContent: boolean): Unit
         }
       : {}),
     ...(unit.startedAt !== undefined ? { startedAt: unit.startedAt } : {}),
+    ...(unit.ending?.kind === "merge_ready" &&
+    unit.mergeAttention?.resolved &&
+    unit.pr?.number === unit.mergeAttention.pr.number &&
+    unit.pr.url === unit.mergeAttention.pr.url &&
+    unit.lastPush === unit.mergeAttention.headSha
+      ? { mergeCompletion: unit.mergeAttention.resolved }
+      : {}),
   };
 }
 

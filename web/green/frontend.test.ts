@@ -334,6 +334,30 @@ describe("Green browser frontend", () => {
     expect(wrapper.findAll("button").map((button) => button.text())).not.toContain("Reply in this thread");
     home.dispose();
   });
+  it("shows an observed merge on the unit while keeping its original reviewed-head report", () => {
+    const seed: UnitSeed = {
+      page: "unit",
+      now: 1000,
+      retentionDays: 30,
+      view: {
+        unit: "pipeline:u",
+        instanceId: "pipeline",
+        id: "u",
+        title: "Bound unit",
+        branch: "codex/u",
+        threads: {},
+        sourceUrls: {},
+        rounds: [],
+        runs: [],
+        instance: { id: "pipeline", repo: "sample/api", createdAt: 1 },
+        ending: { kind: "merge_ready", at: 900, report: "Original reviewed head aaaaaaa." },
+        mergeCompletion: { at: 899, sha: "b".repeat(40) },
+      },
+    };
+    const page = mountApp(UnitPage, { seed });
+    expect(page.get(".green-badge").text()).toBe("Merged");
+    expect(page.text()).toContain("Original reviewed head aaaaaaa.");
+  });
   it("opens an artifact-proven unit PR in the canonical run query route", async () => {
     const seed: UnitSeed = {
       page: "unit",

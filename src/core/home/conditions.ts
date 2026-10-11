@@ -27,7 +27,13 @@ export function createHomeConditionReader(instances: {
       const row = rows[0]!;
       if (row.workBrief !== undefined && !privateRead) return [];
       const merge = row.ending?.kind === "merge_ready" ? row.mergeAttention : undefined;
-      if (merge && row.pr?.number === merge.pr.number && row.pr.url === merge.pr.url && row.lastPush === merge.headSha)
+      if (
+        merge &&
+        !merge.resolved &&
+        row.pr?.number === merge.pr.number &&
+        row.pr.url === merge.pr.url &&
+        row.lastPush === merge.headSha
+      )
         return [
           {
             id: `${unitKey}:merge`,

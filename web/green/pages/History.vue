@@ -24,7 +24,7 @@ function relative(at: number) {
 const groups = computed(() => {
   const days = new Map<string, { label: string; rows: NonNullable<typeof history>["units"] }>();
   for (const row of history?.units ?? []) {
-    const at = row.unit.ending?.at;
+    const at = row.unit.mergeCompletion?.at ?? row.unit.ending?.at;
     const label =
       at === undefined
         ? "Completion time not recorded"
@@ -95,20 +95,26 @@ const olderHref = computed(() => {
             :to="`/runs/unit/${encodeURIComponent(row.unit.unit)}`"
             >{{ row.unit.title ?? `Unit ${row.unit.id}` }}</RouterLink
           >
-          <span class="green-badge" :data-state="row.unit.ending ? endingWordOf(row.unit.ending.kind) : undefined">{{
-            row.unit.ending ? endingWordOf(row.unit.ending.kind) : "Completed"
-          }}</span>
+          <span
+            class="green-badge"
+            :data-state="
+              row.unit.mergeCompletion ? 'merged' : row.unit.ending ? endingWordOf(row.unit.ending.kind) : undefined
+            "
+            >{{
+              row.unit.mergeCompletion ? "Merged" : row.unit.ending ? endingWordOf(row.unit.ending.kind) : "Completed"
+            }}</span
+          >
         </div>
         <time
           v-if="row.unit.ending"
           class="text-xs text-muted"
-          :datetime="new Date(row.unit.ending.at).toISOString()"
+          :datetime="new Date(row.unit.mergeCompletion?.at ?? row.unit.ending.at).toISOString()"
           :title="
             new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'long', timeZone: zone }).format(
-              row.unit.ending.at,
+              row.unit.mergeCompletion?.at ?? row.unit.ending.at,
             )
           "
-          >{{ relative(row.unit.ending.at) }}</time
+          >{{ relative(row.unit.mergeCompletion?.at ?? row.unit.ending.at) }}</time
         >
         <p v-else class="text-xs text-muted">Completion time not recorded</p>
         <p class="text-xs text-muted mt-2 break-words">
