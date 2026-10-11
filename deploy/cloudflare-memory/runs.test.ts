@@ -2197,17 +2197,14 @@ describe("run metrics — the point, the guard and the emission rule", () => {
     expect(metricWarns[0]).toContain("TypeError");
   });
 
-  it("a twenty-column point from a newer writer is stored and written beside a sixteen-column one", async () => {
+  it("a twenty-column point is stored and written beside a sixteen-column one from an older writer", async () => {
     const key = storeKey();
     const written = await metricsDouble(key);
     const narrowRecord = record("r1", Date.now() - 2_000);
-    const narrow = pointOf(narrowRecord)!;
-    expect(narrow.blobs).toHaveLength(16);
+    const narrow = { ...pointOf(narrowRecord)!, blobs: pointOf(narrowRecord)!.blobs.slice(0, 16) };
     const wideRecord = record("r2", Date.now() - 1_000);
-    const wide = {
-      ...pointOf(wideRecord)!,
-      blobs: [...pointOf(wideRecord)!.blobs, "slack", "resident", "", "success"],
-    };
+    const wide = pointOf(wideRecord)!;
+    expect(wide.blobs).toHaveLength(20);
     expect((await post("/runs/put", { storeKey: key, record: narrowRecord, point: narrow })).status).toBe(200);
     expect((await post("/runs/put", { storeKey: key, record: wideRecord, point: wide })).status).toBe(200);
     expect(written.map((p) => p.blobs.length)).toEqual([16, 20]);
@@ -2294,7 +2291,8 @@ describe("run metrics — the point, the guard and the emission rule", () => {
       expect(written).toHaveLength(1);
       expect(blobOf(written[0], "run id")).toBe("r3");
       expect(blobOf(written[0], "status")).toBe("interrupted");
-      expect(blobOf(written[0], "failure kind")).toBe("restart_unclaimed");
+      expect(blobOf(written[0], "error type")).toBe("restart_unclaimed");
+      expect(blobOf(written[0], "outcome")).toBe("error");
       const got = (await post("/runs/get", { storeKey: key, id: "r3" })).data.record as RunRecord;
       expect(got).toMatchObject({ status: "interrupted", failure: { kind: "restart_unclaimed" } });
       expect(got.restarting).toBeUndefined();
@@ -2318,7 +2316,8 @@ describe("run metrics — the point, the guard and the emission rule", () => {
       expect(kept).toMatchObject({ restarting: true, restartUntil: closedAt + 60_000 });
       await runDurableObjectAlarm(stubOf(key));
       expect(written).toHaveLength(1);
-      expect(blobOf(written[0], "failure kind")).toBe("restart_unclaimed");
+      expect(blobOf(written[0], "error type")).toBe("restart_unclaimed");
+      expect(blobOf(written[0], "outcome")).toBe("error");
     });
 
     it("the sweep leaves a restart alone before its deadline, and while a successor's live row holds the id", async () => {

@@ -721,7 +721,13 @@ export async function makeExecutor(
 ): Promise<ExecutorSelection> {
   if (ctx.reattach === undefined) assertRemainingAllowance(ctx);
   const sandboxKey = physicalSandboxKey(opts, ctx);
-  const selection = await selectExecutor(opts, ctx, sandboxKey, span);
+  const selected = await selectExecutor(opts, ctx, sandboxKey, span);
+  // A local or E2B backend is named on the setup result (record 0097), so the
+  // run's workspace word never reads as a Cloudflare sandbox it was not.
+  const selection =
+    selected.setup !== undefined && (selected.backend === "local" || selected.backend === "e2b")
+      ? { ...selected, setup: { ...selected.setup, backend: selected.backend } }
+      : selected;
   return selection.backend === "sandbox" && sandboxKey !== undefined ? { ...selection, sandboxKey } : selection;
 }
 

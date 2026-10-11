@@ -55,6 +55,8 @@ describe("runSetupOf", () => {
       { version: 1, requested: "blank" },
       { version: 1, requested: "resident", reason: "sandbox_start_timeout" },
       { version: 1, requested: "cold", reason: "lost_other" },
+      { version: 1, requested: "cold", backend: "local" },
+      { version: 1, requested: "resident", seeding: "fresh_no_snapshot", reason: "workload_full", backend: "e2b" },
     ];
     for (const shape of shapes) expect(runSetupOf(structuredClone(shape))).toEqual(shape);
   });
@@ -74,6 +76,8 @@ describe("runSetupOf", () => {
       { version: 1, requested: "resident", restored: true, reason: "workload_full" },
       { version: 1, requested: "resident", restored: false },
       { version: 1, requested: "resident", reallocated: "yes" },
+      { version: 1, requested: "cold", backend: "sandbox" },
+      { version: 1, requested: "resident", restored: true, backend: "local" },
       { version: 1, requested: "resident", note: "resident full — using fresh sandbox" },
     ])
       expect(runSetupOf(bad), JSON.stringify(bad)).toBeUndefined();

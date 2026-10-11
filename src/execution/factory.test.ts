@@ -4853,6 +4853,29 @@ describe("the setup result on the selection (record 0097)", () => {
     }
   });
 
+  it("a local or E2B backend is named on the setup result; the Cloudflare sandbox and the resident are not", async () => {
+    stubEnvs();
+    stubFetch({ body: { state: "onboarding", reason: "", snapshot: null } });
+    const local = await makeExecutor(
+      { execution: { type: "local", resident: { baseUrl: "https://resident.example" } }, ...dirs() },
+      repoCtx(),
+    );
+    expect(local.setup).toEqual({
+      version: 1,
+      requested: "resident",
+      seeding: "fresh_no_snapshot",
+      reason: "resident_not_serviceable",
+      backend: "local",
+    });
+    const cold = await makeExecutor({ execution: { type: "local" }, ...dirs() }, repoCtx());
+    expect(cold.setup).toEqual({ version: 1, requested: "cold", backend: "local" });
+    const sandbox = await makeExecutor(residentOpts(), {
+      ...repoCtx(),
+      profile: { ...repoCtx().profile, machine: "repo-cold" as const },
+    });
+    expect(sandbox.setup).toEqual({ version: 1, requested: "cold" });
+  });
+
   it("an agent that asks for no workspace has no setup result", async () => {
     const none = await makeExecutor(residentOpts(), ctxOf(AGENTS.general));
     expect(none.setup).toBeUndefined();

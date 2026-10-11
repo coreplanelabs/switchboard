@@ -11,7 +11,10 @@ import {
   POINT_COLUMNS,
   pointOf,
   isTerminalClose,
+  outcomeOf,
   pointEmits,
+  surfaceOf,
+  workspaceWordOf,
   type RunMetricsPoint,
 } from "./runMetrics.js";
 import { FRICTION_CATEGORIES, type FrictionCategory } from "./runFriction.js";
@@ -90,7 +93,7 @@ function record(over: Partial<RunRecord> = {}): RunRecord {
 }
 
 describe("pointOf — every position by its POINT_COLUMNS name", () => {
-  it("fills the sixteen blobs and twenty doubles of a final record, in order, the agent as the index", () => {
+  it("fills the twenty blobs and twenty doubles of a final record, in order, the agent as the index", () => {
     const point = pointOf(record(), PRICES);
     expect(point).toBeDefined();
     const p = point as RunMetricsPoint;
@@ -102,7 +105,7 @@ describe("pointOf — every position by its POINT_COLUMNS name", () => {
     expect(blobOf(p, "preset")).toBe("coding");
     expect(blobOf(p, "model")).toBe("anthropic/claude-fable-5");
     expect(blobOf(p, "status")).toBe("completed");
-    expect(blobOf(p, "failure kind")).toBe("");
+    expect(blobOf(p, "error type")).toBe("");
     expect(blobOf(p, "dominant friction")).toBe("slow_tool");
     expect(blobOf(p, "channel")).toBe("slack:C1");
     expect(blobOf(p, "repository")).toBe("o/r");
@@ -195,7 +198,7 @@ describe("pointOf — every position by its POINT_COLUMNS name", () => {
       record({ status: "failed", failure: { kind: "policy_refusal" }, replyOk: false }),
     ) as RunMetricsPoint;
     expect(blobOf(p, "status")).toBe("failed");
-    expect(blobOf(p, "failure kind")).toBe("policy_refusal");
+    expect(blobOf(p, "error type")).toBe("policy_refusal");
     expect(blobOf(p, "reply")).toBe("failed");
   });
 
@@ -279,7 +282,8 @@ describe("isRunMetricsPoint", () => {
   });
 
   it("accepts the sixteen-column row and the twenty-column row, so a rolling deploy can widen it; any other width is refused", () => {
-    const widened = { ...good(), blobs: [...good().blobs, "slack", "resident", "", "success"] };
+    // The writer builds the twenty-column row; an older writer's sixteen-column row still lands.
+    const widened = good();
     expect(widened.blobs).toHaveLength(20);
     expect(isRunMetricsPoint(widened)).toBe(true);
     expect(isRunMetricsPoint({ ...good(), blobs: good().blobs.slice(0, 16) })).toBe(true);
@@ -309,5 +313,169 @@ describe("the terminal close and the emission latch (record 0097)", () => {
       expect(pointEmits(latched, provisional)).toBe(false);
       expect(pointEmits(latched, restarting)).toBe(false);
     }
+  });
+});
+
+// Record 0097, "Outcome and error type" and "Rows and columns".
+describe("outcomeOf — the terminal status decides first, then the first matching row", () => {
+  const ending = (e: NonNullable<RunRecord["answerOutcome"]>["ending"]) => ({
+    answerOutcome: { version: 1 as const, ending: e, output: "unknown" as const },
+  });
+  const cases: Array<[string, Partial<RunRecord>, { outcome: string; errorType: string }]> = [
+    ["stopped soft", { status: "stopped_soft" }, { outcome: "cancellation", errorType: "" }],
+    [
+      "stopped hard, even with a failure",
+      { status: "stopped_hard", failure: { kind: "provider_transient" } },
+      { outcome: "cancellation", errorType: "" },
+    ],
+    [
+      "interrupted by the store's sweep",
+      { status: "interrupted", failure: { kind: "restart_unclaimed" } },
+      { outcome: "error", errorType: "restart_unclaimed" },
+    ],
+    ["interrupted otherwise", { status: "interrupted" }, { outcome: "error", errorType: "interrupted" }],
+    [
+      "failed on a policy refusal",
+      { status: "failed", failure: { kind: "policy_refusal" } },
+      { outcome: "failure", errorType: "policy_refusal" },
+    ],
+    [
+      "failed on another named kind",
+      { status: "failed", failure: { kind: "sandbox_fleet_busy" } },
+      { outcome: "error", errorType: "sandbox_fleet_busy" },
+    ],
+    [
+      "failed with a lost word",
+      { status: "failed", setup: { version: 1, requested: "resident", reason: "sandbox_start_timeout" } },
+      { outcome: "error", errorType: "sandbox_start_timeout" },
+    ],
+    [
+      "failed with a reply that failed",
+      { status: "failed", replyOk: false },
+      { outcome: "error", errorType: "reply_failed" },
+    ],
+    [
+      "failed on its time budget",
+      { status: "failed", ...ending("time_budget") },
+      { outcome: "timeout", errorType: "time_budget" },
+    ],
+    [
+      "failed on its turn budget",
+      { status: "failed", ...ending("turn_budget") },
+      { outcome: "timeout", errorType: "turn_budget" },
+    ],
+    ["failed otherwise", { status: "failed" }, { outcome: "error", errorType: "unclassified" }],
+    [
+      "completed on its time budget",
+      { status: "completed", ...ending("time_budget") },
+      { outcome: "timeout", errorType: "time_budget" },
+    ],
+    [
+      "completed with an interrupted answer",
+      { status: "completed", ...ending("interrupted") },
+      { outcome: "error", errorType: "answer_interrupted" },
+    ],
+    [
+      "completed after a stop",
+      { status: "completed", ...ending("hard_stop") },
+      { outcome: "cancellation", errorType: "" },
+    ],
+    [
+      "completed after a soft stop",
+      { status: "completed", ...ending("soft_stop") },
+      { outcome: "cancellation", errorType: "" },
+    ],
+    ["completed", { status: "completed", ...ending("answered") }, { outcome: "success", errorType: "" }],
+    [
+      "completed with a fallback setup word",
+      {
+        status: "completed",
+        setup: { version: 1, requested: "resident", seeding: "snapshot", reason: "workload_full" },
+      },
+      { outcome: "success", errorType: "" },
+    ],
+  ];
+  it.each(cases)("%s", (_name, over, expected) => {
+    expect(outcomeOf(record(over))).toEqual(expected);
+  });
+  it("leaves the error type empty exactly for success and cancellation", () => {
+    for (const [, over] of cases) {
+      const { outcome, errorType } = outcomeOf(record(over));
+      expect(errorType === "", JSON.stringify(over)).toBe(outcome === "success" || outcome === "cancellation");
+    }
+  });
+});
+
+describe("surfaceOf", () => {
+  it("reads the channel's namespace, and nothing for one it does not know", () => {
+    expect(surfaceOf("slack:C1")).toBe("slack");
+    expect(surfaceOf("mcp:ops-ingress")).toBe("mcp");
+    expect(surfaceOf("web:dashboard")).toBe("web");
+    expect(surfaceOf("http:ops")).toBe("http");
+    expect(surfaceOf("cli:local")).toBe("cli");
+    expect(surfaceOf("teams:T1")).toBe("");
+    expect(surfaceOf("noprefix")).toBe("");
+  });
+});
+
+describe("workspaceWordOf — the setup result folded into one word", () => {
+  const word = (setup?: RunRecord["setup"]) => workspaceWordOf(record(setup ? { setup } : {}));
+  it("names each shape the record's table lists", () => {
+    expect(word({ version: 1, requested: "resident" })).toBe("resident");
+    expect(word({ version: 1, requested: "resident", restored: true })).toBe("resident_restored");
+    expect(word({ version: 1, requested: "resident", seeding: "snapshot", reason: "workload_full" })).toBe(
+      "sandbox_snapshot",
+    );
+    expect(word({ version: 1, requested: "resident", seeding: "fresh_no_snapshot", reason: "not_resident" })).toBe(
+      "sandbox_fresh",
+    );
+    expect(
+      word({ version: 1, requested: "resident", seeding: "fresh_after_seed_failure", reason: "fleet_draining" }),
+    ).toBe("sandbox_seed_failed");
+    expect(word({ version: 1, requested: "cold" })).toBe("sandbox_cold");
+    expect(word({ version: 1, requested: "blank" })).toBe("sandbox_blank");
+    expect(word({ version: 1, requested: "resident", reason: "sandbox_start_timeout" })).toBe("none");
+    expect(word()).toBe("");
+  });
+  it("names a local or E2B backend for every shape it ran, never a Cloudflare sandbox, and keeps a lost workspace none", () => {
+    for (const backend of ["local", "e2b"] as const) {
+      expect(word({ version: 1, requested: "cold", backend })).toBe(backend);
+      expect(word({ version: 1, requested: "blank", backend })).toBe(backend);
+      expect(
+        word({ version: 1, requested: "resident", seeding: "fresh_no_snapshot", reason: "not_resident", backend }),
+      ).toBe(backend);
+      expect(word({ version: 1, requested: "cold", reason: "lost_other", backend })).toBe("none");
+    }
+  });
+});
+
+describe("pointOf — the four columns record 0097 appends", () => {
+  it("writes surface, workspace, setup reason and outcome beside the error type", () => {
+    const p = pointOf(
+      record({
+        channelId: "mcp:ops-ingress",
+        status: "failed",
+        setup: { version: 1, requested: "resident", reason: "stopped_in_drain" },
+      }),
+    )!;
+    expect(p.blobs).toHaveLength(20);
+    expect(blobOf(p, "surface")).toBe("mcp");
+    expect(blobOf(p, "workspace")).toBe("none");
+    expect(blobOf(p, "setup reason")).toBe("stopped_in_drain");
+    expect(blobOf(p, "outcome")).toBe("error");
+    expect(blobOf(p, "error type")).toBe("stopped_in_drain");
+    // Appended, so no position changes meaning: the error type is still blob6, the run id blob16.
+    expect(blobColumn("error type")).toBe("blob6");
+    expect(blobColumn("run id")).toBe("blob16");
+    expect(blobColumn("outcome")).toBe("blob20");
+    expect(isRunMetricsPoint(p)).toBe(true);
+  });
+  it("keeps a cancellation's setup reason in its own column", () => {
+    const p = pointOf(
+      record({ status: "stopped_hard", setup: { version: 1, requested: "resident", reason: "stopped_in_drain" } }),
+    )!;
+    expect(blobOf(p, "outcome")).toBe("cancellation");
+    expect(blobOf(p, "error type")).toBe("");
+    expect(blobOf(p, "setup reason")).toBe("stopped_in_drain");
   });
 });
