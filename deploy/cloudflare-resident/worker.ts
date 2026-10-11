@@ -1,4 +1,11 @@
 import {
+  NativeOperationJournal,
+  unstartedNativeOperator,
+  validNativeOperationKey,
+  type NativeOperationRows,
+  type NativeOperationRecord,
+} from "./nativeOperation.js";
+import {
   readCancellationPreparation,
   cancellationFailure,
   cancellationRefusal,
@@ -20,10 +27,10 @@ import {
 // note '/' rules the id out of hostname-based preview URLs, use tunnels).
 //
 // Route surface (JSON in/out; every route below requires a bearer secret):
-//   admin scope     POST /register /onboard /offboard /reconfigure /rebuild /debug (all ops) /recover-admission
+//   admin scope     POST /register /onboard /offboard /reconfigure /rebuild /debug (all ops) /recover-admission /recover-native-operation
 //                   GET /deploy-admissions
 //   drain scope     POST /drain /deploy-fence /reconcile /undrain (admin implied)
-//   read scope      GET /residents   POST /debug ops info|schedules|threads only (admin implied)
+//   read scope      GET /residents   POST /debug ops info|schedules|threads|deps-backups|native-operations (admin implied)
 //   operator scope  POST /attach /detach /exec /publish /read /write /op   GET /status (state, reason, inFlight)
 //   unauthenticated GET /healthz (deploy wake ping; touches no DO)
 //
@@ -2219,15 +2226,15 @@ export class ResidentDO extends Sandbox<Env> {
    *  request (a refresh cycle, a watchdog). */
   private readonly stepTrace = new AsyncLocalStorage<StepTrace>();
   private readonly threadOperationScope = new AsyncLocalStorage<{
+    key: string;
     threadKey: string;
     owner: WorkspaceOwner;
-    pendingNative: number;
     attachment: boolean;
     active: boolean;
   }>();
   private readonly opOperationScope = new AsyncLocalStorage<{
+    key: string;
     owner: string;
-    pendingNative: number;
     active: boolean;
     allocated: boolean;
   }>();
@@ -2575,7 +2582,7 @@ export class ResidentDO extends Sandbox<Env> {
     if (this.destroying || (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY))) {
       throw new Error("resident-destroy-unconfirmed: container reuse refused until destruction is confirmed");
     }
-    let settleNative = await this.beginThreadNativeOperation();
+    let nativeAttempt = await this.beginThreadNativeOperation("process");
     const timeout = opts.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
     const launch = {
       ...(opts.cwd ? { cwd: opts.cwd } : {}),
@@ -2606,7 +2613,7 @@ export class ResidentDO extends Sandbox<Env> {
         // container accepts again in moments — the typed word, for the thread
         // routes to answer with the wait token; never counted as unreachable.
         if (isRuntimeBusy(err)) {
-          settleNative();
+          await nativeAttempt.settle();
           throw new SandboxRuntimeBusyError({ containerId: this.ctx.id.toString(), cause: errMsg(err) });
         }
         // The control port never answered the SDK's connect (its 30 s abort,
@@ -2615,7 +2622,7 @@ export class ResidentDO extends Sandbox<Env> {
         // reads the count — and name it, so no reason ever carries the bare
         // `The operation was aborted`.
         if (isRuntimeUnreachable(err)) {
-          settleNative();
+          await nativeAttempt.settle();
           throw new RuntimeUnreachableError((await this.noteRuntimeUnreachable()).count, err);
         }
         throw err;
@@ -2654,16 +2661,17 @@ export class ResidentDO extends Sandbox<Env> {
           cause: err,
         });
       }
-      settleNative();
-      settleNative = await this.beginThreadNativeOperation();
+      await nativeAttempt.settle();
+      nativeAttempt = await this.beginThreadNativeOperation("process");
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     }
     // The spawn is the proof the control port answers: a persisted count of
     // unanswered connects ends here, whatever the command goes on to do.
     await this.clearRuntimeUnreachable();
+    await nativeAttempt.launched(proc);
     try {
       const out = await proc.output({ encoding: "utf8", timeout: timeout + 30_000 });
-      if (Number.isSafeInteger(out.exitCode) && out.exitCode >= 0) settleNative();
+      if (Number.isSafeInteger(out.exitCode) && out.exitCode >= 0) await nativeAttempt.settle();
       // `truncated` is the SDK saying the process log stream was cut past its
       // own retention — the output here is a prefix, whatever our caps say.
       return {
@@ -2704,7 +2712,7 @@ export class ResidentDO extends Sandbox<Env> {
         console.log(
           `exec: ${argv.join(" ").slice(0, 200)} outlived its ${timeout}ms budget — killed (exit ${exitCode ?? "unobserved"})`,
         );
-        if (exitCode !== null) settleNative();
+        if (exitCode !== null) await nativeAttempt.settle();
         return abandonedWaitStepResult({ detail: errMsg(err), exitCode });
       }
       throw err;
@@ -8341,28 +8349,43 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   private async writeOwnedFile(path: string, content: string) {
-    const settleNative = await this.beginThreadNativeOperation();
+    const nativeAttempt = await this.beginThreadNativeOperation();
     const result = await this.writeFile(path, content);
-    settleNative();
+    await nativeAttempt.settle();
     return result;
   }
 
   /** Admit before native work; only a known completion or no-start result settles it.
    * An unknown outcome deliberately keeps the enclosing durable operation held. */
-  private async beginThreadNativeOperation(): Promise<() => void> {
+  private async beginThreadNativeOperation(kind: "process" | "opaque" = "opaque") {
     await this.assertThreadOperationAllowed();
     const thread = this.threadOperationScope?.getStore();
     const scope = thread ?? this.opOperationScope?.getStore();
-    if (scope && !scope.active) {
+    const ended = () => {
       if (thread) throw new RunCancelledError("run cancelled");
       throw new Error("operator command ended");
+    };
+    if (scope && !scope.active) ended();
+    const journal = new NativeOperationJournal(this.ctx.storage);
+    const id = scope ? await journal.begin(scope.key, kind) : null;
+    // Admission itself awaited storage. A scope which closed in that interval
+    // must settle its never-submitted attempt instead of launching after closure.
+    if (scope && !scope.active) {
+      await journal.settle(scope.key, id!);
+      ended();
     }
-    if (scope) scope.pendingNative++;
     let settled = false;
-    return () => {
-      if (settled) return;
-      settled = true;
-      if (scope) scope.pendingNative--;
+    return {
+      launched: async (process: { status(): Promise<unknown> }) => {
+        if (scope && id) await journal.launched(scope.key, id, await process.status());
+      },
+      settle: async () => {
+        if (settled) return;
+        settled = true;
+        if (scope && id) {
+          await journal.settle(scope.key, id);
+        }
+      },
     };
   }
 
@@ -8373,19 +8396,24 @@ export class ResidentDO extends Sandbox<Env> {
     attachment = false,
   ): Promise<T> {
     const key = `native-operation:${threadKey}:${owner.runId}:${crypto.randomUUID()}`;
-    const scope = { threadKey, owner, pendingNative: 0, attachment, active: true };
-    // A reset can lose the waiting caller, but cannot turn an admitted native
-    // operation into evidence of shutdown. Only its observed completion clears this entry.
-    await this.ctx.storage.put(key, owner);
+    const scope = { key, threadKey, owner, attachment, active: true };
+    return this.withNativeOperationScope(key, owner, scope, () => this.threadOperationScope.run(scope, fn));
+  }
+
+  /** Both request kinds retain the same native-outcome obligation. */
+  private async withNativeOperationScope<T>(
+    key: string,
+    owner: WorkspaceOwner | { opOwner: string },
+    scope: { active: boolean; threadKey?: string },
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const journal = new NativeOperationJournal(this.ctx.storage);
+    await journal.open(key, owner, scope.threadKey);
     try {
-      const result = await this.threadOperationScope.run(scope, fn);
+      return await fn();
+    } finally {
       scope.active = false;
-      if (scope.pendingNative === 0) await this.ctx.storage.delete(key);
-      return result;
-    } catch (error) {
-      scope.active = false;
-      if (scope.pendingNative === 0) await this.ctx.storage.delete(key);
-      throw error;
+      await journal.close(key);
     }
   }
 
@@ -8813,7 +8841,7 @@ export class ResidentDO extends Sandbox<Env> {
             validateEnvNames(env);
             // A dedicated one-send transport: no generic exec logging, retries,
             // output files, timeout recovery command or raw failure response.
-            const settleNative = await this.beginThreadNativeOperation();
+            const nativeAttempt = await this.beginThreadNativeOperation("process");
             const proc = await createExtensionProcessSandbox(this).exec(
               [
                 "/usr/bin/su",
@@ -8825,9 +8853,10 @@ export class ResidentDO extends Sandbox<Env> {
               ] as SandboxCommand,
               { timeout: options.timeoutMs, env: { ...env, GIT_TERMINAL_PROMPT: "0" } },
             );
+            await nativeAttempt.launched(proc);
             try {
               const raw = await proc.output({ encoding: "utf8", timeout: options.timeoutMs });
-              if (Number.isSafeInteger(raw.exitCode) && raw.exitCode >= 0) settleNative();
+              if (Number.isSafeInteger(raw.exitCode) && raw.exitCode >= 0) await nativeAttempt.settle();
               return { ...raw, truncated: raw.truncated === true };
             } catch {
               await proc.kill(9).catch(() => {});
@@ -8882,12 +8911,12 @@ export class ResidentDO extends Sandbox<Env> {
             error instanceof SandboxRuntimeBusyError ||
             error instanceof RuntimeUnreachableError
           )
-            settlePublication();
+            await settlePublication.settle();
           throw error;
         }
         // A failed push can have reached the remote. Its native exit alone
         // does not settle the publication; keep its exact admission held.
-        if (result.exitCode === 0 && !result.timedOut) settlePublication();
+        if (result.exitCode === 0 && !result.timedOut) await settlePublication.settle();
         return {
           stdout: result.stdout.slice(0, EXEC_OUTPUT_CAP),
           stderr: result.stderr.slice(0, EXEC_OUTPUT_CAP),
@@ -10690,12 +10719,8 @@ export class ResidentDO extends Sandbox<Env> {
         !(
           op?.active &&
           !op.allocated &&
-          op.pendingNative === 0 &&
           key === `native-operation:${op.owner}` &&
-          value?.opOwner === op.owner &&
-          typeof value === "object" &&
-          value !== null &&
-          Object.keys(value).length === 1
+          unstartedNativeOperator(value, op.owner)
         ),
     )
       ? 1
@@ -10778,6 +10803,42 @@ export class ResidentDO extends Sandbox<Env> {
   }
   /** Native process observation includes every generated identity, including
    * background work whose original run has ended. Unknown user data refuses. */
+  /** Stored metadata only: never reconnect or inspect a native runtime. */
+  async getNativeOperations(cursor?: string) {
+    return new NativeOperationJournal(this.ctx.storage).list(cursor);
+  }
+
+  /** Recover only original process receipts; no launch, replay, kill or hydration. */
+  async recoverNativeOperation(key: string, recordHash: string) {
+    return this.withRecreateSafeAdmin(async () => {
+      if (this.runsInFlightCount() !== 0)
+        return { error: "native-operation-recovery-refused: request-active", status: 409 as const };
+      const ownerMatches = async (rows: NativeOperationRows, record: NativeOperationRecord) => {
+        if (this.runsInFlightCount() !== 0) return false;
+        if ("opOwner" in record) return key === `native-operation:${record.opOwner}`;
+        const threadKey = record.native.threadKey!;
+        const reg = await rows.get<RunRegistration>(runRegKey(threadKey));
+        const fence = await rows.get<WorkspaceOwner>(runFenceKey(threadKey));
+        return (
+          key.startsWith(`native-operation:${threadKey}:${record.runId}:`) &&
+          registeredRunOwnsRelease(reg, record.runId, record.ownerGen, record.ownerFence) &&
+          fence?.runId === record.runId &&
+          fence.ownerGen === record.ownerGen &&
+          fence.ownerFence === record.ownerFence
+        );
+      };
+      return new NativeOperationJournal(this.ctx.storage).recover(
+        key,
+        recordHash,
+        async (identity) => {
+          const process = await createExtensionProcessSandbox(this).getProcess(identity.id);
+          return process ? process.status() : null;
+        },
+        ownerMatches,
+      );
+    });
+  }
+
   async getResidentRecoveryProbe(): Promise<{ activeProcesses: number }> {
     if (!(await this.isRuntimeActive())) return { activeProcesses: 0 };
     const probe = await this.run(["ps", "-eo", "pid=,user="]);
@@ -10908,13 +10969,10 @@ export class ResidentDO extends Sandbox<Env> {
   /** The existing native echo counter also protects anonymous operator work.
    * An unknown command outcome keeps its capacity marker across an isolate reset. */
   private async withOpNativeOperation<T>(owner: string, fn: () => Promise<T>): Promise<T> {
-    const scope = { owner, pendingNative: 0, active: true, allocated: false };
-    try {
-      return await this.opOperationScope.run(scope, fn);
-    } finally {
-      scope.active = false;
-      if (scope.pendingNative === 0) await this.ctx.storage.delete(`native-operation:${owner}`);
-    }
+    const scope = { key: `native-operation:${owner}`, owner, active: true, allocated: false };
+    return this.withNativeOperationScope(`native-operation:${owner}`, { opOwner: owner }, scope, () =>
+      this.opOperationScope.run(scope, fn),
+    );
   }
 
   /** POST /op work half: run ONE readonly command-table entry in a
@@ -10942,8 +11000,6 @@ export class ResidentDO extends Sandbox<Env> {
         if (workload) res = workload;
         else {
           try {
-            // This capacity marker grants no run ownership or deletion authority.
-            await this.ctx.storage.put(`native-operation:${owner}`, { opOwner: owner });
             res = await this.withOpNativeOperation(owner, () =>
               this.stepTrace.run(trace, () => this.runOpTraced(op, refArg, t0)),
             );
@@ -12007,7 +12063,7 @@ function hasScope(env: Env, token: string | null, scope: Scope): boolean {
 }
 
 /** /debug ops a read-scope bearer may run: pure reads of DO storage/schedules. */
-const READ_DEBUG_OPS = new Set(["info", "schedules", "threads", "deps-backups"]);
+const READ_DEBUG_OPS = new Set(["info", "schedules", "threads", "deps-backups", "native-operations"]);
 
 // ---------------------------------------------------------------------------
 // Request validation
@@ -12177,6 +12233,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/drain": { scope: "drain", method: "POST" }, // close the fleet to new runs for a deploy (item 69; admin implied)
   "/deploy-fence": { scope: "drain", method: "POST" }, // fence reattach and read executing activity
   "/deploy-admissions": { scope: "admin", method: "GET" }, // targeted recovery inventory, never a drain-bearer route
+  "/recover-native-operation": { scope: "admin", method: "POST" }, // exact journal plus original native receipt
   "/recover-admission": { scope: "admin", method: "POST" }, // exact permit plus independent operator evidence
   "/undrain": { scope: "drain", method: "POST" }, // reopen it
   "/reconcile": { scope: "drain", method: "POST" }, // reconcile every container onto the current image, inside the drain window
@@ -12306,6 +12363,18 @@ export default {
             return await handleDeployFence(env);
           case "/deploy-admissions":
             return await handleDeployAdmissions(env);
+          case "/recover-native-operation": {
+            const resource = parseResource(body.resource);
+            if ("error" in resource) return json({ error: resource.error }, 400);
+            if (
+              !validNativeOperationKey(body.key) ||
+              typeof body.recordHash !== "string" ||
+              !/^[0-9a-f]{64}$/.test(body.recordHash)
+            )
+              return json({ error: "exact native operation key and recordHash are required" }, 400);
+            const result = await residentStub(env, resource.resource).recoverNativeOperation(body.key, body.recordHash);
+            return json(result, "error" in result ? result.status : 200);
+          }
           case "/recover-admission":
             return await handleRecoverAdmission(env, body);
           case "/undrain":
@@ -13648,6 +13717,11 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
     }
     case "threads":
       return json(await stub.debugThreads());
+    case "native-operations": {
+      if (body.cursor !== undefined && !validNativeOperationKey(body.cursor))
+        return json({ error: "cursor must identify a native operation" }, 400);
+      return json(await stub.getNativeOperations(body.cursor as string | undefined));
+    }
     case "inspect-dependencies":
       return json(await stub.inspectThreadDependencies(body.input));
     case "discard-absent-binding":

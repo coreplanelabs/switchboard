@@ -1,3 +1,4 @@
+import { NativeOperationJournal, unstartedNativeOperator } from "./nativeOperation.js";
 import { levelPosts, memorySide, mergeOutbox, seatSide } from "./levels.js";
 import { uidLedger, uidOwner, issuedUidCount, claimUid, reserveUid } from "./uidOwnership";
 import { provisionUidCommand } from "./uidProvision";
@@ -1049,6 +1050,7 @@ const ownerMethods = [
   "reconcileRetainedOwner",
   "attachThreadTraced",
   "withOwnedNativeOperation",
+  "withNativeOperationScope",
   "attachThreadBody",
   "allocateThreadUser",
   "claimRetainedThreadUser",
@@ -1134,6 +1136,8 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
       reserveUid,
       provisionUidCommand,
       crypto: webcrypto,
+      NativeOperationJournal,
+      unstartedNativeOperator,
       TextEncoder,
       THREADS_DIR: "/workspace/threads",
       MIRROR_DIR: "/workspace/mirror",
@@ -1408,9 +1412,13 @@ function workloadResident(
       "reserveWorkloadSlot",
       "allocateOpUser",
       "withOpNativeOperation",
+      "withNativeOperationScope",
       "runOp",
       "run",
       "beginThreadNativeOperation",
+      "getNativeOperations",
+      "recoverNativeOperation",
+      "withRecreateSafeAdmin",
       "registeredRunsBeyondOps",
       "automaticContainerLoss",
       "recreateContainer",
@@ -1435,6 +1443,9 @@ function workloadResident(
     reserveUid,
     provisionUidCommand,
     crypto: webcrypto,
+    NativeOperationJournal,
+    unstartedNativeOperator,
+    registeredRunOwnsRelease,
     URL,
     AbortSignal,
     RUN_STORE_KEY: "runs",
@@ -1482,7 +1493,23 @@ function workloadResident(
     DESTROY_UNCONFIRMED_KEY: "destroy-unconfirmed",
     DEFAULT_EXEC_TIMEOUT_MS: 1000,
     createExtensionProcessSandbox: () => ({
+      getProcess: async (id: string) => ({
+        status: async () => ({
+          id,
+          pid: 42,
+          startedAt: "2026-10-11T00:00:00.000Z",
+          state: "exited",
+          endedAt: "2026-10-11T00:00:01.000Z",
+          exit: { code: 0, timedOut: false },
+        }),
+      }),
       exec: async (argv: readonly string[]) => ({
+        status: async () => ({
+          id: "original-process",
+          pid: 42,
+          startedAt: "2026-10-11T00:00:00.000Z",
+          state: "running",
+        }),
         output: async () => {
           if (native.loseOutput) throw new Error("native output lost");
           return {
@@ -1536,7 +1563,11 @@ function workloadResident(
     poolUsersInspecting: new Set<string>(),
     opOperationScope: new AsyncLocalStorage(),
     stepTrace: { run: (_trace: unknown, fn: () => unknown) => fn() },
-    recreateAdmission: { pending: false, run: async (fn: () => unknown) => ({ busy: false, value: await fn() }) },
+    recreateAdmission: {
+      pending: false,
+      blocked: async () => false,
+      run: async (fn: () => unknown) => ({ busy: false, value: await fn() }),
+    },
     attachesInFlight: 0,
     attachAdmissionsInFlight: 0,
     refreshesInFlight: 0,
@@ -1602,6 +1633,75 @@ function workloadResident(
 }
 
 describe("resident workload admission", () => {
+  it("refuses operation recovery while a request is active or its thread owner changed", async () => {
+    const h = workloadResident({ retained: 1 });
+    const journal = new NativeOperationJournal(h.instance.ctx.storage);
+    const key = "native-operation:mcp:owner-0:run-0:original";
+    await journal.open(key, { runId: "run-0", ownerGen: "generation", ownerFence: 1 }, "mcp:owner-0");
+    const attempt = await journal.begin(key, "process");
+    await journal.launched(key, attempt, { id: "original-process", pid: 42, startedAt: "2026-10-11T00:00:00.000Z" });
+    await journal.close(key);
+    const operation = (await h.instance.getNativeOperations()).operations[0];
+    const before = structuredClone(h.rows.get(key));
+    h.instance.opAdmissionsInFlight = 1;
+    expect(await h.instance.recoverNativeOperation(key, operation.recordHash)).toEqual({
+      error: "native-operation-recovery-refused: request-active",
+      status: 409,
+    });
+    h.instance.opAdmissionsInFlight = 0;
+    h.rows.set("fence:mcp:owner-0", { runId: "successor", ownerGen: "generation", ownerFence: 2 });
+    expect(await h.instance.recoverNativeOperation(key, operation.recordHash)).toEqual({
+      error: "native-operation-recovery-refused: record-or-owner-changed",
+      status: 409,
+    });
+    expect(h.rows.get(key)).toEqual(before);
+  });
+
+  it("recovers a lost operator result without replaying its command", async () => {
+    const { instance, rows, native } = workloadResident();
+    instance.run = Object.getPrototypeOf(instance).run;
+    native.loseOutput = true;
+    await expect(instance.withOpNativeOperation("op:lost", () => instance.run(["true"]))).rejects.toThrow(
+      "native output lost",
+    );
+    rows.set("private-files", "unpublished bytes");
+    rows.set("native-operation:op:legacy", { opOwner: "op:legacy" });
+    const operation = (await instance.getNativeOperations()).operations.find(
+      (row: { key: string }) => row.key === "native-operation:op:lost",
+    );
+    const result = await instance.recoverNativeOperation(operation.key, operation.recordHash);
+    expect(result).toMatchObject({
+      key: "native-operation:op:lost",
+      outcome: "native-ended",
+      processes: [{ id: "original-process", exit: { code: 0 } }],
+    });
+    expect(rows.get("private-files")).toBe("unpublished bytes");
+    expect(rows.get("native-operation:op:legacy")).toEqual({ opOwner: "op:legacy" });
+    expect(rows.has("native-operation:op:lost")).toBe(false);
+    expect(rows.get("native-operation-receipt:native-operation:op:lost")).toMatchObject({
+      receipt: result,
+      original: { opOwner: "op:lost" },
+    });
+    expect(await instance.recoverNativeOperation(operation.key, operation.recordHash)).toEqual(result);
+  });
+  it("lists legacy native operations without inspecting a runtime", async () => {
+    const { instance, rows } = workloadResident();
+    rows.set("native-operation:op:unknown", { opOwner: "op:unknown" });
+    instance.run = async () => {
+      throw new Error("metadata must not inspect native processes");
+    };
+    const report = await instance.getNativeOperations();
+    expect(report.operations).toEqual([
+      expect.objectContaining({
+        key: "native-operation:op:unknown",
+        owner: { opOwner: "op:unknown" },
+        recoverable: false,
+        journal: null,
+      }),
+    ]);
+    expect(rows.get("native-operation:op:unknown")).toEqual({ opOwner: "op:unknown" });
+  });
+
   it("keeps background processes beyond the former roster visible to recovery", async () => {
     const { instance } = workloadResident();
     instance.run = async () => ({
@@ -1702,13 +1802,15 @@ describe("resident workload admission", () => {
     native.accountCommands = true;
     native.loseOutput = true;
     const owner = "op:lost-account-result";
-    rows.set(`native-operation:${owner}`, { opOwner: owner });
     expect(await instance.withOpNativeOperation(owner, () => instance.reserveSafePoolUser(owner))).toMatchObject({
       status: 503,
       reason: "workload-unverified",
     });
     expect(await uidOwner(instance.ctx.storage, "worker34")).toBe(owner);
-    expect(rows.get(`native-operation:${owner}`)).toEqual({ opOwner: owner });
+    expect(rows.get(`native-operation:${owner}`)).toMatchObject({
+      opOwner: owner,
+      native: { version: 1, closed: true },
+    });
     native.loseOutput = false;
     expect(
       await instance.withOpNativeOperation("op:new-owner", () => instance.reserveSafePoolUser("op:new-owner")),
@@ -1788,7 +1890,6 @@ describe("resident workload admission", () => {
 
   it("does not exclude the caller after UID allocation or an unobserved native result", async () => {
     const allocated = workloadResident();
-    allocated.rows.set("native-operation:op:allocated", { opOwner: "op:allocated" });
     expect(
       await allocated.instance.withOpNativeOperation("op:allocated", async () => {
         expect(await allocated.instance.allocateOpUser()).toBe("worker18");
@@ -1797,7 +1898,6 @@ describe("resident workload admission", () => {
     ).toBe(1);
 
     const pending = workloadResident();
-    pending.rows.set("native-operation:op:pending", { opOwner: "op:pending" });
     pending.instance.run = Object.getPrototypeOf(pending.instance).run;
     pending.native.loseOutput = true;
     expect(
@@ -1806,7 +1906,10 @@ describe("resident workload admission", () => {
         return pending.instance.registeredRunsBeyondOps();
       }),
     ).toBe(1);
-    expect(pending.rows.get("native-operation:op:pending")).toEqual({ opOwner: "op:pending" });
+    expect(pending.rows.get("native-operation:op:pending")).toMatchObject({
+      opOwner: "op:pending",
+      native: { closed: true },
+    });
   });
 
   it("admits only one of two competing owners for the final slot", async () => {
@@ -1865,7 +1968,6 @@ describe("resident workload admission", () => {
   it("releases an acknowledged operator command but keeps an unobserved native outcome", async () => {
     const { instance, rows, native } = workloadResident();
     instance.run = Object.getPrototypeOf(instance).run;
-    rows.set("native-operation:op:known", { opOwner: "op:known" });
     expect(await instance.withOpNativeOperation("op:known", () => instance.run(["true"]))).toEqual({
       stdout: "completed",
       stderr: "",
@@ -1874,12 +1976,11 @@ describe("resident workload admission", () => {
       truncated: false,
     });
     expect(rows.has("native-operation:op:known")).toBe(false);
-    rows.set("native-operation:op:unknown", { opOwner: "op:unknown" });
     native.loseOutput = true;
     await expect(instance.withOpNativeOperation("op:unknown", () => instance.run(["true"]))).rejects.toThrow(
       "native output lost",
     );
-    expect(rows.get("native-operation:op:unknown")).toEqual({ opOwner: "op:unknown" });
+    expect(rows.get("native-operation:op:unknown")).toMatchObject({ opOwner: "op:unknown", native: { closed: true } });
     native.loseOutput = false;
     expect([...(await instance.activeWorkloadOwners())]).toEqual(["op:unknown"]);
   });
