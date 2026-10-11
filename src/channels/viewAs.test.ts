@@ -1,3 +1,4 @@
+import { DATA_VIEW_COOKIE, resolveWorkViewScope, withWorkViewScope } from "./workViewScope.js";
 import { describe, expect, it } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Readable } from "node:stream";
@@ -23,6 +24,7 @@ import {
 const ADMIN: Actor = accessActor({ sub: "admin" }, (id) =>
   grantsFor(id, { grants: new Map([["access:admin", ALL_GRANTS]]) }),
 );
+withWorkViewScope(ADMIN, resolveWorkViewScope(ADMIN, { organization: "installation" }));
 const READER: Actor = accessActor({ sub: "alice" }, (id) => grantsFor(id, { commandGroups: ["runs"] }));
 
 function request(method: string, url: string, body?: string, headers: Record<string, string> = {}) {
@@ -90,6 +92,7 @@ describe("requestersOf", () => {
       row("7", { userId: "slack:UANON" }),
     ];
     expect(requestersOf(rows)).toEqual([
+      { id: "access:a1" },
       { id: "slack:UBOB", name: "bob" },
       { id: "slack:UIVY", name: "ivy" },
       { id: "slack:UANON" },
@@ -119,6 +122,7 @@ describe("peopleOf and knownPeople", () => {
       { id: "http:ops", name: "ops" }, // never a person
     ];
     expect(peopleOf(rows, known)).toEqual([
+      { id: "access:a1" },
       { id: "slack:UANON", name: "anon" },
       { id: "slack:UBOB", name: "bob" },
       { id: "slack:UIVY", name: "ivy" },
@@ -220,9 +224,62 @@ describe("the view-as routes", () => {
     return { ...t, handled };
   };
 
-  it("claims exactly its two paths", () => {
+  it("sets one global Mine or Everyone preference and clears impersonation without treating the cookie as authority", async () => {
+    const fresh = { ...ADMIN, memberOfOrganizations: new Set(["installation"]) };
+    withWorkViewScope(fresh, resolveWorkViewScope(fresh, { organization: "installation" }));
+    const everyone = post("/runs/data-view", JSON.stringify({ mode: "everyone" }), fresh);
+    expect(everyone.handled).toBe(true);
+    await settle();
+    expect(everyone.status()).toBe(204);
+    expect(everyone.headers()["set-cookie"]).toEqual([
+      `${DATA_VIEW_COOKIE}=everyone; Path=/; HttpOnly; SameSite=Strict; Secure`,
+      `${VIEW_AS_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0`,
+    ]);
+    const denied = post("/runs/data-view", JSON.stringify({ mode: "everyone" }), READER);
+    await settle();
+    expect(denied.status()).toBe(403);
+    const mine = post("/runs/data-view", JSON.stringify({ mode: "mine" }), READER);
+    await settle();
+    expect(mine.status()).toBe(204);
+    const forged = post("/runs/data-view", JSON.stringify({ mode: "person", person: "slack:UIVY" }), fresh);
+    await settle();
+    expect(forged.status()).toBe(400);
+  });
+  it("refuses Everyone when raw grants are narrow even if cached view metadata claims eligibility", async () => {
+    const current = { ...READER };
+    withWorkViewScope(current, { mode: "mine", ownerIds: [current.id], canEveryone: true });
+    const denied = post("/runs/data-view", JSON.stringify({ mode: "everyone" }), current);
+    await settle();
+    expect(denied.status()).toBe(403);
+    expect(denied.headers()).not.toHaveProperty("set-cookie");
+    const allowed = post("/runs/data-view", JSON.stringify({ mode: "mine" }), current);
+    await settle();
+    expect(allowed.status()).toBe(204);
+  });
+  it("accepts a known Access person and rejects unknown or service subjects", async () => {
+    const h = createViewAsHandler({
+      publicBaseUrl: "https://bot.example.test",
+      secure: true,
+      people: () => [{ id: "access:offline", name: "Offline person" }],
+    });
+    const read = async (person: string) => {
+      const t = request("POST", "/runs/view-as", JSON.stringify({ person }), {
+        origin: "https://bot.example.test",
+        "content-type": "application/json",
+      });
+      h(t.req, t.res, { actor: ADMIN });
+      await settle();
+      return t;
+    };
+    expect((await read("access:offline")).status()).toBe(204);
+    expect((await read("access:unknown")).status()).toBe(400);
+    expect((await read("access:svc:bot")).status()).toBe(400);
+    expect((await read("access:loopback")).status()).toBe(400);
+  });
+  it("claims its view-as and global data-view preference paths", () => {
     expect(isViewAsPath("/runs/view-as")).toBe(true);
     expect(isViewAsPath("/runs/view-as/exit")).toBe(true);
+    expect(isViewAsPath("/runs/data-view")).toBe(true);
     for (const p of ["/runs", "/runs/view-as/", "/runs/view-as/x", "/view-as", "/runs/scheduled"])
       expect(isViewAsPath(p), p).toBe(false);
     const other = request("POST", "/runs/abc/stop");
@@ -234,18 +291,24 @@ describe("the view-as routes", () => {
     expect(t.handled).toBe(true);
     await settle();
     expect(t.status()).toBe(204);
-    expect(t.headers()["set-cookie"]).toBe(`${VIEW_AS_COOKIE}=slack%3AUIVY; Path=/; HttpOnly; SameSite=Strict; Secure`);
+    expect(t.headers()["set-cookie"]).toEqual([
+      `${VIEW_AS_COOKIE}=slack%3AUIVY; Path=/; HttpOnly; SameSite=Strict; Secure`,
+      `${DATA_VIEW_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0`,
+    ]);
     expect(t.headers()["cache-control"]).toBe("no-store");
     expect(t.text()).toBe("");
     // The value round-trips through the parser the gate uses.
-    expect(viewAsFromCookie(t.headers()["set-cookie"].split(";")[0])).toBe("slack:UIVY");
+    expect(viewAsFromCookie(t.headers()["set-cookie"] as unknown as string[])).toBe("slack:UIVY");
   });
 
   it("POST /runs/view-as/exit → 204 with the cookie cleared (Max-Age=0), no body read", async () => {
     const t = post("/runs/view-as/exit");
     await settle();
     expect(t.status()).toBe(204);
-    expect(t.headers()["set-cookie"]).toBe(`${VIEW_AS_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0`);
+    expect(t.headers()["set-cookie"]).toEqual([
+      `${VIEW_AS_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0`,
+      `${DATA_VIEW_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=0`,
+    ]);
   });
 
   it("an http deployment sets no Secure attribute (the browser would drop it)", async () => {
@@ -256,7 +319,10 @@ describe("the view-as routes", () => {
     local(t.req, t.res, { actor: ADMIN });
     await settle();
     expect(t.status()).toBe(204);
-    expect(t.headers()["set-cookie"]).toBe(`${VIEW_AS_COOKIE}=slack%3AUIVY; Path=/; HttpOnly; SameSite=Strict`);
+    expect(t.headers()["set-cookie"]).toEqual([
+      `${VIEW_AS_COOKIE}=slack%3AUIVY; Path=/; HttpOnly; SameSite=Strict`,
+      `${DATA_VIEW_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`,
+    ]);
   });
 
   it("a session without `all` is refused both routes with 403 unauthorized before any body is read; a viewing admin still holds its own `all` and may switch or exit", async () => {
@@ -268,6 +334,7 @@ describe("the view-as routes", () => {
       expect(t.headers()).not.toHaveProperty("set-cookie");
     }
     const viewing: Actor = { ...ADMIN, onBehalfOf: READER, viewingAs: { id: "slack:UALICE" } };
+    withWorkViewScope(viewing, resolveWorkViewScope(viewing, { originalActor: ADMIN, organization: "installation" }));
     const t = post("/runs/view-as", JSON.stringify({ person: "slack:UBOB" }), viewing);
     await settle();
     expect(t.status()).toBe(204);

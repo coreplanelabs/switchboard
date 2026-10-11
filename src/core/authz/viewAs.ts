@@ -18,9 +18,14 @@ export function holdsAll(actor: Actor): boolean {
   );
 }
 
-/** A person a session may view as: a Slack person id, the one kind the directory knows. */
+/** A projected person ID, never a service credential or loopback subject.
+ * Access subjects additionally require a known protected requester at the host. */
 export function isViewablePerson(id: string): boolean {
-  return /^slack:U[A-Z0-9]+$/.test(id);
+  return (
+    !id.includes("*") &&
+    (/^slack:U[A-Z0-9]+$/.test(id) ||
+      (/^access:(?!svc:|loopback(?:$|:))[^\s]+$/u.test(id) && id.length <= 2055 && !/\p{Cc}/u.test(id)))
+  );
 }
 
 /** The one sentence a write gets while viewing as a person — the registry door's refusal, the

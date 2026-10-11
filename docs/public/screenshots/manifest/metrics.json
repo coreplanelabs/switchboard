@@ -99,7 +99,7 @@
     "src/core/authz/predicate.ts": "dc30f2aeead55e144cc5ef72dffb93f1353ca887466a3abebfe238c998ebfc20",
     "src/core/authz/resource.ts": "43715463c4aaf35402cf869660b6088a2a162834f784a82e047ce0f18c9bfad8",
     "src/core/authz/types.ts": "4cb87502110dccf8217db7e597476a76ac2ed804908be414285a47dfa4922f05",
-    "src/core/authz/viewAs.ts": "cbfefdca793e908ff07b299af98186e38d47838162a76613e10f71f51554df63",
+    "src/core/authz/viewAs.ts": "fcb733932af3d89d3b33084f4a3b5f8304eb04c80574ba2f3c8e1da54091d135",
     "src/core/branchIdentityBaseline.ts": "b13b930408b3d87887736275b08ad0b7f740514082ca3b2b3f9a75c2f8ad5ead",
     "src/core/branchPublication.ts": "c4d749996d997e598993a46aadac6f386071e106bad1c52275ddddf03afec6a2",
     "src/core/budgets.ts": "2b7e3139a843db80e4fd2ac112430b160d6c0c4330b06ee7ef090376ff7b7467",

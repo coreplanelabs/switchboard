@@ -690,13 +690,13 @@ describe("grantsFor — the grants the policy table decides on", () => {
     expect(more.canRunAgent("slack:URANDOM", "coding")).toBe(false);
   });
 
-  it("grantedPeople lists the Slack people the grants table names, in its order, whatever they hold — never a credential, a surface star or a schedule", () => {
+  it("grantedPeople lists named Slack and Access people in grant order, never services, loopback, surface stars or schedules", () => {
     const s = store(
       withGrants(
-        `  "slack:*": { actions: [runs:read] }\n  "access:op-1": { actions: all, channels: all, repos: all }\n  "http:ops": { actions: [runs:read] }\n`,
+        `  "slack:*": { actions: [runs:read] }\n  "access:op-1": { actions: all, channels: all, repos: all }\n  "http:ops": { actions: [runs:read] }\n  "access:svc:robot": { actions: all }\n  "access:loopback": { actions: all }\n  "access:loopback:ops": { actions: all }\n  "access:*": { actions: all }\n  "schedule:nightly": { actions: all }\n`,
       ),
     );
-    expect(s.grantedPeople()).toEqual(["slack:UADMIN", "slack:UDEV"]);
+    expect(s.grantedPeople()).toEqual(["slack:UADMIN", "slack:UDEV", "access:op-1"]);
   });
 
   it("adminsHint stays generic regardless of named or surface admin grants", () => {

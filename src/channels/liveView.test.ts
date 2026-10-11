@@ -968,7 +968,7 @@ describe("createLiveViewHandler (node:http)", () => {
   });
 
   // Feature: docs/decisions/0053 — the picker is offered to a session holding `all`, to nobody else.
-  it("the index seed offers viewAs — the page's Slack requesters by name — to a viewer holding all, none of it to a narrower viewer, and to an admin already viewing the people the person's own page names", async () => {
+  it("the index seed offers named Slack and Access requesters to a viewer holding all, no services or loopback, and no picker to a narrower viewer", async () => {
     const reg = fixedRegistry();
     reg.create("coding · owner/repo", {
       channelId: "slack:C1",
@@ -977,11 +977,17 @@ describe("createLiveViewHandler (node:http)", () => {
       userName: "bob",
     });
     reg.create("review · owner/repo", { channelId: "web:a1", threadKey: "t2", userId: "access:a1" });
+    reg.create("service", { channelId: "http:ops", threadKey: "service", userId: "http:ops" });
+    reg.create("Access service", { channelId: "web:service", threadKey: "service-access", userId: "access:svc:robot" });
+    reg.create("loopback", { channelId: "web:local", threadKey: "local", userId: "access:loopback" });
+    reg.create("surface pattern", { channelId: "web:any", threadKey: "pattern", userId: "access:*" });
     const handler = liveOnlyHandler(reg);
     const admin = fakeReqRes("GET", "/runs");
     handler(admin.req, admin.res);
     await admin.finished;
-    expect(indexSeedOf(admin.body()).viewAs).toEqual({ people: [{ id: "slack:UBOB", name: "bob" }] });
+    expect(indexSeedOf(admin.body()).viewAs).toEqual({
+      people: [{ id: "access:a1" }, { id: "slack:UBOB", name: "bob" }],
+    });
     const reader = fakeReqRes("GET", "/runs");
     handler(reader.req, reader.res, {
       actor: accessActor({ sub: "alice" }, (id) => grantsFor(id, { commandGroups: ["runs"] })),

@@ -119,6 +119,7 @@ describe("private worker IO — a task thread with no Slack delivery", () => {
           threadKey: instance.threadKey,
           userId: instance.userId,
           sourceRunId: "browser-original-run",
+          unitKey: task,
         });
         return source;
       },

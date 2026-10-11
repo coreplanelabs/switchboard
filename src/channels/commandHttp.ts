@@ -73,6 +73,8 @@ export interface CommandHttpOptions {
   channelsOfTimeoutMs?: number;
   /** A person's display name for the view-as banner and audit line (record 0053); absent → the id. */
   personName?: (personId: string) => Promise<string | undefined>;
+  /** Protected requester/config roster for read-only Access impersonation. */
+  knownPerson?: (personId: string) => boolean;
   /** `PUBLIC_BASE_URL`, when set: the origin writes must come from. */
   publicBaseUrl?: string;
   maxBodyBytes?: number;
@@ -163,13 +165,21 @@ export function serviceTokenAllowed(pathname: string, identity: AccessIdentity):
  */
 export async function resolveAccessActor(
   identity: AccessIdentity,
-  opts: Pick<CommandHttpOptions, "grantsFor" | "personByEmail" | "channelsOf" | "channelsOfTimeoutMs" | "personName">,
+  opts: Pick<
+    CommandHttpOptions,
+    "grantsFor" | "personByEmail" | "channelsOf" | "channelsOfTimeoutMs" | "personName" | "knownPerson"
+  >,
 ): Promise<Actor> {
   const actor = accessActor(identity, opts.grantsFor);
   if (isServiceToken(identity)) return actor;
   // A cookie's word narrows an admin and nobody else: any other session resolves as if it
   // carried none, its own person link included (record 0053).
-  if (identity.viewAs !== undefined && holdsAll(actor) && isViewablePerson(identity.viewAs))
+  if (
+    identity.viewAs !== undefined &&
+    holdsAll(actor) &&
+    isViewablePerson(identity.viewAs) &&
+    (!identity.viewAs.startsWith("access:") || opts.knownPerson?.(identity.viewAs) === true)
+  )
     return viewingAs(actor, identity.viewAs, opts);
   if (!identity.email || !opts.personByEmail) return actor;
   const person = await opts.personByEmail(identity.email).catch(() => undefined);
@@ -197,15 +207,15 @@ export async function resolveAccessActor(
  * grants are the intersection (the person's, under `all`) and every identity fact `is-self` and
  * `member-of` read is the person's, while `id` stays the admin's and `viewingAs` names the
  * person for the audit line and the banner. The caller has checked the admin holds `all` and
- * the id names a Slack person: the cookie's word can narrow an admin and nobody else.
+ * the id names a known person: the cookie's word can narrow an admin and nobody else.
  */
 async function viewingAs(
   admin: Actor,
   personId: string,
-  opts: Pick<CommandHttpOptions, "grantsFor" | "channelsOf" | "channelsOfTimeoutMs" | "personName">,
+  opts: Pick<CommandHttpOptions, "grantsFor" | "channelsOf" | "channelsOfTimeoutMs" | "personName" | "knownPerson">,
 ): Promise<Actor> {
   const [memberOf, name] = await Promise.all([
-    opts.channelsOf
+    opts.channelsOf && personId.startsWith("slack:")
       ? boundedChannels(opts.channelsOf(personId), opts.channelsOfTimeoutMs ?? CHANNEL_DIRECTORY_TIMEOUT_MS)
       : Promise.resolve<ReadonlySet<string> | "unknown">("unknown"),
     opts.personName ? opts.personName(personId).catch((): undefined => undefined) : Promise.resolve(undefined),
@@ -213,10 +223,9 @@ async function viewingAs(
   const person: Actor = {
     kind: "user",
     id: personId,
-    // The browser baseline under a subject no config names — what the person's own session
-    // holds, whose `sub` this process does not know (an entry keyed to that sub is the one
-    // thing view-as cannot see; record 0053 names the boundary).
-    grants: opts.grantsFor(`access:${personId}`),
+    // A known Access requester has an exact config ceiling. A Slack requester retains
+    // the existing browser baseline; this read projection asserts no target Access proof.
+    grants: opts.grantsFor(personId.startsWith("access:") ? personId : `access:${personId}`),
     self: [personId],
     asUser: { id: personId, ...(name ? { name } : {}) },
     ...(memberOf === "unknown" ? {} : { memberOf }),
@@ -255,7 +264,10 @@ async function boundedChannels(
  *  the policy table decides on (`resolveAccessActor`: linked to its person when the email names one). */
 export async function callerFor(
   identity: AccessIdentity,
-  opts: Pick<CommandHttpOptions, "grantsFor" | "personByEmail" | "channelsOf" | "channelsOfTimeoutMs" | "personName">,
+  opts: Pick<
+    CommandHttpOptions,
+    "grantsFor" | "personByEmail" | "channelsOf" | "channelsOfTimeoutMs" | "personName" | "knownPerson"
+  >,
 ): Promise<Caller> {
   return {
     kind: "access",
