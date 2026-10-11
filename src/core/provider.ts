@@ -341,9 +341,7 @@ export function renderProviderFailure(cause: ProviderFailureCause, surface: Prov
         ? "The model provider is rate-limited; your work is kept and will continue when capacity returns."
         : "The model provider is rate-limited; this request did not start.";
     case "credit-or-quota-exhausted":
-      return surface === "parked"
-        ? "The model provider's credit or quota is exhausted; your work is kept and will continue when service recovers."
-        : "The model provider's credit or quota is exhausted; this request did not start.";
+      return "The model provider's credit or quota is exhausted; this request is blocked until the account changes.";
     case "key-absent":
       return "The model provider key is not configured; this request cannot start until the service is restored.";
     case "key-invalid":
@@ -648,7 +646,7 @@ export function providerFailureOf(error: unknown): ProviderFailure {
 
 /** Causes that make the provider unavailable rather than ending one call. */
 export function providerFailureParks(cause: ProviderFailureCause): boolean {
-  return cause === "transient" || cause === "rate-limited" || cause === "credit-or-quota-exhausted";
+  return cause === "transient" || cause === "rate-limited";
 }
 
 /** The three wire shapes a provider block may declare (record 0052):

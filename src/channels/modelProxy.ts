@@ -141,7 +141,7 @@ export interface ModelProxyDeps {
    *  not before. Absent → no operator layer in the turn's price. */
   prices?: () => ModelPriceTable;
   /** The plane's provider seam (record 0064): `level` reports the provider
-   *  `up` on a relayed success and `down` on a failure past the one retry
+   *  `up` on a relayed success and `down` on a retryable failure
    *  (`createModelProxyHandler` dedupes to changes, so a healthy provider is
    *  not re-reported every turn); `park` parks the failing turn's run on
    *  `provider_up`. Both fire and forget — the proxy never waits on the plane. */
@@ -1160,9 +1160,9 @@ async function handleAdmittedCall(
     );
   const outcome = (status: number, outBytes: number) =>
     `[model-proxy] run=${grant.runId} turn=${turn.turn}/${grant.maxTurns} ${shape} → ${status} in=${Buffer.byteLength(payload)} out=${outBytes} ${Math.max(0, deps.clock() - startedAt)}ms`;
-  // One immediate retry TOTAL when the typed cause says the provider is down:
-  // transport/transient, rate-limited, or credit/quota exhausted. The run-level
-  // harness then holds and backs off inside its lease. Every provider answer is
+  // The harness owns the bounded retry policy. One proxy request makes one
+  // upstream request, so nested retries cannot multiply the attempt budget.
+  // Every provider answer is
   // classified before a consumer acts, and every failed response crossing the
   // proxy is rendered from the cause rather than relaying the wire payload.
   const rawBodies = new WeakMap<Response, ReadableStream<Uint8Array>>();
@@ -1395,7 +1395,7 @@ async function handleAdmittedCall(
       }),
     };
   };
-  let providerFailure = await failureOf(res, thrown);
+  const providerFailure = await failureOf(res, thrown);
   const recordFailure = (failure: ProviderFailure) => {
     try {
       grant.publish({
@@ -1416,22 +1416,6 @@ async function handleAdmittedCall(
     }
   };
   if (providerFailure) recordFailure(providerFailure);
-  if (reservation?.responseInterruption && (!providerFailure || providerFailureParks(providerFailure.cause)))
-    return localResponseStop(res);
-  if (providerFailure !== undefined && providerFailureParks(providerFailure.cause) && !aborted()) {
-    let retried: Response | undefined;
-    let retryThrown: unknown;
-    try {
-      retried = await call();
-    } catch (err) {
-      retryThrown = err;
-    }
-    // A retry that also failed transport keeps the first response when there
-    // was one, but its typed cause still decides the provider's level.
-    if (retried !== undefined) res = retried;
-    providerFailure = await failureOf(retried ?? res, retryThrown ?? thrown);
-    if (providerFailure) recordFailure(providerFailure);
-  }
   if (reservation?.responseInterruption && (!providerFailure || providerFailureParks(providerFailure.cause)))
     return localResponseStop(res);
   if (providerFailure !== undefined && providerFailureParks(providerFailure.cause) && !aborted())

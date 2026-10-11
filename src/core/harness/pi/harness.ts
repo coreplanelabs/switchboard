@@ -74,7 +74,13 @@ import { bearerHashOf } from "../../modelProxy/runBearers.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind, type StopMode } from "../../runEvents.js";
 import type { Settlement, ToolUsePart } from "../../runLedger/resume.js";
 import type { AssembledCompaction } from "../../runLedger/transcript.js";
-import { loopClock, MINUTE_MS, PROVIDER_RETRY_BACKOFFS_MS, turnLeaseMs } from "../../budgets.js";
+import {
+  loopClock,
+  MINUTE_MS,
+  PROVIDER_RETRY_BACKOFFS_MS,
+  PROVIDER_RETRY_WAIT_MS,
+  turnLeaseMs,
+} from "../../budgets.js";
 import { followUpMessageId, followUpPrompt, followUpSnippet, type FollowUpInput } from "../../threadAdmission.js";
 import { isReissueSteerText } from "../../plane/decide.js";
 import { PLANE_ACTOR_ID } from "../../authz/grants.js";
@@ -130,12 +136,14 @@ import {
 } from "./relay.js";
 import { settlePushCall, type ToolRuleContext } from "./toolRules.js";
 import { PiRpcTransport } from "./transport.js";
+import { providerRetryDelay } from "../../providerRetry.js";
 
 /** What pi's loop needs beyond what every harness is handed (`HarnessDeps`,
  *  the contract): the deployment's compaction thresholds for pi's settings
  *  (`pi.compaction`; harness-pi item 4), the same for every run on pi; absent,
  *  pi's defaults. `PiHarness` folds them in from its own settings. */
 export interface PiHarnessDeps extends HarnessDeps {
+  random?: () => number;
   compaction?: PiCompactionConfig;
 }
 
@@ -585,9 +593,15 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   const startedAt = now();
   if (run.deadlineAt !== undefined && startedAt >= run.deadlineAt)
     throw new Error("The admitted run deadline ended before model admission.");
-  const admitModelWrite = (command: Record<string, unknown>): boolean =>
-    (command.type !== "prompt" && command.type !== "steer") ||
-    (run.control?.hardSignal.aborted !== true && now() < (run.deadlineAt ?? Infinity));
+  const admitModelWrite = (command: Record<string, unknown>): boolean => {
+    if (command.type !== "prompt" && command.type !== "steer") return true;
+    if (run.control?.hardSignal.aborted === true || now() >= (run.deadlineAt ?? Infinity)) return false;
+    // The saved bound belongs to the loop or post-loop turn that reserved it.
+    // Earlier FIFO controls must not let a queued model write spend it late.
+    if (facts?.retryRecovery && now() >= facts.retryRecovery.until)
+      throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
+    return true;
+  };
   const remainingMs = Math.min(
     run.resume?.remainingMs ?? run.agent.maxMinutes * MINUTE_MS,
     run.deadlineAt === undefined ? Infinity : Math.max(0, run.deadlineAt - startedAt),
@@ -854,6 +868,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       facts = { ...facts, logOffset: mirrored };
       if (!facts.sessionPolicy || policyConfirmed) run.saveFacts?.(facts);
     }
+  };
+  const saveRecovery = async (recovery: PiHarnessFacts["retryRecovery"]) => {
+    if (!facts || (!recovery && !facts.retryRecovery)) return;
+    const { retryRecovery: _old, ...rest } = facts;
+    facts = { ...rest, ...(recovery ? { retryRecovery: recovery } : {}) };
+    const saved = await run.saveFacts?.(facts, run.providerPark ? { requireAcknowledgement: true } : undefined);
+    if (saved === false || saved === "untracked" || (run.providerPark && saved !== true))
+      throw new Error("The model retry could not be recorded; no further model call was started.");
   };
   /** The ledger moved — a step or a compaction row landed — so the row's
    *  offset follows it at once: what a re-attach reads again is then exactly
@@ -1195,6 +1217,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         wire: runWire,
         ...(here !== undefined ? { container: here } : {}),
         relaunches: recorded?.relaunches ?? 0,
+        ...(recorded?.retryRecovery ? { retryRecovery: recorded.retryRecovery } : {}),
       };
       if (!facts.sessionPolicy) save();
       transport = new PiRpcTransport({
@@ -1250,6 +1273,17 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       throw new Error("The admitted run deadline ended before model admission.");
     sends.send({ id: ids.retry, type: "set_auto_retry", enabled: false });
     sends.send({ id: ids.state, type: "get_state" });
+    if (recorded?.retryRecovery) {
+      const recovery = recorded.retryRecovery;
+      if (recovery.retries >= PROVIDER_RETRY_BACKOFFS_MS.length || now() >= Math.min(loopEnd, recovery.until))
+        throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
+      const wait = Math.max(0, recovery.notBefore - now());
+      if (wait > 0 && !(await sleepUnlessStopped({ sleep: deps.sleep, now, signal: run.control?.hardSignal }, wait)))
+        throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
+      if (now() >= Math.min(loopEnd, recovery.until)) throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
+      await saveRecovery({ ...recovery, retries: recovery.retries + 1, until: Math.min(loopEnd, recovery.until) });
+      if (now() >= Math.min(loopEnd, recovery.until)) throw new ModelTransientFailureError(PROVIDER_RETRY_EXHAUSTED);
+    }
     if (reattached)
       // The pi found alive may be inside a tool call — its extension waiting on
       // the relay for the answer the dead generation never sent — and pi
@@ -1587,10 +1621,16 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         retryInFlight !== undefined
       )
         return;
-      if (pendingReissue.length === 0) return;
+      if (pendingReissue.length === 0 || now() < providerRetryNotBefore) return;
+      if (
+        now() >= Math.min(loopEnd, providerRetryUntil ?? Infinity) ||
+        providerRetries >= PROVIDER_RETRY_BACKOFFS_MS.length
+      )
+        throw terminalFailureAtBound(heldTurn);
       if (loopEnded || hardStopped || writeUp !== undefined || finaleAborted) return;
       reissueInFlightRows = pendingReissue.splice(0);
       reissues += 1;
+      providerRetries += 1;
       const id = reissues === 1 ? `${ids.prompt}:reissue` : `${ids.prompt}:reissue:${reissues}`;
       reissueInFlight = id;
       unechoed.push({
@@ -1688,7 +1728,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         return;
       }
       if (heldTurn !== undefined) {
-        if (now() >= loopEnd) throw terminalFailureAtBound(heldTurn);
+        if (now() >= Math.min(loopEnd, providerRetryUntil ?? Infinity)) throw terminalFailureAtBound(heldTurn);
         if (parkSettled && providerRetryReady && retryInFlight === undefined && reissueInFlight === undefined) {
           providerRetryReady = false;
           providerRetryWait = undefined;
@@ -1926,10 +1966,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       return outcome;
     };
     let terminalFailure: PiTerminalFailure | undefined;
-    /** Retries of transport-class provider failures already sent. The ladder's
-     *  final rung repeats; the run's remaining lease, not three quick tries,
-     *  is the retry budget. */
-    let providerRetries = 0;
+    /** Sent retry prompts, including provider-up releases. Model success resets them. */
+    let providerRetries = facts?.retryRecovery?.retries ?? 0;
+    let providerRetryUntil: number | undefined = facts?.retryRecovery?.until;
+    let providerRetryNotBefore = 0;
+    let providerBackoff = 0;
     /** A container command under the read failed saying the runtime was replaced (item 16): the loop ends for the judgement below. */
     let containerSaid: Error | undefined;
     /** A container command under the read failed on its transport with no word
@@ -2038,6 +2079,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // A call that starts while catching up was vetted by the generation that died.
       bridge.judgeGate = !catchingUp;
       const obs = bridge.observe(event);
+      if (!catchingUp && obs.message?.role === "assistant" && obs.terminalFailure === undefined) {
+        providerRetries = 0;
+        providerRetryUntil = undefined;
+        await saveRecovery(undefined);
+      }
       for (const reply of obs.replies) sends.send(reply);
       if (obs.gateBypassed) {
         // Fail closed: a tool ran that the gate never saw. Stop pi now; the
@@ -2197,9 +2243,25 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           // it never re-issues the turn the budget deliberately cut.
           cutAborted = false;
         } else if (!writeUp && !finaleAborted && terminalFailureIsRecoverable(terminal)) {
+          providerRetryUntil ??= Math.min(loopEnd, now() + PROVIDER_RETRY_WAIT_MS);
+          const backoff = providerRetryDelay(
+            terminal.kind === "provider_failure" ? terminal.failure : undefined,
+            providerRetries,
+            now(),
+            deps.random,
+          );
+          if (backoff === undefined || now() + backoff >= Math.min(loopEnd, providerRetryUntil))
+            throw terminalFailureAtBound(terminal);
+          providerBackoff = backoff;
+          providerRetryNotBefore =
+            terminal.kind === "provider_failure" &&
+            (terminal.failure.cause === "rate-limited" ||
+              terminal.failure.diagnostic?.headers?.["retry-after"] !== undefined)
+              ? now() + backoff
+              : 0;
+          await saveRecovery({ retries: providerRetries + 1, until: providerRetryUntil, notBefore: now() + backoff });
           heldTurn = terminal;
           parkSettled = false;
-          const backoff = PROVIDER_RETRY_BACKOFFS_MS[Math.min(providerRetries, PROVIDER_RETRY_BACKOFFS_MS.length - 1)]!;
           const local = terminal.kind === "local_abort" || terminal.kind === "local_stream";
           const progress =
             terminal.kind === "local_abort"
@@ -2228,8 +2290,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           // remain live; the promise only marks the retry ready.
           parkSettled = true;
           if (providerRetryWait === undefined) {
-            const backoff =
-              PROVIDER_RETRY_BACKOFFS_MS[Math.min(providerRetries, PROVIDER_RETRY_BACKOFFS_MS.length - 1)]!;
+            const backoff = providerBackoff;
             const generation = ++providerRetryGeneration;
             providerRetryWait = deps.sleep(backoff).then(() => {
               if (providerRetryGeneration === generation) providerRetryReady = true;
@@ -2442,6 +2503,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       let turnRetryWait: Promise<void> | undefined;
       let turnRetryGeneration = 0;
       let turnRetries = 0;
+      let turnRetryUntil: number | undefined;
+      let turnRetryNotBefore = 0;
+      let turnBackoff = 0;
       let turnRetryInFlight: string | undefined;
       let turnReissueInFlight: string | undefined;
       let turnReissues = 0;
@@ -2469,7 +2533,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           finaleAborted
         )
           return;
+        if (now() < turnRetryNotBefore) return;
+        if (
+          now() >= Math.min(turnDeadline, turnRetryUntil ?? Infinity) ||
+          turnRetries >= PROVIDER_RETRY_BACKOFFS_MS.length
+        )
+          throw terminalFailureAtBound(turnHeld);
         turnReissues += 1;
+        turnRetries += 1;
         turnReissueInFlight = turnReissues === 1 ? `${id}:reissue` : `${id}:reissue:${turnReissues}`;
         turnReissueInFlightRows = turnReissueRows.splice(0);
         turnParkSettled = false;
@@ -2522,7 +2593,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         // end; an up row may race ahead of the failure and is buffered here.
         drainTurnReissues();
         if (turnHeld !== undefined) {
-          if (now() >= turnDeadline) throw terminalFailureAtBound(turnHeld);
+          if (now() >= Math.min(turnDeadline, turnRetryUntil ?? Infinity)) throw terminalFailureAtBound(turnHeld);
           if (
             turnParkSettled &&
             turnRetryReady &&
@@ -2627,6 +2698,11 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           }
           reattaches = 0; // a record read: a re-attach made progress
           const obs = bridge.observe(event);
+          if (obs.message?.role === "assistant" && obs.terminalFailure === undefined) {
+            turnRetries = 0;
+            turnRetryUntil = undefined;
+            await saveRecovery(undefined);
+          }
           for (const reply of obs.replies) sends.send(reply);
           if (obs.gateBypassed) {
             bypass = new GateBypassed(obs.gateBypassed.tool, obs.gateBypassed.callId);
@@ -2691,10 +2767,26 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               writeUpFailed = terminalFailureText(terminal);
               note("harness_error", windDownFailureNote(writeUpFailed, "turn"));
             } else if (terminalFailureIsRecoverable(terminal)) {
+              turnRetryUntil ??= Math.min(turnDeadline, now() + PROVIDER_RETRY_WAIT_MS);
+              const backoff = providerRetryDelay(
+                terminal.kind === "provider_failure" ? terminal.failure : undefined,
+                turnRetries,
+                now(),
+                deps.random,
+              );
+              if (backoff === undefined || now() + backoff >= Math.min(turnDeadline, turnRetryUntil))
+                throw terminalFailureAtBound(terminal);
+              turnBackoff = backoff;
+              turnRetryNotBefore =
+                terminal.kind === "provider_failure" &&
+                (terminal.failure.cause === "rate-limited" ||
+                  terminal.failure.diagnostic?.headers?.["retry-after"] !== undefined)
+                  ? now() + backoff
+                  : 0;
+              await saveRecovery({ retries: turnRetries + 1, until: turnRetryUntil, notBefore: now() + backoff });
               turnHeld = terminal;
               turnFailure = undefined;
               turnParkSettled = false;
-              const backoff = PROVIDER_RETRY_BACKOFFS_MS[Math.min(turnRetries, PROVIDER_RETRY_BACKOFFS_MS.length - 1)]!;
               const local = terminal.kind === "local_abort" || terminal.kind === "local_stream";
               const progress =
                 terminal.kind === "local_abort"
@@ -2713,8 +2805,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
             if (turnHeld !== undefined && turnFailure === undefined && !hardStopped && !writeUp && !finaleAborted) {
               turnParkSettled = true;
               if (turnRetryWait === undefined) {
-                const backoff =
-                  PROVIDER_RETRY_BACKOFFS_MS[Math.min(turnRetries, PROVIDER_RETRY_BACKOFFS_MS.length - 1)]!;
+                const backoff = turnBackoff;
                 const generation = ++turnRetryGeneration;
                 turnRetryWait = deps.sleep(backoff).then(() => {
                   if (turnRetryGeneration === generation) turnRetryReady = true;

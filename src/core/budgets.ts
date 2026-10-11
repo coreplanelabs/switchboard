@@ -270,11 +270,9 @@ export const MERGE_WAIT_ASK_MINUTES = 60;
  *  request's line with the conflict named, never a retry loop. */
 export const PULL_SWEEP = { leaseMinutes: 15, spendCapUsd: 5 } as const;
 
-/** The provider retry ladder: the first backoffs for a transport-class
- *  model-call failure. The final rung repeats while the run's loop lease has
- *  time, so these are pacing intervals rather than a three-attempt terminal
- *  budget. */
-export const PROVIDER_RETRY_BACKOFFS_MS = [5_000, 15_000, 45_000] as const;
+/** Two retries after the original call, within one minute and the run lease. */
+export const PROVIDER_RETRY_BACKOFFS_MS = [5_000, 15_000] as const;
+export const PROVIDER_RETRY_WAIT_MS = MINUTE_MS;
 
 /** How often the model proxy writes an SSE comment while the provider is
  *  reasoning silently. The public container hop has cut an otherwise healthy

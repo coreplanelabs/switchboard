@@ -207,7 +207,7 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
         status: 402,
         diagnostic: { message: "More credits are required; visit https://provider.example/keys/secret-key" },
       },
-      reason: "The model provider's credit or quota is exhausted; this request did not start.",
+      reason: "The model provider's credit or quota is exhausted; this request is blocked until the account changes.",
     });
     expect(decision.reason).not.toMatch(/[{}]|https?:\/\/|limit_source/);
     expect(decision.reason.match(/[.!?](?:\s|$)/g)).toHaveLength(1);
@@ -248,7 +248,7 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
     });
   });
 
-  it("a malformed answer followed by a 402 keeps the nested credit failure park-capable", async () => {
+  it("a malformed answer followed by a 402 keeps the nested credit failure non-retryable", async () => {
     let calls = 0;
     const model: RouteModel = async () => {
       if (calls++ === 0) return "not a verdict";
@@ -261,7 +261,8 @@ describe("decideIntake — the verdict from one forced tool call (routing-and-co
       providerFailure: "credit-or-quota-exhausted",
       attempts: [{ outcome: "violation" }],
     });
-    expect(providerFailureParks(decision.providerFailure!)).toBe(true);
+    expect(providerFailureParks(decision.providerFailure!)).toBe(false);
+    expect(calls).toBe(2);
   });
 
   it("a malformed answer — another tool, prose, an answer outside the enum — is silent with source: error, never a guessed verdict", async () => {

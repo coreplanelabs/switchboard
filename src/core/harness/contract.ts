@@ -117,6 +117,9 @@ export interface PiHarnessFacts {
    *  survives a bot generation; 0 on a fresh start, and read as 0 from a row
    *  written before it existed. */
   relaunches: number;
+  /** Reserved retry attempts and the original wait bound survive a restart.
+   * Reserving before a prompt makes an uncertain send consume its attempt. */
+  retryRecovery?: { retries: number; until: number; notBefore: number };
 }
 
 /** What a run's row will remember about its OpenCode server, the second
