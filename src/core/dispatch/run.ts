@@ -16,6 +16,8 @@ import type { CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { MainStartInput, MainStartResult } from "../coordinator/mainStart.js";
 import type { RunProfile } from "../../config/profile.js";
 import { filterUnavailableTools, mergeTools, toolsForRun } from "../../tools/toolsets.js";
+import { conversationCommandTools } from "../../tools/commands.js";
+import type { ChatCommands } from "../commandChat.js";
 import type { SlackContextBinding } from "./slackContextBinding.js";
 import type { VerifiedSlackContextCapability } from "../../tools/slackContext.js";
 import { mainWorkAudienceAllowed, type DirectAudience } from "../../tools/mainWork.js";
@@ -118,6 +120,7 @@ export interface RunDeps
     Pick<AuthorizeDeps, "fetchPrHead">,
     Pick<ProvisionDeps, "skills" | "runBearers" | "dataDir" | "githubCredentials" | "githubBindings"> {
   config: ConfigStore;
+  commands?: ChatCommands;
   /**
    * The harness's process-wide pieces (docs/reference/specs/harness.md): the
    * object runs are driven by and what it needs from the process. Absent (a
@@ -578,18 +581,29 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         system,
         tools: filterUnavailableTools(
           mergeTools(
-            toolsForRun(
-              agent.toolset,
-              verifiedWorkAudience,
-              verifiedDirectAudience &&
-                canOfferMainStart(
-                  agent.name,
-                  channelVisibility,
-                  msg,
-                  chatActorOf(deps.config, msg),
-                  deps.mainTaskStart !== undefined && ctx.privateWorkVerifierAvailable === true,
-                ),
-            ).filter((tool) => ctx.slackContext !== undefined || tool.name !== "slack_context"),
+            [
+              ...toolsForRun(
+                agent.toolset,
+                verifiedWorkAudience,
+                verifiedDirectAudience &&
+                  canOfferMainStart(
+                    agent.name,
+                    channelVisibility,
+                    msg,
+                    chatActorOf(deps.config, msg),
+                    deps.mainTaskStart !== undefined && ctx.privateWorkVerifierAvailable === true,
+                  ),
+              ),
+              ...(verifiedDirectAudience &&
+              mainWorkAudienceAllowed({
+                agentName: agent.name,
+                actor: chatActorOf(deps.config, msg),
+                message: msg,
+                channelVisibility,
+              })
+                ? conversationCommandTools(deps.commands)
+                : []),
+            ].filter((tool) => ctx.slackContext !== undefined || tool.name !== "slack_context"),
             mcpForRun?.tools,
           ),
           mainWorker ? [] : ["work_progress"],

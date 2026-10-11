@@ -625,7 +625,7 @@ export class CommandRegistry<D> {
     try {
       const held = await commandConfirmationGate(cmd, input, parsed, caller, () => this.confirmationClass(caller));
       if (held) return done(held, "confirmation");
-      commandExecutionStarted();
+      await commandExecutionStarted();
       const value = await cmd.handler({
         args: parsed.args as ArgValues<readonly ArgDef[]>,
         options: parsed.options,

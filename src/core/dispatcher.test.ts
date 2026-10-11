@@ -1,3 +1,4 @@
+import { startRequestRoot } from "./requestTrace.js";
 import { preapprovedCaller } from "./testing/callers.js";
 import { runShipBranch } from "./dispatch/ship.js";
 import { TerminalCommitmentUnknownError, terminalCommitmentUnknown } from "./runLedger/writeThrough.js";
@@ -62,7 +63,7 @@ import { privateWorkerIO } from "../channels/privateWorker.js";
 import { InMemoryPrivateWorkerLog } from "./privateWorkerLog.js";
 import { activeRunCount, dispatch, dispatchClick, type CoreDeps, type DispatchOutcome } from "./dispatcher.js";
 import { CONFIRMATION_TTL_MS, MINUTE_MS, QUESTION_TTL_MS } from "./budgets.js";
-import type { AuditEntry } from "./commandRegistry.js";
+import { CommandRegistry, bindCommands, type AuditEntry } from "./commandRegistry.js";
 import { InMemoryConfirmationStore, STORE_UNREACHABLE_LINE } from "./confirmations.js";
 import { OFFER_EXPIRED_LINE, QUESTION_EXPIRED_LINE } from "./dispatch/confirm.js";
 import { setShutdownNotice } from "./dispatch/run.js";
@@ -601,6 +602,371 @@ describe("dispatch", () => {
     );
     return out;
   };
+
+  const commandProvider = (input: Record<string, unknown>, command = "config.clear") => {
+    const { sourceMessage, ...parameters } = input;
+    let turn = 0;
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(request): Promise<CompletionResult> {
+        requests.push(request);
+        return turn++ === 0
+          ? {
+              content: [
+                { type: "tool_use", id: "command", name: "command_run", input: { command, parameters, sourceMessage } },
+              ],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "I checked the command result." }], stopReason: "end_turn" };
+      },
+    };
+    return { provider, requests };
+  };
+
+  it("keeps settings unchanged when requester access changes during command admission", async () => {
+    let direct = true;
+    const { provider } = commandProvider({ sourceMessage: "reset my config" }, "backend.clear");
+    const deps = makeDeps(mainDmYaml, provider);
+    await deps.config.setUserOverride("slack:UADMIN", { effort: "high" });
+    const registry = new CommandRegistry<Record<string, never>>({
+      audit: () => {},
+      logError: () => {},
+      confirmationClass: async () => {
+        direct = false;
+        return "destructive" as const;
+      },
+    });
+    registry.register({
+      id: "backend.clear",
+      action: "config:write",
+      effect: "write",
+      describe: "Reset personal settings",
+      handler: async () => {
+        await deps.config.clearUserOverride("slack:UADMIN");
+        return "Settings reset.";
+      },
+    });
+    deps.commands = bindCommands(registry, {});
+    const { io } = mainDmIO();
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => direct);
+    await dispatch(deps, { ...mainDm("reset my config"), messageId: "1" }, io);
+    expect(deps.config.scopes("slack:DALICE", "slack:UADMIN").user).toEqual({ effort: "high" });
+  });
+
+  it("keeps the main run trace and channel ownership after an inline command", async () => {
+    const { provider } = commandProvider({ sourceMessage: "read command status" }, "friction.peek");
+    const deps = makeDeps(mainDmYaml, provider);
+    deps.runRegistry = new RunRegistry();
+    const registry = new CommandRegistry<Record<string, never>>({ audit: () => {} });
+    registry.register({
+      id: "friction.peek",
+      action: "config:read",
+      effect: "read",
+      describe: "Read command status",
+      handler: async () => "Command status read.",
+    });
+    deps.commands = bindCommands(registry, {});
+    const { io } = mainDmIO();
+    const started = vi.fn();
+    io.runStarted = started;
+    const replyOwners: Array<string | undefined> = [];
+    deps.sinks = [
+      {
+        onEnd: (span, root) => {
+          if (span.name === "post.reply") replyOwners.push(root?.runId);
+        },
+      },
+    ];
+    const trace = startRequestRoot(deps, { channel: "slack", receivedAt: 0 });
+    await dispatch(deps, { ...mainDm("read command status"), messageId: "1" }, io, { trace });
+    const mainId = started.mock.calls[0][0].id;
+    expect(trace.runId).toBe(mainId);
+    expect(replyOwners).toEqual([mainId]);
+    expect(io.runStarted).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers a channel reset and executes it only after its requester confirms", async () => {
+    const { provider } = commandProvider({ scope: "channel", sourceMessage: "reset this channel" });
+    const deps = makeDeps(mainDmYaml, provider);
+    const store = new InMemoryConfirmationStore();
+    deps.confirmations = store;
+    await deps.config.setChannelOverride("slack:DALICE", { effort: "high" });
+    const { io } = mainDmIO();
+    const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+    io.offer = async (offer) => void offers.push(offer);
+    await dispatch(deps, { ...mainDm("reset this channel"), messageId: "1" }, io);
+    expect(deps.config.scopes("slack:DALICE", "slack:UADMIN").channel).toEqual({
+      agent: "orchestrator",
+      effort: "high",
+    });
+    expect(offers.map(({ line }) => line)).toEqual(["config clear channel"]);
+    const stranger = await dispatchClick(deps, {
+      kind: "confirm",
+      io,
+      id: offers[0].id,
+      actor: { kind: "user", id: "slack:UOTHER", grants: NO_GRANTS },
+    });
+    expect(stranger.refusal).toBe("confirmation_foreign");
+    await dispatchClick(deps, {
+      kind: "confirm",
+      io,
+      id: offers[0].id,
+      actor: { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS },
+    });
+    expect(deps.config.scopes("slack:DALICE", "slack:UADMIN").channel).toEqual({ agent: "orchestrator" });
+  });
+
+  it("keeps channel settings when the conversation requester lacks config write access", async () => {
+    const { provider } = commandProvider({ scope: "channel", sourceMessage: "reset this channel" });
+    const deps = makeDeps(mainDmYaml.replace("actions: all", "actions: [config:read]"), provider);
+    const store = new InMemoryConfirmationStore();
+    deps.confirmations = store;
+    await deps.config.setChannelOverride("slack:DALICE", { effort: "high" });
+    const { io, replies } = mainDmIO();
+    const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+    io.offer = async (offer) => void offers.push(offer);
+    await dispatch(deps, { ...mainDm("reset this channel"), messageId: "1" }, io);
+    expect(offers.map(({ line }) => line)).toEqual(["config clear channel"]);
+    await dispatchClick(deps, {
+      kind: "confirm",
+      io,
+      id: offers[0].id,
+      actor: { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS },
+    });
+    expect(deps.config.scopes("slack:DALICE", "slack:UADMIN").channel).toEqual({
+      agent: "orchestrator",
+      effort: "high",
+    });
+    expect(replies.join("\n")).toContain("restricted");
+  });
+
+  it("delivers command data to the requester without putting it in the model's reusable log", async () => {
+    const body = "protected command source body";
+    const { provider, requests } = commandProvider({ sourceMessage: "show the backend result" }, "backend.peek");
+    const deps = makeDeps(mainDmYaml, provider);
+    const registry = new CommandRegistry<Record<string, never>>({ audit: () => {} });
+    registry.register({
+      id: "backend.peek",
+      action: "config:read",
+      effect: "read",
+      describe: "Read the backend result",
+      handler: async () => body,
+    });
+    deps.commands = bindCommands(registry, {});
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, { ...mainDm("show the backend result"), messageId: "1" }, io);
+    expect(replies).toContain(body);
+    expect(JSON.stringify(requests[1].messages)).not.toContain(body);
+    expect(JSON.stringify(requests[1].messages)).toContain("resultDelivered");
+  });
+
+  it("answers the main conversation while a submitted command is still settling", async () => {
+    let finish!: (value: { ok: boolean; text: string }) => void;
+    const settled = new Promise<{ ok: boolean; text: string }>((resolve) => {
+      finish = resolve;
+    });
+    const { provider, requests } = commandProvider({ sourceMessage: "start the query" }, "backend.wait");
+    const deps = makeDeps(mainDmYaml, provider);
+    const registry = new CommandRegistry<Record<string, never>>({ audit: () => {} });
+    registry.register({
+      id: "backend.wait",
+      action: "config:read",
+      effect: "read",
+      describe: "Start a deferred query",
+      handler: async () => "Query queued.",
+      settle: async () => settled,
+    });
+    deps.commands = bindCommands(registry, {});
+    const { io, replies } = mainDmIO();
+    const run = dispatch(deps, { ...mainDm("start the query"), messageId: "1" }, io);
+    try {
+      await expect.poll(() => replies.includes("I checked the command result.")).toBe(true);
+      expect(replies).toContain("Query queued.");
+      expect(replies).not.toContain("Query finished.");
+      expect(JSON.stringify(requests[1].messages)).toContain("submitted");
+    } finally {
+      finish({ ok: true, text: "Query finished." });
+      await run;
+    }
+    await expect.poll(() => replies.includes("Query finished.")).toBe(true);
+  });
+
+  it("delivers an admitted command completion after a newer requester follow-up", async () => {
+    let finish!: (value: { ok: boolean; text: string }) => void;
+    const settled = new Promise<{ ok: boolean; text: string }>((resolve) => {
+      finish = resolve;
+    });
+    let acknowledge!: () => void;
+    const acknowledgement = new Promise<void>((resolve) => {
+      acknowledge = resolve;
+    });
+    let continueFirst!: () => void;
+    const firstAnswer = new Promise<void>((resolve) => {
+      continueFirst = resolve;
+    });
+    let delivered!: () => void;
+    const delivery = new Promise<void>((resolve) => {
+      delivered = resolve;
+    });
+    let continueLast!: () => void;
+    const lastAnswer = new Promise<void>((resolve) => {
+      continueLast = resolve;
+    });
+    let turn = 0;
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(request): Promise<CompletionResult> {
+        requests.push(request);
+        if (turn++ === 0)
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "query",
+                name: "command_run",
+                input: {
+                  command: "backend.wait",
+                  parameters: {},
+                  sourceMessage: "start the query",
+                },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        if (turn === 2) {
+          acknowledge();
+          await firstAnswer;
+        } else if (turn === 3)
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: "followup",
+                name: "command_run",
+                input: {
+                  command: "backend.peek",
+                  parameters: {},
+                  sourceMessage: "also explain my settings",
+                },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        else {
+          delivered();
+          await lastAnswer;
+        }
+        return { content: [{ type: "text", text: "The conversation continues." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(mainDmYaml, provider);
+    deps.admission = new ThreadAdmission();
+    const registry = new CommandRegistry<Record<string, never>>({ audit: () => {} });
+    registry.register({
+      id: "backend.wait",
+      action: "config:read",
+      effect: "read",
+      describe: "Start a deferred query",
+      handler: async () => "Query queued.",
+      settle: async () => settled,
+    });
+    registry.register({
+      id: "backend.peek",
+      action: "config:read",
+      effect: "read",
+      describe: "Read current settings",
+      handler: async () => "Follow-up read.",
+    });
+    deps.commands = bindCommands(registry, {});
+    const { io, replies } = mainDmIO();
+    const run = dispatch(deps, { ...mainDm("start the query"), messageId: "1" }, io);
+    try {
+      await acknowledgement;
+      await dispatch(deps, { ...mainDm("also explain my settings"), messageId: "2", threadReply: true }, mainDmIO().io);
+      await expect.poll(() => deps.admission!.get("slack:DALICE:1.0")?.inbox.size).toBe(0);
+      continueFirst();
+      await delivery;
+      expect(JSON.stringify(requests[3].messages)).toContain("also explain my settings");
+      expect(replies, JSON.stringify(requests[3].messages)).toContain("Follow-up read.");
+      finish({ ok: true, text: "Query finished." });
+      await expect.poll(() => replies.includes("Query finished.")).toBe(true);
+    } finally {
+      continueFirst();
+      continueLast();
+      finish({ ok: true, text: "Query finished." });
+      await run;
+    }
+  });
+
+  it("refuses a conversation command copied from an earlier requester turn", async () => {
+    const { provider } = commandProvider({ scope: "me", sourceMessage: "reset my config" });
+    const deps = makeDeps(
+      mainDmYaml.replace("agent: orchestrator }", "agent: orchestrator, boundary: { confirm: destructive } }"),
+      provider,
+    );
+    await deps.config.setUserOverride("slack:UADMIN", { effort: "high" });
+    const { io } = mainDmIO([{ role: "user", text: "reset my config" }]);
+    await dispatch(deps, { ...mainDm("explain my settings instead"), messageId: "2" }, io);
+    expect(deps.config.scopes("slack:DALICE", "slack:UADMIN").user).toEqual({ effort: "high" });
+  });
+
+  it("cancels a conversation command offer when its private audience changes", async () => {
+    const { provider } = commandProvider({ scope: "channel", sourceMessage: "reset this channel" });
+    const deps = makeDeps(mainDmYaml, provider);
+    const store = new InMemoryConfirmationStore();
+    deps.confirmations = store;
+    await deps.config.setChannelOverride("slack:DALICE", { effort: "high" });
+    const { io } = mainDmIO();
+    let direct = true;
+    io.verifyDirectAudience = booleanAudienceVerifier(async () => direct);
+    io.offer = async () => {
+      direct = false;
+    };
+    await dispatch(deps, { ...mainDm("reset this channel"), messageId: "1" }, io);
+    expect(store.rows.size).toBe(0);
+    expect(deps.config.scopes("slack:DALICE", "slack:UADMIN").channel).toEqual({
+      agent: "orchestrator",
+      effort: "high",
+    });
+  });
+
+  it.each(["on", "off", "shadow"])(
+    "resets personal settings through a main conversation command tool with legacy routing %s",
+    async (mode) => {
+      let turn = 0;
+      const provider: Provider = {
+        name: "fake",
+        async complete(): Promise<CompletionResult> {
+          return turn++ === 0
+            ? {
+                content: [
+                  {
+                    type: "tool_use",
+                    id: "reset",
+                    name: "command_run",
+                    input: { command: "config.clear", parameters: { scope: "me" }, sourceMessage: "reset my config" },
+                  },
+                ],
+                stopReason: "tool_use",
+              }
+            : { content: [{ type: "text", text: "Your personal settings are reset." }], stopReason: "end_turn" };
+        },
+      };
+      const deps = makeDeps(
+        mainDmYaml
+          .replace("operator: on", `operator: ${mode}`)
+          .replace("agent: orchestrator }", "agent: orchestrator, boundary: { confirm: destructive } }"),
+        provider,
+      );
+      await deps.config.setUserOverride("slack:UADMIN", { effort: "high" });
+      const { io, replies } = mainDmIO();
+      await dispatch(deps, { ...mainDm("reset my config"), messageId: "1" }, io);
+      expect(deps.config.scopes("slack:DALICE", "slack:UADMIN").user).toEqual({});
+      expect(replies).toContain("Your personal settings are reset.");
+    },
+  );
 
   it("routes plain Slack DM conversation to the configured main agent while operator routing is on", async () => {
     const provider = capturingProvider("The answer is 17.");

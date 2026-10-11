@@ -22,6 +22,8 @@ export interface CommandConfirmationContext {
   io: Pick<ChannelIO, "offer">;
   store?: ConfirmationStore;
   beforePublish?: () => Promise<void>;
+  /** A model action must still match its latest requester turn at handler admission. */
+  beforeExecute?: () => Promise<void>;
   onExecute?: () => void;
   contextDependencies?: ContextDependencies;
 }
@@ -60,8 +62,10 @@ export function commandExecutionCaller(caller: Caller): Caller {
   };
 }
 
-export function commandExecutionStarted(): void {
-  invocation.getStore()?.onExecute?.();
+export async function commandExecutionStarted(): Promise<void> {
+  const context = invocation.getStore();
+  await (context?.beforeExecute ?? context?.beforePublish)?.();
+  context?.onExecute?.();
 }
 
 export function commandConfirmationMessage(): IncomingMessage | undefined {
@@ -148,7 +152,7 @@ export async function commandConfirmationGate(
     message: "This action requires verified human approval. This connection cannot show an approval; nothing ran.",
   } as const;
   if (!context?.io.offer || !context.store) return unavailable;
-  await context.beforePublish?.();
+  await (context.beforeExecute ?? context.beforePublish)?.();
   const originRepo = (await caller.origin?.repo?.()) ?? null;
   const rawArgs = [...(raw.args ?? [])];
   while (rawArgs.length && rawArgs.at(-1) === undefined) rawArgs.pop();
@@ -193,8 +197,9 @@ export async function commandConfirmationGate(
   };
   let displayed: void | string;
   try {
-    await context.beforePublish?.();
+    await (context.beforeExecute ?? context.beforePublish)?.();
     displayed = await context.io.offer(shown);
+    await (context.beforeExecute ?? context.beforePublish)?.();
   } catch (error) {
     await context.store
       .cancel(mint.shown.id, [context.message.userId], context.message.approvalConnection?.id)
