@@ -391,6 +391,90 @@ describe("staging workflow isolation", () => {
     }
   });
 
+  it.each([
+    { event: "pull_request_target", inputs: {}, expected: "openai/gpt-6.1-sol" },
+    { event: "workflow_dispatch", inputs: { model: "" }, expected: "openai/gpt-6.1-sol" },
+    {
+      event: "workflow_dispatch",
+      inputs: { model: "anthropic/claude-sonnet-4-5" },
+      expected: "anthropic/claude-sonnet-4-5",
+    },
+  ])(
+    "uses the same staging acceptance model for check and execution on $event with $inputs",
+    ({ inputs, expected }) => {
+      const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
+      // This workflow's model expressions use input/env properties and ||, whose
+      // string/empty semantics are the same in the Actions expression language.
+      const evaluate = (value: string, env: Record<string, string>) =>
+        Function("inputs", "env", `return (${value.slice(3, -2)});`)(inputs, env) ?? "";
+      const env = Object.fromEntries(
+        Object.entries(workflow.env ?? {}).map(([key, value]) => [key, evaluate(value as string, {})]),
+      );
+      const steps = workflow.jobs.deploy.steps.filter(
+        (step: { env?: { SMOKE_MODEL?: string } }) => step.env?.SMOKE_MODEL,
+      );
+      expect(steps.map((step: { name: string }) => step.name)).toEqual([
+        "validate acceptance configuration before upload",
+        "run live Review acceptance on the deployed stack",
+      ]);
+      const directory = mkdtempSync(join(tmpdir(), "staging-model-workflow-"));
+      try {
+        const bin = join(directory, "bin");
+        mkdirSync(bin);
+        const receipt = join(directory, "calls.jsonl");
+        writeFileSync(
+          join(bin, "npm"),
+          `#!${process.execPath}\nrequire("node:fs").appendFileSync(process.env.MODEL_TEST_RECEIPT, JSON.stringify(process.argv.slice(2))+"\\n");\n`,
+          { mode: 0o700 },
+        );
+        writeFileSync(join(bin, "jq"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+        for (const step of steps) {
+          const result = spawnSync("bash", ["-e", "-c", step.run], {
+            encoding: "utf8",
+            env: {
+              PATH: `${bin}:${process.env.PATH}`,
+              RUNNER_TEMP: directory,
+              MODEL_TEST_RECEIPT: receipt,
+              GITHUB_OUTPUT: join(directory, "output"),
+              SMOKE_MODEL: evaluate(step.env.SMOKE_MODEL, env),
+            },
+          });
+          expect(result.status, result.stderr).toBe(0);
+        }
+        const calls = readFileSync(receipt, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as string[]);
+        const smoke = calls.filter((args) => args.includes("smoke:ingress"));
+        expect(smoke).toEqual([
+          [
+            "run",
+            "--silent",
+            "smoke:ingress",
+            "--",
+            join(directory, "staging-fleet.json"),
+            join(directory, "staging-setup.json"),
+            "--check",
+            "--model",
+            expected,
+          ],
+          [
+            "run",
+            "--silent",
+            "smoke:ingress",
+            "--",
+            join(directory, "staging-fleet.json"),
+            join(directory, "staging-e2e.json"),
+            "--model",
+            expected,
+          ],
+        ]);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("uses separate deployment credentials without inheriting production secrets", () => {
     const text = readFileSync(".github/workflows/deploy-staging.yml", "utf8");
     const workflow = parse(text);
