@@ -27,7 +27,7 @@ import type { Clock } from "../trace/types.js";
 import type { IncomingMessage } from "../types.js";
 import { closeResumedRow, type ResumeContext } from "./admission.js";
 import type { RunHistoryWriter } from "../runHistoryWriter.js";
-import type { RunRecord } from "../runRecord.js";
+import type { RunRecord, RunSession } from "../runRecord.js";
 import type { GateCard, GateContext } from "./authorize.js";
 import { RefusalError, refusalOf, type RefusalCode } from "../refusal.js";
 import type { PersonFollowUp } from "./settle.js";
@@ -155,6 +155,8 @@ export function lostWorkspaceNote(why: string, restarts: boolean): string {
  * transcript, in user words.
  */
 export interface CarriedRunIdentity {
+  /** Original claimed log; request-only recovery cannot infer it from the thread. */
+  session?: RunSession;
   /** Original admitted profile carried by the owner during same-run recovery. */
   profile?: RunProfile;
   /** Raw retained evidence must reach the next admission, including malformed bytes. */
@@ -220,7 +222,10 @@ export function carriedRunIdentity(
   registry: Pick<RunRegistry, "snapshotById" | "getById">,
   runId: string,
   note: string,
-  evidence: Pick<CarriedRunIdentity, "branchIdentityBaseline" | "pushedBranch" | "identityUncertain" | "repoCtx"> = {},
+  evidence: Pick<
+    CarriedRunIdentity,
+    "branchIdentityBaseline" | "pushedBranch" | "identityUncertain" | "repoCtx" | "session"
+  > = {},
 ): CarriedRunIdentity | undefined {
   const snap = registry.snapshotById(runId);
   const summary = registry.getById(runId);

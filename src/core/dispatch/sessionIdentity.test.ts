@@ -50,6 +50,16 @@ describe("run session identity comes from the admitted unit", () => {
     expect(runSessionIdentity(threadKey, "coding", original).key).toBe("plan-p-0:U11:coding:@context-v1");
     expect(coordinatorFields(original)).toMatchObject({ coordinatorAttempt: 0 });
   });
+  it("preserves the recorded isolated review log on restart", () => {
+    expect(
+      runSessionIdentity(threadKey, "review", coordinator, {
+        key: `${threadKey}:review:@context-v1:run:original`,
+        seedFrom: 0,
+        request: 0,
+        range: { from: 0 },
+      }),
+    ).toEqual({ key: `${threadKey}:review:@context-v1:run:original` });
+  });
   it("persists the typed unit association independently of the idempotency string", () => {
     expect(coordinatorFields(coordinator)).toMatchObject({ coordinatorUnit: "U11" });
     expect(

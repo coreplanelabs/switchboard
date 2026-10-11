@@ -23544,13 +23544,14 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
       agent?: string;
       tail?: ChatMessage[];
       sources?: SessionSources;
+      sessionKey?: string;
     } = {},
   ) {
     const channelId = options.channelId ?? "slack:CX";
     const userId = options.userId ?? "slack:UADMIN";
     const threadKey = options.threadKey ?? THREAD;
     const agent = options.agent ?? "coding";
-    const key = `${threadKey}:${agent}:@context-v1`;
+    const key = options.sessionKey ?? `${threadKey}:${agent}:@context-v1`;
     const sessionTail = options.tail ?? tail;
     const registry = new RunRegistry({ genId: () => "run-next", genToken: () => "tok" });
     const store = new InMemoryRunStore();
@@ -23646,6 +23647,189 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     vi.mocked(runPiHarnessOpen).mockClear();
     vi.mocked(makeExecutor).mockClear();
   });
+
+  it("starts a fresh review without importing an earlier run's execution receipts or notes", async () => {
+    const oldKey = `${THREAD}:review:@context-v1`;
+    const oldReceipt = {
+      runId: "run-prev",
+      callId: "old-read",
+      resultHash: "a".repeat(64),
+      admissionHash: "b".repeat(64),
+    };
+    const sources: SessionSources = {
+      ...testSessionSources(followUp, []),
+      context: {
+        version: 2,
+        status: "known",
+        revision: 0,
+        origins: [],
+        slack: [],
+        mcp: [],
+        executionGithub: [oldReceipt],
+      },
+    };
+    const t = await threadWithSession(REMOTE_YAML_FIXTURE + "harness:\n  review: pi\n", {
+      agent: "review",
+      sources,
+      tail: [user("old review"), assistant("old answer")],
+    });
+    const { io, replies } = fakeIO();
+    let system = "";
+    let notesResult: unknown;
+    let recalled: unknown;
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async (_deps, run) => {
+        system = run.system;
+        notesResult = await run.tools
+          .find((tool) => tool.name === "notes")!
+          .run({ text: "fresh-owned-note" }, run.toolContext);
+        recalled = await run.tools.find((tool) => tool.name === "recall")!.run({ turn: 0 }, run.toolContext);
+        return piAnswered("Fresh review completed.");
+      },
+      async () => dispatch(t.deps, { ...followUp, text: "agent:review review again", threadReply: true }, io),
+    );
+    await t.writer.settled();
+    const saved = t.ledger.finished.get("run-next")!;
+    expect({
+      status: saved.status,
+      failure: saved.events.filter((event) => event.type === "run_note" && event.kind === "run_failed"),
+    }).toEqual({ status: "completed", failure: [] });
+    expect({
+      key: saved.session?.key,
+      seedFrom: saved.session?.seedFrom,
+      receipts: saved.contextDependencies?.executionGithub ?? [],
+    }).toEqual({ key: `${oldKey}:run:run-next`, seedFrom: 0, receipts: [] });
+    expect(replies.at(-1)).toContain("Fresh review completed.");
+    expect(notesResult).toContain("notes saved (16 bytes)");
+    expect(recalled).toContain("review again");
+    expect((await t.ledger.readNotepad(saved.session!.key))?.text).toBe("fresh-owned-note");
+    expect(system).not.toContain("decided: keep the helper");
+    expect((await t.ledger.readSessionTail(oldKey, 100_000)).sources?.context?.executionGithub).toEqual([oldReceipt]);
+    expect((await t.ledger.readNotepad(oldKey))?.text).toBe("decided: keep the helper; head green at abc123");
+  });
+
+  it("continues a verified session after an earlier review moved to a fresh log", async () => {
+    const key = `${THREAD}:review:@context-v1:run:run-prev`;
+    const t = await threadWithSession(REMOTE_YAML_FIXTURE + "harness:\n  review: pi\n", {
+      agent: "review",
+      sessionKey: key,
+      tail: [user("previous safe request"), assistant("previous safe answer")],
+      sources: {
+        ...testSessionSources(followUp, []),
+        context: { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] },
+      },
+    });
+    const previous = (await t.store.get("run-prev"))!;
+    for (let i = 0; i < 9; i++)
+      await t.store.put({
+        ...previous,
+        id: `later-general-${i}`,
+        agent: "general",
+        session: undefined,
+        pr: undefined,
+        startedAt: NOW - 5_000 + i,
+        finishedAt: NOW - 4_000 + i,
+      });
+    const { io, replies } = fakeIO();
+    let seeded: ChatMessage[] = [];
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async (_deps, run) => {
+        seeded = run.messages;
+        return piAnswered("Verified follow-up completed.");
+      },
+      async () => dispatch(t.deps, { ...followUp, text: "agent:review follow up", threadReply: true }, io),
+    );
+    await t.writer.settled();
+    expect(t.ledger.finished.get("run-next")?.session).toMatchObject({ key, seedFrom: 0 });
+    expect(seeded).toEqual([user("previous safe request"), assistant("previous safe answer"), user("follow up")]);
+    expect(replies.at(-1)).toContain("Verified follow-up completed.");
+  });
+
+  it.each(["carried", "replacement"] as const)(
+    "keeps the isolated session on a request-only restart (%s)",
+    async (mode) => {
+      const key = `${THREAD}:review:@context-v1:run:run-prev`;
+      const t = await threadWithSession(REMOTE_YAML_FIXTURE + "harness:\n  review: pi\n", {
+        agent: "review",
+        sessionKey: key,
+        tail: [user("original request"), assistant("prior step")],
+        sources: {
+          ...testSessionSources(followUp, []),
+          context: { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] },
+        },
+      });
+      const previous = (await t.store.get("run-prev"))!;
+      await t.store.put({ ...previous, restarting: true });
+      const { io, replies } = fakeIO();
+      vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fakeExecutor() });
+      await vi.mocked(runPiHarnessOpen).withImplementation(
+        async () => piAnswered("Recovered original review."),
+        async () => {
+          await dispatch(t.deps, { ...followUp, text: "agent:review original request", threadReply: true }, io, {
+            restartOf: "run-prev",
+            ...(mode === "carried"
+              ? {
+                  restartCarried: {
+                    events: [],
+                    token: "original-token",
+                    startedAt: previous.startedAt,
+                    note: "container replaced",
+                    session: previous.session,
+                  },
+                }
+              : {}),
+          });
+        },
+      );
+      await t.writer.settled();
+      expect(t.ledger.finished.get(mode === "carried" ? "run-prev" : "run-next")?.session).toMatchObject({ key });
+      expect(replies.at(-1)).toContain("Recovered original review.");
+    },
+  );
+
+  it.each(["missing", "foreign", "malformed"] as const)(
+    "holds a request-only recovery when the original session cannot be proved (%s)",
+    async (mode) => {
+      const t = await threadWithSession(REMOTE_YAML_FIXTURE + "harness:\n  review: pi\n", {
+        agent: "review",
+        sources: {
+          ...testSessionSources(followUp, []),
+          context: {
+            version: 2,
+            status: "known",
+            revision: 0,
+            origins: [],
+            slack: [],
+            mcp: [],
+            executionGithub: [
+              { runId: "earlier-review", callId: "read", resultHash: "a".repeat(64), admissionHash: "b".repeat(64) },
+            ],
+          },
+        },
+      });
+      const previous = (await t.store.get("run-prev"))!;
+      const invalid: RunRecord = {
+        ...previous,
+        restarting: true,
+        ...(mode === "foreign"
+          ? { userId: "slack:UOTHER" }
+          : mode === "malformed"
+            ? { session: { key: "../other" } as unknown as NonNullable<RunRecord["session"]> }
+            : { session: undefined }),
+      };
+      const get = t.store.get.bind(t.store);
+      vi.spyOn(t.store, "get").mockImplementation(async (id) => (id === "run-prev" ? invalid : get(id)));
+      const { io, replies } = fakeIO();
+      await dispatch(t.deps, { ...followUp, text: "agent:review original request" }, io, { restartOf: "run-prev" });
+      expect(replies.join(" ")).toContain("couldn't verify the original conversation");
+      expect(t.provider.requests).toEqual([]);
+      expect((await t.ledger.readSessionTail(`${THREAD}:review:@context-v1`, 100_000)).transcript.messages).toEqual(
+        tail,
+      );
+    },
+  );
 
   it("checkpoints a typed general issue request even though the operator is bypassed", async () => {
     const t = await threadWithSession(PI_YAML, { agent: "general" });
