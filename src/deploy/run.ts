@@ -7,7 +7,12 @@ import {
 } from "../configConsumer.js";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { createPagingObserver, type PagingObserver } from "./pagingDiagnostic.js";
+import {
+  createPagingObserver,
+  nativeReadEvidence,
+  type NativeReadEvidence,
+  type PagingObserver,
+} from "./pagingDiagnostic.js";
 import { spawn, execFileSync } from "node:child_process";
 import { MINUTE_MS } from "../core/budgets.js";
 import {
@@ -1281,37 +1286,72 @@ function readProducerLog(file: string | undefined): string | undefined {
   }
 }
 
-/** One read-only wrangler command in a Worker's dir, its `--json` payload parsed;
- *  `CLOUDFLARE_ACCOUNT_ID` stripped like every other wrangler call here. */
+/** One read-only Wrangler command; retain closed failure facts without changing its result. */
 async function wranglerJson(
   dir: string,
   args: string[],
   config?: string,
   signal?: AbortSignal,
   producerLog?: string,
-): Promise<Read<unknown> & { commandExit?: number; interrupted?: true }> {
-  const r = await run("npx", ["wrangler", ...args, ...(config ? ["--config", config] : [])], {
-    cwd: workerDir(dir),
-    unset: UNSET_ENV,
-    ...(producerLog ? { set: { WRANGLER_LOG_PATH: producerLog, WRANGLER_LOG_SANITIZE: "true" } } : {}),
-    signal,
-    ...(signal ? { ownedReadGroup: true as const } : {}),
-  });
-  if (r.cancelled || r.cleanup === "unconfirmed")
-    return {
-      error: "readiness command interrupted; readiness and native outcome unverified",
+): Promise<Read<unknown> & { commandExit?: number; interrupted?: true; diagnostic: NativeReadEvidence }> {
+  let directory: string | undefined;
+  let log = producerLog;
+  if (!log) {
+    try {
+      directory = mkdtempSync(join(tmpdir(), "read-producer-"));
+      log = join(directory, "producer.log");
+    } catch {
+      /* Diagnostics cannot change the read. */
+    }
+  }
+  try {
+    const r = await run("npx", ["wrangler", ...args, ...(config ? ["--config", config] : [])], {
+      cwd: workerDir(dir),
+      unset: UNSET_ENV,
+      ...(log ? { set: { WRANGLER_LOG_PATH: log, WRANGLER_LOG_SANITIZE: "true" } } : {}),
+      signal,
+      ...(signal ? { ownedReadGroup: true as const } : {}),
+    });
+    const parsed = parseWranglerJson(r.output);
+    const interrupted = r.cancelled || r.cleanup === "unconfirmed";
+    const diagnostic = nativeReadEvidence({
+      args,
       commandExit: r.code,
-      interrupted: true,
-    };
-  if (r.code !== 0)
-    return {
-      error: `wrangler ${args.join(" ")} failed: ${lastErrorLines(r.output) || `exit ${r.code}, no output`}`,
-      commandExit: r.code,
-    };
-  const parsed = parseWranglerJson(r.output);
-  return parsed === undefined
-    ? { error: `wrangler ${args.join(" ")}: no JSON in the output`, commandExit: r.code }
-    : { value: parsed, commandExit: r.code };
+      output: r.output,
+      producerLog: readProducerLog(log),
+      reason: interrupted
+        ? "interrupted"
+        : r.code !== 0
+          ? "command-error"
+          : parsed === undefined
+            ? "invalid-json"
+            : "unknown",
+    });
+    if (interrupted)
+      return {
+        error: "readiness command interrupted; readiness and native outcome unverified",
+        commandExit: r.code,
+        interrupted: true,
+        diagnostic,
+      };
+    if (r.code !== 0)
+      return {
+        error: `wrangler ${args.join(" ")} failed: ${lastErrorLines(r.output) || `exit ${r.code}, no output`}`,
+        commandExit: r.code,
+        diagnostic,
+      };
+    return parsed === undefined
+      ? { error: `wrangler ${args.join(" ")}: no JSON in the output`, commandExit: r.code, diagnostic }
+      : { value: parsed, commandExit: r.code, diagnostic };
+  } finally {
+    if (directory) {
+      try {
+        rmSync(directory, { recursive: true, force: true });
+      } catch {
+        /* Own diagnostic files only. */
+      }
+    }
+  }
 }
 
 /** The application id behind a Containers application name — stable, so a
@@ -1322,8 +1362,12 @@ async function resolveContainerAppId(
   containerApp: string,
   config?: string,
   signal?: AbortSignal,
-): Promise<Read<string>> {
-  if (signal?.aborted) return { error: "readiness read interrupted" };
+): Promise<Read<string> & { diagnostic?: NativeReadEvidence }> {
+  if (signal?.aborted)
+    return {
+      error: "readiness read interrupted",
+      diagnostic: nativeReadEvidence({ args: ["containers", "list"], reason: "interrupted" }),
+    };
   const cacheKey = `${workerDir(dir)}:${config ?? ""}:${containerApp}`;
   const known = containerAppIds.get(cacheKey);
   if (known) return { value: known };
@@ -1333,6 +1377,10 @@ async function resolveContainerAppId(
   if (!id)
     return {
       error: `container application ${containerApp} not in \`wrangler containers list\` (wrong account, or renamed class?)`,
+      diagnostic: {
+        ...listing.diagnostic,
+        reason: Array.isArray(listing.value) ? "application-not-found" : "application-list-shape",
+      },
     };
   containerAppIds.set(cacheKey, id);
   return { value: id };
@@ -1359,7 +1407,10 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
     if ("error" in info) return info;
     const state = parseAppState(info.value);
     return state === null
-      ? { error: `wrangler containers info ${id.value}: no numeric version in the output` }
+      ? {
+          error: `wrangler containers info ${id.value}: no numeric version in the output`,
+          diagnostic: { ...info.diagnostic, reason: "application-shape" },
+        }
       : { value: state };
   },
   readInstances: async (dir, containerApp, config, signal, observePaging) => {
@@ -1388,7 +1439,7 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
     };
     const fail = (reason: "repeated-cursor" | "malformed-page" | "command-error" | "interrupted", error: string) => {
       emit({ phase: "failure", app: id.value, pageIndex, requestedCursor, cumulativeCount: rows.length, reason });
-      return { error };
+      return { error, diagnostic: nativeReadEvidence({ args: ["containers", "instances", id.value], reason }) };
     };
     do {
       if (signal?.aborted) return fail("interrupted", "instance inventory interrupted; completeness unverified");
@@ -1450,16 +1501,26 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
         producerLog,
       });
       if ("error" in page)
-        return fail(
-          page.interrupted ? "interrupted" : "command-error",
-          pageToken ? page.error.replaceAll(pageToken, "<cursor>") : page.error,
-        );
-      if (!parsed) return fail("malformed-page", `wrangler containers instances ${id.value}: unexpected JSON shape`);
+        return {
+          ...fail(
+            page.interrupted ? "interrupted" : "command-error",
+            pageToken ? page.error.replaceAll(pageToken, "<cursor>") : page.error,
+          ),
+          diagnostic: page.diagnostic,
+        };
+      if (!parsed)
+        return {
+          ...fail("malformed-page", `wrangler containers instances ${id.value}: unexpected JSON shape`),
+          diagnostic: { ...page.diagnostic, reason: "malformed-page" },
+        };
       if (signal?.aborted) return fail("interrupted", "instance inventory interrupted; completeness unverified");
       rows.push(...parsed.rows);
       pageToken = parsed.nextPageToken;
       if (pageToken && seen.has(pageToken))
-        return fail("repeated-cursor", "instance inventory repeated a page token; completeness unverified");
+        return {
+          ...fail("repeated-cursor", "instance inventory repeated a page token; completeness unverified"),
+          diagnostic: { ...page.diagnostic, reason: "repeated-cursor" },
+        };
       if (pageToken) seen.add(pageToken);
     } while (pageToken);
     return { value: rows };

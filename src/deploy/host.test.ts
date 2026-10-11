@@ -327,8 +327,31 @@ console.log(JSON.stringify(cursor!==null&&process.env.FIXTURE_MODE==='unpaginate
             ],
           });
         else if (mode === "malformed" || mode === "unpaginated")
-          expect(result).toEqual({ error: "wrangler containers instances owned-fixture-app: unexpected JSON shape" });
-        else expect(result).toEqual({ error: "instance inventory repeated a page token; completeness unverified" });
+          expect(result).toEqual({
+            error: "wrangler containers instances owned-fixture-app: unexpected JSON shape",
+            diagnostic: {
+              stage: "instances",
+              reason: "malformed-page",
+              commandExit: 0,
+              httpStatus: null,
+              errorClass: "unknown",
+              responseFormat: "unknown",
+              providerCodes: [],
+            },
+          });
+        else
+          expect(result).toEqual({
+            error: "instance inventory repeated a page token; completeness unverified",
+            diagnostic: {
+              stage: "instances",
+              reason: "repeated-cursor",
+              commandExit: 0,
+              httpStatus: null,
+              errorClass: "unknown",
+              responseFormat: "unknown",
+              providerCodes: [],
+            },
+          });
         const argv = readFileSync(calls, "utf8")
           .trim()
           .split("\n")
@@ -376,6 +399,15 @@ else console.log(JSON.stringify({instances:[{id:'private-instance',name:'private
       const reader = defaultSandboxGateDeps.readInstances as unknown as (...args: unknown[]) => Promise<unknown>;
       expect(await reader("deploy/cloudflare-sandbox", app, undefined, new AbortController().signal, observe)).toEqual({
         error: "instance inventory repeated a page token; completeness unverified",
+        diagnostic: {
+          stage: "instances",
+          reason: "repeated-cursor",
+          commandExit: 0,
+          httpStatus: null,
+          errorClass: "unknown",
+          responseFormat: "unknown",
+          providerCodes: [],
+        },
       });
       expect(events).toEqual(["before", "after", "before", "after", "failure"]);
     } finally {
@@ -462,6 +494,15 @@ console.log(JSON.stringify({instances:[],result_info:{next_page_token:'private-c
           ),
         ).toEqual({
           error: "instance inventory repeated a page token; completeness unverified",
+          diagnostic: {
+            stage: "instances",
+            reason: "repeated-cursor",
+            commandExit: 0,
+            httpStatus: null,
+            errorClass: "unknown",
+            responseFormat: "unknown",
+            providerCodes: [],
+          },
         });
         expect(logs).toEqual(mode === "owned" ? ["owned debug bytes", "owned debug bytes"] : [undefined, undefined]);
         expect(readFileSync(foreign, "utf8")).toBe("foreign debug bytes");
@@ -511,6 +552,15 @@ else {const marker=process.env.FIXTURE_STARTED;fs.writeFileSync(marker+'.ready',
         ),
       ).toEqual({
         error: "readiness command interrupted; readiness and native outcome unverified",
+        diagnostic: {
+          stage: "instances",
+          reason: "interrupted",
+          commandExit: 130,
+          httpStatus: null,
+          errorClass: "unknown",
+          responseFormat: "unknown",
+          providerCodes: [],
+        },
       });
       expect(readFileSync(started, "utf8")).toBe("ready");
       expect(reasons).toEqual(["interrupted"]);
