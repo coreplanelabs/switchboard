@@ -6,6 +6,9 @@ import { AGENTS } from "../../agents/registry.js";
 import { ConfigStore } from "../../config.js";
 import type { ChatMessage } from "../chatMessage.js";
 import { parentContextOf } from "./handoff.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
+import { turnRows } from "../runLedger/transcript.js";
+import { sessionCapabilityFor } from "../../tools/session.js";
 import { RunRegistry } from "../runRegistry.js";
 import type { RunsService } from "../runsService.js";
 import type { ChannelIO, IncomingMessage, OpenedThread } from "../types.js";
@@ -142,6 +145,100 @@ const parent = (io: ChannelIO, over: Partial<SpawnParent> = {}): SpawnParent => 
 });
 
 describe("spawnChild — the one path a child run is born through", () => {
+  it.each(["research", "ship"])(
+    "dispatches %s with a focused durable brief and retains original evidence",
+    async (preset) => {
+      const ledger = new InMemoryRunLedger();
+      const session = { key: "slack:CX:1.0:@thread", seedFrom: 0, request: 0, range: { from: 0, to: 3 } };
+      const evidence: ChatMessage[] = [
+        { role: "user", content: [{ type: "text", text: "Inspect the selected work without broadening its scope." }] },
+        { role: "assistant", content: [{ type: "tool_use", id: "read", name: "read", input: {} }] },
+        {
+          role: "user",
+          content: [{ type: "tool_result", toolUseId: "read", content: "exact original failure output" }],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Correction: staging only." },
+            { type: "document", name: "scope.pdf", mediaType: "application/pdf", data: "cGRm" },
+          ],
+        },
+      ];
+      for (let i = 0; i < evidence.length; i++) {
+        const { rows } = turnRows(i, evidence[i], {}, i === 0 || i === 3 ? PARENT_MSG.userId : undefined);
+        await ledger.appendSession(session.key, `row-${i}`, rows);
+      }
+      await ledger.claimSession(session.key, "run-p", "g");
+      await ledger.writeNotepad(
+        session.key,
+        "g",
+        "Original failure output is at turn 2; retain the scope correction.",
+        "run-p",
+      );
+      const capability = sessionCapabilityFor(
+        { runId: "run-p", session },
+        {
+          readSession: ledger.readSession.bind(ledger),
+          readSessionTail: ledger.readSessionTail.bind(ledger),
+          searchSession: ledger.searchSession.bind(ledger),
+          readNotepad: ledger.readNotepad.bind(ledger),
+          writeNotepad: (key, text, owner) => ledger.writeNotepad(key, "g", text, owner),
+        },
+      )!;
+      const ch = channel();
+      const { dispatch, calls } = fakeDispatch(registers("run-child"));
+      const prompt = preset === "ship" ? "https://github.com/acme/api/pull/7" : "Inspect the scoped failure.";
+      const selection =
+        preset === "ship"
+          ? { prBatch: { kind: "ship" as const, targets: [{ repo: "acme/api", number: 7, url: prompt }] } }
+          : {};
+      const outcome = await spawnChild(
+        deps(dispatch),
+        parent(ch.io, {
+          ...selection,
+          context: () =>
+            capability.captureHandoff!({
+              runId: "run-p",
+              requester: PARENT_MSG.userId,
+              channelId: PARENT_MSG.channelId,
+              threadKey: PARENT_MSG.threadKey,
+            }),
+        }),
+        { preset, prompt, repo: "acme/api" },
+      );
+      expect(outcome.kind).toBe("spawned");
+      const context = calls[0].opts!.parentContext!;
+      expect(context.messages.slice(1)).toEqual([
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Frozen parent working notes (source evidence):\nOriginal failure output is at turn 2; retain the scope correction.",
+            },
+          ],
+        },
+        { role: "user", content: [{ type: "text", text: "Inspect the selected work without broadening its scope." }] },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Correction: staging only." },
+            { type: "document", name: "scope.pdf", mediaType: "application/pdf", data: "cGRm" },
+          ],
+        },
+      ]);
+      expect(context.actors).toEqual([undefined, undefined, "slack:UALICE", "slack:UALICE"]);
+      expect(context.handoff?.brief?.request).toBe(0);
+      expect((await ledger.readSession(context.handoff!.session.key, 2, 2)).messages).toEqual([
+        {
+          role: "user",
+          content: [{ type: "tool_result", toolUseId: "read", content: "exact original failure output" }],
+        },
+      ]);
+    },
+  );
+
   it("a typed flattened Ship batch starts only selected exact PRs across repositories", async () => {
     const text = "ship these: • https://github.com/acme/api/pull/7 • https://github.com/acme/web/pull/9";
     const ch = channel();

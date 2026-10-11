@@ -234,7 +234,7 @@ providers:
 defaults:
   agent: general
   verbosity: quiet
-  models: { general: anthropic/general-model, coding: anthropic/coding-model, review: anthropic/review-model }
+  models: { general: anthropic/general-model, coding: anthropic/coding-model, review: anthropic/review-model, research: anthropic/general-model }
 grants:
   "slack:${REQUESTER}": { actions: all, channels: all, repos: all }
   "slack:UMALLORY": { actions: all, channels: all, repos: all }
@@ -483,11 +483,17 @@ workspaceDir: ${join(world.dir, "workspaces")}
       runHistoryWriter: deps.runHistoryWriter,
       channelVisibilityOf: async () => "dm",
       clock: Date.now,
-      // The external worker is scripted; the production coordinator chooses
-      // its message, contract and IO from the unit admitted by work_start.
+      // Research uses the real dispatcher; coding stays the external worker boundary.
+      // Both receive the production coordinator’s original request, contract and private IO.
       dispatch: (message, io, options) => {
         const work = (async () => {
           workerCalls.push({ message, options: structuredClone(options), hasOpenThread: io.openThread !== undefined });
+          if (options?.coordinator?.idempotencyKey?.endsWith("/research")) {
+            const outcome = await dispatch(deps, message, io, options);
+            await deps.runHistoryWriter.settled();
+            for (const record of ledger.finished.values()) await runStore.put(record);
+            return outcome;
+          }
           const owner = await instances.get(instanceId);
           if (!owner || !options?.coordinator) throw new Error("The admitted worker owner is missing");
           const runId = `worker-${instanceId}`;
@@ -509,6 +515,7 @@ workspaceDir: ${join(world.dir, "workspaces")}
               parentInstanceId: instanceId,
               coordinatorUnit: unit,
               coordinatorAttempt: owner.attempt ?? 0,
+              ...(options.coordinator.researchRunId ? { researchRunId: options.coordinator.researchRunId } : {}),
               idempotencyKey: options.coordinator.idempotencyKey,
             },
             system: "",
@@ -557,18 +564,31 @@ workspaceDir: ${join(world.dir, "workspaces")}
     const instance = await instances.get(instanceId);
     const row = (await instances.listUnits(instanceId)).find((candidate) => candidate.unit === unit);
     if (!instance || !row) throw new Error("The admitted worker is missing");
+    const research = await step("spawn", {
+      parentInstanceId: instanceId,
+      step: `${unit}/0/research`,
+      effectId: `${unit}/0/research`,
+      effectOrdinal: (row.currentEffect?.ordinal ?? 0) + 1,
+      executionWorkflowId: instance.id,
+      preset: "research",
+      brief: { kind: "research", unit },
+    });
+    await Promise.all(pending);
+    if (research?.status !== 200) return { started, research, spawned: research };
+    const researchRunId = (research.body as { runId: string }).runId;
+    const researched = (await instances.listUnits(instanceId)).find((candidate) => candidate.unit === unit)!;
     const spawned = await step("spawn", {
       parentInstanceId: instanceId,
       step: `${unit}/0/coding`,
       effectId: `${unit}/0/coding`,
-      effectOrdinal: (row.currentEffect?.ordinal ?? 0) + 1,
+      effectOrdinal: (researched.currentEffect?.ordinal ?? 0) + 1,
       executionWorkflowId: row.recovery?.workflowId ?? instance.id,
       ...(row.recovery ? { recoveryActionId: row.recovery.actionId } : {}),
       preset: "coding",
-      brief: { kind: "contract", unit, rebase: { branch: row.branch, onto: instance.base } },
+      brief: { kind: "contract", unit, researchRunId, rebase: { branch: row.branch, onto: instance.base } },
     });
     await Promise.all(pending);
-    return { started, spawned };
+    return { started, research, spawned };
   }
   return {
     deliver,

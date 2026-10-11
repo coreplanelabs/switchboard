@@ -8464,6 +8464,8 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       "github_issue_update",
       "github_issue_comment",
       "github_issue_delete",
+      "recall",
+      "notes",
     ]);
     for (const own of ["read", "bash", "edit", "write", "grep", "find", "ls"]) expect(tools).not.toContain(own);
     const models = JSON.parse(container.files.get("/var/tmp/switchboard-pi-run-l/agent/models.json")!);
@@ -8637,7 +8639,15 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
     expect(start.env.SWITCHBOARD_HARNESS_URL).toBe("http://127.0.0.1:8080");
     expect(start.env.SWITCHBOARD_RUN_BEARER).toBe("sbr_run-l.s3cret");
     const tools = start.args[start.args.indexOf("--tools") + 1].split(",");
-    expect(tools).toEqual(["web_fetch", "web_search", "update_status", ...GITHUB_READS]);
+    expect(tools).toEqual([
+      "submit_research",
+      "web_fetch",
+      "web_search",
+      "update_status",
+      ...GITHUB_READS,
+      "recall",
+      "notes",
+    ]);
     for (const own of ["read", "bash", "edit", "write", "grep", "find", "ls"]) expect(tools).not.toContain(own);
     expect(refusals).toEqual([
       {
@@ -8779,6 +8789,8 @@ describe("the pi harness — a preset without a workspace, as a child of the bot
       "web_fetch",
       "update_status",
       ...GITHUB_READS,
+      "recall",
+      "notes",
     ]);
     for (const own of ["read", "bash", "edit", "write", "grep", "find", "ls"]) expect(tools).not.toContain(own);
     expect(results[0]).toMatch(/^spawn refused \(spawn_identity\): `coding` runs as a `write` identity/);

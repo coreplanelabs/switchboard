@@ -254,6 +254,33 @@ describe("hasPilotWorkspaceBinding", () => {
 // so the plan's base survives a bot roll instead of living only in the
 // spawning process's dispatch options.
 describe("carriedCoordinatorTag: the tag a resumed run carries forward", () => {
+  it("retains the required original research source and refuses a missing or changed tag", () => {
+    const claim = row(
+      {},
+      {
+        parentInstanceId: "ship_research_fixture",
+        coordinatorUnit: "U12",
+        idempotencyKey: "ship_research_fixture:U12/0/coding",
+        researchRunId: "run-research",
+      },
+    );
+    const tag = {
+      type: "coordinator_tag" as const,
+      parentInstanceId: "ship_research_fixture",
+      unit: "U12",
+      researchRunId: "run-research",
+    };
+    expect(carriedCoordinatorTag(claim, [tag])).toMatchObject({
+      parentInstanceId: "ship_research_fixture",
+      unit: "U12",
+      researchRunId: "run-research",
+    });
+    expect(() => carriedCoordinatorTag(claim, [])).toThrow("The original research source could not be verified.");
+    expect(() => carriedCoordinatorTag(claim, [{ ...tag, researchRunId: "run-other" }])).toThrow(
+      "The original research source could not be verified.",
+    );
+  });
+
   it("recovers only the persisted typed unit association, never a parsed event label", () => {
     const legacy = {
       ...row(),

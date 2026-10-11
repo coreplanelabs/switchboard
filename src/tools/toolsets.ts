@@ -14,6 +14,7 @@
 // relayed.
 
 import { DEPOT_CI_TOOLS } from "./depotCi.js";
+import { submitResearchTool } from "./research.js";
 import { runCheckTool } from "./check.js";
 import { attachFileTool } from "./attach.js";
 import { planeShowTool } from "./plane.js";
@@ -51,9 +52,9 @@ import { webFetchTool, webSearchTool } from "./web.js";
 // posts into the conversation, so it never joins a read-only toolset.
 // The session tools (docs/reference/specs/session-log.md item 10) — `recall`
 // over the thread-and-agent log and `notes`, the session's notepad — join the
-// toolsets of the presets that have a workspace: `full`, `readonly` and
-// `explore`. The notepad is the session's own state, not a repository write,
-// so the read-only review agent keeps it too.
+// workspace toolsets and `web`, so a research child can read its frozen parent
+// evidence without a workspace. The notepad is the session's own state, not a
+// repository write, so read-only agents keep it too.
 export const TOOLSETS: Record<string, RunnableTool[]> = {
   full: [
     runCheckTool,
@@ -81,11 +82,11 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
     ...GITHUB_READ_TOOLS,
     ...SESSION_TOOLS,
   ],
-  web: [webFetchTool, webSearchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
+  web: [submitResearchTool, webFetchTool, webSearchTool, updateStatusTool, ...GITHUB_READ_TOOLS, ...SESSION_TOOLS],
   /** The general agent: no workspace, no shell — GitHub reads + issue writes
    *  and URL reading, so a plain mention can answer from the repos and act on
    *  issues without being re-sent to another agent. */
-  assistant: [webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS, ...GITHUB_ISSUE_WRITE_TOOLS],
+  assistant: [webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS, ...GITHUB_ISSUE_WRITE_TOOLS, ...SESSION_TOOLS],
   /** The explore agent (docs/reference/specs/agent-explore.md): the web with
    *  search, the skills, the GitHub reads and the status card — and nothing
    *  that writes: no `submit_*`, no issue writes. Its shell and file reads are
@@ -105,7 +106,7 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
    *  steer or await a run — beside the GitHub reads, URL reading and the status
    *  card. No shell, no files, no writes: a conductor coordinates and never
    *  does a child's job. */
-  conductor: [...RUN_TOOLS, webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS],
+  conductor: [...RUN_TOOLS, webFetchTool, updateStatusTool, ...GITHUB_READ_TOOLS, ...SESSION_TOOLS],
   /** The orchestrator (record 0070; docs/reference/specs/orchestration-plane.md
    *  item 12): plane, requester-scoped GitHub and session reads; bounded
    *  Slack context, linked-work controls, private progress and private work

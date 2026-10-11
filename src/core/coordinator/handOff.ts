@@ -348,6 +348,7 @@ async function plan(
     };
   const identity: Identity = {
     kind: "ship",
+    research: true,
     userId: msg.userId,
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
     ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),

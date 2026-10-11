@@ -78,6 +78,8 @@ import { AGENTS } from "../agents/registry.js";
 import { authorize } from "../core/authz/authorize.js";
 import { resolveActor, type GrantsLookup } from "../core/authz/actor.js";
 import type { ChannelVisibility } from "../core/authz/types.js";
+import { isMaintenanceActionId } from "../core/coordinator/maintenanceIdentity.js";
+import { researchFromRun } from "../core/research/source.js";
 import { composeChild, type BriefReaders } from "../core/coordinator/briefs.js";
 import {
   COORDINATOR_STEP_ACTION,
@@ -504,6 +506,7 @@ export interface SpawnStepRequest {
 
 const UNIT_ID = /^[A-Za-z0-9_-]{1,32}$/;
 const PRESETS_OF_KIND: Readonly<Record<Brief["kind"], string>> = {
+  research: "research",
   contract: "coding",
   review: "review",
   findings: "coding",
@@ -515,6 +518,18 @@ function parseBrief(v: unknown): Parsed<Brief> {
   if (typeof v !== "object" || v === null) return invalid("brief must be an object");
   const b = v as Record<string, unknown>;
   if (typeof b.unit !== "string" || !UNIT_ID.test(b.unit)) return invalid("brief.unit must be a unit id");
+  const research: { researchRunId?: string; researchProgressRunId?: string } = {};
+  for (const field of ["researchRunId", "researchProgressRunId"] as const) {
+    if (b[field] !== undefined) {
+      if (
+        !["contract", "findings", "rebase"].includes(String(b.kind)) ||
+        typeof b[field] !== "string" ||
+        !RUN_ID_PATTERN.test(b[field])
+      )
+        return invalid(`brief.${field} must name an original run`);
+      research[field] = b[field];
+    }
+  }
   const pr = (): Parsed<number> =>
     typeof b.pr === "number" && Number.isInteger(b.pr) && b.pr > 0
       ? { ok: true, value: b.pr }
@@ -556,10 +571,17 @@ function parseBrief(v: unknown): Parsed<Brief> {
     };
   };
   switch (b.kind) {
+    case "research":
+      return { ok: true, value: { kind: "research", unit: b.unit } };
     case "contract": {
       const r = b.rebase as Record<string, unknown> | undefined;
       if (typeof r !== "object" || r === null || typeof r.branch !== "string" || typeof r.onto !== "string")
         return invalid("brief.rebase must name the branch and what it is rebased onto");
+      if (
+        b.researchRunId !== undefined &&
+        (typeof b.researchRunId !== "string" || !RUN_ID_PATTERN.test(b.researchRunId))
+      )
+        return invalid("brief.researchRunId must name an original run");
       const c = b.continue as Record<string, unknown> | undefined;
       if (
         c !== undefined &&
@@ -579,6 +601,7 @@ function parseBrief(v: unknown): Parsed<Brief> {
         value: {
           kind: "contract",
           unit: b.unit,
+          ...research,
           rebase: { branch: r.branch, onto: r.onto },
           ...(c !== undefined
             ? {
@@ -646,6 +669,7 @@ function parseBrief(v: unknown): Parsed<Brief> {
         value: {
           kind: "findings",
           unit: b.unit,
+          ...research,
           pr: n.value,
           reviewRunId: review.value,
           ...(b.headSha !== undefined ? { headSha: b.headSha as string } : {}),
@@ -661,7 +685,7 @@ function parseBrief(v: unknown): Parsed<Brief> {
       if (typeof b.base !== "string" || b.base.length === 0) return invalid("brief.base must be a branch");
       return {
         ok: true,
-        value: { kind: "rebase", unit: b.unit, pr: n.value, headSha: b.headSha, base: b.base },
+        value: { kind: "rebase", unit: b.unit, ...research, pr: n.value, headSha: b.headSha, base: b.base },
       };
     }
     default:
@@ -1295,7 +1319,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   if (req.brief !== undefined) {
     if (row === undefined) return json(400, { ok: false, error: "a brief needs the unit it runs for" });
     try {
-      turn = await composeChild(req.brief, instance, row, briefReaders(deps, instance));
+      turn = await composeChild(req.brief, instance, row, briefReaders(deps, instance, row.branch));
     } catch (err) {
       // A brief the bot cannot compose — the plan missing at the base, a run
       // the history lacks — is a failed spawn: the machine ends the unit as an
@@ -1447,6 +1471,130 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   }
   // Hold the drain permit through durable admission and dispatch setup until registration or a closed dispatch outcome.
   const head = await deps.fetchBranchRef(instance.repo, row.branch).catch(() => ({ kind: "unverified" as const }));
+  const implementation = req.preset === "coding";
+  const suppliedResearch = req.brief && "researchRunId" in req.brief ? req.brief.researchRunId : undefined;
+  const researchRunId = implementation ? row.researchRunId : undefined;
+  const initialResearchRequired =
+    instance.research === true &&
+    (req.brief === undefined || req.brief.kind === "contract") &&
+    row.resume === undefined;
+  if (implementation && suppliedResearch !== undefined && suppliedResearch !== researchRunId)
+    return json(403, { ok: false, error: "research_source_changed", at });
+  if (
+    implementation &&
+    researchRunId === undefined &&
+    (initialResearchRequired || row.rounds.some((note) => note.agent === "research"))
+  )
+    return json(403, {
+      ok: false,
+      error: "research_source_missing",
+      message: "The original research source is required before implementation.",
+      at,
+    });
+  let researchContinuationHead = false;
+  if (researchRunId !== undefined && head.kind === "verified") {
+    const cell = row.currentEffect;
+    researchContinuationHead =
+      cell?.target.repo.toLowerCase() === instance.repo.toLowerCase() &&
+      cell.target.ref === row.branch &&
+      cell.calls.some(
+        (call) => call.operation === "rebase_push" && call.state === "accepted" && call.commitSha === head.sha,
+      ) === true;
+    const requested = req.brief && "researchProgressRunId" in req.brief ? req.brief.researchProgressRunId : undefined;
+    const continuation = req.brief?.kind === "contract" ? req.brief.continue?.previousRunId : undefined;
+    const candidates = [
+      ...new Set(
+        [
+          requested,
+          continuation,
+          row.researchProgressRunId,
+          ...(row.recovery?.accounting?.children
+            .filter((child) => /\/(coding|findings|rebase)(?:\/a[1-9][0-9]*)?$/.test(child.key))
+            .map((child) => child.runId) ?? []),
+        ].filter((id): id is string => id !== undefined),
+      ),
+    ];
+    for (const progressRunId of candidates) {
+      if (researchContinuationHead) break;
+      const previous = await deps.runs
+        .getRun(progressRunId, {
+          include: "messages",
+          requireFinalRecord: true,
+          privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+        })
+        .catch(() => undefined);
+      const run = previous?.ok ? previous.value : undefined;
+      const tags = run?.events?.filter((event) => event.type === "coordinator_tag") ?? [];
+      researchContinuationHead =
+        !!run &&
+        run.finished &&
+        run.persisted === true &&
+        !run.provisional &&
+        run.truncated === false &&
+        run.events?.length === run.storedEventCount &&
+        run.eventCount === run.storedEventCount &&
+        run.agent === "coding" &&
+        run.parentInstanceId === instance.id &&
+        run.coordinatorUnit === row.unit &&
+        run.userId === instance.userId &&
+        run.authenticatedAs === instance.authenticatedAs &&
+        run.postedBy === instance.postedBy &&
+        run.channelId === instance.channelId &&
+        run.threadKey === threadKey &&
+        run.repo?.toLowerCase() === instance.repo.toLowerCase() &&
+        run.idempotencyKey?.startsWith(`${instance.id}:${row.unit}/`) === true &&
+        (childPresetOfStep(run.idempotencyKey.slice(instance.id.length + 1)) === "coding" ||
+          (isMaintenanceActionId(tags[0]?.maintenanceActionId) &&
+            run.idempotencyKey === `${instance.id}:${row.unit}/maintenance/${tags[0].maintenanceActionId}` &&
+            row.rounds.some(
+              (round) =>
+                round.maintenance?.actionId === tags[0].maintenanceActionId && round.maintenance?.runId === run.id,
+            ))) &&
+        run.researchRunId === researchRunId &&
+        run.doorPublicationPending === undefined &&
+        branchPublicationOf(run.branchPublication)?.pending === undefined &&
+        tags.length === 1 &&
+        tags[0]?.researchRunId === researchRunId &&
+        tags[0].branch === row.branch &&
+        tags[0].unit === row.unit &&
+        tags[0].parentInstanceId === instance.id &&
+        (branchPushReceiptsOf(run.branchPushReceipts)?.some(
+          (push) => push.ref === row.branch && push.sha === head.sha,
+        ) === true ||
+          (row.researchProgressRunId === run.id &&
+            tags[0].researchTarget?.repo === instance.repo &&
+            tags[0].researchTarget.headSha === head.sha));
+    }
+  }
+  if (researchRunId !== undefined) {
+    const original = await deps.runs
+      .getRun(researchRunId, {
+        include: "messages",
+        requireFinalRecord: true,
+        privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+      })
+      .catch(() => undefined);
+    if (
+      head.kind !== "verified" ||
+      !original?.ok ||
+      !researchFromRun(original.value, {
+        instanceId: instance.id,
+        unit: row.unit,
+        requester: instance.userId,
+        channelId: instance.channelId,
+        threadKey,
+        repo: instance.repo,
+        branch: row.branch,
+        ...(researchContinuationHead ? {} : { headSha: head.sha }),
+      })
+    )
+      return json(403, {
+        ok: false,
+        error: "research_source_changed",
+        message: "The original research source or current target could not be verified; implementation did not start.",
+        at,
+      });
+  }
   if (head.kind !== "verified" || head.ref !== `refs/heads/${row.branch}` || !fullHead(head.sha)) return unavailable();
   const leaveAdmission = deps.childAdmission?.enter();
   if (deps.childAdmission !== undefined && leaveAdmission === undefined) return queued();
@@ -1550,6 +1698,10 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   const tag: CoordinatorTag = {
     parentInstanceId: instance.id,
     idempotencyKey: key,
+    ...(researchRunId !== undefined ? { researchRunId } : {}),
+    ...(req.preset === "research" || researchRunId !== undefined
+      ? { researchTarget: { repo: instance.repo, headSha: head.sha } }
+      : {}),
     ...(row ? { unit: row.unit, instanceAttempt: instance.attempt ?? 0 } : {}),
     ...(instance.grant?.costCapUsd !== undefined ? { costCapUsd: instance.grant.costCapUsd } : {}),
     ...((row?.branch ?? instance.branch) !== undefined ? { branch: row?.branch ?? instance.branch } : {}),
@@ -1578,7 +1730,9 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     dispatching = deps.dispatch(msg, child, {
       operationTarget: {
         repo: instance.repo,
-        ...(req.preset === "coding" ? { ref: turn.ref ?? row?.branch ?? instance.branch } : {}),
+        ...(req.preset === "coding" || req.preset === "research"
+          ? { ref: turn.ref ?? row?.branch ?? instance.branch }
+          : {}),
       },
       coordinator: tag,
       ...(row?.context
@@ -2162,6 +2316,7 @@ async function readRecord(body: Record<string, unknown>, deps: AdminCoordinatorD
       // — so a capped grant never renews on an understated total.
       costUsd: record.cost?.usd ?? null,
       ...(record.handoff !== undefined ? { handoffLists: record.handoff } : {}),
+      ...(record.researchBrief !== undefined ? { researchBrief: record.researchBrief } : {}),
       // The failure by name (run-history item 57): a retryable model-call
       // failure lets the machine re-run a round-0 child that pushed nothing.
       ...(record.failure !== undefined ? { failure: record.failure } : {}),
@@ -3561,10 +3716,10 @@ async function historicalRecoverySpend(
     segment: number;
     round: number;
     order: number;
-    action: "coding" | "review" | "findings" | "rebase";
+    action: "research" | "coding" | "review" | "findings" | "rebase";
   }[] = [];
-  const stageOrder = (agent: "coding" | "review", index: number): number =>
-    agent === "review" ? index * 2 - 1 : index * 2;
+  const stageOrder = (agent: "research" | "coding" | "review", index: number): number =>
+    agent === "research" ? -1 : agent === "review" ? index * 2 - 1 : index * 2;
   const segmentAt = (at: number): number => row.segments?.filter((segment) => segment.at <= at).at(-1)?.index ?? 1;
   const approvalGateMatches = (note: CoordinatorUnit["rounds"][number], run: RunView): boolean => {
     if (run.verdict?.verdict !== "approve") return false;
@@ -3581,6 +3736,7 @@ async function historicalRecoverySpend(
     );
   };
   const permitsNextStage = (note: CoordinatorUnit["rounds"][number], action: string): boolean => {
+    if (note.agent === "research") return note.outcome === "completed";
     if (note.agent === "coding") return note.outcome === "pr_opened";
     if (action === "rebase") return note.outcome === "approve" && note.gate === undefined;
     if (action === "findings")
@@ -3597,22 +3753,26 @@ async function historicalRecoverySpend(
       note.outcome === "dequeued"
     );
   };
-  for (const run of children) {
+  for (let run of children) {
     if (!run.finished) return { reason: "child_active" };
     const suffix = run.idempotencyKey!.slice(unitPrefix.length);
     // Resumed /rN histories cannot prove their lease start in this schema.
     const match =
-      /^(?:s([2-9]|[1-9][0-9]+)\/)?(0|[1-9][0-9]*)\/(coding|review|findings|rebase)(?:\/a[1-9][0-9]*)?$/.exec(suffix);
+      /^(?:s([2-9]|[1-9][0-9]+)\/)?(0|[1-9][0-9]*)\/(research|coding|review|findings|rebase)(?:\/a[1-9][0-9]*)?$/.exec(
+        suffix,
+      );
     const roundIndex = Number(match?.[2]);
-    const action = match?.[3] as "coding" | "review" | "findings" | "rebase" | undefined;
+    const action = match?.[3] as "research" | "coding" | "review" | "findings" | "rebase" | undefined;
     if (
       match === null ||
       !Number.isSafeInteger(roundIndex) ||
-      (roundIndex === 0 ? action !== "coding" : action === "coding") ||
+      (roundIndex === 0
+        ? action !== "coding" && action !== "research"
+        : action === "coding" || action === "research") ||
       run.parentInstanceId !== instance.id ||
       run.userId !== instance.userId ||
-      run.repo?.toLowerCase() !== instance.repo.toLowerCase() ||
-      run.agent !== (action === "review" ? "review" : "coding") ||
+      (action !== "research" && run.repo?.toLowerCase() !== instance.repo.toLowerCase()) ||
+      run.agent !== (action === "research" ? "research" : action === "review" ? "review" : "coding") ||
       run.threadKey !==
         (run.agent === "review"
           ? (row.reviewThread?.threadKey ?? row.threadKey ?? instance.threadKey)
@@ -3634,6 +3794,31 @@ async function historicalRecoverySpend(
       run.eventCount !== run.storedEventCount
     )
       return { reason: "child_history_incomplete" };
+    if (action === "research") {
+      const source = await service
+        .getRun(run.id, {
+          include: "messages",
+          requireFinalRecord: true,
+          privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+        })
+        .catch(() => undefined);
+      if (
+        !source?.ok ||
+        source.value.startedAt !== run.startedAt ||
+        source.value.finishedAt !== run.finishedAt ||
+        !researchFromRun(source.value, {
+          instanceId: instance.id,
+          unit: row.unit,
+          requester: instance.userId,
+          channelId: instance.channelId,
+          threadKey: row.threadKey ?? instance.threadKey,
+          repo: instance.repo,
+          branch: row.branch,
+        })
+      )
+        return { reason: "child_identity_mismatch" };
+      run = source.value;
+    }
     if (
       !Number.isFinite(run.startedAt) ||
       run.startedAt < row.startedAt! ||
@@ -3688,7 +3873,10 @@ async function historicalRecoverySpend(
       run,
       segment: segmentIndex,
       round: roundIndex,
-      order: stageOrder(run.agent === "review" ? "review" : "coding", roundIndex),
+      order: stageOrder(
+        run.agent === "research" ? "research" : run.agent === "review" ? "review" : "coding",
+        roundIndex,
+      ),
       action: action!,
     });
   }
@@ -3715,7 +3903,10 @@ async function historicalRecoverySpend(
         (note) =>
           note.outcome !== "started" &&
           (row.segments?.filter((segment) => segment.at <= note.at).at(-1)?.index ?? 1) === child.segment &&
-          stageOrder(note.agent === "review" ? "review" : "coding", note.index) < child.order &&
+          stageOrder(
+            note.agent === "research" ? "research" : note.agent === "review" ? "review" : "coding",
+            note.index,
+          ) < child.order &&
           child.run.startedAt < note.at,
       )
     )
@@ -3778,7 +3969,10 @@ async function historicalRecoverySpend(
     .map((note) => ({
       note,
       segment: segmentAt(note.at),
-      order: stageOrder(note.agent === "review" ? "review" : "coding", note.index),
+      order: stageOrder(
+        note.agent === "research" ? "research" : note.agent === "review" ? "review" : "coding",
+        note.index,
+      ),
     }));
   const groupKeys = new Set([
     ...stagedChildren.map((child) => `${child.segment}:${child.order}`),
@@ -4150,7 +4344,10 @@ export async function adoptOriginalPublishedHead(
     row.ending === undefined ||
     row.idle !== undefined ||
     row.startedAt === undefined ||
-    row.rounds.some((note) => note.agent !== "coding" || note.index !== 0)
+    row.rounds.some(
+      (note) =>
+        (note.agent !== "coding" && !(instance.research === true && note.agent === "research")) || note.index !== 0,
+    )
   )
     return json(409, { ok: false, error: "adoption_identity_or_stage_mismatch", at });
   const branch = parsePlanBranch(row.branch);
@@ -4983,7 +5180,9 @@ export async function recoverOriginalUnit(
     const reviewCounts = new Map<number, number>();
     for (const entry of row.rounds) {
       if (
-        (entry.agent !== "review" && entry.agent !== "coding") ||
+        (entry.agent !== "review" &&
+          entry.agent !== "coding" &&
+          !(instance.research === true && entry.agent === "research" && entry.index === 0)) ||
         !Number.isSafeInteger(entry.index) ||
         entry.index < (entry.agent === "review" ? 1 : 0) ||
         !Number.isFinite(entry.at) ||
@@ -6712,6 +6911,7 @@ async function plan(body: Record<string, unknown>, deps: AdminCoordinatorDeps): 
     idleDays: instance.idleDays ?? IDLE_DAYS_DEFAULT,
     // The mark (item 16): the machine's report keys its re-issue line on it.
     generated: isGenerated(instance),
+    ...(instance.research === true ? { research: true } : {}),
     // The hard stop's mark (record 0060; issue 1924): the walk reads it before
     // every unit start and ends the remaining units stopped on it.
     ...(instance.stop !== undefined ? { stopped: true } : {}),
@@ -7107,8 +7307,8 @@ async function round(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     return json(400, { ok: false, error: "unit must be a unit id" });
   if (typeof body.index !== "number" || !Number.isInteger(body.index) || body.index < 0)
     return json(400, { ok: false, error: "index must be a whole number" });
-  if (body.agent !== "coding" && body.agent !== "review")
-    return json(400, { ok: false, error: "agent must be coding or review" });
+  if (body.agent !== "coding" && body.agent !== "review" && body.agent !== "research")
+    return json(400, { ok: false, error: "agent must be coding, review or research" });
   if (!ROUND_OUTCOMES.includes(body.outcome as ShipRoundOutcome))
     return json(400, { ok: false, error: `outcome must be one of ${ROUND_OUTCOMES.join(", ")}` });
   // The gate note (agent-ship item 9): the machine's severity check caught an
@@ -9291,9 +9491,13 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
 
 /** What the brief composer reads through the bot: the target repository at the
  *  base ref, a child's record, and the ship request the run's record carried. */
-function briefReaders(deps: AdminCoordinatorDeps, instance: CoordinatorInstance): BriefReaders {
+function briefReaders(deps: AdminCoordinatorDeps, instance: CoordinatorInstance, branch?: string): BriefReaders {
   const ref = instance.base ?? "main";
   return {
+    readTargetHead: async () => {
+      const head = await deps.fetchBranchRef(instance.repo, branch ?? instance.branch).catch(() => undefined);
+      return head?.kind === "verified" && head.ref === `refs/heads/${branch ?? instance.branch}` ? head.sha : undefined;
+    },
     readRepoFile: async (path, opts) => {
       try {
         const file = await deps.github.readFile(instance.repo, path, ref, opts);

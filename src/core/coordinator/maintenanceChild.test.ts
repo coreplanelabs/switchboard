@@ -129,6 +129,33 @@ describe("original maintenance child admission", () => {
     },
   );
 
+  it("retains original research and the exact native target for coding while delta review stays read-only", async () => {
+    const h = fixture();
+    h.owner.instance.research = true;
+    h.owner.unit.researchRunId = "original-research";
+    h.owner.unit.currentEffect!.id = `ONE/maintenance/${maintenanceId}`;
+    expect(await dispatchMaintenanceChild(h.owner, h.request, "coding", h.deps)).toEqual({
+      state: "accepted",
+      runId: "actual-native-run",
+    });
+    expect(h.dispatch.mock.calls[0]![2]).toMatchObject({
+      parentDeadlineAt: 900100,
+      parentRemainingMs: 840000,
+      coordinator: {
+        researchRunId: "original-research",
+        researchTarget: { repo: "acme/api", headSha: head },
+        maintenanceActionId: maintenanceId,
+        costCapUsd: 5,
+      },
+    });
+    const review = fixture("review");
+    review.owner.unit.researchRunId = "original-research";
+    expect(await dispatchMaintenanceChild(review.owner, review.request, "review", review.deps)).toEqual({
+      state: "accepted",
+      runId: "actual-native-run",
+    });
+    expect(review.dispatch.mock.calls[0]![2].coordinator?.researchRunId).toBeUndefined();
+  });
   it("a fractional lease bounds the actual dispatcher with exact remaining milliseconds and integer prose", async () => {
     const h = fixture();
     h.deps.now = () => now + 1_234;

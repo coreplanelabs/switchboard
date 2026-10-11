@@ -28,6 +28,7 @@ import type { Verbosity } from "./verbosity.js";
 import { isHeadMaterial, isSpanRecord } from "./runEvents.js";
 import { isRunUsage, type RunUsage } from "./runUsage.js";
 import type { RunLiveState } from "./runLiveState.js";
+import { isResearchBrief, type ResearchBrief } from "./research/brief.js";
 import { isHandoffShape, type Handoff } from "./ship/handoff.js";
 import { isChildHandoff, type ChildHandoff } from "./dispatch/handoff.js";
 import { contextReferencesOf, retainContextSources, type ContextReference } from "./runLedger/contextRetention.js";
@@ -266,6 +267,7 @@ export interface RunRecord {
    *  three empty lists, distinguishable from none); absent on every other run
    *  and on records written before it existed. */
   handoff?: Handoff;
+  researchBrief?: ResearchBrief;
   /** The verdict a review run submitted through `submit_verdict` (docs/reference/specs/agent-review.md),
    *  redacted like every stored string — what a coordinator's `read-record`
    *  answers for a review child. Present only on a run that submitted one. */
@@ -335,6 +337,8 @@ export interface RunRecord {
    *  carrying it, and `read-record` answers only for a matching instance.
    *  Absent on every run no coordinator spawned. */
   parentInstanceId?: string;
+  /** Required research source survives loss of the original tag event. */
+  researchRunId?: string;
   maintenanceActionId?: string;
   /** Canonical unit/attempt copied from admitted coordinator state. Zero names
    * the original instance; reissues carry their durable attempt number. */
@@ -1291,6 +1295,12 @@ export function isRunRecord(v: unknown): v is RunRecord {
   // The handoff is checked for shape, not bounds (docs/reference/specs/agent-ship.md
   // item 14): redaction may lengthen a stored string past the tool's limit.
   if (r.handoff !== undefined && !isHandoffShape(r.handoff)) return false;
+  if (r.researchBrief !== undefined && !isResearchBrief(r.researchBrief)) return false;
+  if (
+    r.researchRunId !== undefined &&
+    (r.parentInstanceId === undefined || typeof r.researchRunId !== "string" || !RUN_ID_PATTERN.test(r.researchRunId))
+  )
+    return false;
   if (r.childHandoff !== undefined && !isChildHandoff(r.childHandoff)) return false;
   if (
     !workEvidenceBelongsToRun(

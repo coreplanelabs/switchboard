@@ -7,7 +7,7 @@ import { renderContract } from "../ship/contract.js";
 import { privateWorkerThreadKey } from "../privateWorkerLog.js";
 import { acknowledgeUnitSeed, readUnitSeedProof, type UnitSeedProofDeps } from "./unitSeedProof.js";
 
-async function fixture() {
+async function fixture(role: "coding" | "research" = "coding") {
   const instance = {
     id: "plan_seed",
     kind: "ship",
@@ -19,6 +19,7 @@ async function fixture() {
     branch: "plan/seed/task",
     plan: { id: "seed" },
     createdAt: 1,
+    ...(role === "research" ? { research: true } : {}),
   } as CoordinatorInstance;
   const threadKey = privateWorkerThreadKey({ instanceId: instance.id, unit: "task" });
   const unit: CoordinatorUnit = {
@@ -58,7 +59,7 @@ async function fixture() {
     instanceId: instance.id,
     unit: unit.unit,
     instanceAttempt: 0,
-    idempotencyKey: `${instance.id}:task/0/coding`,
+    idempotencyKey: `${instance.id}:task/0/${role}`,
   };
   const contract = await contractFor(instance, unit, {
     readRepoFile: async () => undefined,
@@ -95,7 +96,7 @@ async function fixture() {
       userId: instance.userId,
       channelId: instance.channelId,
       threadKey,
-      agent: "coding",
+      agent: role,
       parentInstanceId: instance.id,
       coordinatorUnit: unit.unit,
       coordinatorAttempt: 0,
@@ -143,6 +144,32 @@ async function fixture() {
 }
 
 describe("canonical unit seed acknowledgment", () => {
+  it("acknowledges the admitted research seed with its original contract and role", async () => {
+    const f = await fixture("research");
+    expect(await acknowledgeUnitSeed(f.deps, f.input)).toMatchObject({
+      kind: "acknowledged",
+      receipt: { child: { runId: "child" }, binding: { idempotencyKey: "plan_seed:task/0/research" } },
+    });
+    expect(await readUnitSeedProof(f.deps, { instance: f.instance, unit: f.unit })).toMatchObject({
+      role: "research",
+      child: { runId: "child", requester: "slack:UA" },
+    });
+  });
+
+  it.each(["unadmitted", "wrong-step", "wrong-contract"])("refuses an invalid research seed (%s)", async (failure) => {
+    const f = await fixture("research");
+    if (failure === "unadmitted") delete f.instance.research;
+    if (failure === "wrong-step") {
+      f.row.meta.idempotencyKey =
+        f.input.binding.idempotencyKey =
+        f.input.handoff.consumer.attempt =
+          "plan_seed:task/0/coding";
+    }
+    if (failure === "wrong-contract") f.input.contract.unit.section = "Different goal";
+    expect(await acknowledgeUnitSeed(f.deps, f.input)).toEqual({ kind: "unavailable" });
+    expect(f.setStateAndFlush).not.toHaveBeenCalled();
+    expect(await readUnitSeedProof(f.deps, { instance: f.instance, unit: f.unit })).toBeUndefined();
+  });
   it.each([null, false, {}, "invalid"])(
     "refuses a present invalid work brief without treating it as absent (%s)",
     async (brief) => {

@@ -317,6 +317,8 @@ export function activityLine(e: RunEvent): string {
       return "unfinished patch saved privately";
     case "review_artifact": // published straight to the registry — never arrives here
       return e.artifact === "pr_description" ? "PR description ready" : "reading diff ready";
+    case "research_brief":
+      return e.confirmed === false ? "research brief pending" : "research brief recorded";
     case "pr_description":
       return "PR description recorded"; // published straight to the registry — never arrives here
     case "pr_opened":

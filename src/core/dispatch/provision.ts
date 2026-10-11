@@ -752,6 +752,8 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
         : {}),
       ...(coordinator.recovery !== undefined ? { recovery: coordinator.recovery } : {}),
       ...(coordinator.base !== undefined ? { base: coordinator.base } : {}),
+      ...(coordinator.researchRunId !== undefined ? { researchRunId: coordinator.researchRunId } : {}),
+      ...(coordinator.researchTarget !== undefined ? { researchTarget: coordinator.researchTarget } : {}),
       ...(coordinator.publication !== undefined ? { publication: coordinator.publication } : {}),
       ...(coordinator.issuedFindingIds !== undefined ? { issuedFindingIds: coordinator.issuedFindingIds } : {}),
       at: clock(),

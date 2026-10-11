@@ -32,7 +32,8 @@ export interface UnitSeedProof {
   brief: "stored" | "missing" | "invalid";
   context: "captured" | "missing";
   childSeed:
-    { state: "unproved" } | { state: "acknowledged"; role: "coding" | "review"; runId: string; acknowledgedAt: number };
+    | { state: "unproved" }
+    | { state: "acknowledged"; role: UnitSeedEvidence["role"]; runId: string; acknowledgedAt: number };
   providerExecution: "unknown";
 }
 
@@ -51,7 +52,12 @@ export async function unitSeedProofFor(
   if (!read || proof.brief !== "stored" || proof.context !== "captured") return proof;
   try {
     const evidence = await read({ instance: structuredClone(instance), unit: structuredClone(unit) });
-    if (!evidence || !isUnitSeedReceipt(evidence.receipt) || (evidence.role !== "coding" && evidence.role !== "review"))
+    if (!evidence || !isUnitSeedReceipt(evidence.receipt) || !["research", "coding", "review"].includes(evidence.role))
+      return proof;
+    if (
+      evidence.role === "research" &&
+      (instance.research !== true || evidence.binding.idempotencyKey !== `${instance.id}:${unit.unit}/0/research`)
+    )
       return proof;
     const { receipt, binding, child } = evidence;
     if (

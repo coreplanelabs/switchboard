@@ -93,6 +93,16 @@ export function carriedCoordinatorTag(row: LiveRunRow, events: readonly RunEvent
     throw new RefusalError(
       refusalOf("publication_ownership_unknown", "the saved work’s execution identity could not be verified"),
     );
+  const researchRunId = tag?.type === "coordinator_tag" ? tag.researchRunId : undefined;
+  if (
+    (researchRunId !== undefined || row.meta.researchRunId !== undefined) &&
+    (tags.length !== 1 ||
+      typeof researchRunId !== "string" ||
+      researchRunId !== row.meta.researchRunId ||
+      tag?.parentInstanceId !== parentInstanceId ||
+      tag.unit !== row.meta.coordinatorUnit)
+  )
+    throw new RefusalError(refusalOf("setup_failed", "The original research source could not be verified."));
   const base = tag?.type === "coordinator_tag" ? tag.base : undefined;
   const candidate = tag?.type === "coordinator_tag" ? tag.publication : undefined;
   const publication =
@@ -118,6 +128,10 @@ export function carriedCoordinatorTag(row: LiveRunRow, events: readonly RunEvent
   const branch = (tag?.type === "coordinator_tag" ? tag.branch : undefined) ?? row.meta.ref;
   return {
     parentInstanceId,
+    ...(researchRunId !== undefined ? { researchRunId } : {}),
+    ...(tag?.type === "coordinator_tag" && tag.researchTarget !== undefined
+      ? { researchTarget: tag.researchTarget }
+      : {}),
     ...(row.meta.coordinatorUnit !== undefined
       ? {
           unit: row.meta.coordinatorUnit,

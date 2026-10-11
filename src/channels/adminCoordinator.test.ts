@@ -10,6 +10,7 @@ import { buildReviewPostBody } from "../core/reviewVerdict.js";
 import { ALL_GRANTS } from "../core/authz/grants.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import { createMainTaskStarter } from "../core/coordinator/mainStart.js";
+import type { DispatchOptions } from "../core/dispatcher.js";
 import { generatedTaskOf } from "../core/coordinator/generatedTask.js";
 import { prepareHistoricalNativeAudit } from "../core/coordinator/historicalNativeAudit.js";
 import { coordinatorReconciliationEffect } from "../core/coordinator/workflowReconciliation.js";
@@ -383,7 +384,11 @@ function harness(
         ...dispatchIo,
         runStarted: ({ id }) => {
           registration = (async () => {
-            const agent = msg.text.startsWith("agent:review") ? "review" : "coding";
+            const agent = msg.text.startsWith("agent:research")
+              ? "research"
+              : msg.text.startsWith("agent:review")
+                ? "review"
+                : "coding";
             const claimed = await ledger.claim({
               runId: id,
               threadKey: msg.threadKey,
@@ -401,6 +406,7 @@ function harness(
                 ref: tag.branch,
                 parentInstanceId: tag.parentInstanceId,
                 coordinatorUnit: tag.unit,
+                researchRunId: tag.researchRunId,
                 coordinatorAttempt: tag.instanceAttempt,
                 idempotencyKey: tag.idempotencyKey,
                 ...(agent === "review" ? { pr: tag.publication?.pr, headSha: tag.publication?.expectedHeadSha } : {}),
@@ -426,6 +432,8 @@ function harness(
                   seq: 2,
                   parentInstanceId: tag.parentInstanceId,
                   unit: tag.unit,
+                  researchRunId: tag.researchRunId,
+                  researchTarget: tag.researchTarget,
                   branch: tag.branch,
                   base: tag.base,
                   publication: tag.publication,
@@ -828,6 +836,362 @@ async function seedSpawnUnit(h: ReturnType<typeof harness>, instance: Coordinato
   ).toEqual({ ok: true });
   h.deps.fetchBranchRef = async (_repo, ref) => ({ kind: "verified", ref: `refs/heads/${ref}`, sha: "a".repeat(40) });
 }
+
+describe("research source at implementation admission", () => {
+  const headSha = "a".repeat(40);
+  const researchBrief = {
+    version: 1 as const,
+    goal: "Restore the login session",
+    headSha,
+    complexity: "simple" as const,
+    decision: "ready" as const,
+    evidence: [{ source: "src/session.ts", ref: headSha, summary: "Session IDs are retained" }],
+    assumptions: [],
+    unknowns: [],
+    approach: ["Restore the stored session"],
+    verification: ["Restart and assert the original session ID"],
+  };
+
+  async function source(h: ReturnType<typeof harness>, over: Partial<RunRecord> = {}, retainResearch = true) {
+    await seedSpawnUnit(h, { ...INSTANCE, runId: "run-parent", research: true });
+    const unit = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    await h.instances.putUnits([
+      {
+        ...unit,
+        generatedTask: generatedTaskOf("Restore the login session", {
+          requesterId: INSTANCE.userId,
+          threadKey: INSTANCE.threadKey,
+          runId: "run-parent",
+          repo: INSTANCE.repo,
+          sourceUrl: INSTANCE.sourceUrl,
+        }),
+      },
+    ]);
+    if (!retainResearch) return;
+    seedCoordinatorUnit(h.instances, {
+      ...(await h.instances.listUnits(INSTANCE.id))[0]!,
+      researchRunId: "run-research",
+    });
+    await h.store.put(
+      record("run-research", {
+        agent: "research",
+        repo: undefined,
+        parentInstanceId: INSTANCE.id,
+        coordinatorUnit: "u12",
+        idempotencyKey: `${INSTANCE.id}:u12/0/research`,
+        researchBrief,
+        events: [
+          {
+            type: "coordinator_tag",
+            seq: 1,
+            parentInstanceId: INSTANCE.id,
+            unit: "u12",
+            branch: INSTANCE.branch,
+            researchTarget: { repo: INSTANCE.repo, headSha },
+          },
+          { type: "research_brief", brief: researchBrief, confirmed: true, seq: 2 },
+        ],
+        ...over,
+      }),
+    );
+  }
+  const request = {
+    ...spawnBody,
+    prompt: undefined,
+    brief: {
+      kind: "contract",
+      unit: "u12",
+      rebase: { branch: INSTANCE.branch, onto: "main" },
+      researchRunId: "run-research",
+    },
+  };
+
+  it("carries only the canonical original research run into implementation", async () => {
+    const h = harness();
+    await source(h);
+    const handle = h.registry.create(
+      "research",
+      {
+        agent: "research",
+        userId: INSTANCE.userId,
+        channelId: INSTANCE.channelId,
+        threadKey: INSTANCE.threadKey,
+        parentInstanceId: INSTANCE.id,
+        coordinatorUnit: "u12",
+        idempotencyKey: `${INSTANCE.id}:u12/0/research`,
+      },
+      { id: "run-research" },
+    );
+    h.registry.finish(handle.id, "completed");
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, request), h.deps)).toMatchObject({
+      status: 200,
+      body: { runId: "run-child" },
+    });
+    expect(h.dispatched[0]?.opts?.coordinator).toMatchObject({
+      parentInstanceId: INSTANCE.id,
+      unit: "u12",
+      researchRunId: "run-research",
+      researchTarget: { repo: INSTANCE.repo, headSha },
+      branch: INSTANCE.branch,
+    });
+    expect(h.dispatched[0]?.msg.text).toContain("Restore the login session");
+  });
+
+  it.each(["findings", "rebase"] as const)(
+    "retains the canonical original source in a later %s coding round",
+    async (kind) => {
+      const h = harness();
+      await source(h);
+      const row = (await h.instances.listUnits(INSTANCE.id))[0]!;
+      const publication = {
+        repo: INSTANCE.repo,
+        pr: 7,
+        headRef: row.branch,
+        publicationRef: row.branch,
+        baseRef: "main",
+        expectedHeadSha: headSha,
+        owner: { instanceId: INSTANCE.id, unit: row.unit },
+      };
+      const facts: PullRequestFacts = {
+        state: "open",
+        sameRepoHead: true,
+        headBranchExists: true,
+        headRef: row.branch,
+        baseRef: "main",
+        headSha,
+        verifiedHead: { repo: INSTANCE.repo, ref: row.branch, sha: headSha },
+        htmlUrl: "https://github.com/acme/api/pull/7",
+      };
+      h.deps.fetchPrFacts = async () => facts;
+      seedCoordinatorUnit(h.instances, {
+        ...row,
+        researchRunId: "run-research",
+        publication,
+        pr: { number: 7, url: facts.htmlUrl! },
+      });
+      await h.store.put(
+        record("run-review", {
+          agent: "review",
+          parentInstanceId: INSTANCE.id,
+          idempotencyKey: `${INSTANCE.id}:u12/1/review`,
+          verdict: {
+            verdict: "request_changes",
+            summary: "Fix the session",
+            findings: [{ id: "F1", severity: "minor", file: "src/session.ts", title: "Restore the retained session" }],
+          },
+        }),
+      );
+      expect(isRunRecord(await h.store.get("run-review"))).toBe(true);
+      expect(await h.deps.runs.getRun("run-review", { include: "messages" })).toMatchObject({
+        ok: true,
+        value: { parentInstanceId: INSTANCE.id },
+      });
+      const later = {
+        ...request,
+        step: `u12/1/${kind}`,
+        effectId: `u12/1/${kind}`,
+        brief:
+          kind === "findings"
+            ? { kind, unit: "u12", pr: 7, headSha, reviewRunId: "run-review" }
+            : { kind, unit: "u12", pr: 7, headSha, base: "main" },
+      };
+      expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, later), h.deps)).toMatchObject({
+        status: 200,
+        body: { runId: "run-child" },
+      });
+      expect(h.dispatched[0]?.opts?.coordinator).toMatchObject({
+        researchRunId: "run-research",
+        researchTarget: { repo: INSTANCE.repo, headSha },
+      });
+      const unavailable = harness();
+      await source(unavailable, {}, false);
+      const prior = (await unavailable.instances.listUnits(INSTANCE.id))[0]!;
+      unavailable.deps.fetchPrFacts = async () => facts;
+      seedCoordinatorUnit(unavailable.instances, {
+        ...prior,
+        researchRunId: "run-research",
+        publication,
+        pr: { number: 7, url: facts.htmlUrl! },
+      });
+      await unavailable.store.put(
+        record("run-review", {
+          agent: "review",
+          parentInstanceId: INSTANCE.id,
+          idempotencyKey: `${INSTANCE.id}:u12/1/review`,
+          verdict: {
+            verdict: "request_changes",
+            summary: "Fix the session",
+            findings: [{ id: "F1", severity: "minor", file: "src/session.ts", title: "Restore the retained session" }],
+          },
+        }),
+      );
+      expect(
+        await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, later), unavailable.deps),
+      ).toMatchObject({ status: 403, body: { error: "research_source_changed" } });
+      expect(unavailable.dispatched).toEqual([]);
+    },
+  );
+  it.each([
+    "native push",
+    "failed unchanged",
+    "publication only",
+    "foreign step",
+    "external head",
+    "unknown writer",
+    "pending publication",
+    "maintenance writer",
+    "foreign maintenance",
+  ] as const)("uses canonical research progression with %s evidence", async (mode) => {
+    const h = harness();
+    await source(h);
+    const row = (await h.instances.listUnits(INSTANCE.id))[0]!;
+    const currentHead = mode === "external head" ? "c".repeat(40) : "b".repeat(40);
+    h.deps.fetchBranchRef = async (_repo, ref) => ({ kind: "verified", ref: `refs/heads/${ref}`, sha: currentHead });
+    const publication = {
+      repo: INSTANCE.repo,
+      pr: 7,
+      headRef: row.branch,
+      publicationRef: row.branch,
+      baseRef: "main",
+      expectedHeadSha: currentHead,
+      owner: { instanceId: INSTANCE.id, unit: row.unit },
+    };
+    const facts: PullRequestFacts = {
+      state: "open",
+      sameRepoHead: true,
+      headBranchExists: true,
+      headRef: row.branch,
+      baseRef: "main",
+      headSha: currentHead,
+      verifiedHead: { repo: INSTANCE.repo, ref: row.branch, sha: currentHead },
+      htmlUrl: "https://github.com/acme/api/pull/7",
+    };
+    h.deps.fetchPrFacts = async () => facts;
+    const maintenanceActionId = `m_${"b".repeat(64)}`;
+    const maintenance = mode === "maintenance writer" || mode === "foreign maintenance";
+    seedCoordinatorUnit(h.instances, {
+      ...row,
+      ...(maintenance
+        ? {
+            rounds: [
+              {
+                index: 1,
+                agent: "coding",
+                outcome: "started",
+                at: NOW - 30000,
+                maintenance: { actionId: maintenanceActionId, runId: "run-writer", budgetUsd: 5 },
+              },
+            ],
+          }
+        : {}),
+      publication,
+      researchProgressRunId: mode === "publication only" ? undefined : "run-writer",
+      pr: { number: 7, url: facts.htmlUrl! },
+    });
+    if (mode !== "publication only") {
+      await h.store.put(
+        record("run-writer", {
+          parentInstanceId: INSTANCE.id,
+          coordinatorUnit: "u12",
+          researchRunId: "run-research",
+          ...(maintenance
+            ? { maintenanceActionId: mode === "foreign maintenance" ? `m_${"c".repeat(64)}` : maintenanceActionId }
+            : {}),
+          repo: INSTANCE.repo,
+          idempotencyKey: `${INSTANCE.id}:u12/${maintenance ? `maintenance/${mode === "foreign maintenance" ? `m_${"c".repeat(64)}` : maintenanceActionId}` : mode === "foreign step" ? "foreign/coding" : "1/findings"}`,
+          status: mode === "failed unchanged" ? "failed" : "completed",
+          provisional: mode === "unknown writer" ? true : undefined,
+          branchPublication:
+            mode === "pending publication"
+              ? {
+                  version: 1,
+                  repo: INSTANCE.repo,
+                  complete: false,
+                  branches: [],
+                  pending: { id: "unknown-push", ref: row.branch, headSha: currentHead },
+                }
+              : undefined,
+          branchPushReceipts: mode === "native push" ? [{ ref: row.branch, sha: currentHead, by: "push" }] : [],
+          events: [
+            {
+              type: "coordinator_tag",
+              parentInstanceId: INSTANCE.id,
+              unit: "u12",
+              branch: row.branch,
+              researchRunId: "run-research",
+              ...(maintenance
+                ? { maintenanceActionId: mode === "foreign maintenance" ? `m_${"c".repeat(64)}` : maintenanceActionId }
+                : {}),
+              researchTarget: { repo: INSTANCE.repo, headSha: "b".repeat(40) },
+              seq: 1,
+            },
+          ],
+          eventCount: 1,
+          storedEventCount: 1,
+        }),
+      );
+    }
+    const outcome = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, request), h.deps);
+    if (mode === "native push" || mode === "failed unchanged" || mode === "maintenance writer") {
+      expect(outcome).toMatchObject({ status: 200, body: { runId: "run-child" } });
+      expect(h.dispatched[0]?.opts?.coordinator).toMatchObject({
+        researchRunId: "run-research",
+        researchTarget: { repo: INSTANCE.repo, headSha: currentHead },
+      });
+    } else {
+      expect(outcome).toMatchObject({ status: 403, body: { error: "research_source_changed" } });
+      expect(h.dispatched).toEqual([]);
+    }
+  });
+  it("refuses a changed target or foreign research actor before dispatch", async () => {
+    const h = harness();
+    await source(h);
+    h.deps.fetchBranchRef = async (_repo, ref) => ({ kind: "verified", ref: `refs/heads/${ref}`, sha: "b".repeat(40) });
+    expect(await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, request), h.deps)).toMatchObject({
+      status: 403,
+      body: { error: "research_source_changed" },
+    });
+    expect(h.dispatched).toEqual([]);
+    const foreign = harness();
+    await source(foreign, { userId: "slack:UOTHER" });
+    expect(
+      await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, request), foreign.deps),
+    ).toMatchObject({ status: 403, body: { error: "research_source_changed" } });
+    expect(foreign.dispatched).toEqual([]);
+  });
+
+  it("dispatches research on the original target and refuses a missing implementation source", async () => {
+    const h = harness();
+    await source(h, {}, false);
+    const res = await handleCoordinatorRequest(
+      post(`${COORDINATOR_ADMIN_PREFIX}spawn`, {
+        ...spawnBody,
+        step: "u12/0/research",
+        effectId: "u12/0/research",
+        preset: "research",
+        prompt: undefined,
+        brief: { kind: "research", unit: "u12" },
+      }),
+      h.deps,
+    );
+    expect(res).toMatchObject({ status: 200, body: { runId: "run-child" } });
+    expect((h.dispatched[0]?.opts as DispatchOptions | undefined)?.operationTarget).toEqual({
+      repo: INSTANCE.repo,
+      ref: INSTANCE.branch,
+    });
+    expect(h.dispatched[0]?.msg).toMatchObject({ userId: INSTANCE.userId, threadKey: INSTANCE.threadKey });
+    expect(h.dispatched[0]?.msg.text).toContain(`inspected revision: ${headSha}`);
+    const missing = harness();
+    await source(missing, {}, false);
+    expect(
+      await handleCoordinatorRequest(
+        post(`${COORDINATOR_ADMIN_PREFIX}spawn`, { ...request, brief: { ...request.brief, researchRunId: undefined } }),
+        missing.deps,
+      ),
+    ).toMatchObject({ status: 403, body: { error: "research_source_missing" } });
+    expect(missing.dispatched).toEqual([]);
+  });
+});
 async function fixtureStep(h: ReturnType<typeof harness>, route: string, input: Record<string, unknown>) {
   const body = { ...input };
   if ((route === "spawn" || route === "branch") && !Object.hasOwn(body, "effectOrdinal")) {
@@ -12682,6 +13046,168 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
         recovery: { accounting: { spendUsd: 0.5, grant: { renewals: 0, costCapUsd: 5 }, renewalsSpent: 0 } },
       });
       expect(h.recoveries).toHaveLength(1);
+    });
+
+    // Paste this describe block inside the existing "historical admission" block.
+    // It reuses its surrounding legacy/recovery helpers; it creates no new harness.
+    describe("research history in original recovery", () => {
+      const originalResearch = (over: Partial<RunRecord> = {}): RunRecord => {
+        const brief: NonNullable<RunRecord["researchBrief"]> = {
+          version: 1,
+          goal: "Keep the existing session after a restart",
+          headSha: HEAD,
+          complexity: "simple",
+          decision: "ready",
+          evidence: [{ source: "src/session.ts", ref: HEAD, summary: "The session is retained" }],
+          assumptions: [],
+          unknowns: [],
+          approach: ["Restore the retained session"],
+          verification: ["Restart and assert the same session ID"],
+        };
+        const events: RunEvent[] = over.events ?? [
+          { type: "run_meta", agent: "research", seq: 1 },
+          {
+            type: "coordinator_tag",
+            seq: 2,
+            parentInstanceId: INSTANCE.id,
+            unit: "U12",
+            branch: INSTANCE.branch,
+            base: INSTANCE.base,
+            researchTarget: { repo: INSTANCE.repo, headSha: HEAD },
+          },
+          { type: "research_brief", brief, confirmed: true, seq: 3 },
+        ];
+        return record("run-original-research", {
+          agent: "research",
+          // Real workspace-less research has no repo field in its projected RunView.
+          repo: undefined,
+          parentInstanceId: INSTANCE.id,
+          coordinatorUnit: "U12",
+          idempotencyKey: `${INSTANCE.id}:U12/0/research`,
+          researchBrief: brief,
+          usage: historicalUsage,
+          startedAt: NOW - minutesToMs(59),
+          finishedAt: NOW - minutesToMs(56),
+          ...over,
+          events,
+          eventCount: over.eventCount ?? events.length,
+          storedEventCount: over.storedEventCount ?? events.length,
+        });
+      };
+
+      const withResearchHistory = async (over: Partial<RunRecord> = {}, costCapUsd = 5) => {
+        const h = await legacyHarness();
+        seedCoordinatorInstance(h.instances, {
+          ...recoveryInstance(),
+          research: true,
+          grant: { renewals: 0, costCapUsd },
+        });
+        const row: CoordinatorUnit = {
+          ...legacyRow(),
+          rounds: [
+            { index: 0, agent: "research", outcome: "started", at: NOW - minutesToMs(59) },
+            { index: 0, agent: "research", outcome: "completed", at: NOW - minutesToMs(56) },
+            { index: 0, agent: "coding", outcome: "started", at: NOW - minutesToMs(55) },
+            { index: 0, agent: "coding", outcome: "pr_opened", at: NOW - minutesToMs(45) },
+            ...legacyRow().rounds,
+          ],
+        };
+        await h.instances.putUnits([row]);
+        await h.store.put(originalResearch(over));
+        return { h, row };
+      };
+
+      it("carries workspace-less research and coding spend into the original recovered lease", async () => {
+        const { h, row } = await withResearchHistory();
+        const research = await h.deps.runs.getRun("run-original-research", {
+          include: "messages",
+          requireFinalRecord: true,
+        });
+        expect(research).toMatchObject({ ok: true, value: { agent: "research", persisted: true } });
+        if (!research.ok) throw new Error("original research record unavailable");
+        expect(research.value.repo).toBeUndefined();
+
+        expect(await callRecovery(h)).toMatchObject({ status: 200 });
+        const recovered = (await h.instances.listUnits(INSTANCE.id))[0]!;
+        expect(recovered).toMatchObject({
+          branch: row.branch,
+          startedAt: row.startedAt,
+          recovery: {
+            deadlineAt: row.startedAt! + minutesToMs(120),
+            accounting: {
+              spendUsd: 0.75,
+              renewalsSpent: 0,
+              grant: { renewals: 0, costCapUsd: 5 },
+              children: [
+                { runId: "run-original-coding", key: `${INSTANCE.id}:U12/0/coding`, usd: 0.25 },
+                { runId: "run-original-research", key: `${INSTANCE.id}:U12/0/research`, usd: 0.25 },
+                { runId: "run-original-review", key: `${INSTANCE.id}:U12/1/review`, usd: 0.25 },
+              ],
+            },
+          },
+        });
+        expect(h.recoveries).toHaveLength(1);
+      });
+
+      it.each([
+        "missing source tag",
+        "foreign repository",
+        "foreign branch",
+        "foreign unit",
+        "truncated source",
+        "unknown price",
+      ] as const)("refuses %s before claiming the original recovered lease", async (scenario) => {
+        const source = originalResearch();
+        let over: Partial<RunRecord>;
+        if (scenario === "truncated source") over = { truncated: true };
+        else if (scenario === "unknown price") over = { usage: undefined };
+        else {
+          const events = source.events
+            .filter((event) => scenario !== "missing source tag" || event.type !== "coordinator_tag")
+            .map((event): RunEvent => {
+              if (event.type !== "coordinator_tag") return event;
+              return {
+                ...event,
+                ...(scenario === "foreign repository"
+                  ? { researchTarget: { ...event.researchTarget!, repo: "other/api" } }
+                  : {}),
+                ...(scenario === "foreign branch" ? { branch: "other/branch" } : {}),
+                ...(scenario === "foreign unit" ? { unit: "U99" } : {}),
+              };
+            })
+            .map((event, index) => ({ ...event, seq: index + 1 }));
+          over = { events };
+        }
+        const { h, row } = await withResearchHistory(over);
+        const before = await h.instances.listUnits(INSTANCE.id);
+        const claim = vi.spyOn(h.instances, "transitionRecovery");
+        const reason =
+          scenario === "truncated source"
+            ? "child_history_incomplete"
+            : scenario === "unknown price"
+              ? "child_price_unknown"
+              : "child_identity_mismatch";
+        expect(await callRecovery(h)).toMatchObject({
+          status: 409,
+          body: { error: "recovery_budget_unknown", reason },
+        });
+        expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+        expect(before).toEqual([row]);
+        expect(claim).not.toHaveBeenCalled();
+        expect(h.recoveries).toEqual([]);
+      });
+
+      it("counts paid research against the original cost cap instead of renewing that cap", async () => {
+        const { h, row } = await withResearchHistory({}, 0.6);
+        const before = await h.instances.listUnits(INSTANCE.id);
+        expect(await callRecovery(h)).toMatchObject({
+          status: 409,
+          body: { error: "recovery_cost_cap_exhausted" },
+        });
+        expect(await h.instances.listUnits(INSTANCE.id)).toEqual(before);
+        expect(before).toEqual([row]);
+        expect(h.recoveries).toEqual([]);
+      });
     });
 
     it.each([

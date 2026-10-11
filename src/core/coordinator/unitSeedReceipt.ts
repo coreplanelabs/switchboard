@@ -15,7 +15,7 @@ export interface UnitSeedReceipt {
 
 /** The reader supplies child identity and contract facts from canonical storage, independently of the receipt. */
 export interface UnitSeedEvidence {
-  role: "coding" | "review";
+  role: "research" | "coding" | "review";
   receipt: UnitSeedReceipt;
   child: UnitSeedReceipt["child"];
   binding: UnitContextBinding;

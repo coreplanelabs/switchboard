@@ -751,7 +751,7 @@ describe("saysTransportLost — the third failure shape: a container command fai
 describe("ExecHarnessContainer — each operation is one command over the executor", () => {
   it("start runs the wrapper with the env on the exec and parses the pid from the last line", async () => {
     const { executor, calls } = recordingExecutor(["4242\n"]);
-    const c = new ExecHarnessContainer(executor);
+    const c = new ExecHarnessContainer(executor, { runId: "run-7", clock: () => 0 });
     const env = { SWITCHBOARD_RUN_BEARER: "sbr_run-7.secret", PI_CODING_AGENT_DIR: paths.agentDir };
     await expect(c.start(piStart(["--mode", "rpc"], env))).resolves.toEqual({ pid: 4242 });
     expect(calls[0].opts?.env).toEqual(env);
@@ -971,7 +971,7 @@ describe("ExecHarnessContainer — each operation is one command over the execut
       "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n\r\nthe log says runtime-replaced: the resident runtime was replaced",
       "HTTP/1.1 204 No Content\r\n\r\n",
     ]);
-    const c = new ExecHarnessContainer(executor);
+    const c = new ExecHarnessContainer(executor, { runId: "run-7", clock: () => 0 });
     const get: HarnessRequest = { method: "GET", port: 41000, path: "/api/health" };
     await expect(c.request(paths, get)).resolves.toEqual({
       status: 200,

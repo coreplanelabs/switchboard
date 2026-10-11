@@ -258,8 +258,13 @@ export interface UnitLineage {
 
 /** `getRun` adds events or structural audience evidence only on an explicit include. */
 export interface RunRecordView extends RunView {
+  /** Original sender retained on canonical record-body reads. */
+  postedBy?: RunRecord["postedBy"];
+  /** Research text is an explicit body read, never generic metadata. */
+  researchBrief?: RunRecord["researchBrief"];
   /** Exact final-record ownership, available only to the trusted internal coordinator reader. */
   coordinatorUnit?: RunRecord["coordinatorUnit"];
+  researchRunId?: RunRecord["researchRunId"];
   coordinatorAttempt?: RunRecord["coordinatorAttempt"];
   unitSeedReceipt?: RunRecord["unitSeedReceipt"];
   reviewPublication?: RunRecord["reviewPublication"];
@@ -686,6 +691,7 @@ function persistedView(
     branchPushReceipts: _branchPushReceipts,
     childHandoff: _childHandoff,
     contextDependencies: _contextDependencies,
+    researchBrief: _researchBrief,
     ...visible
   } = item as typeof item & { workspaceAllocation?: unknown; workspaceDisposition?: unknown };
   return {
@@ -1337,13 +1343,17 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         const view: RunRecordView = persistedView(rest, prices);
         if (opts.privateWorkerAccess === PRIVATE_WORKER_INTERNAL_READ) {
           if (record.coordinatorUnit !== undefined) view.coordinatorUnit = record.coordinatorUnit;
+          if (record.researchRunId !== undefined) view.researchRunId = record.researchRunId;
           if (record.coordinatorAttempt !== undefined) view.coordinatorAttempt = record.coordinatorAttempt;
           if (record.unitSeedReceipt !== undefined) view.unitSeedReceipt = record.unitSeedReceipt;
           if (record.reviewPublication !== undefined) view.reviewPublication = record.reviewPublication;
           if (record.branchPublication !== undefined) view.branchPublication = record.branchPublication;
           if (record.branchPushReceipts !== undefined) view.branchPushReceipts = record.branchPushReceipts;
         }
-        if (opts.include === "messages") view.events = events;
+        if (opts.include === "messages") {
+          view.events = events;
+          if (record.researchBrief !== undefined) view.researchBrief = record.researchBrief;
+        }
         return { ok: true, value: await diagnostic(view) };
       }
       const summary = registry.getById(id);
@@ -1393,6 +1403,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       const { events, ...rest } = record;
       const view: RunRecordView = persistedView(rest, prices);
       view.events = events;
+      if (record.researchBrief !== undefined) view.researchBrief = record.researchBrief;
       return { ok: true, value: await diagnostic(view) };
     },
 

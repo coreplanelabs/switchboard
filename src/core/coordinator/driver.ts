@@ -263,6 +263,7 @@ interface PlanFacts {
   idleDays: number;
   /** The instance's mark as the plan route answers it: a generated one-unit plan (a `plan` with no `path`). */
   generated: boolean;
+  research?: true;
   /** The runs page base the bot answered: the report links a child's write-up to its run page with it. */
   runPageBase?: string;
   /** The hard stop's mark (record 0060; issue 1924): the hosted parent was
@@ -326,6 +327,7 @@ function readPlan(a: BotAnswer): PlanFacts {
     verbosity: isVerbosity(b.verbosity) ? b.verbosity : DEFAULT_VERBOSITY,
     idleDays: readIdleDays(b.idleDays),
     generated: b.generated === true,
+    ...(b.research === true ? { research: true as const } : {}),
     ...(typeof b.runPageBase === "string" && b.runPageBase.length > 0 ? { runPageBase: b.runPageBase } : {}),
     stopped: b.stopped === true,
     repo: b.repo,
@@ -431,6 +433,7 @@ function readRecordReturn(step: string, a: BotAnswer, owner: { runId: string; in
     leaseStartedAt,
     costUsd,
     handoffLists,
+    researchBrief,
     failure,
     interruption,
   } = facts;
@@ -462,6 +465,7 @@ function readRecordReturn(step: string, a: BotAnswer, owner: { runId: string; in
       ...(typeof leaseStartedAt === "number" ? { leaseStartedAt } : {}),
       ...(typeof costUsd === "number" || costUsd === null ? { costUsd } : {}),
       ...(handoffLists !== undefined ? { handoffLists } : {}),
+      ...(researchBrief !== undefined ? { researchBrief } : {}),
       // The failure by name (run-history item 57), shape-checked. These
       // named failures drive the bounded round-0 or pre-model review
       // recovery (agent-ship item 9).
@@ -1259,6 +1263,8 @@ async function runUnit(
     verbosity: plan.verbosity,
     idleDays: row?.recovery !== undefined ? 0 : plan.idleDays,
     generated: plan.generated,
+    ...(plan.research === true ? { research: true as const } : {}),
+    ...(row?.researchRunId ? { researchRunId: row.researchRunId } : {}),
     ...(plan.runPageBase !== undefined ? { runPageBase: plan.runPageBase } : {}),
     ...(resume !== undefined ? { resume } : {}),
     ...(row?.publication !== undefined && resume === undefined && lastPush === undefined ? { freshAdopt: true } : {}),

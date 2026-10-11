@@ -182,6 +182,30 @@ describe("main task actions", () => {
     expect(
       await unitSeedProofFor(INSTANCE, contextual, contextual.workBrief, async () => ({ ...evidence, role: "review" })),
     ).toMatchObject({ childSeed: { state: "acknowledged", role: "review" }, providerExecution: "unknown" });
+    const researchBinding = { ...binding, idempotencyKey: `${INSTANCE.id}:${UNIT.unit}/0/research` };
+    const researchEvidence: UnitSeedEvidence = {
+      ...evidence,
+      role: "research",
+      binding: researchBinding,
+      receipt: { ...evidence.receipt, binding: researchBinding },
+    };
+    expect(
+      await unitSeedProofFor(
+        { ...INSTANCE, research: true },
+        contextual,
+        contextual.workBrief,
+        async () => researchEvidence,
+      ),
+    ).toMatchObject({ childSeed: { state: "acknowledged", role: "research" }, providerExecution: "unknown" });
+    expect(
+      await unitSeedProofFor(INSTANCE, contextual, contextual.workBrief, async () => researchEvidence),
+    ).toMatchObject({ childSeed: { state: "unproved" }, providerExecution: "unknown" });
+    expect(
+      await unitSeedProofFor({ ...INSTANCE, research: true }, contextual, contextual.workBrief, async () => ({
+        ...evidence,
+        role: "research",
+      })),
+    ).toMatchObject({ childSeed: { state: "unproved" }, providerExecution: "unknown" });
     expect(
       await unitSeedProofFor(INSTANCE, contextual, contextual.workBrief, async () => ({
         ...evidence,

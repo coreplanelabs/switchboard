@@ -669,6 +669,10 @@ export type SavedFindingsPatch =
 /** What a coordinator's spawn stamps on the child's every row: its instance,
  *  spawn key and admitted cost cap, plus the base for its PR post-step. */
 export interface CoordinatorTag {
+  /** Required original source envelope for an implementation research brief. */
+  researchRunId?: string;
+  /** Controller-verified immutable target for a no-workspace research child. */
+  researchTarget?: { repo: string; headSha: string };
   parentInstanceId: string;
   /** Canonical unit identity copied from its admitted durable row. */
   unit?: string;
@@ -720,6 +724,7 @@ export interface CoordinatorTag {
  *  a row, summary and record agree. The base never rides here. */
 export function coordinatorFields(tag: CoordinatorTag | undefined): {
   parentInstanceId?: string;
+  researchRunId?: string;
   coordinatorUnit?: string;
   coordinatorAttempt?: number;
   idempotencyKey?: string;
@@ -729,6 +734,7 @@ export function coordinatorFields(tag: CoordinatorTag | undefined): {
   return tag
     ? {
         parentInstanceId: tag.parentInstanceId,
+        ...(tag.researchRunId !== undefined ? { researchRunId: tag.researchRunId } : {}),
         ...(tag.unit !== undefined
           ? {
               coordinatorUnit: tag.unit,
@@ -749,6 +755,8 @@ export function coordinatorFields(tag: CoordinatorTag | undefined): {
  *  lives in `CoordinatorUnit`. The parent retains the instance's identity and
  *  its two surfaces: the card the bot redraws and the final run record. */
 export interface CoordinatorInstance {
+  /** Only newly admitted instances opt into the research step. */
+  research?: true;
   id: string;
   kind: "ship" | "maintenance";
   /** The requesting person (platform-namespaced); every child is dispatched as them. */
@@ -986,6 +994,10 @@ export interface OriginalUnitRecoveryReceipt {
  *  drew and how it ended. One row a person can read for "what happened to this
  *  unit". */
 export interface CoordinatorUnit {
+  /** The canonical first research producer, retained by its accepted spawn effect. */
+  researchRunId?: string;
+  /** Latest canonically admitted writer; its native push still requires independent proof. */
+  researchProgressRunId?: string;
   /** Monotonic pointer into separately stored immutable recovery receipts. */
   history?: { version: 1; receiptId: string };
   instanceId: string;
@@ -1190,7 +1202,18 @@ export function prepareUnfencedUnitWrite(
   current: CoordinatorUnit | undefined,
   replacement: CoordinatorUnit,
 ): CoordinatorUnit {
-  const updated = preserveWorkBrief(current, replacement);
+  if (replacement.researchRunId !== undefined && replacement.researchRunId !== current?.researchRunId)
+    throw new CoordinatorUnitWriteConflict();
+  if (
+    replacement.researchProgressRunId !== undefined &&
+    replacement.researchProgressRunId !== current?.researchProgressRunId
+  )
+    throw new CoordinatorUnitWriteConflict();
+  const updated = {
+    ...preserveWorkBrief(current, replacement),
+    ...(current?.researchRunId ? { researchRunId: current.researchRunId } : {}),
+    ...(current?.researchProgressRunId ? { researchProgressRunId: current.researchProgressRunId } : {}),
+  };
   if (JSON.stringify(current?.reportDelivery) !== JSON.stringify(updated.reportDelivery))
     throw new CoordinatorUnitWriteConflict();
   if (!permitsRecoveryMetadataWrite(current, updated)) throw new CoordinatorUnitWriteConflict();
@@ -1258,6 +1281,11 @@ export function permitsRecoveryMetadataWrite(
   if (
     JSON.stringify(current?.rounds.filter((round) => round.maintenance) ?? []) !==
     JSON.stringify(replacement.rounds.filter((round) => round.maintenance))
+  )
+    return false;
+  if (
+    current?.researchRunId !== replacement.researchRunId ||
+    current?.researchProgressRunId !== replacement.researchProgressRunId
   )
     return false;
   if (JSON.stringify(current?.currentEffect) !== JSON.stringify(replacement.currentEffect)) return false;
@@ -1426,6 +1454,7 @@ export function isCoordinatorInstance(v: unknown): v is CoordinatorInstance {
   const r = v;
   if (typeof r.id !== "string" || !INSTANCE_ID_PATTERN.test(r.id)) return false;
   if (r.kind !== "ship" && r.kind !== "maintenance") return false;
+  if (r.research !== undefined && r.research !== true) return false;
   if (
     r.kind === "maintenance" &&
     (r.admission !== undefined || r.runId !== undefined || r.plan !== undefined || r.generatedTask !== undefined)
@@ -1645,6 +1674,18 @@ export function isRecoveryAdmissionFields(r: unknown): boolean {
 export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
   if (!isObject(v)) return false;
   const r = v;
+  if (
+    r.researchRunId !== undefined &&
+    (typeof r.researchRunId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(r.researchRunId))
+  )
+    return false;
+  if (
+    r.researchProgressRunId !== undefined &&
+    (r.researchRunId === undefined ||
+      typeof r.researchProgressRunId !== "string" ||
+      !/^[A-Za-z0-9_-]{1,128}$/.test(r.researchProgressRunId))
+  )
+    return false;
   if (r.currentEffect !== undefined && !isUnitCurrentEffect(r.currentEffect)) return false;
   if (
     r.history !== undefined &&

@@ -755,9 +755,10 @@ describe("the research preset on pi: the web toolset relayed, run in the bot as 
     return w;
   };
 
-  it("serves exactly the web toolset's definitions (web_fetch, web_search, update_status and the GitHub reads) and none of pi's own tools", () => {
+  it("serves the research, web, status, GitHub-read and session tool definitions without pi's own tools", () => {
     const { harness } = research();
     expect(relayedToolDefinitions(harness).map((d) => d.name)).toEqual([
+      "submit_research",
       "web_fetch",
       "web_search",
       "update_status",
@@ -770,6 +771,8 @@ describe("the research preset on pi: the web toolset relayed, run in the bot as 
       "github_pull_get",
       "github_actions_run",
       "github_actions_job_log",
+      "recall",
+      "notes",
     ]);
   });
 

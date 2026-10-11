@@ -35,7 +35,7 @@ import type { FenceResult, Notepad, SessionHit } from "../core/runLedger/types.j
 import type { LedgerRun, LedgerWriteThrough } from "../core/runLedger/writeThrough.js";
 import type { RunSession } from "../core/runRecord.js";
 import { utf8ByteLength } from "../core/runRecord.js";
-import { runResource } from "../core/runsService.js";
+import { PRIVATE_WORKER_INTERNAL_READ, runResource } from "../core/runsService.js";
 import type { RunnableTool, ToolContext } from "./runnableTool.js";
 
 /** A run's reach into its own session log, as the dispatcher builds it. */
@@ -198,6 +198,19 @@ export function sessionCapabilityFor(
             const notepad = await ledger.readNotepad(session.key);
             const files = await (assets?.read() ?? Promise.resolve([]));
             if (!tail.transcript.complete) throw new Error(`parent context could not be read: ${tail.transcript.gap}`);
+            const frozenTo = tail.from + tail.transcript.turns - 1;
+            if (session.request > frozenTo) throw new Error("the source request is outside the committed parent range");
+            // One canonical row, not an earlier-history scan. A failed read
+            // cannot be replaced by a guessed goal or a model-written note.
+            const request = await ledger.readSession(session.key, session.request, session.request);
+            if (
+              !request.complete ||
+              request.turns !== 1 ||
+              request.messages.length !== 1 ||
+              request.messages[0].role !== "user" ||
+              !request.messages[0].content.some((p) => p.type === "text" || p.type === "image" || p.type === "document")
+            )
+              throw new Error("the original source request could not be captured");
             const snapshot: ChildHandoff = {
               version: 1,
               source,
@@ -206,6 +219,10 @@ export function sessionCapabilityFor(
                 from: tail.from,
                 to: tail.from + tail.transcript.turns - 1,
                 hash: await sourceHash({ messages: tail.transcript.messages, actors: tail.transcript.actors ?? [] }),
+              },
+              brief: {
+                request: session.request,
+                hash: await sourceHash({ messages: request.messages, actors: request.actors ?? [] }),
               },
 
               ...(notepad ? { notepad: await snapshotNotepad(notepad) } : {}),
@@ -219,6 +236,7 @@ export function sessionCapabilityFor(
                         session: inherited.handoff.session,
                         snapshotRunId: inherited.handoff.snapshotRunId ?? run.runId,
                         ...(inherited.handoff.window ? { window: inherited.handoff.window } : {}),
+                        ...(inherited.handoff.brief ? { brief: inherited.handoff.brief } : {}),
                         ...(inherited.handoff.dependencies ? { dependencies: inherited.handoff.dependencies } : {}),
                         ...(inherited.handoff.notepad ? { notepad: inherited.handoff.notepad } : {}),
                         assets: inherited.handoff.assets,
@@ -236,7 +254,10 @@ export function sessionCapabilityFor(
               snapshot.dependencies = { value, hash: await contextDependenciesHash(value) };
             }
             const handoff = boundChildHandoff(snapshot);
-            return parentContextOf(tail.transcript.messages, handoff, tail.transcript.actors);
+            return parentContextOf(tail.transcript.messages, handoff, tail.transcript.actors, {
+              message: request.messages[0],
+              actor: request.actors?.[0],
+            });
           },
         }
       : {}),
@@ -282,7 +303,9 @@ const MAX_HITS = SEARCH_MAX_HITS;
  *  is no, since nothing says who is asking. */
 async function mayRead(ctx: ToolContext): Promise<boolean> {
   if (!ctx.runs?.runId) return false;
-  const res = await ctx.runs.service.getRun(ctx.runs.runId);
+  // The runner supplies this exact current run, whose private worker metadata
+  // is hidden from ordinary history reads. Authorization still checks its resource.
+  const res = await ctx.runs.service.getRun(ctx.runs.runId, { privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ });
   return res.ok && authorize(ctx.runs.actor, "runs:read", runResource(res.value)).allow;
 }
 

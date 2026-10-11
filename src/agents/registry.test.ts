@@ -340,11 +340,18 @@ describe("the workspace prompts name the image toolchain", () => {
   });
 
   // docs/reference/specs/session-log.md item 10 (record 0035, "The notepad"):
-  // every prompt that can run on the pi harness says what belongs in the
-  // notes and that recall reaches every earlier turn, identically.
-  it("every workspace prompt carries the notepad instruction verbatim — recall for the reach back, notes for what must survive a compaction — and the workspace-less prompts do not", () => {
+  // Workspace and read-child prompts explain the same durable notes and recall
+  // capabilities; a workspace is not required to retain working context.
+  it("workspace and read-child prompts explain durable notes and recall; Ship does not promise those tools", () => {
     const paragraph = /YOUR NOTES AND YOUR REACH BACK\.[\s\S]*?not only at the end\./;
-    const carried = Object.entries({ ...cold, ...resident, ...seeded }).map(([name, sys]) => {
+    const carried = Object.entries({
+      ...cold,
+      ...resident,
+      ...seeded,
+      research: AGENTS.research.system,
+      general: AGENTS.general.system,
+      conductor: AGENTS.conductor.system,
+    }).map(([name, sys]) => {
       expect(sys, name).toContain("`recall`");
       expect(sys, name).toContain("`notes`");
       expect(sys, name).toMatch(/at most 8 KiB/);
@@ -358,13 +365,7 @@ describe("the workspace prompts name the image toolchain", () => {
       return m![0];
     });
     expect(new Set(carried).size).toBe(1);
-    for (const [name, sys] of Object.entries({
-      general: AGENTS.general.system,
-      research: AGENTS.research.system,
-      conductor: AGENTS.conductor.system,
-    })) {
-      expect(sys, name).not.toContain("YOUR NOTES AND YOUR REACH BACK");
-    }
+    expect(AGENTS.ship.system).not.toContain("YOUR NOTES AND YOUR REACH BACK");
   });
 
   // docs/reference/specs/agent-coding.md item 10: the one way a run's
@@ -1360,7 +1361,7 @@ describe("conductor agent (docs/reference/specs/agent-conductor.md)", () => {
   // rendered from the registry the way `help` renders its rows — a preset
   // added or moved across the identity line is offered or withheld the day
   // its def changes — and a read child sees this conversation.
-  it("conductor's prompt renders the presets a child can run from the registry — every sibling whose identity is not `write`, in registry order, each with its own description and a repository note where its machine carries a checkout — names the write presets as refused `spawn_identity`, and says a child starts from this conversation's text plus the prompt, never that it sees none of the thread", () => {
+  it("conductor's prompt renders the presets a child can run from the registry — every sibling whose identity is not `write`, in registry order, each with its own description and a repository note where its machine carries a checkout — names write presets as refused and assigns the child a focused source view with scoped recall", () => {
     const sys = AGENTS.conductor.system;
     const siblings = Object.values(AGENTS).filter((a) => a.name !== "conductor");
     const readers = siblings.filter((a) => a.identity !== "write");
@@ -1380,10 +1381,11 @@ describe("conductor agent (docs/reference/specs/agent-conductor.md)", () => {
     expect(refusal).toBeDefined();
     for (const def of writers) expect(refusal).toContain(`\`${def.name}\``);
     expect(refusal).toMatch(/write/);
-    // The child is a reader of this conversation: the old claim is gone.
+    // A child's source view keeps the request and scoped recall references.
     expect(sys).not.toMatch(/sees none of this thread/);
-    expect(sys).toMatch(/this conversation's text/);
-    expect(sys).toMatch(/your prompt/);
+    expect(sys).toContain("a child receives the original request, relevant user context, working notes");
+    expect(sys).toContain("scoped parent recall");
+    expect(sys).toMatch(/your prompt/i);
   });
 
   it("conductor's prompt knows a routed compound: the brief's heading, the numbered `<preset>`: <text> lines, spawn exactly those and never merge, drop or add one", () => {

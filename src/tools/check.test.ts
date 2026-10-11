@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { runCheckTool } from "./check.js";
+import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
+import { notesTool, sessionCapabilityFor } from "./session.js";
+import { createCheckExecution } from "../core/checkExecution.js";
+import type { CheckExecutionState } from "../core/checkExecutionTypes.js";
 import type { ToolContext } from "./runnableTool.js";
 
 const context = () =>
@@ -61,5 +65,210 @@ describe("run_check tool", () => {
     const failed = await runCheckTool.run({ command: "true", purpose: "baseline" }, ctx);
     expect(failed).toContain("persistence_failed");
     expect(failed).not.toContain("command did not start");
+  });
+});
+
+const checkpoint = {
+  phase: "implementation",
+  goal: "Keep recalled evidence available",
+  decisions: ["Keep the existing store because it owns source access"],
+  rejected: ["Do not copy private transcripts into a new store"],
+  completed: ["Updated the bounded reader"],
+  unproven: ["Live provider acceptance"],
+  next: "Ask for review of the current diff",
+};
+
+function phaseContext(exitCode = 0) {
+  let notes = "previous working notes";
+  let state: CheckExecutionState | undefined;
+  const metadata = {
+    stdout: `/work/repo\n${"a".repeat(40)}\n${"b".repeat(40)}\n`,
+    stderr: "",
+    exitCode: 0,
+    truncated: false,
+  };
+  const execResult = vi
+    .fn()
+    .mockResolvedValueOnce(metadata)
+    .mockResolvedValue({ stdout: "2 tests passed", stderr: "", exitCode, truncated: false });
+  const ctx = {
+    executor: {},
+    callId: "verified-phase",
+    checkExecution: createCheckExecution({
+      executor: () => ({ execResult }),
+      workspace: () => "/work/repo",
+      owner: { runId: "phase-run", requester: "cli:owner", threadKey: "cli:thread", repo: "acme/repo" },
+      recordingAvailable: true,
+      authorizeCommand: () => true,
+      save: async (value) => {
+        state = value;
+        return true;
+      },
+      remainingMs: () => 120_000,
+      signal: new AbortController().signal,
+      clock: () => 100,
+    }),
+    session: {
+      writeNotepad: async (text: string) => {
+        notes = text;
+        return { ok: true };
+      },
+    },
+  } as unknown as ToolContext;
+  return { ctx, execResult, notes: () => notes, state: () => state };
+}
+
+const phaseInput = { command: "node tests/focused.js", purpose: "verification", checkpoint };
+
+describe("run_check phase checkpoints", () => {
+  it("saves the working phase with recorded evidence distinct from model-reported progress", async () => {
+    const s = phaseContext();
+    const result = await runCheckTool.run(phaseInput, s.ctx);
+    expect(result).toContain("phase notes saved");
+    expect(s.notes()).toContain("## Goal\n- Keep recalled evidence available");
+    expect(s.notes()).toContain("## Decisions (reported)\n- Keep the existing store because it owns source access");
+    expect(s.notes()).toContain(
+      "## Rejected approaches (reported)\n- Do not copy private transcripts into a new store",
+    );
+    expect(s.notes()).toContain(
+      "## Completed work (reported, not certified by this check)\n- Updated the bounded reader",
+    );
+    expect(s.notes()).toContain("## Unproven\n- Live provider acceptance");
+    expect(s.notes()).toContain("## Next\n- Ask for review of the current diff");
+    expect(s.notes()).toContain("Recorded process completed with exit 0");
+    expect(s.notes()).toContain("HEAD: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(s.notes()).toContain("before the command; the tree may have changed");
+    expect(s.state()?.receipts[0]).toMatchObject({
+      callId: "verified-phase",
+      owner: { repo: "acme/repo" },
+      outcome: { kind: "completed", exitCode: 0 },
+    });
+  });
+
+  it("keeps previous notes for failed and unknown checks and refuses baseline checkpoints", async () => {
+    const failed = phaseContext(1);
+    expect(await runCheckTool.run(phaseInput, failed.ctx)).toContain("phase notes not saved");
+    expect(failed.notes()).toBe("previous working notes");
+    const unknown = phaseContext();
+    unknown.execResult
+      .mockReset()
+      .mockResolvedValueOnce({
+        stdout: `/work/repo\n${"a".repeat(40)}\n${"b".repeat(40)}\n`,
+        stderr: "",
+        exitCode: 0,
+        truncated: false,
+      })
+      .mockRejectedValueOnce(new Error("response lost"));
+    expect(await runCheckTool.run(phaseInput, unknown.ctx)).toContain("phase notes not saved");
+    expect(unknown.notes()).toBe("previous working notes");
+    const baseline = phaseContext();
+    expect(await runCheckTool.run({ ...phaseInput, purpose: "baseline" }, baseline.ctx)).toContain(
+      "checkpoint requires verification",
+    );
+    expect(baseline.execResult).not.toHaveBeenCalled();
+    expect(baseline.notes()).toBe("previous working notes");
+  });
+
+  it("refuses invalid or oversized phase notes before starting a check", async () => {
+    const s = phaseContext();
+    for (const invalid of [
+      { ...checkpoint, next: "" },
+      { ...checkpoint, completed: ["é".repeat(5_000)] },
+      { ...checkpoint, exitCode: 0 },
+    ])
+      expect(await runCheckTool.run({ ...phaseInput, checkpoint: invalid }, s.ctx)).toContain("error:");
+    expect(s.execResult).not.toHaveBeenCalled();
+    expect(s.notes()).toBe("previous working notes");
+  });
+
+  it("does not overwrite newer notes when a completed check call is replayed", async () => {
+    const s = phaseContext();
+    await runCheckTool.run(phaseInput, s.ctx);
+    await s.ctx.session!.writeNotepad("newer phase: reviewed and ready");
+    const replay = await runCheckTool.run(phaseInput, s.ctx);
+    expect(replay).toContain("replayed check; phase notes not saved");
+    expect(s.notes()).toBe("newer phase: reviewed and ready");
+    expect(s.execResult).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains the successful receipt while reporting fenced or uncertain note persistence", async () => {
+    for (const ending of ["fenced", "unknown"] as const) {
+      const s = phaseContext();
+      s.ctx.session!.writeNotepad = async () => {
+        if (ending === "unknown") throw new Error("lost write acknowledgement");
+        return { ok: false, reason: "fenced" };
+      };
+      expect(await runCheckTool.run(phaseInput, s.ctx)).toContain(
+        ending === "fenced" ? "phase notes not saved (fenced)" : "phase notes persistence is unknown",
+      );
+      expect(s.state()?.receipts[0].outcome).toMatchObject({ kind: "completed", exitCode: 0 });
+      expect(s.notes()).toBe("previous working notes");
+    }
+  });
+});
+
+describe("run_check phase note recovery", () => {
+  it("returns saved phase notes to the next owner and fences the prior owner's later refresh", async () => {
+    const ledger = new InMemoryRunLedger(() => 100);
+    const key = "cli:thread:coding";
+    await ledger.claimSession(key, "phase-run", "g1");
+    const bindSession = (runId: string, gen: string) =>
+      sessionCapabilityFor(
+        { runId, session: { key, seedFrom: 0, request: 0, range: { from: 1 } } },
+        {
+          readSession: (...args) => ledger.readSession(...args),
+          searchSession: (...args) => ledger.searchSession(...args),
+          readNotepad: (...args) => ledger.readNotepad(...args),
+          writeNotepad: (key, text, owner) => ledger.writeNotepad(key, gen, text, owner),
+        },
+      );
+    const old = phaseContext();
+    old.ctx.session = bindSession("phase-run", "g1");
+    expect(await runCheckTool.run(phaseInput, old.ctx)).toContain("phase notes saved");
+    await ledger.claimSession(key, "next-run", "g2");
+    const next = { executor: {}, session: bindSession("next-run", "g2") } as ToolContext;
+    expect(await notesTool.run({}, next)).toContain("## Next\n- Ask for review of the current diff");
+    await notesTool.run({ text: "review phase: keep this newer result" }, next);
+    old.ctx.callId = "late-check";
+    old.execResult.mockResolvedValueOnce({
+      stdout: `/work/repo\n${"a".repeat(40)}\n${"b".repeat(40)}\n`,
+      stderr: "",
+      exitCode: 0,
+      truncated: false,
+    });
+    expect(await runCheckTool.run(phaseInput, old.ctx)).toContain("phase notes not saved (fenced)");
+    expect(await notesTool.run({}, next)).toBe("review phase: keep this newer result");
+  });
+
+  it("refuses missing notes before execution and does not save after the originating session stops", async () => {
+    const missing = phaseContext();
+    delete missing.ctx.session;
+    expect(await runCheckTool.run(phaseInput, missing.ctx)).toContain(
+      "phase notes are unavailable; command did not start",
+    );
+    expect(missing.execResult).not.toHaveBeenCalled();
+    const stopped = phaseContext();
+    const control = new AbortController();
+    stopped.ctx.signal = control.signal;
+    const run = stopped.ctx.checkExecution!.run;
+    stopped.ctx.checkExecution!.run = async (...args) => {
+      const result = await run(...args);
+      control.abort();
+      return result;
+    };
+    expect(await runCheckTool.run(phaseInput, stopped.ctx)).toContain(
+      "phase notes not saved: this tool session stopped",
+    );
+    expect(stopped.notes()).toBe("previous working notes");
+    expect(stopped.state()?.receipts[0].outcome).toMatchObject({ kind: "completed", exitCode: 0 });
+  });
+
+  it("keeps an acknowledged phase save successful when timeline publication throws", async () => {
+    const s = phaseContext();
+    s.ctx.publish = () => {
+      throw new Error("timeline unavailable");
+    };
+    expect(await runCheckTool.run(phaseInput, s.ctx)).toContain("phase notes saved");
+    expect(s.notes()).toContain("## Goal\n- Keep recalled evidence available");
   });
 });

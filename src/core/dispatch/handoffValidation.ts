@@ -1,6 +1,7 @@
 // Canonical checks for a child handoff. A manifest identifies evidence; it
 // never proves access or substitutes for the source run and durable log.
 import { sourceHash } from "../references/receipts.js";
+import type { ChatMessage } from "../chatMessage.js";
 import type { Notepad } from "../runLedger/types.js";
 import type { LiveRunRow } from "../runLedger/types.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
@@ -122,6 +123,7 @@ export async function validateChildHandoff(input: {
   )
     return invalid("child context belongs to another child or has no persisted child binding");
   let immediate: AssembledTranscript | undefined;
+  let immediateRequest: { message: ChatMessage; actor?: string } | undefined;
   try {
     if (input.mode === "admitted-bind") {
       if (!isUnitContextBinding(input.admission)) return invalid("the unit context binding is missing or invalid");
@@ -175,6 +177,21 @@ export async function validateChildHandoff(input: {
         return invalid("child context range is outside its original source run");
       if (!(await input.deps.canRead(source, input.consumer)))
         return invalid("child context source access is unavailable");
+      if (source.brief) {
+        if (source.brief.request !== run.session.request)
+          return invalid("child context request is not its source run's original request");
+        const request = await input.deps.readSession(source.session.key, source.brief.request, source.brief.request);
+        if (
+          !request.complete ||
+          request.turns !== 1 ||
+          request.messages.length !== 1 ||
+          request.messages[0].role !== "user" ||
+          !request.messages[0].content.some((p) => p.type === "text" || p.type === "image" || p.type === "document") ||
+          (await sourceHash({ messages: request.messages, actors: request.actors ?? [] })) !== source.brief.hash
+        )
+          return invalid("child context original request or actor does not match its frozen source");
+        if (source === handoff) immediateRequest = { message: request.messages[0], actor: request.actors?.[0] };
+      }
       if (source === handoff) {
         if (run.childHandoff !== undefined && !isChildHandoff(run.childHandoff))
           return invalid("the source run has invalid inherited context");
@@ -262,7 +279,12 @@ export async function validateChildHandoff(input: {
       handoff.consumer = input.consumer;
       handoff.snapshotRunId = input.consumer.runId;
     }
-    const context = parentContextOf(immediate!.messages, handoff, immediate!.actors) as ParentContext & {
+    const context = parentContextOf(
+      immediate!.messages,
+      handoff,
+      immediate!.actors,
+      immediateRequest,
+    ) as ParentContext & {
       handoff: ChildHandoff;
     };
     if (

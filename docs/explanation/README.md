@@ -15,6 +15,7 @@ The contract is elsewhere: [`docs/reference/specs/`](../reference/specs/README.m
 - [One definition, every surface](one-command-many-surfaces.md) — one command becomes chat, CLI, HTTP and MCP.
 - [Runs: live and recorded](runs-live-and-history.md) — live progress and finished history.
 - [A thread outlives its runs](a-thread-continues.md) — the shared conversation and agent working logs.
+- [How agents keep context](context-engineering.md) — research, phase notes, focused child context and recall.
 - [Why config is layered](config-layers.md) — six layers, effort included.
 
 ## Trust

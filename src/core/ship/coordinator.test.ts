@@ -2864,6 +2864,53 @@ describe("the unit pipeline — every ending the ship pipeline has, on step retu
     expect(d.state.ending).toMatchObject({ kind: "held", cause: "blocked" });
   });
 
+  it.each([undefined, "run-research"])(
+    "a fresh adopted PR selects research only without its retained producer %s",
+    (researchRunId) => {
+      const d = new Driver(
+        openUnitPipeline(input({ research: true, researchRunId, generated: true, freshAdopt: true }), T0),
+      );
+      d.answer({
+        type: "pr-check",
+        pr: { state: "open", prNumber: 7, url: PR_URL, headSha: HEAD_A, headBranchExists: true },
+        at: T0,
+      });
+      expect(d.action).toMatchObject({
+        type: "spawn",
+        preset: researchRunId ? "coding" : "research",
+        brief: researchRunId ? { kind: "contract", researchRunId: "run-research" } : { kind: "research" },
+      });
+      expect(d.state.spendUsd).toBe(0);
+    },
+  );
+  it.each(["coding", "findings", "rebase"] as const)(
+    "retains original research and the recorded writer in every %s brief",
+    (kind) => {
+      const state = {
+        ...openUnitPipeline(input({ research: true, researchRunId: "run-research" }), T0),
+        pr: { number: 7, url: PR_URL },
+        lastReviewHead: HEAD_A,
+        lastCodingRunId: "run-writer",
+        phase: {
+          at: "spawn" as const,
+          round: { index: kind === "coding" ? 0 : 1, kind },
+          minutes: 8,
+          busy: 0,
+          holds: 0,
+        },
+      };
+      expect(nextAction(state)).toMatchObject({
+        type: "spawn",
+        preset: "coding",
+        brief: {
+          kind: kind === "coding" ? "contract" : kind,
+          researchRunId: "run-research",
+          researchProgressRunId: "run-writer",
+        },
+      });
+      expect(state.spendUsd).toBe(0);
+    },
+  );
   it("a fresh adopted PR stays held when its coding child stopped before pushing, rather than starting review on the old head", () => {
     const d = new Driver(openUnitPipeline(input({ merge: "person", generated: true, freshAdopt: true }), T0));
     d.answer({
