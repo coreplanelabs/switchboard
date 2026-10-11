@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useMediaQuery } from "@vueuse/core";
-import type { HomeAnswerTarget } from "@core/channels/homeSeed.js";
+import type { HomeAnswerTarget, HomeMergeAction } from "@core/channels/homeSeed.js";
+import MergeAction from "./MergeAction.vue";
 import { SeedKey, useViewingAs } from "../../src/lib/seed";
 import { useHomeSession } from "../lib/homeSession";
 import InlineAnswer from "./InlineAnswer.vue";
@@ -17,6 +18,7 @@ const props = defineProps<{
   attentionRecipient?: string;
   attentionRecipients?: string[];
   answers?: Record<string, HomeAnswerTarget>;
+  actions?: Record<string, HomeMergeAction>;
 }>();
 const query = ref("");
 const home = useHomeSession();
@@ -214,6 +216,10 @@ const state = (row: (typeof props.rows)[number]) => {
               }}</span>
             </div>
             <div class="green-unit-links" aria-label="Original work links">
+              <MergeAction
+                v-if="urgent && actions?.[item.data.unit.unit] && canReply"
+                :action="actions[item.data.unit.unit]"
+              />
               <button
                 v-if="urgent && answers?.[item.data.unit.unit] && home && canReply && !home.inlineAnswer.value"
                 type="button"

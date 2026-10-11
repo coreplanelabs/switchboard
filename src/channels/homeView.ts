@@ -6,7 +6,7 @@ import type { PageSender } from "./webShell.js";
 import { homeWeek } from "../core/home/week.js";
 import { systemClock } from "../core/trace/clock.js";
 import { workReadPredicate, workViewScopeOf } from "./workViewScope.js";
-import type { HomeFleetSeed, HomeAnswerTarget } from "./homeSeed.js";
+import type { HomeFleetSeed, HomeAnswerTarget, HomeMergeAction } from "./homeSeed.js";
 import type { HomeRuntimeContext, HomeThreadProjection } from "./homeRuntime.js";
 import { parsePrivateWorkerThreadKey } from "../core/privateWorkerLog.js";
 
@@ -63,6 +63,10 @@ export function createHomeViewHandler(
       context: HomeViewContext,
       snapshot: HomeFleetSeed["snapshot"],
     ) => Promise<Record<string, HomeAnswerTarget>>;
+    actions?: (
+      context: HomeViewContext,
+      snapshot: HomeFleetSeed["snapshot"],
+    ) => Promise<Record<string, HomeMergeAction>>;
   } = {},
 ) {
   return (req: IncomingMessage, res: ServerResponse, context: HomeViewContext = {}): boolean => {
@@ -219,6 +223,10 @@ export function createHomeViewHandler(
           options.answers && !actor.viewingAs && scope.mode !== "person"
             ? await options.answers(context, snapshot)
             : undefined;
+        const actions =
+          options.actions && !actor.viewingAs && scope.mode !== "person"
+            ? await options.actions(context, snapshot)
+            : undefined;
         if (!(await canEmit())) return;
         page(req, res, 200, actor, "Home", {
           page: "fleetHome",
@@ -226,6 +234,7 @@ export function createHomeViewHandler(
           attentionRecipient: reader.actorId,
           attentionRecipients: [...reader.attentionRecipients],
           ...(answers ? { answers } : {}),
+          ...(actions ? { actions } : {}),
         });
       }
     })().catch(() => plain(res, 503, "Work is unavailable."));

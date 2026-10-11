@@ -1,5 +1,3 @@
-import { createHomeService } from "../core/home/service.js";
-import { createHomeConditionReader } from "../core/home/conditions.js";
 import { seedCoordinatorInstance, seedCoordinatorUnit } from "../core/testing/coordinatorInstance.js";
 import { booleanAudienceVerifier } from "../core/testing/audienceVerifier.js";
 import { describe, expect, it, vi } from "vitest";
@@ -13,6 +11,11 @@ import { ALL_GRANTS } from "../core/authz/grants.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import { createMainTaskStarter } from "../core/coordinator/mainStart.js";
 import type { DispatchOptions } from "../core/dispatcher.js";
+import { createHomeService } from "../core/home/service.js";
+import { createHomeConditionReader } from "../core/home/conditions.js";
+import { CommandRegistry } from "../core/commandRegistry.js";
+import { registerMergeCommands, type MergeCommandDeps } from "../core/commands/merge.js";
+import { callerWith } from "../core/testing/callers.js";
 import { generatedTaskOf } from "../core/coordinator/generatedTask.js";
 import { prepareHistoricalNativeAudit } from "../core/coordinator/historicalNativeAudit.js";
 import { coordinatorReconciliationEffect } from "../core/coordinator/workflowReconciliation.js";
@@ -7496,6 +7499,74 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     await flagged.instances.putUnits([unitRow("U10"), unitRow("U11")]);
     const body = (await call(flagged, "plan", { parentInstanceId: PLAN_INSTANCE.id })).body as Record<string, unknown>;
     expect(body.idleDays).toBe(7);
+  });
+
+  it("unit-end records a real person-merge target that Home shows to its saved recipient", async () => {
+    const h = await planHarness({ issues: [issue(12, "Reviewed work")] });
+    const pr = { number: 12, url: "https://github.com/acme/api/pull/12" };
+    await h.instances.putUnits([unitRow("U10", { pr, threadKey: "slack:C1:2.0" }), unitRow("U11")]);
+    const result = await call(h, "unit-end", {
+      parentInstanceId: PLAN_INSTANCE.id,
+      unit: "U10",
+      pr,
+      headSha: "a".repeat(40),
+      ending: { kind: "merge_ready", report: "Ready for a person to merge." },
+    });
+    expect(result.status).toBe(200);
+    const saved = (await h.instances.listUnits(PLAN_INSTANCE.id)).find((row) => row.unit === "U10")!;
+    expect(saved).toMatchObject({
+      mergeAttention: { assignedTo: PLAN_INSTANCE.userId, pr, headSha: "a".repeat(40), at: NOW },
+      ending: { kind: "merge_ready", report: "Ready for a person to merge." },
+    });
+    const home = createHomeService({
+      organizationId: "acme",
+      instances: h.instances,
+      conditions: createHomeConditionReader(h.instances),
+    });
+    const snapshot = await home.snapshot({ actorId: PLAN_INSTANCE.userId, visibleTo: { kind: "all" } });
+    expect(snapshot.needsYou.map((row) => row.unit.unit)).toEqual([`${PLAN_INSTANCE.id}:U10`]);
+    expect(snapshot.needsYou[0]?.conditions[0]).toMatchObject({
+      owner: { kind: "person", id: PLAN_INSTANCE.userId },
+      nextAction: "Inspect current checks and merge the reviewed pull request when allowed.",
+    });
+    expect(saved.idle).toBeUndefined();
+    const merged: unknown[] = [];
+    const registry = new CommandRegistry<MergeCommandDeps>({ audit: () => {} });
+    registerMergeCommands(registry);
+    const deps: MergeCommandDeps = {
+      merge: {
+        service: async () => ({
+          facts: async () => ({ state: "open", headSha: "a".repeat(40), title: "Reviewed work" }),
+          reviews: async () => [{ state: "APPROVED", commitId: "a".repeat(40) }],
+          checks: async () => ({ total: 1, failed: [], pending: [] }),
+          githubLogin: async (id) => (id === "access:viewer" ? "current-viewer" : undefined),
+          merge: async (target, input) => {
+            merged.push({ target, input });
+            return { ok: true, sha: "b".repeat(40) };
+          },
+          enqueue: async () => ({ ok: true }),
+        }),
+      },
+    };
+    const command = await registry.invoke(
+      "pulls.merge",
+      {
+        args: ["acme/api#12"],
+        options: { head: saved.mergeAttention!.headSha },
+      },
+      callerWith("access", "access:viewer", ["merge:write"]),
+      deps,
+    );
+    expect(command).toMatchObject({
+      ok: true,
+      value: { kind: "merged", by: { user: "access:viewer", login: "current-viewer" } },
+    });
+    expect(merged).toEqual([
+      {
+        target: { repo: "acme/api", number: 12 },
+        input: { sha: "a".repeat(40), title: "Reviewed work", mergedBy: "current-viewer" },
+      },
+    ]);
   });
 
   it("unit-end posts a parked human-gated question on its pull request while keeping the unit unfinished", async () => {

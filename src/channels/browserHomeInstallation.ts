@@ -52,7 +52,7 @@ import { parsePrivateWorkerThreadKey, type PrivateWorkerLog } from "../core/priv
 import { privateWorkerAudienceFor } from "./privateWorker.js";
 import { isUnitContext } from "../core/dispatch/unitContext.js";
 import type { HomeRuntimeContext, HomeThreadProjection } from "./homeRuntime.js";
-import type { HomeAnswerTarget } from "./homeSeed.js";
+import type { HomeAnswerTarget, HomeMergeAction } from "./homeSeed.js";
 import type { LegacySlackAudienceOrigin, LegacySlackRecipient } from "./legacySlackAudience.js";
 import type { Actor } from "../core/authz/types.js";
 import { homeAttachedContext, type HomeContextMetadata } from "./homeAttachedContext.js";
@@ -100,6 +100,8 @@ export interface BrowserHomeInstallationOptions {
   legacyRecipient?(origin: LegacySlackAudienceOrigin): Promise<LegacySlackRecipient | undefined>;
   /** Existing unit metadata only; never its private journal or prompt bytes. */
   originalUnitRecipient?(key: UnitEventKey): Promise<OriginalUnitRecipient | undefined>;
+  /** Existing explicit GitHub binding for the actual credential; never the unit's requester. */
+  mergeLogin?(actorId: string): Promise<string | undefined>;
   refreshProjection?: Parameters<typeof createHomeHost>[0]["refreshProjection"];
   publicBaseUrl?: string;
 }
@@ -1219,6 +1221,69 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     }
     return result;
   }
+  async function mergeActions(context: HomeRuntimeContext, rows: readonly HomeUnit[]) {
+    const result: Record<string, HomeMergeAction> = {};
+    if (
+      context.actor.viewingAs ||
+      ((await options.viewScope?.(context)) ?? workViewScopeOf(context.actor).mode) === "person"
+    )
+      return result;
+    const actual = await current(context).catch(() => undefined);
+    if (
+      !actual ||
+      actual.actor.kind !== "user" ||
+      !authorize(actual.actor, "merge:write", { type: "command", id: "pulls.merge" }).allow ||
+      !(await options.mergeLogin?.(actual.actor.id))
+    )
+      return result;
+    const epoch = await host.currentEpoch(context);
+    if (!epoch) return result;
+    const recipients = new Set([actual.actor.id, ...((await options.provedActorIds?.(context)) ?? [])]);
+    const pipelines = new Map<string, { instance: CoordinatorInstance; units: Map<string, CoordinatorUnit> } | null>();
+    for (const row of rows) {
+      const key = parseUnitKey(row.unit.unit);
+      if (!key) continue;
+      if (!pipelines.has(key.instanceId)) {
+        const [instance, units] = await Promise.all([
+          options.coordinator.get(key.instanceId),
+          options.coordinator.listUnits(key.instanceId),
+        ]);
+        const byUnit = new Map(units.map((unit) => [unit.unit, unit]));
+        pipelines.set(key.instanceId, instance && byUnit.size === units.length ? { instance, units: byUnit } : null);
+      }
+      const pipeline = pipelines.get(key.instanceId),
+        unit = pipeline?.units.get(key.unit);
+      const saved = pipeline && unit ? { instance: pipeline.instance, unit } : undefined;
+      const a = saved?.unit.mergeAttention;
+      if (
+        !saved ||
+        !a ||
+        !recipients.has(a.assignedTo) ||
+        saved.unit.ending?.kind !== "merge_ready" ||
+        saved.unit.pr?.number !== a.pr.number ||
+        saved.unit.pr.url !== a.pr.url ||
+        saved.unit.lastPush !== a.headSha
+      )
+        continue;
+      const [owner, name] = saved.instance.repo.split("/");
+      if (
+        !owner ||
+        !name ||
+        !authorize(actual.actor, "repo:use", { type: "repo", owner, name }).allow ||
+        !matchesPredicate(readableRuns(actual.actor), {
+          userId: saved.instance.userId,
+          channelId: saved.instance.channelId,
+          repo: saved.instance.repo,
+          channelVisibility: "unknown",
+        })
+      )
+        continue;
+      if (saved.unit.workBrief && !(await canReadPrivateUnit(context, saved.instance, saved.unit))) continue;
+      result[row.unit.unit] = { kind: "merge", pr: `${saved.instance.repo}#${a.pr.number}`, head: a.headSha };
+    }
+    const fresh = await current(context).catch(() => undefined);
+    return fresh?.actor.id === actual.actor.id && epoch === (await host.currentEpoch(context)) ? result : {};
+  }
   return {
     host,
     handler: host.handler,
@@ -1226,6 +1291,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     runtime,
     readThread,
     answers,
+    mergeActions,
     canReadPrivateUnit,
     questionOwner,
     readOriginalRun,

@@ -107,7 +107,7 @@
     "src/core/chatMessage.ts": "927d2931ac24b29555c29fcac1c077fb205aa7eead55352cec8b5a18df6afd04",
     "src/core/checkExecutionSchema.ts": "492ca0d08803d3e26fdb8803ca2e1a0188fada72845137a0f618564346515d02",
     "src/core/checkInspection.ts": "a735abcec1c7d2707e3ef486ed04a74d5be021653b9bc987437b69ce64db19ca",
-    "src/core/coordinator/contract.ts": "64cd5ca0fec27810670c4065c24b3712d64fc0f69e9a9ca15a8c628f93b1b6c0",
+    "src/core/coordinator/contract.ts": "cc24837b8744ac71578ced2f1b83300b676103c633be4b428ce2c474ac00a21e",
     "src/core/coordinator/historicalNativeAudit.ts": "31f370b1ef57507079c291bf088ab06d7dd45715557ab2dff28baf7286146be5",
     "src/core/coordinator/mainWorkObservation.ts": "8336abc6d7bff35c873773758701967f5094ce888e58b7206920dfd3d6919bf3",
     "src/core/coordinator/maintenanceIdentity.ts": "aed570306a777c0f063942a388f97b2d39193e768405063bef2da6fa10ddc1d0",

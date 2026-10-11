@@ -87,6 +87,68 @@ const json = (value: unknown) =>
   new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
 const host = defineComponent({ render: () => h("div", [h(Home), h(ConversationDock)]) });
 describe("Home actions", () => {
+  it("merges an owned completed review through its exact saved command choice without opening a reply composer", async () => {
+    const calls: unknown[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      calls.push({ url, body: JSON.parse(String(init?.body)) });
+      if (calls.length === 1)
+        return new Response(
+          JSON.stringify({
+            error: "confirmation_required",
+            confirmation: {
+              id: "saved-merge",
+              line: "pulls merge sample/api#42 --head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            },
+          }),
+          { status: 409 },
+        );
+      if (calls.length === 2) throw new Error("lost acknowledgement");
+      return json({ kind: "merged", sha: "b".repeat(40) });
+    });
+    const wrapper = mountApp(Home, {
+      seed: {
+        ...seed,
+        answers: {},
+        actions: {
+          "i:q": { kind: "merge", pr: "sample/api#42", head: "a".repeat(40) },
+        },
+      },
+    });
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "Merge")!
+      .trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("pulls merge sample/api#42 --head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(wrapper.find("textarea").exists()).toBe(false);
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "Merge")!
+      .trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("The result is unknown.");
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "Check saved action")!
+      .trigger("click");
+    await flushPromises();
+    expect(wrapper.text()).toContain("Merged.");
+    expect(calls).toEqual([
+      { url: "/api/pulls.merge", body: { pr: "sample/api#42", head: "a".repeat(40) } },
+      { url: "/api/pulls.merge", body: { _confirmation: { kind: "confirm", id: "saved-merge" } } },
+      { url: "/api/pulls.merge", body: { _confirmation: { kind: "confirm", id: "saved-merge" } } },
+    ]);
+    const observer = mountApp(Home, {
+      seed: {
+        ...seed,
+        viewingAs: { id: "slack:bob" },
+        dataView: { mode: "person" },
+        actions: { "i:q": { kind: "merge", pr: "sample/api#42", head: "a".repeat(40) } },
+      },
+    });
+    expect(observer.findAll("button").some((button) => button.text() === "Merge")).toBe(false);
+    expect(observer.find('a[href="https://github.com/sample/api/pull/42"]').exists()).toBe(true);
+  });
   it("answers its own All people question as the unchanged current sender while foreign metadata has no answer control", async () => {
     const sends: unknown[] = [];
     const home = createHomeSession(

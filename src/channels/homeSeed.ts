@@ -70,11 +70,18 @@ export interface HomeAnswerTarget {
   question: string;
   primaryAction?: HomePrimaryAction;
 }
+export interface HomeMergeAction {
+  kind: "merge";
+  pr: string;
+  head: string;
+}
 export interface HomeFleetSeed {
   page: "fleetHome";
   snapshot: HomeSnapshot;
   /** Only the current actor's exact recorded question, selected by the server. */
   answers?: Record<string, HomeAnswerTarget>;
+  /** Current viewer command affordances; the command rechecks authority and head. */
+  actions?: Record<string, HomeMergeAction>;
   /** Exact recipient resolved by the server, never inferred from browser context. */
   attentionRecipient?: string;
   /** Current directory-proved source identities for display only. */

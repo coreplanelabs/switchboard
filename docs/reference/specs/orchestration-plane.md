@@ -200,6 +200,7 @@ The embedded chat shows the same saved-action confirmation control as Threads. C
 | Criterion | Proof |
 | --- | --- |
 | The shared state alarm saves its next wake before native Workflow discovery or other external work starts. A process loss before `finally` cannot remove that saved wake. An earlier deadline for other work is preserved. This also applies with no live agent runs and with physical history maintenance paused. | `[unit]` `deploy/cloudflare-memory/runLedger.test.ts::durable coordinator Workflow reconciliation::saves the next wake before native discovery…`; `::blocks native discovery until the next wake is acknowledged and resumes on a later alarm` |
+| A merge command with a recorded head refuses a later approved head; existing callers without the option keep the current merge door | `[unit]` `src/core/commands/merge.test.ts::pulls merge and pulls enqueue — the merge door as commands (record 0070)::merges the recorded head and refuses a later approved head for the same saved action` |
 
 ## Registry commands in the orchestrator
 
