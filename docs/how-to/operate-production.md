@@ -259,3 +259,29 @@ The default confirmation class is `write`. A permitted `boundary.confirm: destru
 An expired, cancelled or consumed id cannot execute again. If a result was lost, inspect the original run history before asking for a new action. A deployed build and a finished request alone do not prove its effect.
 
 For rollout, deploy the state Worker approval routes before the bot. The routes extend the existing confirmation table and keep older saved rows readable. Missing support refuses before an action runs.
+
+
+## Verify an existing Sandbox without uploading
+
+Use the qualified verifier CLI from a clean checkout or published package, with the installation's existing deployment profile, account and credentials. The verifier source can differ from the Worker being checked.
+
+First read the installed facts:
+
+```sh
+npm run cli -- deploy inspect --expected-commit <deployed-worker-commit>
+```
+
+Inspection reports the application's numeric version and image digest, and whether the container inventory is complete. It never sends an echo or grants target acceptance. A failed inventory read keeps any application facts already read and records bounded paging diagnostics. Existing failed deployment receipts remain failed.
+
+Bind the desired image independently: compare the installed digest with the release publisher's manifest and build-provenance attestation. Execution images can survive Worker releases; use the desired release's Dockerfile/COPY input tag (`src/deploy/imageInputs.ts`) and a qualified digest receipt for those unchanged inputs. A matching Worker commit alone cannot establish which SDK image is installed. The opaque application version is an observation, not a Worker build number; pin it only after the image is qualified for the desired release.
+
+Then check the explicit pins without an echo:
+
+```sh
+npm run cli -- deploy verify --expected-commit <deployed-worker-commit> --expected-app-version <qualified-app-version> --expected-image sha256:<qualified-image-digest> --inventory-only
+```
+
+This grants inventory proof only. For full readiness, the live operator can run the same command without `--inventory-only` after authorizing the echo. Complete inventory and target pins must pass before the probe; exact health, application and complete inventory are checked again after it. Both commands retain the existing deadline, cancellation and pagination refusals. Neither uploads, copies an image, restarts a Worker or invokes a model.
+
+
+For the existing GHA credential path, dispatch `verify-sandbox.yml` from qualified `main`, with `verifier-commit` equal to that exact main SHA and `expected-commit` equal to the existing Worker commit. Its default `inspect` mode collects the observation without invoking a model or deployment. After independent image qualification, use `inventory` with both target pins; `probe` explicitly authorizes the echo. The production environment and deploy concurrency group retain the existing actor and serialization. The run keeps its observation and bounded paging artifact for seven days. A new successful observation does not rewrite the old deployment failure or establish its cause.

@@ -543,6 +543,23 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     "action": "deploy:read",
     "args": [],
     "effect": "read",
+    "id": "deploy.inspect",
+    "options": [
+      {
+        "name": "expectedCommit",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
+    "action": "deploy:read",
+    "args": [],
+    "effect": "read",
     "id": "deploy.plan",
     "options": [
       {
@@ -650,6 +667,38 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "name": "source",
         "required": false,
         "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+    ],
+  },
+  {
+    "action": "deploy:write",
+    "args": [],
+    "effect": "write",
+    "id": "deploy.verify",
+    "options": [
+      {
+        "name": "expectedCommit",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "expectedAppVersion",
+        "required": true,
+        "type": "integer",
+      },
+      {
+        "name": "expectedImage",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "inventoryOnly",
+        "required": false,
+        "type": "boolean",
       },
     ],
     "resource": "command",
