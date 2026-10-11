@@ -844,6 +844,24 @@ describe("createLiveViewHandler (node:http)", () => {
     handler(missing.req, missing.res);
     await missing.finished;
     expect(missing.status).toBe(404);
+
+    const empty = fakeReqRes("GET", `/runs/${id}?t=`);
+    handler(empty.req, empty.res);
+    await empty.finished;
+    expect(empty.status).toBe(404);
+    expect((seedOf(empty.body()) as RunNotFoundSeed).page).toBe("runNotFound");
+
+    const restored = reg.create("stored empty capability", undefined, { id: "empty-run", token: "" });
+    const invalidStored = fakeReqRes("GET", `/runs/${restored.id}?t=`);
+    handler(invalidStored.req, invalidStored.res);
+    await invalidStored.finished;
+    expect(invalidStored.status).toBe(404);
+    expect((seedOf(invalidStored.body()) as RunNotFoundSeed).page).toBe("runNotFound");
+    const stop = fakeReqRes("POST", `/runs/${restored.id}/stop?t=&mode=hard`);
+    handler(stop.req, stop.res);
+    await stop.finished;
+    expect(stop.status).toBe(404);
+    expect(restored.control.hardSignal.aborted).toBe(false);
   });
 
   it("streams SSE for a valid id+token and forwards events", () => {
@@ -1347,6 +1365,7 @@ describe("run control: POST /runs/:id/stop", () => {
     const handler = liveOnlyHandler(reg);
     for (const url of [
       `/runs/${id}/stop?t=wrong&mode=hard`,
+      `/runs/${id}/stop?t=&mode=hard`,
       `/runs/${id}/stop?mode=hard`,
       `/runs/nope/stop?t=tok-1&mode=hard`,
     ]) {

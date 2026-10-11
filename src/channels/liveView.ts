@@ -713,7 +713,7 @@ export function createLiveViewHandler(
     }
 
     const token = url.searchParams.get("t") ?? "";
-    const access = token ? service.authorizeLive(route.id, token) : null;
+    const access = service.authorizeLive(route.id, token);
 
     // ── Live path: the token checked out. Synchronous — the registry answers
     // from memory, never the store.
