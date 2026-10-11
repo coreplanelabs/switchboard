@@ -60,7 +60,7 @@ describe("private context refusal receipt on the finished run", () => {
     ).toBeUndefined();
   });
 
-  it("closes a reclaimed run with its row's setup result, and drops a malformed one (record 0097)", () => {
+  it("closes a reclaimed run with its row's setup result and target pull request, and drops a malformed setup result (record 0097)", () => {
     const row: LiveRunRow = {
       runId: "review-run",
       threadKey: "slack:CX:1.0",
@@ -69,7 +69,14 @@ describe("private context refusal receipt on the finished run", () => {
       startedAt: 1,
       phase: "live",
       stop: null,
-      meta: { agent: "review", channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0" },
+      meta: {
+        agent: "review",
+        channelId: "slack:CX",
+        userId: "slack:UX",
+        threadKey: "slack:CX:1.0",
+        repo: "o/r",
+        pr: 42,
+      },
       card: null,
       system: "system",
       tools: [],
@@ -78,6 +85,7 @@ describe("private context refusal receipt on the finished run", () => {
     const record = reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 10 });
     expect(record.setup).toEqual({ version: 1, requested: "resident", restored: true });
     expect(isRunRecord(record)).toBe(true);
+    expect(record.targetPr).toBe(42);
     row.state.setup = { version: 1, requested: "resident", restored: true, reason: "workload_full" };
     expect(reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 10 }).setup).toBeUndefined();
   });
@@ -466,6 +474,14 @@ describe("assembleRunRecord — the handoff on the record", () => {
     finishedAt: 10,
     status: "completed" as const,
     diagnosis: analyzeRunFriction([], { finished: true, truncated: false }),
+  });
+
+  it("carries the pull request the run was admitted to act on, and refuses one that is not a positive integer (record 0097)", () => {
+    const record = assembleRunRecord({ ...base(), repo: "o/r", targetPr: 42 });
+    expect(record.targetPr).toBe(42);
+    expect(isRunRecord(record)).toBe(true);
+    for (const bad of [0, -1, 1.5, "42"]) expect(isRunRecord({ ...record, targetPr: bad })).toBe(false);
+    expect(assembleRunRecord(base()).targetPr).toBeUndefined();
   });
 
   it("carries the setup result and refuses one whose fields disagree (record 0097)", () => {

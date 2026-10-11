@@ -11,8 +11,13 @@ import {
   POINT_COLUMNS,
   pointOf,
   isTerminalClose,
+  isReviewMetricsPoint,
   outcomeOf,
   pointEmits,
+  REVIEW_POINT_COLUMNS,
+  reviewBlobOf,
+  reviewDoubleOf,
+  reviewPointOf,
   surfaceOf,
   workspaceWordOf,
   type RunMetricsPoint,
@@ -477,5 +482,80 @@ describe("pointOf — the four columns record 0097 appends", () => {
     expect(blobOf(p, "outcome")).toBe("cancellation");
     expect(blobOf(p, "error type")).toBe("");
     expect(blobOf(p, "setup reason")).toBe("stopped_in_drain");
+  });
+});
+
+// Record 0097, "Rows and columns": the review row, its own schema word.
+describe("reviewPointOf — the review row", () => {
+  const verdict = (
+    v: "approve" | "request_changes",
+    severities: Array<"blocking" | "major" | "minor" | "nit"> = [],
+  ) => ({
+    verdict: v,
+    summary: "s",
+    findings: severities.map((severity, i) => ({ id: `F${i + 1}`, severity, file: "a.ts", title: "t" })),
+  });
+  const review = (over: Partial<RunRecord> = {}) =>
+    record({
+      agent: "review",
+      channelId: "slack:C1",
+      repo: "o/r",
+      targetPr: 42,
+      reviewHead: "a".repeat(40),
+      verdict: verdict("request_changes", ["major", "minor", "minor", "nit"]),
+      ...over,
+    });
+
+  it("fills its own columns from the run record's target, never from the review post", () => {
+    const p = reviewPointOf(
+      review({
+        reviewPost: {
+          posted: true,
+          target: { repo: "x/y", number: 7 },
+          head: "b".repeat(40),
+          verdict: "approve",
+        } as RunRecord["reviewPost"],
+      }),
+    )!;
+    expect(p.indexes).toEqual(["review"]);
+    expect(p.blobs).toHaveLength(REVIEW_POINT_COLUMNS.blobs.length);
+    expect(p.doubles).toHaveLength(REVIEW_POINT_COLUMNS.doubles.length);
+    expect(reviewBlobOf(p, "schema")).toBe("review-1");
+    expect(reviewBlobOf(p, "run id")).toBe("run-1");
+    expect(reviewBlobOf(p, "repository")).toBe("o/r");
+    expect(reviewBlobOf(p, "pull request number")).toBe("42");
+    expect(reviewBlobOf(p, "head revision")).toBe("a".repeat(40));
+    expect(reviewBlobOf(p, "verdict")).toBe("changes_requested");
+    expect(reviewBlobOf(p, "requester")).toBe("slack:UALICE");
+    expect(reviewBlobOf(p, "surface")).toBe("slack");
+    expect(reviewDoubleOf(p, "finished at")).toBe(NOW);
+    expect(reviewDoubleOf(p, "duration")).toBe(61_000);
+    expect(reviewDoubleOf(p, "findings")).toBe(4);
+    expect(reviewDoubleOf(p, "blocking")).toBe(0);
+    expect(reviewDoubleOf(p, "major")).toBe(1);
+    expect(reviewDoubleOf(p, "minor")).toBe(2);
+    expect(reviewDoubleOf(p, "nit")).toBe(1);
+    expect(isReviewMetricsPoint(p)).toBe(true);
+    expect(isRunMetricsPoint(p)).toBe(false);
+  });
+
+  it("an approval reads approved; a branch review with no pull request writes an empty number", () => {
+    const p = reviewPointOf(review({ verdict: verdict("approve"), targetPr: undefined }))!;
+    expect(reviewBlobOf(p, "verdict")).toBe("approved");
+    expect(reviewBlobOf(p, "pull request number")).toBe("");
+    expect(reviewDoubleOf(p, "findings")).toBe(0);
+  });
+
+  it("writes nothing for a run that is not a review, has no verdict, or is not a terminal close", () => {
+    expect(reviewPointOf(review({ agent: "coding" }))).toBeUndefined();
+    expect(reviewPointOf(review({ verdict: undefined }))).toBeUndefined();
+    expect(reviewPointOf(review({ provisional: true }))).toBeUndefined();
+    expect(reviewPointOf(review({ restarting: true, status: "interrupted" }))).toBeUndefined();
+  });
+
+  it("falls back to the run's observed head when the reviewed head is absent", () => {
+    expect(
+      reviewBlobOf(reviewPointOf(review({ reviewHead: undefined, headSha: "c".repeat(40) }))!, "head revision"),
+    ).toBe("c".repeat(40));
   });
 });

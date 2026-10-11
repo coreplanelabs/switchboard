@@ -3,6 +3,7 @@ import { llmUsdOfUsage, type ModelPriceTable } from "./modelPricing.js";
 import { emptyUsage, UNKNOWN_AGENT } from "./runUsage.js";
 import { utf8ByteLength, type RunRecord } from "./runRecord.js";
 import { isLostWord } from "./runSetup.js";
+import { FINDING_SEVERITIES } from "./reviewVerdict.js";
 
 // Run metrics (docs/reference/specs/run-metrics.md; docs/decisions/0063-every-finished-run-writes-one-metrics-point-and-a-metrics-page-reads-the-trend.md):
 // one flat point per finished run, written to a Workers Analytics Engine
@@ -324,4 +325,96 @@ export function isTerminalClose(record: Pick<RunRecord, "provisional" | "restart
  */
 export function pointEmits(latched: boolean, stored: Pick<RunRecord, "provisional" | "restarting">): boolean {
   return !latched && isTerminalClose(stored);
+}
+
+// ---- The review row (record 0097, "Rows and columns") ----------------------
+//
+// One row per review run with a verdict, written under the same terminal rule
+// and latch as the run row, with its own schema word so 0063's reader (which
+// filters on `schema = "1"`) never counts it. Every field is read from the
+// run record; nothing here needs a price, so the store computes the row from
+// the record it committed.
+
+/** The review row's schema word, `blob1`. */
+export const REVIEW_POINT_SCHEMA = "review-1";
+
+const REVIEW_BLOB_NAMES = [
+  "schema",
+  "run id",
+  "repository",
+  "pull request number",
+  "head revision",
+  "verdict",
+  "requester",
+  "surface",
+] as const;
+
+const REVIEW_DOUBLE_NAMES = ["finished at", "duration", "findings", ...FINDING_SEVERITIES] as const;
+
+export type ReviewBlobName = (typeof REVIEW_BLOB_NAMES)[number];
+export type ReviewDoubleName = (typeof REVIEW_DOUBLE_NAMES)[number];
+
+/** The review row's one ordered table, as `POINT_COLUMNS` is the run row's. */
+export const REVIEW_POINT_COLUMNS = {
+  index: ["review"] as const,
+  blobs: REVIEW_BLOB_NAMES,
+  doubles: REVIEW_DOUBLE_NAMES,
+};
+
+/** A review row's blob by its `REVIEW_POINT_COLUMNS` name. */
+export function reviewBlobOf(point: RunMetricsPoint, name: ReviewBlobName): string {
+  return point.blobs[REVIEW_POINT_COLUMNS.blobs.indexOf(name)];
+}
+
+/** A review row's double by its `REVIEW_POINT_COLUMNS` name. */
+export function reviewDoubleOf(point: RunMetricsPoint, name: ReviewDoubleName): number {
+  return point.doubles[REVIEW_POINT_COLUMNS.doubles.indexOf(name)];
+}
+
+/** The review row of a review run's terminal close with a verdict, else
+ *  undefined. The target (repository, pull request number, head) comes from
+ *  the run record — `repo`, `targetPr`, `reviewHead` falling back to the
+ *  observed `headSha` — never from `reviewPost.target`, which exists only when
+ *  the post succeeded. A branch review with no pull request writes an empty
+ *  number. The verdict reads in GitHub's review states. */
+export function reviewPointOf(record: RunRecord): RunMetricsPoint | undefined {
+  if (record.agent !== "review" || record.verdict === undefined || !isTerminalClose(record)) return undefined;
+  const findings = record.verdict.findings ?? [];
+  const blobs: Record<ReviewBlobName, string> = {
+    schema: REVIEW_POINT_SCHEMA,
+    "run id": record.id,
+    repository: record.repo ?? "",
+    "pull request number": record.targetPr !== undefined ? String(record.targetPr) : "",
+    "head revision": record.reviewHead ?? record.headSha ?? "",
+    verdict: record.verdict.verdict === "approve" ? "approved" : "changes_requested",
+    requester: record.userId,
+    surface: surfaceOf(record.channelId),
+  };
+  const doubles: Record<ReviewDoubleName, number> = {
+    "finished at": record.finishedAt,
+    duration: record.finishedAt - (record.receivedAt ?? record.startedAt),
+    findings: findings.length,
+    blocking: findings.filter((f) => f.severity === "blocking").length,
+    major: findings.filter((f) => f.severity === "major").length,
+    minor: findings.filter((f) => f.severity === "minor").length,
+    nit: findings.filter((f) => f.severity === "nit").length,
+  };
+  return {
+    indexes: ["review"],
+    blobs: REVIEW_POINT_COLUMNS.blobs.map((n) => capBlob(blobs[n])),
+    doubles: REVIEW_POINT_COLUMNS.doubles.map((n) => doubles[n]),
+  };
+}
+
+/** Structural check on a review row: the review index, exactly the review
+ *  columns, its own schema word, each blob within the byte cap, finite numbers. */
+export function isReviewMetricsPoint(v: unknown): v is RunMetricsPoint {
+  if (typeof v !== "object" || v === null) return false;
+  const p = v as Record<string, unknown>;
+  if (!Array.isArray(p.indexes) || p.indexes.length !== 1 || p.indexes[0] !== "review") return false;
+  if (!Array.isArray(p.blobs) || p.blobs.length !== REVIEW_POINT_COLUMNS.blobs.length) return false;
+  if (p.blobs[0] !== REVIEW_POINT_SCHEMA) return false;
+  if (!p.blobs.every((b) => typeof b === "string" && utf8ByteLength(b) <= MAX_POINT_BLOB_BYTES)) return false;
+  if (!Array.isArray(p.doubles) || p.doubles.length !== REVIEW_POINT_COLUMNS.doubles.length) return false;
+  return p.doubles.every(isFinite_);
 }
