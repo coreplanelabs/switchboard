@@ -23,6 +23,7 @@ import { chatActorOf } from "../authz/actor.js";
 import { clipSourceLabel, type RunProfile } from "../../config/profile.js";
 import type { RequestDirectives, ThreadDirectives } from "../../directives.js";
 import {
+  SeedClaimRefusedError,
   WorkspaceReattachLeaseSpentError,
   WorkspaceReattachRefusedError,
   ReadyEnvironmentError,
@@ -34,10 +35,12 @@ import {
 } from "../../execution/factory.js";
 import { fetchBranchHeadSha, fetchRepoShipInfo } from "../../execution/githubPulls.js";
 import type { ReadyEnvironmentRequirement } from "../../execution/seedPlan.js";
-import { isRunStopError } from "../../execution/executor.js";
+import { ExecCapacityError, isRunStopError } from "../../execution/executor.js";
 import type { ResidentStep } from "../../execution/residentStepTrace.js";
 import { graftResidentSteps, residentTraceOf } from "../../execution/residentTrace.js";
-import { ResidentNeedsRefError } from "../../execution/resident.js";
+import { drainWaitOf, ResidentNeedsRefError, ResidentRegistrationMismatchError } from "../../execution/resident.js";
+import { requestedWorkspaceOf, type LostWord, type RunSetup, type SetupRequested } from "../runSetup.js";
+import { ResidentClaimRefusedError } from "../runLedger/writeThrough.js";
 import { reflectionActor, type MemoryStore, type MemoryRecord } from "../memory/index.js";
 import type { AudienceCheck } from "../audienceDecision.js";
 import type { ContextDependencies } from "../references/contextDependencies.js";
@@ -1073,9 +1076,39 @@ export type WorkspaceReattach =
 export type WorkspaceAttach =
   | WorkspaceReattach
   | { kind: "reattach_unready"; reason: ReadyEnvironmentReason; reattach: WorkspaceBinding; message: string }
-  | { kind: "refused"; reason: "which_branch" | "workspace_backend_unconfigured" }
+  | { kind: "refused"; reason: "which_branch" | "workspace_backend_unconfigured"; setup?: RunSetup }
   /** The run's own stop ended the attach (its signal rode into the attach's wait): not a failure, never provisioned cold. */
-  | { kind: "stopped" };
+  | { kind: "stopped"; setup?: RunSetup };
+
+/** Why an attach that threw left the run with no workspace (record 0097),
+ *  read from the error's type only: a lost word, `lost_other` for any failure
+ *  no word names. A stop is `stopped_in_drain` only when it ended a drain wait. */
+export function lostWordOf(err: unknown): LostWord {
+  if (err instanceof ResidentNeedsRefError) return "ref_unresolved";
+  if (err instanceof ResidentRegistrationMismatchError) return "registration_mismatch";
+  if (err instanceof ResidentClaimRefusedError) return "resident_claim_error";
+  if (err instanceof SeedClaimRefusedError) return "seed_claim_refused";
+  if (err instanceof ExecCapacityError) return "sandbox_start_timeout";
+  if (isRunStopError(err) && drainWaitOf(err) !== undefined) return "stopped_in_drain";
+  return "lost_other";
+}
+
+/** The lost setup result an attach failure carries to the run's record: set
+ *  on the thrown error where the attach saw it, so only an attach failure
+ *  ever names one; the first stamp stands. */
+function stampLostSetup<E>(err: E, requested: SetupRequested | undefined): E {
+  if (requested !== undefined && err !== null && typeof err === "object") {
+    const stamped = err as { lostSetup?: RunSetup };
+    stamped.lostSetup ??= { version: 1, requested, reason: lostWordOf(err) };
+  }
+  return err;
+}
+
+/** The lost setup result an attach failure stamped, for the failed-setup record. */
+export function lostSetupOf(err: unknown): RunSetup | undefined {
+  if (err === null || typeof err !== "object") return undefined;
+  return (err as { lostSetup?: RunSetup }).lostSetup;
+}
 
 /**
  * The attach itself, under its `dispatch.workspace.attach` span naming the
@@ -1278,6 +1311,14 @@ export async function attachWorkspace(
 ): Promise<WorkspaceAttach> {
   const { msg, refuse, card, shell, closeLines, clock, agent, profile, repoCtx, root, reattach, stopSignal } = ctx;
   const { remainingMs } = ctx;
+  // What a fresh run asked for (record 0097), so a run that gets no workspace
+  // still says what it wanted and why; a re-attach keeps its row's result.
+  const requested =
+    reattach === undefined
+      ? requestedWorkspaceOf(profile.machine, repoCtx.repo, deps.config.config.execution?.resident !== undefined)
+      : undefined;
+  const lost = (reason: LostWord): RunSetup | undefined =>
+    requested !== undefined ? { version: 1, requested, reason } : undefined;
   // A resumed pilot uses its saved readiness check across config reloads.
   // An absent or invalid saved check leaves the original row paused.
   if (
@@ -1313,7 +1354,7 @@ export async function attachWorkspace(
           }),
         ),
     );
-    return { kind: "refused", reason: "workspace_backend_unconfigured" };
+    return { kind: "refused", reason: "workspace_backend_unconfigured", setup: lost("lost_other") };
   }
   let round: RoundWorkspace;
   try {
@@ -1346,7 +1387,9 @@ export async function attachWorkspace(
         return ctx.preserveOnReattachRefusal === true
           ? { kind: "reattach_unready", reason: err.reason, reattach, message: err.message }
           : { kind: "reattach_refused", why: err.message };
-      throw new RefusalError(refusalOf("setup_failed", err.message));
+      const refused = new RefusalError(refusalOf("setup_failed", err.message));
+      stampLostSetup(refused, requested);
+      throw refused;
     }
     // Ask-once: the resident has no ref binding for this thread, the
     // message named no branch, AND the resident did not name a default to
@@ -1363,7 +1406,7 @@ export async function attachWorkspace(
           shell.close({ kind: "not_started", icon: "🌿", reason: "which branch?", ...closeLines(clock(), false) }),
         ),
       );
-      return { kind: "refused", reason: "which_branch" };
+      return { kind: "refused", reason: "which_branch", setup: lost("ref_unresolved") };
     }
     // A pilot coding checkout may hold unpublished edits. Read its durable
     // policy, not today's config, which can change before a recovery.
@@ -1378,7 +1421,8 @@ export async function attachWorkspace(
     // Read by the error's typed shape, never by the signal's state: a
     // provisioning failure that merely coincided with a pending stop stays the
     // failure it is (`setup_failed`, the error replied).
-    if (isRunStopError(err)) return { kind: "stopped" };
+    if (isRunStopError(err)) return { kind: "stopped", setup: lost(lostWordOf(err)) };
+    stampLostSetup(err, requested);
     throw err;
   }
   return { kind: "attached", round };

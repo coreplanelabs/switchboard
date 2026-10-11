@@ -38,6 +38,7 @@ import type {
 import type { DispatchIdentityRewrite } from "../../execution/identityRewrite.js";
 import type { ReviewCommentTarget } from "../../execution/githubComments.js";
 import { checkoutOfSelection, workspaceBindingFor, type ExecutorSelection } from "../../execution/factory.js";
+import { reallocatedSetup } from "../runSetup.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
 import type { OperationTarget, RepoContext } from "../repoContext.js";
@@ -467,6 +468,10 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
   // beside the harness facts: the generation that resumes the run re-attaches
   // there instead of provisioning as for a new run.
   const workspaceBinding = workspaceBindingFor(selection, profile.machine);
+  // What the run asked for and why it got this workspace (record 0097),
+  // claimed beside the binding so it is durable before the first model turn;
+  // a same-id restart's claim says the workspace was reallocated.
+  const runSetup = reallocatedSetup(selection.setup, ctx.restartOf);
   // The ledger claim (docs/reference/specs/run-history.md item 35): the run's row on the
   // state Worker, with everything a resume must hand the model again — the
   // composed system prompt and the tool definitions verbatim, the card, the
@@ -570,6 +575,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
                 }
               : {})),
           ...(workspaceBinding !== undefined ? { binding: workspaceBinding } : {}),
+          ...(runSetup !== undefined ? { setup: runSetup } : {}),
           ...(ctx.restartBranchIdentityBaseline !== undefined
             ? { branchIdentityBaseline: ctx.restartBranchIdentityBaseline }
             : {}),

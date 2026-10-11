@@ -307,6 +307,16 @@ export interface TerminalCommitmentHold {
 
 /** A caller must retain this original run through setup finalization. The
  * complete private request stays on the inherited uncertain-store witness. */
+/** The ledger refused this generation's resident claim (the run's row is
+ *  fenced or owned elsewhere): typed so a run that lost its workspace this way
+ *  records `resident_claim_error` (record 0097). Its message is unchanged. */
+export class ResidentClaimRefusedError extends Error {
+  constructor(readonly reason: string) {
+    super(`resident claim refused: ${reason}`);
+    this.name = "ResidentClaimRefusedError";
+  }
+}
+
 export class TerminalCommitmentUnknownError extends UncertainStoreError {
   readonly hold: TerminalCommitmentHold;
   constructor(hold: TerminalCommitmentHold, request: StoreRequestWitness) {
@@ -2688,7 +2698,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     sessionPersistence: true,
     async claimResident(runId, threadKey) {
       const result = await ledger.residentClaim(runId, gen, threadKey);
-      if (!result.ok) throw new Error(`resident claim refused: ${result.reason}`);
+      if (!result.ok) throw new ResidentClaimRefusedError(result.reason);
       return result.fence;
     },
     async reserve(req) {

@@ -70,3 +70,86 @@ export function residentRefusalCodeOf(code: unknown): ResidentRefusalCode | "fal
     ? (code as ResidentRefusalCode)
     : "fallback_other";
 }
+
+/** What the run's repository and profile asked for. */
+export type SetupRequested = "resident" | "cold" | "blank";
+
+/** How a sandbox that stood in for a resident was filled. */
+export type SetupSeeding = "snapshot" | "fresh_no_snapshot" | "fresh_after_seed_failure";
+
+/** The run's **setup result** (record 0097): what workspace the run asked
+ *  for and why it did not get it, written whenever the run asked for one.
+ *  `WorkspaceBinding` stays the executor a resume consults; this says what a
+ *  run with no workspace still has to say. Never derived from note text. */
+export interface RunSetup {
+  version: 1;
+  requested: SetupRequested;
+  /** Set only with a fallback word: the sandbox stood in for a resident. */
+  seeding?: SetupSeeding;
+  /** The resident was attached after the bot held its restore wait. */
+  restored?: true;
+  /** A fallback word (a sandbox for a requested resident) or a lost word (no workspace). */
+  reason?: FallbackWord | LostWord;
+  /** A same-id successor replaced the workspace after reattach was refused. */
+  reallocated?: true;
+}
+
+const SETUP_KEYS = ["version", "requested", "seeding", "restored", "reason", "reallocated"];
+
+/** What a run's machine class asks for, read where the factory reads it: a
+ *  `repo-resident` run asks for a resident only with a repository and a
+ *  configured resident backend, otherwise for the cold sandbox it gets by
+ *  configuration, not by fallback. A run with no machine asks for nothing. */
+export function requestedWorkspaceOf(
+  machine: string,
+  repo: string | undefined,
+  residentConfigured: boolean,
+): SetupRequested | undefined {
+  if (machine === "none") return undefined;
+  if (machine === "blank") return "blank";
+  if (machine === "repo-resident" && repo && residentConfigured) return "resident";
+  return "cold";
+}
+
+/** One decoder for the ledger row, the recovered state and the stored record:
+ *  a known shape whose fields agree with each other (record 0097's
+ *  invariants), else undefined. */
+export function runSetupOf(value: unknown): RunSetup | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const v = value as Record<string, unknown>;
+  if (v.version !== 1 || Object.keys(v).some((k) => !SETUP_KEYS.includes(k))) return undefined;
+  if (v.requested !== "resident" && v.requested !== "cold" && v.requested !== "blank") return undefined;
+  if (v.restored !== undefined && v.restored !== true) return undefined;
+  if (v.reallocated !== undefined && v.reallocated !== true) return undefined;
+  const fallback = typeof v.reason === "string" && (FALLBACK_WORDS as readonly string[]).includes(v.reason);
+  const lost = typeof v.reason === "string" && (LOST_WORDS as readonly string[]).includes(v.reason);
+  if (v.reason !== undefined && !fallback && !lost) return undefined;
+  // A fallback word means a sandbox stood in for a requested resident.
+  if (fallback && v.requested !== "resident") return undefined;
+  if (v.seeding !== undefined) {
+    if (!["snapshot", "fresh_no_snapshot", "fresh_after_seed_failure"].includes(v.seeding as string)) return undefined;
+    if (!fallback) return undefined;
+  }
+  // A restore wait leads to a resident binding: no reason beside it.
+  if (v.restored === true && (v.reason !== undefined || v.requested !== "resident")) return undefined;
+  return {
+    version: 1,
+    requested: v.requested,
+    ...(v.seeding !== undefined ? { seeding: v.seeding as SetupSeeding } : {}),
+    ...(v.restored === true ? { restored: true as const } : {}),
+    ...(v.reason !== undefined ? { reason: v.reason as FallbackWord | LostWord } : {}),
+    ...(v.reallocated === true ? { reallocated: true as const } : {}),
+  };
+}
+
+/** Whether a setup word is a lost word: the run got no workspace. */
+export function isLostWord(word: FallbackWord | LostWord | undefined): word is LostWord {
+  return word !== undefined && (LOST_WORDS as readonly string[]).includes(word);
+}
+
+/** The setup result a same-id successor claims with (record 0097): its own
+ *  allocation's result, marked `reallocated` when the claim restarts a run
+ *  whose workspace could not be re-attached. */
+export function reallocatedSetup(setup: RunSetup | undefined, restartOf: string | undefined): RunSetup | undefined {
+  return setup !== undefined && restartOf !== undefined ? { ...setup, reallocated: true } : setup;
+}

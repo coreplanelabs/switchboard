@@ -9,7 +9,7 @@ import { AGENTS, type AgentDef } from "../agents/registry.js";
 import { declaredProfile } from "../config/profile.js";
 import { CloudflareSandboxExecutor } from "./cloudflareSandbox.js";
 import { E2BExecutor } from "./e2b.js";
-import { ExecInfraError, LocalExecutor } from "./executor.js";
+import { ExecCapacityError, ExecInfraError, LocalExecutor } from "./executor.js";
 import {
   DRAIN_FALLBACK_WAIT_MS,
   DRAIN_POLL_MS,
@@ -4638,5 +4638,223 @@ describe("makeExecutor pilot ready environment", () => {
       beforeModel: true,
     });
     expect(calls).toEqual(["/status", "/seed", "/status"]);
+  });
+});
+
+// Feature: record 0097, "The workspace facts" — every selection a run that
+// asked for a workspace gets carries its setup result, decided from the
+// factory's own branches and the resident's typed code, never from the note.
+describe("the setup result on the selection (record 0097)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    resetResidentProbeCache();
+  });
+
+  const residentOpts = (): ExecutorFactoryOptions => ({
+    execution: {
+      type: "cloudflare",
+      url: "https://sandbox.example",
+      resident: { baseUrl: "https://resident.example" },
+    },
+    ...dirs(),
+  });
+  const repoCtx = () => ({ ...ctxOf(AGENTS.coding), repo: "jshttp/vary", ref: "master" });
+  const stubEnvs = () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+  };
+  function stubFetch(...responses: Array<{ status?: number; body?: unknown; reject?: string }>) {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        if (new URL(String(url)).pathname === "/exec") return new Response(JSON.stringify({ exitCode: 0 }));
+        calls.push(new URL(String(url)).pathname);
+        const next = responses.shift();
+        if (!next) throw new Error(`unexpected fetch: ${String(url)}`);
+        if (next.reject) throw new TypeError(next.reject);
+        return new Response(JSON.stringify(next.body ?? {}), { status: next.status ?? 200 });
+      }),
+    );
+    return { calls };
+  }
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+  const C1 = "3f2a9c1e-5b7d-4e8f-9a0b-1c2d3e4f5a6b";
+  const snapshot = {
+    ref: "master",
+    sha: SHA,
+    lockfileHash: "l",
+    createdAt: "t",
+    mirrorBackupId: "11111111-1111-1111-1111-111111111111",
+    checkoutBackupId: C1,
+    depsBackupId: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+  };
+  const warm = { body: { state: "warm", reason: "", snapshot } };
+  const attachOk = { body: { workspace: "/workspace/threads/x/master", ref: "master", sha: SHA, user: "worker2" } };
+  const seeded = {
+    body: {
+      seeded: true,
+      cached: false,
+      slug: "jshttp/vary",
+      ref: "master",
+      sha: SHA,
+      from: { ref: "master", sha: SHA, checkoutBackupId: C1 },
+      ms: 30_000,
+    },
+  };
+  const refused = (code?: string) => ({
+    status: 503,
+    body: {
+      error: "resident workload is full (4/4 active owners)",
+      reason: "workload-full",
+      ...(code ? { code } : {}),
+    },
+  });
+
+  it("a warm attach requested a resident and got one: no reason", async () => {
+    stubEnvs();
+    stubFetch(warm, attachOk);
+    expect((await makeExecutor(residentOpts(), repoCtx())).setup).toEqual({ version: 1, requested: "resident" });
+  });
+
+  it("an attach after the bot held the resident's restore wait is restored", async () => {
+    stubEnvs();
+    stubFetch(
+      { body: { state: "restoring", reason: "rehydrating" } },
+      { body: { state: "warm", reason: "" } },
+      attachOk,
+    );
+    expect((await makeExecutor(residentOpts(), repoCtx())).setup).toEqual({
+      version: 1,
+      requested: "resident",
+      restored: true,
+    });
+  });
+
+  it("a refused attach falls back under the resident's code, seeded from the snapshot", async () => {
+    stubEnvs();
+    stubFetch(warm, refused("workload_full"), seeded);
+    expect((await makeExecutor(residentOpts(), repoCtx())).setup).toEqual({
+      version: 1,
+      requested: "resident",
+      seeding: "snapshot",
+      reason: "workload_full",
+    });
+  });
+
+  it("a refused attach without a code is fallback_other, never read from its sentence or reason", async () => {
+    stubEnvs();
+    stubFetch(warm, refused(), seeded);
+    expect((await makeExecutor(residentOpts(), repoCtx())).setup?.reason).toBe("fallback_other");
+  });
+
+  it("a seed that failed leaves a fresh clone: fresh_after_seed_failure", async () => {
+    stubEnvs();
+    stubFetch(warm, refused("workload_full"), {
+      body: { seeded: false, reason: "seed-failed", detail: "fixup: fix-up exited 128", step: "fixup" },
+    });
+    expect((await makeExecutor(residentOpts(), repoCtx())).setup).toEqual({
+      version: 1,
+      requested: "resident",
+      seeding: "fresh_after_seed_failure",
+      reason: "workload_full",
+    });
+  });
+
+  it("a non-serviceable resident with no snapshot: resident_not_serviceable, fresh_no_snapshot", async () => {
+    stubEnvs();
+    stubFetch({ body: { state: "onboarding", reason: "", snapshot: null } });
+    expect((await makeExecutor(residentOpts(), repoCtx())).setup).toEqual({
+      version: 1,
+      requested: "resident",
+      seeding: "fresh_no_snapshot",
+      reason: "resident_not_serviceable",
+    });
+  });
+
+  it("an unreachable resident: resident_unreachable, fresh_no_snapshot", async () => {
+    stubEnvs();
+    stubFetch({ reject: "fetch failed" });
+    expect((await makeExecutor(residentOpts(), repoCtx())).setup).toEqual({
+      version: 1,
+      requested: "resident",
+      seeding: "fresh_no_snapshot",
+      reason: "resident_unreachable",
+    });
+  });
+
+  it("a restore wait the Worker cannot hold: restore_failed", async () => {
+    stubEnvs();
+    stubFetch(
+      { body: { state: "restoring", reason: "rehydrating" } },
+      { status: 404, body: { error: "unknown route" } },
+    );
+    expect((await makeExecutor(residentOpts(), repoCtx())).setup).toMatchObject({ reason: "restore_failed" });
+  });
+
+  it("a repository not onboarded, or registered without a resident: not_resident, fresh_no_snapshot", async () => {
+    stubEnvs();
+    stubFetch(
+      { status: 404, body: { error: "unknown resource" } },
+      { status: 404, body: { error: "unknown resource" } },
+    );
+    expect((await makeExecutor(residentOpts(), repoCtx())).setup).toEqual({
+      version: 1,
+      requested: "resident",
+      seeding: "fresh_no_snapshot",
+      reason: "not_resident",
+    });
+    resetResidentProbeCache();
+    stubFetch({ body: { state: "cold", reason: "" } });
+    // A resolved head leaves the checkout to the caller's preparation: no clone here.
+    expect((await makeExecutor(residentOpts(), { ...repoCtx(), headSha: SHA })).setup).toEqual({
+      version: 1,
+      requested: "resident",
+      seeding: "fresh_no_snapshot",
+      reason: "not_resident",
+    });
+  });
+
+  it("the cold and blank classes, and a resident class with no resident configured, ask for what they get: no reason", async () => {
+    stubEnvs();
+    const cold = await makeExecutor(residentOpts(), {
+      ...repoCtx(),
+      profile: { ...repoCtx().profile, machine: "repo-cold" as const },
+    });
+    expect(cold.setup).toEqual({ version: 1, requested: "cold" });
+    const blank = await makeExecutor(residentOpts(), {
+      ...repoCtx(),
+      profile: { ...repoCtx().profile, machine: "blank" as const, identity: "none" as const },
+    });
+    expect(blank.setup).toEqual({ version: 1, requested: "blank" });
+    const unconfigured = await makeExecutor(
+      { execution: { type: "cloudflare", url: "https://sandbox.example" }, ...dirs() },
+      repoCtx(),
+    );
+    expect(unconfigured.setup).toEqual({ version: 1, requested: "cold" });
+  });
+
+  it("a claimed seed whose sandbox never starts keeps the capacity error, so the loss reads as a start timeout", async () => {
+    stubEnvs();
+    stubFetch(warm, refused("workload_full"));
+    const timeout = new ExecCapacityError("the thread's sandbox did not finish starting");
+    const seed = vi.spyOn(CloudflareSandboxExecutor.prototype, "seed").mockRejectedValue(timeout);
+    try {
+      const err = await makeExecutor(residentOpts(), {
+        ...repoCtx(),
+        headSha: SHA,
+        runId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        requester: "slack:U123",
+      }).catch((e: unknown) => e);
+      expect(err).toBe(timeout);
+    } finally {
+      seed.mockRestore();
+    }
+  });
+
+  it("an agent that asks for no workspace has no setup result", async () => {
+    const none = await makeExecutor(residentOpts(), ctxOf(AGENTS.general));
+    expect(none.setup).toBeUndefined();
   });
 });

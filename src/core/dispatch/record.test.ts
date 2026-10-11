@@ -60,6 +60,28 @@ describe("private context refusal receipt on the finished run", () => {
     ).toBeUndefined();
   });
 
+  it("closes a reclaimed run with its row's setup result, and drops a malformed one (record 0097)", () => {
+    const row: LiveRunRow = {
+      runId: "review-run",
+      threadKey: "slack:CX:1.0",
+      ownerGen: "old-generation",
+      leaseUntil: 100,
+      startedAt: 1,
+      phase: "live",
+      stop: null,
+      meta: { agent: "review", channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0" },
+      card: null,
+      system: "system",
+      tools: [],
+      state: { setup: { version: 1, requested: "resident", restored: true } },
+    };
+    const record = reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 10 });
+    expect(record.setup).toEqual({ version: 1, requested: "resident", restored: true });
+    expect(isRunRecord(record)).toBe(true);
+    row.state.setup = { version: 1, requested: "resident", restored: true, reason: "workload_full" };
+    expect(reclaimedRunRecord({ row, events: [], status: "interrupted", finishedAt: 10 }).setup).toBeUndefined();
+  });
+
   it("retains the bounded category even when the record budget drops its middle note", () => {
     const msg = {
       channelId: "slack:DPRIVATE",
@@ -444,6 +466,18 @@ describe("assembleRunRecord — the handoff on the record", () => {
     finishedAt: 10,
     status: "completed" as const,
     diagnosis: analyzeRunFriction([], { finished: true, truncated: false }),
+  });
+
+  it("carries the setup result and refuses one whose fields disagree (record 0097)", () => {
+    const setup = { version: 1 as const, requested: "resident" as const, reason: "sandbox_start_timeout" as const };
+    const record = assembleRunRecord({ ...base(), setup });
+    expect(record.setup).toEqual(setup);
+    expect(isRunRecord(record)).toBe(true);
+    expect(isRunRecord({ ...record, setup: { ...setup, seeding: "snapshot" } })).toBe(false);
+    expect(isRunRecord({ ...record, setup: { version: 1, requested: "resident", reason: "uid_exhausted" } })).toBe(
+      false,
+    );
+    expect(assembleRunRecord(base()).setup).toBeUndefined();
   });
 
   it("validates producer outcome separately from fallback text and delivery", () => {

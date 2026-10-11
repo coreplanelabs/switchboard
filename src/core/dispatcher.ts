@@ -27,6 +27,7 @@ import { contextCapsuleOf, type UnitContext, type UnitContextBinding } from "./d
 import { capturePrivateWorkContext } from "./dispatch/mainContextCapture.js";
 import type { HandoffAccess, HandoffAccessFactory } from "./dispatch/handoffRuntime.js";
 import { isBudgetAnswer } from "./answerOutcome.js";
+import { reallocatedSetup, runSetupOf, type RunSetup } from "./runSetup.js";
 import {
   audienceRefusalOf,
   audienceRefusalText,
@@ -156,6 +157,7 @@ import {
 import { RUN_LIST_MAX_LIMIT, isRunSession, type RunFailure, type RunRecord, type RunSeed } from "./runRecord.js";
 import {
   attachWorkspace,
+  lostSetupOf,
   budgetClipLabel,
   composePrompt,
   mintRunBearer,
@@ -873,6 +875,10 @@ export async function dispatch(
   // A failed setup releases an ordinary tree; a resumed pilot retains its
   // original checkout and row for recovery.
   let setupRound: RoundWorkspace | undefined;
+  /** The run's setup result (record 0097): the attach's, the resumed row's,
+   *  or the lost word a failed attach named — on the record whichever way
+   *  the run ends. */
+  let runSetup: RunSetup | undefined;
   let attachedPilotResume = false;
   let pausePilotAfterAttach: ((message: string, options?: { nextAction?: string }) => Promise<void>) | undefined;
   // The ship fork ran, and whether its branch deliberately left its run live —
@@ -2927,6 +2933,7 @@ export async function dispatch(
           finishedAt: clock(),
           status,
           ...(setupFailure !== undefined ? { failure: setupFailure } : {}),
+          ...(runSetup !== undefined ? { setup: runSetup } : {}),
           refusal: setupRefusal ?? refusalOf("setup_failed", "The run ended before its model started."),
         });
         try {
@@ -3562,6 +3569,8 @@ export async function dispatch(
         : {}),
       onLiveStateObservation: observeResidentLiveState,
     });
+    // A re-attach's own outcomes carry no setup result: the row keeps its own.
+    if ((attach.kind === "refused" || attach.kind === "stopped") && "setup" in attach) runSetup = attach.setup;
     if (attach.kind === "refused") return ended;
     if (attach.kind === "stopped") {
       // The run's own stop ended the attach: not a failure (no `setup_failed`,
@@ -3639,6 +3648,7 @@ export async function dispatch(
     }
     const { round } = attach;
     setupRound = round;
+    runSetup = resume ? runSetupOf(resume.row.state.setup) : reallocatedSetup(round.selection.setup, opts.restartOf);
     // Cold registration preparation resolved and observed the effective ref.
     // Keep it in the run context as well as the checkout and durable binding.
     if (repoCtx.ref === undefined && round.selection.cold !== undefined) {
@@ -4421,6 +4431,7 @@ export async function dispatch(
           input,
         ),
       ...(sourceReads ? { sourceReads } : {}),
+      ...(runSetup !== undefined ? { runSetup } : {}),
       msg,
       io,
       addressSeverity,
@@ -4783,6 +4794,7 @@ export async function dispatch(
     if (setupFinalizer && !runLoopStarted) {
       setupRefusal ??= thrown ?? refusalOf("setup_failed", errMsg);
       if (fleetBusyEndingFactsOf(err) !== undefined) setupFailure = { kind: "sandbox_fleet_busy" };
+      runSetup ??= lostSetupOf(err);
       setupFinalizer();
     }
     // A run the full sandbox fleet ended is one queryable line in the bot's

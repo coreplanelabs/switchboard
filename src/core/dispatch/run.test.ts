@@ -579,6 +579,42 @@ describe("claimRun — the ledger claim once the prompt exists", () => {
     expect(ledger.opened[0]!.state).toMatchObject({ branchIdentityBaseline: raw, pushedBranch: "feature/original" });
   });
 
+  it("claims the selection's setup result beside the binding (record 0097), reallocated when the claim restarts a run", async () => {
+    const setupResult = {
+      version: 1 as const,
+      requested: "resident" as const,
+      seeding: "snapshot" as const,
+      reason: "workload_full" as const,
+    };
+    const fresh = setup();
+    await claimRun(fresh.deps, {
+      ...fresh.base,
+      selection: { ...fresh.base.selection, setup: setupResult },
+      reserved: new NullLedgerRun(fresh.base.run.id, { put: async () => {}, abandoned: () => {} }),
+      resume: undefined,
+      ledgerRun: undefined,
+    });
+    expect(fresh.ledger.opened[0]!.state).toMatchObject({ setup: setupResult });
+    const restart = setup();
+    await claimRun(restart.deps, {
+      ...restart.base,
+      selection: { ...restart.base.selection, setup: setupResult },
+      restartOf: restart.base.run.id,
+      reserved: new NullLedgerRun(restart.base.run.id, { put: async () => {}, abandoned: () => {} }),
+      resume: undefined,
+      ledgerRun: undefined,
+    });
+    expect(restart.ledger.opened[0]!.state).toMatchObject({ setup: { ...setupResult, reallocated: true } });
+    const none = setup();
+    await claimRun(none.deps, {
+      ...none.base,
+      reserved: new NullLedgerRun(none.base.run.id, { put: async () => {}, abandoned: () => {} }),
+      resume: undefined,
+      ledgerRun: undefined,
+    });
+    expect(none.ledger.opened[0]!.state).not.toHaveProperty("setup");
+  });
+
   it("promotes a reserved accepted target without losing it before reclaim", async () => {
     const { deps, base } = setup();
     const ledger = new InMemoryRunLedger(() => NOW);
