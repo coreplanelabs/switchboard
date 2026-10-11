@@ -259,6 +259,71 @@ describe("staging workflow isolation", () => {
       }
     },
   );
+  it("forwards the same MCP Review model and effort through preflight and final acceptance in the existing job", () => {
+    const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
+    expect(workflow.on.workflow_dispatch.inputs.review_transport).toMatchObject({
+      type: "choice",
+      default: "http",
+      options: ["http", "mcp"],
+    });
+    const steps = workflow.jobs.deploy.steps.filter((step: { run?: string }) => step.run?.includes("smoke:ingress"));
+    const outputs = steps.map((step: { run: string; env: Record<string, string> }) => {
+      expect(step.env.SMOKE_REVIEW_TRANSPORT).toBe("${{ env.STAGING_REVIEW_TRANSPORT }}");
+      expect(step.env.SMOKE_REVIEW_EFFORT).toBe("${{ env.STAGING_REVIEW_EFFORT }}");
+      const commands = step.run.slice(
+        step.run.indexOf("smoke_args=()"),
+        step.run.indexOf("jq -e") >= 0 ? step.run.indexOf("jq -e") : undefined,
+      );
+      const result = spawnSync("bash", ["-c", `npm() { printf '%s\n' "$@"; }; ${commands}`], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          RUNNER_TEMP: "/fixture",
+          SMOKE_MODEL: "openai/gpt-6.1-sol",
+          SMOKE_REVIEW_TRANSPORT: "mcp",
+          SMOKE_REVIEW_EFFORT: "high",
+        },
+      });
+      expect(result.status).toBe(0);
+      return result.stdout.trim().split("\n");
+    });
+    expect(outputs).toEqual([
+      [
+        "run",
+        "--silent",
+        "smoke:ingress",
+        "--",
+        "/fixture/staging-fleet.json",
+        "/fixture/staging-setup.json",
+        "--check",
+        "--model",
+        "openai/gpt-6.1-sol",
+        "--review-transport",
+        "mcp",
+        "--review-effort",
+        "high",
+      ],
+      [
+        "run",
+        "--silent",
+        "smoke:ingress",
+        "--",
+        "/fixture/staging-fleet.json",
+        "/fixture/staging-e2e.json",
+        "--model",
+        "openai/gpt-6.1-sol",
+        "--review-transport",
+        "mcp",
+        "--review-effort",
+        "high",
+      ],
+    ]);
+    expect(workflow.jobs.deploy.concurrency).toEqual({
+      group: "deploy-staging",
+      queue: "max",
+      "cancel-in-progress": false,
+    });
+  });
 
   it("executes source gates: captures an origin head and refuses forks, unauthorized manual actors and stale heads", () => {
     const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));

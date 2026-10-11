@@ -28,6 +28,15 @@ on: # zizmor: ignore[dangerous-triggers]
         description: Keep selected staging maintenance held until explicit Admin release
         type: boolean
         default: false
+      review_transport:
+        description: Admission transport for the existing bounded Review check
+        type: choice
+        default: http
+        options: [http, mcp]
+      review_effort:
+        description: Explicit approved Review effort
+        type: string
+        default: high
       model:
         description: Optional per-request full model ref for acceptance (provider/model)
         type: string
@@ -40,6 +49,8 @@ env:
   STAGING_ACCEPTANCE_MODEL: ${{ inputs.model }}
   STAGING_REQUIRE_VOUCHED_CONTROLS: ${{ inputs.require_vouched_controls }}
   STAGING_RETAIN_MAINTENANCE: ${{ inputs.retain_maintenance }}
+  STAGING_REVIEW_TRANSPORT: ${{ inputs.review_transport }}
+  STAGING_REVIEW_EFFORT: ${{ inputs.review_effort }}
 
 permissions:
   contents: read
@@ -229,6 +240,8 @@ jobs:
           SMOKE_INGRESS_TOKEN: ${{ secrets.STAGING_SMOKE_TOKEN }}
           SMOKE_EXPECTED_COMMIT: ${{ needs.authorize.outputs.commit }}
           SMOKE_MODEL: ${{ env.STAGING_ACCEPTANCE_MODEL }}
+          SMOKE_REVIEW_TRANSPORT: ${{ env.STAGING_REVIEW_TRANSPORT }}
+          SMOKE_REVIEW_EFFORT: ${{ env.STAGING_REVIEW_EFFORT }}
           SMOKE_SLACK_CONFIG: ${{ vars.STAGING_SLACK_SMOKE_CONFIG }}
           SMOKE_SLACK_USER_TOKEN: ${{ secrets.STAGING_SLACK_TEST_USER_TOKEN }}
         run: |
@@ -236,7 +249,9 @@ jobs:
           if [ "$STAGING_RETAIN_MAINTENANCE" = true ]; then plan_args=(--retain-maintenance); fi
           npm run --silent cli -- deploy plan --allow-branch --json "${plan_args[@]}" > "$RUNNER_TEMP/staging-fleet.json"
           smoke_args=()
-          if [ -n "$SMOKE_MODEL" ]; then smoke_args=(--model "$SMOKE_MODEL"); fi
+          if [ -n "$SMOKE_MODEL" ]; then smoke_args+=(--model "$SMOKE_MODEL"); fi
+          if [ -n "$SMOKE_REVIEW_TRANSPORT" ]; then smoke_args+=(--review-transport "$SMOKE_REVIEW_TRANSPORT"); fi
+          if [ -n "$SMOKE_REVIEW_EFFORT" ]; then smoke_args+=(--review-effort "$SMOKE_REVIEW_EFFORT"); fi
           if [ "$STAGING_REQUIRE_VOUCHED_CONTROLS" = true ]; then smoke_args+=(--require-vouched-controls); fi
           npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-setup.json" --check "${smoke_args[@]}"
       - name: deploy the captured commit to staging
@@ -279,6 +294,8 @@ jobs:
           SMOKE_EXPECTED_COMMIT: ${{ needs.authorize.outputs.commit }}
           SMOKE_REQUIRE_SLACK_CONNECTION: "true"
           SMOKE_MODEL: ${{ env.STAGING_ACCEPTANCE_MODEL }}
+          SMOKE_REVIEW_TRANSPORT: ${{ env.STAGING_REVIEW_TRANSPORT }}
+          SMOKE_REVIEW_EFFORT: ${{ env.STAGING_REVIEW_EFFORT }}
           SMOKE_SLACK_CONFIG: ${{ vars.STAGING_SLACK_SMOKE_CONFIG }}
           SMOKE_SLACK_USER_TOKEN: ${{ secrets.STAGING_SLACK_TEST_USER_TOKEN }}
         run: |
@@ -286,7 +303,9 @@ jobs:
           if [ "$STAGING_RETAIN_MAINTENANCE" = true ]; then plan_args=(--retain-maintenance); fi
           npm run --silent cli -- deploy plan --allow-branch --json "${plan_args[@]}" > "$RUNNER_TEMP/staging-fleet.json"
           smoke_args=()
-          if [ -n "$SMOKE_MODEL" ]; then smoke_args=(--model "$SMOKE_MODEL"); fi
+          if [ -n "$SMOKE_MODEL" ]; then smoke_args+=(--model "$SMOKE_MODEL"); fi
+          if [ -n "$SMOKE_REVIEW_TRANSPORT" ]; then smoke_args+=(--review-transport "$SMOKE_REVIEW_TRANSPORT"); fi
+          if [ -n "$SMOKE_REVIEW_EFFORT" ]; then smoke_args+=(--review-effort "$SMOKE_REVIEW_EFFORT"); fi
           if [ "$STAGING_REQUIRE_VOUCHED_CONTROLS" = true ]; then smoke_args+=(--require-vouched-controls); fi
           npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-e2e.json" "${smoke_args[@]}"
           jq -e '.slackConnection.required == true and .slackConnection.connected == true and .slackConnection.checks == ((.scenarios | length) * 2)' "$RUNNER_TEMP/staging-e2e.json" > /dev/null

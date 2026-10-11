@@ -522,9 +522,8 @@ async function route(
       );
       if (options.admit) {
         try {
-          const admitted = admissionResponse(
-            await options.admit(msg, io, nativeEvidence(identity, connectionId, options)),
-          );
+          const result = await options.admit(msg, io, nativeEvidence(identity, connectionId, options));
+          const admitted = admissionResponse(result);
           const admission = (admitted.body as { admission: { status: string } }).admission;
           return ok(id, {
             content: [
@@ -536,7 +535,13 @@ async function route(
                     : `Request not admitted: ${admission.status}.`,
               },
             ],
-            structuredContent: admitted.body,
+            structuredContent: {
+              ...(admitted.body as Record<string, unknown>),
+              ...(result.status === "receipt" && result.receipt.ownerRunId
+                ? { runId: result.receipt.ownerRunId, threadKey: msg.threadKey }
+                : {}),
+              ...(deps.build ? { build: deps.build } : {}),
+            },
             ...(admitted.status >= 400 ? { isError: true } : {}),
           });
         } finally {

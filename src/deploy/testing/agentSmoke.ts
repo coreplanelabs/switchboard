@@ -38,11 +38,22 @@ export function fixture() {
       const admission = effectiveProfile(agent, directives, undefined, leaseMinimum(agent.name));
       if (admission.kind !== "profile") throw new Error("smoke lease was refused");
       const id = `run-${scenario.id}`;
-      const identity = { userId: "http:smoke", channelId: "http:smoke", threadKey: `http:smoke:${thread}` };
+      const source = scenario.transport ?? "http";
+      const identity = {
+        userId: `${source}:smoke`,
+        channelId: `${source}:smoke`,
+        threadKey: `${source}:smoke:${thread}`,
+      };
       const repo = scenario.id === "answer" ? undefined : config.repo;
       const run = registry.create(
         "fixture",
-        { ...identity, agent: agent.name, repo, channelVisibility: "machine" },
+        {
+          ...identity,
+          agent: agent.name,
+          ...(directives.model ? { model: directives.model } : {}),
+          repo,
+          channelVisibility: "machine",
+        },
         { id },
       );
       const lease = loopClock(10, minutesToMs(admission.profile.minutes), agent.name);
@@ -51,6 +62,12 @@ export function fixture() {
         startedAt: lease.startedAt,
         endsAt: lease.deadline,
         loopEndsAt: lease.loopEnd,
+      });
+      registry.publish(id, {
+        type: "run_meta",
+        agent: agent.name,
+        ...(directives.model ? { model: directives.model } : {}),
+        ...(directives.effort ? { effort: directives.effort } : {}),
       });
       registry.publish(id, { type: "answer", text: scenario.id === "answer" ? "4" : "smoke fixture" });
       registry.publish(id, { type: "tool_call", tool: "read", callId: "read-1", summary: "fixture read" });
@@ -62,7 +79,7 @@ export function fixture() {
         startedAt: 10,
         durationMs: 0,
         status: "ok",
-        attrs: { model: "fixture/model", inputTokens: 1, outputTokens: 1, usd: 0.1 },
+        attrs: { model: directives.model ?? "fixture/model", inputTokens: 1, outputTokens: 1, usd: 0.1 },
       });
       registry.finish(id, "completed");
       const seal = registry.seal(id, { replyOk: true });
@@ -72,6 +89,7 @@ export function fixture() {
         snap,
         seal,
         agent: agent.name,
+        ...(directives.model ? { model: directives.model } : {}),
         repo,
         msg: identity,
         channelVisibility: "machine",
@@ -94,5 +112,5 @@ export function fixture() {
     }),
     readRun: vi.fn(async (id) => records.get(id)),
   };
-  return { transport, records };
+  return { transport, records, service };
 }
