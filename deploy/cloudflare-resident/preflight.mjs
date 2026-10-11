@@ -80,6 +80,39 @@ export async function fetchResidents(baseUrl, token, { timeoutMs = 15_000 } = {}
   }
 }
 
+// Closed pairs produced by getResidentDeployInfo's registration classifier.
+// Unknown or malformed reporting data never changes the safety decision.
+const READBACK_REASONS = {
+  unknown: ["malformed-registration", "owner-unverified", "binding-conflict", "ledger-unverified"],
+  legacy: ["operation-active", "legacy-protected", "protection-elapsed", "legacy-reconciled"],
+  owned: ["live-owner", "terminal-owner"],
+};
+
+function registrationReadbackText(rows) {
+  if (!Array.isArray(rows) || rows.length > 10) return "unavailable";
+  const seen = new Set();
+  const facts = [];
+  for (const row of rows) {
+    if (
+      !row ||
+      typeof row !== "object" ||
+      Array.isArray(row) ||
+      typeof row.category !== "string" ||
+      typeof row.reason !== "string" ||
+      !Object.hasOwn(READBACK_REASONS, row.category) ||
+      !READBACK_REASONS[row.category].includes(row.reason) ||
+      !Number.isSafeInteger(row.count) ||
+      row.count <= 0
+    )
+      return "unavailable";
+    const key = `${row.category}/${row.reason}`;
+    if (seen.has(key)) return "unavailable";
+    seen.add(key);
+    facts.push(`${key}=${row.count}`);
+  }
+  return facts.length ? facts.sort().join(", ") : "empty";
+}
+
 /**
  * The decision, pure. `fetched` is the result of `fetchResidents`.
  * @returns {{ allow: boolean, forced: boolean, busy: {resource:string,inFlight:number}[], provisioning: {resource:string,state:string}[], interrupting: {resource:string,state:string}[], unknown: {resource:string,error:string}[], message: string }}
@@ -154,7 +187,10 @@ export function decide(fetched, { force = false } = {}) {
           // Fewer categorized claims than that count means work went unseen.
           unknown.push({ resource, error: "deploy activity misses a protected run or operation" });
         } else if (live.unknownRuns > 0) {
-          unknown.push({ resource, error: `${live.unknownRuns} run owner(s) unverified` });
+          unknown.push({
+            resource,
+            error: `${live.unknownRuns} run owner(s) unverified; registration readback: ${registrationReadbackText(live.registrationReadback)}`,
+          });
         } else {
           retained += live.retainedRuns;
           // The fenced read separates executing work from terminal registrations

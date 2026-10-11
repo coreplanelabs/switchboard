@@ -762,11 +762,12 @@ export function classifyDeployOutput(exitCode: number, output: string): DeployOu
     return { kind: "deployed", versionId: m ? m[1] : undefined };
   }
   if (/preflight REFUSED/i.test(output)) {
-    const bullet = output
+    const bullets = output
       .split("\n")
       .map((l) => l.trim())
-      .find((l) => l.startsWith("- "));
-    return { kind: "preflight-refused", reason: bullet ? bullet.slice(2) : "preflight refused" };
+      .filter((l) => l.startsWith("- "))
+      .map((l) => l.slice(2));
+    return { kind: "preflight-refused", reason: bullets.length ? bullets.join("; ") : "preflight refused" };
   }
   // The full output was already streamed; this is the one-line summary for the
   // table. Prefer a real cause over npm's `npm ERR!` preamble lines.
