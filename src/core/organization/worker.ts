@@ -14,6 +14,18 @@ export class WorkerOrganizationStore implements OrganizationStore {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     if (!options.installation || !options.token) throw new Error("organization store requires installation and token");
     this.directory = {
+      pendingNotices: async (organization, limit) =>
+        directoryResponses.notices.parse(
+          await this.directoryPost({ action: "notices", command: { action: "pending", organization, limit } }),
+        ),
+      markNoticeAttempted: async (organization, id) =>
+        directoryResponses.notices.parse(
+          await this.directoryPost({ action: "notices", command: { action: "attempted", organization, id } }),
+        ),
+      markNoticeDelivered: async (organization, id) =>
+        directoryResponses.notices.parse(
+          await this.directoryPost({ action: "notices", command: { action: "delivered", organization, id } }),
+        ),
       createPerson: async () =>
         directoryResponses.createPerson.parse(await this.directoryPost({ action: "createPerson" })),
       resolve: async (identity) =>

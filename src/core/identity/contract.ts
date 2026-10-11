@@ -78,11 +78,14 @@ export type ReceiptsResult =
 
 /** Trusted internal storage boundary, not an account-linking or authorization API. */
 export interface PersonDirectory {
+  pendingNotices?(organization: string, limit: number): Promise<import("./notices.js").NoticeResult>;
+  markNoticeAttempted?(organization: string, id: string): Promise<import("./notices.js").NoticeResult>;
+  markNoticeDelivered?(organization: string, id: string): Promise<import("./notices.js").NoticeResult>;
   createPerson(): Promise<CreatePersonResult>;
   resolve(identity: ExternalIdentity): Promise<BindingResolution>;
   change(change: BindingChange): Promise<ChangeResult>;
   receipts(identity: ExternalIdentity): Promise<ReceiptsResult>;
-  /** Disabled dual-identity intent lifecycle; every command is one transaction. */
+  /** Verified dual-identity operation; every command is one transaction. */
   link(command: LinkCommand): Promise<LinkResult>;
 }
 

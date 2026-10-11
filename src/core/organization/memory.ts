@@ -20,6 +20,11 @@ export class InMemoryOrganizationStore implements OrganizationStore {
   constructor(private readonly now: () => number) {
     this.rawDirectory = new InMemoryPersonDirectory(now);
     this.directory = {
+      pendingNotices: (organization, limit) => this.serial(() => this.rawDirectory.pendingNotices(organization, limit)),
+      markNoticeAttempted: (organization, id) =>
+        this.serial(() => this.rawDirectory.markNoticeAttempted(organization, id)),
+      markNoticeDelivered: (organization, id) =>
+        this.serial(() => this.rawDirectory.markNoticeDelivered(organization, id)),
       createPerson: () => this.serial(() => this.rawDirectory.createPerson()),
       resolve: (identity) =>
         this.serial(() => {

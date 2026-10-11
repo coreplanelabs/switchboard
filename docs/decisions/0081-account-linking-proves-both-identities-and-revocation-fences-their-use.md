@@ -1,6 +1,7 @@
 ---
 title: Account linking proves both identities and revocation fences their use
-status: proposed
+status: superseded
+superseded_by: 0104-account-operations-require-fresh-proof-and-preserve-native-ownership.md
 date: 2026-09-26
 pattern: Dual authentication with a one-time intent; transactional binding and revision-fenced authorization
 ---
