@@ -42,6 +42,10 @@ export const STAGING_VALIDATION_WAIT_MS = 35 * MINUTE_MS;
 export const AGENT_SMOKE_POLL_MS = 5 * SECOND_MS;
 /** Slack reconnect reads enough history to cover the longest drain and cold start. */
 export const DEFAULT_CATCH_UP_WINDOW_MS = 30 * MINUTE_MS;
+/** How long the review dashboard reuses a report whose range still fills (record 0097): a page left open costs a dozen reads an hour. */
+export const REVIEWS_CACHE_OPEN_MS = 5 * MINUTE_MS;
+/** The review dashboard's duration histogram: runs this long or longer share its last, open bucket. */
+export const REVIEWS_HISTOGRAM_OPEN_MS = 30 * MINUTE_MS;
 export const HOSTED_MCP_CONNECT_POLL_MS = 2 * SECOND_MS;
 export const HOSTED_MCP_PROBE_TIMEOUT_MS = 15 * SECOND_MS;
 export const HOSTED_MCP_CALL_TIMEOUT_MS = 15 * MINUTE_MS;
