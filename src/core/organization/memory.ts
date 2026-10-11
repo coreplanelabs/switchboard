@@ -49,13 +49,20 @@ export class InMemoryOrganizationStore implements OrganizationStore {
           for (const identity of this.knownIdentities.values()) {
             const resolved = await this.rawDirectory.resolve(identity);
             if (resolved.status === "bound") before.set(identityKey(identity), resolved.binding.revision);
+            else if (resolved.status === "revoked") before.set(identityKey(identity), resolved.revision);
           }
           const result = await this.rawDirectory.link(command);
           if (result.status === "committed")
             for (const identity of this.knownIdentities.values()) {
               const resolved = await this.rawDirectory.resolve(identity);
-              if (resolved.status === "bound" && before.get(identityKey(identity)) !== resolved.binding.revision) {
-                this.stampCutoff(identity, resolved.binding.revision, snapshots);
+              const revision =
+                resolved.status === "bound"
+                  ? resolved.binding.revision
+                  : resolved.status === "revoked"
+                    ? resolved.revision
+                    : undefined;
+              if (revision !== undefined && before.get(identityKey(identity)) !== revision) {
+                if (resolved.status === "bound") this.stampCutoff(identity, revision, snapshots);
                 this.advanceBindingProjection();
               }
             }
@@ -108,6 +115,7 @@ export class InMemoryOrganizationStore implements OrganizationStore {
     return this.serial(async () => {
       if (!commandSchema.safeParse(command).success) return { status: "invalid" };
       const bindings = new Map<string, BindingResolution>();
+      const retainedPartitions = new Map<string, { revision: number; personId: string }>();
       const identities: ExternalIdentity[] = [...this.knownIdentities.values()];
       if (command.action === "admit")
         identities.push(command.envelope.actor.onBehalfOf ?? command.envelope.actor.identity);
@@ -122,7 +130,8 @@ export class InMemoryOrganizationStore implements OrganizationStore {
         command.action === "execution" ||
         command.action === "submission" ||
         command.action === "provenance" ||
-        command.action === "source-catalogue"
+        command.action === "source-catalogue" ||
+        command.action === "source-policy-observe"
       )
         identities.push(command.actor.onBehalfOf ?? command.actor.identity);
       for (const [key, row] of this.rows)
@@ -131,7 +140,16 @@ export class InMemoryOrganizationStore implements OrganizationStore {
             .actor;
           identities.push(actor.onBehalfOf ?? actor.identity);
         }
-      for (const identity of identities) bindings.set(identityKey(identity), await this.rawDirectory.resolve(identity));
+      for (const identity of identities) {
+        const current = await this.rawDirectory.resolve(identity);
+        bindings.set(identityKey(identity), current);
+        if (current.status === "revoked") {
+          const receipts = await this.rawDirectory.receipts(identity);
+          const last = receipts.status === "ok" ? receipts.receipts.at(-1)?.binding : undefined;
+          if (!last || last.state !== "revoked" || last.revision !== current.revision) return { status: "unavailable" };
+          retainedPartitions.set(identityKey(identity), { revision: current.revision, personId: last.personId });
+        }
+      }
       const next = structuredClone(this.rows);
       const key = (kind: string, org: string, id: string) => JSON.stringify([kind, org, id]);
       const rows: OrganizationRows = {
@@ -149,7 +167,16 @@ export class InMemoryOrganizationStore implements OrganizationStore {
               return (
                 tuple[0] === kind &&
                 tuple[1] === org &&
+                (options.sourceIdentity === undefined ||
+                  identityKey(
+                    kind === "stream"
+                      ? (row.value as { identity: ExternalIdentity }).identity
+                      : (row.value as { actor: { identity: ExternalIdentity } }).actor.identity,
+                  ) === identityKey(options.sourceIdentity)) &&
                 (options.partition === undefined || row.partition === options.partition) &&
+                (options.partitions === undefined || options.partitions.includes(row.partition)) &&
+                (options.afterKey === undefined ||
+                  Buffer.compare(Buffer.from(tuple[2]!), Buffer.from(options.afterKey)) > 0) &&
                 (options.after === undefined || row.ordinal > options.after) &&
                 (options.before === undefined || row.ordinal < options.before) &&
                 (options.expiresBefore === undefined || row.expiry <= options.expiresBefore) &&
@@ -157,11 +184,23 @@ export class InMemoryOrganizationStore implements OrganizationStore {
                   (row.value as { receiptId?: string }).receiptId === options.receiptId)
               );
             })
-            .map(([, row]) => row)
-            .sort((a, b) => (options.descending ? b.ordinal - a.ordinal : a.ordinal - b.ordinal))
+            .sort(([encodedA, a], [encodedB, b]) =>
+              options.keyOrder
+                ? Buffer.compare(
+                    Buffer.from((JSON.parse(encodedA) as string[])[2]!),
+                    Buffer.from((JSON.parse(encodedB) as string[])[2]!),
+                  )
+                : options.descending
+                  ? b.ordinal - a.ordinal
+                  : a.ordinal - b.ordinal,
+            )
             .slice(0, options.limit)
-            .map((row) => row.value),
+            .map(([, row]) => row.value),
         binding: (identity) => bindings.get(identityKey(identity)) ?? { status: "unknown" },
+        ownPartition: (identity, revision) => {
+          const stored = retainedPartitions.get(identityKey(identity));
+          return stored?.revision === revision ? stored.personId : undefined;
+        },
         identities: (personId) =>
           [...bindings.values()].flatMap((binding) =>
             binding.status === "bound" && binding.binding.personId === personId ? [binding.binding.identity] : [],

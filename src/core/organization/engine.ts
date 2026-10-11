@@ -37,16 +37,21 @@ export interface OrganizationRows {
     kind: string,
     org: string,
     options?: {
+      sourceIdentity?: ExternalIdentity;
       partition?: string;
+      partitions?: string[];
       after?: number;
       before?: number;
       descending?: boolean;
       limit?: number;
       expiresBefore?: number;
       receiptId?: string;
+      afterKey?: string;
+      keyOrder?: boolean;
     },
   ): unknown[];
   binding(identity: ExternalIdentity): BindingResolution;
+  ownPartition(identity: ExternalIdentity, revision: number): string | undefined;
   identities(personId: string): ExternalIdentity[];
 }
 function state(rows: OrganizationRows, organization: string): OrganizationState {
@@ -63,6 +68,7 @@ function state(rows: OrganizationRows, organization: string): OrganizationState 
     orchestrator: `organization:${organization}`,
     revision: 0,
     accessRevision: 0,
+    sourcePolicyRevision: 0,
     wakeSequence: 0,
     reconciledSequence: 0,
     streamSequence: 0,
@@ -80,12 +86,15 @@ function validActor(rows: OrganizationRows, organization: string, actor: Organiz
   const current = rows.binding(actor.onBehalfOf ?? actor.identity);
   if (current.status === "bound")
     return actor.stream === current.binding.personId && actor.bindingRevision === current.binding.revision;
-  return (
-    current.status === "unknown" &&
-    actor.kind === "human" &&
-    actor.stream === actor.principal &&
-    actor.bindingRevision === 0
-  );
+  // Unlinked delegation keeps the service's source partition, never a person join.
+  if (current.status === "revoked")
+    return actor.stream === actor.principal && actor.bindingRevision === current.revision;
+  return current.status === "unknown" && actor.stream === actor.principal && actor.bindingRevision === 0;
+}
+function ownPartition(rows: OrganizationRows, actor: OrganizationActor): string | undefined {
+  return actor.stream === actor.principal && actor.bindingRevision > 0
+    ? rows.ownPartition(actor.onBehalfOf ?? actor.identity, actor.bindingRevision)
+    : undefined;
 }
 function releaseReservation(rows: OrganizationRows, org: string, envelope: OrganizationEnvelope, receiptId: string) {
   if (!envelope.target) return;
@@ -147,6 +156,15 @@ function catalogueSource(
   const key = JSON.stringify([envelope.actor.stream, authority]);
   const prior = rows.get("source-policy", s.organization, key);
   const expiry = Math.max(expiresAt, prior === undefined ? 0 : sourcePolicySchema.parse(prior).expiresAt);
+  const previous = prior === undefined ? undefined : sourcePolicySchema.parse(prior);
+  if (
+    !previous ||
+    previous.sourceReference?.privateSource !== envelope.sourceReference?.privateSource ||
+    previous.sourceReference?.questionOwnership?.questionDigest !==
+      envelope.sourceReference?.questionOwnership?.questionDigest
+  )
+    s.sourcePolicyRevision++;
+
   rows.put(
     "source-policy",
     s.organization,
@@ -154,6 +172,7 @@ function catalogueSource(
     sourcePolicySchema.parse({
       version: 1,
       authority,
+      ...(prior === undefined ? {} : { observedFingerprint: sourcePolicySchema.parse(prior).observedFingerprint }),
       source: envelope.source,
       actor: envelope.actor,
       ...(envelope.sourceReference ? { sourceReference: envelope.sourceReference } : {}),
@@ -317,11 +336,22 @@ export function executeOrganization(
     if (!validActor(rows, org, command.actor) || command.actor.stream === null) return { status: "fenced" };
     const index = rows.get("source-policy-index", org, "version");
     if (index !== 1 && (index !== undefined || s.streamSequence !== 0)) return { status: "unavailable" };
-    const candidates = [...new Set([command.actor.stream, command.actor.principal])].flatMap((partition) =>
-      rows
-        .list("source-policy", org, { partition, limit: command.limit + 1 })
-        .map((row) => sourcePolicySchema.parse(row)),
-    );
+    if (command.after && !command.paged) return { status: "invalid" };
+    const retainedOwnPartition = ownPartition(rows, command.actor);
+    const candidates = rows
+      .list("source-policy", org, {
+        partitions: [
+          ...new Set([
+            command.actor.stream,
+            command.actor.principal,
+            ...(retainedOwnPartition ? [retainedOwnPartition] : []),
+          ]),
+        ],
+        ...(retainedOwnPartition ? { sourceIdentity: command.actor.identity } : {}),
+        limit: command.limit + 1,
+        ...(command.paged ? { keyOrder: true, ...(command.after ? { afterKey: command.after } : {}) } : {}),
+      })
+      .map((row) => sourcePolicySchema.parse(row));
     if (
       candidates.some(
         (row) =>
@@ -331,14 +361,23 @@ export function executeOrganization(
     )
       return { status: "fenced" };
     if (
-      candidates.length > command.limit ||
+      (!command.paged && candidates.length > command.limit) ||
       candidates.some((row) => row.authority !== sourceAuthority(row.source, row.actor, row.sourceReference))
     )
       return { status: "unavailable" };
+    const selected = candidates.slice(0, command.limit);
     return {
       status: "source-catalogue",
       accessRevision: s.accessRevision,
-      entries: candidates
+      ...(command.paged
+        ? {
+            revision: s.sourcePolicyRevision,
+            ...(candidates.length > command.limit
+              ? { next: JSON.stringify([selected.at(-1)!.actor.stream, selected.at(-1)!.authority]) }
+              : {}),
+          }
+        : {}),
+      entries: selected
         .filter((row) => row.expiresAt > now)
         .map((row) => ({
           authority: row.authority,
@@ -349,6 +388,68 @@ export function executeOrganization(
         })),
     };
   }
+  if (command.action === "source-policy-observe") {
+    if (!validActor(rows, org, command.actor) || command.actor.stream === null) return { status: "fenced" };
+    if (command.expectedRevision !== s.sourcePolicyRevision) return { status: "conflict" };
+    if (new Set(command.observations.map((row) => row.authority)).size !== command.observations.length)
+      return { status: "invalid" };
+    const updates = command.observations.map((observation) => {
+      const retainedOwnPartition = ownPartition(rows, command.actor);
+      const partitions = [
+        ...new Set([
+          command.actor.stream!,
+          command.actor.principal,
+          ...(retainedOwnPartition ? [retainedOwnPartition] : []),
+        ]),
+      ];
+      const found = partitions.flatMap((partition) => {
+        const key = JSON.stringify([partition, observation.authority]);
+        const raw = rows.get("source-policy", org, key);
+        return raw === undefined ? [] : [{ key, row: sourcePolicySchema.parse(raw) }];
+      });
+      if (
+        !found.length ||
+        found.some(
+          ({ row }) =>
+            row.expiresAt <= now ||
+            row.authority !== sourceAuthority(row.source, row.actor, row.sourceReference) ||
+            ((command.actor.bindingRevision === 0 || row.actor.stream !== command.actor.stream) &&
+              identityKey(row.actor.identity) !== identityKey(command.actor.identity)),
+        )
+      )
+        return;
+      return { observation, found };
+    });
+    if (updates.some((update) => !update)) return { status: "fenced" };
+    let changed = false,
+      lost = false;
+    for (const update of updates)
+      for (const { key, row } of update!.found) {
+        const fingerprint = update!.observation.fingerprint;
+        if (row.observedFingerprint === fingerprint) continue;
+        // Admission establishes allowed access. A first valid observation merely
+        // registers its baseline; later policy changes fence retained consumers.
+        lost ||= row.observedFingerprint !== undefined || fingerprint === null;
+        changed = true;
+        rows.put(
+          "source-policy",
+          org,
+          key,
+          { ...row, observedFingerprint: fingerprint },
+          row.actor.stream!,
+          0,
+          row.expiresAt,
+        );
+      }
+    if (changed) {
+      s.revision++;
+      s.sourcePolicyRevision++;
+      if (lost) s.accessRevision++;
+      save();
+    }
+    return { status: "source-policies-observed", revision: s.sourcePolicyRevision, accessRevision: s.accessRevision };
+  }
+
   if (command.action === "provenance") {
     if (!validActor(rows, org, command.actor)) return { status: "fenced" };
     const value = rows.get("source-provenance", org, command.receiptId);
@@ -357,7 +458,7 @@ export function executeOrganization(
     if (
       provenance.actor.stream !== command.actor.stream &&
       !(
-        provenance.actor.stream === command.actor.principal &&
+        (provenance.actor.stream === command.actor.principal || command.actor.stream === command.actor.principal) &&
         identityKey(provenance.actor.identity) === identityKey(command.actor.identity)
       )
     )
@@ -683,12 +784,16 @@ export function executeOrganization(
     const epoch = JSON.stringify([reader, command.actor.bindingRevision]);
     const rawCutoff = rows.get("binding-cutoff", org, epoch) ?? rows.get("binding-cutoff", "", epoch);
     const cutoff = rawCutoff === undefined ? undefined : bindingCutoffSchema.parse(rawCutoff).sequence;
-    const partitions = [...new Set([command.stream, command.actor.principal])];
+    const retainedOwnPartition = ownPartition(rows, command.actor);
+    const partitions = [
+      ...new Set([command.stream, command.actor.principal, ...(retainedOwnPartition ? [retainedOwnPartition] : [])]),
+    ];
     const candidates = partitions
       .flatMap((partition) =>
         rows
           .list("stream", org, {
             partition,
+            ...(partition === retainedOwnPartition ? { sourceIdentity: command.actor.identity } : {}),
             ...(command.action === "tail" ? { before: command.before, descending: true } : { after: command.after }),
             limit: command.limit + 1,
           })
@@ -708,7 +813,12 @@ export function executeOrganization(
         return false;
       if (entry.expiresAt <= now || !identities.has(identityKey(entry.onBehalfOf ?? entry.identity))) return false;
       const binding = rows.binding(entry.onBehalfOf ?? entry.identity);
-      return binding.status === "bound" ? binding.binding.personId === command.stream : binding.status === "unknown";
+      return binding.status === "bound"
+        ? binding.binding.personId === command.stream
+        : binding.status === "unknown" ||
+            (binding.status === "revoked" &&
+              (entry.stream === command.actor.principal || entry.stream === retainedOwnPartition) &&
+              identityKey(entry.identity) === identityKey(command.actor.identity));
     });
     const entries = eligible;
     if (command.action === "tail")
@@ -782,7 +892,9 @@ export function executeOrganization(
     if (original !== undefined) {
       const provenance = sourceProvenanceSchema.parse(original);
       if (
-        (provenance.actor.stream !== command.stream && provenance.actor.stream !== command.actor.principal) ||
+        (provenance.actor.stream !== command.stream &&
+          provenance.actor.stream !== command.actor.principal &&
+          command.actor.stream !== command.actor.principal) ||
         identityKey(provenance.actor.identity) !== identityKey(command.actor.identity)
       )
         return { status: "not_found" };
@@ -791,7 +903,9 @@ export function executeOrganization(
     if (typeof receiptKey === "string") {
       const receipt = receiptSchema.parse(rows.get("receipt", org, receiptKey));
       if (
-        (receipt.actor.stream !== command.stream && receipt.actor.stream !== command.actor.principal) ||
+        (receipt.actor.stream !== command.stream &&
+          receipt.actor.stream !== command.actor.principal &&
+          command.actor.stream !== command.actor.principal) ||
         identityKey(receipt.actor.identity) !== identityKey(command.actor.identity)
       )
         return { status: "not_found" };
@@ -873,9 +987,15 @@ export function executeOrganization(
     s.revision++;
     save();
   }
+  let expiredPolicies = false;
   for (const value of rows.list("source-policy", org, { expiresBefore: now, limit: 1000 })) {
     const row = sourcePolicySchema.parse(value);
     rows.remove("source-policy", org, JSON.stringify([row.actor.stream, row.authority]));
+    expiredPolicies = true;
+  }
+  if (expiredPolicies) {
+    s.sourcePolicyRevision++;
+    save();
   }
   for (const value of rows.list("source-provenance", org, { expiresBefore: now, limit: 1000 }))
     rows.remove("source-provenance", org, sourceProvenanceSchema.parse(value).receiptId);

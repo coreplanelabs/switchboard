@@ -152,6 +152,7 @@ export const stateSchema = z
     orchestrator: text,
     revision,
     accessRevision: revision.default(0),
+    sourcePolicyRevision: revision.default(0),
     wakeSequence: revision,
     reconciledSequence: revision,
     streamSequence: revision,
@@ -202,6 +203,30 @@ export const commandSchema = z.discriminatedUnion("action", [
       ...addressed,
       actor: actorSchema,
       limit: z.number().int().positive().max(200),
+      paged: z.literal(true).optional(),
+      after: z.string().min(1).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("source-policy-observe"),
+      ...addressed,
+      actor: actorSchema,
+      expectedRevision: revision,
+      observations: z
+        .array(
+          z
+            .object({
+              authority: z.string().min(1),
+              fingerprint: z
+                .string()
+                .regex(/^[0-9a-f]{64}$/)
+                .nullable(),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(200),
     })
     .strict(),
   z.object({ action: z.literal("owner-clears"), ...addressed, limit: z.number().int().positive().max(100) }).strict(),
@@ -285,12 +310,15 @@ export const commandSchema = z.discriminatedUnion("action", [
 ]);
 export type OrganizationCommand = z.infer<typeof commandSchema>;
 export const resultSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("source-policies-observed"), revision, accessRevision: revision }).strict(),
   z.object({ status: z.literal("submission"), envelope: envelopeSchema, receipt: receiptSchema }).strict(),
   z.object({ status: z.literal("provenance"), provenance: sourceProvenanceSchema }).strict(),
   z
     .object({
       status: z.literal("source-catalogue"),
       accessRevision: revision,
+      revision: revision.optional(),
+      next: z.string().min(1).optional(),
       entries: z
         .array(
           z

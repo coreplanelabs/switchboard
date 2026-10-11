@@ -76,6 +76,115 @@ async function sendBrowser(service: OrganizationService, authentication = browse
 }
 
 describe("organization authenticated service", () => {
+  it("keeps unlinked delegation source-only and applies current authorization and native source proof", async () => {
+    let allowed = true;
+    let native: "allowed" | "denied" | "unavailable" = "allowed";
+    const checked: OrganizationAuthorization[] = [];
+    const store = new InMemoryOrganizationStore(() => 1);
+    const service = new OrganizationService({
+      store,
+      directory: store.directory,
+      mappings,
+      limits,
+      authorize: async (value) => {
+        checked.push(value);
+        return allowed;
+      },
+      currentIdentityRead: async () => native,
+    });
+    const auth: OrganizationAuthentication = {
+      source: "mcp",
+      identity: { issuer: "token:test", tenant: null, subject: "device" },
+      kind: "service",
+      organizations: ["org:test"],
+      onBehalfOf: identity,
+    };
+    const admitted = await service.admit(auth, input("delegated-unlinked"));
+    expect(admitted).toMatchObject({
+      status: "receipt",
+      receipt: {
+        actor: {
+          identity: auth.identity,
+          kind: "service",
+          stream: 'mcp:["token:test",null,"device"]',
+          bindingRevision: 0,
+          onBehalfOf: identity,
+        },
+      },
+    });
+    expect(await service.streamTail(auth)).toMatchObject({
+      status: "stream_tail",
+      entries: [{ content: "A private request", identity: auth.identity, onBehalfOf: identity }],
+    });
+    expect(
+      checked.map((value) => ({
+        action: value.action,
+        actor: value.actor.identity,
+        onBehalfOf: value.actor.onBehalfOf,
+      })),
+    ).toEqual([
+      { action: "send", actor: auth.identity, onBehalfOf: identity },
+      { action: "read", actor: auth.identity, onBehalfOf: identity },
+    ]);
+    native = "denied";
+    expect(await service.streamTail(auth)).toMatchObject({ status: "stream_tail", entries: [] });
+    native = "unavailable";
+    expect(await service.streamTail(auth)).toEqual({ status: "unavailable" });
+    allowed = false;
+    expect(await service.admit(auth, input("after-policy-loss"))).toEqual({ status: "not_found" });
+    expect(await service.streamTail(auth)).toEqual({ status: "not_found" });
+  });
+  it("keeps a freshly authenticated unlinked source usable while fencing its former joined owner", async () => {
+    const { service, store } = setup();
+    const slack = { issuer: "https://slack.com", tenant: "workspace", subject: "UALICE" };
+    const personId = await bind(store, [identity, slack]);
+    const old = await sendBrowser(service);
+    expect(old).toMatchObject({ status: "receipt", receipt: { actor: { stream: personId, bindingRevision: 1 } } });
+    await store.directory.change({
+      action: "revoke",
+      identity,
+      personId,
+      expectedRevision: 1,
+      actor: identity,
+      proof: { method: "authenticated-human", version: 1 },
+    });
+    expect(await service.resolve(browser)).toMatchObject({
+      actor: {
+        stream: 'browser:["access:test",null,"alice"]',
+        bindingRevision: 2,
+      },
+    });
+    expect(
+      await sendBrowser(service, browser, { ...input("after-unlink"), content: "Only this source" }),
+    ).toMatchObject({ status: "receipt", receipt: { status: "pending" } });
+    expect(await service.stream(browser)).toMatchObject({
+      status: "stream",
+      entries: [{ content: "A private request" }, { content: "Only this source" }],
+    });
+    expect(await service.streamForIdentities(browser, [identity, slack])).toMatchObject({
+      status: "stream",
+      entries: [{ content: "A private request" }, { content: "Only this source" }],
+    });
+    if (old.status !== "receipt") throw new Error("Missing original source receipt");
+    expect(await service.delete({ source: "slack", identity: slack, kind: "human" }, old.receipt.id)).toEqual({
+      status: "not_found",
+    });
+    expect(await service.delete(browser, old.receipt.id)).toEqual({ status: "ok", removed: 1 });
+    expect(await service.stream({ source: "slack", identity: slack, kind: "human" })).toMatchObject({
+      status: "stream",
+      entries: [],
+    });
+    const lease = await store.execute({ action: "claim", organization: "org:test", owner: "worker", leaseMs: 100 });
+    expect(lease.status).toBe("state");
+    const pending = await store.execute({
+      action: "pending",
+      organization: "org:test",
+      owner: "worker",
+      generation: 1,
+      limit: 10,
+    });
+    expect(pending).toMatchObject({ status: "pending", envelopes: [{ content: "Only this source" }] });
+  });
   it("holds every private history path when original-source verification is absent", async () => {
     const store = new InMemoryOrganizationStore(() => 1);
     const options = { store, directory: store.directory, mappings, limits, authorize: async () => true };
@@ -285,7 +394,10 @@ describe("organization authenticated service", () => {
     });
     revoke = true;
     expect(await service.stream(browser)).toEqual({ status: "fenced" });
-    expect(await service.stream(browser)).toEqual({ status: "not_found" });
+    expect(await service.stream(browser)).toMatchObject({
+      status: "stream",
+      entries: [{ content: "A private request" }],
+    });
   });
   it("revalidates a preserved actor after pending selection and before its effect", async () => {
     const { service, store } = setup();

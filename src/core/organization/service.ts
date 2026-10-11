@@ -125,7 +125,7 @@ export class OrganizationService {
       identity: parsed.data,
       kind: authentication.kind,
       principal,
-      stream: authentication.kind === "human" ? principal : null,
+      stream: authentication.kind === "human" || authentication.onBehalfOf ? principal : null,
       bindingRevision: 0,
       onBehalfOf: authentication.onBehalfOf ?? null,
     };
@@ -139,7 +139,9 @@ export class OrganizationService {
       if (binding.status === "bound") {
         actor.stream = binding.binding.personId;
         actor.bindingRevision = binding.binding.revision;
-      } else if (binding.status !== "unknown" || authentication.onBehalfOf) return undefined;
+      } else if (binding.status === "revoked") {
+        actor.bindingRevision = binding.revision;
+      } else if (binding.status !== "unknown") return undefined;
     }
     return { organization, actor };
   }
@@ -319,7 +321,7 @@ export class OrganizationService {
     )
       return { status: "not_found" };
     let identities = [authentication.onBehalfOf ?? authentication.identity];
-    if (resolved.actor.bindingRevision > 0) {
+    if (resolved.actor.bindingRevision > 0 && resolved.actor.stream !== resolved.actor.principal) {
       const result = await this.options.store.execute({
         action: "identities",
         organization: resolved.organization,
@@ -364,7 +366,9 @@ export class OrganizationService {
       const binding = await this.options.directory.resolve(identity);
       if (
         (binding.status === "bound" && binding.binding.personId === resolved.actor.stream) ||
-        (binding.status === "unknown" && identityKey(identity) === identityKey(authentication.identity))
+        ((binding.status === "unknown" ||
+          (binding.status === "revoked" && resolved.actor.stream === resolved.actor.principal)) &&
+          identityKey(identity) === identityKey(authentication.onBehalfOf ?? authentication.identity))
       )
         eligible.push(identity);
     }
