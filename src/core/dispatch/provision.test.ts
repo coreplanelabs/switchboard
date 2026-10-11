@@ -18,11 +18,13 @@ import { declaredProfile } from "../../config/profile.js";
 import { parseDirectives } from "../../directives.js";
 import {
   ReadyEnvironmentError,
+  SeedClaimRefusedError,
   WorkspaceReattachRefusedError,
   type WorkspaceBinding,
 } from "../../execution/factory.js";
-import { ExecInfraError } from "../../execution/executor.js";
-import { ResidentNeedsRefError } from "../../execution/resident.js";
+import { ExecCapacityError, ExecInfraError } from "../../execution/executor.js";
+import { ResidentNeedsRefError, ResidentRegistrationMismatchError } from "../../execution/resident.js";
+import { ResidentClaimRefusedError } from "../runLedger/writeThrough.js";
 import { NullMemoryStore, InMemoryMemoryStore } from "../memory/index.js";
 import { sealMemoryCandidate } from "../memory/provenance.js";
 import { NullRunHistoryWriter } from "../runHistoryWriter.js";
@@ -55,6 +57,8 @@ import { resolveRun } from "./resolve.js";
 import {
   attachWorkspace,
   budgetClipLabel,
+  lostSetupOf,
+  lostWordOf,
   composePrompt,
   sessionNotesBlock,
   mintRunBearer,
@@ -82,6 +86,8 @@ const attachState = vi.hoisted(() => ({
   reattached: undefined as import("../reviewRound.js").RoundWorkspace | undefined,
   refuseReattach: undefined as string | undefined,
   failReady: false,
+  /** A fresh attach that throws this (record 0097's lost words). */
+  fail: undefined as unknown,
   /** The run's stop ended the re-attach's wait: the factory rethrows the executor's typed `aborted` error. */
   stopReattach: false,
   rounds: [] as Array<Parameters<typeof import("../reviewRound.js").attachRoundWorkspace>[0]["round"]>,
@@ -92,6 +98,7 @@ vi.mock("../reviewRound.js", async (importOriginal) => {
     ...mod,
     attachRoundWorkspace: async (input: Parameters<typeof mod.attachRoundWorkspace>[0]) => {
       attachState.rounds.push(input.round);
+      if (attachState.fail !== undefined) throw attachState.fail;
       if (attachState.needsRef !== undefined) throw new ResidentNeedsRefError(attachState.needsRef);
       if (attachState.attached !== undefined) return attachState.attached;
       if (input.round.reattach !== undefined) {
@@ -556,6 +563,7 @@ async function resumeOf(runId: string, system?: string): Promise<ResumeContext> 
 beforeEach(() => {
   vi.stubEnv("PUBLIC_BASE_URL", "");
   attachState.needsRef = undefined;
+  attachState.fail = undefined;
   attachState.attached = undefined;
   attachState.reattached = undefined;
   attachState.refuseReattach = undefined;
@@ -1858,7 +1866,11 @@ describe("attachWorkspace — the workspace attach and the ask-once refusal", ()
       repoCtx: { repo: "acme/api", pr: 41 },
       root: r.root,
     });
-    expect(out).toEqual({ kind: "refused", reason: "workspace_backend_unconfigured" });
+    expect(out).toMatchObject({
+      kind: "refused",
+      reason: "workspace_backend_unconfigured",
+      setup: { version: 1, reason: "lost_other" },
+    });
     expect(r.refusals).toEqual(["setup_failed"]);
     expect(r.refusalTexts).toEqual(["🚫 `review` cannot start because this bot has no workspace backend configured."]);
     expect(r.refusalTexts[0]?.split(/[.!?](?:\s|$)/).filter(Boolean)).toHaveLength(1);
@@ -1910,7 +1922,11 @@ describe("attachWorkspace — the workspace attach and the ask-once refusal", ()
       repoCtx: { repo: "acme/api" },
       root: r.root,
     });
-    expect(out).toEqual({ kind: "refused", reason: "which_branch" });
+    expect(out).toEqual({
+      kind: "refused",
+      reason: "which_branch",
+      setup: { version: 1, requested: "cold", reason: "ref_unresolved" },
+    });
     expect(r.refusals).toEqual(["which_branch"]);
     expect(JSON.stringify(closes)).toContain("which branch?");
     expect(r.refusalTexts[0]).toMatch(/^🌿 Which branch of `acme\/api` should this thread work on\?/);
@@ -2434,5 +2450,73 @@ describe("mintRunBearer — the run's model-proxy bearer", () => {
     d.runBearers = store;
     expect(mintRunBearer(d, { ...ctx, resolved: { ...resolved, modelRef: "vanished/model" } })).toBeUndefined();
     expect(store.size()).toBe(0);
+  });
+});
+
+// Record 0097, "The workspace facts": a run that asked for a workspace and got
+// none says why in a lost word, read from the attach failure's type.
+describe("a lost workspace's setup result", () => {
+  it("names each lost word by the error's type, and lost_other for any other failure", () => {
+    const drained = Object.assign(new ExecInfraError("resident /attach: the run was stopped", "aborted"), {
+      drainWaitMs: 60_000,
+    });
+    expect(lostWordOf(new ResidentNeedsRefError("acme/api"))).toBe("ref_unresolved");
+    expect(lostWordOf(new ResidentRegistrationMismatchError("repo:acme/api", "run-registration-mismatch: x"))).toBe(
+      "registration_mismatch",
+    );
+    expect(lostWordOf(new ResidentClaimRefusedError("fenced"))).toBe("resident_claim_error");
+    expect(lostWordOf(new SeedClaimRefusedError("seed owner: trusted run context does not match"))).toBe(
+      "seed_claim_refused",
+    );
+    expect(lostWordOf(new ExecCapacityError("the sandbox did not finish starting"))).toBe("sandbox_start_timeout");
+    expect(lostWordOf(drained)).toBe("stopped_in_drain");
+    expect(lostWordOf(new ExecInfraError("resident /attach: the run was stopped", "aborted"))).toBe("lost_other");
+    expect(lostWordOf(new Error("resident claim refused: fenced"))).toBe("lost_other");
+  });
+
+  function attachCtx(d: ProvisionDeps, repoCtx: { repo?: string; ref?: string } = { repo: "acme/api" }) {
+    const r = request(d, "agent:coding fix it", "coding");
+    const { io } = fakeIO();
+    return {
+      msg: r.message,
+      io,
+      refuse: r.refuse,
+      card: { update: () => {}, done: async () => {} },
+      shell: r.shell,
+      closeLines: () => ({}),
+      clock: () => NOW,
+      agent: r.agent,
+      profile: r.profile,
+      repoCtx,
+      root: r.root,
+    };
+  }
+
+  it("an attach that throws carries its lost setup result to the failed-setup record; the error is unchanged", async () => {
+    const d = deps();
+    const thrown = new ExecCapacityError("the sandbox did not finish starting");
+    attachState.fail = thrown;
+    const err = await attachWorkspace(d, attachCtx(d)).catch((e: unknown) => e);
+    expect(err).toBe(thrown);
+    expect(lostSetupOf(err)).toEqual({ version: 1, requested: "cold", reason: "sandbox_start_timeout" });
+    expect(lostSetupOf(new Error("thrown after the attach"))).toBeUndefined();
+  });
+
+  it("an ask-once refusal is ref_unresolved, and a stop that ended a drain wait is stopped_in_drain", async () => {
+    const d = deps();
+    attachState.needsRef = "acme/api";
+    expect(await attachWorkspace(d, attachCtx(d))).toEqual({
+      kind: "refused",
+      reason: "which_branch",
+      setup: { version: 1, requested: "cold", reason: "ref_unresolved" },
+    });
+    attachState.needsRef = undefined;
+    attachState.fail = Object.assign(new ExecInfraError("resident /attach: the run was stopped", "aborted"), {
+      drainWaitMs: 60_000,
+    });
+    expect(await attachWorkspace(d, attachCtx(d))).toEqual({
+      kind: "stopped",
+      setup: { version: 1, requested: "cold", reason: "stopped_in_drain" },
+    });
   });
 });

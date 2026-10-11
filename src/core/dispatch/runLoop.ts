@@ -25,6 +25,7 @@ import { validateReviewFollowup, type ReviewHistoryContext } from "../reviewHist
 import type { ParentContext } from "./handoff.js";
 import type { UnitContext } from "./unitContext.js";
 import { answerOutcomeOf, captureAnswerOutcome, type AnswerOutcome } from "../answerOutcome.js";
+import type { RunSetup } from "../runSetup.js";
 import { audienceRefusalText, noteAudienceRefusal, type AudienceRefusalCode } from "../audienceDecision.js";
 // The run stage's loop (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // the model turn and everything that rides on it. The card frame the loop
@@ -305,6 +306,8 @@ export interface RunLoopContext {
     authority: (currentSource?: boolean) => Promise<boolean>,
   ) => Promise<import("../commandChat.js").ChatCommandResult>;
   sourceReads?: SourceReads;
+  /** The run's setup result as it was claimed (record 0097), for its record. */
+  runSetup?: RunSetup;
   msg: IncomingMessage;
   io: ChannelIO;
   agent: AgentDef;
@@ -4326,6 +4329,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       shell.freeze(finishedAt);
       registerFinishRecord(deps, {
         answerOutcome,
+        ...(ctx.runSetup !== undefined ? { setup: ctx.runSetup } : {}),
         audience: privateAudienceLatch,
         ...(contextRefusals.length ? { contextRefusals } : {}),
         ending,

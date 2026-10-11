@@ -11,6 +11,7 @@ import { mkdirSync } from "node:fs";
 import type { AgentDef, Identity, MachineClass } from "../agents/registry.js";
 import type { RunProfile } from "../config/profile.js";
 import {
+  ExecCapacityError,
   ExecInfraError,
   LocalExecutor,
   execDeadline,
@@ -39,6 +40,7 @@ import {
 } from "./seedPlan.js";
 import {
   DRAIN_FALLBACK_WAIT_MS,
+  attachRefusalCodeOf,
   drainWaitOf,
   ResidentExecutor,
   ResidentLeaseSpentError,
@@ -50,6 +52,7 @@ import {
   type ResidentExecutorOptions,
   type ResidentStatusProbe,
 } from "./resident.js";
+import { requestedWorkspaceOf, type FallbackWord, type RunSetup } from "../core/runSetup.js";
 import { repoResourceId, validRef } from "../core/residentAdmin.js";
 import { nearMatch } from "../core/nearMatch.js";
 import { githubAppConfigured, resolveGithubIdentity, type GithubTokenScope } from "./githubApp.js";
@@ -445,6 +448,21 @@ export function workspaceBindingFor(
  *  another tree than the run's. Nothing else was provisioned (the run's work
  *  is on that backend or nowhere, so no other backend is tried), and the
  *  dispatcher restarts the run from its request, saying why. */
+/** A claimed seed refused to fall to a fresh start: the trusted run context
+ *  did not match the resolved seed, or the claimed `/seed` failed. A claimed
+ *  owner never silently moves to a new checkout, so the run gets no
+ *  workspace and records `seed_claim_refused` (record 0097). */
+export class SeedClaimRefusedError extends Error {
+  constructor(
+    message: string,
+    /** What the claimed `/seed` threw, when the refusal is its failure. */
+    readonly seedError?: unknown,
+  ) {
+    super(message);
+    this.name = "SeedClaimRefusedError";
+  }
+}
+
 export class WorkspaceReattachRefusedError extends Error {
   constructor(
     readonly recorded: WorkspaceBinding,
@@ -617,6 +635,12 @@ export interface ExecutorSelection {
   seeded?: SeededSandbox;
   /** Verified cold checkout, when neither attach nor seed supplied one. */
   cold?: { ref: string; sha: string; workspace: string };
+  /** The run's setup result (record 0097): what it asked for and why it got
+   *  something else, decided from this selection's own branch and the
+   *  resident's typed code, never from `note`. Set on every fresh selection
+   *  for a run that asked for a workspace; unset on a re-attach (the row
+   *  keeps the result it was written with) and for a run that asked for none. */
+  setup?: RunSetup;
   /** Where the run's commands execute (docs/reference/specs/tracing.md): recorded on its
    *  `exec.*` spans. Every production selection names one; a test double may
    *  leave it out. */
@@ -931,6 +955,7 @@ async function selectExecutor(
         sandboxKey,
       ),
       backend: perThreadBackend(opts),
+      setup: { version: 1, requested: "blank" },
     };
   }
   // `repo-cold` → the per-thread backend with the checkout and the run's
@@ -942,6 +967,7 @@ async function selectExecutor(
     return {
       executor: await makePerThreadExecutor(opts, perThreadCheckout(opts, ctx), sandboxKey),
       backend: perThreadBackend(opts),
+      setup: { version: 1, requested: "cold" },
     };
   }
 
@@ -968,6 +994,10 @@ async function selectExecutor(
   let failedAttach: ResidentTrace | undefined;
   /** The drain's share of a failed attach's wait, for the run's `drain_wait` note. */
   let drainWaitMs: number | undefined;
+  /** `reason`'s setup word (record 0097), set beside it at each branch. */
+  let fallback: FallbackWord | undefined;
+  /** What this run asked for: a resident only with a repository and a resident backend. */
+  const requested = requestedWorkspaceOf(machine, ctx.repo, opts.execution?.resident !== undefined) ?? "cold";
   if (ctx.repo && opts.execution?.resident) {
     const resident = opts.execution.resident;
     const tokenEnv = resident.tokenEnv ?? "RESIDENT_OPERATOR_TOKEN";
@@ -1018,8 +1048,10 @@ async function selectExecutor(
           `resident restoring${probe.reason ? ` (${probe.reason})` : ""} — this Worker has no /await-restore route, ` +
             `so waiting for the resident's restore is not possible`,
         );
+        fallback = "restore_failed";
       } else {
         reason = oneLine(`resident restoring — waiting for the resident's restore failed (${wait.error})`);
+        fallback = "restore_failed";
       }
     }
     if (reason !== undefined) {
@@ -1104,6 +1136,7 @@ async function selectExecutor(
         reason = oneLine(
           `resident attach failed (${err instanceof Error ? err.message : String(err)})${waitedNote(probeWaitMs)}${restoreWait}`,
         );
+        fallback = attachRefusalCodeOf(err);
       }
       if (selection) {
         // Attach can wait while a newer generation reclaims the run. A claim
@@ -1155,12 +1188,14 @@ async function selectExecutor(
           ? {
               ...selection,
               note: oneLine(`${selection.note ?? "resident"} · after waiting for the resident's restore`),
+              setup: { version: 1, requested, restored: true },
             }
-          : selection;
+          : { ...selection, setup: { version: 1, requested } };
       }
     } else if (probe.kind === "unreachable") {
       // A probe waited through a typed blip that never cleared names the wait.
       reason = oneLine(`resident unreachable (${probe.error})${waitedNote(probeWaitMs)}`);
+      fallback = "resident_unreachable";
     } else if (probe.state === "cold") {
       if (ready !== undefined)
         throw readyFailure("repository_not_onboarded", "The pilot requires a warm repository environment.");
@@ -1172,6 +1207,7 @@ async function selectExecutor(
         executor,
         backend: perThreadBackend(opts),
         note: "repo registered without a resident — running in a per-thread sandbox",
+        setup: { version: 1, requested, seeding: "fresh_no_snapshot", reason: "not_resident" },
       };
       // Executor repo/ref options do not prepare a checkout. Ordinary cold
       // registrations must clone and observe the effective branch before the
@@ -1190,6 +1226,7 @@ async function selectExecutor(
       // Item 27: a restore that landed on a non-serviceable state still names the wait.
       const wait = waitedForRestore ? " after waiting for the resident's restore" : "";
       reason = oneLine(`resident ${probe.state}${probe.reason ? ` (${probe.reason})` : ""}${wait}`);
+      fallback = "resident_not_serviceable";
     } else {
       // not-onboarded is the ordinary per-thread case — but still make the cold
       // fall-through visible: the user needs to know coding ran cold in a
@@ -1249,6 +1286,7 @@ async function selectExecutor(
           note: seededSandboxNote(reason, outcome.seeded),
           backend: perThreadBackend(opts),
           seeded: { ...outcome.seeded, sourceSha: outcome.sourceSha },
+          setup: { version: 1, requested, seeding: "snapshot", reason: fallback ?? "fallback_other" },
           ...(failedAttach ? { trace: failedAttach.steps } : {}),
           ...(drainWaitMs !== undefined ? { drainWaitMs } : {}),
         };
@@ -1266,6 +1304,12 @@ async function selectExecutor(
         executor,
         note: `${reason} — using fresh sandbox${outcome ? ` (${outcome.why})` : ""}`,
         backend: perThreadBackend(opts),
+        setup: {
+          version: 1,
+          requested,
+          seeding: outcome ? "fresh_after_seed_failure" : "fresh_no_snapshot",
+          reason: fallback ?? "fallback_other",
+        },
         ...(failedAttach ? { trace: failedAttach.steps } : {}),
         ...(drainWaitMs !== undefined ? { drainWaitMs } : {}),
       };
@@ -1282,6 +1326,12 @@ async function selectExecutor(
     note,
     backend: perThreadBackend(opts),
     ...(failedAttach ? { trace: failedAttach.steps } : {}),
+    // Only the not-onboarded branch reaches here with a resident requested;
+    // every other run here asked for the cold sandbox it gets.
+    setup:
+      requested === "resident"
+        ? { version: 1, requested, seeding: "fresh_no_snapshot", reason: "not_resident" }
+        : { version: 1, requested },
   };
 }
 
@@ -1308,7 +1358,7 @@ export function seedOwnerClaim(
     ctx.headSha !== (seed.fetchSha ?? seed.sha) ||
     !parsePreservationOwner(claim, false)
   )
-    throw new Error("seed owner: trusted run context does not match the resolved seed");
+    throw new SeedClaimRefusedError("seed owner: trusted run context does not match the resolved seed");
   return claim;
 }
 
@@ -1340,7 +1390,11 @@ async function seedSandbox(
     } catch (err) {
       // A stop ends setup, not just this attempt to seed. Falling through to
       // a fresh sandbox would hide the stop and start work the run no longer owns.
-      if (isRunStopError(err) || claim || fleetBusyEndingFactsOf(err) !== undefined) throw err;
+      // A sandbox that never started is a start timeout, claimed or not: it
+      // stays the capacity error it is, so the run's loss is named by it.
+      if (isRunStopError(err) || fleetBusyEndingFactsOf(err) !== undefined || err instanceof ExecCapacityError)
+        throw err;
+      if (claim) throw new SeedClaimRefusedError(err instanceof Error ? err.message : String(err), err);
       return { why: oneLine(`seed failed (${err instanceof Error ? err.message : String(err)})`) };
     }
     if (answer.seeded) {

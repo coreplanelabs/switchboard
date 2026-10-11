@@ -10,6 +10,7 @@ import {
 } from "./branchPublication.js";
 import { reviewPublicationOf, type ReviewPublicationReceipt } from "./reviewPublication.js";
 import { answerOutcomeOf, type AnswerOutcome } from "./answerOutcome.js";
+import { runSetupOf, type RunSetup } from "./runSetup.js";
 import {
   isMainContextRefusalCode,
   MAIN_CONTEXT_REFUSAL_CODES,
@@ -145,6 +146,10 @@ export interface RunRecord {
   branchPushReceipts?: BranchPushReceipt[];
   /** Authored-output facts; absent on legacy records means unknown. */
   answerOutcome?: AnswerOutcome;
+  /** What workspace the run asked for and why it got another or none
+   *  (record 0097); absent for a run that asked for none and on records
+   *  written before the field. */
+  setup?: RunSetup;
   /** null preserves a present but invalid canonical receipt; absent is legacy unknown. */
   publicationSettlement?: PublicationSettlement | null;
   /** Structural audience refusal; exposed only by authorized diagnostic reads. */
@@ -1447,6 +1452,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
     if (r[key] !== undefined && !isFiniteNumber(r[key])) return false;
   }
   if (r.answerOutcome !== undefined && !answerOutcomeOf(r.answerOutcome)) return false;
+  if (r.setup !== undefined && !runSetupOf(r.setup)) return false;
   if (r.replyOk !== undefined && typeof r.replyOk !== "boolean") return false;
   if (r.audienceRefusal !== undefined && !audienceRefusalOf(r.audienceRefusal)) return false;
   if (r.replyNote !== undefined && typeof r.replyNote !== "string") return false;

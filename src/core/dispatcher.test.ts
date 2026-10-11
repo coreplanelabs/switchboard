@@ -11075,6 +11075,30 @@ describe("run history write path", () => {
     return { deps, registry, store, writer, warnings };
   }
 
+  it("the record carries the setup result its attach claimed, and a failed attach's lost word (record 0097)", async () => {
+    const setup = {
+      version: 1 as const,
+      requested: "resident" as const,
+      seeding: "snapshot" as const,
+      reason: "workload_full" as const,
+    };
+    const fake = { exec: async () => "", readFile: async () => "", writeFile: async () => "" };
+    const ran = wired(capturingProvider());
+    vi.mocked(makeExecutor).mockResolvedValueOnce({ executor: fake, setup });
+    await dispatch(ran.deps, msg("agent:review look at it", "slack:UADMIN"), fakeIO().io);
+    await ran.writer.settled();
+    expect((await ran.store.get("run-h"))!.setup).toEqual(setup);
+
+    const lost = wired(capturingProvider());
+    vi.mocked(makeExecutor).mockRejectedValueOnce(new ExecCapacityError("the sandbox did not finish starting"));
+    await dispatch(lost.deps, msg("agent:review look at it", "slack:UADMIN"), fakeIO().io);
+    await lost.writer.settled();
+    const record = (await lost.store.get("run-h"))!;
+    expect(record.status).toBe("failed");
+    expect(record.setup).toMatchObject({ version: 1, reason: "sandbox_start_timeout" });
+    expect(isRunRecord(record)).toBe(true);
+  });
+
   it("the record carries where the run came from and what it was last doing (live-view item 21): sourceUrl from the message, activity from the stored events; neither when absent", async () => {
     const { deps, store, writer } = wired(capturingProvider());
     await dispatch(

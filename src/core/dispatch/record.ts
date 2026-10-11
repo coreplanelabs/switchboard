@@ -1,4 +1,5 @@
 import { answerOutcomeOf, type AnswerOutcome } from "../answerOutcome.js";
+import { runSetupOf, type RunSetup } from "../runSetup.js";
 import { publicationSettlementForRun, publicationSettlementOf } from "../publicationSettlement.js";
 import { audienceRefusalOf, type AudienceRefusalReceipt, type AudienceTrace } from "../audienceDecision.js";
 // The record stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
@@ -225,6 +226,7 @@ export function reclaimedRunRecord(input: {
   return assembleRunRecord({
     audienceRefusal: audienceRefusalOf(row.state.audienceRefusal),
     answerOutcome: answerOutcomeOf(row.state.answerOutcome),
+    setup: runSetupOf(row.state.setup),
     contextRefusals: contextRefusalsOf(row.state.contextRefusals),
     ...(row.state.publicationSettlement !== undefined
       ? {
@@ -362,6 +364,8 @@ export function writeAbandonedRunRecords(
 export function assembleRunRecord(input: {
   audienceRefusal?: AudienceRefusalReceipt;
   answerOutcome?: AnswerOutcome;
+  /** The run's setup result (record 0097), as its row or its failed setup holds it. */
+  setup?: RunSetup;
   /** Closed private capture categories, held outside the lossy live backlog. */
   contextRefusals?: RunRecord["contextRefusals"];
   run: Pick<RunHandle, "id" | "label">;
@@ -489,6 +493,7 @@ export function assembleRunRecord(input: {
   const fitted = fitRecordToBudget({
     id: run.id,
     ...(input.answerOutcome ? { answerOutcome: input.answerOutcome } : {}),
+    ...(input.setup ? { setup: input.setup } : {}),
     ...(input.audienceRefusal ? { audienceRefusal: input.audienceRefusal } : {}),
     ...(privateMain && input.contextRefusals?.length ? { contextRefusals: [...input.contextRefusals] } : {}),
     ...(run.label !== undefined ? { label: run.label } : {}),
@@ -700,6 +705,8 @@ export function finishSetupRun(
     refusal: Refusal;
     status: RunStatus;
     failure?: RunFailure;
+    /** The setup result the attach reached: a selection's, or a lost word for a run that got no workspace. */
+    setup?: RunSetup;
   },
 ): void {
   const { registry, runId, finishedAt, refusal, status, ending } = ctx;
@@ -723,6 +730,7 @@ export function finishSetupRun(
       deps.runHistoryWriter.write(
         assembleRunRecord({
           audienceRefusal: ctx.audience?.refusal,
+          ...(ctx.setup !== undefined ? { setup: ctx.setup } : {}),
           run: { id: runId, ...(label !== undefined ? { label } : {}) },
           snap,
           agent: ctx.agent.name,
@@ -748,6 +756,8 @@ export function finishSetupRun(
 /** What `registerFinishRecord` reads off the dispatch. */
 export interface FinishRecordContext {
   answerOutcome?: AnswerOutcome;
+  /** The run's setup result (record 0097), as it was claimed. */
+  setup?: RunSetup;
   audience?: AudienceTrace;
   contextRefusals?: RunRecord["contextRefusals"];
   ending: RunEnding;
@@ -845,6 +855,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
         assembleRunRecord({
           audienceRefusal: ctx.audience?.refusal,
           answerOutcome: ctx.answerOutcome,
+          ...(ctx.setup !== undefined ? { setup: ctx.setup } : {}),
           ...(ctx.contextRefusals?.length ? { contextRefusals: ctx.contextRefusals } : {}),
           run,
           snap,
