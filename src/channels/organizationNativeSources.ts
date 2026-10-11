@@ -19,7 +19,7 @@ export interface OrganizationNativeSourcesOptions {
       }): Promise<{ user?: { team_id?: string; deleted?: boolean; is_bot?: boolean; real_name?: string } }>;
     };
   };
-  slackTeamId: string;
+  slackTeamId?: string | (() => string | undefined);
 }
 /** Live credentials are retained only by their adapter, outside the model and
  * durable envelope. A restart holds browser work until a fresh session arrives. */
@@ -81,9 +81,11 @@ export function createOrganizationNativeSources(options: OrganizationNativeSourc
     _attestation?: unknown,
     reference?: OrganizationSourceReference,
   ): Promise<NativeOrganizationProof> => {
+    const team = typeof options.slackTeamId === "function" ? options.slackTeamId() : options.slackTeamId;
+    if (!team) return { status: "unavailable" };
     if (
       identity.issuer !== "https://slack.com" ||
-      identity.tenant !== options.slackTeamId ||
+      identity.tenant !== team ||
       !/^[UW][A-Z0-9_]+$/.test(identity.subject)
     )
       return { status: "fenced" };
@@ -94,8 +96,7 @@ export function createOrganizationNativeSources(options: OrganizationNativeSourc
       ]);
       const person = result.user;
       if (!installation.team_id || !person?.team_id) return { status: "unavailable" };
-      if (installation.team_id !== options.slackTeamId || person.team_id !== options.slackTeamId || person.deleted)
-        return { status: "fenced" };
+      if (installation.team_id !== team || person.team_id !== team || person.deleted) return { status: "fenced" };
       const actorId = `slack:${identity.subject}`;
       let privateSource = false;
       let directAudience;
@@ -118,6 +119,9 @@ export function createOrganizationNativeSources(options: OrganizationNativeSourc
         privateSource = true;
         directAudience = address;
       }
+      const finalTeam = typeof options.slackTeamId === "function" ? options.slackTeamId() : options.slackTeamId;
+      if (!finalTeam) return { status: "unavailable" };
+      if (finalTeam !== team) return { status: "fenced" };
       return {
         status: "verified",
         identity,
@@ -128,7 +132,7 @@ export function createOrganizationNativeSources(options: OrganizationNativeSourc
         ...(directAudience ? { directAudience } : {}),
         ...(person.real_name ? { name: person.real_name } : {}),
         epoch: createHash("sha256")
-          .update(JSON.stringify([options.slackTeamId, actorId, person.is_bot === true, privateSource]))
+          .update(JSON.stringify([team, actorId, person.is_bot === true, privateSource]))
           .digest("hex"),
       };
     } catch {
