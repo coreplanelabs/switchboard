@@ -133,8 +133,9 @@ const proxyFailure = (
   cause: ProviderFailureCause,
   message = "The model provider did not complete the call.",
   status?: number,
+  headers?: Record<string, string>,
 ): string =>
-  `${status === undefined ? "" : `${status} `}${JSON.stringify({ type: "error", error: authenticateProxyProviderFailure({ type: "provider_failure", cause, message }) })}`;
+  `${status === undefined ? "" : `${status} `}${JSON.stringify({ type: "error", error: authenticateProxyProviderFailure({ type: "provider_failure", cause, message, ...(headers ? { details: { diagnostic: { headers } } } : {}) }) })}`;
 
 /** A row's pi facts as a previous generation wrote them: the discriminator and a relaunch count of 0 unless the test says otherwise. */
 const piFacts = (facts: Omit<PiHarnessFacts, "harness" | "relaunches"> & { relaunches?: number }): PiHarnessFacts => ({
@@ -357,8 +358,9 @@ function world(
     ...(opts.logIndexOf ? { logIndexOf: opts.logIndexOf } : {}),
     // pi's loop writes pi's facts alone; the guard keeps the recorder typed as such.
     saveFacts: (f, control) => {
-      if (control?.requireAcknowledgement) return "untracked" as const;
+      if (control?.requireAcknowledgement && !opts.providerPark) return "untracked" as const;
       if (isPiFacts(f)) facts.push(f);
+      if (control?.requireAcknowledgement) return true;
     },
   };
   const harnessDeps: PiHarnessDeps = {
@@ -369,6 +371,7 @@ function world(
     bearers,
     ...(opts.compaction ? { compaction: opts.compaction } : {}),
     clock: () => clock.now,
+    random: () => 0,
     sleep:
       opts.sleep ??
       ((ms) =>
@@ -1435,7 +1438,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   // failure (a gateway 5xx, a stream cut mid-message) retries on the bounded
   // ladder (issue 1932): each attempt a note on the record, its wait charged
   // to the lease; a failure past the ladder fails the run in plain words.
-  it("a typed 402 credit-limit failure holds the turn and resumes it instead of ending the run", async () => {
+  it("a typed billing failure ends the run without another model prompt", async () => {
     const slept: number[] = [];
     const w = world({ providerPark: true, sleep: async (ms) => void slept.push(ms) });
     scriptedPi(w.container, (n, c) => {
@@ -1454,9 +1457,220 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
         );
       } else finalTurn(c, "recovered after credit returned");
     });
-    await expect(w.start()).resolves.toBe("recovered after credit returned");
-    expect(w.notes.some((note) => note.includes("the turn is held and retry 1 waits"))).toBe(true);
-    expect(slept).toContain(PROVIDER_RETRY_BACKOFFS_MS[0]);
+    await expect(w.start()).rejects.toThrow(
+      "The model provider's credit or quota is exhausted; this request is blocked until the account changes.",
+    );
+    expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(1);
+  });
+
+  it("repeated temporary failures stop after three model attempts in initial and follow-up turns", async () => {
+    for (const followUp of [false, true]) {
+      const w = world();
+      scriptedPi(w.container, (n, c) => {
+        if (followUp && n === 0) return finalTurn(c, "first answer");
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: proxyFailure("transient", "unavailable", 503),
+            },
+          },
+          { type: "agent_settled" },
+        );
+      });
+      if (followUp) {
+        const session = await w.open();
+        try {
+          await expect(
+            session.followUp({ text: "continue", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+          ).rejects.toThrow("the model provider did not complete the call before the run's retry budget ended");
+        } finally {
+          await session.end();
+        }
+      } else
+        await expect(w.start()).rejects.toThrow(
+          "the model provider did not complete the call before the run's retry budget ended",
+        );
+      expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(followUp ? 4 : 3);
+    }
+  });
+
+  it("a post-loop turn can recover inside its own lease after the initial loop deadline", async () => {
+    const clock = { now: NOW };
+    const promptTimes: number[] = [];
+    const w = world({
+      clock,
+      agent: { maxMinutes: 90 },
+      providerPark: true,
+      sleep: async (ms) => {
+        if (ms >= 5000) clock.now += ms;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      },
+    });
+    scriptedPi(w.container, (n, c) => {
+      promptTimes.push(clock.now);
+      if (n === 1)
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: proxyFailure("transient", "unavailable", 503),
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else finalTurn(c, n === 0 ? "first answer" : "recovered post-loop turn");
+    });
+    const session = await w.open();
+    clock.now = NOW + 85 * 60000;
+    try {
+      await expect(
+        session.followUp({ text: "write the description", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+      ).resolves.toBe("recovered post-loop turn");
+      expect(promptTimes).toEqual([NOW, NOW + 85 * 60000, NOW + 85 * 60000 + 5000]);
+    } finally {
+      await session.end();
+    }
+  });
+
+  it("rate limits honor Retry-After even when provider-up arrives before the wait in initial and follow-up turns", async () => {
+    for (const followUp of [false, true]) {
+      const clock = { now: NOW };
+      const promptTimes: number[] = [];
+      const w = world({
+        clock,
+        sleep: async (ms) => {
+          if (ms >= 5000) clock.now += ms;
+        },
+      });
+      scriptedPi(w.container, (n, c) => {
+        if (followUp && n === 0) return finalTurn(c, "first answer");
+        promptTimes.push(clock.now);
+        if (n === (followUp ? 1 : 0)) {
+          w.inbox.push({ text: reissueSteerSentence("anthropic"), userId: "plane", at: NOW, ledgerSeq: 5 });
+          c.emit(
+            {
+              type: "message_end",
+              message: {
+                role: "assistant",
+                content: [],
+                stopReason: "error",
+                errorMessage: proxyFailure("rate-limited", "slow down", 429, { "retry-after": "30" }),
+              },
+            },
+            { type: "agent_settled" },
+          );
+        } else finalTurn(c, "recovered after rate limit");
+      });
+      if (followUp) {
+        const session = await w.open();
+        try {
+          await expect(
+            session.followUp({ text: "continue", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+          ).resolves.toBe("recovered after rate limit");
+        } finally {
+          await session.end();
+        }
+      } else await expect(w.start()).resolves.toBe("recovered after rate limit");
+      expect(promptTimes).toEqual([NOW, NOW + 30000]);
+    }
+  });
+
+  it("billing failures end a follow-up turn without a recovery prompt", async () => {
+    const w = world();
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0) return finalTurn(c, "first answer");
+      c.emit(
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: proxyFailure("credit-or-quota-exhausted", "credit exhausted", 402),
+          },
+        },
+        { type: "agent_settled" },
+      );
+    });
+    const session = await w.open();
+    try {
+      await expect(
+        session.followUp({ text: "continue", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+      ).rejects.toThrow(
+        "The model provider's credit or quota is exhausted; this request is blocked until the account changes.",
+      );
+    } finally {
+      await session.end();
+    }
+    expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(2);
+  });
+
+  it("a refused retry reservation ends before another model prompt", async () => {
+    const w = world({ providerPark: true });
+    const save = w.run.saveFacts!;
+    w.run.saveFacts = (facts, control) => (isPiFacts(facts) && facts.retryRecovery ? false : save(facts, control));
+    scriptedPi(w.container, (_n, c) => {
+      c.emit(
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: proxyFailure("transient", "unavailable", 503),
+          },
+        },
+        { type: "agent_settled" },
+      );
+    });
+    await expect(w.start()).rejects.toThrow(
+      "The model retry could not be recorded; no further model call was started.",
+    );
+    expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(1);
+  });
+
+  it("a tracked retry waits for the durable reservation acknowledgement before another model prompt", async () => {
+    const w = world({ providerPark: true, sleep: async () => {} });
+    const save = w.run.saveFacts!;
+    let acknowledge: ((saved: boolean) => void) | undefined;
+    w.run.saveFacts = (facts, control) => {
+      save(facts, control);
+      if (isPiFacts(facts) && facts.retryRecovery)
+        return new Promise<boolean>((resolve) => {
+          acknowledge = resolve;
+        });
+      return control?.requireAcknowledgement ? true : undefined;
+    };
+    scriptedPi(w.container, (n, c) => {
+      if (n === 0)
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: proxyFailure("transient", "unavailable", 503),
+            },
+          },
+          { type: "agent_settled" },
+        );
+      else finalTurn(c, "recovered after recorded retry");
+    });
+    const done = w.start();
+    await vi.waitFor(() => expect(acknowledge).toBeDefined());
+    expect(w.facts.at(-1)?.retryRecovery).toEqual({ retries: 1, until: NOW + 60000, notBefore: NOW + 5000 });
+    expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(1);
+    acknowledge!(true);
+    await expect(done).resolves.toBe("recovered after recorded retry");
+    expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(2);
   });
 
   // Features: docs/reference/specs/model-proxy.md item 12a and
@@ -1464,7 +1678,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   // run's provider hold: a description/verdict/re-review/follow-up turn stays
   // live through a parked 402, and every provider-up row that lands before the
   // successful release response remains consumed after restart.
-  it("a 402 during a follow-up turn parks and resumes on provider-up without ending the run", async () => {
+  it("a temporary failure during a follow-up turn parks and resumes on provider-up without ending the run", async () => {
     const { ledger, providerUp, reclaimWithLease } = await memoryFixture();
     const wt = createLedgerWriteThrough({
       ledger,
@@ -1526,7 +1740,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
               role: "assistant",
               content: [],
               stopReason: "error",
-              errorMessage: proxyFailure("credit-or-quota-exhausted", "credit exhausted", 402),
+              errorMessage: proxyFailure("transient", "temporarily unavailable", 503),
             },
           },
           { type: "agent_settled" },
@@ -2534,9 +2748,15 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   });
 
   it("the harness's park decision is the typed cause set, not a second prose classifier", () => {
-    for (const cause of ["transient", "rate-limited", "credit-or-quota-exhausted"] as const)
-      expect(providerFailureParks(cause), cause).toBe(true);
-    for (const cause of ["key-absent", "key-invalid", "model-unknown", "request-rejected", "permanent"] as const)
+    for (const cause of ["transient", "rate-limited"] as const) expect(providerFailureParks(cause), cause).toBe(true);
+    for (const cause of [
+      "credit-or-quota-exhausted",
+      "key-absent",
+      "key-invalid",
+      "model-unknown",
+      "request-rejected",
+      "permanent",
+    ] as const)
       expect(providerFailureParks(cause), cause).toBe(false);
   });
 
@@ -2932,6 +3152,98 @@ describe("runPiHarness — after a bot restart", () => {
     // the next reclaim.
     expect(w.steps.map((s) => s.firstIdx)).toEqual([transcript.length]);
     expect(w.steps.every((s) => s.turns.every((t) => t.content.length > 0))).toBe(true);
+  });
+
+  it("the first replacement Pi facts retain a spent retry reservation before any continuation", async () => {
+    const w = world();
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+      retryRecovery: { retries: 2, until: NOW + 60000, notBefore: NOW },
+    });
+    w.run.resume!.relaunch = { from: "vm-old", to: "vm-fake" };
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "unexpected continuation"));
+    await expect(w.start()).rejects.toThrow(
+      "the model provider did not complete the call before the run's retry budget ended",
+    );
+    expect(w.facts[0]?.retryRecovery).toEqual({ retries: 2, until: NOW + 60000, notBefore: NOW });
+    expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(0);
+  });
+
+  it("a restart continuation cannot start after its recovery deadline passes during acknowledgement", async () => {
+    const clock = { now: NOW + 59000 };
+    const w = world({ clock, providerPark: true });
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+      retryRecovery: { retries: 1, until: NOW + 60000, notBefore: NOW },
+    });
+    const save = w.run.saveFacts!;
+    w.run.saveFacts = (facts, control) => {
+      const saved = save(facts, control);
+      if (control?.requireAcknowledgement && isPiFacts(facts) && facts.retryRecovery) clock.now += 2000;
+      return saved;
+    };
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "unexpected late continuation"));
+    await expect(w.start()).rejects.toThrow(
+      "the model provider did not complete the call before the run's retry budget ended",
+    );
+    expect(w.facts.at(-1)?.retryRecovery).toEqual({ retries: 2, until: NOW + 60000, notBefore: NOW });
+    expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(0);
+  });
+
+  it.each(["set_auto_retry", "get_state"])(
+    "a restart continuation cannot spend its recovery deadline behind queued %s",
+    async (control) => {
+      const clock = { now: NOW + 59000 };
+      const w = world({ clock, providerPark: true });
+      await w.container.start({ paths, command: "pi", args: [], env: {} });
+      w.run.resume = resume({
+        pid: 4242,
+        logOffset: 0,
+        root: paths.dir,
+        bearerHash: bearerHashOf(w.bearer),
+        retryRecovery: { retries: 1, until: NOW + 60000, notBefore: NOW },
+      });
+      const write = w.container.writeLine.bind(w.container);
+      w.container.writeLine = async (paths, line) => {
+        if (JSON.parse(line).type === control) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          clock.now += 2000;
+        }
+        await write(paths, line);
+      };
+      scriptedPi(w.container, (_n, c) => finalTurn(c, "unexpected late continuation"));
+      await expect(w.start()).rejects.toThrow(
+        "the model provider did not complete the call before the run's retry budget ended",
+      );
+      expect(clock.now).toBe(NOW + 61000);
+      expect(w.facts.at(-1)?.retryRecovery).toEqual({ retries: 2, until: NOW + 60000, notBefore: NOW });
+      expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(0);
+    },
+  );
+
+  it("a restart cannot replenish a spent model retry budget or issue a continuation", async () => {
+    const w = world();
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
+    w.run.resume = resume({
+      pid: 4242,
+      logOffset: 0,
+      root: paths.dir,
+      bearerHash: bearerHashOf(w.bearer),
+      retryRecovery: { retries: 2, until: NOW + 60000, notBefore: NOW },
+    });
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "unexpected continuation"));
+    await expect(w.start()).rejects.toThrow(
+      "the model provider did not complete the call before the run's retry budget ended",
+    );
+    expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(0);
+    expect(w.container.killed).toEqual([4242]);
   });
 
   it("re-attaches without judging the calls the log already held — the generation that died vetted them — and judges its own from the prompt on", async () => {

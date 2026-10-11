@@ -65,7 +65,7 @@ const FAILURE_MATRIX: ReadonlyArray<{
       metadata: { limit_source: "openrouter_key_limit" },
     },
     operatorUrl: "https://openrouter.ai/workspaces/default/keys/key-test",
-    disposition: "park",
+    disposition: "end",
   },
   {
     cause: "key-absent",

@@ -460,7 +460,6 @@ describe("Responses raw storage refusal", () => {
   it.each([
     [200, 1],
     [429, 1],
-    [429, 2],
   ] as const)(
     "retains a document raw-backing refusal after pressure ends for status %s attempt %s",
     async (status, attempt) => {
@@ -578,9 +577,6 @@ describe("Responses raw storage refusal", () => {
     [402, 1],
     [429, 1],
     [503, 1],
-    [402, 2],
-    [429, 2],
-    [503, 2],
     [400, 1],
     [401, 1],
     [422, 1],
@@ -595,10 +591,12 @@ describe("Responses raw storage refusal", () => {
     try {
       const response = await pending;
       const body = JSON.parse(String(response.body)) as unknown;
-      if (status === 400 || status === 401 || status === 422) {
+      if (status === 400 || status === 401 || status === 402 || status === 422) {
         expect(response.status).toBe(status);
         expect(proxyProviderFailureIsAuthenticated(body)).toBe(true);
-        expect(String(response.body)).toContain(status === 401 ? "key-invalid" : "request-rejected");
+        expect(String(response.body)).toContain(
+          status === 401 ? "key-invalid" : status === 402 ? "credit-or-quota-exhausted" : "request-rejected",
+        );
       } else {
         expect(response.status).toBe(403);
         expect(readProxyUnknownTerminal(body)?.reason).toBe("consumer_rejected");
@@ -2508,7 +2506,7 @@ describe("Responses transport admission", () => {
     expect(responsesValidationCapacity.activeCount).toBe(0);
   });
 
-  it("keeps a healthy bounded retry positive without charging clone branches twice", async () => {
+  it("a new request after a temporary failure has its own response reservation", async () => {
     let attempts = 0;
     const wire =
       'data: {"type":"response.created","response":{"id":"response"}}\n\ndata: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}\n\n';
@@ -2522,61 +2520,20 @@ describe("Responses transport admission", () => {
           : new Response(wire, { headers: { "content-type": "text/event-stream" } }),
     });
     const token = h.bearers.mint(h.responsesGrant("bounded-retry"));
+    const failed = await handleModelProxyRequest(
+      request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: responsesRequest() }).req,
+      h.deps,
+    );
+    expect(failed.status).toBe(500);
+    expect(responsesValidationCapacity.activeCount).toBe(0);
     const result = await handleModelProxyRequest(
       request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: responsesRequest() }).req,
       h.deps,
     );
     expect((await drain(result.body)).join("")).toBe(wire);
     expect(h.calls).toHaveLength(2);
-    expect(h.ends.find((span) => span.name === "model.turn")?.status).toBe("ok");
+    expect(h.ends.filter((span) => span.name === "model.turn").at(-1)?.status).toBe("ok");
     expect(responsesValidationCapacity.activeCount).toBe(0);
-  });
-
-  it("retains cumulative response bytes across the bounded retry and latches overflow without a third call", async () => {
-    let attempts = 0;
-    const first = new Uint8Array(16 * 1024 * 1024).fill(32);
-    const frame = new Uint8Array(8 * 1024 * 1024).fill(120);
-    frame[0] = 58;
-    frame[frame.length - 2] = 10;
-    frame[frame.length - 1] = 10;
-    let part = 0,
-      cancelled = 0;
-    const h = harness({
-      answer: () =>
-        ++attempts === 1
-          ? new Response(first, { status: 500, headers: { "content-type": "application/json" } })
-          : new Response(
-              new ReadableStream({
-                pull(controller) {
-                  if (part < 6) {
-                    part++;
-                    controller.enqueue(frame);
-                  } else controller.enqueue(Uint8Array.of(58));
-                },
-                cancel() {
-                  cancelled++;
-                },
-              }),
-              { headers: { "content-type": "text/event-stream" } },
-            ),
-    });
-    const token = h.bearers.mint(h.responsesGrant("cumulative-retry"));
-    const result = await handleModelProxyRequest(
-      request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: responsesRequest() }).req,
-      h.deps,
-    );
-    const reader = (result.body as ReadableStream<Uint8Array>).getReader();
-    let last = "";
-    for (;;) {
-      const next = await reader.read();
-      if (next.done) break;
-      if (next.value.length < 2048) last = new TextDecoder().decode(next.value);
-    }
-    expect(last).toContain("consumer_rejected");
-    expect(h.calls).toHaveLength(2);
-    expect(cancelled).toBe(1);
-    expect(h.ends.find((span) => span.name === "model.turn")?.status).toBe("error");
-    await expect.poll(() => responsesValidationCapacity.activeCount).toBe(0);
   });
 
   it("preserves a signed pre-body refusal when the diagnostic logger throws", async () => {
@@ -2687,7 +2644,7 @@ describe("Responses transport admission", () => {
       expect(responsesValidationCapacity.queuedCount).toBe(0);
       const verified = h.bearers.verify(token);
       expect(verified.ok && verified.turns).toBe(["buffered", "provider-error", "network"].includes(ending) ? 1 : 0);
-      expect(h.calls).toHaveLength(ending === "network" ? 2 : ["buffered", "provider-error"].includes(ending) ? 1 : 0);
+      expect(h.calls).toHaveLength(["buffered", "provider-error", "network"].includes(ending) ? 1 : 0);
     },
   );
 
@@ -4921,6 +4878,34 @@ describe("createModelProxyHandler — the node adapter", () => {
 });
 
 describe("the provider level and the park (record 0064)", () => {
+  it("billing failures stop after one upstream request without a provider recovery wait", async () => {
+    const h = harness({
+      answer: () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              type: "invalid_request_error",
+              message: "Your credit balance is too low to access the Anthropic API.",
+            },
+          }),
+          { status: 400 },
+        ),
+    });
+    const levels: unknown[] = [],
+      parks: unknown[] = [];
+    const token = h.bearers.mint(h.grant("billing-failure"));
+    const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, {
+      ...h.deps,
+      plane: {
+        level: (...args: unknown[]) => void levels.push(args),
+        park: (...args: unknown[]) => void parks.push(args),
+      },
+    });
+    expect(res.status).toBe(400);
+    expect(classifyProviderFailure({ error: res.body, trustedEnvelope: true }).cause).toBe("credit-or-quota-exhausted");
+    expect(h.calls).toHaveLength(1);
+    expect({ levels, parks }).toEqual({ levels: [], parks: [] });
+  });
   const planeFake = () => {
     const levels: Array<{ provider: string; side: string; cause?: string }> = [];
     const parks: Array<{ runId: string; provider: string }> = [];
@@ -4935,7 +4920,7 @@ describe("the provider level and the park (record 0064)", () => {
     };
   };
 
-  it("a 402 credit limit is provider-down by typed cause: it gets one retry, parks the held turn, and relays one safe sentence without the payload or key URL", async () => {
+  it("a credit limit ends immediately with a safe sentence and no provider recovery wait", async () => {
     const payload = {
       message:
         "This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 12789. To increase, visit https://openrouter.ai/workspaces/default/keys/key-test and adjust the key's total limit",
@@ -4950,9 +4935,9 @@ describe("the provider level and the park (record 0064)", () => {
     const token = h.bearers.mint(h.grant("run-1"));
     const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, { ...h.deps, plane: p.plane });
     expect(res.status).toBe(402);
-    expect(h.calls).toHaveLength(2);
-    expect(p.levels).toEqual([{ provider: "anthropic", side: "down", cause: "credit-or-quota-exhausted" }]);
-    expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
+    expect(h.calls).toHaveLength(1);
+    expect(p.levels).toEqual([]);
+    expect(p.parks).toEqual([]);
     expect(String(res.body)).toContain("The model provider's credit or quota is exhausted");
     expect((json(res).error as { message: string }).message).not.toMatch(/limit_source|https:\/\//);
     expect(classifyProviderFailure({ error: res.body, trustedEnvelope: true }).diagnostic?.response).toContain(
@@ -4960,7 +4945,7 @@ describe("the provider level and the park (record 0064)", () => {
     );
   });
 
-  it("a transport failure gets one retry; past it the provider is reported down and the run parked, and the error is still relayed", async () => {
+  it("a transport failure makes one request, reports down and parks for harness recovery", async () => {
     const h = harness({
       answer: () => {
         throw new TypeError("fetch failed");
@@ -4971,12 +4956,12 @@ describe("the provider level and the park (record 0064)", () => {
     const token = h.bearers.mint(h.grant("run-1"));
     const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, deps);
     expect(res.status).toBe(502);
-    expect(h.calls).toHaveLength(2); // the one retry
+    expect(h.calls).toHaveLength(1); // one upstream request
     expect(p.levels).toEqual([{ provider: "anthropic", side: "down", cause: "transient" }]);
     expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
   });
 
-  it("the retry is one in all: a transport failure whose retry answers 5xx makes two upstream calls, reports down once and relays the 5xx", async () => {
+  it("a transport failure is relayed without consuming the next upstream answer", async () => {
     let first = true;
     const h = harness({
       answer: () => {
@@ -4991,13 +4976,13 @@ describe("the provider level and the park (record 0064)", () => {
     const deps = { ...h.deps, plane: p.plane };
     const token = h.bearers.mint(h.grant("run-1"));
     const res = await handleModelProxyRequest(request({ headers: bearer(token) }).req, deps);
-    expect(res.status).toBe(529);
-    expect(h.calls).toHaveLength(2); // never a third call (record 0064's one retry)
+    expect(res.status).toBe(502);
+    expect(h.calls).toHaveLength(1); // the proxy does not retry
     expect(p.levels).toEqual([{ provider: "anthropic", side: "down", cause: "transient" }]);
     expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
   });
 
-  it("a gateway HTML page is a transport failure even when it claims 200: it is retried, parked past the retry, and never relayed as model output", async () => {
+  it("a gateway HTML page is a transport failure even when it claims 200: it is parked and never relayed as model output", async () => {
     const h = harness({
       answer: () =>
         new Response("<html><title>Bad Gateway</title><body>cloudflare</body></html>", {
@@ -5014,7 +4999,7 @@ describe("the provider level and the park (record 0064)", () => {
     expect(classifyProviderFailure({ error: res.body, trustedEnvelope: true }).diagnostic?.response).toContain(
       "cloudflare",
     );
-    expect(h.calls).toHaveLength(2);
+    expect(h.calls).toHaveLength(1);
     expect(p.levels).toEqual([{ provider: "anthropic", side: "down", cause: "transient" }]);
     expect(p.parks).toEqual([{ runId: "run-1", provider: "anthropic" }]);
   });
