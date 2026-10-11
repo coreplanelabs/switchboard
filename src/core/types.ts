@@ -63,8 +63,8 @@ export interface SlackDirectAudience {
 }
 
 export interface IncomingMessage {
-  /** Server-verified connection and normalized request bound to a browser approval. */
-  approvalConnection?: { id: string; credentialId: string; requestHash: string };
+  /** Server-verified connection and normalized request bound to a saved approval. */
+  approvalConnection?: { id: string; credentialId: string; requestHash: string; mode?: "form" };
   /**
    * Scope key for channel-level config. Must be globally unique across
    * platforms — adapters namespace with a platform prefix, e.g. "slack:C0123".

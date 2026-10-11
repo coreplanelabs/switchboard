@@ -4,6 +4,11 @@ What an operator changes when a release breaks something: one section per such r
 
 A section says, in this order: what no longer works as it did, what replaces it, and the smallest edit that gets an installation from one to the other — a config key to rename, a command to re-run, a secret to add. Nothing else: history and reasons live in the changelog and the [decision records](../explanation/design-decisions.md).
 
+## 1.296.0
+
+- Ordinary MCP confirmation now uses form elicitation inside supported clients, without opening a browser or signing in again. The exact saved action, current user/credential permissions, organization floor and one-use execution remain enforced. Unsupported clients retain reads, routine permitted writes and already-approved continuations; fresh confirmation returns a named unavailable result.
+- Deploy the state Worker first: it records the consent source in the existing confirmation row. Older approved browser rows remain readable. Browser connection setup and retained web forms keep their existing protections.
+
 ## 1.295.0
 
 - Remote command writes now honor the same confirmation policy as chat. An action at or above `boundary.confirm` returns HTTP `409 confirmation_required` or an MCP approval continuation instead of executing. The dashboard displays the saved action and submits Confirm or Cancel by id, including token and loopback installations. MCP uses authenticated browser approval, then the original credential resumes by saved id. Model-supplied confirmation flags have no authority. Routine writes can use an authorized `boundary.confirm: destructive` scope; destructive actions still require consent. Existing local CLI operator and named schedule authority remain bounded by normal authorization. A command declaring fresh consent always requires a supported approval surface.

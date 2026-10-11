@@ -1,3 +1,4 @@
+import { hasConfirmationConsent, type ConfirmationConsentSource } from "../../src/core/confirmationConsent.ts";
 import {
   prepareCancellation,
   cancellationBindingMatches,
@@ -1205,7 +1206,7 @@ export class ConfigDO extends DurableObject<Env> {
       }
       if (!actorIds.includes(stored.requester)) return { refused: "foreign", row: stored };
       const binding = confirmationConnection(stored);
-      if (binding && (binding !== connectionId || stored.body.browserApproved !== true)) return { refused: "foreign" };
+      if (binding && (binding !== connectionId || !hasConfirmationConsent(stored.body))) return { refused: "foreign" };
       this.sql.exec(`DELETE FROM confirmations WHERE id = ?`, id);
       return { row: stored };
     });
@@ -1220,6 +1221,7 @@ export class ConfigDO extends DurableObject<Env> {
     actorIds: readonly string[],
     connectionId: string,
     now: number,
+    source: ConfirmationConsentSource = "browser",
   ): Promise<ConfirmationOutcome> {
     return this.ctx.storage.transactionSync(() => {
       const stored = this.readConfirmation(id);
@@ -1230,7 +1232,10 @@ export class ConfigDO extends DurableObject<Env> {
       }
       if (!actorIds.includes(stored.requester) || confirmationConnection(stored) !== connectionId)
         return { refused: "foreign" };
-      stored.body.browserApproved = true;
+      const message = stored.body.message as { approvalConnection?: { mode?: string } } | undefined;
+      if (source === "mcp-form" && message?.approvalConnection?.mode !== "form") return { refused: "foreign" };
+      stored.body.approvedBy = source;
+      if (source === "browser") stored.body.browserApproved = true;
       this.sql.exec(`UPDATE confirmations SET body = ? WHERE id = ?`, JSON.stringify(stored.body), id);
       return { row: stored };
     });
@@ -1916,7 +1921,17 @@ async function handleConfig(pathname: string, body: unknown, env: Env): Promise<
       const click = confirmationClickOf(b);
       if (click instanceof Response) return click;
       if (!click.connectionId) return json({ error: "connectionId required" }, 400);
-      return json(await dO.approveConfirmation(click.id, click.actorIds, click.connectionId, systemClock()));
+      if (b.source !== undefined && b.source !== "browser" && b.source !== "mcp-form")
+        return json({ error: "approval source malformed" }, 400);
+      return json(
+        await dO.approveConfirmation(
+          click.id,
+          click.actorIds,
+          click.connectionId,
+          systemClock(),
+          b.source as ConfirmationConsentSource | undefined,
+        ),
+      );
     }
     case "/config/confirmations/consume": {
       const click = confirmationClickOf(b);

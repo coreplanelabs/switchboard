@@ -1,3 +1,4 @@
+import { hasConfirmationConsent } from "../core/confirmationConsent.js";
 import { createHash } from "node:crypto";
 import type { Actor } from "../core/authz/types.js";
 import type { Confirmation, ConfirmationStore } from "../core/confirmations.js";
@@ -99,7 +100,7 @@ export async function resumeApproval(
   const requester = identity ? await mcpRequester(identity, options) : undefined;
   if (!identity || requester?.userId !== row.message.userId || `mcp:${identity.subject}` !== actor.id)
     return "This connection or its verified identity was revoked; nothing ran.";
-  if (row.browserApproved !== true) return "Browser approval is still required; nothing ran.";
+  if (!hasConfirmationConsent(row)) return "Client confirmation is still required; nothing ran.";
   await dispatchClick(deps, { kind: "confirm", id: row.id, actor, io, connectionId });
   return "";
 }

@@ -108,6 +108,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0097 | [Every terminal run row carries its outcome and its workspace, and the review dashboard is grouped queries over them](../decisions/0097-every-run-row-carries-its-outcome-and-workspace-and-the-review-dashboard-is-six-queries-over-them.md) | Wide event (one fact row per terminal run, every metric a query over it) with closed vocabularies named after the OpenTelemetry semantic conventions; classification as a report-side mapping, never a stored judgement | proposed | 2026-10-09 |
 | 0098 | [Bound stream concurrency separately from parsing](../decisions/0098-bound-stream-concurrency-separately-from-parsing.md) | Bounded concurrency and FIFO backpressure | proposed | 2026-10-09 |
 | 0099 | [One confirmation policy for every command surface](../decisions/0099-command-confirmation-is-shared-across-all-surfaces.md) | One command policy with thin consent adapters | accepted | 2026-10-09 |
+| 0100 | [Ordinary MCP confirmation uses the client form](../decisions/0100-mcp-confirmation-uses-the-client-form.md) | One consent policy with native host input | accepted | 2026-10-10 |
 
 <!-- /generated:decision-records -->
 
