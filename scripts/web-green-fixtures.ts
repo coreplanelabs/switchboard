@@ -81,6 +81,7 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
     actor: ACTOR,
     stream: "person:preview",
     bindingRevision: 0,
+    accessEpoch: "fixture:current-source",
     revision,
     entries: transcripts.get(streamKey(thread)) ?? [],
     history: { cursor: transcripts.get(streamKey(thread))?.length ?? 0, hasMore: false, status: "complete" },

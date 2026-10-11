@@ -73,7 +73,11 @@ export const envelopeSchema = z
     content: z.string().max(32_768),
     contentExpiresAt: instant.optional(),
     context: z
-      .array(z.object({ kind: z.enum(["unit", "pipeline", "thread", "run", "pull-request"]), key: text }).strict())
+      .array(
+        z
+          .object({ kind: z.enum(["unit", "pipeline", "thread", "run", "pull-request", "repository"]), key: text })
+          .strict(),
+      )
       .max(8),
     sourceReference: sourceReferenceSchema.optional(),
     continuation: z

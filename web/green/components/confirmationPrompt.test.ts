@@ -21,6 +21,7 @@ function session(): HomeSession {
     actor: "access:alice",
     stream: "person:alice",
     bindingRevision: 0,
+    accessEpoch: "fixture:current-source",
     revision: 1,
     entries: [],
     submissionKey: "issued:one",

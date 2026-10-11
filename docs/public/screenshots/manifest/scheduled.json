@@ -61,7 +61,7 @@
     "package.json": "9497d3f3b7a7a2e14f2b99f3eacc085a4c9e965673b877569c5e6328f82c12d3",
     "scripts/screenshot-output-worker.mts": "4183d9c7909ebb82903a8caa715b4facc48076eb2d9238c8706cacf35862003b",
     "scripts/screenshots.mts": "f62f9806ba5d836ff6a5f789dc2b348ed5526763dbba3f95333b66a0eda34044",
-    "scripts/web-green-fixtures.ts": "7869ae6a694e63c01a8d8248b8f824bbe54fcf8025d4c2f82d9f1dd42a623cb9",
+    "scripts/web-green-fixtures.ts": "5f2adda8172431c36d1d0d79b274f06d8167d0521e5d40329f683c0d9c7fde98",
     "scripts/web-preview-reading-diff.ts": "24dea75cb4b61c011fa75878b138dde75e8a260d3c5b06c05c1e6fe2f2a58649",
     "scripts/web-preview.ts": "d0afc4c773ec05c0540f52318780ea5f9b559ae6913e1128eab768471c8fad9e",
     "src/agents/defaults.json": "f6fbe3d390a8aca3edf622d7494658145dca9590642183294d36e004c64760d8",
