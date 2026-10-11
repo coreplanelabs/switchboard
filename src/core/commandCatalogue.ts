@@ -39,6 +39,7 @@ import { parseCostsConfig } from "./costs.js";
 import { costsFromConfig, NullCostsService, type CostsService } from "./costsService.js";
 import { AnalyticsEngineSqlSource, parseMetricsConfig } from "./metrics.js";
 import { createMetricsService, NullMetricsService, type MetricsService } from "./metricsService.js";
+import { createReviewsService, NullReviewsService, type ReviewsService } from "./reviewsService.js";
 import { createPlaneService, type PlaneService } from "./planeService.js";
 import type { MergeDoorService } from "./commands/merge.js";
 import {
@@ -162,6 +163,8 @@ export interface CoreCommandWiring {
    *  page will read); default: the Analytics Engine SQL API over the `metrics:` block and
    *  the costs block's credential, or the Null Object when the reader is off. */
   metrics?: () => MetricsService;
+  /** The review report's service (record 0097), built beside `metrics` over the same dataset and credential. */
+  reviews?: () => ReviewsService;
   /** The plane service behind `plane show` (index.ts shares the one the `/plane`
    *  panel reads); default: the runs service and the instance store above with
    *  the merge door's GitHub reads. */
@@ -359,6 +362,22 @@ export function buildCoreCommands(
       { ...(wiring.now ? { now: wiring.now } : {}) },
     );
   });
+  // ONE review report service per binding (record 0097): the same dataset and
+  // credential as `metrics trend`, its own cache.
+  const reviews = once(async (): Promise<ReviewsService> => {
+    if (wiring.reviews) return wiring.reviews();
+    if (wiring.capabilities && !wiring.capabilities.metrics) return new NullReviewsService();
+    const config = (await cfg()).config;
+    const metricsCfg = parseMetricsConfig(config.metrics);
+    const costsCfg = parseCostsConfig(config.costs);
+    const token = costsCfg && wiring.secrets.named(costsCfg.cloudflareTokenEnv);
+    if (!metricsCfg || !costsCfg || !token) return new NullReviewsService();
+    return createReviewsService(
+      metricsCfg,
+      new AnalyticsEngineSqlSource({ accountId: costsCfg.cloudflareAccountId, token: token.reveal() }),
+      { ...(wiring.now ? { now: wiring.now } : {}) },
+    );
+  });
   // ONE plane service per binding: `plane show` and the `/plane` panel read the
   // same table over the same runs service and instance store.
   const plane = once(async (): Promise<PlaneService> => {
@@ -495,7 +514,7 @@ export function buildCoreCommands(
     contract: { readFile: readOptionalFile },
     delivery: { service: delivery },
     costs: { service: costs },
-    metrics: { service: metrics },
+    metrics: { service: metrics, reviews },
     plane: { service: plane },
     // The merge door (record 0070, criterion 4): `pulls merge|enqueue` over the
     // door's own GitHub reads and writes, the person named by their binding.

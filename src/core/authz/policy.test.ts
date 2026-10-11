@@ -225,9 +225,11 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.admin, command("metrics.trend")],
       [A.browser, command("metrics.trend")],
       [A.operator, command("metrics.trend")],
+      [A.browser, command("metrics.reviews")],
     ],
     deny: [
       [A.member, command("metrics.trend")],
+      [A.chatUser, command("metrics.reviews")],
       [A.chatUser, command("metrics.trend")],
       [A.noGrants, command("metrics.trend")],
     ],

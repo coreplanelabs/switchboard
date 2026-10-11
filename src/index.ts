@@ -43,6 +43,7 @@ import { parseCostsConfig } from "./core/costs.js";
 import { costsFromConfig, NullCostsService } from "./core/costsService.js";
 import { AnalyticsEngineSqlSource, parseMetricsConfig } from "./core/metrics.js";
 import { createMetricsService, NullMetricsService } from "./core/metricsService.js";
+import { createReviewsService, NullReviewsService } from "./core/reviewsService.js";
 import { NullResidentAdminClient, residentAdminFromConfig } from "./core/residentAdmin.js";
 import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
 import { httpJwksFetcher, JwksCache, parseAccessConfig, type VerifyDeps } from "./channels/accessAuth.js";
@@ -811,6 +812,14 @@ export async function runBot(): Promise<void> {
           new AnalyticsEngineSqlSource({ accountId: costsCfg.cloudflareAccountId, token: metricsToken.reveal() }),
         )
       : new NullMetricsService();
+  // The review dashboard's report (record 0097): the same dataset and token.
+  const reviewsService =
+    capabilities.metrics && metricsCfg && costsCfg && metricsToken
+      ? createReviewsService(
+          metricsCfg,
+          new AnalyticsEngineSqlSource({ accountId: costsCfg.cloudflareAccountId, token: metricsToken.reveal() }),
+        )
+      : new NullReviewsService();
   const dispatchSweepChild = (
     owner: { instance: CoordinatorInstance; unit: CoordinatorUnit },
     request: SweepDispatchRequest,
@@ -910,6 +919,7 @@ export async function runBot(): Promise<void> {
     delivery: () => deliveryService,
     costs: () => costsService,
     metrics: () => metricsService,
+    reviews: () => reviewsService,
     plane: () => planeService,
     abridger: () => abridger,
     frictionLedger,

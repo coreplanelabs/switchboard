@@ -512,6 +512,14 @@ export const COMMAND_FIXTURES: Readonly<
     }
   >
 > = {
+  "metrics.reviews": {
+    // Two whole UTC days a week apart, `--from` first: the generic string sample is no day.
+    hints: {
+      from: new Date(Date.UTC(2023, 10, 8)).toISOString().slice(0, 10),
+      to: new Date(Date.UTC(2023, 10, 14)).toISOString().slice(0, 10),
+    },
+    why: "`--from` and `--to` are UTC days, `--from` on or before `--to`; a generic string sample is neither",
+  },
   "repo.onboard": {
     variants: { "all-options-set": { omit: ["evictColdest"] } },
     why: "metadata-only registration and resident eviction are mutually exclusive; individual true/false variants still cover both flags",

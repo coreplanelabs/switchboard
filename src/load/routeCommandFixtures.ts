@@ -230,6 +230,13 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
   f("c35p", "paraphrase", "break the run spend down by agent", "costs.by", { args: ["agent"], options: {} }),
   f("c39h", "happy", "show the run trend for the last 7 days", "metrics.trend", { args: [], options: { days: 7 } }),
   f("c39p", "paraphrase", "how are the agents' runs trending lately — failures and wall times?", "metrics.trend"),
+  f("c45h", "happy", "show the review dashboard report for this week", "metrics.reviews"),
+  f(
+    "c45p",
+    "paraphrase",
+    "how many code reviews ran this week, who asked for them, and how many fell back to a cold sandbox?",
+    "metrics.reviews",
+  ),
   f("c37h", "happy", "check our aggregator models against the provider's endpoints", "providers.check"),
   f("c37p", "paraphrase", "does the model registry still match what openrouter actually serves?", "providers.check"),
   // The steer (record 0057): words into a live run, by run id.
@@ -334,6 +341,7 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c34d", "was the reviewer right to decline the fix on acme/api#42?", "runs.findings"),
   d("c35d", "is the review agent worth what it costs us?", "costs.by"),
   d("c39d", "the metrics point for run run-8f2 looks wrong — what does it carry?", "metrics.trend"),
+  d("c45d", "why did the review of acme/api#42 ask for changes?", "metrics.reviews", ["runs.findings"]),
   d("c37d", "which openrouter model should the coding preset run on?", "providers.check"),
   // Asks why the pull request conflicts, not for it to be rebased.
   d("c40d", "why is acme/api#42 conflicting with main?", "pulls.rebase", ["runs.findings"]),

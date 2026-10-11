@@ -91,6 +91,7 @@ const GATES: Record<string, (c: Capabilities) => boolean> = {
   "costs.by": (c) => c.costs,
   "costs.snapshot": (c) => c.costs,
   "metrics.trend": (c) => c.metrics,
+  "metrics.reviews": (c) => c.metrics,
 };
 
 /** Nothing on, tools in a per-thread sandbox: the deterministic ops have no backend either. */

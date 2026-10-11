@@ -50,6 +50,7 @@ import { InMemoryCostsSnapshotStore } from "../costsSnapshotStore.js";
 import { createCostsService } from "../costsService.js";
 import { InMemoryMetricsSource, parseMetricsConfig } from "../metrics.js";
 import { createMetricsService } from "../metricsService.js";
+import { createReviewsService } from "../reviewsService.js";
 import { pointOf } from "../runMetrics.js";
 import { createDeliveryService, InMemoryDeliverySource, type PullRequestFacts } from "../delivery.js";
 import { invokeChatCommand, parseChatCommand } from "../commandChat.js";
@@ -692,10 +693,13 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
     }),
     { now: () => new Date(NOW) },
   );
+  // `metrics reviews`: the real service over a source with no rows — an empty
+  // range is a zero report, so every surface renders the same shape.
+  const reviews = createReviewsService({ dataset: "fixture_runs" }, { query: async () => [] }, { now: () => NOW });
   return {
     delivery: { service: async () => delivery },
     costs: { service: async () => costs },
-    metrics: { service: async () => metrics },
+    metrics: { service: async () => metrics, reviews: async () => reviews },
     // `plane show`: the table over the same registry, store and unit rows the runs
     // fixtures seed; no GitHub reader, so every pull request reads `unknown`.
     plane: { service: async () => createPlaneService({ runs: await runs(), instances: s.units, clock: () => NOW }) },
