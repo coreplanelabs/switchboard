@@ -2,6 +2,7 @@ import { FRICTION_CATEGORIES, type CategoryTotals, type FrictionCategory } from 
 import { llmUsdOfUsage, type ModelPriceTable } from "./modelPricing.js";
 import { emptyUsage, UNKNOWN_AGENT } from "./runUsage.js";
 import { utf8ByteLength, type RunRecord } from "./runRecord.js";
+import { isLostWord } from "./runSetup.js";
 
 // Run metrics (docs/reference/specs/run-metrics.md; docs/decisions/0063-every-finished-run-writes-one-metrics-point-and-a-metrics-page-reads-the-trend.md):
 // one flat point per finished run, written to a Workers Analytics Engine
@@ -31,7 +32,7 @@ const BLOB_NAMES = [
   "preset",
   "model",
   "status",
-  "failure kind",
+  "error type",
   "dominant friction",
   "channel",
   "repository",
@@ -42,6 +43,11 @@ const BLOB_NAMES = [
   "requester",
   "identity",
   "run id",
+  // Appended by record 0097, so no position above changes meaning.
+  "surface",
+  "workspace",
+  "setup reason",
+  "outcome",
 ] as const;
 
 const DOUBLE_NAMES = [
@@ -156,13 +162,14 @@ export function pointOf(record: RunRecord, prices?: ModelPriceTable): RunMetrics
     cacheWriteTokens += m.cacheWriteTokens;
   }
   const shape = record.diagnosis.shape;
+  const { outcome, errorType } = outcomeOf(record);
   const blobs: Record<PointBlobName, string> = {
     schema: POINT_SCHEMA,
     agent: record.agent ?? "",
     preset: record.profile?.preset ?? "",
     model: record.model ?? "",
     status: record.status,
-    "failure kind": record.failure?.kind ?? "",
+    "error type": errorType,
     "dominant friction": dominantFriction(record.diagnosis.byCategory),
     channel: record.channelId,
     repository: record.repo ?? "",
@@ -173,6 +180,10 @@ export function pointOf(record: RunRecord, prices?: ModelPriceTable): RunMetrics
     requester: record.userId,
     identity: record.profile?.identity ?? "",
     "run id": record.id,
+    surface: surfaceOf(record.channelId),
+    workspace: workspaceWordOf(record),
+    "setup reason": record.setup?.reason ?? "",
+    outcome,
   };
   const doubles: Record<PointDoubleName, number> = {
     wall: record.finishedAt - (record.receivedAt ?? record.startedAt),
@@ -201,6 +212,75 @@ export function pointOf(record: RunRecord, prices?: ModelPriceTable): RunMetrics
     blobs: POINT_COLUMNS.blobs.map((n) => capBlob(blobs[n])),
     doubles: POINT_COLUMNS.doubles.map((n) => doubles[n]),
   };
+}
+
+/** A run's **outcome** in OpenTelemetry's CI/CD result vocabulary, and its
+ *  **error type** (record 0097, "Outcome and error type"): a failure is work
+ *  that ran and said no, an error is the system breaking. */
+export type RunOutcome = "success" | "failure" | "error" | "timeout" | "cancellation";
+
+/** The record's outcome and error type: the terminal status decides first,
+ *  then the first matching row of record 0097's table. A changes-requested
+ *  review is a success (the verdict is the review row's); the setup reason has
+ *  its own column, so a cancellation keeps it. Error type is empty exactly for
+ *  `success` and `cancellation`, and `unclassified` names a failed run no row
+ *  explains. */
+export function outcomeOf(record: RunRecord): { outcome: RunOutcome; errorType: string } {
+  const ending = record.answerOutcome?.ending;
+  const budget = ending === "time_budget" || ending === "turn_budget" ? ending : undefined;
+  switch (record.status) {
+    case "stopped_soft":
+    case "stopped_hard":
+      return { outcome: "cancellation", errorType: "" };
+    case "interrupted":
+      return {
+        outcome: "error",
+        errorType: record.failure?.kind === "restart_unclaimed" ? "restart_unclaimed" : "interrupted",
+      };
+    case "failed": {
+      const kind = record.failure?.kind;
+      if (kind === "policy_refusal") return { outcome: "failure", errorType: kind };
+      if (kind !== undefined) return { outcome: "error", errorType: kind };
+      if (isLostWord(record.setup?.reason)) return { outcome: "error", errorType: record.setup!.reason! };
+      if (record.replyOk === false) return { outcome: "error", errorType: "reply_failed" };
+      if (budget !== undefined) return { outcome: "timeout", errorType: budget };
+      return { outcome: "error", errorType: "unclassified" };
+    }
+    case "completed":
+      if (budget !== undefined) return { outcome: "timeout", errorType: budget };
+      if (ending === "interrupted") return { outcome: "error", errorType: "answer_interrupted" };
+      if (ending === "hard_stop" || ending === "soft_stop") return { outcome: "cancellation", errorType: "" };
+      return { outcome: "success", errorType: "" };
+  }
+}
+
+/** The surfaces a run arrives on, read from its channel's namespace. */
+const SURFACES = ["slack", "mcp", "web", "http", "cli"] as const;
+
+/** The run's **surface**: its channel's namespace when it is one of
+ *  `SURFACES`, else empty. */
+export function surfaceOf(channelId: string): string {
+  const namespace = channelId.slice(0, channelId.indexOf(":"));
+  return (SURFACES as readonly string[]).includes(namespace) ? namespace : "";
+}
+
+/** The run's **workspace** word (record 0097, "Rows and columns"): its setup
+ *  result folded into one word — the resident it got, how a sandbox that stood
+ *  in was filled, the sandbox a cold or blank class asked for, `local` or
+ *  `e2b` for a run on that backend, `none` for a lost workspace, and empty for
+ *  a run that asked for none or a record written before the setup result
+ *  existed. */
+export function workspaceWordOf(record: Pick<RunRecord, "setup">): string {
+  const setup = record.setup;
+  if (setup === undefined) return "";
+  if (isLostWord(setup.reason)) return "none";
+  if (setup.backend !== undefined) return setup.backend;
+  if (setup.seeding === "snapshot") return "sandbox_snapshot";
+  if (setup.seeding === "fresh_no_snapshot") return "sandbox_fresh";
+  if (setup.seeding === "fresh_after_seed_failure") return "sandbox_seed_failed";
+  if (setup.requested === "cold") return "sandbox_cold";
+  if (setup.requested === "blank") return "sandbox_blank";
+  return setup.restored === true ? "resident_restored" : "resident";
 }
 
 /** The run point widths a store accepts: the sixteen columns record 0063

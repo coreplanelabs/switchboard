@@ -9465,11 +9465,14 @@ function parseSummary(row: Pick<RunRow, "summary_json">): RunListItem | null {
  *  row is a provisional tombstone. Deliberately not a full `RunRecord` parse
  *  (run-metrics.md item 2) — this runs inside every upsert's transaction. */
 /** The `restarting` close's point as the sweep's terminal close writes it:
- *  `interrupted`, with `restart_unclaimed` as its failure kind. */
+ *  `interrupted`, with `restart_unclaimed` as its error type and, on a row
+ *  wide enough to carry it, `error` as its outcome (record 0097). */
 function unclaimedRestartPoint(point: RunMetricsPoint): RunMetricsPoint {
   const blobs = [...point.blobs];
   blobs[POINT_COLUMNS.blobs.indexOf("status")] = "interrupted";
-  blobs[POINT_COLUMNS.blobs.indexOf("failure kind")] = "restart_unclaimed";
+  blobs[POINT_COLUMNS.blobs.indexOf("error type")] = "restart_unclaimed";
+  const outcome = POINT_COLUMNS.blobs.indexOf("outcome");
+  if (outcome < blobs.length) blobs[outcome] = "error";
   return { indexes: point.indexes, blobs, doubles: point.doubles };
 }
 

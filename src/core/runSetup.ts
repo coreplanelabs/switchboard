@@ -92,9 +92,13 @@ export interface RunSetup {
   reason?: FallbackWord | LostWord;
   /** A same-id successor replaced the workspace after reattach was refused. */
   reallocated?: true;
+  /** The per-thread backend when it is not the Cloudflare sandbox (a local
+   *  or E2B deployment), so a workspace word never reads as a sandbox it was
+   *  not; absent for the Cloudflare sandbox and the resident. */
+  backend?: "local" | "e2b";
 }
 
-const SETUP_KEYS = ["version", "requested", "seeding", "restored", "reason", "reallocated"];
+const SETUP_KEYS = ["version", "requested", "seeding", "restored", "reason", "reallocated", "backend"];
 
 /** What a run's machine class asks for, read where the factory reads it: a
  *  `repo-resident` run asks for a resident only with a repository and a
@@ -130,8 +134,10 @@ export function runSetupOf(value: unknown): RunSetup | undefined {
     if (!["snapshot", "fresh_no_snapshot", "fresh_after_seed_failure"].includes(v.seeding as string)) return undefined;
     if (!fallback) return undefined;
   }
-  // A restore wait leads to a resident binding: no reason beside it.
-  if (v.restored === true && (v.reason !== undefined || v.requested !== "resident")) return undefined;
+  // A restore wait leads to a resident binding: no reason or other backend beside it.
+  if (v.restored === true && (v.reason !== undefined || v.requested !== "resident" || v.backend !== undefined))
+    return undefined;
+  if (v.backend !== undefined && v.backend !== "local" && v.backend !== "e2b") return undefined;
   return {
     version: 1,
     requested: v.requested,
@@ -139,6 +145,7 @@ export function runSetupOf(value: unknown): RunSetup | undefined {
     ...(v.restored === true ? { restored: true as const } : {}),
     ...(v.reason !== undefined ? { reason: v.reason as FallbackWord | LostWord } : {}),
     ...(v.reallocated === true ? { reallocated: true as const } : {}),
+    ...(v.backend !== undefined ? { backend: v.backend as "local" | "e2b" } : {}),
   };
 }
 
