@@ -35,6 +35,13 @@ import {
   type RestartRunResult,
 } from "../../deploy/run.js";
 import { profileUrls } from "../../deploy/profile.js";
+import type { DeploymentProfile } from "../../deploy/profile.js";
+import type {
+  SandboxVerificationOptions,
+  SandboxVerificationResult,
+  SandboxInspectionOptions,
+  SandboxInspectionResult,
+} from "../../deploy/sandboxVerification.js";
 import {
   PROJECT_FACTS_FILE,
   renderSiteConfig,
@@ -79,6 +86,8 @@ import {
 export interface DeployCommandDeps {
   deploy: {
     run(plan: DeployPlan): Promise<DeployRunResult>;
+    verify(profile: DeploymentProfile, options: SandboxVerificationOptions): Promise<SandboxVerificationResult>;
+    inspect(profile: DeploymentProfile, options: SandboxInspectionOptions): Promise<SandboxInspectionResult>;
     /** `deploy restart`: POST the admin route, wait out a refusal, gate on a later `startedAt` (src/deploy/run.ts `runBotRestart`). */
     restart(plan: RestartPlan): Promise<RestartRunResult>;
     /** Where the deploy runs from — a checkout or the published package in the operator's directory (`plan.root`) —
@@ -386,6 +395,75 @@ export const deployAll = defineCommand({
       );
     }
     return output(result.results, copies, []);
+  },
+});
+
+export const deployInspect = defineCommand({
+  id: "deploy.inspect",
+  options: z.object({
+    expectedCommit: z
+      .string()
+      .regex(/^[a-f0-9]{40}$/, "expected a full Worker commit")
+      .describe("Worker commit whose installed Sandbox target to observe"),
+  }),
+  action: "deploy:read",
+  effect: "read",
+  surfaces: { chat: false, mcp: false, http: false },
+  describe:
+    "Observe Sandbox health, application version, image digest and complete inventory without an echo or upload. This reports installed facts; target acceptance requires independent release image provenance.",
+  render: (output) => {
+    const o = output as JsonObject;
+    return `Observation only; target acceptance and full readiness unverified\napplication version ${o.appVersion ?? "unknown"}; image digest ${o.imageDigest ?? "unknown"}; inventory ${o.inventoryComplete ? "complete" : "incomplete"}\n${o.reason}\nverifier ${o.source}; expected Worker ${o.expectedCommit}`;
+  },
+  handler: async ({ options, deps }) => {
+    const loaded = await loadProfile(deps);
+    if (loaded.origin === "example")
+      throw new CommandError("unavailable", "inspection requires this installation's deployment profile");
+    return (await deps.deploy.inspect(loaded.profile, { ...options, inspect: true })) as unknown as JsonValue;
+  },
+});
+
+export const deployVerify = defineCommand({
+  id: "deploy.verify",
+  options: z.object({
+    expectedCommit: z
+      .string()
+      .regex(/^[a-f0-9]{40}$/, "expected a full Worker commit")
+      .describe("Worker commit to verify, independent of this CLI's source"),
+    expectedAppVersion: z.coerce
+      .number()
+      .int()
+      .nonnegative()
+      .describe("application version from the original deployment receipt"),
+    expectedImage: z
+      .string()
+      .regex(/^(?:[^\s?#]+@)?sha256:[a-f0-9]{64}$/, "expected a digest-pinned image")
+      .describe("exact installed application image from the original receipt"),
+    inventoryOnly: flag
+      .optional()
+      .describe(
+        "read health, application and complete inventory without an echo probe; full readiness stays unverified",
+      ),
+  }),
+  action: "deploy:write",
+  effect: "write",
+  surfaces: { chat: false, mcp: false, http: false },
+  describe:
+    "Verify the existing Sandbox without upload, image copy or restart. Require explicit deployed commit, application version and image digest. Complete inventory must pass before any echo; recheck the target after the probe.",
+  render: (output) => {
+    const o = output as JsonObject;
+    return `${o.live ? "Sandbox readiness verified" : "Sandbox inventory verified"}: ${o.reason}\nverifier ${o.source}; expected Worker ${o.expectedCommit}`;
+  },
+  handler: async ({ options, deps }) => {
+    const loaded = await loadProfile(deps);
+    if (loaded.origin === "example")
+      throw new CommandError("unavailable", "verification requires this installation's deployment profile");
+    const result = await deps.deploy.verify(loaded.profile, {
+      ...options,
+      inventoryOnly: options.inventoryOnly ?? false,
+    });
+    if (!result.ok) throw new CommandError("unavailable", `Sandbox readiness unverified — ${result.reason}`);
+    return result as unknown as JsonValue;
   },
 });
 
@@ -830,6 +908,8 @@ export const deployImages = defineCommand({
 export const deployCommands: readonly CommandDef<DeployCommandDeps>[] = [
   deployPlan,
   deployAll,
+  deployInspect,
+  deployVerify,
   deployRestart,
   deployInit,
   deploySecrets,

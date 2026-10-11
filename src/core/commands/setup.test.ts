@@ -68,6 +68,12 @@ function bind(world: World = {}) {
         : undefined,
     },
     deploy: {
+      inspect: async () => {
+        throw new Error("must not inspect Sandbox during setup");
+      },
+      verify: async () => {
+        throw new Error("must not verify Sandbox during setup");
+      },
       run: async () => {
         throw new Error("must not deploy");
       },

@@ -11,6 +11,111 @@ import { parseIngressTokenMap } from "./core/ingressTokens.js";
 import { DOCKERFILES, IMAGE_KINDS, VERSION, type ImageKind } from "./deploy/images.js";
 import { WORKER_DIRS } from "./deploy/plan.js";
 
+describe("paging failure artifact", () => {
+  it("retains the bounded failure snapshot independently of smoke acceptance", () => {
+    const workflow = parse(readFileSync(".github/workflows/deploy-production.yml", "utf8"));
+    const steps = Object.values(workflow.jobs).flatMap((job: any) => job.steps ?? []);
+    const artifact = steps.find((step: any) => step.name === "paging diagnostic artifact") as any;
+    expect(artifact.with).toEqual({
+      name: "paging-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}",
+      path: "${{ runner.temp }}/paging-diagnostic.json",
+      "retention-days": 7,
+      "if-no-files-found": "ignore",
+    });
+    expect(artifact.if).toBe("always() && steps.deploy.outcome != 'success'");
+    expect(artifact.if).not.toContain("smoke");
+  });
+});
+
+describe("Sandbox verification workflow", () => {
+  it("binds verifier and Worker separately and executes only the requested inspection or verification", () => {
+    const workflow = parse(readFileSync(".github/workflows/verify-sandbox.yml", "utf8"));
+    const job = workflow.jobs.verify;
+    const preflight = job.steps.find((step: any) => step.name === "exact verifier and target").run;
+    const command = job.steps.find((step: any) => step.name === "verify without uploading").run;
+    const dir = mkdtempSync(path.join(tmpdir(), "sandbox-workflow-"));
+    const calls = path.join(dir, "calls");
+    try {
+      writeFileSync(
+        path.join(dir, "npm"),
+        `#!${process.execPath}\nconst fs=require('node:fs');fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify(process.argv.slice(2))+'\\n');console.log('{}');`,
+        { mode: 0o755 },
+      );
+      const env = {
+        PATH: `${dir}:/usr/bin:/bin`,
+        RUNNER_TEMP: dir,
+        FIXTURE_CALLS: calls,
+        GITHUB_REF: "refs/heads/main",
+        GITHUB_SHA: "c".repeat(40),
+        VERIFIER_COMMIT: "c".repeat(40),
+        EXPECTED_COMMIT: "a".repeat(40),
+        EXPECTED_APP_VERSION: "12",
+        EXPECTED_IMAGE: "sha256:" + "b".repeat(64),
+        SWITCHBOARD_DEPLOY_PROFILE: "fixture-profile",
+        CLOUDFLARE_API_TOKEN: "synthetic-no-access",
+        SANDBOX_TOKEN: "fixture",
+      };
+      for (const mode of ["inspect", "inventory", "probe"]) {
+        expect(spawnSync("bash", ["-c", preflight], { env: { ...env, MODE: mode } }).status).toBe(0);
+        expect(spawnSync("bash", ["-c", command], { env: { ...env, MODE: mode } }).status).toBe(0);
+      }
+      const requested = readFileSync(calls, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(requested).toEqual([
+        ["run", "--silent", "cli", "--", "deploy", "inspect", "--expected-commit", "a".repeat(40), "--json"],
+        [
+          "run",
+          "--silent",
+          "cli",
+          "--",
+          "deploy",
+          "verify",
+          "--expected-commit",
+          "a".repeat(40),
+          "--expected-app-version",
+          "12",
+          "--expected-image",
+          "sha256:" + "b".repeat(64),
+          "--json",
+          "--inventory-only",
+        ],
+        [
+          "run",
+          "--silent",
+          "cli",
+          "--",
+          "deploy",
+          "verify",
+          "--expected-commit",
+          "a".repeat(40),
+          "--expected-app-version",
+          "12",
+          "--expected-image",
+          "sha256:" + "b".repeat(64),
+          "--json",
+        ],
+      ]);
+      for (const changed of [
+        { VERIFIER_COMMIT: "d".repeat(40) },
+        { GITHUB_REF: "refs/heads/other" },
+        { EXPECTED_COMMIT: "main" },
+        { EXPECTED_IMAGE: "" },
+      ]) {
+        expect(spawnSync("bash", ["-c", preflight], { env: { ...env, MODE: "probe", ...changed } }).status).toBe(1);
+      }
+      expect(workflow.permissions).toEqual({ contents: "read" });
+      expect(workflow.on.workflow_dispatch.inputs.mode.default).toBe("inspect");
+      expect(
+        job.steps.filter((step: any) => step.uses?.startsWith("actions/upload-artifact@"))[0].with["retention-days"],
+      ).toBe(7);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 // CI is a thin caller of the repository's own scripts. Every check a job runs
 // is an `npm run <script>` a contributor or an agent can run locally with the
 // same result, and nothing lives only in workflow YAML. This test is the rule:

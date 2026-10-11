@@ -109,6 +109,25 @@ function bind(
   const writes: string[] = [];
   const commands = bindCommands(registry, {
     deploy: {
+      inspect: async (_profile, options) => ({
+        ok: true,
+        live: false,
+        targetVerified: false,
+        inventoryComplete: true,
+        source: "c".repeat(40),
+        expectedCommit: options.expectedCommit,
+        appVersion: 12,
+        imageDigest: "sha256:" + "b".repeat(64),
+        reason: "observation only; target acceptance and full readiness unverified",
+      }),
+      verify: async (_profile, options) => ({
+        ok: true,
+        live: false,
+        inventoryVerified: true,
+        source: "c".repeat(40),
+        expectedCommit: options.expectedCommit,
+        reason: "inventory verified; echo probe not requested; full readiness unverified",
+      }),
       run: (plan) => {
         plans.push(plan);
         return run(plan);
@@ -1939,5 +1958,28 @@ describe("deploy.plan / deploy.all in registry mode", () => {
     );
     await build.commands.invoke("deploy.init", {}, cli);
     expect(build.disk.get("deploy/cloudflare/wrangler.jsonc")).toContain('{ "image": "../../Dockerfile" }');
+  });
+});
+
+describe("deploy.verify", () => {
+  it("offers an explicit inventory-only verification command without invoking deployment", async () => {
+    const h = neverRuns();
+    const result = await h.commands.invoke(
+      "deploy.verify",
+      {
+        options: {
+          expectedCommit: "a".repeat(40),
+          expectedAppVersion: 12,
+          expectedImage: "registry.example/sandbox@sha256:" + "b".repeat(64),
+          inventoryOnly: true,
+        },
+      },
+      cli,
+    );
+    expect(result).toMatchObject({ ok: true, value: { live: false, inventoryVerified: true } });
+    if (!result.ok) throw new Error(result.message);
+    expect(renderText(h.commands.get("deploy.verify")!, result.value)).toBe(
+      `Sandbox inventory verified: inventory verified; echo probe not requested; full readiness unverified\nverifier ${"c".repeat(40)}; expected Worker ${"a".repeat(40)}`,
+    );
   });
 });

@@ -584,6 +584,18 @@ export const COMMAND_FIXTURES: Readonly<
     hints: { only: "bot" },
     why: "`--only` is an enum of the one restartable Worker (`bot`) — the generic `only` hint (`memory`) is a deploy target",
   },
+  "deploy.verify": {
+    hints: {
+      expectedCommit: "a".repeat(40),
+      expectedAppVersion: "12",
+      expectedImage: "registry.example/sandbox@sha256:" + "b".repeat(64),
+    },
+    why: "verification targets explicit deployed facts independent of the verifier's source, not an arbitrary generic string",
+  },
+  "deploy.inspect": {
+    hints: { expectedCommit: "a".repeat(40) },
+    why: "the expected Worker commit is an exact independently supplied source identity",
+  },
   "deploy.secrets": {
     hints: { only: "MEMORY_TOKEN" },
     why: "`--only` is a comma list of SECRET names from the fixture manifest — the generic `only` hint (`memory`) is a deploy target",

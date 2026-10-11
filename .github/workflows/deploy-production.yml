@@ -447,6 +447,14 @@ jobs:
           # handoff (run-history item 39) a bot with runs in flight is not busy.
           # shellcheck disable=SC2086
           $CLI deploy all $ARGS --allow-branch
+      - name: paging diagnostic artifact
+        if: always() && steps.deploy.outcome != 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: paging-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/paging-diagnostic.json
+          retention-days: 7
+          if-no-files-found: ignore
       # What production serves now, whatever happened above — the receipt.
       - name: what is live
         id: readiness
