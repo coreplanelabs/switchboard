@@ -5,6 +5,9 @@ import type { OrganizationSourceReference } from "../core/organization/contract.
 import type { NativeOrganizationProof } from "./organizationAuthentication.js";
 import type { AccessConfig, AccessIdentity } from "./accessAuth.js";
 import { isServiceToken } from "./accessAuth.js";
+import { callerIdFor } from "./commandHttp.js";
+import type { IngressIdentity } from "./http.js";
+import type { McpIdentity } from "./mcpApproval.js";
 import type { DashboardRequest, DashboardVerifier } from "./dashboardAuth.js";
 import { verifySlackDirectAudience, type SlackDirectAudienceClient } from "./slack/directAudience.js";
 
@@ -28,6 +31,14 @@ export function createOrganizationNativeSources(options: OrganizationNativeSourc
     options.dashboard.mode === "access" && options.access
       ? `https://${options.access.teamDomain}`
       : `installation:${options.organization}:dashboard:${options.dashboard.mode}`;
+  const mcpIssuer = `installation:${options.organization}:mcp:sso:${options.dashboard.mode}:${createHash("sha256")
+    .update(JSON.stringify([browserIssuer, options.access?.aud ?? null]))
+    .digest("hex")}`;
+  const mcpIdentity = (identity: AccessIdentity): ExternalIdentity => ({
+    issuer: mcpIssuer,
+    tenant: null,
+    subject: identity.sub,
+  });
   const browserIdentity = (identity: AccessIdentity): ExternalIdentity => ({
     issuer: browserIssuer,
     tenant: null,
@@ -75,6 +86,100 @@ export function createOrganizationNativeSources(options: OrganizationNativeSourc
         .update(JSON.stringify([browserIssuer, identity.subject, options.dashboard.mode]))
         .digest("hex"),
     };
+  };
+  // Exact MCP credentials stay in their request-bound verifier closure. Saved
+  // envelopes carry only this source identity and connection digest.
+  const mcpSessions = new Map<string, () => Promise<McpIdentity | undefined>>();
+  const currentMcp = async (
+    expected: ExternalIdentity | IngressIdentity,
+    attestation?: unknown,
+    reference?: OrganizationSourceReference,
+  ): Promise<NativeOrganizationProof> => {
+    if (options.dashboard.mode !== "access" && options.dashboard.mode !== "token") return { status: "fenced" };
+    if (options.dashboard.mode === "access" && !options.access) return { status: "unavailable" };
+    const session = "session" in expected ? (expected as McpIdentity).session : undefined;
+    const identity = session ? mcpIdentity(session) : "issuer" in expected ? expected : undefined;
+    if (!identity || identity.issuer !== mcpIssuer || identity.tenant !== null || !identity.subject || !reference)
+      return { status: "fenced" };
+    const actorId = `access:${identity.subject}`;
+    if (
+      !reference.credentialDigest ||
+      reference.actorId !== actorId ||
+      reference.userId !== actorId ||
+      reference.authenticatedAs !== actorId ||
+      reference.postedBy ||
+      reference.approvalConnection?.id !== reference.credentialDigest ||
+      reference.approvalConnection.credentialId !== actorId
+    )
+      return { status: "fenced" };
+    const key = JSON.stringify([
+      identity,
+      reference.credentialDigest,
+      actorId,
+      reference.userId,
+      reference.channelId,
+      reference.threadKey,
+      reference.approvalConnection,
+    ]);
+    const supplied =
+      attestation && typeof attestation === "object"
+        ? (attestation as {
+            kind?: unknown;
+            mode?: unknown;
+            revalidateConnection?: unknown;
+          })
+        : undefined;
+    const revalidate =
+      session &&
+      supplied?.kind === "mcp-sso" &&
+      supplied.mode === options.dashboard.mode &&
+      typeof supplied.revalidateConnection === "function"
+        ? () =>
+            (supplied.revalidateConnection as (id: string) => Promise<McpIdentity | undefined>)(
+              reference.credentialDigest!,
+            )
+        : mcpSessions.get(key);
+    if (!revalidate) return { status: "unavailable" };
+    try {
+      const current = await revalidate();
+      const actual = current?.session;
+      if (
+        !actual ||
+        current.subject !== actual.sub ||
+        isServiceToken(actual) ||
+        actual.viewAs ||
+        callerIdFor(actual) !== actorId ||
+        identityKey(mcpIdentity(actual)) !== identityKey(identity)
+      )
+        return { status: "fenced" };
+      // Replace only after this same credential has passed fresh verification.
+      mcpSessions.delete(key);
+      mcpSessions.set(key, revalidate);
+      if (mcpSessions.size > 1000) mcpSessions.delete(mcpSessions.keys().next().value!);
+      const human = options.dashboard.mode === "access";
+      return {
+        status: "verified",
+        identity,
+        actorId,
+        kind: human ? "human" : "service",
+        organizationMember: human,
+        privateSource: human,
+        access: actual,
+        epoch: createHash("sha256")
+          .update(
+            JSON.stringify([
+              browserIssuer,
+              options.access?.aud,
+              options.dashboard.mode,
+              identity.subject,
+              reference.credentialDigest,
+            ]),
+          )
+          .digest("hex"),
+      };
+    } catch {
+      return { status: "unavailable" };
+    }
   };
   const currentSlack = async (
     identity: ExternalIdentity,
@@ -139,5 +244,5 @@ export function createOrganizationNativeSources(options: OrganizationNativeSourc
       return { status: "unavailable" };
     }
   };
-  return { browserIdentity, browserIssuer, rememberBrowser, currentBrowser, currentSlack };
+  return { browserIdentity, browserIssuer, mcpIssuer, rememberBrowser, currentBrowser, currentMcp, currentSlack };
 }

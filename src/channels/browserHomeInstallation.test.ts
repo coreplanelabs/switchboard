@@ -1,3 +1,6 @@
+import { generateKeyPairSync, sign } from "node:crypto";
+import { createOrganizationNativeSources } from "./organizationNativeSources.js";
+import { buildDashboardVerifier, tokenVerifier } from "./dashboardAuth.js";
 import {
   CLIENT_CAPABILITIES_META_KEY,
   CLIENT_INFO_META_KEY,
@@ -32,7 +35,7 @@ import { FakeHarnessContainer } from "../core/harness/testing/fakeContainer.js";
 import { scriptPiFromProvider } from "../core/harness/pi/testing/providerPi.js";
 import { createLedgerWriteThrough } from "../core/runLedger/writeThrough.js";
 import { createMcpApprovalView } from "./mcpApprovalView.js";
-import { handleMcpRequest } from "./mcp.js";
+import { createMcpHandler, handleMcpRequest, type McpOptions } from "./mcp.js";
 import { ConfigStore } from "../config.js";
 import { NullMcpToolSource } from "../mcp/source.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
@@ -54,7 +57,7 @@ import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
 import { NullLedgerWriteThrough } from "../core/runLedger/writeThrough.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
-import { NullRunHistoryWriter } from "../core/runHistoryWriter.js";
+import { NullRunHistoryWriter, createRunHistoryWriter } from "../core/runHistoryWriter.js";
 import { createRunsService } from "../core/runsService.js";
 import type { RunRecord } from "../core/runRecord.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
@@ -112,6 +115,7 @@ async function fixture(
   productionRetention = false,
   metadataRecipient = false,
   personalApproved = false,
+  nativeMcp?: ReturnType<typeof createOrganizationNativeSources>,
 ) {
   let now = 1000,
     policy = "config";
@@ -256,6 +260,10 @@ async function fixture(
       clock: () => now,
     });
   }
+  if (nativeMcp) {
+    core.runLedger = createLedgerWriteThrough({ ledger, gen: "sso-original", fallback: runStore, warn: () => {} });
+    core.runHistoryWriter = createRunHistoryWriter({ store: runStore, warn: () => {}, sleep: async () => {} });
+  }
   const slackIdentity = { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" };
   const mappings = [
     { source: "http" as const, issuer: "installation:fixture:http", tenant: null, organization: "fixture" },
@@ -263,6 +271,7 @@ async function fixture(
     { source: "browser" as const, issuer: identity.issuer, tenant: null, organization: "fixture" },
     { source: "slack" as const, issuer: slackIdentity.issuer, tenant: slackIdentity.tenant, organization: "fixture" },
   ];
+  if (nativeMcp) mappings.push({ source: "mcp", issuer: nativeMcp.mcpIssuer, tenant: null, organization: "fixture" });
   if (linkedSlack) {
     const person = await store.directory.createPerson();
     if (person.status !== "created") throw new Error("No fixture person");
@@ -288,6 +297,7 @@ async function fixture(
     grantsFor: (id) => (id === "access:alice" ? browserGrants : ALL_GRANTS),
     auth: () => ({ tokens }),
     personalTokens,
+    currentMcp: nativeMcp?.currentMcp,
     ...(personalApproved ? { personalApproval: { issuer: identity.issuer, audience: "access-app" } } : {}),
     directory: store.directory,
     store,
@@ -1932,6 +1942,431 @@ describe("browser installation", () => {
     expect(await s.installation.admitNative({ ...msg, messageId: "1000.2" }, evidence)).toEqual({
       status: "unavailable",
     });
+  });
+  async function ssoInstallation(mode: "access" | "oauth" | "token" | "hex") {
+    let clock = 1000,
+      unavailable = false;
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const unsigned = [
+      { alg: "RS256", kid: "fixture-sso" },
+      {
+        iss: "https://team.cloudflareaccess.com",
+        aud: "fixture-app",
+        sub: "alice",
+        email: "alice@example.test",
+        exp: 301,
+      },
+    ]
+      .map((value) => Buffer.from(JSON.stringify(value)).toString("base64url"))
+      .join(".");
+    const assertion = `${unsigned}.${sign("RSA-SHA256", Buffer.from(unsigned), privateKey).toString("base64url")}`;
+    const access = { teamDomain: "team.cloudflareaccess.com", aud: "fixture-app" };
+    const bearer = mode === "hex" ? "d".repeat(64) : "dashboard-credential";
+    const verifier =
+      mode === "access" || mode === "oauth"
+        ? buildDashboardVerifier({
+            dashboard: { auth: "access" },
+            access,
+            secrets: secretsFrom({}),
+            publicBaseUrl: undefined,
+            verify: {
+              now: () => clock,
+              fetchJwks: async () => [{ ...publicKey.export({ format: "jwk" }), kid: "fixture-sso" }],
+            },
+          })
+        : tokenVerifier({ token: bearer, env: "FIXTURE_DASHBOARD_TOKEN", subject: "alice" });
+    const sso = {
+      ...verifier,
+      verify: (req: Parameters<typeof verifier.verify>[0]) =>
+        unavailable
+          ? Promise.resolve({ ok: false as const, status: 503, body: "authentication unavailable" })
+          : verifier.verify(req),
+    };
+    const nativeOptions: Parameters<typeof createOrganizationNativeSources>[0] = {
+      organization: "fixture",
+      dashboard: sso,
+      access,
+      slack: {
+        auth: { test: async () => ({}) },
+        users: { info: async () => ({}) },
+        conversations: { info: async () => ({}) },
+      },
+    };
+    const native = createOrganizationNativeSources(nativeOptions);
+    const s = await fixture(false, false, undefined, false, false, false, native);
+    const options: McpOptions = {
+      auth: { tokens: s.tokens },
+      sso,
+      personalTokens: s.personalTokens,
+      personByEmail: async () => ({ id: "slack:UALICE" }),
+      commands: s.core.commands,
+      approvalsEnabled: true,
+      publicBaseUrl: "https://fixture.test",
+      replayChoice: s.installation.replayNativeChoice,
+      admit: (msg, _io, evidence, choice) => s.installation.admitNative(msg, evidence, choice),
+    };
+    const headers: Record<string, string> =
+      mode === "access" || mode === "oauth"
+        ? {
+            "cf-access-jwt-assertion": assertion,
+            ...(mode === "oauth" ? { authorization: "Bearer oauth:opaque" } : {}),
+          }
+        : { authorization: `Bearer ${bearer}` };
+    async function send(
+      args: Record<string, unknown>,
+      overrides: Record<string, string> = {},
+      name = "dispatch",
+      opts = options,
+      modern?: Record<string, unknown>,
+    ) {
+      const body = JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name, arguments: args, ...(modern ?? {}) },
+      });
+      const req = Object.assign(Readable.from([Buffer.from(body)]), {
+        method: "POST",
+        url: "/mcp",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          ...headers,
+          ...overrides,
+          ...(modern
+            ? { "mcp-protocol-version": FORM_PROTOCOL_VERSION, "mcp-method": "tools/call", "mcp-name": name }
+            : {}),
+        },
+      });
+      let status = 0,
+        response = "";
+      await new Promise<void>((resolve) => {
+        const res = {
+          writeHead(code: number) {
+            status = code;
+          },
+          on() {},
+          write(chunk: string | Uint8Array) {
+            response += Buffer.from(chunk).toString();
+            return true;
+          },
+          end(chunk?: string) {
+            response += chunk ?? "";
+            resolve();
+          },
+        };
+        createMcpHandler(s.core, opts)(req as IncomingMessage, res as unknown as ServerResponse);
+      });
+      const wire = JSON.parse(
+        response.includes("data: ")
+          ? response
+              .split("\n")
+              .filter((line) => line.startsWith("data: "))
+              .at(-1)!
+              .slice(6)
+          : response,
+      );
+      return { status, wire };
+    }
+    return {
+      ...s,
+      native,
+      nativeOptions,
+      credentials: [assertion, bearer, "oauth:opaque"],
+      options,
+      send,
+      expireSession: () => {
+        clock = 400000;
+      },
+      fault: (value: boolean) => {
+        unavailable = value;
+      },
+    };
+  }
+  it.each(["access", "oauth", "token", "hex"] as const)(
+    "admits the actual %s MCP account through Node and the original-owner installation",
+    async (mode) => {
+      const s = await ssoInstallation(mode);
+      const args = { text: "memory forget", idempotencyKey: "sso-original", async: mode === "oauth" };
+      const { status, wire } = await s.send(args);
+      expect(status).toBe(200);
+      expect(wire).toMatchObject({
+        result: {
+          structuredContent: { admission: { status: "accepted", duplicate: false, runId: expect.any(String) } },
+        },
+      });
+      const owner = wire.result.structuredContent.admission.runId;
+      const recorded = await s.ledger.readIngressByRun(owner);
+      expect(recorded).toMatchObject({
+        status: "record",
+        record: {
+          runId: owner,
+          origin: {
+            source: "mcp",
+            actor: {
+              kind: mode === "access" || mode === "oauth" ? "human" : "service",
+              identity: {
+                issuer:
+                  mode === "access" || mode === "oauth"
+                    ? "installation:fixture:mcp:sso:access:1590d5d5850c04f3296f06c6e543f78f50e879a2af4ab563ba42463236480951"
+                    : "installation:fixture:mcp:sso:token:21c1e4447cfed904f1338046ae18106ffa5483cafd7afbc057dd4c46fb68a699",
+                subject: "alice",
+              },
+            },
+            sourceReference: {
+              actorId: "access:alice",
+              userId: "access:alice",
+              authenticatedAs: "access:alice",
+              channelId: "mcp:default",
+              threadKey: "mcp:default:default",
+            },
+          },
+        },
+      });
+      if (recorded.status !== "record" || !recorded.record.origin) throw new Error("Missing original owner");
+      expect(recorded.record.origin.actor.stream === null).toBe(mode === "token" || mode === "hex");
+      for (const credential of s.credentials) expect(JSON.stringify(recorded)).not.toContain(credential);
+      expect(JSON.stringify(recorded.record.origin)).not.toContain("slack:UALICE");
+      expect(await s.send(args)).toMatchObject({
+        wire: { result: { structuredContent: { admission: { status: "accepted", duplicate: true, runId: owner } } } },
+      });
+      expect(await s.send({ ...args, text: "changed text" })).toMatchObject({
+        wire: { result: { structuredContent: { admission: { status: "conflict" } }, isError: true } },
+      });
+      await s.execute();
+      expect(s.effects).toEqual(["access:alice"]);
+      expect(s.nativeReplies).toEqual(["Read-only command completed."]);
+      expect(await s.send(args)).toMatchObject({
+        wire: { result: { structuredContent: { admission: { status: "accepted", duplicate: true, runId: owner } } } },
+      });
+      expect(s.effects).toEqual(["access:alice"]);
+    },
+  );
+  it("holds the original SSO owner on current proof outage and refuses expired proof without another actor", async () => {
+    const s = await ssoInstallation("access");
+    const { wire } = await s.send({ text: "memory forget", idempotencyKey: "sso-held" });
+    const owner = wire.result.structuredContent.admission.runId;
+    const saved = await s.ledger.readIngressByRun(owner);
+    if (saved.status !== "record" || !saved.record.origin) throw new Error("Missing original owner");
+    s.fault(true);
+    expect(await s.authentication.resolveEnvelope(saved.record.origin)).toEqual({ status: "unavailable" });
+    expect(await s.send({ text: "memory forget", idempotencyKey: "sso-held" })).toMatchObject({ status: 503 });
+    s.fault(false);
+    expect(await s.authentication.resolveEnvelope(saved.record.origin)).toMatchObject({
+      status: "resolved",
+      actor: { id: "access:alice" },
+    });
+    s.expireSession();
+    expect(await s.authentication.resolveEnvelope(saved.record.origin)).toEqual({ status: "fenced" });
+    expect(await s.send({ text: "memory forget", idempotencyKey: "sso-held" })).toMatchObject({ status: 401 });
+    await s.execute();
+    expect(await s.ledger.readIngressByRun(owner)).toMatchObject({
+      status: "record",
+      record: { runId: owner, status: "completed" },
+    });
+    expect(s.effects).toEqual([]);
+  });
+  it("keeps static and personal MCP credentials authoritative beside valid Access SSO", async () => {
+    const s = await ssoInstallation("access");
+    for (const [authorization, actor, key] of [
+      ["Bearer native-token", "mcp:bot", "static-original"],
+      [`Bearer ${"c".repeat(64)}`, "mcp:personal:alice", "personal-original"],
+    ]) {
+      const { wire } = await s.send({ text: "memory forget", idempotencyKey: key }, { authorization });
+      expect(wire).toMatchObject({
+        result: { structuredContent: { admission: { status: "accepted", duplicate: false } } },
+      });
+      const owner = wire.result.structuredContent.admission.runId;
+      const record = await s.ledger.readIngressByRun(owner);
+      expect(record).toMatchObject({
+        status: "record",
+        record: {
+          origin: {
+            actor: { kind: "service", identity: { issuer: "installation:fixture:mcp" } },
+            sourceReference: { actorId: actor },
+          },
+        },
+      });
+      await s.execute();
+    }
+    expect(s.effects).toEqual(["mcp:bot", "mcp:personal:alice"]);
+    await s.personalTokens.delete(digestBearer("c".repeat(64)), "personal:alice");
+    expect(
+      await s.send(
+        { text: "memory forget", idempotencyKey: "revoked-original" },
+        { authorization: `Bearer ${"c".repeat(64)}` },
+      ),
+    ).toMatchObject({ status: 401 });
+    expect(s.effects).toEqual(["mcp:bot", "mcp:personal:alice"]);
+  });
+  it.each([false, true])(
+    "retains the original SSO receipt after an uncertain Node response (async %s)",
+    async (async) => {
+      const s = await ssoInstallation("oauth");
+      let first = true;
+      const options = {
+        ...s.options,
+        admit: async (...args: Parameters<NonNullable<McpOptions["admit"]>>) => {
+          const result = await s.options.admit!(...args);
+          if (first) {
+            first = false;
+            throw new Error("response interrupted after admission");
+          }
+          return result;
+        },
+      };
+      const args = { text: "memory forget", idempotencyKey: "lost-response", async };
+      const lost = await s.send(args, {}, "dispatch", options);
+      expect(lost.wire.result?.isError ?? !!lost.wire.error).toBe(true);
+      expect(s.tasks).toHaveLength(1);
+      const retry = await s.send(args, {}, "dispatch", options);
+      expect(retry.wire).toMatchObject({
+        result: {
+          structuredContent: { admission: { status: "accepted", duplicate: true, runId: expect.any(String) } },
+        },
+      });
+      expect(s.tasks).toHaveLength(1);
+      await s.execute();
+      expect(s.effects).toEqual(["access:alice"]);
+      expect(s.nativeReplies).toEqual(["Read-only command completed."]);
+    },
+  );
+  it("preserves actual SSO registry reads without giving the durable owner an email alias", async () => {
+    const s = await ssoInstallation("access");
+    expect(await s.send({}, {}, "memory_forget")).toMatchObject({
+      wire: {
+        result: { content: [{ type: "text", text: 'memory.forget: ok\n{"text":"Read-only command completed."}' }] },
+      },
+    });
+    expect(s.effects).toEqual(["access:alice"]);
+    expect(s.tasks).toHaveLength(0);
+  });
+  it("keeps browser history readable and holds an SSO original after adapter restart", async () => {
+    const s = await ssoInstallation("access");
+    const sent = await s.send({ text: "memory forget", idempotencyKey: "restart-proof" });
+    const owner = sent.wire.result.structuredContent.admission.runId;
+    const saved = await s.ledger.readIngressByRun(owner);
+    if (saved.status !== "record" || !saved.record.origin) throw new Error("Missing original owner");
+    expect(
+      await s.authentication.evaluateSourceIdentity(identity, s.context.authentication.sourceReference),
+    ).toMatchObject({ status: "allowed" });
+    const freshNative = createOrganizationNativeSources(s.nativeOptions);
+    const afterRestart = createOrganizationAuthentication({
+      organization: "fixture",
+      store: s.store,
+      directory: s.store.directory,
+      auth: () => ({ tokens: s.tokens }),
+      personalTokens: s.personalTokens,
+      grantsFor: () => ALL_GRANTS,
+      mappings: [
+        { source: "mcp", issuer: "installation:fixture:mcp", tenant: null, organization: "fixture" },
+        { source: "mcp", issuer: freshNative.mcpIssuer, tenant: null, organization: "fixture" },
+      ],
+      currentBrowser: freshNative.currentBrowser,
+      currentSlack: freshNative.currentSlack,
+      currentMcp: freshNative.currentMcp,
+    });
+    expect(await afterRestart.resolveEnvelope(saved.record.origin)).toEqual({ status: "unavailable" });
+    expect(await s.authentication.resolveEnvelope(saved.record.origin)).toMatchObject({
+      status: "resolved",
+      actor: { id: "access:alice" },
+    });
+    expect(s.effects).toEqual([]);
+  });
+  it("keeps ordinary SSO form consent on its original connection with production admission installed", async () => {
+    const s = await ssoInstallation("token");
+    let changed = 0;
+    const registry = new CommandRegistry({ audit: () => {} });
+    registry.register({
+      id: "repo.offboard",
+      action: "repo:write",
+      effect: "write",
+      annotations: { destructive: true },
+      describe: "Remove the fixture repository",
+      handler: async () => ({ removed: ++changed }),
+    });
+    const bound = bindCommands(registry, {});
+    s.core.commands = bound;
+    const options = { ...s.options, commands: bound };
+    const meta = {
+      _meta: {
+        [PROTOCOL_VERSION_META_KEY]: FORM_PROTOCOL_VERSION,
+        [CLIENT_INFO_META_KEY]: { name: "fixture-client", version: "1" },
+        [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { form: {} } },
+      },
+    };
+    const offered = await s.send({}, {}, "repo_offboard", options, meta);
+    expect(offered.wire).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "form" } } } } });
+    expect(changed).toBe(0);
+    const consent = {
+      ...meta,
+      requestState: offered.wire.result.requestState,
+      inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+    };
+    expect(
+      await s.send({}, { authorization: "Bearer another-session" }, "repo_offboard", options, consent),
+    ).toMatchObject({ status: 401 });
+    expect(changed).toBe(0);
+    const done = await s.send({}, {}, "repo_offboard", options, consent);
+    expect(done.wire).toMatchObject({ result: { content: [{ text: expect.stringContaining("removed: 1") }] } });
+    expect(changed).toBe(1);
+    expect(await s.send({}, {}, "repo_offboard", options, consent)).toMatchObject({
+      wire: { error: { code: -32001 } },
+    });
+    expect(changed).toBe(1);
+    expect(s.tasks).toHaveLength(0);
+  });
+  it("keeps an SSO native saved choice on the actual Access owner and replays its consumed receipt", async () => {
+    const s = await ssoInstallation("access");
+    const meta = {
+      _meta: {
+        [PROTOCOL_VERSION_META_KEY]: FORM_PROTOCOL_VERSION,
+        [CLIENT_INFO_META_KEY]: { name: "fixture-client", version: "1" },
+        [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { form: {} } },
+      },
+    };
+    const first = await s.send({ text: "memory forget", idempotencyKey: "sso-offer" }, {}, "dispatch", s.options, meta);
+    const owner = first.wire.result.structuredContent.admission.runId;
+    await s.execute();
+    const original = await s.installation.originalBinding(owner);
+    if (!original) throw new Error("Missing saved source owner");
+    const id = "00000000-0000-4000-8000-000000000012";
+    const row = await s.confirmations.put(
+      {
+        kind: "redispatch",
+        id,
+        message: { ...original.msg, text: "memory forget" },
+        line: "memory forget",
+        evidence: "Explicit saved fixture action",
+        code: "fixture",
+      },
+      DAY_MS,
+    );
+    expect(row.originalOrganization?.ingressRunId).toBe(owner);
+    const consent = {
+      ...meta,
+      requestState: id,
+      inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+    };
+    const choice = await s.send({ id }, {}, "approval_resume", s.options, consent);
+    expect(choice.wire).toMatchObject({
+      result: { structuredContent: { admission: { status: "accepted", duplicate: false, runId: expect.any(String) } } },
+    });
+    const choiceOwner = choice.wire.result.structuredContent.admission.runId;
+    expect(choiceOwner).not.toBe(owner);
+    await s.execute();
+    expect(await s.ledger.readIngressByRun(choiceOwner)).toMatchObject({
+      status: "record",
+      record: { status: "completed" },
+    });
+    expect(s.nativeReplies).toEqual(["Read-only command completed.", "Read-only command completed."]);
+    expect(s.effects).toEqual(["access:alice", "access:alice"]);
+    expect(await s.send({ id }, {}, "approval_resume", s.options)).toMatchObject({
+      wire: {
+        result: { structuredContent: { admission: { status: "accepted", duplicate: true, runId: choiceOwner } } },
+      },
+    });
+    expect(s.effects).toEqual(["access:alice", "access:alice"]);
   });
   it("admits authenticated HTTP and MCP calls under their own durable owners without email stream joins", async () => {
     const s = await fixture();
