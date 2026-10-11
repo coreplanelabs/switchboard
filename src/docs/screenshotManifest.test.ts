@@ -165,7 +165,9 @@ describe("hashInputs", () => {
 describe("expectedFiles", () => {
   it("is one PNG per surface per theme, named <surface>-<theme>.png", () => {
     const files = expectedFiles();
-    expect(files).toHaveLength(64);
+    expect(files).toHaveLength(70);
+    expect(files).toContain("metrics-phone-light.png");
+    expect(files).toContain("metrics-health-phone-dark.png");
     expect(files).toContain("green-home-phone-light.png");
     expect(files).toContain("green-runtime-phone-dark.png");
     expect(files).toContain("run-page-light.png");
@@ -458,7 +460,7 @@ describe("capture profiles", () => {
       ]),
     );
     for (const surface of SURFACES.filter((surface) => surface.fixture.server === "scripts/web-preview.ts")) {
-      expect(resolveCaptures([surface])).toEqual(
+      expect(resolveCaptures([surface]).filter((capture) => capture.profile === "desktop")).toEqual(
         THEMES.map((theme) =>
           expect.objectContaining({
             profile: "desktop",

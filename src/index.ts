@@ -50,7 +50,7 @@ import { matchesPredicate } from "./core/authz/predicate.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createWebChatHandler, orchestratorChatSeed, resumeWebIO } from "./channels/web.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
-import { createMetricsViewHandler } from "./channels/metricsView.js";
+import { createReviewsMetricsViewHandler } from "./channels/metricsView.js";
 import { createPlaneViewHandler } from "./channels/planeView.js";
 import { createDeliveryViewHandler } from "./channels/deliveryView.js";
 import { createSettingsViewHandler } from "./channels/settingsView.js";
@@ -81,7 +81,7 @@ import { createViewAsHandler, peopleSource, viewAsFromCookie } from "./channels/
 import { RUN_LIST_MAX_LIMIT } from "./core/runRecord.js";
 import { resolvePersonByEmail, resolveUserEmail, resolveUserName } from "./channels/slack/lookups.js";
 import { slackNames } from "./channels/slackNames.js";
-import { NO_NAMES, type NameDirectory } from "./core/names.js";
+import { namesOf, NO_NAMES, type NameDirectory } from "./core/names.js";
 import { mdToMrkdwn } from "./channels/mrkdwn.js";
 import { buildMemoryStore, NullMemoryStore, pendingReflectionCount } from "./core/memory/index.js";
 import { healthPayload, readBuildInfo } from "./channels/health.js";
@@ -1824,12 +1824,13 @@ export async function runBot(): Promise<void> {
       : costsCfg
         ? `GET /costs (503 — ${costsCfg.cloudflareTokenEnv} not set)`
         : "GET /costs (503 — no costs config)";
-    // Run metrics page (run-metrics.md item 10): GET /metrics (+ .json twin) over
-    // the reader built above; gated below alongside /runs, /residents and /costs.
-    // The line names the dataset the page reads, or the reason the reader is off.
-    const metricsView = createMetricsViewHandler(metricsService, page);
+    // Both review tabs and their JSON twin use the same protected report.
+    // Name lookup is display-only and sees only the returned requester ids.
+    const metricsView = createReviewsMetricsViewHandler(reviewsService, page, {
+      requesterNames: async (_actor, ids) => Object.fromEntries(await namesOf(personName, ids)),
+    });
     const metricsState =
-      metricsService instanceof NullMetricsService
+      reviewsService instanceof NullReviewsService
         ? metricsCfg
           ? `GET /metrics (503 — ${costsCfg ? `${costsCfg.cloudflareTokenEnv} not set` : "no costs config"})`
           : "GET /metrics (503 — no metrics config)"
@@ -2323,7 +2324,32 @@ export async function runBot(): Promise<void> {
             if (mcpApproval(req, res, gate.identity, actor)) return;
             if (residentsView(req, res, { actor })) return;
             if (costsView(req, res, { identity, actor })) return;
-            if (metricsView(req, res, { actor })) return;
+            if (
+              metricsView(req, res, {
+                actor,
+                currentActor: async () => {
+                  const fresh = await browserWiring!.context(req, gate.identity);
+                  const current = browserWiring!.current();
+                  if (!fresh || !current) throw new Error("Current source proof is unavailable.");
+                  const source = await current.organization.resolve(fresh.authentication);
+                  if (!source) throw new Error("Current source proof is unavailable.");
+                  if (
+                    !(await current.host.authorize({
+                      ...source,
+                      source: fresh.authentication.source,
+                      sourceReference: fresh.authentication.sourceReference,
+                      action: "read",
+                      destination: { kind: "broad" },
+                      target: null,
+                      context: [],
+                    }))
+                  )
+                    return;
+                  return fresh.actor;
+                },
+              })
+            )
+              return;
             if (planeView(req, res, { actor, identity })) return;
             if (deliveryView(req, res, { actor })) return;
             if (settingsView(req, res, { identity })) return;

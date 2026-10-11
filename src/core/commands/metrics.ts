@@ -118,7 +118,7 @@ export const metricsTrend = defineCommand({
   effect: "read",
   enabledWhen: (caps) => caps.metrics,
   describe:
-    "The run trend from the metrics dataset: runs, failure rate, p50/p95 wall and dollars per day and per agent over the range, weighted for sampling — the /metrics page's report as text or JSON; nothing written.",
+    "The run trend from the metrics dataset: runs, failure rate, p50/p95 wall and dollars per day and per agent over the range, weighted for sampling as text or JSON; review dashboard tabs use metrics reviews; nothing written.",
   render: renderTrend,
   handler: async ({ options, deps }) => {
     const service = await deps.metrics.service();
