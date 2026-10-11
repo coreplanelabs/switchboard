@@ -168,7 +168,7 @@ const state = (row: (typeof props.rows)[number]) => {
     </p>
     <template v-else>
       <p v-if="filtered.length > 10" class="px-5 pt-3 text-xs text-muted" role="status">
-        {{ filtered.length }} matching units. Scroll or use Page Down and Page Up to see all unresolved work.
+        {{ filtered.length }} matching units. Scroll or use Page Down and Page Up to see all matching work.
       </p>
       <div
         ref="viewport"

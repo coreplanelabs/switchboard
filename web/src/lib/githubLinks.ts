@@ -32,6 +32,24 @@ export function githubTreeUrl(repo: string | undefined, ref: string | undefined)
   return `${base}/tree/${ref.split("/").map(encodeURIComponent).join("/")}`;
 }
 
+/** A recorded file on a recorded ref; this does not claim a pinned revision. */
+export function githubFileUrl(
+  repo: string | undefined,
+  ref: string | undefined,
+  path: string | undefined,
+): string | undefined {
+  const base = githubRepoUrl(repo);
+  if (!base || !ref || !REF_RE.test(ref) || !path) return undefined;
+  const parts = path.split("/");
+  if (parts.some((part) => !part || part === "." || part === ".." || part.includes("\\") || /\p{Cc}/u.test(part)))
+    return undefined;
+  try {
+    return `${base}/blob/${ref.split("/").map(encodeURIComponent).join("/")}/${parts.map(encodeURIComponent).join("/")}`;
+  } catch {
+    return undefined;
+  }
+}
+
 export function githubCommitUrl(repo: string | undefined, sha: string | undefined): string | undefined {
   const base = githubRepoUrl(repo);
   if (!base || !sha || !SHA_RE.test(sha)) return undefined;

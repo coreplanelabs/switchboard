@@ -75,6 +75,8 @@ export interface HomeUnit {
   conditions: HomeCondition[];
   /** Current reader is the saved merge recipient or original work creator. */
   mergeCompletionForReader?: boolean;
+  /** Pipeline-only current read classification; absent coverage stays unknown. */
+  completion?: "complete" | "active" | "unknown";
   nextAction: { kind: "recorded"; text: string } | { kind: "unknown" };
 }
 export interface HomePipeline {
@@ -300,7 +302,14 @@ export function createHomeService(deps: HomeServiceDeps): {
         ? { kind: "recorded", text: nextCondition.nextAction }
         : { kind: "unknown" },
     };
-    return { row, conditionsComplete, terminal: conditionsComplete && completed(instance, unit, conditions) };
+    const terminal = conditionsComplete && completed(instance, unit, conditions);
+    const completion =
+      !conditionsComplete || (unit.workBrief !== undefined && !privateRead)
+        ? ("unknown" as const)
+        : terminal
+          ? ("complete" as const)
+          : ("active" as const);
+    return { row, conditionsComplete, terminal, completion };
   }
 
   function assignedToReader(input: HomeReader, id: string) {
@@ -523,9 +532,9 @@ export function createHomeService(deps: HomeServiceDeps): {
         if (!inSelectedWork(input, instance, projected.row.conditions)) continue;
         // A private worker's provenance stays redacted throughout this entity projection.
         projected.row.instance = shownInstance;
-        pipeline.units.push(projected.row);
+        pipeline.units.push({ ...projected.row, completion: projected.completion });
         if (!projected.conditionsComplete) status = "partial";
-        if (projected.terminal) continue;
+        if (projected.completion === "complete") continue;
         pipeline.unresolved++;
         if (live.has(key)) movingUnitKeys.push(key);
         const group = projected.row.conditions.some(

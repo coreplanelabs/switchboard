@@ -1,9 +1,33 @@
 // Feature: docs/reference/specs/live-view.md item 19 — the REVIEW/CODING row's links
 // are built from shape-verified values only; anything odd renders as text.
 import { describe, expect, it } from "vitest";
-import { githubCommitUrl, githubPrUrl, githubRepoUrl, githubTreeUrl, shortSha } from "./githubLinks";
+import { githubCommitUrl, githubFileUrl, githubPrUrl, githubRepoUrl, githubTreeUrl, shortSha } from "./githubLinks";
 
 describe("githubLinks", () => {
+  it("builds recorded file links from safe repository, ref and path values without adding a revision", () => {
+    expect(githubFileUrl("acme/web", "release/next", "docs/My plan.md")).toBe(
+      "https://github.com/acme/web/blob/release/next/docs/My%20plan.md",
+    );
+    expect(githubFileUrl("acme/web", "main", "docs/plan#draft?.md")).toBe(
+      "https://github.com/acme/web/blob/main/docs/plan%23draft%3F.md",
+    );
+    for (const path of [
+      "../private.md",
+      "docs/../private.md",
+      "/absolute.md",
+      "docs//plan.md",
+      "docs/./plan.md",
+      "docs\\plan.md",
+      "docs/plan\n.md",
+      "docs/\ud800.md",
+      "",
+      undefined,
+    ])
+      expect(githubFileUrl("acme/web", "main", path)).toBeUndefined();
+    expect(githubFileUrl("javascript:invalid", "main", "docs/plan.md")).toBeUndefined();
+    expect(githubFileUrl("acme/web", undefined, "docs/plan.md")).toBeUndefined();
+    expect(githubFileUrl("acme/web", "main#wrong", "docs/plan.md")).toBeUndefined();
+  });
   it("a well-formed repo, branch, PR number and sha each build their one URL", () => {
     expect(githubRepoUrl("acme/web")).toBe("https://github.com/acme/web");
     expect(githubPrUrl("acme/web", 42)).toBe("https://github.com/acme/web/pull/42");
