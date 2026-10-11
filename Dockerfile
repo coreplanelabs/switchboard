@@ -26,7 +26,10 @@ COPY web ./web
 # The web app (Vue, served as hashed assets under /assets/*): vite build reads
 # the shared pure modules from ../src, so src must be in place first.
 RUN npm run build -w web
-RUN npm run build
+# Validate the same compiled output that the runtime stage copies. CI's image
+# gate covers this check without another runner installing and building the bot.
+COPY scripts/check-dist.mjs ./scripts/
+RUN npm run check:dist
 
 # Runtime dependencies alone: the bot's production dependencies, no dev tools,
 # no web toolchain — a clean install rather than a prune, so nothing hoisted

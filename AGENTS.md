@@ -65,7 +65,7 @@ Deterministic, non-interactive commands. Credentials are named when required. CI
 | `npm run lint:fix` | ESLint with autofix. | Part of `fix`. |
 | `npm run format` | Prettier over the whole tree (not Markdown). | Part of `fix`. |
 | `npm run format:check` | Prettier in check mode. | Part of `verify:root`. |
-| `npm run check:dist` | Builds, then proves the compiled entry points and the web bundle the image needs exist. | Part of `verify:root`. |
+| `npm run check:dist` | Builds the bot, rejects test files in dist/, and checks required runtime files. | Local checks and the CI image build. |
 | `npm run check:site` | Every page the dashboard links to is in the built site, and its home page reads `displayName`. | After a docs change; part of `verify`. |
 | `npm run check:image` | Builds every Worker's image. | After touching a Dockerfile; needs Docker. One CI leg per image. |
 | `npm run skills:sync` | Vendors the skills listed in `skills/manifest.yaml`. | After changing the manifest; part of `fix`. |

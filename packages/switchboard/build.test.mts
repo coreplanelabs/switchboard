@@ -99,11 +99,12 @@ describe("shippedDeployAssets", () => {
   });
 
   it("the root assets are the files init derives from, the marker the resolver looks for, the bot image's own files, and the manifest + lockfile a materialised Worker directory installs against", () => {
-    expect(ROOT_ASSETS).toEqual([
+    expect(shippedAssets([])).toEqual([
       ".env.example",
       "config/config.example.yaml",
       "project.json",
       "Dockerfile",
+      "scripts/check-dist.mjs",
       "docker-entrypoint.sh",
       ".dockerignore",
       "package.json",
