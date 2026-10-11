@@ -115,6 +115,22 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.viewingAsIvy, { type: "identity", id: A.viewingAsIvy.id }],
     ],
   },
+  "identity:read identity [is-actor] kinds=user": {
+    allow: [[A.browser, { type: "identity", id: A.browser.id }]],
+    deny: [
+      [A.browser, { type: "identity", id: "slack:UALICE" }],
+      [A.token, { type: "identity", id: A.token.id }],
+      [A.viewingAsIvy, { type: "identity", id: A.viewingAsIvy.id }],
+    ],
+  },
+  "identity:exec identity [is-actor & not-viewing-as] kinds=user": {
+    allow: [[A.browser, { type: "identity", id: A.browser.id }]],
+    deny: [
+      [A.browser, { type: "identity", id: "slack:UALICE" }],
+      [A.token, { type: "identity", id: A.token.id }],
+      [A.viewingAsIvy, { type: "identity", id: A.viewingAsIvy.id }],
+    ],
+  },
   "credentials:exec command [has-grant(credentials:exec)] kinds=user|service": {
     allow: [
       [A.admin, command("credentials.inspect")],

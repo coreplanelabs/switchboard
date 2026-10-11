@@ -147,6 +147,19 @@ import {
 // ---- 7. the regression fences -------------------------------------------------------------------------
 
 const here = dirname(fileURLToPath(import.meta.url));
+const accessPowerCaller: Caller = {
+  kind: "access",
+  id: "access:power",
+  actor: { kind: "user", id: "access:power", grants: powerCaller.actor.grants },
+};
+// A HTTP-only verified operation still has a real reference surface.
+function referenceCaller(cmd: CommandDef<unknown>): Caller {
+  return CommandRegistry.exposedTo(cmd, "cli")
+    ? powerCaller
+    : CommandRegistry.exposedTo(cmd, "chat")
+      ? chatPowerCaller
+      : accessPowerCaller;
+}
 
 /** The cross-surface fold: this caller's id → the token; for a command whose output names every
  *  fixture caller (`COMMAND_FIXTURES[id].folds === "every-caller"`, e.g. `mcp list --all`), every
@@ -183,6 +196,44 @@ describe("command conformance — catalogue fences", () => {
     });
     const refused = await mcp.run(f, cmd, { run: "fin-1" }, "nobody");
     expect(refused).toMatchObject({ ok: false, code: "unauthorized" });
+  });
+
+  it("routes identity operations through the full registry only with current adapter proof and rejects caller-selected identity fields", async () => {
+    const f = await fixture();
+    const results = [];
+    for (const command of ["challenge", "list", "link", "unlink", "recover"])
+      results.push(await f.commands.invoke(`identity.${command}`, { options: {} }, accessPowerCaller));
+    expect(results).toMatchObject([
+      { ok: true, value: { status: "complete", operation: "challenge", actorId: "access:power" } },
+      { ok: true, value: { status: "complete", operation: "list", actorId: "access:power" } },
+      { ok: true, value: { status: "complete", operation: "link", actorId: "access:power" } },
+      { ok: true, value: { status: "complete", operation: "unlink", actorId: "access:power" } },
+      { ok: true, value: { status: "complete", operation: "recover", actorId: "access:power" } },
+    ]);
+    expect(await f.commands.invoke("identity.link", { options: { person: "other" } }, accessPowerCaller)).toMatchObject(
+      {
+        ok: false,
+        error: "invalid_input",
+      },
+    );
+    expect(
+      await f.commands.invoke(
+        "identity.link",
+        { options: {} },
+        { ...accessPowerCaller, actor: { ...accessPowerCaller.actor, viewingAs: { id: "access:other" } } },
+      ),
+    ).toMatchObject({ ok: false, error: "unauthorized" });
+    const ordinary = buildCoreCommands(freshConfig().store, new InMemoryRunStore(), {
+      registry: new RunRegistry(),
+      secrets: secretsFrom({}),
+      dataDir: CONFIG_DIR,
+      warn: () => {},
+      audit: () => {},
+    });
+    expect(await ordinary.invoke("identity.link", { options: {} }, accessPowerCaller)).toMatchObject({
+      ok: false,
+      error: "unavailable",
+    });
   });
   it("every chat-exposed command is exposed to CLI, HTTP and MCP", () => {
     const gaps = CATALOGUE.filter((cmd) => CommandRegistry.exposedTo(cmd, "chat")).flatMap((cmd) =>
@@ -664,7 +715,7 @@ async function conformanceFailures(build: () => Promise<Fixture>): Promise<strin
       continue;
     }
     const happy = variants.find((v) => v.name === "required-only")!;
-    const caller = CommandRegistry.exposedTo(cmd, powerCaller.kind) ? powerCaller : chatPowerCaller;
+    const caller = referenceCaller(cmd);
     const res = await reference(f, cmd, happy.named, caller);
     if (!res.ok)
       failures.push(
@@ -905,11 +956,11 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
       }
     }
     // A credential holding no grant at all is refused whatever the surface (fail-closed).
-    const bareKind = CommandRegistry.exposedTo(cmd, "cli") ? ("cli" as const) : ("chat" as const);
+    const bareKind = referenceCaller(cmd).kind;
     const bare = await reference(await fixture(), cmd, happy.named, {
       kind: bareKind,
       id: `${bareKind}:nothing`,
-      actor: { kind: bareKind === "cli" ? "service" : "user", id: `${bareKind}:nothing`, grants: NO_GRANTS },
+      actor: { kind: bareKind === "chat" ? "user" : "service", id: `${bareKind}:nothing`, grants: NO_GRANTS },
     });
     expect(bare).toMatchObject({ ok: false, error: "unauthorized", decidedBy: "registry" });
     if (cmd.surfaces?.http !== false) {
@@ -975,7 +1026,7 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
         );
       f.recorded.length = 0;
       f.executed.length = 0;
-      const capsCaller = CommandRegistry.exposedTo(cmd, powerCaller.kind) ? powerCaller : chatPowerCaller;
+      const capsCaller = referenceCaller(cmd);
       const res = await reference(f, cmd, happy.named, capsCaller);
       if (enabled) expect(res.ok, `${where}: ${JSON.stringify(res)}`).toBe(true);
       else {

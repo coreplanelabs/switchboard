@@ -48,6 +48,11 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 
 | Route | Methods | Action | What it does |
 |---|---|---|---|
+| `/api/identity.challenge` | `POST` | `identity:exec` | Complete challenge through fresh two-sided account verification. |
+| `/api/identity.list` | `GET`, `POST` | `identity:read` | Read your verified identity operation. |
+| `/api/identity.link` | `POST` | `identity:exec` | Complete link through fresh two-sided account verification. |
+| `/api/identity.unlink` | `POST` | `identity:exec` | Complete unlink through fresh two-sided account verification. |
+| `/api/identity.recover` | `POST` | `identity:exec` | Complete recover through fresh two-sided account verification. |
 | `/api/help.show` | `GET`, `POST` | `help:read` | How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show. |
 | `/api/help.commands` | `GET`, `POST` | `help:read` | Every chat command by group, the grammar, and the per-request directives. |
 | `/api/status.show` | `GET`, `POST` | `status:read` | Which build this process runs and, when known, the base config loaded at startup. |

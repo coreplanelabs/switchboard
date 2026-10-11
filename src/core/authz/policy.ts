@@ -74,6 +74,13 @@ export const POLICY: readonly Rule[] = [
   },
   // Provider proof and atomic consent remain the linking ceremony's responsibility.
   { action: "identity:link", resource: "identity", actorKinds: ["user"], when: [{ kind: "is-actor" }] },
+  { action: "identity:read", resource: "identity", actorKinds: ["user"], when: [{ kind: "is-actor" }] },
+  {
+    action: "identity:exec",
+    resource: "identity",
+    actorKinds: ["user"],
+    when: [{ kind: "is-actor" }, { kind: "not-viewing-as" }],
+  },
   // ── runs ─────────────────────────────────────────────────────────────────
   // A run is readable by a member of its channel, by anyone who sees every
   // channel, or by the user it belongs to.

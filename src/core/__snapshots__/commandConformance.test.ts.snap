@@ -880,6 +880,61 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "identity:exec",
+    "args": [],
+    "effect": "write",
+    "id": "identity.challenge",
+    "options": [],
+    "resource": "identity",
+    "surfaces": [
+      "http",
+    ],
+  },
+  {
+    "action": "identity:exec",
+    "args": [],
+    "effect": "write",
+    "id": "identity.link",
+    "options": [],
+    "resource": "identity",
+    "surfaces": [
+      "http",
+    ],
+  },
+  {
+    "action": "identity:read",
+    "args": [],
+    "effect": "read",
+    "id": "identity.list",
+    "options": [],
+    "resource": "identity",
+    "surfaces": [
+      "http",
+    ],
+  },
+  {
+    "action": "identity:exec",
+    "args": [],
+    "effect": "write",
+    "id": "identity.recover",
+    "options": [],
+    "resource": "identity",
+    "surfaces": [
+      "http",
+    ],
+  },
+  {
+    "action": "identity:exec",
+    "args": [],
+    "effect": "write",
+    "id": "identity.unlink",
+    "options": [],
+    "resource": "identity",
+    "surfaces": [
+      "http",
+    ],
+  },
+  {
     "action": "mcp:write",
     "args": [
       {
