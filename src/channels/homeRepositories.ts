@@ -49,7 +49,7 @@ export function createHomeRepositories(options: { config: ConfigStore; github: G
   async function currentChoice(actor: Actor, repo: string): Promise<string | undefined> {
     if (!repoSlug(repo) || !options.config.canUseRepo(actor, repo)) return;
     const choices = await read(actor);
-    if (choices.status !== "complete") return;
+    if (choices.status === "unavailable") throw new Error("Current repository verification is unavailable.");
     const chosen = choices.repositories.find((row) => row.repo.toLowerCase() === repo.toLowerCase());
     return chosen && options.config.canUseRepo(actor, chosen.repo) ? chosen.repo : undefined;
   }

@@ -66,14 +66,28 @@ describe("Home repository selection", () => {
 
   it("keeps an unavailable directory distinct from a confirmed empty eligible set", async () => {
     const { actor, config } = fixture();
+    let available = false;
     class UnavailableGithub extends InMemoryGithubApi {
-      override async listRepos(): Promise<never> {
-        throw new Error("Unavailable");
+      override async listRepos() {
+        if (!available) throw new Error("Unavailable");
+        return super.listRepos();
       }
     }
-    const unavailable = createHomeRepositories({ config, github: new UnavailableGithub() });
+    const unavailable = createHomeRepositories({
+      config,
+      github: new UnavailableGithub({ "sample/a": { private: false } }),
+    });
     expect(await unavailable.read(actor)).toEqual({ status: "unavailable", repositories: [] });
-    expect(await unavailable.authorize(actor, "sample/a")).toBe(false);
+    await expect(unavailable.authorize(actor, "sample/a")).rejects.toThrow(
+      "Current repository verification is unavailable.",
+    );
+    await expect(unavailable.sourceChoice(actor, { selected: "sample/a" })).rejects.toThrow(
+      "Current repository verification is unavailable.",
+    );
+    expect(await unavailable.authorize(fixture([]).actor, "sample/a")).toBe(false);
+    available = true;
+    expect(await unavailable.authorize(actor, "sample/a")).toBe(true);
+    expect(await unavailable.sourceChoice(actor, { selected: "sample/a" })).toBe("sample/a");
     const empty = createHomeRepositories({ config, github: new InMemoryGithubApi() });
     expect(await empty.read(actor)).toEqual({ status: "complete", repositories: [] });
     expect(envelopeSchema.shape.context.parse([{ kind: "repository", key: "sample/a" }])).toEqual([

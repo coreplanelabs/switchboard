@@ -51,7 +51,10 @@ export const sourceReferenceSchema = z
     channelId: text,
     threadKey: text,
     messageId: text.optional(),
-    approvalConnection: z.object({ id: text, credentialId: text, requestHash: text }).strict().optional(),
+    approvalConnection: z
+      .object({ id: text, credentialId: text, requestHash: text, mode: z.literal("form").optional() })
+      .strict()
+      .optional(),
   })
   .strict();
 export type OrganizationSourceReference = z.infer<typeof sourceReferenceSchema>;

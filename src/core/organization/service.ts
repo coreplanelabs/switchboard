@@ -105,8 +105,11 @@ export class OrganizationService {
       >;
     },
   ) {}
-  async resolve(authentication: OrganizationAuthentication): Promise<ResolvedOrganization | undefined> {
-    return this.resolveCurrent(authentication, false);
+  async resolve(
+    authentication: OrganizationAuthentication,
+    requireProof = false,
+  ): Promise<ResolvedOrganization | undefined> {
+    return this.resolveCurrent(authentication, requireProof);
   }
   private async resolveCurrent(
     authentication: OrganizationAuthentication,
