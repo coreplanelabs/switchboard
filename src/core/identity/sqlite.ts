@@ -7,6 +7,7 @@ import {
   type CreatePersonResult,
   type ExternalIdentity,
   type PersonDirectory,
+  type PersonBinding,
   type ReceiptsResult,
 } from "./contract.js";
 import type { LinkCommand, LinkResult } from "./linkContract.js";
@@ -40,6 +41,7 @@ export class SqlitePersonDirectory implements PersonDirectory {
   constructor(
     private readonly storage: DirectorySqlStorage,
     private readonly now: () => number,
+    private readonly onBindingChanged?: (binding: PersonBinding) => void,
   ) {
     try {
       storage.transactionSync(() => {
@@ -118,6 +120,7 @@ export class SqlitePersonDirectory implements PersonDirectory {
           result.binding.revision,
           JSON.stringify({ action: change.action, actor: change.actor, binding: result.binding }),
         );
+        this.onBindingChanged?.(result.binding);
         return result;
       });
     } catch {
@@ -161,6 +164,7 @@ export class SqlitePersonDirectory implements PersonDirectory {
                 receipt.binding.revision,
                 JSON.stringify(receipt),
               );
+              this.onBindingChanged?.(receipt.binding);
             },
             putAudit: (audit) => {
               this.storage.sql.exec(

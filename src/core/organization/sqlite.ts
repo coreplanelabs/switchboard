@@ -3,6 +3,7 @@ import { SqlitePersonDirectory, type DirectorySqlStorage } from "../identity/sql
 import { bindingSchema, type PersonDirectory } from "../identity/contract.js";
 import { executeOrganization, type OrganizationRows } from "./engine.js";
 import type { OrganizationCommand, OrganizationResult, OrganizationStore } from "./contract.js";
+import { bindingCutoffSchema, stateSchema } from "./contract.js";
 
 function decode(body: string): unknown {
   return JSON.parse(body);
@@ -14,7 +15,33 @@ export class SqliteOrganizationStore implements OrganizationStore {
     private readonly storage: DirectorySqlStorage,
     private readonly now: () => number,
   ) {
-    this.directory = new SqlitePersonDirectory(storage, now);
+    this.directory = new SqlitePersonDirectory(storage, now, (binding) => {
+      const key = JSON.stringify([identityKey(binding.identity), binding.revision]);
+      const write = (organization: string, sequence: number) =>
+        storage.sql.exec(
+          "INSERT INTO organization_rows (organization, kind, row_key, partition_key, ordinal, expires_at, body) VALUES (?, 'binding-cutoff', ?, '', 0, ?, ?) ON CONFLICT (organization, kind, row_key) DO NOTHING",
+          organization,
+          key,
+          Number.MAX_SAFE_INTEGER,
+          JSON.stringify(bindingCutoffSchema.parse({ version: 1, sequence })),
+        );
+      // Future organizations have no older stream rows. Existing organizations
+      // capture their sequence in this SAME binding transaction, even in one ms.
+      if (binding.state === "active") write("", 0);
+      for (const row of storage.sql.exec<{ organization: string; body: string }>(
+        "SELECT organization, body FROM organization_rows WHERE kind = 'state'",
+      )) {
+        const state = stateSchema.parse(decode(row.body));
+        if (binding.state === "active") write(row.organization, state.streamSequence);
+        state.revision++;
+        state.accessRevision++;
+        storage.sql.exec(
+          "UPDATE organization_rows SET body = ? WHERE organization = ? AND kind = 'state'",
+          JSON.stringify(stateSchema.parse(state)),
+          row.organization,
+        );
+      }
+    });
     storage.transactionSync(() => {
       storage.sql.exec(
         "CREATE TABLE IF NOT EXISTS organization_rows (organization TEXT NOT NULL, kind TEXT NOT NULL, row_key TEXT NOT NULL, partition_key TEXT NOT NULL, ordinal INTEGER NOT NULL, expires_at INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY (organization, kind, row_key))",
@@ -79,6 +106,10 @@ export class SqliteOrganizationStore implements OrganizationStore {
               query += " AND ordinal > ?";
               params.push(options.after);
             }
+            if (options.before !== undefined) {
+              query += " AND ordinal < ?";
+              params.push(options.before);
+            }
             if (options.receiptId !== undefined) {
               query += " AND json_extract(body, '$.receiptId') = ?";
               params.push(options.receiptId);
@@ -87,7 +118,7 @@ export class SqliteOrganizationStore implements OrganizationStore {
               query += " AND expires_at <= ?";
               params.push(options.expiresBefore);
             }
-            query += " ORDER BY ordinal";
+            query += options.descending ? " ORDER BY ordinal DESC" : " ORDER BY ordinal";
             if (options.limit !== undefined) {
               query += " LIMIT ?";
               params.push(options.limit);

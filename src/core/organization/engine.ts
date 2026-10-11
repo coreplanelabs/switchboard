@@ -1,3 +1,4 @@
+import { sourceAuthority, sourcePolicySchema } from "./accessCatalogue.js";
 import { redactSecrets } from "../redact.js";
 import { identityKey } from "../identity/engine.js";
 import type { BindingResolution, ExternalIdentity } from "../identity/contract.js";
@@ -7,6 +8,10 @@ import {
   receiptSchema,
   stateSchema,
   streamEntrySchema,
+  replyAddressSchema,
+  replyKeySchema,
+  bindingCutoffSchema,
+  sourceProvenanceSchema,
   type OrganizationActor,
   type OrganizationCommand,
   type OrganizationEnvelope,
@@ -31,7 +36,15 @@ export interface OrganizationRows {
   list(
     kind: string,
     org: string,
-    options?: { partition?: string; after?: number; limit?: number; expiresBefore?: number; receiptId?: string },
+    options?: {
+      partition?: string;
+      after?: number;
+      before?: number;
+      descending?: boolean;
+      limit?: number;
+      expiresBefore?: number;
+      receiptId?: string;
+    },
   ): unknown[];
   binding(identity: ExternalIdentity): BindingResolution;
   identities(personId: string): ExternalIdentity[];
@@ -49,6 +62,7 @@ function state(rows: OrganizationRows, organization: string): OrganizationState 
     organization,
     orchestrator: `organization:${organization}`,
     revision: 0,
+    accessRevision: 0,
     wakeSequence: 0,
     reconciledSequence: 0,
     streamSequence: 0,
@@ -119,6 +133,37 @@ function eligiblePending(
       return true;
     });
 }
+function catalogueSource(
+  rows: OrganizationRows,
+  s: OrganizationState,
+  envelope: OrganizationEnvelope,
+  expiresAt: number,
+) {
+  if (envelope.actor.stream === null) return;
+  // An older database without this index cannot certify a complete catalogue.
+  if (s.streamSequence === 0 && rows.get("source-policy-index", s.organization, "version") === undefined)
+    rows.put("source-policy-index", s.organization, "version", 1);
+  const authority = sourceAuthority(envelope.source, envelope.actor, envelope.sourceReference);
+  const key = JSON.stringify([envelope.actor.stream, authority]);
+  const prior = rows.get("source-policy", s.organization, key);
+  const expiry = Math.max(expiresAt, prior === undefined ? 0 : sourcePolicySchema.parse(prior).expiresAt);
+  rows.put(
+    "source-policy",
+    s.organization,
+    key,
+    sourcePolicySchema.parse({
+      version: 1,
+      authority,
+      source: envelope.source,
+      actor: envelope.actor,
+      ...(envelope.sourceReference ? { sourceReference: envelope.sourceReference } : {}),
+      expiresAt: expiry,
+    }),
+    envelope.actor.stream,
+    0,
+    expiry,
+  );
+}
 function append(
   rows: OrganizationRows,
   s: OrganizationState,
@@ -130,10 +175,19 @@ function append(
   ttl: number,
 ) {
   if (envelope.destination.kind !== "broad" || envelope.actor.stream === null) return;
+  const provenance = sourceProvenanceSchema.parse(rows.get("source-provenance", s.organization, receipt.id));
+  catalogueSource(
+    rows,
+    s,
+    { ...envelope, source: provenance.source, actor: provenance.actor, sourceReference: provenance.sourceReference },
+    Math.max(receipt.expiresAt, now + ttl),
+  );
   s.streamSequence++;
+  if (role === "user") provenance.admissionSequence ??= s.streamSequence;
   const entry: OrganizationStreamEntry = {
     version: 1,
     sequence: s.streamSequence,
+    ...(provenance.admissionSequence === undefined ? {} : { admissionSequence: provenance.admissionSequence }),
     stream: envelope.actor.stream,
     receiptId: receipt.id,
     source: envelope.source,
@@ -153,6 +207,27 @@ function append(
     entry.stream,
     entry.sequence,
     entry.expiresAt,
+  );
+  // A shorter reply cannot expire proof that an older retained entry still needs.
+  provenance.retentionDeadline = Math.max(
+    provenance.retentionDeadline ??
+      Math.max(
+        0,
+        ...rows
+          .list("stream", s.organization, { receiptId: receipt.id })
+          .map((value) => streamEntrySchema.parse(value).expiresAt),
+      ),
+    receipt.expiresAt,
+    entry.expiresAt,
+  );
+  rows.put(
+    "source-provenance",
+    s.organization,
+    receipt.id,
+    provenance,
+    undefined,
+    undefined,
+    provenance.retentionDeadline,
   );
 }
 /** One synchronous transaction decides receipts and outbox rows before any effect. */
@@ -184,6 +259,16 @@ export function executeOrganization(
     command.reason = sanitized.data.reason;
     command.reply = sanitized.data.reply;
   }
+  if (command.action === "owner-refused") {
+    const sanitized = commandSchema.safeParse({ ...command, reason: redactSecrets(command.reason) });
+    if (!sanitized.success || sanitized.data.action !== "owner-refused") return { status: "invalid" };
+    command.reason = sanitized.data.reason;
+  }
+  if (command.action === "reply") {
+    const sanitized = commandSchema.safeParse({ ...command, content: redactSecrets(command.content) });
+    if (!sanitized.success || sanitized.data.action !== "reply") return { status: "invalid" };
+    command.content = sanitized.data.content;
+  }
   const org = command.action === "admit" ? command.envelope.organization : command.organization;
   if (command.action !== "expire") executeOrganization(rows, { action: "expire", organization: org }, now);
   const s = state(rows, org);
@@ -193,10 +278,12 @@ export function executeOrganization(
     return { status: "state", state: s };
   };
   if (command.action === "access") {
+    const changed = (rows.get("revoked-source", org, identityKey(command.identity)) !== true) !== command.allowed;
     if (command.allowed) rows.remove("revoked-source", org, identityKey(command.identity));
     else rows.put("revoked-source", org, identityKey(command.identity), true);
     eligiblePending(rows, org, now, () => s.revision++);
     s.revision++;
+    if (changed) s.accessRevision++;
     save();
     return { status: "ok", removed: 0 };
   }
@@ -218,6 +305,111 @@ export function executeOrganization(
   }
   if (command.action === "identities") return { status: "identities", identities: rows.identities(command.personId) };
   if (command.action === "get") return { status: "state", state: s };
+  if (command.action === "submission") {
+    if (!validActor(rows, org, command.actor)) return { status: "fenced" };
+    const scope = JSON.stringify([command.source, identityKey(command.actor.identity), command.key]);
+    const receipt = rows.get("receipt", org, scope);
+    const metadata = rows.get("submission", org, scope);
+    if (!receipt || !metadata) return { status: "not_found" };
+    return { status: "submission", receipt: receiptSchema.parse(receipt), envelope: envelopeSchema.parse(metadata) };
+  }
+  if (command.action === "source-catalogue") {
+    if (!validActor(rows, org, command.actor) || command.actor.stream === null) return { status: "fenced" };
+    const index = rows.get("source-policy-index", org, "version");
+    if (index !== 1 && (index !== undefined || s.streamSequence !== 0)) return { status: "unavailable" };
+    const candidates = [...new Set([command.actor.stream, command.actor.principal])].flatMap((partition) =>
+      rows
+        .list("source-policy", org, { partition, limit: command.limit + 1 })
+        .map((row) => sourcePolicySchema.parse(row)),
+    );
+    if (
+      candidates.some(
+        (row) =>
+          (command.actor.bindingRevision === 0 || row.actor.stream !== command.actor.stream) &&
+          identityKey(row.actor.identity) !== identityKey(command.actor.identity),
+      )
+    )
+      return { status: "fenced" };
+    if (
+      candidates.length > command.limit ||
+      candidates.some((row) => row.authority !== sourceAuthority(row.source, row.actor, row.sourceReference))
+    )
+      return { status: "unavailable" };
+    return {
+      status: "source-catalogue",
+      accessRevision: s.accessRevision,
+      entries: candidates
+        .filter((row) => row.expiresAt > now)
+        .map((row) => ({
+          authority: row.authority,
+          source: row.source,
+          actor: row.actor,
+          ...(row.sourceReference ? { sourceReference: row.sourceReference } : {}),
+          allowed: rows.get("revoked-source", org, identityKey(row.actor.identity)) !== true,
+        })),
+    };
+  }
+  if (command.action === "provenance") {
+    if (!validActor(rows, org, command.actor)) return { status: "fenced" };
+    const value = rows.get("source-provenance", org, command.receiptId);
+    if (!value) return { status: "not_found" };
+    const provenance = sourceProvenanceSchema.parse(value);
+    if (
+      provenance.actor.stream !== command.actor.stream &&
+      !(
+        provenance.actor.stream === command.actor.principal &&
+        identityKey(provenance.actor.identity) === identityKey(command.actor.identity)
+      )
+    )
+      return { status: "not_found" };
+    return { status: "provenance", provenance };
+  }
+  if (command.action === "owner-refused") {
+    const scope = rows.get("receipt-key", org, command.receiptId);
+    if (typeof scope !== "string") {
+      const reservation = command.target
+        ? (rows.get("reservation", org, command.target.key) as { receiptId?: string; ownerRunId?: string } | undefined)
+        : undefined;
+      if (
+        reservation?.receiptId === command.receiptId &&
+        reservation.ownerRunId === command.ownerRunId &&
+        command.target
+      ) {
+        rows.remove("reservation", org, command.target.key);
+        s.revision++;
+        save();
+        return { status: "ok", removed: 1 };
+      }
+      return { status: "not_found" };
+    }
+    const receipt = receiptSchema.parse(rows.get("receipt", org, scope));
+    if (receipt.ownerRunId !== command.ownerRunId) return { status: "fenced" };
+    if (receipt.status !== "accepted") return { status: "receipt", receipt, duplicate: true };
+    if (
+      receipt.target &&
+      (rows.get("reservation", org, receipt.target) as { receiptId?: string } | undefined)?.receiptId === receipt.id
+    )
+      rows.remove("reservation", org, receipt.target);
+    receipt.status = "rejected";
+    receipt.reason = command.reason;
+    receipt.settledAt = now;
+    rows.put("receipt", org, scope, receiptSchema.parse(receipt), receipt.id, 0, receipt.expiresAt);
+    rows.remove("reply-address", org, receipt.id);
+    s.revision++;
+    save();
+    return { status: "receipt", receipt, duplicate: false };
+  }
+  if (command.action === "owner-clears")
+    return {
+      status: "owner-clears",
+      items: rows.list("owner-clear", org, { limit: command.limit }) as { receiptId: string; effectKey: string }[],
+    };
+  if (command.action === "owner-cleared") {
+    const pending = rows.get("owner-clear", org, command.receiptId) as { effectKey: string } | undefined;
+    if (pending && pending.effectKey !== command.effectKey) return { status: "conflict" };
+    rows.remove("owner-clear", org, command.receiptId);
+    return { status: "ok", removed: pending ? 1 : 0 };
+  }
   if (command.action === "wake") {
     s.wakeSequence++;
     s.revision++;
@@ -255,6 +447,12 @@ export function executeOrganization(
     }
     s.reconciledSequence = Math.max(s.reconciledSequence, command.through);
     // Retain the generation after release so an old process can never reuse it.
+    s.lease!.expiresAt = now;
+    s.revision++;
+    return stateResult();
+  }
+  if (command.action === "yield") {
+    if (!owns(s, command.owner, command.generation, now)) return { status: "fenced" };
     s.lease!.expiresAt = now;
     s.revision++;
     return stateResult();
@@ -334,8 +532,25 @@ export function executeOrganization(
       expiresAt: now + command.limits.receiptTtlMs,
     };
     rows.put("receipt", org, scope, receiptSchema.parse(receipt), id, 0, receipt.expiresAt);
+    rows.put("submission", org, scope, envelopeSchema.parse({ ...e, content: "" }), "", 0, receipt.expiresAt);
+    rows.put(
+      "source-provenance",
+      org,
+      id,
+      sourceProvenanceSchema.parse({
+        receiptId: id,
+        source: e.source,
+        actor: e.actor,
+        ...(e.sourceReference ? { sourceReference: e.sourceReference } : {}),
+        retentionDeadline: Math.max(receipt.expiresAt, now + command.limits.contentTtlMs),
+      }),
+      "",
+      0,
+      Math.max(receipt.expiresAt, now + command.limits.contentTtlMs),
+    );
     rows.put("receipt-key", org, id, scope);
     if (status === "pending") {
+      catalogueSource(rows, s, e, Math.max(receipt.expiresAt, now + command.limits.contentTtlMs));
       if (e.target) rows.put("reservation", org, e.target.key, { revision: e.target.revision, receiptId: id });
       rows.put(
         "pending",
@@ -429,30 +644,82 @@ export function executeOrganization(
     }
     s.revision++;
     receipt.status = command.status;
+    if (command.ownerRunId) receipt.ownerRunId = command.ownerRunId;
+    if (command.status === "accepted" && command.ownerRunId && envelope.target) {
+      const reservation = rows.get("reservation", org, envelope.target.key) as
+        { receiptId?: string; revision?: number } | undefined;
+      if (reservation?.receiptId === receipt.id)
+        rows.put("reservation", org, envelope.target.key, { ...reservation, ownerRunId: command.ownerRunId });
+    }
     receipt.reason = command.reason;
     receipt.settledAt = now;
     rows.put("receipt", org, scope, receiptSchema.parse(receipt), receipt.id, 0, receipt.expiresAt);
     rows.remove("pending", org, receipt.id);
+    if (command.status === "accepted" && command.ownerRunId)
+      rows.put(
+        "reply-address",
+        org,
+        receipt.id,
+        replyAddressSchema.parse({
+          receiptId: receipt.id,
+          envelope: { ...envelope, content: "", context: [], sourceReference: undefined },
+          ownerRunId: command.ownerRunId,
+          expiresAt: envelope.contentExpiresAt,
+        }),
+        "",
+        0,
+        envelope.contentExpiresAt,
+      );
     if (command.status === "rejected") releaseReservation(rows, org, envelope, receipt.id);
     if (command.reply && validActor(rows, org, envelope.actor))
       append(rows, s, envelope, receipt, "assistant", command.reply, now, command.contentTtlMs);
     save();
     return { status: "receipt", receipt, duplicate: false };
   }
-  if (command.action === "stream") {
+  if (command.action === "stream" || command.action === "tail") {
     if (command.actor.stream !== command.stream || !validActor(rows, org, command.actor)) return { status: "fenced" };
     const identities = new Set(command.identities.map(identityKey));
-    const candidates = rows
-      .list("stream", org, { partition: command.stream, after: command.after, limit: command.limit + 1 })
-      .map((v) => streamEntrySchema.parse(v));
+    const reader = identityKey(command.actor.onBehalfOf ?? command.actor.identity);
+    const epoch = JSON.stringify([reader, command.actor.bindingRevision]);
+    const rawCutoff = rows.get("binding-cutoff", org, epoch) ?? rows.get("binding-cutoff", "", epoch);
+    const cutoff = rawCutoff === undefined ? undefined : bindingCutoffSchema.parse(rawCutoff).sequence;
+    const partitions = [...new Set([command.stream, command.actor.principal])];
+    const candidates = partitions
+      .flatMap((partition) =>
+        rows
+          .list("stream", org, {
+            partition,
+            ...(command.action === "tail" ? { before: command.before, descending: true } : { after: command.after }),
+            limit: command.limit + 1,
+          })
+          .map((v) => streamEntrySchema.parse(v)),
+      )
+      .sort((a, b) => (command.action === "tail" ? b.sequence - a.sequence : a.sequence - b.sequence))
+      .slice(0, command.limit + 1);
     const scanned = candidates.slice(0, command.limit);
     const eligible = scanned.filter((entry) => {
       if (rows.get("revoked-source", org, identityKey(entry.identity)) === true) return false;
+      if (entry.stream !== command.stream && identityKey(entry.identity) !== identityKey(command.actor.identity))
+        return false;
+      if (
+        identityKey(entry.onBehalfOf ?? entry.identity) !== reader &&
+        (cutoff === undefined || entry.admissionSequence === undefined || entry.admissionSequence <= cutoff)
+      )
+        return false;
       if (entry.expiresAt <= now || !identities.has(identityKey(entry.onBehalfOf ?? entry.identity))) return false;
       const binding = rows.binding(entry.onBehalfOf ?? entry.identity);
       return binding.status === "bound" ? binding.binding.personId === command.stream : binding.status === "unknown";
     });
     const entries = eligible;
+    if (command.action === "tail")
+      return {
+        status: "stream_tail",
+        revision: s.revision,
+        entries: entries.reverse(),
+        cursor: scanned[0]?.sequence ?? s.streamSequence,
+        beforeCursor: scanned.at(-1)?.sequence ?? 0,
+        hasMore: candidates.length > scanned.length,
+      };
     return {
       status: "stream",
       revision: s.revision,
@@ -461,11 +728,84 @@ export function executeOrganization(
       hasMore: candidates.length > scanned.length,
     };
   }
+  if (command.action === "reply" || command.action === "execution") {
+    if (!validActor(rows, org, command.actor)) return { status: "fenced" };
+    const address = rows.get("reply-address", org, command.receiptId);
+    if (!address) return { status: "not_found" };
+    const raw = replyAddressSchema.parse(address);
+    if (raw.expiresAt <= now) return { status: "not_found" };
+    if (raw.ownerRunId !== command.ownerRunId || JSON.stringify(raw.envelope.actor) !== JSON.stringify(command.actor))
+      return { status: "fenced" };
+    const scope = rows.get("receipt-key", org, command.receiptId);
+    if (typeof scope !== "string") return { status: "not_found" };
+    const receipt = receiptSchema.parse(rows.get("receipt", org, scope));
+    if (receipt.status !== "accepted") return { status: "fenced" };
+    if (command.action === "execution") {
+      if (raw.envelope.target && rows.get("target", org, raw.envelope.target.key) !== raw.envelope.target.revision)
+        return { status: "stale" };
+      return { status: "ok", removed: 0 };
+    }
+    const key = JSON.stringify([command.receiptId, command.replyKey]);
+    const prior = rows.get("reply-key", org, key);
+    if (prior !== undefined)
+      return replyKeySchema.parse(prior).digest === command.digest
+        ? { status: "ok", removed: 0 }
+        : { status: "conflict" };
+    append(
+      rows,
+      s,
+      raw.envelope,
+      receipt,
+      "assistant",
+      command.content,
+      now,
+      Math.min(command.contentTtlMs, raw.expiresAt - now),
+    );
+    rows.put(
+      "reply-key",
+      org,
+      key,
+      replyKeySchema.parse({ key, digest: command.digest, expiresAt: raw.expiresAt }),
+      "",
+      0,
+      raw.expiresAt,
+    );
+    s.revision++;
+    save();
+    return { status: "ok", removed: 0 };
+  }
   if (command.action === "delete") {
     if (command.actor.stream !== command.stream || !validActor(rows, org, command.actor)) return { status: "fenced" };
+    const receiptKey = rows.get("receipt-key", org, command.receiptId);
+    const original = rows.get("source-provenance", org, command.receiptId);
+    let partition = command.stream;
+    if (original !== undefined) {
+      const provenance = sourceProvenanceSchema.parse(original);
+      if (
+        (provenance.actor.stream !== command.stream && provenance.actor.stream !== command.actor.principal) ||
+        identityKey(provenance.actor.identity) !== identityKey(command.actor.identity)
+      )
+        return { status: "not_found" };
+      partition = provenance.actor.stream!;
+    }
+    if (typeof receiptKey === "string") {
+      const receipt = receiptSchema.parse(rows.get("receipt", org, receiptKey));
+      if (
+        (receipt.actor.stream !== command.stream && receipt.actor.stream !== command.actor.principal) ||
+        identityKey(receipt.actor.identity) !== identityKey(command.actor.identity)
+      )
+        return { status: "not_found" };
+      partition = receipt.actor.stream!;
+      if (receipt.effectKey)
+        rows.put("owner-clear", org, receipt.id, { receiptId: receipt.id, effectKey: receipt.effectKey });
+    }
     let removed = 0;
+    const address = rows.get("reply-address", org, command.receiptId);
+    if (address && (address as { envelope: OrganizationEnvelope }).envelope.actor.stream === partition) {
+      rows.remove("reply-address", org, command.receiptId);
+    }
     for (const entry of rows
-      .list("stream", org, { partition: command.stream, receiptId: command.receiptId })
+      .list("stream", org, { partition, receiptId: command.receiptId })
       .map((v) => streamEntrySchema.parse(v)))
       if (entry.receiptId === command.receiptId) {
         rows.remove("stream", org, String(entry.sequence));
@@ -475,7 +815,7 @@ export function executeOrganization(
     const raw = rows.get("pending", org, command.receiptId);
     if (raw !== undefined) {
       const e = envelopeSchema.parse(raw);
-      if (e.actor.stream === command.stream) {
+      if (e.actor.stream === partition) {
         rows.remove("pending", org, command.receiptId);
         releaseReservation(rows, org, e, command.receiptId);
         const scope = rows.get("receipt-key", org, command.receiptId);
@@ -488,13 +828,17 @@ export function executeOrganization(
         }
       }
     }
-    if (removed > 0 || raw !== undefined) {
+    if (removed > 0 || raw !== undefined || address !== undefined) {
       s.revision++;
       save();
     }
     return { status: "ok", removed };
   }
   let removed = 0;
+  for (const value of rows.list("reply-address", org, { expiresBefore: now, limit: 1000 }))
+    rows.remove("reply-address", org, replyAddressSchema.parse(value).receiptId);
+  for (const value of rows.list("reply-key", org, { expiresBefore: now, limit: 1000 }))
+    rows.remove("reply-key", org, replyKeySchema.parse(value).key);
   for (const entry of rows
     .list("stream", org, { expiresBefore: now, limit: 1000 })
     .map((v) => streamEntrySchema.parse(v))) {
@@ -521,6 +865,7 @@ export function executeOrganization(
     const scope = rows.get("receipt-key", org, receipt.id);
     if (typeof scope !== "string") throw new Error("organization receipt unavailable");
     rows.remove("receipt", org, scope);
+    rows.remove("submission", org, scope);
     rows.remove("receipt-key", org, receipt.id);
     removed++;
   }
@@ -528,5 +873,11 @@ export function executeOrganization(
     s.revision++;
     save();
   }
+  for (const value of rows.list("source-policy", org, { expiresBefore: now, limit: 1000 })) {
+    const row = sourcePolicySchema.parse(value);
+    rows.remove("source-policy", org, JSON.stringify([row.actor.stream, row.authority]));
+  }
+  for (const value of rows.list("source-provenance", org, { expiresBefore: now, limit: 1000 }))
+    rows.remove("source-provenance", org, sourceProvenanceSchema.parse(value).receiptId);
   return { status: "ok", removed };
 }

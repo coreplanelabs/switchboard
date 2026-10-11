@@ -4,6 +4,7 @@ import { SqliteOrganizationStore } from "./sqlite.js";
 import type { PersonDirectory } from "../identity/contract.js";
 import type { DirectorySqlStorage } from "../identity/sqlite.js";
 import { InMemoryOrganizationStore } from "./memory.js";
+import { OrganizationService } from "./service.js";
 import type { OrganizationEnvelope, OrganizationLimits, OrganizationStore } from "./contract.js";
 
 const identity = { issuer: "access:test", tenant: null, subject: "alice" };
@@ -41,6 +42,693 @@ function organizationContract(
   _name: string,
 ) {
   describe("organization store contract", () => {
+    it.each(["settlement", "owner"] as const)(
+      "retains original source proof when a shorter-lived %s reply expires",
+      async (delivery) => {
+        let now = 1;
+        const store = factory(() => now);
+        const request = envelope("retained-original");
+        const service = new OrganizationService({
+          store,
+          directory: store.directory,
+          limits,
+          mappings: [{ source: "http", issuer: identity.issuer, tenant: null, organization: "org:test" }],
+          authorize: async () => true,
+          currentIdentityRead: async () => "allowed",
+        });
+        const auth = { source: "http" as const, identity, kind: "human" as const, organizations: ["org:test"] };
+        const resolved = await service.resolve(auth);
+        if (!resolved) throw new Error("no actor");
+        request.actor = resolved.actor;
+        const admitted = await store.execute({
+          action: "admit",
+          envelope: request,
+          limits: { ...limits, receiptTtlMs: 10 },
+        });
+        if (admitted.status !== "receipt") throw new Error("no receipt");
+        const lease = { organization: "org:test", owner: "worker", generation: 1 };
+        expect(
+          await store.execute({ action: "claim", organization: lease.organization, owner: lease.owner, leaseMs: 100 }),
+        ).toMatchObject({ status: "state", state: { lease: { generation: 1 } } });
+        now = 2;
+        expect(
+          await store.execute({
+            action: "settle",
+            ...lease,
+            receiptId: admitted.receipt.id,
+            status: "accepted",
+            reason: null,
+            ownerRunId: "original-owner",
+            reply: delivery === "settlement" ? "Short answer" : null,
+            contentTtlMs: 10,
+          }),
+        ).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+        await store.execute({ action: "complete", ...lease, through: 1 });
+        if (delivery === "owner")
+          expect(
+            await store.execute({
+              action: "reply",
+              organization: "org:test",
+              receiptId: admitted.receipt.id,
+              actor: request.actor,
+              ownerRunId: "original-owner",
+              replyKey: "short",
+              digest: "b".repeat(64),
+              content: "Short answer",
+              contentTtlMs: 10,
+            }),
+          ).toEqual({ status: "ok", removed: 0 });
+        now = 13;
+        expect(await store.execute({ action: "expire", organization: "org:test" })).toMatchObject({ status: "ok" });
+        for (const read of [
+          await service.stream(auth),
+          await service.streamTail(auth),
+          await service.streamForIdentities(auth, [identity]),
+        ]) {
+          expect(
+            read.status === "stream" || read.status === "stream_tail"
+              ? read.entries.map((entry) => entry.content)
+              : read.status,
+          ).toEqual(["Private request"]);
+        }
+        now = 91;
+        expect(await store.execute({ action: "expire", organization: "org:test" })).toMatchObject({ status: "ok" });
+        expect(
+          await store.execute({
+            action: "provenance",
+            organization: "org:test",
+            actor: request.actor,
+            receiptId: admitted.receipt.id,
+          }),
+        ).toEqual({ status: "not_found" });
+      },
+    );
+    it.each(["settlement", "owner"] as const)(
+      "keeps late %s replies behind their original admission's linking cutoff",
+      async (delivery) => {
+        const store = factory(() => 1);
+        const person = await store.directory.createPerson();
+        if (person.status !== "created") throw new Error("no person");
+        const peer = { ...identity, subject: "bob" };
+        const link = async (source: typeof identity) => {
+          expect(
+            await store.directory.change({
+              action: "link",
+              identity: source,
+              personId: person.person.id,
+              expectedRevision: 0,
+              actor: source,
+              proof: { method: "dual-authentication", version: 1 },
+            }),
+          ).toMatchObject({ status: "changed" });
+        };
+        await link(identity);
+        const original = {
+          ...envelope("before-link"),
+          actor: { ...envelope().actor, stream: person.person.id, bindingRevision: 1 },
+        };
+        const admit = async (request: OrganizationEnvelope) => {
+          const result = await store.execute({ action: "admit", envelope: request, limits });
+          if (result.status !== "receipt") throw new Error("no receipt");
+          return result.receipt;
+        };
+        const finish = async (request: OrganizationEnvelope, receiptId: string, reply: string) => {
+          const claim = await store.execute({
+            action: "claim",
+            organization: request.organization,
+            owner: "process",
+            leaseMs: 30,
+          });
+          if (claim.status !== "state" || !claim.state.lease) throw new Error("no lease");
+          const lease = {
+            organization: request.organization,
+            owner: "process",
+            generation: claim.state.lease.generation,
+          };
+          expect(
+            await store.execute({
+              action: "settle",
+              ...lease,
+              receiptId,
+              status: "accepted",
+              reason: null,
+              ownerRunId: `owner:${receiptId}`,
+              reply: delivery === "settlement" ? reply : null,
+              contentTtlMs: 90,
+            }),
+          ).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+          expect(
+            await store.execute({ action: "complete", ...lease, through: claim.state.lease.through }),
+          ).toMatchObject({ status: "state" });
+          if (delivery === "owner")
+            expect(
+              await store.execute({
+                action: "reply",
+                organization: request.organization,
+                receiptId,
+                actor: request.actor,
+                ownerRunId: `owner:${receiptId}`,
+                replyKey: "answer",
+                digest: "a".repeat(64),
+                content: reply,
+                contentTtlMs: 90,
+              }),
+            ).toEqual({ status: "ok", removed: 0 });
+        };
+        const old = await admit(original);
+        await link(peer);
+        await finish(original, old.id, "Private pre-link answer");
+        const future = { ...original, key: "after-link", sourceEvent: "after-link", content: "Future request" };
+        await finish(future, (await admit(future)).id, "Future answer");
+        const service = new OrganizationService({
+          store,
+          directory: store.directory,
+          limits,
+          mappings: [{ source: "http", issuer: identity.issuer, tenant: null, organization: "org:test" }],
+          authorize: async () => true,
+          currentIdentityRead: async () => "allowed",
+        });
+        const auth = (source: typeof identity) => ({
+          source: "http" as const,
+          identity: source,
+          kind: "human" as const,
+          organizations: ["org:test"],
+        });
+        for (const read of [
+          await service.stream(auth(peer)),
+          await service.streamTail(auth(peer)),
+          await service.streamForIdentities(auth(peer), [identity, peer]),
+        ]) {
+          expect(read.status).toMatch(/^stream(?:_tail)?$/);
+          expect(
+            read.status === "stream" || read.status === "stream_tail"
+              ? read.entries.map((entry) => entry.content)
+              : null,
+          ).toEqual(["Future request", "Future answer"]);
+        }
+        const own = await service.streamTail(auth(identity));
+        expect(own.status === "stream_tail" ? own.entries.map((entry) => entry.content) : null).toEqual([
+          "Private request",
+          "Private pre-link answer",
+          "Future request",
+          "Future answer",
+        ]);
+      },
+    );
+    it("catalogues complete source authorities without growing for ordinary messages and refuses a capped census", async () => {
+      let now = 1;
+      const store = factory(() => now);
+      const send = async (key: string, digest: string) => {
+        const input = envelope(key);
+        input.sourceReference = {
+          actorId: "http:alice",
+          userId: "http:alice",
+          channelId: "http:home",
+          threadKey: "http:home:alice",
+          messageId: key,
+          browserRevision: key.length,
+          credentialDigest: digest,
+          approvalConnection: { id: digest, credentialId: "http:alice", requestHash: "d".repeat(64) },
+        };
+        const issued = await store.execute({
+          action: "issue",
+          organization: input.organization,
+          source: input.source,
+          actor: input.actor,
+          ttlMs: 500,
+        });
+        if (issued.status !== "key") throw new Error("not issued");
+        input.key = issued.key;
+        expect(
+          (
+            await store.execute({
+              action: "admit",
+              envelope: input,
+              limits: { ...limits, pendingPerActor: 10, pendingPerSource: 10, pendingPerOrganization: 10 },
+            })
+          ).status,
+        ).toBe("receipt");
+      };
+      await send("first", "a".repeat(64));
+      await send("ordinary-next", "a".repeat(64));
+      const query = {
+        action: "source-catalogue" as const,
+        organization: "org:test",
+        actor: envelope().actor,
+        limit: 3,
+      };
+      const same = await store.execute(query);
+      expect(same).toMatchObject({
+        status: "source-catalogue",
+        accessRevision: 0,
+        entries: [{ sourceReference: { credentialDigest: "a".repeat(64), messageId: "ordinary-next" }, allowed: true }],
+      });
+      if (same.status !== "source-catalogue") throw new Error("not catalogued");
+      expect(same.entries).toHaveLength(1);
+      await send("second-key", "b".repeat(64));
+      await send("third-key", "c".repeat(64));
+      expect(await store.execute({ ...query, limit: 2 })).toEqual({ status: "unavailable" });
+      const complete = await store.execute(query);
+      if (complete.status !== "source-catalogue") throw new Error("not catalogued");
+      expect(complete.entries.map((entry) => entry.sourceReference?.credentialDigest).sort()).toEqual([
+        "a".repeat(64),
+        "b".repeat(64),
+        "c".repeat(64),
+      ]);
+      expect(
+        await store.execute({ ...query, actor: { ...query.actor, identity: { ...identity, subject: "bob" } } }),
+      ).toEqual({ status: "fenced" });
+      now = 500;
+      expect(await store.execute(query)).toEqual({ status: "source-catalogue", accessRevision: 0, entries: [] });
+    });
+    it("preserves bounded own-source history and deletion after linking without inheriting another source's old history", async () => {
+      const store = factory(() => 1);
+      const service = new OrganizationService({
+        store,
+        directory: store.directory,
+        limits,
+        mappings: [{ source: "http", issuer: identity.issuer, tenant: null, organization: "org:test" }],
+        authorize: async () => true,
+        currentIdentityRead: async () => "allowed",
+      });
+      const other = { ...identity, subject: "bob" };
+      const auth = (id: typeof identity) => ({
+        source: "http" as const,
+        identity: id,
+        kind: "human" as const,
+        organizations: ["org:test"],
+      });
+      const send = (id: typeof identity, key: string, content: string) =>
+        service.admit(auth(id), {
+          key,
+          sourceEvent: key,
+          content,
+          destination: { kind: "broad" },
+          workload: "message",
+          target: null,
+          context: [],
+        });
+      const original = await send(identity, "own-old", "My original history");
+      if (original.status !== "receipt") throw new Error("no receipt");
+      await send(other, "other-old", "Their original history");
+      const person = await store.directory.createPerson();
+      if (person.status !== "created") throw new Error("no person");
+      for (const id of [identity, other])
+        await store.directory.change({
+          action: "link",
+          identity: id,
+          personId: person.person.id,
+          expectedRevision: 0,
+          actor: id,
+          proof: { method: "dual-authentication", version: 1 },
+        });
+      await send(identity, "joined-new", "Future joined history");
+      expect(await service.streamTail(auth(identity), 2)).toMatchObject({
+        status: "stream_tail",
+        entries: [
+          { sequence: 1, content: "My original history" },
+          { sequence: 3, content: "Future joined history" },
+        ],
+        hasMore: false,
+      });
+      expect(await service.streamTail(auth(other), 2)).toMatchObject({
+        status: "stream_tail",
+        entries: [
+          { sequence: 2, content: "Their original history" },
+          { sequence: 3, content: "Future joined history" },
+        ],
+        hasMore: false,
+      });
+      expect(await service.streamTail(auth(identity), 1, 3)).toMatchObject({
+        status: "stream_tail",
+        entries: [{ sequence: 1, content: "My original history" }],
+        hasMore: false,
+      });
+      expect(await service.delete(auth(other), original.receipt.id)).toEqual({ status: "not_found" });
+      expect(await service.delete(auth(identity), original.receipt.id)).toMatchObject({ status: "ok", removed: 1 });
+      expect(await service.stream(auth(identity), 0, 2)).toMatchObject({
+        status: "stream",
+        entries: [{ sequence: 3, content: "Future joined history" }],
+      });
+    });
+    it("limits private content deletion to the exact authenticated source even in a joined person stream", async () => {
+      const store = factory(() => 1);
+      const person = await store.directory.createPerson();
+      if (person.status !== "created") throw new Error("no person");
+      const other = { ...identity, subject: "bob" };
+      for (const source of [identity, other])
+        await store.directory.change({
+          action: "link",
+          identity: source,
+          personId: person.person.id,
+          expectedRevision: 0,
+          actor: source,
+          proof: { method: "dual-authentication", version: 1 },
+        });
+      const first = { ...envelope(), actor: { ...envelope().actor, stream: person.person.id, bindingRevision: 1 } };
+      const receipt = await store.execute({ action: "admit", envelope: first, limits });
+      if (receipt.status !== "receipt") throw new Error("no receipt");
+      const command = {
+        action: "delete" as const,
+        organization: "org:test",
+        stream: person.person.id,
+        receiptId: receipt.receipt.id,
+      };
+      expect(
+        await store.execute({ ...command, actor: { ...first.actor, identity: other, principal: "access:bob" } }),
+      ).toEqual({ status: "not_found" });
+      expect(
+        await store.execute({
+          action: "stream",
+          organization: "org:test",
+          stream: person.person.id,
+          actor: first.actor,
+          identities: [identity, other],
+          after: 0,
+          limit: 10,
+        }),
+      ).toMatchObject({ status: "stream", entries: [{ content: "Private request" }] });
+      expect(await store.execute({ ...command, actor: first.actor })).toMatchObject({ status: "ok", removed: 1 });
+    });
+    it("uses a separate access epoch for policy changes without clearing drafts on messages", async () => {
+      const store = factory(() => 1);
+      const admitted = await store.execute({ action: "admit", envelope: envelope(), limits });
+      expect(admitted.status).toBe("receipt");
+      expect(await store.execute({ action: "get", organization: "org:test" })).toMatchObject({
+        status: "state",
+        state: { accessRevision: 0 },
+      });
+      await store.execute({ action: "access", organization: "org:test", identity, allowed: false });
+      expect(await store.execute({ action: "get", organization: "org:test" })).toMatchObject({
+        status: "state",
+        state: { accessRevision: 1 },
+      });
+      await store.execute({ action: "access", organization: "org:test", identity, allowed: false });
+      expect(await store.execute({ action: "get", organization: "org:test" })).toMatchObject({
+        status: "state",
+        state: { accessRevision: 1 },
+      });
+      await store.execute({ action: "access", organization: "org:test", identity, allowed: true });
+      expect(await store.execute({ action: "get", organization: "org:test" })).toMatchObject({
+        status: "state",
+        state: { accessRevision: 2 },
+      });
+    });
+    it("filters private history through the exact original source proof and holds unknown policy", async () => {
+      const store = factory(() => 1);
+      let decision: "allowed" | "denied" | "unavailable" = "allowed";
+      const proofs: unknown[] = [];
+      const service = new OrganizationService({
+        store,
+        directory: store.directory,
+        limits,
+        mappings: [{ source: "http", issuer: identity.issuer, tenant: null, organization: "org:test" }],
+        authorize: async () => true,
+        currentIdentityRead: async (source, reference) => {
+          proofs.push([source, reference?.credentialDigest]);
+          return decision;
+        },
+      });
+      const auth = {
+        source: "http" as const,
+        identity,
+        kind: "human" as const,
+        organizations: ["org:test"],
+        sourceReference: {
+          actorId: "access:alice",
+          userId: "access:alice",
+          channelId: "http:home",
+          threadKey: "http:home:alice",
+          credentialDigest: "b".repeat(64),
+        },
+      };
+      expect(
+        await service.admit(auth, {
+          key: "source-proof",
+          sourceEvent: "source-proof",
+          content: "Private request",
+          destination: { kind: "broad" },
+          workload: "message",
+          target: null,
+          context: [],
+        }),
+      ).toMatchObject({ status: "receipt" });
+      expect(await service.streamTail(auth)).toMatchObject({
+        status: "stream_tail",
+        entries: [{ content: "Private request" }],
+      });
+      expect(proofs).toEqual([[identity, "b".repeat(64)]]);
+      decision = "denied";
+      expect(await service.streamTail(auth)).toMatchObject({ status: "stream_tail", entries: [] });
+      decision = "unavailable";
+      expect(await service.streamTail(auth)).toEqual({ status: "unavailable" });
+    });
+    it("links only future cross-source private activity at an atomic sequence cutoff even in the same millisecond", async () => {
+      const store = factory(() => 1);
+      const person = await store.directory.createPerson();
+      if (person.status !== "created") throw new Error("no person");
+      const second = { ...identity, subject: "bob" };
+      const link = (linked: typeof identity) =>
+        store.directory.change({
+          action: "link",
+          identity: linked,
+          personId: person.person.id,
+          expectedRevision: 0,
+          actor: linked,
+          proof: { method: "dual-authentication", version: 1 },
+        });
+      await link(identity);
+      const first = {
+        ...envelope("before-link"),
+        actor: { ...envelope().actor, stream: person.person.id, bindingRevision: 1 },
+      };
+      const accept = async (e: OrganizationEnvelope) => {
+        const admitted = await store.execute({ action: "admit", envelope: e, limits });
+        if (admitted.status !== "receipt") throw new Error("not admitted");
+        const claimed = await store.execute({
+          action: "claim",
+          organization: e.organization,
+          owner: "process",
+          leaseMs: 30,
+        });
+        if (claimed.status !== "state" || !claimed.state.lease) throw new Error("not claimed");
+        const lease = { organization: e.organization, owner: "process", generation: claimed.state.lease.generation };
+        await store.execute({
+          action: "settle",
+          ...lease,
+          receiptId: admitted.receipt.id,
+          status: "accepted",
+          reason: null,
+          reply: null,
+          contentTtlMs: 90,
+        });
+        await store.execute({ action: "complete", ...lease, through: claimed.state.lease.through });
+      };
+      await accept(first);
+      await link(second);
+      const service = new OrganizationService({
+        store,
+        directory: store.directory,
+        limits,
+        mappings: [{ source: "http", issuer: identity.issuer, tenant: null, organization: "org:test" }],
+        authorize: async () => true,
+        currentIdentityRead: async () => "allowed",
+      });
+      const auth = (external: typeof identity) => ({
+        source: "http" as const,
+        identity: external,
+        kind: "human" as const,
+        organizations: ["org:test"],
+      });
+      expect(await service.streamTail(auth(second), 10)).toMatchObject({ status: "stream_tail", entries: [] });
+      await accept({ ...first, key: "after-link", sourceEvent: "after-link", content: "Future shared activity" });
+      expect(await service.streamTail(auth(second), 10)).toMatchObject({
+        status: "stream_tail",
+        entries: [{ sequence: 2, content: "Future shared activity" }],
+      });
+      expect(await service.stream(auth(identity), 0, 10)).toMatchObject({
+        status: "stream",
+        entries: [
+          { sequence: 1, content: "Private request" },
+          { sequence: 2, content: "Future shared activity" },
+        ],
+      });
+      const before = await store.execute({ action: "get", organization: first.organization });
+      if (before.status !== "state") throw new Error("no state");
+      await store.directory.change({
+        action: "revoke",
+        identity,
+        personId: person.person.id,
+        expectedRevision: 1,
+        actor: identity,
+        proof: { method: "authenticated-human", version: 1 },
+      });
+      const hidden = await service.streamTail(auth(second), 10);
+      expect(hidden).toMatchObject({ status: "stream_tail", entries: [] });
+      if (hidden.status !== "stream_tail") throw new Error("no tail");
+      expect(hidden.revision).toBe(before.state.revision + 1);
+    });
+    it("opens the latest private page with bounded older cursors and follows new replies", async () => {
+      const store = factory(() => 1);
+      const service = new OrganizationService({
+        store,
+        directory: store.directory,
+        mappings: [{ source: "http", issuer: identity.issuer, tenant: null, organization: "org:test" }],
+        limits,
+        authorize: async () => true,
+        currentIdentityRead: async () => "allowed",
+      });
+      const auth = { source: "http" as const, identity, kind: "human" as const, organizations: ["org:test"] };
+      for (let index = 1; index <= 5; index++) {
+        const admitted = await service.admit(auth, {
+          key: `tail-${index}`,
+          sourceEvent: `tail-${index}`,
+          content: `Message ${index}`,
+          destination: { kind: "broad" },
+          workload: "message",
+          target: null,
+          context: [],
+        });
+        if (admitted.status !== "receipt") throw new Error("not admitted");
+        const claimed = await store.execute({
+          action: "claim",
+          organization: "org:test",
+          owner: "process",
+          leaseMs: 30,
+        });
+        if (claimed.status !== "state" || !claimed.state.lease) throw new Error("not claimed");
+        const lease = { organization: "org:test", owner: "process", generation: claimed.state.lease.generation };
+        await store.execute({
+          action: "settle",
+          ...lease,
+          receiptId: admitted.receipt.id,
+          status: "accepted",
+          reason: null,
+          reply: null,
+          contentTtlMs: 90,
+        });
+        await store.execute({ action: "complete", ...lease, through: claimed.state.lease.through });
+      }
+      expect(await service.streamTail(auth, 2)).toMatchObject({
+        status: "stream_tail",
+        entries: [
+          { sequence: 4, content: "Message 4" },
+          { sequence: 5, content: "Message 5" },
+        ],
+        cursor: 5,
+        beforeCursor: 4,
+        hasMore: true,
+      });
+      expect(await service.streamTail(auth, 2, 4)).toMatchObject({
+        status: "stream_tail",
+        entries: [
+          { sequence: 2, content: "Message 2" },
+          { sequence: 3, content: "Message 3" },
+        ],
+        cursor: 3,
+        beforeCursor: 2,
+        hasMore: true,
+      });
+      expect(await service.streamTail(auth, 2, 2)).toMatchObject({
+        status: "stream_tail",
+        entries: [{ sequence: 1, content: "Message 1" }],
+        beforeCursor: 1,
+        hasMore: false,
+      });
+      await service.admit(auth, {
+        key: "tail-6",
+        sourceEvent: "tail-6",
+        content: "Message 6",
+        destination: { kind: "broad" },
+        workload: "message",
+        target: null,
+        context: [],
+      });
+      expect(await service.stream(auth, 5, 2)).toMatchObject({
+        status: "stream",
+        entries: [{ sequence: 6, content: "Message 6" }],
+        cursor: 6,
+        hasMore: false,
+      });
+      await store.execute({ action: "access", organization: "org:test", identity, allowed: false });
+      expect(await service.streamTail(auth, 2)).toEqual({ status: "fenced" });
+    });
+    it("delivers an original owner's addressed reply once after lease completion and blocks deletion or revocation", async () => {
+      const store = factory(() => 1);
+      const e = envelope();
+      const admitted = await store.execute({ action: "admit", envelope: e, limits });
+      if (admitted.status !== "receipt") throw new Error("not admitted");
+      const claimed = await store.execute({
+        action: "claim",
+        organization: e.organization,
+        owner: "process",
+        leaseMs: 30,
+      });
+      if (claimed.status !== "state" || !claimed.state.lease) throw new Error("not claimed");
+      const lease = { organization: e.organization, owner: "process", generation: claimed.state.lease.generation };
+      expect(
+        await store.execute({
+          action: "settle",
+          ...lease,
+          receiptId: admitted.receipt.id,
+          status: "accepted",
+          ownerRunId: "original-run",
+          reason: null,
+          reply: null,
+          contentTtlMs: 90,
+        }),
+      ).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+      expect(await store.execute({ action: "complete", ...lease, through: claimed.state.lease.through })).toMatchObject(
+        { status: "state", state: { lease: { expiresAt: 1 } } },
+      );
+      const reply = {
+        action: "reply" as const,
+        organization: e.organization,
+        receiptId: admitted.receipt.id,
+        actor: e.actor,
+        ownerRunId: "original-run",
+        replyKey: "final",
+        digest: "a".repeat(64),
+        content: "Original result",
+        contentTtlMs: 90,
+      };
+      expect(await store.execute({ ...reply, ownerRunId: "rival-run" })).toEqual({ status: "fenced" });
+      expect(await store.execute(reply)).toEqual({ status: "ok", removed: 0 });
+      expect(await store.execute(reply)).toEqual({ status: "ok", removed: 0 });
+      const stream = {
+        action: "stream" as const,
+        organization: e.organization,
+        stream: e.actor.stream!,
+        actor: e.actor,
+        identities: [identity],
+        after: 0,
+        limit: 100,
+      };
+      expect(await store.execute(stream)).toMatchObject({
+        status: "stream",
+        entries: [
+          { role: "user", content: "Private request" },
+          { role: "assistant", content: "Original result" },
+        ],
+      });
+      expect(await store.execute({ ...reply, replyKey: "secret", content: "API_TOKEN=abcd\n".repeat(2000) })).toEqual({
+        status: "invalid",
+      });
+      expect(
+        await store.execute({
+          action: "delete",
+          organization: e.organization,
+          stream: e.actor.stream!,
+          actor: e.actor,
+          receiptId: admitted.receipt.id,
+        }),
+      ).toEqual({ status: "ok", removed: 2 });
+      expect(await store.execute({ ...reply, replyKey: "late" })).toEqual({ status: "not_found" });
+      expect(await store.execute({ action: "access", organization: e.organization, identity, allowed: false })).toEqual(
+        { status: "ok", removed: 0 },
+      );
+      expect(await store.execute(reply)).toEqual({ status: "fenced" });
+    });
     it("keeps one durable logical orchestrator and fences replacement owners", async () => {
       let now = 1;
       const store = factory(() => now);
@@ -586,8 +1274,6 @@ function organizationContract(
       await store.execute({ action: "admit", envelope: bound, limits });
       await store.execute({ action: "admit", envelope: envelope("bob-live", "bob"), limits });
       await store.execute({ action: "claim", organization: "org:test", owner: "worker", leaseMs: 100 });
-      const before = await store.execute({ action: "get", organization: "org:test" });
-      if (before.status !== "state") throw new Error("state unavailable");
       await store.directory.change({
         action: "revoke",
         identity,
@@ -596,6 +1282,8 @@ function organizationContract(
         actor: identity,
         proof: { method: "authenticated-human", version: 1 },
       });
+      const before = await store.execute({ action: "get", organization: "org:test" });
+      if (before.status !== "state") throw new Error("state unavailable");
       expect(
         await store.execute({
           action: "complete",
@@ -841,7 +1529,7 @@ function organizationContract(
               await store.execute({
                 action: "delete",
                 organization: input.organization,
-                actor: reader,
+                actor: input.actor,
                 stream: person.person.id,
                 receiptId: admitted.receipt.id,
               }),

@@ -49,6 +49,7 @@ function setup(
     mappings: suppliedMappings,
     limits,
     authorize,
+    currentIdentityRead: async () => "allowed",
   });
   return { store, service };
 }
@@ -75,6 +76,104 @@ async function sendBrowser(service: OrganizationService, authentication = browse
 }
 
 describe("organization authenticated service", () => {
+  it("holds every private history path when original-source verification is absent", async () => {
+    const store = new InMemoryOrganizationStore(() => 1);
+    const options = { store, directory: store.directory, mappings, limits, authorize: async () => true };
+    const missing = new OrganizationService(options);
+    expect(await sendBrowser(missing)).toMatchObject({ status: "receipt", receipt: { status: "pending" } });
+    for (const read of [
+      await missing.stream(browser),
+      await missing.streamTail(browser),
+      await missing.streamForIdentities(browser, [identity]),
+    ])
+      expect(read).toEqual({ status: "unavailable" });
+    const proved = new OrganizationService({ ...options, currentIdentityRead: async () => "allowed" });
+    expect(await proved.stream(browser)).toMatchObject({
+      status: "stream",
+      entries: [{ content: "A private request" }],
+    });
+  });
+  it("replays the original saved question and observed browser revision after the current question changes", async () => {
+    const { service, store } = setup();
+    const auth: OrganizationAuthentication = {
+      ...browser,
+      sourceReference: {
+        actorId: "access:alice",
+        userId: "access:alice",
+        channelId: "http:home",
+        threadKey: "unit:thread",
+        browserRevision: 77,
+      },
+    };
+    const issued = await service.issue(auth, 30);
+    if (issued.status !== "key") throw new Error("not issued");
+    await store.execute({ action: "observe", organization: "org:test", target: "question:old", revision: 1 });
+    const body = {
+      key: issued.key,
+      content: "Raw API_TOKEN=abcd",
+      context: [],
+      destination: { kind: "thread" as const, thread: "unit:thread" },
+      revision: 77,
+    };
+    const first = await service.admit(auth, {
+      ...body,
+      sourceEvent: "original-browser-event",
+      workload: "act",
+      target: { key: "question:old", revision: 1 },
+    });
+    expect(first).toMatchObject({ status: "receipt", receipt: { status: "pending" } });
+    await store.execute({ action: "observe", organization: "org:test", target: "question:old", revision: 2 });
+    expect(await service.replay(auth, body)).toEqual({ ...first, duplicate: true });
+    expect(await service.replay(auth, { ...body, revision: 78 })).toEqual({ status: "conflict" });
+    expect(await service.replay(auth, { ...body, content: "Raw API_TOKEN=wxyz" })).toEqual({ status: "conflict" });
+    expect(await service.replay(auth, { ...body, key: "unknown" })).toBeUndefined();
+  });
+  it("takes replay identity lookup facts only from authentication and ignores forged body facts", async () => {
+    const calls: OrganizationAuthorization[] = [];
+    const { store, service } = setup(async (request) => {
+      calls.push(request);
+      return true;
+    });
+    const http: OrganizationAuthentication = {
+      source: "http",
+      identity: { issuer: "token:test", tenant: null, subject: "credential" },
+      kind: "human",
+      organizations: ["org:test"],
+    };
+    const forged = {
+      ...input("source-forgery"),
+      sourceReference: {
+        actorId: "access:forged-admin",
+        userId: "slack:forged",
+        channelId: "slack:private",
+        threadKey: "slack:private:1",
+      },
+    };
+    const admitted = await service.admit(http, forged);
+    expect(admitted).toMatchObject({ status: "receipt", receipt: { status: "pending" } });
+    const lease = await store.execute({ action: "claim", organization: "org:test", owner: "process", leaseMs: 30 });
+    if (lease.status !== "state" || !lease.state.lease) throw new Error("not claimed");
+    const pending = await store.execute({
+      action: "pending",
+      organization: "org:test",
+      owner: "process",
+      generation: lease.state.lease.generation,
+      limit: 10,
+    });
+    if (pending.status !== "pending") throw new Error("not pending");
+    expect(pending.envelopes[0]?.sourceReference).toBeUndefined();
+    expect(calls[0]).toMatchObject({ source: "http", actor: { identity: http.identity } });
+    const trusted = {
+      actorId: "http:credential",
+      userId: "http:credential",
+      channelId: "http:home",
+      threadKey: "http:home:credential",
+    };
+    expect(
+      await service.admit({ ...http, sourceReference: trusted }, { ...forged, key: "source-trusted" }),
+    ).toMatchObject({ status: "receipt", receipt: { status: "pending" } });
+    expect(calls.at(-1)?.sourceReference).toEqual(trusted);
+  });
   it("resolves every supported source from authenticated scope and requires caller organization grants", async () => {
     const { service } = setup();
     expect(await service.resolve(browser)).toMatchObject({
@@ -165,6 +264,7 @@ describe("organization authenticated service", () => {
       directory: store.directory,
       mappings,
       limits,
+      currentIdentityRead: async () => "allowed",
       authorize: async (request) => {
         if (revoke && request.action === "read")
           await store.directory.change({
@@ -342,5 +442,49 @@ describe("organization authenticated service", () => {
     expect(await service.admit(browser, { ...reordered, content: "Raw API_TOKEN=wxyz" })).toEqual({
       status: "conflict",
     });
+  });
+  it("passes only retained server delegation to the current source read check", async () => {
+    const store = new InMemoryOrganizationStore(() => 1);
+    await bind(store, [identity]);
+    const checked: unknown[] = [];
+    const service = new OrganizationService({
+      store,
+      directory: store.directory,
+      mappings,
+      limits,
+      authorize: async () => true,
+      currentIdentityRead: async (source, reference, onBehalfOf) => {
+        checked.push({ source, reference, onBehalfOf });
+        return onBehalfOf?.subject === "alice" ? "allowed" : "denied";
+      },
+    });
+    const delegated: OrganizationAuthentication = {
+      source: "mcp",
+      identity: { issuer: "token:test", tenant: null, subject: "job" },
+      kind: "service",
+      organizations: ["org:test"],
+      onBehalfOf: identity,
+      sourceReference: {
+        actorId: "mcp:job",
+        userId: "access:alice",
+        authenticatedAs: "mcp:job",
+        channelId: "mcp:home",
+        threadKey: "mcp:home:alice",
+        credentialDigest: "a".repeat(64),
+      },
+    };
+    expect(
+      (
+        await sendBrowser(service, delegated, {
+          ...input(),
+          onBehalfOf: { ...identity, subject: "forged" },
+        } as OrganizationAdmissionInput)
+      ).status,
+    ).toBe("receipt");
+    const result = await service.streamTail(browser);
+    expect(result).toMatchObject({ status: "stream_tail", entries: [{ content: "A private request" }] });
+    expect(checked).toEqual([
+      { source: delegated.identity, reference: delegated.sourceReference, onBehalfOf: identity },
+    ]);
   });
 });
