@@ -106,6 +106,8 @@ export interface BrowserHomeWiringOptions {
   owner: string;
   limits: OrganizationLimits;
   privateWorkerLog?: Parameters<typeof createBrowserHomeInstallation>[0]["privateWorkerLog"];
+  mergeLogin?: Parameters<typeof createBrowserHomeInstallation>[0]["mergeLogin"];
+  mergeFacts?: Parameters<typeof createBrowserHomeInstallation>[0]["mergeFacts"];
   launch(task: () => Promise<void>): void;
   nativeIo?(request: Omit<OrganizationExecutionRequest, "io">): ChannelIO | undefined;
   legacySlackIo?(audience: SlackDirectAudience): ChannelIO | undefined;
@@ -440,6 +442,8 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
       runs: options.runs,
       coordinator: options.core.coordinatorInstances,
       privateWorkerLog: options.privateWorkerLog,
+      mergeLogin: options.mergeLogin,
+      mergeFacts: options.mergeFacts,
       legacyRecipient: async (origin) => await legacyAudience?.recipient(origin),
       commands: options.commands,
       mappings,

@@ -43,7 +43,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
   for (const fn of cleanup.splice(0)) fn();
 });
-async function fixture(secret = true, initialSlackReady = true, pendingRealm?: Promise<string | undefined>) {
+async function fixture(
+  secret = true,
+  initialSlackReady = true,
+  pendingRealm?: Promise<string | undefined>,
+  merge?: Pick<Parameters<typeof createBrowserHomeWiring>[0], "mergeLogin" | "mergeFacts">,
+) {
   const dir = mkdtempSync(join(tmpdir(), "home-wiring-"));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(
@@ -111,6 +116,7 @@ async function fixture(secret = true, initialSlackReady = true, pendingRealm?: P
   let shared = false;
   let slackReady = initialSlackReady;
   const wiring = createBrowserHomeWiring({
+    ...(merge ?? {}),
     config,
     dashboard: { mode: "access", describe: () => "fixture", verify: async () => ({ ok: true, identity: credential }) },
     access: { teamDomain: "access.fixture.test", aud: "fixture-audience" },
@@ -193,6 +199,69 @@ async function fixture(secret = true, initialSlackReady = true, pendingRealm?: P
   };
 }
 describe("browser production wiring", () => {
+  it("offers an owned reviewed-head merge and observes native completion through installation callbacks without a model", async () => {
+    const callers: string[] = [],
+      reads: { repo: string; unit: string; number?: number }[] = [];
+    const s = await fixture(true, true, undefined, {
+      mergeLogin: async (id) => {
+        callers.push(id);
+        return "bound-viewer";
+      },
+      mergeFacts: async (_context, instance, unit) => {
+        reads.push({ repo: instance.repo, unit: unit.unit, number: unit.pr?.number });
+        return { headSha: "a".repeat(40), mergeCommitSha: "b".repeat(40), mergedAt: 900 };
+      },
+    });
+    await s.wiring.initialize();
+    const context = await s.wiring.context(s.request(), s.credential);
+    if (!context) throw new Error("No current browser context");
+    seedCoordinatorInstance(s.coordinator, {
+      id: "merge-work",
+      kind: "ship",
+      userId: "access:opaque",
+      channelId: "web:opaque",
+      threadKey: "web:opaque:original",
+      repo: "sample/api",
+      branch: "work",
+      createdAt: 1,
+    });
+    const pr = { number: 42, url: "https://github.com/sample/api/pull/42" };
+    seedCoordinatorUnit(s.coordinator, {
+      instanceId: "merge-work",
+      unit: "original",
+      slug: "original",
+      branch: "work",
+      dependsOn: [],
+      rounds: [],
+      pr,
+      lastPush: "a".repeat(40),
+      ending: { kind: "merge_ready", report: "Original reviewed-head report.", at: 800 },
+      mergeAttention: { assignedTo: "access:opaque", pr, headSha: "a".repeat(40), at: 800 },
+    });
+    const service = createHomeService({
+      organizationId: "fixture",
+      instances: s.coordinator,
+      conditions: createHomeConditionReader(s.coordinator),
+    });
+    const reader = { actorId: context.actor.id, visibleTo: readableRuns(context.actor) };
+    const snapshot = await service.snapshot(reader);
+    const installed = s.wiring.current()!;
+    expect(await installed.mergeActions(context, snapshot.needsYou)).toEqual({
+      "merge-work:original": { kind: "merge", pr: "sample/api#42", head: "a".repeat(40) },
+    });
+    expect(callers).toEqual(["access:opaque"]);
+    const before = s.tasks.length;
+    installed.queueMergeObservations(context, snapshot.needsYou);
+    expect(s.tasks).toHaveLength(before + 1);
+    await s.tasks.at(-1)!();
+    expect(reads).toEqual([{ repo: "sample/api", unit: "original", number: 42 }]);
+    expect((await service.snapshot(reader)).needsYou).toEqual([]);
+    expect((await service.history(reader)).units[0]?.unit).toMatchObject({
+      mergeCompletion: { at: 900, sha: "b".repeat(40) },
+      ending: { kind: "merge_ready", report: "Original reviewed-head report.", at: 800 },
+    });
+    expect(s.effects).toEqual([]);
+  });
   it("keeps a freshly signed-in account usable after unlinking without restoring its former peer", async () => {
     const s = await fixture();
     await s.wiring.initialize();
