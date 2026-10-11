@@ -353,6 +353,17 @@ describe("strayFiles", () => {
 });
 
 describe("renderManifest", () => {
+  it("retains the rendered inputs and fixture requests used to decide whether capture is needed", () => {
+    const rendered = {
+      inputs: { "fixture:/costs": "a".repeat(64) },
+      requests: [{ path: "/costs", accept: "text/html" }],
+    };
+    expect(renderManifest({}, costsSurface, rendered).rendered).toEqual({
+      inputs: { "fixture:/costs": "a".repeat(64) },
+      requests: [{ path: "/costs", accept: "text/html" }],
+    });
+  });
+
   it("records the inputs, the viewport and the fixed clock, and nothing that varies between two renders of the same tree", () => {
     const m = renderManifest({ x: "0".repeat(64) }, costsSurface);
     expect(m).toEqual({

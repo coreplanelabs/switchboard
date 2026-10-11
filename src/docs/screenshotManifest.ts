@@ -14,8 +14,8 @@ import { parse as parseSfc } from "@vue/compiler-sfc";
 // rendered from — the shared inputs plus the import closure of its page
 // component. A file that changed while the surface's pictures did not is
 // drift, and `npm run screenshots:check` names the surface and the file;
-// `npm run screenshots:gen` re-renders only the surfaces whose inputs changed
-// and rewrites only their manifests, so two branches touching different pages
+// `npm run screenshots:gen` refreshes only stale surfaces, comparing their
+// rendered inputs before capturing, so two branches touching different pages
 // never collide on one file. Input discovery reads the local tree; only the
 // generator writes manifests and pictures.
 
@@ -220,6 +220,18 @@ export interface Manifest {
   captures: ReturnType<typeof resolveCaptures>;
   configHash: string;
   /** Repository-relative input → sha256; the registry module hashes mechanics only. */
+  inputs: Record<string, string>;
+  /** Browser resources and fixture responses from the last successful capture. */
+  rendered?: RenderedInputs;
+}
+
+export interface RenderedRequest {
+  path: string;
+  accept: string;
+}
+
+export interface RenderedInputs {
+  requests: RenderedRequest[];
   inputs: Record<string, string>;
 }
 
@@ -783,7 +795,7 @@ export function expectedFiles(surfaces: readonly Surface[] = SURFACES): string[]
 
 /** The resolved capture configuration, hashed independently of other registrations.
  * viewport remains the historical default metadata; captures records each actual viewport. */
-export function renderManifest(inputs: Record<string, string>, surface: Surface): Manifest {
+export function renderManifest(inputs: Record<string, string>, surface: Surface, rendered?: RenderedInputs): Manifest {
   const captures = resolveCaptures([surface]);
   const config = {
     path: surface.path,
@@ -799,6 +811,7 @@ export function renderManifest(inputs: Record<string, string>, surface: Surface)
     captures,
     configHash,
     inputs: Object.fromEntries(Object.entries(inputs).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))),
+    ...(rendered ? { rendered } : {}),
   };
 }
 

@@ -1,6 +1,6 @@
 // The dashboard screenshots (docs/reference/specs/screenshot-capture.md).
 //
-//   npm run screenshots:gen     render stale surfaces and record their inputs
+//   npm run screenshots:gen     refresh stale surfaces; capture changed rendered inputs
 //                               (--force re-renders all; --no-build reuses the bundle)
 //   npm run screenshots:check   drift and missing/stray output checks, no browser
 //
@@ -11,6 +11,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import {
   captureBatches,
   currentSurfaceInputs,
@@ -26,6 +27,8 @@ import {
   strayFiles,
   SURFACES,
   type Manifest,
+  type RenderedInputs,
+  type RenderedRequest,
   type Surface,
 } from "../src/docs/screenshotManifest.js";
 import {
@@ -35,14 +38,35 @@ import {
   readOutputFile,
   removeUnexpectedOutputFiles,
 } from "../src/docs/screenshotOutput.js";
+import {
+  captureRequired,
+  loadRenderedAssets,
+  renderedInputs,
+  renderedMechanics,
+} from "../src/docs/screenshotRenderedInputs.js";
 
-const PORT = 8791;
 /** A picture past this is a page weight problem, not a screenshot. */
 const SIZE_BUDGET_BYTES = 400 * 1024;
 
 const root = process.cwd();
 const check = process.argv.includes("--check");
 const tag = check ? "screenshots:check" : "screenshots:gen";
+// Parallel captures must not attach to another preview's fixed port.
+const PORT = check
+  ? 0
+  : await new Promise<number>((resolve, reject) => {
+      const reservation = createServer();
+      reservation.on("error", reject);
+      reservation.listen(0, "127.0.0.1", () => {
+        const address = reservation.address();
+        if (!address || typeof address === "string") {
+          reservation.close();
+          reject(new Error("Could not allocate a screenshot preview port"));
+          return;
+        }
+        reservation.close((error) => (error ? reject(error) : resolve(address.port)));
+      });
+    });
 
 function inputSources(): { path: string; text: string; bytes: Buffer }[] {
   return listInputs(root).map((path) => {
@@ -133,21 +157,51 @@ async function runGen(): Promise<number> {
     console.log(`${tag} nothing to render — every surface is current (use --force to re-render)`);
     return 0;
   }
-  console.log(`${tag} rendering ${stale.length}/${SURFACES.length} surface(s): ${stale.map((s) => s.name).join(", ")}`);
+  console.log(`${tag} checking ${stale.length}/${SURFACES.length} surface(s): ${stale.map((s) => s.name).join(", ")}`);
   if (!process.argv.includes("--no-build")) {
     const build = spawnSync("npm", ["run", "--silent", "build", "-w", "web"], { cwd: root, stdio: "inherit" });
     if (build.status !== 0) return build.status ?? 1;
   }
-  const { chromium } = await import("playwright-core");
-  const browser = await chromium.launch().catch((e: unknown) => {
-    throw new Error(`${tag} could not launch chromium — run \`npx playwright-core install chromium\`\n${String(e)}`);
-  });
+  const assets = loadRenderedAssets(root);
+  const mechanics = renderedMechanics(sources);
+  const rendered = new Map<string, RenderedInputs>();
+  let browser: import("playwright-core").Browser | undefined;
+  // Unknown or unbounded fixture responses cannot establish equivalence.
+  const snapshot = async (requests: readonly RenderedRequest[]) => {
+    try {
+      return await renderedInputs(`http://127.0.0.1:${PORT}`, requests, assets, mechanics);
+    } catch (error) {
+      console.log(`${tag} rendered inputs unavailable — capturing: ${String(error)}`);
+      return undefined;
+    }
+  };
   ensureOutputDirectory(root, SCREENSHOTS_DIR);
   try {
     for (const server of new Set(stale.map((s) => s.fixture.server))) {
-      const surfaces = stale.filter((s) => s.fixture.server === server);
-      const stopPreview = await startPreview(surfaces[0]);
+      const candidates = stale.filter((s) => s.fixture.server === server);
+      const stopPreview = await startPreview(candidates[0]);
       try {
+        const surfaces: Surface[] = [];
+        for (const surface of candidates) {
+          const recorded = recordedManifest(surface.name);
+          const next = recorded?.rendered ? await snapshot(recorded.rendered.requests) : undefined;
+          if (!force && !captureRequired(surface, recorded, present, next)) {
+            rendered.set(surface.name, next!);
+            console.log(`${tag} ${surface.name} rendered inputs unchanged — skipped browser capture`);
+          } else surfaces.push(surface);
+        }
+        if (!surfaces.length) continue;
+        console.log(`${tag} capturing ${surfaces.length} surface(s): ${surfaces.map((s) => s.name).join(", ")}`);
+        if (!browser) {
+          const { chromium } = await import("playwright-core");
+          browser = await chromium.launch().catch((e: unknown) => {
+            throw new Error(
+              `${tag} could not launch chromium — run \`npx playwright-core install chromium\`\n${String(e)}`,
+            );
+          });
+        }
+        const requests = new Map(surfaces.map((s) => [s.name, new Map<string, RenderedRequest>()]));
+        const unsafe = new Set<string>();
         for (const batch of captureBatches(surfaces)) {
           const context = await browser.newContext(batch.context);
           try {
@@ -158,6 +212,15 @@ async function runGen(): Promise<number> {
             for (const { surface, capture } of batch.tasks) {
               const origin = `http://127.0.0.1:${PORT}`;
               const page = await context.newPage();
+              page.on("request", (request) => {
+                const url = new URL(request.url());
+                if (url.origin !== origin || request.method() !== "GET") {
+                  unsafe.add(surface.name);
+                  return;
+                }
+                const input = { path: `${url.pathname}${url.search}`, accept: request.headers().accept ?? "*/*" };
+                requests.get(surface.name)!.set(JSON.stringify(input), input);
+              });
               await page.clock.setFixedTime(FIXED_NOW);
               const response = await page.goto(`${origin}${surface.path}`, { waitUntil: "load" });
               if (!response?.ok()) throw new Error(`Preview failed: ${surface.name}`);
@@ -196,16 +259,21 @@ async function runGen(): Promise<number> {
             await context.close();
           }
         }
+        for (const surface of surfaces) {
+          if (unsafe.has(surface.name)) continue;
+          const next = await snapshot([...requests.get(surface.name)!.values()]);
+          if (next) rendered.set(surface.name, next);
+        }
       } finally {
         await stopPreview();
       }
     }
   } finally {
-    await browser.close();
+    await browser?.close();
   }
   ensureOutputDirectory(root, MANIFEST_DIR);
   for (const surface of stale) {
-    const manifest = renderManifest(current.get(surface.name)!, surface);
+    const manifest = renderManifest(current.get(surface.name)!, surface, rendered.get(surface.name));
     publishOutputFile(
       root,
       MANIFEST_DIR,

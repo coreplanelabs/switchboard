@@ -106,7 +106,9 @@ dashboard's screenshots are generated the same way: a change under `web/` that
 alters what a surface looks like needs `npm run screenshots:gen` (once:
 `npx playwright-core install chromium`) and the regenerated PNGs committed —
 `npm run screenshots:check` and its unit-test twin fail otherwise, naming the
-file that changed.
+file that changed. Source drift also needs generation to refresh its receipt,
+but unchanged built assets and fixture responses skip browser capture and
+retain the existing images. `--force` always captures.
 
 **Diagrams share one visual system.** Every diagram is a ```mermaid fence; the
 site draws it in its own palette and GitHub in its defaults, so a fence carries
