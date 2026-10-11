@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { processSecrets } from "../../secrets.js";
 import { ConfigStore } from "../../config.js";
 import { CONFIRMATION_TTL_MS, MINUTE_MS, QUESTION_TTL_MS } from "../budgets.js";
-import { buildCoreCommands } from "../commandCatalogue.js";
+import { buildCoreCommands, type CoreCommandWiring } from "../commandCatalogue.js";
 import type { AuditEntry } from "../commandRegistry.js";
 import {
   InMemoryConfirmationStore,
@@ -19,9 +19,13 @@ import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { isSpanRecord, type RunEvent } from "../runEvents.js";
 import { NullRunHistoryWriter } from "../runHistoryWriter.js";
+import { NullResidentAdminClient } from "../residentAdmin.js";
+import { InMemoryRunLedger } from "../runLedger/inMemory.js";
+import { contextThreadSessionKey } from "../runLedger/sessionLog.js";
 import { RunRegistry } from "../runRegistry.js";
-import type { ChannelIO, IncomingMessage } from "../types.js";
+import type { ChannelIO, IncomingMessage, StatusUpdate } from "../types.js";
 import type { FastPathDeps } from "./fastPath.js";
+import { answerChatCommand } from "./fastPath.js";
 import {
   actorIdsOf,
   cancelPending,
@@ -60,6 +64,7 @@ const tick = (ms: number) => void (now += ms);
 
 function deps(
   verbosity: "quiet" | "verbose" = "verbose",
+  wiring: Partial<CoreCommandWiring> = {},
 ): FastPathDeps & { runRegistry: RunRegistry; audits: AuditEntry[]; store: InMemoryConfirmationStore } {
   const dir = mkdtempSync(join(tmpdir(), "swb-confirm-"));
   const path = join(dir, "config.yaml");
@@ -74,6 +79,7 @@ function deps(
     dataDir: dir,
     warn: () => {},
     audit: (e) => void audits.push(e),
+    ...wiring,
   });
   const store = new InMemoryConfirmationStore({ clock: () => now });
   return {
@@ -157,6 +163,142 @@ describe("the named lines and the clicker's ids", () => {
 });
 
 describe("consumeAndRun — the stored input runs once, as the requester, through the typed path (record 0044)", () => {
+  it.each([
+    ["repo offboard acme/api", "• Offboarded `acme/api`."],
+    ["repo onboard acme/api --no-resident", "• Registered `acme/api` · cold."],
+  ])("publishes the confirmed %s receipt after storing both command turns", async (text, expected) => {
+    const ledger = new InMemoryRunLedger();
+    const admin = new NullResidentAdminClient();
+    const effects: string[] = [];
+    vi.spyOn(admin, "offboard").mockImplementation(async (resource) => {
+      effects.push(resource);
+      return {
+        status: 200,
+        data: {
+          registryRemoved: true,
+          schedulesCancelled: true,
+          containerStopped: true,
+          storageCleared: true,
+          backupObjectsDeleted: 0,
+          r2ObjectsDeleted: 0,
+        },
+      };
+    });
+    vi.spyOn(admin, "onboard").mockImplementation(async (body) => {
+      effects.push(String(body.resource));
+      return { status: 200, data: { state: "cold" } };
+    });
+    const d = {
+      ...deps("quiet", {
+        residentAdmin: () => admin,
+        repoInspector: async () => ({ ok: true, facts: { entries: [] } }),
+      }),
+      runLedger: { sessionPersistence: true, appendSession: ledger.appendSession.bind(ledger) },
+    };
+    const original = { ...message(), messageId: "1.0", text };
+    const initial = request(d);
+    let offerId = "";
+    initial.io.offer = async (offer) => {
+      offerId = offer.id;
+      return "Approval is pending; nothing ran.";
+    };
+    expect(await answerChatCommand(d, { ...initial, msg: original })).toBe(true);
+    expect(effects).toEqual([]);
+    const confirmed = request(d);
+    const frames: StatusUpdate[] = [];
+    confirmed.io.status = async () => ({
+      handle: { channel: "CX", ts: "2.0" },
+      update: () => {},
+      done: async () => {},
+      doneWithReceipt: async (frame) => {
+        frames.push(frame);
+        return { delivered: true, complete: true };
+      },
+    });
+    const result = await consumeAndRun(
+      d,
+      { id: offerId, actorIds: ["slack:UADMIN"] },
+      confirmed.io,
+      confirmed.ending,
+      confirmed.trace,
+      noRedispatch,
+    );
+    expect(result).toMatchObject({ kind: "ran", result: { ok: true, cardShown: true } });
+    expect(frames.map((frame) => frame.detail)).toEqual([expected]);
+    expect(effects).toEqual(["repo:acme/api"]);
+    if (result.kind !== "ran") throw new Error("expected command");
+    const stored = await ledger.readSession(contextThreadSessionKey(original.threadKey), 0);
+    expect(stored.messages).toEqual([
+      { role: "assistant", content: [{ type: "text", text: "Approval is pending; nothing ran." }] },
+      { role: "assistant", content: [{ type: "text", text: result.result.text }] },
+    ]);
+    expect(
+      await consumeAndRun(
+        d,
+        { id: offerId, actorIds: ["slack:UADMIN"] },
+        confirmed.io,
+        confirmed.ending,
+        confirmed.trace,
+        noRedispatch,
+      ),
+    ).toMatchObject({ kind: "refused", refusal: "confirmation_used" });
+    expect(effects).toEqual(["repo:acme/api"]);
+  });
+
+  it("stores the approval offer and confirmed result as separate turns before returning the outcome", async () => {
+    const ledger = new InMemoryRunLedger();
+    const d = {
+      ...deps("quiet"),
+      runLedger: { sessionPersistence: true, appendSession: ledger.appendSession.bind(ledger) },
+    };
+    const original = {
+      ...message(),
+      messageId: "1.0",
+      text: "config set channel --models.coding anthropic/claude-opus-5",
+    };
+    const initial = request(d);
+    let offerId = "";
+    initial.io.offer = async (offer) => {
+      offerId = offer.id;
+      return "Approval is pending; nothing ran.";
+    };
+    expect(await answerChatCommand(d, { ...initial, msg: original })).toBe(true);
+    expect(codingModelIn(d)).toBe("anthropic/coding-model");
+    const confirmed = request(d);
+    const result = await consumeAndRun(
+      d,
+      { id: offerId, actorIds: ["slack:UADMIN"] },
+      confirmed.io,
+      confirmed.ending,
+      confirmed.trace,
+      noRedispatch,
+    );
+    expect(result).toMatchObject({
+      kind: "ran",
+      text: "Updated channel scope: models `coding=anthropic/claude-opus-5`.",
+    });
+    expect(codingModelIn(d)).toBe("anthropic/claude-opus-5");
+    expect(
+      await consumeAndRun(
+        d,
+        { id: offerId, actorIds: ["slack:UADMIN"] },
+        confirmed.io,
+        confirmed.ending,
+        confirmed.trace,
+        noRedispatch,
+      ),
+    ).toMatchObject({ kind: "refused", refusal: "confirmation_used" });
+    const stored = await ledger.readSession(contextThreadSessionKey(original.threadKey), 0);
+    expect(stored.messages).toEqual([
+      { role: "assistant", content: [{ type: "text", text: "Approval is pending; nothing ran." }] },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Updated channel scope: models `coding=anthropic/claude-opus-5`." }],
+      },
+    ]);
+    expect(stored.contexts?.map((context) => context?.status)).toEqual(["unknown", "unknown"]);
+  });
+
   it("quiet confirmation shows the outcome without repeating the route receipt", async () => {
     const d = deps("quiet");
     await d.store.put(pending("quiet"), CONFIRMATION_TTL_MS);

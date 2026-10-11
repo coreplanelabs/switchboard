@@ -188,6 +188,7 @@ export async function consumeAndRun(
     result = await withConsumedCommand(row, () =>
       runChatCommand(deps, row.message, io, { kind: "invoke", id: row.command, input: row.input }, ending, trace, {
         source: "confirm",
+        confirmationId: row.id,
         ...(derivation ? { beforePublish, contextDependencies: derivation.context } : {}),
         route: {
           preset: COMMAND_RUN_AGENT,

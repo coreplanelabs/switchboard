@@ -68,6 +68,8 @@ export interface CommandRunOptions {
    *  the run's `route` event, never acted on here. */
   operator?: OperatorEventFields;
   source?: "route" | "confirm";
+  /** A consumed approval is a separate event from the message that offered it. */
+  confirmationId?: string;
   /** Recheck requester and source access before publishing command output. */
   beforePublish?: () => Promise<void>;
   /** Nested commands keep the main run as channel and trace owner. */
@@ -131,6 +133,9 @@ export async function runChatCommand(
 ): Promise<ChatCommandResult> {
   const commands = deps.commands;
   if (!commands) return { ok: false, text: "" };
+  const eventId = opts.confirmationId
+    ? `confirmation:${opts.confirmationId}`
+    : (msg.messageId ?? `request:${trace.root.traceId}:${trace.root.id}`);
   const persistText = async (text: string, suffix = "") => {
     if (text && deps.runLedger?.sessionPersistence) {
       await opts.beforePublish?.();
@@ -140,7 +145,7 @@ export async function runChatCommand(
         { appendSession: ledger.appendSession.bind(ledger) },
         {
           threadKey: msg.threadKey,
-          rowId: `${msg.messageId ?? `request:${trace.root.traceId}:${trace.root.id}`}:command:${parsed.kind === "invoke" ? parsed.id : "help"}${suffix}`,
+          rowId: `${eventId}:command:${parsed.kind === "invoke" ? parsed.id : "help"}${suffix}`,
           role: "assistant",
           text,
           context: UNKNOWN_CONTEXT_DEPENDENCIES,
