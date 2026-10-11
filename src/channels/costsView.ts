@@ -1,3 +1,5 @@
+import { readableRuns } from "./liveView/viewer.js";
+import { hasWorkViewScope, workViewScopeOf } from "./workViewScope.js";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { authorize } from "../core/authz/authorize.js";
 import type { Actor } from "../core/authz/types.js";
@@ -218,6 +220,33 @@ export function createCostsViewHandler(
       const reason = (err instanceof Error ? err.message : String(err)).slice(0, UPSTREAM_REASON_MAX);
       plain(res, 502, `cost report unavailable: ${reason}`);
     };
+    if (ctx.actor && hasWorkViewScope(ctx.actor) && workViewScopeOf(ctx.actor).mode !== "everyone") {
+      if (!service.workReport) {
+        plain(res, 503, "Personal work cost reporting is unavailable.");
+        return true;
+      }
+      const dimension = route.view === "daily" ? "model" : DIMENSION_OF_VIEW[route.view];
+      service
+        .workReport(group, days, dimension, readableRuns(ctx.actor))
+        .then((work) => {
+          if (route.kind === "json" || route.kind === "by-json") {
+            json(res, work);
+            return;
+          }
+          page(req, res, 200, ctx.actor, `${group} work spend`, {
+            page: "costs",
+            group,
+            report: null,
+            work,
+            groups,
+            view: route.view,
+            snapshot: service.status(),
+            canSnapshot: canSnapshot(ctx.actor),
+          });
+        })
+        .catch(failed);
+      return true;
+    }
     const byReport = (view: CostsByView): Promise<CostsByReport> =>
       service.byReport(group, days, DIMENSION_OF_VIEW[view], ctx.identity).then((report) => labelled(report, names));
     if (route.kind === "by-json" && route.view !== "daily") {

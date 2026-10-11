@@ -199,6 +199,7 @@ export interface IssueRow extends DeliveryIndicators {
 
 export interface DeliveryReport {
   repo: string;
+  workCoverage?: "complete" | "partial" | "unavailable";
   range: DeliveryRange;
   weeks: WeekRow[];
   units: IssueRow[];
@@ -214,6 +215,30 @@ export interface DeliveryReport {
    *  (`weekIncomplete`). The service stamps it from the source; a report built straight from
    *  facts has none. */
   completeFrom?: string;
+}
+
+/** A selected work view keeps no aggregate from excluded pull requests. */
+export function selectedDeliveryReport(
+  report: DeliveryReport,
+  numbers: readonly number[],
+  status: "complete" | "partial" | "unavailable",
+): DeliveryReport {
+  const owned = new Set(numbers);
+  const prs = report.prs.filter((pr) => owned.has(pr.number));
+  return {
+    ...report,
+    workCoverage: status,
+    prs,
+    totals: indicatorsOf(prs),
+    weeks: report.weeks.map((week) => {
+      const selected = prs.filter((pr) => pr.week === week.week);
+      return { ...week, prs: selected.map((pr) => pr.number), ...indicatorsOf(selected) };
+    }),
+    units: report.units.flatMap((unit) => {
+      const selected = prs.filter((pr) => unit.prs.includes(pr.number));
+      return selected.length ? [{ ...unit, prs: selected.map((pr) => pr.number), ...indicatorsOf(selected) }] : [];
+    }),
+  };
 }
 
 /** A week row holds the newest pull requests only — not the week's — when the report is truncated and
@@ -748,6 +773,10 @@ export interface DeliveryReportOptions {
   fresh?: boolean;
   /** The caller's finished runs of the repository over the resolved range — what the history adds. */
   runs?: (range: DeliveryRange) => Promise<RunFact[]>;
+  /** Browser-selected work; the callable reads canonical publication ownership. */
+  ownedPrs?: (
+    range: DeliveryRange,
+  ) => Promise<{ numbers: readonly number[]; status: "complete" | "partial" | "unavailable" }>;
 }
 
 export interface DeliveryService {
@@ -807,11 +836,14 @@ export function createDeliveryService(
         agentLogins: [...new Set([...(cfg?.agentLogins ?? []), ...(process.agentLogins ?? [])])],
         agentCoauthors: [...new Set([...(cfg?.agentCoauthors ?? []), ...(process.agentCoauthors ?? [])])],
       };
+      const owned = await o.ownedPrs?.(range);
+      const selected = owned ? new Set(owned.numbers) : undefined;
       return {
+        ...(owned ? { workCoverage: owned.status } : {}),
         ...buildDeliveryReport({
           repo,
           range,
-          prs: fetched.prs,
+          prs: selected ? fetched.prs.filter((pr) => selected.has(pr.number)) : fetched.prs,
           runs,
           identities,
           truncated: fetched.truncated,

@@ -1,3 +1,4 @@
+import { resolveWorkViewScope, withWorkViewScope } from "./workViewScope.js";
 import { describe, expect, it } from "vitest";
 import {
   NullResidentAdminClient,
@@ -195,6 +196,24 @@ describe("residentsFleetTone", () => {
 // ---- handler ----------------------------------------------------------------
 
 describe("createResidentsViewHandler", () => {
+  it("withholds shared runtime rows only for an attached personal view and preserves legacy unscoped reads", async () => {
+    const h = handler(fakeClient(() => Promise.resolve(ok(LISTING as never))));
+    const actor = { ...ADMIN.actor };
+    withWorkViewScope(actor, resolveWorkViewScope(actor, { organization: "installation" }));
+    const personal = fakeReqRes("GET", "/residents");
+    h(personal.req, personal.res, { actor });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(personal.status).toBe(403);
+    const withheld = seedOf(personal.body()) as ResidentsIndexSeed;
+    expect(withheld.scopeUnavailable).toBe("Select All people to see the shared runtime.");
+    expect(withheld).not.toHaveProperty("count");
+    const legacy = fakeReqRes("GET", "/residents");
+    h(legacy.req, legacy.res, ADMIN);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(legacy.status).toBe(200);
+    expect(seedOf(legacy.body())).not.toHaveProperty("scopeUnavailable");
+  });
+
   it("ignores non-/residents paths (returns false, writes nothing)", () => {
     const h = handler(fakeClient(() => Promise.resolve(ok(LISTING as never))));
     const io = fakeReqRes("GET", "/runs");

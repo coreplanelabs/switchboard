@@ -63,3 +63,11 @@ Confirmation offers carry their id and expiry. The browser shows the exact saved
 | 2, 8, 11: the pure projections — the requester, the turn, the history, the thread groups, the title cut, the palette by exposure and grant, the chips by the viewer's facts, the IO's on-demand history | `[unit]` `src/channels/web.test.ts::the projections — requester, turn, history, threads, title, palette, chips::*` |
 | 3, 7: the first send from `/threads` rewrites the address to the conversation's URL and a send from `/threads/<id>` moves nothing; a thread from another channel draws its turns with no composer and a line naming the channel with its link; a foreign row in the rail wears no tag — its channel is its tooltip's | `[unit]` `web/src/pages/home.test.ts::HomePage — sending (rules 3, 5; items 2, 3)::the first send from /threads rewrites the address…`, `web/src/pages/home.test.ts::HomePage — a thread from another channel (item 7)::*`, `web/src/pages/home.test.ts::HomePage — the empty state (rules 6, 7)::the rail: the new-thread control…` |
 | 11, live: `/` on the deployed installation answers `302` to `/threads`; `/threads` unauthenticated is Access's `302`; signed in, a plain request starts a run whose row reads the person with the `web` label and whose record carries `web:<sub>:<conversation>`, `authenticatedAs: access:<sub>` and `dm`; a message during the live run answers the steer text and the run's `input` event stamps the turn; a `help` answers inline with no run | `[agent]` human-gated after deploy, once the Access application lists `threads`: receipt on the tracking issue |
+
+### Attached browser work scope
+
+The loaded thread list uses the trusted selected owner predicate when present, intersected with the actual actor's raw read permission. Proved source aliases add discovery matches only; they do not grant private-source reads. Unscoped legacy calls retain the existing own-thread filter.
+
+| Criterion | Evidence |
+|---|---|
+| Trusted owner aliases retain their readable threads without lending private source authority; legacy calls keep their original list | `[unit]` `src/channels/web.test.ts::GET /threads and /threads/<id> — the seed from the runs service (items 2, 7, 8, 11)::uses current proved owner scope in the loaded thread list without lending private source read authority` |

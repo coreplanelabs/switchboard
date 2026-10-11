@@ -195,6 +195,37 @@ describe("createCostsService", () => {
     expect(week.range.to).toBe(AUG_30);
   });
 
+  it("reports only readable owned work without account, invoice, cloud, or another person's totals", async () => {
+    const snapshots = snapshotterWith({
+      ...usageReport,
+      shipRuns: usageReport.shipRuns!.map((run) => ({
+        ...run,
+        userId: "slack:UALICE",
+        channelId: WHERE.channelId,
+        threadKey: WHERE.threadKey,
+      })),
+    });
+    await snapshots.refresh("schedule");
+    const service = createCostsService(cfg, snapshots, { emailOfSlackUser: async () => "same-email@example.test" });
+    const owned = await service.workReport!("switchboard", "3", "user", {
+      kind: "and",
+      of: [
+        { kind: "user-is", userId: "slack:UALICE" },
+        { kind: "channels-in", channelIds: new Set([WHERE.channelId]) },
+      ],
+    });
+    expect(owned.rows.map((row) => [row.key, row.runs])).toEqual([["slack:UALICE", 2]]);
+    expect(owned.infrastructure).toBe("unattributed");
+    expect(owned.shipSpend?.units).toMatchObject([{ key: "plan-example-1:U12", totalUsd: 4.5 }]);
+    expect(owned.unitSpendStatus).toBe("complete");
+    for (const field of ["account", "totals", "billers", "reconciliation", "viewer"])
+      expect(owned).not.toHaveProperty(field);
+    expect(JSON.stringify(owned)).not.toContain("cloudUsd");
+    expect(JSON.stringify(owned)).not.toContain("slack:UBOB");
+    const denied = await service.workReport!("switchboard", "3", "user", { kind: "none" });
+    expect(denied.rows).toEqual([]);
+    expect(denied.shipSpend?.units).toEqual([]);
+  });
   it("omits Ship spend for legacy run usage without child points", async () => {
     const snapshots = snapshotterWith({ ...usageReport, shipRuns: undefined });
     await snapshots.refresh("schedule");

@@ -1,3 +1,4 @@
+import { resolveWorkViewScope, withWorkViewScope } from "./workViewScope.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   createLiveViewHandler,
@@ -2432,6 +2433,64 @@ describe("live view on RunsService: history pages + index toggle", () => {
       return t;
     }
 
+    it("an attached Mine scope narrows the index feed and point reads without capability links widening its owner", async () => {
+      const h = harness();
+      const scoped: LiveViewContext = {
+        actor: withWorkViewScope(
+          { ...admin.actor },
+          resolveWorkViewScope(admin.actor, { organization: "installation", ownerIds: ["access:admin"] }),
+        ),
+      };
+      await h.store!.put(record("own-history", { ...PUBLIC, userId: "access:admin" }));
+      await h.store!.put(record("peer-history", { ...PUBLIC, userId: "slack:UB" }));
+      expect((await index(h, "/runs?all=1&mine=0", scoped)).ids).toEqual(["own-history"]);
+      expect((await request(h, "/runs/own-history", scoped)).status).toBe(200);
+      expect((await request(h, "/runs/peer-history", scoped)).status).toBe(404);
+      const own = h.registry.create("Own run", { ...PUBLIC, userId: "access:admin", threadKey: "own" });
+      const peer = h.registry.create("Peer run", { ...PUBLIC, userId: "slack:UB", threadKey: "peer" });
+      expect((await index(h, "/runs?mine=0", scoped)).ids).toEqual([own.id]);
+      const feed = fakeReqRes("GET", "/runs?stream=1&mine=0");
+      h.handler(feed.req, feed.res, scoped);
+      expect(feed.body()).toContain(`"id":"${own.id}"`);
+      expect(feed.body()).not.toContain(`"id":"${peer.id}"`);
+      feed.fireClose();
+      for (const suffix of ["", "/friction", "/events"])
+        expect((await request(h, `/runs/${peer.id}${suffix}?t=${peer.token}`, scoped)).status).toBe(404);
+      expect((await request(h, `/runs/${peer.id}/stop?t=${peer.token}&mode=soft`, scoped, "POST")).status).toBe(404);
+      expect(peer.control.requested).toBeUndefined();
+    });
+
+    it("an attached person scope stays read-only while All retains the actual admin's normal run controls", async () => {
+      const h = harness();
+      const viewedActor = { ...admin.actor, viewingAs: { id: "slack:UA", name: "Ann" } };
+      const viewed = {
+        actor: withWorkViewScope(
+          viewedActor,
+          resolveWorkViewScope(viewedActor, { organization: "installation", ownerIds: ["slack:UA"] }),
+        ),
+      };
+      const all = {
+        actor: withWorkViewScope(
+          { ...admin.actor },
+          resolveWorkViewScope(admin.actor, { organization: "installation", mode: "everyone" }),
+        ),
+      };
+      await h.store!.put(record("assigned", { ...PUBLIC, userId: "slack:UA" }));
+      await h.store!.put(record("peer", { ...PUBLIC, userId: "slack:UB" }));
+      expect((await index(h, "/runs?all=1&mine=0", viewed)).ids).toEqual(["assigned"]);
+      expect((await index(h, "/runs?all=1&mine=1", all)).ids).toEqual(["assigned", "peer"]);
+      const run = h.registry.create("Assigned run", { ...PUBLIC, userId: "slack:UA", threadKey: "assigned" });
+      expect((await request(h, `/runs/${run.id}?t=${run.token}`, viewed)).status).toBe(200);
+      for (const query of [`?t=${run.token}&mode=soft`, "?mode=soft"])
+        expect((await request(h, `/runs/${run.id}/stop${query}`, viewed, "POST")).status).toBe(403);
+      expect(run.control.requested).toBeUndefined();
+      const stopped = await request(h, `/runs/${run.id}/stop?t=${run.token}&mode=soft`, all, "POST");
+      expect(stopped.status).toBe(200);
+      expect(JSON.parse(stopped.body())).toEqual({ id: run.id, mode: "soft", state: "stopping" });
+      expect(run.control.requested).toBe("soft");
+      expect(all.actor.id).toBe("access:admin");
+    });
+
     it("`/runs?all=1` lists an unlisted browser session only the public runs, a native channel grant adds that channel, the admin lists the fleet — the actor's predicate rides down to the service, never a filter after loading", async () => {
       const h = harness();
       await h.store!.put(record("pub", PUBLIC));
@@ -3255,7 +3314,7 @@ describe("the unit page and what a run is the parent of (item 28)", () => {
     };
   }
 
-  async function harness(opts: { units?: boolean } = {}) {
+  async function harness(opts: { units?: boolean; readPrivateUnit?: LiveViewDeps["readPrivateUnit"] } = {}) {
     let n = 0;
     const registry = new RunRegistry({ genId: () => `run-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
     const store = new InMemoryRunStore({ now: () => NOW });
@@ -3266,10 +3325,17 @@ describe("the unit page and what a run is the parent of (item 28)", () => {
     await store.put(record("r1", { threadKey: "slack:C1:u1r", agent: "review", startedAt: T0 + 12_000 }));
     const service = createRunsService({ registry, store, ...(opts.units === false ? {} : { units: instances }) });
     const handler = adminByDefault(
-      createLiveViewHandler({ page, service, index: registry, now: () => NOW, retention: { retentionDays: 30 } }),
+      createLiveViewHandler({
+        page,
+        service,
+        index: registry,
+        now: () => NOW,
+        retention: { retentionDays: 30 },
+        ...(opts.readPrivateUnit ? { readPrivateUnit: opts.readPrivateUnit } : {}),
+      }),
     );
-    const get = async (url: string, ctx?: LiveViewContext) => {
-      const t = fakeReqRes("GET", url);
+    const get = async (url: string, ctx?: LiveViewContext, headers?: Record<string, string>) => {
+      const t = fakeReqRes("GET", url, headers);
       handler(t.req, t.res, ctx);
       await t.finished;
       return t;
@@ -3277,6 +3343,175 @@ describe("the unit page and what a run is the parent of (item 28)", () => {
     return { registry, store, instances, handler, get };
   }
   const unitSeedOf = (html: string) => seedOf(html) as UnitSeed;
+
+  it("serves only fresh source-proved private unit metadata without lending its thread links log authority", async () => {
+    const privateUnit: CoordinatorUnit = {
+      ...u1,
+      title: "Owned private unit",
+      ending: { kind: "stopped", at: NOW, report: "Private report details" },
+      threadKey: "worker:plan-p-1:U16",
+      reviewThread: undefined,
+      workBrief: {
+        requesterId: instance.userId,
+        mainThreadKey: instance.threadKey,
+        actId: "original-main-act",
+        repo: instance.repo,
+        base: "main",
+        question: "Original private request",
+        findings: [],
+        requestedChange: "Implement the request",
+      },
+    };
+    const scoped = {
+      actor: withWorkViewScope(
+        { ...ADMIN.actor },
+        resolveWorkViewScope(ADMIN.actor, { organization: "installation", ownerIds: [instance.userId] }),
+      ),
+    };
+    const h = await harness({ readPrivateUnit: async () => privateUnit });
+    await h.instances.putUnits([privateUnit, u2]);
+    const html = await h.get("/runs/unit/plan-p-1:U16", scoped);
+    expect(html.status).toBe(200);
+    expect(unitSeedOf(html.body()).view).toMatchObject({
+      title: "Owned private unit",
+      threads: { coding: "worker:plan-p-1:U16" },
+      runs: [],
+    });
+    const json = await h.get("/runs/unit/plan-p-1:U16", scoped, { accept: "application/json" });
+    expect(json.status).toBe(200);
+    expect(JSON.parse(json.body()).view).toMatchObject({
+      title: "Owned private unit",
+      threads: { coding: "worker:plan-p-1:U16" },
+      runs: [],
+    });
+    expect(json.body()).not.toContain("Original private request");
+    const legacy = await h.get("/runs/unit/plan-p-1:U16");
+    expect(unitSeedOf(legacy.body()).view).toMatchObject({ threads: {}, runs: [] });
+    expect(legacy.body()).not.toContain("Owned private unit");
+    const viewedActor = { ...ADMIN.actor, viewingAs: { id: instance.userId } };
+    const person = {
+      actor: withWorkViewScope(
+        viewedActor,
+        resolveWorkViewScope(viewedActor, { organization: "installation", ownerIds: [instance.userId] }),
+      ),
+    };
+    for (const accept of ["text/html", "application/json"]) {
+      const observer = await h.get("/runs/unit/plan-p-1:U16", person, { accept });
+      expect(observer.status).toBe(200);
+      const observerSeed = accept === "application/json" ? JSON.parse(observer.body()) : unitSeedOf(observer.body());
+      expect(observerSeed.view).toMatchObject({
+        title: "Owned private unit",
+        threads: { coding: "worker:plan-p-1:U16" },
+        runs: [],
+        ending: { kind: "stopped", at: NOW },
+      });
+      expect(observerSeed.viewingAs).toEqual({ id: instance.userId });
+      expect(observer.body()).not.toContain("Private report details");
+      expect(observer.body()).not.toContain("Original private request");
+    }
+    const foreignInstance = { ...instance, id: "plan-other-1", userId: "slack:UOTHER", threadKey: "slack:C2:other" };
+    await h.instances.put(foreignInstance);
+    await h.instances.putUnits([
+      {
+        ...privateUnit,
+        instanceId: foreignInstance.id,
+        title: "Other private unit",
+        workBrief: {
+          ...privateUnit.workBrief!,
+          requesterId: foreignInstance.userId,
+          mainThreadKey: foreignInstance.threadKey,
+        },
+      },
+    ]);
+    const foreign = await h.get("/runs/unit/plan-other-1:U16", person);
+    expect(foreign.status).toBe(404);
+    expect(foreign.body()).not.toContain("Other private unit");
+    const active = h.registry.create("Selected person's run", {
+      channelId: "slack:C1",
+      userId: instance.userId,
+      threadKey: "slack:C1:control",
+    });
+    const stop = fakeReqRes("POST", `/runs/${active.id}/stop?t=${active.token}&mode=soft`);
+    h.handler(stop.req, stop.res, person);
+    await stop.finished;
+    expect(stop.status).toBe(403);
+    expect(active.control.requested).toBeUndefined();
+    const everyone = {
+      actor: withWorkViewScope(
+        { ...ADMIN.actor },
+        resolveWorkViewScope(ADMIN.actor, { organization: "installation", mode: "everyone" }),
+      ),
+    };
+    for (const accept of ["text/html", "application/json"]) {
+      const all = await h.get("/runs/unit/plan-p-1:U16", everyone, { accept });
+      expect(all.status).toBe(200);
+      const allView = accept === "application/json" ? JSON.parse(all.body()).view : unitSeedOf(all.body()).view;
+      expect(allView).toMatchObject({
+        title: "Owned private unit",
+        threads: { coding: "worker:plan-p-1:U16" },
+        ending: { kind: "stopped", at: NOW },
+      });
+      expect(all.body()).not.toContain("Private report details");
+      expect(all.body()).not.toContain("Original private request");
+    }
+    const wrong = await harness({ readPrivateUnit: async () => ({ ...privateUnit, unit: "U17" }) });
+    await wrong.instances.putUnits([privateUnit, u2]);
+    expect((await wrong.get("/runs/unit/plan-p-1:U16", scoped)).status).toBe(404);
+  });
+
+  it("withholds private unit HTML and JSON when current recipient proof is lost before emission", async () => {
+    const privateUnit: CoordinatorUnit = {
+      ...u1,
+      title: "Private title after proof loss",
+      threadKey: "worker:plan-p-1:U16",
+      reviewThread: undefined,
+      workBrief: {
+        requesterId: instance.userId,
+        mainThreadKey: instance.threadKey,
+        actId: "original-main-act",
+        repo: instance.repo,
+        base: "main",
+        question: "Original private request",
+        findings: [],
+        requestedChange: "Implement the request",
+      },
+    };
+    const scoped = {
+      actor: withWorkViewScope(
+        { ...ADMIN.actor },
+        resolveWorkViewScope(ADMIN.actor, { organization: "installation", ownerIds: [instance.userId] }),
+      ),
+    };
+    const everyone = {
+      actor: withWorkViewScope(
+        { ...ADMIN.actor },
+        resolveWorkViewScope(ADMIN.actor, { organization: "installation", mode: "everyone" }),
+      ),
+    };
+    const viewedActor = { ...ADMIN.actor, viewingAs: { id: instance.userId } };
+    const person = {
+      actor: withWorkViewScope(
+        viewedActor,
+        resolveWorkViewScope(viewedActor, { organization: "installation", ownerIds: [instance.userId] }),
+      ),
+    };
+    for (const selected of [scoped, everyone, person])
+      for (const accept of ["text/html", "application/json"]) {
+        let readable = true;
+        const h = await harness({
+          readPrivateUnit: async () => {
+            const row = readable ? privateUnit : undefined;
+            readable = false;
+            return row;
+          },
+        });
+        await h.instances.putUnits([privateUnit, u2]);
+        const refused = await h.get("/runs/unit/plan-p-1:U16", selected, { accept });
+        expect(refused.status).toBe(404);
+        expect(refused.body()).not.toContain("Private title after proof loss");
+        expect(refused.body()).not.toContain("worker:plan-p-1:U16");
+      }
+  });
 
   it("seeds the unit page from the unit's read — its facts, its instance, both threads' runs in round order — with a live row's token re-attached and no token on a finished row; the title names the unit", async () => {
     const h = await harness();

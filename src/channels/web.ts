@@ -16,6 +16,7 @@ import type { AccessIdentity } from "./accessAuth.js";
 import { originAllowed } from "./commandHttp.js";
 import { HttpIO, MAX_BODY_BYTES, readBody, type DispatchFn } from "./http.js";
 import { readableRuns } from "./liveView/viewer.js";
+import { hasWorkViewScope } from "./workViewScope.js";
 import type {
   HomeCommandSeed,
   HomeConversationRowSeed,
@@ -648,7 +649,7 @@ export function createWebChatHandler(
   async function railOf(actor: Actor, sub: string): Promise<{ rows: HomeConversationRowSeed[]; runs: RunView[] }> {
     const listed = await deps.service.listRuns({
       status: "all",
-      visibleTo: allOf([readableRuns(actor), ownedBy(actor)]),
+      visibleTo: hasWorkViewScope(actor) ? readableRuns(actor) : allOf([readableRuns(actor), ownedBy(actor)]),
       limit: RAIL_RUNS,
     });
     const groups = threadsOf(listed.runs);

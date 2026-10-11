@@ -1,3 +1,5 @@
+import { matchesPredicate } from "./authz/predicate.js";
+import type { Predicate } from "./authz/types.js";
 import {
   AnthropicCostReportSource,
   CloudflareGraphqlUsageSource,
@@ -34,8 +36,30 @@ export interface CostsViewer {
   email?: string;
 }
 
+/** Personal measured work, without account bills or inferred cloud allocation. */
+export interface CostWorkReport {
+  scope: "personal";
+  group: string;
+  dimension: CostDimension;
+  range: CostsByReport["range"];
+  coverage: CostsByReport["coverage"];
+  rows: Omit<CostsByReport["rows"][number], "cloudUsd">[];
+  days: Omit<CostsByReport["days"][number], "cloudUsd">[];
+  generatedAt: number;
+  snapshot?: CostsByReport["snapshot"];
+  infrastructure: "unattributed";
+  completeness: "complete" | "partial" | "unavailable";
+  unitSpendStatus: "complete" | "partial" | "unavailable";
+  shipSpend?: import("./shipSpend.js").ShipSpendReport;
+}
 export interface CostsService {
   groups(): string[];
+  workReport?(
+    group: string,
+    daysParam: string | null,
+    dimension: CostDimension,
+    visibleTo: Predicate,
+  ): Promise<CostWorkReport>;
   /** The group's daily report for `?days`, as of the snapshot. `NoCostsSnapshotError` before the first snapshot lands. */
   report(group: string, daysParam: string | null): Promise<CostReport>;
   /** Cost by user, thread, channel, agent or model for the same range (costs.md items 10–10a); on the
@@ -83,6 +107,9 @@ const NULL_STATUS: CostsSnapshotStatus = Object.freeze({
 });
 
 export class NullCostsService implements CostsService {
+  workReport(): Promise<CostWorkReport> {
+    return Promise.reject(new Error(COSTS_OFF_MESSAGE));
+  }
   groups(): string[] {
     return [];
   }
@@ -169,6 +196,59 @@ export function createCostsService(
         ...(snapshot.runUsage?.shipRuns
           ? { shipSpend: buildShipSpendReport(snapshot.runUsage.shipRuns, daily.range) }
           : {}),
+      };
+    },
+    async workReport(group, daysParam, dimension, visibleTo) {
+      const g = groupOf(group);
+      const snapshot = await snapshotOrThrow();
+      const usage = snapshot.runUsage;
+      const ownedRows = (usage?.rows ?? []).filter((row) =>
+        matchesPredicate(visibleTo, { userId: row.userId, channelId: row.channelId, channelVisibility: "unknown" }),
+      );
+      const daily = reportFromSnapshot(snapshot, group, g, daysParam, meta);
+      const scoped = byReportFromSnapshot(
+        {
+          ...snapshot,
+          runUsage: usage
+            ? {
+                ...usage,
+                rows: ownedRows,
+                pending: 0,
+                earliestFinishedAt: ownedRows.length
+                  ? Math.min(...ownedRows.map((row) => Date.parse(row.day + "T00:00:00Z")))
+                  : undefined,
+              }
+            : null,
+        },
+        { ...daily, days: daily.days.map((day) => ({ ...day, cloudUsd: 0, llmUsd: 0, total: 0 })) },
+        dimension,
+        { prices: cfg.prices },
+      );
+      const shipRuns = usage?.shipRuns;
+      const ownedShip = (shipRuns ?? []).filter(
+        (run) =>
+          run.userId !== undefined &&
+          run.channelId !== undefined &&
+          matchesPredicate(visibleTo, { userId: run.userId, channelId: run.channelId, channelVisibility: "unknown" }),
+      );
+      return {
+        scope: "personal",
+        group: scoped.group,
+        dimension: scoped.dimension,
+        range: scoped.range,
+        coverage: scoped.coverage,
+        rows: scoped.rows.map(({ cloudUsd: _cloud, ...row }) => ({ ...row, totalUsd: row.llmUsd })),
+        days: scoped.days.map(({ cloudUsd: _cloud, ...day }) => day),
+        generatedAt: scoped.generatedAt,
+        ...(scoped.snapshot ? { snapshot: scoped.snapshot } : {}),
+        infrastructure: "unattributed",
+        completeness: !usage ? "unavailable" : usage.pending ? "partial" : "complete",
+        unitSpendStatus: !shipRuns
+          ? "unavailable"
+          : shipRuns.some((run) => run.userId === undefined || run.channelId === undefined)
+            ? "partial"
+            : "complete",
+        ...(shipRuns ? { shipSpend: buildShipSpendReport(ownedShip, daily.range) } : {}),
       };
     },
     async byReport(group, daysParam, dimension, viewer) {

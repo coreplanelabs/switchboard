@@ -1,3 +1,4 @@
+import { hasWorkViewScope, workReadPredicate } from "../workViewScope.js";
 import {
   authorize,
   matchesPredicate,
@@ -26,7 +27,9 @@ const NONE: Predicate = { kind: "none" };
 /** What the viewer may list (authorization.md item 6): nothing unless the actor
  *  is admitted to run reads, else the store predicate over its channels. */
 export function readableRuns(actor: Actor): Predicate {
-  return authorize(actor, "runs:read", RUNS_LIST).allow ? predicateFor(actor, "runs:read", "run") : NONE;
+  if (!authorize(actor, "runs:read", RUNS_LIST).allow) return NONE;
+  const readable = predicateFor(actor, "runs:read", "run");
+  return hasWorkViewScope(actor) ? workReadPredicate(actor, readable) : readable;
 }
 
 /**

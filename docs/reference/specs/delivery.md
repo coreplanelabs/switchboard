@@ -71,3 +71,11 @@ The page and the command need the `github` capability (the App triple or `GH_TOK
 | 27 | Incremental refresh: a later refresh lists the rows touched since the previous read less the ten-minute overlap, with the update times the snapshot holds; a touched row replaces its stored facts, an untouched row survives, a row merged before the window is dropped; the store receives the patch, not the whole snapshot; the merged snapshot serves the next request without a GitHub read (item 10) | `[unit]` `src/core/deliverySnapshot.test.ts::SnapshottingDeliverySource::a later refresh is incremental…` |
 | 28 | The merge rule: the read's rows replace theirs by number, the rest survive, rows merged before the window are dropped, number order kept; a read that reached back to the previous read's time joins its completeness — the earlier instant, never before the window's start, healing as the window slides past it — and one that stopped short is complete from its own reach alone; with no previous snapshot the read is the snapshot (item 10) | `[unit]` `src/core/deliverySnapshot.test.ts::mergeSnapshot::*` |
 | 29 | A store with nothing to merge into — an earlier write it refused — is written whole on the next refresh, and the warning is the refused write's alone (item 10) | `[unit]` `src/core/deliverySnapshot.test.ts::SnapshottingDeliverySource::a store with nothing to merge into…` |
+
+### Attached browser work scope
+
+A trusted personal work scope selects original published pull requests using the current read predicate and canonical ownership callback. Excluded publications contribute no PR, issue or aggregate rows. Coverage remains partial when the installation cannot prove the complete publication set. All people and unscoped legacy callers retain the shared delivery report.
+
+| Criterion | Evidence |
+|---|---|
+| Only selected owned publications contribute PR rows, issue rows, weeks and totals; unscoped legacy reports retain their publications | `[unit]` `src/channels/deliveryView.test.ts::createDeliveryViewHandler::filters pull requests and every aggregate using the canonical selected owner publication set` |

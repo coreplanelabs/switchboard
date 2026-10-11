@@ -1,3 +1,4 @@
+import { resolveWorkViewScope, withWorkViewScope } from "./workViewScope.js";
 import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
@@ -776,6 +777,48 @@ describe("orchestratorChatSeed — the plane's chat half (record 0070; orchestra
 });
 
 describe("GET /threads and /threads/<id> — the seed from the runs service (items 2, 7, 8, 11)", () => {
+  it("uses current proved owner scope in the loaded thread list without lending private source read authority", async () => {
+    const { handler, store } = setup();
+    await store.put(record("own-browser", NOW - 1000));
+    await store.put(
+      record("own-slack", NOW - 2000, {
+        userId: "slack:UALICE",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:1.2",
+        channelVisibility: "public",
+      }),
+    );
+    await store.put(
+      record("denied-slack", NOW - 3000, {
+        userId: "slack:UALICE",
+        channelId: "slack:G1",
+        threadKey: "slack:G1:1.2",
+        channelVisibility: "private",
+      }),
+    );
+    await store.put(
+      record("peer-public", NOW - 4000, {
+        userId: "slack:UOTHER",
+        channelId: "slack:C2",
+        threadKey: "slack:C2:1.2",
+        channelVisibility: "public",
+      }),
+    );
+    const actor = withWorkViewScope(
+      { ...alice },
+      resolveWorkViewScope(alice, {
+        organization: "installation",
+        ownerIds: ["access:a1", "slack:UALICE"],
+      }),
+    );
+    const personal = await request(handler, { url: "/threads", actor });
+    expect(personal.status).toBe(200);
+    expect(seedOf<HomeSeed>(personal.body).conversations.map((row) => row.id)).toEqual(["conv-1", "slack:C1:1.2"]);
+    const legacy = await request(handler, { url: "/threads", actor: { ...alice } });
+    expect(seedOf<HomeSeed>(legacy.body).conversations.map((row) => row.id)).toEqual(["conv-1"]);
+    expect(personal.body).not.toContain("slack:G1:1.2");
+    expect(personal.body).not.toContain("slack:C2:1.2");
+  });
   it("/threads mints a conversation of the viewer's own lane: no turns, a send URL under it, the palette the viewer may run, chips grounded in their runs", async () => {
     const { handler, store } = setup();
     await store.put(record("r-1", NOW - 60_000, { repo: "acme/api", status: "failed" }));

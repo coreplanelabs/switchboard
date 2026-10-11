@@ -365,6 +365,8 @@ export interface HomeCommandSeed {
  *  the `/residents?stream=1` feed (`ResidentsFeedFrame`). */
 export interface ResidentsIndexSeed {
   page: "residents";
+  /** Shared infrastructure is withheld in a personal work view. */
+  scopeUnavailable?: string;
   cap?: unknown;
   count?: unknown;
   pendingReplicas?: unknown;
@@ -416,6 +418,7 @@ export interface CostsSeed {
   snapshot: CostsSnapshotStatus;
   /** Whether the viewer holds `costs:write` — the **Snapshot now** button is offered only then. */
   canSnapshot: boolean;
+  work?: import("../core/costsService.js").CostWorkReport;
 }
 
 /** The run-metrics page (docs/reference/specs/run-metrics.md item 10): the
@@ -585,6 +588,10 @@ export type WebSeed = PageSeed & {
   /** The person this session is viewing the page as (record 0053), stamped by the shell renderer
    *  from the viewer's actor — the banner and every write control read it. Absent otherwise. */
   viewingAs?: ViewablePerson;
+  /** Trusted global dashboard scope; absent on legacy documents. */
+  dataView?: { mode: "mine" | "person" | "everyone"; canViewEveryone?: boolean };
+  asUser?: ViewablePerson;
+  viewAs?: { people: ViewablePerson[] };
 };
 
 /** The id of the `<script type="application/json">` seed island. */
