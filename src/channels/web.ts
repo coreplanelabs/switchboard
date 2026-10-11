@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
-import { allOf, authorize, ownedBy, type Actor } from "../core/authz/index.js";
+import { allOf, authorize, ownedBy, type Actor, type Predicate } from "../core/authz/index.js";
 import { resolveChatActor, type GrantsLookup } from "../core/authz/actor.js";
 import type { Capabilities } from "../core/capabilities.js";
 import { NO_NAMES, namesOf, type NameDirectory } from "../core/names.js";
@@ -271,10 +271,10 @@ async function parentWordsOf(
   threadKey: string,
   actor: Actor,
   runs: readonly RunView[],
+  visibleTo = readableRuns(actor),
 ): Promise<HomeParentTurnSeed[]> {
   const instanceIds = [...new Set(runs.map((r) => r.parentInstanceId).filter((id) => id !== undefined))];
   if (instanceIds.length === 0) return [];
-  const visibleTo = readableRuns(actor);
   const out: HomeParentTurnSeed[] = [];
   for (const instanceId of instanceIds) {
     const runId = await deps.service.parentRunOfInstance(instanceId, visibleTo);
@@ -314,11 +314,11 @@ export async function turnsOf(
   deps: ConversationDeps,
   threadKey: string,
   actor: Actor,
-  opts?: { receipts?: boolean },
+  opts?: { receipts?: boolean; visibleTo?: Predicate },
 ): Promise<{ turns: ConversationTurn[]; runs: RunView[] }> {
   const listed = await deps.service.listRuns({
     status: "all",
-    visibleTo: readableRuns(actor),
+    visibleTo: opts?.visibleTo ?? readableRuns(actor),
     threadKey,
     limit: CONVERSATION_RUNS,
   });
@@ -335,7 +335,7 @@ export async function turnsOf(
       }),
     ),
     seedOnly ? silentReceiptsOf(deps, threadKey, runs.length > 0) : [],
-    seedOnly ? parentWordsOf(deps, threadKey, actor, runs) : [],
+    seedOnly ? parentWordsOf(deps, threadKey, actor, runs, opts?.visibleTo) : [],
   ]);
   return { turns: interleaveReceipts(withParentWord(turns, parents), receipts), runs };
 }

@@ -145,6 +145,8 @@ export const streamEntrySchema = z
   })
   .strict();
 export type OrganizationStreamEntry = z.infer<typeof streamEntrySchema>;
+/** Read-only attribution after current source proof; never stored on a stream row. */
+export const streamReadEntrySchema = streamEntrySchema.extend({ authorId: text.optional() });
 export const stateSchema = z
   .object({
     version: z.literal(1),
@@ -344,7 +346,7 @@ export const resultSchema = z.discriminatedUnion("status", [
     .object({
       status: z.literal("stream_tail"),
       revision,
-      entries: z.array(streamEntrySchema),
+      entries: z.array(streamReadEntrySchema),
       cursor: revision,
       beforeCursor: revision,
       hasMore: z.boolean(),
@@ -361,7 +363,7 @@ export const resultSchema = z.discriminatedUnion("status", [
     .object({
       status: z.literal("stream"),
       revision,
-      entries: z.array(streamEntrySchema),
+      entries: z.array(streamReadEntrySchema),
       cursor: revision,
       hasMore: z.boolean(),
     })

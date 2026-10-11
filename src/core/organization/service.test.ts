@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ExternalIdentity, PersonId } from "../identity/contract.js";
+import { resultSchema, streamEntrySchema } from "./contract.js";
 import { InMemoryOrganizationStore } from "./memory.js";
 import {
   OrganizationService,
@@ -76,6 +77,77 @@ async function sendBrowser(service: OrganizationService, authentication = browse
 }
 
 describe("organization authenticated service", () => {
+  it("projects only protected source authors and discards supplied read author stamps", async () => {
+    const { service, store } = setup();
+    const slack = { issuer: "https://slack.com", tenant: "workspace", subject: "UBOB" };
+    await bind(store, [identity, slack]);
+    const browserSource = {
+      ...browser,
+      sourceReference: {
+        actorId: "access:alice",
+        userId: "access:alice",
+        channelId: "web:alice",
+        threadKey: "web:alice:home",
+      },
+    };
+    expect((await sendBrowser(service, browserSource)).status).toBe("receipt");
+    expect(
+      (
+        await service.admit(
+          {
+            source: "slack",
+            identity: slack,
+            kind: "human",
+            sourceReference: {
+              actorId: "slack:UBOB",
+              userId: "slack:UBOB",
+              channelId: "slack:Dprivate",
+              threadKey: "slack:Dprivate:home",
+            },
+          },
+          input("peer"),
+        )
+      ).status,
+    ).toBe("receipt");
+    expect((await sendBrowser(service, browser, input("legacy-author"))).status).toBe("receipt");
+    const addressed = await service.resolve(browserSource);
+    if (!addressed?.actor.stream) throw new Error("Missing stream");
+    const direct = await store.execute({
+      action: "tail",
+      ...addressed,
+      stream: addressed.actor.stream,
+      limit: 100,
+      identities: [identity, slack],
+    });
+    expect(direct.status === "stream_tail" ? direct.entries.map((e) => e.content) : []).toEqual([
+      "A private request",
+      "A private request",
+      "A private request",
+    ]);
+    expect(direct.status === "stream_tail" ? direct.entries : []).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ authorId: expect.anything() })]),
+    );
+    const execute = store.execute.bind(store);
+    store.execute = async (command) => {
+      const result = await execute(command);
+      return result.status === "stream" || result.status === "stream_tail"
+        ? { ...result, entries: result.entries.map((entry) => ({ ...entry, authorId: "access:invented-viewer" })) }
+        : result;
+    };
+    for (const result of [await service.stream(browserSource), await service.streamTail(browserSource)]) {
+      expect(result).toMatchObject({
+        entries: [
+          { role: "user", authorId: "access:alice" },
+          { role: "user", authorId: "slack:UBOB" },
+          { role: "user" },
+        ],
+      });
+      expect(resultSchema.safeParse(result).success).toBe(true);
+      if (result.status !== "stream" && result.status !== "stream_tail") throw new Error("Missing authorized read");
+      expect(streamEntrySchema.safeParse(result.entries[0]).success).toBe(false);
+      expect(Object.hasOwn(result.entries[2]!, "authorId")).toBe(false);
+    }
+  });
   it("keeps unlinked delegation source-only and applies current authorization and native source proof", async () => {
     let allowed = true;
     let native: "allowed" | "denied" | "unavailable" = "allowed";
@@ -594,7 +666,10 @@ describe("organization authenticated service", () => {
       ).status,
     ).toBe("receipt");
     const result = await service.streamTail(browser);
-    expect(result).toMatchObject({ status: "stream_tail", entries: [{ content: "A private request" }] });
+    expect(result).toMatchObject({
+      status: "stream_tail",
+      entries: [{ content: "A private request", authorId: "access:alice" }],
+    });
     expect(checked).toEqual([
       { source: delegated.identity, reference: delegated.sourceReference, onBehalfOf: identity },
     ]);

@@ -296,7 +296,11 @@ export class OrganizationService {
       );
       const status = typeof decision === "string" ? decision : decision.status;
       if (status === "unavailable") return { status: "unavailable" };
-      if (status === "allowed") entries.push(entry);
+      if (status === "allowed") {
+        const { authorId: _suppliedAuthor, ...stored } = entry;
+        const authorId = entry.role === "user" ? original.provenance.sourceReference?.userId : undefined;
+        entries.push({ ...stored, ...(authorId ? { authorId } : {}) });
+      }
     }
     return { ...result, entries };
   }
