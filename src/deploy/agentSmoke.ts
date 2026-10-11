@@ -19,6 +19,7 @@ const configSchema = z
     disposable: z.literal(true),
     channel: component,
     subject: component,
+    requireVouchedControls: z.boolean().optional(),
     repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
     model: z
       .string()
@@ -91,6 +92,22 @@ const runSchema = z.object({
       ok: z.boolean().optional(),
       cut: z.boolean().optional(),
       infra: z.boolean().optional(),
+      kind: z.string().optional(),
+      control: z.string().optional(),
+      effort: z.string().optional(),
+      card: z
+        .object({
+          ref: z.string(),
+          levels: z.union([
+            z.literal("unknown"),
+            z.record(z.string(), z.union([z.literal("refused"), z.object({ word: z.string(), named: z.boolean() })])),
+          ]),
+          capField: z.string(),
+          window: z.number().positive(),
+          cache: z.enum(["automatic", "markers", "none", "unknown"]),
+          provenance: z.object({ levels: z.string(), capField: z.string(), window: z.string() }),
+        })
+        .optional(),
     }),
   ),
   reviewHead: z.string().optional(),
@@ -162,6 +179,7 @@ interface ScenarioReceipt {
   observedUsd?: number;
   requestedModel?: string;
   actualModel?: string;
+  modelControls?: { effort: string; capField: string; window: number; cache: string };
   artifact?: { repo: string; number: number; head: string; verdict?: "approve" | "request_changes" };
 }
 export const PRODUCT_ACCEPTANCE_GAP = {
@@ -359,6 +377,29 @@ export async function runAgentSmoke(input: {
         break;
       }
       if (!run.finished || run.persisted !== true || run.provisional || run.restarting) break;
+      if (config.requireVouchedControls) {
+        const meta = run.events.find((event) => event.type === "run_meta");
+        const card = meta?.card;
+        const level = card?.levels !== "unknown" && meta?.effort ? card?.levels[meta.effort] : undefined;
+        if (
+          !card ||
+          card.ref !== run.model ||
+          !meta?.effort ||
+          !level ||
+          level === "refused" ||
+          !level.named ||
+          [card.provenance.levels, card.provenance.capField, card.provenance.window].some(
+            (source) => !["registry", "operator"].includes(source),
+          ) ||
+          card.cache === "unknown" ||
+          run.events.some((event) => event.type === "run_note" && event.kind === "control_degraded")
+        ) {
+          row.outcome = "failed";
+          row.reason = "model_controls_unproven";
+          break;
+        }
+        row.modelControls = { effort: meta.effort, capField: card.capField, window: card.window, cache: card.cache };
+      }
       if (!["started", "completed"].includes(response.run.status) || run.status !== "completed") {
         row.outcome = "failed";
         row.reason = "run_not_completed";

@@ -368,6 +368,18 @@ const UNKNOWN_MODEL_REF = "openrouter/deepseek/conformance-unknown-model";
  *  unknown-card rows substitute the fictional fixture for the former. */
 export const PROVIDER_ROWS: readonly ProviderScenarioRow[] = [
   {
+    id: "openrouter-chat-cap",
+    control: "cap",
+    title: "the exact public gateway card vouches its cap across upstream spellings",
+    ref: "openrouter/openai/gpt-5.3-codex",
+    asked: { effort: "high" },
+    expect: { outcome: "native", applied: "max_completion_tokens", vouched: true },
+    payload: (body) => {
+      if (body.model !== "openai/gpt-5.3-codex" || body.max_completion_tokens !== 4096)
+        throw new Error("the public gateway request does not carry its exact model and cap");
+    },
+  },
+  {
     id: "trace-2-unknown-card",
     control: "window",
     trace: 2,

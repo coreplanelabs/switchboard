@@ -744,6 +744,15 @@ export function wireOf(block: Pick<ProviderConfig, "type" | "wire">): Wire {
   return block.wire ?? WIRE_ALIASES[block.type] ?? "openai-chat";
 }
 
+/** The public gateway's protocol contract does not describe custom proxies. */
+export function isPublicOpenRouterChat(block: ProviderConfig | undefined): boolean {
+  return (
+    block !== undefined &&
+    wireOf(block) === "openai-chat" &&
+    block.baseUrl?.replace(/\/+$/, "") === "https://openrouter.ai/api/v1"
+  );
+}
+
 /** One `<block>/<model>` ref read for the vendor it serves (record 0052):
  *  the block, the model id as the ref spells it, the vendor, the vendor's own
  *  id (the model id less a vendor prefix) and which layer named the vendor. */

@@ -16,7 +16,7 @@ import {
   type RequestDirectives,
   type ThreadDirectives,
 } from "../../directives.js";
-import { parseModelRef } from "../provider.js";
+import { isPublicOpenRouterChat, parseModelRef } from "../provider.js";
 import { decideControls, resolveModelCard, type ControlDecision, type ModelCard } from "../modelCard.js";
 import { installedModelRegistry } from "../installedModelRegistry.js";
 import { DEFAULT_HARNESS } from "../harness/roster.js";
@@ -333,7 +333,7 @@ export function resolveRepoTarget(
  */
 export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): ResolvedTarget {
   const { msg, resolved } = ctx;
-  const { provider: providerName } = parseModelRef(resolved.modelRef);
+  const { provider: providerName, model } = parseModelRef(resolved.modelRef);
   const providers = deps.config.config.providers;
   if (!providers[providerName]) {
     throw new RefusalError(
@@ -342,6 +342,28 @@ export function resolveTarget(deps: ResolveDeps, ctx: ResolveTargetContext): Res
         `Unknown provider "${providerName}". Configured providers: ${Object.keys(providers).join(", ")}`,
       ),
     );
+  }
+
+  const block = providers[providerName];
+  if (isPublicOpenRouterChat(block) && !model.includes("/") && !block.models?.[model]) {
+    const catalog = block.catalog ?? providerName;
+    const file = installedModelRegistry.file(catalog);
+    const matches = [
+      ...new Set(
+        Object.values(file ?? {}).flatMap((cards) =>
+          Object.keys(cards).filter((id) => id.slice(id.lastIndexOf("/") + 1).toLowerCase() === model.toLowerCase()),
+        ),
+      ),
+    ];
+    // A unique short-name match offers an exact ref; it never rewrites the
+    // requested identity or borrows metadata for an undeclared wire alias.
+    if (matches.length === 1 && !installedModelRegistry.card(catalog, "openai-chat", model))
+      throw new RefusalError(
+        refusalOf(
+          "model_card_refused",
+          `Model "${resolved.modelRef}" is not an exact catalog id. Use "${providerName}/${matches[0]}".`,
+        ),
+      );
   }
 
   // The model card (record 0052): resolved once, here, where the block is

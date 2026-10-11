@@ -125,6 +125,39 @@ describe("vendorOf — the one vendor parse", () => {
 });
 
 describe("resolveModelCard — operator over registry over wire", () => {
+  it("vouches all requested controls for the exact public OpenRouter Codex card", () => {
+    const card = resolveModelCard(
+      "openrouter/openai/gpt-5.3-codex",
+      { openrouter: block({ baseUrl: "https://openrouter.ai/api/v1/", catalog: "openrouter" }) },
+      installedModelRegistry,
+    );
+    expect(card).toMatchObject({ window: 400_000, cache: "automatic", capField: "max_completion_tokens" });
+    expect(decideControls(card, { effort: "high" })).toEqual([
+      { control: "effort", outcome: "native", asked: "high", applied: "high", vouched: true, why: "" },
+      { control: "cap", outcome: "native", applied: "max_completion_tokens", vouched: true, why: "" },
+      { control: "window", outcome: "native", applied: "400000", vouched: true, why: "" },
+      { control: "cache", outcome: "native", applied: "automatic", vouched: true, why: "" },
+    ]);
+    const custom = resolveModelCard(
+      "openrouter/openai/gpt-5.3-codex",
+      { openrouter: block({ baseUrl: "https://gateway.example/v1", catalog: "openrouter" }) },
+      installedModelRegistry,
+    );
+    expect(decideControls(custom, {}).find((d) => d.control === "cap")).toMatchObject({
+      outcome: "degraded",
+      vouched: false,
+    });
+    const unknown = resolveModelCard(
+      "openrouter/openai/conformance-unknown-model",
+      { openrouter: block({ baseUrl: "https://openrouter.ai/api/v1" }) },
+      installedModelRegistry,
+    );
+    expect(decideControls(unknown, {}).find((d) => d.control === "cap")).toMatchObject({
+      outcome: "degraded",
+      vouched: false,
+    });
+  });
+
   it("uses only an explicit exact catalog identity for a wire alias, preserving unknown vendor and unvouched cap and cache", () => {
     const ref = "openrouter/GPT-5.3-Codex";
     const unknown = resolveModelCard(ref, blocks, installedModelRegistry);

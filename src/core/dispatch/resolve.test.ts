@@ -296,6 +296,69 @@ describe("resolveTarget — the provider checked, and the target repo/ref/PR sta
       { msg: message, directives: { agent: agentName, text: message.text }, history },
     ).resolved;
 
+  it("refuses a public OpenRouter short name with its exact ref before resolving a workspace, preserving declared aliases", async () => {
+    const yaml = YAML.replace(
+      "providers:\n",
+      "providers:\n  openrouter:\n    type: openai-compatible\n    baseUrl: https://openrouter.ai/api/v1\n",
+    );
+    const agent = getAgent("coding");
+    const seen: string[] = [];
+    const run = (config: ConfigStore, model: string) =>
+      resolveTarget(
+        {
+          config,
+          resolveRepoContext: () => {
+            seen.push(model);
+            return { repo: "acme/api" };
+          },
+        },
+        {
+          msg: message,
+          history,
+          agent,
+          profile: declaredProfile(agent),
+          resolved: resolveRun(
+            { config },
+            { msg: message, directives: { agent: "coding", model, effort: "high", text: message.text }, history },
+          ).resolved,
+          resume: undefined,
+          root: root(message).root,
+        },
+      );
+    expect(() => run(configStore(yaml), "openrouter/GPT-5.3-Codex")).toThrow(
+      'Model "openrouter/GPT-5.3-Codex" is not an exact catalog id. Use "openrouter/openai/gpt-5.3-codex".',
+    );
+    expect(seen).toEqual([]);
+    const exact = run(configStore(yaml), "openrouter/openai/gpt-5.3-codex");
+    expect(exact.modelCard).toMatchObject({
+      ref: "openrouter/openai/gpt-5.3-codex",
+      window: 400_000,
+      cache: "automatic",
+    });
+    await exact.repoCtxP;
+    const aliasYaml = yaml.replace(
+      "    baseUrl: https://openrouter.ai/api/v1",
+      "    baseUrl: https://openrouter.ai/api/v1\n    models:\n      GPT-5.3-Codex:\n        catalogModel: openai/gpt-5.3-codex",
+    );
+    const alias = run(configStore(aliasYaml), "openrouter/GPT-5.3-Codex");
+    expect(alias.modelCard).toMatchObject({ ref: "openrouter/GPT-5.3-Codex", window: 400_000, cache: "unknown" });
+    await alias.repoCtxP;
+    expect(seen).toEqual(["openrouter/openai/gpt-5.3-codex", "openrouter/GPT-5.3-Codex"]);
+    const custom = run(
+      configStore(yaml.replace("https://openrouter.ai/api/v1", "https://gateway.example/v1")),
+      "openrouter/GPT-5.3-Codex",
+    );
+    expect(custom.modelCard).toMatchObject({ ref: "openrouter/GPT-5.3-Codex", levels: "unknown", window: 128_000 });
+    await custom.repoCtxP;
+    const unknown = run(configStore(yaml), "openrouter/conformance-unknown-model");
+    expect(unknown.modelCard).toMatchObject({
+      ref: "openrouter/conformance-unknown-model",
+      levels: "unknown",
+      window: 128_000,
+    });
+    await unknown.repoCtxP;
+  });
+
   it("an agent that declares no repository resolves none: the resolver is never asked, the context is empty", async () => {
     const calls: unknown[] = [];
     const deps: ResolveDeps = {

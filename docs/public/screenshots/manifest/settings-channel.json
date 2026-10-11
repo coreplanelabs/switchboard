@@ -134,12 +134,12 @@
     "src/core/mergeWatch.ts": "09fa7c422cd5f78c6eced30bdf99916995d6049ae70e36cb5b255941ca5e09d9",
     "src/core/metrics.ts": "77411d98a0c23fad75deed03437916680a3ee6e3eb7216cc42d15ecfd8e1c45e",
     "src/core/modelPricing.ts": "341bb29f20113ef579bbc54d2232018794804277fde2fae16a590381c1118192",
-    "src/core/modelRegistry.ts": "a9dc0edf86a09ab3cbd0dda7ff47616ce232f88f276b86de5634c88317f1d3d1",
+    "src/core/modelRegistry.ts": "301481fdd52ed53bfae4413e95d7a48708dfaaa5f3d954e27c979d7f0098439b",
     "src/core/names.ts": "85ac837cbf8b1e7eb4663c7f4c53f17501b5b5cca7aad70dcfcf33b6d4c8bd42",
     "src/core/normalizeSpans.ts": "51010154bf3de59ac4a20caed8b9f264da8d0893d12f6d5a8343eadc33eb71f7",
     "src/core/pipelineStanding.ts": "0f4445044caf9eed59d82612f93c2e2d5e27ff2d648744de4c8f2c5efd177712",
     "src/core/plane/table.ts": "8ec1bd124a42ee681a1c5bdf0eabb4bb1a08440459495f851cbc72a987e2ad95",
-    "src/core/provider.ts": "869f990b346ce1eb3b3a1a4800f500acb04cc4cb870413a81513ec8abbb486f6",
+    "src/core/provider.ts": "d202fc4a43aee539d4915e28ab36b535fef9109b903a9f36dda081a636b41069",
     "src/core/publicationSettlement.ts": "c74f0bd5abe4a4256539d604106e0b8ceadede3ac54b90ff659cc30412bf4cb1",
     "src/core/readingDiff.ts": "82d6f1b3d0af9eb9a5e105cde1473e1ac35a260dee08cfdb0835daa753003280",
     "src/core/redact.ts": "03df97cd8b376d8c27a5323a2ecc587d2196dd0e375c7b1b7ac369c01b8bc3a5",
@@ -249,19 +249,15 @@
   "rendered": {
     "requests": [
       {
-        "path": "/assets/1f41ad8c2578e46c.woff2",
-        "accept": "*/*"
-      },
-      {
-        "path": "/assets/25ea74757df8dad0.woff2",
-        "accept": "*/*"
-      },
-      {
         "path": "/assets/28904c3f6575692b.js",
         "accept": "*/*"
       },
       {
         "path": "/assets/30519f187e29203c.js",
+        "accept": "*/*"
+      },
+      {
+        "path": "/assets/4bc9835edd11b53c.woff2",
         "accept": "*/*"
       },
       {
@@ -286,6 +282,10 @@
       },
       {
         "path": "/assets/8c63b478a250d0ad.js",
+        "accept": "*/*"
+      },
+      {
+        "path": "/assets/9825f6c791051da3.woff2",
         "accept": "*/*"
       },
       {
@@ -317,20 +317,20 @@
       "src/docs/screenshotOutput.ts": "e33c1a9d0b2664f3f6e21e7fc1d2b02e80f9411e0eddd8b3ec31bd17f25a19f4",
       "src/docs/screenshotOutputPinned.ts": "be4be6869229593070c35867166a8fd60928504178f0c0f028a64759f82b0992",
       "src/docs/screenshotRenderedInputs.ts": "5b474d753207f6a2f72622cc9f872e99d1f6526252de2b981b883b4bd8f2259f",
-      "response:*/*:/assets/1f41ad8c2578e46c.woff2": "117a54f5e0a35fa3c994d46f9f3596c4029817f06b45b546594c6671d68f1149",
-      "response:*/*:/assets/25ea74757df8dad0.woff2": "8242759635f72b65d7a1eae10ef8a97fe59a8b60d3d7f5a6f65e67d72693540e",
       "response:*/*:/assets/28904c3f6575692b.js": "87ca286429704e9f6df7352c3234444e0a13a26897eebace10eb0cd1c92cd531",
       "response:*/*:/assets/30519f187e29203c.js": "14622bd4c447c6410c36bf0d4c992b372a7ec55578ff6e07be91f26fb477b6e9",
+      "response:*/*:/assets/4bc9835edd11b53c.woff2": "117a54f5e0a35fa3c994d46f9f3596c4029817f06b45b546594c6671d68f1149",
       "response:*/*:/assets/4fab5baaca5c14d2.js": "d87a5d78463623df2c22f585ab00456a81be8be16e5658941b936b8708bd3fd1",
       "response:*/*:/assets/4ff3282cc72f2ec6.js": "eefc726439473adbbc4269b53d31d2fffe30c23ee2928c4d39f89a946da21ad9",
       "response:*/*:/assets/536024deca28e1ce.js": "2c8faa55777b3bd108e1917eada2b5201f7798b2b8b1bdc7c1b7a642f2660c44",
       "response:*/*:/assets/5fd1e101e29ae073.js": "31f587073c2942a213ef609827afaf369e3a1971d0b8aaec2def4f0723544772",
       "response:*/*:/assets/7704038c40f6cb06.js": "a15d0f835c27b5325cfa4e9d7daab26eeef937a3a410f5a8c7da25ebc562b208",
       "response:*/*:/assets/8c63b478a250d0ad.js": "2ed876acb1874ff306c9cd091c8c8152fed86346b4bdba391e7f25876413369a",
+      "response:*/*:/assets/9825f6c791051da3.woff2": "8242759635f72b65d7a1eae10ef8a97fe59a8b60d3d7f5a6f65e67d72693540e",
       "response:*/*:/assets/e2d5b96b99e916ef.js": "12a21290b18c32e8acad52f209ba85cce7b954ae5dc97ea5ac12a1d230690352",
       "response:*/*:/assets/e87d52e570baa2d6.js": "8e0a19a1e86dfbdf0c51e72f2e16430ef4591560d6b7e3100b962a3f41dfc33e",
       "response:*/*:/assets/e9ff939360af94d8.js": "68837b1c242cce069e6db9d50c63f6f8ce2ad2a53e0a3616b0d219100d4aa73a",
-      "response:*/*:/assets/main.css": "e01dd843b66d420845ff5c36c11165f8f892b441ae8fb0b0c0a877f3041162fe",
+      "response:*/*:/assets/main.css": "c69d38722b1b28fbef9737aed0630d82dd97daa54c0d1ea67b1cdbecaf0cac6d",
       "response:*/*:/settings/channels/slack:CACME0001": "745b00f7f1b5525ac52ce6a1662651f852898f1a2b8b15b442428b5b06c6ee51"
     }
   }

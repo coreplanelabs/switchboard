@@ -10,11 +10,13 @@ import {
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
-  options: { check: { type: "boolean" }, model: { type: "string" } },
+  options: { check: { type: "boolean" }, model: { type: "string" }, "require-vouched-controls": { type: "boolean" } },
 });
 const [planPath, receiptPath] = positionals;
 if (!planPath || !receiptPath || positionals.length !== 2) {
-  throw new Error("usage: smoke:ingress <deploy-plan.json> <receipt.json> [--check] [--model provider/model]");
+  throw new Error(
+    "usage: smoke:ingress <deploy-plan.json> <receipt.json> [--check] [--model provider/model] [--require-vouched-controls]",
+  );
 }
 // Outside the tree, written atomically before admission and after each known phase.
 const save = async (value: unknown) => {
@@ -37,6 +39,7 @@ try {
   const config = parseSmokeConfig({
     ...JSON.parse(process.env.SMOKE_INGRESS_CONFIG ?? "null"),
     ...(values.model === undefined ? {} : { model: values.model }),
+    ...(values["require-vouched-controls"] ? { requireVouchedControls: true } : {}),
   });
   const transport = agentSmokeTransport({
     origin: process.env.SMOKE_INGRESS_ORIGIN ?? "",

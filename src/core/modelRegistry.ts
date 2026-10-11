@@ -18,6 +18,8 @@ export interface RegistryCard {
   name?: string;
   /** pi's own wire word (`anthropic-messages`, `openai-completions`, `openai-responses`). */
   api?: string;
+  /** The catalog's endpoint, used only when it matches the selected public protocol. */
+  baseUrl?: string;
   reasoning?: boolean;
   /** Our tiers as pi spells them: `null` refuses a level, an absent tier is
    *  not named (the card's reader applies pi's rule). */
