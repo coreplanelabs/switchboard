@@ -1,3 +1,7 @@
+import { z } from "zod";
+import { withCommandConfirmation } from "../core/commandConfirmations.js";
+import { resolveChatActor } from "../core/authz/actor.js";
+import type { Caller } from "../core/commandRegistry.js";
 import { principalOf } from "../core/authz/authorize.js";
 import { InMemoryPersonalTokenStore, digestBearer } from "../mcp/personalTokens.js";
 import { createCommandHttpHandler } from "./commandHttp.js";
@@ -24,6 +28,11 @@ import { handleMcpRequest, type McpOptions } from "./mcp.js";
 import { createMcpApprovalView } from "./mcpApprovalView.js";
 
 const APPROVAL_PROTOCOL_VERSION = "2026-07-28";
+const FORM_META = {
+  [PROTOCOL_VERSION_META_KEY]: APPROVAL_PROTOCOL_VERSION,
+  [CLIENT_INFO_META_KEY]: { name: "personal-client", version: "1" },
+  [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { form: {} } },
+};
 
 // Feature: docs/reference/specs/mcp-ingress.md — delegated authority and human approval.
 describe("MCP approval parity", () => {
@@ -143,17 +152,13 @@ describe("MCP approval parity", () => {
       return { status, text, headers };
     };
     const offeredId = async () => {
-      const result = await call();
-      expect(result.body).toMatchObject({
-        result: {
-          structuredContent: { approval: { url: expect.stringContaining("https://bot.example/settings/approve?id=") } },
-        },
-      });
-      return (result.body as { result: { structuredContent: { approval: { id: string } } } }).result.structuredContent
-        .approval.id;
+      const result = await call("repo_offboard", {}, "tok", { _meta: FORM_META });
+      expect(result.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "form" } } } } });
+      return (result.body as { result: { requestState: string } }).result.requestState;
     };
     return {
       dir,
+      commandRegistry: registry,
       deps,
       options,
       call,
@@ -174,55 +179,147 @@ describe("MCP approval parity", () => {
       },
     };
   }
-  it("the official SDK URL elicitation cannot execute on an auto-accepted response without browser consent", async () => {
-    const f = fixture(ALL_GRANTS, true);
-    const envelope = {
+  it("client form confirmation executes the saved action once without a browser", async () => {
+    const f = fixture(ALL_GRANTS, false);
+    const _meta = {
       [PROTOCOL_VERSION_META_KEY]: APPROVAL_PROTOCOL_VERSION,
-      [CLIENT_INFO_META_KEY]: { name: "test-client", version: "1" },
-      [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { url: {} } },
+      [CLIENT_INFO_META_KEY]: { name: "personal-client", version: "1" },
+      [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { form: {} } },
     };
-    const first = await f.call("repo_offboard", {}, "tok", { _meta: envelope });
+    const first = await f.call("repo_offboard", {}, "tok", { _meta });
     expect(first.body).toMatchObject({
       result: {
         inputRequests: {
           approval: {
             method: "elicitation/create",
-            params: { mode: "url", url: expect.stringContaining("https://bot.example/settings/approve?id=") },
+            params: { mode: "form", requestedSchema: { required: ["decision"] } },
           },
         },
       },
     });
-    const id = (first.body as { result: { requestState: string } }).result.requestState;
-    const accepted = await f.call("repo_offboard", {}, "tok", {
-      _meta: envelope,
-      requestState: id,
-      inputResponses: { approval: { action: "accept" } },
-    });
-    expect(accepted.body).toMatchObject({
-      result: { content: [{ text: "Browser approval is still required; nothing ran." }] },
-    });
+    expect(JSON.stringify(first.body)).not.toContain("https://bot.example");
     expect(f.removed()).toBe(0);
-    expect(
-      (await f.call("repo_offboard", { target: "other" }, "tok", { _meta: envelope, requestState: id })).body,
-    ).toMatchObject({ error: { code: -32001 } });
-    expect((await f.browserCall(id, "approve")).status).toBe(200);
+    const requestState = (first.body as { result: { requestState: string } }).result.requestState;
+    const approved = await f.call("repo_offboard", {}, "tok", {
+      _meta,
+      requestState,
+      inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+    });
+    expect(approved.body).toMatchObject({ result: { content: [{ text: expect.stringContaining("removed: 1") }] } });
+    expect(f.removed()).toBe(1);
     expect(
       (
         await f.call("repo_offboard", {}, "tok", {
-          _meta: envelope,
-          requestState: id,
-          inputResponses: { approval: { action: "accept" } },
+          _meta,
+          requestState,
+          inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
         })
       ).body,
-    ).toHaveProperty("result");
+    ).toMatchObject({ error: { code: -32001 } });
     expect(f.removed()).toBe(1);
   });
+
+  it("regenerated forms retain the frozen implicit repository and execute that repository", async () => {
+    const f = fixture();
+    let currentRepo = "acme/api";
+    const swept: string[] = [];
+    f.commandRegistry.register({
+      id: "memory.sweep",
+      action: "memory:write",
+      effect: "write",
+      describe: "Sweep repository memory",
+      options: z.object({ scope: z.literal("repo") }),
+      annotations: { destructive: true },
+      handler: async ({ caller }) => {
+        swept.push((await caller.origin?.repo?.())!);
+        return { swept };
+      },
+    });
+    f.options.dispatch = async (_deps, msg, io) => {
+      const caller: Caller = {
+        kind: "mcp",
+        id: "mcp:device",
+        actor: resolveChatActor(msg, f.options.grantsFor!),
+        origin: { channelId: msg.channelId, threadKey: msg.threadKey, repo: async () => currentRepo },
+      };
+      await withCommandConfirmation({ message: msg, io, store: f.deps.confirmations }, () =>
+        f.options.commands!.invoke("memory.sweep", { options: { scope: "repo" } }, caller),
+      );
+    };
+    const args = { text: "sweep this repository's memory" };
+    const first = await f.call("dispatch", args, "tok", { _meta: FORM_META });
+    const id = (first.body as { result: { requestState: string } }).result.requestState;
+    expect(JSON.stringify(first.body)).toContain("Repository: acme/api");
+    currentRepo = "acme/other";
+    const continuation = await f.call("approval_resume", { id }, "tok", { _meta: FORM_META });
+    expect(JSON.stringify(continuation.body)).toContain("Repository: acme/api");
+    const invalid = await f.call("dispatch", args, "tok", {
+      _meta: FORM_META,
+      requestState: id,
+      inputResponses: { approval: { action: "accept" } },
+    });
+    expect(JSON.stringify(invalid.body)).toContain("Repository: acme/api");
+    await f.call("approval_resume", { id }, "tok", {
+      _meta: FORM_META,
+      requestState: id,
+      inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+    });
+    expect(swept).toEqual(["acme/api"]);
+  });
+
+  it("URL-only and unsupported clients do not mint ordinary approval or execute", async () => {
+    const f = fixture(ALL_GRANTS, true);
+    expect(
+      (
+        await f.call("repo_offboard", {}, "tok", {
+          _meta: { ...FORM_META, [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { url: {} } } },
+        })
+      ).body,
+    ).toMatchObject({ error: { code: -32004 } });
+    expect((await f.call()).body).toMatchObject({ error: { code: -32004 } });
+    expect((await f.call("repo_reconfigure")).body).toMatchObject({
+      result: { content: [{ text: 'repo.reconfigure: ok\n{"saved":"configuration"}' }] },
+    });
+    expect(f.removed()).toBe(0);
+    expect(await f.deps.confirmations!.pendingByThread("mcp:default:default")).toBeUndefined();
+  });
+
+  it("bare acceptance, changed targets and extra form fields cannot approve an offered action", async () => {
+    const f = fixture(ALL_GRANTS, false);
+    const id = await f.offeredId();
+    for (const content of [undefined, { decision: "approve", target: "other" }, { confirm: true }]) {
+      const res = await f.call("repo_offboard", {}, "tok", {
+        _meta: FORM_META,
+        requestState: id,
+        inputResponses: { approval: { action: "accept", ...(content ? { content } : {}) } },
+      });
+      expect(res.body).toMatchObject({ result: { resultType: "input_required", requestState: id } });
+      expect(f.removed()).toBe(0);
+    }
+    expect(
+      (
+        await f.call("repo_offboard", { target: "other" }, "tok", {
+          _meta: FORM_META,
+          requestState: id,
+          inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+        })
+      ).body,
+    ).toMatchObject({ error: { code: -32001 } });
+    const approved = await f.call("repo_offboard", {}, "tok", {
+      _meta: FORM_META,
+      requestState: id,
+      inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+    });
+    expect(approved.body).toMatchObject({ result: { content: [{ text: expect.stringContaining("removed: 1") }] } });
+    expect(f.removed()).toBe(1);
+  });
+
   it("a declined SDK elicitation cancels the saved action without browser approval or effects", async () => {
     const f = fixture(ALL_GRANTS, true);
     const envelope = {
       [PROTOCOL_VERSION_META_KEY]: APPROVAL_PROTOCOL_VERSION,
       [CLIENT_INFO_META_KEY]: { name: "test-client", version: "1" },
-      [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { url: {} } },
+      [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { form: {} } },
     };
     const first = await f.call("repo_offboard", {}, "tok", { _meta: envelope });
     const id = (first.body as { result: { requestState: string } }).result.requestState;
@@ -238,6 +335,89 @@ describe("MCP approval parity", () => {
     expect((await f.call("approval_resume", { id })).body).toMatchObject({ error: { code: -32003 } });
     expect(f.removed()).toBe(0);
   });
+  it("form response cannot exceed revoked user or credential policy and races execute once", async () => {
+    const response = { action: "accept", content: { decision: "approve" } };
+    for (const revoke of ["user", "credential"] as const) {
+      const f = fixture();
+      const id = await f.offeredId();
+      if (revoke === "user") f.revoke();
+      else f.readOnly();
+      const result = await f.call("repo_offboard", {}, "tok", {
+        _meta: FORM_META,
+        requestState: id,
+        inputResponses: { approval: response },
+      });
+      expect(JSON.stringify(result.body)).toContain("🚫");
+      expect(f.removed()).toBe(0);
+    }
+    const f = fixture();
+    const id = await f.offeredId();
+    await Promise.all(
+      [1, 2].map(() =>
+        f.call("repo_offboard", {}, "tok", {
+          _meta: FORM_META,
+          requestState: id,
+          inputResponses: { approval: response },
+        }),
+      ),
+    );
+    expect(f.removed()).toBe(1);
+  });
+
+  it("an older state service cannot mislabel client consent as browser approval", async () => {
+    const f = fixture();
+    const id = await f.offeredId();
+    const store = f.deps.confirmations as InMemoryConfirmationStore;
+    const approve = store.approve.bind(store);
+    store.approve = async (savedId, ids, connection) => {
+      const out = await approve(savedId, ids, connection);
+      if (out.ok) {
+        delete out.row.approvedBy;
+        delete store.rows.get(savedId)!.approvedBy;
+      }
+      return out;
+    };
+    const result = await f.call("repo_offboard", {}, "tok", {
+      _meta: FORM_META,
+      requestState: id,
+      inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+    });
+    expect(result.body).toMatchObject({ error: { code: -32004 } });
+    expect((await f.call("approval_resume", { id })).body).toMatchObject({ error: { code: -32004 } });
+    expect(f.removed()).toBe(0);
+  });
+
+  it("preapproved exact consent survives restart and runs directly without another elicitation", async () => {
+    const f = fixture(ALL_GRANTS, false, true);
+    const id = await f.offeredId();
+    expect(await f.deps.confirmations!.approve!(id, ["slack:UALICE"], digestBearer("tok"), "mcp-form")).toMatchObject({
+      ok: true,
+      row: { approvedBy: "mcp-form" },
+    });
+    f.restart();
+    const result = await f.call("approval_resume", { id });
+    expect(result.body).toMatchObject({ result: { content: [{ text: expect.stringContaining("removed: 1") }] } });
+    expect(JSON.stringify(result.body)).not.toContain("input_required");
+    expect(f.removed()).toBe(1);
+    expect((await f.call("approval_resume", { id })).body).toMatchObject({ error: { code: -32003 } });
+  });
+
+  it("a saved continuation asks in the client and cancellation never executes", async () => {
+    const f = fixture(ALL_GRANTS, false);
+    const id = await f.offeredId();
+    expect((await f.call("approval_resume", { id }, "tok", { _meta: FORM_META })).body).toMatchObject({
+      result: { requestState: id, inputRequests: { approval: { params: { mode: "form" } } } },
+    });
+    const result = await f.call("approval_resume", { id }, "tok", {
+      _meta: FORM_META,
+      requestState: id,
+      inputResponses: { approval: { action: "accept", content: { decision: "cancel" } } },
+    });
+    expect(result.body).toMatchObject({ result: { content: [{ text: "Cancelled; nothing ran" }] } });
+    expect((await f.call("approval_resume", { id })).body).toMatchObject({ error: { code: -32003 } });
+    expect(f.removed()).toBe(0);
+  });
+
   it("an ordinary person's direct MCP settings change updates that person's scope, while a read-only client cannot write", async () => {
     const f = fixture(NO_GRANTS);
     const commands = buildCoreCommands(f.deps.config, null, {
@@ -352,7 +532,7 @@ describe("MCP approval parity", () => {
       expect(denied.status).toBe(403);
       expect(denied.text).toContain("This form must be submitted from Switchboard.");
       expect((await f.call("approval_resume", { id })).body).toMatchObject({
-        result: { content: [{ type: "text", text: "Browser approval is still required; nothing ran." }] },
+        error: { code: -32004 },
       });
       expect(f.removed()).toBe(0);
     },
@@ -364,7 +544,7 @@ describe("MCP approval parity", () => {
       const id = await f.offeredId();
       expect((await f.browserCall(id, action)).status).toBe(400);
       expect((await f.call("approval_resume", { id })).body).toMatchObject({
-        result: { content: [{ type: "text", text: "Browser approval is still required; nothing ran." }] },
+        error: { code: -32004 },
       });
       expect(f.removed()).toBe(0);
     },
@@ -373,7 +553,7 @@ describe("MCP approval parity", () => {
     const f = fixture(ALL_GRANTS, true);
     const id = await f.offeredId();
     expect((await f.call("approval_resume", { id })).body).toMatchObject({
-      result: { content: [{ text: "Browser approval is still required; nothing ran." }] },
+      error: { code: -32004 },
     });
     expect(f.removed()).toBe(0);
     expect((await f.browserCall(id, "approve")).status).toBe(200);
@@ -498,9 +678,8 @@ describe("MCP approval parity", () => {
       audit() {},
     });
     f.deps.commands = f.options.commands;
-    const offered = await f.call("runs_stop", { id: live.id, mode: "hard" });
-    const id = (offered.body as { result: { structuredContent: { approval: { id: string } } } }).result
-      .structuredContent.approval.id;
+    const offered = await f.call("runs_stop", { id: live.id, mode: "hard" }, "tok", { _meta: FORM_META });
+    const id = (offered.body as { result: { requestState: string } }).result.requestState;
     expect(
       registry
         .snapshot(live.id, live.token)

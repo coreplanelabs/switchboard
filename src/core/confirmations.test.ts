@@ -302,6 +302,30 @@ describe("WorkerConfirmationStore (the ConfigDO confirmations client)", () => {
     };
   }
 
+  it("form consent crosses the Worker client with its provenance and parses the approved row", async () => {
+    const value = pending("form-1", {
+      message: {
+        ...message,
+        approvalConnection: { id: "connection", credentialId: "mcp:alice", requestHash: "request", mode: "form" },
+      },
+    });
+    const { store, calls } = fake({
+      "/config/confirmations/approve": (b) => ({
+        row: { body: { ...value, approvedBy: b.source }, expiresAt: 4_200_000 },
+      }),
+    });
+    expect(await store.approve("form-1", [message.userId], "connection", "mcp-form")).toMatchObject({
+      ok: true,
+      row: { id: "form-1", approvedBy: "mcp-form", expiresAt: 4_200_000 },
+    });
+    expect(calls[0]!.body).toEqual({
+      id: "form-1",
+      actorIds: ["slack:UREQ"],
+      connectionId: "connection",
+      source: "mcp-form",
+    });
+  });
+
   it("speaks the route contract with the bearer: the thread and the requester are lifted off the message, the ttl travels and the object's expiry comes back", async () => {
     const { calls, store } = fake({
       "/config/confirmations/put": () => ({ ok: true, expiresAt: 4_200_000 }),

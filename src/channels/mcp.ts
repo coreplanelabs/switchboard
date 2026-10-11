@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { hasConfirmationConsent } from "../core/confirmationConsent.js";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { resolveChatActor, type GrantsLookup } from "../core/authz/actor.js";
@@ -16,14 +18,7 @@ import { startRequestRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
 import type { IncomingMessage, ConfirmationOffer } from "../core/types.js";
 import { withCommandConfirmation } from "../core/commandConfirmations.js";
-import {
-  mcpRequester,
-  type McpIdentity,
-  approvalUrl,
-  ownApproval,
-  resumeApproval,
-  requestHash,
-} from "./mcpApproval.js";
+import { mcpRequester, type McpIdentity, ownApproval, resumeApproval, requestHash } from "./mcpApproval.js";
 import {
   Server,
   WebStandardStreamableHTTPServerTransport,
@@ -31,6 +26,7 @@ import {
   createMcpHandler as createSdkHandler,
   ProtocolError,
   inputRequired,
+  acceptedContent,
   type ServerContext,
   type CallToolResult,
   type ListToolsResult,
@@ -350,20 +346,16 @@ async function route(
       if (name === "approval_resume" || name === "approval_cancel") {
         if (typeof args.id !== "string" || Object.keys(args).some((key) => key !== "id"))
           return err(id, INVALID_PARAMS, "Only the saved offer id is accepted");
-        return approvalResult(id, args.id, deps, options, caller.actor, connectionId, name === "approval_cancel");
+        if (ctx?.mcpReq.requestState<string>() !== undefined && ctx.mcpReq.requestState<string>() !== args.id)
+          return err(id, AUTH_ERROR, "The saved confirmation does not match this request; nothing ran");
+        return approvalResult(id, args.id, deps, options, caller.actor, connectionId, name === "approval_cancel", ctx);
       }
       const state = ctx?.mcpReq.requestState<string>();
       if (typeof state === "string") {
         const row = deps.confirmations && (await ownApproval(deps.confirmations, state, caller.actor, connectionId));
         if (!row || row.message.approvalConnection?.requestHash !== requestHash(String(name), args))
           return err(id, AUTH_ERROR, "The offer is used, expired, or does not match this request; nothing ran");
-        const response = ctx?.mcpReq.inputResponses?.approval;
-        const cancel =
-          response &&
-          typeof response === "object" &&
-          "action" in response &&
-          (response.action === "decline" || response.action === "cancel");
-        return approvalResult(id, state, deps, options, caller.actor, connectionId, !!cancel);
+        return approvalResult(id, state, deps, options, caller.actor, connectionId, false, ctx);
       }
       const command = options.commands && mcpExposed(options.commands).find((c) => mcpToolName(c.id) === name);
       if (command) {
@@ -379,16 +371,13 @@ async function route(
           id: connectionId,
           credentialId: caller.id,
           requestHash: requestHash(String(name), args),
+          ...(supportsForm(ctx) ? { mode: "form" as const } : {}),
         };
         const io = new McpIO(
           [],
           msg.threadKey,
-          !!msg.authenticatedAs &&
-            !!approvalUrl(options, "offer") &&
-            !!deps.confirmations?.approve &&
-            !!deps.confirmations.get
-            ? (offer) =>
-                `Nothing ran. Review ${offer.line} at ${approvalUrl(options, offer.id)}, then call approval_resume with id ${offer.id}.`
+          !!msg.authenticatedAs && supportsForm(ctx) && !!deps.confirmations?.approve && !!deps.confirmations.get
+            ? (offer) => `Nothing ran. Confirm the saved action ${offer.line} in your MCP client.`
             : undefined,
         );
         const result = await withCommandConfirmation({ message: msg, io, store: deps.confirmations }, () =>
@@ -448,19 +437,20 @@ async function route(
       // dispatch. Neither mutable text/thread nor a reusable JSON-RPC id names it.
       const msg: IncomingMessage = {
         ...incoming,
-        approvalConnection: { id: connectionId, credentialId: caller.id, requestHash: requestHash(String(name), args) },
+        approvalConnection: {
+          id: connectionId,
+          credentialId: caller.id,
+          requestHash: requestHash(String(name), args),
+          ...(supportsForm(ctx) ? { mode: "form" as const } : {}),
+        },
         messageId: `${PLATFORM}:${randomUUID()}`,
         receivedAt,
       };
       const io = new McpIO(
         [],
         msg.threadKey,
-        !!msg.authenticatedAs &&
-          !!approvalUrl(options, "offer") &&
-          !!deps.confirmations?.approve &&
-          !!deps.confirmations.get
-          ? (offer) =>
-              `Nothing ran. Review ${offer.line} at ${approvalUrl(options, offer.id)}, then call approval_resume with id ${offer.id}.`
+        !!msg.authenticatedAs && supportsForm(ctx) && !!deps.confirmations?.approve && !!deps.confirmations.get
+          ? (offer) => `Nothing ran. Confirm the saved action ${offer.line} in your MCP client.`
           : undefined,
       );
       const dispatchFn = options.dispatch ?? realDispatch;
@@ -623,39 +613,41 @@ function sdkHandler(identity: McpIdentity, deps: CoreDeps, options: McpOptions, 
   };
 }
 
-function offeredResult(
-  id: JsonRpcId,
-  offer: ConfirmationOffer,
-  options: McpOptions,
-  ctx?: ServerContext,
-): JsonRpcResultBody | JsonRpcErrorBody {
-  const url = approvalUrl(options, offer.id);
-  if (!url) return err(id, -32004, "Browser approval is unavailable; nothing ran");
+const APPROVAL_DECISIONS = ["approve", "cancel"] as const;
+const approvalDecision = z.object({ decision: z.enum(APPROVAL_DECISIONS) }).strict();
+
+function supportsForm(ctx?: ServerContext): boolean {
   const capabilities = (ctx?.mcpReq.envelope as { [CLIENT_CAPABILITIES_META_KEY]?: ClientCapabilities } | undefined)?.[
     CLIENT_CAPABILITIES_META_KEY
   ];
-  if (capabilities?.elicitation?.url)
-    return ok(
-      id,
-      inputRequired({
-        requestState: offer.id,
-        inputRequests: {
-          approval: inputRequired.elicitUrl({
-            url,
-            message: "Review and approve the saved Switchboard action in your signed-in browser.",
-          }),
-        },
-      }),
-    );
-  return ok(id, {
-    content: [
-      {
-        type: "text",
-        text: `Nothing ran. Review the saved action at ${url}, then call approval_resume with id ${offer.id}. To decline, call approval_cancel with that id.`,
+  const elicitation = capabilities?.elicitation;
+  return !!elicitation && ("form" in elicitation || Object.keys(elicitation).length === 0);
+}
+
+function offeredResult(
+  id: JsonRpcId,
+  offer: ConfirmationOffer,
+  _options: McpOptions,
+  ctx?: ServerContext,
+): JsonRpcResultBody | JsonRpcErrorBody {
+  if (!supportsForm(ctx)) return err(id, -32004, "This client cannot show the required confirmation; nothing ran");
+  return ok(
+    id,
+    inputRequired({
+      requestState: offer.id,
+      inputRequests: {
+        approval: inputRequired.elicit({
+          mode: "form",
+          message: `Confirm this saved Switchboard action: ${offer.line}${offer.risk ? "\n" + offer.risk : ""}`,
+          requestedSchema: {
+            type: "object",
+            properties: { decision: { type: "string", enum: [...APPROVAL_DECISIONS] } },
+            required: ["decision"],
+          },
+        }),
       },
-    ],
-    structuredContent: { approval: { id: offer.id, url, expiresAt: offer.expiresAt } },
-  });
+    }),
+  );
 }
 
 async function approvalResult(
@@ -666,6 +658,7 @@ async function approvalResult(
   actor: Caller["actor"],
   connectionId: string,
   cancel: boolean,
+  ctx?: ServerContext,
 ): Promise<JsonRpcResultBody | JsonRpcErrorBody> {
   const store = deps.confirmations;
   const row = store && (await ownApproval(store, offerId, actor, connectionId));
@@ -675,7 +668,14 @@ async function approvalResult(
       -32003,
       "This offer is unavailable or already used. Check its original run history before requesting another action.",
     );
-  if (cancel) {
+  const response = ctx?.mcpReq.inputResponses?.approval;
+  const decision = acceptedContent(ctx?.mcpReq.inputResponses, "approval", approvalDecision);
+  const declined =
+    typeof response === "object" &&
+    response !== null &&
+    "action" in response &&
+    (response.action === "decline" || response.action === "cancel");
+  if (cancel || declined || decision?.decision === "cancel") {
     const result = await store.cancel(offerId, [row.message.userId], connectionId);
     return ok(id, {
       content: [
@@ -683,15 +683,42 @@ async function approvalResult(
       ],
     });
   }
-  const io = new McpIO(
-    [],
-    row.message.threadKey,
-    approvalUrl(options, "offer") && store.approve && store.get
-      ? (offer) =>
-          `Nothing ran. Review ${offer.line} at ${approvalUrl(options, offer.id)}, then call approval_resume with id ${offer.id}.`
-      : undefined,
-  );
-  const refusal = await resumeApproval(deps, store, row, actor, io, connectionId, options);
+  if (row.expiresAt <= (deps.clock ?? systemClock)())
+    return err(id, -32003, "The saved confirmation expired; nothing ran");
+  if (!hasConfirmationConsent(row)) {
+    if (row.message.approvalConnection?.mode !== "form")
+      return err(id, -32004, "This saved action still requires its original approval; nothing ran");
+    if (
+      decision?.decision === "approve" &&
+      ctx?.mcpReq.requestState<string>() === row.id &&
+      row.message.approvalConnection?.mode === "form" &&
+      store.approve
+    ) {
+      const approved = await store.approve(row.id, [row.message.userId], connectionId, "mcp-form");
+      if (!approved.ok) return err(id, AUTH_ERROR, "The saved confirmation is unavailable; nothing ran");
+      if (approved.row.approvedBy !== "mcp-form")
+        return err(id, -32004, "The state service cannot record client confirmation; nothing ran");
+    } else {
+      return offeredResult(
+        id,
+        {
+          id: row.id,
+          line: row.kind === "run" ? row.receipt : row.line,
+          risk:
+            row.kind === "run"
+              ? [row.risk, row.originRepo ? `Repository: ${row.originRepo}` : ""].filter(Boolean).join("\n")
+              : "",
+          expiresAt: row.expiresAt,
+        },
+        options,
+        ctx,
+      );
+    }
+  }
+  const approvedRow = await ownApproval(store, row.id, actor, connectionId);
+  if (!approvedRow) return err(id, AUTH_ERROR, "The saved confirmation is unavailable; nothing ran");
+  const io = new McpIO([], row.message.threadKey);
+  const refusal = await resumeApproval(deps, store, approvedRow, actor, io, connectionId, options);
   return ok(id, {
     content: [{ type: "text", text: refusal || io.collected() }],
     ...(io.run() ? { structuredContent: io.run() } : {}),

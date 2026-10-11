@@ -1,3 +1,5 @@
+import { hasConfirmationConsent, type ConfirmationConsentSource } from "./confirmationConsent.js";
+export { hasConfirmationConsent } from "./confirmationConsent.js";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -54,6 +56,7 @@ export interface RunConfirmation {
   /** Original operator inputs travel with the exact command they derived. */
   derivation?: { kind: "operator"; context: ContextDependencies };
   browserApproved?: true;
+  approvedBy?: ConfirmationConsentSource;
   /** null means no repository context existed when this action was offered. */
   originRepo?: string | null;
   expiresAt: number;
@@ -76,6 +79,7 @@ export interface RedispatchConfirmation {
   /** Exact PR and objective shown by a Ship work question. */
   binding?: PrWorkBinding;
   browserApproved?: true;
+  approvedBy?: ConfirmationConsentSource;
   expiresAt: number;
 }
 
@@ -111,8 +115,13 @@ export interface ConfirmationStore {
   consume(id: string, actorIds: readonly string[], connectionId?: string): Promise<ConsumeOutcome>;
   /** Read an exact offer without changing its expiry or consuming it. */
   get?(id: string): Promise<Confirmation | undefined>;
-  /** Verified browser consent: update an existing row atomically, never recreate one. */
-  approve?(id: string, actorIds: readonly string[], connectionId: string): Promise<ConsumeOutcome>;
+  /** Verified adapter consent: update an existing row atomically, never recreate one. */
+  approve?(
+    id: string,
+    actorIds: readonly string[],
+    connectionId: string,
+    source?: ConfirmationConsentSource,
+  ): Promise<ConsumeOutcome>;
   /** Delete under the same requester check; a cancel and a consume on one id
    *  cannot both succeed. */
   cancel(id: string, actorIds: readonly string[], connectionId?: string): Promise<CancelOutcome>;
@@ -254,13 +263,15 @@ export function parsePendingConfirmation(v: unknown): PendingConfirmation | unde
   if (v.parsedInput !== undefined && !isRecord(v.parsedInput)) return undefined;
   if (v.originRepo !== undefined && v.originRepo !== null && typeof v.originRepo !== "string") return undefined;
   if (v.browserApproved !== undefined && v.browserApproved !== true) return undefined;
+  if (v.approvedBy !== undefined && v.approvedBy !== "browser" && v.approvedBy !== "mcp-form") return undefined;
   if (isRecord(v.message) && v.message.approvalConnection !== undefined) {
     const c = v.message.approvalConnection;
     if (
       !isRecord(c) ||
       typeof c.id !== "string" ||
       typeof c.credentialId !== "string" ||
-      typeof c.requestHash !== "string"
+      typeof c.requestHash !== "string" ||
+      (c.mode !== undefined && c.mode !== "form")
     )
       return undefined;
   }
@@ -305,6 +316,7 @@ function judge(
   now: number,
   kind: "consume" | "cancel" | "approve",
   connectionId?: string,
+  source: ConfirmationConsentSource = "browser",
 ): ConsumeOutcome | CancelOutcome {
   const row = rows.get(id);
   if (!row) return { ok: false, refused: "used" };
@@ -313,13 +325,14 @@ function judge(
     return { ok: false, refused: "expired", row };
   }
   const connection = row.message.approvalConnection;
-  if (connection && (connection.id !== connectionId || (kind === "consume" && row.browserApproved !== true)))
+  if (connection && (connection.id !== connectionId || (kind === "consume" && !hasConfirmationConsent(row))))
     return { ok: false, refused: "foreign" };
   if (!actorIds.includes(row.message.userId))
     return kind === "consume" ? { ok: false, refused: "foreign", row } : { ok: false, refused: "foreign" };
   if (kind === "approve") {
-    if (!connection) return { ok: false, refused: "foreign" };
-    row.browserApproved = true;
+    if (!connection || (source === "mcp-form" && connection.mode !== "form")) return { ok: false, refused: "foreign" };
+    row.approvedBy = source;
+    if (source === "browser") row.browserApproved = true;
     return { ok: true, row };
   }
   rows.delete(id);
@@ -353,8 +366,15 @@ export class InMemoryConfirmationStore implements ConfirmationStore {
     const row = this.rows.get(id);
     return row ? structuredClone(row) : undefined;
   }
-  async approve(id: string, actorIds: readonly string[], connectionId: string): Promise<ConsumeOutcome> {
-    return structuredClone(judge(this.rows, id, actorIds, this.clock(), "approve", connectionId)) as ConsumeOutcome;
+  async approve(
+    id: string,
+    actorIds: readonly string[],
+    connectionId: string,
+    source: ConfirmationConsentSource = "browser",
+  ): Promise<ConsumeOutcome> {
+    return structuredClone(
+      judge(this.rows, id, actorIds, this.clock(), "approve", connectionId, source),
+    ) as ConsumeOutcome;
   }
   async consume(id: string, actorIds: readonly string[], connectionId?: string): Promise<ConsumeOutcome> {
     const out = judge(this.rows, id, actorIds, this.clock(), "consume", connectionId) as ConsumeOutcome;
@@ -414,9 +434,14 @@ export class FileConfirmationStore implements ConfirmationStore {
   async get(id: string): Promise<Confirmation | undefined> {
     return this.read().get(id);
   }
-  async approve(id: string, actorIds: readonly string[], connectionId: string): Promise<ConsumeOutcome> {
+  async approve(
+    id: string,
+    actorIds: readonly string[],
+    connectionId: string,
+    source: ConfirmationConsentSource = "browser",
+  ): Promise<ConsumeOutcome> {
     const rows = this.read();
-    const result = judge(rows, id, actorIds, this.clock(), "approve", connectionId) as ConsumeOutcome;
+    const result = judge(rows, id, actorIds, this.clock(), "approve", connectionId, source) as ConsumeOutcome;
     this.write(rows);
     return result;
   }
@@ -484,8 +509,18 @@ export class WorkerConfirmationStore implements ConfirmationStore {
     if (body.row === null) return undefined;
     return this.readRow(body.row);
   }
-  async approve(id: string, actorIds: readonly string[], connectionId: string): Promise<ConsumeOutcome> {
-    const body = await this.post("/config/confirmations/approve", { id, actorIds, connectionId });
+  async approve(
+    id: string,
+    actorIds: readonly string[],
+    connectionId: string,
+    source: ConfirmationConsentSource = "browser",
+  ): Promise<ConsumeOutcome> {
+    const body = await this.post("/config/confirmations/approve", {
+      id,
+      actorIds,
+      connectionId,
+      ...(source === "browser" ? {} : { source }),
+    });
     if (isRefusal(body.refused)) return { ok: false, refused: body.refused };
     const row = this.readRow(body.row);
     if (!row) throw new Error("confirmation store returned no approved row");

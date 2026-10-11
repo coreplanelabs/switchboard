@@ -484,6 +484,64 @@ describe("ConfigDO confirmations (docs/reference/specs/routing-and-config.md ite
     ttlMs: TTL,
   });
 
+  it("client form consent is tied to its declared challenge and consumed once in SQLite", async () => {
+    const id = `c-${key()}`;
+    const connectionId = "a".repeat(64);
+    const message = { userId: requester, approvalConnection: { id: connectionId, mode: "form" } };
+    await post("/config/confirmations/put", row(id, `mcp:default:${key()}`, { command: "repo.offboard", message }));
+    expect(
+      (await post("/config/confirmations/approve", { id, actorIds: [requester], connectionId, source: "model" }))
+        .status,
+    ).toBe(400);
+    expect(
+      (
+        await post("/config/confirmations/approve", {
+          id,
+          actorIds: [requester],
+          connectionId: "b".repeat(64),
+          source: "mcp-form",
+        })
+      ).data,
+    ).toEqual({ refused: "foreign" });
+    const approved = await post("/config/confirmations/approve", {
+      id,
+      actorIds: [requester],
+      connectionId,
+      source: "mcp-form",
+    });
+    expect(approved.data.row).toMatchObject({ id, body: { approvedBy: "mcp-form" } });
+    expect((await post("/config/confirmations/get", { id })).data.row).toMatchObject({
+      id,
+      body: { approvedBy: "mcp-form" },
+    });
+    const outcomes = await Promise.all(
+      [1, 2].map(() => post("/config/confirmations/consume", { id, actorIds: [requester], connectionId })),
+    );
+    expect(outcomes.find((x) => "row" in x.data)?.data.row).toMatchObject({
+      id,
+      body: { command: "repo.offboard", approvedBy: "mcp-form" },
+    });
+    expect(outcomes.find((x) => "refused" in x.data)?.data).toEqual({ refused: "used" });
+    const legacy = `c-${key()}`;
+    await post(
+      "/config/confirmations/put",
+      row(legacy, `mcp:default:${key()}`, {
+        command: "repo.offboard",
+        message: { userId: requester, approvalConnection: { id: connectionId } },
+      }),
+    );
+    expect(
+      (
+        await post("/config/confirmations/approve", {
+          id: legacy,
+          actorIds: [requester],
+          connectionId,
+          source: "mcp-form",
+        })
+      ).data,
+    ).toEqual({ refused: "foreign" });
+  });
+
   it("browser approval updates only the existing bound offer and single-use consumption requires that connection", async () => {
     const id = `c-${key()}`;
     const connectionId = "a".repeat(64);
