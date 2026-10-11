@@ -1088,20 +1088,44 @@ export interface ActualConfigConsumerBinding {
   readonly instances: Read<ContainerInstance[]>;
 }
 
-async function readActualConfigConsumerOnHost(target: ConfigConsumerTarget): Promise<ActualConfigConsumerBinding> {
+async function readActualConfigConsumerOnHost(
+  target: ConfigConsumerTarget,
+  identity?: ConfigConsumerIdentity,
+): Promise<ActualConfigConsumerBinding> {
   // Wrangler prefers account_id in its config over the environment. A private
   // account-only file binds these reads even if the installation's files change.
   const directory = mkdtempSync(join(tmpdir(), "switchboard-consumer-read-"));
   const config = join(directory, "wrangler.jsonc");
+  let paging: ReturnType<typeof createPagingObserver> | undefined;
   try {
+    try {
+      paging = createPagingObserver({
+        log: (line) => process.stderr.write(`${line}\n`),
+        source: identity?.commit ?? "unknown",
+        expectedCommit: identity?.commit ?? "unknown",
+        env: process.env,
+        ...(process.env.RUNNER_TEMP
+          ? { artifactFile: join(process.env.RUNNER_TEMP, "config-read-diagnostic.json") }
+          : {}),
+      });
+    } catch {
+      /* Diagnostic availability cannot change the read. */
+    }
     writeFileSync(config, JSON.stringify({ account_id: target.account }));
     const [health, application, instances] = await Promise.all([
       defaultSandboxGateDeps.readHealth(target.healthUrl),
       defaultSandboxGateDeps.readAppState(target.dir, target.containerApp, config),
-      defaultSandboxGateDeps.readInstances(target.dir, target.containerApp, config),
+      defaultSandboxGateDeps.readInstances(target.dir, target.containerApp, config, undefined, paging?.observe),
     ]);
-    return { health, application, instances };
+    const binding = { health, application, instances };
+    try {
+      paging?.recordConsumerReads(binding);
+    } catch {
+      /* Observation only. */
+    }
+    return binding;
   } finally {
+    paging?.close();
     rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -1122,7 +1146,7 @@ export async function pushConfigOnHost(input: {
     };
   const publisher = await configPublisherIdentityOnHost();
   if (!publisher.ok) return { ...publisher, write: "not-written" };
-  const binding = await readActualConfigConsumerOnHost(opts.consumerTarget);
+  const binding = await readActualConfigConsumerOnHost(opts.consumerTarget, publisher.identity);
   const { health, application: app, instances } = binding;
   const current = eligibleConfigPublicationConsumer(publisher.identity, health, app, instances);
   if (!current.ok) return { ...current, write: "not-written" };

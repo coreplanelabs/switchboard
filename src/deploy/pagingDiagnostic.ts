@@ -4,6 +4,7 @@ import { closeSync, ftruncateSync, openSync, writeSync } from "node:fs";
 const MAX_BYTES = 16_384;
 const MAX_FRAMES = 8;
 const FINAL_LOG_BYTES = 8_192;
+const CONSUMER_READ_LOG_BYTES = 512;
 const MAX_VERSIONS = 16;
 const KEYS = ["per_page", "page_token", "next_page_token"] as const;
 const record = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -78,7 +79,12 @@ export function createPagingObserver(options: {
   expectedCommit: string;
   env: Record<string, string | undefined>;
   artifactFile?: string;
-}): { observe: PagingObserver; close: () => void; setSource: (value: string) => void } {
+}): {
+  observe: PagingObserver;
+  close: () => void;
+  setSource: (value: string) => void;
+  recordConsumerReads: (reads: { health: unknown; application: unknown; instances: unknown }) => void;
+} {
   const key = randomBytes(32);
   const digest = (s: string) => createHmac("sha256", key).update(s).digest("hex");
   const numeric = (s: string | undefined) => (/^\d{1,24}$/.test(s ?? "") ? s : null);
@@ -102,6 +108,7 @@ export function createPagingObserver(options: {
   let fd: number | undefined;
   let logBytes = 0;
   let fileUnavailable = false;
+  let consumerReadsRecorded = false;
   const persist = () => {
     try {
       let text = JSON.stringify(state);
@@ -206,7 +213,10 @@ export function createPagingObserver(options: {
         artifactAvailable: fd !== undefined && !fileUnavailable,
         frames: [...frames],
       };
-      while (Buffer.byteLength(JSON.stringify(capture)) + 24 > FINAL_LOG_BYTES && capture.frames.length > 3) {
+      while (
+        Buffer.byteLength(JSON.stringify(capture)) + 24 > FINAL_LOG_BYTES - CONSUMER_READ_LOG_BYTES &&
+        capture.frames.length > 3
+      ) {
         capture.frames.shift();
         capture.truncated = true;
       }
@@ -215,6 +225,48 @@ export function createPagingObserver(options: {
   };
   return {
     observe,
+    recordConsumerReads: (reads) => {
+      if (consumerReadsRecorded) return;
+      consumerReadsRecorded = true;
+      const health = record(reads.health) ? reads.health : undefined;
+      const status =
+        health &&
+        typeof health.status === "number" &&
+        Number.isInteger(health.status) &&
+        health.status >= 100 &&
+        health.status <= 599
+          ? health.status
+          : null;
+      const readKind = (read: unknown, inventory = false) => {
+        if (!record(read)) return "unknown";
+        if ("error" in read) return "read-error";
+        if (inventory && Array.isArray(read.value)) return "complete";
+        if (
+          !inventory &&
+          record(read.value) &&
+          typeof read.value.version === "number" &&
+          Number.isFinite(read.value.version)
+        )
+          return "available";
+        return "unknown";
+      };
+      const predicates = {
+        health:
+          health && "error" in health
+            ? "read-error"
+            : status === null
+              ? "unknown"
+              : status === 200
+                ? "available"
+                : "non-200",
+        healthStatus: health && "error" in health ? null : status,
+        application: readKind(reads.application),
+        instances: readKind(reads.instances, true),
+      };
+      state.consumerReads = predicates;
+      persist();
+      log({ phase: "consumer-read", source: state.source, expectedCommit: state.expectedCommit, predicates }, true);
+    },
     setSource: (value) => {
       if (!failed) {
         state.source = source(value);

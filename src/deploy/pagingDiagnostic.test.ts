@@ -14,6 +14,66 @@ const page = (next: unknown = null) => ({
 const event = { app, pageIndex: 2, requestedCursor: "private-cursor", cumulativeCount: 2 };
 
 describe("bounded paging evidence", () => {
+  it("consumer predicates stay structural, preserve interruption and cannot overwrite the first read", () => {
+    const directory = mkdtempSync(join(tmpdir(), "consumer-predicates-"));
+    const file = join(directory, "capture.json");
+    const logs: string[] = [];
+    const capture = createPagingObserver({
+      log: (line) => logs.push(line),
+      source,
+      expectedCommit: source,
+      env,
+      artifactFile: file,
+    });
+    try {
+      capture.observe({ ...event, phase: "failure", reason: "interrupted" });
+      capture.recordConsumerReads({
+        health: { status: 200, body: { secret: "private-body" } },
+        application: { value: { version: 12, image: "private-image" } },
+        instances: { error: "private-error" },
+      });
+      const text = readFileSync(file, "utf8");
+      expect(JSON.parse(text)).toMatchObject({
+        originalError: "interrupted",
+        consumerReads: { health: "available", healthStatus: 200, application: "available", instances: "read-error" },
+      });
+      capture.recordConsumerReads({ health: { status: 503 }, application: null, instances: null });
+      expect(readFileSync(file, "utf8")).toBe(text);
+      expect(text + logs.join("\n")).not.toContain("private-");
+    } finally {
+      capture.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  it("consumer predicates keep unknown input unknown and tolerate an unavailable sink", () => {
+    const directory = mkdtempSync(join(tmpdir(), "consumer-unknown-"));
+    const file = join(directory, "capture.json");
+    const capture = createPagingObserver({
+      log: () => {
+        throw new Error("sink unavailable");
+      },
+      source,
+      expectedCommit: source,
+      env,
+      artifactFile: file,
+    });
+    try {
+      capture.recordConsumerReads({
+        health: { status: "private-status" },
+        application: { value: "private-value" },
+        instances: { value: "private-value" },
+      });
+      expect(JSON.parse(readFileSync(file, "utf8")).consumerReads).toEqual({
+        health: "unknown",
+        healthStatus: null,
+        application: "unknown",
+        instances: "unknown",
+      });
+    } finally {
+      capture.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
   it("preserves actual wire facts separately from argv and freezes the original failure", () => {
     const directory = mkdtempSync(join(tmpdir(), "paging-evidence-"));
     const file = join(directory, "capture.json");
@@ -114,6 +174,16 @@ describe("bounded paging evidence", () => {
       expect(final.frames.slice(-3).map((f: { phase: string }) => f.phase)).toEqual(["before", "after", "failure"]);
       expect(Buffer.byteLength(logs.join(""))).toBeLessThanOrEqual(16384);
       expect(readFileSync(file, "utf8")).toBe("foreign bytes");
+      capture.recordConsumerReads({
+        health: { status: 503 },
+        application: { error: "private-error" },
+        instances: { error: "private-error" },
+      });
+      expect(JSON.parse(logs.at(-1)!.replace("[paging-diagnostic] ", ""))).toMatchObject({
+        phase: "consumer-read",
+        predicates: { health: "non-200", healthStatus: 503, application: "read-error", instances: "read-error" },
+      });
+      expect(Buffer.byteLength(logs.join("\n")) + 1).toBeLessThanOrEqual(16384);
     } finally {
       capture.close();
       rmSync(directory, { recursive: true, force: true });
