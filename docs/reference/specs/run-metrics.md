@@ -111,3 +111,17 @@ Every finished run writes one flat metrics point into a Workers Analytics Engine
 | Criterion | Proof |
 |---|---|
 | Hovering a day in the replacement Metrics outcome chart shows the total and each outcome as run counts, without currency formatting. Shared cost charts retain their USD formatter. | `[unit]` `web/green/pages/metrics.test.ts::Green Metrics::shows the hovered outcome total and breakdown as run counts`, `web/src/pages/costs.test.ts::CostsPage::hovering a day shows a compact tooltip: the day and its total on top, then one row per component, largest first, the estimate tagged; leaving hides it` |
+
+
+## Current-user page aggregates
+
+The Metrics page and its JSON twin use the current run-read predicate and the global work view before aggregation. Mine selects current proved owner identities; Person keeps the selected person's read ceiling; Everyone retains the actual actor's current permission boundary. Query parameters cannot choose another owner. The existing generic metrics command keeps its unscoped behavior. No global fallback replaces an unavailable personal read, and shared system health remains unavailable to personal views when it cannot be attributed.
+
+The SQL reader compiles this common predicate against stored requester, channel and repository fields. Missing visibility facts remain unknown. The in-memory reader receives the same predicate through the existing query seam, requires a matching canonical query, and applies the reference predicate evaluator before any sums or quantiles. A missing or mismatched scoped predicate fails closed. Point schema, immutable writers, outcome fields, model and pricing formats remain unchanged.
+
+| Criterion | Proof |
+|---|---|
+| Mine, read-only Person, authorized Everyone and a denied reader return literal distinct-owner aggregate totals on both page and JSON; forged owner/all query knobs cannot retarget the view. | `[unit]` `src/channels/metricsView.test.ts::current work metrics projection::filters Mine, read-only Person and authorized Everyone before aggregation on the page and JSON twin` |
+| Unavailable scoped source reads return 503 without global totals or provider details. | `[unit]` `src/channels/metricsView.test.ts::current work metrics projection::does not substitute global totals when scoped source reads are unavailable` |
+| Stored owner/repository scope filters before aggregation, missing or mismatched scope refuses, and unscoped queries preserve their existing totals. | `[unit]` `src/core/metrics.test.ts::scoped metrics aggregation::filters stored owner and repository facts before aggregating and refuses missing or mismatched scope` |
+| An empty conjunction remains denied in both SQL and the stored-point evaluator. | `[unit]` `src/core/metrics.test.ts::scoped metrics aggregation::keeps an empty conjunction denied in both SQL and stored-point aggregation` |

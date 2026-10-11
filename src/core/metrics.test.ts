@@ -24,11 +24,17 @@ function point(opts: {
   unpriced?: number;
   turns?: number;
   finishedAt: number;
+  userId?: string;
+  channelId?: string;
+  repo?: string;
 }): RunMetricsPoint {
   const blobs = POINT_COLUMNS.blobs.map(() => "");
   blobs[0] = POINT_SCHEMA;
   blobs[POINT_COLUMNS.blobs.indexOf("agent")] = opts.agent;
   blobs[POINT_COLUMNS.blobs.indexOf("status")] = opts.status ?? "completed";
+  blobs[POINT_COLUMNS.blobs.indexOf("requester")] = opts.userId ?? "";
+  blobs[POINT_COLUMNS.blobs.indexOf("channel")] = opts.channelId ?? "";
+  blobs[POINT_COLUMNS.blobs.indexOf("repository")] = opts.repo ?? "";
   const doubles = POINT_COLUMNS.doubles.map(() => 0);
   doubles[POINT_COLUMNS.doubles.indexOf("wall")] = opts.wallMs ?? 1000;
   doubles[POINT_COLUMNS.doubles.indexOf("dollars")] = opts.usd ?? 0;
@@ -80,6 +86,32 @@ describe("parseMetricsConfig", () => {
 });
 
 describe("metricsQueries — the three texts, pinned", () => {
+  it("applies the same readable owner predicate before every aggregate and treats unstamped visibility as unknown", () => {
+    const scoped = metricsQueries(
+      {
+        ...RANGE,
+        visibleTo: {
+          kind: "and",
+          of: [
+            { kind: "user-is", userId: "access:alice'quoted" },
+            { kind: "channels-in", channelIds: new Set(["slack:C1"]) },
+          ],
+        },
+      },
+      "runs",
+    );
+    for (const sql of Object.values(scoped)) {
+      expect(sql).toContain("blob14 = 'access:alice''quoted'");
+      expect(sql).toContain("blob8 IN ('slack:C1')");
+      expect(sql).not.toContain("undefined");
+    }
+    const hidden = metricsQueries(
+      { ...RANGE, visibleTo: { kind: "visibility-in", visibilities: new Set(["public"]) } },
+      "runs",
+    );
+    expect(hidden.byAgent).toContain(" AND 0 ");
+  });
+
   const q = metricsQueries(RANGE, "switchboard_runs");
 
   it("every query is weighted with _sample_interval and names its columns from POINT_COLUMNS", () => {
@@ -298,5 +330,47 @@ describe("buildMetricsReport over the in-memory source", () => {
     expect(empty.byDay.every((d) => d.runs === 0)).toBe(true);
     expect(empty.byAgent).toEqual([]);
     expect(empty.p50ByDayAgent).toEqual([]);
+  });
+});
+
+describe("scoped metrics aggregation", () => {
+  it("keeps an empty conjunction denied in both SQL and stored-point aggregation", async () => {
+    const scope = { kind: "and" as const, of: [] };
+    const queries = metricsQueries({ ...RANGE, visibleTo: scope }, "runs_v1");
+    expect(queries.byAgent).toContain(" AND 0 GROUP BY ");
+    const source = new InMemoryMetricsSource([
+      point({ agent: "coding", userId: "access:alice", usd: 2, finishedAt: SINCE }),
+    ]);
+    expect(await source.query(queries.byAgent, scope)).toEqual([]);
+    expect(await source.query(metricsQueries(RANGE, "runs_v1").byAgent)).toMatchObject([
+      { agent: "coding", runs: 1, usd: 2 },
+    ]);
+  });
+
+  it("filters stored owner and repository facts before aggregating and refuses missing or mismatched scope", async () => {
+    const scope = {
+      kind: "and" as const,
+      of: [
+        { kind: "user-is" as const, userId: "access:alice" },
+        { kind: "repos-in" as const, repos: new Set(["demo/allowed"]) },
+      ],
+    };
+    const source = new InMemoryMetricsSource([
+      point({ agent: "coding", userId: "access:alice", repo: "demo/allowed", usd: 2, finishedAt: SINCE }),
+      point({ agent: "coding", userId: "access:alice", repo: "demo/hidden", usd: 50, finishedAt: SINCE }),
+      point({ agent: "review", userId: "access:bob", repo: "demo/allowed", usd: 100, finishedAt: SINCE }),
+    ]);
+    const scoped = metricsQueries({ ...RANGE, visibleTo: scope }, "runs_v1");
+    expect(await source.query(scoped.byAgent, scope)).toEqual([
+      { agent: "coding", runs: 1, failed: 0, p50WallMs: 1000, p95WallMs: 1000, usd: 2, unpricedTokens: 0, turns: 1 },
+    ]);
+    await expect(source.query(scoped.byAgent)).rejects.toThrow("metrics read scope is unavailable");
+    await expect(source.query(scoped.byAgent, { kind: "user-is", userId: "access:bob" })).rejects.toThrow(
+      "metrics read scope is unavailable",
+    );
+    expect(await source.query(metricsQueries(RANGE, "runs_v1").byAgent)).toMatchObject([
+      { agent: "coding", runs: 2, usd: 52 },
+      { agent: "review", runs: 1, usd: 100 },
+    ]);
   });
 });

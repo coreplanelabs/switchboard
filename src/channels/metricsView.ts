@@ -1,3 +1,4 @@
+import { readableRuns } from "./liveView/viewer.js";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import type { Actor } from "../core/authz/types.js";
 import { METRICS_AGENT_NAME, METRICS_MAX_DAYS, type MetricsReport } from "../core/metrics.js";
@@ -82,7 +83,11 @@ export function createMetricsViewHandler(
     }
     const agent = agentParam ?? undefined;
     service
-      .report({ ...(days === undefined ? {} : { days }), ...(agent === undefined ? {} : { agent }) })
+      .report({
+        ...(days === undefined ? {} : { days }),
+        ...(agent === undefined ? {} : { agent }),
+        visibleTo: ctx.actor ? readableRuns(ctx.actor) : { kind: "none" },
+      })
       .then((report: MetricsReport) => {
         if (route.kind === "json") {
           json(res, report);
