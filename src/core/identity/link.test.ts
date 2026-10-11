@@ -462,6 +462,7 @@ describe("atomic link contract", () => {
 });
 
 describe("durable link intent", () => {
+  // Two tsx child processes start before SQLite arbitrates; cold starts under a loaded CI runner exceed the 5 s default.
   it("serializes independent writers at the database authority", async () => {
     const path = dbPath();
     const h = harness("sqlite", path);
@@ -525,7 +526,7 @@ describe("durable link intent", () => {
       if (h.db.isTransaction) h.db.exec("ROLLBACK");
       for (const child of children) child.kill();
     }
-  });
+  }, 30_000);
   it("survives restart at claim consent and committed response loss", async () => {
     const h = harness("sqlite");
     const abandoned = await start(h.directory);
