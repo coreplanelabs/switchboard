@@ -17,10 +17,12 @@ npx tsx src/cli.ts <group> <verb> [args…] [--kebab-option value…] [--json]
 ## The two built-ins: `ask` and `start`
 
 ```
-npx tsx src/cli.ts ask [--thread <key>] "<request>"
+npx tsx src/cli.ts ask [--thread <key>] [--idempotency-key <key>] "<request>"
 ```
 
 Not a registered command — a **channel**, exactly like Slack, just printing to your terminal instead. Directives (`agent:`, `model:`, `effort:`, `budget:`) work identically. Use `--thread` to simulate a follow-up in an existing thread (stickiness applies). With `SWITCHBOARD_CLI_EMAIL` set (and `SLACK_BOT_TOKEN` in `.env` to look it up), the run is yours — the Slack person the email names, on the runs index, under "show mine" and on the costs page — authenticated as `cli:local`, whose every grant it keeps; unset, the run is `cli:local`'s own ([authorization](authorization.md#ingress-tokens-are-credentials-not-grants)). The answer goes to stdout and nothing else does — the status lines and the process log (`[run] …`) go to stderr — and the process exits 1 when the run did not complete — a refused key, a failed tool — so a script can tell an answer from a failure.
+
+A connected profile sends `ask` through the host's MCP adapter. The CLI prints a request key and thread before sending. If the acknowledgement is lost, retry the same text and credential with both printed `--idempotency-key` and `--thread` values. It never retries automatically. A host that stores requests returns a receipt and, when known, the original run; this confirms receipt of the request, not completion. Safe retries require that host to retain the original request. A local `ask` has no durable receipt and refuses `--idempotency-key` before work starts.
 
 ```
 npx tsx src/cli.ts start

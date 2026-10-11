@@ -208,6 +208,29 @@ describe("parseCliArgv — the `ask` built-in (the channel harness, not a regist
     });
   });
 
+  it("an explicit retry key is stripped from text and gives repeated asks the same default thread", async () => {
+    const { commands } = await fixture();
+    const first = parseCliArgv(["ask", "--idempotency-key", "retry-1", "hello"], commands, now);
+    expect(first).toEqual({
+      kind: "ask",
+      threadKey: "cli:3998fbdb8d844aa01d03de09b39b7b082e03bee469c40387bf2fedb81b1883f8",
+      text: "hello",
+      idempotencyKey: "retry-1",
+    });
+    expect(parseCliArgv(["ask", "hello", "--idempotency-key=retry-1"], commands, () => 5678)).toEqual(first);
+    expect(
+      parseCliArgv(["ask", "--thread", "cli:chosen", "--idempotency-key", "retry-1", "hello"], commands, now),
+    ).toEqual({
+      kind: "ask",
+      threadKey: "cli:chosen",
+      idempotencyKey: "retry-1",
+      text: "hello",
+    });
+    for (const tail of [["--idempotency-key"], ["--idempotency-key="], ["--idempotency-key", "x".repeat(129)]]) {
+      expect(parseCliArgv(["ask", "hello", ...tail], commands, now)).toMatchObject({ kind: "usage" });
+    }
+  });
+
   it("an empty request or a dangling --thread is a usage error", async () => {
     const { commands } = await fixture();
     expect(parseCliArgv(["ask"], commands, now)).toMatchObject({

@@ -119,17 +119,26 @@ afterAll(async () => {
 });
 
 /** `npx tsx src/cli.ts ask <text>` from the empty directory, both streams captured. */
-function ask(text: string): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function ask(
+  text: string,
+  flags: string[] = [],
+  clientConfig?: string,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const repo = process.cwd();
-  const child = spawn(process.execPath, [join(repo, "node_modules/.bin/tsx"), join(repo, "src/cli.ts"), "ask", text], {
-    cwd: dir,
-    env: {
-      ...process.env,
-      SWITCHBOARD_CONFIG: join(dir, "config", "config.yaml"),
-      SWITCHBOARD_SKILLS_DIR: join(repo, "skills"),
-      FAKE_API_KEY: "not-a-real-key",
+  const child = spawn(
+    process.execPath,
+    [join(repo, "node_modules/.bin/tsx"), join(repo, "src/cli.ts"), "ask", ...flags, text],
+    {
+      cwd: dir,
+      env: {
+        ...process.env,
+        SWITCHBOARD_CONFIG: join(dir, "config", "config.yaml"),
+        SWITCHBOARD_SKILLS_DIR: join(repo, "skills"),
+        SWITCHBOARD_CLIENT_CONFIG: clientConfig ?? join(dir, "no-hosted-profile.json"),
+        FAKE_API_KEY: "not-a-real-key",
+      },
     },
-  });
+  );
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (c: Buffer) => (stdout += c.toString()));
@@ -168,5 +177,83 @@ describe("the CLI process running `ask` against a provider", () => {
     expect(r.stdout).not.toMatch(PROCESS_LOG_LINE);
     expect(r.stderr).toContain("[operator] cli:");
     expect(r.stderr).toContain('Provider "fake": FAKE_API_KEY was refused');
+  }, 60_000);
+
+  it("a local retry key refuses before work because this process has no durable admission store", async () => {
+    const r = await ask("what is 2+2", ["--idempotency-key", "local-retry"]);
+    expect(r.code).toBe(2);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain(
+      "--idempotency-key requires a connected host; local asks have no durable admission receipt.",
+    );
+  }, 60_000);
+});
+
+describe("the hosted CLI process admission receipt", () => {
+  it("prints its key before a lost acknowledgement and retries the same native MCP request and owner", async () => {
+    const requests: Array<{ text: string; thread: string; idempotencyKey: string }> = [];
+    const credentials: Array<string | undefined> = [];
+    const admitted = new Map<string, string>();
+    const host = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        const rpc = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        requests.push(rpc.params.arguments);
+        credentials.push(req.headers.authorization);
+        const { thread, idempotencyKey } = rpc.params.arguments;
+        const address = JSON.stringify([thread, idempotencyKey]);
+        const duplicate = admitted.has(address);
+        admitted.set(address, "original-owner");
+        if (requests.length === 1) {
+          res.destroy();
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: rpc.id,
+            result: {
+              content: [{ type: "text", text: "Request admitted." }],
+              structuredContent: {
+                admission: { status: "accepted", receiptId: "original-receipt", runId: "original-owner", duplicate },
+              },
+            },
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) => host.listen(0, "127.0.0.1", resolve));
+    try {
+      const profile = join(dir, "hosted-test.json");
+      writeFileSync(
+        profile,
+        JSON.stringify({ url: `http://127.0.0.1:${(host.address() as AddressInfo).port}`, bearer: "a".repeat(64) }),
+      );
+      const first = await ask("continue the work", [], profile);
+      expect(first.code).toBe(1);
+      const key = /^Request key: (.+)$/m.exec(first.stderr)?.[1];
+      const thread = /^Thread: (.+)$/m.exec(first.stderr)?.[1];
+      expect(key).toMatch(/^"[a-f0-9-]{36}"$/);
+      expect(thread).toMatch(/^"[^"\n]+"$/);
+      const retry = await ask(
+        "continue the work",
+        ["--thread", JSON.parse(thread!), "--idempotency-key", JSON.parse(key!)],
+        profile,
+      );
+      expect(retry.code, retry.stderr).toBe(0);
+      expect(retry.stdout.trim()).toBe(
+        "Admission: accepted\nReceipt: original-receipt\nRun: original-owner\nAlready received: yes",
+      );
+      expect(requests).toEqual([
+        { text: "continue the work", thread: JSON.parse(thread!), idempotencyKey: JSON.parse(key!) },
+        { text: "continue the work", thread: JSON.parse(thread!), idempotencyKey: JSON.parse(key!) },
+      ]);
+      expect(admitted.size).toBe(1);
+      expect(credentials).toEqual([`Bearer ${"a".repeat(64)}`, `Bearer ${"a".repeat(64)}`]);
+    } finally {
+      await new Promise<void>((resolve) => host.close(() => resolve()));
+    }
   }, 60_000);
 });
