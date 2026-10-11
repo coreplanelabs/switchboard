@@ -5,6 +5,7 @@ import {
   buildMetricsReport,
   InMemoryMetricsSource,
   metricsQueries,
+  metricsPredicate,
   MetricsSourceError,
   parseMetricsConfig,
   type MetricsRange,
@@ -372,5 +373,26 @@ describe("scoped metrics aggregation", () => {
       { agent: "coding", runs: 2, usd: 52 },
       { agent: "review", runs: 1, usd: 100 },
     ]);
+  });
+});
+
+describe("table-specific metrics read predicate", () => {
+  it("preserves the legacy run columns and unknown visibility while absent custom-table facts deny", () => {
+    expect(
+      metricsPredicate({
+        kind: "and",
+        of: [
+          { kind: "user-is", userId: "access:alice" },
+          { kind: "channels-in", channelIds: new Set(["slack:C1"]) },
+          { kind: "repos-not-in", repos: new Set(["org/secret"]) },
+          { kind: "visibility-in", visibilities: new Set(["unknown"]) },
+        ],
+      }),
+    ).toBe("(blob14 = 'access:alice' AND blob8 IN ('slack:C1') AND blob9 NOT IN ('org/secret') AND 1)");
+    expect(metricsPredicate({ kind: "repos-not-in", repos: new Set() }, {})).toBe("0");
+    expect(metricsPredicate({ kind: "visibility-in", visibilities: new Set(["unknown"]) }, {})).toBe("0");
+    expect(metricsPredicate({ kind: "user-is", userId: "access:alice" }, { requester: "blob7" })).toBe(
+      "blob7 = 'access:alice'",
+    );
   });
 });

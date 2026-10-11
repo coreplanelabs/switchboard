@@ -63,10 +63,49 @@ describe("reviewsQueries", () => {
   });
 });
 
+describe("scoped reviewsQueries", () => {
+  it("filters every aggregate with each table's exact requester and repository columns", () => {
+    const q = reviewsQueries(RANGE, "d", {
+      kind: "and",
+      of: [
+        { kind: "user-is", userId: "access:alice" },
+        { kind: "repos-in", repos: new Set(["org/one"]) },
+      ],
+    });
+    for (const [key, sql] of Object.entries(q)) {
+      const filter =
+        key === "reviews"
+          ? "(blob7 = 'access:alice' AND (blob3 != '' AND lower(blob3) IN ('org/one')))"
+          : "(blob14 = 'access:alice' AND (blob9 != '' AND lower(blob9) IN ('org/one')))";
+      expect(
+        sql.slice(sql.indexOf(" WHERE "), sql.indexOf(" GROUP BY ") < 0 ? undefined : sql.indexOf(" GROUP BY ")),
+      ).toContain(" AND " + filter);
+    }
+  });
+
+  it("holds unsupported review facts while preserving a supported OR branch and escaping SQL strings", () => {
+    const channel = reviewsQueries(RANGE, "d", { kind: "channels-in", channelIds: new Set(["slack:C1"]) });
+    expect(channel.runs).toContain(" AND blob8 IN ('slack:C1')");
+    expect(channel.reviews).toContain(" AND 0 GROUP BY");
+    const mixed = reviewsQueries(RANGE, "d", {
+      kind: "or",
+      of: [
+        { kind: "channels-in", channelIds: new Set(["slack:C1"]) },
+        { kind: "user-is", userId: "access:a'b" },
+      ],
+    });
+    expect(mixed.reviews).toContain(" AND (0 OR blob7 = 'access:a''b') GROUP BY");
+    expect(() => reviewsQueries(RANGE, "d", { kind: "user-is", userId: "access:bad\nsubject" })).toThrow(
+      "invalid metrics scope value",
+    );
+  });
+});
+
 // The functions Analytics Engine's SQL reference documents (aggregate,
 // conditional, date-time, mathematical); a query calling anything else is
 // refused by the service, and one refused query fails the whole report.
 const DOCUMENTED_FUNCTIONS = new Set([
+  "lower",
   "count",
   "sum",
   "avg",
@@ -118,10 +157,12 @@ const DOCUMENTED_FUNCTIONS = new Set([
 
 describe("reviewsQueries — only documented SQL functions", () => {
   it("calls no function outside Analytics Engine's SQL reference", () => {
-    const q = reviewsQueries(RANGE, "switchboard_runs");
+    const q = reviewsQueries(RANGE, "switchboard_runs", { kind: "repos-not-in", repos: new Set(["org/private"]) });
     for (const [name, sql] of Object.entries(q)) {
       const called = [...sql.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)].map((m) => m[1]);
-      for (const fn of called) expect(DOCUMENTED_FUNCTIONS.has(fn), `${name} calls ${fn}`).toBe(true);
+      // Parenthesized policy groups follow SQL operators, not function calls.
+      for (const fn of called.filter((name) => !["AND", "OR", "IN"].includes(name.toUpperCase())))
+        expect(DOCUMENTED_FUNCTIONS.has(fn), `${name} calls ${fn}`).toBe(true);
     }
   });
 });
@@ -356,5 +397,36 @@ describe("buildReviewsReport", () => {
     expect(r.maxSampleInterval).toBe(4);
     expect(r.usage.reviewsPerPullRequest).toBeUndefined();
     expect(r.usage.pullRequests).toBe(2);
+  });
+});
+
+describe("review duration population", () => {
+  it("retains the successful surface population so no sample differs from a valid zero duration", () => {
+    const report = buildReviewsReport(
+      {
+        ...EMPTY,
+        runs: [
+          { day: sqlDay(0), surface: "mcp", outcome: "success", requester: "access:alice", runs: 2 },
+          { day: sqlDay(0), surface: "http", outcome: "failure", requester: "access:alice", runs: 1 },
+        ],
+        durationBySurface: [{ surface: "mcp", runs: 2, p50Ms: 0, p95Ms: 0 }],
+      },
+      RANGE,
+    );
+    expect(report.usage.bySurface).toEqual([
+      { surface: "mcp", runs: 2, durationRuns: 2, p50Ms: 0, p95Ms: 0 },
+      { surface: "http", runs: 1, durationRuns: 0, p50Ms: 0, p95Ms: 0 },
+    ]);
+  });
+  it("does not invent a successful sample population when a legacy duration row omitted it", () => {
+    const report = buildReviewsReport(
+      {
+        ...EMPTY,
+        runs: [{ day: sqlDay(0), surface: "mcp", outcome: "success", requester: "access:alice", runs: 2 }],
+        durationBySurface: [{ surface: "mcp", p50Ms: 0, p95Ms: 0 }],
+      },
+      RANGE,
+    );
+    expect(report.usage.bySurface).toEqual([{ surface: "mcp", runs: 2, p50Ms: 0, p95Ms: 0 }]);
   });
 });

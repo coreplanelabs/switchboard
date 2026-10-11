@@ -145,7 +145,26 @@ const DAY = "toStartOfInterval(timestamp, INTERVAL '1' DAY) AS day";
 
 /** Translation of the common policy predicate to the stored metrics fields.
  * Missing visibility facts stay unknown; this adds no authorization rules. */
-function metricsPredicate(predicate: Predicate): string {
+export interface MetricsPredicateColumns {
+  requester?: string;
+  channel?: string;
+  repository?: string;
+  /** Empty blobs mean absent repositories; policy compares stored names without case. */
+  normalizeRepository?: boolean;
+  /** The legacy run table has no visibility column: every stored row is unknown. */
+  channelVisibility?: "unknown";
+}
+const RUN_PREDICATE_COLUMNS: MetricsPredicateColumns = {
+  requester: blobColumn("requester"),
+  channel: blobColumn("channel"),
+  repository: blobColumn("repository"),
+  channelVisibility: "unknown",
+};
+
+export function metricsPredicate(
+  predicate: Predicate,
+  columns: MetricsPredicateColumns = RUN_PREDICATE_COLUMNS,
+): string {
   const quote = (value: string): string => {
     if (!value || value.length > 2048 || /\p{Cc}/u.test(value)) throw new Error("invalid metrics scope value");
     return "'" + value.replaceAll("\\", "\\\\").replaceAll("'", "''") + "'";
@@ -156,6 +175,12 @@ function metricsPredicate(predicate: Predicate): string {
       : excluding
         ? "1"
         : "0";
+  const repositories = (values: ReadonlySet<string>, excluding = false): string => {
+    const column = columns.repository;
+    if (!column) return "0";
+    if (!columns.normalizeRepository) return listed(column, values, excluding);
+    return `(${column} != '' AND ${listed(`lower(${column})`, new Set([...values].map((repo) => repo.toLowerCase())), excluding)})`;
+  };
   switch (predicate.kind) {
     case "all":
       return "1";
@@ -163,19 +188,23 @@ function metricsPredicate(predicate: Predicate): string {
     case "organizations-in":
       return "0";
     case "user-is":
-      return `${blobColumn("requester")} = ${quote(predicate.userId)}`;
+      return columns.requester ? `${columns.requester} = ${quote(predicate.userId)}` : "0";
     case "channels-in":
-      return listed(blobColumn("channel"), predicate.channelIds);
+      return columns.channel ? listed(columns.channel, predicate.channelIds) : "0";
     case "repos-in":
-      return listed(blobColumn("repository"), predicate.repos);
+      return repositories(predicate.repos);
     case "repos-not-in":
-      return listed(blobColumn("repository"), predicate.repos, true);
+      return repositories(predicate.repos, true);
     case "visibility-in":
-      return predicate.visibilities.has("unknown") ? "1" : "0";
+      return columns.channelVisibility === "unknown" && predicate.visibilities.has("unknown") ? "1" : "0";
     case "and":
-      return predicate.of.length ? "(" + predicate.of.map(metricsPredicate).join(" AND ") + ")" : "0";
+      return predicate.of.length
+        ? "(" + predicate.of.map((part) => metricsPredicate(part, columns)).join(" AND ") + ")"
+        : "0";
     case "or":
-      return predicate.of.length ? "(" + predicate.of.map(metricsPredicate).join(" OR ") + ")" : "0";
+      return predicate.of.length
+        ? "(" + predicate.of.map((part) => metricsPredicate(part, columns)).join(" OR ") + ")"
+        : "0";
   }
 }
 

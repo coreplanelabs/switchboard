@@ -1,5 +1,6 @@
+import type { Predicate } from "./authz/types.js";
 import { DAY_MS, MINUTE_MS, REVIEWS_HISTOGRAM_OPEN_MS } from "./budgets.js";
-import { METRICS_DATASET_NAME, METRICS_MAX_DAYS, type MetricsRow } from "./metrics.js";
+import { METRICS_DATASET_NAME, METRICS_MAX_DAYS, metricsPredicate, type MetricsRow } from "./metrics.js";
 import {
   blobColumn,
   doubleColumn,
@@ -66,7 +67,7 @@ const finishDay = (finishedAt: string): string =>
 
 /** The eight report queries over `dataset` for `range` — the ONLY place their
  *  text is built. */
-export function reviewsQueries(range: ReviewsRange, dataset: string): ReviewsQueries {
+export function reviewsQueries(range: ReviewsRange, dataset: string, visibleTo?: Predicate): ReviewsQueries {
   if (!METRICS_DATASET_NAME.test(dataset)) throw new Error(`not an Analytics Engine dataset name: ${dataset}`);
   const { fromMs, toMs } = range;
   if (!Number.isSafeInteger(fromMs) || !Number.isSafeInteger(toMs) || toMs <= fromMs)
@@ -81,11 +82,17 @@ export function reviewsQueries(range: ReviewsRange, dataset: string): ReviewsQue
   const reviewFinish = reviewDouble("finished at");
   const runs =
     `${scan} AND ${runBlob("schema")} = '${POINT_SCHEMA}' AND ${RUN_INDEX} = 'review' ` +
-    `AND ${runFinish} >= ${fromMs} AND ${runFinish} < ${toMs}`;
+    `AND ${runFinish} >= ${fromMs} AND ${runFinish} < ${toMs}` +
+    (visibleTo
+      ? ` AND ${metricsPredicate(visibleTo, { requester: runBlob("requester"), channel: runBlob("channel"), repository: runBlob("repository"), channelVisibility: "unknown", normalizeRepository: true })}`
+      : "");
   const successes = `${runs} AND ${runBlob("outcome")} = 'success'`;
   const reviews =
     `${scan} AND ${reviewBlob("schema")} = '${REVIEW_POINT_SCHEMA}' ` +
-    `AND ${reviewFinish} >= ${fromMs} AND ${reviewFinish} < ${toMs}`;
+    `AND ${reviewFinish} >= ${fromMs} AND ${reviewFinish} < ${toMs}` +
+    (visibleTo
+      ? ` AND ${metricsPredicate(visibleTo, { requester: reviewBlob("requester"), repository: reviewBlob("repository"), normalizeRepository: true })}`
+      : "");
   const quantiles =
     `sum(_sample_interval) AS runs, ` +
     `quantileExactWeighted(0.5)(${WALL}, _sample_interval) AS p50Ms, ` +
@@ -200,7 +207,7 @@ export interface ReviewsReport {
     byRequester: Array<
       { requester: string; runs: number; succeeded: number; wallMs: number } & Omit<ReviewsDuration, "runs">
     >;
-    bySurface: Array<{ surface: string; runs: number } & Omit<ReviewsDuration, "runs">>;
+    bySurface: Array<{ surface: string; runs: number; durationRuns?: number } & Omit<ReviewsDuration, "runs">>;
     histogram: Array<{ minute: number; runs: number }>;
     pullRequests: number;
     /** Reviews per pull request, as a distribution; absent when the rows were sampled. */
@@ -269,6 +276,9 @@ export function buildReviewsReport(rows: ReviewsRows, range: ReviewsRange): Revi
     new Map(list.map((r) => [str(r[key]), { p50Ms: num(r.p50Ms), p95Ms: num(r.p95Ms) }]));
   const byRequesterQ = quantilesOf(rows.durationByRequester, "requester");
   const bySurfaceQ = quantilesOf(rows.durationBySurface, "surface");
+  const surfaceDurationRuns = new Map(
+    rows.durationBySurface.map((r) => [str(r.surface), r.runs === undefined ? undefined : num(r.runs)]),
+  );
   const surfaceRuns: Record<string, number> = {};
   for (const perDay of surfacesOfDay.values()) for (const [s, n] of Object.entries(perDay)) add(surfaceRuns, s, n);
   const overall = rows.durationOverall[0] ?? {};
@@ -350,6 +360,11 @@ export function buildReviewsReport(rows: ReviewsRows, range: ReviewsRange): Revi
         Object.entries(surfaceRuns).map(([surface, n]) => ({
           surface,
           runs: n,
+          ...(!surfaceDurationRuns.has(surface)
+            ? { durationRuns: 0 }
+            : surfaceDurationRuns.get(surface) === undefined
+              ? {}
+              : { durationRuns: surfaceDurationRuns.get(surface) }),
           p50Ms: bySurfaceQ.get(surface)?.p50Ms ?? 0,
           p95Ms: bySurfaceQ.get(surface)?.p95Ms ?? 0,
         })),
