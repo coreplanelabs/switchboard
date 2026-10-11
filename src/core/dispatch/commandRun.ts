@@ -68,8 +68,12 @@ export interface CommandRunOptions {
    *  the run's `route` event, never acted on here. */
   operator?: OperatorEventFields;
   source?: "route" | "confirm";
-  /** Recheck the exact model input before publishing its decision or invoking its action. */
+  /** Recheck requester and source access before publishing command output. */
   beforePublish?: () => Promise<void>;
+  /** Nested commands keep the main run as channel and trace owner. */
+  parentRunId?: string;
+  /** Recheck the latest action source immediately before the handler. */
+  beforeExecute?: () => Promise<void>;
   /** Internal provenance for later reuse of the saved decision, never a public event field. */
   contextDependencies?: ContextDependencies;
 }
@@ -178,6 +182,7 @@ export async function runChatCommand(
         io,
         store: deps.confirmations,
         beforePublish: opts.beforePublish,
+        beforeExecute: opts.beforeExecute,
         contextDependencies: opts.contextDependencies,
         onExecute: () => startCommand?.(),
       },
@@ -202,7 +207,7 @@ export async function runChatCommand(
       return persistResult(
         await runInlineCommandRun(deps, msg, cliWords(parsed.id)[0], io, invoke, ending, trace, {
           ...opts,
-          announce: inline,
+          announce: inline && !opts.parentRunId,
           startWhenInvoked: (start) => {
             startCommand = start;
           },
@@ -459,6 +464,7 @@ export async function runInlineCommandRun<
     }),
     {
       agent: COMMAND_RUN_AGENT,
+      ...(opts.parentRunId ? { parentRunId: opts.parentRunId } : {}),
       channelId: msg.channelId,
       userId: msg.userId,
       threadKey: msg.threadKey,
@@ -471,7 +477,8 @@ export async function runInlineCommandRun<
   // The command run rides the request's trace like an agent run: the setup
   // spans so far backfill, then `run.command` and the reply follow live. A
   // natural-language fall-through rebinds the same root to the agent run next.
-  trace.bindRun(run.id, (e) => registry.publish(run.id, e));
+  // Nested commands keep live spans on the main run; their result has its own row.
+  if (!opts.parentRunId) trace.bindRun(run.id, (e) => registry.publish(run.id, e));
   if (announce) {
     const start = () => io.runStarted?.({ id: run.id });
     if (opts.startWhenInvoked) opts.startWhenInvoked(start);
@@ -605,6 +612,7 @@ export async function runInlineCommandRun<
             run,
             snap,
             agent: COMMAND_RUN_AGENT,
+            ...(opts.parentRunId ? { parentRunId: opts.parentRunId } : {}),
             msg,
             channelVisibility,
             finishedAt,

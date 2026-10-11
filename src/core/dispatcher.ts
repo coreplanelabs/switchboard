@@ -178,6 +178,7 @@ import {
 import { directAudienceStampOf } from "./runLedger/inboxMessage.js";
 import { parsePrivateWorkerThreadKey } from "./privateWorkerLog.js";
 import { runLoop } from "./dispatch/runLoop.js";
+import { executeConversationCommand } from "./dispatch/conversationCommand.js";
 import { afterReply, deliverAnswer, type ReplyDeps } from "./dispatch/reply.js";
 import { mainAudienceAtPrompt, mainAudienceAtReply, planeRowIdentities } from "./dispatch/mainAudience.js";
 import { createSourceReads } from "../mcp/sourceRead.js";
@@ -1089,8 +1090,8 @@ export async function dispatch(
       Object.keys(typed).every((key) => key === "agent" || key === "text") &&
       parseOriginalUnitAdoptionRequest(typed.text) !== undefined;
     let operatorMode =
-      configuredOperator === "on" &&
-      (originalRecoveryCommand || originalAdoptionCommand || (mainDm && typedAgent !== "ship" && !bareShipPrRequest))
+      (mainDm && typedAgent !== "ship" && !bareShipPrRequest) ||
+      (configuredOperator === "on" && (originalRecoveryCommand || originalAdoptionCommand))
         ? "off"
         : configuredOperator;
     // The preset an `on` decision binds on the person's own words, with the
@@ -1145,7 +1146,6 @@ export async function dispatch(
       // main agent on plain follow-ups, even without a channel override. The
       // current message's typed agent or exact PR target still uses its door.
       if (
-        operatorMode === "on" &&
         !typedDecision &&
         !exactPrReply &&
         msg.channelId.startsWith("slack:D") &&
@@ -4336,6 +4336,26 @@ export async function dispatch(
     // the settle and the post-steps, the finish. A throw propagates to the
     // outer catch after the workspace is released.
     const ran = await runLoop(deps, {
+      executeCommand: async (message, id, input, authority) =>
+        executeConversationCommand(
+          deps,
+          {
+            msg: message,
+            io,
+            trace,
+            ending,
+            context: structuredClone(admittedContext),
+            check: async (currentSource = true) => {
+              if (!(await authority(currentSource))) return { ok: false, code: "direct-audience-denied" };
+              const checked = await revalidateAdmitted();
+              return checked.ok && !(await authority(currentSource))
+                ? { ok: false, code: "direct-audience-denied" }
+                : checked;
+            },
+          },
+          id,
+          input,
+        ),
       ...(sourceReads ? { sourceReads } : {}),
       msg,
       io,

@@ -38,10 +38,13 @@ import type { MainWorkerCapability } from "./mainWorker.js";
 import type { RunsReadCapability, SteerCapability } from "./runs.js";
 import type { SessionCapability } from "./session.js";
 import type { SlackContextCapability } from "./slackContext.js";
+import type { ConversationCommand } from "./commands.js";
 import type { WebCapability } from "./web.js";
 import type { SourceReadOperation, SourceReads } from "../mcp/sourceRead.js";
 
 export interface ToolContext {
+  /** Registered commands bound to the latest verified requester turn. */
+  command?: ConversationCommand;
   /** Exact PR whose prior findings a review must verify before submitting. */
   reviewHistory?: ReviewHistoryContext;
   /** Durable read actions bound by dispatch, never authority supplied by tool arguments. */

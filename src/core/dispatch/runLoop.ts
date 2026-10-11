@@ -62,7 +62,12 @@ import { parseModelRef } from "../provider.js";
 import { isReissueSteerText } from "../plane/decide.js";
 import type { ModelCard } from "../modelCard.js";
 import { filterUnavailableTools, mergeTools, toolsForRun } from "../../tools/toolsets.js";
-import { createMainWorkEffectGate, mainWorkForRun, type DirectAudience } from "../../tools/mainWork.js";
+import {
+  createMainWorkEffectGate,
+  mainWorkForRun,
+  mainWorkAudienceAllowed,
+  type DirectAudience,
+} from "../../tools/mainWork.js";
 import { readUnitSeedProof } from "./unitSeedProof.js";
 import { type SlackContextBinding } from "./slackContextBinding.js";
 import {
@@ -72,6 +77,7 @@ import {
   type PrivateAudienceLatch,
 } from "./privateAudience.js";
 import { mainStartForRun } from "../../tools/mainStart.js";
+import { conversationCommandTools, type ConversationCommand } from "../../tools/commands.js";
 import { MainContextCaptureError } from "./mainContextCapture.js";
 import { contextRefusalsOf, isMainContextRefusalCode } from "../mainContextRefusal.js";
 import {
@@ -292,6 +298,12 @@ export type RunLoopOutcome = RunOutcome | RunInterrupted | RunPaused;
 
 /** What `runLoop` reads off the dispatch. */
 export interface RunLoopContext {
+  executeCommand?: (
+    message: IncomingMessage,
+    id: string,
+    input: import("../commandRegistry.js").CommandInput,
+    authority: (currentSource?: boolean) => Promise<boolean>,
+  ) => Promise<import("../commandChat.js").ChatCommandResult>;
   sourceReads?: SourceReads;
   msg: IncomingMessage;
   io: ChannelIO;
@@ -1830,6 +1842,37 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // A private work source comes only from a delivered requester message, never
   // the operator's combined prompt. Follow-ups bind after confirmed delivery.
   const mainSources = new MainSourceTracker(msg, (source) => chatActorOf(deps.config, source));
+  const command: ConversationCommand | undefined =
+    mainWorkAudienceAllowed({
+      agentName: agent.name,
+      actor: chatActorOf(deps.config, msg),
+      message: msg,
+      channelVisibility,
+    }) &&
+    verifiedAtOpen &&
+    mainWorkTrusted &&
+    ctx.executeCommand
+      ? async (quote, id, input) => {
+          const source = mainSources.select(quote);
+          if (source.kind === "refused")
+            return { ok: false, text: "This call does not match the latest requester turn." };
+          const trusted = (currentSource: boolean) =>
+            mainWorkTrusted &&
+            !privateAudienceLatch.revoked &&
+            run.control.requested === undefined &&
+            (!currentSource || mainSources.get(quote) === source.source);
+          const authority = async (currentSource = true) =>
+            trusted(currentSource) &&
+            (await verifyDirectAudience!(source.source.msg.directAudience!)).ok &&
+            trusted(currentSource);
+          return (
+            (await mainWorkEffectGate.run(async () => {
+              if (!(await authority())) return { ok: false, text: "Requester authority is unavailable; nothing ran." };
+              return ctx.executeCommand!(source.source.msg, id, input, authority);
+            })) ?? { ok: false, text: "Requester authority was withdrawn; nothing ran." }
+          );
+        }
+      : undefined;
   const stageFollowUps = async (inputs: readonly FollowUpInput[]): Promise<string> => {
     const ready = async (line: string) => {
       if (privateAudienceLatch.revoked) await withdrawMainWork();
@@ -2135,6 +2178,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       ? { target: { repo: repoCtx.repo, number: repoCtx.pr } }
       : undefined;
   const toolContext = {
+    ...(command ? { command } : {}),
     ...(ctx.captureParentContext
       ? {
           sourceContext: async () => {
@@ -3028,6 +3072,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                       mainWork !== undefined,
                       mainStart !== undefined && verifiedAtOpen && mainWorkTrusted && !privateAudienceLatch.revoked,
                     ),
+                    ...(command ? conversationCommandTools(deps.commands) : []),
                     ...(reviewCheckReady && commandPolicy === "hosted-review" && checkExecution ? [runCheckTool] : []),
                   ].filter((tool) => slackContext !== undefined || tool.name !== "slack_context"),
                   mcpForRun?.tools,

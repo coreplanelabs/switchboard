@@ -17,6 +17,44 @@ to trusted code; they do not give its model a shell, provider credential, or
 arbitrary write-capable MCP tools. Delegation only narrows the requester's
 authority. A denied action remains denied when another agent is selected.
 
+## One conversation interpreter
+
+The main conversation chooses a registered command or a worker tool in its
+normal model loop. It does not ask a second model to classify the same turn.
+The command registry still validates input, authorizes the resolved requester,
+and applies its shared approval policy. Worker execution still enters the
+dispatcher with its existing ownership, repository, budget, and review gates.
+
+The main command path uses `command_schema` for on-demand schema discovery
+and `command_run` for named parameters. Native command results reach the
+requester directly. The model receives only invocation or submission status,
+refusal, or pending approval; source data without a durable read receipt does
+not enter its reusable log. Private command admission uses the same latest
+requester, direct-audience, and revocation boundaries as linked work.
+
+The private main conversation ignores the legacy operator routing setting.
+Global retirement of the operator and `routing.operator` is **not complete**.
+The remaining entry paths still bind shared-channel Ship, review, pending
+questions, and original-unit recovery before their admission gates.
+
+Retire that path in this order:
+
+1. Give each remaining chat entry a main conversation with an adapter-verified
+   requester. Keep typed CLI, HTTP, and MCP inputs on their existing schemas.
+2. Expose closed worker proposals through the existing dispatcher. Preserve
+   requester-authored PR targets, original-unit continuation, source access,
+   branch ownership, and durable return addresses. Source questions and code
+   changes retain separate domain outcomes.
+3. Prove shared-channel and web handoffs, parked questions, stop and recovery,
+   restart, duplicate delivery, and revoked authority through the existing
+   behavioral suites. A new operation must not replace an original writer.
+4. Delete the separate interpreter, its mode setting and shadow path, and the
+   superseded interpretation tests. Keep the command registry and execution
+   guards. Update the owning specs and migration guidance in the same change.
+
+The main command fix does not certify those retirement gates or authorize a
+deployment. Until their proofs hold, keep the legacy entry behavior intact.
+
 ## Existing contracts and observed gaps
 
 These boundaries motivate the migration. Each delivery slice updates the
