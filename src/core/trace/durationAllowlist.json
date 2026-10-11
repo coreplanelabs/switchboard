@@ -97,8 +97,5 @@
   "web/src/lib/durationTone.ts": 4,
   "web/src/lib/homeModel.ts": 1,
   "web/src/lib/indexRow.ts": 1,
-  "web/src/lib/runPageModel.ts": 2,
-  "web/src/pages/CostsPage.vue": 1,
-  "web/src/pages/DeliveryPage.vue": 1,
-  "web/src/pages/RunsIndexPage.vue": 1
+  "web/src/lib/runPageModel.ts": 2
 }

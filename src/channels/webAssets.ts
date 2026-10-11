@@ -58,7 +58,7 @@ export interface WebAssets {
  * manifest is missing — the server must not start half-blind: run
  * `npm run build` in web/ first (the Docker build does).
  */
-export function loadWebAssets(distDir: string, entryKey = "src/main.ts"): WebAssets {
+export function loadWebAssets(distDir: string, entryKey = "green/main.ts"): WebAssets {
   let manifest: Record<string, ManifestChunk>;
   try {
     manifest = JSON.parse(readFileSync(join(distDir, ".vite", "manifest.json"), "utf8")) as Record<

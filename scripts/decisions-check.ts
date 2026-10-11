@@ -26,6 +26,7 @@ import {
   type BaseHistory,
   type RecordText,
 } from "../src/docs/records.js";
+import { HISTORICAL_SOURCE_LINKS } from "../docs/.vitepress/source-links.mjs";
 import { DECISION_RECORD_ENV, decisionRecordNumberProblems } from "../src/core/decisionRecordReservation.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -68,6 +69,16 @@ const history: BaseHistory = {
 function main(): number {
   const records = listRecords();
   const problems = statusProblems(records, (path) => existsSync(join(root, path)));
+  for (const source of HISTORICAL_SOURCE_LINKS) {
+    if (
+      !/^[a-f0-9]{40}$/.test(source.commit) ||
+      gitOrNull("cat-file", "-t", `${source.commit}:${source.path}`) !== "blob"
+    )
+      problems.push({
+        path: `docs/${source.document}`,
+        what: `Historical source ${source.commit}:${source.path} is not a retained commit blob.`,
+      });
+  }
   const ref = process.env.DECISIONS_BASE ?? "origin/main";
   const base = baseRecords(ref, history);
   if (base.kind === "found") problems.push(...immutabilityProblems(records, base.texts));

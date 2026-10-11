@@ -103,8 +103,5 @@
   },
   "web/src/components/settings/McpServersPanel.vue": {
     "tier": 3
-  },
-  "web/src/pages/DeliveryPage.vue": {
-    "attempt": 1
   }
 }

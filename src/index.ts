@@ -1717,16 +1717,12 @@ export async function runBot(): Promise<void> {
     // runs; a missing build is a boot error (the Docker image and the package
     // build it; local dev runs `npm run build` in web/ once, or points
     // SWITCHBOARD_WEB_DIST elsewhere).
-    const webAssets = loadWebAssets(webDistDir(publicEnv(), PACKAGE_ROOT));
-    const bluePage = makePageSender(webAssets.entry, capabilities);
     const greenAssets = loadWebAssets(webDistDir(publicEnv(), PACKAGE_ROOT), "green/main.ts");
     const greenDocument = makePageSender(greenAssets.entry, capabilities, { csp: GREEN_PAGE_CSP });
     nativePage = greenDocument;
     void browserWiring!.emoji.refresh(app.client).catch(() => {});
     const page: PageSender = (...args) => (browserWiring ? browserWiring.page(...args) : greenDocument(...args));
     const greenPage = page;
-    // The blue document remains isolated while this candidate uses green.
-    void bluePage;
     const verifiedPageActors = new WeakMap<AccessIdentity, Actor>();
     const verifiedHomeContexts = new WeakMap<Actor, HomeRuntimeContext>();
     const historyKeyName = parseMcpSettings(config.config.mcp)?.credentialKeyEnv ?? DEFAULT_MCP_KEY_ENV;
@@ -2160,7 +2156,7 @@ export async function runBot(): Promise<void> {
       // GUARD: because this route is ungated, nothing beyond the built bundle
       // may land in web/dist — in particular, keep `build.sourcemap` OFF in
       // web/vite.config.ts, or the app's source would be world-readable here.
-      if (!path.startsWith("/assets/emoji/") && (greenAssets.serve(req, res) || webAssets.serve(req, res))) return;
+      if (!path.startsWith("/assets/emoji/") && greenAssets.serve(req, res)) return;
       // The dashboard gate: identity FIRST (the configured strategy, fail-closed),
       // before the view dispatch. The gate is async (`access` may fetch the JWKS),
       // so we resolve the promise here; a rejection is a 403, never a 500 that

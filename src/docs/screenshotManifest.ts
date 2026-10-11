@@ -172,156 +172,156 @@ export const SURFACES = [
   },
   {
     name: "home-empty",
-    path: "/threads",
+    path: "/home",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/HomePage.vue",
-    what: "the home page's empty state: the mark, the greeting, the composer in the middle, the chips",
+    page: "web/green/pages/Home.vue",
+    what: "the current work overview and one private conversation controller",
   },
   {
     name: "home-conversation",
     path: "/threads/conv-1",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/HomePage.vue",
+    page: "web/green/pages/Thread.vue",
     what: "a finished conversation: three turns, each a run with its receipt and reply",
   },
   {
     name: "home-live",
     path: "/threads/conv-live",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/HomePage.vue",
+    page: "web/green/pages/Thread.vue",
     what: "a conversation whose newest run is live: the pending row and the open work",
   },
   {
     name: "runs-index",
     path: "/runs?all=1",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/RunsIndexPage.vue",
+    page: "web/green/pages/Runs.vue",
     what: "the runs index, live and finished rows",
   },
   {
     name: "runs-index-viewing-as",
     path: "/runs?all=1&viewing=1",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/RunsIndexPage.vue",
+    page: "web/green/pages/Runs.vue",
     what: "the runs index while an admin views it as a person: the banner, that person's rows, the picker",
   },
   {
     name: "run-page",
     path: "/runs/hist-1",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/RunRoutePage.vue",
+    page: "web/green/pages/RunRoute.vue",
     what: "a finished coding run's page and timeline",
   },
   {
     name: "residents",
     path: "/residents?open=acme/web",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/ResidentsIndexPage.vue",
+    page: "web/green/pages/Runtime.vue",
     what: "the residents index, one resident folded open",
   },
   {
     name: "costs",
     path: "/costs",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/CostsPage.vue",
+    page: "web/green/pages/Costs.vue",
     what: "the spend page",
   },
   {
     name: "plane",
-    path: "/plane",
+    path: "/home",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/PlanePage.vue",
-    what: "the plane's table — every live and recent run, every unit and every tracked pull request with its owner and health — beside the pinned orchestrator chat",
+    page: "web/green/pages/Home.vue",
+    what: "Home with current assigned questions, compact pipeline context, and the one messages dock",
   },
   {
     name: "costs-users",
     path: "/costs?view=users",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/CostsPage.vue",
+    page: "web/green/pages/Costs.vue",
     what: "the spend page's By user tab",
   },
   {
     name: "metrics",
     path: "/metrics",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/MetricsPage.vue",
+    page: "web/green/pages/Metrics.vue",
     what: "the run metrics page: the trend tiles, the three day charts and the by-agent table",
   },
   {
     name: "costs-models",
     path: "/costs?view=models",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/CostsPage.vue",
+    page: "web/green/pages/Costs.vue",
     what: "the spend page's By model tab: turns and LLM dollars per model, no cloud column",
   },
   {
     name: "scheduled",
     path: "/runs/scheduled",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/ScheduledPage.vue",
+    page: "web/green/pages/Scheduled.vue",
     what: "the scheduled runs tab",
   },
   {
     name: "unit-page",
     path: "/runs/unit/plan-acme-3:U13?open=unit-c1",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/UnitRoutePage.vue",
+    page: "web/green/pages/Unit.vue",
     what: "a ship unit through two review rounds, both threads, one run's timeline open",
   },
   {
     name: "unit-page-coding-only",
     path: "/runs/unit/plan-acme-3:U14",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/UnitRoutePage.vue",
+    page: "web/green/pages/Unit.vue",
     what: "a unit in its first coding round, one thread, nothing reviewed yet",
   },
   {
     name: "unit-search",
     path: "/runs/unit/plan-acme-3:U13?session=coding&q=lockfile",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/UnitRoutePage.vue",
+    page: "web/green/pages/Unit.vue",
     what: "the unit page's search over the coding thread's log, hits placed in their runs",
   },
   {
     name: "unit-search-landed",
     path: "/runs/unit/plan-acme-3:U13?session=coding&q=lockfile&open=unit-c1&turn=47",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/UnitRoutePage.vue",
+    page: "web/green/pages/Unit.vue",
     what: "a search hit landed on its step: the run's fold open at the step the turn lives in, drawn as the run page draws it",
   },
   {
     name: "conductor-page",
     path: "/runs/cond-1",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/RunRoutePage.vue",
+    page: "web/green/pages/RunRoute.vue",
     what: "a finished conductor's page listing the runs it spawned",
   },
   {
     name: "review-page",
     path: "/runs/hist-4",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/RunRoutePage.vue",
+    page: "web/green/pages/RunRoute.vue",
     what: "a finished pull request review: the verdict as the Reply, the pull request and its Findings ledger link in the facts bar",
   },
   {
     name: "settings-mcps",
     path: "/settings/mcps",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/SettingsPage.vue",
+    page: "web/green/pages/Settings.vue",
     what: "the settings page's MCPs tab: three tiers of servers and the add form",
   },
   {
     name: "settings-channel",
     path: "/settings/channels/slack:CACME0001",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/SettingsPage.vue",
+    page: "web/green/pages/Settings.vue",
     what: "the settings page's Channels tab with one channel's scope open as a form",
   },
   {
     name: "settings-installation",
     path: "/settings/installation",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
-    page: "web/src/pages/SettingsPage.vue",
+    page: "web/green/pages/Settings.vue",
     what: "the settings page's Installation tab: the running config's knobs and the capabilities that are on",
   },
 ] as const satisfies readonly Surface[];
@@ -388,8 +388,8 @@ const NAMED_INPUTS = [
 
 export function isSharedInput(path: string): boolean {
   if (NAMED_INPUTS.includes(path)) return true;
-  if (["web/src/main.ts", "web/src/routes.ts", "web/src/App.vue"].includes(path)) return true;
-  return path.startsWith("web/src/assets/");
+  if (["web/green/main.ts", "web/green/routes.ts", "web/green/App.vue"].includes(path)) return true;
+  return path.startsWith("web/src/assets/") || path === "web/green/theme.css";
 }
 
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -708,7 +708,8 @@ export function surfaceInputs(
 
 export function isScreenshotInput(path: string): boolean {
   if (NAMED_INPUTS.includes(path) || path === "scripts/web-preview.ts") return true;
-  if (!path.startsWith("web/src/") || path.startsWith("web/src/testing/")) return false;
+  if ((!path.startsWith("web/src/") && !path.startsWith("web/green/")) || path.startsWith("web/src/testing/"))
+    return false;
   return !/\.(test|d)\.ts$/.test(path);
 }
 

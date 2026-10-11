@@ -7,7 +7,7 @@
 // the first `submit_pr_description`, not a type error. Run after
 // `npm run build` (the `check:dist` script does both).
 
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /** Files under dist/ that are not compiled from TypeScript and that the bot imports at runtime. */
@@ -42,6 +42,17 @@ if (missing.length > 0) {
     `check:dist FAILED — ${missing.length} runtime input(s) missing from dist/ (tsc emits them under allowJs):`,
   );
   for (const f of missing) console.error(`  ${f}`);
+  process.exit(1);
+}
+// Exercise the same default manifest loader the shipped server calls.
+try {
+  const { loadWebAssets } = await import("../dist/channels/webAssets.js");
+  const webDist = join(process.cwd(), "web", "dist");
+  loadWebAssets(webDist);
+  const manifest = JSON.parse(readFileSync(join(webDist, ".vite", "manifest.json"), "utf8"));
+  if (manifest["src/main.ts"]?.isEntry) throw new Error("obsolete dashboard entry remains in the bundle");
+} catch (error) {
+  console.error(`check:dist FAILED — dashboard bundle: ${error.message}`);
   process.exit(1);
 }
 console.log(`check:dist ok — ${files.length} file(s) in dist/, no test files, every runtime input present`);

@@ -2,7 +2,8 @@
 defineOptions({ name: "GreenShell" });
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
-import { useColorMode, useMediaQuery } from "@vueuse/core";
+import { useMediaQuery } from "@vueuse/core";
+import ThemeToggle from "../../src/components/ThemeToggle.vue";
 import { SeedKey } from "../../src/lib/seed";
 import { useHomeSession } from "../lib/homeSession";
 import { watchSlackEmoji } from "../lib/emoji";
@@ -58,13 +59,6 @@ watch(wide, (value) => {
     menuOpen.value = false;
     document.body.style.overflow = previousOverflow;
   }
-});
-const mode = useColorMode({ emitAuto: true });
-const theme = computed<"system" | "light" | "dark">({
-  get: () => (mode.value === "auto" ? "system" : mode.value === "dark" ? "dark" : "light"),
-  set: (value) => {
-    mode.value = value === "system" ? "auto" : value;
-  },
 });
 onMounted(() => {
   window.addEventListener("keydown", onKeydown);
@@ -130,14 +124,7 @@ watch(
             ><UIcon name="i-lucide-settings-2" />Settings</RouterLink
           >
         </nav>
-        <label class="green-theme"
-          ><UIcon name="i-lucide-sun-moon" /><span class="sr-only">Appearance</span
-          ><select v-model="theme" aria-label="Appearance">
-            <option value="system">System</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select></label
-        >
+        <ThemeToggle />
         <a class="green-help" href="/docs" target="_blank" rel="noopener noreferrer"
           >Documentation <UIcon name="i-lucide-arrow-up-right"
         /></a>

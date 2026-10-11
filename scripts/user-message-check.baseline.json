@@ -10,11 +10,5 @@
   },
   "web/src/components/runs/RunRow.vue": {
     "run": 1
-  },
-  "web/src/pages/MetricsPage.vue": {
-    "run": 2
-  },
-  "web/src/pages/NotFoundPage.vue": {
-    "run": 1
   }
 }

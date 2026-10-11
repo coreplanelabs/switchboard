@@ -9,11 +9,12 @@
 // Build: `npm run build` in docs/ → docs/.vitepress/dist, deployed by CI from
 // deploy/cloudflare-docs/ (an assets-only Worker). Dead links FAIL the build.
 import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join, posix } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitepress";
 import { MermaidMarkdown } from "vitepress-plugin-mermaid";
 import { writeOgCards } from "./og-render.mjs";
+import { repositorySourceLink } from "./source-links.mjs";
 import { ogHead, ogSubject, type OgSubject } from "./og.mjs";
 
 // The project's identity — the name a reader sees, its repository and steward —
@@ -124,21 +125,15 @@ export default defineConfig({
         codeInline(tokens, idx, options, env, self).replace(/^<code/, "<code v-pre");
       // A relative link that leaves this tree (a source file, AGENTS.md, a
       // plan) has no page here: on the site it points at the repository. The
-      // source stays relative so GitHub follows it to the file.
+      // source stays relative; frozen records can retain an exact historical
+      // source snapshot after the current file is retired.
       const linkOpen =
         md.renderer.rules.link_open ?? ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
       md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
         const token = tokens[idx];
         const href = token.attrGet("href");
-        if (href && /^\.\.?\//.test(href)) {
-          const [file, hash] = href.split("#");
-          const target = posix.normalize(posix.join(posix.dirname(env.relativePath ?? ""), file));
-          if (target.startsWith("../") || target.startsWith("plans/")) {
-            const repoPath = posix.normalize(posix.join("docs", target));
-            const view = repoPath.endsWith("/") ? "tree" : "blob";
-            token.attrSet("href", `${GITHUB_REPO}/${view}/main/${repoPath}${hash ? `#${hash}` : ""}`);
-          }
-        }
+        const source = href && repositorySourceLink(env.relativePath ?? "", href, GITHUB_REPO);
+        if (source) token.attrSet("href", source.href);
         return linkOpen(tokens, idx, options, env, self);
       };
     },

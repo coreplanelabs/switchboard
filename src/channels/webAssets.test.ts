@@ -10,8 +10,8 @@ function fixtureDist(): string {
   mkdirSync(join(dir, ".vite"), { recursive: true });
   mkdirSync(join(dir, "assets"), { recursive: true });
   const manifest = {
-    "src/main.ts": { file: "assets/main-AbC123.js", isEntry: true, css: ["assets/main-DeF456.css"] },
-    "src/pages/RunPage.vue": { file: "assets/RunPage-XyZ789.js", isDynamicEntry: true, imports: ["src/main.ts"] },
+    "green/main.ts": { file: "assets/main-AbC123.js", isEntry: true, css: ["assets/main-DeF456.css"] },
+    "green/pages/RunRoute.vue": { file: "assets/RunPage-XyZ789.js", isDynamicEntry: true, imports: ["green/main.ts"] },
   };
   writeFileSync(join(dir, ".vite", "manifest.json"), JSON.stringify(manifest));
   writeFileSync(join(dir, "assets", "main-AbC123.js"), "console.log('entry')");
@@ -63,17 +63,17 @@ describe("loadWebAssets", () => {
         "_shared.js": { file: "assets/shared.js", css: ["assets/shared.css"] },
       }),
     );
-    expect(loadWebAssets(dir).entry).toEqual({
+    expect(loadWebAssets(dir, "src/main.ts").entry).toEqual({
       js: "/assets/main-AbC123.js",
       css: ["/assets/shared.css", "/assets/main-DeF456.css"],
     });
-    expect(loadWebAssets(dir, "green/main.ts").entry).toEqual({
+    expect(loadWebAssets(dir).entry).toEqual({
       js: "/assets/green.js",
       css: ["/assets/shared.css", "/assets/green.css"],
     });
   });
   it("refuses a missing frontend entry instead of switching the viewer to another build", () => {
-    expect(() => loadWebAssets(fixtureDist(), "green/main.ts")).toThrow("entry");
+    expect(() => loadWebAssets(fixtureDist(), "missing/main.ts")).toThrow("entry");
   });
   it("exposes the entry's hashed js and css paths from the manifest", () => {
     const assets = loadWebAssets(fixtureDist());
