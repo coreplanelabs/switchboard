@@ -183,6 +183,8 @@ import { CloudflareSandboxExecutor } from "../src/execution/cloudflareSandbox.js
 import { parseSeed, type SandboxSeed } from "../src/execution/seedPlan.js";
 import { ResidentExecutor } from "../src/execution/resident.js";
 import { systemClock } from "../src/core/trace/clock.js";
+import { SECOND_MS } from "../src/core/budgets.js";
+import { runHomeLoad } from "../src/load/homeLoad.js";
 
 import { modelCapacityCommand } from "./model-capacity.js";
 import { contextEvaluationCommand } from "../src/load/contextEvaluationCommand.js";
@@ -201,6 +203,11 @@ commands
              --fixtures PATH [--baseline RECEIPT]; local scoring, no provider calls
              or --provider NAME --model ID --key-env VAR [--task all|<name> --context-arm raw|managed]
              provider trials use isolated synthetic tasks; context reloads are simulated
+  home       offline canonical Home projection and JSON response at >=1000 unresolved units
+             --units N (default 1000) --pipelines N (default units) --iterations N (default 25)
+             --browser builds this checkout before timing pinned desktop/phone themes; local HTTP only
+             judges 500ms p95 first-attention and 2s p95 complete-list budgets
+             private authentication, live fleet sizing and Cloudflare timing remain unmeasured qualifications
   history    peak concurrency and durations from the run store
              [--limit N]: stop after N runs have been read (default: unlimited, 0 = unlimited)
              env: SWITCHBOARD_STATE_WORKER_URL, MEMORY_TOKEN (or --state-url / --token-env)
@@ -288,6 +295,10 @@ function flags(argv: string[]): Flags {
       "context-arm": { type: "string" },
       resource: { type: "string" },
       threads: { type: "string" },
+      units: { type: "string" },
+      pipelines: { type: "string" },
+      browser: { type: "boolean" },
+      iterations: { type: "string" },
       cards: { type: "string" },
       channels: { type: "string" },
       hold: { type: "string" },
@@ -2101,6 +2112,36 @@ async function door(f: Flags): Promise<boolean> {
   return !report.storeUnavailable;
 }
 
+/** Minimum-scale measurements use the real local HTTP and optional browser paths. */
+async function home(f: Flags): Promise<boolean> {
+  const units = num(f, "units", 1000);
+  const out = await runHomeLoad({
+    units,
+    pipelines: num(f, "pipelines", units),
+    iterations: num(f, "iterations", 25),
+    browser: f.browser === true,
+  });
+  const summary = summarize(out.samples);
+  const checks = evaluateSlo(summary, {
+    latencyMs: summary.ops.map((row) => ({
+      op: row.op,
+      p: 95 as const,
+      maxMs: row.op === "first-attention" ? SECOND_MS / 2 : row.op === "complete-list" ? 2 * SECOND_MS : SECOND_MS,
+    })),
+    zeroFailures: summary.ops.map((row) => row.op),
+  });
+  return writeResults(
+    "home",
+    runId(),
+    new Date(systemClock()).toISOString(),
+    out.parameters,
+    summary,
+    checks,
+    { samples: out.samples, observations: out.observations },
+    out.notes,
+  );
+}
+
 async function main(): Promise<number> {
   const [command, ...rest] = process.argv.slice(2);
   const f = flags(rest);
@@ -2112,6 +2153,7 @@ async function main(): Promise<number> {
   const commands: Record<string, (f: Flags) => Promise<boolean>> = {
     context: (f) => contextEvaluationCommand(f, RESULTS_DIR),
     history,
+    home,
     resident,
     sandbox,
     e2e,
