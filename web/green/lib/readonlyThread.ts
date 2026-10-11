@@ -14,6 +14,7 @@ export function useReadonlyThread(thread: () => string | null) {
   const session = ref<HomeSession | null>(null);
   const status = ref<"loading" | "ready" | "unavailable">("loading");
   const canWrite = ref(false);
+  const revocations = ref(0);
   let proofRevision: number | null = null;
   let proofGeneration = 0;
   let generation = 0;
@@ -94,7 +95,10 @@ export function useReadonlyThread(thread: () => string | null) {
       };
       for (const name of ["revoked", "unavailable"])
         source.addEventListener(name, () => {
-          if (mine === generation) clear("unavailable");
+          if (mine === generation) {
+            clear("unavailable");
+            if (name === "revoked") revocations.value++;
+          }
         });
       source.onerror = () => {
         if (mine === generation) clear("unavailable");
@@ -103,5 +107,5 @@ export function useReadonlyThread(thread: () => string | null) {
     { immediate: true, flush: "sync" },
   );
   onBeforeUnmount(() => clear("unavailable"));
-  return { session, status, canWrite };
+  return { session, status, canWrite, revocations };
 }

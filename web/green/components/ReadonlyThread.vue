@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { inject, ref } from "vue";
+import { inject, nextTick, ref, watch } from "vue";
 import { SeedKey, useViewingAs } from "../../src/lib/seed";
 import { useWallClock } from "../../src/lib/wallClock";
 import AssistantTurn from "../../src/components/home/AssistantTurn.vue";
@@ -16,8 +16,13 @@ const home = useHomeSession();
 const viewingAs = useViewingAs();
 const globalSeed = inject(SeedKey, null);
 const canReply = !viewingAs && (!globalSeed?.dataView || globalSeed.dataView.mode !== "person");
-const { session, status, canWrite } = useReadonlyThread(() => props.thread);
+const { session, status, canWrite, revocations } = useReadonlyThread(() => props.thread);
 const busy = ref(false);
+const unavailableExplanation = ref<HTMLElement | null>(null);
+watch(revocations, async () => {
+  await nextTick();
+  unavailableExplanation.value?.focus();
+});
 const now = useWallClock();
 async function reply() {
   if (!home || busy.value) return;
@@ -48,11 +53,12 @@ async function reply() {
     </div>
     <div class="green-section-content">
       <p v-if="status === 'loading'" class="text-xs text-muted" role="status">Loading conversation…</p>
-      <EmptyState
-        v-else-if="status === 'unavailable'"
-        title="Conversation is unavailable"
-        description="The thread is unknown or cannot be read with your current access."
-      />
+      <div v-else-if="status === 'unavailable'" ref="unavailableExplanation" tabindex="-1" role="alert">
+        <EmptyState
+          title="Conversation is unavailable"
+          description="The thread is unknown or cannot be read with your current access."
+        />
+      </div>
       <ol v-else-if="session?.turns?.length" class="list-none m-0 p-0 grid grid-cols-1 gap-6">
         <li v-for="(turn, index) in session.turns" :key="index" class="min-w-0">
           <template v-if="'kind' in turn"

@@ -7,6 +7,7 @@ import MarkdownText from "../../src/components/MarkdownText.vue";
 import AssistantTurn from "../../src/components/home/AssistantTurn.vue";
 import { useWallClock } from "../../src/lib/wallClock";
 import { useHomeSession, type AttachedContext } from "../lib/homeSession";
+import { createPrReviewCollector } from "../../src/lib/prReviewCollector";
 import type { HomeTurnSeed } from "@core/channels/webSeed.js";
 const home = useHomeSession();
 const now = useWallClock();
@@ -24,10 +25,19 @@ const liveTurns = computed(
 );
 const route = useRoute();
 const seed = useSeed("unit");
+const run = useSeed("run");
 const viewingAs = useViewingAs();
 const globalSeed = inject(SeedKey, null);
 const transcript = ref<HTMLElement | null>(null);
 const expanded = ref(false);
+const unavailableExplanation = ref<HTMLElement | null>(null);
+watch(
+  () => home?.revocations.value,
+  async () => {
+    await nextTick();
+    unavailableExplanation.value?.focus();
+  },
+);
 const destinationKey = computed(() => {
   const session = home?.session.value;
   return session
@@ -41,6 +51,14 @@ const currentContext = computed<AttachedContext | null>(() => {
       key: String(route.params.key),
       label: seed?.view.title ?? `Unit ${seed?.view.id ?? route.params.key}`,
     };
+  if (route.path.startsWith("/pipelines/") && route.params.id)
+    return { kind: "pipeline", key: String(route.params.id), label: "This pipeline" };
+  if (route.path.startsWith("/runs/") && route.query.view === "pull-request") {
+    const collector = createPrReviewCollector();
+    if (run?.mode === "history") for (const event of run.events) collector.handle(event);
+    const { repo, number } = collector.state.pr;
+    return repo && number ? { kind: "pull-request", key: `${repo}#${number}`, label: `${repo}#${number}` } : null;
+  }
   if (route.path.startsWith("/runs/") && route.params.id)
     return { kind: "run", key: String(route.params.id), label: "This run" };
   if (route.path.startsWith("/threads/") && route.params.id)
@@ -115,7 +133,13 @@ watch([destinationKey, transcript], () => {
     <div v-if="home.status.value === 'loading'" class="green-dock-transcript p-5 text-xs text-muted" role="status">
       Loading your conversation…
     </div>
-    <div v-else-if="home.status.value === 'unavailable'" class="p-5 text-xs text-muted" role="alert">
+    <div
+      v-else-if="home.status.value === 'unavailable'"
+      ref="unavailableExplanation"
+      tabindex="-1"
+      class="p-5 text-xs text-muted"
+      role="alert"
+    >
       <p>{{ home.notice.value }}</p>
       <button class="green-button mt-3" type="button" @click="home.load()">Load conversation</button>
     </div>
@@ -252,7 +276,8 @@ watch([destinationKey, transcript], () => {
           class="green-context-attach"
           @click="home.attach(currentContext)"
         >
-          <UIcon name="i-lucide-paperclip" />Attach this {{ currentContext.kind }}
+          <UIcon name="i-lucide-paperclip" />Attach this
+          {{ currentContext.kind === "pull-request" ? "pull request" : currentContext.kind }}
         </button>
         <ConversationComposer />
       </div>

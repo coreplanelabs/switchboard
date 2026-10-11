@@ -32,6 +32,75 @@ function session(thread: string | null): HomeSession {
   };
 }
 describe("Conversation dock scroll", () => {
+  it("attaches the viewed pipeline and recorded pull request without changing the reply destination", async () => {
+    const stream = fakeEventSourceFactory();
+    const home = createHomeSession(
+      (async () => new Response(JSON.stringify(session(null)))) as typeof fetch,
+      stream.factory,
+    );
+    await home.load();
+    const page = mountApp(ConversationDock, {
+      provides: [[HomeSessionKey, home]],
+      seed: {
+        page: "run",
+        mode: "history",
+        id: "evidence",
+        startedAt: 1,
+        eventCount: 1,
+        events: [{ type: "run_meta", agent: "review", repo: "sample/api", pr: 42 }],
+      },
+    });
+    page.vm.$router.addRoute({ path: "/pipelines/:id", component: { template: "<div />" } });
+    page.vm.$router.addRoute({ path: "/runs/:id", component: { template: "<div />" } });
+    await page.vm.$router.push("/pipelines/old-pipeline");
+    await flushPromises();
+    await page
+      .findAll("button")
+      .find((button) => button.text() === "Attach this pipeline")!
+      .trigger("click");
+    await page.vm.$router.push("/runs/evidence?view=pull-request");
+    await flushPromises();
+    await page
+      .findAll("button")
+      .find((button) => button.text() === "Attach this pull request")!
+      .trigger("click");
+    expect(home.context.value).toEqual([
+      { kind: "pipeline", key: "old-pipeline", label: "This pipeline" },
+      { kind: "pull-request", key: "sample/api#42", label: "sample/api#42" },
+    ]);
+    expect(home.session.value?.destination).toEqual({
+      kind: "broad",
+      thread: null,
+      label: "Your messages",
+      revision: 1,
+      canWrite: true,
+    });
+    home.dispose();
+  });
+  it("moves focus to the unavailable explanation only on explicit conversation revocation", async () => {
+    const stream = fakeEventSourceFactory();
+    const home = createHomeSession(
+      (async () => new Response(JSON.stringify(session(null)))) as typeof fetch,
+      stream.factory,
+    );
+    await home.load();
+    const page = mountApp(ConversationDock, { provides: [[HomeSessionKey, home]] });
+    const button = page.get("button").element as HTMLButtonElement;
+    button.focus();
+    home.text.value = "Unsent draft";
+    stream.created[0]!.emitError();
+    await flushPromises();
+    expect(document.activeElement).toBe(button);
+    expect(home.text.value).toBe("Unsent draft");
+    expect(page.text()).toContain("Connection lost");
+    stream.created[0]!.emitNamed("revoked");
+    await flushPromises();
+    expect(document.activeElement?.textContent).toContain("Conversation is unavailable with your current access.");
+    expect(document.activeElement?.getAttribute("tabindex")).toBe("-1");
+    expect(page.find("textarea").exists()).toBe(false);
+    home.dispose();
+  });
+
   it("enables a new question on the same thread after an accepted reply and captures a distinct reply", async () => {
     const stream = fakeEventSourceFactory(),
       sends: unknown[] = [];
