@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BASE_URL_ENV, decide, main, readToken } from "./preflight.mjs";
 
 describe("resident deploy preflight — main()", () => {
@@ -46,6 +46,165 @@ const payload = (residents) => ({
 const resident = (resource, inFlight) => ({ resource, live: { state: "warm", inFlight } });
 
 describe("resident deploy preflight — decide()", () => {
+  it.each([
+    [
+      "unknown",
+      "malformed-registration",
+      "1 run owner(s) unverified; registration readback: unknown/malformed-registration=1",
+    ],
+    ["unknown", "owner-unverified", "1 run owner(s) unverified; registration readback: unknown/owner-unverified=1"],
+    ["unknown", "binding-conflict", "1 run owner(s) unverified; registration readback: unknown/binding-conflict=1"],
+    ["unknown", "ledger-unverified", "1 run owner(s) unverified; registration readback: unknown/ledger-unverified=1"],
+    ["legacy", "operation-active", "1 run owner(s) unverified; registration readback: legacy/operation-active=1"],
+    ["legacy", "legacy-protected", "1 run owner(s) unverified; registration readback: legacy/legacy-protected=1"],
+    ["legacy", "protection-elapsed", "1 run owner(s) unverified; registration readback: legacy/protection-elapsed=1"],
+    ["legacy", "legacy-reconciled", "1 run owner(s) unverified; registration readback: legacy/legacy-reconciled=1"],
+    ["owned", "live-owner", "1 run owner(s) unverified; registration readback: owned/live-owner=1"],
+    ["owned", "terminal-owner", "1 run owner(s) unverified; registration readback: owned/terminal-owner=1"],
+  ])("renders only registered readback pairs: %s/%s", (category, reason, expected) => {
+    const d = decide(
+      payload([
+        {
+          resource: "repo:acme/widgets",
+          live: {
+            state: "warm",
+            inFlight: 1,
+            runsInFlight: 1,
+            executingRuns: 0,
+            retainedRuns: 0,
+            unknownRuns: 1,
+            registrationReadback: [{ category, reason, count: 1, extra: "private-secret" }],
+          },
+        },
+      ]),
+    );
+    expect(d.allow).toBe(false);
+    expect(d.unknown).toEqual([{ resource: "repo:acme/widgets", error: expected }]);
+    expect(d.message).not.toContain("private-secret");
+  });
+
+  it.each(
+    [
+      undefined,
+      null,
+      "private-readback",
+      {},
+      [null],
+      [[]],
+      [{ category: "private-category", reason: "ledger-unverified", count: 1 }],
+      [{ category: "unknown", reason: "private-reason", count: 1 }],
+      [{ category: { toString: 1, valueOf: 1 }, reason: "ledger-unverified", count: 1 }],
+      [{ category: "unknown", reason: { toString: 1 }, count: 1 }],
+      [{ category: "owned", reason: "ledger-unverified", count: 1 }],
+      [{ category: "none", reason: "no-registration", count: 1 }],
+      ...[undefined, "private-count", NaN, Infinity, 0.5, -1, 0, Number.MAX_SAFE_INTEGER + 1].map((count) => [
+        { category: "unknown", reason: "ledger-unverified", count },
+      ]),
+      Array.from({ length: 2 }, () => ({ category: "unknown", reason: "ledger-unverified", count: 1 })),
+      Array.from({ length: 11 }, () => ({ category: "unknown", reason: "ledger-unverified", count: 1 })),
+    ].map((readback) => [readback]),
+  )("keeps malformed or missing readback unavailable: %#", (registrationReadback) => {
+    const d = decide(
+      payload([
+        {
+          resource: "repo:acme/widgets",
+          live: {
+            state: "warm",
+            inFlight: 1,
+            runsInFlight: 1,
+            executingRuns: 0,
+            retainedRuns: 0,
+            unknownRuns: 1,
+            registrationReadback,
+          },
+        },
+      ]),
+    );
+    expect({ allow: d.allow, forced: d.forced, unknown: d.unknown }).toEqual({
+      allow: false,
+      forced: false,
+      unknown: [
+        { resource: "repo:acme/widgets", error: "1 run owner(s) unverified; registration readback: unavailable" },
+      ],
+    });
+    expect(d.message).not.toContain("private-");
+  });
+
+  it("reports empty readback as empty without classifying unknown work", () => {
+    const d = decide(
+      payload([
+        {
+          resource: "repo:acme/widgets",
+          live: {
+            state: "warm",
+            inFlight: 1,
+            runsInFlight: 1,
+            executingRuns: 0,
+            retainedRuns: 0,
+            unknownRuns: 1,
+            registrationReadback: [],
+          },
+        },
+      ]),
+    );
+    expect({ allow: d.allow, unknown: d.unknown }).toEqual({
+      allow: false,
+      unknown: [{ resource: "repo:acme/widgets", error: "1 run owner(s) unverified; registration readback: empty" }],
+    });
+  });
+
+  it("reports the closed unknown registration reason while main still exits refused", async () => {
+    const fetched = payload([
+      {
+        resource: "repo:acme/widgets",
+        live: {
+          state: "warm",
+          inFlight: 1,
+          runsInFlight: 1,
+          executingRuns: 0,
+          retainedRuns: 0,
+          unknownRuns: 1,
+          registrationReadback: [
+            {
+              category: "unknown",
+              reason: "ledger-unverified",
+              count: 1,
+              runId: "private-run",
+              ownerGen: "private-owner",
+              token: "private-token",
+            },
+          ],
+        },
+      },
+    ]);
+    fetched.payload.draining.swapFence = false;
+    fetched.payload.fenceReady = false;
+    const d = decide(fetched);
+    expect({ allow: d.allow, forced: d.forced, unknown: d.unknown }).toEqual({
+      allow: false,
+      forced: false,
+      unknown: [
+        {
+          resource: "repo:acme/widgets",
+          error: "1 run owner(s) unverified; registration readback: unknown/ledger-unverified=1",
+        },
+      ],
+    });
+    const lines = [];
+    const logger = vi.spyOn(console, "error").mockImplementation((line) => lines.push(String(line)));
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify(fetched.payload), { status: 200 }));
+    try {
+      expect(
+        await main([], { RESIDENT_BASE_URL: "https://resident.invalid", RESIDENT_DRAIN_TOKEN: "private-token" }),
+      ).toBe(1);
+      expect(lines.join("\n")).toContain("unknown/ledger-unverified=1");
+      expect(lines.join("\n")).not.toContain("private-");
+    } finally {
+      logger.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("retained terminal registrations do not count as executing under a closed deploy fence", () => {
     const d = decide({
       ok: true,

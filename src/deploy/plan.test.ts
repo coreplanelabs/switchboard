@@ -689,6 +689,19 @@ describe("decideAccount", () => {
 });
 
 describe("classifyDeployOutput", () => {
+  it("keeps every printed refusal bullet including the closed owner reason", () => {
+    const output =
+      "[resident-preflight] preflight REFUSED: Worker deploy —\n  - deploy fence is missing or invalid\n  - deploy fence is not ready\n  - unknown state: repo:acme/widgets (1 run owner(s) unverified; registration readback: unknown/ledger-unverified=1)\n  wait and retry";
+    expect(classifyDeployOutput(1, output)).toEqual({
+      kind: "preflight-refused",
+      reason:
+        "deploy fence is missing or invalid; deploy fence is not ready; unknown state: repo:acme/widgets (1 run owner(s) unverified; registration readback: unknown/ledger-unverified=1)",
+    });
+    expect(classifyDeployOutput(1, "[resident-preflight] preflight REFUSED: no printed details")).toEqual({
+      kind: "preflight-refused",
+      reason: "preflight refused",
+    });
+  });
   it("a preflight refusal is retryable and names what would be killed; success yields the version id", () => {
     const refused =
       "[bot-preflight] preflight REFUSED: a Worker deploy rolls the bot container —\n  - 2 run(s) in flight — a rollout would kill them\n  wait and retry";
