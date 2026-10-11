@@ -46,11 +46,11 @@ export function recoveryStepName(step: RecoveryStep): string {
 }
 
 /** The child preset is fixed by its canonical action name, including renewed and recovery executions. */
-export function childPresetOfStep(value: string): "coding" | "review" | undefined {
+export function childPresetOfStep(value: string): "research" | "coding" | "review" | undefined {
   const recovered = parseRecoveryStep(value);
   if (recovered) return recovered.kind === "review" ? "review" : "coding";
   const match =
-    /^([A-Za-z0-9_-]{1,32})(?:\/s([1-9][0-9]*))?(?:\/r([1-9][0-9]*))?\/(0|[1-9][0-9]*)\/(coding|review|findings|rebase)(?:\/a([1-9][0-9]*))?$/.exec(
+    /^([A-Za-z0-9_-]{1,32})(?:\/s([1-9][0-9]*))?(?:\/r([1-9][0-9]*))?\/(0|[1-9][0-9]*)\/(research|coding|review|findings|rebase)(?:\/a([1-9][0-9]*))?$/.exec(
       value,
     );
   if (
@@ -59,8 +59,8 @@ export function childPresetOfStep(value: string): "coding" | "review" | undefine
       (number) => number !== undefined && !Number.isSafeInteger(Number(number)),
     ) ||
     (match[2] !== undefined && Number(match[2]) < 2) ||
-    (match[5] === "coding" ? Number(match[4]) !== 0 : Number(match[4]) < 1)
+    (["coding", "research"].includes(match[5]!) ? Number(match[4]) !== 0 : Number(match[4]) < 1)
   )
     return undefined;
-  return match[5] === "review" ? "review" : "coding";
+  return match[5] === "research" ? "research" : match[5] === "review" ? "review" : "coding";
 }

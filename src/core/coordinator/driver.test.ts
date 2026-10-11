@@ -145,6 +145,101 @@ const prMerged = (at = T0, mergedAt = "2026-09-13T23:55:59Z"): BotReply =>
   ok({ ok: true, state: "merged", prNumber: 7, url: PR_URL, sha: MERGED, mergedAt }, at);
 const acked = (at = T0): BotReply => ok({ ok: true }, at);
 
+describe("Ship research phase", () => {
+  const researchBrief = {
+    version: 1,
+    goal: "Restore the login session",
+    headSha: HEAD,
+    complexity: "simple",
+    decision: "ready",
+    evidence: [{ source: "src/session.ts", ref: HEAD, summary: "Session IDs are retained" }],
+    assumptions: [],
+    unknowns: [],
+    approach: ["Restore the stored session"],
+    verification: ["Restart and assert the original session ID"],
+  };
+
+  it("runs bounded research before coding and carries its original run into the coding contract", async () => {
+    const s = steps({
+      "U10/0/research/wait/1": "event",
+      "U10/0/coding/wait/1": "event",
+      "U10/1/review/wait/1": "event",
+    });
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "runner", { research: true })],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-research"), spawned("run-c0", T0 + MIN), spawned("run-r1", T0 + 10 * MIN)],
+      "read-record": [
+        record({ id: "run-research", finished: true, status: "completed", researchBrief, costUsd: 1 }, T0 + MIN),
+        codingDone("run-c0", T0 + 10 * MIN),
+        reviewApproved("run-r1", T0 + 20 * MIN),
+      ],
+      "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+      round: [acked(), acked(), acked(), acked(), acked(), acked()],
+      merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+      "unit-end": [ok({ ok: true, told: true }, T0 + 21 * MIN)],
+      finish: [ok({ ok: true, runId: "run-parent" }, T0 + 21 * MIN)],
+    });
+    expect(await runPlan(s.runner, b.client, INSTANCE)).toEqual({
+      instance: INSTANCE,
+      planId: "fixture",
+      units: { U10: "merged" },
+      outcome: "completed",
+    });
+    expect(b.of("spawn").map((body) => ({ preset: body.preset, brief: body.brief }))).toEqual([
+      { preset: "research", brief: { kind: "research", unit: "U10" } },
+      {
+        preset: "coding",
+        brief: {
+          kind: "contract",
+          unit: "U10",
+          rebase: { branch: "plan/fixture/u10", onto: "main" },
+          researchRunId: "run-research",
+        },
+      },
+      { preset: "review", brief: { kind: "review", unit: "U10", pr: 7, headSha: HEAD, round: 1 } },
+    ]);
+    expect(b.of("spawn")[0]?.budget).toBe(8);
+  });
+
+  it("ends a blocked research result before starting an implementation child", async () => {
+    const s = steps({ "U10/0/research/wait/1": "event" });
+    const b = bot({
+      plan: [planAnswer([row("U10")], T0, "person", { research: true })],
+      "unit-start": [started("U10")],
+      branch: [branched("U10")],
+      spawn: [spawned("run-research")],
+      "read-record": [
+        record(
+          {
+            id: "run-research",
+            finished: true,
+            status: "completed",
+            researchBrief: {
+              ...researchBrief,
+              complexity: "complex",
+              decision: "blocked",
+              blockedReason: "Retention policy is unknown",
+            },
+            costUsd: 1,
+          },
+          T0 + MIN,
+        ),
+      ],
+      "pr-check": [prNone()],
+      round: [acked(), acked()],
+      "unit-end": [ok({ ok: true, told: true })],
+      finish: [ok({ ok: true })],
+    });
+    expect(await runPlan(s.runner, b.client, INSTANCE)).toMatchObject({ outcome: "failed", units: { U10: "aborted" } });
+    expect(b.of("spawn").map((body) => body.preset)).toEqual(["research"]);
+    expect((b.of("unit-end")[0]?.ending as { report: string })?.report).toContain(
+      "Research blocked: Retention policy is unknown",
+    );
+  });
+});
+
 describe("runOriginalUnitRecovery", () => {
   const ACTION = `r_${"a".repeat(64)}`;
   const WORKFLOW = `recovery-${ACTION}`;

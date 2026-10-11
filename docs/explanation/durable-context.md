@@ -2,6 +2,8 @@
 
 The model interprets the request. Storage preserves the evidence it used, and current policy decides whether the next reader may use it. A product name can resolve from working notes, memory or a repository README; the person need not repeat `owner/repo` when the existing context is enough. Execution still checks the resolved target and its ownership.
 
+[How agents keep context](context-engineering.md) walks through research, phase notes, focused child context and recall. [Context lifecycle](../reference/context-lifecycle.md) defines the records and access checks behind that flow.
+
 ## One reader over the existing stores
 
 `contextAccessForMessage` supplies the current reader's checks. It composes the existing stores; it does not create another database or permission system.

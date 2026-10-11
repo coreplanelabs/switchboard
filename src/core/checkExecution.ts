@@ -212,7 +212,7 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
     const prior = state.receipts.find((receipt) => receipt.callId === callId);
     if (prior)
       return prior.inputHash === inputHash
-        ? { kind: "recorded", receipt: structuredClone(prior) }
+        ? { kind: "recorded", receipt: structuredClone(prior), replayed: true }
         : unavailable("call_mismatch");
     const commandHash = hash(input.command);
     // A new tool id is not permission to retry a command whose response was lost.

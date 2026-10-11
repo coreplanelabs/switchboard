@@ -10,13 +10,15 @@ import type { UnitEnding } from "./ship/coordinator.js";
 // never disagree. Total over any event list; it never throws.
 
 /** The stage vocabulary (record 0065): what every surface says a unit is in. */
-export type Stage = "coding" | "review" | "fix" | "approved" | "merge-ready" | "merged" | "idle" | "ended";
+export type Stage = "research" | "coding" | "review" | "fix" | "approved" | "merge-ready" | "merged" | "idle" | "ended";
 
 export const HOSTED_PIPELINE_STARTING_DETAIL = "pipeline starting";
 
 /** Safe detail for a hosted parent's shared `working` state, total over Stage. */
 export function hostedStageDetail(stage: Stage): string {
   switch (stage) {
+    case "research":
+      return "researching a unit";
     case "coding":
       return "coding a unit";
     case "review":
@@ -37,6 +39,7 @@ export function hostedStageDetail(stage: Stage): string {
 }
 
 export const STAGES = [
+  "research",
   "coding",
   "review",
   "fix",
@@ -48,7 +51,7 @@ export const STAGES = [
 ] as const satisfies readonly Stage[];
 
 /** The stages a unit is still open in: what `PipelineSummary.current` lists. */
-const OPEN_STAGES: ReadonlySet<Stage> = new Set(["coding", "review", "fix", "approved", "idle"]);
+const OPEN_STAGES: ReadonlySet<Stage> = new Set(["research", "coding", "review", "fix", "approved", "idle"]);
 
 /** One unit's standing: the stage, the latest round index bound to it, the
  *  segment count (raised by a `continued` round and by a reopen from idle),
@@ -282,7 +285,12 @@ export function pipelineStandingOf(events: readonly RunEvent[]): PipelineStandin
         continue;
       }
       consumed.add(i + 1);
-      const mapped = (ROUND_STAGE as Record<string, Stage | "start" | "continue" | "hold">)[e.outcome] ?? "hold";
+      const mapped =
+        e.agent === "research"
+          ? e.outcome === "started"
+            ? "research"
+            : "hold"
+          : ((ROUND_STAGE as Record<string, Stage | "start" | "continue" | "hold">)[e.outcome] ?? "hold");
       const stage: Stage =
         mapped === "start"
           ? e.agent === "review"

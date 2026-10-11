@@ -1,3 +1,4 @@
+import type { ResearchBrief } from "../core/research/brief.js";
 import type { ParentContext } from "../core/dispatch/handoff.js";
 import type { ReviewHistoryContext } from "../core/reviewHistory.js";
 // What a tool is to the loop that runs it — the native runner today, the pi
@@ -199,6 +200,7 @@ export interface ToolContext {
    *  run record carries it; a ship round posts it to the unit's board issue.
    *  Absent → the tool says nothing is recording it. */
   onHandoff?: (handoff: Handoff) => void;
+  onResearchBrief?: (brief: ResearchBrief) => Promise<boolean>;
   /** Exact finding IDs carried by the coordinator's durable findings-child tag.
    *  Absent on non-findings runs and legacy children: no disposition authority. */
   issuedFindingIds?: readonly string[];

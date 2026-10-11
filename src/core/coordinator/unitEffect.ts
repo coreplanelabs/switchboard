@@ -409,6 +409,15 @@ export function unitEffectRunId(input: UnitEffectTransition): string | undefined
   )
     return input.outcome.runId;
 }
+/** Maintenance identifies its single coding spawn by native operation, not Workflow step syntax. */
+function maintenanceCodingSpawn(effect: UnitCurrentEffect): boolean {
+  return (
+    effect.execution.maintenance !== undefined &&
+    effect.calls.length === 1 &&
+    effect.calls[0]?.operation === "spawn" &&
+    effect.calls[0].agent === "coding"
+  );
+}
 function spawnEvidenceRefusal(
   instance: CoordinatorInstance,
   unit: CoordinatorUnit,
@@ -432,13 +441,37 @@ function spawnEvidenceRefusal(
     effect.calls.slice(0, spawnIndex).every((call) => call.state === "accepted") &&
     priorPush?.state === "accepted" &&
     sha(priorPush.commitSha);
-  const modelRound =
-    effect.execution.maintenance !== undefined &&
-    effect.calls.length === 1 &&
-    effect.calls[0]?.operation === "spawn" &&
-    effect.calls[0].agent === "coding";
+  const modelRound = maintenanceCodingSpawn(effect);
   const expectedAgent = modelRound ? "coding" : deltaReview ? "review" : childPresetOfStep(effect.id);
+  if (expectedAgent === "research" && unit.researchRunId !== undefined && unit.researchRunId !== runId)
+    return "conflict";
+  if (
+    expectedAgent === "coding" &&
+    (meta.researchRunId !== unit.researchRunId || tag.researchRunId !== unit.researchRunId)
+  )
+    return "conflict";
+  if (
+    expectedAgent === "coding" &&
+    unit.researchRunId !== undefined &&
+    (!object(tag.researchTarget) ||
+      tag.researchTarget.repo !== effect.target.repo ||
+      tag.researchTarget.headSha !== effect.target.headSha)
+  )
+    return "conflict";
   const expectedHead = deltaReview && priorPush?.state === "accepted" ? priorPush.commitSha! : effect.target.headSha;
+  const researchTarget = tag.researchTarget;
+  const repoMatches =
+    meta.agent === "research"
+      ? instance.research === true &&
+        effect.id === `${unit.unit}/0/research` &&
+        object(researchTarget) &&
+        typeof researchTarget.repo === "string" &&
+        researchTarget.repo.toLowerCase() === effect.target.repo.toLowerCase() &&
+        typeof researchTarget.headSha === "string" &&
+        researchTarget.headSha.toLowerCase() === expectedHead.toLowerCase() &&
+        (meta.repo === undefined ||
+          (typeof meta.repo === "string" && meta.repo.toLowerCase() === effect.target.repo.toLowerCase()))
+      : typeof meta.repo === "string" && meta.repo.toLowerCase() === effect.target.repo.toLowerCase();
   const thread = meta.agent === "review" ? (unit.reviewThread?.threadKey ?? unit.threadKey) : unit.threadKey;
   if (
     evidence.runId !== runId ||
@@ -465,8 +498,7 @@ function spawnEvidenceRefusal(
     meta.authenticatedAs !== instance.authenticatedAs ||
     meta.postedBy !== instance.postedBy ||
     meta.threadKey !== (thread ?? instance.threadKey) ||
-    typeof meta.repo !== "string" ||
-    meta.repo.toLowerCase() !== effect.target.repo.toLowerCase() ||
+    !repoMatches ||
     meta.parentInstanceId !== instance.id ||
     meta.coordinatorUnit !== unit.unit ||
     meta.coordinatorAttempt !== (instance.attempt ?? 0) ||
@@ -696,6 +728,14 @@ export function planUnitEffectTransition(
       ok: true,
       unit: {
         ...current,
+        ...(proof.kind === "spawn_run" && childPresetOfStep(effect.id) === "research"
+          ? { researchRunId: proof.runId }
+          : {}),
+        ...(proof.kind === "spawn_run" &&
+        current.researchRunId !== undefined &&
+        (maintenanceCodingSpawn(effect) || childPresetOfStep(effect.id) === "coding")
+          ? { researchProgressRunId: proof.runId }
+          : {}),
         ...(call.agent === "coding" && proof.kind === "spawn_run"
           ? { rounds: maintenanceSpawnRounds(current, effect, proof.runId) }
           : {}),
@@ -746,6 +786,15 @@ export function planUnitEffectTransition(
   };
   const next = {
     ...current,
+    ...(call.operation === "spawn" && input.outcome.state === "accepted" && childPresetOfStep(effect.id) === "research"
+      ? { researchRunId: input.outcome.runId }
+      : {}),
+    ...(call.operation === "spawn" &&
+    current.researchRunId !== undefined &&
+    input.outcome.state === "accepted" &&
+    (maintenanceCodingSpawn(effect) || childPresetOfStep(effect.id) === "coding")
+      ? { researchProgressRunId: input.outcome.runId }
+      : {}),
     ...(call.operation === "spawn" && call.agent === "coding" && input.outcome.state === "accepted"
       ? { rounds: maintenanceSpawnRounds(current, effect, input.outcome.runId!) }
       : {}),
@@ -787,7 +836,19 @@ export function unitEffectResultMatches(input: UnitEffectTransition, unit: Coord
     input.expected.currentEffect?.calls[input.call]?.agent === "coding"
       ? { ...input.expected, rounds: maintenanceSpawnRounds(input.expected, input.expected.currentEffect, chargedRun) }
       : input.expected;
-  const { currentEffect: _before, ...expectedFields } = expected;
+  const originalPreset =
+    input.expected.currentEffect && maintenanceCodingSpawn(input.expected.currentEffect)
+      ? "coding"
+      : childPresetOfStep(input.expected.currentEffect?.id ?? "");
+  const canonicalExpected =
+    chargedRun !== undefined && originalPreset === "research"
+      ? { ...expected, researchRunId: chargedRun }
+      : chargedRun !== undefined && originalPreset === "coding" && expected.researchRunId !== undefined
+        ? { ...expected, researchProgressRunId: chargedRun }
+        : expected;
+  if (input.expected.researchRunId !== undefined && canonicalExpected.researchRunId !== input.expected.researchRunId)
+    return false;
+  const { currentEffect: _before, ...expectedFields } = canonicalExpected;
   const { currentEffect: effect, ...actualFields } = unit;
   if (!same(expectedFields, actualFields) || !effect) return false;
   if (input.kind === "admit" || input.kind === "prepare") return same(effect, input.effect);

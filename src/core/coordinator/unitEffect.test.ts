@@ -545,30 +545,30 @@ describe("unit current effect", () => {
 });
 
 describe("spawn effect durable receipt", () => {
-  async function setup() {
+  async function setup(role: "coding" | "research" = "coding", admittedResearch = role === "research") {
     const ledger = new InMemoryRunLedger(() => 2);
     const store = new InMemoryCoordinatorInstanceStore(ledger);
-    await store.put(instance);
+    await store.put({ ...instance, ...(admittedResearch ? { research: true } : {}) });
     const pending: CoordinatorUnit = {
       ...unit,
       currentEffect: {
         ...effect,
-        id: "ONE/0/coding",
+        id: `ONE/0/${role}`,
         calls: [{ operation: "spawn", state: "uncertain" }],
       },
     };
     (store as unknown as { units: Map<string, string> }).units.set(`${instance.id}\0ONE`, JSON.stringify(pending));
     const meta = {
-      agent: "coding",
+      agent: role,
       channelId: instance.channelId,
       userId: instance.userId,
       threadKey: unit.threadKey!,
-      repo: instance.repo,
+      repo: role === "research" ? undefined : instance.repo,
       ref: unit.branch,
       parentInstanceId: instance.id,
       coordinatorUnit: unit.unit,
       coordinatorAttempt: 0,
-      idempotencyKey: `${instance.id}:ONE/0/coding`,
+      idempotencyKey: `${instance.id}:ONE/0/${role}`,
       operationTarget: { repo: instance.repo, ref: unit.branch },
     };
     expect(
@@ -592,18 +592,183 @@ describe("spawn effect durable receipt", () => {
       unit: unit.unit,
       branch: unit.branch,
       base: instance.base,
+      ...(role === "research" ? { researchTarget: { repo: instance.repo, headSha: "a".repeat(40) } } : {}),
     };
     await ledger.append("exact-child", "g1", [tag]);
     const input = {
       kind: "resolve",
       expected: pending,
       execution,
-      effectId: "ONE/0/coding",
+      effectId: `ONE/0/${role}`,
       call: 0,
       observation: { kind: "spawn_run", runId: "exact-child" },
     } as Extract<UnitEffectTransition, { kind: "resolve" }>;
     return { ledger, store, pending, meta, tag, input };
   }
+  it("accepts a workspace-less research spawn only from its admitted immutable target tag", async () => {
+    const h = await setup("research");
+    expect(h.ledger.live.get("exact-child")!.meta.repo).toBeUndefined();
+    expect(accepted(await transition(h.store, h.input)).currentEffect?.calls).toEqual([
+      { operation: "spawn", state: "accepted", runId: "exact-child" },
+    ]);
+  });
+  it("retains one immutable original research source through resolve and ordinary metadata updates", async () => {
+    const h = await setup("research");
+    const row = accepted(await transition(h.store, h.input));
+    expect(row).toMatchObject({ researchRunId: "exact-child" });
+    const { researchRunId: _source, ...omitted } = row;
+    expect(await h.store.putUnits([{ ...omitted, title: "Updated title" }])).toEqual({ ok: true });
+    expect((await h.store.listUnits(instance.id))[0]).toMatchObject({
+      researchRunId: "exact-child",
+      title: "Updated title",
+    });
+    await expect(h.store.putUnits([{ ...row, researchRunId: "other-child" }])).rejects.toThrow(
+      "conflicts with retained state",
+    );
+    expect(
+      await h.store.compareAndReplaceUnit((await h.store.listUnits(instance.id))[0]!, {
+        ...row,
+        researchRunId: undefined,
+      }),
+    ).toEqual({ ok: false, reason: "stale" });
+  });
+  it("updates only the canonical source-bound writer pointer and refuses unadmitted source markers", async () => {
+    const h = await setup();
+    const unit = { ...h.pending, researchRunId: "original-research", researchProgressRunId: "previous-writer" };
+    (h.store as unknown as { units: Map<string, string> }).units.set(`${instance.id}\0ONE`, JSON.stringify(unit));
+    h.ledger.live.get("exact-child")!.meta.researchRunId = "original-research";
+    h.ledger.events.set("exact-child", [
+      {
+        ...h.tag,
+        researchRunId: "original-research",
+        researchTarget: { repo: instance.repo, headSha: "a".repeat(40) },
+      },
+    ]);
+    const updated = accepted(await transition(h.store, { ...h.input, expected: unit }));
+    expect(updated).toMatchObject({ researchRunId: "original-research", researchProgressRunId: "exact-child" });
+    const { researchProgressRunId: _progress, ...omitted } = updated;
+    expect(await h.store.putUnits([{ ...omitted, title: "Metadata update" }])).toEqual({ ok: true });
+    expect((await h.store.listUnits(instance.id))[0]).toMatchObject({
+      researchRunId: "original-research",
+      researchProgressRunId: "exact-child",
+    });
+    for (const side of ["metadata", "tag", "both"] as const) {
+      const foreign = await setup();
+      if (side !== "tag") foreign.ledger.live.get("exact-child")!.meta.researchRunId = "unadmitted-research";
+      if (side !== "metadata")
+        foreign.ledger.events.set("exact-child", [{ ...foreign.tag, researchRunId: "unadmitted-research" }]);
+      expect(await transition(foreign.store, foreign.input)).toEqual({ ok: false, reason: "conflict" });
+    }
+  });
+  it.each(["complete", "resolve"] as const)(
+    "retains a source-bound maintenance writer through native %s and its exact paid-round receipt",
+    async (kind) => {
+      const h = await setup();
+      const actionId = `m_${"b".repeat(64)}`;
+      const execution = {
+        maintenance: {
+          id: actionId,
+          admittedAt: 1,
+          bounds: { leaseMinutes: 15, spendCapUsd: 5 },
+          intent: {
+            kind: "watch" as const,
+            eventId: "github:event",
+            instanceId: instance.id,
+            unit: unit.unit,
+            requester: instance.userId,
+          },
+        },
+      };
+      const publication = {
+        repo: instance.repo,
+        pr: 7,
+        headRef: unit.branch,
+        publicationRef: unit.branch,
+        baseRef: "main",
+        expectedHeadSha: "a".repeat(40),
+        owner: { instanceId: instance.id, unit: unit.unit },
+      };
+      const current: CoordinatorUnit = {
+        ...h.pending,
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        publication,
+        researchRunId: "original-research",
+        currentEffect: {
+          ...h.pending.currentEffect!,
+          id: `ONE/maintenance/${actionId}`,
+          execution,
+          target: { ...h.pending.currentEffect!.target, pr: 7 },
+          calls: [{ operation: "spawn", agent: "coding", state: kind === "complete" ? "pending" : "uncertain" }],
+        },
+      };
+      (h.store as unknown as { units: Map<string, string> }).units.set(`${instance.id}\0ONE`, JSON.stringify(current));
+      Object.assign(h.ledger.live.get("exact-child")!.meta, {
+        researchRunId: "original-research",
+        maintenanceActionId: actionId,
+        idempotencyKey: `${instance.id}:ONE/maintenance/${actionId}`,
+      });
+      h.ledger.events.set("exact-child", [
+        {
+          ...h.tag,
+          publication,
+          researchRunId: "original-research",
+          researchTarget: { repo: instance.repo, headSha: "a".repeat(40) },
+          maintenanceActionId: actionId,
+        },
+      ]);
+      const request: UnitEffectTransition =
+        kind === "complete"
+          ? {
+              kind,
+              expected: current,
+              execution,
+              effectId: current.currentEffect!.id,
+              call: 0,
+              outcome: { state: "accepted", runId: "exact-child" },
+            }
+          : {
+              kind,
+              expected: current,
+              execution,
+              effectId: current.currentEffect!.id,
+              call: 0,
+              observation: { kind: "spawn_run", runId: "exact-child" },
+            };
+      const result = accepted(await h.store.transitionUnitEffect(request));
+      expect(result).toMatchObject({
+        researchRunId: "original-research",
+        researchProgressRunId: "exact-child",
+        rounds: [
+          { agent: "coding", outcome: "started", maintenance: { actionId, runId: "exact-child", budgetUsd: 5 } },
+        ],
+      });
+      expect(unitEffectResultMatches(request, result)).toBe(true);
+      expect(unitEffectResultMatches(request, { ...result, researchProgressRunId: "foreign-child" })).toBe(false);
+    },
+  );
+  it("refuses a second research producer instead of replacing the original source", async () => {
+    const h = await setup("research");
+    const current = { ...h.pending, researchRunId: "original-research" };
+    (h.store as unknown as { units: Map<string, string> }).units.set(`${instance.id}\0ONE`, JSON.stringify(current));
+    expect(await transition(h.store, { ...h.input, expected: current })).toEqual({ ok: false, reason: "conflict" });
+    expect((await h.store.listUnits(instance.id))[0]).toMatchObject({ researchRunId: "original-research" });
+  });
+  it.each(["unadmitted", "missing-target", "foreign-repo", "changed-head", "conflicting-workspace"])(
+    "refuses research spawn evidence with %s",
+    async (failure) => {
+      const h = await setup("research", failure !== "unadmitted");
+      const tag = structuredClone(h.tag);
+      if (failure === "missing-target") delete tag.researchTarget;
+      if (failure === "foreign-repo") tag.researchTarget!.repo = "other/repo";
+      if (failure === "changed-head") tag.researchTarget!.headSha = "b".repeat(40);
+      if (failure === "conflicting-workspace") h.ledger.live.get("exact-child")!.meta.repo = "other/repo";
+      h.ledger.events.set("exact-child", [tag]);
+      expect(await transition(h.store, h.input)).toEqual({ ok: false, reason: "conflict" });
+      expect((await h.store.listUnits(instance.id))[0]?.currentEffect?.calls).toEqual([
+        { operation: "spawn", state: "uncertain" },
+      ]);
+    },
+  );
   it("a review receipt must retain its exact admitted pull and head", async () => {
     for (const changed of [{ pr: 8 }, { headSha: "b".repeat(40) }, { headSha: undefined }]) {
       const h = await setup();

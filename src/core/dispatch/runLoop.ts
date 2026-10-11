@@ -146,6 +146,7 @@ import { publicationEffectTool } from "../publicationEffect.js";
 import { bearerHashOf } from "../modelProxy/runBearers.js";
 import type { GitPublicationUpdate } from "../modelProxy/gitBindings.js";
 import { PrDescriptionSchema, redactPrDescription, type PrDescription } from "../prDescription.js";
+import { researchBriefFromSubmission, type ResearchBrief } from "../research/brief.js";
 import { parseHandoff, type Handoff } from "../ship/handoff.js";
 import {
   parseDispositionsInput,
@@ -1200,6 +1201,24 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     prDescription = d;
     ledgerRun?.setState({ prDescription: d });
   };
+  // Research is acknowledged before returning its tool result and restored from the same original run.
+  let researchBrief = researchBriefFromSubmission(
+    restored.researchBrief,
+    resume?.events ?? [],
+    resume !== undefined &&
+      resume.events.length === resume.lastSeq &&
+      resume.events.every((event, index) => event.seq === index + 1),
+  );
+  const onResearchBrief = async (brief: ResearchBrief): Promise<boolean> => {
+    // A later valid decision supersedes the earlier artifact even when its write is uncertain.
+    researchBrief = undefined;
+    events.publish({ type: "research_brief", brief, confirmed: false, at: clock() });
+    await events.drain();
+    if (ledgerRun?.tracked() !== true || !(await ledgerRun.setStateAndFlush({ researchBrief: brief }))) return false;
+    researchBrief = brief;
+    events.publish({ type: "research_brief", brief, confirmed: true, at: clock() });
+    return true;
+  };
   // The unit handoff (docs/reference/specs/agent-coding.md item 9), set only
   // through submit_handoff — the last valid call wins — and restored like the
   // description so a resumed run keeps what its earlier generation submitted.
@@ -2231,6 +2250,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     onDigest,
     onPrDescription,
     onHandoff,
+    onResearchBrief,
     onDispositions,
     ...(coordinator?.issuedFindingIds !== undefined ? { issuedFindingIds: coordinator.issuedFindingIds } : {}),
   };
@@ -4371,6 +4391,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             }
           : {}),
         ...(handoff !== undefined ? { handoff } : {}),
+        ...(researchBrief !== undefined ? { researchBrief } : {}),
         ...(verdict !== undefined ? { verdict } : {}),
         ...(reviewHead !== undefined ? { reviewHead } : {}),
         ...(dispositions !== undefined ? { dispositions } : {}),

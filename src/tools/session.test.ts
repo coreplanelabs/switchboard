@@ -5,6 +5,7 @@ import type { RunEvent } from "../core/runEvents.js";
 import { NOTEPAD_MAX_BYTES } from "../core/runLedger/sessionLog.js";
 import type { FenceResult, Notepad, SessionHit } from "../core/runLedger/types.js";
 import type { RunsService, RunView } from "../core/runsService.js";
+import { PRIVATE_WORKER_INTERNAL_READ } from "../core/runsService.js";
 import type { ThreadAsset } from "../core/dispatch/threadAssets.js";
 import type { Actor } from "../core/authz/types.js";
 import type { ToolContext } from "./runnableTool.js";
@@ -105,6 +106,28 @@ const ctxWith = (cap: SessionCapability | undefined, over: Partial<ToolContext> 
   }) as ToolContext;
 
 describe("recall — the caller's own session log", () => {
+  it.each([true, false])("private own-run metadata still requires requester read permission (%s)", async (allowed) => {
+    const { cap } = capability({ turns: { 4: say("Exact original failure") } });
+    const privateView: RunView = {
+      ...view,
+      threadKey: "worker:owned:task",
+      channelVisibility: "private",
+      ...(allowed ? {} : { userId: "slack:UBOB", channelId: "slack:G_PRIV" }),
+    };
+    const getRun = vi.fn(async (id: string, opts?: { privateWorkerAccess?: unknown }) =>
+      id === "run-1" && opts?.privateWorkerAccess === PRIVATE_WORKER_INTERNAL_READ
+        ? { ok: true, value: privateView }
+        : { ok: false, error: "not_found" },
+    );
+    const ctx = ctxWith(cap, { runs: { service: { getRun } as unknown as RunsService, actor: alice, runId: "run-1" } });
+    expect(JSON.parse(String(await recallTool.run({ turn: 4 }, ctx)))).toEqual(
+      allowed
+        ? { turn: 4, role: "user", content: [{ type: "text", text: "Exact original failure" }] }
+        : { turn: 4, content: null },
+    );
+    expect(getRun).toHaveBeenCalledExactlyOnceWith("run-1", { privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ });
+    expect(cap.readTurn).toHaveBeenCalledTimes(allowed ? 1 : 0);
+  });
   it("searches in relevance order and answers each hit's turn, role and a snippet, and the gaps a search straddles", async () => {
     const { cap } = capability({
       hits: [
@@ -524,7 +547,8 @@ describe("inherited session context", () => {
     expect(captured.messages).toContainEqual(say("before compaction"));
     expect(captured.messages).toContainEqual(say("after compaction"));
     expect(JSON.stringify(captured.messages)).not.toContain("a lossy summary");
-    expect(captured.actors).toEqual([undefined, "slack:UALICE", undefined]);
+    expect(captured.messages).toContainEqual(say("original output"));
+    expect(captured.actors).toEqual([undefined, undefined, undefined, "slack:UALICE", undefined]);
     await expect(cap.captureHandoff!({ ...source, runId: "someone-else" })).rejects.toThrow("does not match");
   });
 
@@ -562,7 +586,7 @@ describe("inherited session context", () => {
       },
       6,
     );
-    expect(order).toEqual(["body", "frozen-body", "note", "assets", "dependencies"]);
+    expect(order).toEqual(["body", "frozen-body", "note", "assets", "frozen-body", "dependencies"]);
     expect(captured.handoff?.session.to).toBe(6);
     expect(captured.handoff?.dependencies?.value?.revision).toBe(1);
     expect(wt.readSession).toHaveBeenCalledWith(childSession.key, 6, 6);

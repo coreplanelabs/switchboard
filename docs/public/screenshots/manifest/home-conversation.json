@@ -64,7 +64,7 @@
     "scripts/web-preview-reading-diff.ts": "24dea75cb4b61c011fa75878b138dde75e8a260d3c5b06c05c1e6fe2f2a58649",
     "scripts/web-preview.ts": "43f471439f4074689921d153e91829b6deb9dc8e33af46c4e3362d26a423a9d1",
     "src/agents/defaults.json": "f6fbe3d390a8aca3edf622d7494658145dca9590642183294d36e004c64760d8",
-    "src/agents/registry.ts": "49ef1275debffa4dedc226ca8ed2d6d2779904f7b5c5a832eb8a46f78ab7be58",
+    "src/agents/registry.ts": "52d4bdc42942b4cf772ee87b16074ef2ef08618f425f9925b7469f29ab33d158",
     "src/agents/resourceLifetime.ts": "3e1394c21439e9c53b4d13aa23b0f2e3fd67365dfc0ab4bcf1fa28e3494f5847",
     "src/artifacts/config.ts": "4aefd5a56a6b68599a994e31ae640e7729c3cc72221c30a1c003728a4ed35db9",
     "src/artifacts/contentType.ts": "637607106665db5fd51a526a41cbd71c4793005a8873be2cf77ca17a3bcdc23e",
@@ -101,18 +101,18 @@
     "src/core/authz/viewAs.ts": "cbfefdca793e908ff07b299af98186e38d47838162a76613e10f71f51554df63",
     "src/core/branchIdentityBaseline.ts": "b13b930408b3d87887736275b08ad0b7f740514082ca3b2b3f9a75c2f8ad5ead",
     "src/core/branchPublication.ts": "c4d749996d997e598993a46aadac6f386071e106bad1c52275ddddf03afec6a2",
-    "src/core/budgets.ts": "0d17a901bc508959ffd9613d88ff86bdca67b7b29a7bc8a813b919aedfc9f83a",
+    "src/core/budgets.ts": "3ef517c53bf6836683a92d5a1fbcee230c9ccfc4b6d3325d890e0a8bfab5f430",
     "src/core/capabilities.ts": "5d95cfcefc532d454d583b1e267d591d1f013193fa954391d9975bec176ec481",
     "src/core/chatMessage.ts": "927d2931ac24b29555c29fcac1c077fb205aa7eead55352cec8b5a18df6afd04",
-    "src/core/coordinator/contract.ts": "998e90be1e31ae1b03ca644dd772217b27316607f1e8efbd5f45fe7aa01d2b3e",
+    "src/core/coordinator/contract.ts": "bff1f98c2abb8fce1aaf2fd9472f8900b430f72138bd3ad6ea35c86d0e262ddd",
     "src/core/coordinator/historicalNativeAudit.ts": "31f370b1ef57507079c291bf088ab06d7dd45715557ab2dff28baf7286146be5",
     "src/core/coordinator/mainWorkObservation.ts": "8336abc6d7bff35c873773758701967f5094ce888e58b7206920dfd3d6919bf3",
     "src/core/coordinator/maintenanceIdentity.ts": "aed570306a777c0f063942a388f97b2d39193e768405063bef2da6fa10ddc1d0",
-    "src/core/coordinator/recoveryStep.ts": "ca93a67a9cb0544d7c1a19960fb66500db7679db769288661d8a4f3654228c6b",
+    "src/core/coordinator/recoveryStep.ts": "90bff1b53cbc826ea306afcd9b4ad8eca4a23e642a9e37780d495d5b3063d78b",
     "src/core/coordinator/reportAdmission.ts": "a15e55feac3523c34dc2ad75d1de06b66d7dbce3bce96f555b4de1b15a82b2a9",
     "src/core/coordinator/shipOutcome.ts": "fd9ffd0a8d796bf4186ffae227e6eaa02deca611c9a5285153749018c88e92c6",
-    "src/core/coordinator/unitEffect.ts": "a8d429b32fb3a964c0adb325947d98eda6c3dde62999b7eb5123621f7792039a",
-    "src/core/coordinator/unitSeedReceipt.ts": "fb1a33eb2d83dff73092f055728eb6b2e98dca819f4f03fae0267bdf5cc7af79",
+    "src/core/coordinator/unitEffect.ts": "947f784e0ec108764488f1b3232440c4de2527de9b8387326b6a4c51aac5e866",
+    "src/core/coordinator/unitSeedReceipt.ts": "86ba4910958da0ff0e0654079a0ec072110f24d2885af4da4e166e281d16f840",
     "src/core/costs.ts": "c387635a7d94791ae385444b664c953a04b556a27c6772981bf1cd7a9d118f18",
     "src/core/costsBy.ts": "b01e82dffd9d635701923ad3252379a28db6d19257263685d2cc59e96c721069",
     "src/core/costsService.ts": "55f165b8d981e09a8a1248a3ed150ad59d911160d0b5e26408465647ed113155",
@@ -120,7 +120,8 @@
     "src/core/costsSnapshotStore.ts": "9dd1b5e0ce7dfe3bdafada4823f37859320fa1204fdb0415771f784fbc6ba0c1",
     "src/core/dashboardAuthConfig.ts": "0952512293481cad46a639c50b327948f33681ea4d4d62cb4aed63a9f7a4304d",
     "src/core/delivery.ts": "09d106265fe54ff39b482a6fbaaa9a869f379666bd68a1e10b5acf9a3104de8c",
-    "src/core/dispatch/handoff.ts": "257ae75fd29be450a1ef90157c3f9a633fec4879445e398bf168713d30a4b55b",
+    "src/core/dispatch/handoff.ts": "ab68cf95a62b2804d89ab527497536bb1308c73315bb8c20c9e24aa1272bf2a2",
+    "src/core/dispatch/handoffBrief.ts": "41a97afc78d2bf3547dc1d8663b0ef581b9214f22d6ed88357d6a87050c7f0d8",
     "src/core/dispatch/spawnConfig.ts": "49de1720cd08ef2b95ce5de5f8fa32966065adfd3dd195286f97c0ad24ccc70a",
     "src/core/dispatch/unitContext.ts": "d5f6abbb64424f3ad00699375e68adaacf7eed296a6a509d9309269f76bedd3d",
     "src/core/harness/names.ts": "a037f8198985138aec0fa909458b5cf9f44ba934b7d093b7f295ea07677fbfbd",
@@ -139,7 +140,7 @@
     "src/core/modelRegistry.ts": "a9dc0edf86a09ab3cbd0dda7ff47616ce232f88f276b86de5634c88317f1d3d1",
     "src/core/names.ts": "85ac837cbf8b1e7eb4663c7f4c53f17501b5b5cca7aad70dcfcf33b6d4c8bd42",
     "src/core/normalizeSpans.ts": "51010154bf3de59ac4a20caed8b9f264da8d0893d12f6d5a8343eadc33eb71f7",
-    "src/core/pipelineStanding.ts": "8c19d988576053533309d1cdc1f66d63404c1b4a7f294db7f41695f693a683f9",
+    "src/core/pipelineStanding.ts": "0f4445044caf9eed59d82612f93c2e2d5e27ff2d648744de4c8f2c5efd177712",
     "src/core/plane/table.ts": "8ec1bd124a42ee681a1c5bdf0eabb4bb1a08440459495f851cbc72a987e2ad95",
     "src/core/provider.ts": "869f990b346ce1eb3b3a1a4800f500acb04cc4cb870413a81513ec8abbb486f6",
     "src/core/publicationSettlement.ts": "c74f0bd5abe4a4256539d604106e0b8ceadede3ac54b90ff659cc30412bf4cb1",
@@ -150,12 +151,13 @@
     "src/core/references/receipts.ts": "011458ca2fb30c26547b0b8be700046a9cb67854c6cfc0d8fcd4937b8ff8ed64",
     "src/core/references/sourceReceipt.ts": "03a4fc0fe383095f85ef21a56d03a6ba5fc3f863ccf0e1ac3bd08f198c48b647",
     "src/core/references/unitStatusReference.ts": "a7d07aa188ec78fcfd8763a3d6f1ae3a814e5aa50f3c8d55edc085a3b9203084",
+    "src/core/research/brief.ts": "06aa667d03646eb0eb8527fc1d41808aa87f0e8a6791277233fa846c1f54fd15",
     "src/core/reviewPost.ts": "6ac0a2d4e2e53f840ce19d752187c9920df6e90d6a932c68cb8aa1193028462c",
     "src/core/reviewPublication.ts": "1673180bf13218417dd9a6ef19dbca7c6e716ad005cfda7aefabb20485f8c92d",
     "src/core/reviewVerdict.ts": "b2377cead886016c1ec68c8af5b923e81d52efb0028f0d31134aa9383e01ddb5",
     "src/core/reviewedHead.ts": "943f8078a2e0eff3ec98ca7330c29d7da72c2af702b003589f0c53d6c610652c",
     "src/core/runDuration.ts": "dca2a672930febee9fae33e917c5129d6271fd1f9781a7dbcb4cb2217dbe2dae",
-    "src/core/runEvents.ts": "0772f8bd19f4a3fdc97db44825b64c27c1703d4ad23977de6c33b84e03f90ffc",
+    "src/core/runEvents.ts": "4bd8520d63bba1e83225507bc0412e5c59b90574ad24195a6d15b54bd177ceec",
     "src/core/runFriction.ts": "463871a1cffdbfdb6f9028766b28de593481e4568a3e51fbdffff13584fd59d1",
     "src/core/runIdentity.ts": "de4ec56068e42c38d84ba40b63c373426d4ebd6aad20f55b6d15bcd2e372e95a",
     "src/core/runLedger/cancellation.ts": "1189f109f451b35d3458e78d232eba8196d94f96ba9405f14680387609b1ff68",
@@ -163,7 +165,7 @@
     "src/core/runLedger/inboxMessage.ts": "b64666d38694557d4c741549ee29c2326d49f8e40618e8aec3d9e3c95d648ee2",
     "src/core/runMetrics.ts": "90ba2ff8a339e9e183a3bd1b86a40fedb1579c6b28790528164e6c82440a11d2",
     "src/core/runPace.ts": "5bec2b2a007c7db8461b6414fe18d94775bf93763336268c60fcc83177874e97",
-    "src/core/runRecord.ts": "47859813c9bfa311b04dcb44ede95805a9828c7bb798ce279812956cfd4ebad9",
+    "src/core/runRecord.ts": "90e3731fc5727349fd5b876cf8f0390404bff45c113aa12302828abdad2cb9c9",
     "src/core/runSetup.ts": "08c0539273435e0463f799ab1eb8da04314cb2e21a683d335a0a65b5d4a00d6e",
     "src/core/runShape.ts": "0962881b1f2201c02214b8ee6d897f279dc90f64feb9a57c3950b23e7ea8d1f2",
     "src/core/runStateWriteDiagnostic.ts": "59543fd7ef0ea990d868fc82d5b3d0506475ed5fe9157ad73156ea52dd251e54",
@@ -173,7 +175,7 @@
     "src/core/runUsage.ts": "830044e2a427a677f14c4edaed5c08ab8aeabd3db92cd0bcca0ef384fbfbf7e5",
     "src/core/schedules.ts": "c67d8fad132186568cd747d5ee2990931720dea8d6bd89e13b3d7b217f78788b",
     "src/core/ship/contract.ts": "cd07f4df639ea45591b471dad3baa9c70db1f8b6087a89da152593f0b95f6b16",
-    "src/core/ship/coordinator.ts": "45060fc23fe7584d62d8290015bfed1610dd4529e300ef4660a4ff340fb17a8c",
+    "src/core/ship/coordinator.ts": "47ebef0447eaf606508d16c7e279df38fa78ab3da097092fe85ac601d6f2f1fa",
     "src/core/ship/handoff.ts": "e059cbf249dbf6af286503704dfe9dcc74d2664d169cd82ba7069ffd7ef2ffae",
     "src/core/ship/renewal.ts": "640dc8434bc88879a6a08b0706bc1d40503c3422cfa5198ef1bee1c8341e25d8",
     "src/core/shipPipeline.ts": "aca498b773b434933d83ca94c3d785a1a4680ffeb8ce40913639066e621e3200",
@@ -278,7 +280,15 @@
         "accept": "*/*"
       },
       {
+        "path": "/assets/1f41ad8c2578e46c.woff2",
+        "accept": "*/*"
+      },
+      {
         "path": "/assets/234d05a8be46e9e1.js",
+        "accept": "*/*"
+      },
+      {
+        "path": "/assets/25ea74757df8dad0.woff2",
         "accept": "*/*"
       },
       {
@@ -287,10 +297,6 @@
       },
       {
         "path": "/assets/30519f187e29203c.js",
-        "accept": "*/*"
-      },
-      {
-        "path": "/assets/4bc9835edd11b53c.woff2",
         "accept": "*/*"
       },
       {
@@ -319,10 +325,6 @@
       },
       {
         "path": "/assets/8c63b478a250d0ad.js",
-        "accept": "*/*"
-      },
-      {
-        "path": "/assets/9825f6c791051da3.woff2",
         "accept": "*/*"
       },
       {
@@ -367,24 +369,24 @@
       "src/docs/screenshotOutputPinned.ts": "be4be6869229593070c35867166a8fd60928504178f0c0f028a64759f82b0992",
       "src/docs/screenshotRenderedInputs.ts": "5b474d753207f6a2f72622cc9f872e99d1f6526252de2b981b883b4bd8f2259f",
       "response:*/*:/assets/185aa3500ac77e55.js": "bd974607edd30f7e63df9a25df36afa8ee2eeda13d69df8c848f7fdfd27920c4",
+      "response:*/*:/assets/1f41ad8c2578e46c.woff2": "117a54f5e0a35fa3c994d46f9f3596c4029817f06b45b546594c6671d68f1149",
       "response:*/*:/assets/234d05a8be46e9e1.js": "7a64bdbbd34165c472a8fd36a9b3083328d8e0b78a4d939cb54ef28473ba812f",
+      "response:*/*:/assets/25ea74757df8dad0.woff2": "8242759635f72b65d7a1eae10ef8a97fe59a8b60d3d7f5a6f65e67d72693540e",
       "response:*/*:/assets/2d1117dc530202a2.js": "ff9ff84e3ffd632c9a24b5caf07a0b3d9c0fff4812c0eaf8158b51711ab6a0a6",
       "response:*/*:/assets/30519f187e29203c.js": "14622bd4c447c6410c36bf0d4c992b372a7ec55578ff6e07be91f26fb477b6e9",
-      "response:*/*:/assets/4bc9835edd11b53c.woff2": "117a54f5e0a35fa3c994d46f9f3596c4029817f06b45b546594c6671d68f1149",
       "response:*/*:/assets/4fab5baaca5c14d2.js": "d87a5d78463623df2c22f585ab00456a81be8be16e5658941b936b8708bd3fd1",
       "response:*/*:/assets/5e62d5d97dca6e65.js": "145fcd85ea3b368ef36c27a2db6dbbd770e7961f7e3e0c9d924b14d7ee1bf40f",
       "response:*/*:/assets/5fd1e101e29ae073.js": "31f587073c2942a213ef609827afaf369e3a1971d0b8aaec2def4f0723544772",
-      "response:*/*:/assets/7704038c40f6cb06.js": "94e8a192e3e3a577bb0b268b381181e511fcb4013ab024e94988b8a72c7607b1",
+      "response:*/*:/assets/7704038c40f6cb06.js": "a15d0f835c27b5325cfa4e9d7daab26eeef937a3a410f5a8c7da25ebc562b208",
       "response:*/*:/assets/77aafe06ab1b0b9e.js": "463e570684dec52664ebe0d20d00b00d4e3f2a1bc7337db415c353de0fb2efbb",
       "response:*/*:/assets/801c8f91d5264208.js": "1422afdfe078dd9b78a5eb0566f87496cf000aabebe580a5640872a8e83d6cc1",
       "response:*/*:/assets/8c63b478a250d0ad.js": "2ed876acb1874ff306c9cd091c8c8152fed86346b4bdba391e7f25876413369a",
-      "response:*/*:/assets/9825f6c791051da3.woff2": "8242759635f72b65d7a1eae10ef8a97fe59a8b60d3d7f5a6f65e67d72693540e",
       "response:*/*:/assets/d89759a31e26ce19.js": "7089d6e1422b587b21b4e0bc8a72782c0d7bb3b1d14d8f7b4634ad5e5647449a",
       "response:*/*:/assets/e2d5b96b99e916ef.js": "12a21290b18c32e8acad52f209ba85cce7b954ae5dc97ea5ac12a1d230690352",
       "response:*/*:/assets/e84c77bd8d4c7e31.js": "bdc4ce806ebb7f3147856e84b2a18c90467a90aecdc98b89b0c1ecaa98052473",
       "response:*/*:/assets/e87d52e570baa2d6.js": "8e0a19a1e86dfbdf0c51e72f2e16430ef4591560d6b7e3100b962a3f41dfc33e",
       "response:*/*:/assets/f08257fe1b44dd1d.js": "4f9625f1b6aa1fc543ca024a80dee4b7fc39af72b6b0b4576a1d1ba15e1925e1",
-      "response:*/*:/assets/main.css": "c69d38722b1b28fbef9737aed0630d82dd97daa54c0d1ea67b1cdbecaf0cac6d",
+      "response:*/*:/assets/main.css": "e01dd843b66d420845ff5c36c11165f8f892b441ae8fb0b0c0a877f3041162fe",
       "response:*/*:/threads/conv-1": "07c575b883a257d02fb942d7d6ba5712741c3bbadb1d75d7f9b921dd2bfe51c4",
       "response:text/event-stream:/runs?stream=1&mine=1": "2244c5739933d2462c3f2d703307a3ae12ba93a1ef6a3bdd11615cec5b52aef6"
     }

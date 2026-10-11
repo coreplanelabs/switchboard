@@ -185,6 +185,7 @@ import { ResidentExecutor } from "../src/execution/resident.js";
 import { systemClock } from "../src/core/trace/clock.js";
 
 import { modelCapacityCommand } from "./model-capacity.js";
+import { contextEvaluationCommand } from "../src/load/contextEvaluationCommand.js";
 
 const RESULTS_DIR = process.env.SWITCHBOARD_LOAD_RESULTS ?? "load-results";
 
@@ -196,6 +197,10 @@ commands
              writes workload, current settings, source fingerprint and comparisons
              optional --image <cached-node-image> --platform linux/amd64|linux/arm64
              --cpu 0.5 --memory-mib 4096; no provider credentials or deployment
+  context    score retained facts, notes and source references after a context boundary
+             --fixtures PATH [--baseline RECEIPT]; local scoring, no provider calls
+             or --provider NAME --model ID --key-env VAR [--task all|<name> --context-arm raw|managed]
+             provider trials use isolated synthetic tasks; context reloads are simulated
   history    peak concurrency and durations from the run store
              [--limit N]: stop after N runs have been read (default: unlimited, 0 = unlimited)
              env: SWITCHBOARD_STATE_WORKER_URL, MEMORY_TOKEN (or --state-url / --token-env)
@@ -280,6 +285,7 @@ function flags(argv: string[]): Flags {
       cpu: { type: "string" },
       "memory-mib": { type: "string" },
       baseline: { type: "string" },
+      "context-arm": { type: "string" },
       resource: { type: "string" },
       threads: { type: "string" },
       cards: { type: "string" },
@@ -2104,6 +2110,7 @@ async function main(): Promise<number> {
   }
   if (command === "model-capacity") return modelCapacityCommand(f, RESULTS_DIR);
   const commands: Record<string, (f: Flags) => Promise<boolean>> = {
+    context: (f) => contextEvaluationCommand(f, RESULTS_DIR),
     history,
     resident,
     sandbox,

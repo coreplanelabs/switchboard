@@ -3449,6 +3449,99 @@ const AUTH = { authorization: "Bearer test-token", "content-type": "application/
 let n = 0;
 const storeKey = () => `runs:ledger-${Date.now()}-${n++}`;
 
+describe("research artifacts in real SQLite", () => {
+  it("retains the exact research brief and source closure across reclaim and final storage", async () => {
+    const key = storeKey(),
+      id = "research-roundtrip",
+      thread = "slack:C1:research";
+    const researchBrief = {
+      version: 1 as const,
+      goal: "Restore the login session",
+      headSha: "a".repeat(40),
+      complexity: "simple" as const,
+      decision: "ready" as const,
+      evidence: [{ source: "src/session.ts", ref: "a".repeat(40), summary: "Session IDs are retained" }],
+      assumptions: [],
+      unknowns: [],
+      approach: ["Restore the stored session"],
+      verification: ["Restart and assert the original session ID"],
+    };
+    const origin = { runId: id, requester: "slack:UALICE", channelId: "slack:C1", threadKey: thread };
+    const contextDependencies = {
+      version: 1 as const,
+      status: "known" as const,
+      revision: 0,
+      origins: [origin, { ...origin, runId: "older-source" }],
+      slack: [],
+      mcp: [],
+    };
+    const state = { researchBrief, contextDependencies };
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, id, thread, "g1", {
+            meta: { agent: "research", channelId: "slack:C1", userId: "slack:UALICE", threadKey: thread },
+            tools: [],
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect((await post("/runs/state", { storeKey: key, runId: id, gen: "g1", state })).status).toBe(200);
+    expect((await post("/runs/handoff", { storeKey: key, gen: "g1", runIds: [id] })).status).toBe(200);
+    const reclaimed = await post("/runs/reclaim", { storeKey: key, gen: "g2", now: Date.now(), leaseMs: LEASE_MS });
+    expect(reclaimed.data.runs).toMatchObject([{ row: { runId: id, ownerGen: "g2", state } }]);
+    const terminal: RunRecord = {
+      ...record(id, thread),
+      agent: "research",
+      researchBrief,
+      contextDependencies,
+      events: [{ type: "research_brief", brief: researchBrief, seq: 1 }],
+    };
+    expect((await post("/runs/finish", { storeKey: key, runId: id, gen: "g2", record: terminal })).status).toBe(200);
+    expect((await post("/runs/get", { storeKey: key, id })).data.record).toEqual(terminal);
+
+    const coding = "coding-roundtrip",
+      codingThread = "slack:C1:coding";
+    const tag: RunEvent = {
+      type: "coordinator_tag",
+      parentInstanceId: "ship_research_fixture",
+      unit: "U12",
+      branch: "plan/research/u12",
+      researchRunId: id,
+      seq: 1,
+    };
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, coding, codingThread, "g1", {
+            meta: {
+              agent: "coding",
+              channelId: "slack:C1",
+              userId: "slack:UALICE",
+              threadKey: codingThread,
+              parentInstanceId: "ship_research_fixture",
+              coordinatorUnit: "U12",
+              idempotencyKey: "ship_research_fixture:U12/0/coding",
+              researchRunId: id,
+            },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect((await post("/runs/append", { storeKey: key, runId: coding, gen: "g1", events: [tag] })).status).toBe(200);
+    expect(
+      (await post("/runs/state", { storeKey: key, runId: coding, gen: "g1", state: { contextDependencies } })).status,
+    ).toBe(200);
+    expect((await post("/runs/handoff", { storeKey: key, gen: "g1", runIds: [coding] })).status).toBe(200);
+    expect(
+      (await post("/runs/reclaim", { storeKey: key, gen: "g3", now: Date.now(), leaseMs: LEASE_MS })).data.runs,
+    ).toMatchObject([{ row: { runId: coding, meta: { researchRunId: id }, state: { contextDependencies } } }]);
+    expect((await post("/runs/live-events", { storeKey: key, runId: coding })).data.events).toEqual([tag]);
+  });
+});
+
 describe("private worker log on the state Worker", () => {
   it("stores ordered private history, replays an input id once, and refuses a changed replay", async () => {
     const key = storeKey();
@@ -9834,13 +9927,14 @@ describe("unit effect owner transaction", () => {
 });
 
 describe("spawn effect durable receipt transaction", () => {
-  it.each(["coding", "review"] as const)(
+  it.each(["coding", "review", "research"] as const)(
     "reads the exact %s child and retained admission inside the unit transaction, preserving unknown work on absent or foreign evidence",
     async (preset) => {
       const key = storeKey();
       const instance: CoordinatorInstance = {
         id: "spawn_exact",
         kind: "ship",
+        ...(preset === "research" ? { research: true } : {}),
         userId: "slack:UALICE",
         channelId: "slack:C1",
         threadKey: "slack:C1:spawn-exact",
@@ -9862,7 +9956,7 @@ describe("spawn effect durable receipt transaction", () => {
         currentEffect: {
           version: 1,
           ordinal: 1,
-          id: preset === "review" ? "ONE/1/review" : "ONE/0/coding",
+          id: preset === "review" ? "ONE/1/review" : `ONE/0/${preset}`,
           execution,
           target: {
             repo: instance.repo,
@@ -9913,7 +10007,7 @@ describe("spawn effect durable receipt transaction", () => {
         channelId: instance.channelId,
         userId: instance.userId,
         threadKey: instance.threadKey,
-        repo: instance.repo,
+        ...(preset === "research" ? {} : { repo: instance.repo }),
         ref: unit.branch,
         parentInstanceId: instance.id,
         coordinatorUnit: unit.unit,
@@ -9933,12 +10027,13 @@ describe("spawn effect durable receipt transaction", () => {
         base: "main",
         seq: 2,
         ...(unit.publication ? { publication: unit.publication } : {}),
+        ...(preset === "research" ? { researchTarget: { repo: instance.repo, headSha: "a".repeat(40) } } : {}),
       };
       const original = {
         type: "run_meta",
         agent: preset,
         seq: 1,
-        repo: instance.repo,
+        ...(preset === "research" ? {} : { repo: instance.repo }),
         ref: unit.branch,
         pr: 7,
         headSha: "a".repeat(40),
@@ -9997,10 +10092,12 @@ describe("spawn effect durable receipt transaction", () => {
           "spawn-child",
         );
       });
-      expect((await post("/runs/coordinator/stop", { storeKey: key, instanceId: instance.id, at: 3 })).status).toBe(
-        200,
-      );
-      expect(await resolve()).toMatchObject({
+      if (preset !== "research")
+        expect((await post("/runs/coordinator/stop", { storeKey: key, instanceId: instance.id, at: 3 })).status).toBe(
+          200,
+        );
+      const resolved = await resolve();
+      expect(resolved).toMatchObject({
         status: 200,
         data: {
           ok: true,
@@ -10011,6 +10108,130 @@ describe("spawn effect durable receipt transaction", () => {
           },
         },
       });
+      if (preset === "research") {
+        expect(resolved.data.unit.researchRunId).toBe("spawn-child");
+        const settled = await post("/runs/coordinator/units/effect-transition", {
+          storeKey: key,
+          input: { kind: "settle", expected: resolved.data.unit, execution, effectId: input.effectId },
+        });
+        expect(settled).toMatchObject({ status: 200, data: { unit: { researchRunId: "spawn-child" } } });
+        const { researchRunId: _source, ...metadata } = settled.data.unit;
+        expect(
+          (
+            await post("/runs/coordinator/units/put", {
+              storeKey: key,
+              units: [{ ...metadata, title: "Keep original research" }],
+            })
+          ).status,
+        ).toBe(200);
+        const listed = (await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data
+          .units;
+        expect(listed).toEqual([{ ...settled.data.unit, title: "Keep original research" }]);
+        expect(
+          (
+            await post("/runs/coordinator/units/put", {
+              storeKey: key,
+              units: [{ ...listed[0], researchRunId: "different-source" }],
+            })
+          ).status,
+        ).toBe(409);
+        expect(
+          (
+            await post("/runs/coordinator/units/claim-legacy-continuation", {
+              storeKey: key,
+              expected: listed[0],
+              recovered: { ...listed[0], researchRunId: undefined },
+            })
+          ).status,
+        ).toBe(409);
+        expect(
+          (await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data.units,
+        ).toEqual(listed);
+        const codingEffect = {
+          ...unit.currentEffect!,
+          id: "ONE/0/coding",
+          ordinal: 2,
+          phase: "active",
+          calls: [{ operation: "spawn", state: "unstarted" }],
+        };
+        const route = (input: unknown) => post("/runs/coordinator/units/effect-transition", { storeKey: key, input });
+        const admitted = await route({ kind: "admit", expected: listed[0], execution, effect: codingEffect });
+        expect(admitted.status).toBe(200);
+        const begun = await route({
+          kind: "begin",
+          expected: admitted.data.unit,
+          execution,
+          effectId: codingEffect.id,
+          call: 0,
+        });
+        expect(begun.status).toBe(200);
+        const codingMeta = {
+          ...meta,
+          agent: "coding",
+          repo: instance.repo,
+          researchRunId: "spawn-child",
+          idempotencyKey: `${instance.id}:ONE/0/coding`,
+        };
+        expect(
+          (await post("/runs/claim", claimBody(key, "source-coder", instance.threadKey, "g2", { meta: codingMeta })))
+            .status,
+        ).toBe(200);
+        expect(
+          (
+            await post("/runs/append", {
+              storeKey: key,
+              runId: "source-coder",
+              gen: "g2",
+              events: [
+                { ...original, agent: "coding", repo: instance.repo },
+                { ...tag, researchRunId: "spawn-child" },
+              ],
+            })
+          ).status,
+        ).toBe(200);
+        const completed = await route({
+          kind: "complete",
+          expected: begun.data.unit,
+          execution,
+          effectId: codingEffect.id,
+          call: 0,
+          outcome: { state: "accepted", runId: "source-coder" },
+        });
+        expect(completed).toMatchObject({
+          status: 200,
+          data: { unit: { researchRunId: "spawn-child", researchProgressRunId: "source-coder" } },
+        });
+        const codingSettled = await route({
+          kind: "settle",
+          expected: completed.data.unit,
+          execution,
+          effectId: codingEffect.id,
+        });
+        expect(codingSettled.status).toBe(200);
+        const { researchRunId: _original, researchProgressRunId: _progress, ...update } = codingSettled.data.unit;
+        expect(
+          (
+            await post("/runs/coordinator/units/put", {
+              storeKey: key,
+              units: [{ ...update, title: "Keep source and progress" }],
+            })
+          ).status,
+        ).toBe(200);
+        const durable = (await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data
+          .units;
+        expect(durable).toEqual([{ ...codingSettled.data.unit, title: "Keep source and progress" }]);
+        expect(
+          (
+            await post("/runs/coordinator/units/put", {
+              storeKey: key,
+              units: [{ ...durable[0], researchProgressRunId: "other-coder" }],
+            })
+          ).status,
+        ).toBe(409);
+        expect(
+          (await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data.units,
+        ).toEqual(durable);
+      }
     },
   );
 });

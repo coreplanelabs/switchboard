@@ -55,6 +55,8 @@ export interface RunMeta {
    *  coordinator spawned, so the live summary names them and a retried spawn
    *  finds its run without the record. */
   parentInstanceId?: string;
+  /** Required research source survives loss of the original tag event. */
+  researchRunId?: string;
   maintenanceActionId?: string;
   coordinatorUnit?: string;
   coordinatorAttempt?: number;

@@ -575,6 +575,26 @@ export function carve(remainingMs: number, round: RoundPosition, loop: Loop | un
   return { kind: "carved", minutes, boundedBy: minutes === ask ? "ask" : "parent", holds };
 }
 
+/** Research shares the original Ship lease and holds every implementation round. */
+export const SHIP_RESEARCH_ASK_MINUTES = 15;
+export function carveShipResearch(remainingMs: number, loop: Loop): Carve {
+  const holds = reserveMinutes({ kind: "coding", index: -1 }, loop);
+  const minutes = Math.min(
+    SHIP_RESEARCH_ASK_MINUTES,
+    ASKS.research,
+    Math.max(0, Math.floor(remainingMs / MINUTE_MS) - holds),
+  );
+  const floor = PRESET_FLOORS.research;
+  return minutes < floor
+    ? { kind: "refused", reason: "under floor", minutes, floor, holds }
+    : {
+        kind: "carved",
+        minutes,
+        boundedBy: minutes === Math.min(SHIP_RESEARCH_ASK_MINUTES, ASKS.research) ? "ask" : "parent",
+        holds,
+      };
+}
+
 /** A pipeline's wall clock and its loop: what `fit` judges. */
 export interface Pipeline extends Loop {
   maxMinutes: number;

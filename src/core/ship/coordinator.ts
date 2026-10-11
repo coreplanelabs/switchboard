@@ -35,6 +35,7 @@ import {
 // module reaches nothing but node-free modules — the child presets' budgets
 // arrive in the input rather than from the agent registry.
 
+import { isResearchBrief, type ResearchBrief } from "../research/brief.js";
 import type { ShipRoundOutcome } from "../runEvents.js";
 import { shows, type Verbosity } from "../verbosity.js";
 import type { Handoff, HandoffLanded } from "./handoff.js";
@@ -64,6 +65,7 @@ import {
 import { parsePlanUnit, planUnitIds } from "./contract.js";
 import {
   carve,
+  carveShipResearch,
   DEFAULT_GRANT,
   IDLE_DAYS_MAX,
   loopPosition,
@@ -460,7 +462,7 @@ export function cursorFinished(cursor: PlanCursor): boolean {
  *  findings dispatched into the unit thread as `agent:coding`, so the coding
  *  session there continues with them (record 0034). Never a `fix` child briefed
  *  from the review. */
-export type RoundKind = "coding" | "review" | "findings" | "rebase";
+export type RoundKind = "research" | "coding" | "review" | "findings" | "rebase";
 export interface RoundRef {
   /** Round 0 is the coding round; review round n and its findings step share n. */
   index: number;
@@ -471,20 +473,23 @@ export interface RoundRef {
    *  Workflow's durable cache never hands the re-run the dead attempt's answers. */
   attempt?: number;
 }
-export type ChildPreset = "coding" | "review";
+export type ChildPreset = "research" | "coding" | "review";
 
 /** The preset a round's child runs as: the findings step's run is a coding run. */
 export function presetOf(kind: RoundKind): ChildPreset {
-  return kind === "review" ? "review" : "coding";
+  return kind === "research" ? "research" : kind === "review" ? "review" : "coding";
 }
 
 /** How a spawn's child is briefed — ids only, never text. The bot composes the
  *  turn: the unit's contract, or the review turn from the pull request and the
  *  prior rounds' records, or the findings message from the review run's verdict. */
 export type Brief =
+  | { kind: "research"; unit: string }
   | {
       kind: "contract";
       unit: string;
+      researchRunId?: string;
+      researchProgressRunId?: string;
       rebase: { branch: string; onto: string };
       /** A renewal's segment (decision 0046): the child continues the previous
        *  segment's work from `from`, briefed with that run's write-up and handoff. */
@@ -507,6 +512,8 @@ export type Brief =
   | {
       kind: "findings";
       unit: string;
+      researchRunId?: string;
+      researchProgressRunId?: string;
       pr: number;
       /** The exact reviewed head the fix round may replace. */
       headSha?: string;
@@ -523,6 +530,8 @@ export type Brief =
   | {
       kind: "rebase";
       unit: string;
+      researchRunId?: string;
+      researchProgressRunId?: string;
       pr: number;
       headSha: string;
       base: string;
@@ -641,6 +650,7 @@ export type ChildFacts =
       leaseStartedAt?: number;
       costUsd?: number | null;
       handoffLists?: Handoff;
+      researchBrief?: ResearchBrief;
       /** The failure by name off a `failed` run's record (run-history item 57):
        *  provider/stream failure may earn one empty round-0 re-run; a fleet
        *  refusal during pre-model setup may recheck and retry review. */
@@ -1180,6 +1190,9 @@ export interface UnitPipelineInput {
    *  `plan` with an id and no `path` — whose unit runs in the requesting
    *  thread and is re-issued with the request's own text, never a plan path. */
   generated: boolean;
+  /** Absent on admitted legacy instances; never inserts new cached workflow steps. */
+  research?: true;
+  researchRunId?: string;
   /** The idle flag (record 0051; agent-ship item 8): `ship.idleDays` as the
    *  ship fork resolved it onto the instance — above zero, an idling kind ends
    *  `idle` instead; zero or absent is today's behavior byte for byte. The
@@ -1378,6 +1391,7 @@ export interface UnitPipelineState {
   readonly findingsRunByRound: Readonly<Record<number, string>>;
   /** The last coding run (round 0's child or a findings step's): its record carries the unit's handoff. */
   readonly lastCodingRunId?: string;
+  readonly researchRunId?: string;
   /** The head the last coding child left the branch at, and its handoff — the
    *  continuation facts an `idle` ending carries (record 0051). */
   readonly lastChildHead?: string;
@@ -1422,6 +1436,7 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
   const pending = input.session?.humanGate;
   const base: UnitPipelineState = {
     input,
+    ...(input.researchRunId ? { researchRunId: input.researchRunId } : {}),
     startedAt: at,
     clock: at,
     phase: { at: "pre-check" },
@@ -1492,6 +1507,7 @@ export function openRecoveredUnitPipeline(
     throw new Error("review recovery lacks its verified pull request");
   const base: UnitPipelineState = {
     input,
+    ...(input.researchRunId ? { researchRunId: input.researchRunId } : {}),
     startedAt: at,
     clock: at,
     phase: { at: "ended" },
@@ -1596,6 +1612,7 @@ function widenedOnly(s: UnitPipelineState, round: RoundRef, findings: readonly F
  *  A review round `n` and the findings step that follows it share `n`; the
  *  module's positions are the loop's own. */
 function roundCarve(s: UnitPipelineState, round: RoundRef): Carve {
+  if (round.kind === "research") return carveShipResearch(remainingMs(s), loopOf(s));
   const kind = round.kind === "rebase" ? "findings" : round.kind;
   return carve(remainingMs(s), { kind, index: loopPosition(loopOf(s), kind, round.index) }, loopOf(s));
 }
@@ -1617,12 +1634,17 @@ const roundStep = (s: UnitPipelineState, round: RoundRef) =>
 
 function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
   const unit = s.input.unit.id;
+  const research = s.researchRunId
+    ? { researchRunId: s.researchRunId, ...(s.lastCodingRunId ? { researchProgressRunId: s.lastCodingRunId } : {}) }
+    : {};
+  if (round.kind === "research") return { kind: "research", unit };
   if (round.kind === "coding") {
     const session = s.input.session;
     const recovered = s.input.recovery?.coding;
     return {
       kind: "contract",
       unit,
+      ...research,
       rebase: { branch: s.input.unit.branch, onto: s.input.base },
       ...(recovered !== undefined
         ? {
@@ -1647,7 +1669,7 @@ function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
   }
   const pr = s.pr!.number;
   if (round.kind === "rebase") {
-    return { kind: "rebase", unit, pr, headSha: s.lastReviewHead!, base: s.input.base };
+    return { kind: "rebase", unit, ...research, pr, headSha: s.lastReviewHead!, base: s.input.base };
   }
   if (round.kind === "findings") {
     const issued = s.findingsByRound[round.index] ?? [];
@@ -1657,6 +1679,7 @@ function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
     return {
       kind: "findings",
       unit,
+      ...research,
       pr,
       ...(s.lastReviewHead !== undefined ? { headSha: s.lastReviewHead } : {}),
       ...(reviewRunId !== undefined ? { reviewRunId } : {}),
@@ -3492,7 +3515,10 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           return nextReview(adopted);
         }
         if (s.input.freshAdopt === true)
-          return enterRound({ ...clocked, pr: { number: r.pr.prNumber, url: r.pr.url } }, { index: 0, kind: "coding" });
+          return enterRound(
+            { ...clocked, pr: { number: r.pr.prNumber, url: r.pr.url } },
+            { index: 0, kind: s.input.research === true && s.researchRunId === undefined ? "research" : "coding" },
+          );
         const branchHead = normalizeHead(r.pr.branchHead);
         const lastPush = normalizeHead(s.input.lastPush);
         const atBranchHead = head !== undefined && branchHead !== undefined && sameCommit(head, branchHead);
@@ -3542,7 +3568,14 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
     }
     case "branch": {
       const r = ret as Extract<StepReturn, { type: "branch" }>;
-      if (r.ok) return enterRound(clocked, { index: 0, kind: "coding" });
+      if (r.ok)
+        return enterRound(clocked, {
+          index: 0,
+          kind:
+            s.input.research === true && s.input.session === undefined && s.researchRunId === undefined
+              ? "research"
+              : "coding",
+        });
       return end(clocked, {
         kind: "aborted",
         reason: `⚠️ Could not create the pipeline branch \`${s.input.unit.branch}\` from \`${s.input.base}\` on \`${s.input.repo}\`: ${r.reason} — round 0 never started.`,
@@ -3557,14 +3590,16 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           // The child's budget runs from the spawn's answer; the wait walks it, plus the margin, in chunks.
           const until = clocked.clock + p.minutes * MIN + WAIT_MARGIN_MS;
           const runs =
-            p.round.kind === "review"
-              ? { reviewRunByRound: { ...s.reviewRunByRound, [p.round.index]: r.runId } }
-              : p.round.kind === "findings"
-                ? {
-                    findingsRunByRound: { ...s.findingsRunByRound, [p.round.index]: r.runId },
-                    lastCodingRunId: r.runId,
-                  }
-                : { lastCodingRunId: r.runId };
+            p.round.kind === "research"
+              ? { researchRunId: r.runId }
+              : p.round.kind === "review"
+                ? { reviewRunByRound: { ...s.reviewRunByRound, [p.round.index]: r.runId } }
+                : p.round.kind === "findings"
+                  ? {
+                      findingsRunByRound: { ...s.findingsRunByRound, [p.round.index]: r.runId },
+                      lastCodingRunId: r.runId,
+                    }
+                  : { lastCodingRunId: r.runId };
           return {
             state: { ...clocked, ...runs, phase: { at: "wait", round: p.round, runId: r.runId, n: 1, until } },
             notes: [roundNote(p.round, "started")],
@@ -3691,6 +3726,39 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
           },
           notes: [],
         };
+      if (p.round.kind === "research") {
+        const charged = { ...clocked, spendUsd: addSpend(clocked.spendUsd, r.run.costUsd) };
+        const brief = r.run.researchBrief;
+        if (r.run.status !== "completed" || !isResearchBrief(brief) || brief.decision !== "ready")
+          return end(
+            charged,
+            {
+              kind: "aborted",
+              reason:
+                brief?.decision === "blocked"
+                  ? `Research blocked: ${brief.blockedReason}`
+                  : "Research ended without a complete ready brief; implementation did not start.",
+              round: p.round,
+              reviewRounds: s.reviewRounds,
+            },
+            [roundNote(p.round, "aborted")],
+          );
+        const cap = s.input.grant?.costCapUsd;
+        if (cap !== undefined && (charged.spendUsd === null || charged.spendUsd >= cap))
+          return end(
+            charged,
+            {
+              kind: "aborted",
+              reason: "The original cost cap cannot hold implementation after research.",
+              round: p.round,
+              reviewRounds: s.reviewRounds,
+            },
+            [roundNote(p.round, "aborted")],
+          );
+        return enterRound({ ...charged, researchRunId: p.runId }, { index: 0, kind: "coding" }, [
+          roundNote(p.round, "completed"),
+        ]);
+      }
       // An unfinished local checkpoint is never review-ready, even if an
       // uncertain push later appears remotely. Preserve the original attempt
       // for reconciliation instead of manufacturing a new PR or writer.

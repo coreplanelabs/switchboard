@@ -109,6 +109,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0098 | [Bound stream concurrency separately from parsing](../decisions/0098-bound-stream-concurrency-separately-from-parsing.md) | Bounded concurrency and FIFO backpressure | proposed | 2026-10-09 |
 | 0099 | [One confirmation policy for every command surface](../decisions/0099-command-confirmation-is-shared-across-all-surfaces.md) | One command policy with thin consent adapters | accepted | 2026-10-09 |
 | 0100 | [Ordinary MCP confirmation uses the client form](../decisions/0100-mcp-confirmation-uses-the-client-form.md) | One consent policy with native host input | accepted | 2026-10-10 |
+| 0103 | [Context is a bounded view of source-bound work](../decisions/0103-context-is-a-bounded-view-of-source-bound-work.md) | Durable source records with scoped working projections and acknowledged phase artifacts | proposed | 2026-10-11 |
 
 <!-- /generated:decision-records -->
 

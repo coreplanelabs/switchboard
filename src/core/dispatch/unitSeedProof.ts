@@ -74,12 +74,14 @@ async function canonicalChild(
     handoff.consumer.threadKey !== facts.threadKey ||
     handoff.consumer.attempt !== facts.idempotencyKey ||
     handoff.snapshotRunId !== facts.id ||
-    (facts.agent !== "coding" && facts.agent !== "review")
+    (facts.agent !== "coding" && facts.agent !== "review" && facts.agent !== "research") ||
+    (facts.agent === "research" &&
+      (instance.research !== true || facts.idempotencyKey !== `${instance.id}:${unit.unit}/0/research`))
   )
     return undefined;
   const { consumer: _consumer, snapshotRunId: _snapshot, ...unbound } = handoff;
   if ((await sourceHash({ version: 1, handoff: unbound })) !== (await sourceHash(unit.context))) return undefined;
-  const contract = await contractFor(instance, unit, emptyReaders, facts.agent);
+  const contract = await contractFor(instance, unit, emptyReaders, facts.agent === "research" ? "coding" : facts.agent);
   return {
     role: facts.agent,
     child: { runId: facts.id, requester: facts.userId, channelId: facts.channelId, threadKey: facts.threadKey },

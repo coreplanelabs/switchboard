@@ -118,6 +118,8 @@ export interface LiveRunMeta {
    *  carried (item 48) — stored at the claim, so a reclaimed child's record
    *  still sends the parent its event and a retried spawn finds its run. */
   parentInstanceId?: string;
+  /** Required research source survives loss of the original tag event. */
+  researchRunId?: string;
   maintenanceActionId?: string;
   /** Unit identity from admitted coordinator state, never parsed from a step key. */
   coordinatorUnit?: string;

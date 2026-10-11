@@ -196,6 +196,12 @@ export async function dispatchMaintenanceChild(
         branch: unit.branch,
         base: expectedBase,
         publication: unit.publication,
+        ...(agent === "coding" && unit.researchRunId !== undefined
+          ? {
+              researchRunId: unit.researchRunId,
+              researchTarget: { repo: cell.target.repo, headSha: expectedHead! },
+            }
+          : {}),
         ...(cell.execution.maintenance
           ? {
               maintenanceActionId: cell.execution.maintenance.id,

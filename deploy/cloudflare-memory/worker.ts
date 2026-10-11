@@ -11747,6 +11747,13 @@ function parseClaim(b: Record<string, unknown>): Validated<ClaimRequest> {
     if (typeof meta.parentInstanceId !== "string" || !INSTANCE_ID_PATTERN.test(meta.parentInstanceId))
       return invalid("run.meta.parentInstanceId must be a Workflow instance id");
   }
+  if (
+    meta.researchRunId !== undefined &&
+    (meta.parentInstanceId === undefined ||
+      typeof meta.researchRunId !== "string" ||
+      !RUN_ID_PATTERN.test(meta.researchRunId))
+  )
+    return invalid("run.meta.researchRunId must name its required original research source");
   if (meta.idempotencyKey !== undefined) {
     if (typeof meta.idempotencyKey !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(meta.idempotencyKey))
       return invalid("run.meta.idempotencyKey must be <parentInstanceId>:<step>");

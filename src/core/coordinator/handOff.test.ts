@@ -540,6 +540,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     expect(instance).toEqual({
       id: "plan-fixture",
       kind: "ship",
+      research: true,
       userId: "slack:UALICE",
       userName: "alice",
       channelId: "slack:C1",

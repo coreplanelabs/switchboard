@@ -1017,7 +1017,16 @@ export type RunEvent =
    *  `base` is absent when the spawn knew none; the post-step then falls to
    *  the coordinator store's `instance.base`. Additive: unknown → ignored. */
   | {
+      type: "research_brief";
+      brief: import("./research/brief.js").ResearchBrief;
+      confirmed?: boolean;
+      at?: number;
+      seq?: number;
+    }
+  | {
       type: "coordinator_tag";
+      researchRunId?: string;
+      researchTarget?: import("./coordinator/contract.js").CoordinatorTag["researchTarget"];
       parentInstanceId: string;
       unit?: string;
       costCapUsd?: number;

@@ -58,7 +58,12 @@ export interface CheckMetadataFailure {
 }
 
 export type CheckExecutionResponse =
-  | { kind: "recorded"; receipt: CheckExecutionReceipt; executionDiagnostic?: TypedExecutionDiagnostic }
+  | {
+      kind: "recorded";
+      receipt: CheckExecutionReceipt;
+      replayed?: true;
+      executionDiagnostic?: TypedExecutionDiagnostic;
+    }
   | {
       kind: "unavailable";
       metadataFailure?: CheckMetadataFailure;

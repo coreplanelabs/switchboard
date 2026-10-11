@@ -1,3 +1,6 @@
+import { wrapUntrusted } from "./untrusted.js";
+import { isResearchBrief, renderResearchBrief } from "./research/brief.js";
+import { researchFromRun } from "./research/source.js";
 import { runSessionIdentity } from "./dispatch/sessionIdentity.js";
 import { resumedPilotBindingFor } from "./dispatch/readyBinding.js";
 import { appendThreadTurn } from "./runLedger/threadSession.js";
@@ -154,7 +157,14 @@ import {
   WorkspaceFiles,
   type StagedOutcome,
 } from "./dispatch/staging.js";
-import { RUN_LIST_MAX_LIMIT, isRunSession, type RunFailure, type RunRecord, type RunSeed } from "./runRecord.js";
+import {
+  branchPushReceiptsOf,
+  RUN_LIST_MAX_LIMIT,
+  isRunSession,
+  type RunFailure,
+  type RunRecord,
+  type RunSeed,
+} from "./runRecord.js";
 import {
   attachWorkspace,
   lostSetupOf,
@@ -217,7 +227,15 @@ import {
   recordRestartDeath,
   type CarriedRunIdentity,
 } from "./dispatch/reattach.js";
-import { prepareColdPublicationCheckout, workspaceBindingFor, workspaceBindingOf } from "../execution/factory.js";
+import {
+  checkoutOfSelection,
+  prepareColdPublicationCheckout,
+  workspaceBindingFor,
+  workspaceBindingOf,
+} from "../execution/factory.js";
+import { BASH_TIMEOUT_MS } from "../execution/bashTimeout.js";
+import { gitInCheckout } from "../execution/workspaceAdvance.js";
+import { parseRevParseOutput } from "./reviewedHead.js";
 import { readyEnvironmentCommand, type ReadyEnvironmentRequirement } from "../execution/seedPlan.js";
 import { fleetBusyEndingFactsOf, fleetBusyRunEndedLine } from "../execution/sandboxErrors.js";
 import { lineageOf, lineageParent, tellParent, type LineageHeard } from "./dispatch/lineage.js";
@@ -243,7 +261,7 @@ import {
 import { threadArtifactsFor } from "./dispatch/threadArtifacts.js";
 import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/threadAssets.js";
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
-import { createRunsService, type RunsService, type RunView } from "./runsService.js";
+import { createRunsService, PRIVATE_WORKER_INTERNAL_READ, type RunsService, type RunView } from "./runsService.js";
 import {
   unitKeyOf,
   unitNudgeEventType,
@@ -2471,6 +2489,59 @@ export async function dispatch(
       ? renderContract(opts.contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text
       : undefined;
     const requestText = route?.parts ? compoundBrief(directives.text, route.parts) : directives.text;
+    if (coordinator?.unit && agent.name === "coding") {
+      const rows = await deps.coordinatorInstances?.listUnits(coordinator.parentInstanceId).catch(() => undefined);
+      const units = rows?.filter((row) => row.unit === coordinator.unit);
+      if (
+        !units ||
+        units.length !== 1 ||
+        (units?.length === 1 && units[0].researchRunId !== coordinator.researchRunId)
+      ) {
+        await refuse(refusalOf("setup_failed", "The original unit research source could not be verified."));
+        return ended;
+      }
+    }
+    let researchContext: ContextDependencies | undefined;
+    let researchArtifact: string | undefined;
+    if (coordinator?.researchRunId !== undefined) {
+      const source = await runsService
+        .getRun(coordinator.researchRunId, {
+          include: "messages",
+          requireFinalRecord: true,
+          privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+        })
+        .catch(() => undefined);
+      const context = await contextReader.readRunDependencies(coordinator.researchRunId);
+      const brief =
+        source?.ok && coordinator.unit && repoCtx.repo && coordinator.branch
+          ? researchFromRun(source.value, {
+              instanceId: coordinator.parentInstanceId,
+              unit: coordinator.unit,
+              requester: msg.userId,
+              channelId: msg.channelId,
+              threadKey: msg.threadKey,
+              repo: repoCtx.repo,
+              branch: coordinator.branch,
+            })
+          : undefined;
+      if (
+        !brief ||
+        !isContextDependencies(context) ||
+        context.status !== "known" ||
+        !context.origins.some((origin) => origin.runId === coordinator.researchRunId) ||
+        !(await contextReader.validateDependencies(context)).ok
+      ) {
+        await refuse(
+          refusalOf(
+            "setup_failed",
+            "The original research sources could not be verified; implementation did not start.",
+          ),
+        );
+        return ended;
+      }
+      researchContext = structuredClone(context);
+      researchArtifact = wrapUntrusted(renderResearchBrief(brief));
+    }
     // Where the conversation starts (run-history item 52), and every row and
     // record the run has says which: a spawned child from its parent's text
     // turns (routing-and-config item 20); a follow-up in a thread from the log
@@ -2712,6 +2783,7 @@ export async function dispatch(
       contextForReferences(references, msg),
       ...(session ? [candidateContext] : []),
       ...(threadArtifacts?.context ? [threadArtifacts.context] : []),
+      ...(researchContext ? [researchContext] : []),
     );
     const seedNotes = [
       ...(sourceContinuation === undefined ? (fromSession?.notes ?? []) : []),
@@ -3850,8 +3922,15 @@ export async function dispatch(
           ref: repoCtx.ref,
           doorUrl: githubDoor.baseUrl,
           ...(round.selection.cold ? { prepared: round.selection.cold } : {}),
-          ...((coordinator.publication?.expectedHeadSha ?? recovery?.expectedHeadSha)
-            ? { expectedHeadSha: coordinator.publication?.expectedHeadSha ?? recovery?.expectedHeadSha }
+          ...((coordinator.publication?.expectedHeadSha ??
+          recovery?.expectedHeadSha ??
+          coordinator.researchTarget?.headSha)
+            ? {
+                expectedHeadSha:
+                  coordinator.publication?.expectedHeadSha ??
+                  recovery?.expectedHeadSha ??
+                  coordinator.researchTarget?.headSha,
+              }
             : {}),
         },
         run.control.hardSignal,
@@ -3871,6 +3950,31 @@ export async function dispatch(
         card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
       );
       return ended;
+    }
+    if (coordinator?.researchRunId !== undefined && agent.name === "coding") {
+      const target = coordinator.researchTarget;
+      const ownPush = resume
+        ? branchPushReceiptsOf(resume.row.state.branchPushReceipts)?.find((push) => push.ref === coordinator.branch)
+        : undefined;
+      const output = await round.selection.executor
+        .exec(`${gitInCheckout(checkoutOfSelection(round.selection))} rev-parse HEAD`, {
+          timeoutMs: BASH_TIMEOUT_MS,
+          signal: run.control.hardSignal,
+        })
+        .catch(() => undefined);
+      const actualHead = output === undefined ? undefined : parseRevParseOutput(output);
+      const expectedHead = ownPush?.sha ?? target?.headSha;
+      if (
+        !target ||
+        target.repo.toLowerCase() !== repoCtx.repo?.toLowerCase() ||
+        !actualHead ||
+        actualHead.toLowerCase() !== expectedHead?.toLowerCase()
+      ) {
+        await refuse(
+          refusalOf("setup_failed", "The implementation checkout no longer matches its verified research target."),
+        );
+        return ended;
+      }
     }
     const verifiedAtAttach = headGate.verifiedAtAttach;
     // The run's meta went out at the reservation with the head as resolved
@@ -3906,6 +4010,12 @@ export async function dispatch(
     // The prompt (dispatch/provision.ts): skills, MCP discovery, the config and
     // self-description blocks, the custom instructions, the memory block, and
     // the system composer pinned to the head this run reviews.
+    if (researchContext && !(await contextReader.validateDependencies(researchContext)).ok) {
+      await refuse(
+        refusalOf("setup_failed", "The original research sources could not be verified; implementation did not start."),
+      );
+      return ended;
+    }
     const seedNotepad = session?.notepad ?? boundHandoff?.notepad?.text;
     const prompt = await composePrompt(deps, {
       msg,
@@ -3925,7 +4035,9 @@ export async function dispatch(
       ...(contractBlock !== undefined && agent.name === "review" ? { contract: contractBlock } : {}),
       // What the thread's other runs recorded since this agent last ran here
       // (session-log item 9), as data, right after the notes.
-      ...(threadArtifacts?.block !== undefined ? { threadArtifacts: threadArtifacts.block.text } : {}),
+      ...(threadArtifacts?.block !== undefined || researchArtifact !== undefined
+        ? { threadArtifacts: [threadArtifacts?.block?.text, researchArtifact].filter(Boolean).join("\n\n") }
+        : {}),
       // What the session already knows (session-log item 10): the notepad and
       // the newest compaction's summary the seed brought back, and the thread's
       // files (record 0033) with where each is for this run, for the prompt.
@@ -3947,7 +4059,12 @@ export async function dispatch(
       ...(boundHandoff?.dependencies?.value ? [boundHandoff.dependencies.value] : []),
     );
     const resumedContext = resume?.row.state.contextDependencies;
-    if (isContextDependencies(resumedContext) && resumedContext.executionGithub?.length)
+    if (
+      isContextDependencies(resumedContext) &&
+      (resumedContext.executionGithub?.length ||
+        isResearchBrief(resume?.row.state.researchBrief) ||
+        coordinator?.researchRunId !== undefined)
+    )
       seedContext = mergeContextDependencies(seedContext, resumedContext);
     const contextValidation =
       agent.name === "orchestrator" ? await contextReader.validateDependencies(seedContext) : undefined;

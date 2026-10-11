@@ -28,6 +28,7 @@ import {
 import { generatedTaskText } from "./generatedTask.js";
 import { buildShipReviewTurn } from "../ship/reviewChild.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
+import { researchRequest } from "../research/brief.js";
 import type { Handoff } from "../ship/handoff.js";
 
 /** What a child run's record tells the next brief: the review's findings, the coding run's dispositions, the child's final words. */
@@ -40,6 +41,7 @@ export interface ChildRunFacts {
 }
 
 export interface BriefReaders {
+  readTargetHead?(): Promise<string | undefined>;
   /** A file of the target repository at the base ref (the plan, a spec, the
    *  rules file), or undefined when there is none: its text up to `opts.maxChars`
    *  (the tool clip when unset) and whether it was cut there. Plans, specs and
@@ -55,7 +57,7 @@ export interface BriefReaders {
 /** The composed child: the preset's turn, the branch its thread binds to, and
  *  the contract both round-0 children hold. */
 export interface ComposedChild {
-  preset: "coding" | "review";
+  preset: "research" | "coding" | "review";
   prompt: string;
   /** The branch the coding child's thread binds to (`on branch <ref>`); a review child pins the pull request's head itself. */
   ref?: string;
@@ -297,6 +299,20 @@ export async function composeChild(
 ): Promise<ComposedChild> {
   const where = `${instance.repo}#${"pr" in brief ? brief.pr : ""}`;
   switch (brief.kind) {
+    case "research": {
+      const contract = await contractFor(instance, unit, readers);
+      const headSha = await readers.readTargetHead?.();
+      if (!headSha || !/^[a-f0-9]{40}$/i.test(headSha))
+        throw new Error("the research target revision could not be verified");
+      return {
+        preset: "research",
+        ref: unit.branch,
+        contract,
+        prompt: researchRequest(
+          `Repository: ${instance.repo}; branch: ${unit.branch}; inspected revision: ${headSha}. Read source files at this immutable revision with the GitHub tools.\n\n${escapeControlTokens(contract.unit.section)}`,
+        ),
+      };
+    }
     case "contract": {
       const contract = await contractFor(instance, unit, readers);
       // A generated unit's prompt is the request text itself — the section

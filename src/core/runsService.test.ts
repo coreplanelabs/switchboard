@@ -95,6 +95,37 @@ function expectNoToken(value: unknown): void {
 }
 
 describe("RunsService.getRun", () => {
+  it("keeps research text out of metadata and applies private body gates to explicit research reads", async () => {
+    const { store, svc } = setup();
+    const researchBrief = {
+      version: 1 as const,
+      goal: "Inspect the source",
+      headSha: "a".repeat(40),
+      complexity: "simple" as const,
+      decision: "ready" as const,
+      evidence: [{ source: "src/session.ts", ref: "a".repeat(40), summary: "Session IDs are retained" }],
+      assumptions: [],
+      unknowns: [],
+      approach: ["Restore the stored session"],
+      verification: ["Restart and assert the original session ID"],
+    };
+    await store!.put(record("research-visible", NOW, { researchBrief }));
+    expect((await svc.getRun("research-visible")).ok).toBe(true);
+    expect(JSON.stringify(await svc.getRun("research-visible"))).not.toContain("Session IDs are retained");
+    expect(JSON.stringify(await svc.listRuns({ status: "all", visibleTo: ALL }))).not.toContain(
+      "Session IDs are retained",
+    );
+    expect(await svc.getRun("research-visible", { include: "messages" })).toMatchObject({
+      ok: true,
+      value: { researchBrief },
+    });
+    await store!.put(record("research-private", NOW, { researchBrief, threadKey: "worker:ship_research_fixture:U12" }));
+    expect(await svc.getRun("research-private", { include: "messages" })).toEqual({ ok: false, error: "not_found" });
+    expect(
+      await svc.getRun("research-private", { include: "messages", privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ }),
+    ).toMatchObject({ ok: true, value: { researchBrief } });
+  });
+
   it("finished registry projection exposes the persisted admitted profile", async () => {
     const { reg, store, svc } = setup();
     const profile = { preset: "review", machine: "repo-resident", identity: "read", minutes: 7 } as const;

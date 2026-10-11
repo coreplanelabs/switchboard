@@ -20,6 +20,7 @@ import type { UnitEnding } from "./ship/coordinator.js";
 describe("hosted pipeline live-state detail", () => {
   it("maps every Stage to display-safe working detail", () => {
     expect(Object.fromEntries(STAGES.map((stage) => [stage, hostedStageDetail(stage)]))).toEqual({
+      research: "researching a unit",
       coding: "coding a unit",
       review: "reviewing a unit",
       fix: "fixing review findings",
@@ -133,6 +134,23 @@ function unit(name: string, state: string, at: number, extra: { pr?: number; thr
 }
 
 describe("the fold binds rounds by adjacency, ignores a companion's state and is total over the unions", () => {
+  it("keeps completed research open until coding and a unit ending settle the work", () => {
+    const research = [
+      unit("U12", "started", 1),
+      round(0, "research", "started", 2),
+      unit("U12", "started", 2),
+      round(0, "research", "completed", 3),
+      unit("U12", "completed", 3),
+    ];
+    const summary = pipelineOfEvents(research)!;
+    expect(summary.current).toEqual([{ unit: "U12", stage: "research", round: 0, segment: 1, since: 2 }]);
+    expect(summary.counts).toMatchObject({ research: 1, coding: 0, merged: 0 });
+    expect(
+      pipelineOfEvents([...research, round(0, "coding", "started", 4), unit("U12", "started", 4)])?.current,
+    ).toEqual([{ unit: "U12", stage: "coding", round: 0, segment: 1, since: 4 }]);
+    expect(pipelineOfEvents([...research, unit("U12", "merged", 5)])?.counts.merged).toBe(1);
+  });
+
   it("the runtime tables cover every member of both unions and nothing else", () => {
     expect(Object.keys(ROUND_STAGE).sort()).toEqual([...ROUND_OUTCOME_WORDS].sort());
     // `blocked` and `failed` are unit statuses the driver posts to `unit-end`

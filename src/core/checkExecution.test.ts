@@ -367,7 +367,7 @@ describe("recorded coding checks", () => {
     resumed.binding.workspace = () => "/work/recreated";
     resumed.binding.authorizeCommand = () => false;
     resumed.execResult.mockReset().mockResolvedValue({ ...metadata, stdout: "different tree" });
-    expect(await resumed.capability().run(input, "call-1")).toEqual(result);
+    expect(await resumed.capability().run(input, "call-1")).toEqual({ ...result, replayed: true });
     expect(resumed.execResult).not.toHaveBeenCalled();
   });
 
@@ -375,7 +375,7 @@ describe("recorded coding checks", () => {
     const s = setup();
     const capability = s.capability();
     const [a, b] = await Promise.all([capability.run(input, "call-1"), capability.run(input, "call-1")]);
-    expect(a).toEqual(b);
+    expect(b).toEqual({ ...a, replayed: true });
     expect(s.execResult).toHaveBeenCalledTimes(2);
     expect(await capability.run({ ...input, command: "another-check" }, "call-1")).toEqual({
       kind: "unavailable",
@@ -392,7 +392,7 @@ describe("recorded coding checks", () => {
     const submitted = { ...input, timeoutMs: first };
     const recorded = await capability.run(submitted, "call-1");
     expect(recorded).toMatchObject({ kind: "recorded" });
-    expect(await capability.run(submitted, "call-1")).toEqual(recorded);
+    expect(await capability.run(submitted, "call-1")).toEqual({ ...recorded, replayed: true });
     expect(await capability.run({ ...input, timeoutMs: next }, "call-1")).toEqual({
       kind: "unavailable",
       reason: "call_mismatch",
@@ -409,7 +409,7 @@ describe("recorded coding checks", () => {
       expect(first).toMatchObject({ kind: "recorded", receipt: { outcome: { kind: "unknown" } } });
       const resumed = setup(s.saved.at(-1));
       const capability = resumed.capability();
-      expect(await capability.run(input, "call-1")).toEqual(first);
+      expect(await capability.run(input, "call-1")).toEqual({ ...first, replayed: true });
       expect(await capability.run(input, "call-2")).toEqual({ kind: "unavailable", reason: "reconciliation_required" });
       expect(resumed.execResult).not.toHaveBeenCalled();
     },
@@ -487,7 +487,7 @@ describe("recorded coding checks", () => {
     const result = await s.capability().run(input, "call-1");
     expect(result).toMatchObject({ kind: "recorded", receipt: { outcome: { kind: "completed", truncated: true } } });
     expect(JSON.stringify(result).length).toBeLessThan(8_000);
-    expect(await setup(s.saved.at(-1)).capability().run(input, "call-1")).toEqual(result);
+    expect(await setup(s.saved.at(-1)).capability().run(input, "call-1")).toEqual({ ...result, replayed: true });
     for (const previous of [
       { version: 1, receipts: [{}] },
       { ...s.saved.at(-1), version: 2 },
@@ -613,7 +613,7 @@ describe("recorded coding checks", () => {
         rmSync(scratch, { recursive: true, force: true });
       }
       writeFileSync(join(workspace, "source.txt"), "after\n");
-      expect(await capability.run(actualInput, "real-call")).toEqual(receipt);
+      expect(await capability.run(actualInput, "real-call")).toEqual({ ...receipt, replayed: true });
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }
@@ -631,7 +631,7 @@ describe("recorded command owner binding", () => {
     expect(Object.hasOwn(first.receipt.owner, "unit")).toBe(false);
     const resumed = setup(s.saved.at(-1));
     delete (resumed.binding.owner as { unit?: string }).unit;
-    expect(await resumed.capability().run(input, "standalone-call")).toEqual(first);
+    expect(await resumed.capability().run(input, "standalone-call")).toEqual({ ...first, replayed: true });
     expect(resumed.execResult).not.toHaveBeenCalled();
   });
 

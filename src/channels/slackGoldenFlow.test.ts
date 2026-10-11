@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { toolResultText, type ChatMessage } from "../core/chatMessage.js";
+import { PRIVATE_WORKER_INTERNAL_READ } from "../core/runsService.js";
 import { contractFor } from "../core/coordinator/briefs.js";
 import { privateWorkerThreadKey } from "./privateWorker.js";
 import {
@@ -11,6 +13,7 @@ import {
   SOURCE,
   SOURCE_QUERY,
   REQUESTER,
+  type ScriptStep,
 } from "./testing/goldenFlow.js";
 import type { CompletionRequest } from "../core/provider.js";
 import { installOutboundGuard } from "./testing/outboundGuard.js";
@@ -100,7 +103,7 @@ describe("Slack golden flow", () => {
       timeWindow: "2026-02-01T00:00:00Z/2026-02-02T00:00:00Z",
     };
     world.state.sourceResponse = initial;
-    const process = goldenProcess(world, "generation-one", [
+    const script: ScriptStep[] = [
       () => call("mcp__metrics__signups", SOURCE_QUERY),
       (req) => sourcedAnswer(req),
       (req) => {
@@ -113,7 +116,8 @@ describe("Slack golden flow", () => {
       (req) => sourcedStart(req, "fresh-query", "start-one"),
       (req) => sourcedStart(req, "fresh-query", "retry-one"),
       () => answer("I started one private worker with the query and acceptance check."),
-    ]);
+    ];
+    const process = goldenProcess(world, "generation-one", script);
     const read = await process.deliver(world.event("How many signups failed?"));
     expect(read, JSON.stringify({ read, posts: world.posts })).toMatchObject({ status: "completed" });
     expect(world.sourceReads).toHaveLength(1);
@@ -151,17 +155,142 @@ describe("Slack golden flow", () => {
     expect(contract.unit.section).toContain("Cause: unknown");
     const identity = { instanceId: instance!.id, unit: units[0]!.unit };
     const postsBeforeWorker = world.posts.length;
+    const researchedGoal = units[0]!.workBrief!.requestedChange;
+    const researchBrief = {
+      version: 1,
+      goal: researchedGoal,
+      headSha: "a".repeat(40),
+      complexity: "simple",
+      decision: "ready",
+      evidence: [{ source: refreshed.sourceUrl, ref: "a".repeat(40), summary: refreshed.result }],
+      assumptions: [],
+      unknowns: ["The query measures failures, not their cause"],
+      approach: ["Inspect failed signups and fix the verified cause"],
+      verification: ["Add a regression test and review the PR"],
+    };
+    script.push(
+      (req) => {
+        for (const value of Object.values(refreshed)) expect(JSON.stringify(req.messages)).toContain(value);
+        expect(JSON.stringify(req.messages)).toContain(researchedGoal);
+        return call("recall", { source: "parent", query: "9 failures" }, "research-recall");
+      },
+      (req) => {
+        const result = req.messages
+          .flatMap((message) => message.content)
+          .find((part) => part.type === "tool_result" && part.toolUseId === "research-recall");
+        expect(result).toMatchObject({ type: "tool_result", toolUseId: "research-recall" });
+        if (result?.type !== "tool_result") throw new Error("Parent recall is missing");
+        const recalled = JSON.parse(toolResultText(result.content)) as {
+          hits: { turn: number; role?: string; snippet: string }[];
+        };
+        expect(recalled.hits.length, JSON.stringify(recalled)).toBeGreaterThan(0);
+        const sourceTurn = recalled.hits.find((hit) => hit.role === "user");
+        if (!sourceTurn) throw new Error("The original source result is missing from parent recall");
+        return call("recall", { source: "parent", turn: sourceTurn.turn }, "research-source");
+      },
+      (req) => {
+        const result = req.messages
+          .flatMap((message) => message.content)
+          .find((part) => part.type === "tool_result" && part.toolUseId === "research-source");
+        expect(result).toMatchObject({ type: "tool_result", toolUseId: "research-source" });
+        if (result?.type !== "tool_result") throw new Error("Original source turn is missing");
+        const recalled = JSON.parse(toolResultText(result.content)) as ChatMessage & { source: string };
+        expect(recalled.source).toBe("parent");
+        expect(sourceResult({ ...req, messages: [recalled] }, "fresh-query")).toEqual(refreshed);
+        return call("submit_research", researchBrief);
+      },
+      () => answer("Research ready: signup failure totals retained; inspect the cause and add a regression test."),
+    );
     const worker = await process.spawnWorker(instance!.id, units[0]!.unit, "Worker-only findings");
-    expect(worker, JSON.stringify(worker)).toMatchObject({
+    expect(
+      worker,
+      JSON.stringify({
+        worker,
+        privateLog: await process.privateWorkerLog.list(privateWorkerThreadKey(identity)),
+        requests: process.requests.length,
+        remaining: process.remaining(),
+      }),
+    ).toMatchObject({
       started: { status: 200 },
+      research: { status: 200 },
       spawned: { status: 200 },
     });
-    expect(process.workerCalls).toHaveLength(1);
+    expect(process.workerCalls).toHaveLength(2);
+    const researchRunId = (worker.research!.body as { runId: string }).runId;
+    const retained = await process.deps.runs!.getRun(researchRunId, {
+      include: "messages",
+      requireFinalRecord: true,
+      privateWorkerAccess: PRIVATE_WORKER_INTERNAL_READ,
+    });
+    expect(retained).toMatchObject({
+      ok: true,
+      value: {
+        status: "completed",
+        persisted: true,
+        researchBrief,
+        userId: `slack:${REQUESTER}`,
+        threadKey: privateWorkerThreadKey(identity),
+        parentInstanceId: instance!.id,
+        coordinatorUnit: units[0]!.unit,
+        idempotencyKey: `${instance!.id}:${units[0]!.unit}/0/research`,
+      },
+    });
+    if (!retained.ok) throw new Error("Canonical research is missing");
+    expect(retained.value.repo).toBeUndefined();
+    expect(retained.value.unitSeedReceipt).toMatchObject({
+      version: 1,
+      child: {
+        runId: researchRunId,
+        requester: `slack:${REQUESTER}`,
+        channelId: `slack:${world.channel}`,
+        threadKey: privateWorkerThreadKey(identity),
+      },
+      binding: { ...identity, instanceAttempt: 0, idempotencyKey: `${instance!.id}:${units[0]!.unit}/0/research` },
+      ownerGen: "generation-one",
+    });
+    const storedResearch = await process.deps.runStore.get(researchRunId);
+    expect(storedResearch?.contextDependencies).toMatchObject({
+      status: "known",
+      origins: expect.arrayContaining([
+        expect.objectContaining({ runId: units[0]!.context!.handoff.source.runId, requester: `slack:${REQUESTER}` }),
+      ]),
+      mcp: expect.arrayContaining([expect.objectContaining({ callIds: ["fresh-query"] })]),
+    });
+    expect(await process.instances.get(instance!.id)).toEqual(instance);
+    expect((await process.instances.listUnits(instance!.id))[0]).toMatchObject({
+      branch: units[0]!.branch,
+      threadKey: privateWorkerThreadKey(identity),
+      startedAt: (worker.started!.body as { at: number }).at,
+      workBrief: units[0]!.workBrief,
+      context: units[0]!.context,
+    });
+    expect(retained.value.events).toContainEqual(
+      expect.objectContaining({
+        type: "coordinator_tag",
+        unit: identity.unit,
+        parentInstanceId: instance!.id,
+        branch: units[0]!.branch,
+        researchTarget: { repo: "acme/api", headSha: "a".repeat(40) },
+      }),
+    );
     expect(process.workerCalls[0]).toMatchObject({
       hasOpenThread: false,
       message: { userId: `slack:${REQUESTER}`, threadKey: privateWorkerThreadKey(identity) },
       options: {
+        unitContextAdmission: {
+          ...identity,
+          instanceAttempt: 0,
+          idempotencyKey: `${instance!.id}:${units[0]!.unit}/0/research`,
+        },
+        operationTarget: { repo: "acme/api", ref: units[0]!.branch },
+      },
+    });
+    expect(process.workerCalls[1]).toMatchObject({
+      hasOpenThread: false,
+      message: { userId: `slack:${REQUESTER}`, threadKey: privateWorkerThreadKey(identity) },
+      options: {
         childHandoff: units[0]!.context!.handoff,
+        coordinator: { researchRunId, researchTarget: { repo: "acme/api", headSha: "a".repeat(40) } },
         unitContextAdmission: {
           ...identity,
           instanceAttempt: 0,
@@ -169,13 +298,15 @@ describe("Slack golden flow", () => {
         },
       },
     });
-    for (const value of Object.values(refreshed)) expect(process.workerCalls[0]?.message.text).toContain(value);
+    for (const value of Object.values(refreshed)) expect(process.workerCalls[1]?.message.text).toContain(value);
     expect(world.posts).toHaveLength(postsBeforeWorker);
-    expect((await process.privateWorkerLog.list(privateWorkerThreadKey(identity))).map((event) => event.kind)).toEqual([
-      "input",
-      "reply",
-    ]);
+    expect(
+      (await process.privateWorkerLog.list(privateWorkerThreadKey(identity)))
+        .map((event) => event.kind)
+        .filter((kind) => kind !== "status"),
+    ).toEqual(["input", "reply", "input", "reply"]);
     expect(world.sourceReads).toHaveLength(2);
+    expect(process.remaining()).toBe(0);
     expect(world.posts.every((post) => post.channel === world.channel && post.thread_ts === world.root)).toBe(true);
     expect((await process.privateWorkerLog.list(privateWorkerThreadKey(identity))).at(-1)).toMatchObject({
       kind: "reply",

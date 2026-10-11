@@ -11,5 +11,6 @@ The mechanical parts of these pages (every command, every flag, every `/api` rou
 - [Authorization](authorization.md) — the `grants` and `restrict` blocks: every axis, every baseline, what fails closed.
 - [Dashboard routes](dashboard-routes.md) — every route, its auth, what it shows.
 - [Code map](code-map.md) — every module, what it owns, and the rule a change there must keep; its Areas table is the PR-title scope vocabulary.
+- [Context lifecycle](context-lifecycle.md) — research checks, verification checkpoints, focused child context and source-bound recall.
 - [Migration notes](migrations.md) — what an installation changes at each major version, one section per release.
 - [Specs](specs/README.md) — the behavioral contract: one file per feature, every criterion bound to the test or procedure that proves it.

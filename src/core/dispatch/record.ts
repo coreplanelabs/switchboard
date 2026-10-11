@@ -40,6 +40,7 @@ import {
 } from "../runRecord.js";
 import { pipelineOfEvents, type PipelineSummary } from "../pipelineStanding.js";
 import type { RunProfile } from "../../config/profile.js";
+import type { ResearchBrief } from "../research/brief.js";
 import { redactHandoff, type Handoff } from "../ship/handoff.js";
 import {
   redactDispositions,
@@ -410,6 +411,7 @@ export function assembleRunRecord(input: {
    *  as the tool accepted it; redacted HERE, the one assembly, so no caller
    *  can forget. Omitted (not set undefined) when the run submitted none. */
   handoff?: Handoff;
+  researchBrief?: ResearchBrief;
   /** The verdict a review run submitted and the head it reviewed, the
    *  dispositions a fix round submitted (run-history item 2) — redacted HERE
    *  like the handoff. Each omitted when the run has none. */
@@ -539,6 +541,7 @@ export function assembleRunRecord(input: {
     ...(input.headSha !== undefined && !privateMain ? { headSha: input.headSha } : {}),
     ...(input.doorPublicationPending !== undefined ? { doorPublicationPending: input.doorPublicationPending } : {}),
     ...(input.handoff !== undefined ? { handoff: redactHandoff(input.handoff) } : {}),
+    ...(input.researchBrief !== undefined ? { researchBrief: input.researchBrief } : {}),
     ...(input.verdict !== undefined ? { verdict: redactVerdict(input.verdict) } : {}),
     ...(input.reviewHead !== undefined ? { reviewHead: input.reviewHead } : {}),
     ...(input.dispositions !== undefined ? { dispositions: redactDispositions(input.dispositions) } : {}),
@@ -790,6 +793,7 @@ export interface FinishRecordContext {
   branchIdentityBaseline?: RunRecord["branchIdentityBaseline"];
   /** The handoff the run loop captured from `submit_handoff`, when one was submitted. */
   handoff?: Handoff;
+  researchBrief?: ResearchBrief;
   /** The verdict a review run submitted and the head it reviewed; the dispositions a fix round submitted. */
   verdict?: ReviewVerdict;
   reviewHead?: string;
@@ -840,6 +844,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     branchIdentityBaseline,
     publicationSettlement,
     handoff,
+    researchBrief,
     verdict,
     reviewHead,
     dispositions,
@@ -880,6 +885,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           ...(doorPublicationPending !== undefined ? { doorPublicationPending } : {}),
           ...(publicationSettlement !== undefined ? { publicationSettlement } : {}),
           ...(handoff !== undefined ? { handoff } : {}),
+          ...(researchBrief !== undefined ? { researchBrief } : {}),
           ...(verdict !== undefined ? { verdict } : {}),
           ...(reviewHead !== undefined ? { reviewHead } : {}),
           ...(dispositions !== undefined ? { dispositions } : {}),
