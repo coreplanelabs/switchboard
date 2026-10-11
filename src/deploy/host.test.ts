@@ -357,6 +357,172 @@ console.log(JSON.stringify(cursor!==null&&process.env.FIXTURE_MODE==='unpaginate
     }
   });
 
+  it("paging logging observes the original request and response before preserving the repeated-cursor refusal", async () => {
+    const savedEnv = process.env;
+    const dir = mkdtempSync(join(tmpdir(), "paging-logging-"));
+    const events: string[] = [];
+    const app = `fixture-${randomUUID()}`;
+    try {
+      writeFileSync(
+        join(dir, "npx"),
+        `#!${process.execPath}
+const a=process.argv.slice(2);
+if(a.includes('list')) console.log(JSON.stringify([{name:process.env.FIXTURE_APP,id:'owned-app'}]));
+else console.log(JSON.stringify({instances:[{id:'private-instance',name:'private-name',state:'running',version:12}],result_info:{next_page_token:'private-cursor'}}));`,
+        { mode: 0o755 },
+      );
+      process.env = { PATH: dir, CLOUDFLARE_API_TOKEN: "synthetic-no-access", FIXTURE_APP: app };
+      const observe = (event: { phase: string }) => events.push(event.phase);
+      const reader = defaultSandboxGateDeps.readInstances as unknown as (...args: unknown[]) => Promise<unknown>;
+      expect(await reader("deploy/cloudflare-sandbox", app, undefined, new AbortController().signal, observe)).toEqual({
+        error: "instance inventory repeated a page token; completeness unverified",
+      });
+      expect(events).toEqual(["before", "after", "before", "after", "failure"]);
+    } finally {
+      process.env = savedEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a throwing producer retains paging failure and removes only its own temporary debug log", async () => {
+    const savedEnv = process.env;
+    const dir = mkdtempSync(join(tmpdir(), "paging-producer-failure-"));
+    const paths = join(dir, "paths");
+    const app = `fixture-${randomUUID()}`;
+    const phases: string[] = [];
+    writeFileSync(join(dir, "keep"), "foreign bytes");
+    try {
+      writeFileSync(
+        join(dir, "npx"),
+        `#!${process.execPath}
+const fs=require('node:fs'),a=process.argv.slice(2);
+if(a.includes('list'))console.log(JSON.stringify([{name:process.env.FIXTURE_APP,id:'owned-app'}]));
+else {fs.writeFileSync(process.env.WRANGLER_LOG_PATH,'private raw cursor');fs.writeFileSync(process.env.FIXTURE_PATHS,process.env.WRANGLER_LOG_PATH);throw new Error('synthetic producer failure');}`,
+        { mode: 0o755 },
+      );
+      process.env = { PATH: dir, CLOUDFLARE_API_TOKEN: "synthetic-no-access", FIXTURE_APP: app, FIXTURE_PATHS: paths };
+      const reader = defaultSandboxGateDeps.readInstances as unknown as (
+        ...args: unknown[]
+      ) => Promise<{ error: string }>;
+      const result = await reader(
+        "deploy/cloudflare-sandbox",
+        app,
+        undefined,
+        new AbortController().signal,
+        (e: { phase: string }) => {
+          phases.push(e.phase);
+          if (e.phase === "after") throw new Error("diagnostic callback failure");
+        },
+      );
+      expect(result.error).toContain("synthetic producer failure");
+      expect(phases).toEqual(["before", "after", "failure"]);
+      expect(() => readFileSync(readFileSync(paths, "utf8"), "utf8")).toThrow();
+      expect(readFileSync(join(dir, "keep"), "utf8")).toBe("foreign bytes");
+    } finally {
+      process.env = savedEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("producer debug capture refuses symlinks and oversized files while preserving readiness", async () => {
+    const savedEnv = process.env;
+    const dir = mkdtempSync(join(tmpdir(), "paging-bounded-read-"));
+    const foreign = join(dir, "foreign");
+    writeFileSync(foreign, "foreign debug bytes");
+    try {
+      writeFileSync(
+        join(dir, "npx"),
+        `#!${process.execPath}
+const fs=require('node:fs'),a=process.argv.slice(2);
+if(a.includes('list'))console.log(JSON.stringify([{name:process.env.FIXTURE_APP,id:'owned-app'}]));
+else {if(process.env.FIXTURE_MODE==='symlink')fs.symlinkSync(process.env.FIXTURE_FOREIGN,process.env.WRANGLER_LOG_PATH);
+else fs.writeFileSync(process.env.WRANGLER_LOG_PATH,process.env.FIXTURE_MODE==='oversized'?'x'.repeat(65537):'owned debug bytes');
+console.log(JSON.stringify({instances:[],result_info:{next_page_token:'private-cursor'}}));}`,
+        { mode: 0o755 },
+      );
+      for (const mode of ["symlink", "oversized", "owned"]) {
+        const app = `fixture-${randomUUID()}`;
+        process.env = {
+          PATH: dir,
+          CLOUDFLARE_API_TOKEN: "synthetic-no-access",
+          FIXTURE_APP: app,
+          FIXTURE_MODE: mode,
+          FIXTURE_FOREIGN: foreign,
+        };
+        const logs: (string | undefined)[] = [];
+        expect(
+          await defaultSandboxGateDeps.readInstances(
+            "deploy/cloudflare-sandbox",
+            app,
+            undefined,
+            new AbortController().signal,
+            (event) => {
+              if (event.phase === "after") logs.push(event.producerLog);
+            },
+          ),
+        ).toEqual({
+          error: "instance inventory repeated a page token; completeness unverified",
+        });
+        expect(logs).toEqual(mode === "owned" ? ["owned debug bytes", "owned debug bytes"] : [undefined, undefined]);
+        expect(readFileSync(foreign, "utf8")).toBe("foreign debug bytes");
+      }
+    } finally {
+      process.env = savedEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("retains interruption as the first paging failure after an owned command is cancelled", async () => {
+    const savedEnv = process.env;
+    const dir = mkdtempSync(join(tmpdir(), "paging-cancel-class-"));
+    const started = join(dir, "started");
+    const app = `fixture-${randomUUID()}`;
+    const controller = new AbortController();
+    const reasons: (string | undefined)[] = [];
+    let watcher: ReturnType<typeof watch> | undefined;
+    const stop = setTimeout(() => controller.abort(), 2_000);
+    try {
+      writeFileSync(
+        join(dir, "npx"),
+        `#!${process.execPath}
+const fs=require('node:fs'),a=process.argv.slice(2);
+if(a.includes('list'))console.log(JSON.stringify([{name:process.env.FIXTURE_APP,id:'owned-app'}]));
+else {const marker=process.env.FIXTURE_STARTED;fs.writeFileSync(marker+'.ready','ready');fs.renameSync(marker+'.ready',marker);setInterval(()=>{},1000);}`,
+        { mode: 0o755 },
+      );
+      process.env = {
+        PATH: dir,
+        CLOUDFLARE_API_TOKEN: "synthetic-no-access",
+        FIXTURE_APP: app,
+        FIXTURE_STARTED: started,
+      };
+      watcher = watch(dir, (_event, name) => {
+        if (name?.toString() === "started") controller.abort();
+      });
+      expect(
+        await defaultSandboxGateDeps.readInstances(
+          "deploy/cloudflare-sandbox",
+          app,
+          undefined,
+          controller.signal,
+          (event) => {
+            if (event.phase === "failure") reasons.push(event.reason);
+          },
+        ),
+      ).toEqual({
+        error: "readiness command interrupted; readiness and native outcome unverified",
+      });
+      expect(readFileSync(started, "utf8")).toBe("ready");
+      expect(reasons).toEqual(["interrupted"]);
+    } finally {
+      controller.abort();
+      clearTimeout(stop);
+      watcher?.close();
+      process.env = savedEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("owned readiness command exits and uncertain group signalling retain truthful results", async () => {
     const dir = mkdtempSync(join(tmpdir(), "readiness-results-"));
     const unset = Object.keys(process.env).filter((name) => name !== "PATH");

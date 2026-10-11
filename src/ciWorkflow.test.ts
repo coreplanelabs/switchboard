@@ -11,6 +11,22 @@ import { parseIngressTokenMap } from "./core/ingressTokens.js";
 import { DOCKERFILES, IMAGE_KINDS, VERSION, type ImageKind } from "./deploy/images.js";
 import { WORKER_DIRS } from "./deploy/plan.js";
 
+describe("paging failure artifact", () => {
+  it("retains the bounded failure snapshot independently of smoke acceptance", () => {
+    const workflow = parse(readFileSync(".github/workflows/deploy-production.yml", "utf8"));
+    const steps = Object.values(workflow.jobs).flatMap((job: any) => job.steps ?? []);
+    const artifact = steps.find((step: any) => step.name === "paging diagnostic artifact") as any;
+    expect(artifact.with).toEqual({
+      name: "paging-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}",
+      path: "${{ runner.temp }}/paging-diagnostic.json",
+      "retention-days": 7,
+      "if-no-files-found": "ignore",
+    });
+    expect(artifact.if).toBe("always() && steps.deploy.outcome != 'success'");
+    expect(artifact.if).not.toContain("smoke");
+  });
+});
+
 // CI is a thin caller of the repository's own scripts. Every check a job runs
 // is an `npm run <script>` a contributor or an agent can run locally with the
 // same result, and nothing lives only in workflow YAML. This test is the rule:

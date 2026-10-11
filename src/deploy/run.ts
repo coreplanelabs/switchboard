@@ -6,6 +6,8 @@ import {
   type ConfigConsumerIdentity,
 } from "../configConsumer.js";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
+import { createPagingObserver, type PagingObserver } from "./pagingDiagnostic.js";
 import { spawn, execFileSync } from "node:child_process";
 import { MINUTE_MS } from "../core/budgets.js";
 import {
@@ -31,7 +33,20 @@ import {
   residentImageReportsProblem,
   reconciledResources,
 } from "./residentReadiness.js";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  openSync,
+  readSync,
+  closeSync,
+  fstatSync,
+  constants as fsConstants,
+} from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
 import { startProcessRoot } from "../core/requestTrace.js";
@@ -1197,6 +1212,8 @@ type GateOutcome = { live: true; detail: string; waitedMs: number } | { live: fa
 
 /** The sandbox gate's I/O, injectable so the loop is unit-tested without a network, wrangler or a clock. */
 export interface SandboxGateDeps {
+  /** The already-qualified deployment source; observation only, no extra read. */
+  setPagingSource?(source: string): void;
   /** Only this operator deployment; cancellation grants no native ending or lift proof. */
   signal?: AbortSignal;
   env: Record<string, string | undefined>;
@@ -1209,6 +1226,7 @@ export interface SandboxGateDeps {
     containerApp: string,
     config?: string,
     signal?: AbortSignal,
+    observePaging?: PagingObserver,
   ): Promise<Read<ContainerInstance[]>>;
   /** The application list Wrangler uses to compute its deploy diff. */
   readListedAppState?(dir: string, containerApp: string, account: string): Promise<Read<AppState>>;
@@ -1228,19 +1246,30 @@ async function wranglerJson(
   args: string[],
   config?: string,
   signal?: AbortSignal,
-): Promise<Read<unknown>> {
+  producerLog?: string,
+): Promise<Read<unknown> & { commandExit?: number; interrupted?: true }> {
   const r = await run("npx", ["wrangler", ...args, ...(config ? ["--config", config] : [])], {
     cwd: workerDir(dir),
     unset: UNSET_ENV,
+    ...(producerLog ? { set: { WRANGLER_LOG_PATH: producerLog, WRANGLER_LOG_SANITIZE: "true" } } : {}),
     signal,
     ...(signal ? { ownedReadGroup: true as const } : {}),
   });
   if (r.cancelled || r.cleanup === "unconfirmed")
-    return { error: "readiness command interrupted; readiness and native outcome unverified" };
+    return {
+      error: "readiness command interrupted; readiness and native outcome unverified",
+      commandExit: r.code,
+      interrupted: true,
+    };
   if (r.code !== 0)
-    return { error: `wrangler ${args.join(" ")} failed: ${lastErrorLines(r.output) || `exit ${r.code}, no output`}` };
+    return {
+      error: `wrangler ${args.join(" ")} failed: ${lastErrorLines(r.output) || `exit ${r.code}, no output`}`,
+      commandExit: r.code,
+    };
   const parsed = parseWranglerJson(r.output);
-  return parsed === undefined ? { error: `wrangler ${args.join(" ")}: no JSON in the output` } : { value: parsed };
+  return parsed === undefined
+    ? { error: `wrangler ${args.join(" ")}: no JSON in the output`, commandExit: r.code }
+    : { value: parsed, commandExit: r.code };
 }
 
 /** The application id behind a Containers application name — stable, so a
@@ -1291,25 +1320,119 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
       ? { error: `wrangler containers info ${id.value}: no numeric version in the output` }
       : { value: state };
   },
-  readInstances: async (dir, containerApp, config, signal) => {
+  readInstances: async (dir, containerApp, config, signal, observePaging) => {
     const id = await resolveContainerAppId(dir, containerApp, config, signal);
     if ("error" in id) return id;
     const rows: ContainerInstance[] = [];
     let pageToken: string | null = null;
+    let pageIndex = 0;
+    let requestedCursor: string | null = null;
     const seen = new Set<string>();
+    let producerVersion: string | undefined;
+    if (observePaging) {
+      try {
+        const require = createRequire(join(workerDir(dir), "package.json"));
+        producerVersion = JSON.parse(readFileSync(require.resolve("wrangler/package.json"), "utf8")).version;
+      } catch {
+        /* Missing producer metadata is unknown, not inferred. */
+      }
+    }
+    const emit = (event: Parameters<PagingObserver>[0]) => {
+      try {
+        observePaging?.(event);
+      } catch {
+        /* Diagnostics cannot change readiness. */
+      }
+    };
+    const fail = (reason: "repeated-cursor" | "malformed-page" | "command-error" | "interrupted", error: string) => {
+      emit({ phase: "failure", app: id.value, pageIndex, requestedCursor, cumulativeCount: rows.length, reason });
+      return { error };
+    };
     do {
-      if (signal?.aborted) return { error: "instance inventory interrupted; completeness unverified" };
+      if (signal?.aborted) return fail("interrupted", "instance inventory interrupted; completeness unverified");
+      pageIndex++;
+      requestedCursor = pageToken;
+      emit({
+        phase: "before",
+        app: id.value,
+        pageIndex,
+        requestedCursor: pageToken,
+        cumulativeCount: rows.length,
+        producerVersion,
+      });
       const args = ["containers", "instances", id.value, "--json", "--per-page", String(INSTANCES_PER_PAGE)];
       if (pageToken) args.push("--page-token", pageToken);
-      const page = await wranglerJson(dir, args, config, signal);
-      if ("error" in page) return page;
-      const parsed = parseInstancesPage(page.value);
-      if (!parsed) return { error: `wrangler containers instances ${id.value}: unexpected JSON shape` };
-      if (signal?.aborted) return { error: "instance inventory interrupted; completeness unverified" };
+      let directory: string | undefined;
+      let log: string | undefined;
+      if (observePaging) {
+        try {
+          directory = mkdtempSync(join(tmpdir(), "paging-producer-"));
+          log = join(directory, "producer.log");
+        } catch {
+          /* Log capture unavailable. */
+        }
+      }
+      let page: Awaited<ReturnType<typeof wranglerJson>>;
+      let producerLog: string | undefined;
+      try {
+        page = await wranglerJson(dir, args, config, signal, log);
+        try {
+          if (log) {
+            const fd = openSync(log, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+            try {
+              if (fstatSync(fd).isFile()) {
+                const bytes = Buffer.alloc(65_537);
+                const length = readSync(fd, bytes, 0, bytes.length, 0);
+                if (length <= 65_536) producerLog = bytes.subarray(0, length).toString("utf8");
+              }
+            } finally {
+              closeSync(fd);
+            }
+          }
+        } catch {
+          /* HTTP facts remain unavailable. */
+        }
+      } catch (error) {
+        emit({
+          phase: "failure",
+          app: id.value,
+          pageIndex,
+          requestedCursor,
+          cumulativeCount: rows.length,
+          reason: signal?.aborted ? "interrupted" : "command-error",
+        });
+        throw error;
+      } finally {
+        if (directory) {
+          try {
+            rmSync(directory, { recursive: true, force: true });
+          } catch {
+            /* Own diagnostic files only. */
+          }
+        }
+      }
+      const parsed = "value" in page ? parseInstancesPage(page.value) : undefined;
+      emit({
+        phase: "after",
+        app: id.value,
+        pageIndex,
+        requestedCursor: pageToken,
+        cumulativeCount: rows.length + (parsed?.rows.length ?? 0),
+        ...("value" in page ? { page: page.value } : {}),
+        commandExit: page.commandExit,
+        producerLog,
+      });
+      if ("error" in page)
+        return fail(
+          page.interrupted ? "interrupted" : "command-error",
+          pageToken ? page.error.replaceAll(pageToken, "<cursor>") : page.error,
+        );
+      if (!parsed) return fail("malformed-page", `wrangler containers instances ${id.value}: unexpected JSON shape`);
+      if (signal?.aborted) return fail("interrupted", "instance inventory interrupted; completeness unverified");
       rows.push(...parsed.rows);
       pageToken = parsed.nextPageToken;
       if (pageToken && seen.has(pageToken))
-        return { error: "instance inventory repeated a page token; completeness unverified" };
+        return fail("repeated-cursor", "instance inventory repeated a page token; completeness unverified");
       if (pageToken) seen.add(pageToken);
     } while (pageToken);
     return { value: rows };
@@ -2123,17 +2246,37 @@ export async function runDeployPlan(
   const directory = mkdtempSync(join(tmpdir(), "switchboard-plan-native-"));
   const config = join(directory, "wrangler.jsonc");
   const uploadConfigs: string[] = [];
+  let paging: ReturnType<typeof createPagingObserver> | undefined;
+  try {
+    paging = createPagingObserver({
+      log: (line) => io.log(line),
+      source: "unknown",
+      expectedCommit: "unknown",
+      env: originalDeps.env,
+      ...(originalDeps.env.RUNNER_TEMP
+        ? { artifactFile: join(originalDeps.env.RUNNER_TEMP, "paging-diagnostic.json") }
+        : {}),
+    });
+  } catch {
+    try {
+      io.warn("[paging-diagnostic] capture unavailable; readiness unchanged");
+    } catch {
+      /* Diagnostic sink only. */
+    }
+  }
   try {
     writeFileSync(config, JSON.stringify({ account_id: plan.checks.account }));
     const deps: SandboxGateDeps = {
       ...originalDeps,
+      setPagingSource: paging?.setSource,
       readAppState: (dir, app, _config, signal) =>
         originalDeps.readAppState(dir, app, config, signal ?? originalDeps.signal),
       readInstances: (dir, app, _config, signal) =>
-        originalDeps.readInstances(dir, app, config, signal ?? originalDeps.signal),
+        originalDeps.readInstances(dir, app, config, signal ?? originalDeps.signal, paging?.observe),
     };
     return await runSelectedDeployPlan(plan, io, deps, uploadConfigs);
   } finally {
+    paging?.close();
     for (const path of uploadConfigs) rmSync(path, { force: true });
     rmSync(directory, { recursive: true, force: true });
   }
@@ -2208,6 +2351,7 @@ async function runSelectedDeployPlan(
     plan.root.mode === "checkout"
       ? (await run("git", ["rev-parse", "HEAD"], { cwd: OPERATOR_ROOT.root, signal: deps.signal })).output.trim()
       : packageSourceOnHost().commit;
+  deps.setPagingSource?.(expectedCommit);
   if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
   if (!/^[0-9a-f]{40}$/.test(expectedCommit)) {
     return {
