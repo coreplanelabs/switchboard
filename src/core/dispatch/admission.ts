@@ -1,3 +1,11 @@
+import { copyChatActor } from "../authz/actor.js";
+import {
+  organizationPrivateAudienceOf,
+  organizationSourceSequenceOf,
+  originalOrganizationDispatchOf,
+  withOriginalOrganizationDispatch,
+  withOrganizationPrivateAudience,
+} from "./privateDestination.js";
 // The admission stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // who may hold the thread. The claim — ONE live run per thread — a steer into
 // the run in flight, a refusal, the boot-gap steer to a run live on another
@@ -86,7 +94,12 @@ export interface AdmissionDeps {
  *  arrived on — what a fresh turn needs if the live run ends without consuming
  *  it (docs/reference/specs/thread-admission.md item 4). A steer a run sent
  *  (`from` set; item 7) has no handle: a program's message is never run fresh. */
-export type DispatchFollowUp = FollowUpInput & { msg: IncomingMessage; io?: ChannelIO };
+export type DispatchFollowUp = FollowUpInput & {
+  msg: IncomingMessage;
+  io?: ChannelIO;
+  /** This local input preceded receiver reservation, never a failed inbox write. */
+  beforeReservation?: true;
+};
 
 /** One follow-up as the slot's inbox holds it: the message's sender, link and
  *  attachments on the runner's shape, the arrival time, the durable seq when
@@ -97,10 +110,10 @@ function followUpOf(
   msg: IncomingMessage,
   text: string,
   at: number,
-  opts: { io?: ChannelIO; ledgerSeq?: number; from?: { runId: string } },
+  opts: { io?: ChannelIO; ledgerSeq?: number; from?: { runId: string }; beforeReservation?: true },
 ): DispatchFollowUp {
   const directAudience = opts.from === undefined ? directAudienceStampOf(msg) : undefined;
-  return {
+  const input: DispatchFollowUp = {
     text,
     ...(msg.approvalConnection !== undefined ? { approvalConnection: msg.approvalConnection } : {}),
     ...(msg.mergedFollowUps ? { mergedFollowUps: true as const } : {}),
@@ -120,10 +133,15 @@ function followUpOf(
     ...(msg.messageId !== undefined ? { messageId: msg.messageId } : {}),
     at,
     ...(opts.ledgerSeq !== undefined ? { ledgerSeq: opts.ledgerSeq } : {}),
+    ...(opts.beforeReservation ? { beforeReservation: true as const } : {}),
     ...(opts.from !== undefined ? { from: opts.from } : {}),
     msg: msg.directAudience !== undefined ? { ...msg, directAudience } : msg,
     ...(opts.io !== undefined ? { io: opts.io } : {}),
   };
+  const audience = opts.from === undefined ? organizationPrivateAudienceOf(msg) : undefined;
+  const source = audience ? withOrganizationPrivateAudience(input, audience, organizationSourceSequenceOf(msg)) : input;
+  const original = opts.from === undefined ? originalOrganizationDispatchOf(msg) : undefined;
+  return copyChatActor(msg, original ? withOriginalOrganizationDispatch(source, original) : source);
 }
 
 /** The process-wide admission map (one bot process = one map; the registry's
@@ -346,7 +364,7 @@ export type AdmissionOutcome =
   /** The run this message was steered into ended during the round trip: the message runs fresh, as its own dispatch. */
   | { kind: "redispatch" }
   /** Folded into the run in flight — here, or on another generation through its durable inbox — and acked. */
-  | { kind: "steered"; where: "here" | "elsewhere" }
+  | { kind: "steered"; where: "here" | "elsewhere"; runId?: string }
   /** Queued by the plane (record 0064, "The queue"): the ask met a live
    *  thread, a window or a pending deploy on the object — the request is
    *  stored there under the minted id, the thread was answered with the
@@ -581,8 +599,9 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
     // run with no row yet (still in setup) has no durable copy: it is not
     // resumable until its seed lands anyway.
     const at = clock();
-    const ledgerSeq = claim.live.runId
-      ? await deps.runLedger.pushInbox(claim.live.runId, durableInboxMessage(msg, directives.text, at))
+    const beforeReservation = claim.live.runId === undefined;
+    const ledgerSeq = !beforeReservation
+      ? await deps.runLedger.pushInbox(claim.live.runId!, durableInboxMessage(msg, directives.text, at))
       : undefined;
     if (admission.get(msg.threadKey) !== claim.live) {
       // The run finished and released the thread during the round trip: an
@@ -592,7 +611,13 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
       console.log(`[dispatch] ${msg.threadKey} the run finished during the steer — running the follow-up fresh`);
       return { kind: "redispatch" };
     }
-    claim.live.inbox.push(followUpOf(msg, directives.text, at, { io, ledgerSeq }));
+    claim.live.inbox.push(
+      followUpOf(msg, directives.text, at, {
+        io,
+        ledgerSeq,
+        ...(beforeReservation ? { beforeReservation: true } : {}),
+      }),
+    );
     console.log(
       `[dispatch] ${msg.threadKey} follow-up steered into the ${claim.live.agent} run in flight (${claim.live.inbox.size} pending${ledgerSeq !== undefined ? `, durable seq ${ledgerSeq}` : ""})`,
     );
@@ -603,7 +628,7 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
         attrs: { outcome: "steered" },
       },
     );
-    return { kind: "steered", where: "here" };
+    return { kind: "steered", where: "here", ...(claim.live.runId ? { runId: claim.live.runId } : {}) };
   }
   // The thread is free here, but its live run may be on the ledger under
   // another generation, or reclaimed and not yet launched (thread-admission
@@ -690,7 +715,7 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
         `[dispatch] ${msg.threadKey} follow-up steered into run ${elsewhere.runId} live on another generation (durable seq ${seq}${nowLive ? ", now live here" : ""})`,
       );
       await replyAck(io, verbosityOf(deps, msg, directives), steerAck(far, now));
-      return { kind: "steered", where: "elsewhere" };
+      return { kind: "steered", where: "elsewhere", runId: elsewhere.runId };
     }
     deps.threadsElsewhere.forget(msg.threadKey);
     console.log(`[dispatch] ${msg.threadKey} run ${elsewhere.runId} is no longer on the ledger — running fresh`);

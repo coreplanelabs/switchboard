@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { isOrganizationPrivateAudience } from "../core/dispatch/privateDestination.js";
 import type { RefusalCause } from "../core/refusal.js";
 import { AGENTS } from "../agents/registry.js";
 import type { ConfigStore, ResolvedMcpServer, Scope } from "../config.js";
@@ -797,19 +798,24 @@ export class McpService {
    *  agent, shadowed names reported as such, credentials opened for this run. */
   async resolveForRun(agentName: string, caller: McpRunCaller): Promise<ResolvedServer[]> {
     const out: ResolvedServer[] = [];
+    const privateBrowser =
+      isOrganizationPrivateAudience(caller.organizationPrivateAudience) &&
+      caller.organizationPrivateAudience.actorId === caller.userId &&
+      caller.organizationPrivateAudience.userId === caller.userId &&
+      caller.organizationPrivateAudience.channelId === caller.channelId;
     for (const r of this.opts.config.mcpServersFor(caller.channelId ?? `none:${caller.userId}`, caller.userId)) {
       const agents = r.entry.agents ?? MCP_DEFAULT_AGENTS;
       if (!agents.includes(agentName)) continue;
-      // A main-agent answer is posted back to its Slack conversation. The
-      // pilot can prove the audience of a one-person DM and a source owned by
-      // that requester; an org or channel credential proves neither.
+      // Private main answers require a proved requester address and that
+      // requester's own credential; org or channel credentials prove neither.
       if (
         agentName === "orchestrator" &&
         (r.kind !== "user" ||
-          !/^slack:D[A-Z0-9_]+$/.test(caller.channelId ?? "") ||
-          caller.directAudience?.kind !== "slack-unshared-im" ||
-          caller.directAudience.channelId !== caller.channelId ||
-          caller.directAudience.userId !== caller.userId)
+          (!privateBrowser &&
+            (!/^slack:D[A-Z0-9_]+$/.test(caller.channelId ?? "") ||
+              caller.directAudience?.kind !== "slack-unshared-im" ||
+              caller.directAudience.channelId !== caller.channelId ||
+              caller.directAudience.userId !== caller.userId)))
       )
         continue;
       if (r.kind !== "org" && !MCP_SELF_SERVE_AGENTS.includes(agentName)) continue; // defense in depth over validateMcpServers

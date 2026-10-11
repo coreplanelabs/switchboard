@@ -30,6 +30,7 @@ import type { ChatCommands } from "../commandChat.js";
 import { CONFIRMATION_TTL_MS } from "../budgets.js";
 import {
   confirmationMessageOf,
+  confirmationActionLabel,
   newConfirmationId,
   type Confirmation,
   type ConfirmationStore,
@@ -640,7 +641,10 @@ export async function mintConfirmationOffer(
     );
     return { kind: "store_unreachable" };
   }
-  return { kind: "offered", shown: { id: row.id, line, risk, expiresAt: row.expiresAt } };
+  return {
+    kind: "offered",
+    shown: { id: row.id, line, risk, expiresAt: row.expiresAt, actionLabel: confirmationActionLabel(row) },
+  };
 }
 
 /** A bound input as the record may carry it: every string redacted and cut at

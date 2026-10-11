@@ -17,6 +17,11 @@ import type { SlackDirectAudience } from "../types.js";
  *  same identity fields the persisted record carries, so a live row projects
  *  like a persisted one (`RunsService.listRuns` filters on them, F8). */
 export interface RunMeta {
+  /** Redaction only. Current source proof remains an independent admission gate. */
+  privateConversation?: true;
+  authoritativeHistory?: true;
+  /** Original organization ingress owner. Recovery must re-prove its source. */
+  organizationIngressRunId?: string;
   /** Resolved agent name. */
   agent?: string;
   /** `<provider>/<model>` the run resolved to. */
@@ -42,6 +47,8 @@ export interface RunMeta {
   /** The credential that authenticated the request when it was bound to the
    *  person `userId` names (`IncomingMessage.authenticatedAs`, authorization.md item 15). */
   authenticatedAs?: string;
+  /** The authenticated app that relayed this request for the credited person. */
+  postedBy?: string;
   /** Our process saw the message that started this run (docs/reference/specs/tracing.md);
    *  the run's duration opens here, falling back to `startedAt` when absent. */
   receivedAt?: number;

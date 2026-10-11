@@ -178,6 +178,9 @@ export const namesOriginalUnitAdoption = (text: string): boolean => /^adopt\s+un
 /** What the agent:ship fork carries out of dispatch()'s prelude — values the
  *  branch must not re-derive, because the gates already ran against them. */
 export interface ShipContext {
+  /** The original ingress owner already minted this parent identity. */
+  ingressRunId?: string;
+  authoritativeHistory?: true;
   /** A spawning run's validated, frozen evidence for the admitted units. */
   context?: UnitContext;
   /** The ship preset as this deployment declares it (`shipPresetFor`: its
@@ -470,20 +473,27 @@ export async function runShipBranch(
     userName: msg.userName,
     text: directives.text,
   });
-  const run = registry.create(runLabel, {
-    hosted: true,
-    agent: agent.name,
-    model: ctx.modelRef,
-    channelId: msg.channelId,
-    userId: msg.userId,
-    threadKey: msg.threadKey,
-    channelVisibility,
-    receivedAt: trace.receivedAt,
-    ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
-    ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
-    ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
-    ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
-  });
+  const run = registry.create(
+    runLabel,
+    {
+      ...(ctx.ingressRunId ? { organizationIngressRunId: ctx.ingressRunId } : {}),
+      ...(ctx.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
+      hosted: true,
+      agent: agent.name,
+      model: ctx.modelRef,
+      channelId: msg.channelId,
+      userId: msg.userId,
+      threadKey: msg.threadKey,
+      channelVisibility,
+      receivedAt: trace.receivedAt,
+      ...(repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+      ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
+      ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
+      ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+      ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
+    },
+    ctx.ingressRunId ? { id: ctx.ingressRunId } : {},
+  );
   let ledgerRun: LedgerRun | undefined;
   let outcome: HandOffOutcome | undefined;
   let shipDiagnosis: FrictionDiagnosis | undefined;
@@ -597,6 +607,8 @@ export async function runShipBranch(
             threadKey: hostKey,
             startedAt: registry.snapshot(run.id, run.token)?.startedAt ?? clock(),
             meta: {
+              ...(ctx.ingressRunId ? { organizationIngressRunId: ctx.ingressRunId } : {}),
+              ...(ctx.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
               hosted: true,
               label: runLabel,
               agent: agent.name,
@@ -722,7 +734,13 @@ export async function runShipBranch(
       ctx.agentSource === "operator" &&
       (ctx.shipEntry === "work_from_thread" || (ctx.shipEntry === "work" && ctx.shipRepoSource === "thread"));
     let threadEvidence: string | undefined;
-    if (requiresThreadEvidence && repoCtx.repo !== undefined && deps.runLedger !== undefined) {
+    if (requiresThreadEvidence && repoCtx.repo !== undefined && ctx.authoritativeHistory) {
+      threadEvidence = requesterThreadEvidence(
+        ctx.history.map((turn) => ({ text: `${turn.role}: ${turn.text}`, ...(turn.user ? { actor: turn.user } : {}) })),
+        msg.userId,
+        repoCtx.repo,
+      );
+    } else if (requiresThreadEvidence && repoCtx.repo !== undefined && deps.runLedger !== undefined) {
       try {
         const target = await deps.runLedger.readRequesterTarget(threadSessionKey(msg.threadKey), msg.userId);
         if (target && !target.conflict && target.repo === repoCtx.repo)

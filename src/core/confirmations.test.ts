@@ -1,3 +1,4 @@
+import { withOriginalOrganizationDispatch } from "./dispatch/originalOrganizationInput.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -5,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { IncomingMessage } from "./types.js";
 import {
   confirmationMessageOf,
+  confirmationActionLabel,
   FileConfirmationStore,
   InMemoryConfirmationStore,
   isConfirmation,
@@ -51,6 +53,29 @@ function contract(
   browserApproval = true,
 ) {
   describe(name, () => {
+    it("persists only the server-minted original organization source pointer and never trusts a body pointer", async () => {
+      const { store } = make();
+      const pointer = { ingressRunId: "original-owner", organizationSequence: 7, organizationRepo: "acme/api" };
+      const row = await store.put(
+        {
+          ...pending("original-source"),
+          message: withOriginalOrganizationDispatch(message, pointer),
+          originalOrganization: { ingressRunId: "forged-body", organizationSequence: 999 },
+        } as PendingConfirmation,
+        TTL,
+      );
+      expect(row).toMatchObject({ id: "original-source", originalOrganization: pointer });
+      const saved = await store.pendingByThread(message.threadKey);
+      expect(saved).toMatchObject({ id: "original-source", originalOrganization: pointer });
+      const consumed = await store.consume("original-source", [message.userId]);
+      expect(consumed).toMatchObject({ ok: true, row: { id: "original-source", originalOrganization: pointer } });
+      const raw = await store.put(
+        { ...pending("raw-source"), originalOrganization: pointer } as PendingConfirmation,
+        TTL,
+      );
+      expect(raw).not.toHaveProperty("originalOrganization");
+    });
+
     if (browserApproval) {
       it("browser approval preserves the expiry and permits only the requester and originating connection to consume once", async () => {
         const { store } = make();
@@ -284,6 +309,27 @@ contract(
   },
   false,
 );
+
+describe("saved organization confirmation provenance", () => {
+  it("labels Merge only from the saved canonical action and keeps unknown proposals as Confirm", () => {
+    expect(confirmationActionLabel({ kind: "run", command: "pulls.merge" })).toBe("Merge");
+    expect(confirmationActionLabel({ kind: "run", command: "config.set" })).toBe("Confirm");
+    expect(confirmationActionLabel({ kind: "redispatch" })).toBe("Confirm");
+  });
+
+  it("rejects malformed source pointers while preserving a valid pointer without recreating authority", () => {
+    const base = { ...pending("c1"), expiresAt: 5 };
+    for (const pointer of [
+      null,
+      { ingressRunId: "x", organizationSequence: 0 },
+      { ingressRunId: "x", organizationSequence: 7, grants: "all" },
+    ])
+      expect(parseConfirmation({ ...base, originalOrganization: pointer })).toBeUndefined();
+    expect(
+      parseConfirmation({ ...base, originalOrganization: { ingressRunId: "original-owner", organizationSequence: 7 } }),
+    ).toMatchObject({ originalOrganization: { ingressRunId: "original-owner", organizationSequence: 7 } });
+  });
+});
 
 describe("WorkerConfirmationStore (the ConfigDO confirmations client)", () => {
   function fake(routes: Record<string, (body: Record<string, unknown>) => unknown>, status = 200) {

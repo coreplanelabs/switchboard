@@ -1,3 +1,6 @@
+import { FileConfirmationStore } from "../confirmations.js";
+import { chatActorOf } from "../authz/actor.js";
+import { withOriginalOrganizationDispatch } from "./originalOrganizationInput.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -299,6 +302,102 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
       },
     ]);
     expect(stored.contexts?.map((context) => context?.status)).toEqual(["unknown", "unknown"]);
+  });
+
+  it("holds a serialized saved choice when current source proof is absent and executes the exact id once after fresh proof", async () => {
+    const d = deps();
+    const file = join(mkdtempSync(join(tmpdir(), "swb-source-confirm-")), "confirmations.json");
+    const first = new FileConfirmationStore(file, { clock: () => now });
+    const pointer = { ingressRunId: "original-offer-owner", organizationSequence: 7, organizationRepo: "acme/api" };
+    await first.put(
+      {
+        ...pending("c1"),
+        message: withOriginalOrganizationDispatch(message(), pointer),
+        derivation: {
+          kind: "operator",
+          context: { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] },
+        },
+      },
+      CONFIRMATION_TTL_MS,
+    );
+    d.confirmations = new FileConfirmationStore(file, { clock: () => now });
+    const chooser = chatActorOf(d.config, message());
+    const { io, ending, trace } = request(d);
+    let current = false;
+    d.guardOrganizationConfirmation = async (row, actor) => {
+      expect(row.originalOrganization).toEqual(pointer);
+      expect(actor?.id).toBe("slack:UADMIN");
+      return current ? { actor: chooser, io } : undefined;
+    };
+    expect(
+      await consumeAndRun(
+        d,
+        { id: "c1", actorIds: [chooser.id], actor: chooser },
+        io,
+        ending,
+        trace,
+        noRedispatch,
+        async () => ({ ok: true }),
+      ),
+    ).toMatchObject({ kind: "refused", refusal: "confirmation_unreadable" });
+    expect(await d.confirmations.get!("c1")).toMatchObject({ id: "c1", originalOrganization: pointer });
+    expect(codingModelIn(d)).toBe("anthropic/coding-model");
+    expect(d.audits).toEqual([]);
+    current = true;
+    expect(
+      await consumeAndRun(
+        d,
+        { id: "c1", actorIds: [chooser.id], actor: chooser },
+        io,
+        ending,
+        trace,
+        noRedispatch,
+        async () => ({ ok: true }),
+      ),
+    ).toMatchObject({ kind: "ran", result: { ok: true } });
+    expect(codingModelIn(d)).toBe("anthropic/claude-opus-5");
+    expect(d.audits).toHaveLength(1);
+    expect(
+      await consumeAndRun(
+        d,
+        { id: "c1", actorIds: [chooser.id], actor: chooser },
+        io,
+        ending,
+        trace,
+        noRedispatch,
+        async () => ({ ok: true }),
+      ),
+    ).toMatchObject({ kind: "refused", refusal: "confirmation_used" });
+    expect(d.audits).toHaveLength(1);
+  });
+  it("does not consume a protected choice for an id list without its actual chooser or for a different credential actor", async () => {
+    const d = deps();
+    const chooser = chatActorOf(d.config, message());
+    const { io, ending, trace } = request(d);
+    await d.store.put(
+      {
+        ...pending("c1"),
+        message: withOriginalOrganizationDispatch(message(), { ingressRunId: "offer-owner", organizationSequence: 7 }),
+      },
+      CONFIRMATION_TTL_MS,
+    );
+    d.guardOrganizationConfirmation = async () => ({ actor: chooser, io });
+    expect(await consumeAndRun(d, { id: "c1", actorIds: [chooser.id] }, io, ending, trace, noRedispatch)).toMatchObject(
+      { kind: "refused" },
+    );
+    const other = { ...chooser, id: "http:other", self: [chooser.id] };
+    expect(
+      await consumeAndRun(
+        d,
+        { id: "c1", actorIds: [chooser.id, "http:other"], actor: other },
+        io,
+        ending,
+        trace,
+        noRedispatch,
+      ),
+    ).toMatchObject({ kind: "refused" });
+    expect(await d.store.get("c1")).toMatchObject({ id: "c1" });
+    expect(d.audits).toEqual([]);
   });
 
   it("quiet confirmation shows the outcome without repeating the route receipt", async () => {
@@ -619,6 +718,9 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
     const d = deps();
     const { io, ending, trace } = request(d);
     const throwing: ConfirmationStore = {
+      get: async () => {
+        throw new Error("store down");
+      },
       put: (row, ttl) => d.store.put(row, ttl),
       cancel: (id, ids) => d.store.cancel(id, ids),
       cancelByThread: (key, ids) => d.store.cancelByThread(key, ids),

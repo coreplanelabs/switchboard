@@ -1,3 +1,11 @@
+import { copyChatActor } from "../authz/actor.js";
+import {
+  privateDestinationOf,
+  organizationPrivateAudienceOf,
+  organizationSourceSequenceOf,
+  samePrivateDestination,
+  withOrganizationPrivateAudience,
+} from "./privateDestination.js";
 import type { Actor } from "../authz/types.js";
 import { PLANE_ACTOR_ID } from "../authz/grants.js";
 import { isReissueSteerText } from "../plane/decide.js";
@@ -46,13 +54,14 @@ export class MainSourceTracker {
   observe(input: FollowUpInput): boolean {
     if (input.userId === PLANE_ACTOR_ID && isReissueSteerText(input.text)) return false;
     const previous = this.latest;
-    const audience = input.directAudience;
-    const expected = previous?.msg.directAudience;
+    const audience = organizationPrivateAudienceOf(input) ?? input.directAudience;
+    const expected = previous ? (privateDestinationOf(previous.msg) ?? previous.msg.directAudience) : undefined;
     if (
       this.compromised ||
       !previous ||
       input.from ||
       input.mergedFollowUps ||
+      (expected !== undefined && (input.postedBy !== undefined || input.authenticatedAs !== undefined)) ||
       (input.messageId === undefined &&
         (expected !== undefined || !Number.isSafeInteger(input.ledgerSeq) || Number(input.ledgerSeq) <= 0)) ||
       input.userId !== previous.msg.userId ||
@@ -63,7 +72,11 @@ export class MainSourceTracker {
         ? audience?.kind !== expected.kind ||
           audience.channelId !== expected.channelId ||
           audience.userId !== expected.userId ||
-          audience.threadKey !== expected.threadKey
+          audience.threadKey !== expected.threadKey ||
+          !samePrivateDestination(audience, expected) ||
+          audience.channelId !== previous.msg.channelId ||
+          audience.userId !== input.userId ||
+          audience.threadKey !== previous.msg.threadKey
         : audience !== undefined)
     ) {
       this.revoke();
@@ -76,7 +89,8 @@ export class MainSourceTracker {
     for (const input of inputs) {
       if (!this.observe(input)) continue;
       const previous = this.latest!;
-      const msg: IncomingMessage = {
+      const audience = organizationPrivateAudienceOf(input) ?? input.directAudience;
+      const plain: IncomingMessage = {
         channelId: previous.msg.channelId,
         threadKey: previous.msg.threadKey,
         userId: input.userId,
@@ -91,6 +105,12 @@ export class MainSourceTracker {
         ...(input.userName !== undefined ? { userName: input.userName } : {}),
         ...(input.sourceUrl !== undefined ? { sourceUrl: input.sourceUrl } : {}),
       };
+      const msg = copyChatActor(
+        input,
+        audience?.kind === "organization-private"
+          ? withOrganizationPrivateAudience(plain, audience, organizationSourceSequenceOf(input))
+          : plain,
+      );
       this.latest = { actor: this.actorOf(msg), msg, selectableText: input.text };
     }
   }

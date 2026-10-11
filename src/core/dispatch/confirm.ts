@@ -1,3 +1,9 @@
+import {
+  withOrganizationPrivateAudience,
+  isOrganizationPrivateAudience,
+  verifyPrivateDestination,
+} from "./privateDestination.js";
+import { withOriginalOrganizationDispatch, withoutOriginalOrganizationDispatch } from "./originalOrganizationInput.js";
 import { withConsumedCommand } from "../commandConfirmations.js";
 // The click on a confirmation (docs/decisions/0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md;
 // docs/reference/specs/routing-and-config.md item 25): the pure pieces
@@ -12,6 +18,8 @@ import { withConsumedCommand } from "../commandConfirmations.js";
 // confirmed` on the record's `route` event. Every refusal is a named statement;
 // a later request may mint a new offer, but this click never delegates recovery.
 import type { Actor } from "../authz/types.js";
+import { withChatActor } from "../authz/actor.js";
+import { markPrivateConversation } from "./privateConversation.js";
 import type { ChatCommandResult } from "../commandChat.js";
 import {
   parseConfirmation,
@@ -19,6 +27,8 @@ import {
   type ConfirmationRefusal,
   type ConfirmationStore,
   type RedispatchConfirmation,
+  type ConfirmationSource,
+  type ConfirmationSourceGuard,
 } from "../confirmations.js";
 import type { ContextDependencies } from "../references/contextDependencies.js";
 import type { AudienceCheck } from "../audienceDecision.js";
@@ -100,6 +110,10 @@ export interface Click {
   id: string;
   actorIds: readonly string[];
   connectionId?: string;
+  /** Trusted current chooser, never an id list or request-body Actor. */
+  actor?: Actor;
+  /** Original owner of this new choice, distinct from its saved offer source. */
+  ingressRunId?: string;
 }
 
 function refused(
@@ -121,24 +135,67 @@ const UNREADABLE = { kind: "refused", refusal: "confirmation_unreadable", text: 
  * and announced to the channel only when the command was a run anyway.
  */
 /** Atomic saved-id claim shared by chat and machine command continuations. */
+/** Protected rows require current channel-owned original-source proof before
+ * their existing one-time store claim. Legacy rows retain the typed path. */
+export async function currentConfirmationSource(
+  row: Confirmation,
+  chooser: Actor | undefined,
+  guard: ConfirmationSourceGuard | undefined,
+): Promise<ConfirmationSource | undefined | false> {
+  if (!row.originalOrganization) return undefined;
+  if (!chooser || chooser.viewingAs || !guard) return false;
+  try {
+    const current = await guard(row, chooser);
+    if (!current || current.actor.viewingAs || current.actor.id !== chooser.id) return false;
+    return current;
+  } catch {
+    return false;
+  }
+}
 export async function claimConfirmation(
   store: ConfirmationStore | undefined,
   click: Click,
-): Promise<Extract<ClickResult, { kind: "refused" }> | { kind: "claimed"; row: Confirmation }> {
-  if (!store) return UNREADABLE;
-  let consumed;
+  guard?: ConfirmationSourceGuard,
+): Promise<
+  Extract<ClickResult, { kind: "refused" }> | { kind: "claimed"; row: Confirmation; source?: ConfirmationSource }
+> {
+  if (!store?.get) return UNREADABLE;
   try {
-    consumed = await store.consume(click.id, click.actorIds, click.connectionId);
+    const pending = await store.get(click.id);
+    if (!pending) return refused("used");
+    const row = parseConfirmation(pending);
+    if (!row) return UNREADABLE;
+    if (
+      row.originalOrganization &&
+      row.kind === "redispatch" &&
+      (!click.ingressRunId || click.ingressRunId === row.originalOrganization.ingressRunId)
+    )
+      return { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
+    const source = await currentConfirmationSource(row, click.actor, guard);
+    if (source === false) return { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
+    // Guarded credit applies only to this saved id, never Actor.self or grants.
+    const consumed = await store.consume(
+      click.id,
+      source ? [...new Set([...actorIdsOf(source.actor), row.message.userId])] : click.actorIds,
+      click.connectionId,
+    );
+    if (!consumed.ok)
+      return refused(
+        consumed.refused,
+        consumed.row && ("derivation" in consumed.row || consumed.row.originalOrganization) ? undefined : consumed.row,
+      );
+    const claimed = parseConfirmation(structuredClone(consumed.row));
+    if (!claimed) return UNREADABLE;
+    // The saved id cannot acquire a different source between read and claim.
+    if (JSON.stringify(claimed.originalOrganization ?? null) !== JSON.stringify(row.originalOrganization ?? null))
+      return { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
+    return { kind: "claimed", row: claimed, ...(source ? { source } : {}) };
   } catch (err) {
     console.warn(
       `[confirm] ${click.id}: the store could not be read — ${err instanceof Error ? err.message : String(err)}`,
     );
     return UNREADABLE;
   }
-  if (!consumed.ok)
-    return refused(consumed.refused, consumed.row && "derivation" in consumed.row ? undefined : consumed.row);
-  const row = parseConfirmation(structuredClone(consumed.row));
-  return row ? { kind: "claimed", row } : UNREADABLE;
 }
 
 export async function consumeAndRun(
@@ -149,10 +206,51 @@ export async function consumeAndRun(
   trace: RequestTrace,
   redispatch: (row: RedispatchConfirmation) => Promise<DispatchOutcome>,
   validateContext?: (context: ContextDependencies, message: IncomingMessage) => Promise<AudienceCheck>,
+  trusted?: { actor: Actor; ingressRunId?: string; authoritativeHistory?: boolean },
 ): Promise<ClickResult> {
-  const claimed = await claimConfirmation(deps.confirmations, click);
+  const claimed = await claimConfirmation(
+    deps.confirmations,
+    { ...click, actor: click.actor ?? trusted?.actor, ingressRunId: click.ingressRunId ?? trusted?.ingressRunId },
+    deps.guardOrganizationConfirmation,
+  );
   if (claimed.kind === "refused") return claimed;
   const row = claimed.row;
+  const chooser = click.actor ?? trusted?.actor;
+  const sourceCurrent = async () => currentConfirmationSource(row, chooser, deps.guardOrganizationConfirmation);
+  const current = await sourceCurrent();
+  if (current === false) return { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
+  if (current) {
+    io = current.io;
+    row.message = withChatActor(row.message, current.actor);
+    const audience = current.io.organizationPrivateAudience?.();
+    if (audience !== undefined) {
+      if (
+        !isOrganizationPrivateAudience(audience) ||
+        audience.actorId !== current.actor.id ||
+        audience.userId !== row.message.userId ||
+        audience.channelId !== row.message.channelId ||
+        audience.threadKey !== row.message.threadKey ||
+        !(await verifyPrivateDestination(current.io, audience)).ok
+      )
+        return { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
+      row.message = withOrganizationPrivateAudience(
+        row.message,
+        audience,
+        row.originalOrganization!.organizationSequence,
+      );
+      row.message = markPrivateConversation(row.message);
+    } else if (trusted?.authoritativeHistory) row.message = markPrivateConversation(row.message);
+    // A fresh proposal dispatch receives the distinct choice pointer in opts.
+    // Typed actions retain the original source pointer solely for guarded minting.
+    row.message =
+      row.kind === "redispatch"
+        ? withoutOriginalOrganizationDispatch(row.message)
+        : withOriginalOrganizationDispatch(row.message, row.originalOrganization!);
+  }
+  if (trusted && !current) {
+    row.message = withChatActor(row.message, trusted.actor);
+    if (trusted.authoritativeHistory) row.message = markPrivateConversation(row.message);
+  }
   const verbosity = deps.config.verbosityFor(
     row.message.channelId,
     row.message.userId,
@@ -163,15 +261,30 @@ export async function consumeAndRun(
   // hands it back to `dispatch()` whole, as the requester, through the
   // caller's `redispatch`. The store already judged the requester and the
   // expiry, exactly as it judges record 0044's Run.
-  if (row.kind === "redispatch") return { kind: "redispatched", row, outcome: await redispatch(row) };
+  if (row.kind === "redispatch") {
+    if ((await sourceCurrent()) === false) return { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
+    return { kind: "redispatched", row, outcome: await redispatch(row) };
+  }
   const derivation = row.derivation;
   const contextUnavailable = { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
   let denied = false;
   const publicationCheck = async (): Promise<AudienceCheck> => {
+    if ((await sourceCurrent()) === false) {
+      denied = true;
+      return { ok: false, code: "saved-context-unproved" };
+    }
     if (!derivation) return { ok: true };
     if (!denied && derivation.context.status === "known" && validateContext) {
       try {
-        if ((await validateContext(structuredClone(derivation.context), structuredClone(row.message))).ok)
+        const message = structuredClone(row.message);
+        if (
+          (
+            await validateContext(
+              structuredClone(derivation.context),
+              trusted ? withChatActor(message, trusted.actor) : message,
+            )
+          ).ok
+        )
           return { ok: true };
       } catch {
         /* Unavailable source proof cannot authorize the saved command. */
@@ -191,7 +304,9 @@ export async function consumeAndRun(
       runChatCommand(deps, row.message, io, { kind: "invoke", id: row.command, input: row.input }, ending, trace, {
         source: "confirm",
         confirmationId: row.id,
-        ...(derivation ? { beforePublish, contextDependencies: derivation.context } : {}),
+        ...(trusted?.ingressRunId ? { ingressRunId: trusted.ingressRunId } : {}),
+        ...(derivation || row.originalOrganization ? { beforePublish } : {}),
+        ...(derivation ? { contextDependencies: derivation.context } : {}),
         route: {
           preset: COMMAND_RUN_AGENT,
           reason: CONFIRMED_REASON,
@@ -208,7 +323,7 @@ export async function consumeAndRun(
     throw error;
   }
   if (!(await publicationCheck()).ok) return contextUnavailable;
-  if (derivation && result.followUp) {
+  if ((derivation || row.originalOrganization) && result.followUp) {
     const followUp = result.followUp;
     result = {
       ...result,
@@ -230,17 +345,24 @@ export async function consumeAndRun(
     text: shows(verbosity, "verbose")
       ? `${ROUTED_RECEIPT_PREFIX} ${row.receipt}\n${result.text}`
       : (result.quietText ?? result.text),
-    ...(derivation ? { publicationCheck } : {}),
+    ...(derivation || row.originalOrganization ? { publicationCheck } : {}),
   };
 }
 
 /** The other button: delete the row under the same requester check; nothing runs. */
 export async function cancelPending(deps: FastPathDeps, click: Click): Promise<CancelResult> {
   const store = deps.confirmations;
-  if (!store) return UNREADABLE;
+  if (!store?.get) return UNREADABLE;
   let cancelled;
   try {
-    cancelled = await store.cancel(click.id, click.actorIds, click.connectionId);
+    const row = await store.get(click.id);
+    if (!row) return refused("used");
+    const source = await currentConfirmationSource(row, click.actor, deps.guardOrganizationConfirmation);
+    if (source === false) return { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
+    // The current source guard proved this exact saved request's credited
+    // person. Credit is local to this id and changes no Actor aliases/grants.
+    const ids = source ? [...new Set([...actorIdsOf(source.actor), row.message.userId])] : click.actorIds;
+    cancelled = await store.cancel(click.id, ids, click.connectionId);
   } catch (err) {
     console.warn(
       `[confirm] ${click.id}: the store could not be read — ${err instanceof Error ? err.message : String(err)}`,

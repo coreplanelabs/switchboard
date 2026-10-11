@@ -784,6 +784,40 @@ describe("openAckCard — the ack card the thread sees while setup runs", () => 
 
 describe("registerRun — the run's row on every surface before the attach", () => {
   const repoCtx: RepoContext = { repo: "acme/api", ref: "main", pr: 41, headSha: "a".repeat(40) };
+  it("publishes a newly admitted run under its original ingress owner's identity", async () => {
+    const d = deps();
+    const r = request(d, "Original request", "general");
+    const registry = new RunRegistry({ genId: () => "rival-fresh-id", genToken: () => "token" });
+    const registered = await registerRun(d, {
+      agentSource: "directive",
+      msg: { ...r.message, postedBy: "http:automation" },
+      io: fakeIO().io,
+      agent: r.agent,
+      resolved: r.resolved,
+      directives: r.directives,
+      history: [],
+      repoCtx: {},
+      carriedRow: undefined,
+      resume: undefined,
+      startedAt: NOW,
+      receivedAt: NOW,
+      clock: () => NOW,
+      root: r.root,
+      trace: r.trace,
+      registry,
+      shell: r.shell,
+      admitted: r.admitted,
+      ingressRunId: "original-ingress-id",
+    });
+    expect(registered.runId).toBe("original-ingress-id");
+    expect(registry.getById("original-ingress-id")).toMatchObject({
+      id: "original-ingress-id",
+      postedBy: "http:automation",
+      userId: r.message.userId,
+      threadKey: r.message.threadKey,
+    });
+    expect(registry.getById("rival-fresh-id")).toBeNull();
+  });
 
   it("gives a main DM a generic run label and no private request or repo facts on the live page", async () => {
     const d = deps();

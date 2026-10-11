@@ -13,6 +13,7 @@ import type { Clock, Span } from "../trace/types.js";
 import type { RunControl } from "../runRegistry/runControl.js";
 import { channelOf, startRequestRoot, type RequestTrace, type RequestTraceDeps } from "../requestTrace.js";
 import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
+import { withoutOrganizationPrivateAudience } from "./privateDestination.js";
 import { mergeFollowUps, type LiveThread } from "../threadAdmission.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import { defaultAdmission, type AdmissionDeps, type DispatchFollowUp } from "./admission.js";
@@ -105,7 +106,7 @@ export async function tellDropped(root: Span, pending: PersonFollowUp[]): Promis
 export interface FreshTurn {
   msg: IncomingMessage;
   io: ChannelIO;
-  opts: { trace: RequestTrace; queuedBehindMs: number };
+  opts: import("../dispatcher.js").DispatchOptions & { trace: RequestTrace; queuedBehindMs: number };
 }
 
 /**
@@ -131,7 +132,9 @@ export function prepareFreshTurn(
   const first = pending[0];
   // A merged request speaks for every pending sender. The first sender's
   // one-person proof cannot authorize private tools for their combined words.
-  const firstMsg = { ...first.msg } as IncomingMessage & { directAudience?: unknown };
+  const firstMsg = (
+    pending.length === 1 ? { ...first.msg } : withoutOrganizationPrivateAudience(first.msg)
+  ) as IncomingMessage & { directAudience?: unknown };
   delete firstMsg.directAudience;
   const directAudience =
     pending.length === 1 &&

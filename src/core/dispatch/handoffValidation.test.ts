@@ -142,6 +142,48 @@ describe("canonical child handoff validation", () => {
     expect((await read(ancestorDropped)).kind).toBe("invalid");
   });
 
+  it("rebuilds private handoffs from current verified projection and never frozen history notes or assets", async () => {
+    const w = await fixture();
+    const original = [{ role: "user" as const, content: [{ type: "text" as const, text: "Original private input" }] }];
+    const projected = {
+      ...w.handoff,
+      session: { key: w.handoff.session.key, from: 0, to: -1 },
+      window: undefined,
+      privateProjectionHash: await sourceHash({ messages: original, actors: [] }),
+      requiresFreshSources: true as const,
+    };
+    w.parent.authoritativeHistory = true;
+    let current: ChatMessage[] | undefined = original;
+    w.deps.readPrivateProjection = async () => current;
+    const capture = await validateChildHandoff({
+      value: projected,
+      consumer: { ...consumer, ...projected.source },
+      mode: "capture",
+      deps: w.deps,
+    });
+    expect(capture.kind).toBe("valid");
+    current = [{ role: "user", content: [{ type: "text", text: "Current retained input" }] }];
+    const bound = await w.validate(projected);
+    expect(bound.kind).toBe("valid");
+    if (bound.kind !== "valid") throw new Error("private bind failed");
+    expect(bound.context.messages.at(-1)).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "Current retained input" }],
+    });
+    expect(JSON.stringify(bound.context)).not.toContain("Original private input");
+    expect(bound.context.handoff.session).toEqual({ key: w.handoff.session.key, from: 0, to: -1 });
+    expect(w.deps.readSession).not.toHaveBeenCalled();
+    expect(w.deps.readNotepad).not.toHaveBeenCalled();
+    expect(w.deps.readAssets).not.toHaveBeenCalled();
+    current = undefined;
+    expect((await w.validate(projected)).kind).toBe("invalid");
+    current = original;
+    vi.mocked(w.deps.validateDependencies).mockResolvedValueOnce(false);
+    expect((await w.validate(projected)).kind).toBe("invalid");
+    w.parent.authoritativeHistory = undefined;
+    expect((await w.validate(projected)).kind).toBe("invalid");
+  });
+
   it("accepts a finished source with no written turn and refuses an unproved live range", async () => {
     const w = await fixture();
     const emptySession = { key: w.parent.session.key, seedFrom: 0, request: 0, range: { from: 0 } };

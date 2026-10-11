@@ -5,6 +5,8 @@ import type { IncomingMessage, SlackDirectAudience } from "../types.js";
 import { followUpFromInbox } from "./admission.js";
 import { durableInboxMessage } from "../runLedger/inboxMessage.js";
 import { MainSourceTracker } from "./mainSource.js";
+import { withOrganizationPrivateAudience, requesterMessageId } from "./privateDestination.js";
+import { withChatActor, resolveChatActor } from "../authz/actor.js";
 
 const directAudience: SlackDirectAudience = {
   kind: "slack-unshared-im",
@@ -108,6 +110,62 @@ describe("main action source", () => {
     expect(sources.select("set my effort high")).toEqual({ kind: "refused", reason: "source_compromised" });
   });
 
+  it("keeps a browser followup's fresh actor and source ordinal and rejects a JSON source guess", () => {
+    const plain = {
+      channelId: "http:home",
+      threadKey: "http:home:alice",
+      userId: "access:alice",
+      messageId: "browser:first",
+      text: "Explain it",
+    };
+    const audience = {
+      kind: "organization-private" as const,
+      organization: "acme",
+      stream: "person:alice",
+      actorId: plain.userId,
+      userId: plain.userId,
+      channelId: plain.channelId,
+      threadKey: plain.threadKey,
+    };
+    const first = withOrganizationPrivateAudience(plain, audience, 1);
+    const actual: Actor = {
+      ...actor(plain),
+      memberOf: new Set(["slack:PROVED"]),
+      memberOfOrganizations: new Set(["acme"]),
+    };
+    const sources = new MainSourceTracker(withChatActor(first, actual), (message) =>
+      resolveChatActor(message, () => ALL_GRANTS),
+    );
+    const followup = withChatActor(
+      withOrganizationPrivateAudience(
+        { userId: plain.userId, messageId: "browser:second", text: "fix it", at: 2 },
+        audience,
+        9,
+      ),
+      actual,
+    );
+    expect(sources.observe(followup)).toBe(true);
+    expect(sources.get("Explain it")?.msg.messageId).toBe("browser:first");
+    sources.accept([followup]);
+    const selected = sources.select("fix it");
+    expect(selected).toMatchObject({
+      kind: "selected",
+      source: {
+        actor: { id: "access:alice", memberOf: new Set(["slack:PROVED"]), memberOfOrganizations: new Set(["acme"]) },
+        msg: { messageId: "browser:second" },
+      },
+    });
+    if (selected.kind !== "selected") throw new Error("No source");
+    expect(requesterMessageId(selected.source.msg)).toBe("browser:9:browser%3Asecond");
+    const publicSource = new MainSourceTracker(plain, actor);
+    publicSource.accept([followup]);
+    expect(publicSource.select("fix it")).toEqual({ kind: "refused", reason: "source_compromised" });
+    const missingNativeId = new MainSourceTracker(first, actor);
+    missingNativeId.accept([{ ...followup, messageId: undefined, ledgerSeq: 9 }]);
+    expect(missingNativeId.select("fix it")).toEqual({ kind: "refused", reason: "source_compromised" });
+    sources.accept([JSON.parse(JSON.stringify(followup))]);
+    expect(sources.select("fix it")).toEqual({ kind: "refused", reason: "source_compromised" });
+  });
   it("reports a compromised source separately from a quote that is not in the latest turn", () => {
     const sources = new MainSourceTracker(initial, actor);
     expect(sources.select("fix it")).toEqual({

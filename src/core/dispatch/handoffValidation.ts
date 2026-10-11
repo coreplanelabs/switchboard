@@ -44,6 +44,7 @@ export interface CanonicalHandoffRun {
   session: RunSession;
   /** Last committed source row, obtained from its finished range or live step. */
   writtenThrough: number;
+  authoritativeHistory?: true;
   childHandoff?: unknown;
   /** Canonical source-read state or its completed-run archive, kept on its original run. */
   dependencies?: ContextDependencies;
@@ -91,6 +92,9 @@ export function canonicalHandoffRunOf(
     threadKey: facts.threadKey,
     session,
     writtenThrough,
+    ...("authoritativeHistory" in facts && facts.authoritativeHistory === true
+      ? { authoritativeHistory: true as const }
+      : {}),
     ...("childHandoff" in facts && facts.childHandoff !== undefined ? { childHandoff: facts.childHandoff } : {}),
     ...(dependencies !== undefined ? { dependencies } : {}),
   };
@@ -101,6 +105,8 @@ export interface HandoffValidationDeps {
   loadRun(runId: string): Promise<CanonicalHandoffRun | undefined>;
   readSession(key: string, from: number, to: number): Promise<AssembledTranscript>;
   readNotepad(key: string): Promise<Notepad | null>;
+  /** Current source proof supplies private bytes; stored snapshots cannot. */
+  readPrivateProjection?(source: HandoffSource): Promise<import("../chatMessage.js").ChatMessage[] | undefined>;
   /** Check live requester grants and the destination audience for this source. */
   canRead(source: HandoffSource, consumer: HandoffConsumer): Promise<boolean>;
   /** Read original artifact events through their frozen source cursors. */
@@ -195,6 +201,43 @@ export async function validateChildHandoff(input: {
         !sameOrchestratorOwner(source.orchestratorOwner, expectedOwner)
       )
         return invalid("child context changed or invented its orchestrator owner");
+      if (source.privateProjectionHash) {
+        if (
+          run.authoritativeHistory !== true ||
+          handoff.ancestors?.length ||
+          source !== handoff ||
+          source.session.key !== run.session.key ||
+          source.session.from !== 0 ||
+          source.session.to !== -1 ||
+          source.notepad ||
+          source.assets.length ||
+          source.assetRuns ||
+          !(await input.deps.canRead(source, input.consumer))
+        )
+          return invalid("private context source or current access is unavailable");
+        const dependencies = source.dependencies?.value;
+        if (
+          !dependencies ||
+          dependencies.status !== "known" ||
+          (await contextDependenciesHash(dependencies)) !== source.dependencies?.hash ||
+          !(await input.deps.validateDependencies(dependencies, source, input.consumer))
+        )
+          return invalid("private context dependency access is unavailable");
+        const messages = await input.deps.readPrivateProjection?.(source);
+        if (!messages) return invalid("the current private context could not be verified");
+        const hash = await sourceHash({ messages, actors: [] });
+        if (input.mode === "capture" && hash !== source.privateProjectionHash)
+          return invalid("the private context changed during capture");
+        handoff.privateProjectionHash = hash;
+        if (input.mode !== "capture") {
+          handoff.consumer = input.consumer;
+          handoff.snapshotRunId = input.consumer.runId;
+        }
+        return {
+          kind: "valid",
+          context: parentContextOf(messages, handoff) as ParentContext & { handoff: ChildHandoff },
+        };
+      }
       if (
         run.session.range === "broken" ||
         source.session.key !== run.session.key ||

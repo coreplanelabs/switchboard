@@ -1,3 +1,4 @@
+import { privateDestinationOf, organizationPrivateAudienceOf } from "./privateDestination.js";
 import { TerminalCommitmentUnknownError } from "../runLedger/writeThrough.js";
 import { originalColdAllocation, sameWorkspaceAllocation } from "../runLedger/workspaceDurability.js";
 import { residentRouteOf } from "../../execution/residentRoute.js";
@@ -357,6 +358,9 @@ export interface RegisteredRun {
 
 /** What `registerRun` reads off the dispatch. */
 export interface RegisterRunContext {
+  /** Server-owned original ingress identity, never an adapter body field. */
+  ingressRunId?: string;
+  authoritativeHistory?: true;
   /** Reserve before any surface can discover the run id. */
   beforeRegister?: (identity: { runId: string; channelVisibility: ChannelVisibility }) => Promise<void>;
   /** Give the new row a terminal setup path before publishing its link. */
@@ -487,7 +491,8 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   // admission anti-steer alone): reusing the id with nothing to replay would
   // upsert an eventless record over the predecessor's, silently replacing the
   // transcript its interrupted record holds.
-  const runId = carriedRow?.runId ?? (ctx.restartCarried ? ctx.restartOf : undefined) ?? registry.mintId();
+  const runId =
+    carriedRow?.runId ?? (ctx.restartCarried ? ctx.restartOf : undefined) ?? ctx.ingressRunId ?? registry.mintId();
   // Asked once per run (the authorization spec's channel-visibility rule):
   // the registry row, the reservation and the claim reuse it.
   const channelVisibility =
@@ -513,7 +518,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
   // `run.label` is the one the record and the friction row carry (never
   // `runLabel`, which may hold a pasted secret).
   const directAudience = directAudienceStampOf(msg);
-  const privateMain = agent.name === "orchestrator" && directAudience !== undefined;
+  const privateMain = agent.name === "orchestrator" && privateDestinationOf(msg) !== undefined;
   const runLabel = privateMain
     ? "main · private conversation"
     : composeRunLabel({
@@ -529,6 +534,9 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
     runLabel,
     {
       agent: agent.name,
+      ...(ctx.ingressRunId ? { organizationIngressRunId: ctx.ingressRunId } : {}),
+      ...(ctx.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
+      ...(privateMain ? { privateConversation: true as const } : {}),
       model: resolved.modelRef,
       channelId: msg.channelId,
       userId: msg.userId,
@@ -540,6 +548,7 @@ export async function registerRun(deps: ProvisionDeps, ctx: RegisterRunContext):
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
       ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+      ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
       ...(parentRunId !== undefined ? { parentRunId } : {}),
       ...coordinatorFields(coordinator),
       ...(seed !== undefined ? { seed } : {}),
@@ -777,6 +786,8 @@ export interface Reservation {
 
 /** What `reserveRun` reads off the dispatch. */
 export interface ReserveContext {
+  ingressRunId?: string;
+  authoritativeHistory?: true;
   /** Identity consumed by the preceding resolved actor gates, captured by the dispatcher. */
   admissionIdentity?: { requester: string; channelId: string; threadKey: string };
   msg: IncomingMessage;
@@ -850,9 +861,12 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
   if (!resume && !restart) {
     const requestRow = durableInboxMessage(msg, msg.text, receivedAt);
     const directAudience = directAudienceStampOf(msg);
-    const privateMain = agent.name === "orchestrator" && directAudience !== undefined;
+    const privateMain = agent.name === "orchestrator" && privateDestinationOf(msg) !== undefined;
     const meta: LiveRunMeta = {
       residentExecution: "native-v1",
+      ...(privateMain ? { privateConversation: true as const } : {}),
+      ...(ctx.ingressRunId ? { organizationIngressRunId: ctx.ingressRunId } : {}),
+      ...(ctx.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
       agent: agent.name,
       model: resolved.modelRef,
       channelId: msg.channelId,
@@ -1619,6 +1633,9 @@ export async function composePrompt(deps: ProvisionDeps, ctx: PromptContext): Pr
       userId: msg.userId,
       channelId: msg.channelId,
       ...(ctx.directAudienceVerified && msg.directAudience ? { directAudience: msg.directAudience } : {}),
+      ...(ctx.directAudienceVerified && organizationPrivateAudienceOf(msg)
+        ? { organizationPrivateAudience: organizationPrivateAudienceOf(msg) }
+        : {}),
     }),
   );
   const mcpBlock = mcpGuidanceBlock(mcpForRun.servers);

@@ -1,4 +1,11 @@
 import {
+  privateDestinationOf,
+  organizationPrivateAudienceOf,
+  isOrganizationPrivateAudience,
+  withOrganizationPrivateAudience,
+  type PrivateDestination,
+} from "./privateDestination.js";
+import {
   mainTaskClaimMatches,
   STEP_NAME_PATTERN,
   unitOfIdempotencyKey,
@@ -21,7 +28,7 @@ import {
 import type { ConversationRef } from "../references/types.js";
 import type { MemoryScope } from "../memory/types.js";
 import { githubCapabilityFor } from "./run.js";
-import type { ChannelIO, IncomingMessage, SlackDirectAudience } from "../types.js";
+import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { MemoryRecord } from "../memory/types.js";
 import { frozenMemoryRecord, validMemoryProvenance } from "../memory/provenance.js";
 import type { CoreDeps } from "../dispatcher.js";
@@ -188,7 +195,7 @@ function buildContextAccess(
   const privateUnitAudience = async (
     instance: CoordinatorInstance,
     unit: CoordinatorUnit,
-  ): Promise<SlackDirectAudience | undefined> => {
+  ): Promise<PrivateDestination | undefined> => {
     const brief = unit.workBrief;
     if (
       !brief ||
@@ -208,6 +215,17 @@ function buildContextAccess(
       link.authority.repo.toLowerCase() !== instance.repo.toLowerCase()
     )
       return undefined;
+    const organization = organizationPrivateAudienceOf(msg) ?? (await io.privateWorkerDestination?.());
+    if (organization?.kind === "organization-private") {
+      if (
+        !isOrganizationPrivateAudience(organization) ||
+        organization.userId !== instance.userId ||
+        organization.channelId !== instance.channelId ||
+        organization.threadKey !== instance.threadKey
+      )
+        return undefined;
+      return organization;
+    }
     return directAudienceStampOf({
       ...instance,
       directAudience: {
@@ -218,9 +236,9 @@ function buildContextAccess(
       },
     });
   };
-  const destinationAudience = async (): Promise<SlackDirectAudience | undefined> => {
+  const destinationAudience = async (): Promise<PrivateDestination | undefined> => {
     if (!msg.threadKey.startsWith("worker:"))
-      return (await privateAudienceDecision(msg, io)).ok ? directAudienceStampOf(msg) : undefined;
+      return (await privateAudienceDecision(msg, io)).ok ? privateDestinationOf(msg) : undefined;
     const worker = parsePrivateWorkerThreadKey(msg.threadKey);
     if (!worker || msg.directAudience !== undefined) return undefined;
     const stored = await unitFor(worker.instanceId, worker.unit);
@@ -247,7 +265,16 @@ function buildContextAccess(
     if (msg.threadKey.startsWith("worker:")) {
       const audience = await destinationAudience();
       if (!audience) return false;
-      destination = { ...msg, channelId: audience.channelId, threadKey: audience.threadKey, directAudience: audience };
+      const address = {
+        ...msg,
+        channelId: audience.channelId,
+        threadKey: audience.threadKey,
+        directAudience: undefined,
+      };
+      destination =
+        audience.kind === "slack-unshared-im"
+          ? { ...address, directAudience: audience }
+          : withOrganizationPrivateAudience(address, audience);
     }
     return (await deps.slackContextForRun?.(actor(), destination).canReadSource?.(ref)) === true;
   };
@@ -440,7 +467,7 @@ function buildContextAccess(
         const current = await githubCapabilityFor(deps, actor(), {
           requesterId: msg.userId,
           verifiedDirectAudience:
-            directAudienceStampOf(msg) !== undefined && (await destinationAudience()) !== undefined,
+            privateDestinationOf(msg) !== undefined && (await destinationAudience()) !== undefined,
         }).readableRepos?.(dependencies.githubRepos);
         const readable = new Set(current?.map((repo) => repo.fullName.toLowerCase()));
         if (dependencies.githubRepos.some((repo) => !readable.has(repo.toLowerCase())))
@@ -494,7 +521,9 @@ function buildContextAccess(
         const tools = await deps.mcp.toolsFor(owner.agent, {
           userId: msg.userId,
           channelId: audience.channelId,
-          directAudience: audience,
+          ...(audience.kind === "slack-unshared-im"
+            ? { directAudience: audience }
+            : { organizationPrivateAudience: audience }),
         });
         const decision = await inspectStoredSourceRead({
           state,

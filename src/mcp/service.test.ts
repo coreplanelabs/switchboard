@@ -539,6 +539,28 @@ describe("McpService — the run-time view (item 17)", () => {
       }),
     ).toEqual({ tools: [], servers: [] });
     const out = await h.service.source.toolsFor("orchestrator", dm);
+    const browser = {
+      userId: alice.id,
+      channelId: "http:home",
+      organizationPrivateAudience: {
+        kind: "organization-private" as const,
+        organization: "acme",
+        stream: "person:alice",
+        actorId: alice.id,
+        userId: alice.id,
+        channelId: "http:home",
+        threadKey: "http:home:alice",
+      },
+    };
+    expect((await h.service.source.toolsFor("orchestrator", browser)).tools.map((tool) => tool.name)).toEqual([
+      "mcp__own__search",
+    ]);
+    expect(
+      await h.service.source.toolsFor("orchestrator", {
+        ...browser,
+        organizationPrivateAudience: { ...browser.organizationPrivateAudience, actorId: bob.id },
+      }),
+    ).toEqual({ tools: [], servers: [] });
     expect(out.tools.map((t) => t.name)).toEqual(["mcp__own__search"]);
     expect(out.servers).toEqual([
       expect.objectContaining({

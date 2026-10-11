@@ -46,6 +46,8 @@ export class RelaunchRefusedError extends HarnessInterruptedError {
 
 /** What the relaunch reads off the run. */
 export interface RelaunchContext {
+  /** Current private projection cannot attest cached provider transcripts. */
+  authoritativeHistory?: true;
   runId: string;
   ownerGen?: string;
   threadKey: string;
@@ -96,7 +98,11 @@ export type RelaunchDecision =
   | { kind: "refused"; interruption: HarnessInterruptedError }
   /** A coding checkout can hold unpublished edits; leave its original row and
    *  binding for a later recovery rather than restarting from the request. */
-  | { kind: "paused"; reason: ReadyEnvironmentReason | "relaunch_ceiling"; message: string }
+  | {
+      kind: "paused";
+      reason: ReadyEnvironmentReason | "relaunch_ceiling" | "private_context_unverified";
+      message: string;
+    }
   /** The run's own stop ended the re-attach: nothing is written or rotated, and the run ends stopped. */
   | { kind: "stopped" }
   /** The run is inside its write-up reserve, or ran into it under the
@@ -122,6 +128,12 @@ export async function prepareRelaunch(
   ctx: RelaunchContext,
 ): Promise<RelaunchDecision> {
   const { replaced, facts, harness } = ctx;
+  if (ctx.authoritativeHistory)
+    return {
+      kind: "paused",
+      reason: "private_context_unverified",
+      message: "The private run is held because its saved provider context cannot be verified.",
+    };
   const refuse = (why: string, reason: string, refusal = "container_replaced"): RelaunchDecision => ({
     kind: "refused",
     interruption: new RelaunchRefusedError(why, reason, refusal),

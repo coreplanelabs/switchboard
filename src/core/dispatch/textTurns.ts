@@ -13,6 +13,8 @@ import type { ChatMessage, ContentPart } from "../chatMessage.js";
 export interface TextTurn {
   role: "user" | "assistant";
   text: string;
+  /** Optional adapter-proved user author; text reduction never invents it. */
+  user?: string;
 }
 
 /**

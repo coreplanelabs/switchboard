@@ -1,4 +1,9 @@
 import {
+  isOrganizationPrivateAudience,
+  verifyPrivateDestination,
+  type PrivateDestination,
+} from "../core/dispatch/privateDestination.js";
+import {
   PRIVATE_WORKER_EVENT_MAX_CHARS,
   PRIVATE_WORKER_REPLY_MAX_CHARS,
   privateWorkerThreadKey,
@@ -9,14 +14,8 @@ import type { AudienceCheck } from "../core/audienceDecision.js";
 import { mainTaskClaimMatches, type CoordinatorInstance, type CoordinatorUnit } from "../core/coordinator/contract.js";
 import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import { directAudienceStampOf } from "../core/runLedger/inboxMessage.js";
-import type {
-  ChannelIO,
-  HistoryItem,
-  IncomingMessage,
-  SlackDirectAudience,
-  StatusHandle,
-  StatusUpdate,
-} from "../core/types.js";
+import { isUnitContext } from "../core/dispatch/unitContext.js";
+import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle, StatusUpdate } from "../core/types.js";
 
 export { privateWorkerThreadKey, parsePrivateWorkerThreadKey } from "../core/privateWorkerLog.js";
 export type { PrivateWorkerIdentity } from "../core/privateWorkerLog.js";
@@ -27,22 +26,27 @@ const SHORTENED_COPY = "\n\n[Private history copy shortened; original text may b
  * the worker's internal thread. */
 export interface PrivateWorkerAudienceBinding {
   actId: string;
-  requester: SlackDirectAudience;
+  requester: PrivateDestination;
   spawnKey: string;
-  verify(audience: SlackDirectAudience): Promise<AudienceCheck>;
+  verify(audience: PrivateDestination): Promise<AudienceCheck>;
+  authoritativePrivateSourceHistory?: ChannelIO["authoritativePrivateSourceHistory"];
 }
 
 export type PrivateWorkerAudienceSource =
   PrivateWorkerAudienceBinding | (() => Promise<PrivateWorkerAudienceBinding | undefined>);
 
 /** Only the original stored main decision can supply a worker's requester. */
-export function privateWorkerAudienceFor(
+export async function privateWorkerAudienceFor(
   instance: CoordinatorInstance,
   row: CoordinatorUnit,
   spawnKey: string,
-  ioFor: (thread: { threadKey: string; userId: string }) => ChannelIO | undefined,
+  ioFor: (thread: {
+    threadKey: string;
+    userId: string;
+    sourceRunId?: string;
+  }) => ChannelIO | undefined | Promise<ChannelIO | undefined>,
   instances: Pick<CoordinatorInstanceStore, "getMainTask">,
-): PrivateWorkerAudienceBinding | undefined {
+): Promise<PrivateWorkerAudienceBinding | undefined> {
   const brief = row.workBrief;
   if (
     !brief ||
@@ -50,31 +54,66 @@ export function privateWorkerAudienceFor(
     !mainTaskClaimMatches({ mainThreadKey: brief.mainThreadKey, actId: brief.actId }, instance, row)
   )
     return undefined;
-  const requester = directAudienceStampOf({
-    channelId: instance.channelId,
-    userId: instance.userId,
-    threadKey: instance.threadKey,
-    ...(instance.postedBy !== undefined ? { postedBy: instance.postedBy } : {}),
-    ...(instance.authenticatedAs !== undefined ? { authenticatedAs: instance.authenticatedAs } : {}),
-    directAudience: {
-      kind: "slack-unshared-im",
-      channelId: instance.channelId,
-      userId: instance.userId,
-      threadKey: instance.threadKey,
-    },
-  });
-  if (!requester) return undefined;
+  let sourceRunId: string | undefined;
+  if (row.context !== undefined) {
+    if (!isUnitContext(row.context)) return undefined;
+    const source = row.context.handoff.source;
+    if (
+      source.requester !== instance.userId ||
+      source.channelId !== instance.channelId ||
+      source.threadKey !== brief.mainThreadKey
+    )
+      return undefined;
+    sourceRunId = source.runId;
+  }
+  if (!instance.channelId.startsWith("slack:") && sourceRunId === undefined) return undefined;
   let originIO: ChannelIO | undefined;
   try {
-    originIO = ioFor({ threadKey: brief.mainThreadKey, userId: brief.requesterId });
+    originIO = await ioFor({
+      threadKey: brief.mainThreadKey,
+      userId: brief.requesterId,
+      ...(sourceRunId ? { sourceRunId } : {}),
+    });
   } catch {
     return undefined;
   }
   if (!originIO) return undefined;
+  const organization = originIO.organizationPrivateAudience?.();
+  const requester =
+    organization !== undefined
+      ? isOrganizationPrivateAudience(organization)
+        ? organization
+        : undefined
+      : directAudienceStampOf({
+          channelId: instance.channelId,
+          userId: instance.userId,
+          threadKey: instance.threadKey,
+          ...(instance.postedBy !== undefined ? { postedBy: instance.postedBy } : {}),
+          ...(instance.authenticatedAs !== undefined ? { authenticatedAs: instance.authenticatedAs } : {}),
+          directAudience: {
+            kind: "slack-unshared-im",
+            channelId: instance.channelId,
+            userId: instance.userId,
+            threadKey: instance.threadKey,
+          },
+        });
+  if (
+    !requester ||
+    requester.channelId !== instance.channelId ||
+    requester.userId !== instance.userId ||
+    requester.threadKey !== instance.threadKey
+  )
+    return undefined;
   return {
     actId: brief.actId,
     requester,
     spawnKey,
+    ...(sourceRunId && originIO.authoritativePrivateSourceHistory
+      ? {
+          authoritativePrivateSourceHistory: async (id: string) =>
+            id === sourceRunId ? originIO.authoritativePrivateSourceHistory!(id) : undefined,
+        }
+      : {}),
     verify: async (audience) => {
       const link = await instances.getMainTask({ mainThreadKey: brief.mainThreadKey, actId: brief.actId });
       if (
@@ -84,16 +123,7 @@ export function privateWorkerAudienceFor(
         link.authority.repo.toLowerCase() !== instance.repo.toLowerCase()
       )
         return { ok: false, code: "direct-address-unproved" };
-      const address = originIO.directAudience?.();
-      if (!address) return { ok: false, code: "direct-address-unproved" };
-      if (
-        address.channelId !== audience.channelId ||
-        address.userId !== audience.userId ||
-        address.threadKey !== audience.threadKey
-      )
-        return { ok: false, code: "direct-address-mismatch" };
-      if (!originIO.verifyDirectAudience) return { ok: false, code: "direct-address-unproved" };
-      return originIO.verifyDirectAudience(audience);
+      return verifyPrivateDestination(originIO, audience);
     },
   };
 }
@@ -106,7 +136,11 @@ export function rehostPrivateWorkerIO(
     clock: () => number;
     currentInputId?: string;
     instances: Pick<CoordinatorInstanceStore, "get" | "listUnits" | "getMainTask">;
-    ioFor: (thread: { threadKey: string; userId: string }) => ChannelIO | undefined;
+    ioFor: (thread: {
+      threadKey: string;
+      userId: string;
+      sourceRunId?: string;
+    }) => ChannelIO | undefined | Promise<ChannelIO | undefined>;
   },
 ): ChannelIO {
   return privateWorkerIO(log, identity, {
@@ -188,7 +222,9 @@ export function privateWorkerIO(
       !audience.actId ||
       !audience.spawnKey ||
       audience.spawnKey !== opts.currentInputId ||
-      directAudienceStampOf({ ...audience.requester, directAudience: audience.requester }) === undefined
+      (audience.requester.kind === "organization-private"
+        ? !isOrganizationPrivateAudience(audience.requester)
+        : directAudienceStampOf({ ...audience.requester, directAudience: audience.requester }) === undefined)
     )
       return { ok: false, code: "direct-address-unproved" };
     if (
@@ -237,6 +273,22 @@ export function privateWorkerIO(
   };
   return {
     history,
+    authoritativePrivateSourceHistory: async (id) => {
+      const audience = await resolveAudience();
+      if (!audience || !(await verifyBinding(currentRequest(audience), audience)).ok) return undefined;
+      const turns = await audience.authoritativePrivateSourceHistory?.(id);
+      return (await verifyBinding(currentRequest(audience), audience)).ok ? turns : undefined;
+    },
+    ...(opts.audience
+      ? {
+          privateWorkerDestination: async () => {
+            const audience = await resolveAudience();
+            return audience && (await verifyBinding(currentRequest(audience), audience)).ok
+              ? audience.requester
+              : undefined;
+          },
+        }
+      : {}),
     ...(opts.audience ? { verifyPrivateWorkerAudience } : {}),
     reply: async (text) => {
       await checkCurrentAudience();

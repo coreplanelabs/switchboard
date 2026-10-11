@@ -43,6 +43,7 @@
 // The handler here is pure over a parsed request (`handleCoordinatorRequest`),
 // like the ingress; `createAdminCoordinatorHandler` is the node:http adapter.
 
+import { assignHumanGate } from "../core/coordinator/humanGate.js";
 import { findRunnerPullOwner } from "../core/runnerOwnership.js";
 import { createSweepEffectJournal } from "../core/coordinator/sweepEffectJournal.js";
 import { isPullOwnersResult, pullOwnerReadDiagnosticFrom } from "../core/coordinator/pullOwnership.js";
@@ -339,6 +340,12 @@ export interface AdminCoordinatorDeps {
    *  row's parts — the card's ts when the handle must redraw it); undefined for
    *  a platform no thread can be rebuilt on. */
   ioFor: (thread: { threadKey: string; userId: string; cardTs?: string }) => ChannelIO | undefined;
+  /** Model reads restore the exact protected original source before deriving an audience. */
+  privateWorkerSourceIoFor?: (thread: {
+    threadKey: string;
+    userId: string;
+    sourceRunId?: string;
+  }) => ChannelIO | undefined | Promise<ChannelIO | undefined>;
   /** Durable internal conversation for main-agent workers. Missing means no worker admission. */
   privateWorkerLog?: PrivateWorkerLog;
   /** The open pull request heading a branch (githubPulls.findOpenPrByHead), and
@@ -827,29 +834,16 @@ function unitIO(
   deps: AdminCoordinatorDeps,
   instance: CoordinatorInstance,
   row: CoordinatorUnit,
-  currentInputId?: string,
 ): ChannelIO | undefined {
   if (row.workBrief !== undefined) {
     if (!deps.privateWorkerLog) return undefined;
     // A final report and a wake append to the durable internal log without a
     // model read. Only a new coding/review spawn needs the requester gate.
-    if (!currentInputId)
-      return privateWorkerIO(
-        deps.privateWorkerLog,
-        { instanceId: instance.id, unit: row.unit },
-        {
-          clock: deps.clock ?? systemClock,
-        },
-      );
-    const audience = privateWorkerAudienceFor(instance, row, currentInputId, deps.ioFor, deps.instances);
-    if (!audience) return undefined;
     return privateWorkerIO(
       deps.privateWorkerLog,
       { instanceId: instance.id, unit: row.unit },
       {
         clock: deps.clock ?? systemClock,
-        currentInputId,
-        audience,
       },
     );
   }
@@ -857,6 +851,32 @@ function unitIO(
   return thread.threadKey === undefined
     ? undefined
     : deps.ioFor({ threadKey: thread.threadKey, userId: instance.userId });
+}
+async function unitSpawnIO(
+  deps: AdminCoordinatorDeps,
+  instance: CoordinatorInstance,
+  row: CoordinatorUnit,
+  currentInputId: string,
+): Promise<ChannelIO | undefined> {
+  if (row.workBrief === undefined) return unitIO(deps, instance, row);
+  if (!deps.privateWorkerLog) return;
+  const audience = await privateWorkerAudienceFor(
+    instance,
+    row,
+    currentInputId,
+    deps.privateWorkerSourceIoFor ?? deps.ioFor,
+    deps.instances,
+  );
+  if (!audience) return;
+  return privateWorkerIO(
+    deps.privateWorkerLog,
+    { instanceId: instance.id, unit: row.unit },
+    {
+      clock: deps.clock ?? systemClock,
+      currentInputId,
+      audience,
+    },
+  );
 }
 
 type OpenedThreadRef = { threadKey: string; sourceUrl?: string };
@@ -1311,7 +1331,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
   }
   const io =
     row?.workBrief !== undefined
-      ? unitIO(deps, instance, row, key)
+      ? await unitSpawnIO(deps, instance, row, key)
       : deps.ioFor({ threadKey, userId: instance.userId });
   if (!io) return json(503, { ok: false, error: "no_channel", at });
   // The child's turn: the caller's prompt, or the brief composed from what the
@@ -8114,7 +8134,12 @@ async function unitEnd(
   // An idle ending is not the unit's end (record 0051): the row gets the idle
   // — the old kind as `why` and the continuation facts — and no `ending`, so
   // the unit stays unfinished and keeps owning its thread.
-  const idle = ending.kind === "idle" ? parseIdle(ending, body.codingRunId, at) : undefined;
+  const parsedIdle = ending.kind === "idle" ? parseIdle(ending, body.codingRunId, at) : undefined;
+  const priorQuestion =
+    row.idle?.humanGate ?? (row.recoveryHold?.cause === "human" ? row.recoveryHold.gate : undefined);
+  const idle = parsedIdle?.humanGate
+    ? { ...parsedIdle, humanGate: assignHumanGate(parsedIdle.humanGate, instance.userId, priorQuestion) }
+    : parsedIdle;
   if (idle?.researchGate !== undefined && idle.researchGate.runId !== row.researchRunId)
     return json(409, { ok: false, error: "research_source_changed", at });
   if (ending.kind === "idle" && idle === undefined)
@@ -8122,7 +8147,7 @@ async function unitEnd(
   const segments = row.segments ?? [];
   const recoveryHold =
     row.recovery !== undefined && ending.kind === "held" && isHumanGatePending(ending.humanGate)
-      ? ({ cause: "human", gate: ending.humanGate } as const)
+      ? ({ cause: "human", gate: assignHumanGate(ending.humanGate, instance.userId, priorQuestion) } as const)
       : row.recovery !== undefined &&
           ending.kind === "held" &&
           ending.holdCause === "draft" &&

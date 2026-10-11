@@ -31,6 +31,7 @@ export interface RunStopStatus {
  * `create()`, so callers can sort/label without reaching into run internals.
  */
 export interface RunSummary {
+  authoritativeHistory?: true;
   id: string;
   token: string;
   /** Short human label set at create() (e.g. "coding · owner/repo"); optional. */
@@ -73,6 +74,9 @@ export interface RunSummary {
   userName?: string;
   /** `RunMeta.authenticatedAs`: the bound credential behind the person, when there was one. */
   authenticatedAs?: string;
+  /** The authenticated app that relayed this request for the credited person. */
+  postedBy?: string;
+  organizationIngressRunId?: string;
   /** `RunMeta.parentRunId`: the run that spawned this one (run-history item 46). */
   parentRunId?: string;
   /** `RunMeta.parentInstanceId` / `RunMeta.idempotencyKey`: the coordinator
@@ -126,6 +130,9 @@ export interface RunSummary {
 /** What `snapshot`/`snapshotById` return: a COPY of the retained backlog plus the
  *  two record fields not derivable from the events. */
 export interface RunSnapshot {
+  privateConversation?: true;
+  authoritativeHistory?: true;
+  organizationIngressRunId?: string;
   events: RunEvent[];
   finished: boolean;
   startedAt: number;
@@ -177,6 +184,9 @@ export function summaryOf(run: RunState, now: number): RunSummary {
     ...(m?.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
     ...(m?.userName !== undefined ? { userName: m.userName } : {}),
     ...(m?.authenticatedAs !== undefined ? { authenticatedAs: m.authenticatedAs } : {}),
+    ...(m?.postedBy !== undefined ? { postedBy: m.postedBy } : {}),
+    ...(m?.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
+    ...(m?.organizationIngressRunId !== undefined ? { organizationIngressRunId: m.organizationIngressRunId } : {}),
     ...(m?.parentRunId !== undefined ? { parentRunId: m.parentRunId } : {}),
     ...(m?.parentInstanceId !== undefined ? { parentInstanceId: m.parentInstanceId } : {}),
     ...(m?.maintenanceActionId !== undefined ? { maintenanceActionId: m.maintenanceActionId } : {}),
@@ -224,6 +234,11 @@ export function summaryOf(run: RunState, now: number): RunSummary {
  *  derivable from it. `truncated` says the bounded backlog dropped events. */
 export function snapshotOf(run: RunState): RunSnapshot {
   return {
+    ...(run.meta?.privateConversation ? { privateConversation: true as const } : {}),
+    ...(run.meta?.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
+    ...(run.meta?.organizationIngressRunId !== undefined
+      ? { organizationIngressRunId: run.meta.organizationIngressRunId }
+      : {}),
     events: [...run.backlog],
     finished: run.finished,
     startedAt: run.startedAt,

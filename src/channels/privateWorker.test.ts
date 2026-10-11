@@ -1,4 +1,5 @@
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
+import { contextCapsuleOf } from "../core/dispatch/unitContext.js";
 import { describe, expect, it } from "vitest";
 import {
   InMemoryPrivateWorkerLog,
@@ -21,6 +22,128 @@ const threadKey = "worker:plan_A-1:U12";
 const now = () => 1000;
 
 describe("private worker IO — a task thread with no Slack delivery", () => {
+  it("rehosts browser worker history only through the original claim and fresh private source proof", async () => {
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+    const instance: CoordinatorInstance = {
+      id: task.instanceId,
+      kind: "ship",
+      userId: "access:alice",
+      channelId: "http:home",
+      threadKey: "http:home:alice",
+      repo: "acme/api",
+      branch: "plan/private-task/u12",
+      base: "main",
+      merge: "person",
+      plan: { id: "private-task" },
+      createdAt: 1,
+    };
+    const unit = {
+      instanceId: instance.id,
+      context: contextCapsuleOf({
+        version: 1,
+        source: {
+          runId: "browser-original-run",
+          requester: instance.userId,
+          channelId: instance.channelId,
+          threadKey: instance.threadKey,
+        },
+        session: { key: "http:home:alice:@thread", from: 0, to: -1 },
+        assets: [],
+      }),
+      unit: task.unit,
+      slug: "u12",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      workBrief: {
+        requesterId: instance.userId,
+        mainThreadKey: instance.threadKey,
+        actId: "m_original",
+        repo: instance.repo,
+        base: "main",
+        question: "Why?",
+        findings: [],
+        requestedChange: "Fix it",
+      },
+    };
+    expect(
+      await instances.recordRequesterTurn({
+        threadKey: instance.threadKey,
+        requesterId: instance.userId,
+        messageId: "browser:1:original-key",
+      }),
+    ).toMatchObject({ ok: true });
+    expect(
+      await instances.claimMainTask({ mainThreadKey: instance.threadKey, actId: "m_original" }, instance, unit, {
+        requesterId: instance.userId,
+        sourceMessageId: "browser:1:original-key",
+        revision: 1,
+        repo: instance.repo,
+      }),
+    ).toMatchObject({ ok: true, created: true });
+    const audience = {
+      kind: "organization-private" as const,
+      organization: "acme",
+      stream: "person:alice",
+      actorId: instance.userId,
+      userId: instance.userId,
+      channelId: instance.channelId,
+      threadKey: instance.threadKey,
+    };
+    let live = true;
+    const source = {
+      reply: async () => {
+        throw new Error("No public post");
+      },
+      status: async () => ({ update() {}, done: async () => {} }),
+      history: async () => [],
+      authoritativePrivateSourceHistory: async (runId: string) =>
+        runId === "browser-original-run" ? [{ role: "user" as const, text: "Current source input" }] : undefined,
+      organizationPrivateAudience: () => audience,
+      verifyOrganizationPrivateAudience: async () =>
+        live ? { ok: true as const } : { ok: false as const, code: "direct-audience-denied" as const },
+    };
+    const log = new InMemoryPrivateWorkerLog();
+    await appendPrivateWorkerInput(log, task, {
+      id: "prior-input",
+      sender: instance.userId,
+      text: "Private evidence",
+      at: 1,
+    });
+    const io = rehostPrivateWorkerIO(log, task, {
+      clock: now,
+      currentInputId: "spawn-1",
+      instances,
+      ioFor: async (original) => {
+        expect(original).toEqual({
+          threadKey: instance.threadKey,
+          userId: instance.userId,
+          sourceRunId: "browser-original-run",
+        });
+        return source;
+      },
+    });
+    const request = {
+      channelId: instance.channelId,
+      userId: instance.userId,
+      threadKey,
+      messageId: "spawn-1",
+      text: "continue",
+    };
+    expect(await io.verifyPrivateWorkerAudience?.(request)).toEqual({ ok: true });
+    expect(await io.privateWorkerDestination?.()).toEqual(audience);
+    expect(await io.history()).toEqual([{ role: "user", text: "Private evidence", at: 1, user: instance.userId }]);
+    expect(await io.authoritativePrivateSourceHistory?.("browser-original-run")).toEqual([
+      { role: "user", text: "Current source input" },
+    ]);
+    expect(await io.authoritativePrivateSourceHistory?.("foreign-source")).toBeUndefined();
+    live = false;
+    expect(await io.authoritativePrivateSourceHistory?.("browser-original-run")).toBeUndefined();
+    expect(await io.privateWorkerDestination?.()).toBeUndefined();
+    await expect(io.history()).rejects.toThrow("private worker audience unavailable");
+    await expect(io.reply("Late private output")).rejects.toThrow("private worker audience unavailable");
+    expect((await log.list(threadKey)).map((event) => event.kind)).toEqual(["input"]);
+  });
   it("checks the original act and private requester before exposing worker history", async () => {
     const log = new InMemoryPrivateWorkerLog();
     await appendPrivateWorkerInput(log, task, { id: "spawn-1", sender: "slack:UA", text: "private finding", at: 10 });

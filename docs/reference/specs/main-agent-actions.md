@@ -30,3 +30,5 @@ For status, steer, and stop, the main agent addresses one existing Ship unit by 
 | Criterion | Proof |
 | --- | --- |
 | A failed Workflow nudge retains the admitted steer and offers reconciliation for the original unit through the existing durable outbox. | `[unit]` `src/core/coordinator/mainActions.test.ts::*::a failed nudge leaves the event queued and offers reconciliation to its original owner` |
+
+| A private current-history command does not read or change an earlier requester target. It still records its current owner/source decision, rechecks source access and delivers only native result metadata; ordinary commands retain requester checkpoint behavior. | `[unit]` `src/core/dispatch/conversationCommand.test.ts::conversation command receipts::keeps private command preparation off retained requester checkpoints while ordinary commands still update them` |

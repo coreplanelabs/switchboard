@@ -1,3 +1,4 @@
+import { privateDestinationOf, verifyPrivateDestination } from "./privateDestination.js";
 import type { AudienceCheck } from "../audienceDecision.js";
 // The run stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // what the model turn needs around it. The ledger claim once the prompt exists;
@@ -273,6 +274,8 @@ export interface RunDeps
 
 /** What `claimRun` reads off the dispatch. */
 export interface ClaimContext {
+  ingressRunId?: string;
+  authoritativeHistory?: true;
   /** Original admission time and receiver row, carried without inventing new authority. */
   startedAt?: number;
   carriedRow?: LiveRunRow;
@@ -486,7 +489,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
   // already made this run untracked, with the one warning; asking again
   // would only warn again.
   if (!resume && reserved) {
-    const privateMain = agent.name === "orchestrator" && directAudience !== undefined;
+    const privateMain = agent.name === "orchestrator" && privateDestinationOf(msg) !== undefined;
     const workAudienceCandidate =
       deps.coordinatorInstances !== undefined &&
       deps.plane !== undefined &&
@@ -496,13 +499,16 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
         message: msg,
         channelVisibility,
       });
+    const privateDestination = privateDestinationOf(msg);
     const verifiedDirectAudience =
-      directAudience !== undefined && ctx.verifyDirectAudience !== undefined
-        ? await ctx.verifyDirectAudience(directAudience).then(
-            (checked) => checked.ok,
-            () => false,
-          )
-        : false;
+      privateDestination?.kind === "organization-private"
+        ? (await verifyPrivateDestination(ctx.io, privateDestination)).ok
+        : directAudience !== undefined && ctx.verifyDirectAudience !== undefined
+          ? await ctx.verifyDirectAudience(directAudience).then(
+              (checked) => checked.ok,
+              () => false,
+            )
+          : false;
     const verifiedWorkAudience = workAudienceCandidate && verifiedDirectAudience;
     const mainWorker = await mainWorkerCapabilityFor(
       deps,
@@ -513,6 +519,9 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
     );
     const ledger = deps.runLedger;
     const meta: LiveRunMeta = {
+      ...(privateMain ? { privateConversation: true as const } : {}),
+      ...(ctx.ingressRunId ? { organizationIngressRunId: ctx.ingressRunId } : {}),
+      ...(ctx.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
       agent: agent.name,
       model: resolved.modelRef,
       ...(ctx.mainAudienceChecked ? { mainAudienceChecked: true as const } : {}),

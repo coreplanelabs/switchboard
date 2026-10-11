@@ -126,6 +126,46 @@ describe("RunsService.getRun", () => {
     ).toMatchObject({ ok: true, value: { researchBrief } });
   });
 
+  it("preserves relay attribution beside the person and credential in live, ledger and saved views", async () => {
+    const { reg } = testRegistry();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const svc = createRunsService({ registry: reg, store, ledger });
+    const attribution = { userId: "slack:UALICE", authenticatedAs: "http:alice-key", postedBy: "http:automation" };
+    const live = reg.create("relayed request", {
+      channelId: "slack:C1",
+      threadKey: "slack:C1:relay-live",
+      ...attribution,
+    });
+    await ledger.claim({
+      runId: "relay-far",
+      gen: "other-owner",
+      threadKey: "slack:C1:relay-far",
+      startedAt: NOW,
+      leaseMs: 30000,
+      meta: { channelId: "slack:C1", threadKey: "slack:C1:relay-far", ...attribution },
+      card: null,
+      system: "",
+      tools: [],
+    });
+    await store.put(record("relay-saved", NOW - 1, attribution));
+    expect(reg.getById(live.id)).toMatchObject(attribution);
+    for (const id of [live.id, "relay-far", "relay-saved"]) {
+      const found = await svc.getRun(id);
+      expect(found.ok && found.value).toMatchObject(attribution);
+    }
+    const page = await svc.listRuns({ status: "all", visibleTo: ALL });
+    expect(
+      page.runs
+        .filter((run) => run.postedBy === "http:automation")
+        .map((run) => run.id)
+        .sort(),
+    ).toEqual([live.id, "relay-far", "relay-saved"].sort());
+    const plain = reg.create("plain", { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:plain" });
+    const found = await svc.getRun(plain.id);
+    expect(found.ok && "postedBy" in found.value).toBe(false);
+  });
+
   it("finished registry projection exposes the persisted admitted profile", async () => {
     const { reg, store, svc } = setup();
     const profile = { preset: "review", machine: "repo-resident", identity: "read", minutes: 7 } as const;

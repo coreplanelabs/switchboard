@@ -10,6 +10,7 @@ import { workStartTool } from "../../tools/mainStart.js";
 import type { ToolContext } from "../../tools/runnableTool.js";
 import { contractFor } from "./briefs.js";
 import { contextCapsuleOf } from "../dispatch/unitContext.js";
+import { withOrganizationPrivateAudience, requesterMessageId } from "../dispatch/privateDestination.js";
 
 const msg: IncomingMessage = {
   channelId: "slack:D123",
@@ -97,6 +98,57 @@ function harness(over: Partial<MainStartDeps> = {}) {
 }
 
 describe("main-agent private worker start", () => {
+  it("keeps a proved browser request on one original private unit across retry", async () => {
+    const h = harness();
+    const plain: IncomingMessage = {
+      channelId: "http:home",
+      userId: "access:alice",
+      threadKey: "http:home:alice",
+      messageId: "browser:once",
+      text: "fix it",
+    };
+    const browser = withOrganizationPrivateAudience(
+      plain,
+      {
+        kind: "organization-private",
+        organization: "acme",
+        stream: "person:alice",
+        actorId: plain.userId,
+        userId: plain.userId,
+        channelId: plain.channelId,
+        threadKey: plain.threadKey,
+      },
+      1,
+    );
+    const turn = await h.instances.recordRequesterTurn({
+      threadKey: plain.threadKey,
+      requesterId: plain.userId,
+      messageId: requesterMessageId(browser)!,
+    });
+    if (!turn.ok) throw new Error("no turn");
+    const value: MainStartInput = {
+      ...h.input,
+      msg: browser,
+      actor: { ...actor, id: plain.userId, origin: { channelId: plain.channelId, threadKey: plain.threadKey } },
+      authority: {
+        requesterId: plain.userId,
+        sourceMessageId: requesterMessageId(browser)!,
+        revision: turn.turn.revision,
+        repo: "acme/api",
+      },
+    };
+    const first = await h.start(value);
+    expect(first.kind).toBe("accepted");
+    if (first.kind !== "accepted") throw new Error("no admission");
+    expect(await h.start(value)).toMatchObject({ kind: "existing", instanceId: first.instanceId, actId: first.actId });
+    expect(h.created).toEqual([first.instanceId]);
+    expect((await h.instances.listUnits(first.instanceId))[0]).toMatchObject({
+      instanceId: first.instanceId,
+      workBrief: { requesterId: plain.userId, mainThreadKey: plain.threadKey },
+    });
+    expect(await h.start({ ...value, msg: JSON.parse(JSON.stringify(browser)) })).toMatchObject({ kind: "refused" });
+    expect(h.created).toHaveLength(1);
+  });
   it("persists the original context capsule before worker creation and preserves it on replay", async () => {
     const capsule = contextCapsuleOf({
       version: 1,

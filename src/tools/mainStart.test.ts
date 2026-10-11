@@ -1,4 +1,5 @@
 import { booleanAudienceVerifier } from "../core/testing/audienceVerifier.js";
+import { withOrganizationPrivateAudience } from "../core/dispatch/privateDestination.js";
 import { describe, expect, it, vi } from "vitest";
 import { ALL_GRANTS } from "../core/authz/grants.js";
 import type { Actor } from "../core/authz/types.js";
@@ -30,14 +31,16 @@ const actor: Actor = {
 };
 
 const input = {
-  schemaVersion: 1,
-  cause: { kind: "unknown", reason: "Not investigated" },
-  evidence: { availability: "provided" },
-  requirements: { analysis: "not_required", evidence: "required" },
+  schemaVersion: 1 as const,
+  cause: { kind: "unknown" as const, reason: "Not investigated" },
+  evidence: { availability: "provided" as const },
+  requirements: { analysis: "not_required" as const, evidence: "required" as const },
   acceptance: "Regression test passes",
   repo: "acme/api",
   question: "Why did signup fail?",
-  findings: [{ kind: "observation", text: "Five failed signups yesterday", sourceUrl: "https://example.com/signup" }],
+  findings: [
+    { kind: "observation" as const, text: "Five failed signups yesterday", sourceUrl: "https://example.com/signup" },
+  ],
   requestedChange: "Fix signup and add a regression test",
   sourceMessage: "fix it",
 };
@@ -51,6 +54,61 @@ const resolveSource = (sources: MainSourceTracker, quote: string, repo: string, 
 };
 
 describe("work_start — plain-language private worker handoff", () => {
+  it("starts from a proved browser destination and refuses lost proof or forged JSON audience", async () => {
+    const plain: IncomingMessage = {
+      channelId: "http:home",
+      userId: "access:alice",
+      threadKey: "http:home:alice",
+      messageId: "browser:once",
+      text: "fix it",
+    };
+    const audience = {
+      kind: "organization-private" as const,
+      organization: "acme",
+      stream: "person:alice",
+      actorId: plain.userId,
+      userId: plain.userId,
+      channelId: plain.channelId,
+      threadKey: plain.threadKey,
+    };
+    const browser = withOrganizationPrivateAudience(plain, audience, 1);
+    const browserActor: Actor = {
+      ...actor,
+      id: plain.userId,
+      origin: { channelId: plain.channelId, threadKey: plain.threadKey },
+    };
+    let privateNow = true;
+    const starts: MainStartInput[] = [];
+    const make = (message: IncomingMessage) =>
+      mainStartForRun({
+        agentName: "orchestrator",
+        channelVisibility: "unknown",
+        initial: { actor: browserActor, msg: message },
+        source: () => ({ kind: "ready", actor: browserActor, msg: message, authorizedRepo: input.repo }),
+        live: () => true,
+        runId: "original-browser-run",
+        verifyOrganizationPrivateAudience: async () =>
+          privateNow ? { ok: true } : { ok: false, code: "direct-audience-denied" },
+        recordDecision: async () => () => true,
+        start: async (value) => {
+          starts.push(value);
+          return { kind: "accepted", actId: "act:once", instanceId: "original-unit", reply: "Started" };
+        },
+      });
+    expect(make(JSON.parse(JSON.stringify(browser)))).toBeUndefined();
+    const capability = make(browser);
+    expect(capability).toBeDefined();
+    expect(await capability!.start(input.repo, input, "fix it")).toMatchObject({ kind: "accepted", actId: "act:once" });
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({
+      actor: { id: "access:alice" },
+      msg: { messageId: "browser:once" },
+      mainRunId: "original-browser-run",
+    });
+    privateNow = false;
+    expect(await capability!.start(input.repo, input, "fix it")).toMatchObject({ kind: "refused" });
+    expect(starts).toHaveLength(1);
+  });
   it("keeps capture refusal private and emits a bounded category without starting a worker", async () => {
     const onContextRefusal = vi.fn();
     const start = vi.fn<(value: MainStartInput) => Promise<MainStartResult>>();

@@ -115,6 +115,26 @@ describe("Original question answer admission", () => {
     ]);
   });
 
+  it("rejects an old primary action after the original owner changes it and accepts only the complete current question", async () => {
+    const store = await fixture();
+    const observed = { ...question, primaryAction: { label: "Merge", text: "Merge the reviewed pull request" } };
+    const current = { ...observed, primaryAction: { label: "Merge", text: "Merge after the required check passes" } };
+    await store.putUnits([{ ...row, idle: { ...row.idle!, humanGate: current } }]);
+    expect(
+      await store.appendEvent(key, { ...answer, text: observed.primaryAction.text }, true, undefined, undefined, {
+        expectedQuestion: observed,
+      }),
+    ).toEqual({ ok: false, reason: "stale" });
+    expect(await store.listEvents(key)).toEqual([]);
+    const currentAnswer = { ...answer, text: current.primaryAction.text };
+    expect(
+      await store.appendEvent(key, currentAnswer, true, undefined, undefined, { expectedQuestion: current }),
+    ).toEqual({ ok: true, seq: 1 });
+    expect(await store.listEvents(key)).toEqual([
+      { ...currentAnswer, seq: 1, questionDigest: "ae3e66af125d4272f049b3d86e7a46e08e15e511e20df68b3bb72326e97927b9" },
+    ]);
+  });
+
   it("keeps a changed question and a foreign sender from receiving the old answer", async () => {
     const store = await fixture();
     await store.putUnits([{ ...row, idle: { ...row.idle!, humanGate: { ...question, askedAt: 4 } } }]);

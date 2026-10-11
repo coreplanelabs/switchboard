@@ -9,6 +9,7 @@ import { isMainTaskKey, type StoredWorkBriefDraft, type WorkBriefIssue } from ".
 import { isMainTaskAuthority, type MainTaskAuthority } from "./requesterAuthority.js";
 import type { MainSourceFailureCode } from "../dispatch/mainSource.js";
 import { isUnitContext, type UnitContext } from "../dispatch/unitContext.js";
+import { privateDestinationOf, requesterMessageId } from "../dispatch/privateDestination.js";
 
 /** Trusted dispatch context supplies the actor, message, gates and runner seams.
  * The model supplies only a repository and bounded evidence for one change. */
@@ -31,7 +32,7 @@ export interface MainStartInput {
   context?: UnitContext;
   /** A trusted run fence checked again after async preflight and before start. */
   stillLive: () => boolean;
-  /** Freshly proves the original Slack DM is still a one-person internal audience. */
+  /** Freshly proves the original requester destination is still private. */
   stillPrivate: () => Promise<boolean>;
   repo: string;
   /** Resolved from the person's delivered request, never from tool input. */
@@ -77,11 +78,13 @@ export function createMainTaskStarter(deps: MainStartDeps) {
     };
     // A message id survives process restarts. One user request owns one act,
     // even if the model repeats this tool call with different wording.
+    const audience = privateDestinationOf(msg);
     if (
-      msg.directAudience?.kind !== "slack-unshared-im" ||
-      msg.directAudience.channelId !== msg.channelId ||
-      msg.directAudience.userId !== msg.userId ||
-      msg.directAudience.threadKey !== msg.threadKey ||
+      !audience ||
+      audience.channelId !== msg.channelId ||
+      audience.userId !== msg.userId ||
+      audience.threadKey !== msg.threadKey ||
+      (audience.kind === "organization-private" && audience.actorId !== actor.id) ||
       actor.viewingAs ||
       (actor.kind !== "user" && actor.kind !== "agent") ||
       actor.origin?.channelId !== msg.channelId ||
@@ -90,7 +93,7 @@ export function createMainTaskStarter(deps: MainStartDeps) {
       !msg.messageId ||
       !isMainTaskAuthority(input.authority) ||
       input.authority.requesterId !== msg.userId ||
-      input.authority.sourceMessageId !== msg.messageId ||
+      input.authority.sourceMessageId !== requesterMessageId(msg) ||
       !deps.privateWorkerAvailable ||
       !deps.privateWorkerLog
     )

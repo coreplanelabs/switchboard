@@ -7,6 +7,12 @@ import { isUnitContext, type UnitContext } from "../core/dispatch/unitContext.js
 import type { MainSourceRefusal, MainSourceResolution } from "../core/dispatch/mainSource.js";
 import { MainContextCaptureError, type MainContextRefusalCode } from "../core/dispatch/mainContextCapture.js";
 import type { IncomingMessage, SlackDirectAudience } from "../core/types.js";
+import {
+  privateDestinationOf,
+  requesterMessageId,
+  samePrivateDestination,
+  type OrganizationPrivateAudience,
+} from "../core/dispatch/privateDestination.js";
 import type { RunnableTool } from "./runnableTool.js";
 
 type Brief = MainStartInput["brief"];
@@ -18,7 +24,7 @@ export interface MainStartCapability {
 }
 
 /** The private worker's progress and completion path is proved only for a
- * direct requester in a Slack DM. Keep seed and live model tool lists equal. */
+ * direct requester in a proved private destination. Keep seed and live model tool lists equal. */
 export function canOfferMainStart(
   agentName: string,
   visibility: ChannelVisibility,
@@ -26,17 +32,24 @@ export function canOfferMainStart(
   actor: Actor,
   hasStarter: boolean,
 ): boolean {
+  const destination = privateDestinationOf(msg);
+  const privateAddress =
+    destination?.kind === "organization-private"
+      ? destination.actorId === actor.id && visibility !== "public" && requesterMessageId(msg) !== undefined
+      : visibility === "dm" &&
+        /^slack:D[A-Za-z0-9]+$/.test(msg.channelId) &&
+        msg.threadKey.startsWith(`${msg.channelId}:`) &&
+        /^slack:[UW][A-Za-z0-9]+$/.test(msg.userId);
   return (
     agentName === "orchestrator" &&
-    visibility === "dm" &&
+    privateAddress &&
+    destination !== undefined &&
     hasStarter &&
-    /^slack:D[A-Za-z0-9]+$/.test(msg.channelId) &&
-    msg.threadKey.startsWith(`${msg.channelId}:`) &&
-    /^slack:[UW][A-Za-z0-9]+$/.test(msg.userId) &&
-    msg.directAudience?.kind === "slack-unshared-im" &&
-    msg.directAudience.channelId === msg.channelId &&
-    msg.directAudience.userId === msg.userId &&
-    msg.directAudience.threadKey === msg.threadKey &&
+    destination.channelId === msg.channelId &&
+    destination.userId === msg.userId &&
+    destination.threadKey === msg.threadKey &&
+    msg.relayedBy === undefined &&
+    !actor.viewingAs &&
     msg.postedBy === undefined &&
     msg.authenticatedAs === undefined &&
     actor.kind === "user" &&
@@ -60,14 +73,23 @@ export function mainStartForRun(deps: {
   captureContext?: () => Promise<UnitContext>;
   onContextRefusal?: (code: MainContextRefusalCode) => Promise<void> | void;
   verifyDirectAudience?: (audience: SlackDirectAudience) => Promise<AudienceCheck>;
+  verifyOrganizationPrivateAudience?: (audience: OrganizationPrivateAudience) => Promise<AudienceCheck>;
   start?: (input: MainStartInput) => Promise<MainStartResult>;
   recordDecision: (input: MainStartInput, toolCallId?: string) => Promise<(() => boolean) | undefined>;
 }): MainStartCapability | undefined {
-  // The model's tool call and evidence are logged in the conversation. Only a
-  // verified direct Slack DM may carry private work through this tool.
-  const verifyDirectAudience = deps.verifyDirectAudience;
+  const initialDestination = privateDestinationOf(deps.initial.msg);
+  const verifySource = async (message: IncomingMessage): Promise<boolean> => {
+    const current = privateDestinationOf(message);
+    if (!initialDestination || !current || !samePrivateDestination(initialDestination, current)) return false;
+    return current.kind === "slack-unshared-im"
+      ? (await deps.verifyDirectAudience?.(current))?.ok === true
+      : (await deps.verifyOrganizationPrivateAudience?.(current))?.ok === true;
+  };
   if (
-    !verifyDirectAudience ||
+    !initialDestination ||
+    (initialDestination.kind === "slack-unshared-im"
+      ? !deps.verifyDirectAudience
+      : !deps.verifyOrganizationPrivateAudience) ||
     !canOfferMainStart(deps.agentName, deps.channelVisibility, deps.initial.msg, deps.initial.actor, !!deps.start)
   )
     return undefined;
@@ -79,8 +101,7 @@ export function mainStartForRun(deps: {
         let retryQuote: string | undefined;
         if (source.reason === "source_quote_mismatch" && source.retryQuote && deps.live()) {
           try {
-            if ((await verifyDirectAudience(deps.initial.msg.directAudience!)).ok && deps.live())
-              retryQuote = source.retryQuote;
+            if ((await verifySource(deps.initial.msg)) && deps.live()) retryQuote = source.retryQuote;
           } catch {
             // A failed audience read cannot release private request text.
           }
@@ -96,7 +117,7 @@ export function mainStartForRun(deps: {
         return Promise.resolve({ kind: "refused", reply: "I can't start from that sender; nothing started." });
       let privateNow = false;
       try {
-        privateNow = (await verifyDirectAudience(source.msg.directAudience!)).ok;
+        privateNow = await verifySource(source.msg);
       } catch {
         // A failed Slack read is no proof that the destination stayed private.
       }
@@ -116,7 +137,7 @@ export function mainStartForRun(deps: {
         }
         if (!deps.live()) return { kind: "refused", reply: "The main run stopped, so no work started." };
         try {
-          if (!(await verifyDirectAudience(source.msg.directAudience!)).ok)
+          if (!(await verifySource(source.msg)))
             return { kind: "refused", reply: "This is no longer a private conversation; nothing started." };
         } catch {
           return { kind: "refused", reply: "I couldn't verify this private conversation; no work started." };
@@ -134,7 +155,7 @@ export function mainStartForRun(deps: {
         stillLive: deps.live,
         stillPrivate: async () => {
           try {
-            return (await verifyDirectAudience(source.msg.directAudience!)).ok;
+            return await verifySource(source.msg);
           } catch {
             return false;
           }
@@ -155,7 +176,7 @@ const text = (v: unknown, cap: number): v is string => typeof v === "string" && 
 export const workStartTool: RunnableTool = {
   name: "work_start",
   description:
-    "When the latest person turn in a direct Slack DM asks you to fix or build something, start one private coding worker. Interpret the whole turn: later corrections or a request for explanation alone mean do not start work. If intent is unclear, ask once. Carry forward the question and evidence you found with explicit finding kinds, cause uncertainty, acceptance and evidence requirements. If evidence is unavailable, say why; never invent it. Typed field issues return to this turn for correction; keep the user here and report the work id. Set sourceMessage to a short exact quote copied from that latest person turn. If source_quote_mismatch returns retryQuote, re-read the latest turn and retry once with that literal only when it still asks for this work. Other source-resolution codes mean this call started no new work and do not justify another DM or target guess. Preserve any earlier pending work id and its uncertain status.",
+    "When the latest person turn in this proved private conversation asks you to fix or build something, start one private coding worker. Interpret the whole turn: later corrections or a request for explanation alone mean do not start work. If intent is unclear, ask once. Carry forward the question and evidence you found with explicit finding kinds, cause uncertainty, acceptance and evidence requirements. If evidence is unavailable, say why; never invent it. Typed field issues return to this turn for correction; keep the user here and report the work id. Set sourceMessage to a short exact quote copied from that latest person turn. If source_quote_mismatch returns retryQuote, re-read the latest turn and retry once with that literal only when it still asks for this work. Other source-resolution codes mean this call started no new work and do not justify another conversation or target guess. Preserve any earlier pending work id and its uncertain status.",
   inputSchema: {
     type: "object",
     properties: {

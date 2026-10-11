@@ -10,6 +10,14 @@ describe("run session identity comes from the admitted unit", () => {
     unit: "U11",
     instanceAttempt: 2,
   };
+  it("keeps authoritative history in its original run lane without a shared or legacy fallback", () => {
+    expect(runSessionIdentity(threadKey, "orchestrator", undefined, undefined, "original-input")).toEqual({
+      key: "private:original-input:@context-v1",
+    });
+    expect(runSessionIdentity(threadKey, "orchestrator", undefined, undefined, "later-input")).toEqual({
+      key: "private:later-input:@context-v1",
+    });
+  });
   it("uses one coding lane and one review lane across rounds and reissues", () => {
     expect(runSessionIdentity(threadKey, "coding", coordinator)).toEqual({
       key: "plan-p:U11:coding:@context-v1",

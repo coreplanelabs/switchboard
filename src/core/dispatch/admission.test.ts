@@ -328,7 +328,7 @@ describe("admit — the thread admission claim", () => {
     expect(s.admission.get(THREAD)?.inbox.size ?? 0).toBe(0);
     if (where === "elsewhere") expect(s.elsewhere.get(THREAD)?.runId).toBe("run-owned");
     unavailable = false;
-    expect(await admit(s.deps, s.ctx)).toEqual({ kind: "steered", where });
+    expect(await admit(s.deps, s.ctx)).toEqual({ kind: "steered", where, runId: "run-owned" });
     expect((await inner.readInbox("run-owned", 0)).map((entry) => [entry.seq, entry.message.text])).toEqual([
       [1, "also check the migration"],
     ]);
@@ -356,7 +356,7 @@ describe("admit — the thread admission claim", () => {
     const ledger = new RecordingLedger({ pushSeq: () => 7 });
     const { deps, ctx, replies, message, io } = setup("and also the numbers", { user: "slack:UY", admission, ledger });
     const outcome = await admit(deps, ctx);
-    expect(outcome).toEqual({ kind: "steered", where: "here" });
+    expect(outcome).toEqual({ kind: "steered", where: "here", runId: "run-1" });
     expect(ledger.pushes).toEqual([
       { runId: "run-1", message: durableInboxMessage(message, "and also the numbers", NOW) },
     ]);
@@ -395,7 +395,7 @@ describe("admit — the thread admission claim", () => {
     admitted.admitted.runId = "run-1";
     const later = setup("fix it", { admission, ledger });
     later.ctx.msg = { ...dm, text: "fix it" };
-    expect(await admit(later.deps, later.ctx)).toEqual({ kind: "steered", where: "here" });
+    expect(await admit(later.deps, later.ctx)).toEqual({ kind: "steered", where: "here", runId: "run-1" });
     expect(admission.get(dm.threadKey)).toBe(admitted.admitted);
     const [live] = admitted.admitted.inbox.drain();
     expect(live.text).toBe("fix it");
@@ -410,7 +410,7 @@ describe("admit — the thread admission claim", () => {
 
     const relayed = setup("fix it again", { admission, ledger });
     relayed.ctx.msg = { ...dm, text: "fix it again", relayedBy: "slack:bot:BOTHER" };
-    expect(await admit(relayed.deps, relayed.ctx)).toEqual({ kind: "steered", where: "here" });
+    expect(await admit(relayed.deps, relayed.ctx)).toEqual({ kind: "steered", where: "here", runId: "run-1" });
     const [indirect] = admitted.admitted.inbox.drain();
     expect(indirect.directAudience).toBeUndefined();
     expect(indirect.msg.directAudience).toBeUndefined();
@@ -422,7 +422,7 @@ describe("admit — the thread admission claim", () => {
     const claim = admission.claim(THREAD, { agent: "general", now: 4_000 });
     claim.live.runId = "run-1";
     const { deps, ctx, replies } = setup("verbosity:verbose and also the numbers", { user: "slack:UY", admission });
-    expect(await admit(deps, ctx)).toEqual({ kind: "steered", where: "here" });
+    expect(await admit(deps, ctx)).toEqual({ kind: "steered", where: "here", runId: "run-1" });
     const [item] = claim.live.inbox.drain();
     expect(item).toMatchObject({ text: "and also the numbers" });
     expect(replies).toHaveLength(1);
@@ -474,7 +474,7 @@ describe("admit — the thread admission claim", () => {
     const { deps, ctx, refusals } = setup("and the next agent:ship in the thread claims the host key", {
       admission,
     });
-    expect(await admit(deps, ctx)).toEqual({ kind: "steered", where: "here" });
+    expect(await admit(deps, ctx)).toEqual({ kind: "steered", where: "here", runId: "run-1" });
     expect(refusals).toEqual([]);
     const [item] = claim.live.inbox.drain();
     expect(item).toMatchObject({ text: "and the next agent:ship in the thread claims the host key" });
@@ -586,7 +586,7 @@ describe("admit — the thread admission claim", () => {
         ledger,
         elsewhere: far("general"),
       });
-      expect(await admit(deps, ctx)).toEqual({ kind: "steered", where: "elsewhere" });
+      expect(await admit(deps, ctx)).toEqual({ kind: "steered", where: "elsewhere", runId: "run-far" });
       expect(ledger.pushes).toEqual([
         { runId: "run-far", message: durableInboxMessage(message, "and also the numbers", NOW) },
       ]);
@@ -683,7 +683,7 @@ describe("admit — the thread admission claim", () => {
         ledger: new RecordingLedger({ pushSeq: () => 3 }),
         elsewhere: far("coding"),
       });
-      expect(await admit(plain.deps, plain.ctx)).toEqual({ kind: "steered", where: "elsewhere" });
+      expect(await admit(plain.deps, plain.ctx)).toEqual({ kind: "steered", where: "elsewhere", runId: "run-far" });
       expect(plain.ledger.pushes.map((p) => p.runId)).toEqual(["run-far"]);
     });
 
@@ -696,7 +696,7 @@ describe("admit — the thread admission claim", () => {
         elsewhere: far("coding"),
         restartOf: "run-closed",
       });
-      expect(await admit(deps, ctx)).toEqual({ kind: "steered", where: "elsewhere" });
+      expect(await admit(deps, ctx)).toEqual({ kind: "steered", where: "elsewhere", runId: "run-far" });
       expect(ledger.pushes.map((p) => p.runId)).toEqual(["run-far"]);
     });
   });
@@ -1863,7 +1863,7 @@ describe("the owner rule and the pending question are read before the loop", () 
     const ledger = new RecordingLedger({ pushSeq: () => 7 });
     const { deps, ctx } = setup("also cover the docs", { admission, ledger });
     const outcome = await admit(deps, ctx);
-    expect(outcome).toEqual({ kind: "steered", where: "here" });
+    expect(outcome).toEqual({ kind: "steered", where: "here", runId: "run-owner" });
     const [item] = claim.live.inbox.drain();
     expect(item.msg).toMatchObject({ text: "also cover the docs" });
     expect(admission.get(THREAD)).toBe(claim.live);

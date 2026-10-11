@@ -137,6 +137,7 @@ export function mainAudienceAtPrompt(input: {
   requester: string;
   channelId: string;
   verifiedDirectAudience: boolean;
+  verifiedOrganizationPrivateAudience?: boolean;
   servers: readonly McpServerOutcome[];
   session?: SessionSeed;
   resumed?: ResumedAudienceEvidence;
@@ -160,7 +161,10 @@ export function mainAudienceAtPrompt(input: {
   if (input.threadArtifacts && !checkedContext) return { ok: false, code: "artifact-context-unproved" };
   const sources = servedSources(input.servers, input.requester);
   if (!sources) return { ok: false, code: "mcp-audience-unproved" };
-  if (sources.length > 0 && (!directSlack || !input.verifiedDirectAudience))
+  if (
+    sources.length > 0 &&
+    ((!directSlack && !input.verifiedOrganizationPrivateAudience) || !input.verifiedDirectAudience)
+  )
     return { ok: false, code: "mcp-audience-unproved" };
 
   const seed = input.session;

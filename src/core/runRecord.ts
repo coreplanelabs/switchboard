@@ -178,6 +178,9 @@ export interface RunRecord {
    *  names — the run is theirs, the grants were the credential's. Absent when
    *  the sender and the credential are one. */
   authenticatedAs?: string;
+  organizationIngressRunId?: string;
+  privateConversation?: true;
+  authoritativeHistory?: true;
   postedBy?: string;
   /** Original private audience identity, retained for internal checkpoint verification. */
   directAudience?: DirectAudienceStamp;
@@ -1507,6 +1510,9 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.restartUntil !== undefined && (!isFiniteNumber(r.restartUntil) || r.restarting !== true)) return false;
   if (r.relayedBy !== undefined && typeof r.relayedBy !== "string") return false;
   if (r.authenticatedAs !== undefined && typeof r.authenticatedAs !== "string") return false;
+  if (r.organizationIngressRunId !== undefined && typeof r.organizationIngressRunId !== "string") return false;
+  if (r.privateConversation !== undefined && r.privateConversation !== true) return false;
+  if (r.authoritativeHistory !== undefined && r.authoritativeHistory !== true) return false;
   if (r.postedBy !== undefined && typeof r.postedBy !== "string") return false;
   if (r.directAudience !== undefined && directAudienceStampOf(r as unknown as RunRecord) === undefined) return false;
   // Absent on records written before the stamp existed (read as `unknown`); present → a known value.

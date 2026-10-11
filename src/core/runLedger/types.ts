@@ -60,6 +60,7 @@ export interface LiveRunMeta {
   /** Plane placeholder only; first execution owner freezes its own protocol. */
   executionUnclaimed?: true;
   privateConversation?: true;
+  authoritativeHistory?: true;
   /** Non-content origin fence; never a cached grant or a person hint. */
   organizationIngressRunId?: string;
   /** Explicit first-admission contract; missing on legacy allocations. */

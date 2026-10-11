@@ -1,4 +1,11 @@
 import {
+  privateDestinationOf,
+  requesterMessageId,
+  organizationPrivateAudienceOf,
+  samePrivateDestination,
+  verifyPrivateDestination,
+} from "./privateDestination.js";
+import {
   commandRouteForLaunch,
   harnessLaunchIntentOf,
   originalSessionPolicyOf,
@@ -19,7 +26,7 @@ import {
 import { doorPublicationOf, branchPublicationOf, type BranchPublication } from "../branchPublication.js";
 import { createWorkFreshness } from "./workFreshness.js";
 import { appendRunReport } from "../runLedger/threadSession.js";
-import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
+import { isPrivateConversation } from "./privateConversation.js";
 import { contextDependenciesOf, type ContextDependencies } from "../references/contextDependencies.js";
 import { GITHUB_READ_TOOLS } from "../../tools/github.js";
 import { githubReadWithContext } from "./githubReadContext.js";
@@ -317,7 +324,12 @@ export interface RunInterrupted {
  * not be reattached. The durable row and binding remain for the same run. */
 export interface RunPaused {
   kind: "paused";
-  reason: ReadyEnvironmentReason | "relaunch_ceiling" | "first_test_required" | "checkpoint_unavailable";
+  reason:
+    | ReadyEnvironmentReason
+    | "relaunch_ceiling"
+    | "private_context_unverified"
+    | "first_test_required"
+    | "checkpoint_unavailable";
   message: string;
   handedOff: boolean;
 }
@@ -2079,15 +2091,19 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     mainWorkTrusted = false;
     await mainWorkEffectGate.revoke();
   };
-  const directAudience = (msg as IncomingMessage & { directAudience?: DirectAudience }).directAudience;
   const verifyDirectAudience = io.verifyDirectAudience?.bind(io);
+  const privateDestination = privateDestinationOf(msg);
   const verifiedAtOpen =
-    agent.name === "orchestrator" && directAudience && verifyDirectAudience
-      ? await verifyDirectAudience(directAudience).then(
-          (checked) => checked.ok,
-          () => false,
-        )
+    agent.name === "orchestrator" && privateDestination
+      ? privateDestination.kind === "slack-unshared-im"
+        ? ((await verifyDirectAudience?.(privateDestination).then(
+            (checked) => checked.ok,
+            () => false,
+          )) ?? false)
+        : (await verifyPrivateDestination(io, privateDestination)).ok
       : false;
+  if (privateDestination?.kind === "organization-private" && !verifiedAtOpen && agent.name === "orchestrator")
+    throw new RefusalError(refusalOf("setup_failed", "The private conversation could not be verified."));
   // An action source comes only from a delivered requester message, never
   // the operator's combined prompt. Follow-ups bind after confirmed delivery.
   const mainSources = new MainSourceTracker(
@@ -2308,20 +2324,25 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             input.userId !== msg.userId ||
             input.postedBy !== undefined ||
             input.authenticatedAs !== undefined ||
-            input.directAudience?.kind !== "slack-unshared-im" ||
-            input.directAudience.channelId !== msg.channelId ||
-            input.directAudience.userId !== msg.userId ||
-            input.directAudience.threadKey !== msg.threadKey ||
+            !privateDestination ||
+            !(organizationPrivateAudienceOf(input) ?? input.directAudience) ||
+            !samePrivateDestination(
+              privateDestination,
+              (organizationPrivateAudienceOf(input) ?? input.directAudience)!,
+            ) ||
             input.messageId === undefined ||
             input.from !== undefined,
         )
       )
         await withdrawMainWork();
-      if (mainWorkTrusted && directAudience && verifyDirectAudience) {
-        const stillDirect = await verifyDirectAudience(directAudience).then(
-          (checked) => checked.ok,
-          () => false,
-        );
+      if (mainWorkTrusted && privateDestination) {
+        const stillDirect =
+          privateDestination.kind === "slack-unshared-im"
+            ? ((await verifyDirectAudience?.(privateDestination).then(
+                (checked) => checked.ok,
+                () => false,
+              )) ?? false)
+            : (await verifyPrivateDestination(io, privateDestination)).ok;
         if (!stillDirect) await withdrawMainWork();
       }
       // A steer can be replayed from the durable inbox without this process's
@@ -2330,7 +2351,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       // ingress, so re-recording each one would falsely revoke the latest.
       if (mainWorkTrusted && deps.coordinatorInstances) {
         const newest = requesterInputs.at(-1)!;
-        const turn = { threadKey: msg.threadKey, requesterId: newest.userId, messageId: newest.messageId! };
+        const turn = {
+          threadKey: msg.threadKey,
+          requesterId: newest.userId,
+          messageId: requesterMessageId(newest) ?? newest.messageId!,
+        };
         try {
           if (!isRequesterTurnInput(turn)) throw new Error("invalid requester turn");
           const recorded = await deps.coordinatorInstances.recordRequesterTurn(turn);
@@ -2430,7 +2455,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let githubReadUnknown = false;
   const github = githubCapabilityFor(deps, chatActorOf(deps.config, msg), {
     requesterId: msg.userId,
-    verifiedDirectAudience: verifiedAtOpen === true && directAudienceStampOf(msg) !== undefined,
+    verifiedDirectAudience: verifiedAtOpen === true && privateDestinationOf(msg) !== undefined,
   });
   github.recordRead = (repo) => {
     if (/^[^/\s]+\/[^/\s]+$/.test(repo)) githubReadRepos.add(repo.toLowerCase());
@@ -2475,7 +2500,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         return refuse("requester_turn_read_failed");
       }
       if (!turn) return refuse("requester_turn_missing");
-      if (turn.messageId !== selected.source.msg.messageId) return refuse("requester_turn_superseded");
+      if (turn.messageId !== requesterMessageId(selected.source.msg)) return refuse("requester_turn_superseded");
       const work = mainSources.bindRepository(selected.source, repo, ctx.configuredRepo);
       if (work.kind === "refused") return refuse(work.reason);
       return {
@@ -2495,6 +2520,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       registry.getById(run.id)?.finished === false,
     runId: run.id,
     ...(io.verifyDirectAudience ? { verifyDirectAudience: io.verifyDirectAudience.bind(io) } : {}),
+    ...(io.verifyOrganizationPrivateAudience
+      ? { verifyOrganizationPrivateAudience: io.verifyOrganizationPrivateAudience.bind(io) }
+      : {}),
     captureContext: async () => {
       if (!ctx.captureUnitContext) throw new MainContextCaptureError("precondition_capture_unavailable");
       return ctx.captureUnitContext();
@@ -3775,6 +3803,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           try {
             decision = await prepareRelaunch(deps, {
               runId: run.id,
+              ...(registry.snapshot(run.id, run.token)?.authoritativeHistory
+                ? { authoritativeHistory: true as const }
+                : {}),
               ownerGen: deps.runLedger.gen,
               threadKey: msg.threadKey,
               requester: msg.userId,
@@ -4622,28 +4653,30 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     if (deps.runLedger.sessionPersistence && ledgerRun?.session) {
       const checkpoint = await checkpointBeforeTransition();
       if (!checkpoint) throw new Error("The answer context checkpoint is unavailable.");
-      const saved = await deps.runLedger.readSessionTail(checkpoint.key, 1);
-      const reported = await appendRunReport(
-        deps.runLedger,
-        {
-          runId: run.id,
-          threadKey: msg.threadKey,
-          requester: msg.userId,
-          channelId: msg.channelId,
-          text: answer,
-          ...(parentRunId !== undefined ? { parentRunId } : {}),
-          ...(parentRunId !== undefined || coordinator !== undefined ? { folded: true } : {}),
-          context: contextDependenciesOf(saved.sources),
-          canPublish: publicationAllowed,
-        },
-        async (id) => registry.getById(id) ?? (await deps.runStore.getSummary(id)),
-      );
-      if (reported.parent === "unavailable")
-        events.publish({
-          type: "context",
-          text: "The parent conversation is unavailable; this report remains in the child's conversation.",
-          at: clock(),
-        });
+      if (!isPrivateConversation(msg)) {
+        const saved = await deps.runLedger.readSessionTail(checkpoint.key, 1);
+        const reported = await appendRunReport(
+          deps.runLedger,
+          {
+            runId: run.id,
+            threadKey: msg.threadKey,
+            requester: msg.userId,
+            channelId: msg.channelId,
+            text: answer,
+            ...(parentRunId !== undefined ? { parentRunId } : {}),
+            ...(parentRunId !== undefined || coordinator !== undefined ? { folded: true } : {}),
+            context: contextDependenciesOf(saved.sources),
+            canPublish: publicationAllowed,
+          },
+          async (id) => registry.getById(id) ?? (await deps.runStore.getSummary(id)),
+        );
+        if (reported.parent === "unavailable")
+          events.publish({
+            type: "context",
+            text: "The parent conversation is unavailable; this report remains in the child's conversation.",
+            at: clock(),
+          });
+      }
     }
     // Report writes await storage and may also await the canonical parent.
     // A late revocation withholds every later exposure of the original answer.

@@ -1,5 +1,6 @@
 import { SCHEDULES, isRunSchedule } from "../schedules.js";
 import { ALL_GRANTS } from "./grants.js";
+import { intersectGrants } from "./authorize.js";
 import type { Actor, Grants } from "./types.js";
 
 // Actor resolution — adapters resolve identity, never authority: each adapter
@@ -109,6 +110,27 @@ interface BoundFields {
   authenticatedAs?: string;
   userName?: string;
 }
+const trustedChatActor = Symbol("trusted-chat-actor");
+/** Host-only binding after fresh authentication. Symbol keys survive internal
+ * message copies but cannot arrive in JSON or enter a durable grant snapshot. */
+export function withChatActor<T extends object>(message: T, actor: Actor): T {
+  return { ...message, [trustedChatActor]: actor };
+}
+/** Live source copies retain the freshly bound actor; JSON recovery must resolve it again. */
+export function copyChatActor<T extends object>(source: object, target: T): T {
+  const actor = (source as { [trustedChatActor]?: Actor })[trustedChatActor];
+  return actor ? withChatActor(target, actor) : target;
+}
+function currentBoundActor(actor: Actor, grantsFor: GrantsLookup): Actor {
+  return {
+    ...actor,
+    grants:
+      actor.id === CLI_ACTOR.id && actor.kind === CLI_ACTOR.kind
+        ? actor.grants
+        : intersectGrants(actor.grants, grantsFor(actor.id)),
+    ...(actor.onBehalfOf ? { onBehalfOf: currentBoundActor(actor.onBehalfOf, grantsFor) } : {}),
+  };
+}
 
 /** The actor every gate in the dispatch path decides on: `resolveChatActor`
  *  over the message, with config's grants lookup. Every `canRunAgent` /
@@ -145,6 +167,8 @@ export function resolveChatActor(
   msg: { userId: string; channelId: string; threadKey: string; postedBy?: string } & BoundFields,
   grantsFor: GrantsLookup,
 ): Actor {
+  const trusted = (msg as typeof msg & { [trustedChatActor]?: Actor })[trustedChatActor];
+  if (trusted) return currentBoundActor(trusted, grantsFor);
   const person = resolveNamespacedActor(msg.userId, msg, grantsFor);
   if (msg.postedBy === undefined) {
     if (msg.authenticatedAs === undefined || msg.authenticatedAs === msg.userId) return person;

@@ -13,6 +13,11 @@ import type { FollowUpInput } from "../threadAdmission.js";
 import type { SessionSeed } from "./seed.js";
 import type { SlackSourceReceipt } from "../references/receipts.js";
 import { githubAccessDiagnosticOf, type GithubAccessDiagnostic } from "../references/githubAccessDiagnostic.js";
+import {
+  organizationPrivateAudienceOf,
+  samePrivateDestination,
+  verifyPrivateDestination,
+} from "./privateDestination.js";
 
 /** A live run's private-source revocation follows it through answer delivery. */
 export interface PrivateAudienceLatch extends AudienceTrace {
@@ -27,7 +32,7 @@ export interface PrivateAudienceLatch extends AudienceTrace {
 
 /** A private capability may expose model data only in the verified requester's DM. */
 export function privateAudienceRequired(msg: IncomingMessage): boolean {
-  return msg.directAudience?.kind === "slack-unshared-im";
+  return msg.directAudience?.kind === "slack-unshared-im" || organizationPrivateAudienceOf(msg) !== undefined;
 }
 
 /** A recovered row cannot prove no indirect source was consumed before the crash. */
@@ -126,12 +131,28 @@ export async function savedSlackSourcesStillValid(latch: PrivateAudienceLatch): 
   return false;
 }
 
-/** A source change permanently ends this run's right to private Slack reads. */
+/** A source change permanently ends this run's right to private reads. */
 export function samePrivateRequesterFollowUp(
   origin: IncomingMessage,
   input: Pick<FollowUpInput, "userId" | "directAudience" | "from"> & { msg: IncomingMessage },
 ): boolean {
   const expected = directAudienceStampOf(origin);
+  const organization = organizationPrivateAudienceOf(origin);
+  if (organization) {
+    const received = organizationPrivateAudienceOf(input.msg);
+    const admitted = organizationPrivateAudienceOf(input);
+    return (
+      !input.from &&
+      !input.msg.relayedBy &&
+      !input.msg.postedBy &&
+      !input.msg.authenticatedAs &&
+      input.userId === organization.userId &&
+      !!received &&
+      !!admitted &&
+      samePrivateDestination(organization, received) &&
+      samePrivateDestination(organization, admitted)
+    );
+  }
   const received = directAudienceStampOf(input.msg);
   const admitted = input.directAudience;
   return (
@@ -151,6 +172,8 @@ export function samePrivateRequesterFollowUp(
 
 /** Recheck the adapter's current address and Slack's current DM membership. */
 export async function privateAudienceDecision(msg: IncomingMessage, io: ChannelIO): Promise<AudienceCheck> {
+  const organization = organizationPrivateAudienceOf(msg);
+  if (organization) return verifyPrivateDestination(io, organization);
   const audience = msg.directAudience;
   if (!audience || !io.verifyDirectAudience) return { ok: false, code: "direct-address-unproved" };
   try {
