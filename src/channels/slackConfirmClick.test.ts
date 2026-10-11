@@ -90,6 +90,25 @@ describe("the confirm.* action intake — Bolt-level wiring (docs/reference/spec
     vi.restoreAllMocks();
   });
 
+  it("hands a saved button choice to the trusted callback without changing its actor or saved id", async () => {
+    const deps = { config: { config: {}, grantsFor: () => NO_GRANTS } } as unknown as CoreDeps;
+    const choices: { kind: string; id: string; actor?: object }[] = [];
+    const confirmChoice: typeof dispatchClick = async (_deps, choice) => {
+      if (choice.kind === "confirm" || choice.kind === "cancel") choices.push(choice);
+      return { status: "completed" };
+    };
+    const { app } = createSlackApp(deps, undefined, undefined, confirmChoice);
+    await app.processEvent({ body: blockActions("confirm.run"), ack: async () => {} });
+    expect(choices).toMatchObject([
+      {
+        kind: "confirm",
+        id: "c-1",
+        actor: { kind: "user", id: "slack:UA", origin: { channelId: "slack:C1", threadKey: "slack:C1:1.0" } },
+      },
+    ]);
+    expect(dispatchClickMock).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["confirm.run", "confirm"],
     ["confirm.cancel", "cancel"],
