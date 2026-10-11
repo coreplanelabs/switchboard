@@ -273,6 +273,11 @@ export interface RunRecord {
   /** The head a review run reviewed and posted against (7 to 40 lowercase hex),
    *  after the settle; present only on a review run that pinned one. */
   reviewHead?: string;
+  /** The pull request number the run was admitted to act on: its repository
+   *  context's, resolved before the model starts (record 0097, the review
+   *  row's target). Distinct from `pr`, the one a coding post-step opened, and
+   *  from `reviewPost.target`, which exists only when a post succeeded. */
+  targetPr?: number;
   /** How the review run's post-step ended (docs/reference/specs/agent-review.md
    *  item 18): the verdict posted to a named pull request at a pinned head, or
    *  not posted with the reason — what a coordinator's `read-record` answers
@@ -1282,6 +1287,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
   if (r.recordTaskKey !== undefined && (typeof r.recordTaskKey !== "string" || !/^[0-9a-f]{16}$/.test(r.recordTaskKey)))
     return false;
   if (r.headSha !== undefined && (typeof r.headSha !== "string" || !REVIEW_HEAD_PATTERN.test(r.headSha))) return false;
+  if (r.targetPr !== undefined && (!Number.isSafeInteger(r.targetPr) || (r.targetPr as number) < 1)) return false;
   // The handoff is checked for shape, not bounds (docs/reference/specs/agent-ship.md
   // item 14): redaction may lengthen a stored string past the tool's limit.
   if (r.handoff !== undefined && !isHandoffShape(r.handoff)) return false;

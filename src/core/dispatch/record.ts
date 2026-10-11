@@ -253,6 +253,7 @@ export function reclaimedRunRecord(input: {
     },
     channelVisibility: row.meta.channelVisibility ?? "unknown",
     repo: row.meta.repo,
+    ...(row.meta.pr !== undefined ? { targetPr: row.meta.pr } : {}),
     // The row carries the profile the run was admitted with (a clipped budget
     // included); a row from before profiles existed leaves the record without one.
     ...(row.meta.profile && row.meta.agent ? { profile: { preset: row.meta.agent, ...row.meta.profile } } : {}),
@@ -387,6 +388,8 @@ export function assembleRunRecord(input: {
   /** The stamp taken at create (`channelVisibilityOf`) — the record carries what the run was stamped with. */
   channelVisibility: ChannelVisibility;
   repo?: string;
+  /** The pull request number the run was admitted to act on (record 0097). */
+  targetPr?: number;
   finishedAt: number;
   status: RunStatus;
   diagnosis: FrictionDiagnosis;
@@ -508,6 +511,7 @@ export function assembleRunRecord(input: {
     threadKey: msg.threadKey,
     channelVisibility: input.channelVisibility,
     ...(input.repo !== undefined && !privateMain ? { repo: input.repo } : {}),
+    ...(input.targetPr !== undefined && !privateMain ? { targetPr: input.targetPr } : {}),
     // The window's opening rides the record (docs/reference/specs/tracing.md): every
     // duration surface and the diagnosis's window start here, not at create.
     ...(snap?.receivedAt !== undefined ? { receivedAt: snap.receivedAt } : {}),
@@ -671,6 +675,7 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
             msg,
             channelVisibility,
             ...(!privateMain && repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+            ...(repoCtx.pr !== undefined ? { targetPr: repoCtx.pr } : {}),
             profile: profileRecordOf(agent, profile),
             ...(route !== undefined && !privateMain ? { route } : {}),
             ...(parentRunId !== undefined ? { parentRunId } : {}),
@@ -738,6 +743,7 @@ export function finishSetupRun(
           msg: ctx.msg,
           channelVisibility: ctx.channelVisibility,
           ...(!privateMain && ctx.repoCtx.repo !== undefined ? { repo: ctx.repoCtx.repo } : {}),
+          ...(ctx.repoCtx.pr !== undefined ? { targetPr: ctx.repoCtx.pr } : {}),
           profile: profileRecordOf(ctx.agent, ctx.profile),
           coordinator: ctx.coordinator,
           parentRunId: ctx.parentRunId,
@@ -864,6 +870,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           msg,
           channelVisibility,
           ...(!privateMain && repoCtx.repo !== undefined ? { repo: repoCtx.repo } : {}),
+          ...(repoCtx.pr !== undefined ? { targetPr: repoCtx.pr } : {}),
           profile: profileRecordOf(agent, profile),
           finishedAt,
           status: failedAfterFinish && status === "completed" ? "failed" : status,

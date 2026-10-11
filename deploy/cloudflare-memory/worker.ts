@@ -453,6 +453,7 @@ import {
   isTerminalClose,
   pointEmits,
   POINT_COLUMNS,
+  reviewPointOf,
   type RunMetricsPoint,
 } from "../../src/core/runMetrics.ts";
 import { AnalyticsEngineSink, NullSink, type RunMetricsSink } from "./runMetricsSink.ts";
@@ -2304,6 +2305,10 @@ export class RunHistoryDO extends DurableObject<Env> {
     }
     this.sql.exec(`CREATE INDEX IF NOT EXISTS context_refs_active ON context_refs(retention_pin, ordinary_pin)
       WHERE retention_pin = 1 OR ordinary_pin = 1`);
+
+    // Metrics rows the sink refused, counted by row kind (record 0097): a drop
+    // after the commit is otherwise invisible, since delivery is best effort.
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS metrics_write_failures (kind TEXT PRIMARY KEY, n INTEGER NOT NULL)`);
 
     // The live-run ledger (run-history items 28–34): live runs never enter
     // `runs` — that table's finished_at drives retention and listing — they
@@ -7268,6 +7273,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       custody?.session && custody.threadReport && confirming ? await this.workspaceCustody(confirming) : custody;
     let out: FenceResult & { stored?: boolean } = { ok: true };
     let emits = false;
+    let reviewPoint: RunMetricsPoint | undefined;
     this.ctx.storage.transactionSync(() => {
       const row = this.liveRow(runId);
       if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
@@ -7332,6 +7338,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         true,
       );
       emits = put.emits;
+      reviewPoint = put.reviewPoint;
       out = { ok: true, stored: put.stored };
     });
     if (!out.ok) return out;
@@ -7341,7 +7348,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     // The point after the commit, never inside it (`sendRunFinished`'s placement):
     // the finish usually replaces the start tombstone, so this is where most
     // runs are counted (run-metrics.md item 2).
-    this.writeMetricsPoint(runId, point, emits && out.stored === true);
+    this.writeMetricsRows(runId, point, reviewPoint, emits && out.stored === true);
     if ((await this.ctx.storage.getAlarm()) === null)
       await this.ctx.storage.setAlarm(systemClock() + RUN_SWEEP_INTERVAL_MS);
     await this.refreshSessionBytes(record.session?.key);
@@ -7592,6 +7599,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       reason?: "fenced";
       stored?: boolean;
       emits?: boolean;
+      reviewPoint?: RunMetricsPoint;
     };
     this.ctx.storage.transactionSync(() => {
       const current = this.liveRow(cancellation.runId);
@@ -7618,11 +7626,16 @@ export class RunHistoryDO extends DurableObject<Env> {
         record.finishedAt,
         true,
       );
-      result = { ok: true, stored: true, emits: put.emits };
+      result = {
+        ok: true,
+        stored: true,
+        emits: put.emits,
+        ...(put.reviewPoint ? { reviewPoint: put.reviewPoint } : {}),
+      };
     });
     if (result.ok) {
       this.planeSealed(record.id, record.threadKey, systemClock());
-      this.writeMetricsPoint(record.id, point, result.emits === true);
+      this.writeMetricsRows(record.id, point, result.reviewPoint, result.emits === true);
       const transportWorkflowId =
         record.parentInstanceId === undefined
           ? undefined
@@ -7632,7 +7645,9 @@ export class RunHistoryDO extends DurableObject<Env> {
         ...(transportWorkflowId ? { transportWorkflowId } : {}),
       });
     }
-    return result;
+    // The review row was written above; it never rides the route's answer.
+    const { reviewPoint: _reviewPoint, ...answer } = result;
+    return answer;
   }
 
   async listLive(): Promise<LiveRunRow[]> {
@@ -8315,16 +8330,29 @@ export class RunHistoryDO extends DurableObject<Env> {
     record: RunRecord,
     proposal?: RunPolicyProposal,
     point?: RunMetricsPoint,
-  ): Promise<{ ok: true; retained: number; stored: boolean; rewritten: boolean; emits: boolean }> {
+  ): Promise<{
+    ok: true;
+    retained: number;
+    stored: boolean;
+    rewritten: boolean;
+    emits: boolean;
+    reviewPoint?: RunMetricsPoint;
+  }> {
     if (this.promotionHeld(record.id)) throw new PromotionPendingError(record.id);
     record = await this.archiveCheckpoint(record);
     return this.withRangePins([{ id: record.id, handoff: record.childHandoff }], async () => {
-      let result = { ok: true as const, retained: 0, stored: false, rewritten: false, emits: false };
+      let result: Awaited<ReturnType<RunHistoryDO["put"]>> = {
+        ok: true as const,
+        retained: 0,
+        stored: false,
+        rewritten: false,
+        emits: false,
+      };
       this.ctx.storage.transactionSync(() => {
         if (this.promotionHeld(record.id)) throw new PromotionPendingError(record.id);
         result = this.upsertInTransaction(record, proposal, point);
       });
-      this.writeMetricsPoint(record.id, point, result.emits && result.stored);
+      this.writeMetricsRows(record.id, point, result.reviewPoint, result.emits && result.stored);
       // A coordinator child closed OUTSIDE the ledger's finish — the run loop or
       // a reclaim writing an `interrupted` record, the pi harness's typed restart,
       // a resume abandoning a lost workspace — still wakes its parent's wait at
@@ -8357,7 +8385,15 @@ export class RunHistoryDO extends DurableObject<Env> {
     proposal?: RunPolicyProposal,
     /** The record's point: kept beside a `restarting` row for the sweep (record 0097). */
     point?: RunMetricsPoint,
-  ): { ok: true; retained: number; stored: boolean; rewritten: boolean; emits: boolean } {
+  ): {
+    ok: true;
+    retained: number;
+    stored: boolean;
+    rewritten: boolean;
+    emits: boolean;
+    /** The committed record's review row when this write emits (record 0097). */
+    reviewPoint?: RunMetricsPoint;
+  } {
     if (workspaceAuthorityFieldsPresent(record))
       throw new Error("workspace allocation authority cannot be written through a run record");
     {
@@ -8647,6 +8683,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         stored: kept.has(record.id),
         rewritten: existing !== undefined && !unchanged,
         emits,
+        // Built from the committed projection (its clamped stamps), never the input.
+        ...(emits ? { reviewPoint: reviewPointOf(stored) } : {}),
       };
     }
   }
@@ -8704,18 +8742,56 @@ export class RunHistoryDO extends DurableObject<Env> {
     }
   }
 
-  /** One point per run at its terminal close, AFTER the commit (run-metrics.md
-   *  item 2; record 0097) — advisory: a throwing sink leaves the answer exactly
-   *  as a recording one would, and says so in one warn line with the run id and
-   *  the error's constructor name, never the point's contents. */
-  private writeMetricsPoint(runId: string, point: RunMetricsPoint | undefined, emits: boolean): void {
+  /** A run's rows at its terminal close, AFTER the commit: the point the
+   *  client priced, and the review row `upsertInTransaction` built from the
+   *  record it committed (record 0097) — under the one emission decision. */
+  private writeMetricsRows(
+    runId: string,
+    point: RunMetricsPoint | undefined,
+    reviewPoint: RunMetricsPoint | undefined,
+    emits: boolean,
+  ): void {
+    this.writeMetricsPoint(runId, point, emits, "run");
+    this.writeMetricsPoint(runId, reviewPoint, emits, "review");
+  }
+
+  /** One metrics row, AFTER the commit (run-metrics.md item 2; record 0097) —
+   *  advisory: a throwing sink leaves the answer exactly as a recording one
+   *  would, says so in one warn line with the run id, the row kind and the
+   *  error's constructor name, never the row's contents, and is counted by row
+   *  kind for `metricsHealth`. */
+  private writeMetricsPoint(
+    runId: string,
+    point: RunMetricsPoint | undefined,
+    emits: boolean,
+    kind: MetricsRowKind = "run",
+  ): void {
     if (point === undefined || !emits) return;
     try {
       this.metrics.write(point);
     } catch (err) {
-      const kind = err instanceof Error ? err.constructor.name : "Error";
-      console.warn(`[runs/metrics] ${runId} point not written: ${kind}`);
+      const name = err instanceof Error ? err.constructor.name : "Error";
+      console.warn(`[runs/metrics] ${runId} ${kind} row not written: ${name}`);
+      try {
+        this.sql.exec(
+          `INSERT INTO metrics_write_failures (kind, n) VALUES (?, 1) ON CONFLICT(kind) DO UPDATE SET n = n + 1`,
+          kind,
+        );
+      } catch {
+        // The count is advisory too: it can fail no write.
+      }
     }
+  }
+
+  /** The metrics rows this store's sink refused, by row kind (record 0097):
+   *  what the System health tab shows as rows the store failed to write. */
+  metricsHealth(): { failedWrites: Record<MetricsRowKind, number> } {
+    const failedWrites: Record<MetricsRowKind, number> = { run: 0, review: 0 };
+    for (const row of this.sql
+      .exec<{ kind: string; n: number }>(`SELECT kind, n FROM metrics_write_failures`)
+      .toArray())
+      if (row.kind === "run" || row.kind === "review") failedWrites[row.kind] = row.n;
+    return { failedWrites };
   }
 
   /** Remove a run and its events. Returns whether a run row existed. */
@@ -9464,6 +9540,9 @@ function parseSummary(row: Pick<RunRow, "summary_json">): RunListItem | null {
 /** The one field of a stored row's summary the emission rule reads: whether the
  *  row is a provisional tombstone. Deliberately not a full `RunRecord` parse
  *  (run-metrics.md item 2) — this runs inside every upsert's transaction. */
+/** The kinds of metrics row the store writes (record 0097). */
+type MetricsRowKind = "run" | "review";
+
 /** The `restarting` close's point as the sweep's terminal close writes it:
  *  `interrupted`, with `restart_unclaimed` as its error type and, on a row
  *  wide enough to carry it, `error` as its outcome (record 0097). */
@@ -12739,11 +12818,17 @@ async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Re
     if (pendingPromotion) return json(pendingPromotion, 423);
     // `emits` stays internal: the wire answer is exactly the shape it
     // always was, binding or no binding (run-metrics.md item 4).
-    const { emits: _emits, ...result } = await stub(storeKey).put(record, proposal, point);
+    const { emits: _emits, reviewPoint: _reviewPoint, ...result } = await stub(storeKey).put(record, proposal, point);
     console.log(
       `[runs/put] ${storeKey} <- ${record.id} (${record.storedEventCount} events, stored=${result.stored}, ${result.retained} retained)`,
     );
     return json(result);
+  }
+  if (pathname === "/runs/metrics-health") {
+    const key = parseStoreKey(body as Record<string, unknown>);
+    if (!key.ok) return json({ error: key.error }, 400);
+    const target = stub(key.value) as unknown as Pick<RunHistoryDO, "metricsHealth">;
+    return json(await target.metricsHealth());
   }
   if (pathname === "/runs/get") {
     const parsed = parseRunTarget(body);
@@ -12816,6 +12901,7 @@ const ROUTES = new Set([
   "/runs/events",
   "/runs/usage",
   "/runs/delete",
+  "/runs/metrics-health",
   ...LEDGER_ROUTES,
   ...PLANE_ROUTES,
 ]);

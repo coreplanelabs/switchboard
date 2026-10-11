@@ -5,7 +5,7 @@ import type { RunRecord } from "../../src/core/runRecord.ts";
 import type { CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
 import { LEASE_MS } from "../../src/core/runLedger/types.ts";
-import { blobOf, pointOf, type RunMetricsPoint } from "../../src/core/runMetrics.ts";
+import { blobOf, pointOf, reviewBlobOf, reviewDoubleOf, type RunMetricsPoint } from "../../src/core/runMetrics.ts";
 import { featuresOf, RunHistoryDO } from "./worker.ts";
 import { RUN_EVENT_INSERT_BATCH } from "../../src/memorySqlLimits.ts";
 
@@ -2236,6 +2236,77 @@ describe("run metrics — the point, the guard and the emission rule", () => {
     expect(
       featuresOf({ RUN_METRICS: { writeDataPoint() {} } as AnalyticsEngineDataset, RUN_METRICS_DATASET: "swb_runs" }),
     ).toEqual(["memory", "schedules", "runs", "config", "delivery", "costs", "plane", "runMetrics:swb_runs"]);
+  });
+
+  // Record 0097, "Rows and columns": the review row, written by the store from
+  // the record it committed, under the run row's emission decision.
+  describe("the review row (record 0097)", () => {
+    const reviewRecord = (id: string, finishedAt: number, over: Partial<RunRecord> = {}) =>
+      record(id, finishedAt, {
+        agent: "review",
+        repo: "o/r",
+        targetPr: 42,
+        reviewHead: "a".repeat(40),
+        verdict: {
+          verdict: "request_changes",
+          summary: "s",
+          findings: [{ id: "F1", severity: "major", file: "a.ts", title: "t" }],
+        },
+        ...over,
+      });
+
+    it("a review run's terminal close writes its run row and its review row; a later write writes neither again", async () => {
+      const key = storeKey();
+      const written = await metricsDouble(key);
+      const rec = reviewRecord("v1", Date.now() - 1_000);
+      await putDirectWithPoint(key, rec, pointOf(rec));
+      expect(written).toHaveLength(2);
+      const [run, review] = written;
+      expect(blobOf(run, "run id")).toBe("v1");
+      expect(reviewBlobOf(review, "schema")).toBe("review-1");
+      expect(reviewBlobOf(review, "pull request number")).toBe("42");
+      expect(reviewBlobOf(review, "verdict")).toBe("changes_requested");
+      expect(reviewDoubleOf(review, "major")).toBe(1);
+      await putDirectWithPoint(key, rec, pointOf(rec));
+      expect(written).toHaveLength(2);
+    });
+
+    it("a review row is written even when the client sent no run point, and not for a run without a verdict", async () => {
+      const key = storeKey();
+      const written = await metricsDouble(key);
+      await putDirectWithPoint(key, reviewRecord("v2", Date.now() - 1_000));
+      expect(written.map((p) => p.blobs[0])).toEqual(["review-1"]);
+      const plain = reviewRecord("v3", Date.now() - 1_000, { verdict: undefined });
+      await putDirectWithPoint(key, plain, pointOf(plain));
+      expect(written.map((p) => p.blobs[0])).toEqual(["review-1", "1"]);
+    });
+
+    it("the review row is the committed record's: a finish dated past the skew limit is written at the clamped time", async () => {
+      const key = storeKey();
+      const written = await metricsDouble(key);
+      const future = Date.now() + 3 * DAY;
+      const rec = reviewRecord("v5", future, { startedAt: future - 60_000, receivedAt: future - 61_000 });
+      await putDirectWithPoint(key, rec);
+      const stored = (await post("/runs/get", { storeKey: key, id: "v5" })).data.record as RunRecord;
+      expect(stored.finishedAt).toBeLessThan(future);
+      expect(reviewDoubleOf(written[0], "finished at")).toBe(stored.finishedAt);
+      expect(reviewDoubleOf(written[0], "duration")).toBe(stored.finishedAt - stored.receivedAt!);
+    });
+
+    it("a throwing sink is counted by row kind and served on /runs/metrics-health", async () => {
+      const key = storeKey();
+      await metricsDouble(key, "throw");
+      expect(await post("/runs/metrics-health", { storeKey: key })).toEqual({
+        status: 200,
+        data: { failedWrites: { run: 0, review: 0 } },
+      });
+      const rec = reviewRecord("v4", Date.now() - 1_000);
+      await putDirectWithPoint(key, rec, pointOf(rec));
+      expect(await post("/runs/metrics-health", { storeKey: key })).toEqual({
+        status: 200,
+        data: { failedWrites: { run: 1, review: 1 } },
+      });
+    });
   });
 
   // Record 0097, "The terminal close": a run's rows describe its terminal
