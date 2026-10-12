@@ -3807,6 +3807,7 @@ export async function executeOperatorDecision(
           ok: res.ok,
           quietText: res.quietText,
           cardShown: res.cardShown,
+          confirmation: res.confirmation,
         });
     }
     // A decision nothing ran from records on a door record of its own, or the

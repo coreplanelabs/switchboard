@@ -137,6 +137,7 @@ export async function answerChatCommand(deps: FastPathDeps, ctx: RequestContext)
                   ok: res.ok,
                   quietText: res.quietText,
                   cardShown: res.cardShown,
+                  confirmation: res.confirmation,
                 }),
               );
       // The command run (if the command made one) seals after its reply.

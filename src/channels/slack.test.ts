@@ -1132,46 +1132,77 @@ describe("SlackIO.offer (docs/reference/specs/slack-channel.md item 14)", () => 
   type Block = { type: string; text?: { type: string; text: string }; elements?: Array<Record<string, unknown>> };
   const blocksOf = (call: Record<string, unknown>) => call.blocks as Block[];
 
-  it("posts one message in the thread: the line as a code span, the risk as context, Run (primary) and Cancel carrying the id, and a text fallback that carries the line", async () => {
+  it("leads with the effect, offers Approve and Cancel, and keeps the exact command collapsed without typed-confirm instructions", async () => {
     const { c, postMessage } = client();
     await new SlackIO(c, ev).offer({ id: "c-1", line: LINE, risk: RISK, expiresAt: 600_000 });
     expect(postMessage).toHaveBeenCalledTimes(1);
     const call = postMessage.mock.calls[0]![0];
-    expect(call).toMatchObject({ channel: "C1", thread_ts: "1.0" });
-    expect(String(call.text)).toContain(LINE);
-    expect(String(call.text)).toContain("Or type `confirm c-1` or `cancel c-1` in this thread.");
+    expect(call).toMatchObject({
+      channel: "C1",
+      thread_ts: "1.0",
+      text: "This will change the release-planning channel's settings for everyone who asks there until reset.",
+    });
     const blocks = blocksOf(call);
-    expect(blocks.map((b) => b.type)).toEqual(["section", "context", "actions"]);
+    expect(blocks.map((b) => b.type)).toEqual(["section", "actions", "container"]);
     expect(blocks[0]!.text).toEqual({
       type: "mrkdwn",
-      text: `\`${LINE}\`\nOr type \`confirm c-1\` or \`cancel c-1\` in this thread.`,
+      text: "This will change the release-planning channel's settings for everyone who asks there until reset.",
     });
-    expect(blocks[1]!.elements).toEqual([{ type: "mrkdwn", text: RISK }]);
-    expect(blocks[2]!.elements).toEqual([
+    expect(blocks[1]!.elements).toEqual([
       {
         type: "button",
         action_id: "confirm.run",
-        text: { type: "plain_text", text: "Run" },
+        text: { type: "plain_text", text: "Approve" },
         style: "primary",
         value: "c-1",
       },
       { type: "button", action_id: "confirm.cancel", text: { type: "plain_text", text: "Cancel" }, value: "c-1" },
     ]);
+    expect(blocks[2]).toEqual({
+      type: "container",
+      title: { type: "plain_text", text: "Command details" },
+      is_collapsible: true,
+      default_collapsed: true,
+      child_blocks: [{ type: "section", text: { type: "mrkdwn", text: `\`${LINE}\`` } }],
+    });
+    expect(JSON.stringify(call)).not.toContain("Or type");
   });
 
-  it("a command that declares no risk gets the line and the buttons alone — no context block, no footer (routing-and-config item 28); a line with a backtick rides as a fenced block; `&`, `<` and `>` are escaped for Slack, in the span and in the fallback", async () => {
+  it("keeps commands with backticks and Slack markup intact in collapsed details, with a concise fallback when no effect is declared", async () => {
     const { c, postMessage } = client();
     await new SlackIO(c, ev).offer({ id: "c-2", line: LINE, risk: "", expiresAt: 600_000 });
-    expect(blocksOf(postMessage.mock.calls[0]![0]).map((b) => b.type)).toEqual(["section", "actions"]);
+    expect(postMessage.mock.calls[0]![0].text).toBe("Approve this action?");
     const tricky = 'config instructions channel "use `npm` & <nothing> else"';
     await new SlackIO(c, ev).offer({ id: "c-3", line: tricky, risk: RISK, expiresAt: 600_000 });
-    const call = postMessage.mock.calls[1]![0];
-    expect(blocksOf(call)[0]!.text!.text).toBe(
-      '```\nconfig instructions channel "use `npm` &amp; &lt;nothing&gt; else"\n```\nOr type `confirm c-3` or `cancel c-3` in this thread.',
+    expect(blocksOf(postMessage.mock.calls[1]![0])[2]).toMatchObject({
+      child_blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: '```\nconfig instructions channel "use `npm` &amp; &lt;nothing&gt; else"\n```',
+          },
+        },
+      ],
+    });
+  });
+
+  it("an invalid-blocks rejection falls back to the effect and buttons with command details below them; other failures remain failures", async () => {
+    const { c, postMessage } = client();
+    postMessage.mockRejectedValueOnce({ code: "slack_webapi_platform_error", data: { error: "invalid_blocks" } });
+    await new SlackIO(c, ev).offer({ id: "c-1", line: LINE, risk: RISK, expiresAt: 600_000 });
+    const fallback = postMessage.mock.calls[1]![0];
+    expect(fallback.text).toBe(
+      "This will change the release-planning channel's settings for everyone who asks there until reset.",
     );
-    expect(String(call.text)).toContain('"use `npm` &amp; &lt;nothing&gt; else"');
-    // The buttons still carry the id whatever the line looks like.
-    expect(blocksOf(call)[2]!.elements!.map((e) => e.value)).toEqual(["c-3", "c-3"]);
+    expect(blocksOf(fallback).map((b) => b.type)).toEqual(["section", "actions", "section"]);
+    expect(blocksOf(fallback)[2]!.text).toEqual({ type: "mrkdwn", text: `\`${LINE}\`` });
+    expect(blocksOf(fallback)[1]!.elements![0]).toMatchObject({ action_id: "confirm.run", value: "c-1" });
+    postMessage.mockRejectedValueOnce(new Error("transport unavailable"));
+    await expect(new SlackIO(c, ev).offer({ id: "c-2", line: LINE, risk: RISK, expiresAt: 600_000 })).rejects.toThrow(
+      "transport unavailable",
+    );
+    expect(postMessage.mock.calls).toHaveLength(3);
   });
 
   it("a question's offer (record 0054) posts the refusal's sentence, `Did you mean:` over the line as code, the evidence as context, and Yes (primary) and No carrying the id", async () => {
@@ -1196,7 +1227,7 @@ describe("SlackIO.offer (docs/reference/specs/slack-channel.md item 14)", () => 
     expect(blocks[0]!.text).toEqual({ type: "mrkdwn", text: "acme/api is not onboarded here." });
     expect(blocks[1]!.text).toEqual({
       type: "mrkdwn",
-      text: "Did you mean:\n`agent:ship repo:acme/api fix it`\nOr type `confirm q-1` or `cancel q-1` in this thread.",
+      text: "Did you mean:\n`agent:ship repo:acme/api fix it`",
     });
     expect(blocks[2]!.elements).toEqual([
       { type: "mrkdwn", text: "acme/api is one edit away from acme/apj, which is onboarded" },

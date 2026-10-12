@@ -1496,18 +1496,32 @@ export class SlackIO implements ChannelIO {
     for (const chunk of rest) await this.post(chunk);
   }
 
-  /** The confirmation a routed write is offered as (docs/reference/specs/slack-channel.md
-   *  item 14, record 0044): one message in the thread — the exact line to run
-   *  as a code span, the risk line as context, and Run and
-   *  Cancel whose value is the offer's id — with the offer's text as the
-   *  fallback, so a client without blocks still shows the line to type. */
+  /** One approval message: effect first, buttons, then collapsed command details. */
   async offer(offer: ConfirmationOffer): Promise<void> {
-    const posted = await this.client.chat.postMessage({
+    const payload = {
       channel: this.ev.channel,
       thread_ts: this.ev.threadTs,
-      text: escapeMrkdwn(`${renderOffer(offer)}\n${offerTextContinuation(offer)}`),
+      text: escapeMrkdwn(offer.question ? renderOffer(offer) : offerSummary(offer)),
       blocks: offerBlocks(offer),
-    });
+    };
+    let posted;
+    try {
+      posted = await this.client.chat.postMessage(payload);
+    } catch (error) {
+      const refusal = error as { code?: string; data?: { error?: string } } | undefined;
+      // Only a definite block rejection permits a second post. An unknown
+      // transport result may already have posted the offer.
+      if (offer.question || refusal?.code !== "slack_webapi_platform_error" || refusal.data?.error !== "invalid_blocks")
+        throw error;
+      posted = await this.client.chat.postMessage({
+        ...payload,
+        blocks: payload.blocks.flatMap((block) =>
+          block.type === "container"
+            ? (block as slackTypes.Block & { child_blocks: slackTypes.KnownBlock[] }).child_blocks
+            : [block],
+        ),
+      });
+    }
     markPostedSource(this.ev.channel, posted);
   }
 
@@ -1849,19 +1863,16 @@ function chunkText(text: string, limit: number): string[] {
   return chunks;
 }
 
-/** The offer's Block Kit (item 14): the line as code — a span, or a fenced
- *  block when the line itself carries a backtick, which a span cannot hold —
- *  the risk (when the command declares one) as context, and the two buttons,
- *  each carrying the id the core consumes. Every text is escaped
- *  for mrkdwn: `&`, `<`, `>` are structural even inside code. */
-function offerTextContinuation(offer: ConfirmationOffer): string {
-  return `Or type \`confirm ${offer.id}\` or \`cancel ${offer.id}\` in this thread.`;
+/** Keep the effect visible; the exact command stays available in details. */
+function offerSummary(offer: ConfirmationOffer): string {
+  if (!offer.risk) return "Approve this action?";
+  const risk = offer.risk.replace(/^changes /, "This will change ");
+  return risk[0]!.toUpperCase() + risk.slice(1) + (/[.!?]$/.test(risk) ? "" : ".");
 }
 
-function offerBlocks(offer: ConfirmationOffer): slackTypes.KnownBlock[] {
+function offerBlocks(offer: ConfirmationOffer): SlackBlockKit[] {
   const line = escapeMrkdwn(offer.line);
   const code = line.includes("`") ? `\`\`\`\n${line}\n\`\`\`` : `\`${line}\``;
-  const continuation = offerTextContinuation(offer);
   // A question's offer (record 0054): the refusal's sentence above the line —
   // the marker's `Did you mean:` leading the code — the evidence as context,
   // and Yes and No on the same two actions the confirmation uses, so one
@@ -1869,7 +1880,7 @@ function offerBlocks(offer: ConfirmationOffer): slackTypes.KnownBlock[] {
   if (offer.question) {
     return [
       { type: "section", text: { type: "mrkdwn", text: escapeMrkdwn(offer.question.text) } },
-      { type: "section", text: { type: "mrkdwn", text: `Did you mean:\n${code}\n${continuation}` } },
+      { type: "section", text: { type: "mrkdwn", text: `Did you mean:\n${code}` } },
       { type: "context", elements: [{ type: "mrkdwn", text: escapeMrkdwn(offer.question.evidence) }] },
       {
         type: "actions",
@@ -1886,28 +1897,30 @@ function offerBlocks(offer: ConfirmationOffer): slackTypes.KnownBlock[] {
       },
     ];
   }
-  // The risk rides as context when the command declares one; a command
-  // without a risk gets the line and the buttons alone — no footer (routing-
-  // and-config item 28: which scope asked is an operator's fact).
-  const context: slackTypes.KnownBlock[] = offer.risk
-    ? [{ type: "context", elements: [{ type: "mrkdwn", text: escapeMrkdwn(offer.risk) }] }]
-    : [];
+  // The installed SDK accepts generic blocks for newer Slack block types.
+  const details = {
+    type: "container",
+    title: { type: "plain_text", text: "Command details" },
+    is_collapsible: true,
+    default_collapsed: true,
+    child_blocks: [{ type: "section", text: { type: "mrkdwn", text: code } }],
+  };
   return [
-    { type: "section", text: { type: "mrkdwn", text: `${code}\n${continuation}` } },
-    ...context,
+    { type: "section", text: { type: "mrkdwn", text: escapeMrkdwn(offerSummary(offer)) } },
     {
       type: "actions",
       elements: [
         {
           type: "button",
           action_id: "confirm.run",
-          text: { type: "plain_text", text: "Run" },
+          text: { type: "plain_text", text: "Approve" },
           style: "primary",
           value: offer.id,
         },
         { type: "button", action_id: "confirm.cancel", text: { type: "plain_text", text: "Cancel" }, value: offer.id },
       ],
     },
+    details,
   ];
 }
 
