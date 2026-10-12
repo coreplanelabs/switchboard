@@ -253,11 +253,13 @@ describe("review history restoration from canonical results", () => {
         {
           ...verdict,
           verdict: "request_changes",
-          findings: [{ ...finding, id: "review:1:F1", cases: finding.cases.slice(0, 1) }],
+          findings: [{ id: "review:1:F1" }],
         },
         next,
       ),
-    ).toContain("preserve every previous case for review:1:F1");
+    ).toContain(
+      'assess every prior case for review:1:F1 in caseAssessments with outcome and current-head evidence; missing: ["C1","C2"]',
+    );
     expect(
       await submitVerdictTool.run(
         {
@@ -265,10 +267,24 @@ describe("review history restoration from canonical results", () => {
           resolutions: [
             { findingId: "review:1:F1", disposition: "fixed", note: "Checked both retry paths in store.ts" },
           ],
+          caseAssessments: [
+            {
+              findingId: "review:1:F1",
+              caseId: "C1",
+              outcome: "fixed",
+              note: "store.ts retains the concurrent retry at this head",
+            },
+            {
+              findingId: "review:1:F1",
+              caseId: "C2",
+              outcome: "fixed",
+              note: "store.ts retains the replacement after restart at this head",
+            },
+          ],
         },
         next,
       ),
-    ).toBe("verdict recorded: approve (0 findings)");
+    ).toMatch(/^verdict recorded: approve \(0 findings\)/);
   });
 
   it("retains yesterday's recorded fact but refuses changed history at the same head until a new read is delivered", async () => {

@@ -6,6 +6,13 @@ import type { Handoff } from "../core/ship/handoff.js";
 import { TOOLSETS } from "./toolsets.js";
 import { submitHandoffTool, submitPrDescriptionTool, submitVerdictTool } from "./submit.js";
 import type { ToolContext } from "./runnableTool.js";
+import {
+  buildReviewPostBody,
+  recordedVerdictFromTranscript,
+  redactVerdict,
+  type ReviewVerdict,
+} from "../core/reviewVerdict.js";
+import { outstandingReviewFindings } from "../core/reviewHistory.js";
 
 // The recorders: `submit_verdict`, `submit_dispositions`, `submit_handoff` and
 // `submit_pr_description` set dispatcher state through the tool context and
@@ -15,6 +22,282 @@ import type { ToolContext } from "./runnableTool.js";
 describe("submit_verdict tool", () => {
   const ctxWith = (onVerdict?: ToolContext["onVerdict"]): ToolContext =>
     ({ executor: {} as ToolContext["executor"], onVerdict }) as ToolContext;
+
+  const caseReview = (kind: "single" | "pattern" = "pattern", humanGated = false) => {
+    const head = "a".repeat(40);
+    const prior = outstandingReviewFindings([
+      {
+        id: 1,
+        author: "review[bot]",
+        authorType: "Bot",
+        head,
+        state: "COMMENTED",
+        submittedAt: "2026-01-01T00:00:00Z",
+        body: buildReviewPostBody("evidence", {
+          verdict: "request_changes",
+          summary: "fix",
+          head,
+          findings: [
+            {
+              id: "F1",
+              severity: "major",
+              file: "store.ts",
+              title: "Retry drops new work",
+              kind,
+              ...(humanGated ? { humanGated: true as const } : {}),
+              ...(kind === "pattern"
+                ? {
+                    invariant: "Keep the newest write",
+                    cases: [
+                      { scenario: "A concurrent retry", expected: "Keep the new write" },
+                      { scenario: "A restart retry", expected: "Keep the replacement" },
+                    ],
+                  }
+                : { line: 7 }),
+            },
+          ],
+        }),
+      },
+    ]);
+    const recorded: ReviewVerdict[] = [];
+    const ctx = {
+      ...ctxWith((v) => recorded.push(v)),
+      reviewHistory: { target: { repo: "acme/api", number: 7 }, snapshot: { head, findings: prior } },
+    };
+    const assessments = [
+      {
+        findingId: "review:1:F1",
+        caseId: "C1",
+        outcome: "open",
+        note: "store.ts still deletes the concurrent write at this head",
+      },
+      {
+        findingId: "review:1:F1",
+        caseId: "C2",
+        outcome: "fixed",
+        note: "store.ts retains the replacement after restart at this head",
+      },
+    ];
+    return { head, prior, recorded, ctx, assessments };
+  };
+
+  it.each(["single", "pattern"] as const)(
+    "rejects changes to controller-owned %s metadata before approval or human-gated holds",
+    async (kind) => {
+      const f = caseReview(kind);
+      const input = {
+        verdict: "approve",
+        summary: "Checked",
+        head: f.head,
+        findings: [{ id: "review:1:F1" }],
+        ...(kind === "pattern" ? { caseAssessments: f.assessments } : {}),
+      };
+      for (const patch of [
+        { severity: "nit" },
+        { file: "other.ts" },
+        { title: "A different issue" },
+        { line: 99 },
+        { humanGated: true },
+        { kind: kind === "single" ? "pattern" : "single" },
+        { invariant: "A different rule" },
+        ...(kind === "single" ? [{ cases: [{ scenario: "A new path", expected: "Keep work" }] }] : []),
+      ]) {
+        expect(await submitVerdictTool.run({ ...input, findings: [{ id: "review:1:F1", ...patch }] }, f.ctx)).toMatch(
+          /^error:/,
+        );
+        expect(f.recorded).toEqual([]);
+      }
+      const receipt = await submitVerdictTool.run(input, f.ctx);
+      expect(String(receipt).split("\n")[0]).toMatch(/^verdict recorded: request_changes/);
+      const recovered = recordedVerdictFromTranscript([
+        { role: "assistant", content: [{ type: "tool_use", id: "v", name: "submit_verdict", input }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "v", content: String(receipt) }] },
+      ]);
+      expect(recovered?.findings?.[0]).toMatchObject({
+        id: "review:1:F1",
+        severity: "major",
+        file: "store.ts",
+        title: "Retry drops new work",
+        kind,
+      });
+      expect(buildReviewPostBody("evidence", recovered)).toMatch(/^Changes requested:/);
+      const held = caseReview(kind, true);
+      expect(
+        await submitVerdictTool.run({ ...input, findings: [{ id: "review:1:F1", humanGated: false }] }, held.ctx),
+      ).toMatch(/^error:/);
+      expect(await submitVerdictTool.run(input, held.ctx)).toMatch(/^verdict recorded: request_changes/);
+      expect(held.recorded[0]?.findings?.[0]?.humanGated).toBe(true);
+      expect(buildReviewPostBody("evidence", held.recorded[0])).toContain("Needs human verification");
+    },
+  );
+
+  it("rejects copied or duplicate new cases instead of keeping a resolved finding actionable", async () => {
+    const f = caseReview();
+    const input = {
+      verdict: "request_changes",
+      summary: "Checked",
+      head: f.head,
+      findings: [{ id: "review:1:F1" }],
+      caseAssessments: f.assessments.map((row) => ({ ...row, outcome: "fixed" })),
+    };
+    for (const cases of [
+      [{ scenario: "A concurrent retry", expected: "Keep the new write" }],
+      [{ scenario: " A concurrent retry\n", expected: "Keep the new write" }],
+      [
+        { scenario: "A new rollback path", expected: "Keep the replacement" },
+        { scenario: "A new rollback path", expected: "Keep the replacement" },
+      ],
+    ]) {
+      expect(await submitVerdictTool.run({ ...input, findings: [{ id: "review:1:F1", cases }] }, f.ctx)).toMatch(
+        /^error:/,
+      );
+      expect(f.recorded).toEqual([]);
+    }
+    expect(
+      await submitVerdictTool.run(
+        {
+          ...input,
+          findings: [
+            { id: "review:1:F1", cases: [{ scenario: "A new rollback path", expected: "Keep the replacement" }] },
+          ],
+        },
+        f.ctx,
+      ),
+    ).toMatch(/^verdict recorded: request_changes/);
+    expect(f.recorded[0]?.findings?.[0]?.cases?.[2]).toEqual({
+      id: "C3",
+      scenario: "A new rollback path",
+      expected: "Keep the replacement",
+    });
+  });
+
+  it("re-raises prior cases by ID with evidence, preserving text and identity through publication and accepted replay", async () => {
+    const f = caseReview();
+    const input = {
+      verdict: "request_changes",
+      summary: "Retry remains unsafe",
+      head: f.head,
+      findings: [
+        { id: "review:1:F1", cases: [{ scenario: "A retry after rollback", expected: "Keep the replacement" }] },
+      ],
+      caseAssessments: f.assessments,
+    };
+    const tool: Tool = {
+      name: submitVerdictTool.name,
+      description: submitVerdictTool.description,
+      parameters: submitVerdictTool.inputSchema as Tool["parameters"],
+    };
+    const validated = validateToolArguments(tool, { type: "toolCall", id: "v", name: tool.name, arguments: input });
+    const result = await submitVerdictTool.run(validated, f.ctx);
+    expect(result).toMatch(/^verdict recorded: request_changes/);
+    expect(f.recorded[0]?.findings?.[0]).toEqual({
+      id: "review:1:F1",
+      severity: "major",
+      file: "store.ts",
+      title: "Retry drops new work",
+      kind: "pattern",
+      invariant: "Keep the newest write",
+      cases: [
+        { id: "C1", scenario: "A concurrent retry", expected: "Keep the new write" },
+        { id: "C2", scenario: "A restart retry", expected: "Keep the replacement" },
+        { id: "C3", scenario: "A retry after rollback", expected: "Keep the replacement" },
+      ],
+    });
+    expect(f.recorded[0]?.caseAssessments).toEqual(f.assessments);
+    const replay = recordedVerdictFromTranscript([
+      { role: "assistant", content: [{ type: "tool_use", id: "v", name: "submit_verdict", input }] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "v", content: String(result) }] },
+    ]);
+    expect(replay).toEqual(f.recorded[0]);
+    const redacted = redactVerdict(replay!, (text) => text.replaceAll("store.ts", "checked.ts"));
+    expect(redacted.caseAssessments?.[0]).toEqual({
+      findingId: "review:1:F1",
+      caseId: "C1",
+      outcome: "open",
+      note: "checked.ts still deletes the concurrent write at this head",
+    });
+    expect(redacted.findings?.[0]?.cases?.map((row) => row.id)).toEqual(["C1", "C2", "C3"]);
+    for (const content of [String(result).split("\n")[0], String(result).slice(0, -1)])
+      expect(
+        recordedVerdictFromTranscript([
+          { role: "assistant", content: [{ type: "tool_use", id: "v", name: "submit_verdict", input }] },
+          { role: "user", content: [{ type: "tool_result", toolUseId: "v", content }] },
+        ]),
+      ).toBeUndefined();
+    const body = buildReviewPostBody("evidence", replay);
+    expect(body).toContain("store.ts still deletes the concurrent write at this head");
+    const next = outstandingReviewFindings([
+      {
+        id: 2,
+        author: "review[bot]",
+        authorType: "Bot",
+        head: f.head,
+        state: "COMMENTED",
+        submittedAt: "2026-01-01T00:00:01Z",
+        body,
+      },
+    ]);
+    expect(next[0]?.finding.cases).toEqual([
+      { id: "C1", scenario: "A concurrent retry", expected: "Keep the new write" },
+      { id: "C2", scenario: "A restart retry", expected: "Keep the replacement" },
+      { id: "C3", scenario: "A retry after rollback", expected: "Keep the replacement" },
+    ]);
+  });
+
+  it("refuses missing, unknown, duplicate and unsupported case assessments atomically before accepting a closure", async () => {
+    const f = caseReview();
+    const assessments = f.assessments.map((row) => ({ ...row, outcome: "fixed" }));
+    const input = {
+      verdict: "approve",
+      summary: "All retry paths checked",
+      head: f.head,
+      findings: [],
+      resolutions: [{ findingId: "review:1:F1", disposition: "fixed", note: "Verified both retry paths in store.ts" }],
+      caseAssessments: assessments,
+    };
+    for (const rows of [
+      undefined,
+      assessments.slice(0, 1),
+      [...assessments, assessments[0]],
+      [assessments[0], { ...assessments[1], caseId: "C99" }],
+      [assessments[0], { ...assessments[1], findingId: "review:9:F1" }],
+      [assessments[0], { ...assessments[1], note: " " }],
+      f.assessments,
+      assessments.map((row) => ({ ...row, outcome: "declined" })),
+      [{ ...assessments[0], note: "x".repeat(121_000) }, assessments[1]],
+    ]) {
+      expect(await submitVerdictTool.run({ ...input, caseAssessments: rows }, f.ctx)).toMatch(/^error:/);
+      expect(f.recorded).toEqual([]);
+    }
+    const result = await submitVerdictTool.run(input, f.ctx);
+    expect(result).toMatch(/^verdict recorded: approve/);
+    expect(f.recorded[0]?.caseAssessments).toEqual(assessments);
+    expect(f.recorded[0]?.resolutions).toEqual([
+      { findingId: "review:1:F1", disposition: "fixed", note: "Verified both retry paths in store.ts" },
+    ]);
+    expect(
+      await submitVerdictTool.run(
+        {
+          ...input,
+          caseAssessments: [
+            assessments[0],
+            {
+              ...assessments[1],
+              outcome: "declined",
+              note: "The restart path cannot reach this write at the reviewed head",
+            },
+          ],
+        },
+        f.ctx,
+      ),
+    ).toMatch(/^verdict recorded: approve/);
+    expect(f.recorded[1]?.caseAssessments?.[1]).toEqual({
+      findingId: "review:1:F1",
+      caseId: "C2",
+      outcome: "declined",
+      note: "The restart path cannot reach this write at the reviewed head",
+    });
+  });
 
   it("rejects contradictory finding variants in the provider-visible schema", () => {
     const tool: Tool = {
@@ -105,6 +388,15 @@ describe("submit_verdict tool", () => {
       ),
     ).toMatch(/^verdict recorded: approve/);
     expect(got).toMatchObject([{ resolutions: [{ findingId: "review:1:F1", disposition: "fixed" }] }]);
+    const repeated = { ...input, findings: [{ id: "review:1:F1" }] };
+    const receipt = await submitVerdictTool.run(repeated, ctx);
+    expect(String(receipt).split("\n")[0]).toMatch(/^verdict recorded: request_changes/);
+    expect(
+      recordedVerdictFromTranscript([
+        { role: "assistant", content: [{ type: "tool_use", id: "v", name: "submit_verdict", input: repeated }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "v", content: String(receipt) }] },
+      ])?.findings,
+    ).toEqual([{ id: "review:1:F1", severity: "major", file: "a.ts", title: "Lost write", kind: "single" }]);
   });
 
   it.each(["HEAD", "", undefined, "not-a-commit"])(
@@ -285,7 +577,7 @@ describe("submit_verdict tool", () => {
         },
         ctxWith((v) => got.push(v)),
       );
-      expect(result).toBe("verdict recorded: request_changes (1 finding)");
+      expect(String(result).split("\n")[0]).toBe("verdict recorded: request_changes (1 finding)");
       expect(got).toMatchObject([
         {
           findings: [

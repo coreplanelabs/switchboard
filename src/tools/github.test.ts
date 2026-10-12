@@ -291,6 +291,14 @@ describe("github_* reads", () => {
               note: "Both concurrent writes keep unique IDs; rollback deletes only its own row",
             },
           ],
+          caseAssessments: [
+            {
+              findingId: "review:1:F1",
+              caseId: "C1",
+              outcome: "fixed",
+              note: "Rollback deletes only its own row when timestamps collide at this head",
+            },
+          ],
         },
         ctx,
       ),

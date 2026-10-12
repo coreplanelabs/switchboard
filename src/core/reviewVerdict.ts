@@ -100,10 +100,20 @@ export function downgradeNote(d: { findings: readonly string[]; level: AddressSe
 }
 
 export interface FindingCase {
+  /** Assigned by the controller; stable within the finding across review rounds. */
+  id?: string;
   /** An independently reproducible input or path through the invariant. */
   scenario: string;
   /** The result the implementation must produce for this case. */
   expected: string;
+}
+
+export interface CaseAssessment {
+  findingId: string;
+  caseId: string;
+  outcome: "open" | "fixed" | "declined";
+  /** Evidence at this verdict's reviewed head, not an author's fix claim. */
+  note: string;
 }
 
 export interface Finding {
@@ -154,6 +164,8 @@ export interface ReviewVerdict {
   findings?: Finding[];
   /** Reviewer-verified closure of prior GitHub findings, with an evidence note. */
   resolutions?: FindingDisposition[];
+  /** One current-head assessment per prior case, including cases of closed findings. */
+  caseAssessments?: CaseAssessment[];
   /** Parse notes naming what was dropped from `findings` (ids/indices with
    *  reasons) — surfaced in the tool ack so the model can resubmit, never
    *  rendered into the posted body. */
@@ -187,6 +199,15 @@ export function parseVerdictInput(
   const head = normalizeHead(input.head);
   const out: ReviewVerdict = { verdict, summary };
   if (head) out.head = head;
+  if (input.caseAssessments !== undefined) {
+    if (!isCaseAssessmentsShape(input.caseAssessments)) return null;
+    out.caseAssessments = input.caseAssessments.map(({ findingId, caseId, outcome, note }) => ({
+      findingId,
+      caseId,
+      outcome,
+      note: oneLine(note),
+    }));
+  }
   if (input.resolutions !== undefined) {
     const parsed = parseDispositionsInput({ dispositions: input.resolutions });
     if (
@@ -235,10 +256,23 @@ export function recordedVerdictFromTranscript(
       const input = pending.get(part.toolUseId);
       pending.delete(part.toolUseId);
       if (part.isError || typeof input !== "object" || input === null || Array.isArray(input)) continue;
-      const verdict = parseVerdictInput(input as Record<string, unknown>, opts);
-      const receipt = verdict && `verdict recorded: ${verdict.verdict}`;
       const result = toolResultText(part.content);
-      if (receipt && (result === receipt || result.startsWith(`${receipt} (`))) recorded = verdict;
+      const [ack, canonical] = result.split("\nRecorded verdict: ");
+      let accepted = input as Record<string, unknown>;
+      if (accepted.caseAssessments !== undefined && canonical === undefined) continue;
+      if (canonical !== undefined) {
+        try {
+          const saved: unknown = JSON.parse(canonical);
+          if (!isReviewVerdictShape(saved) || saved.head !== normalizeHead(accepted.head)) continue;
+          accepted = saved as unknown as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+      }
+      const verdict = parseVerdictInput(accepted, opts);
+      const receipt = verdict && `verdict recorded: ${verdict.verdict}`;
+      if (receipt && !verdict.droppedFindings?.length && (ack === receipt || ack.startsWith(`${receipt} (`)))
+        recorded = verdict;
     }
   }
   return recorded;
@@ -305,7 +339,11 @@ function parseFinding(
       const scenario = typeof row.scenario === "string" ? oneLine(row.scenario) : "";
       const expected = typeof row.expected === "string" ? oneLine(row.expected) : "";
       if (!scenario || !expected) return { id, reason: "each case needs a scenario and expected result" };
-      cases.push({ scenario, expected });
+      if (row.id !== undefined && (typeof row.id !== "string" || !/^C[1-9]\d*$/.test(row.id)))
+        return { id, reason: "case IDs must be exact controller-issued C1, C2, … identities" };
+      if (row.id !== undefined && cases.some((existing) => existing.id === row.id))
+        return { id, reason: "case IDs must be unique within a finding" };
+      cases.push({ ...(row.id !== undefined ? { id: row.id as string } : {}), scenario, expected });
     }
     finding.invariant = invariant;
     finding.cases = cases;
@@ -369,7 +407,7 @@ export function formatFinding(f: Finding): string {
   const location = f.line !== undefined ? `${f.file}:${f.line}` : f.file;
   const headline = `[${f.severity}] ${f.id} ${location} — ${f.title}${f.humanGated ? " (human-gated)" : ""}`;
   return f.invariant && f.cases
-    ? `${headline}\n  Invariant: ${f.invariant}\n  Cases:\n${f.cases.map((row) => `  - ${row.scenario} → ${row.expected}`).join("\n")}`
+    ? `${headline}\n  Invariant: ${f.invariant}\n  Cases:\n${f.cases.map((row) => `  - ${row.id ? `[${row.id}] ` : ""}${row.scenario} → ${row.expected}`).join("\n")}`
     : headline;
 }
 
@@ -482,6 +520,7 @@ function verdictMarker(verdict: ReviewVerdict | undefined, target: ReviewBodyTar
   const payload = {
     verdict: verdict?.verdict ?? "none",
     ...(head ? { head } : {}),
+    ...(verdict?.caseAssessments !== undefined ? { caseAssessments: verdict.caseAssessments } : {}),
     ...(verdict?.findings
       ? {
           findings: verdict.findings.map((f) => ({
@@ -553,12 +592,24 @@ export function buildReviewPostBody(
     if (f.invariant && f.cases) {
       agentParts.push(
         `**${escapeMarkdownTableCell(f.id)} invariant:** ${f.invariant}\n\n` +
-          f.cases.map((row) => `- ${row.scenario} → ${row.expected}`).join("\n"),
+          f.cases.map((row) => `- ${row.id ? `[${row.id}] ` : ""}${row.scenario} → ${row.expected}`).join("\n"),
       );
     }
   }
 
   const marker = verdictMarker(verdict, target);
+  if (verdict?.caseAssessments?.length) {
+    agentParts.push(
+      [
+        "| Finding | Case | Outcome | Current-head evidence |",
+        "| --- | --- | --- | --- |",
+        ...verdict.caseAssessments.map(
+          (row) =>
+            `| ${escapeMarkdownTableCell(row.findingId)} | ${row.caseId} | ${row.outcome} | ${escapeMarkdownTableCell(row.note)} |`,
+        ),
+      ].join("\n"),
+    );
+  }
   if (verdict?.resolutions?.length) {
     agentParts.push(
       [
@@ -713,6 +764,29 @@ const DISPOSITION_KINDS: readonly string[] = ["fixed", "declined"];
 
 const isRecordLike = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
+export function isCaseAssessmentsShape(value: unknown): value is CaseAssessment[] {
+  if (!Array.isArray(value)) return false;
+  const seen = new Set<string>();
+  return value.every((row) => {
+    if (
+      !isRecordLike(row) ||
+      typeof row.findingId !== "string" ||
+      !row.findingId.trim() ||
+      row.findingId !== row.findingId.trim() ||
+      typeof row.caseId !== "string" ||
+      !/^C[1-9]\d*$/.test(row.caseId) ||
+      !["open", "fixed", "declined"].includes(row.outcome as string) ||
+      typeof row.note !== "string" ||
+      !row.note.trim()
+    )
+      return false;
+    const key = JSON.stringify([row.findingId, row.caseId]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 export function isFindingShape(v: unknown): v is Finding {
   if (!isRecordLike(v)) return false;
   return (
@@ -733,6 +807,7 @@ export function isFindingShape(v: unknown): v is Finding {
         v.cases.every(
           (row: unknown) =>
             isRecordLike(row) &&
+            (row.id === undefined || (typeof row.id === "string" && /^C[1-9]\d*$/.test(row.id))) &&
             typeof row.scenario === "string" &&
             row.scenario.length > 0 &&
             typeof row.expected === "string" &&
@@ -752,6 +827,7 @@ export function isReviewVerdictShape(v: unknown): v is ReviewVerdict {
   if (v.head !== undefined && typeof v.head !== "string") return false;
   if (v.findings !== undefined && !(Array.isArray(v.findings) && v.findings.every(isFindingShape))) return false;
   if (v.resolutions !== undefined && !isFindingDispositionsShape(v.resolutions)) return false;
+  if (v.caseAssessments !== undefined && !isCaseAssessmentsShape(v.caseAssessments)) return false;
   return true;
 }
 
@@ -821,6 +897,9 @@ export function redactVerdict(v: ReviewVerdict, redact: (s: string) => string = 
     summary: redact(v.summary),
     ...(v.head !== undefined ? { head: v.head } : {}),
     ...(v.resolutions !== undefined ? { resolutions: redactDispositions(v.resolutions, redact) } : {}),
+    ...(v.caseAssessments !== undefined
+      ? { caseAssessments: v.caseAssessments.map((row) => ({ ...row, note: redact(row.note) })) }
+      : {}),
     ...(v.findings !== undefined
       ? {
           findings: v.findings.map((f) => ({
@@ -829,7 +908,13 @@ export function redactVerdict(v: ReviewVerdict, redact: (s: string) => string = 
             title: redact(f.title),
             ...(f.invariant !== undefined ? { invariant: redact(f.invariant) } : {}),
             ...(f.cases !== undefined
-              ? { cases: f.cases.map((row) => ({ scenario: redact(row.scenario), expected: redact(row.expected) })) }
+              ? {
+                  cases: f.cases.map((row) => ({
+                    ...row,
+                    scenario: redact(row.scenario),
+                    expected: redact(row.expected),
+                  })),
+                }
               : {}),
           })),
         }

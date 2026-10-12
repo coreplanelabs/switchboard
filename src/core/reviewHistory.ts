@@ -30,6 +30,61 @@ export interface ReviewHistoryContext {
 
 const VERDICT_MARKER = /^<!-- switchboard:verdict (\{[^\r\n]*\}) -->\r?$/gm;
 
+/** Legacy matrices get IDs in their recorded order. Appends never renumber existing cases. */
+export function withFindingCaseIds(finding: Finding): Finding {
+  if (!finding.cases) return finding;
+  let next = Math.max(0, ...finding.cases.map((row) => (row.id ? Number(row.id.slice(1)) : 0)));
+  return { ...finding, cases: finding.cases.map((row) => ({ ...row, id: row.id ?? `C${++next}` })) };
+}
+
+/** Prior text belongs to the record. A follow-up supplies identity and new cases only. */
+export function materializeReviewFollowup(
+  input: Record<string, unknown>,
+  prior: readonly PriorReviewFinding[],
+): { input: Record<string, unknown>; error?: string } {
+  if (!Array.isArray(input.findings)) return { input };
+  let error: string | undefined;
+  const findings = input.findings.map((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+    const row = raw as Record<string, unknown>;
+    const previous = prior.find((p) => p.finding.id === row.id)?.finding;
+    const additions = row.cases;
+    if (Array.isArray(additions) && additions.some((value) => value && typeof value === "object" && "id" in value)) {
+      error = `new cases for ${row.id} must omit IDs; assess prior cases in caseAssessments`;
+      return raw;
+    }
+    if (!previous) {
+      if (typeof row.id === "string" && row.id.startsWith("review:"))
+        error = `unknown prior finding ${row.id}; read complete review history first`;
+      return raw;
+    }
+    if (additions !== undefined && !Array.isArray(additions)) {
+      error = `new cases for ${previous.id} must be an array`;
+      return raw;
+    }
+    if (Array.isArray(additions) && additions.length && !previous.cases) {
+      error = `prior finding ${previous.id} has no invariant case table; new cases require a pattern finding`;
+      return raw;
+    }
+    const metadata: Finding = { ...previous, kind: previous.kind ?? (previous.cases ? "pattern" : "single") };
+    if (
+      Object.entries(row).some(
+        ([key, value]) => key !== "id" && key !== "cases" && value !== metadata[key as keyof Finding],
+      )
+    ) {
+      error = `metadata for ${previous.id} belongs to history; re-raise with its ID and new cases only`;
+      return raw;
+    }
+    return {
+      ...metadata,
+      ...(previous.cases
+        ? { cases: [...withFindingCaseIds(previous).cases!, ...((additions as unknown[]) ?? [])] }
+        : {}),
+    };
+  });
+  return { input: { ...input, findings }, ...(error ? { error } : {}) };
+}
+
 /** Redact prose separately from the authoritative marker: header patterns can
  * consume the rest of a JSON line. Never re-redact the reconstructed envelope
  * or the serialized history document; only its text leaves are source text. */
@@ -90,7 +145,7 @@ export function outstandingReviewFindings(reviews: readonly PullReviewFeedback[]
         reviewId: review.id,
         author: review.author,
         head: verdict.head,
-        finding: { ...finding, id: key },
+        finding: withFindingCaseIds({ ...finding, id: key }),
       });
     }
     for (const closure of verdict.resolutions ?? []) {
@@ -115,11 +170,15 @@ export function validateReviewFollowup(
     if (finding.id.startsWith("review:") && !issued.has(finding.id)) return `unknown prior finding ${finding.id}`;
     seen.add(finding.id);
     const previous = prior.find((p) => p.finding.id === finding.id)?.finding;
-    const missingCases = previous?.cases?.filter(
-      (row) => !finding.cases?.some((next) => next.scenario === row.scenario && next.expected === row.expected),
-    );
-    if (missingCases?.length)
-      return `preserve every previous case for ${finding.id}; copy these scenario and expected values exactly, then add new cases: ${JSON.stringify(missingCases)}`;
+    const missingCases =
+      previous &&
+      withFindingCaseIds(previous).cases?.filter(
+        (row) =>
+          !finding.cases?.some(
+            (next) => next.id === row.id && next.scenario === row.scenario && next.expected === row.expected,
+          ),
+      );
+    if (missingCases?.length) return `prior case identity or text changed for ${finding.id}`;
   }
   for (const resolution of resolutions) {
     if (!issued.has(resolution.findingId)) return `unknown resolution ${resolution.findingId}`;
@@ -128,7 +187,40 @@ export function validateReviewFollowup(
     seen.add(resolution.findingId);
   }
   const missing = [...issued].filter((id) => !seen.has(id));
-  return missing.length
-    ? `re-raise or explicitly resolve each prior finding; missing: ${JSON.stringify(missing)}`
-    : undefined;
+  if (missing.length) return `re-raise or explicitly resolve each prior finding; missing: ${JSON.stringify(missing)}`;
+  const assessments = verdict.caseAssessments ?? [];
+  const assessed = new Set<string>();
+  for (const row of assessments) {
+    const previous = prior.find((p) => p.finding.id === row.findingId)?.finding;
+    if (!previous || !withFindingCaseIds(previous).cases?.some((c) => c.id === row.caseId))
+      return `unknown prior case ${row.findingId}/${row.caseId}`;
+    const key = JSON.stringify([row.findingId, row.caseId]);
+    if (assessed.has(key)) return `duplicate case assessment ${row.findingId}/${row.caseId}`;
+    assessed.add(key);
+    if (!row.note.trim()) return `current-head evidence required for ${row.findingId}/${row.caseId}`;
+    const closure = resolutions.find((r) => r.findingId === row.findingId);
+    if (closure && (row.outcome === "open" || (closure.disposition === "declined" && row.outcome !== "declined")))
+      return `case ${row.findingId}/${row.caseId} must support its ${closure.disposition} resolution`;
+  }
+  for (const { finding } of prior) {
+    const previous = withFindingCaseIds(finding);
+    const missing = previous.cases?.filter((row) => !assessed.has(JSON.stringify([finding.id, row.id])));
+    if (missing?.length)
+      return `assess every prior case for ${finding.id} in caseAssessments with outcome and current-head evidence; missing: ${JSON.stringify(missing.map((row) => row.id))}`;
+    if (
+      previous.cases &&
+      resolutions.some((row) => row.findingId === finding.id && row.disposition === "fixed") &&
+      !assessments.some((row) => row.findingId === finding.id && row.outcome === "fixed")
+    )
+      return `a fixed resolution for ${finding.id} requires a verified fixed case; decline findings whose cases do not apply`;
+    const repeated = findings.find((f) => f.id === finding.id);
+    if (
+      previous.cases &&
+      repeated &&
+      !assessments.some((row) => row.findingId === finding.id && row.outcome === "open") &&
+      repeated.cases?.length === previous.cases.length
+    )
+      return `resolve ${finding.id} when all its cases are closed, or add the newly failing case`;
+  }
+  return undefined;
 }
