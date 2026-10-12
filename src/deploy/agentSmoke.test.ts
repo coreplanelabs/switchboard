@@ -5,6 +5,93 @@ import { MCP_PROTOCOL_VERSION } from "../mcp/client.js";
 import { commit, config, fixture, head } from "./testing/agentSmoke.js";
 
 describe("bounded agent smoke", () => {
+  it("requests the Explore floor and retains twelve minutes of workspace loop time", async () => {
+    const { transport } = fixture();
+    const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
+    expect(receipt).toMatchObject({
+      capabilityOutcome: "passed",
+      limits: {
+        maxRuns: 3,
+        scenarios: [
+          { id: "answer", runMinutes: 4, requestDeadlineMs: 300000 },
+          { id: "workspace", runMinutes: 15, requestDeadlineMs: 960000 },
+          { id: "review", runMinutes: 15, requestDeadlineMs: 960000 },
+        ],
+      },
+      scenarios: [
+        { outcome: "passed" },
+        {
+          outcome: "passed",
+          evidence: {
+            record: {
+              profile: { preset: "explore", minutes: 15 },
+              events: expect.arrayContaining([
+                expect.objectContaining({ type: "lease", startedAt: 10, endsAt: 900010, loopEndsAt: 720010 }),
+              ]),
+            },
+          },
+        },
+        { outcome: "passed" },
+      ],
+    });
+    expect((transport.request as ReturnType<typeof vi.fn>).mock.calls[1][0]).toMatchObject({
+      id: "workspace",
+      agent: "explore",
+      minutes: 15,
+      text: "agent:explore budget:15 Read SMOKE.md in acme/smoke using the workspace. Reply only with its contents. Do not change files.",
+    });
+  });
+
+  it("refuses a workspace budget mismatch or present-output budget ending while retaining all 115 events", async () => {
+    for (const mismatch of [true, false]) {
+      const { transport, records } = fixture();
+      transport.readRun = async (id) => {
+        const record = records.get(id) as { profile: object; events: object[] };
+        if (id !== "run-workspace") return record;
+        const events = [
+          ...record.events,
+          ...Array.from({ length: 115 - record.events.length }, (_, index) => ({
+            type: "run_note",
+            kind: "diagnostic",
+            summary: index === 114 - record.events.length ? "retained-workspace-last-event" : "history",
+          })),
+        ].map((event, index) => ({ ...event, seq: index + 1 }));
+        return {
+          ...record,
+          profile: { ...record.profile, minutes: mismatch ? 4 : 15 },
+          answerOutcome: { version: 1, ending: mismatch ? "answered" : "time_budget", output: "present" },
+          eventCount: 115,
+          events,
+        };
+      };
+      const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
+      expect(receipt).toMatchObject({
+        capabilityOutcome: "failed",
+        scenarios: [
+          { outcome: "passed" },
+          {
+            id: "workspace",
+            runId: "run-workspace",
+            outcome: "failed",
+            reason: mismatch ? "run_budget_mismatch" : "execution_output_unproven",
+            ...(!mismatch ? { failedChecks: ["answerOutcome.ending"] } : {}),
+            evidence: {
+              identityVerified: true,
+              record: {
+                eventCount: 115,
+                events: expect.arrayContaining([
+                  { type: "run_note", kind: "diagnostic", summary: "retained-workspace-last-event", seq: 115 },
+                ]),
+              },
+            },
+          },
+          { outcome: "skipped", reason: "prior_scenario_unproven" },
+        ],
+      });
+      expect((receipt.scenarios[1].evidence?.record as { events: unknown[] }).events).toHaveLength(115);
+    }
+  });
+
   it("retains the original budget failure and complete run evidence before refusing acceptance", async () => {
     const { transport, records } = fixture();
     const saves: unknown[] = [];
@@ -122,7 +209,7 @@ describe("bounded agent smoke", () => {
               id,
               agent: id === "answer" ? "general" : id === "workspace" ? "explore" : "review",
               text: request.text,
-              minutes: id === "review" ? 15 : 4,
+              minutes: id === "answer" ? 4 : 15,
             },
             request.thread,
           )) as { run: { id: string }; build: unknown };
@@ -272,7 +359,7 @@ describe("bounded agent smoke", () => {
     );
     expect((transport.request as ReturnType<typeof vi.fn>).mock.calls.map(([scenario]) => scenario.text)).toEqual([
       "What is 2 + 2? Answer only with the number. budget:4 model:openai/gpt-6.1-sol",
-      "agent:explore budget:4 Read SMOKE.md in acme/smoke using the workspace. Reply only with its contents. Do not change files. model:openai/gpt-6.1-sol",
+      "agent:explore budget:15 Read SMOKE.md in acme/smoke using the workspace. Reply only with its contents. Do not change files. model:openai/gpt-6.1-sol",
       `agent:review budget:15 Review https://github.com/acme/smoke/pull/7 at head ${head}. Publish the review; do not change files or merge. model:openai/gpt-6.1-sol`,
     ]);
   });
@@ -549,7 +636,7 @@ describe("bounded agent smoke", () => {
           const id = request.thread.split("-").at(-1);
           const agent = id === "answer" ? "general" : id === "workspace" ? "explore" : "review";
           const result = (await original.transport.request(
-            { id, agent, text: request.text, minutes: id === "review" ? 15 : 4 },
+            { id, agent, text: request.text, minutes: id === "answer" ? 4 : 15 },
             request.thread,
           )) as { run: { id: string }; build: unknown };
           return Response.json(

@@ -1,6 +1,12 @@
 import { z } from "zod";
 import { checkExecutionReceiptSchema } from "../core/checkExecution.js";
-import { AGENT_SMOKE_POLL_MS, AGENT_SMOKE_REVIEW_MINUTES, leaseMinimum, minutesToMs } from "../core/budgets.js";
+import {
+  AGENT_SMOKE_POLL_MS,
+  AGENT_SMOKE_REVIEW_MINUTES,
+  PRESET_FLOORS,
+  leaseMinimum,
+  minutesToMs,
+} from "../core/budgets.js";
 import { answerOutcomeOf } from "../core/answerOutcome.js";
 import { redactSecrets } from "../core/redact.js";
 import { unwrapUntrusted } from "../core/untrusted.js";
@@ -220,7 +226,7 @@ export interface AgentSmokeReceipt {
 /** Fixed capability representatives, selected once per deployment, not per model or preset. */
 function scenarios(config: SmokeConfig): SmokeScenario[] {
   const general = leaseMinimum("general"),
-    explore = leaseMinimum("explore"),
+    explore = PRESET_FLOORS.explore,
     review = AGENT_SMOKE_REVIEW_MINUTES;
   const selected: SmokeScenario[] = [
     {

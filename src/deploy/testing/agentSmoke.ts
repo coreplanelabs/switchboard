@@ -1,7 +1,7 @@
 import { vi } from "vitest";
 import { getAgent } from "../../agents/registry.js";
 import { effectiveProfile } from "../../config/profile.js";
-import { leaseMinimum } from "../../core/budgets.js";
+import { leaseMinimum, loopClock, minutesToMs } from "../../core/budgets.js";
 import { parseDirectives } from "../../directives.js";
 import { captureAnswerOutcome } from "../../core/answerOutcome.js";
 import { assembleRunRecord } from "../../core/dispatch/record.js";
@@ -45,6 +45,13 @@ export function fixture() {
         { ...identity, agent: agent.name, repo, channelVisibility: "machine" },
         { id },
       );
+      const lease = loopClock(10, minutesToMs(admission.profile.minutes), agent.name);
+      registry.publish(id, {
+        type: "lease",
+        startedAt: lease.startedAt,
+        endsAt: lease.deadline,
+        loopEndsAt: lease.loopEnd,
+      });
       registry.publish(id, { type: "answer", text: scenario.id === "answer" ? "4" : "smoke fixture" });
       registry.publish(id, { type: "tool_call", tool: "read", callId: "read-1", summary: "fixture read" });
       registry.publish(id, { type: "tool_result", tool: "read", callId: "read-1", ok: true, summary: "fixture read" });
