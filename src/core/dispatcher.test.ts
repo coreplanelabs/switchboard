@@ -477,6 +477,35 @@ beforeEach(() => {
 });
 
 describe("dispatch", () => {
+  it("quiet config clear shows one approval offer without a duplicate pending command and keeps settings until approval", async () => {
+    const deps = makeDeps(YAML_FIXTURE, capturingProvider());
+    deps.confirmations = new InMemoryConfirmationStore();
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
+    await deps.config.setUserOverride("slack:UADMIN", { effort: "high" });
+    const { io, replies } = fakeIO();
+    const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+    io.offer = async (offer) => void offers.push(offer);
+    await dispatch(deps, msg("config clear me", "slack:UADMIN"), io);
+    expect(offers).toEqual([
+      {
+        id: expect.any(String),
+        line: "config clear me",
+        risk: "This will clear your saved settings.",
+        expiresAt: expect.any(Number),
+      },
+    ]);
+    expect(replies).toEqual([]);
+    expect(deps.config.scopes("slack:CX", "slack:UADMIN").user).toEqual({ effort: "high" });
+    await dispatchClick(deps, {
+      kind: "confirm",
+      id: offers[0]!.id,
+      actor: { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS },
+      io,
+    });
+    expect(deps.config.scopes("slack:CX", "slack:UADMIN").user).toEqual({});
+    expect(replies).toEqual(["Cleared your overrides."]);
+  });
+
   it("admits research with its original source closure and refuses revoked or unknown research before the provider", async () => {
     const researchRunId = "run-research",
       branch = "plan/research/u12",
@@ -23318,7 +23347,11 @@ workspaceDir: __WORKDIR__
     const t = treeDeps(provider);
     const { parent, child } = treeIO();
     await dispatch(t.deps, inChannel("CX", "agent:conductor delegate this"), parent.io);
-    await vi.waitFor(() => expect(t.registry.getById("run-child")?.finished).toBe(true));
+    // Run completion precedes reply delivery; wait for both before checking the refusal.
+    await vi.waitFor(() => {
+      expect(t.registry.getById("run-child")?.finished).toBe(true);
+      expect(child.replies).toHaveLength(1);
+    });
     expect(parent.replies[0]).toContain("spawned a conductor run: run-child");
     // The child conductor's answer echoes ITS tool result: the depth refusal.
     expect(child.replies).toHaveLength(1);
@@ -29276,6 +29309,36 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     return { ...f, offers };
   };
   const requester: Actor = { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS };
+
+  it("on: quiet config clear keeps the same stored and offered clear-me copy", async () => {
+    const { deps, store } = confirming("config clear me");
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
+    await deps.config.setUserOverride("slack:UADMIN", { effort: "high" });
+    const { io, replies, offers } = offering();
+    await dispatch(deps, msg("clear my settings", "slack:UADMIN"), io);
+    expect(offers.map(({ line, risk }) => ({ line, risk }))).toEqual([
+      { line: "config clear me", risk: "This will clear your saved settings." },
+    ]);
+    expect(store.rows.get(offers[0]!.id)).toMatchObject({
+      command: "config.clear",
+      risk: "This will clear your saved settings.",
+    });
+    expect(replies).toEqual([]);
+    expect(deps.config.scopes("slack:CX", "slack:UADMIN").user).toEqual({ effort: "high" });
+  });
+
+  it("on: quiet config approval shows the offer once without a second command reply", async () => {
+    const { deps, store } = confirming();
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
+    const { io, replies, offers } = offering();
+    await dispatch(deps, msg("set my agent to review", "slack:UADMIN"), io);
+    expect(offers.map(({ line, risk }) => ({ line, risk }))).toEqual([
+      { line: "config set me --agent review", risk: "changes your own settings until you reset them" },
+    ]);
+    expect(replies).toEqual([]);
+    expect(store.rows.get(offers[0]!.id)).toMatchObject({ kind: "run", command: "config.set" });
+    expect(deps.config.scopes("slack:CX", "slack:UADMIN").user).toEqual({});
+  });
 
   it("on: a config-set-me bind on a channel with offer mints one confirmation row and offers the click — no To-run-this text (routing-and-config items 25 and 29)", async () => {
     const { deps, store } = confirming();

@@ -776,7 +776,8 @@ export const configClear = defineCommand({
   effect: "write",
   annotations: {
     destructive: destructiveBeyondMe,
-    risk: configRisk,
+    risk: (input, origin) =>
+      input.args?.[0] === "me" ? "This will clear your saved settings." : configRisk(input, origin),
   },
   describe:
     "Drops every runtime override of a channel (gated), of yourself (your GitHub binding stays — it is an identity admin's write), or of a thread (gated like the channel); `config clear user --user <id>` removes one person's GitHub binding (identity admins). Static config.yaml values show through again.",

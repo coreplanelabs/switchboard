@@ -649,8 +649,16 @@ export async function replyCommandOutput(
   io: ChannelIO,
   parsed: ParsedChatCommand,
   text: string,
-  display: { verbosity?: Verbosity; ok?: boolean; quietText?: string; cardShown?: boolean } = {},
+  display: {
+    verbosity?: Verbosity;
+    ok?: boolean;
+    quietText?: string;
+    cardShown?: boolean;
+    confirmation?: ConfirmationOffer;
+  } = {},
 ): Promise<void> {
+  // The gate already delivered this offer; keep its full receipt on the record.
+  if (display.confirmation) return;
   if (!shows(display.verbosity ?? "quiet", "verbose")) {
     if (display.cardShown) return;
     text = display.quietText ?? text;
