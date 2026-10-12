@@ -1686,17 +1686,51 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     async writeSources(sources: SessionSources): Promise<boolean> {
       if (this.detached || !this.sessionRow) return false;
+      let stage = "checkpoint";
+      const diagnose = (facts: string): void => {
+        try {
+          warn(`[ledger] ${this.threadKey} run=${this.runId} source context not written stage=${stage} ${facts}`);
+        } catch {
+          // An unavailable warning channel cannot change the source write's result.
+        }
+      };
       try {
         const receipt = this.state.contextCheckpointReceipt;
         if (isContextCheckpointReceipt(receipt)) {
           sources = { ...sources, context: applyContextCheckpoint(contextDependenciesOf(sources), receipt) };
         }
+        stage = "read-before";
         const before = await ledger.readSessionTail(this.sessionRow.key, 1);
+        stage = "merge-sources";
         const merged = mergeSessionSources(before.sources, sources, before.from === 0 && before.transcript.turns === 0);
-        if (!(await ledger.writeSessionSources(this.sessionRow.key, this.runId, gen, merged)).ok) return false;
+        stage = "write-sources";
+        const written = await ledger.writeSessionSources(this.sessionRow.key, this.runId, gen, merged);
+        if (!written.ok) {
+          const reason =
+            written.reason === "fenced" || written.reason === "unknown-run" ? written.reason : "unclassified";
+          diagnose(`failure=refused reason=${reason}`);
+          return false;
+        }
+        stage = "read-after";
         const saved = await ledger.readSessionTail(this.sessionRow.key, 1);
-        return await this.setStateAndFlush({ contextDependencies: contextDependenciesOf(saved.sources) });
-      } catch {
+        stage = "state-ack";
+        const committed = await this.setStateAndFlush({ contextDependencies: contextDependenciesOf(saved.sources) });
+        if (!committed) diagnose("failure=unacknowledged");
+        return committed;
+      } catch (error) {
+        diagnose(
+          error instanceof UncertainStoreError
+            ? uncertainStoreSummary(error)
+            : `failure=${
+                error instanceof RouteMissingError
+                  ? "route-missing"
+                  : error instanceof PermanentStoreError
+                    ? "permanent"
+                    : error instanceof TransientStoreError
+                      ? "transient"
+                      : "unclassified"
+              }`,
+        );
         return false;
       }
     }
