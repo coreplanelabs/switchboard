@@ -16,6 +16,8 @@ import type { RunRecord } from "../runRecord.js";
 import type { LiveRunRow } from "../runLedger/types.js";
 import { type ContextOrigin, type ContextDependencies } from "../references/contextDependencies.js";
 import { sourceHash } from "../references/receipts.js";
+import { executionAdmissionHash } from "./executionGithubContext.js";
+import type { ChatMessage } from "../chatMessage.js";
 import {
   checkpointMembersOf,
   checkpointMemberHashesOf,
@@ -31,6 +33,7 @@ import { sealMemoryCandidate } from "../memory/provenance.js";
 import type { HandoffSource } from "./handoff.js";
 import {
   contextAccessForMessage,
+  contextAccessForExecution,
   contextAccessForRun,
   revalidateAdmittedContext,
   type ContextAccessDeps,
@@ -54,6 +57,32 @@ const clean = { version: 1 as const, status: "known" as const, revision: 0, orig
 const closure = { ...clean, origins: [origin] };
 
 describe("publication of admitted context", () => {
+  it("names unknown, changing and unavailable context separately", async () => {
+    let current: ContextDependencies = clean;
+    expect(
+      await revalidateAdmittedContext(
+        () => ({ ...clean, status: "unknown" }),
+        async () => ({ ok: true }),
+      ),
+    ).toEqual({ ok: false, code: "saved-context-unproved", check: "context_unknown" });
+    expect(
+      await revalidateAdmittedContext(
+        () => current,
+        async () => {
+          current = { ...current, revision: current.revision + 1 };
+          return { ok: true };
+        },
+      ),
+    ).toEqual({ ok: false, code: "saved-context-unproved", check: "context_changed" });
+    expect(
+      await revalidateAdmittedContext(
+        () => clean,
+        async () => {
+          throw new Error("private source content");
+        },
+      ),
+    ).toEqual({ ok: false, code: "saved-context-unproved", check: "context_validation_exception" });
+  });
   it("rechecks a dependency admitted during the asynchronous validation", async () => {
     let current: ContextDependencies = clean;
     const seen: unknown[] = [];
@@ -449,6 +478,118 @@ describe("canonical saved operator decisions", () => {
 });
 
 describe("message-bound context access", () => {
+  it("names missing receipts, incomplete transcripts and changed result bytes while allowing proved execution", async () => {
+    const f = setup();
+    const meta: LiveRunRow["meta"] = {
+      agent: "review",
+      profile: { machine: "repo-resident", identity: "read", minutes: 25 },
+      readonly: true,
+      userId: msg.userId,
+      channelId: msg.channelId,
+      threadKey: msg.threadKey,
+      repo: "acme/api",
+      pr: 7,
+      session: { key: "session", seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
+    };
+    const admissionHash = (await executionAdmissionHash(meta))!;
+    const input = { repo: "acme/api", path: "src/x.ts" };
+    const receipt = {
+      version: 2 as const,
+      runId: "review",
+      callId: "read",
+      tool: "github_file",
+      repos: ["acme/api"],
+      admissionHash,
+      inputHash: await sourceHash(input),
+      resultHash: await sourceHash("original code"),
+    };
+    const messages: ChatMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "read", name: "github_file", input }] },
+      {
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: "read", content: "original code" }],
+        sourceResults: [receipt],
+      },
+    ];
+    const row = {
+      runId: "review",
+      ownerGen: "gen",
+      meta,
+      state: { sourceResults: [receipt] },
+    } as unknown as LiveRunRow;
+    f.live.push(row);
+    const readSession = vi.fn(async () => ({ complete: true, messages }));
+    f.deps.runLedger.readSession = readSession as never;
+    f.deps.githubApi = new InMemoryGithubApi({ "acme/api": { files: { "src/x.ts": "current code" } } });
+    const execution = contextAccessForExecution(f.deps, {
+      msg,
+      io: f.io,
+      executionConsumer: { runId: "review", gen: "gen", admissionHash },
+    });
+    const context: ContextDependencies = {
+      ...clean,
+      version: 2,
+      executionGithub: [
+        {
+          runId: "review",
+          callId: "read",
+          resultHash: receipt.resultHash,
+          admissionHash,
+        },
+      ],
+    };
+    expect(await execution.validateDependencies(context)).toEqual({ ok: true });
+    row.state.sourceResults = [];
+    expect(await execution.validateDependencies(context)).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "execution_receipt_missing",
+    });
+    row.state.sourceResults = [receipt];
+    readSession.mockResolvedValueOnce({ complete: false, messages });
+    expect(await execution.validateDependencies(context)).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "execution_session_incomplete",
+    });
+    messages[1]!.content = [{ type: "tool_result", toolUseId: "read", content: "changed code" }];
+    expect(await execution.validateDependencies(context)).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "execution_call_result_unproved",
+    });
+  });
+  it("distinguishes an absent execution controller from a missing live owner", async () => {
+    const f = setup();
+    const context: ContextDependencies = {
+      ...clean,
+      version: 2,
+      executionGithub: [
+        {
+          runId: "review",
+          callId: "read",
+          resultHash: "a".repeat(64),
+          admissionHash: "b".repeat(64),
+        },
+      ],
+    };
+    expect(await f.access.validateDependencies(context)).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "execution_consumer_missing",
+    });
+    const execution = contextAccessForExecution(f.deps, {
+      msg,
+      io: f.io,
+      executionConsumer: { runId: "review", gen: "gen", admissionHash: "b".repeat(64) },
+    });
+    expect(await execution.validateDependencies(context)).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "execution_owner_missing",
+    });
+    expect(await execution.validateDependencies(clean)).toEqual({ ok: true });
+  });
   it("checks the current destination before reusing a public source", async () => {
     const f = setup();
     const source = { ...origin, channelId: "slack:C_INTERNAL", threadKey: "slack:C_INTERNAL:1" };
@@ -467,6 +608,7 @@ describe("message-bound context access", () => {
     expect(await destination.validateDependencies({ ...clean, origins: [source] })).toEqual({
       ok: false,
       code: "saved-context-unproved",
+      check: "origin_destination_unproved",
     });
     expect(await destination.readRunDependencies(source.runId)).toBeUndefined();
   });

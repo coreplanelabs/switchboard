@@ -3,6 +3,7 @@ import {
   type AudienceCheck,
   type AudienceTrace,
   type AudienceRefusalCode,
+  type ContextRefusalCheck,
 } from "../audienceDecision.js";
 import type { SlackContextBinding } from "./slackContextBinding.js";
 import { SOURCE_REVALIDATE_MAX_MS } from "../budgets.js";
@@ -17,6 +18,7 @@ export interface PrivateAudienceLatch extends AudienceTrace {
   revoked: boolean;
   /** Recovery cannot reconstruct every consumed follow-up's source. */
   code?: AudienceRefusalCode;
+  check?: ContextRefusalCheck;
   /** A saved Slack read must still match a fresh authorized source at publication. */
   revalidateSources?: () => Promise<AudienceCheck>;
 }
@@ -109,7 +111,10 @@ export async function savedSlackSourcesStillValid(latch: PrivateAudienceLatch): 
   try {
     const checked = await latch.revalidateSources();
     if (checked.ok && !latch.revoked) return true;
-    if (!checked.ok) latch.code ??= checked.code;
+    if (!checked.ok && latch.code === undefined) {
+      latch.code = checked.code;
+      latch.check = checked.check;
+    }
   } catch {
     // Failed source checks never restore an earlier result's authority.
   }
@@ -178,6 +183,7 @@ export async function privateRunAudienceDecision(
   const revoked = (): AudienceCheck => ({
     ok: false,
     code: latch.refusal?.code ?? latch.code ?? "followup-unverified",
+    ...((latch.refusal?.check ?? latch.check) ? { check: latch.refusal?.check ?? latch.check } : {}),
   });
   if (latch.revoked) return revoked();
   if (privateAudienceRequired(msg)) {

@@ -30,13 +30,60 @@ export const AUDIENCE_REFUSAL_CODES = [
   "source-check-timeout",
 ] as const;
 export type AudienceRefusalCode = (typeof AUDIENCE_REFUSAL_CODES)[number];
-export type AudienceCheck = { ok: true } | { ok: false; code: AudienceRefusalCode };
+/** Closed condition names survive terminal cleanup without copying source bytes. */
+export const CONTEXT_REFUSAL_CHECKS = [
+  "context_invalid",
+  "context_unknown",
+  "context_changed",
+  "context_validation_exception",
+  "worker_audience_unproved",
+  "execution_consumer_missing",
+  "execution_owner_missing",
+  "execution_generation_mismatch",
+  "execution_agent_mismatch",
+  "execution_requester_mismatch",
+  "execution_channel_mismatch",
+  "execution_thread_mismatch",
+  "execution_authentication_mismatch",
+  "execution_relay_mismatch",
+  "execution_admission_mismatch",
+  "execution_session_missing",
+  "execution_session_incomplete",
+  "execution_receipt_owner_mismatch",
+  "execution_receipt_admission_mismatch",
+  "execution_receipt_missing",
+  "execution_call_result_unproved",
+  "execution_github_access_unproved",
+  "execution_owner_changed",
+  "unit_status_unproved",
+  "memory_scope_denied",
+  "github_repository_unproved",
+  "origin_record_missing",
+  "origin_access_denied",
+  "origin_identity_mismatch",
+  "origin_checkpoint_missing",
+  "origin_checkpoint_binding_mismatch",
+  "origin_checkpoint_invalid",
+  "origin_worker_binding_mismatch",
+  "origin_worker_owner_mismatch",
+  "origin_worker_audience_unproved",
+  "origin_destination_unproved",
+  "origin_visibility_unavailable",
+  "origin_requester_mismatch",
+  "mcp_record_unproved",
+  "mcp_agent_missing",
+  "mcp_state_unproved",
+  "mcp_audience_unproved",
+] as const;
+export type ContextRefusalCheck = (typeof CONTEXT_REFUSAL_CHECKS)[number];
+export type AudienceCheck = { ok: true } | { ok: false; code: AudienceRefusalCode; check?: ContextRefusalCheck };
 export type AudienceStage = "prompt" | "followup" | "recovery" | "answer-event" | "reply";
 export interface AudienceRefusalReceipt {
   version: 1;
   causeAt: AudienceStage;
   withheldAt?: "prompt" | "answer-event" | "reply";
   code: AudienceRefusalCode;
+  check?: ContextRefusalCheck;
 }
 export interface AudienceTrace {
   refusal?: AudienceRefusalReceipt;
@@ -47,10 +94,11 @@ export function audienceRefusalOf(value: unknown): AudienceRefusalReceipt | unde
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const v = value as Record<string, unknown>;
   if (
-    Object.keys(v).some((key) => !["version", "causeAt", "withheldAt", "code"].includes(key)) ||
+    Object.keys(v).some((key) => !["version", "causeAt", "withheldAt", "code", "check"].includes(key)) ||
     v.version !== 1 ||
     !["prompt", "followup", "recovery", "answer-event", "reply"].includes(v.causeAt as string) ||
     !(AUDIENCE_REFUSAL_CODES as readonly unknown[]).includes(v.code) ||
+    (v.check !== undefined && !(CONTEXT_REFUSAL_CHECKS as readonly unknown[]).includes(v.check)) ||
     (v.withheldAt !== undefined && !["prompt", "answer-event", "reply"].includes(v.withheldAt as string))
   )
     return undefined;
@@ -58,6 +106,7 @@ export function audienceRefusalOf(value: unknown): AudienceRefusalReceipt | unde
     version: 1,
     causeAt: v.causeAt as AudienceStage,
     code: v.code as AudienceRefusalCode,
+    ...(v.check !== undefined ? { check: v.check as ContextRefusalCheck } : {}),
     ...(v.withheldAt !== undefined ? { withheldAt: v.withheldAt as AudienceRefusalReceipt["withheldAt"] } : {}),
   };
 }
@@ -68,8 +117,9 @@ export function noteAudienceRefusal(
   code: AudienceRefusalCode,
   causeAt: AudienceStage,
   withheldAt?: AudienceRefusalReceipt["withheldAt"],
+  check?: ContextRefusalCheck,
 ): AudienceRefusalReceipt {
-  trace.refusal ??= { version: 1, causeAt, code };
+  trace.refusal ??= { version: 1, causeAt, code, ...(check !== undefined ? { check } : {}) };
   if (withheldAt !== undefined && trace.refusal.withheldAt === undefined)
     trace.refusal = { ...trace.refusal, withheldAt };
   return trace.refusal;

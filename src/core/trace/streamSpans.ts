@@ -48,6 +48,7 @@ export const STREAMED_SPANS = [
   "run.observe_workspace",
   "run.pr_post_step",
   "run.review_post_step",
+  "run.publication_context_check",
   "run.reading_diff_join",
   "run.pr_description_join",
   "model.turn",
@@ -95,6 +96,7 @@ const GETTING_READY: ReadonlySet<string> = new Set([
   "dispatch.route",
 ]);
 const FINISHING_UP: ReadonlySet<string> = new Set([
+  "run.publication_context_check",
   "run.observe_workspace",
   "run.pr_post_step",
   "run.review_post_step",
@@ -161,6 +163,7 @@ export const PARENTS: Readonly<Record<string, readonly string[]>> = {
   "run.observe_workspace": ["request", "ship.round"],
   "run.pr_post_step": ["request", "ship.round"],
   "run.review_post_step": ["request", "ship.round"],
+  "run.publication_context_check": ["request", "ship.round"],
   "run.reading_diff_join": ["request", "ship.round"],
   "run.pr_description_join": ["request", "ship.round"],
   "model.turn": ["run.agent"],

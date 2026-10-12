@@ -8,6 +8,21 @@ import {
 } from "./audienceDecision.js";
 
 describe("audience refusal diagnostics", () => {
+  it("retains a closed context check without accepting source content", () => {
+    const trace: AudienceTrace = {};
+    const check = "execution_receipt_missing";
+    noteAudienceRefusal(trace, "saved-context-unproved", "answer-event", "answer-event", check);
+    expect(audienceRefusalOf(trace.refusal)).toEqual({
+      version: 1,
+      causeAt: "answer-event",
+      withheldAt: "answer-event",
+      code: "saved-context-unproved",
+      check,
+    });
+    noteAudienceRefusal(trace, "saved-context-unproved", "reply", "reply", "execution_owner_missing");
+    expect(trace.refusal?.check).toBe("execution_receipt_missing");
+    expect(audienceRefusalOf({ ...trace.refusal, check: "private source content" })).toBeUndefined();
+  });
   it("accepts only the closed structural receipt and never private extra fields", () => {
     const receipt = { version: 1, causeAt: "reply", withheldAt: "reply", code: "github-access-lost" };
     expect(audienceRefusalOf(receipt)).toEqual(receipt);

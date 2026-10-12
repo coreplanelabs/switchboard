@@ -10625,6 +10625,67 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect((await s.store.get(s.run.id))?.reviewPublication).toMatchObject({ runId: s.run.id, state: "accepted" });
   });
 
+  it("retains the failed context check and traces it when review publication is withheld", async () => {
+    const s = setup("", {
+      agent: "review",
+      provider: neverCalled(),
+      ...prThread,
+      executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+      review: {
+        head: HEAD,
+        post: async () => {
+          throw new Error("refused review reached GitHub");
+        },
+      },
+    });
+    const resume = finishing("private review bytes", {
+      agent: "review",
+      state: { verdict: VERDICT },
+      repoCtx: prThread.repoCtx,
+    });
+    const trace = startRequestRoot({ clock: () => NOW }, { channel: "slack", receivedAt: NOW });
+    trace.bindRun(s.run.id, (event) => s.registry.publish(s.run.id, event));
+    const ctx = await trackedCodingContext(s, {
+      ...s.ctx,
+      root: trace.root,
+      resume,
+      messages: resume.plan.messages,
+      publicationContextCheck: async () => ({
+        ok: false,
+        code: "saved-context-unproved",
+        check: "execution_receipt_missing",
+      }),
+    });
+    const out = answered(await runLoop(s.deps, ctx));
+    expect(out.reviewPost).toEqual({
+      posted: false,
+      reason: "the review publication was refused",
+    });
+    s.ending.drain(true);
+    await s.writer.settled();
+    const record = (await s.store.get(s.run.id))!;
+    expect(record.audienceRefusal).toEqual({
+      version: 1,
+      causeAt: "answer-event",
+      withheldAt: "answer-event",
+      code: "saved-context-unproved",
+      check: "execution_receipt_missing",
+    });
+    expect(
+      record.events
+        .filter((e) => e.type === "span_end" && e.name === "run.publication_context_check")
+        .map((e) => (e.type === "span_end" ? e.attrs : undefined)),
+    ).toEqual([{ outcome: "execution_receipt_missing" }]);
+    expect(out.answer).toBe(
+      "I can't safely use earlier source data in this conversation. Please ask me to check the source again.",
+    );
+    expect(
+      record.events.filter((e) => e.type === "answer").map((e) => (e.type === "answer" ? e.text : undefined)),
+    ).toEqual([
+      "I can't safely use earlier source data in this conversation. Please ask me to check the source again.",
+    ]);
+  });
+
   it("a soft stop after durable pending admission records confirmed refusal without native dispatch", async () => {
     const post = vi.fn(async () => ({ state: "accepted" as const }));
     const s = setup("", {
