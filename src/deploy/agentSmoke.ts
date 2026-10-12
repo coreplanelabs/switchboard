@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { checkExecutionReceiptSchema } from "../core/checkExecution.js";
-import { AGENT_SMOKE_POLL_MS, leaseMinimum, minutesToMs } from "../core/budgets.js";
+import { AGENT_SMOKE_POLL_MS, AGENT_SMOKE_REVIEW_MINUTES, leaseMinimum, minutesToMs } from "../core/budgets.js";
 import { answerOutcomeOf } from "../core/answerOutcome.js";
+import { redactSecrets } from "../core/redact.js";
 import { unwrapUntrusted } from "../core/untrusted.js";
 import { StreamableHttpMcpClient } from "../mcp/client.js";
 import { assertSmokeOriginMatchesPlan } from "./ingressSmoke.js";
@@ -163,7 +164,7 @@ export interface SmokeScenario {
 export interface SmokeTransport {
   health(): Promise<unknown>;
   request(scenario: SmokeScenario, thread: string): Promise<unknown>;
-  readRun(id: string): Promise<unknown>;
+  readRun(id: string, onRecord?: (record: unknown) => Promise<void>): Promise<unknown>;
 }
 interface ScenarioReceipt {
   id: SmokeScenario["id"];
@@ -181,6 +182,18 @@ interface ScenarioReceipt {
   actualModel?: string;
   modelControls?: { effort: string; capField: string; window: number; cache: string };
   artifact?: { repo: string; number: number; head: string; verdict?: "approve" | "request_changes" };
+  evidence?: { identityVerified: boolean; record: unknown; unverifiedObservation?: unknown };
+  failedChecks?: string[];
+  observationError?: { code: string; fields?: Array<{ path: string; code: string }> };
+}
+
+/** Preserve JSON structure and diagnostic text, without credentials from the transport or log. */
+function safeSmokeRecord(value: unknown, token?: string): unknown {
+  if (typeof value === "string") return redactSecrets(token ? value.replaceAll(token, "«redacted»") : value);
+  if (Array.isArray(value)) return value.map((item) => safeSmokeRecord(item, token));
+  if (value !== null && typeof value === "object")
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, safeSmokeRecord(item, token)]));
+  return value;
 }
 export const PRODUCT_ACCEPTANCE_GAP = {
   outcome: "incomplete",
@@ -208,7 +221,7 @@ export interface AgentSmokeReceipt {
 function scenarios(config: SmokeConfig): SmokeScenario[] {
   const general = leaseMinimum("general"),
     explore = leaseMinimum("explore"),
-    review = leaseMinimum("review");
+    review = AGENT_SMOKE_REVIEW_MINUTES;
   const selected: SmokeScenario[] = [
     {
       id: "answer",
@@ -339,7 +352,48 @@ export async function runAgentSmoke(input: {
         row.reason = "served_build_mismatch";
         break;
       }
-      const run = runSchema.parse(await input.transport.readRun(response.run.id));
+      const retainRun = async (value: unknown) => {
+        const raw = value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
+        const identityVerified =
+          raw.id === row.runId &&
+          raw.userId === `http:${config.subject}` &&
+          raw.channelId === `http:${config.channel}` &&
+          raw.threadKey === `http:${config.channel}:${row.thread}` &&
+          raw.agent === scenario.agent &&
+          (scenario.id === "answer" || raw.repo === config.repo);
+        // An observation from another actor/thread is diagnostic, not authority to expose its content.
+        const record = identityVerified
+          ? raw
+          : Object.fromEntries(
+              [
+                "id",
+                "userId",
+                "channelId",
+                "threadKey",
+                "agent",
+                "repo",
+                "finished",
+                "persisted",
+                "status",
+                "provisional",
+                "restarting",
+                "eventCount",
+                "storedEventCount",
+                "truncated",
+              ]
+                .filter((key) => raw[key] !== undefined && (raw[key] === null || typeof raw[key] !== "object"))
+                .map((key) => [key, raw[key]]),
+            );
+        if (!identityVerified && row.evidence?.identityVerified) {
+          row.evidence.unverifiedObservation = safeSmokeRecord(record);
+        } else {
+          row.evidence = { identityVerified, record: safeSmokeRecord(record) };
+        }
+        await save();
+      };
+      const originalRecord = await input.transport.readRun(response.run.id, retainRun);
+      await retainRun(originalRecord);
+      const run = runSchema.parse(originalRecord);
       row.userId = run.userId;
       row.threadKey = run.threadKey;
       row.parentInstanceId = run.parentInstanceId;
@@ -407,18 +461,23 @@ export async function runAgentSmoke(input: {
       }
       const answer = answerOutcomeOf(run.answerOutcome);
       const output = run.events.filter((e) => e.type === "answer").at(-1)?.text;
-      if (
-        answer?.ending !== "answered" ||
-        answer.output === "absent" ||
-        run.replyOk !== true ||
-        !run.usage?.turns ||
-        !output?.trim()
-      ) {
+      const outputChecks = {
+        "answerOutcome.ending": answer?.ending === "answered",
+        "answerOutcome.output": answer?.output !== "absent",
+        replyOk: run.replyOk === true,
+        "usage.turns": Boolean(run.usage?.turns),
+        "events.answer.text": Boolean(output?.trim()),
+      };
+      const failedChecks = Object.entries(outputChecks)
+        .filter(([, passed]) => !passed)
+        .map(([field]) => field);
+      if (failedChecks.length) {
+        row.failedChecks = failedChecks;
         row.outcome = "failed";
         row.reason = "execution_output_unproven";
         break;
       }
-      const text = unwrapUntrusted(output).trim();
+      const text = unwrapUntrusted(output ?? "").trim();
       if (
         (scenario.id === "answer" && text !== "4") ||
         (scenario.id === "workspace" && text !== config.workspace.answer)
@@ -495,8 +554,26 @@ export async function runAgentSmoke(input: {
       row.outcome = "passed";
       row.reason = "accepted";
       await save();
-    } catch {
+    } catch (error) {
       // Preserve the last known phase and identity; remote diagnostic prose is not authority.
+      const knownErrors = [
+        "health_unavailable",
+        "ingress_unavailable",
+        "admission_unproven",
+        "record_unavailable",
+        "record_protocol_mismatch",
+        "run_deadline_exceeded",
+      ];
+      row.observationError =
+        error instanceof z.ZodError
+          ? {
+              code: "record_invalid",
+              fields: error.issues.map((issue) => ({ path: issue.path.join("."), code: issue.code })),
+            }
+          : {
+              code:
+                error instanceof Error && knownErrors.includes(error.message) ? error.message : "observation_failed",
+            };
       break;
     }
   }
@@ -562,7 +639,7 @@ export function agentSmokeTransport(input: {
         threadKey: admission.threadKey,
       };
     },
-    async readRun(id) {
+    async readRun(id, onRecord) {
       const deadline = deadlines.get(id);
       if (deadline === undefined) throw new Error("admission_unproven");
       while (systemClock() < deadline) {
@@ -574,6 +651,10 @@ export function agentSmokeTransport(input: {
         if (block?.type !== "text" || typeof block.text !== "string" || !block.text.startsWith(prefix))
           throw new Error("record_protocol_mismatch");
         const record: unknown = JSON.parse(block.text.slice(prefix.length));
+        // runs_get include:messages supplies the complete retained event history, not an event page.
+        // Save each original observation before parsing or the next read can fail.
+        const safeRecord = safeSmokeRecord(record, input.token);
+        await onRecord?.(safeRecord);
         const state = z
           .object({
             id: z.literal(id),
@@ -583,7 +664,7 @@ export function agentSmokeTransport(input: {
             restarting: z.boolean().optional(),
           })
           .parse(record);
-        if (state.finished && state.persisted === true && !state.provisional && !state.restarting) return record;
+        if (state.finished && state.persisted === true && !state.provisional && !state.restarting) return safeRecord;
         const left = deadline - systemClock();
         if (left > 0) await new Promise((resolve) => setTimeout(resolve, Math.min(AGENT_SMOKE_POLL_MS, left)));
       }

@@ -5,6 +5,208 @@ import { MCP_PROTOCOL_VERSION } from "../mcp/client.js";
 import { commit, config, fixture, head } from "./testing/agentSmoke.js";
 
 describe("bounded agent smoke", () => {
+  it("retains the original budget failure and complete run evidence before refusing acceptance", async () => {
+    const { transport, records } = fixture();
+    const saves: unknown[] = [];
+    transport.readRun = async (id) => {
+      const record = records.get(id) as { events: unknown[] };
+      if (id !== "run-review") return record;
+      return {
+        ...record,
+        startedAt: 1000,
+        finishedAt: 65000,
+        sealedAt: 65001,
+        replyOk: false,
+        answerOutcome: { version: 1, ending: "time_budget", output: "present" },
+        events: [
+          ...record.events,
+          { type: "lease", startedAt: 1000, endsAt: 901000, loopEndsAt: 541000, seq: 100 },
+          { type: "run_note", kind: "time_budget_exhausted", at: 61000, seq: 101, summary: "time ended" },
+          { type: "tool_result", tool: "read", seq: 102, output: "Authorization: Bearer abcdefghijklmnopqrst" },
+        ],
+      };
+    };
+    const receipt = await runAgentSmoke({
+      config,
+      thread: "release-1",
+      transport,
+      onReceipt: async (snapshot) => {
+        saves.push(snapshot);
+      },
+    });
+    expect(receipt).toMatchObject({
+      capabilityOutcome: "failed",
+      scenarios: [
+        { outcome: "passed" },
+        { outcome: "passed" },
+        {
+          id: "review",
+          reason: "execution_output_unproven",
+          failedChecks: ["answerOutcome.ending", "replyOk"],
+          evidence: {
+            identityVerified: true,
+            record: {
+              id: "run-review",
+              startedAt: 1000,
+              finishedAt: 65000,
+              sealedAt: 65001,
+              answerOutcome: { ending: "time_budget", output: "present" },
+              replyOk: false,
+              reviewPost: { posted: true, head },
+              events: expect.arrayContaining([
+                { type: "lease", startedAt: 1000, endsAt: 901000, loopEndsAt: 541000, seq: 100 },
+                { type: "run_note", kind: "time_budget_exhausted", at: 61000, seq: 101, summary: "time ended" },
+              ]),
+            },
+          },
+        },
+      ],
+    });
+    expect(saves).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          scenarios: expect.arrayContaining([
+            expect.objectContaining({
+              reason: "run_record_unproven",
+              evidence: expect.objectContaining({
+                record: expect.objectContaining({ id: "run-review", sealedAt: 65001 }),
+              }),
+            }),
+          ]),
+        }),
+      ]),
+    );
+    expect(JSON.stringify(receipt)).not.toContain("abcdefghijklmnopqrst");
+  });
+
+  it("saves the last original observation when monitoring fails without another admission", async () => {
+    const { transport, records } = fixture();
+    transport.readRun = async (id, observe) => {
+      await observe?.({ ...(records.get(id) as object), finished: false, persisted: false });
+      await observe?.({ id: "other-run", userId: "http:other", events: [{ text: "unrelated-private-body" }] });
+      throw new Error("run_deadline_exceeded");
+    };
+    const receipt = await runAgentSmoke({ config, thread: "release-1", transport });
+    expect(receipt).toMatchObject({
+      capabilityOutcome: "incomplete",
+      scenarios: [
+        {
+          runId: "run-answer",
+          reason: "run_record_unproven",
+          observationError: { code: "run_deadline_exceeded" },
+          evidence: {
+            record: { id: "run-answer", finished: false, persisted: false },
+            unverifiedObservation: { id: "other-run", userId: "http:other" },
+          },
+        },
+        { outcome: "skipped" },
+        { outcome: "skipped" },
+      ],
+    });
+    expect((transport.request as ReturnType<typeof vi.fn>).mock.calls.map(([, thread]) => thread)).toEqual([
+      "release-1-answer",
+    ]);
+    expect(JSON.stringify(receipt)).not.toContain("unrelated-private-body");
+  });
+
+  it("retains full service history through the HTTP transport and excludes another requester's content", async () => {
+    for (const foreign of [false, true]) {
+      const original = fixture();
+      const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: { commit } });
+        const request = JSON.parse(String(init?.body));
+        if (String(url).endsWith("/ingress")) {
+          const id = request.thread.split("-").at(-1);
+          const result = (await original.transport.request(
+            {
+              id,
+              agent: id === "answer" ? "general" : id === "workspace" ? "explore" : "review",
+              text: request.text,
+              minutes: id === "review" ? 15 : 4,
+            },
+            request.thread,
+          )) as { run: { id: string }; build: unknown };
+          return Response.json(
+            { runId: result.run.id, threadKey: `http:smoke:${request.thread}`, build: result.build },
+            { status: 202 },
+          );
+        }
+        if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+        if (request.method === "initialize")
+          return Response.json({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: MCP_PROTOCOL_VERSION } });
+        const id = request.params.arguments.id;
+        const record = original.records.get(id) as { events: unknown[] };
+        return Response.json({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: `runs.get: ok\n${JSON.stringify({
+                  ...record,
+                  userId: foreign ? "http:other" : "http:smoke",
+                  events: [
+                    ...record.events,
+                    ...Array.from({ length: 501 }, (_, index) => ({
+                      type: "run_note",
+                      seq: 1000 + index,
+                      kind: "diagnostic",
+                      summary:
+                        index === 500 ? (foreign ? "other-requester-private-data" : "retained-last-event") : "history",
+                    })),
+                    { type: "run_note", kind: "diagnostic", summary: "transport-opaque-value" },
+                  ],
+                })}`,
+              },
+            ],
+          },
+        });
+      });
+      const transport = agentSmokeTransport({
+        origin: "https://bot.example.test",
+        healthUrl: "https://bot.example.test/healthz",
+        token: "transport-opaque-value",
+        config,
+        fetch,
+      });
+      const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
+      if (foreign) {
+        expect(receipt).toMatchObject({
+          capabilityOutcome: "failed",
+          scenarios: [
+            {
+              reason: "run_identity_mismatch",
+              evidence: { identityVerified: false, record: { id: "run-answer", userId: "http:other" } },
+            },
+            { outcome: "skipped" },
+            { outcome: "skipped" },
+          ],
+        });
+        expect(JSON.stringify(receipt)).not.toContain("other-requester-private-data");
+      } else {
+        expect(receipt).toMatchObject({
+          capabilityOutcome: "passed",
+          scenarios: [
+            {
+              evidence: {
+                identityVerified: true,
+                record: {
+                  events: expect.arrayContaining([
+                    { type: "run_note", seq: 1500, kind: "diagnostic", summary: "retained-last-event" },
+                  ]),
+                },
+              },
+            },
+            { outcome: "passed" },
+            { outcome: "passed" },
+          ],
+        });
+        expect(JSON.stringify(receipt)).not.toContain("transport-opaque-value");
+      }
+    }
+  });
+
   it("requires recorded model controls when requested, rejecting degraded or missing evidence", async () => {
     const card = {
       ref: "openrouter/openai/gpt-5.3-codex",
@@ -71,7 +273,7 @@ describe("bounded agent smoke", () => {
     expect((transport.request as ReturnType<typeof vi.fn>).mock.calls.map(([scenario]) => scenario.text)).toEqual([
       "What is 2 + 2? Answer only with the number. budget:4 model:openai/gpt-6.1-sol",
       "agent:explore budget:4 Read SMOKE.md in acme/smoke using the workspace. Reply only with its contents. Do not change files. model:openai/gpt-6.1-sol",
-      `agent:review budget:7 Review https://github.com/acme/smoke/pull/7 at head ${head}. Publish the review; do not change files or merge. model:openai/gpt-6.1-sol`,
+      `agent:review budget:15 Review https://github.com/acme/smoke/pull/7 at head ${head}. Publish the review; do not change files or merge. model:openai/gpt-6.1-sol`,
     ]);
   });
 
@@ -347,7 +549,7 @@ describe("bounded agent smoke", () => {
           const id = request.thread.split("-").at(-1);
           const agent = id === "answer" ? "general" : id === "workspace" ? "explore" : "review";
           const result = (await original.transport.request(
-            { id, agent, text: request.text, minutes: id === "review" ? 7 : 4 },
+            { id, agent, text: request.text, minutes: id === "review" ? 15 : 4 },
             request.thread,
           )) as { run: { id: string }; build: unknown };
           return Response.json(
