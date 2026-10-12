@@ -248,7 +248,7 @@ export interface RunLedger {
    *  without facts (a hosted parent, an older wiring) still extends its lease. */
   heartbeat(runId: string, gen: string, leaseMs: number, facts?: HeartbeatFacts): Promise<HeartbeatResult>;
   append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult>;
-  /** Validate and commit a state boundary plus row projection in one transaction. */
+  /** Commit a state boundary and row projection atomically; ended also fences execution replay. */
   assignLiveState(runId: string, gen: string, assignment: LiveStateAssignRequest): Promise<LiveStateAssignResult>;
   setState(runId: string, gen: string, state: RunState): Promise<FenceResult>;
   /** Any generation: a steer arrives on whichever container is up. */
@@ -263,7 +263,7 @@ export interface RunLedger {
   /** Mark this generation's runs for the next one. A paused retry has no
    *  local runner left; unlike a SIGTERM handoff it can be sealed here. */
   handoff(gen: string, runIds: string[], opts?: { pausedForRetry: true }): Promise<{ marked: string[] }>;
-  /** CAS `live → finishing`, taken before the reply. */
+  /** CAS to no-replay before the reply; an ended row confirms its existing atomic boundary. */
   finishing(runId: string, gen: string): Promise<FenceResult>;
   /** The finished record replaces the live rows in one transaction. Fenced by
    *  generation only, NOT by phase: the owner may finish from any phase, because

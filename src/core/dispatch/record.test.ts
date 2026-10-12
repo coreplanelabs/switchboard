@@ -23,6 +23,154 @@ import { planContextCheckpoint } from "../references/contextCheckpoint.js";
 import { contextDependenciesHash } from "../references/contextDependencies.js";
 import type { IncomingMessage } from "../types.js";
 
+describe("reclaimed terminal artifacts", () => {
+  const head = "a".repeat(40);
+  const row = (state: Record<string, unknown>): LiveRunRow => ({
+    runId: "terminal-run",
+    threadKey: "slack:C1:terminal",
+    ownerGen: "g2",
+    leaseUntil: 100,
+    startedAt: 1,
+    phase: "live",
+    stop: null,
+    card: null,
+    system: "test",
+    tools: [],
+    state,
+    meta: {
+      agent: "review",
+      repo: "acme/api",
+      pr: 42,
+      channelId: "slack:C1",
+      userId: "slack:UACTOR",
+      threadKey: "slack:C1:terminal",
+    },
+  });
+  const verdict = {
+    verdict: "request_changes",
+    summary: "One remaining issue",
+    head,
+    findings: [{ id: "F1", severity: "minor", file: "src/a.ts", line: 1, title: "Handle empty input" }],
+    resolutions: [{ findingId: "old:F1", disposition: "fixed", note: "The prior bug is fixed" }],
+  };
+
+  it.each(["accepted", "refused", "pending", "uncertain"] as const)(
+    "preserves the saved review and canonical %s publication without inventing delivery",
+    (state) => {
+      const publication = {
+        version: 1,
+        runId: "terminal-run",
+        target: { repo: "acme/api", number: 42, commitId: head },
+        bodyHash: "b".repeat(64),
+        verdict: "request_changes",
+        state,
+      };
+      const savedPost = { posted: false, reason: "publication not confirmed", uncertain: true };
+      const record = reclaimedRunRecord({
+        row: row({
+          verdict,
+          reviewHead: head,
+          reviewPublication: publication,
+          ...(state === "accepted" ? {} : { reviewPost: savedPost }),
+        }),
+        events: [],
+        status: "completed",
+        finishedAt: 20,
+      });
+      expect(record.verdict).toEqual(verdict);
+      expect(record.reviewHead).toBe(head);
+      expect(record.reviewPublication).toEqual(publication);
+      expect(record.reviewPost).toEqual(
+        state === "accepted"
+          ? { posted: true, target: { repo: "acme/api", number: 42 }, head, verdict: "request_changes" }
+          : savedPost,
+      );
+      expect(record.replyOk).toBeUndefined();
+      expect(isRunRecord(record)).toBe(true);
+    },
+  );
+
+  it("preserves findings dispositions, terminal head and an affirmed empty or deviating handoff", () => {
+    const dispositions = [{ findingId: "review:1:F1", disposition: "fixed", note: "Handle the empty result" }];
+    for (const handoff of [
+      { deviations: [], followUps: [], unproven: [] },
+      {
+        deviations: [{ from: "Use a new queue", to: "Reuse the ledger", why: "One owner is sufficient" }],
+        followUps: [],
+        unproven: [],
+      },
+    ]) {
+      const record = reclaimedRunRecord({
+        row: row({ dispositions, handoff, headSha: head }),
+        events: [],
+        status: "completed",
+        finishedAt: 20,
+      });
+      expect(record).toMatchObject({ status: "completed", headSha: head, dispositions, handoff });
+      expect(isRunRecord(record)).toBe(true);
+    }
+  });
+
+  it("preserves only the canonical research brief matching the last submission", () => {
+    const brief = {
+      version: 1 as const,
+      goal: "Understand restart",
+      headSha: head,
+      complexity: "simple" as const,
+      decision: "ready" as const,
+      evidence: [{ source: "repo", ref: "src/core/boot.ts", summary: "Verified the original recovery path" }],
+      assumptions: [],
+      unknowns: [],
+      approach: ["Commit completion atomically"],
+      verification: ["Restart after completion"],
+    };
+    const events = [{ type: "research_brief" as const, brief, confirmed: false, seq: 1, at: 2 }];
+    const record = reclaimedRunRecord({
+      row: row({ researchBrief: brief }),
+      events,
+      status: "completed",
+      finishedAt: 20,
+    });
+    expect(record.researchBrief).toEqual(brief);
+    expect(isRunRecord(record)).toBe(true);
+    const displayOnly = reclaimedRunRecord({
+      row: row({}),
+      events: [{ ...events[0], confirmed: true }],
+      status: "completed",
+      finishedAt: 20,
+    });
+    expect(displayOnly).toMatchObject({ id: "terminal-run", status: "completed" });
+    expect(displayOnly.researchBrief).toBeUndefined();
+    expect(() =>
+      reclaimedRunRecord({
+        row: row({ researchBrief: { ...brief, goal: "Older submission" } }),
+        events,
+        status: "completed",
+        finishedAt: 20,
+      }),
+    ).toThrow("the saved research brief could not be verified");
+  });
+
+  it.each(["verdict", "dispositions", "handoff"])("refuses to archive malformed saved %s", (field) => {
+    expect(() =>
+      reclaimedRunRecord({ row: row({ [field]: { unknown: true } }), events: [], status: "completed", finishedAt: 20 }),
+    ).toThrow("the saved terminal artifacts could not be verified");
+  });
+
+  it("does not turn a review display event into a successful post", () => {
+    const record = reclaimedRunRecord({
+      row: row({ verdict }),
+      events: [
+        { type: "review_posted", repo: "acme/api", number: 42, head, verdict: "request_changes", seq: 1, at: 2 },
+      ],
+      status: "completed",
+      finishedAt: 20,
+    });
+    expect(record.verdict).toEqual(verdict);
+    expect(record.reviewPost).toBeUndefined();
+  });
+});
+
 describe("private context refusal receipt on the finished run", () => {
   it("retains the bounded refusal when a reclaimed run has no surviving note", () => {
     const row: LiveRunRow = {

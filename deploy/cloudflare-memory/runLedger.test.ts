@@ -22,7 +22,7 @@ import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it, vi } from "vitest";
 import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
-import { LEASE_MS } from "../../src/core/runLedger/types.ts";
+import { LEASE_MS, type LiveRunRow, type AppendableEvent } from "../../src/core/runLedger/types.ts";
 import type { CoordinatorInstance, CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
 import {
   checkpointKey,
@@ -51,7 +51,6 @@ import type { ClaimRequest } from "../../src/core/runLedger/types.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
 import { WorkerRunLedger } from "../../src/core/runLedgerWorker.ts";
 import { createCheckExecution } from "../../src/core/checkExecution.ts";
-import type { LiveRunRow } from "../../src/core/runLedger/types.ts";
 import type { StoredWorkspaceCustody } from "../../src/core/runLedger/workspaceDurability.ts";
 import { appendRunReport } from "../../src/core/runLedger/threadSession.ts";
 import { contextThreadSessionKey } from "../../src/core/runLedger/sessionLog.ts";
@@ -4781,6 +4780,199 @@ describe("run ledger — steps, events, inbox, state (items 30–31)", () => {
       [3, "run_state"],
       [4, "run_state"],
     ]);
+  });
+
+  it.each(["accepted review", "uncertain review", "findings", "empty handoff", "research"])(
+    "archives original %s outputs through SQLite recovery without replay",
+    async (kind) => {
+      const at = Date.now();
+      const key = storeKey(),
+        id = "saved-output",
+        thread = "slack:C1:saved-output",
+        head = "a".repeat(40);
+      const verdict = {
+        verdict: "request_changes",
+        summary: "Fix one issue",
+        head,
+        findings: [{ id: "F1", severity: "minor", file: "src/a.ts", title: "Handle empty input" }],
+        resolutions: [{ findingId: "old:F1", disposition: "fixed", note: "The earlier issue is fixed" }],
+      };
+      const brief = {
+        version: 1 as const,
+        goal: "Understand restart",
+        headSha: head,
+        complexity: "simple" as const,
+        decision: "ready" as const,
+        evidence: [{ source: "src/core/boot.ts", ref: head, summary: "Original recovery source" }],
+        assumptions: [],
+        unknowns: [],
+        approach: ["Commit completion atomically"],
+        verification: ["Restart after completion"],
+      };
+      const publication = {
+        version: 1,
+        runId: id,
+        target: { repo: "acme/api", number: 42, commitId: head },
+        bodyHash: "b".repeat(64),
+        verdict: "request_changes",
+        state: kind === "accepted review" ? "accepted" : "uncertain",
+      };
+      const dispositions = [{ findingId: "review:1:F1", disposition: "fixed", note: "Handled empty input" }];
+      const handoff = {
+        deviations:
+          kind === "empty handoff"
+            ? []
+            : [{ from: "Add a queue", to: "Reuse the ledger", why: "One owner is sufficient" }],
+        followUps: [],
+        unproven: [],
+      };
+      const origin = { runId: id, requester: "slack:UALICE", channelId: "slack:C1", threadKey: thread };
+      const contextDependencies = { version: 1, status: "known", revision: 0, origins: [origin], slack: [], mcp: [] };
+      const statePatch = {
+        finalStatus: "completed",
+        headSha: head,
+        ...(kind.includes("review")
+          ? {
+              verdict,
+              reviewHead: head,
+              reviewPublication: publication,
+              ...(kind === "uncertain review"
+                ? { reviewPost: { posted: false, reason: "publication outcome unknown", uncertain: true } }
+                : {}),
+            }
+          : kind === "research"
+            ? { researchBrief: brief, contextDependencies }
+            : { dispositions, handoff }),
+      };
+      await post(
+        "/runs/claim",
+        claimBody(key, id, thread, "g1", {
+          meta: {
+            agent: kind.includes("review") ? "review" : kind === "research" ? "research" : "coding",
+            repo: "acme/api",
+            pr: 42,
+            channelId: "slack:C1",
+            userId: "slack:UALICE",
+            threadKey: thread,
+          },
+        }),
+      );
+      await post("/runs/live-state", {
+        storeKey: key,
+        runId: id,
+        gen: "g1",
+        assignment: { expectedSeq: 0, at: at, state: "admitted", bound: at + 1_000 },
+      });
+      expect(
+        await post("/runs/live-state", {
+          storeKey: key,
+          runId: id,
+          gen: "g1",
+          assignment: {
+            expectedSeq: 1,
+            at: at + 200,
+            state: "ended",
+            cause: "completed",
+            statePatch,
+            ...(kind === "research"
+              ? { sourceEvents: [{ type: "research_brief", brief, confirmed: false, at: at + 150, seq: 2 }] }
+              : {}),
+          },
+        }),
+      ).toMatchObject({ status: 200, data: { ok: true } });
+      const reclaimed = await post("/runs/reclaim", {
+        storeKey: key,
+        gen: "g2",
+        now: Date.now() + LEASE_MS * 2,
+        leaseMs: LEASE_MS,
+      });
+      const row = (reclaimed.data.runs as Array<{ row: LiveRunRow }>)[0].row;
+      const events = (await post("/runs/live-events", { storeKey: key, runId: id })).data.events as AppendableEvent[];
+      const terminal = reclaimedRunRecord({ row, events, status: "completed", finishedAt: at + 200 });
+      expect(await post("/runs/finish", { storeKey: key, runId: id, gen: "g2", record: terminal })).toMatchObject({
+        status: 200,
+        data: { ok: true },
+      });
+      const stored = (await post("/runs/get", { storeKey: key, id })).data.record as RunRecord;
+      expect(stored).toMatchObject({ id, status: "completed", headSha: head });
+      if (kind.includes("review")) {
+        expect(stored.verdict).toEqual(verdict);
+        expect(stored.reviewHead).toBe(head);
+        expect(stored.reviewPublication).toEqual(publication);
+        expect(stored.reviewPost).toEqual(
+          kind === "accepted review"
+            ? { posted: true, target: { repo: "acme/api", number: 42 }, head, verdict: "request_changes" }
+            : { posted: false, reason: "publication outcome unknown", uncertain: true },
+        );
+      } else if (kind === "research") {
+        expect(stored.researchBrief).toEqual(brief);
+        expect(stored.contextDependencies).toEqual(contextDependencies);
+      } else {
+        expect(stored.dispositions).toEqual(dispositions);
+        expect(stored.handoff).toEqual(handoff);
+      }
+      expect(stored.replyOk).toBeUndefined();
+    },
+  );
+
+  it("terminal completion atomically fences replay and preserves the result through reclaim", async () => {
+    const key = storeKey();
+    await post("/runs/claim", claimBody(key, "terminal-state", "slack:C1:terminal"));
+    await post("/runs/live-state", {
+      storeKey: key,
+      runId: "terminal-state",
+      gen: "g1",
+      assignment: {
+        expectedSeq: 0,
+        at: 100,
+        state: "admitted",
+        bound: 1_000,
+      },
+    });
+    const assignment = {
+      expectedSeq: 1,
+      at: 200,
+      state: "ended",
+      cause: "failed",
+      statePatch: { finalStatus: "failed", answerOutcome: { version: 1, ending: "unknown", output: "absent" } },
+    };
+    expect(
+      await post("/runs/live-state", {
+        storeKey: key,
+        runId: "terminal-state",
+        gen: "g1",
+        assignment: { ...assignment, expectedSeq: 0 },
+      }),
+    ).toEqual({ status: 400, data: { ok: false, reason: "stale-sequence" } });
+    expect(((await post("/runs/live", { storeKey: key })).data.runs as unknown[])[0]).toMatchObject({
+      phase: "live",
+      liveState: { state: "admitted" },
+    });
+    expect(
+      await post("/runs/live-state", { storeKey: key, runId: "terminal-state", gen: "g1", assignment }),
+    ).toMatchObject({ status: 200, data: { ok: true, liveStateSeq: 2 } });
+    expect(((await post("/runs/live", { storeKey: key })).data.runs as unknown[])[0]).toMatchObject({
+      phase: "finishing",
+      liveState: { state: "ended", since: 200 },
+      state: assignment.statePatch,
+    });
+    expect(await post("/runs/finishing", { storeKey: key, runId: "terminal-state", gen: "g1" })).toEqual({
+      status: 200,
+      data: { ok: true },
+    });
+    const reclaimed = await post("/runs/reclaim", {
+      storeKey: key,
+      gen: "g2",
+      now: Date.now() + LEASE_MS * 2,
+      leaseMs: LEASE_MS,
+    });
+    expect(reclaimed.data.runs).toMatchObject([
+      { reclaimedFrom: "finishing", row: { liveState: { state: "ended" }, state: assignment.statePatch } },
+    ]);
+    expect(await post("/runs/finishing", { storeKey: key, runId: "terminal-state", gen: "g1" })).toEqual({
+      status: 409,
+      data: { ok: false, reason: "fenced" },
+    });
   });
 
   it("live-state assignment commits its boundary and projection together, while a pre-commit refusal exposes neither half", async () => {

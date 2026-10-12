@@ -4297,6 +4297,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                   at,
                   state,
                   cause: causeOfClose(status, interrupted !== undefined),
+                  statePatch: {
+                    finalStatus: status,
+                    answerOutcome,
+                    ...(observedHead !== undefined ? { headSha: observedHead } : {}),
+                    ...(verdict !== undefined ? { verdict } : {}),
+                    ...(reviewHead !== undefined ? { reviewHead } : {}),
+                    ...(dispositions !== undefined ? { dispositions } : {}),
+                    ...(handoff !== undefined ? { handoff } : {}),
+                    ...(researchBrief !== undefined ? { researchBrief } : {}),
+                    ...(reviewPost !== undefined ? { reviewPost } : {}),
+                  },
                 }
               : {
                   expectedSeq: summary.liveStateSeq ?? 0,

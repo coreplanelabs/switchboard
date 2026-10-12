@@ -39,7 +39,7 @@ export const GEN_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 /** `attaching`: reserved at admission (item 42) — the row holds the request
  *  and no prompt yet; a reclaim restarts the run from the request. `live`:
  *  the prompt and seed landed. `handoff`: the owner drained. `finishing`: the
- *  owner replied. */
+ *  execution replay is fenced; channel delivery remains unconfirmed. */
 export type LivePhase = "attaching" | "live" | "handoff" | "finishing";
 export type StopMode = "soft" | "hard";
 
