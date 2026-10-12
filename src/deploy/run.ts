@@ -1420,7 +1420,8 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
     let pageToken: string | null = null;
     let pageIndex = 0;
     let requestedCursor: string | null = null;
-    const seen = new Set<string>();
+    type CursorOrigin = Pick<Parameters<PagingObserver>[0], "pageIndex" | "requestedCursor" | "cumulativeCount">;
+    const seen = new Map<string, CursorOrigin>();
     let producerVersion: string | undefined;
     if (observePaging) {
       try {
@@ -1437,8 +1438,20 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
         /* Diagnostics cannot change readiness. */
       }
     };
-    const fail = (reason: "repeated-cursor" | "malformed-page" | "command-error" | "interrupted", error: string) => {
-      emit({ phase: "failure", app: id.value, pageIndex, requestedCursor, cumulativeCount: rows.length, reason });
+    const fail = (
+      reason: "repeated-cursor" | "malformed-page" | "command-error" | "interrupted",
+      error: string,
+      firstSeen?: CursorOrigin,
+    ) => {
+      emit({
+        phase: "failure",
+        app: id.value,
+        pageIndex,
+        requestedCursor,
+        cumulativeCount: rows.length,
+        reason,
+        ...(firstSeen && pageToken ? { cycle: { cursor: pageToken, firstSeen } } : {}),
+      });
       return { error, diagnostic: nativeReadEvidence({ args: ["containers", "instances", id.value], reason }) };
     };
     do {
@@ -1516,12 +1529,15 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
       if (signal?.aborted) return fail("interrupted", "instance inventory interrupted; completeness unverified");
       rows.push(...parsed.rows);
       pageToken = parsed.nextPageToken;
-      if (pageToken && seen.has(pageToken))
+      const firstSeen = pageToken ? seen.get(pageToken) : undefined;
+      if (firstSeen)
         return {
-          ...fail("repeated-cursor", "instance inventory repeated a page token; completeness unverified"),
+          ...fail("repeated-cursor", "instance inventory repeated a page token; completeness unverified", firstSeen),
           diagnostic: { ...page.diagnostic, reason: "repeated-cursor" },
         };
-      if (pageToken) seen.add(pageToken);
+      // Keep only the compact origin in the existing cursor index, not an
+      // unbounded page history. Long cycles can outlive the diagnostic ring.
+      if (pageToken) seen.set(pageToken, { pageIndex, requestedCursor, cumulativeCount: rows.length });
     } while (pageToken);
     return { value: rows };
   },

@@ -380,6 +380,53 @@ console.log(JSON.stringify(cursor!==null&&process.env.FIXTURE_MODE==='unpaginate
     }
   });
 
+  it("retains the first cursor receipt when a long inventory cycle repeats outside the page window", async () => {
+    const savedEnv = process.env;
+    const dir = mkdtempSync(join(tmpdir(), "paging-cycle-"));
+    const app = `fixture-${randomUUID()}`;
+    const events: unknown[] = [];
+    try {
+      writeFileSync(
+        join(dir, "npx"),
+        `#!${process.execPath}
+const a=process.argv.slice(2);
+if(a.includes('list')) console.log(JSON.stringify([{name:process.env.FIXTURE_APP,id:'owned-app'}]));
+else {
+ const cursor=a.includes('--page-token')?a[a.indexOf('--page-token')+1]:null;
+ const index=cursor===null?1:Number(cursor.slice('private-cursor-'.length))+1;
+ const next=index===35?'private-cursor-9':'private-cursor-'+index;
+ console.log(JSON.stringify({instances:Array.from({length:100},(_,n)=>({id:'private-row-'+index+'-'+n,state:'running',version:78})),result_info:{page_token:cursor,next_page_token:next}}));
+}`,
+        { mode: 0o755 },
+      );
+      process.env = { PATH: dir, CLOUDFLARE_API_TOKEN: "synthetic-no-access", FIXTURE_APP: app };
+      const result = await defaultSandboxGateDeps.readInstances(
+        "deploy/cloudflare-sandbox",
+        app,
+        undefined,
+        undefined,
+        (event) => events.push(event),
+      );
+      expect(result).toMatchObject({
+        error: "instance inventory repeated a page token; completeness unverified",
+        diagnostic: { stage: "instances", reason: "repeated-cursor", commandExit: 0 },
+      });
+      expect(events.at(-1)).toMatchObject({
+        phase: "failure",
+        pageIndex: 35,
+        requestedCursor: "private-cursor-34",
+        cumulativeCount: 3500,
+        cycle: {
+          cursor: "private-cursor-9",
+          firstSeen: { pageIndex: 9, requestedCursor: "private-cursor-8", cumulativeCount: 900 },
+        },
+      });
+    } finally {
+      process.env = savedEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("paging logging observes the original request and response before preserving the repeated-cursor refusal", async () => {
     const savedEnv = process.env;
     const dir = mkdtempSync(join(tmpdir(), "paging-logging-"));

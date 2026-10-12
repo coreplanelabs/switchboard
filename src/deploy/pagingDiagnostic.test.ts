@@ -14,6 +14,95 @@ const page = (next: unknown = null) => ({
 const event = { app, pageIndex: 2, requestedCursor: "private-cursor", cumulativeCount: 2 };
 
 describe("bounded paging evidence", () => {
+  it("keeps the matching first and repeated cursor receipts after the page ring rolls over", () => {
+    const directory = mkdtempSync(join(tmpdir(), "paging-cycle-witness-"));
+    const file = join(directory, "capture.json");
+    const logs: string[] = [];
+    const capture = createPagingObserver({
+      log: (line) => logs.push(line),
+      source,
+      expectedCommit: source,
+      env,
+      artifactFile: file,
+    });
+    try {
+      for (let pageIndex = 1; pageIndex <= 35; pageIndex++) {
+        const requestedCursor = pageIndex === 1 ? null : `private-cursor-${pageIndex - 1}`;
+        capture.observe({ app, phase: "before", pageIndex, requestedCursor, cumulativeCount: (pageIndex - 1) * 100 });
+        const query =
+          requestedCursor === null ? "per_page=100" : `per_page=100&page_token=${encodeURIComponent(requestedCursor)}`;
+        capture.observe({
+          app,
+          phase: "after",
+          pageIndex,
+          requestedCursor,
+          cumulativeCount: pageIndex * 100,
+          page: {
+            ...page(pageIndex === 35 ? "private-cursor-9" : `private-cursor-${pageIndex}`),
+            result_info: {
+              per_page: 100,
+              page_token: requestedCursor,
+              next_page_token: pageIndex === 35 ? "private-cursor-9" : `private-cursor-${pageIndex}`,
+            },
+          },
+          commandExit: 0,
+          producerLog: `-- START CF API REQUEST: https://api.cloudflare.com/client/v4/accounts/private-account/containers/dash/applications/${app}/instances?${query}\n-- START CF API RESPONSE: OK 200\n-- END CF API RESPONSE`,
+        });
+      }
+      capture.observe({
+        app,
+        phase: "failure",
+        pageIndex: 35,
+        requestedCursor: "private-cursor-34",
+        cumulativeCount: 3500,
+        reason: "repeated-cursor",
+        cycle: {
+          cursor: "private-cursor-9",
+          firstSeen: { pageIndex: 9, requestedCursor: "private-cursor-8", cumulativeCount: 900 },
+        },
+      });
+      const text = readFileSync(file, "utf8"),
+        saved = JSON.parse(text);
+      const failure = saved.frames.at(-1),
+        terminal = saved.frames.find(
+          (frame: { phase: string; pageIndex: number }) => frame.phase === "after" && frame.pageIndex === 35,
+        );
+      expect(failure).toMatchObject({
+        phase: "failure",
+        reason: "repeated-cursor",
+        cycleWitness: {
+          firstSeen: { pageIndex: 9, cumulativeCount: 900 },
+          repeated: { pageIndex: 35, cumulativeCount: 3500 },
+          nextCursorProvenance: "CLI result_info; pinned producer forwards provider next-page field",
+        },
+      });
+      expect(failure.cycleWitness.firstSeen.nextCursorHash).toBe(terminal.nextCursorHash);
+      expect(failure.cycleWitness.repeated.nextCursorHash).toBe(terminal.nextCursorHash);
+      expect(failure.cycleWitness.repeated.requestedCursorHash).toBe(terminal.requestedCursorHash);
+      expect(terminal.http).toMatchObject({
+        available: true,
+        status: 200,
+        request: { cursorHash: terminal.requestedCursorHash, perPage: 100 },
+      });
+      expect(terminal).toMatchObject({
+        instancesType: "array",
+        metadataType: "object",
+        versionHistogram: { "12": 1 },
+        end: "continue",
+      });
+      expect(saved.frames.length).toBeLessThanOrEqual(8);
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(16384);
+      expect(Buffer.byteLength(logs.join("\n")) + 1).toBeLessThanOrEqual(16384);
+      expect(text + logs.join("\n")).not.toContain("private-");
+      expect(text + logs.join("\n")).not.toContain(app);
+      capture.observe({ ...event, phase: "failure", reason: "malformed-page" });
+      expect(readFileSync(file, "utf8")).toBe(text);
+    } finally {
+      capture.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("consumer failure details stay closed and bounded after a paging failure", () => {
     const directory = mkdtempSync(join(tmpdir(), "consumer-facts-"));
     const file = join(directory, "capture.json"),
