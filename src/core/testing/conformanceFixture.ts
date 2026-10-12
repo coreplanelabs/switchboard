@@ -556,17 +556,28 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
     reconfigure: async (body) => exec(`admin.reconfigure ${String(body.resource)}`, { status: 200, data: {} }),
     status: async (resource) =>
       exec(`admin.status ${resource}`, { status: 200, data: { state: "warm", reason: "", inFlight: 0 } }),
-    rebuild: async (resource, dryRun) =>
+    rebuild: async (resource, dryRun, full) =>
       exec(`admin.rebuild ${resource} dryRun=${dryRun}`, {
         status: dryRun ? 200 : 202,
-        data: dryRun
+        data: full
           ? {
-              from: { state: "warm" },
-              discards: { backupObjects: 0 },
-              reprovision: { defaultRef: "master", provisioningTimeoutMs: 600000 },
-              keeps: { threadBindings: 0 },
+              state: "onboarding",
+              containerStopped: true,
+              storageCleared: true,
+              backupObjectsDeleted: 0,
+              r2ObjectsDeleted: 0,
+              wouldRemove: { threadBindings: 0, backupObjects: 0, r2Objects: 0 },
+              reprovision: { defaultRef: "master" },
+              originalOperationOutcome: "unknown",
             }
-          : { backupObjectsDeleted: 0, reprovision: { defaultRef: "master" } },
+          : dryRun
+            ? {
+                from: { state: "warm" },
+                discards: { backupObjects: 0 },
+                reprovision: { defaultRef: "master", provisioningTimeoutMs: 600000 },
+                keeps: { threadBindings: 0 },
+              }
+            : { backupObjectsDeleted: 0, reprovision: { defaultRef: "master" } },
       }),
     residents: async () => ({ status: 200, data: RESIDENTS }),
   };

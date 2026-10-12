@@ -6,7 +6,7 @@ import type { Span } from "./trace/types.js";
 import { processSecrets, type Secrets } from "../secrets.js";
 
 // The resident Worker's admin plane, as the bot sees it: the client for
-// the `/onboard`, `/offboard`, `/reconfigure`, `/rebuild`, `/residents` routes
+// the `/onboard`, `/offboard`, `/reconfigure`, `/rebuild`, `/reset`, `/residents` routes
 // (bearer = RESIDENT_ADMIN_TOKEN), its config-driven construction, and the two
 // validators every repo surface shares — `parseSlug` (owner/name → lowercase
 // slug) and `validRef` (the resident's strict branch-ref pattern). The commands
@@ -26,7 +26,7 @@ export interface ResidentAdminClient {
   onboard(body: Record<string, unknown>): Promise<ResidentAdminResponse>;
   offboard(resource: string, dryRun: boolean): Promise<ResidentAdminResponse>;
   reconfigure(body: Record<string, unknown>): Promise<ResidentAdminResponse>;
-  rebuild(resource: string, dryRun: boolean): Promise<ResidentAdminResponse>;
+  rebuild(resource: string, dryRun: boolean, full?: boolean): Promise<ResidentAdminResponse>;
   residents(): Promise<ResidentAdminResponse>;
   /** One resident's `{ state, reason, inFlight }` (`GET /status`; 404 when not
    *  onboarded) — what the onboard/rebuild follow-up polls. */
@@ -76,7 +76,8 @@ export class NullResidentAdminClient implements ResidentAdminClient {
 }
 
 /** The admin routes, as the span names them: the path literal, never a query. */
-type AdminRoute = "/register" | "/onboard" | "/offboard" | "/reconfigure" | "/rebuild" | "/residents" | "/status";
+type AdminRoute =
+  "/register" | "/onboard" | "/offboard" | "/reconfigure" | "/rebuild" | "/reset" | "/residents" | "/status";
 
 export function makeResidentAdminClient(baseUrl: string, token: string): ResidentAdminClient {
   // One closure per parent: the unbound client, and the view `withSpan` makes
@@ -122,7 +123,8 @@ export function makeResidentAdminClient(baseUrl: string, token: string): Residen
       onboard: (body) => call(body.noResident === true ? "/register" : "/onboard", "POST", body),
       offboard: (resource, dryRun) => call("/offboard", "POST", { resource, ...(dryRun ? { dryRun: true } : {}) }),
       reconfigure: (body) => call("/reconfigure", "POST", body),
-      rebuild: (resource, dryRun) => call("/rebuild", "POST", { resource, ...(dryRun ? { dryRun: true } : {}) }),
+      rebuild: (resource, dryRun, full) =>
+        call(full ? "/reset" : "/rebuild", "POST", { resource, ...(dryRun ? { dryRun: true } : {}) }),
       residents: () => call("/residents", "GET"),
       status: (resource) => call("/status", "GET", undefined, `/status?resource=${encodeURIComponent(resource)}`),
       withSpan: (span) => clientFor(span),

@@ -273,6 +273,7 @@ function harness(
     BASH_TIMEOUT_MS: 1000,
     EXEC_OUTPUT_CAP: 10000,
     DESTROY_UNCONFIRMED_KEY: "destroy",
+    CLEANUP_PENDING_KEY: "cleanup",
     isControlReset: () => false,
     isRuntimeReplacement: () => false,
     isRuntimeBusy: isRuntimeBusySignal,

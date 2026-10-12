@@ -74,6 +74,23 @@ describe("makeResidentAdminClient (real fetch client)", () => {
   }
   const route = (c: { url: string }) => new URL(c.url).pathname;
 
+  it("full reset uses its dedicated route and never retries an unsupported or uncertain request", async () => {
+    const { calls } = stubFetch(
+      { status: 200, body: { dryRun: true } },
+      { status: 404, body: { error: "not found" } },
+      { reject: "connection lost" },
+    );
+    const client = makeResidentAdminClient("https://resident.example", "test-token");
+    expect(await client.rebuild("repo:acme/api", true, true)).toEqual({ status: 200, data: { dryRun: true } });
+    expect(await client.rebuild("repo:acme/api", false, true)).toEqual({ status: 404, data: { error: "not found" } });
+    await expect(client.rebuild("repo:acme/api", false, true)).rejects.toThrow("connection lost");
+    expect(calls.map((c) => ({ route: route(c), body: JSON.parse(String(c.init.body)) }))).toEqual([
+      { route: "/reset", body: { resource: "repo:acme/api", dryRun: true } },
+      { route: "/reset", body: { resource: "repo:acme/api" } },
+      { route: "/reset", body: { resource: "repo:acme/api" } },
+    ]);
+  });
+
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();

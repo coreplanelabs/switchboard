@@ -27,7 +27,7 @@ import {
 // note '/' rules the id out of hostname-based preview URLs, use tunnels).
 //
 // Route surface (JSON in/out; every route below requires a bearer secret):
-//   admin scope     POST /register /onboard /offboard /reconfigure /rebuild /debug (all ops) /recover-admission /recover-native-operation
+//   admin scope     POST /register /onboard /offboard /reconfigure /rebuild /reset /debug (all ops) /recover-admission /recover-native-operation
 //                   GET /deploy-admissions
 //   drain scope     POST /drain /deploy-fence /reconcile /undrain (admin implied)
 //   read scope      GET /residents   POST /debug ops info|schedules|threads|deps-backups|native-operations (admin implied)
@@ -1979,6 +1979,8 @@ const RETIRED_REBUILD_STRIKES_KEY = "resident:rebuildStrikes";
 const RUNTIME_UNREACHABLE_KEY = "resident:runtimeUnreachable";
 /** A failed or interrupted VM destroy forbids another process on an unconfirmed disk. */
 const DESTROY_UNCONFIRMED_KEY = "resident:destroyUnconfirmed";
+/** The selected resource remains held until backup and prefix cleanup finish. */
+const CLEANUP_PENDING_KEY = "resident:cleanupPending";
 const RECREATE_ADMISSION_KEY = "resident:recreateAdmission";
 /** The row under RUNTIME_UNREACHABLE_KEY: the count and both instants, so the
  *  fleet watch sees how long the runtime has been silent. Cleared by any exec
@@ -2579,6 +2581,8 @@ export class ResidentDO extends Sandbox<Env> {
     argv: readonly string[],
     opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {},
   ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean; truncated?: boolean }> {
+    if ((await this.ctx.storage.get(CLEANUP_PENDING_KEY)) !== undefined)
+      throw new Error("full-rebuild-cleanup-incomplete: runtime work is paused until cleanup completes");
     if (this.destroying || (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY))) {
       throw new Error("resident-destroy-unconfirmed: container reuse refused until destruction is confirmed");
     }
@@ -2662,6 +2666,10 @@ export class ResidentDO extends Sandbox<Env> {
         });
       }
       await nativeAttempt.settle();
+      if ((await this.ctx.storage.get(CLEANUP_PENDING_KEY)) !== undefined)
+        throw new Error("full-rebuild-cleanup-incomplete: runtime work is paused until cleanup completes", {
+          cause: err,
+        });
       nativeAttempt = await this.beginThreadNativeOperation("process");
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     }
@@ -3517,6 +3525,8 @@ export class ResidentDO extends Sandbox<Env> {
    *  container — onboard must return immediately; the container first starts
    *  when runProvisioning's schedule fires (~1s later). */
   async initResident(resource: string, provisioningTimeoutMs: number, rebuilding = false): Promise<ResidentStatus> {
+    if ((await this.ctx.storage.get(CLEANUP_PENDING_KEY)) !== undefined)
+      throw new Error("full-rebuild-cleanup-incomplete: provisioning is paused until cleanup completes");
     if (this.destroying || (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY))) {
       throw new Error("resident-destroy-unconfirmed: onboarding refused until destruction is confirmed");
     }
@@ -3743,6 +3753,8 @@ export class ResidentDO extends Sandbox<Env> {
    *  transitions. Called by the refresh instance's fetch step (and the attach
    *  path). */
   async ensureHydrated(): Promise<void> {
+    if ((await this.ctx.storage.get(CLEANUP_PENDING_KEY)) !== undefined)
+      throw new ResidentDownError("full-rebuild-cleanup-incomplete: hydration is paused until cleanup completes");
     // Fresh positive verdict for this incarnation → nothing to probe. See the
     // per-incarnation memo block for why this is safe; the refresh cycle's
     // 10-min cadence always outlives the TTL, so a cycle re-probes for real.
@@ -7929,8 +7941,14 @@ export class ResidentDO extends Sandbox<Env> {
     if (keys.length === 0) return 0;
     const records = await this.ctx.storage.get<DepsBackupRecord>(keys.map((k) => depsBackupStorageKey(k)));
     const ids = [...records.values()].map((r) => r.backup.id);
-    await this.ctx.storage.delete(keys.map((k) => depsBackupStorageKey(k)));
-    return this.deleteBackupObjects(ids);
+    const deleted = await this.deleteBackupObjects(ids);
+    await this.ctx.storage.transaction(async (rows) => {
+      for (const [key, record] of records) {
+        const current = await rows.get<DepsBackupRecord>(key);
+        if (current?.backup.id === record.backup.id) await rows.delete(key);
+      }
+    });
+    return deleted;
   }
 
   private async allDepsBackups(): Promise<DepsBackupRecord[]> {
@@ -10791,25 +10809,25 @@ export class ResidentDO extends Sandbox<Env> {
       else if (state === "retained") retainedRuns++;
       else if (state === "unknown") unknownRuns++;
     }
-    if (this.runsInFlightCount() === 0 && (await this.ctx.storage.list({ prefix: "native-operation:", limit: 1 })).size)
-      unknownRuns++;
+    const nativeOperationReadback = await this.getNativeOperations();
+    if (this.runsInFlightCount() === 0 && nativeOperationReadback.operations.length > 0) unknownRuns++;
     return {
       ...(await this.getResidentInfo()),
       executingRuns: executingRuns + this.runsInFlightCount(),
       retainedRuns,
       unknownRuns,
       registrationReadback: [...readback.values()],
+      nativeOperationReadback,
     };
   }
-  /** Native process observation includes every generated identity, including
-   * background work whose original run has ended. Unknown user data refuses. */
   /** Stored metadata only: never reconnect or inspect a native runtime. */
   async getNativeOperations(cursor?: string) {
     return new NativeOperationJournal(this.ctx.storage).list(cursor);
   }
 
-  /** Recover only original process receipts; no launch, replay, kill or hydration. */
-  async recoverNativeOperation(key: string, recordHash: string) {
+  /** Observe original receipts; explicit termination uses the SDK capability
+   * bound to that process's existing runtime, never a PID in a new VM. */
+  async recoverNativeOperation(key: string, recordHash: string, terminate = false) {
     return this.withRecreateSafeAdmin(async () => {
       if (this.runsInFlightCount() !== 0)
         return { error: "native-operation-recovery-refused: request-active", status: 409 as const };
@@ -10827,14 +10845,26 @@ export class ResidentDO extends Sandbox<Env> {
           fence.ownerFence === record.ownerFence
         );
       };
+      const processes = new Map<
+        string,
+        NonNullable<Awaited<ReturnType<ReturnType<typeof createExtensionProcessSandbox>["getProcess"]>>>
+      >();
       return new NativeOperationJournal(this.ctx.storage).recover(
         key,
         recordHash,
         async (identity) => {
           const process = await createExtensionProcessSandbox(this).getProcess(identity.id);
+          if (process) processes.set(identity.id, process);
           return process ? process.status() : null;
         },
         ownerMatches,
+        terminate
+          ? async (identity) => {
+              const process = processes.get(identity.id);
+              if (!process) throw new Error("original process handle unavailable");
+              await process.kill(9);
+            }
+          : undefined,
       );
     });
   }
@@ -11498,7 +11528,14 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   async getStatus(): Promise<ResidentStatus> {
-    const map = await this.ctx.storage.get<string | boolean>([STATE_KEY, REASON_KEY, DESTROY_UNCONFIRMED_KEY]);
+    const map = await this.ctx.storage.get<string | boolean>([
+      STATE_KEY,
+      REASON_KEY,
+      DESTROY_UNCONFIRMED_KEY,
+      CLEANUP_PENDING_KEY,
+    ]);
+    if (map.has(CLEANUP_PENDING_KEY))
+      return { state: "down", reason: "full-rebuild-cleanup-incomplete: cleanup is still pending" };
     if (this.destroying || map.get(DESTROY_UNCONFIRMED_KEY)) {
       return { state: "down", reason: "resident-destroy-unconfirmed: container reuse refused" };
     }
@@ -11552,6 +11589,7 @@ export class ResidentDO extends Sandbox<Env> {
       MEMORY_KEY,
       IMAGE_REPORT_PENDING_KEY,
       DESTROY_UNCONFIRMED_KEY,
+      CLEANUP_PENDING_KEY,
       RECREATE_ADMISSION_KEY,
     ]);
     const facts = map.get(FACTS_KEY) as RepoFacts | undefined;
@@ -11618,11 +11656,17 @@ export class ResidentDO extends Sandbox<Env> {
       .catch(() => null);
     return {
       resource: map.get(RESOURCE_KEY) ?? null,
-      state: this.destroying || map.get(DESTROY_UNCONFIRMED_KEY) ? "down" : (map.get(STATE_KEY) ?? "down"),
+      state:
+        this.destroying || map.get(DESTROY_UNCONFIRMED_KEY) || map.has(CLEANUP_PENDING_KEY)
+          ? "down"
+          : (map.get(STATE_KEY) ?? "down"),
+      cleanupPending: map.get(CLEANUP_PENDING_KEY) ?? null,
       reason:
         this.destroying || map.get(DESTROY_UNCONFIRMED_KEY)
           ? "resident-destroy-unconfirmed: container reuse refused"
-          : (map.get(REASON_KEY) ?? ""),
+          : map.has(CLEANUP_PENDING_KEY)
+            ? "full-rebuild-cleanup-incomplete: cleanup is still pending"
+            : (map.get(REASON_KEY) ?? ""),
       updatedAt: map.get(UPDATED_KEY) ?? null,
       defaultRef: facts?.defaultRef ?? null,
       sha: facts?.sha ?? null,
@@ -11878,68 +11922,72 @@ export class ResidentDO extends Sandbox<Env> {
       }
     | { error: string; status: number }
   > {
-    const from = await this.getStatus();
-    if (from.state === "onboarding" || from.state === "refreshing" || from.state === "restoring") {
-      return {
-        error: `rebuild-refused: the engine is mid-flight (state ${from.state}) — retry once it settles (warm/degraded/down)`,
-        status: 409,
-      };
-    }
-    const snap = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
-    const recorded = await this.recordedBackupIds(snap);
-    const bindings = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
-    const plan = {
-      resource,
-      dryRun,
-      from,
-      discards: {
-        snapshot: snap
-          ? {
-              ref: snap.ref,
-              sha: snap.sha,
-              lockfileHash: snap.lockfileHash,
-              createdAt: snap.createdAt,
-              mirrorBackupId: snap.mirror.id,
-              checkoutBackupId: snap.checkout.id,
-            }
-          : null,
-        backupObjects: await this.countBackupObjects(recorded),
-      },
-      reprovision: { defaultRef, provisioningTimeoutMs },
-      keeps: { registryRecord: true as const, threadBindings: bindings.size },
-    };
-    if (dryRun) return plan;
-
-    // A failed destroy must leave the old snapshot and budget intact, and
-    // must never arm provisioning against an unconfirmed old VM.
-    const destroy = async () => {
-      this.swapIncarnation();
-      await this.destroyConfirmed();
-    };
-    if (opts.auto) {
-      if (!(await this.automaticContainerLoss("auto-rebuild", destroy)))
-        return { error: "workspace-preservation: automatic rebuild deferred", status: 503 };
-    } else await destroy();
-
-    // Old snapshot objects go before initResident wipes the stored handles,
-    // and backups/<id>/ lives outside the resident/<resource>/ prefix — this
-    // is the only path that can still reach them (same ordering as teardown).
-    let backupObjectsDeleted = 0;
-    if (recorded.length > 0) {
-      try {
-        backupObjectsDeleted = await this.deleteBackupObjects(recorded);
-      } catch {
-        // best effort — the 1-year R2 TTL is the leak backstop
+    return this.withRecreateSafeAdmin(async () => {
+      const from = await this.getStatus();
+      if ((await this.ctx.storage.get(CLEANUP_PENDING_KEY)) !== undefined)
+        return { error: "rebuild-refused: full rebuild cleanup is still incomplete", status: 409 };
+      if (from.state === "onboarding" || from.state === "refreshing" || from.state === "restoring") {
+        return {
+          error: `rebuild-refused: the engine is mid-flight (state ${from.state}) — retry once it settles (warm/degraded/down)`,
+          status: 409,
+        };
       }
-    }
-    // A person's rebuild resets the auto-rebuild budget (item 36): the
-    // history is what stops a flapping resident, and a person asking for a
-    // rebuild has seen it. The automatic one keeps the history — it IS the
-    // budget's count.
-    if (!opts.auto) await this.ctx.storage.delete(AUTO_REBUILDS_KEY);
-    // Provisioning starts only after confirmed destruction.
-    await this.initResident(resource, provisioningTimeoutMs, true);
-    return { ...plan, backupObjectsDeleted, state: "onboarding" as const };
+      const snap = await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY);
+      const recorded = await this.recordedBackupIds(snap);
+      const bindings = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
+      const plan = {
+        resource,
+        dryRun,
+        from,
+        discards: {
+          snapshot: snap
+            ? {
+                ref: snap.ref,
+                sha: snap.sha,
+                lockfileHash: snap.lockfileHash,
+                createdAt: snap.createdAt,
+                mirrorBackupId: snap.mirror.id,
+                checkoutBackupId: snap.checkout.id,
+              }
+            : null,
+          backupObjects: await this.countBackupObjects(recorded),
+        },
+        reprovision: { defaultRef, provisioningTimeoutMs },
+        keeps: { registryRecord: true as const, threadBindings: bindings.size },
+      };
+      if (dryRun) return plan;
+
+      // A failed destroy must leave the old snapshot and budget intact, and
+      // must never arm provisioning against an unconfirmed old VM.
+      const destroy = async () => {
+        this.swapIncarnation();
+        await this.destroyConfirmed();
+      };
+      if (opts.auto) {
+        if (!(await this.automaticContainerLoss("auto-rebuild", destroy)))
+          return { error: "workspace-preservation: automatic rebuild deferred", status: 503 };
+      } else await destroy();
+
+      // Old snapshot objects go before initResident wipes the stored handles,
+      // and backups/<id>/ lives outside the resident/<resource>/ prefix — this
+      // is the only path that can still reach them (same ordering as teardown).
+      let backupObjectsDeleted = 0;
+      if (recorded.length > 0) {
+        try {
+          backupObjectsDeleted = await this.deleteBackupObjects(recorded);
+        } catch {
+          // best effort — the 1-year R2 TTL is the leak backstop
+        }
+      }
+      // A person's rebuild resets the auto-rebuild budget (item 36): the
+      // history is what stops a flapping resident, and a person asking for a
+      // rebuild has seen it. The automatic one keeps the history — it IS the
+      // budget's count.
+      if (!opts.auto) await this.ctx.storage.delete(AUTO_REBUILDS_KEY);
+      // Provisioning starts only after confirmed destruction.
+      await this.initResident(resource, provisioningTimeoutMs, true);
+      return { ...plan, backupObjectsDeleted, state: "onboarding" as const };
+    });
   }
 
   /** Dry-run itemization for offboard: everything the real teardown
@@ -11959,14 +12007,56 @@ export class ResidentDO extends Sandbox<Env> {
       this.listSchedules(PROVISION_RUN_CALLBACK),
     ]);
     const ids = await this.recordedBackupIds(await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY));
+    const depsIds = (await this.allDepsBackups()).map((record) => record.backup.id);
     const bindings = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
     return {
       ...status,
       schedules: prov.length + run.length,
       snapshotBackupIds: ids,
-      backupObjects: await this.countBackupObjects(ids),
+      backupObjects: await this.countBackupObjects([...new Set([...ids, ...depsIds])]),
       threadBindings: bindings.size,
     };
+  }
+
+  /** Explicit full reset keeps the registry settings, but discards every
+   * resident fact after confirmed destruction. A retained operation's result
+   * remains unknown; resetting the runtime is not its completion receipt. */
+  async reset(resource: string, defaultRef: string, provisioningTimeoutMs: number, dryRun: boolean) {
+    const plan = {
+      resource,
+      dryRun,
+      wouldRemove: {
+        ...(await this.teardownPlan()),
+        r2Objects: await countR2Prefix(this.env.BACKUP_BUCKET, r2Prefix(resource)),
+      },
+      keeps: { registryRecord: true as const },
+      reprovision: { defaultRef, provisioningTimeoutMs },
+      originalOperationOutcome: "unknown" as const,
+    };
+    if (dryRun) return plan;
+    const admission = await this.recreateAdmission.run(async () => {
+      const from = await this.getStatus();
+      if (["onboarding", "refreshing", "restoring"].includes(from.state))
+        return { status: 409, error: `reset-refused: the engine is mid-flight (state ${from.state})` };
+      const active =
+        this.inFlightCount() + this.refreshAdmissionsInFlight + this.adminWorkInFlight + (this.hydration ? 1 : 0);
+      if (active > 0) return { status: 409, error: `reset-refused: ${active} request(s) still in flight` };
+      const removed = await this.teardown();
+      if (removed.errors.length > 0)
+        return { ...removed, status: 503, error: `reset-incomplete: ${removed.errors.join("; ")}` };
+      try {
+        const r2ObjectsDeleted = await deleteR2Prefix(this.env.BACKUP_BUCKET, r2Prefix(resource));
+        await this.confirmCleanup(resource);
+        await this.initResident(resource, provisioningTimeoutMs);
+        return { ...plan, ...removed, r2ObjectsDeleted, state: "onboarding" as const };
+      } catch (err) {
+        await this.setResidentState("down", `full-rebuild-cleanup-incomplete: ${errMsg(err)}`);
+        return { ...plan, ...removed, status: 503, error: `reset-incomplete: ${errMsg(err)}` };
+      }
+    });
+    return admission.busy
+      ? { status: 409, error: "reset-refused: another VM recycle is in progress" }
+      : admission.value;
   }
 
   /** Offboard teardown: confirm container destruction before deleting timers
@@ -11982,6 +12072,10 @@ export class ResidentDO extends Sandbox<Env> {
   }> {
     const errors: string[] = [];
     let backupObjectsDeleted = 0;
+    const resource =
+      (await this.ctx.storage.get<string>(CLEANUP_PENDING_KEY)) ?? (await this.ctx.storage.get<string>(RESOURCE_KEY));
+    if (typeof resource !== "string") throw new Error("resident-cleanup-target-unavailable");
+    await this.ctx.storage.put(CLEANUP_PENDING_KEY, resource);
     await this.destroyConfirmed();
     const containerStopped = true;
     this.deleteSchedules(PROVISIONING_CALLBACK);
@@ -12001,6 +12095,12 @@ export class ResidentDO extends Sandbox<Env> {
     } catch (err) {
       errors.push(`deps backup deletion failed: ${errMsg(err)}`);
     }
+    if (errors.length > 0) {
+      // Retain the current, retired and dependency handles until their R2
+      // removal is confirmed. A restart must rediscover unfinished cleanup.
+      await this.setResidentState("down", `full-rebuild-cleanup-incomplete: ${errors.join("; ")}`);
+      return { schedulesCancelled: true, containerStopped, storageCleared: false, backupObjectsDeleted, errors };
+    }
     // Retired DO: clear the alarm the Container base may have armed for its
     // schedules, then delete every stored key — ours and the SDK's (its runtime
     // identity among them) — so nothing ever wakes this object again. Keys, not
@@ -12011,9 +12111,30 @@ export class ResidentDO extends Sandbox<Env> {
     // empty — its rows are the two schedules cancelled above.
     this.swapIncarnation(); // retired object, retired memos
     await this.ctx.storage.deleteAlarm();
-    const keys = [...(await this.ctx.storage.list()).keys()];
+    const keys = [...(await this.ctx.storage.list()).keys()].filter((key) => key !== CLEANUP_PENDING_KEY);
     for (let i = 0; i < keys.length; i += 128) await this.ctx.storage.delete(keys.slice(i, i + 128));
     return { schedulesCancelled: true, containerStopped, storageCleared: true, backupObjectsDeleted, errors };
+  }
+
+  /** Metadata and deterministic R2 reads confirm cleanup; no runtime wakes. */
+  async confirmCleanup(resource: string): Promise<void> {
+    const pending = await this.ctx.storage.get<string>(CLEANUP_PENDING_KEY);
+    if (pending === undefined) return;
+    if (
+      pending !== resource ||
+      this.destroying ||
+      (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY)) ||
+      this.ctx.container?.running === true
+    )
+      throw new Error("resident-cleanup-unconfirmed");
+    const backups = await this.recordedBackupIds(await this.ctx.storage.get<SnapshotRecord>(SNAPSHOT_KEY));
+    if (
+      backups.length ||
+      (await this.allDepsBackups()).length ||
+      (await countR2Prefix(this.env.BACKUP_BUCKET, r2Prefix(resource))) > 0
+    )
+      throw new Error("resident-cleanup-unconfirmed");
+    await this.ctx.storage.delete(CLEANUP_PENDING_KEY);
   }
 }
 
@@ -12230,6 +12351,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/offboard": { scope: "admin", method: "POST" },
   "/reconfigure": { scope: "admin", method: "POST" },
   "/rebuild": { scope: "admin", method: "POST" },
+  "/reset": { scope: "admin", method: "POST" },
   "/drain": { scope: "drain", method: "POST" }, // close the fleet to new runs for a deploy (item 69; admin implied)
   "/deploy-fence": { scope: "drain", method: "POST" }, // fence reattach and read executing activity
   "/deploy-admissions": { scope: "admin", method: "GET" }, // targeted recovery inventory, never a drain-bearer route
@@ -12357,6 +12479,8 @@ export default {
             return await handleReconfigure(env, body);
           case "/rebuild":
             return await withFleetAdmission(env, () => handleRebuild(env, body));
+          case "/reset":
+            return await withFleetAdmission(env, () => handleReset(env, body));
           case "/drain":
             return await handleDrain(env, body);
           case "/deploy-fence":
@@ -12372,7 +12496,13 @@ export default {
               !/^[0-9a-f]{64}$/.test(body.recordHash)
             )
               return json({ error: "exact native operation key and recordHash are required" }, 400);
-            const result = await residentStub(env, resource.resource).recoverNativeOperation(body.key, body.recordHash);
+            if (body.terminate !== undefined && typeof body.terminate !== "boolean")
+              return json({ error: "terminate must be a boolean" }, 400);
+            const result = await residentStub(env, resource.resource).recoverNativeOperation(
+              body.key,
+              body.recordHash,
+              body.terminate === true,
+            );
             return json(result, "error" in result ? result.status : 200);
           }
           case "/recover-admission":
@@ -12672,10 +12802,11 @@ async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<
   const registry = registryStub(env);
   const record = await registry.getRepository(resource.resource);
   if (!record) {
-    // A prior destroy may have failed after registry removal. Retry teardown
-    // on that same DO identity; a fully removed resident has no resource row.
+    // Registry and resource rows may already be gone after partial cleanup.
+    // Only the same durable cleanup target can authorize another teardown.
     const old = await residentStub(env, resource.resource).getResidentInfo();
-    if (old.resource !== resource.resource) return json({ error: `${resource.resource} is not onboarded` }, 404);
+    if (old.resource !== resource.resource && old.cleanupPending !== resource.resource)
+      return json({ error: `${resource.resource} is not onboarded` }, 404);
   }
 
   if (record?.noResident === true) {
@@ -12743,8 +12874,8 @@ async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<
 /** The full offboard teardown (item 11), shared by POST /offboard and the LRU
  *  eviction path of POST /onboard: registry removal first (the slot frees
  *  atomically and no new work routes here), then the DO teardown and the
- *  resident/<resource>/ R2 prefix sweep concurrently — they touch disjoint
- *  data (the teardown's backup objects live under backups/<id>/). */
+ *  resident/<resource>/ R2 prefix sweep, then confirmed cleanup releases the
+ *  durable hold. The teardown's backups live under backups/<id>/. */
 async function offboardResident(
   env: Env,
   resource: string,
@@ -12789,6 +12920,13 @@ async function teardownResident(
 
   const errors = [...teardown.errors];
   if (r2Sweep.error) errors.push(r2Sweep.error);
+  if (teardown.storageCleared && errors.length === 0) {
+    try {
+      await residentStub(env, resource).confirmCleanup(resource);
+    } catch (err) {
+      errors.push(`cleanup confirmation failed: ${errMsg(err)}`);
+    }
+  }
 
   return {
     schedulesCancelled: teardown.schedulesCancelled,
@@ -12848,12 +12986,28 @@ async function handleReconfigure(env: Env, body: Record<string, unknown>): Promi
   return json({ resource: updated.resource, record: updated });
 }
 
-/** The down→onboarding rebuild — discard the stamped snapshots and
- *  reprovision from scratch through the ordinary provisioning pipeline,
- *  reusing the registry record (command table, ref, budget) as-is; the cap
- *  slot and thread bindings are untouched. `dryRun:true` answers 200 with the
- *  itemized plan and executes nothing; a real rebuild answers 202 like
- *  onboard (the transition is provisioning's schedule). */
+/** Full resident reset keeps registration durable while replacing its runtime
+ * and stored work. An older Worker must refuse this dedicated route instead
+ * of silently running a binding-preserving rebuild. */
+async function handleReset(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const resource = parseResource(body.resource);
+  if ("error" in resource) return json({ error: resource.error }, 400);
+  if (body.dryRun !== undefined && typeof body.dryRun !== "boolean")
+    return json({ error: "dryRun must be a boolean" }, 400);
+  const record = await registryStub(env).getRepository(resource.resource);
+  if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
+  if (record.noResident === true) return json({ error: `${record.resource} has no resident to reset` }, 409);
+  const dryRun = body.dryRun === true;
+  const result = await residentStub(env, resource.resource).reset(
+    resource.resource,
+    record.defaultRef,
+    record.provisioningTimeoutMs,
+    dryRun,
+  );
+  return json(result, "error" in result ? result.status : dryRun ? 200 : 202);
+}
+
+/** Snapshot rebuild keeps the registry and thread bindings. */
 async function handleRebuild(env: Env, body: Record<string, unknown>): Promise<Response> {
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);

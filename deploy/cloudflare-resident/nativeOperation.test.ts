@@ -91,6 +91,8 @@ describe("native operation journal", () => {
       owner: { opOwner: "op:0" },
       journal: null,
       recoverable: false,
+      recoveryReason: "legacy-or-invalid-record",
+      controls: [],
     });
     const last = await h.journal.list(page.cursor!);
     expect(last.operations.map((row) => row.key)).toEqual(["native-operation:op:25"]);
@@ -121,6 +123,111 @@ describe("native operation journal", () => {
       ),
     ).toEqual(receipt);
     await expect(restarted.begin(key, "process")).rejects.toThrow();
+  });
+
+  it("terminates only the original recorded process and preserves unrelated work", async () => {
+    const h = fixture();
+    const operation = await lostProcess(h);
+    h.rows.set("private-bytes", "unpublished work");
+    let stopped = false;
+    const killed: unknown[] = [];
+    expect(
+      await h.journal.recover(
+        key,
+        operation.recordHash,
+        async () => (stopped ? terminal : { ...identity, state: "running" }),
+        matches,
+        async (target) => {
+          killed.push(target);
+          stopped = true;
+        },
+      ),
+    ).toEqual({ key, recordHash: operation.recordHash, outcome: "native-ended", processes: [terminal] });
+    expect(killed).toEqual([{ id: "original-process", pid: 42, startedAt: "2026-10-11T00:00:00.000Z" }]);
+    expect(h.rows.get("private-bytes")).toBe("unpublished work");
+    expect(h.rows.get(`native-operation-control:${key}:${identity.id}`)).toEqual({
+      process: identity,
+      recordHash: operation.recordHash,
+      outcome: "kill-acknowledged",
+    });
+  });
+
+  it("refuses termination when the original owner or process identity changes", async () => {
+    for (const ownerMatches of [true, false]) {
+      const h = fixture();
+      const operation = await lostProcess(h);
+      const before = structuredClone(h.rows);
+      const killed: unknown[] = [];
+      const result = await h.journal.recover(
+        key,
+        operation.recordHash,
+        async () => ({ ...identity, pid: ownerMatches ? 43 : 42, state: "running" }),
+        async () => ownerMatches,
+        async (target) => {
+          killed.push(target);
+        },
+      );
+      expect(result).toEqual({
+        error: `native-operation-recovery-refused: ${ownerMatches ? "original-process-identity-changed" : "record-or-owner-changed"}`,
+        status: 409,
+      });
+      expect(h.rows).toEqual(before);
+      expect(killed).toEqual([]);
+    }
+  });
+
+  it("records an unknown termination outcome durably and refuses replay after restart", async () => {
+    const h = fixture();
+    const operation = await lostProcess(h);
+    const original = structuredClone(h.rows.get(key));
+    let controls = 0;
+    const terminate = async () => {
+      controls++;
+      throw new Error("lost reply");
+    };
+    const lookup = async () => ({ ...identity, state: "running" });
+    expect(await h.journal.recover(key, operation.recordHash, lookup, matches, terminate)).toEqual({
+      error: "native-operation-recovery-refused: termination-outcome-unverified",
+      status: 503,
+      details: { class: "Error" },
+    });
+    const restarted = new NativeOperationJournal(h.storage);
+    expect((await restarted.list()).operations[0]?.controls).toEqual([
+      { process: identity, recordHash: operation.recordHash, outcome: "kill-unverified", failure: { class: "Error" } },
+    ]);
+    expect(await restarted.recover(key, operation.recordHash, lookup, matches, terminate)).toEqual({
+      error:
+        "native-operation-recovery-refused: termination-already-requested; observe the original process before recovery",
+      status: 409,
+    });
+    expect(controls).toBe(1);
+    expect(h.rows.get(key)).toEqual(original);
+    h.rows.delete(key);
+    expect(await restarted.recover(key, operation.recordHash, lookup, matches)).toEqual({
+      status: 409,
+      error: "native-operation-recovery-refused: record-missing-or-changed",
+      controls: [
+        {
+          process: identity,
+          recordHash: operation.recordHash,
+          outcome: "kill-unverified",
+          failure: { class: "Error" },
+        },
+      ],
+    });
+    const changed = structuredClone(original) as { native: { closed: boolean } };
+    changed.native.closed = false;
+    h.rows.set(key, changed);
+    const current = (await restarted.list()).operations[0]!;
+    expect(current.controls).toEqual([
+      { process: identity, recordHash: operation.recordHash, outcome: "kill-unverified", failure: { class: "Error" } },
+    ]);
+    expect(await restarted.recover(key, current.recordHash, lookup, matches, terminate)).toMatchObject({
+      status: 409,
+      error:
+        "native-operation-recovery-refused: termination-already-requested; observe the original process before recovery",
+    });
+    expect(controls).toBe(1);
   });
 
   it.each([
@@ -230,7 +337,11 @@ describe("native operation journal", () => {
         },
         matches,
       ),
-    ).toEqual({ error: "native-operation-recovery-refused: native-evidence-unreadable", status: 503 });
+    ).toEqual({
+      error: "native-operation-recovery-refused: native-evidence-unreadable",
+      status: 503,
+      details: { class: "Error" },
+    });
     expect(h.rows).toEqual(before);
   });
 
@@ -250,7 +361,7 @@ describe("native operation journal", () => {
   });
 });
 
-function httpFixture(h: ReturnType<typeof fixture>) {
+function httpFixture(h: ReturnType<typeof fixture>, running = false) {
   const source = ts.createSourceFile("worker.ts", readSource("worker.ts"), ts.ScriptTarget.Latest, true);
   const functions = [
     "bearerToken",
@@ -282,6 +393,8 @@ function httpFixture(h: ReturnType<typeof fixture>) {
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
   ).outputText;
   let nativeReads = 0;
+  let nativeControls = 0;
+  let terminated = false;
   const worker = runInNewContext(compiled + "\nworker", {
     Request,
     Response,
@@ -299,15 +412,21 @@ function httpFixture(h: ReturnType<typeof fixture>) {
     },
     residentStub: () => ({
       getNativeOperations: (cursor?: string) => h.journal.list(cursor),
-      recoverNativeOperation: (key: string, hash: string) =>
+      recoverNativeOperation: (key: string, hash: string, terminate = false) =>
         h.journal.recover(
           key,
           hash,
           async () => {
             nativeReads++;
-            return terminal;
+            return running && !terminated ? { ...identity, state: "running" } : terminal;
           },
           matches,
+          terminate
+            ? async () => {
+                nativeControls++;
+                terminated = true;
+              }
+            : undefined,
         ),
     }),
   });
@@ -328,10 +447,31 @@ function httpFixture(h: ReturnType<typeof fixture>) {
         env,
       ) as Promise<Response>,
     nativeReads: () => nativeReads,
+    nativeControls: () => nativeControls,
   };
 }
 
 describe("native operation HTTP permissions", () => {
+  it("admin termination must be explicit and strictly typed, while readers cannot signal a process", async () => {
+    const h = fixture();
+    const operation = await lostProcess(h);
+    const api = httpFixture(h, true);
+    const target = { resource: "repo:acme/app", key, recordHash: operation.recordHash };
+    expect((await api.request("/recover-native-operation", "reader", { ...target, terminate: true })).status).toBe(401);
+    expect((await api.request("/recover-native-operation", "admin", { ...target, terminate: "yes" })).status).toBe(400);
+    expect((await api.request("/recover-native-operation", "admin", target)).status).toBe(409);
+    expect(api.nativeControls()).toBe(0);
+    const stopped = await api.request("/recover-native-operation", "admin", { ...target, terminate: true });
+    expect(stopped.status).toBe(200);
+    expect(await stopped.json()).toEqual({
+      key,
+      recordHash: operation.recordHash,
+      outcome: "native-ended",
+      processes: [terminal],
+    });
+    expect(api.nativeControls()).toBe(1);
+  });
+
   it("a read bearer inventories metadata but cannot recover an operation", async () => {
     const h = fixture();
     const operation = await lostProcess(h);
