@@ -1742,15 +1742,55 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
 
     async searchSession(key, query, limit, visibleTo) {
       const empty: SessionSearchView = { session: key, hits: [], gaps: [] };
-      // The key is `<threadKey>:<agent>` (`sessionKey`): the thread's runs of
-      // that agent are the session's runs, and a reader outside every one of
-      // them sees nothing — the same answer a session nobody ran gets.
-      const at = key.lastIndexOf(":");
+      const base = key.endsWith(":@context-v1") ? key.slice(0, -":@context-v1".length) : key;
+      const at = base.lastIndexOf(":");
       if (!sessions || visibleTo.kind === "none" || at <= 0) return empty;
-      const agent = key.slice(at + 1);
-      const own = (await threadRuns(key.slice(0, at), visibleTo)).filter(
-        (r) => r.session?.key === key || (r.session === undefined && r.agent === agent),
-      );
+      const agent = base.slice(at + 1);
+      const threadKey = base.slice(0, at);
+      const working = parseUnitKey(threadKey) !== undefined && (agent === "coding" || agent === "review");
+      // A unit's rounds may run in different transport threads. The key only
+      // narrows the listing; the stored or admitted session grants the read.
+      const own: RunView[] = [];
+      let cursor: RunListCursor | undefined;
+      do {
+        const page = await service.listRuns({
+          status: "all",
+          visibleTo,
+          ...(agent !== "-" ? { agent } : {}),
+          ...(!working ? { threadKey } : {}),
+          limit: RUN_LIST_MAX_LIMIT,
+          ...(cursor ? { before: cursor.finishedAt, beforeId: cursor.id } : {}),
+        });
+        for (const run of page.runs) {
+          if (agent === "-" && run.agent !== undefined) continue;
+          let session = run.session;
+          if (!run.finished && !session) {
+            const rows = await liveRows()?.catch(() => []);
+            const meta = rows?.find((row) => row.runId === run.id)?.meta;
+            const local = registry.getById(run.id);
+            if (
+              meta &&
+              meta.threadKey === run.threadKey &&
+              meta.agent === run.agent &&
+              meta.userId === run.userId &&
+              meta.channelId === run.channelId &&
+              meta.repo === run.repo &&
+              (meta.channelVisibility ?? "unknown") === (run.channelVisibility ?? "unknown") &&
+              meta.parentInstanceId === run.parentInstanceId &&
+              meta.idempotencyKey === run.idempotencyKey &&
+              (!local ||
+                (meta.coordinatorUnit === local.coordinatorUnit &&
+                  meta.coordinatorAttempt === local.coordinatorAttempt))
+            )
+              session = meta.session;
+          }
+          if (session?.key === key || (!session && run.persisted && !working && base === key))
+            own.push(session ? { ...run, session } : run);
+        }
+        const next = page.nextBefore;
+        if (next?.finishedAt === cursor?.finishedAt && next?.id === cursor?.id) break;
+        cursor = next;
+      } while (cursor);
       if (own.length === 0) return empty;
       const found = await sessions.searchSession(key, query, limit);
       const gaps = [...found.gaps].sort((a, b) => a - b);

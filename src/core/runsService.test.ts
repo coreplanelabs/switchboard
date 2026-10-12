@@ -2732,9 +2732,9 @@ describe("RunsService.searchSession — a person's search over one session's log
     content: [{ type: "tool_result", toolUseId: "c1", content: "1 failed: lockfile.test.ts" }],
   };
 
-  async function world() {
+  async function world(key = KEY, over: Partial<RunRecord> = {}) {
     const ledger = new InMemoryRunLedger(() => NOW);
-    await ledger.claimSession(KEY, "run-a", "g1");
+    await ledger.claimSession(key, "run-a", "g1");
     await ledger.seed(
       "run-a",
       "g1",
@@ -2745,7 +2745,7 @@ describe("RunsService.searchSession — a person's search over one session's log
         failed,
         say("unrelated remark"),
       ].map((message, idx) => ({ idx, message })),
-      KEY,
+      key,
     );
     const store = new InMemoryRunStore({ now: () => NOW });
     // Two runs of the session: the first wrote turns 0–1, the second (after a
@@ -2754,20 +2754,196 @@ describe("RunsService.searchSession — a person's search over one session's log
       record("run-a", NOW - 20_000, {
         threadKey: "slack:C1:s",
         agent: "coding",
-        session: { key: KEY, seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
+        ...over,
+        session: { key, seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
       }),
     );
     await store.put(
       record("run-b", NOW - 10_000, {
         threadKey: "slack:C1:s",
         agent: "coding",
-        session: { key: KEY, seedFrom: 0, request: 3, range: { from: 2, to: 4 } },
+        ...over,
+        session: { key, seedFrom: 0, request: 3, range: { from: 2, to: 4 } },
       }),
     );
     const { reg } = testRegistry();
     const svc = createRunsService({ registry: reg, store, sessions: ledger });
     return { svc, ledger, store, reg };
   }
+
+  it.each([
+    "slack:C1:s:coding:@context-v1",
+    "plan-search:task:coding",
+    "plan-search:task:coding:@context-v1",
+    "slack:C1:s:-",
+    "slack:C1:s:-:@context-v1",
+  ])("searches the exact recorded session %s under the reader's predicate", async (key) => {
+    const { svc, ledger } = await world(key, key.includes(":-") ? { agent: undefined } : {});
+    const search = vi.spyOn(ledger, "searchSession");
+    expect(await svc.searchSession(key, "unrelated", 5, { kind: "user-is", userId: "slack:UBOB" })).toEqual({
+      session: key,
+      hits: [],
+      gaps: [],
+    });
+    expect(search).not.toHaveBeenCalled();
+    expect(await svc.searchSession(key, "unrelated", 5, { kind: "user-is", userId: "slack:UALICE" })).toEqual({
+      session: key,
+      hits: [{ turn: 4, role: "user", snippet: "unrelated remark", runId: "run-b" }],
+      gaps: [],
+    });
+  });
+
+  it("does not infer access to a fresh context from a legacy run without a recorded session", async () => {
+    const key = "slack:C1:s:coding:@context-v1";
+    const { svc, store, ledger } = await world(key);
+    await store.delete("run-a");
+    await store.delete("run-b");
+    await store.put(record("legacy-run", NOW, { threadKey: "slack:C1:s" }));
+    const search = vi.spyOn(ledger, "searchSession");
+    expect(await svc.searchSession(key, "unrelated", 5, ALL)).toEqual({ session: key, hits: [], gaps: [] });
+    expect(search).not.toHaveBeenCalled();
+    expect(await svc.searchSession(KEY, "anything", 5, ALL)).toEqual({ session: KEY, hits: [], gaps: [] });
+    expect(search).toHaveBeenCalledWith(KEY, "anything", 5);
+  });
+
+  it.each([
+    { source: "local", key: "slack:C1:s:coding", agent: "coding" },
+    { source: "local", key: "slack:C1:s:coding:@context-v1", agent: "coding" },
+    { source: "foreign", key: "slack:C1:s:coding", agent: "coding" },
+    { source: "foreign", key: "slack:C1:s:coding:@context-v1", agent: "coding" },
+    { source: "local", key: "slack:C1:s:-", agent: undefined },
+    { source: "local", key: "slack:C1:s:-:@context-v1", agent: undefined },
+    { source: "foreign", key: "slack:C1:s:-", agent: undefined },
+    { source: "foreign", key: "slack:C1:s:-:@context-v1", agent: undefined },
+    { source: "local", key: "plan-search:task:coding", agent: "coding" },
+    { source: "local", key: "plan-search:task:coding:@context-v1", agent: "coding" },
+    { source: "local", key: "plan-search:task:review", agent: "review" },
+    { source: "local", key: "plan-search:task:review:@context-v1", agent: "review" },
+    { source: "foreign", key: "plan-search:task:coding:@context-v1", agent: "coding" },
+  ])("searches an active $source run by its exact admitted session $key", async ({ source, key, agent }) => {
+    const { ledger, store, reg } = await world(key);
+    await store.delete("run-a");
+    await store.delete("run-b");
+    const meta = {
+      agent,
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      repo: "acme/search",
+      channelVisibility: "public" as const,
+      threadKey: "slack:C1:s",
+      parentInstanceId: "plan-search",
+      idempotencyKey: "plan-search:task/0/coding",
+      coordinatorUnit: "task",
+      coordinatorAttempt: 2,
+      session: { key, seedFrom: 0, request: 0, range: { from: 0 } },
+    };
+    const id = source === "local" ? reg.create("coding", meta).id : "active-far";
+    await ledger.claim({
+      runId: id,
+      threadKey: meta.threadKey,
+      gen: "g1",
+      leaseMs: 30_000,
+      startedAt: NOW,
+      meta,
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    const svc = createRunsService({ registry: reg, store, ledger, sessions: ledger });
+    expect(await svc.searchSession(key, "unrelated", 5, { kind: "user-is", userId: "slack:UBOB" })).toEqual({
+      session: key,
+      hits: [],
+      gaps: [],
+    });
+    expect(await svc.searchSession(key, "unrelated", 5, { kind: "user-is", userId: "slack:UALICE" })).toEqual({
+      session: key,
+      hits: [{ turn: 4, role: "user", snippet: "unrelated remark", runId: id }],
+      gaps: [],
+    });
+    // A reused registry id cannot borrow another admitted run's session.
+    for (const mismatch of [
+      { threadKey: "slack:C1:other" },
+      { agent: "general" },
+      { userId: "slack:UBOB" },
+      { channelId: "slack:C2" },
+      { repo: "acme/other" },
+      { channelVisibility: "private" as const },
+      { parentInstanceId: "plan-other" },
+      { idempotencyKey: "plan-search:other-task/0/coding" },
+      { coordinatorUnit: "other-task" },
+      { coordinatorAttempt: 3 },
+      { coordinatorUnit: undefined },
+      { coordinatorAttempt: undefined },
+    ]) {
+      const { reg: conflicting } = testRegistry({ genId: () => id });
+      conflicting.create("coding", { ...meta, ...mismatch });
+      const conflict = createRunsService({ registry: conflicting, store, ledger, sessions: ledger });
+      const search = vi.spyOn(ledger, "searchSession");
+      search.mockClear();
+      expect(await conflict.searchSession(key, "unrelated", 5, ALL)).toEqual({ session: key, hits: [], gaps: [] });
+      expect(search).not.toHaveBeenCalled();
+    }
+    for (const omission of [
+      { coordinatorUnit: undefined },
+      { coordinatorAttempt: undefined },
+      { session: undefined },
+    ]) {
+      const { reg: legacyReg } = testRegistry();
+      const legacyLedger = new InMemoryRunLedger(() => NOW);
+      legacyReg.create("coding", meta);
+      await legacyLedger.claim({
+        runId: "id-1",
+        threadKey: meta.threadKey,
+        gen: "g1",
+        leaseMs: 30_000,
+        startedAt: NOW,
+        meta: { ...meta, ...omission },
+        card: null,
+        system: "sys",
+        tools: [],
+      });
+      const missing = createRunsService({ registry: legacyReg, store, ledger: legacyLedger, sessions: ledger });
+      const search = vi.spyOn(ledger, "searchSession");
+      search.mockClear();
+      expect(await missing.searchSession(key, "unrelated", 5, ALL)).toEqual({ session: key, hits: [], gaps: [] });
+      expect(search).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(["plan-search:task:coding:@context-v1", "slack:C1:s:-", "slack:C1:s:-:@context-v1"])(
+    "finds older session %s beyond the first visible page without granting another binding or a private worker run",
+    async (key) => {
+      const agentless = key.includes(":-");
+      const { svc, store } = await world(key, agentless ? { agent: undefined } : {});
+      for (let i = 0; i < 201; i++)
+        await store.put(record(`recent-${i}`, NOW, { threadKey: agentless ? "slack:C1:s" : "slack:C1:other" }));
+      const other = agentless
+        ? key.endsWith(":@context-v1")
+          ? "slack:C1:s:-"
+          : "slack:C1:s:-:@context-v1"
+        : "plan-search:other-task:coding:@context-v1";
+      expect(await svc.searchSession(other, "unrelated", 5, ALL)).toEqual({
+        session: other,
+        hits: [],
+        gaps: [],
+      });
+      expect(await svc.searchSession(key, "unrelated", 5, ALL)).toEqual({
+        session: key,
+        hits: [{ turn: 4, role: "user", snippet: "unrelated remark", runId: "run-b" }],
+        gaps: [],
+      });
+      await store.delete("run-a");
+      await store.delete("run-b");
+      await store.put(
+        record("private-worker", NOW, {
+          threadKey: "worker:private:task",
+          ...(agentless ? { agent: undefined } : {}),
+          session: { key, seedFrom: 0, request: 0, range: { from: 0, to: 4 } },
+        }),
+      );
+      expect(await svc.searchSession(key, "unrelated", 5, ALL)).toEqual({ session: key, hits: [], gaps: [] });
+    },
+  );
 
   it("answers the matching turns in relevance order, each with its role, a one-line snippet and the run whose range holds it, the gap markers the hits straddle, and on a hit past a marker the marker's turn; `limit` caps the hits", async () => {
     const { svc } = await world();
