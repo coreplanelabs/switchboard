@@ -1,10 +1,11 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, watch } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, watch } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { PACKAGE_ROOT, PACKAGE_SOURCE_FILE, packageVersion } from "../packageRoot.js";
 import { cliVersionOnHost, OPERATOR_ROOT, workAreaNpmCiArgs } from "./host.js";
 import { resolveOperatorRoot } from "./operatorRoot.js";
+import { createPagingObserver } from "./pagingDiagnostic.js";
 import { run, defaultSandboxGateDeps } from "./run.js";
 import { TEST_PROFILE } from "./testing/profile.js";
 import { spawn } from "node:child_process";
@@ -21,6 +22,134 @@ afterAll(() => {
 });
 
 describe("deployment command cancellation", () => {
+  it("public inspection keeps auth credentials off disk while preserving supported header formats", async () => {
+    const savedEnv = process.env;
+    const fetcher = vi.spyOn(globalThis, "fetch");
+    const dir = mkdtempSync(join(tmpdir(), "public-auth-private-"));
+    const config = join(dir, "config.json");
+    const log = join(dir, "default-wrangler.log");
+    const application = "11111111-1111-4111-8111-111111111111";
+    writeFileSync(config, JSON.stringify({ account_id: TEST_PROFILE.account }));
+    try {
+      writeFileSync(
+        join(dir, "npx"),
+        `#!${process.execPath}
+const fs=require('node:fs'),a=process.argv.slice(2);
+if(a.includes('list')) console.log(JSON.stringify([{name:process.env.FIXTURE_APP,id:${JSON.stringify(application)}}]));
+else if(a.slice(0,3).join(' ')==='wrangler auth token') {if(process.env.WRANGLER_WRITE_LOGS!=='false')fs.appendFileSync(process.env.FIXTURE_LOG,process.env.FIXTURE_AUTH);console.log(process.env.FIXTURE_AUTH);} else process.exit(99);`,
+        { mode: 0o755 },
+      );
+      for (const [auth, expectedHeaders] of [
+        [{ type: "api_token", token: "synthetic-token" }, { authorization: "Bearer synthetic-token" }],
+        [{ type: "oauth", token: "synthetic-oauth" }, { authorization: "Bearer synthetic-oauth" }],
+        [
+          { type: "api_key", key: "synthetic-key", email: "fixture@example.test" },
+          { "X-Auth-Key": "synthetic-key", "X-Auth-Email": "fixture@example.test" },
+        ],
+      ]) {
+        const app = `fixture-${randomUUID()}`;
+        process.env = {
+          PATH: dir,
+          FIXTURE_APP: app,
+          FIXTURE_LOG: log,
+          FIXTURE_AUTH: JSON.stringify(auth),
+          WRANGLER_WRITE_LOGS: "true",
+        };
+        const requests: unknown[] = [];
+        fetcher.mockImplementation(async (_url, options) => {
+          requests.push(options?.headers);
+          return Response.json({ success: true, errors: [], result: [], result_info: { next_page_token: null } });
+        });
+        const actual = await defaultSandboxGateDeps.readPublicMetadata!(
+          "deploy/cloudflare-sandbox",
+          app,
+          TEST_PROFILE.account,
+          config,
+          new AbortController().signal,
+        );
+        expect(actual).toMatchObject({
+          complete: true,
+          pages: 1,
+          rows: 0,
+          states: {},
+          reason: "public metadata traversal complete; application-version evidence unavailable",
+        });
+        expect(requests).toEqual([expectedHeaders]);
+        expect({ logCreated: existsSync(log), leakedOutput: JSON.stringify(actual).includes("synthetic-") }).toEqual({
+          logCreated: false,
+          leakedOutput: false,
+        });
+      }
+    } finally {
+      fetcher.mockRestore();
+      process.env = savedEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a public auth deadline ends its noncooperating owned processes without a native request", async () => {
+    const savedEnv = process.env;
+    const dir = mkdtempSync(join(tmpdir(), "public-auth-deadline-"));
+    const config = join(dir, "config.json"),
+      ids = join(dir, "ids"),
+      later = join(dir, "later");
+    const application = "11111111-1111-4111-8111-111111111111",
+      app = `fixture-${randomUUID()}`;
+    const fetcher = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("unexpected native request"));
+    let pending: Promise<unknown> | undefined;
+    let actual: unknown;
+    const ownedPids = () => (existsSync(ids) ? readFileSync(ids, "utf8").trim().split("\n").map(Number) : []);
+    try {
+      writeFileSync(config, JSON.stringify({ account_id: TEST_PROFILE.account }));
+      writeFileSync(
+        join(dir, "helper.cjs"),
+        "const fs=require('node:fs');process.on('SIGTERM',()=>{});fs.appendFileSync(process.env.FIXTURE_IDS,process.pid+'\\n');setTimeout(()=>fs.writeFileSync(process.env.FIXTURE_LATER,'escaped'),1400);setInterval(()=>{},1000);",
+      );
+      writeFileSync(
+        join(dir, "npx"),
+        `#!${process.execPath}
+const fs=require('node:fs'),a=process.argv.slice(2);
+if(a.includes('list')) console.log(JSON.stringify([{name:process.env.FIXTURE_APP,id:${JSON.stringify(application)}}]));
+else {process.on('SIGTERM',()=>{});fs.writeFileSync(process.env.FIXTURE_IDS,process.pid+'\\n');require('node:child_process').spawn(process.execPath,[${JSON.stringify(join(dir, "helper.cjs"))}],{stdio:['ignore','inherit','inherit']});setInterval(()=>{},1000);}`,
+        { mode: 0o755 },
+      );
+      process.env = { PATH: dir, FIXTURE_APP: app, FIXTURE_IDS: ids, FIXTURE_LATER: later };
+      pending = defaultSandboxGateDeps.readPublicMetadata!(
+        "deploy/cloudflare-sandbox",
+        app,
+        TEST_PROFILE.account,
+        config,
+        AbortSignal.timeout(1000),
+      ).then((result) => {
+        actual = result;
+        return result;
+      });
+      // Observe the deadline's settlement before cleanup; this is not a production grace timer.
+      await new Promise((resolve) => setTimeout(resolve, 1600));
+      expect(ownedPids()).toHaveLength(2);
+      expect(actual).toMatchObject({
+        complete: false,
+        pages: 0,
+        rows: 0,
+        failure: { reason: "interrupted", commandExit: 130 },
+      });
+      expect({ laterWork: existsSync(later), nativeRequests: fetcher.mock.calls.length }).toEqual({
+        laterWork: false,
+        nativeRequests: 0,
+      });
+    } finally {
+      for (const pid of ownedPids())
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          /* Owned fixture already ended. */
+        }
+      await pending;
+      fetcher.mockRestore();
+      process.env = savedEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it("cancellation during whoami prevents token verification and the next capability or Git command", async ({
     signal,
     onTestFinished,
@@ -465,6 +594,49 @@ else {
         },
       });
     } finally {
+      process.env = savedEnv;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("records the actual legacy page argument alongside its independent HTTP query", async () => {
+    const savedEnv = process.env,
+      dir = mkdtempSync(join(tmpdir(), "paging-argument-")),
+      app = `fixture-${randomUUID()}`;
+    const logs: string[] = [];
+    const capture = createPagingObserver({
+      source: "a".repeat(40),
+      expectedCommit: "a".repeat(40),
+      env: {},
+      log: (line) => logs.push(line),
+    });
+    try {
+      writeFileSync(
+        join(dir, "npx"),
+        `#!${process.execPath}
+const fs=require('node:fs'),a=process.argv.slice(2);
+if(a.includes('list'))console.log(JSON.stringify([{name:process.env.FIXTURE_APP,id:'owned-app'}]));
+else {const size=a[a.indexOf('--per-page')+1];fs.writeFileSync(process.env.WRANGLER_LOG_PATH,'-- START CF API REQUEST: https://api.cloudflare.com/client/v4/accounts/private-account/containers/dash/applications/owned-app/instances?per_page='+size+'\\n-- START CF API RESPONSE: OK 200\\n-- END CF API RESPONSE');console.log(JSON.stringify({instances:[{id:'private-row',name:'sample',state:'running',version:78}],result_info:{next_page_token:null}}));}`,
+        { mode: 0o755 },
+      );
+      process.env = { PATH: dir, CLOUDFLARE_API_TOKEN: "synthetic-no-access", FIXTURE_APP: app };
+      expect(
+        await defaultSandboxGateDeps.readInstances(
+          "deploy/cloudflare-sandbox",
+          app,
+          undefined,
+          undefined,
+          capture.observe,
+        ),
+      ).toEqual({ value: [{ name: "sample", state: "running", version: 78 }] });
+      const after = JSON.parse(logs.at(-1)!.replace("[paging-diagnostic] ", ""));
+      expect(after).toMatchObject({
+        argv: { shell: false, perPage: 1000 },
+        http: { available: true, status: 200, request: { perPage: 1000 } },
+      });
+      expect(logs.join("\n")).not.toContain("private-");
+    } finally {
+      capture.close();
       process.env = savedEnv;
       rmSync(dir, { recursive: true, force: true });
     }

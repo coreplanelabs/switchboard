@@ -109,17 +109,39 @@ function bind(
   const writes: string[] = [];
   const commands = bindCommands(registry, {
     deploy: {
-      inspect: async (_profile, options) => ({
-        ok: true,
-        live: false,
-        targetVerified: false,
-        inventoryComplete: true,
-        source: "c".repeat(40),
-        expectedCommit: options.expectedCommit,
-        appVersion: 12,
-        imageDigest: "sha256:" + "b".repeat(64),
-        reason: "observation only; target acceptance and full readiness unverified",
-      }),
+      inspect: async (_profile, options) =>
+        options.publicMetadata
+          ? {
+              ok: true,
+              live: false,
+              targetVerified: false,
+              inventoryComplete: false,
+              source: "c".repeat(40),
+              expectedCommit: options.expectedCommit,
+              appVersion: null,
+              imageDigest: null,
+              reason: "public metadata only",
+              publicMetadata: {
+                complete: true,
+                pages: 1,
+                rows: 2,
+                states: { running: 2 },
+                missingNames: 0,
+                emptyImages: 0,
+                reason: "public metadata only",
+              },
+            }
+          : {
+              ok: true,
+              live: false,
+              targetVerified: false,
+              inventoryComplete: true,
+              source: "c".repeat(40),
+              expectedCommit: options.expectedCommit,
+              appVersion: 12,
+              imageDigest: "sha256:" + "b".repeat(64),
+              reason: "observation only; target acceptance and full readiness unverified",
+            },
       verify: async (_profile, options) => ({
         ok: true,
         live: false,
@@ -211,6 +233,30 @@ const neverRunsPlan = async (): Promise<DeployRunResult> => {
   throw new Error("must not run");
 };
 const neverRuns = () => bind(neverRunsPlan);
+
+describe("deploy.inspect public metadata", () => {
+  it("forwards the explicit selector and keeps readiness and legacy inventory unverified", async () => {
+    const { commands } = neverRuns();
+    const actual = await commands.invoke(
+      "deploy.inspect",
+      { options: { expectedCommit: "a".repeat(40), publicMetadata: true } },
+      cli,
+    );
+    expect(actual.ok).toBe(true);
+    if (!actual.ok) throw new Error("inspection failed");
+    expect(actual.value).toMatchObject({
+      live: false,
+      targetVerified: false,
+      inventoryComplete: false,
+      appVersion: null,
+      imageDigest: null,
+      publicMetadata: { complete: true, rows: 2 },
+    });
+    expect(renderText(commands.get("deploy.inspect")!, actual.value)).toContain(
+      "Public metadata observation only; application-version evidence and readiness unverified",
+    );
+  });
+});
 
 describe("deploy.plan", () => {
   it("computes the canonical plan (memory → bot → resident → sandbox) with the bot's live gate, and renders formatPlan", async () => {

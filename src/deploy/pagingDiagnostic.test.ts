@@ -11,7 +11,7 @@ const page = (next: unknown = null) => ({
   instances: [{ id: "private-instance", name: "private-name", state: "running", version: 12 }],
   result_info: { page_token: "private-cursor", next_page_token: next },
 });
-const event = { app, pageIndex: 2, requestedCursor: "private-cursor", cumulativeCount: 2 };
+const event = { app, perPage: 100, pageIndex: 2, requestedCursor: "private-cursor", cumulativeCount: 2 };
 
 describe("bounded paging evidence", () => {
   it("keeps the matching first and repeated cursor receipts after the page ring rolls over", () => {
@@ -76,6 +76,11 @@ describe("bounded paging evidence", () => {
           nextCursorProvenance: "CLI result_info; pinned producer forwards provider next-page field",
         },
       });
+      expect(saved).toMatchObject({
+        producer: "wrangler",
+        cursorEncoding: "opaque argv string; pinned producer uses encodeURIComponent",
+      });
+      expect(failure.argv).toEqual({ shell: false, perPage: null, cursorFlag: "--page-token" });
       expect(failure.cycleWitness.firstSeen.nextCursorHash).toBe(terminal.nextCursorHash);
       expect(failure.cycleWitness.repeated.nextCursorHash).toBe(terminal.nextCursorHash);
       expect(failure.cycleWitness.repeated.requestedCursorHash).toBe(terminal.requestedCursorHash);
@@ -100,6 +105,75 @@ describe("bounded paging evidence", () => {
     } finally {
       capture.close();
       rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("public metadata pages retain only native wire facts and hashed identities", () => {
+    const logs: string[] = [];
+    const capture = createPagingObserver({ log: (line) => logs.push(line), source, expectedCommit: source, env });
+    try {
+      capture.observe({
+        ...event,
+        phase: "after",
+        page: {
+          instances: [{ id: "private-actor", name: "private-name", image: "private-image", state: "unknown" }],
+          result_info: { next_page_token: "private-next" },
+        },
+        publicMetadata: { account: "private-account", wireCursor: "private-cursor", httpStatus: 200 },
+      });
+      capture.observe({
+        ...event,
+        phase: "failure",
+        reason: "unknown-state",
+        producer: "cloudflare-public-v2",
+        publicMetadata: { account: "private-account", wireCursor: "private-cursor", httpStatus: 200 },
+      });
+      const saved = JSON.parse(logs.at(-1)!.replace("[paging-diagnostic] ", ""));
+      expect(saved.producer).toBe("cloudflare-public-v2");
+      expect(saved.originalError).toBe("unknown-state");
+      const frame = saved.frames[0];
+      expect(frame.http).toMatchObject({
+        available: true,
+        status: 200,
+        request: { path: "/accounts/<account>/containers/applications/<app>/instances-v2", perPage: 100 },
+      });
+      expect(frame.http.request.cursorHash).toBe(frame.requestedCursorHash);
+      expect(frame.publicMetadata).toMatchObject({ states: { unknown: 1 }, missingNames: 0, emptyImages: 0 });
+      expect(frame.publicMetadata.accountHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(frame.publicMetadata.nameRowsHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(frame.publicMetadata.imageRowsHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(logs.join("\n")).not.toContain("private-");
+    } finally {
+      capture.close();
+    }
+  });
+
+  it("records explicit public size and unknown malformed sizes without inventing arguments", () => {
+    for (const [perPage, expected] of [
+      [100, 100],
+      [undefined, null],
+      ["private-size", null],
+      [0, null],
+      [-1, null],
+      [Number.MAX_SAFE_INTEGER + 1, null],
+    ] as const) {
+      const logs: string[] = [];
+      const capture = createPagingObserver({ source, expectedCommit: source, env, log: (line) => logs.push(line) });
+      try {
+        capture.observe({
+          ...event,
+          phase: "after",
+          perPage,
+          page: page(null),
+          publicMetadata: { account: "private-account", wireCursor: "private-cursor", httpStatus: 200 },
+        });
+        const frame = JSON.parse(logs.at(-1)!.replace("[paging-diagnostic] ", ""));
+        expect(frame.request.perPage).toBe(expected);
+        expect(frame.http.request.perPage).toBe(expected);
+        expect(logs.join("\n")).not.toContain("private-");
+      } finally {
+        capture.close();
+      }
     }
   });
 

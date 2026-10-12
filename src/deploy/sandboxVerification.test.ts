@@ -107,6 +107,78 @@ describe("verification without upload", () => {
       ).toBe(false);
     }
   });
+  it("public metadata inspection cannot credit legacy inventory or invoke its runtime probe", async () => {
+    const h = harness();
+    h.deps.readPublicMetadata = async () => {
+      h.calls.push("public-metadata");
+      return {
+        complete: true,
+        pages: 3,
+        rows: 2,
+        states: { running: 2 },
+        missingNames: 1,
+        emptyImages: 0,
+        reason: "public metadata traversal complete; application-version evidence unavailable",
+      };
+    };
+    expect(
+      await inspectSandboxOnce(
+        { inspect: true, expectedCommit: options.expectedCommit, publicMetadata: true },
+        { ...target, account: "d".repeat(32) },
+        h.deps,
+      ),
+    ).toEqual({
+      ok: true,
+      live: false,
+      targetVerified: false,
+      inventoryComplete: false,
+      source: "c".repeat(40),
+      expectedCommit: "a".repeat(40),
+      appVersion: null,
+      imageDigest: null,
+      reason: "public metadata traversal complete; application-version evidence unavailable",
+      publicMetadata: {
+        complete: true,
+        pages: 3,
+        rows: 2,
+        states: { running: 2 },
+        missingNames: 1,
+        emptyImages: 0,
+        reason: "public metadata traversal complete; application-version evidence unavailable",
+      },
+    });
+    expect(h.calls).toEqual(["health", "public-metadata"]);
+  });
+
+  it("public metadata refuses non-success health even when the body claims the expected build", async () => {
+    const h = harness();
+    h.deps.readHealth = async () => {
+      h.calls.push("health");
+      return { status: 502, body: { ok: true, build: { commit: options.expectedCommit } } };
+    };
+    h.deps.readPublicMetadata = async () => {
+      throw new Error("metadata must not run");
+    };
+    expect(
+      await inspectSandboxOnce(
+        { inspect: true, publicMetadata: true, expectedCommit: options.expectedCommit },
+        { ...target, account: "d".repeat(32) },
+        h.deps,
+      ),
+    ).toEqual({
+      ok: false,
+      live: false,
+      targetVerified: false,
+      inventoryComplete: false,
+      source: "c".repeat(40),
+      expectedCommit: "a".repeat(40),
+      appVersion: null,
+      imageDigest: null,
+      reason: "Worker health does not carry HTTP 200 and the exact pinned commit",
+    });
+    expect(h.calls).toEqual(["health"]);
+  });
+
   it("observes installed pins without granting target acceptance, even with complete inventory", async () => {
     const h = harness();
     expect(await inspectSandboxOnce({ inspect: true, expectedCommit: options.expectedCommit }, target, h.deps)).toEqual(

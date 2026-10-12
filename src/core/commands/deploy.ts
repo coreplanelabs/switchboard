@@ -401,6 +401,10 @@ export const deployAll = defineCommand({
 export const deployInspect = defineCommand({
   id: "deploy.inspect",
   options: z.object({
+    publicMetadata: z
+      .boolean()
+      .optional()
+      .describe("Collect unfiltered public instance metadata only; no application-version or readiness credit"),
     expectedCommit: z
       .string()
       .regex(/^[a-f0-9]{40}$/, "expected a full Worker commit")
@@ -410,9 +414,13 @@ export const deployInspect = defineCommand({
   effect: "read",
   surfaces: { chat: false, mcp: false, http: false },
   describe:
-    "Observe Sandbox health, application version, image digest and complete inventory without an echo or upload. This reports installed facts; target acceptance requires independent release image provenance.",
+    "Observe Sandbox health and inventory without upload or echo. --public-metadata collects unfiltered public metadata only, without application-version or readiness credit.",
   render: (output) => {
     const o = output as JsonObject;
+    if (o.publicMetadata) {
+      const metadata = o.publicMetadata as JsonObject;
+      return `Public metadata observation only; application-version evidence and readiness unverified\nmetadata ${metadata.complete ? "complete" : "incomplete"}; ${metadata.rows ?? 0} emitted row(s)\n${o.reason}\nverifier ${o.source}; expected Worker ${o.expectedCommit}`;
+    }
     return `Observation only; target acceptance and full readiness unverified\napplication version ${o.appVersion ?? "unknown"}; image digest ${o.imageDigest ?? "unknown"}; inventory ${o.inventoryComplete ? "complete" : "incomplete"}\n${o.reason}\nverifier ${o.source}; expected Worker ${o.expectedCommit}`;
   },
   handler: async ({ options, deps }) => {

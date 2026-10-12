@@ -546,6 +546,11 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     "id": "deploy.inspect",
     "options": [
       {
+        "name": "publicMetadata",
+        "required": false,
+        "type": "boolean",
+      },
+      {
         "name": "expectedCommit",
         "required": true,
         "type": "string",
