@@ -96,6 +96,75 @@ function harness(script: Scripted) {
   return { deps, io, exec, calls, lines };
 }
 
+describe("build deployment waits for its uploaded target", () => {
+  const oldTarget: Read<AppState> = { value: { version: 55, image: NEWER_IMAGE } };
+  const newTarget: Read<AppState> = { value: { version: 56, image: PRIOR_IMAGE } };
+  const loaded = (version: number): HealthRead => ({
+    status: 200,
+    body: {
+      ok: true,
+      draining: false,
+      build: { commit: PRIOR_COMMIT },
+      loadedBase: {
+        schema: 1,
+        source: { kind: "state", key: `base-${PRIOR_COMMIT}`, version },
+        sha256: "a".repeat(64),
+        process: { commit: PRIOR_COMMIT },
+      },
+    },
+  });
+  const buildStep = { ...botStep, botImage: undefined };
+
+  it("same-commit image replacement does not finish on the old healthy application and config", async () => {
+    const h = harness({ app: [oldTarget, oldTarget, newTarget], health: [loaded(1), loaded(2)] });
+    const result = await deployStep(buildStep, plan, PRIOR_COMMIT, h.io, h.deps, h.exec);
+    expect(result).toEqual({ ok: true, versionId: WORKER_VERSION, live: "live" });
+    expect(h.lines.join("\n")).toContain(`targets ${PRIOR_IMAGE} at version 56`);
+    expect(h.lines.join("\n")).not.toContain(`live (container application ${APP} targets ${NEWER_IMAGE} at version 55`);
+  });
+
+  it("same-commit old image cannot succeed at the existing deadline", async () => {
+    const h = harness({ app: [oldTarget], health: [loaded(1)] });
+    expect(await deployStep(buildStep, plan, PRIOR_COMMIT, h.io, h.deps, h.exec)).toMatchObject({
+      ok: false,
+      versionId: WORKER_VERSION,
+      live: expect.stringContaining("deployed, not live"),
+    });
+  });
+
+  it("a new application version with the old image still refuses", async () => {
+    const h = harness({ app: [oldTarget, { value: { version: 56, image: NEWER_IMAGE } }], health: [loaded(1)] });
+    expect(await deployStep(buildStep, plan, PRIOR_COMMIT, h.io, h.deps, h.exec)).toMatchObject({
+      ok: false,
+      versionId: WORKER_VERSION,
+      live: expect.stringContaining("expected uploaded image"),
+    });
+  });
+
+  it("a Worker-only upload retains its unchanged application target", async () => {
+    const h = harness({ app: [oldTarget], health: [loaded(1)], output: `Current Version ID: ${WORKER_VERSION}` });
+    expect(await deployStep(buildStep, plan, PRIOR_COMMIT, h.io, h.deps, h.exec)).toEqual({
+      ok: true,
+      versionId: WORKER_VERSION,
+      live: "live",
+    });
+  });
+
+  it("a configuration-only rollout must leave the old application version", async () => {
+    const h = harness({
+      app: [oldTarget, oldTarget, { value: { version: 56, image: NEWER_IMAGE } }],
+      health: [loaded(1)],
+      output: `Container application changes\nEDIT ${APP}\n+ "max_instances": 1\nCurrent Version ID: ${WORKER_VERSION}`,
+    });
+    expect(await deployStep(buildStep, plan, PRIOR_COMMIT, h.io, h.deps, h.exec)).toEqual({
+      ok: true,
+      versionId: WORKER_VERSION,
+      live: "live",
+    });
+    expect(h.lines.join("\n")).toContain(`targets ${NEWER_IMAGE} at version 56`);
+  });
+});
+
 describe("deployment health cancellation", () => {
   it("aborts an already pending health response and performs no later poll", async () => {
     try {
@@ -188,7 +257,13 @@ describe("deployStep (bot rollback fence)", () => {
   it("also admits a forward version only after application and runtime uptake", async () => {
     const initial = { value: { version: 16, image: PRIOR_IMAGE } };
     const final = { value: { version: 17, image: NEWER_IMAGE } };
-    const h = harness({ app: [initial, initial, final], health: [serving(PRIOR_COMMIT), serving(NEWER_COMMIT)] });
+    const h = harness({
+      app: [initial, initial, final],
+      health: [serving(PRIOR_COMMIT), serving(NEWER_COMMIT)],
+      output: deployOutput
+        .replace(`-         "image": "${NEWER_IMAGE}"`, `-         "image": "${PRIOR_IMAGE}"`)
+        .replace(`+         "image": "${PRIOR_IMAGE}"`, `+         "image": "${NEWER_IMAGE}"`),
+    });
     expect(
       await deployStep({ ...botStep, botImage: NEWER_IMAGE }, plan, NEWER_COMMIT, h.io, h.deps, h.exec),
     ).toMatchObject({ ok: true, live: "live" });
@@ -217,6 +292,7 @@ describe("deployStep (bot rollback fence)", () => {
       app: [effective, effective, landed],
       listed: stale,
       health: [serving(NEWER_COMMIT), serving(PRIOR_COMMIT)],
+      output: deployOutput.replace(`+         "image": "${PRIOR_IMAGE}"`, `+         "image": "${selected}"`),
     });
     expect(
       await deployStep({ ...botStep, botImage: selected }, plan, PRIOR_COMMIT, h.io, h.deps, h.exec),

@@ -1628,6 +1628,7 @@ export async function waitUntilBotLive(
   expectedCommit: string,
   io: Pick<DeployRunnerIO, "log">,
   deps: SandboxGateDeps = defaultSandboxGateDeps,
+  rollout?: SandboxRollout,
 ): Promise<GateOutcome> {
   const started = deps.now();
   for (;;) {
@@ -1648,6 +1649,7 @@ export async function waitUntilBotLive(
       expectedImage: step.botImage ?? null,
       instances,
       expectedCommit,
+      ...(rollout ? { rollout } : {}),
       ...(gate.requireRunningSingleton ? { requireRunningSingleton: true as const } : {}),
       elapsedMs: elapsed,
     });
@@ -2209,12 +2211,12 @@ async function deployStepLoop(
       // "live" line below prints, so the log and the span cannot disagree.
       const gate = await root.span("deploy.wait_live", async (wait) => {
         if (!application) throw new Error(`${step.name}: live gate has no application state`);
-        const target = liveGate.kind === "sandbox" ? rolloutTargetFromDeployOutput(r.output) : null;
+        const target = rolloutTargetFromDeployOutput(r.output);
         const from =
           "value" in application.before ? `version ${application.before.value.version}` : "its pre-deploy version";
         if (liveGate.kind === "bot")
           io.log(
-            `[deploy:all] bot: gate requires ${step.botImage ?? "the directly read application image"}, unique singleton identity and exact healthy commit ${expectedCommit}`,
+            `[deploy:all] bot: gate requires ${step.botImage ?? target?.image ?? "the directly read application image"}, unique singleton identity and exact healthy commit ${expectedCommit}`,
           );
         else
           io.log(
@@ -2232,7 +2234,7 @@ async function deployStepLoop(
                 io,
                 deps,
               )
-            : await waitUntilBotLive(step, liveGate, expectedCommit, io, deps);
+            : await waitUntilBotLive(step, liveGate, expectedCommit, io, deps, { before: application.before, target });
         wait.setAttrs(g.live ? { outcome: "live", waitedMs: g.waitedMs } : { outcome: "not_live" });
         return g;
       });

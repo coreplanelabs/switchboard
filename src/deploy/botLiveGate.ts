@@ -1,6 +1,13 @@
 import { MINUTE_MS } from "../core/budgets.js";
 import { LIVE_GATE_DEADLINE_MS, servedCommit } from "./liveGate.js";
-import type { AppState, HealthRead, Read, ContainerInstance } from "./sandboxLiveGate.js";
+import {
+  rolloutAdvanced,
+  type AppState,
+  type HealthRead,
+  type Read,
+  type ContainerInstance,
+  type RolloutTarget,
+} from "./sandboxLiveGate.js";
 
 /** The facts the bot gate combines after a full Worker + container application deploy. */
 export interface BotLiveInput {
@@ -11,6 +18,8 @@ export interface BotLiveInput {
   expectedImage: string | null;
   instances: Read<ContainerInstance[]>;
   expectedCommit: string;
+  /** A reported container change must register before the old same-commit process can count as live. */
+  rollout?: { before: Read<AppState>; target: RolloutTarget | null };
   requireRunningSingleton?: true;
   elapsedMs: number;
 }
@@ -30,6 +39,14 @@ function judge(input: BotLiveInput): BotLiveDecision {
     return waiting(
       `container application ${input.containerApp} still targets ${app.image}; expected ${input.expectedImage}`,
     );
+  if (input.rollout?.target) {
+    const advanced = rolloutAdvanced(app, input.rollout.before, input.rollout.target);
+    if (!advanced.ok) return waiting(advanced.reason);
+    if (input.rollout.target.image !== null && app.image !== input.rollout.target.image)
+      return waiting(
+        `container application ${input.containerApp} targets ${app.image}; expected uploaded image ${input.rollout.target.image}`,
+      );
+  }
   if ("error" in input.instances)
     return waiting(`container instances ${input.containerApp} unreadable: ${input.instances.error}`);
   if (
