@@ -9,6 +9,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createBashToolDefinition, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { normalizeContext, validateToolArguments, type Model, type Tool, type ToolCall } from "@earendil-works/pi-ai";
+import { stream as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { judgeToolCall } from "./toolRules.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,6 +18,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { piExtensionSource } from "./extensionSource.js";
 import type { ToolDef } from "../../provider.js";
+import { runCheckTool } from "../../../tools/check.js";
 const PI_EXTENSION_SOURCE = piExtensionSource([]);
 import { HARNESS_URL_ENV, RUN_BEARER_ENV } from "./process.js";
 
@@ -778,4 +781,111 @@ describe("hosted Review extension relay", () => {
       { toolCallId: "original-review-call", tool: "run_check", input },
     ]);
   });
+});
+
+describe("run_check provider schema", () => {
+  it.each(["sk-ant-test", "sk-ant-oat01-test"])(
+    "retains the checkpoint rule in the serialized Anthropic payload for %s without restoring removed tools",
+    async (apiKey) => {
+      const pi = fakePi();
+      await (
+        await load([runCheckTool, ...TOOLS.tools])
+      )(pi.api);
+      const model: Model<"anthropic-messages"> = {
+        id: "claude-sonnet-4-6",
+        name: "fixture",
+        api: "anthropic-messages",
+        provider: "anthropic",
+        baseUrl: "https://api.anthropic.com",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200_000,
+        maxTokens: 100,
+      };
+      const tool: Tool = {
+        name: runCheckTool.name,
+        description: runCheckTool.description,
+        parameters: runCheckTool.inputSchema as Tool["parameters"],
+      };
+      const bodies: Array<{
+        model: string;
+        max_tokens: number;
+        tools: Array<{ name: string; input_schema: Tool["parameters"] }>;
+      }> = [];
+      const request = async (tools: Tool[]) =>
+        anthropicStream(model, normalizeContext({ messages: [], tools }), {
+          apiKey,
+          onPayload: async (payload) => pi.handlers.get("before_provider_request")?.({ payload }, {}),
+          fetch: async (_url, init) => {
+            bodies.push(JSON.parse(String(init?.body)));
+            return new Response(
+              'event: message_start\ndata: {"type":"message_start","message":{"id":"fixture","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+            );
+          },
+        }).result();
+      const other: Tool = {
+        name: "update_status",
+        description: "status",
+        parameters: { type: "object", properties: {}, required: [] },
+      };
+      await request([tool, other]);
+      expect({ model: bodies[0].model, maxTokens: bodies[0].max_tokens }).toEqual({
+        model: "claude-sonnet-4-6",
+        maxTokens: 100,
+      });
+      expect(bodies[0].tools.find((entry) => entry.name === "update_status")?.input_schema).toEqual({
+        type: "object",
+        properties: {},
+        required: [],
+      });
+      const sent = bodies[0].tools.find((entry) => entry.name === "run_check")!;
+      const checkpoint = {
+        phase: "verify",
+        goal: "Check the change",
+        decisions: [],
+        rejected: [],
+        completed: [],
+        unproven: [],
+        next: "Review",
+      };
+      const validate = (input: ToolCall["arguments"]) =>
+        validateToolArguments(
+          { ...tool, parameters: sent.input_schema },
+          {
+            type: "toolCall",
+            id: "payload-check",
+            name: tool.name,
+            arguments: input,
+          },
+        );
+      expect(() => validate({ command: "true", purpose: "baseline", checkpoint })).toThrow(
+        'Validation failed for tool "run_check"',
+      );
+      const validInputs: ToolCall["arguments"][] = [
+        { command: "true", purpose: "baseline" },
+        { command: "true", purpose: "verification" },
+        { command: "true", purpose: "verification", checkpoint },
+      ];
+      for (const input of validInputs) expect(validate(input)).toEqual(input);
+      await request([other]);
+      expect(bodies[1].tools.map(({ name, input_schema }) => ({ name, input_schema }))).toEqual([
+        { name: "update_status", input_schema: { type: "object", properties: {}, required: [] } },
+      ]);
+      const otherWire = { tools: [{ type: "function", name: "run_check", parameters: { type: "object" } }] };
+      expect((await pi.handlers.get("before_provider_request")?.({ payload: otherWire }, {})) ?? otherWire).toEqual({
+        tools: [{ type: "function", name: "run_check", parameters: { type: "object" } }],
+      });
+      for (const tool of [
+        { name: "run_check", strict: true, input_schema: { type: "object" } },
+        {
+          name: "run_check",
+          input_schema: { type: "object", anyOf: [{ properties: { purpose: { enum: ["verification"] } } }] },
+        },
+      ]) {
+        const payload = { tools: [tool] };
+        expect((await pi.handlers.get("before_provider_request")?.({ payload }, {})) ?? payload).toBe(payload);
+      }
+    },
+  );
 });

@@ -88,6 +88,15 @@ export const runCheckTool: RunnableTool = {
       timeoutMs: { type: "integer", minimum: BASH_TIMEOUT_MIN_MS, maximum: BASH_TIMEOUT_MAX_MS },
     },
     required: ["command", "purpose"],
+    anyOf: [
+      { type: "object", properties: { purpose: { type: "string", enum: ["verification"] } } },
+      {
+        type: "object",
+        additionalProperties: false,
+        // The root validates these fields; this branch excludes a baseline checkpoint.
+        properties: { command: {}, purpose: { type: "string", enum: ["baseline"] }, timeoutMs: {} },
+      },
+    ],
   },
   failsInText: true,
   async run(input, ctx) {
