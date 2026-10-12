@@ -4894,7 +4894,7 @@ export async function recoverOriginalUnit(
   const rows = await deps.instances.listUnits(instance.id);
   const matches = rows.filter((candidate) => candidate.unit === body.unit);
   if (matches.length !== 1) return json(409, { ok: false, error: "unit_evidence_ambiguous", at });
-  const row = matches[0]!;
+  let row = matches[0]!;
   if (row.instanceId !== instance.id) return json(409, { ok: false, error: "recovery_identity_mismatch", at });
   if (
     requestedWorkflowId !== undefined &&
@@ -4916,6 +4916,22 @@ export async function recoverOriginalUnit(
     return json(503, { ok: false, error: "recovery_history_unavailable", at });
   }
   if (savedAction !== null) {
+    // An action lookup can settle after another request atomically claims the
+    // same unit. Validate its pending action against a current unit snapshot.
+    if (savedAction.state === "pending" && row.recovery?.actionId !== savedAction.id) {
+      let current: CoordinatorUnit[];
+      try {
+        current = await deps.instances.listUnits(instance.id);
+      } catch {
+        return json(503, { ok: false, error: "recovery_history_unavailable", at });
+      }
+      const sameUnit = current.filter((candidate) => candidate.unit === row.unit);
+      if (sameUnit.length !== 1 || sameUnit[0]!.instanceId !== instance.id)
+        return json(409, { ok: false, error: "recovery_identity_mismatch", at });
+      row = sameUnit[0]!;
+      if (caller !== undefined && caller.threadKey !== (row.threadKey ?? instance.threadKey))
+        return json(403, { ok: false, error: "recovery_requester_mismatch", at });
+    }
     if (
       savedAction.repo !== instance.repo ||
       savedAction.base !== instance.base ||
