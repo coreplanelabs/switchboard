@@ -1,5 +1,51 @@
 # Changelog
 
+## [1.296.0](https://github.com/coreplanelabs/switchboard/compare/v1.295.1...v1.296.0) (2026-10-12)
+
+
+### Features
+
+* **core:** answer the review report as metrics reviews on every surface ([#2999](https://github.com/coreplanelabs/switchboard/issues/2999)) ([a4a15fc](https://github.com/coreplanelabs/switchboard/commit/a4a15fcf1bfa8398e07cfa5fcd6d960fa22a9ef7))
+* **core:** build the review dashboard's report from eight queries ([#2997](https://github.com/coreplanelabs/switchboard/issues/2997)) ([47f293b](https://github.com/coreplanelabs/switchboard/commit/47f293b7721daf18cfae5faa70a62047580efe46))
+* **core:** count a run at its terminal close, once ([#2954](https://github.com/coreplanelabs/switchboard/issues/2954)) ([1fbb5fe](https://github.com/coreplanelabs/switchboard/commit/1fbb5fe590496a9a0c7d6524a04058bbba4d8e49))
+* **core:** give every run row its outcome, surface and workspace ([#2956](https://github.com/coreplanelabs/switchboard/issues/2956)) ([a3a64e0](https://github.com/coreplanelabs/switchboard/commit/a3a64e076d752f6824a2590d56dbdc91a67e9dd4))
+* **core:** preserve research and context through long-running work ([#3001](https://github.com/coreplanelabs/switchboard/issues/3001)) ([fdc3739](https://github.com/coreplanelabs/switchboard/commit/fdc3739bb823ffa05ada12f63c8196ddd542bc79))
+* **core:** record each run's typed setup result ([#2953](https://github.com/coreplanelabs/switchboard/issues/2953)) ([611bac9](https://github.com/coreplanelabs/switchboard/commit/611bac9bb8e9ae07a04543ac2b759877988995d7))
+* **core:** write each review's verdict row beside its run row ([#2995](https://github.com/coreplanelabs/switchboard/issues/2995)) ([c26e9bb](https://github.com/coreplanelabs/switchboard/commit/c26e9bb8d2392a734dad2d118a29d3f41450528a))
+* **main:** run registered commands in the main conversation ([#2934](https://github.com/coreplanelabs/switchboard/issues/2934)) ([f76be3b](https://github.com/coreplanelabs/switchboard/commit/f76be3ba64a196d2f562aa20b8798623c1f9b24a))
+* **resident:** recover operations before full rebuilds ([#3025](https://github.com/coreplanelabs/switchboard/issues/3025)) ([3c7ec19](https://github.com/coreplanelabs/switchboard/commit/3c7ec1972e40d5ad8e49bcf4c55d76dccddc76ca))
+* **resident:** recover original native process outcomes ([#3022](https://github.com/coreplanelabs/switchboard/issues/3022)) ([5ced67f](https://github.com/coreplanelabs/switchboard/commit/5ced67f315efea264eec29024e1b1ee99a71ed97))
+* **sandbox:** name each resident attach refusal by its setup word ([#2951](https://github.com/coreplanelabs/switchboard/issues/2951)) ([57f97b5](https://github.com/coreplanelabs/switchboard/commit/57f97b551fafdb9ea92eb230a24c7c2640d8f0a8))
+
+
+### Bug fixes
+
+* **core:** keep the requested model on thread re-reviews ([#3002](https://github.com/coreplanelabs/switchboard/issues/3002)) ([f4eb8f2](https://github.com/coreplanelabs/switchboard/commit/f4eb8f27b01242ada4787137e473efb27f006377))
+* **core:** show confirmed command outcomes without false errors ([#2937](https://github.com/coreplanelabs/switchboard/issues/2937)) ([7efc482](https://github.com/coreplanelabs/switchboard/commit/7efc482b2656956b9361e2c10940f6fbaddbbcd6))
+* **deploy:** record failed consumer reads without changing gates ([#2993](https://github.com/coreplanelabs/switchboard/issues/2993)) ([abcc0dd](https://github.com/coreplanelabs/switchboard/commit/abcc0dd4b635b83e0df472b39da024773e7ff17f))
+* **deploy:** retain native consumer read failure details ([#3000](https://github.com/coreplanelabs/switchboard/issues/3000)) ([d72a3a1](https://github.com/coreplanelabs/switchboard/commit/d72a3a1e37ef875c6834ec617665abcb8084839c))
+* **deploy:** retain resident preflight ownership reasons ([#3020](https://github.com/coreplanelabs/switchboard/issues/3020)) ([89325ab](https://github.com/coreplanelabs/switchboard/commit/89325ab2d7147cfd584ebe4d14b3feadc961bc32))
+* **deploy:** retain sanitized paging failure evidence ([#2939](https://github.com/coreplanelabs/switchboard/issues/2939)) ([7e8430f](https://github.com/coreplanelabs/switchboard/commit/7e8430f4996a387aa23d3714c9a3806aa012bcbf))
+* **deploy:** retain smoke evidence and allow longer Review ([#3027](https://github.com/coreplanelabs/switchboard/issues/3027)) ([a843bf9](https://github.com/coreplanelabs/switchboard/commit/a843bf91f2e7daaa3cdc8edbd25af927b820b52b))
+* **deploy:** use configured review models in staging CI ([#2938](https://github.com/coreplanelabs/switchboard/issues/2938)) ([4d7e427](https://github.com/coreplanelabs/switchboard/commit/4d7e4279135b1365d394a549db61911a9a6dac01))
+* **dispatcher:** keep fresh reviews free of earlier run receipts ([#2940](https://github.com/coreplanelabs/switchboard/issues/2940)) ([b7fec79](https://github.com/coreplanelabs/switchboard/commit/b7fec795fc38b40e2f366b92407259d5c9572d46))
+* **main:** preserve each command invocation result ([#3026](https://github.com/coreplanelabs/switchboard/issues/3026)) ([9b8ac72](https://github.com/coreplanelabs/switchboard/commit/9b8ac7278697c1ba949e01dc86d26d3b041469eb))
+* **mcp:** confirm saved actions inside the client ([#2941](https://github.com/coreplanelabs/switchboard/issues/2941)) ([4c7c17f](https://github.com/coreplanelabs/switchboard/commit/4c7c17ff021a7ccaba466b2fbedc4a59a2fcb7af))
+* **providers:** stop billing retries and bound temporary failures ([#2955](https://github.com/coreplanelabs/switchboard/issues/2955)) ([bbba203](https://github.com/coreplanelabs/switchboard/commit/bbba2033872705a2c94d4c25326fe3fe20f3fbf7))
+* **providers:** verify public OpenRouter model controls ([#3023](https://github.com/coreplanelabs/switchboard/issues/3023)) ([73e7b28](https://github.com/coreplanelabs/switchboard/commit/73e7b281c0df9802093a9fff1bcbdb3807f22092))
+* **slack:** make approval prompts quiet and effect-first ([#3028](https://github.com/coreplanelabs/switchboard/issues/3028)) ([62323f3](https://github.com/coreplanelabs/switchboard/commit/62323f32744d8a754cfbc40cd917bbc955a4c1b4))
+* **tracing:** explain refused review publication ([#3024](https://github.com/coreplanelabs/switchboard/issues/3024)) ([f35d5ef](https://github.com/coreplanelabs/switchboard/commit/f35d5ef74d902db9a4adf593cd40687d95dd51cd))
+
+
+### Performance
+
+* **docs:** skip captures when rendered screenshot inputs match ([aa5f2a1](https://github.com/coreplanelabs/switchboard/commit/aa5f2a1743484a58c7d3258a58e366f2909579d8))
+
+
+### Documentation
+
+* **docs:** note where record 0097's build departed from its text ([#2996](https://github.com/coreplanelabs/switchboard/issues/2996)) ([eb52357](https://github.com/coreplanelabs/switchboard/commit/eb52357005f6bc24dc0076c211566279924a7414))
+
 ## [1.295.1](https://github.com/coreplanelabs/switchboard/compare/v1.295.0...v1.295.1) (2026-10-11)
 
 
