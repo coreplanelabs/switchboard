@@ -71,6 +71,7 @@ export type ResumePlan =
       turn: number;
       iteration: number;
       remainingMs: number;
+      publicationAnswer?: string;
     }
   | {
       /** The model's loop had ended: the transcript's last turn is its final
@@ -87,6 +88,7 @@ export type ResumePlan =
       step: number;
       turn: number;
       remainingMs: number;
+      publicationAnswer?: string;
     };
 
 /** The built-in tools that are safe to run again although they are not
@@ -202,6 +204,10 @@ export function planResume(input: {
     transcriptTurns: transcript.turns,
   });
   if (completeness.kind === "interrupted") return completeness;
+  const selected =
+    typeof lastStep.publicationAnswer === "string" ? { publicationAnswer: lastStep.publicationAnswer } : {};
+  if (completeness.kind !== "resume" && selected.publicationAnswer !== undefined)
+    return { kind: "interrupted", why: "the next post-turn's answer selection was not committed" };
   const tools = new Map<string, KnownTool>();
   for (const t of input.tools) tools.set(t.name, t);
   const messages = transcript.messages;
@@ -227,7 +233,8 @@ export function planResume(input: {
         return {
           kind: "finish",
           messages,
-          answer: textOf(last),
+          answer: selected.publicationAnswer ?? textOf(last),
+          ...selected,
           inboxConsumedSeq: lastStep.inboxConsumedSeq,
           step: lastStep.step,
           turn: lastStep.turn,
@@ -240,6 +247,7 @@ export function planResume(input: {
         compactions: transcript.compactions,
         settlements: [],
         stepRecorded: true,
+        ...selected,
         inboxConsumedSeq: lastStep.inboxConsumedSeq,
         step: lastStep.step,
         turn: lastStep.turn,
@@ -263,6 +271,7 @@ export function planResume(input: {
       compactions: transcript.compactions,
       settlements: calls.map((c) => settlementFor(c, tools)),
       stepRecorded: true,
+      ...selected,
       inboxConsumedSeq: lastStep.inboxConsumedSeq,
       step: lastStep.step,
       turn: lastStep.turn,
@@ -284,6 +293,7 @@ export function planResume(input: {
       kind: "finish",
       messages,
       answer: textOf(last),
+      ...selected,
       inboxConsumedSeq: lastStep.inboxConsumedSeq,
       step: lastStep.step + 1,
       turn: lastStep.turn + 1,
@@ -297,6 +307,7 @@ export function planResume(input: {
     compactions: transcript.compactions,
     settlements: calls.map((c) => ({ toolUse: c, action: "rerun" as const })),
     stepRecorded: false,
+    ...selected,
     inboxConsumedSeq: lastStep.inboxConsumedSeq,
     step: lastStep.step + 1,
     turn: lastStep.turn + (bookkeepingOnly ? 0 : 1),

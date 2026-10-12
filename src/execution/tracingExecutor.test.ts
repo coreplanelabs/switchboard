@@ -126,6 +126,7 @@ describe("TracingExecutor", () => {
 
   it("wraps release and moveTo only when the inner executor has them; a throw ends the span `error` and propagates", async () => {
     const inner: Executor = {
+      moveRequiresIdleProducer: true,
       exec: async () => {
         throw new ExecInfraError("resident /exec HTTP 503", "worker-unavailable");
       },
@@ -141,6 +142,7 @@ describe("TracingExecutor", () => {
     let moveOpts: { signal?: AbortSignal; span?: unknown } | undefined;
     const { log, call } = traced();
     const ex = new TracingExecutor(inner, call);
+    expect(ex.moveRequiresIdleProducer).toBe(true);
     const control = new AbortController();
     expect(await ex.moveTo!("abc123", { signal: control.signal })).toEqual({ sha: "abc123" });
     // The round's stop reaches the inner executor through the wrapper, beside the wrapper's span.

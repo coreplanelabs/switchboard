@@ -4,7 +4,9 @@ import { describe, expect, it } from "vitest";
 import type { AgentDef } from "../../agents/registry.js";
 import type { Executor } from "../../execution/executor.js";
 import type { RunnableTool } from "../../tools/runnableTool.js";
-import { bearerHashOf } from "../modelProxy/runBearers.js";
+import { createTracer } from "../trace/tracer.js";
+import { shapeTools } from "../../channels/modelProxy.js";
+import { bearerHashOf, RunBearerStore } from "../modelProxy/runBearers.js";
 import type { Provider } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
 import type { StepReport } from "../runLedger/stepReport.js";
@@ -181,6 +183,30 @@ const piFactsIn = (container?: string): PiHarnessFacts => ({
 });
 
 describe("durable launch intent", () => {
+  it.each(["pi", "opencode"] as const)("starts a successor only after the exact %s producer ending", (harness) => {
+    const driver = harness === "pi" ? piDriver() : openCodeDriver();
+    const policy = { version: 1, commandRoute: "hosted-review", identity: "read" } as const;
+    const intent = { version: 1, harness, phase: "begun", ordinal: 0, sessionPolicy: policy };
+    const original = {
+      ...driver.facts({ pid: 999, container: "vm-original" }),
+      sessionPolicy: policy,
+      launchOrdinal: 0,
+    };
+    expect(nextHarnessLaunch("run-c", intent, { ...original, ended: true }, "ended")).toEqual({
+      version: 1,
+      harness,
+      phase: "prepared",
+      ordinal: 1,
+      clockKind: "turn",
+      sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+    });
+    for (const facts of [
+      original,
+      { ...original, ended: true as const, launchOrdinal: 1 },
+      { ...original, ended: true as const, sessionPolicy: { ...policy, commandRoute: "native" as const } },
+    ])
+      expect(() => nextHarnessLaunch("run-c", intent, facts, "ended")).toThrow(HarnessEndingUnconfirmedError);
+  });
   it.each(["pi", "opencode"] as const)("binds the next %s intent to the vouched original producer", (harness) => {
     const driver = harness === "pi" ? piDriver() : openCodeDriver();
     const policy = { version: 1, commandRoute: "hosted-review", identity: "read" } as const;
@@ -766,6 +792,61 @@ describe("openThroughSeam — the seam's door", () => {
       end: async () => {},
     };
   }
+
+  it.each(["pi", "opencode"] as const)(
+    "a %s successor restores proxy tool access and clears it after success or failure",
+    async (name) => {
+      for (const fail of [false, true]) {
+        const w = world();
+        const bearers = new RunBearerStore({ clock: () => NOW });
+        bearers.mint({
+          span: createTracer({ clock: () => NOW }).start("request", { sinks: [] }),
+          publish: () => {},
+          runId: w.run.runId,
+          modelRef: "anthropic/general-model",
+          providerName: "anthropic",
+          providerWire: "anthropic-messages",
+          model: "general-model",
+          maxTokens: 4096,
+          maxTurns: 50,
+          expiresAt: NOW + 600_000,
+        });
+        bearers.markLoopEnded(w.run.runId);
+        w.deps.bearers = bearers;
+        w.run.launchIntent = {
+          version: 1,
+          harness: name,
+          phase: "prepared",
+          ordinal: 1,
+          sessionPolicy: { version: 1, commandRoute: "native", identity: "write" },
+          clockKind: "turn",
+        };
+        let choice: string | undefined;
+        const session = {
+          answer: "Current-head reasoning.",
+          followUp: async () => "",
+          remainingMs: () => 300_000,
+          end: async () => {},
+        };
+        const harness = {
+          ...stubHarness(async () => {
+            choice = shapeTools(
+              "anthropic-messages",
+              { tools: [{ name: "read" }], tool_choice: { type: "auto" } },
+              bearers.marksOf(w.run.runId),
+            ).toolChoice;
+            if (fail) throw new Error("successor failed");
+            return session;
+          }),
+          name,
+        };
+        if (fail) await expect(openThroughSeam(harness, w.deps, w.run)).rejects.toThrow("successor failed");
+        else expect(await openThroughSeam(harness, w.deps, w.run)).toBe(session);
+        expect(choice).toBe("auto");
+        expect(bearers.marksOf(w.run.runId)).toEqual({ loopEnded: true });
+      }
+    },
+  );
 
   it("refuses a resume whose facts another harness wrote before the harness is asked anything: a harness_error note and a progress line say so, HarnessMismatchError names both harnesses, and open is never called", async () => {
     const opened: HarnessRun[] = [];

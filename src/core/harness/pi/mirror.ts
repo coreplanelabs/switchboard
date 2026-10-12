@@ -135,6 +135,11 @@ export class PiMirror {
   private readonly compactionRows: AssembledCompaction[] = [];
   /** The highest ledger inbox seq folded in so far (run-history item 40). */
   inboxConsumedSeq = 0;
+  publicationAnswer?: string;
+
+  get deferredInboxSeqs(): number[] | undefined {
+    return this.inboxDeferred().inboxDeferredSeqs;
+  }
 
   /** The owed seqs the cursor has already passed, ascending; absent when none. */
   private inboxDeferred(): { inboxDeferredSeqs?: number[] } {
@@ -253,6 +258,7 @@ export class PiMirror {
       iteration: this.iteration++,
       remainingMs: Math.max(0, this.deps.remainingMs()),
       inboxConsumedSeq: this.inboxConsumedSeq,
+      ...(this.publicationAnswer !== undefined ? { publicationAnswer: this.publicationAnswer } : {}),
       ...this.inboxDeferred(),
     };
     this.lastTurn = report.turn;
@@ -285,6 +291,7 @@ export class PiMirror {
       iteration: this.iteration,
       remainingMs: Math.max(0, this.deps.remainingMs()),
       inboxConsumedSeq: this.inboxConsumedSeq,
+      ...(this.publicationAnswer !== undefined ? { publicationAnswer: this.publicationAnswer } : {}),
       ...this.inboxDeferred(),
     };
     this.lastTurn = report.turn;
@@ -297,9 +304,9 @@ export class PiMirror {
     return true;
   }
 
-  /** Persist only the inbox cursor and its deferred exceptions. Post-loop
-   * turns deliberately stay out of the resumable transcript, but a control
-   * row they consume must survive a bot restart just as a loop step does. */
+  /** Persist the inbox cursor and its deferred exceptions without adding a
+   * transcript row. A consumed control must survive a bot restart even when
+   * the next assistant message has not finished yet. */
   async checkpointInbox(): Promise<void> {
     if (!this.deps.onStep) return;
     await this.deps.onStep({
@@ -310,6 +317,7 @@ export class PiMirror {
       iteration: this.lastIteration,
       remainingMs: Math.max(0, this.deps.remainingMs()),
       inboxConsumedSeq: this.inboxConsumedSeq,
+      ...(this.publicationAnswer !== undefined ? { publicationAnswer: this.publicationAnswer } : {}),
       ...this.inboxDeferred(),
     });
   }

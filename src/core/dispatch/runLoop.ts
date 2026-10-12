@@ -5,6 +5,7 @@ import {
   type HarnessLaunchIntent,
 } from "../harness/sessionPolicy.js";
 import { runCheckTool } from "../../tools/check.js";
+import type { ToolContext } from "../../tools/runnableTool.js";
 import { PUSHED_MAX } from "../../execution/residentRebind.js";
 import {
   reviewPublicationOf,
@@ -89,6 +90,8 @@ import {
   openThroughSeam,
   nextHarnessLaunch,
   type HarnessFacts,
+  type HarnessRecord,
+  type FollowUpTurnInput,
   type HarnessRun,
   type HarnessResume,
   type HarnessSession,
@@ -297,6 +300,8 @@ export interface RunPaused {
 }
 
 export type RunLoopOutcome = RunOutcome | RunInterrupted | RunPaused;
+
+class ContextCheckpointDeferred extends Error {}
 
 /** What `runLoop` reads off the dispatch. */
 export interface RunLoopContext {
@@ -1369,6 +1374,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             at: clock(),
           });
       }
+      if (harnessSession && lastFacts && ledgerRun?.tracked()) {
+        lastFacts = { ...lastFacts, ended: true };
+        if (!(await ledgerRun.setStateAndFlush({ harness: lastFacts })))
+          throw new ContextCheckpointDeferred("The producer ending could not be saved.");
+      }
       harnessEndState = "settled";
     } catch (error) {
       harnessEndState = "unconfirmed";
@@ -1384,6 +1394,23 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // `finish` plan has none: the loop had answered before the restart and its
   // process is ended below, so the post-turns run no turn (item 14).
   let harnessSession: HarnessSession | undefined;
+  let restartHarness: ((input: FollowUpTurnInput) => Promise<string>) | undefined;
+  let endedRecord: HarnessRecord | undefined;
+  const checkpointBeforeTransition = async () => {
+    if (!deps.runLedger.sessionPersistence || !ledgerRun?.session) return undefined;
+    let checkpoint = await ledgerRun.checkpointSession();
+    if (!checkpoint && ledgerRun.tracked() && ledgerRun.lastCheckpointFailure === "state-unavailable")
+      checkpoint = await ledgerRun.checkpointSession();
+    if (
+      !checkpoint &&
+      ledgerRun.tracked() &&
+      (ledgerRun.lastCheckpointFailure === "state-unavailable" || ledgerRun.lastCheckpointFailure === "state-unknown")
+    )
+      throw new ContextCheckpointDeferred("The completed model context could not be saved.");
+    if (!checkpoint)
+      throw new Error(`answer context checkpoint was not persisted (${ledgerRun.lastCheckpointFailure ?? "unknown"})`);
+    return checkpoint;
+  };
   /** The budget's answer when a relaunch found the run inside its write-up reserve (`lease_spent`): the run ends on its budget with no process to write up. */
   let leaseSpentDuringRelaunch: string | undefined;
   /** The wind-down that labelled the loop's answer, when one did — the
@@ -2296,7 +2323,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // or a row with no facts, opens on the word the scopes resolved for the
   // preset (`resolved.harness`: the requester's own scope, the channel's, the
   // deployment's block), pi when none named it.
-  const facts = resume ? harnessFactsOf(resume.row.state.harness) : undefined;
+  const recordedFacts = resume ? harnessFactsOf(resume.row.state.harness) : undefined;
+  const facts = recordedFacts?.ended === true ? undefined : recordedFacts;
+
   const harnessOf = (roster: NonNullable<RunDeps["harness"]>) =>
     facts
       ? roster.harnesses[facts.harness]
@@ -2739,6 +2768,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         }
       }
     }
+    if (reentry && recordedFacts?.ended === true) {
+      const intent = harnessLaunchIntentOf(launchIntent);
+      if (intent?.phase !== "prepared") {
+        const next = nextHarnessLaunch(run.id, launchIntent, recordedFacts, "ended");
+        if (!ledgerRun?.tracked() || !(await ledgerRun.setStateAndFlush({ harnessLaunch: next })))
+          throw new ContextCheckpointDeferred("The successor launch could not be saved.");
+        launchIntent = next;
+      }
+    }
     if (finish) {
       onEvent({
         type: "run_note",
@@ -2774,11 +2812,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         const found = await judge.find(facts, container).catch((err: unknown) => {
           if (!isContainerGone(err)) {
             harnessEndState = "unconfirmed";
-            throw err;
+            onEvent({
+              type: "run_note",
+              kind: "harness_error",
+              summary: "The saved answer is complete; the original producer custody remains unverified.",
+            });
+            return "unverified" as const;
           }
           return "gone" as const;
         });
         switch (found) {
+          case "unverified":
+            break;
           case "gone":
             onEvent({
               type: "run_note",
@@ -2906,6 +2951,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             remainingMs: reentry.remainingMs,
             turn: reentry.turn,
             inboxConsumedSeq: reentry.inboxConsumedSeq,
+            publicationAnswer: reentry.publicationAnswer,
             ...(facts ? { facts } : {}),
           }
         : undefined;
@@ -2942,6 +2988,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                 : {}),
             })
           : undefined;
+      let openingToolContext: ToolContext = toolContext;
       const openRun = async () => {
         ctx.assertAdmissionBudget();
         if (agent.name === "review" && coordinator?.publication !== undefined) {
@@ -3116,7 +3163,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               ),
               ...(publicationTool ? [publicationTool] : []),
             ],
-            toolContext,
+            toolContext: openingToolContext,
             ...(ctx.decisionRecord !== undefined ? { environment: { [DECISION_RECORD_ENV]: ctx.decisionRecord } } : {}),
             ...(session
               ? { notepad: () => session.readNotepad(), conversation: () => session.readConversation() }
@@ -3184,7 +3231,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             // without the ledger the harness's retry ladder answers as before.
             ...(ledgerRun
               ? {
-                  onStep: ledgerRun.step.bind(ledgerRun),
+                  onStep: async (report) => {
+                    await ledgerRun.step(report);
+                    // A zero-row selection must be acknowledged before ancillary
+                    // transcript rows can land in a separate store request.
+                    if (report.publicationAnswer !== undefined && report.turns.length === 0 && !report.compaction)
+                      await checkpointBeforeTransition();
+                  },
                   logIndexOf: ledgerRun.logIndexOf.bind(ledgerRun),
                   providerPark: true,
                 }
@@ -3194,9 +3247,42 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           },
         );
       };
-      // The survival clause's ceiling (harness.md item 6; dispatch/relaunch.ts):
-      // the harness's typed word that the run's container was replaced under
-      // it — the bot lives, or this loop would not be running — relaunches the
+      // Checkout replacement ends a confirmed producer, then continues its saved conversation.
+      restartHarness = async (input) => {
+        const record = endedRecord;
+        if (!record || lastFacts?.ended !== true || !ledgerRun?.tracked())
+          throw new Error("The original producer ending cannot qualify workspace continuation.");
+        const next = nextHarnessLaunch(run.id, launchIntent, lastFacts, "ended");
+        if (!(await ledgerRun.setStateAndFlush({ harnessLaunch: next })))
+          throw new ContextCheckpointDeferred("The successor launch could not be saved.");
+        launchIntent = next;
+        const request: ChatMessage = { role: "user", content: [{ type: "text", text: input.text }] };
+        await ledgerRun.step({
+          turns: [request],
+          firstIdx: record.messages.length + record.compactions.length,
+          inFlight: [],
+          turn: record.turn,
+          iteration: 0,
+          inboxConsumedSeq: record.inboxConsumedSeq,
+          remainingMs: record.deadline - clock(),
+        });
+        await checkpointBeforeTransition();
+        harnessResume = {
+          messages: [...record.messages, request],
+          compactions: record.compactions,
+          settlements: [],
+          turn: record.turn,
+          inboxConsumedSeq: record.inboxConsumedSeq,
+          remainingMs: record.deadline - clock(),
+        };
+        openingToolContext = input.toolContext;
+        harnessEndState = "pending";
+        harnessSession = undefined;
+        harnessSession = await openRun();
+        endedRecord = undefined;
+        return harnessSession.answer;
+      };
+      // The survival clause's ceiling relaunches the process after container replacement:
       // process from the record in the container the run holds: the bound
       // read off the row's facts, the workspace re-attached or refused by
       // name, the bearer rotated with the row written inside the rotation,
@@ -3362,7 +3448,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       }
       // No session only when the relaunch's re-attach ended the run: on the
       // lease's end, the budget's answer; on a stop, the stop's.
-      answer = harnessSession?.answer ?? leaseSpentDuringRelaunch ?? HARD_STOP_MESSAGE;
+      answer =
+        (run.control.requested !== "hard" ? harnessSession?.record?.().publicationAnswer : undefined) ??
+        harnessSession?.answer ??
+        leaseSpentDuringRelaunch ??
+        HARD_STOP_MESSAGE;
       if (harnessSession?.ending !== undefined) windDownEnding = harnessSession.ending;
     }
     clearStoppedReviewTail();
@@ -3392,12 +3482,38 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         answer,
         messages,
         executor,
+        ...(executor.moveRequiresIdleProducer && harnessSession
+          ? {
+              beforeWorkspaceAdvance: async () => {
+                if (!harnessSession?.record || !restartHarness)
+                  throw new Error("The harness cannot preserve its conversation before checkout replacement.");
+                const record = structuredClone(harnessSession.record());
+                if (record.settlements.length || record.messages.at(-1)?.role !== "assistant")
+                  throw new Error("Checkout replacement requires a completed model turn.");
+                const checkpoint = await checkpointBeforeTransition();
+                if (!checkpoint || !ledgerRun?.session)
+                  throw new Error("Checkout replacement requires an acknowledged conversation checkpoint.");
+                const saved = await deps.runLedger.readSession(
+                  checkpoint.key,
+                  ledgerRun.session.seedFrom,
+                  checkpoint.through,
+                );
+                if (!saved.complete || saved.turns !== record.messages.length + record.compactions.length)
+                  throw new Error("The completed conversation is not fully saved.");
+                endedRecord = { ...record, messages: saved.messages, compactions: saved.compactions };
+                await endHarness();
+                if (commandInFlight) throw new Error("Checkout replacement preserves a command still in flight.");
+              },
+            }
+          : {}),
         turn: {
           agent,
           toolContext,
           onEvent,
           control: run.control,
-          ...(harnessSession ? { followUp: harnessSession.followUp } : {}),
+          ...(harnessSession
+            ? { followUp: (input) => (endedRecord ? restartHarness!(input) : harnessSession!.followUp(input)) }
+            : {}),
         },
         fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
         fetchPrCommits: deps.fetchPrCommits ?? prCommitsSince,
@@ -3453,7 +3569,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             toolContext,
             onProgress,
             onEvent,
-            ...(harnessSession ? { followUp: harnessSession.followUp, remainingMs: harnessSession.remainingMs } : {}),
+            ...(harnessSession
+              ? {
+                  followUp: (input) => harnessSession!.followUp({ ...input, publicationAnswer: answer }),
+                  remainingMs: harnessSession.remainingMs,
+                }
+              : {}),
           },
           logKey: msg.threadKey,
         }),
@@ -3590,7 +3711,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               toolContext,
               onProgress,
               onEvent,
-              ...(harnessSession ? { followUp: harnessSession.followUp, remainingMs: harnessSession.remainingMs } : {}),
+              ...(harnessSession
+                ? {
+                    followUp: (input) => harnessSession!.followUp({ ...input, publicationAnswer: answer }),
+                    remainingMs: harnessSession.remainingMs,
+                  }
+                : {}),
             },
             logKey: msg.threadKey,
           }),
@@ -3623,6 +3749,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             })
         : undefined,
     );
+    await checkpointBeforeTransition();
     await endHarness();
     // The last model turn and its checkpoint are finished. Close the Git door
     // before any PR lookup or edit: a delayed receive-pack request otherwise
@@ -3994,33 +4121,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     let rawAnswer = acceptedAnswer.ok && acceptedAnswer.changed ? answer : undefined;
     if (acceptedAnswer.ok) answer = acceptedAnswer.value;
     if (deps.runLedger.sessionPersistence && ledgerRun?.session) {
-      let checkpoint = await ledgerRun.checkpointSession();
-      // A failed state ACK leaves the cursor dirty on this same run. One more
-      // owned write can carry it through after a transient store interruption.
-      if (!checkpoint && ledgerRun.tracked() && ledgerRun.lastCheckpointFailure === "state-unavailable")
-        checkpoint = await ledgerRun.checkpointSession();
-      if (!checkpoint && ledgerRun.tracked() && ledgerRun.lastCheckpointFailure === "state-unavailable") {
-        events.publish({
-          type: "run_note",
-          kind: "checkpoint_deferred",
-          summary: "final context checkpoint unavailable; answer and review publication deferred",
-          at: clock(),
-        });
-        await events.drain();
-        const handedOff = await ledgerRun.pauseForRetry().catch(() => false);
-        pausedForRetry = true;
-        registry.discard(run.id);
-        return {
-          kind: "paused",
-          reason: "checkpoint_unavailable",
-          message: "The result could not be safely posted because its saved context was not confirmed.",
-          handedOff,
-        };
-      }
-      if (!checkpoint)
-        throw new Error(
-          `answer context checkpoint was not persisted (${ledgerRun.lastCheckpointFailure ?? "unknown"})`,
-        );
+      const checkpoint = await checkpointBeforeTransition();
+      if (!checkpoint) throw new Error("The answer context checkpoint is unavailable.");
       const saved = await deps.runLedger.readSessionTail(checkpoint.key, 1);
       const reported = await appendRunReport(
         deps.runLedger,
@@ -4143,6 +4245,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   } catch (openingFailure) {
     const openingEnding = openingFailure instanceof HarnessEndingUnconfirmedError ? openingFailure : undefined;
     const err = openingEnding === undefined ? openingFailure : openingEnding.openingError;
+    if (err instanceof ContextCheckpointDeferred) {
+      events.publish({ type: "run_note", kind: "checkpoint_deferred", summary: err.message, at: clock() });
+      await events.drain();
+      const handedOff = (await ledgerRun?.pauseForRetry().catch(() => false)) ?? false;
+      pausedForRetry = true;
+      registry.discard(run.id);
+      return { kind: "paused", reason: "checkpoint_unavailable", message: err.message, handedOff };
+    }
     if (err instanceof FirstTestHeld) {
       if (ctx.githubDoor && deps.githubBindings) {
         if (existingPrPublication !== undefined) blockExistingPrPublication("the first test is held");

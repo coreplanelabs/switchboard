@@ -2031,6 +2031,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         step: ++this.stepNo,
         seq: this.lastSeq,
         turnIndex: report.firstIdx + turns.length,
+        ...(report.publicationAnswer !== undefined ? { publicationAnswer: report.publicationAnswer } : {}),
         inFlight: report.inFlight,
         inboxConsumedSeq: report.inboxConsumedSeq,
         ...(report.inboxDeferredSeqs?.length ? { inboxDeferredSeqs: report.inboxDeferredSeqs } : {}),

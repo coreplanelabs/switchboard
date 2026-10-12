@@ -5,6 +5,9 @@ import { UNKNOWN_CONTEXT_DEPENDENCIES } from "./references/contextDependencies.j
 import { testSessionSources } from "./testing/slackSources.js";
 import { describe, expect, it } from "vitest";
 import { secretsFrom } from "../secrets.js";
+import { planResume } from "./runLedger/resume.js";
+import { assembleTranscript, turnRows } from "./runLedger/transcript.js";
+import type { StepRecord, TranscriptRow } from "./runLedger/types.js";
 import type { ChatMessage } from "./chatMessage.js";
 import { buildRunLedger, WorkerRunLedger, type WorkerRunLedgerOptions } from "./runLedgerWorker.js";
 import { createLedgerWriteThrough } from "./runLedger/writeThrough.js";
@@ -275,6 +278,63 @@ describe("WorkerRunLedger", () => {
     });
     expect(busy.calls).toHaveLength(1);
   });
+
+  it.each([false, true])(
+    "an acknowledged first ancillary marker prevents publishing a split-write acknowledgement (tool call: %s)",
+    async (toolCall) => {
+      const initial: ChatMessage[] = [
+        { role: "user", content: [{ type: "text", text: "work" }] },
+        { role: "assistant", content: [{ type: "text", text: "Completed substantive report." }] },
+      ];
+      const rows: TranscriptRow[] = initial.flatMap((message, idx) => turnRows(idx, message).rows);
+      let saved: StepRecord = {
+        step: 1,
+        seq: 1,
+        turnIndex: 2,
+        inFlight: [],
+        inboxConsumedSeq: 0,
+        remainingMs: 300_000,
+        turn: 1,
+        iteration: 0,
+      };
+      const w = stubWorker((path, body) => {
+        if (path === "/runs/step") {
+          const record = body.record as StepRecord;
+          if (record.turnIndex === 4) return { status: 409, data: { ok: false, reason: "fenced" } };
+          saved = structuredClone(record);
+        } else rows.push(...structuredClone(body.rows as TranscriptRow[]));
+        return { status: 200, data: { ok: true } };
+      });
+      const marker: StepRecord = { ...saved, step: 2, publicationAnswer: "Completed substantive report." };
+      expect(await w.ledger.step("r1", "g1", marker, [])).toEqual({ ok: true });
+      expect(planResume({ transcript: assembleTranscript(rows, []), lastStep: saved, tools: [] })).toMatchObject({
+        kind: "finish",
+        answer: "Completed substantive report.",
+      });
+      const next: StepRecord = {
+        ...marker,
+        step: 3,
+        turnIndex: 4,
+        inFlight: toolCall ? [{ callId: "v", tool: "submit_verdict" }] : [],
+      };
+      const acknowledgement: ChatMessage = {
+        role: "assistant",
+        content: toolCall
+          ? [{ type: "tool_use", id: "v", name: "submit_verdict", input: {} }]
+          : [{ type: "text", text: "Description resubmitted." }],
+      };
+      expect(
+        await w.ledger.step("r1", "g1", next, [
+          { idx: 2, message: { role: "user", content: [{ type: "text", text: "ancillary task" }] } },
+          { idx: 3, message: acknowledgement },
+        ]),
+      ).toEqual({ ok: false, reason: "fenced" });
+      expect(
+        planResume({ transcript: assembleTranscript(rows, []), lastStep: saved, tools: [{ name: "submit_verdict" }] }),
+      ).toEqual({ kind: "interrupted", why: "the next post-turn's answer selection was not committed" });
+      expect(assembleTranscript(rows, []).messages.slice(0, 2)).toEqual(initial);
+    },
+  );
 
   it("step writes the transcript turns FIRST (chunked rows, attachments one per request), then the step record; a fenced transcript write stops before the record", async () => {
     const w = stubWorker();

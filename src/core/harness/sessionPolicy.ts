@@ -9,6 +9,8 @@ export interface HarnessLaunchIntent {
   phase: "prepared" | "begun";
   ordinal: number;
   sessionPolicy: OriginalSessionPolicy;
+  /** A post-loop successor retains its turn clock across another restart. */
+  clockKind?: "loop" | "turn";
 }
 
 export function commandRouteForLaunch(
@@ -40,7 +42,9 @@ export function harnessLaunchIntentOf(value: unknown): HarnessLaunchIntent | und
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const v = value as Record<string, unknown>;
   if (
-    Object.keys(v).length !== 5 ||
+    Object.keys(v).some(
+      (key) => !["version", "harness", "phase", "ordinal", "sessionPolicy", "clockKind"].includes(key),
+    ) ||
     !["version", "harness", "phase", "ordinal", "sessionPolicy"].every((key) => Object.hasOwn(v, key))
   )
     return undefined;
@@ -51,10 +55,18 @@ export function harnessLaunchIntentOf(value: unknown): HarnessLaunchIntent | und
     (v.phase !== "prepared" && v.phase !== "begun") ||
     !Number.isSafeInteger(v.ordinal) ||
     (v.ordinal as number) < 0 ||
-    !sessionPolicy
+    !sessionPolicy ||
+    (v.clockKind !== undefined && v.clockKind !== "loop" && v.clockKind !== "turn")
   )
     return undefined;
-  return { version: 1, harness: v.harness, phase: v.phase, ordinal: v.ordinal as number, sessionPolicy };
+  return {
+    version: 1,
+    harness: v.harness,
+    phase: v.phase,
+    ordinal: v.ordinal as number,
+    sessionPolicy,
+    ...(v.clockKind !== undefined ? { clockKind: v.clockKind } : {}),
+  };
 }
 
 /** The original launcher's logical command route, not a native table or

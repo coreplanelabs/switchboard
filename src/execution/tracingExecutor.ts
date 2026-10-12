@@ -25,6 +25,7 @@ import type {
 // tracker in the runner) does the work; this one only times it.
 
 export class TracingExecutor implements Executor {
+  readonly moveRequiresIdleProducer?: boolean;
   inspectCredentials?: (input: CredentialInspectionInput) => Promise<CredentialInspection>;
   release?: (mode: ReleaseMode) => Promise<ReleaseResult>;
   moveTo?: (sha: string, opts?: MoveOptions) => Promise<{ sha: string }>;
@@ -38,6 +39,7 @@ export class TracingExecutor implements Executor {
     private readonly span: Span,
     private readonly backend?: Backend,
   ) {
+    this.moveRequiresIdleProducer = inner.moveRequiresIdleProducer;
     if (inner.inspectCredentials)
       this.inspectCredentials = async (input) => {
         try {

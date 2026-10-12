@@ -22,6 +22,14 @@ function preserveLaunchIntent(prior: RunState, incoming: RunState): RunState | u
       (!replacement ||
         replacement.harness !== original.harness ||
         !sameOriginalSessionPolicy(original.sessionPolicy, replacement.sessionPolicy) ||
+        ((replacement.clockKind ?? "loop") !== (original.clockKind ?? "loop") &&
+          !(
+            (original.clockKind ?? "loop") === "loop" &&
+            replacement.clockKind === "turn" &&
+            replacement.ordinal === original.ordinal + 1 &&
+            record(prior.harness) &&
+            prior.harness.ended === true
+          )) ||
         (replacement.ordinal === original.ordinal
           ? original.phase === "begun" && replacement.phase !== "begun"
           : replacement.ordinal !== original.ordinal + 1 ||
@@ -50,13 +58,31 @@ function preserveLaunchIntent(prior: RunState, incoming: RunState): RunState | u
   return { ...incoming, harnessLaunch: structuredClone(intent) };
 }
 
-/** Preserve only original session policy so caller snapshots and owning stores
+/** Preserve producer custody and original session policy so caller snapshots and owning stores
  * share the same wire state without granting checkpoint or unit-seed authority. */
 export function preserveHarnessPolicy(prior: RunState, incoming: RunState): RunState | undefined {
   const next = preserveLaunchIntent(prior, incoming);
   if (!next) return undefined;
   const before = Object.hasOwn(prior, "harness") ? prior.harness : undefined;
   const after = Object.hasOwn(incoming, "harness") ? incoming.harness : undefined;
+  if (record(before) && before.ended === true && after === undefined) next.harness = structuredClone(before);
+  if (record(after) && after.ended === true) {
+    if (
+      !record(before) ||
+      ["harness", "launchOrdinal", "pid", "root", "container", "processBirth", "port", "sessionID"].some(
+        (key) => before[key] !== after[key],
+      )
+    )
+      return undefined;
+  }
+  if (
+    record(before) &&
+    before.ended === true &&
+    record(after) &&
+    after.launchOrdinal === before.launchOrdinal &&
+    after.ended !== true
+  )
+    return undefined;
   const originalRaw = record(before) && Object.hasOwn(before, "sessionPolicy") ? before.sessionPolicy : undefined;
   const replacementRaw = record(after) && Object.hasOwn(after, "sessionPolicy") ? after.sessionPolicy : undefined;
   if (originalRaw === undefined) {

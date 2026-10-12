@@ -13,6 +13,21 @@ const facts = {
   sessionPolicy: policy,
 };
 describe("original session policy custody", () => {
+  it("keeps a confirmed ending bound to its producer and refuses stale resurrection", () => {
+    const original = { ...facts, launchOrdinal: 0 };
+    const ended = { ...original, ended: true };
+    const saved = preserveCheckpointState({ harness: original }, { harness: ended });
+    expect(saved?.harness).toMatchObject({ harness: "pi", pid: 42, processBirth: "original", ended: true });
+    expect(preserveCheckpointState({ harness: ended }, { harness: original })).toBeUndefined();
+    expect(preserveCheckpointState({ harness: original }, { harness: { ...ended, pid: 43 } })).toBeUndefined();
+    expect(
+      preserveCheckpointState({ harness: original }, { harness: { ...ended, processBirth: "foreign" } }),
+    ).toBeUndefined();
+    expect(preserveCheckpointState({}, { harness: ended })).toBeUndefined();
+    expect(
+      preserveCheckpointState({ harness: { ...ended, sessionPolicy: undefined } }, { notes: "later" })?.harness,
+    ).toMatchObject({ pid: 42, ended: true });
+  });
   it("admits a declared policy only with the first original facts", () => {
     expect(preserveCheckpointState({}, { harness: facts })).toEqual({ harness: facts });
   });

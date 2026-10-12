@@ -619,6 +619,8 @@ export interface SettleReviewedHeadInput {
   checkout?: () => string | undefined;
   /** Canonical child permission stays at this exact head through settlement. */
   publication?: ExistingPrPublicationBinding;
+  /** A destructive checkout move first checkpoints and ends the owned producer. */
+  beforeWorkspaceAdvance?: () => Promise<void>;
   /** The parent span, when the run is traced. */
   span?: Span;
   pr: { repo: string; number: number };
@@ -808,6 +810,8 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
         if (!executor.moveTo)
           throw new ReviewWorkspaceAdvanceError(current, "executor cannot advance the review workspace");
         const beforeCheckout = checkout();
+        await input.beforeWorkspaceAdvance?.();
+        if (stopped()) return outcome();
         const moved = await executor.moveTo(current, {
           ...trace,
           signal: turn.control.hardSignal,

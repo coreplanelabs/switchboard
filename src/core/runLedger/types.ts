@@ -226,6 +226,8 @@ export interface InFlightCall {
 
 /** Written BEFORE a step's tools run (after its transcript turns landed). */
 export interface StepRecord {
+  /** Selected report during an ancillary post-turn; stored with its transcript boundary. */
+  publicationAnswer?: string;
   step: number;
   /** The registry `seq` at the time, for ordering against events. */
   seq: number;
