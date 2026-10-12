@@ -31,6 +31,33 @@ const msg: IncomingMessage = {
 };
 
 describe("private audience publication gate", () => {
+  it("keeps the failed context check across private publication rechecks", async () => {
+    const io: ChannelIO = {
+      reply: async () => {},
+      history: async () => [],
+      status: async () => ({ update: async () => {}, done: async () => {} }),
+      directAudience: () => msg.directAudience,
+      verifyDirectAudience: async () => ({ ok: true }),
+    };
+    const latch = {
+      revoked: false,
+      revalidateSources: async () => ({
+        ok: false as const,
+        code: "saved-context-unproved" as const,
+        check: "execution_receipt_missing" as const,
+      }),
+    };
+    expect(await privateRunAudienceDecision(msg, io, latch)).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "execution_receipt_missing",
+    });
+    expect(await privateRunAudienceDecision(msg, io, latch)).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "execution_receipt_missing",
+    });
+  });
   it("keeps a verified private answer after three reads and one recovered unavailable check", async () => {
     let checks = 0;
     let unavailable = false;

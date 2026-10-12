@@ -27,7 +27,7 @@ import { frozenMemoryRecord, validMemoryProvenance } from "../memory/provenance.
 import type { CoreDeps } from "../dispatcher.js";
 import { chatActorOf } from "../authz/actor.js";
 import { authorize } from "../authz/authorize.js";
-import type { AudienceCheck } from "../audienceDecision.js";
+import type { AudienceCheck, ContextRefusalCheck } from "../audienceDecision.js";
 import { RUN_EVENTS_MAX_PAGE, operatorOfEvents, type RunOperatorDecision, type RunRecord } from "../runRecord.js";
 import type { LiveRunRow } from "../runLedger/types.js";
 import { executionAdmissionHash, recordedGithubRead, currentGithubReadCapability } from "./executionGithubContext.js";
@@ -64,7 +64,11 @@ export type ContextAccessDeps = Pick<
   | "githubApi"
   | "coordinatorInstances"
 >;
-const denied = (): AudienceCheck => ({ ok: false, code: "saved-context-unproved" });
+const denied = (check?: ContextRefusalCheck): AudienceCheck => ({
+  ok: false,
+  code: "saved-context-unproved",
+  ...(check !== undefined ? { check } : {}),
+});
 
 /** Validate only the inputs admitted to this execution. A stored session can
  * also contain omitted legacy rows or live-only results that cannot be reused. */
@@ -75,7 +79,8 @@ export async function revalidateAdmittedContext(
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
       const snapshot = structuredClone(current());
-      if (!isContextDependencies(snapshot) || snapshot.status !== "known") return denied();
+      if (!isContextDependencies(snapshot)) return denied("context_invalid");
+      if (snapshot.status !== "known") return denied("context_unknown");
       const revision = JSON.stringify(snapshot);
       const checked = await validate(snapshot);
       if (!checked.ok) return checked;
@@ -83,8 +88,9 @@ export async function revalidateAdmittedContext(
     }
   } catch {
     // Missing proof cannot authorize publication.
+    return denied("context_validation_exception");
   }
-  return denied();
+  return denied("context_changed");
 }
 const factsOf = (row: StoredContextRun) => ("meta" in row ? { ...row.meta, id: row.runId } : row);
 
@@ -245,9 +251,10 @@ function buildContextAccess(
     }
     return (await deps.slackContextForRun?.(actor(), destination).canReadSource?.(ref)) === true;
   };
-  const originAllowed = async (origin: ContextOrigin): Promise<boolean> => {
+  const originDecision = async (origin: ContextOrigin): Promise<AudienceCheck> => {
     const row = await load(origin.runId);
-    if (!row || !admitted(row)) return false;
+    if (!row) return denied("origin_record_missing");
+    if (!admitted(row)) return denied("origin_access_denied");
     const source = factsOf(row);
     if (
       source.id !== origin.runId ||
@@ -255,21 +262,23 @@ function buildContextAccess(
       source.channelId !== origin.channelId ||
       source.threadKey !== origin.threadKey
     )
-      return false;
+      return denied("origin_identity_mismatch");
     if (origin.checkpoint !== undefined) {
       const checkpoint = await deps.runLedger.readContextCheckpoint(origin.runId);
+      if (!checkpoint?.receipt) return denied("origin_checkpoint_missing");
       if (
-        !checkpoint?.receipt ||
         checkpoint.receipt.hash !== origin.checkpoint ||
         checkpoint.runId !== origin.runId ||
         checkpoint.meta.userId !== origin.requester ||
         checkpoint.meta.channelId !== origin.channelId ||
-        checkpoint.meta.threadKey !== origin.threadKey ||
-        !(await validateContextCheckpoint(checkpoint.receipt, checkpoint))
+        checkpoint.meta.threadKey !== origin.threadKey
       )
-        return false;
+        return denied("origin_checkpoint_binding_mismatch");
+      if (!(await validateContextCheckpoint(checkpoint.receipt, checkpoint)))
+        return denied("origin_checkpoint_invalid");
     }
-    if (msg.threadKey.startsWith("worker:") && !(await destinationAudience())) return false;
+    if (msg.threadKey.startsWith("worker:") && !(await destinationAudience()))
+      return denied("worker_audience_unproved");
     let visibilityOrigin = origin;
     if (origin.threadKey.startsWith("worker:")) {
       const worker = parsePrivateWorkerThreadKey(origin.threadKey);
@@ -279,29 +288,34 @@ function buildContextAccess(
         !stepMatches(source.idempotencyKey, worker.instanceId, worker.unit) ||
         origin.requester !== msg.userId
       )
-        return false;
+        return denied("origin_worker_binding_mismatch");
       const stored = await unitFor(worker.instanceId, worker.unit);
       if (!stored || stored.instance.userId !== origin.requester || stored.instance.channelId !== origin.channelId)
-        return false;
+        return denied("origin_worker_owner_mismatch");
       const audience = await privateUnitAudience(stored.instance, stored.unit);
-      if (!audience) return false;
+      if (!audience) return denied("origin_worker_audience_unproved");
       visibilityOrigin = { ...origin, channelId: audience.channelId, threadKey: audience.threadKey };
     }
     if (!origin.channelId.startsWith("slack:"))
-      return origin.requester === msg.userId && origin.channelId === msg.channelId;
+      return origin.requester === msg.userId && origin.channelId === msg.channelId
+        ? { ok: true }
+        : denied("origin_destination_unproved");
     const capability = deps.slackContextForRun?.(actor(), originMessage(visibilityOrigin));
     const visibility = await capability?.originAudience?.();
-    if (visibility === undefined) return false;
+    if (visibility === undefined) return denied("origin_visibility_unavailable");
     if (visibility === "public")
-      return sourceAllowedAtDestination({
+      return (await sourceAllowedAtDestination({
         channelId: visibilityOrigin.channelId,
         threadKey: visibilityOrigin.threadKey,
         url: "",
-      });
-    if (origin.requester !== msg.userId) return false;
-    if (origin.channelId === msg.channelId && visibility !== "dm") return true;
-    return (await destinationAudience()) !== undefined;
+      }))
+        ? { ok: true }
+        : denied("origin_destination_unproved");
+    if (origin.requester !== msg.userId) return denied("origin_requester_mismatch");
+    if (origin.channelId === msg.channelId && visibility !== "dm") return { ok: true };
+    return (await destinationAudience()) !== undefined ? { ok: true } : denied("origin_destination_unproved");
   };
+  const originAllowed = async (origin: ContextOrigin): Promise<boolean> => (await originDecision(origin)).ok;
   const unitStatusAllowed = async (ref: UnitStatusReference): Promise<boolean> => {
     const stored = await unitFor(ref.instanceId, ref.unit);
     if (
@@ -356,34 +370,36 @@ function buildContextAccess(
     }).allow;
   };
   const validate = async (dependencies: ContextDependencies): Promise<AudienceCheck> => {
-    if (!isContextDependencies(dependencies) || dependencies.status !== "known") return denied();
+    if (!isContextDependencies(dependencies)) return denied("context_invalid");
+    if (dependencies.status !== "known") return denied("context_unknown");
     try {
       dependencies = structuredClone(dependencies);
-      if (msg.threadKey.startsWith("worker:") && !(await destinationAudience())) return denied();
+      if (msg.threadKey.startsWith("worker:") && !(await destinationAudience()))
+        return denied("worker_audience_unproved");
       if (dependencies.executionGithub?.length) {
-        if (!executionConsumer) return denied();
+        if (!executionConsumer) return denied("execution_consumer_missing");
         const current = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === executionConsumer.runId);
-        if (
-          !current ||
-          current.ownerGen !== executionConsumer.gen ||
-          current.meta.agent === "orchestrator" ||
-          current.meta.userId !== msg.userId ||
-          current.meta.channelId !== msg.channelId ||
-          current.meta.threadKey !== msg.threadKey ||
-          current.meta.authenticatedAs !== msg.authenticatedAs ||
-          current.meta.postedBy !== msg.postedBy ||
-          (await executionAdmissionHash(current.meta)) !== executionConsumer.admissionHash ||
-          !current.meta.session?.key
-        )
-          return denied();
+        if (!current) return denied("execution_owner_missing");
+        if (current.ownerGen !== executionConsumer.gen) return denied("execution_generation_mismatch");
+        if (current.meta.agent === "orchestrator") return denied("execution_agent_mismatch");
+        if (current.meta.userId !== msg.userId) return denied("execution_requester_mismatch");
+        if (current.meta.channelId !== msg.channelId) return denied("execution_channel_mismatch");
+        if (current.meta.threadKey !== msg.threadKey) return denied("execution_thread_mismatch");
+        if (current.meta.authenticatedAs !== msg.authenticatedAs) return denied("execution_authentication_mismatch");
+        if (current.meta.postedBy !== msg.postedBy) return denied("execution_relay_mismatch");
+        if ((await executionAdmissionHash(current.meta)) !== executionConsumer.admissionHash)
+          return denied("execution_admission_mismatch");
+        if (!current.meta.session?.key) return denied("execution_session_missing");
         const retained = await deps.runLedger.readSession(current.meta.session.key, current.meta.session.seedFrom);
-        if (!retained.complete) return denied();
+        if (!retained.complete) return denied("execution_session_incomplete");
         const receipts = Array.isArray(current.state.sourceResults)
           ? current.state.sourceResults.filter(isSourceResultReceipt)
           : [];
         const github = githubCapabilityFor(deps, actor());
         for (const ref of dependencies.executionGithub) {
-          if (ref.runId !== current.runId || ref.admissionHash !== executionConsumer.admissionHash) return denied();
+          if (ref.runId !== current.runId) return denied("execution_receipt_owner_mismatch");
+          if (ref.admissionHash !== executionConsumer.admissionHash)
+            return denied("execution_receipt_admission_mismatch");
           const receipt = receipts.find(
             (r) =>
               r.version === 2 &&
@@ -392,10 +408,11 @@ function buildContextAccess(
               r.resultHash === ref.resultHash &&
               r.admissionHash === ref.admissionHash,
           );
-          if (!receipt) return denied();
+          if (!receipt) return denied("execution_receipt_missing");
           const original = await recordedGithubRead(retained.messages, receipt);
-          if (!original || !(await currentGithubReadCapability(receipt, original, github, current.meta.agent!)))
-            return denied();
+          if (!original) return denied("execution_call_result_unproved");
+          if (!(await currentGithubReadCapability(receipt, original, github, current.meta.agent!)))
+            return denied("execution_github_access_unproved");
         }
         const final = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === current.runId);
         if (
@@ -403,10 +420,11 @@ function buildContextAccess(
           final.ownerGen !== executionConsumer.gen ||
           (await executionAdmissionHash(final.meta)) !== executionConsumer.admissionHash
         )
-          return denied();
+          return denied("execution_owner_changed");
       }
 
-      for (const status of dependencies.unitStatuses ?? []) if (!(await unitStatusAllowed(status))) return denied();
+      for (const status of dependencies.unitStatuses ?? [])
+        if (!(await unitStatusAllowed(status))) return denied("unit_status_unproved");
       for (const key of dependencies.memoryScopes ?? []) {
         const kind = key.slice(0, key.indexOf(":")) as MemoryScope;
         if (
@@ -416,7 +434,7 @@ function buildContextAccess(
             kind,
           }).allow
         )
-          return denied();
+          return denied("memory_scope_denied");
       }
       if (dependencies.githubRepos?.length) {
         const current = await githubCapabilityFor(deps, actor(), {
@@ -425,10 +443,12 @@ function buildContextAccess(
             directAudienceStampOf(msg) !== undefined && (await destinationAudience()) !== undefined,
         }).readableRepos?.(dependencies.githubRepos);
         const readable = new Set(current?.map((repo) => repo.fullName.toLowerCase()));
-        if (dependencies.githubRepos.some((repo) => !readable.has(repo.toLowerCase()))) return denied();
+        if (dependencies.githubRepos.some((repo) => !readable.has(repo.toLowerCase())))
+          return denied("github_repository_unproved");
       }
       for (const origin of dependencies.origins) {
-        if (!(await originAllowed(origin))) return denied();
+        const checked = await originDecision(origin);
+        if (!checked.ok) return checked;
       }
       const slack = await revalidateSourcesDecision(dependencies.slack, async (receipt) => {
         if (
@@ -456,9 +476,9 @@ function buildContextAccess(
       if (!slack.ok) return slack;
       for (const reference of dependencies.mcp) {
         const row = await load(reference.runId);
-        if (!row || !admitted(row)) return denied();
+        if (!row || !admitted(row)) return denied("mcp_record_unproved");
         const source = factsOf(row);
-        if (!source.agent) return denied();
+        if (!source.agent) return denied("mcp_agent_missing");
         const owner = {
           runId: source.id,
           requester: source.userId,
@@ -468,9 +488,9 @@ function buildContextAccess(
         };
         const archive = "meta" in row ? row.state.sourceReads : row.sourceReads;
         const state = sourceReadState(archive, owner);
-        if (!state) return denied();
+        if (!state) return denied("mcp_state_unproved");
         const audience = await destinationAudience();
-        if (!audience) return denied();
+        if (!audience) return denied("mcp_audience_unproved");
         const tools = await deps.mcp.toolsFor(owner.agent, {
           userId: msg.userId,
           channelId: audience.channelId,
@@ -495,7 +515,7 @@ function buildContextAccess(
       }
       return { ok: true };
     } catch {
-      return denied();
+      return denied("context_validation_exception");
     }
   };
   const canReadOrigin = async (origin: ContextOrigin): Promise<boolean> => {

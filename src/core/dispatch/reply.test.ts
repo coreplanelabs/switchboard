@@ -1,4 +1,5 @@
 import type { AudienceTrace } from "../audienceDecision.js";
+import { createSpanLog } from "../trace/spanLog.js";
 import { booleanAudienceVerifier } from "../testing/audienceVerifier.js";
 import { describe, expect, it, vi } from "vitest";
 import type { ParsedChatCommand } from "../commandChat.js";
@@ -792,6 +793,62 @@ describe("deliverAnswer — the answer reaches the thread", () => {
   const NOW = 10_000;
   const agent = getAgent("review");
   const msg = { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0", text: "review it" };
+
+  it.each(["public", "private"])(
+    "traces the failed context check first seen during %s delivery",
+    async (visibility) => {
+      const s = finishedRun();
+      const log = createSpanLog();
+      const trace = startRequestRoot({ clock: () => NOW, spanLog: log }, { channel: "slack", receivedAt: NOW });
+      const audience: AudienceTrace = {};
+      let readable = true;
+      const check = async () =>
+        readable
+          ? { ok: true as const }
+          : {
+              ok: false as const,
+              code: "saved-context-unproved" as const,
+              check: "execution_github_access_unproved" as const,
+            };
+      await deliverAnswer({
+        ...s.ctx,
+        root: trace.root,
+        audience,
+        ...(visibility === "public"
+          ? { publicationCheck: check }
+          : {
+              privateAudienceLatch: { revoked: false, revalidateSources: check },
+              slackContext: { destinationStillPrivate: async () => true } as never,
+            }),
+        card: {
+          ...s.ctx.card,
+          done: async () => {
+            readable = false;
+          },
+        },
+      });
+      expect(audience.refusal).toEqual({
+        version: 1,
+        code: "saved-context-unproved",
+        causeAt: "reply",
+        withheldAt: "reply",
+        check: "execution_github_access_unproved",
+      });
+      expect(
+        log
+          .read()
+          .lines.filter((line) => line.span === "run.publication_context_check")
+          .map((line) => line.attrs.outcome),
+      ).toEqual(
+        visibility === "public"
+          ? ["execution_github_access_unproved"]
+          : ["allowed", "execution_github_access_unproved"],
+      );
+      expect(s.replies).toEqual([
+        "I can't safely use earlier source data in this conversation. Please ask me to check the source again.",
+      ]);
+    },
+  );
 
   function finishedRun(finishing?: () => Promise<"ok" | "fenced" | "unavailable">) {
     const registry = new RunRegistry({ genId: () => "run-d", genToken: () => "tok" });

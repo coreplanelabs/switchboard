@@ -3960,13 +3960,23 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     let publicationWithheld = false;
     const publicationAllowed = async (): Promise<boolean> => {
       if (publicationWithheld) return false;
-      const checked = privateRun
-        ? await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)
-        : ctx.publicationContextCheck
-          ? await ctx.publicationContextCheck()
-          : { ok: true as const };
+      const checked = await root.span("run.publication_context_check", async (span) => {
+        const result = privateRun
+          ? await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)
+          : ctx.publicationContextCheck
+            ? await ctx.publicationContextCheck()
+            : { ok: true as const };
+        span.setAttrs({ outcome: result.ok ? "allowed" : (result.check ?? result.code) });
+        return result;
+      });
       if (!checked.ok) {
-        const receipt = noteAudienceRefusal(privateAudienceLatch, checked.code, "answer-event", "answer-event");
+        const receipt = noteAudienceRefusal(
+          privateAudienceLatch,
+          checked.code,
+          "answer-event",
+          "answer-event",
+          checked.check,
+        );
         ledgerRun?.setState({ audienceRefusal: receipt });
         answer = audienceRefusalText(receipt.code);
         publicationWithheld = true;

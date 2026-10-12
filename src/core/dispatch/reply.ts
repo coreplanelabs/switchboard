@@ -774,11 +774,17 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
   const privateCard = privateRun;
   const latch = ctx.privateAudienceLatch ?? { revoked: false };
   const audience = ctx.audience ?? latch;
+  const traceCheck = (check: () => Promise<AudienceCheck>): Promise<AudienceCheck> =>
+    root.span("run.publication_context_check", async (span) => {
+      const result = await check();
+      span.setAttrs({ outcome: result.ok ? "allowed" : (result.check ?? result.code) });
+      return result;
+    });
   const privateCheck = async (): Promise<AudienceCheck> =>
-    privateRun ? privateRunAudienceDecision(msg, io, latch, ctx.slackContext) : { ok: true };
+    privateRun ? traceCheck(() => privateRunAudienceDecision(msg, io, latch, ctx.slackContext)) : { ok: true };
   const fenced = new Error("reply ownership changed");
   const commitRefusal = async (check: Extract<AudienceCheck, { ok: false }>) => {
-    const receipt = noteAudienceRefusal(audience, check.code, "reply", "reply");
+    const receipt = noteAudienceRefusal(audience, check.code, "reply", "reply", check.check);
     if (ledgerRun && (await ledgerRun.commitState({ audienceRefusal: receipt })) === "fenced") {
       ending.drop(run.id);
       throw fenced;
@@ -900,7 +906,7 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
       () =>
         root.span("post.reply", async () => {
           if (!addressCheck.ok) return refusal(addressCheck);
-          const publication = await ctx.publicationCheck?.();
+          const publication = ctx.publicationCheck ? await traceCheck(() => ctx.publicationCheck!()) : undefined;
           const privateDecision = await privateCheck();
           if (!privateDecision.ok) return refusal(privateDecision);
           if (publication && !publication.ok) return refusal(publication);

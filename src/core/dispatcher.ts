@@ -4076,7 +4076,10 @@ export async function dispatch(
       if (!context.executionGithub?.length) return contextReader.validateDependencies(context);
       const current = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === run.id);
       const hash = current && current.ownerGen === deps.runLedger.gen && (await executionAdmissionHash(current.meta));
-      if (!hash) return { ok: false, code: "saved-context-unproved" };
+      if (!current) return { ok: false, code: "saved-context-unproved", check: "execution_owner_missing" };
+      if (current.ownerGen !== deps.runLedger.gen)
+        return { ok: false, code: "saved-context-unproved", check: "execution_generation_mismatch" };
+      if (!hash) return { ok: false, code: "saved-context-unproved", check: "execution_admission_mismatch" };
       return contextAccessForExecution(deps, {
         msg,
         io,
@@ -4161,7 +4164,7 @@ export async function dispatch(
           })
         : undefined;
     if (mainAudience && !mainAudience.ok) {
-      noteAudienceRefusal(audienceTrace, mainAudience.code, "prompt", "prompt");
+      noteAudienceRefusal(audienceTrace, mainAudience.code, "prompt", "prompt", mainAudience.check);
       const reason = audienceRefusalText(mainAudience.code);
       await refuse(refusalOf("setup_failed", reason), () =>
         card.done(shell.close({ kind: "refused", icon: "🚫", reason, ...closeLines(clock(), false) })),
