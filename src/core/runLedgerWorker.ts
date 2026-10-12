@@ -169,7 +169,14 @@ import type {
 import type { PlaneAdmitPost, PlaneLevelPost, PlaneObservePost } from "./runLedger/ledger.js";
 import type { UnreadIngressProof, IngressRequest, IngressSettlement, IngressResult } from "./runLedger/ingress.js";
 import { DEFAULT_SESSION_LOG_MAX_BYTES } from "./runLedger/sessionLog.js";
-import { assembleTranscript, chunkRows, turnRows, type AssembledTranscript } from "./runLedger/transcript.js";
+import {
+  assembleTranscript,
+  chunkRows,
+  turnRows,
+  boundedTranscript,
+  RequiredTranscriptError,
+  type AssembledTranscript,
+} from "./runLedger/transcript.js";
 import {
   GEN_PATTERN,
   isIntakeReceipt,
@@ -389,13 +396,19 @@ export class WorkerRunLedger implements RunLedger {
         data.runId === askedRun
       )
         throw new PromotionPendingError(data.runId, data.reason === "promotion_corrupt" ? "corrupt" : "prepared");
+      if (res.status === 423 && data.kind === "held" && data.reason === "transcript_incomplete")
+        throw new RequiredTranscriptError("Memory read incomplete");
       if (res.status === 409 || res.ok || (acceptBadRequest && res.status === 400))
         return { status: res.status, data, request };
       phase = "http";
       throw new PermanentStoreError(`run ledger ${path}: HTTP ${res.status} ${String(data.error ?? "")}`.trim());
     } catch (error) {
       // Expected holds describe ownership, not a storage exception.
-      if (!(error instanceof SourceSeedPendingError) && !(error instanceof PromotionPendingError))
+      if (
+        !(error instanceof SourceSeedPendingError) &&
+        !(error instanceof PromotionPendingError) &&
+        !(error instanceof RequiredTranscriptError)
+      )
         this.reportFailure(request, kind, phase, error, res, server);
       throw error;
     }
@@ -849,26 +862,42 @@ export class WorkerRunLedger implements RunLedger {
       const out = turnRows(
         t.idx,
         "message" in t ? t.message : { compaction: t.compaction },
-        {},
+        { canonical: true },
         "message" in t ? t.actor : undefined,
       );
       rows.push(...out.rows);
       attachments.push(...out.attachments);
     }
+    const encoded = boundedTranscript(rows, attachments);
     const { path, body: targetBody } = this.target(runId, gen, session);
     const body = { ...targetBody, ...(seed && session !== undefined ? { seed: true } : {}) };
+    const internal = encoded.rows.some((row) => JSON.parse(row.json).internalTranscript !== undefined);
+    const sendingBody = internal ? { ...body, transcriptCodec: 1 } : body;
+    if (internal) {
+      const readiness = await this.post(path, { ...sendingBody, rows: [], attachments: [] });
+      const fence = this.fenceResult(readiness);
+      if (!fence.ok) return fence;
+      if (readiness.data.transcriptCodec !== 1) throw new RequiredTranscriptError("Memory codec unavailable");
+    }
+    const send = async (batch: TranscriptRow[], blobs: TranscriptAttachment[]) => {
+      const payload = { ...sendingBody, rows: batch, attachments: blobs };
+      if (new TextEncoder().encode(JSON.stringify(payload)).byteLength > TRANSCRIPT_REQUEST_BYTES)
+        throw new RequiredTranscriptError("write exceeds existing request budget");
+      const result = await this.post(path, payload);
+      if (internal && result.data.ok === true && result.data.transcriptCodec !== 1)
+        throw new UncertainStoreError("run ledger: transcript codec acknowledgement missing", result.request);
+      return this.fenceResult(result);
+    };
     // Attachments travel one per request (each is under the fence by the ref
     // threshold); rows are chunked under the fence.
-    for (const a of attachments) {
-      const r = await this.post(path, { ...body, rows: [], attachments: [a] });
-      const f = this.fenceResult(r);
+    for (const a of encoded.attachments) {
+      const f = await send([], [a]);
       if (!f.ok) return f;
     }
-    const chunks = chunkRows(rows, TRANSCRIPT_REQUEST_BYTES - 4_096);
+    const chunks = chunkRows(encoded.rows, TRANSCRIPT_REQUEST_BYTES - 4_096);
     for (const chunk of chunks.length ? chunks : [[]]) {
-      if (chunk.length === 0 && attachments.length > 0) continue;
-      const r = await this.post(path, { ...body, rows: chunk, attachments: [] });
-      const f = this.fenceResult(r);
+      if (chunk.length === 0 && encoded.attachments.length > 0) continue;
+      const f = await send(chunk, []);
       if (!f.ok) return f;
     }
     return { ok: true };
@@ -1178,8 +1207,15 @@ export class WorkerRunLedger implements RunLedger {
     const result = await this.post("/runs/ingress/refusal-ack", { storeKey: this.opts.storeKey, request });
     return result.data as unknown as IngressResult;
   }
-  async clearIngressContent(effectKey: string): Promise<IngressResult> {
-    const result = await this.post("/runs/ingress/clear", { storeKey: this.opts.storeKey, effectKey });
+  async clearIngressContent(
+    effectKey: string,
+    protection?: import("./runLedger/ingress.js").IngressClearProtection,
+  ): Promise<IngressResult> {
+    const result = await this.post("/runs/ingress/clear", {
+      storeKey: this.opts.storeKey,
+      effectKey,
+      ...(protection ? { protection } : {}),
+    });
     return result.data as unknown as IngressResult;
   }
   async finishIngress(request: IngressSettlement): Promise<IngressResult> {

@@ -4,7 +4,10 @@ import { SeedKey, useViewingAs } from "../../src/lib/seed";
 import { useHomeSession } from "../lib/homeSession";
 import type { HomePrimaryAction } from "@core/channels/homeSeed.js";
 import ConfirmationPrompt from "./ConfirmationPrompt.vue";
-const props = defineProps<{ capturedRevision?: number; primaryAction?: HomePrimaryAction }>();
+const props = withDefaults(
+  defineProps<{ capturedRevision?: number; primaryAction?: HomePrimaryAction; autofocus?: boolean }>(),
+  { autofocus: true, capturedRevision: undefined, primaryAction: undefined },
+);
 const home = useHomeSession();
 const viewingAs = useViewingAs();
 const globalSeed = inject(SeedKey, null);
@@ -97,6 +100,7 @@ const commands = computed(() =>
     : [],
 );
 function focusComposer() {
+  if (props.autofocus === false) return;
   if (buttonFirst.value)
     (
       controls.value?.querySelector<HTMLButtonElement>(

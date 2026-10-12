@@ -1,7 +1,12 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, inject } from "vue";
 import { useColorMode } from "@vueuse/core";
-const mode = useColorMode({ emitAuto: true });
+import { SeedKey } from "../lib/seed";
+const access = inject(SeedKey, null)?.pageAccess;
+// Missing account scope must not inherit another account's appearance.
+const storageKey =
+  access?.actor && access.organization ? `sb-appearance:${JSON.stringify([access.actor, access.organization])}` : null;
+const mode = useColorMode({ emitAuto: true, storageKey });
 const theme = computed<"system" | "light" | "dark">({
   get: () => (mode.value === "auto" ? "system" : mode.value === "dark" ? "dark" : "light"),
   set: (value) => {

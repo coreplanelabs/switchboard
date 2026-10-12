@@ -2531,7 +2531,7 @@ const HOME_LIVE_TURNS: (HomeTurnSeed | HomeReceiptTurnSeed)[] = [
 /** The admin viewing as alice (record 0053): the shell stamps the banner from this viewer. */
 const VIEWING_AS_ALICE: Actor = {
   kind: "user",
-  id: "access:admin",
+  id: "access:preview",
   grants: { actions: "all", channels: "all", repos: "all" },
   viewingAs: { id: "slack:UALICE", name: "alice" },
 };

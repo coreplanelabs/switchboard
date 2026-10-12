@@ -218,8 +218,17 @@ export function durableInboxMessage(
     // Staged references are metadata (record 0033) — a few hundred bytes each —
     // so they ride the base row and survive the restart whatever the
     // attachments below do.
-    ...(msg.staged && msg.staged.length > 0 ? { staged: msg.staged.map(stagedRow) } : {}),
+    ...(originalOrganizationInput?.nativeMediaDigest
+      ? { nativeMediaDigest: originalOrganizationInput.nativeMediaDigest }
+      : msg.staged && msg.staged.length > 0
+        ? { staged: msg.staged.map(stagedRow) }
+        : {}),
   };
+  if (originalOrganizationInput?.savedNativeMediaSource) {
+    delete base.staged;
+    return base;
+  }
+  if (originalOrganizationInput?.nativeMediaDigest) return base;
   const images = msg.images ?? [];
   const documents = msg.documents ?? [];
   if (images.length === 0 && documents.length === 0) return base;
@@ -381,7 +390,15 @@ export function messageFromInbox(
   if (original !== undefined) {
     if (!original || typeof original !== "object" || Array.isArray(original)) return;
     try {
-      restored = withOriginalOrganizationDispatch(msg, original as OriginalOrganizationDispatch);
+      if (m.nativeMediaDigest !== undefined) {
+        if (
+          typeof m.nativeMediaDigest !== "string" ||
+          m.nativeMediaDigest !== (original as OriginalOrganizationDispatch).nativeMediaDigest
+        )
+          return;
+        restored = { ...msg, nativeMediaDigest: m.nativeMediaDigest };
+      }
+      restored = withOriginalOrganizationDispatch(restored, original as OriginalOrganizationDispatch);
     } catch {
       return;
     }

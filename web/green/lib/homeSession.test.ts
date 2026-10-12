@@ -1,3 +1,4 @@
+import { flushPromises } from "@vue/test-utils";
 // Feature: docs/reference/specs/browser-home.md — one authorized destination and retry identity.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HomeSession } from "@core/channels/homeSeed.js";
@@ -49,6 +50,309 @@ function body(fetcher: ReturnType<typeof vi.fn>, index: number): Record<string, 
 }
 
 describe("Home conversation destination", () => {
+  it.each([
+    ["broad text", false, "text", 403, "forbidden"],
+    ["broad confirm", false, "confirm", 401, "<html>Sign in</html>"],
+    ["broad cancel", false, "cancel", 404, ""],
+    ["focused confirm", true, "confirm", 403, "forbidden"],
+    ["focused cancel", true, "cancel", 404, ""],
+    ["focused retry", true, "retry", 401, "<html>Sign in</html>"],
+  ] as const)(
+    "handles definite non-JSON denial for %s without replaying its original intent",
+    async (_case, local, intent, statusCode, responseBody) => {
+      const offer = { id: "saved:original", line: "Original private proposal" };
+      const responses: Array<Response | Error> = [json(session({ offer }))];
+      if (local) responses.push(json({ ...focused(), offer }));
+      if (intent === "retry") responses.push(new Error("Unknown first result"));
+      responses.push(new Response(responseBody, { status: statusCode }));
+      if (local) responses.push(json(session()));
+      const { home, fetcher } = harness(responses);
+      await home.load();
+      home.text.value = "Keep my broad draft";
+      if (local) await home.focus("slack:C1:1");
+      home.text.value = "Original private reply";
+      const submit = () =>
+        intent === "confirm" || intent === "cancel"
+          ? home.submitConfirmation({ kind: intent, id: offer.id })
+          : home.submit();
+      if (intent === "retry") await submit();
+      await submit();
+      expect({
+        status: home.status.value,
+        destination: home.session.value?.destination.kind ?? null,
+        text: home.text.value,
+        offer: home.offer.value,
+        pending: home.pendingSubmission.value,
+        revocations: home.revocations.value,
+      }).toEqual(
+        local
+          ? {
+              status: "ready",
+              destination: "broad",
+              text: "Keep my broad draft",
+              offer: null,
+              pending: false,
+              revocations: 1,
+            }
+          : { status: "unavailable", destination: null, text: "", offer: null, pending: false, revocations: 1 },
+      );
+      const sends = fetcher.mock.calls.filter(([url, init]) => url === "/home/send" && init?.method === "POST");
+      const payload = {
+        key: local ? "issued:thread" : "issued:one",
+        revision: local ? 9 : 4,
+        destination: local ? { kind: "thread", thread: "slack:C1:1" } : { kind: "broad" },
+        context: [],
+        ...(intent === "confirm" || intent === "cancel"
+          ? { confirmation: { kind: intent, id: offer.id } }
+          : { text: "Original private reply" }),
+      };
+      expect(sends.map(([, init]) => JSON.parse(String(init?.body)))).toEqual(
+        intent === "retry" ? [payload, payload] : [payload],
+      );
+      home.dispose();
+    },
+  );
+  it.each(["malformed200", "object200", "malformed500", "network"] as const)(
+    "keeps %s uncertain with its exact original retry rather than a new intent",
+    async (failure) => {
+      const first =
+        failure === "network"
+          ? new Error("Transport lost")
+          : failure === "object200"
+            ? json({})
+            : new Response("not JSON", { status: failure === "malformed500" ? 500 : 200 });
+      const { home, fetcher } = harness([json(session()), first, json({ status: "accepted", duplicate: true })]);
+      await home.load();
+      home.text.value = "Original private reply";
+      await home.submit();
+      expect({
+        status: home.status.value,
+        text: home.text.value,
+        pending: home.pendingSubmission.value,
+        revocations: home.revocations.value,
+      }).toEqual({ status: "ready", text: "Original private reply", pending: true, revocations: 0 });
+      expect(home.notice.value).toBe("The result could not be confirmed. Retry returns the same submission receipt.");
+      await home.submit();
+      expect([body(fetcher, 1), body(fetcher, 2)]).toEqual([
+        { text: "Original private reply", destination: { kind: "broad" }, revision: 4, context: [], key: "issued:one" },
+        { text: "Original private reply", destination: { kind: "broad" }, revision: 4, context: [], key: "issued:one" },
+      ]);
+      expect(home.notice.value).toBe("The original message was already accepted. It was not sent twice.");
+      home.dispose();
+    },
+  );
+  it("ignores a late non-JSON target denial after navigation without clearing the current broad draft", async () => {
+    let release!: (value: Response) => void;
+    const delayed = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    const { home, fetcher } = harness([json(session()), json(focused()), delayed]);
+    await home.load();
+    await home.focus("slack:C1:1");
+    home.text.value = "Original local reply";
+    const pending = home.submit();
+    await flushPromises();
+    home.routeChanged("/home");
+    home.text.value = "New authorized broad draft";
+    release(new Response("forbidden", { status: 403 }));
+    await pending;
+    expect({
+      status: home.status.value,
+      destination: home.session.value?.destination.kind,
+      text: home.text.value,
+      revocations: home.revocations.value,
+    }).toEqual({ status: "ready", destination: "broad", text: "New authorized broad draft", revocations: 0 });
+    expect(body(fetcher, 2)).toEqual({
+      text: "Original local reply",
+      destination: { kind: "thread", thread: "slack:C1:1" },
+      revision: 9,
+      context: [],
+      key: "issued:thread",
+    });
+    home.dispose();
+  });
+  it.each(["unit", "thread", "inline"] as const)(
+    "restores only freshly authorized broad draft and scroll after focused %s revocation",
+    async (entry) => {
+      let authorize!: (response: Response) => void;
+      const pending = new Promise<Response>((resolve) => {
+        authorize = resolve;
+      });
+      const broad = session({
+        entries: [{ id: "old-broad", role: "assistant", isViewer: false, content: "Old broad message" }],
+      });
+      const local = {
+        ...focused(),
+        entries: [{ id: "local", role: "assistant" as const, isViewer: false, content: "Focused private message" }],
+      };
+      const { home, stream, fetcher } = harness([json(broad), json(local), pending]);
+      home.routeChanged(
+        entry === "unit" ? "/runs/unit/unit-a" : entry === "thread" ? "/threads/slack%3AC1%3A1" : "/home",
+      );
+      await home.load();
+      home.text.value = "Keep my broad draft";
+      home.scroll.value = 420;
+      home.attach({ kind: "thread", key: "slack:C1:1", label: "Affected thread" });
+      home.attach({ kind: "unit", key: "unit-a", label: "Affected unit" });
+      home.attach({ kind: "run", key: "unrelated", label: "Other work" });
+      if (entry === "inline")
+        expect(
+          await home.beginInlineAnswer("unit-a", "Unit A", {
+            thread: "slack:C1:1",
+            revision: 9,
+            question: "Choose the behavior",
+            primaryAction: { label: "Answer", text: "yes" },
+          }),
+        ).toBe(true);
+      else expect(await home.focus("slack:C1:1")).toBe(true);
+      const revoked = stream.created.at(-1)!;
+      home.text.value = "Private local draft";
+      home.scroll.value = 80;
+      revoked.emitNamed("revoked");
+      expect(revoked.closed).toBe(true);
+      expect(home.session.value?.entries.some((row) => row.content === "Focused private message")).not.toBe(true);
+      expect(home.text.value).toBe("");
+      authorize(
+        json(
+          session({
+            submissionKey: "issued:recovered",
+            ...(entry === "thread" ? { destination: { ...session().destination, canWrite: false } } : {}),
+            entries: [
+              { id: "fresh-broad", role: "assistant", isViewer: false, content: "Freshly authorized broad message" },
+            ],
+          }),
+        ),
+      );
+      await flushPromises();
+      expect({
+        status: home.status.value,
+        destination: home.session.value?.destination.kind,
+        text: home.text.value,
+        scroll: home.scroll.value,
+      }).toEqual({ status: "ready", destination: "broad", text: "Keep my broad draft", scroll: 420 });
+      expect(home.session.value?.entries.map((row) => row.content)).toEqual(["Freshly authorized broad message"]);
+      expect(home.context.value.some((ref) => ref.kind === "thread" && ref.key === "slack:C1:1")).toBe(false);
+      if (entry !== "thread")
+        expect(home.context.value.some((ref) => ref.kind === "unit" && ref.key === "unit-a")).toBe(false);
+      expect(home.context.value).toContainEqual({ kind: "run", key: "unrelated", label: "Other work" });
+      expect(home.inlineAnswer.value).toBe(null);
+      expect(home.session.value?.destination.canWrite).toBe(entry !== "thread");
+      expect(fetcher.mock.calls[2]?.[0]).toBe("/home/session");
+      revoked.emitMessage(local);
+      expect(home.session.value?.destination.kind).toBe("broad");
+      expect(home.text.value).toBe("Keep my broad draft");
+      home.dispose();
+    },
+  );
+  it.each(["actor", "organization", "stream", "binding", "epoch", "denied", "unknown"] as const)(
+    "clears focused and broad private state when fresh broad proof is %s",
+    async (failure) => {
+      const replacement = session({
+        ...(failure === "actor" ? { actor: "access:bob" } : {}),
+        ...(failure === "organization" ? { organization: "org:b" } : {}),
+        ...(failure === "stream" ? { stream: "person:other" } : {}),
+        ...(failure === "binding" ? { bindingRevision: 1 } : {}),
+        ...(failure === "epoch" ? { accessEpoch: "changed-policy" } : {}),
+      });
+      const answer =
+        failure === "denied" ? json({}, 403) : failure === "unknown" ? new Error("unavailable") : json(replacement);
+      const { home, stream } = harness([json(session()), json(focused()), answer]);
+      await home.load();
+      home.text.value = "Private broad draft";
+      await home.focus("slack:C1:1");
+      home.text.value = "Private target draft";
+      stream.created.at(-1)!.emitNamed("revoked");
+      await flushPromises();
+      expect({
+        status: home.status.value,
+        session: home.session.value,
+        text: home.text.value,
+        context: home.context.value,
+      }).toEqual({ status: "unavailable", session: null, text: "", context: [] });
+      home.dispose();
+    },
+  );
+  it.each(["navigate", "reset", "dispose"] as const)(
+    "does not revive cached focus during recovery after %s",
+    async (change) => {
+      let finish!: (response: Response) => void;
+      const pending = new Promise<Response>((resolve) => {
+        finish = resolve;
+      });
+      const { home, stream, fetcher } = harness([json(session()), json(focused()), pending]);
+      await home.load();
+      home.text.value = "Lawful broad draft";
+      await home.focus("slack:C1:1");
+      home.text.value = "Closed target draft";
+      const closed = stream.created.at(-1)!;
+      closed.emitNamed("revoked");
+      home.exitFocus();
+      expect(await home.focus("slack:C1:other")).toBe(false);
+      if (change === "navigate") home.routeChanged("/runs");
+      else if (change === "reset") home.resetPrivate();
+      else home.dispose();
+      expect(home.session.value).toBe(null);
+      expect(home.text.value).toBe("");
+      closed.emitMessage(focused());
+      finish(json(session({ submissionKey: "issued:after-recovery" })));
+      await flushPromises();
+      if (change === "navigate")
+        expect({
+          status: home.status.value,
+          destination: home.session.value?.destination.kind,
+          text: home.text.value,
+        }).toEqual({ status: "ready", destination: "broad", text: "Lawful broad draft" });
+      else
+        expect({ status: home.status.value, session: home.session.value, text: home.text.value }).toEqual({
+          status: "unavailable",
+          session: null,
+          text: "",
+        });
+      expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+      home.dispose();
+    },
+  );
+  it("keeps only opaque original receipt recovery while a revoked target's late acknowledgment cannot consume the broad draft or repost", async () => {
+    let accept!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      accept = resolve;
+    });
+    const { home, stream, fetcher } = harness([
+      json(session()),
+      json(focused()),
+      pending,
+      json(session({ submissionKey: "issued:fresh-broad" })),
+      json({ status: "accepted" }),
+    ]);
+    await home.load();
+    home.text.value = "Keep broad intent";
+    await home.focus("slack:C1:1");
+    home.text.value = "Target intent";
+    const sent = home.submit();
+    const revoked = stream.created.at(-1)!;
+    revoked.emitNamed("revoked");
+    await flushPromises();
+    expect(home.earlierRequests.value.some((item) => item.key === "issued:thread")).toBe(true);
+    expect(home.pendingSubmission.value).toBe(false);
+    expect(home.text.value).toBe("Keep broad intent");
+    accept(json({ status: "accepted", offer: { id: "old-target-offer", line: "Old target action" } }));
+    await sent;
+    expect(home.offer.value).toBe(null);
+    expect(home.text.value).toBe("Keep broad intent");
+    expect(home.earlierRequests.value.some((item) => item.key === "issued:thread")).toBe(false);
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(2);
+    await home.submit();
+    expect(body(fetcher, 4)).toEqual({
+      text: "Keep broad intent",
+      destination: { kind: "broad" },
+      revision: 4,
+      context: [],
+      key: "issued:fresh-broad",
+    });
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(3);
+    home.dispose();
+  });
+
   it("does not retarget an unsent draft or attached context onto a changed shared question", async () => {
     const { home, stream, fetcher } = harness([json(session()), json(focused())]);
     await home.load();

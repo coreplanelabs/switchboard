@@ -1,5 +1,6 @@
 import type { AudienceCheck } from "./audienceDecision.js";
 import type { Verbosity } from "./verbosity.js";
+import type { NativeMedia } from "./nativeMedia.js";
 
 // Channel abstraction. A channel (Slack, CLI, Discord, HTTP, ...) is only a
 // transport: it receives text from a user somewhere, hands it to the core
@@ -133,6 +134,9 @@ export interface IncomingMessage {
   authenticatedAs?: string;
   /** Images attached to the triggering message, if any. */
   images?: ImageAttachment[];
+  /** Source-bound accepted media; private bytes are re-read before each consumption. */
+  nativeMedia?: NativeMedia;
+  nativeMediaDigest?: string;
   /** Non-image files (PDFs, text/code/CSV/logs) on the triggering message, if any. */
   documents?: DocumentAttachment[];
   /** Files the inline path cannot carry — too large, or a type the model does
@@ -284,6 +288,11 @@ export interface ChannelIO {
   /** Re-read current retained private history for this exact original owned input. Never a cached seed. */
   /** Restore this exact consumed input's fresh Actor and receipt sink; absent proof holds it. */
   rehostOrganizationInput?(request: IncomingMessage): Promise<{ msg: IncomingMessage; io: ChannelIO } | undefined>;
+  /** Reprove a server-minted saved read dependency without borrowing its actor or owner. */
+  readSavedNativeMedia?(
+    reference: import("./dispatch/originalOrganizationInput.js").SavedNativeMediaSource,
+    request: IncomingMessage,
+  ): Promise<Pick<IncomingMessage, "images" | "documents" | "staged"> | undefined>;
   authoritativePrivateHistory?(request?: IncomingMessage): Promise<import("./dispatch/textTurns.js").TextTurn[]>;
   /** Current source proof and retained history for an original source run. Missing proof holds. */
   authoritativePrivateSourceHistory?(

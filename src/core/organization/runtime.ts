@@ -1,5 +1,6 @@
 import type { Actor } from "../authz/types.js";
 import { withChatActor } from "../authz/actor.js";
+import { withOriginalOrganizationDispatch } from "../dispatch/originalOrganizationInput.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import type { RunLedger } from "../runLedger/ledger.js";
 import type { IngressResult } from "../runLedger/ingress.js";
@@ -172,9 +173,17 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
     if (pending.status !== "owner-clears") return false;
     for (const item of pending.items) {
       try {
-        const cleared = await options.ledger.clearIngressContent(item.effectKey);
+        const cleared = await options.ledger.clearIngressContent(item.effectKey, {
+          receiptTtlMs: options.service.receiptRetentionMs,
+          ...(item.expiresAt !== undefined ? { expiresAt: item.expiresAt } : {}),
+        });
         if (cleared.status !== "record" && cleared.status !== "not_found") return false;
-        const ack = await options.store.execute({ action: "owner-cleared", organization, ...item });
+        const ack = await options.store.execute({
+          action: "owner-cleared",
+          organization,
+          receiptId: item.receiptId,
+          effectKey: item.effectKey,
+        });
         if (ack.status !== "ok") return false;
       } catch {
         return false;
@@ -349,7 +358,14 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
             envelope,
             receipt: submission.receipt,
             actor: current.actor,
-            msg: withChatActor({ ...current.msg, text: envelope.content }, current.actor),
+            msg: withOriginalOrganizationDispatch(
+              withChatActor({ ...current.msg, text: envelope.content }, current.actor),
+              {
+                ingressRunId: original.runId,
+                organizationSequence: submission.receipt.revision,
+                ...(envelope.nativeMediaDigest ? { nativeMediaDigest: envelope.nativeMediaDigest } : {}),
+              },
+            ),
             runId: original.runId,
           };
           let outcome: OrganizationOwnerOutcome;
@@ -443,7 +459,7 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
           requester: resolved.msg.userId,
           threadKey: resolved.msg.threadKey,
           request: { envelope: snapshotEnvelope(envelope, receipt) },
-          origin: { ...envelope, content: "", context: [] },
+          origin: { ...envelope, content: "", nativeMedia: undefined, context: [] },
           originExpiresAt: receipt.expiresAt,
           receiptId: receipt.id,
           contentExpiresAt: Math.min(envelope.contentExpiresAt, snapshotDeadline(receipt)),
@@ -523,7 +539,14 @@ export function createOrganizationRuntime(options: OrganizationRuntimeOptions) {
               envelope: snapshotEnvelope(envelope, accepted.receipt),
               receipt: accepted.receipt,
               actor: current.actor,
-              msg: withChatActor({ ...current.msg, text: envelope.content }, current.actor),
+              msg: withOriginalOrganizationDispatch(
+                withChatActor({ ...current.msg, text: envelope.content }, current.actor),
+                {
+                  ingressRunId: runId,
+                  organizationSequence: accepted.receipt.revision,
+                  ...(envelope.nativeMediaDigest ? { nativeMediaDigest: envelope.nativeMediaDigest } : {}),
+                },
+              ),
               runId,
             };
             await finish(await execute({ ...request, io: options.sink(request) }));

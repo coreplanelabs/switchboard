@@ -138,6 +138,7 @@ export interface OpenCodePrompt {
   metadata?: Record<string, unknown>;
   delivery?: "steer" | "queue";
   resume?: boolean;
+  files?: { uri: string; name?: string }[];
 }
 
 /** The answer to a prompt: the admitted inbox item (`packages/schema/src/session-inbox.ts:59`), never the turn. */
@@ -146,7 +147,7 @@ export interface OpenCodeInboxUser {
   sessionID: string;
   time: { created: number };
   type: "user";
-  payload: { text: string };
+  payload: { text: string; files?: { data: string; mime: string; source?: { type: string } }[] };
   delivery: "steer" | "queue";
 }
 

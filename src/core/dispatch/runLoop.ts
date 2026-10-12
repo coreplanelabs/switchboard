@@ -55,6 +55,10 @@ import {
 // (harness-pi item 14) and is ended here after them. The stage's claim and
 // the tools' capabilities are run.ts.
 import { randomUUID } from "node:crypto";
+import { originalOrganizationDispatchOf } from "./originalOrganizationInput.js";
+import { requiresNativeMedia } from "../harness/nativeMedia.js";
+import { nativeMediaDigest } from "../nativeMedia.js";
+import { turnContent } from "./messages.js";
 import {
   isPublicationSettlement,
   redactPublicationSettlement,
@@ -78,12 +82,7 @@ import { parseModelRef } from "../provider.js";
 import { isReissueSteerText } from "../plane/decide.js";
 import type { ModelCard } from "../modelCard.js";
 import { filterUnavailableTools, mergeTools, toolsForRun } from "../../tools/toolsets.js";
-import {
-  createMainWorkEffectGate,
-  mainWorkForRun,
-  mainWorkAudienceAllowed,
-  type DirectAudience,
-} from "../../tools/mainWork.js";
+import { createMainWorkEffectGate, mainWorkForRun, type DirectAudience } from "../../tools/mainWork.js";
 import { readUnitSeedProof } from "./unitSeedProof.js";
 import { type SlackContextBinding } from "./slackContextBinding.js";
 import {
@@ -92,7 +91,7 @@ import {
   privateFollowUpFailure,
   type PrivateAudienceLatch,
 } from "./privateAudience.js";
-import { mainStartForRun } from "../../tools/mainStart.js";
+import { canOfferMainStart, mainStartForRun } from "../../tools/mainStart.js";
 import { conversationCommandTools, type ConversationCommand } from "../../tools/commands.js";
 import { MainContextCaptureError } from "./mainContextCapture.js";
 import { contextRefusalsOf, isMainContextRefusalCode } from "../mainContextRefusal.js";
@@ -153,7 +152,7 @@ import {
   openPullRequest,
   updatePullRequest,
 } from "../../execution/githubPulls.js";
-import type { ChatMessage } from "../chatMessage.js";
+import type { ChatMessage, ContentPart } from "../chatMessage.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
 import type { SourceReads } from "../../mcp/sourceRead.js";
 import { currentPrHeadSha, prCommitsSince, recordPrOf, type RepoContext } from "../repoContext.js";
@@ -419,6 +418,7 @@ export interface RunLoopContext {
   publicationContextCheck?: () => Promise<import("../audienceDecision.js").AudienceCheck>;
   admitSourceContext?: (context: ContextDependencies) => Promise<boolean>;
   validateExecutionContext?: (context: ContextDependencies) => Promise<import("../audienceDecision.js").AudienceCheck>;
+  currentNativeMediaContext?: () => ContextDependencies | undefined;
   /** The severity to address in force for this run (agent-review.md item 5a),
    *  resolved by the dispatcher — directive > user > channel > org — for the
    *  verdict parser: a submitted or restored approve carrying a finding at or
@@ -2148,12 +2148,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   };
   const command: ConversationCommand | undefined =
     (publicActions ||
-      (mainWorkAudienceAllowed({
-        agentName: agent.name,
-        actor: chatActorOf(deps.config, msg),
-        message: msg,
-        channelVisibility,
-      }) &&
+      (canOfferMainStart(agent.name, channelVisibility, msg, chatActorOf(deps.config, msg), !!ctx.executeCommand) &&
         verifiedAtOpen &&
         mainWorkTrusted)) &&
     ctx.executeCommand
@@ -2168,10 +2163,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             !privateAudienceLatch.revoked &&
             run.control.requested === undefined &&
             (!currentSource || mainSources.get(quote) === source.source);
-          const authority = async (currentSource = true) =>
-            trusted(currentSource) &&
-            (publicActions || (await verifyDirectAudience!(source.source.msg.directAudience!)).ok) &&
-            trusted(currentSource);
+          const authority = async (currentSource = true) => {
+            const destination = privateDestinationOf(source.source.msg);
+            return (
+              trusted(currentSource) &&
+              (publicActions ||
+                (privateDestination !== undefined &&
+                  destination !== undefined &&
+                  samePrivateDestination(privateDestination, destination) &&
+                  (await verifyPrivateDestination(io, destination)).ok)) &&
+              trusted(currentSource)
+            );
+          };
           return (
             (await commandEffectGate.run(async () => {
               if (!(await authority())) return { ok: false, text: "Requester authority is unavailable; nothing ran." };
@@ -2180,6 +2183,153 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           );
         }
       : undefined;
+  const prepareFollowUps = async (inputs: readonly FollowUpInput[]): Promise<boolean> => {
+    const prepared: { input: FollowUpInput; msg: IncomingMessage; io: ChannelIO }[] = [];
+    for (const input of inputs) {
+      if (!requiresNativeMedia(input)) continue;
+      const original = input as FollowUpInput & { msg?: IncomingMessage; io?: ChannelIO };
+      const pointer = original.msg && originalOrganizationDispatchOf(original.msg);
+      const source = original.io ?? io;
+      if (original.msg && pointer?.savedNativeMediaSource) {
+        const media = await source.readSavedNativeMedia?.(pointer.savedNativeMediaSource, original.msg);
+        if (!media) return false;
+        prepared.push({ input, msg: { ...original.msg, ...media }, io: source });
+        continue;
+      }
+      if (!original.msg || !pointer?.nativeMediaDigest || !source.rehostOrganizationInput) return false;
+      if (original.msg.nativeMediaDigest !== undefined && original.msg.nativeMediaDigest !== pointer.nativeMediaDigest)
+        return false;
+      const restored = await source.rehostOrganizationInput(original.msg);
+      const restoredPointer = restored && originalOrganizationDispatchOf(restored.msg);
+      if (
+        !restored ||
+        restored.msg.nativeMediaDigest !== pointer.nativeMediaDigest ||
+        restoredPointer?.nativeMediaDigest !== pointer.nativeMediaDigest ||
+        restoredPointer.ingressRunId !== pointer.ingressRunId ||
+        restoredPointer.organizationSequence !== pointer.organizationSequence ||
+        restored.msg.userId !== original.msg.userId ||
+        restored.msg.threadKey !== original.msg.threadKey ||
+        restored.msg.messageId !== original.msg.messageId
+      )
+        return false;
+      prepared.push({ input, msg: restored.msg, io: restored.io });
+    }
+    // A later refusal leaves every original input unchanged; no partial batch is delivered.
+    for (const restored of prepared) {
+      Object.assign(restored.input, {
+        images: restored.msg.images,
+        documents: restored.msg.documents,
+        staged: restored.msg.staged,
+        msg: restored.msg,
+        io: restored.io,
+      });
+    }
+    return true;
+  };
+  const initialPointer = originalOrganizationDispatchOf(msg);
+  const savedMedia = initialPointer?.savedNativeMediaSource;
+  const initialMedia = initialPointer?.nativeMediaDigest ?? savedMedia?.sourceDigest;
+  if (savedMedia || initialPointer?.nativeMediaDigest) {
+    const reference = savedMedia ?? {
+      version: 1 as const,
+      kind: "original" as const,
+      sourceRunId: initialPointer!.ingressRunId,
+      sourceSequence: initialPointer!.organizationSequence,
+      sourceDigest: initialPointer!.nativeMediaDigest!,
+      intentDigest: await nativeMediaDigest(msg.text),
+    };
+    const dependency: ContextDependencies = {
+      version: 3,
+      status: "known",
+      revision: 0,
+      origins: [],
+      slack: [],
+      mcp: [],
+      nativeMediaSources: [
+        {
+          executionRunId: initialPointer!.ingressRunId,
+          executionSequence: initialPointer!.organizationSequence,
+          reference,
+        },
+      ],
+    };
+    if (
+      !ctx.admitSourceContext ||
+      !ctx.validateExecutionContext ||
+      !(await ctx.validateExecutionContext(dependency).then((check) => check.ok)) ||
+      !(await ctx.admitSourceContext(dependency))
+    )
+      throw new Error("The media source could not be retained and verified for this run.");
+  }
+  const initialRequest = [...messages].reverse().find((message) => message.role === "user");
+  const prepareSourceMedia = async (): Promise<boolean> => {
+    const pointer = originalOrganizationDispatchOf(msg);
+    const context = ctx.currentNativeMediaContext?.();
+    if (
+      context &&
+      (context.version === 3 || context.nativeMediaSources?.length) &&
+      (!ctx.validateExecutionContext || !(await ctx.validateExecutionContext(context).then((check) => check.ok)))
+    )
+      return false;
+    if (!initialMedia) return true;
+    if (!pointer) return false;
+    let media: Pick<IncomingMessage, "images" | "documents" | "staged">;
+    if (savedMedia) {
+      if (!io.readSavedNativeMedia || (await nativeMediaDigest(msg.text)) !== savedMedia.intentDigest) return false;
+      const restored = await io.readSavedNativeMedia(savedMedia, msg);
+      if (!restored) return false;
+      media = restored;
+    } else {
+      if (!io.rehostOrganizationInput) return false;
+      const restored = await io.rehostOrganizationInput(msg);
+      const original = restored && originalOrganizationDispatchOf(restored.msg);
+      if (
+        !restored ||
+        restored.msg.nativeMediaDigest !== initialMedia ||
+        original?.nativeMediaDigest !== initialMedia ||
+        original.ingressRunId !== pointer.ingressRunId ||
+        original.organizationSequence !== pointer.organizationSequence ||
+        restored.msg.text !== msg.text ||
+        restored.msg.userId !== msg.userId ||
+        restored.msg.threadKey !== msg.threadKey ||
+        restored.msg.messageId !== msg.messageId
+      )
+        return false;
+      media = restored.msg;
+    }
+    const request = initialRequest;
+    if (!request) return false;
+    const expected =
+      media.images?.length || media.documents?.length ? turnContent("", media.images, media.documents) : [];
+    const binary = (parts: readonly ContentPart[]) =>
+      parts.filter((part) => part.type === "image" || part.type === "document");
+    if (JSON.stringify(binary(request.content)) !== JSON.stringify(binary(expected))) return false;
+    let offset = 0;
+    for (const part of expected) {
+      const index = request.content.findIndex(
+        (actual, index) => index >= offset && JSON.stringify(actual) === JSON.stringify(part),
+      );
+      if (index < 0) return false;
+      offset = index + 1;
+    }
+    return true;
+  };
+  if (privateRun || isPrivateConversation(msg) || initialMedia) {
+    deps.runBearers?.bindSourceGuard(run.id, async () => {
+      if (!registry.isActive(run.id, run.control)) return false;
+      if (!(await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)).ok) return false;
+      if (!(await prepareSourceMedia())) return false;
+      if (!(await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)).ok) return false;
+      const destination = privateDestinationOf(msg);
+      if (destination) {
+        if (!(await verifyPrivateDestination(io, destination)).ok) return false;
+      } else if (isPrivateConversation(msg)) {
+        if (!io.authoritativePrivateHistory) return false;
+        await io.authoritativePrivateHistory(msg);
+      }
+      return registry.isActive(run.id, run.control) && !privateAudienceLatch.revoked;
+    });
+  }
   const requesterSourceCurrent = (quote: string, source: MainSource) =>
     operatorModeOf(deps.config.config) === "on" &&
     !privateAudienceLatch.revoked &&
@@ -3722,6 +3872,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             control: run.control,
             inbox: admitted.inbox,
             stageFollowUps,
+            prepareFollowUps,
+            ...(initialMedia ? { nativeMediaDigest: initialMedia } : {}),
+            prepareSourceMedia,
+            sourceContextRequired: () => {
+              const current = ctx.currentNativeMediaContext?.();
+              return !!(current?.version === 3 || current?.nativeMediaSources?.length);
+            },
             confirmedFollowUps: (inputs) => mainSources.accept(inputs),
             onEvent,
             onProgress,

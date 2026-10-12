@@ -1,4 +1,6 @@
 import { RUN_DEADLINE_RESERVE_MS } from "../../../execution/bashTimeout.js";
+import { guardNativeSource, requiresNativeSource } from "../nativeMedia.js";
+import { openCodeMediaFiles, openCodeMediaId, openCodeMediaAck } from "./media.js";
 import { OP_TIMEOUT_MS } from "../container.js";
 import type { LiveHarness } from "../pi/relay.js";
 import type { ToolRecovery } from "../toolRecovery.js";
@@ -3079,6 +3081,12 @@ export async function driveOpenCode(
       text: run.resume !== undefined ? continuePrompt(run.toolContext.reviewHistory) : openCodePromptText(run.messages),
       delivery,
     };
+    const media = run.resume
+      ? []
+      : openCodeMediaFiles([...run.messages].reverse().find((message) => message.role === "user")?.content ?? []);
+    const mediaBody = media.length
+      ? { ...promptBody, id: openCodeMediaId(run.runId, promptBody.text, media, run.nativeMediaDigest), files: media }
+      : promptBody;
     // What the store held before this prompt, for a reset's resolution to stop at.
     const knownAtPrompt: ReadonlySet<string> = new Set(conn.knownMessageIds ?? []);
     let admitted: HarnessResponse | "landed";
@@ -3086,7 +3094,8 @@ export async function driveOpenCode(
     let promptId: string | undefined;
     const promptSeq = conn.writes ? ++conn.writes.seq : 0;
     try {
-      admitted = await request(sessionRoutes["session.prompt"], promptBody);
+      if (requiresNativeSource(run)) await guardNativeSource(run);
+      admitted = await request(sessionRoutes["session.prompt"], mediaBody);
     } catch (err) {
       if (!(err instanceof Error && (isControlReset(err) || saysTransportLost(err)))) throw err;
       const lostTransport = saysTransportLost(err);
@@ -3099,6 +3108,11 @@ export async function driveOpenCode(
         }
       }
       resetUnder(lostTransport ? TRANSPORT_ALIVE_REATTACH_NOTE : CONTROL_RESET_RESUMED_NOTE);
+      if (media.length)
+        throw new OpenCodeWriteUnresolvedError(
+          promptName,
+          "The original media prompt acknowledgment is unknown. Its caption is not delivery proof.",
+        );
       try {
         if (delivery === "steer" && lostTransport)
           throw new OpenCodeWriteUnresolvedError(
@@ -3134,11 +3148,18 @@ export async function driveOpenCode(
         throw unresolved;
       }
     }
+    if (media.length && admitted !== "landed" && admitted.status >= 500)
+      throw new OpenCodeWriteUnresolvedError(promptName, "The original media prompt outcome could not be confirmed.");
     if (admitted !== "landed" && (admitted.status < 200 || admitted.status >= 300)) {
       refused = new OpenCodeRequestRefusedError(promptPhase, admitted.status, admitted.body);
       note("harness_error", `${refused.message} — the run is stopped`);
       throw refused;
     }
+    if (media.length && admitted !== "landed" && !openCodeMediaAck(admitted.body, conn.sessionID, mediaBody))
+      throw new OpenCodeWriteUnresolvedError(
+        promptName,
+        "The original media prompt's identity could not be confirmed.",
+      );
     // The prompt's message — by the id its answer names, or the row the
     // reset's resolution found — in the session's write order, and known to
     // the store's readers: a steer's resolution sets it and its execution's

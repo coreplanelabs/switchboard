@@ -22,6 +22,7 @@ import { withConsumedCommand } from "../commandConfirmations.js";
 // confirmed` on the record's `route` event. Every refusal is a named statement;
 // a later request may mint a new offer, but this click never delegates recovery.
 import type { Actor } from "../authz/types.js";
+import { nativeMediaDigest } from "../nativeMedia.js";
 import { withChatActor } from "../authz/actor.js";
 import { markPrivateConversation } from "./privateConversation.js";
 import type { ChatCommandResult } from "../commandChat.js";
@@ -145,11 +146,12 @@ export async function currentConfirmationSource(
   row: Confirmation,
   chooser: Actor | undefined,
   guard: ConfirmationSourceGuard | undefined,
+  purpose?: "confirm" | "cancel" | "read",
 ): Promise<ConfirmationSource | undefined | false> {
   if (!row.originalOrganization) return undefined;
   if (!chooser || chooser.viewingAs || !guard) return false;
   try {
-    const current = await guard(row, chooser);
+    const current = await guard(row, chooser, purpose);
     if (!current || current.actor.viewingAs || current.actor.id !== chooser.id) return false;
     return current;
   } catch {
@@ -208,7 +210,7 @@ export async function consumeAndRun(
   io: ChannelIO,
   ending: RunEnding,
   trace: RequestTrace,
-  redispatch: (row: RedispatchConfirmation) => Promise<DispatchOutcome>,
+  redispatch: (row: RedispatchConfirmation, io?: ChannelIO) => Promise<DispatchOutcome>,
   validateContext?: (context: ContextDependencies, message: IncomingMessage) => Promise<AudienceCheck>,
   trusted?: { actor: Actor; ingressRunId?: string; authoritativeHistory?: boolean; message?: IncomingMessage },
 ): Promise<ClickResult> {
@@ -219,6 +221,7 @@ export async function consumeAndRun(
   );
   if (claimed.kind === "refused") return claimed;
   const row = claimed.row;
+  const intendedText = row.message.text;
   const chooser = click.actor ?? trusted?.actor;
   // Preserve the original saved source before stamping the distinct choice's
   // native address. Publication rechecks A; execution and outputs belong to B.
@@ -227,6 +230,7 @@ export async function consumeAndRun(
   const current = await sourceCurrent();
   if (current === false) return { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
   if (current) {
+    if (current.message) row.message = { ...current.message, text: intendedText };
     if (!trusted?.ingressRunId) io = current.io;
     row.message = withChatActor(
       trusted?.message
@@ -235,6 +239,7 @@ export async function consumeAndRun(
             text: row.message.text,
             ...(row.message.images ? { images: row.message.images } : {}),
             ...(row.message.documents ? { documents: row.message.documents } : {}),
+            ...(row.message.staged ? { staged: row.message.staged } : {}),
           }
         : row.message,
       trusted?.ingressRunId ? trusted.actor : current.actor,
@@ -267,6 +272,42 @@ export async function consumeAndRun(
           ? row.message
           : withOriginalOrganizationDispatch(row.message, row.originalOrganization!);
   }
+  if (row.kind === "redispatch" && row.originalOrganization?.nativeMediaDigest) {
+    const execution = trusted?.message && originalOrganizationDispatchOf(trusted.message);
+    if (
+      !execution ||
+      execution.ingressRunId === row.originalOrganization.ingressRunId ||
+      execution.nativeMediaDigest ||
+      !io.readSavedNativeMedia
+    )
+      return { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
+    const reference = {
+      version: 1 as const,
+      kind: "confirmed" as const,
+      sourceRunId: row.originalOrganization.ingressRunId,
+      sourceSequence: row.originalOrganization.organizationSequence,
+      sourceDigest: row.originalOrganization.nativeMediaDigest,
+      confirmationId: row.id,
+      intentDigest: await nativeMediaDigest(intendedText),
+    };
+    delete row.message.nativeMedia;
+    delete row.message.nativeMediaDigest;
+    row.message = withOriginalOrganizationDispatch(row.message, { ...execution, savedNativeMediaSource: reference });
+    const destination = io;
+    const sourceRead = async () => !!(await destination.readSavedNativeMedia!(reference, row.message));
+    const guarded = Object.create(destination) as ChannelIO;
+    guarded.reply = async (text) => {
+      if (!(await sourceRead())) throw new Error(OFFER_CONTEXT_LINE);
+      await destination.reply(text);
+    };
+    guarded.verifyOrganizationPrivateAudience = async (audience) => {
+      if (!(await sourceRead())) return { ok: false, code: "saved-context-unproved" };
+      return destination.verifyOrganizationPrivateAudience
+        ? destination.verifyOrganizationPrivateAudience(audience)
+        : { ok: false, code: "saved-context-unproved" };
+    };
+    io = guarded;
+  }
   if (trusted && !current) {
     row.message = withChatActor(row.message, trusted.actor);
     if (trusted.authoritativeHistory) row.message = markPrivateConversation(row.message);
@@ -283,7 +324,7 @@ export async function consumeAndRun(
   // expiry, exactly as it judges record 0044's Run.
   if (row.kind === "redispatch") {
     if ((await sourceCurrent()) === false) return { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
-    return { kind: "redispatched", row, outcome: await redispatch(row) };
+    return { kind: "redispatched", row, outcome: await redispatch(row, io) };
   }
   const derivation = row.derivation;
   const contextUnavailable = { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
@@ -377,7 +418,7 @@ export async function cancelPending(deps: FastPathDeps, click: Click): Promise<C
   try {
     const row = await store.get(click.id);
     if (!row) return refused("used");
-    const source = await currentConfirmationSource(row, click.actor, deps.guardOrganizationConfirmation);
+    const source = await currentConfirmationSource(row, click.actor, deps.guardOrganizationConfirmation, "cancel");
     if (source === false) return { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
     // The current source guard proved this exact saved request's credited
     // person. Credit is local to this id and changes no Actor aliases/grants.

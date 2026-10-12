@@ -398,6 +398,54 @@ describe("canonical unit context access", () => {
   });
 });
 
+describe("saved native read provenance", () => {
+  it("requires the canonical completed B leaf and a fresh current-consumer source check", async () => {
+    const f = setup();
+    const leaf = {
+      executionRunId: "choice-B",
+      executionSequence: 2,
+      reference: {
+        version: 1 as const,
+        kind: "confirmed" as const,
+        sourceRunId: origin.runId,
+        sourceSequence: 1,
+        sourceDigest: "a".repeat(64),
+        confirmationId: "saved-choice",
+        intentDigest: "b".repeat(64),
+      },
+    };
+    const context: ContextDependencies = { ...clean, version: 3, nativeMediaSources: [leaf] };
+    f.records.set("choice-B", { ...f.record, id: "choice-B", contextDependencies: context });
+    let allowed = true;
+    const readers: string[] = [];
+    f.deps.revalidateNativeMediaSource = async (_source, consumer) => {
+      readers.push(consumer.actor.id);
+      return allowed;
+    };
+    expect(await f.access.validateDependencies(context)).toEqual({ ok: true });
+    expect(readers).toEqual(["slack:UA"]);
+    expect(
+      await f.access.validateDependencies({
+        ...context,
+        nativeMediaSources: [{ ...leaf, reference: { ...leaf.reference, sourceDigest: "c".repeat(64) } }],
+      }),
+    ).toEqual({ ok: false, code: "saved-context-unproved", check: "context_invalid" });
+    allowed = false;
+    expect(await f.access.validateDependencies(context)).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "context_invalid",
+    });
+    delete f.deps.revalidateNativeMediaSource;
+    expect(await f.access.validateDependencies(context)).toEqual({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "context_invalid",
+    });
+    expect(await f.access.validateDependencies(clean)).toEqual({ ok: true });
+  });
+});
+
 describe("canonical saved operator decisions", () => {
   function pending() {
     const f = setup();

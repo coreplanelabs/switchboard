@@ -2409,6 +2409,128 @@ describe("dispatch", () => {
     expect(JSON.stringify(requests[1].messages)).not.toContain("*Effective for you in this channel:*");
   });
 
+  it.each(["browser", "delegated MCP"] as const)(
+    "executes a private %s conversation command with its original requester and withholds reusable command data",
+    async (source) => {
+      for (const outcome of ["read", "approval", "revoked"] as const) {
+        let privateNow = true;
+        const body = "Current effort: high.";
+        const write = outcome !== "read";
+        const text = write ? "reset private settings" : "show private settings";
+        const { provider, requests } = commandProvider(
+          { sourceMessage: text },
+          write ? "backend.clear" : "backend.peek",
+        );
+        const deps = makeDeps(
+          YAML_FIXTURE.replace(
+            "grants:\n",
+            'grants:\n  "access:alice": { actions: all, channels: all, repos: all }\n  "mcp:personal:alice": { actions: all, channels: all, repos: all }\n',
+          ),
+          provider,
+        );
+        let minted = 0;
+        deps.runRegistry = new RunRegistry({
+          genId: () => (++minted === 1 ? "private-command-run" : `private-command-child-${minted}`),
+        });
+        const ledger = wireChildLedger(deps);
+        deps.confirmations = new InMemoryConfirmationStore();
+        await deps.config.setUserOverride("access:alice", { effort: "high" });
+        const credited = "access:alice",
+          actual = source === "browser" ? credited : "mcp:personal:alice";
+        const request = {
+          channelId: source === "browser" ? "http:home" : "mcp:default",
+          threadKey: source === "browser" ? "http:home:alice" : "mcp:default:alice",
+          userId: credited,
+          messageId: "original-private-command",
+          text,
+          ...(source === "delegated MCP" ? { authenticatedAs: actual } : {}),
+        };
+        const actor: Actor =
+          source === "browser"
+            ? {
+                kind: "user",
+                id: actual,
+                grants: ALL_GRANTS,
+                origin: { channelId: request.channelId, threadKey: request.threadKey },
+              }
+            : {
+                kind: "service",
+                id: actual,
+                grants: ALL_GRANTS,
+                self: [actual],
+                origin: { channelId: request.channelId, threadKey: request.threadKey },
+                onBehalfOf: { kind: "user", id: credited, grants: ALL_GRANTS, self: [credited] },
+              };
+        const audience = {
+          kind: "organization-private" as const,
+          organization: "acme",
+          stream: "person:alice",
+          actorId: actual,
+          userId: credited,
+          channelId: request.channelId,
+          threadKey: request.threadKey,
+        };
+        const callers: unknown[] = [];
+        const registry = new CommandRegistry<Record<string, never>>({
+          audit: () => {},
+          logError: () => {},
+          confirmationClass: async () => {
+            if (outcome === "revoked") privateNow = false;
+            return "write" as const;
+          },
+        });
+        registry.register({
+          id: write ? "backend.clear" : "backend.peek",
+          action: write ? "config:write" : "config:read",
+          effect: write ? "write" : "read",
+          describe: write ? "Reset private settings" : "Read private settings",
+          handler: async ({ caller }) => {
+            callers.push({
+              actual: caller.actor.id,
+              credited: caller.actor.onBehalfOf?.id ?? caller.actor.id,
+              origin: caller.origin,
+            });
+            if (write) {
+              await deps.config.clearUserOverride(credited);
+              return "Settings reset.";
+            }
+            return `Current effort: ${deps.config.scopes(request.channelId, credited).user.effort}.`;
+          },
+        });
+        deps.commands = bindCommands(registry, {});
+        const { io, replies } = fakeIO();
+        const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+        io.offer = async (offer) => void offers.push(offer);
+        io.authoritativePrivateHistory = async () => [];
+        io.organizationPrivateAudience = () => audience;
+        io.verifyOrganizationPrivateAudience = async () =>
+          privateNow ? { ok: true } : { ok: false, code: "direct-audience-unavailable" };
+        await dispatch(deps, withChatActor(request, actor), io, {
+          organizationConversation: true,
+          organizationSequence: 7,
+          authoritativeHistory: true,
+          seed: [],
+        });
+        expect(deps.config.scopes(request.channelId, credited).user).toEqual({ effort: "high" });
+        if (write) {
+          expect(callers).toEqual([]);
+          expect(replies).not.toContain("Settings reset.");
+          expect(offers.map((offer) => offer.line)).toEqual(outcome === "approval" ? ["backend clear"] : []);
+          if (outcome === "approval") expect(JSON.stringify(requests[1].messages)).toContain("approval_pending");
+        } else {
+          expect(replies).toContain(body);
+          expect(callers).toMatchObject([
+            { actual, credited, origin: { channelId: request.channelId, threadKey: request.threadKey } },
+          ]);
+          expect(JSON.stringify(requests[1].messages)).not.toContain(body);
+          expect(JSON.stringify(requests[1].messages)).toContain("resultDelivered");
+        }
+        expect(JSON.stringify(deps.runRegistry.snapshotById("private-command-run")?.events)).not.toContain(body);
+        expect(JSON.stringify([...ledger.sessions.values()])).not.toContain(body);
+      }
+    },
+  );
+
   it("keeps settings unchanged when requester access changes during command admission", async () => {
     let direct = true;
     const { provider } = commandProvider({ sourceMessage: "reset my config" }, "backend.clear");
@@ -28313,6 +28435,268 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     deps.operatorModel = operator;
     return operator;
   };
+  async function nativeQuestionSetup(visibility: "public" | "dm", held = false) {
+    const question = {
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      round: 1,
+      verdict: "request_changes" as const,
+      askedAt: 1,
+      assignedTo: "slack:UADMIN",
+      primaryAction: { label: "Confirm", text: "Use the documented behavior" },
+      findings: [
+        { id: "F1", severity: "minor" as const, file: "app.ts", title: "Choose behavior", humanGated: true as const },
+      ],
+    };
+    const channelId = visibility === "dm" ? "slack:DX" : "slack:CX";
+    const threadKey = `${channelId}:1.0`;
+    const idle = { why: "held", at: 1, renewalsLeft: 0, spendUsd: 1, wakes: 0, humanGate: question };
+    const s = await unitOwnedSetup(
+      held
+        ? {
+            threadKey,
+            ending: { kind: "held", at: 1, report: "Waiting for a person" },
+            recoveryHold: { cause: "human", gate: question },
+          }
+        : { idle, threadKey },
+    );
+    const now = Date.now();
+    s.deps.clock = () => now;
+    await s.instances.put({
+      id: INSTANCE,
+      kind: "ship",
+      userId: "slack:UADMIN",
+      channelId,
+      threadKey,
+      repo: "acme/api",
+      branch: "work",
+      createdAt: 1,
+    });
+    const nativeIO = fakeIO();
+    s.deps.channelDirectory = { ...PUBLIC_CHANNEL, info: async () => ({ visibility }) };
+    const options = {
+      thread: [
+        { id: "original-parent", startedAt: 1, finished: true, eventCount: 0, agent: "ship", instanceId: INSTANCE },
+      ],
+    };
+    const native = {
+      ...msg("agent:coding Use the documented behavior", "slack:UADMIN"),
+      channelId,
+      threadKey,
+      messageId: "slack:original-answer",
+    };
+    if (visibility === "dm") {
+      const audience = { kind: "slack-unshared-im" as const, channelId, threadKey, userId: native.userId };
+      Object.assign(native, { directAudience: audience });
+      nativeIO.io.directAudience = () => audience;
+      nativeIO.io.verifyDirectAudience = booleanAudienceVerifier(async () => true);
+    }
+    return { ...s, ...nativeIO, question, idle, native, options };
+  }
+  it("distinguishes uncapped native answer media when the durable question event drops oversized bytes", async () => {
+    const s = await nativeQuestionSetup("public");
+    const first = { ...s.native, images: [{ mediaType: "image/png", data: "a".repeat(450000) }] };
+    expect(await dispatch(s.deps, first, s.io, s.options)).toEqual({ status: "completed" });
+    const changed = { ...s.native, images: [{ mediaType: "image/png", data: "b".repeat(450000) }] };
+    await dispatch(s.deps, changed, s.io, s.options);
+    expect(s.replies.join("\n")).toContain("original message changed");
+    expect(await dispatch(s.deps, first, s.io, s.options)).toEqual({ status: "completed" });
+    const events = await s.instances.listEvents(s.key);
+    expect(events).toHaveLength(1);
+    expect(events[0].attachmentsDropped).toBe(1);
+    expect(s.sends).toEqual([{ instance: INSTANCE, type: "unit-nudge-plan-fix-the-login-6435ec-U12" }]);
+  });
+  it.each(["reference", "position", "order"] as const)(
+    "refuses a changed staged answer %s while exact replay keeps its single original nudge",
+    async (change) => {
+      const s = await nativeQuestionSetup("dm");
+      const staged = [0, 1].map((index) => ({
+        name: `${index}.zip`,
+        type: "application/zip",
+        size: 12,
+        url: `https://files.slack.com/F${index}`,
+        messageId: s.native.messageId,
+        workspaceIndex: index,
+      }));
+      const first = { ...s.native, staged };
+      expect(await dispatch(s.deps, first, s.io, s.options)).toEqual({ status: "completed" });
+      const changed = structuredClone(staged);
+      if (change === "reference") changed[0]!.url = "https://files.slack.com/FNEW";
+      if (change === "position") changed[0]!.workspaceIndex = 2;
+      if (change === "order") changed.reverse();
+      await dispatch(s.deps, { ...s.native, staged: changed }, s.io, s.options);
+      expect(s.replies.at(-1)).toBe("This answer's original message changed. No new work started.");
+      expect(await dispatch(s.deps, first, s.io, s.options)).toEqual({ status: "completed" });
+      expect((await s.instances.listEvents(s.key)).map((event) => event.attachments)).toEqual([
+        staged.map((file) => ({ mediaType: file.type, data: "", name: file.name, staged: file })),
+      ]);
+      expect(s.sends).toEqual([{ instance: INSTANCE, type: "unit-nudge-plan-fix-the-login-6435ec-U12" }]);
+    },
+  );
+  it.each(["public", "dm"] as const)(
+    "reserves a native %s question answer before a competing browser answer",
+    async (visibility) => {
+      const s = await nativeQuestionSetup(visibility);
+      expect(await dispatch(s.deps, s.native, s.io, s.options)).toEqual({ status: "completed" });
+      expect(
+        await s.instances.appendEvent(
+          s.key,
+          {
+            id: "browser:competing-answer",
+            sender: "slack:UADMIN",
+            text: "Choose the opposite behavior",
+            mode: "wake",
+            at: 11,
+          },
+          true,
+          undefined,
+          undefined,
+          { expectedQuestion: s.question },
+        ),
+      ).toEqual({ ok: false, reason: "stale" });
+      expect(await dispatch(s.deps, s.native, s.io, s.options)).toEqual({ status: "completed" });
+      expect(await s.instances.listEvents(s.key)).toEqual([
+        expect.objectContaining({
+          seq: 1,
+          id: "slack:original-answer",
+          sender: "slack:UADMIN",
+          text: "Use the documented behavior",
+          mode: "wake",
+          questionDigest: expect.any(String),
+        }),
+      ]);
+      expect(s.sends).toHaveLength(1);
+      expect(s.provider.requests).toEqual([]);
+    },
+  );
+  it.each(["public", "dm"] as const)("keeps a browser winner when a native %s answer competes", async (visibility) => {
+    const s = await nativeQuestionSetup(visibility);
+    expect(
+      await s.instances.appendEvent(
+        s.key,
+        { id: "browser:first-answer", sender: "slack:UADMIN", text: "Use the opposite behavior", mode: "wake", at: 2 },
+        true,
+        undefined,
+        undefined,
+        { expectedQuestion: s.question },
+      ),
+    ).toEqual({ ok: true, seq: 1 });
+    await dispatch(s.deps, s.native, s.io, s.options);
+    expect(s.replies).toEqual(["This question changed or is closed. No new work started."]);
+    expect(await s.instances.listEvents(s.key)).toEqual([
+      expect.objectContaining({ id: "browser:first-answer", text: "Use the opposite behavior", seq: 1 }),
+    ]);
+    expect(s.provider.requests).toEqual([]);
+    expect(s.sends).toEqual([]);
+  });
+  it.each(["question", "assignment", "ending", "stop"] as const)(
+    "refuses a native answer when the complete %s changes at append",
+    async (change) => {
+      const s = await nativeQuestionSetup("public");
+      const append = s.instances.appendEvent.bind(s.instances);
+      s.instances.appendEvent = async (...args) => {
+        if (change === "stop") await s.instances.markStopped(INSTANCE, 2);
+        else {
+          const current = (await s.instances.listUnits(INSTANCE))[0]!;
+          const updated =
+            change === "ending"
+              ? { ...current, ending: { kind: "aborted" as const, at: 2, report: "Closed" } }
+              : {
+                  ...current,
+                  idle: {
+                    ...s.idle,
+                    humanGate: {
+                      ...s.question,
+                      ...(change === "assignment"
+                        ? { assignedTo: "slack:UX" }
+                        : { primaryAction: { label: "Confirm", text: "Use another behavior" } }),
+                    },
+                  },
+                };
+          expect(await s.instances.compareAndReplaceUnit(current, updated)).toEqual({ ok: true });
+        }
+        return append(...args);
+      };
+      await dispatch(s.deps, s.native, s.io, s.options);
+      expect(s.replies).toEqual(["This question changed or is closed. No new work started."]);
+      expect(await s.instances.listEvents(s.key)).toEqual([]);
+      expect(s.provider.requests).toEqual([]);
+      expect(s.sends).toEqual([]);
+    },
+  );
+  it.each(["aborted", "merged"] as const)(
+    "acknowledges only the exact native answer after consumption clearing and %s ending without restarting its owner",
+    async (ending) => {
+      const s = await nativeQuestionSetup("dm");
+      expect(await dispatch(s.deps, s.native, s.io, s.options)).toEqual({ status: "completed" });
+      await s.instances.markConsumed(s.key, [1], "original-child");
+      const current = (await s.instances.listUnits(INSTANCE))[0]!;
+      const { idle: _idle, ...rest } = current;
+      expect(
+        await s.instances.compareAndReplaceUnit(current, {
+          ...rest,
+          ending: { kind: ending, at: 3, report: "Original run ended" },
+        }),
+      ).toEqual({ ok: true });
+      s.deps.clock = () => Date.now() + 100;
+      expect(await dispatch(s.deps, s.native, s.io, s.options)).toEqual({ status: "completed" });
+      await dispatch(s.deps, { ...s.native, text: "agent:coding Changed original answer" }, s.io, s.options);
+      expect(s.replies.at(-1)).toBe("This answer's original message changed. No new work started.");
+      expect(await s.instances.listEvents(s.key)).toEqual([
+        expect.objectContaining({
+          id: "slack:original-answer",
+          seq: 1,
+          consumedBy: "original-child",
+          text: "Use the documented behavior",
+        }),
+      ]);
+      expect(s.sends).toHaveLength(1);
+      expect(s.provider.requests).toEqual([]);
+    },
+  );
+  it("stores a native answer in its recovered human hold without reopening execution", async () => {
+    const s = await nativeQuestionSetup("dm", true);
+    expect(await dispatch(s.deps, s.native, s.io, s.options)).toEqual({ status: "completed" });
+    expect(s.replies).toEqual([
+      "Your answer is stored with the original unit. Its execution remains held; no new work started.",
+    ]);
+    expect(await s.instances.listEvents(s.key)).toEqual([
+      expect.objectContaining({ id: "slack:original-answer", seq: 1, questionDigest: expect.any(String) }),
+    ]);
+    expect((await s.instances.listUnits(INSTANCE))[0]).toMatchObject({
+      ending: { kind: "held" },
+      recoveryHold: { cause: "human", gate: s.question },
+    });
+    expect(s.sends).toEqual([]);
+    expect(s.provider.requests).toEqual([]);
+  });
+  it("refuses an ambiguous accepted native message across released historical units", async () => {
+    const s = await nativeQuestionSetup("public");
+    expect(await dispatch(s.deps, s.native, s.io, s.options)).toEqual({ status: "completed" });
+    const current = (await s.instances.listUnits(INSTANCE))[0]!;
+    const another = { ...current, unit: "another-unit", branch: "work/another-unit" };
+    expect(await s.instances.putUnits([another])).toEqual({ ok: true });
+    const { seq: _seq, questionDigest: _digest, ...event } = (await s.instances.listEvents(s.key))[0]!;
+    expect(
+      await s.instances.appendEvent({ instanceId: INSTANCE, unit: another.unit }, event, true, undefined, undefined, {
+        expectedQuestion: s.question,
+      }),
+    ).toEqual({ ok: true, seq: 1 });
+    for (const unit of [current, another]) {
+      const { idle: _idle, ...rest } = unit;
+      expect(
+        await s.instances.compareAndReplaceUnit(unit, {
+          ...rest,
+          ending: { kind: "merged", at: 3, report: "Original work ended" },
+        }),
+      ).toEqual({ ok: true });
+    }
+    await dispatch(s.deps, s.native, s.io, s.options);
+    expect(s.replies.at(-1)).toBe("This answer matches multiple original units. No new work started.");
+    expect(await s.instances.listEvents(s.key)).toHaveLength(1);
+    expect(await s.instances.listEvents({ instanceId: INSTANCE, unit: another.unit })).toHaveLength(1);
+    expect(s.sends).toHaveLength(1);
+    expect(s.provider.requests).toEqual([]);
+  });
   it("keeps a target-bound answer on its original unit and refuses a question changed at append", async () => {
     const question = {
       pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
@@ -29796,8 +30180,25 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
               }),
         },
       });
+      await s.instances.put({
+        id: INSTANCE,
+        kind: "ship",
+        userId: "slack:UADMIN",
+        channelId: "slack:CX",
+        threadKey: THREAD,
+        repo: "acme/api",
+        branch: "work",
+        createdAt: 1,
+      });
       const { io } = fakeIO([{ role: "user", text: "hi" }]);
-      await dispatch(s.deps, msg("agent:coding the independent reader supplied the receipt", "slack:UADMIN"), io);
+      await dispatch(
+        s.deps,
+        {
+          ...msg("agent:coding the independent reader supplied the receipt", "slack:UADMIN"),
+          messageId: "slack:gate-answer",
+        },
+        io,
+      );
       expect(await s.instances.listEvents(s.key)).toEqual([
         expect.objectContaining({
           sender: "slack:UADMIN",

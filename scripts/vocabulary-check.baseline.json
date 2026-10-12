@@ -37,9 +37,9 @@
     "intake": 1
   },
   "docs/reference/dashboard-routes.md": {
+    "tier": 3,
     "intake": 1,
-    "session": 2,
-    "tier": 3
+    "session": 1
   },
   "docs/reference/migrations.md": {
     "runner": 2,

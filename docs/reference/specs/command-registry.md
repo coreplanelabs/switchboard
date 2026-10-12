@@ -333,3 +333,5 @@ An offer stores normalized arguments, requester, credential/connection, reposito
 | An Access browser without operator grants can stop its own run through the registry; another user’s and missing runs return the same 404 | `[unit]` `src/channels/commandHttp.test.ts::createCommandHttpHandler — caller resolution::a browser account without an operator grant lists runs and stops only its own run` |
 
 | A configured current caller resolver refuses missing, foreign and invalid service proof before buffering a write body, without email fallback; a current read-only projection still reads | `[unit]` `src/channels/commandHttp.test.ts::createCommandHttpHandler — caller resolution::uses trusted current callers and refuses missing proof before body buffering without email fallback` |
+
+| Conformance Markdown keeps literal backslashes and pipes in prose cells, flattens row controls, and preserves CLI code bytes including backticks without splitting the table | `[unit]` `src/core/commandConformance.test.ts::command conformance — catalogue fences::renders literal backslashes, pipes and controls without changing table cells` |

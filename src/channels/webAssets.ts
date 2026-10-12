@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import type { ShellAssets } from "./webShell.js";
@@ -94,7 +94,14 @@ export function loadWebAssets(distDir: string, entryKey = "green/main.ts"): WebA
   const assetsDir = join(distDir, "assets");
   for (const name of readdirSync(assetsDir)) {
     const full = join(assetsDir, name);
-    if (statSync(full).isFile()) files.set(`/assets/${name}`, readFileSync(full));
+    // Inspect and read one no-follow descriptor. A replacement of its pathname
+    // cannot substitute another file after validation; non-files stay uncached.
+    const descriptor = openSync(full, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      if (fstatSync(descriptor).isFile()) files.set(`/assets/${name}`, readFileSync(descriptor));
+    } finally {
+      closeSync(descriptor);
+    }
   }
 
   const serve = (req: HttpRequest, res: ServerResponse): boolean => {

@@ -1068,7 +1068,17 @@ const CELL_TEXT: Record<MatrixCell["kind"], string> = {
   "not-exposed": "—",
 };
 
-const mdCell = (s: string) => s.replace(/\|/g, "\\|");
+const mdCell = (s: string) => s.replace(/[\\|]/g, "\\$&").replace(/[\r\n\t]+/g, " ");
+// HTML code preserves literal backslashes/backticks; entities keep pipes in one table cell.
+const mdCodeCell = (s: string) =>
+  `<code>${s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\\/g, "&#92;")
+    .replace(/`/g, "&#96;")
+    .replace(/\|/g, "&#124;")
+    .replace(/[\r\n\t]+/g, " ")}</code>`;
 
 /** The Variant column: the name, plus — once per rejected row — the one code every ⛔ cell carries. */
 export function renderVariantCell(row: Pick<MatrixRow, "variant" | "rejection">): string {
@@ -1094,7 +1104,7 @@ export function renderConformanceMatrix(matrix: ConformanceMatrix): string {
     );
     for (const row of cmd.rows)
       out.push(
-        `| ${renderVariantCell(row)} | \`${mdCell(row.input)}\` | ${SURFACE_METAS.map((s) => CELL_TEXT[row.cells[s.key].kind]).join(" | ")} |`,
+        `| ${renderVariantCell(row)} | ${mdCodeCell(row.input)} | ${SURFACE_METAS.map((s) => CELL_TEXT[row.cells[s.key].kind]).join(" | ")} |`,
       );
     out.push("");
   }

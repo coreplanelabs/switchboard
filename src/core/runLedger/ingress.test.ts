@@ -53,6 +53,422 @@ const origin = {
   },
 };
 describe("original ingress owner", () => {
+  it.each(["completed", "content cleared", "pending", "uncertain", "refusal", "live custody", "dependent consumer"])(
+    "bounds unread continuation metadata after its original horizon: %s",
+    async (kind) => {
+      let now = 1;
+      const ledger = new InMemoryRunLedger(() => now);
+      const input = { ...request, origin, originExpiresAt: 365 };
+      const owned = await ledger.consumeIngress(input);
+      if (owned.status !== "claimed") throw new Error("original owner not claimed");
+      const profile = { preset: "general", machine: "none" as const, identity: "none" as const, minutes: 1 };
+      const claim = (runId: string, state = {}) =>
+        ledger.claim({
+          runId,
+          gen: "g",
+          threadKey: input.threadKey,
+          leaseMs: 30000,
+          startedAt: 1,
+          meta: { channelId: "http:home", userId: input.requester, threadKey: input.threadKey, profile },
+          state,
+          system: "",
+          tools: [],
+          card: null,
+        });
+      expect(await claim("receiver")).toMatchObject({ ok: true });
+      const { withOriginalOrganizationDispatch } = await import("../dispatch/originalOrganizationInput.js");
+      const { durableInboxMessage } = await import("./inboxMessage.js");
+      const message = withOriginalOrganizationDispatch(
+        { channelId: "http:home", userId: input.requester, threadKey: input.threadKey, text: "Start original work" },
+        { ingressRunId: owned.record.runId, organizationSequence: 7 },
+      );
+      expect(await ledger.pushInbox("receiver", durableInboxMessage(message, message.text, 1))).toMatchObject({
+        ok: true,
+        seq: 1,
+      });
+      expect(
+        await ledger.holdUnreadIngress({
+          ingressRunId: owned.record.runId,
+          receiverRunId: "receiver",
+          receiverGen: "g",
+          inboxSeq: 1,
+        }),
+      ).toMatchObject({ status: "record", record: { unread: { status: "pending" } } });
+      expect(await ledger.finish("receiver", "g", receiverRecord)).toMatchObject({ ok: true });
+      if (kind !== "pending")
+        expect(await ledger.claimUnreadIngress(owned.record.runId)).toMatchObject({
+          status: "claimed",
+          record: { runId: owned.record.runId, unread: { status: "claimed" } },
+        });
+      if (kind !== "pending" && kind !== "uncertain") {
+        expect(await claim(owned.record.runId)).toMatchObject({ ok: true });
+        if (kind !== "live custody")
+          expect(
+            await ledger.finish(owned.record.runId, "g", {
+              ...receiverRecord,
+              id: owned.record.runId,
+              profile,
+              answerOutcome: { version: 1, ending: "answered", output: "absent" },
+            }),
+          ).toMatchObject({ ok: true });
+      }
+      const status = kind === "uncertain" ? "uncertain" : "completed";
+      expect(
+        await ledger.finishIngress({
+          effectKey: input.effectKey,
+          digest: input.digest,
+          runId: owned.record.runId,
+          status,
+          outcome: "Original continuation returned.",
+          ...(kind === "refusal" ? { refusalPending: true } : {}),
+        }),
+      ).toMatchObject({ status: "record", record: { status } });
+      if (kind === "content cleared")
+        expect(await ledger.clearIngressContent(input.effectKey)).toMatchObject({
+          status: "record",
+          record: { request: null, unread: { status: "claimed" } },
+        });
+      if (kind === "dependent consumer")
+        expect(
+          await claim("consumer", {
+            contextDependencies: {
+              version: 3,
+              status: "known",
+              revision: 1,
+              origins: [],
+              slack: [],
+              mcp: [],
+              nativeMediaSources: [
+                {
+                  executionRunId: "execution-source",
+                  executionSequence: 2,
+                  reference: {
+                    version: 1,
+                    kind: "confirmed",
+                    sourceRunId: owned.record.runId,
+                    sourceSequence: 1,
+                    sourceDigest: input.digest,
+                    confirmationId: "saved-choice",
+                    intentDigest: "b".repeat(64),
+                  },
+                },
+              ],
+            },
+          }),
+        ).toMatchObject({ ok: true });
+      now = 364;
+      expect(await ledger.consumeIngress(input)).toMatchObject({
+        status: "duplicate",
+        record: { runId: owned.record.runId, status, unread: { status: kind === "pending" ? "pending" : "claimed" } },
+      });
+      expect(await ledger.readIngressByRun(owned.record.runId)).toMatchObject({
+        status: "record",
+        record: { runId: owned.record.runId, origin: { sourceEvent: "original" } },
+      });
+      now = 365;
+      if (kind === "completed" || kind === "content cleared") {
+        expect(await ledger.readIngress(input.effectKey)).toEqual({ status: "not_found" });
+        expect(await ledger.readIngressByRun(owned.record.runId)).toEqual({ status: "not_found" });
+        expect(await ledger.consumeIngress(input)).toEqual({ status: "invalid" });
+      } else {
+        expect(await ledger.readIngress(input.effectKey)).toMatchObject({
+          status: "record",
+          record: { runId: owned.record.runId, status, request: null },
+        });
+        expect(await ledger.consumeIngress(input)).toMatchObject({
+          status: "duplicate",
+          record: { runId: owned.record.runId },
+        });
+      }
+      expect(await ledger.claimUnreadIngress(owned.record.runId)).toEqual({
+        status: kind === "completed" || kind === "content cleared" ? "not_found" : "fenced",
+      });
+    },
+  );
+  it("never resets a deletion deadline from retry, policy or request-body changes", async () => {
+    let now = 1;
+    const ledger = new InMemoryRunLedger(() => now);
+    const input = {
+      ...request,
+      origin,
+      originExpiresAt: 50,
+      contentExpiresAt: 1000,
+      request: { ...request.request, protection: { expiresAt: 1 } },
+    };
+    expect(await ledger.clearIngressContent(request.effectKey, { expiresAt: 50, receiptTtlMs: 900 })).toEqual({
+      status: "not_found",
+    });
+    now = 20;
+    expect(await ledger.clearIngressContent(request.effectKey, { expiresAt: 900, receiptTtlMs: 9000 })).toEqual({
+      status: "not_found",
+    });
+    now = 49;
+    expect(await ledger.consumeIngress(input)).toEqual({ status: "fenced" });
+    now = 50;
+    expect(await ledger.consumeIngress(input)).toEqual({ status: "invalid" });
+  });
+  it.each(["known none", "unknown ending", "missing ending", "changed profile"] as const)(
+    "retires terminal metadata only for canonical %s evidence",
+    async (caseName) => {
+      let now = 1;
+      const ledger = new InMemoryRunLedger(() => now);
+      const owned = await ledger.consumeIngress({ ...request, origin, originExpiresAt: 365 });
+      if (owned.status !== "claimed") throw new Error("owner not claimed");
+      const profile = { preset: "general", machine: "none" as const, identity: "none" as const, minutes: 1 };
+      expect(
+        await ledger.claim({
+          runId: owned.record.runId,
+          gen: "g",
+          threadKey: request.threadKey,
+          leaseMs: 30000,
+          startedAt: 1,
+          meta: { channelId: "http:home", userId: request.requester, threadKey: request.threadKey, profile },
+          state: {},
+          system: "",
+          tools: [],
+          card: null,
+        }),
+      ).toMatchObject({ ok: true });
+      expect(
+        await ledger.finish(owned.record.runId, "g", {
+          ...receiverRecord,
+          id: owned.record.runId,
+          profile: caseName === "changed profile" ? { ...profile, machine: "repo-cold" } : profile,
+          ...(caseName === "missing ending"
+            ? {}
+            : {
+                answerOutcome: {
+                  version: 1,
+                  ending: caseName === "unknown ending" ? "unknown" : "answered",
+                  output: "absent",
+                },
+              }),
+        }),
+      ).toMatchObject({ ok: true });
+      await ledger.finishIngress({
+        effectKey: request.effectKey,
+        digest: request.digest,
+        runId: owned.record.runId,
+        status: "completed",
+        outcome: "handler returned",
+      });
+      now = 365;
+      expect((await ledger.readIngress(request.effectKey)).status).toBe(
+        caseName === "known none" ? "not_found" : "record",
+      );
+      expect(await ledger.consumeIngress({ ...request, origin, originExpiresAt: 365 })).toMatchObject({
+        status: caseName === "known none" ? "invalid" : "duplicate",
+      });
+    },
+  );
+  it("preserves an expired source owner required by an exact retained native A/B/C dependency", async () => {
+    let now = 1;
+    const ledger = new InMemoryRunLedger(() => now);
+    const owned = await ledger.consumeIngress({ ...request, origin, originExpiresAt: 365 });
+    if (owned.status !== "claimed") throw new Error("owner not claimed");
+    await ledger.finishIngress({
+      effectKey: request.effectKey,
+      digest: request.digest,
+      runId: owned.record.runId,
+      status: "completed",
+      outcome: "handler returned",
+    });
+    const context = {
+      version: 3 as const,
+      status: "known" as const,
+      revision: 1,
+      origins: [],
+      slack: [],
+      mcp: [],
+      nativeMediaSources: [
+        {
+          executionRunId: "source-B",
+          executionSequence: 2,
+          reference: {
+            version: 1 as const,
+            kind: "confirmed" as const,
+            sourceRunId: owned.record.runId,
+            sourceSequence: 1,
+            sourceDigest: "a".repeat(64),
+            confirmationId: "saved-choice",
+            intentDigest: "b".repeat(64),
+          },
+        },
+      ],
+    };
+    expect(
+      await ledger.claim({
+        runId: "consumer-C",
+        gen: "g",
+        threadKey: request.threadKey,
+        leaseMs: 30000,
+        startedAt: 1,
+        meta: { channelId: "http:home", userId: request.requester, threadKey: request.threadKey },
+        state: { contextDependencies: context },
+        system: "",
+        tools: [],
+        card: null,
+      }),
+    ).toMatchObject({ ok: true });
+    now = 365;
+    expect(await ledger.readIngress(request.effectKey)).toMatchObject({
+      status: "record",
+      record: { runId: owned.record.runId },
+    });
+    // A malformed retained dependency cannot become a pruning permission.
+    ledger.live.get("consumer-C")!.state.contextDependencies = {
+      ...context,
+      nativeMediaSources: [
+        {
+          ...context.nativeMediaSources[0],
+          reference: { ...context.nativeMediaSources[0]!.reference, sourceDigest: "bad" },
+        },
+      ],
+    };
+    expect(await ledger.readIngress(request.effectKey)).toMatchObject({
+      status: "record",
+      record: { runId: owned.record.runId },
+    });
+  });
+  it.each(["ordinary", "target answer", "saved confirmation"] as const)(
+    "retires completed %s owner metadata after its receipt horizon",
+    async (kind) => {
+      let now = 1;
+      const ledger = new InMemoryRunLedger(() => now);
+      const input = {
+        ...request,
+        effectKey: `expired:${kind}`,
+        origin: {
+          ...origin,
+          ...(kind === "target answer" ? { target: { key: "unit:question", revision: 1 } } : {}),
+          ...(kind === "saved confirmation"
+            ? {
+                workload: "act" as const,
+                continuation: { kind: "confirm" as const, id: "00000000-0000-4000-8000-000000000001" },
+              }
+            : {}),
+        },
+        originExpiresAt: 365,
+      };
+      const owned = await ledger.consumeIngress(input);
+      if (owned.status !== "claimed") throw new Error("original owner not claimed");
+      expect(
+        await ledger.finishIngress({
+          effectKey: input.effectKey,
+          digest: input.digest,
+          runId: owned.record.runId,
+          status: "completed",
+          outcome: "handler returned",
+        }),
+      ).toMatchObject({ status: "record", record: { status: "completed" } });
+      expect(await ledger.readIngress(input.effectKey)).toMatchObject({
+        status: "record",
+        record: { runId: owned.record.runId },
+      });
+      now = 365;
+      expect(await ledger.readIngress(input.effectKey)).toEqual({ status: "not_found" });
+      expect(await ledger.readIngressByRun(owned.record.runId)).toEqual({ status: "not_found" });
+      expect(await ledger.consumeIngress(input)).toEqual({ status: "invalid" });
+    },
+  );
+  it("retires an expired completed deleted owner and its marker without permitting its expired request", async () => {
+    let now = 1;
+    const ledger = new InMemoryRunLedger(() => now);
+    const owned = await ledger.consumeIngress({ ...request, origin, originExpiresAt: 365 });
+    if (owned.status !== "claimed") throw new Error("original owner not claimed");
+    await ledger.finishIngress({
+      effectKey: request.effectKey,
+      digest: request.digest,
+      runId: owned.record.runId,
+      status: "completed",
+      outcome: "handler returned",
+    });
+    expect(await ledger.clearIngressContent(request.effectKey)).toMatchObject({
+      status: "record",
+      record: { request: null },
+    });
+    expect(await ledger.consumeIngress(request)).toMatchObject({
+      status: "duplicate",
+      record: { runId: owned.record.runId, request: null },
+    });
+    now = Number.MAX_SAFE_INTEGER - 1;
+    expect(await ledger.readIngress(request.effectKey)).toEqual({ status: "not_found" });
+    expect(await ledger.readIngressByRun(owned.record.runId)).toEqual({ status: "not_found" });
+    expect(await ledger.consumeIngress(request)).toEqual({ status: "invalid" });
+  });
+  it("retires a standalone deletion marker behind a bounded retained-owner backlog", async () => {
+    let now = 1;
+    const ledger = new InMemoryRunLedger(() => now);
+    for (let i = 0; i < 100; i++) {
+      const effectKey = `retained:${i}`;
+      expect(await ledger.consumeIngress({ ...request, effectKey, origin, originExpiresAt: 20 })).toMatchObject({
+        status: "claimed",
+      });
+      expect(await ledger.clearIngressContent(effectKey, { expiresAt: 20, receiptTtlMs: 19 })).toMatchObject({
+        status: "record",
+        record: { request: null },
+      });
+    }
+    expect(await ledger.clearIngressContent("standalone", { expiresAt: 20, receiptTtlMs: 19 })).toEqual({
+      status: "not_found",
+    });
+    now = 21;
+    expect(await ledger.consumeIngress({ ...request, effectKey: "standalone", origin, originExpiresAt: 20 })).toEqual({
+      status: "invalid",
+    });
+    expect(await ledger.readIngress("retained:0")).toMatchObject({
+      status: "record",
+      record: { status: "dispatching", request: null },
+    });
+  });
+  it("bounds a deletion-before-consume marker and still rejects an expired original request", async () => {
+    let now = 1;
+    const ledger = new InMemoryRunLedger(() => now);
+    expect(await ledger.clearIngressContent(request.effectKey)).toEqual({ status: "not_found" });
+    expect(await ledger.consumeIngress(request)).toEqual({ status: "fenced" });
+    now = Number.MAX_SAFE_INTEGER - 1;
+    expect(await ledger.consumeIngress(request)).toEqual({ status: "invalid" });
+  });
+  it.each(["dispatching", "uncertain", "completed with live custody"] as const)(
+    "keeps expired %s original ownership",
+    async (status) => {
+      let now = 1;
+      const ledger = new InMemoryRunLedger(() => now);
+      const owned = await ledger.consumeIngress({ ...request, origin, originExpiresAt: 365 });
+      if (owned.status !== "claimed") throw new Error("original owner not claimed");
+      if (status !== "dispatching")
+        await ledger.finishIngress({
+          effectKey: request.effectKey,
+          digest: request.digest,
+          runId: owned.record.runId,
+          status: status === "uncertain" ? "uncertain" : "completed",
+          outcome: "original disposition",
+        });
+      if (status === "completed with live custody")
+        expect(
+          await ledger.claim({
+            runId: owned.record.runId,
+            gen: "g",
+            threadKey: request.threadKey,
+            leaseMs: 30000,
+            startedAt: 1,
+            meta: { channelId: "http:home", userId: request.requester, threadKey: request.threadKey },
+            system: "",
+            tools: [],
+            card: null,
+          }),
+        ).toMatchObject({ ok: true });
+      now = 365;
+      expect(await ledger.readIngress(request.effectKey)).toMatchObject({
+        status: "record",
+        record: { runId: owned.record.runId, request: null },
+      });
+      expect(await ledger.consumeIngress(request)).toMatchObject({
+        status: "duplicate",
+        record: { runId: owned.record.runId },
+      });
+    },
+  );
   it("replays a committed unread handback after its live receiver closes without a step", async () => {
     const ledger = new InMemoryRunLedger(() => 1);
     const owned = await ledger.consumeIngress(request);

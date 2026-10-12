@@ -20,6 +20,10 @@ export function contextReferencesOf(
   };
   for (const source of handoff ? [handoff, ...(handoff.ancestors ?? [])] : [])
     add(source.source.runId, source.session.key);
+  for (const leaf of context?.nativeMediaSources ?? []) {
+    add(leaf.reference.sourceRunId);
+    add(leaf.executionRunId);
+  }
   const runIds = [
     ...(handoff ? childHandoffRunIds(handoff) : []),
     ...(context?.origins ?? []).map((o) => o.runId),

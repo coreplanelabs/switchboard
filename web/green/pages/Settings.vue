@@ -3,6 +3,7 @@ defineOptions({ name: "GreenSettingsPage" });
 import { computed } from "vue";
 import { useRoute } from "vue-router";
 import { useSeed } from "../../src/lib/seed";
+import { browser } from "../../src/lib/browser";
 import ChannelsPanel from "../../src/components/settings/ChannelsPanel.vue";
 import InstallationPanel from "../../src/components/settings/InstallationPanel.vue";
 import McpServersPanel from "../../src/components/settings/McpServersPanel.vue";
@@ -52,5 +53,10 @@ const tabs = computed(() => [
     v-else
     title="Settings could not be loaded"
     description="Configuration is unavailable for this address."
-  />
+    icon="i-lucide-circle-alert"
+  >
+    <button type="button" class="green-button" aria-label="Reload settings" @click="browser.reload()">
+      <UIcon name="i-lucide-rotate-cw" />Reload
+    </button>
+  </EmptyState>
 </template>

@@ -79,6 +79,11 @@ function seedOf(html: string): WebSeed {
 const indexSeedOf = (html: string) => seedOf(html) as RunsIndexSeed;
 const runSeedOf = (html: string) => seedOf(html) as RunLiveSeed | RunHistorySeed;
 const scheduledSeedOf = (html: string) => seedOf(html) as ScheduledSeed;
+/** The caller stamp changes with the viewer; every other byte stays equal. */
+function withComparablePageActor(html: string, actor: string): string {
+  expect(seedOf(html).pageAccess).toEqual({ actor });
+  return html.replace(`"pageAccess":{"actor":${JSON.stringify(actor)}`, '"pageAccess":{"actor":"current-viewer"');
+}
 
 /** Deterministic registry so ids/tokens are predictable in URL assertions. */
 function fixedRegistry(over: Partial<RunRegistryOptions> = {}) {
@@ -758,6 +763,146 @@ describe("scheduled tab — GET /runs/scheduled (item 18)", () => {
     expect(await hrefFor()).toBe("/runs/run-live?t=tok-live");
   });
 
+  it("keeps shared schedule definitions but withholds unreadable firing details under Mine and Person while Everyone retains allowed firings", async () => {
+    const registry = fixedRegistry();
+    const own = registry.create("Own scheduled work", {
+      channelId: "http:cron",
+      userId: "access:admin",
+      threadKey: "http:cron:own",
+      channelVisibility: "machine",
+    });
+    const peer = registry.create("Peer scheduled work", {
+      channelId: "http:cron",
+      userId: "access:bob",
+      threadKey: "http:cron:peer",
+      channelVisibility: "machine",
+    });
+    const definition = FIXTURE_SCHEDULES.find((row) => row.name === "self-improvement")!;
+    const schedules = [definition, { ...definition, name: "peer-job", description: "Shared peer job definition" }];
+    const store = new InMemoryScheduleStore();
+    await store.record({
+      schedule: definition.name,
+      firedAt: NOW - 60_000,
+      outcome: "completed",
+      runId: own.id,
+      detail: "OWN_FIRING_PRIVATE_RESULT",
+      traceId: "own-private-trace",
+    });
+    await store.record({
+      schedule: "peer-job",
+      firedAt: NOW - 60_000,
+      outcome: "completed",
+      runId: peer.id,
+      detail: "PEER_FIRING_PRIVATE_RESULT",
+      traceId: "peer-private-trace",
+    });
+    const handler = panelHandler(registry, { scheduled: { schedules, store } });
+    const mine: LiveViewContext = {
+      actor: withWorkViewScope(
+        { ...ADMIN.actor },
+        resolveWorkViewScope(ADMIN.actor, { organization: "installation", ownerIds: ["access:admin"] }),
+      ),
+    };
+    const personActor = { ...ADMIN.actor, viewingAs: { id: "access:bob", name: "Bob" } };
+    const person: LiveViewContext = {
+      actor: withWorkViewScope(
+        personActor,
+        resolveWorkViewScope(personActor, { organization: "installation", ownerIds: ["access:bob"] }),
+      ),
+    };
+    const everyone: LiveViewContext = {
+      actor: withWorkViewScope(
+        { ...ADMIN.actor },
+        resolveWorkViewScope(ADMIN.actor, { organization: "installation", mode: "everyone" }),
+      ),
+    };
+    async function read(url: string, ctx: LiveViewContext) {
+      const result = fakeReqRes("GET", url);
+      expect(handler(result.req, result.res, ctx)).toBe(true);
+      await result.finished;
+      return result;
+    }
+    const mineDenied = await read(`/runs/${peer.id}?t=${peer.token}`, mine);
+    expect(mineDenied.status).toBe(404);
+    const minePage = await read("/runs/scheduled", mine);
+    expect(minePage.status).toBe(200);
+    expect(scheduledSeedOf(minePage.body()).rows?.map((row) => row.name)).toEqual(["self-improvement", "peer-job"]);
+    expect(scheduledSeedOf(minePage.body()).rows?.[0]?.last).toMatchObject({
+      runId: "run-1",
+      runHref: "/runs/run-1?t=tok-1",
+      detail: "OWN_FIRING_PRIVATE_RESULT",
+      traceId: "own-private-trace",
+    });
+    expect(scheduledSeedOf(minePage.body()).rows?.[1]?.last).toBeUndefined();
+    expect(minePage.body()).not.toContain("PEER_FIRING_PRIVATE_RESULT");
+    expect(minePage.body()).not.toContain("peer-private-trace");
+    expect(minePage.body()).not.toContain("run-2");
+    expect((await read(`/runs/${own.id}?t=${own.token}`, person)).status).toBe(404);
+    const personPage = await read("/runs/scheduled", person);
+    expect(personPage.status).toBe(200);
+    expect(scheduledSeedOf(personPage.body()).rows?.[0]?.last).toBeUndefined();
+    expect(scheduledSeedOf(personPage.body()).rows?.[1]?.last).toMatchObject({ detail: "PEER_FIRING_PRIVATE_RESULT" });
+    expect(personPage.body()).not.toContain("OWN_FIRING_PRIVATE_RESULT");
+    const allPage = await read("/runs/scheduled", everyone);
+    expect(allPage.status).toBe(200);
+    expect(scheduledSeedOf(allPage.body()).rows?.map((row) => row.last?.detail)).toEqual([
+      "OWN_FIRING_PRIVATE_RESULT",
+      "PEER_FIRING_PRIVATE_RESULT",
+    ]);
+    expect((await read(`/runs/${peer.id}?t=${peer.token}`, everyone)).status).toBe(200);
+  });
+
+  it("keeps unreadable, absent and runless firing evidence unknown without borrowing a shared definition's identity", async () => {
+    const registry = fixedRegistry();
+    const owned = registry.create("Owned work", {
+      channelId: "http:cron",
+      userId: "access:admin",
+      threadKey: "http:cron:own",
+      channelVisibility: "machine",
+    });
+    const privateRun = registry.create("Private worker", {
+      channelId: "http:cron",
+      userId: "access:admin",
+      threadKey: "worker:private-unit",
+      channelVisibility: "machine",
+    });
+    const definition = FIXTURE_SCHEDULES.find((row) => row.name === "self-improvement")!;
+    const schedules = [
+      definition,
+      ...["private-job", "expired-job", "runless-job"].map((name) => ({ ...definition, name })),
+    ];
+    const store = new InMemoryScheduleStore();
+    for (const [schedule, runId, detail] of [
+      [definition.name, owned.id, "Readable result"],
+      ["private-job", privateRun.id, "PRIVATE_WORKER_RESULT"],
+      ["expired-job", "unproved-run", "PRUNED_PRODUCER_RESULT"],
+      ["runless-job", undefined, "UNPROVED_NO_RUN_RESULT"],
+    ] as const)
+      await store.record({ schedule, ...(runId ? { runId } : {}), firedAt: NOW, outcome: "completed", detail });
+    const handler = panelHandler(registry, { scheduled: { schedules, store } });
+    const everyone = {
+      actor: withWorkViewScope(
+        { ...ADMIN.actor },
+        resolveWorkViewScope(ADMIN.actor, { organization: "installation", mode: "everyone" }),
+      ),
+    };
+    const response = fakeReqRes("GET", "/runs/scheduled");
+    handler(response.req, response.res, everyone);
+    await response.finished;
+    expect(response.status).toBe(200);
+    const seed = scheduledSeedOf(response.body());
+    expect(seed.rows?.map((row) => row.name)).toEqual([
+      "self-improvement",
+      "private-job",
+      "expired-job",
+      "runless-job",
+    ]);
+    expect(seed.rows?.map((row) => row.last?.detail)).toEqual(["Readable result", undefined, undefined, undefined]);
+    expect(seed.firingsUnavailable).toBe("History is limited to work you can read.");
+    for (const marker of ["PRIVATE_WORKER_RESULT", "PRUNED_PRODUCER_RESULT", "UNPROVED_NO_RUN_RESULT", "unproved-run"])
+      expect(response.body()).not.toContain(marker);
+  });
+
   it("no store → the seed lists the schedules and says history is unavailable (not 'never fired')", async () => {
     const t = pageFor({ scheduled: { schedules: FIXTURE_SCHEDULES } });
     await tick();
@@ -816,6 +961,7 @@ describe("createLiveViewHandler (node:http)", () => {
       serverNow: expect.any(Number),
       startedAt: expect.any(Number),
       capabilities: ALL_CAPABILITIES,
+      pageAccess: { actor: "access:admin" },
     });
   });
 
@@ -2046,6 +2192,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
             title: "No run found",
             retentionDays: 30,
             capabilities: ALL_CAPABILITIES,
+            pageAccess: { actor: "access:admin" },
           }); // nothing echoed from the request — a static seed
           expect(t.body()).not.toContain("nope");
           expect(t.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
@@ -2071,6 +2218,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
         title: "No run found",
         retentionDays: 30,
         capabilities: ALL_CAPABILITIES,
+        pageAccess: { actor: "access:admin" },
       });
     });
   });
@@ -2574,6 +2722,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
         title: "No run found",
         retentionDays: 30,
         capabilities: ALL_CAPABILITIES,
+        pageAccess: { actor: "access:alice" },
       });
       for (const url of ["/runs/priv/events", "/runs/priv/friction"]) {
         const t = await request(h, url, alice);
@@ -2662,7 +2811,10 @@ describe("live view on RunsService: history pages + index toggle", () => {
 
       const page = await request(h, `/runs/${live.id}?t=${live.token}`, nobody);
       expect(page.status).toBe(200);
-      expect(page.body()).toBe((await request(h, `/runs/${live.id}?t=${live.token}`, admin)).body());
+      const adminPage = await request(h, `/runs/${live.id}?t=${live.token}`, admin);
+      expect(withComparablePageActor(page.body(), "access:nobody")).toBe(
+        withComparablePageActor(adminPage.body(), "access:admin"),
+      );
       expect(runSeedOf(page.body())).toMatchObject({
         mode: "live",
         eventsUrl: `/runs/${live.id}/events?t=${live.token}`,
@@ -3572,7 +3724,9 @@ describe("the unit page and what a run is the parent of (item 28)", () => {
     };
     const denied = await h.get("/runs/unit/plan-p-1:U16", elsewhere);
     expect(denied.status).toBe(404);
-    expect(denied.body()).toBe(unknown.body());
+    expect(withComparablePageActor(denied.body(), "access:eve")).toBe(
+      withComparablePageActor(unknown.body(), "access:admin"),
+    );
     // Nothing at all for an actor with no grants: the same page.
     const nobody: LiveViewContext = { actor: accessActor({ sub: "nobody" }, () => NO_GRANTS) };
     expect((await h.get("/runs/unit/plan-p-1:U16", nobody)).status).toBe(404);

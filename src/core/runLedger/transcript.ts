@@ -4,9 +4,10 @@ import { parseStoredJson } from "../storedJson.js";
 // part: no row nears the Durable Object's 2 MB limit, a step writes only its
 // new turns, and the read side assembles the exact array — thinking blocks and
 // all — or names the gap. Base64 attachment data over a threshold is stored
-// once and referenced, so a 20 MB PDF in the seed is one attachment row, not
-// a 20 MB part row.
+// by bounded Memory transport chunks. Successful reads reconstruct ordinary
+// parts; the physical codec never becomes a provider content type.
 
+import { sha256Hex } from "../ship/coordinator.js";
 import type { ChatMessage, ContentPart } from "../chatMessage.js";
 import { isSourceResultReceipt, type SourceResultReceipt } from "../references/sourceResultContext.js";
 import { isContextDependencies, type ContextDependencies } from "../references/contextDependencies.js";
@@ -14,6 +15,7 @@ import { utf8ByteLength } from "../runRecord.js";
 import {
   ATTACHMENT_REF_BYTES,
   TRANSCRIPT_PART_BYTES,
+  TRANSCRIPT_READ_BYTES,
   type CompactionEntry,
   type TranscriptAttachment,
   type TranscriptRow,
@@ -63,10 +65,10 @@ const isCompaction = (v: ChatMessage | StoredCompaction): v is StoredCompaction 
 export function turnRows(
   idx: number,
   message: ChatMessage | StoredCompaction,
-  opts: { partBytes?: number; attachmentRefBytes?: number } = {},
+  opts: { partBytes?: number; attachmentRefBytes?: number; canonical?: boolean } = {},
   actor?: string,
 ): { rows: TranscriptRow[]; attachments: TranscriptAttachment[] } {
-  const partBytes = opts.partBytes ?? TRANSCRIPT_PART_BYTES;
+  const partBytes = opts.canonical ? Infinity : (opts.partBytes ?? TRANSCRIPT_PART_BYTES);
   const refBytes = opts.attachmentRefBytes ?? ATTACHMENT_REF_BYTES;
   const rows: TranscriptRow[] = [];
   const attachments: TranscriptAttachment[] = [];
@@ -255,4 +257,246 @@ export function assembleTranscript(
     if (kept !== undefined) c.keptBefore = kept;
   }
   return { complete: true, turns: messages.length + compactions.length, messages, compactions, ...actorsOrNone() };
+}
+
+/** Physical Memory encoding only. Successful reads always project StoredRow. */
+interface InternalRow {
+  role: ChatMessage["role"];
+  part: null;
+  actor?: string;
+  internalTranscript: {
+    version: 1;
+    utf8Bytes: number;
+    sha256: string;
+    refs: Array<{ ref: string; utf8Bytes: number; sha256: string }>;
+  };
+}
+export class RequiredTranscriptError extends Error {
+  constructor(message = "content unavailable") {
+    super(`required transcript: ${message}`);
+    this.name = "RequiredTranscriptError";
+  }
+}
+const CHUNK_MEDIA = "application/x-switchboard-transcript-v1";
+export function isInternalTranscript(json: string): boolean {
+  return JSON.parse(json)?.internalTranscript !== undefined;
+}
+function internalDescriptor(stored: unknown): InternalRow["internalTranscript"] {
+  const row = stored as InternalRow;
+  const d = row?.internalTranscript;
+  if (
+    !d ||
+    typeof d !== "object" ||
+    d.version !== 1 ||
+    !Array.isArray(d.refs) ||
+    !d.refs.length ||
+    !Number.isSafeInteger(d.utf8Bytes) ||
+    d.utf8Bytes < 1 ||
+    typeof d.sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(d.sha256)
+  )
+    throw new RequiredTranscriptError("unknown codec");
+  const seen = new Set<string>();
+  for (const r of d.refs) {
+    if (
+      !r ||
+      typeof r !== "object" ||
+      typeof r.ref !== "string" ||
+      !r.ref ||
+      typeof r.sha256 !== "string" ||
+      !/^[0-9a-f]{64}$/.test(r.sha256) ||
+      !Number.isSafeInteger(r.utf8Bytes) ||
+      r.utf8Bytes < 1 ||
+      seen.has(r.ref)
+    )
+      throw new RequiredTranscriptError("invalid chunk descriptor");
+    seen.add(r.ref);
+  }
+  return d;
+}
+export function storedAttachmentRefs(json: string): string[] {
+  let stored;
+  try {
+    stored = JSON.parse(json);
+  } catch {
+    throw new RequiredTranscriptError("invalid stored row");
+  }
+  if (stored?.internalTranscript !== undefined) return internalDescriptor(stored).refs.map((r) => r.ref);
+  const refs: string[] = [];
+  if (typeof stored?.part?.dataRef === "string") refs.push(stored.part.dataRef);
+  if (stored?.part?.type === "tool_result" && Array.isArray(stored.part.content))
+    for (const c of stored.part.content) if (typeof c?.dataRef === "string") refs.push(c.dataRef);
+  return refs;
+}
+export function assertTranscriptReadBudget<T>(value: T): T {
+  if (utf8ByteLength(JSON.stringify(value)) > TRANSCRIPT_READ_BYTES)
+    throw new RequiredTranscriptError("read exceeds existing RPC budget");
+  return value;
+}
+export function validTranscriptChunk(attachment: TranscriptAttachment): boolean {
+  if (!attachment.ref.includes(":v1:")) return true;
+  const hash = attachment.ref.split(":").at(-1);
+  return (
+    attachment.mediaType === CHUNK_MEDIA &&
+    hash === sha256Hex(attachment.data) &&
+    utf8ByteLength(JSON.stringify(attachment)) <= TRANSCRIPT_PART_BYTES
+  );
+}
+export function boundedTranscript(
+  rows: readonly TranscriptRow[],
+  attachments: readonly TranscriptAttachment[],
+): { rows: TranscriptRow[]; attachments: TranscriptAttachment[] } {
+  const out: TranscriptRow[] = [],
+    blobs: TranscriptAttachment[] = [];
+  for (const row of rows) {
+    const refs = storedAttachmentRefs(row.json),
+      associated = attachments.filter((a) => refs.includes(a.ref));
+    const body = JSON.parse(row.json);
+    const indexedText =
+      body.part?.type === "text"
+        ? body.part.text
+        : body.part?.type === "tool_result" && typeof body.part.content === "string"
+          ? body.part.content
+          : (body.compaction?.summary ?? "");
+    const large =
+      utf8ByteLength(row.json) + utf8ByteLength(indexedText) + 512 > TRANSCRIPT_PART_BYTES ||
+      utf8ByteLength(JSON.stringify(row)) > TRANSCRIPT_PART_BYTES ||
+      associated.some((a) => utf8ByteLength(JSON.stringify(a)) > TRANSCRIPT_PART_BYTES);
+    if (!large) {
+      out.push(row);
+      for (const a of associated) if (!blobs.some((b) => b.ref === a.ref)) blobs.push(a);
+      continue;
+    }
+    if ("compaction" in body) throw new RequiredTranscriptError("compaction exceeds existing row budget");
+    const data = JSON.stringify({ row: JSON.parse(row.json), attachments: associated });
+    if (new TextDecoder().decode(new TextEncoder().encode(data)) !== data)
+      throw new RequiredTranscriptError("nonlossless UTF8");
+    const whole = sha256Hex(data),
+      parts: InternalRow["internalTranscript"]["refs"] = [];
+    let offset = 0;
+    while (offset < data.length) {
+      let lo = offset + 1,
+        hi = data.length,
+        end = offset;
+      const prefix = `t${row.idx}p${row.part}:v1:${whole}:${parts.length}:`;
+      while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        const value = data.slice(offset, mid);
+        if (
+          utf8ByteLength(JSON.stringify({ ref: prefix + "0".repeat(64), mediaType: CHUNK_MEDIA, data: value })) <=
+          TRANSCRIPT_PART_BYTES - 4096
+        ) {
+          end = mid;
+          lo = mid + 1;
+        } else hi = mid - 1;
+      }
+      if (end < data.length && data.charCodeAt(end - 1) >= 0xd800 && data.charCodeAt(end - 1) <= 0xdbff) end--;
+      if (end <= offset) throw new RequiredTranscriptError("chunk budget");
+      const value = data.slice(offset, end),
+        hash = sha256Hex(value),
+        ref = prefix + hash;
+      parts.push({ ref, sha256: hash, utf8Bytes: utf8ByteLength(value) });
+      blobs.push({ ref, mediaType: CHUNK_MEDIA, data: value });
+      offset = end;
+    }
+    const original = JSON.parse(row.json);
+    out.push({
+      ...row,
+      json: JSON.stringify({
+        ...original,
+        part: null,
+        internalTranscript: { version: 1, sha256: whole, utf8Bytes: utf8ByteLength(data), refs: parts },
+      }),
+    });
+  }
+  return { rows: out, attachments: blobs };
+}
+export function projectTranscriptRows<T extends TranscriptRow>(
+  rows: readonly T[],
+  attachments: readonly TranscriptAttachment[],
+): { rows: T[]; attachments: TranscriptAttachment[] } {
+  const ordinary: T[] = [],
+    blobs = attachments.filter((a) => !a.ref.includes(":v1:"));
+  for (const row of rows) {
+    let stored: InternalRow;
+    try {
+      stored = JSON.parse(row.json);
+    } catch (error) {
+      if (row.json.includes('"internalTranscript"')) throw new RequiredTranscriptError("invalid stored row");
+      throw error;
+    }
+    if (stored?.internalTranscript === undefined) {
+      ordinary.push(row);
+      continue;
+    }
+    const descriptor = internalDescriptor(stored);
+    if (
+      stored.part !== null ||
+      descriptor.version !== 1 ||
+      !Array.isArray(descriptor.refs) ||
+      !descriptor.refs.length ||
+      !/^[0-9a-f]{64}$/.test(descriptor.sha256) ||
+      !Number.isSafeInteger(descriptor.utf8Bytes)
+    )
+      throw new RequiredTranscriptError("unknown codec");
+    const seen = new Set<string>();
+    const pieces: string[] = [];
+    for (const [index, ref] of descriptor.refs.entries()) {
+      if (!ref.ref.startsWith(`t${row.idx}p${row.part}:v1:${descriptor.sha256}:${index}:`))
+        throw new RequiredTranscriptError("reordered chunk");
+      const matches = attachments.filter((a) => a.ref === ref.ref);
+      if (seen.has(ref.ref) || matches.length !== 1) throw new RequiredTranscriptError("missing or duplicate chunk");
+      seen.add(ref.ref);
+      const part = matches[0]!;
+      if (
+        !validTranscriptChunk(part) ||
+        sha256Hex(part.data) !== ref.sha256 ||
+        utf8ByteLength(part.data) !== ref.utf8Bytes
+      )
+        throw new RequiredTranscriptError("corrupt chunk");
+      pieces.push(part.data);
+    }
+    const value = pieces.join("");
+    if (sha256Hex(value) !== descriptor.sha256 || utf8ByteLength(value) !== descriptor.utf8Bytes)
+      throw new RequiredTranscriptError("corrupt part");
+    let decoded: { row: StoredPart; attachments: TranscriptAttachment[] };
+    try {
+      decoded = JSON.parse(value);
+    } catch {
+      throw new RequiredTranscriptError("invalid part");
+    }
+    const outer = { ...stored } as unknown as Record<string, unknown>;
+    delete outer.internalTranscript;
+    outer.part = decoded.row?.part;
+    if (JSON.stringify(outer) !== JSON.stringify(decoded.row))
+      throw new RequiredTranscriptError("changed row metadata");
+    if (!decoded.row?.part || !["user", "assistant"].includes(decoded.row.role) || !Array.isArray(decoded.attachments))
+      throw new RequiredTranscriptError("invalid part");
+    ordinary.push({ ...row, json: JSON.stringify(decoded.row) });
+    for (const part of decoded.attachments) {
+      if (
+        !part ||
+        typeof part !== "object" ||
+        typeof part.ref !== "string" ||
+        typeof part.mediaType !== "string" ||
+        typeof part.data !== "string"
+      )
+        throw new RequiredTranscriptError("invalid decoded attachment");
+      const previous = blobs.find((b) => b.ref === part.ref);
+      if (previous && JSON.stringify(previous) !== JSON.stringify(part))
+        throw new RequiredTranscriptError("conflicting reference");
+      if (!previous) blobs.push(part);
+    }
+  }
+  const projected = { rows: ordinary, attachments: blobs };
+  return assertTranscriptReadBudget(projected);
+}
+export function logicalTranscriptBytes(row: TranscriptRow, attachments: readonly TranscriptAttachment[]): number {
+  const projected = projectTranscriptRows([row], attachments);
+  return (
+    utf8ByteLength(projected.rows[0]!.json) +
+    projected.attachments
+      .filter((a) => storedAttachmentRefs(projected.rows[0]!.json).includes(a.ref))
+      .reduce((n, a) => n + utf8ByteLength(a.data), 0)
+  );
 }

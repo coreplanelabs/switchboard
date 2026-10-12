@@ -700,6 +700,12 @@ export interface HarnessRun {
    *  it answers with (the attachments line, or empty) ends the steer's text. Bound by the loop
    *  only when the deployment configures a store — absent, the steer is sent as it always was. */
   stageFollowUps?: (inputs: readonly FollowUpInput[]) => Promise<string>;
+  /** Re-prove required original media before staging and again before delivery. */
+  prepareFollowUps?: (inputs: readonly FollowUpInput[]) => Promise<boolean>;
+  /** Exact original source proof for already-built current media, before import and prompt. */
+  nativeMediaDigest?: string;
+  sourceContextRequired?: true | (() => boolean);
+  prepareSourceMedia?: () => Promise<boolean>;
   /** Called only when the harness confirms a steer reached the model's conversation. */
   confirmedFollowUps?: (inputs: readonly FollowUpInput[]) => void;
   onEvent?: (event: RunEvent) => void;

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CoordinatorInstance, CoordinatorUnit } from "../coordinator/contract.js";
 import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import { createHomeService, type HomeCondition, type HomeInventory } from "./service.js";
@@ -31,6 +31,84 @@ function inventory(rows: CoordinatorUnit[], instances = [instance]): HomeInvento
 }
 
 describe("Home durable fleet", () => {
+  it.each(["snapshot", "pipeline", "history"] as const)(
+    "summarizes failed condition reads once without private details in %s",
+    async (operation) => {
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const home = createHomeService({
+          organizationId: "organization:example",
+          instances: inventory(
+            Array.from({ length: 120 }, (_, i) =>
+              unit(`item-${i}`, { ending: { kind: "merged", at: 2, report: "Done" } }),
+            ),
+          ),
+          conditions: {
+            list: async () => {
+              throw new Error("PRIVATE_CONDITION_DETAIL");
+            },
+          },
+        });
+        const result =
+          operation === "pipeline" ? await home.pipeline(viewer, instance.id) : await home[operation](viewer);
+        expect(result).toMatchObject({ status: "partial" });
+        expect(warning.mock.calls).toEqual([
+          [JSON.stringify({ event: "home.read.degraded", phase: "unit_conditions", reason: "unavailable_or_invalid" })],
+        ]);
+        expect(JSON.stringify(warning.mock.calls)).not.toContain("PRIVATE_");
+      } finally {
+        warning.mockRestore();
+      }
+    },
+  );
+  it.each(["snapshot", "pipeline", "history"] as const)(
+    "reports failed inventory reads without changing unavailable %s output",
+    async (operation) => {
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const home = createHomeService({
+          organizationId: "organization:example",
+          instances: {
+            listInstances: async () => {
+              throw new Error("PRIVATE_INVENTORY_DETAIL");
+            },
+            listUnits: async () => [],
+          },
+        });
+        const result =
+          operation === "pipeline" ? await home.pipeline(viewer, instance.id) : await home[operation](viewer);
+        expect(result).toMatchObject({ status: "unavailable" });
+        expect(warning.mock.calls).toEqual([
+          [JSON.stringify({ event: "home.read.degraded", phase: "inventory_list", reason: "unavailable_or_invalid" })],
+        ]);
+        expect(JSON.stringify(warning.mock.calls)).not.toContain("PRIVATE_");
+      } finally {
+        warning.mockRestore();
+      }
+    },
+  );
+  it("reports invalid history cursors but does not log ordinary census bounds", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const home = createHomeService({
+        organizationId: "organization:example",
+        historyCursorKey: HISTORY_KEY,
+        maxUnits: 1,
+        instances: inventory([unit("first"), unit("second")]),
+      });
+      expect(await home.snapshot(viewer)).toMatchObject({ status: "partial", waiting: [{ unit: { id: "first" } }] });
+      expect(warning.mock.calls).toEqual([]);
+      await expect(home.history(viewer, { cursor: "PRIVATE_INVALID_CURSOR" })).rejects.toThrow(
+        "Home history cursor is invalid for this reader",
+      );
+      expect(warning.mock.calls).toEqual([
+        [JSON.stringify({ event: "home.read.degraded", phase: "history_cursor", reason: "unavailable_or_invalid" })],
+      ]);
+      expect(JSON.stringify(warning.mock.calls)).not.toContain("PRIVATE_");
+    } finally {
+      warning.mockRestore();
+    }
+  });
   it("classifies pipeline completion only after known conditions and readable private facts", async () => {
     const home = createHomeService({
       organizationId: "organization:example",
@@ -293,7 +371,7 @@ describe("Home durable fleet", () => {
     const home = createHomeService({
       organizationId: "organization:example",
       instances: inventory([unit("work-01"), unit("work-02", { ending: { kind: "no_verdict", report: "", at: 2 } })]),
-      liveUnitKeys: async () => new Set(["old-work:work-01"]),
+      liveUnitRuns: async () => new Map([["old-work:work-01", new Set(["original-child"])]]),
     });
     expect(await home.snapshot(viewer)).toMatchObject({
       status: "complete",
@@ -819,7 +897,11 @@ describe("Home durable fleet", () => {
           throw new Error("private condition failure");
         },
       },
-      liveUnitKeys: async () => new Set(["old-work:work-02", "foreign:work"]),
+      liveUnitRuns: async () =>
+        new Map([
+          ["old-work:work-02", new Set(["original-child"])],
+          ["foreign:work", new Set(["foreign-child"])],
+        ]),
     });
     const result = await home.pipeline(viewer, instance.id);
     expect(result).toMatchObject({
@@ -898,7 +980,7 @@ describe("Home durable fleet", () => {
     const liveUnknown = createHomeService({
       organizationId: "organization:example",
       instances: { ...inventory([unit("work-01")]), get: async () => instance },
-      liveUnitKeys: async () => {
+      liveUnitRuns: async () => {
         throw new Error("private live failure");
       },
     });

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 defineOptions({ name: "GreenThreadPage" });
-import { computed, inject, ref } from "vue";
+import { computed, inject, nextTick, ref, watch } from "vue";
 import { SeedKey, useSeed, useViewingAs } from "../../src/lib/seed";
 import { useWallClock } from "../../src/lib/wallClock";
 import AssistantTurn from "../../src/components/home/AssistantTurn.vue";
@@ -18,6 +18,8 @@ const viewingAs = useViewingAs();
 const globalSeed = inject(SeedKey, null);
 const canReply = !viewingAs && (!globalSeed?.dataView || globalSeed.dataView.mode !== "person");
 const home = useHomeSession();
+const emit = defineEmits<{ accessLost: [reference: { kind: "thread"; key: string }] }>();
+const unavailableExplanation = ref<HTMLElement | null>(null);
 const now = useWallClock(seed?.now);
 const busy = ref(false);
 const threadKey = computed(() =>
@@ -27,7 +29,12 @@ const threadKey = computed(() =>
       : seed.conversation
     : null,
 );
-const { session, status, canWrite } = useReadonlyThread(() => threadKey.value);
+const { session, status, canWrite, revocations } = useReadonlyThread(() => threadKey.value);
+watch(revocations, async () => {
+  if (threadKey.value) emit("accessLost", { kind: "thread", key: threadKey.value });
+  await nextTick();
+  unavailableExplanation.value?.focus();
+});
 const sourceUrl = computed(() =>
   seed?.elsewhere?.url && /^https?:\/\//.test(seed.elsewhere.url) ? seed.elsewhere.url : null,
 );
@@ -78,11 +85,12 @@ async function reply() {
         description="The thread is unknown or cannot be read with your current access."
       />
       <p v-else-if="status === 'loading'" class="text-xs text-muted" role="status">Checking current thread access…</p>
-      <EmptyState
-        v-else-if="status === 'unavailable'"
-        title="Conversation is unavailable"
-        description="The thread is unknown or cannot be read with your current access."
-      />
+      <div v-else-if="status === 'unavailable'" ref="unavailableExplanation" tabindex="-1" role="alert">
+        <EmptyState
+          title="Conversation is unavailable"
+          description="The thread is unknown or cannot be read with your current access."
+        />
+      </div>
       <ol v-else-if="session?.turns?.length" class="list-none m-0 p-0 grid gap-6">
         <li v-for="(turn, index) in session.turns" :key="index">
           <template v-if="'kind' in turn"

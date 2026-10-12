@@ -41,6 +41,7 @@ const savedActions = ref<Record<string, SavedAction>>({});
 let active = true,
   refreshGeneration = 0;
 const privacy = () => {
+  if (home?.recoveringPrivacy.value) return home.recoveringPrivacy.value;
   const session = home?.session.value;
   return session
     ? JSON.stringify([
@@ -63,6 +64,32 @@ const actionScope = computed(() =>
   ]),
 );
 const workInvalidated = ref(false);
+const recoveryHeld = ref(false);
+const recoveredWork = ref(false);
+const lostAnswerUnit = ref<string | null>(null);
+let lastAnswerUnit: string | null = null;
+watch(
+  [() => home?.inlineAnswer.value?.unit, () => home?.focused.value],
+  ([unit, focused]) => {
+    if (unit) lastAnswerUnit = unit;
+    else if (!focused) lastAnswerUnit = null;
+  },
+  { flush: "sync" },
+);
+watch(
+  () => home?.recoveringPrivacy.value,
+  (next, previous) => {
+    if (next) {
+      refreshGeneration++;
+      recoveryHeld.value = true;
+      lostAnswerUnit.value = lastAnswerUnit;
+      refreshNotice.value = "Checking current work access.";
+    } else if (previous && privacy() === previous && home?.status.value === "ready") {
+      void refreshWork();
+    }
+  },
+  { flush: "sync" },
+);
 function hideWork() {
   workInvalidated.value = true;
   savedActions.value = {};
@@ -131,27 +158,124 @@ function settleAction(unit: string) {
   delete next[unit];
   savedActions.value = next;
 }
+function readableMergeRow(key: string, action: HomeMergeAction) {
+  const row = [
+    ...(refreshed.value?.needsYou ?? []),
+    ...(refreshed.value?.moving ?? []),
+    ...(refreshed.value?.waiting ?? []),
+  ].find((item) => item.unit.unit === key);
+  const original = [
+    ...(seed?.snapshot.needsYou ?? []),
+    ...(seed?.snapshot.moving ?? []),
+    ...(seed?.snapshot.waiting ?? []),
+  ].find((item) => item.unit.unit === key);
+  // IDs and PRs survive private redaction. They cannot prove an old offer readable.
+  const merge = row?.conditions.find(
+    (condition) =>
+      condition.id === `${key}:merge` &&
+      condition.unitKey === key &&
+      condition.state === "open" &&
+      condition.owner.kind === "person" &&
+      (seed?.attentionRecipients ?? [seed?.attentionRecipient]).includes(condition.owner.id),
+  );
+  return row &&
+    merge &&
+    row.unit.ending?.kind === "merge_ready" &&
+    original &&
+    row.instance.repo === original.instance.repo &&
+    row.unit.branch === original.unit.branch &&
+    JSON.stringify(row.unit.threads) === JSON.stringify(original.unit.threads) &&
+    `${row.instance.repo}#${row.unit.pr?.number}` === action.pr &&
+    JSON.stringify(row.conditions) === JSON.stringify(original.conditions)
+    ? row
+    : null;
+}
+const readableSavedActions = computed(() => {
+  if (recoveryHeld.value) return {};
+  if (!recoveredWork.value) return savedActions.value;
+  return Object.fromEntries(
+    Object.entries(savedActions.value).flatMap(([key, saved]) => {
+      const row = readableMergeRow(key, saved.action);
+      return row ? [[key, { ...saved, label: row.unit.title ?? row.unit.unit }]] : [];
+    }),
+  );
+});
+const unprovedSavedActions = computed(
+  () =>
+    recoveredWork.value &&
+    !recoveryHeld.value &&
+    Object.keys(savedActions.value).some((key) => !readableSavedActions.value[key]),
+);
+const answerTargets = computed(() =>
+  Object.fromEntries(
+    Object.entries(seed?.answers ?? {}).filter(([key, target]) => {
+      if (key === lostAnswerUnit.value) return false;
+      if (!recoveredWork.value) return true;
+      const row = [
+        ...(refreshed.value?.needsYou ?? []),
+        ...(refreshed.value?.moving ?? []),
+        ...(refreshed.value?.waiting ?? []),
+      ].find((item) => item.unit.unit === key);
+      const original = [
+        ...(seed?.snapshot.needsYou ?? []),
+        ...(seed?.snapshot.moving ?? []),
+        ...(seed?.snapshot.waiting ?? []),
+      ].find((item) => item.unit.unit === key);
+      return (
+        row?.unit.threads.coding === target.thread &&
+        !!original &&
+        JSON.stringify(row.conditions) === JSON.stringify(original.conditions) &&
+        row.conditions.some(
+          (condition) =>
+            condition.id === `${key}:question` &&
+            condition.unitKey === key &&
+            condition.state === "open" &&
+            condition.owner.kind === "person" &&
+            (seed?.attentionRecipients ?? [seed?.attentionRecipient]).includes(condition.owner.id),
+        )
+      );
+    }),
+  ),
+);
+const mergeActions = computed(() =>
+  Object.fromEntries(
+    Object.entries(seed?.actions ?? {}).filter(
+      ([key, action]) => key !== lostAnswerUnit.value && (!recoveredWork.value || !!readableMergeRow(key, action)),
+    ),
+  ),
+);
 const savedOutsideList = computed(() =>
-  Object.entries(savedActions.value).filter(([key]) => !snapshot.value?.needsYou.some((row) => row.unit.unit === key)),
+  Object.entries(readableSavedActions.value).filter(
+    ([key]) => !snapshot.value?.needsYou.some((row) => row.unit.unit === key),
+  ),
 );
 onBeforeUnmount(() => {
   active = false;
   refreshGeneration++;
 });
-async function refreshWork(unit: string) {
+async function refreshWork(unit?: string) {
   if (workInvalidated.value || viewingAs || globalSeed?.dataView?.mode === "person" || home?.scopeChanging.value)
     return;
   const request = ++refreshGeneration,
-    scope = actionScope.value;
+    scope = actionScope.value,
+    source = privacy();
   const current = () =>
-    active && request === refreshGeneration && !home?.scopeChanging.value && actionScope.value === scope;
+    active &&
+    request === refreshGeneration &&
+    !home?.scopeChanging.value &&
+    actionScope.value === scope &&
+    privacy() === source;
   try {
-    const response = await fetch(`/home/snapshot?observe=${encodeURIComponent(unit)}`, {
+    const response = await fetch(unit ? `/home/snapshot?observe=${encodeURIComponent(unit)}` : "/home/snapshot", {
       credentials: "same-origin",
       headers: { accept: "application/json" },
     });
     if (!current()) return;
     if (response.status === 403 || response.status === 404) {
+      if (unit === undefined) {
+        refreshNotice.value = "Current work access could not be confirmed.";
+        return;
+      }
       hideWork();
       refreshNotice.value = "Work access changed. This page's data is hidden.";
       return;
@@ -167,16 +291,29 @@ async function refreshWork(unit: string) {
       !Array.isArray(value.waiting) ||
       !Array.isArray(value.pipelines)
     ) {
-      refreshNotice.value = "Merge recorded. Completion could not be verified.";
+      refreshNotice.value =
+        unit === undefined
+          ? "Current work access could not be confirmed."
+          : "Merge recorded. Completion could not be verified.";
       return;
     }
     refreshed.value = value;
+    if (unit === undefined) {
+      recoveredWork.value = true;
+      recoveryHeld.value = false;
+      refreshNotice.value = "Current work access checked.";
+      return;
+    }
     refreshNotice.value =
       value.observation === "observed"
         ? "Completed work updated."
         : "Merge recorded. Completion has not been verified.";
   } catch {
-    if (current()) refreshNotice.value = "Merge recorded. Completion could not be verified.";
+    if (current())
+      refreshNotice.value =
+        unit === undefined
+          ? "Current work access could not be confirmed."
+          : "Merge recorded. Completion could not be verified.";
   }
 }
 const savedReplyOutsideList = computed(
@@ -190,7 +327,12 @@ const savedReplyOutsideList = computed(
       (row) => row.unit.unit === home.inlineAnswer.value?.unit,
     ),
 );
-const snapshot = computed(() => refreshed.value ?? seed?.snapshot ?? null);
+const snapshot = computed(() => {
+  const value = refreshed.value ?? seed?.snapshot ?? null;
+  return recoveryHeld.value && value
+    ? { ...value, status: "unavailable", needsYou: [], moving: [], waiting: [], pipelines: [] }
+    : value;
+});
 const count = computed(() =>
   snapshot.value ? snapshot.value.needsYou.length + snapshot.value.moving.length + snapshot.value.waiting.length : 0,
 );
@@ -210,7 +352,8 @@ const pipelines = computed(() => {
     rows: rows.get(pipeline.instance.id) ?? [],
   }));
 });
-const replyThread = (row: HomeUnit) => seed?.answers?.[row.unit.unit]?.thread ?? row.unit.threads.coding;
+const replyThread = (row: HomeUnit) =>
+  recoveredWork.value ? row.unit.threads.coding : (seed?.answers?.[row.unit.unit]?.thread ?? row.unit.threads.coding);
 </script>
 <template>
   <PageHeading title="Home" description="What needs you, what is moving, and what happens next."
@@ -220,6 +363,9 @@ const replyThread = (row: HomeUnit) => seed?.answers?.[row.unit.unit]?.thread ??
     ></PageHeading
   >
   <p v-if="refreshNotice" class="green-notice" role="status">{{ refreshNotice }}</p>
+  <p v-if="unprovedSavedActions" class="green-notice" role="status">
+    Saved action result is unknown. Its work cannot be confirmed with current access.
+  </p>
   <section v-if="savedOutsideList.length" class="green-section" aria-label="Saved actions with unknown results">
     <h2>Saved actions with unknown results</h2>
     <div v-for="[unit, saved] in savedOutsideList" :key="unit" class="mt-3">
@@ -247,10 +393,10 @@ const replyThread = (row: HomeUnit) => seed?.answers?.[row.unit.unit]?.thread ??
     <template v-if="count"
       ><UnitList
         :rows="snapshot.needsYou"
-        :answers="seed?.answers"
-        :actions="seed?.actions"
+        :answers="answerTargets"
+        :actions="mergeActions"
         :action-scope="actionScope"
-        :saved-actions="savedActions"
+        :saved-actions="readableSavedActions"
         label="Needs you"
         urgent
         :attention-recipient="seed?.attentionRecipient"

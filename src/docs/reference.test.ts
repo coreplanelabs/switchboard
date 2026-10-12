@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { marked } from "marked";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { CommandRegistry, flag, type CommandDef } from "../core/commandRegistry.js";
@@ -245,7 +246,11 @@ describe("the real catalogue", () => {
 
   it("renders every registered command into the CLI table — including the groups a hand-written table had gone stale on", () => {
     const out = renderCliCommands(real);
-    for (const cmd of real) expect(out).toContain(`\`${cmd.usage.replace(/\|/g, "\\|")}\``);
+    const usages: string[] = [];
+    marked.walkTokens(marked.lexer(out), (token) => {
+      if (token.type === "codespan") usages.push(token.text);
+    });
+    for (const cmd of real) expect(usages).toContain(cmd.usage);
     expect(out).toContain("### `mcp`");
     expect(out).toContain("deploy restart");
   });

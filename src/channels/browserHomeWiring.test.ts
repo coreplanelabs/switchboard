@@ -29,6 +29,8 @@ import type { PageSeed, WebSeed } from "./webSeed.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import { DAY_MS } from "../core/budgets.js";
 import { createBrowserHomeWiring } from "./browserHomeWiring.js";
+import { tokenVerifier, type DashboardVerifier } from "./dashboardAuth.js";
+import { createLiveViewHandler } from "./liveView.js";
 import { receiveSlackSourceDeletion } from "./slack.js";
 import { workViewScopeOf } from "./workViewScope.js";
 import { createHomeService } from "../core/home/service.js";
@@ -49,6 +51,7 @@ async function fixture(
   initialSlackReady = true,
   pendingRealm?: Promise<string | undefined>,
   merge?: Pick<Parameters<typeof createBrowserHomeWiring>[0], "mergeLogin" | "mergeFacts">,
+  dashboard?: DashboardVerifier,
 ) {
   const dir = mkdtempSync(join(tmpdir(), "home-wiring-"));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -119,7 +122,11 @@ async function fixture(
   const wiring = createBrowserHomeWiring({
     ...(merge ?? {}),
     config,
-    dashboard: { mode: "access", describe: () => "fixture", verify: async () => ({ ok: true, identity: credential }) },
+    dashboard: dashboard ?? {
+      mode: "access",
+      describe: () => "fixture",
+      verify: async () => ({ ok: true, identity: credential }),
+    },
     access: { teamDomain: "access.fixture.test", aud: "fixture-audience" },
     slack: {
       auth: {
@@ -200,6 +207,90 @@ async function fixture(
   };
 }
 describe("browser production wiring", () => {
+  it("keeps token private Home fenced and rechecks the original credential for later report reads", async () => {
+    const dashboard = tokenVerifier({ token: "dashboard-fixture", env: "DASHBOARD_TOKEN", subject: "opaque" });
+    const s = await fixture(true, false, undefined, undefined, dashboard);
+    await s.wiring.initialize();
+    const req = { ...s.request(), headers: { authorization: "Bearer dashboard-fixture" } } as IncomingMessage;
+    const gate = await dashboard.verify(req);
+    if (!gate.ok) throw new Error("valid fixture token was refused");
+    const current = await s.wiring.currentTokenPageActor(req, gate.identity);
+    expect(current).toMatchObject({ id: "access:opaque", kind: "service", self: ["access:opaque"] });
+    expect(await s.wiring.context(req, gate.identity)).toBeUndefined();
+    req.headers.authorization = "Bearer revoked";
+    expect(await s.wiring.currentTokenPageActor(req, gate.identity)).toBeUndefined();
+    req.headers.authorization = "Bearer dashboard-fixture";
+    expect(await s.wiring.currentTokenPageActor(req, { sub: "another-caller" })).toBeUndefined();
+    const access = await fixture();
+    await access.wiring.initialize();
+    expect(await access.wiring.context(access.request(), access.credential)).toMatchObject({
+      actor: { id: "access:opaque" },
+    });
+    expect(access.wiring.tokenPageActor(access.credential)).toBeUndefined();
+    expect(s.effects).toEqual([]);
+    expect(s.tasks).toEqual([]);
+  });
+  it("serves the configured token caller's run page without inventing a private human Home source", async () => {
+    const dashboard = tokenVerifier({ token: "dashboard-fixture", env: "DASHBOARD_TOKEN", subject: "opaque" });
+    const s = await fixture(false, false, undefined, undefined, dashboard);
+    const req = {
+      ...s.request(),
+      method: "GET",
+      url: "/runs",
+      headers: { authorization: "Bearer dashboard-fixture" },
+    } as IncomingMessage;
+    const gate = await dashboard.verify(req);
+    expect(gate.ok).toBe(true);
+    if (!gate.ok) throw new Error("valid fixture token was refused");
+    const actor = s.wiring.tokenPageActor(gate.identity);
+    expect(actor).toMatchObject({ id: "access:opaque", kind: "service", self: ["access:opaque"] });
+    if (!actor) throw new Error("no token page actor");
+    expect(workViewScopeOf(actor)).toEqual({ mode: "mine", ownerIds: ["access:opaque"], canEveryone: false });
+    expect(await s.wiring.context(req, gate.identity)).toBeUndefined();
+    const registry = s.core.runRegistry!;
+    registry.create("my run", {
+      userId: "access:opaque",
+      channelId: "http:ops",
+      threadKey: "http:ops:1",
+      channelVisibility: "public",
+    });
+    registry.create("someone else's run", {
+      userId: "slack:UALICE",
+      channelId: "slack:PUBLIC",
+      threadKey: "slack:PUBLIC:1",
+      channelVisibility: "public",
+    });
+    let status = 0;
+    let sent: PageSeed | undefined;
+    const handler = createLiveViewHandler({
+      service: createRunsService({ registry, store: null }),
+      index: registry,
+      retention: null,
+      page: (_req, _res, code, _actor, _title, seed) => {
+        status = code;
+        sent = seed;
+      },
+    });
+    const res = {
+      writeHead: (code: number) => {
+        status = code;
+        return res;
+      },
+      end() {},
+    } as unknown as ServerResponse;
+    expect(handler(req, res, { actor })).toBe(true);
+    await vi.waitFor(() => expect(status).toBe(200));
+    expect(sent?.page).toBe("runs");
+    if (sent?.page !== "runs") throw new Error("no run index seed");
+    expect(sent.rows.map((row) => row.label)).toEqual(["my run"]);
+    expect(await dashboard.verify({ headers: { authorization: "Bearer wrong" } })).toMatchObject({
+      ok: false,
+      status: 403,
+    });
+    expect(s.wiring.tokenPageActor({ sub: "", commonName: "service" })).toBeUndefined();
+    expect(s.effects).toEqual([]);
+    expect(s.tasks).toEqual([]);
+  });
   it("erases the verified native Slack source through the production callback without rehosting its copied input", async () => {
     const s = await fixture();
     await s.wiring.initialize();

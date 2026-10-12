@@ -111,6 +111,7 @@ export type ProxyRefusalCode =
   | "unknown_run"
   | "expired"
   | "revoked"
+  | "source_unavailable"
   | "wrong_shape"
   | "body_too_large"
   | "invalid_body"
@@ -179,7 +180,13 @@ export interface ProxyResponse {
 }
 
 export type Door =
-  | { ok: true; shape: ProxyShape; grant: RunBearerGrant; turns: number }
+  | {
+      ok: true;
+      shape: ProxyShape;
+      grant: RunBearerGrant;
+      turns: number;
+      sourceGuard: ReturnType<RunBearerStore["sourceGuardFor"]>;
+    }
   | { ok: false; response: ProxyResponse; code: ProxyRefusalCode; runId?: string };
 
 /** A refusal in the shape of the route, so the client's SDK reads it as the
@@ -261,7 +268,14 @@ export function decideDoor(
     );
   }
   const verdict = bearers.verify(presented);
-  if (verdict.ok) return { ok: true, shape, grant: verdict.grant, turns: verdict.turns };
+  if (verdict.ok)
+    return {
+      ok: true,
+      shape,
+      grant: verdict.grant,
+      turns: verdict.turns,
+      sourceGuard: bearers.sourceGuardFor(verdict.grant.runId),
+    };
   switch (verdict.reason) {
     case "malformed":
       return refused(shape, 401, "malformed_bearer", "the bearer is not a run bearer");
@@ -1120,6 +1134,14 @@ async function handleAdmittedCall(
   };
   const { schemaShaped, payload, offered } = consumer ? await consumer.withParsing(async () => prepare()) : prepare();
   await deps.bearers.settleRecovery(grant.runId, false);
+  const sourceRefused = (code: "revoked" | "expired" | "source_unavailable") => {
+    log(`[model-proxy] 403 ${code} run=${grant.runId}`);
+    return refusalResponse(shape, 403, code, "The run's current model source could not be verified.");
+  };
+  const sourceAllowed = await door.sourceGuard.check();
+  const sourceRefusal = door.sourceGuard.current();
+  if (sourceRefusal) return sourceRefused(sourceRefusal);
+  if (!sourceAllowed) return sourceRefused("source_unavailable");
   const turn = deps.bearers.consumeTurn(grant.runId);
   if (!turn.ok && turn.reason === "tool_recovery") {
     log(`[model-proxy] 403 tool_recovery_exhausted run=${grant.runId} reason=${turn.stop.reason}`);
@@ -1386,6 +1408,13 @@ async function handleAdmittedCall(
   };
   let res: Response | undefined;
   let thrown: unknown;
+  // No awaited work separates this entry/expiry fence from the outbound call.
+  // A local source refusal must never become a provider outage or retry.
+  const finalSourceRefusal = door.sourceGuard.current();
+  if (finalSourceRefusal) {
+    span.end("error");
+    return sourceRefused(finalSourceRefusal);
+  }
   try {
     res = await call();
   } catch (err) {

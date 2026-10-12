@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../chatMessage.js";
 import type { AssembledTranscript } from "../runLedger/transcript.js";
+import { RequiredTranscriptError } from "../runLedger/transcript.js";
 import type { HistoryItem } from "../types.js";
 import type { RunView } from "../runsService.js";
 import type { SessionSources } from "../references/receipts.js";
@@ -280,6 +281,31 @@ describe("sessionSeed — the tail, the lines since, the request", () => {
 });
 
 describe("sessionSeedFor — the seed read from the ledger, with the notepad", () => {
+  it("holds unreadable required transcript bytes instead of falling back to channel history", async () => {
+    const common = {
+      threadKey: "slack:channel:1",
+      agent: "coding",
+      thread: [],
+      history: [{ role: "user" as const, text: "Channel fallback" }],
+      request: { text: "Continue" },
+    };
+    const ledger = {
+      readSessionTail: async () => {
+        throw new RequiredTranscriptError("corrupt chunk");
+      },
+      readNotepad: async () => null,
+    };
+    await expect(sessionSeedFor({ ...common, ledger })).rejects.toThrow("required transcript: corrupt chunk");
+    const missing = {
+      ...ledger,
+      readSessionTail: async () => {
+        throw new Error("legacy route unavailable");
+      },
+    };
+    expect(await sessionSeedFor({ ...common, ledger: missing })).toMatchObject({
+      notes: [expect.stringContaining("run seeds from the channel")],
+    });
+  });
   const ledgerOver = (over: {
     tail?: ReturnType<typeof complete>;
     notepad?: { text: string; updatedAt: number } | null;

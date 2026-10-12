@@ -120,6 +120,8 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
   const status = ref<HomeSessionStatus>("loading");
   const scopeChanging = ref(false);
   const revocations = ref(0);
+  // An invalidation identity only: no transcript, draft or composing capability.
+  const recoveringPrivacy = ref<string | null>(null);
   const text = ref("");
   const scroll = ref(0);
   const context = ref<AttachedContext[]>([]);
@@ -306,6 +308,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
     restoringDraft = false;
     status.value = "ready";
     offer.value = offerFor(next);
+    recoveringPrivacy.value = null;
   }
   function resetPrivate(
     message = "Dashboard scope changed. Personal messages are hidden until the new view is confirmed.",
@@ -322,6 +325,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
     source?.close();
     source = null;
     session.value = null;
+    recoveringPrivacy.value = null;
     earlierRequests.value = [];
     broad = null;
     drafts.clear();
@@ -336,6 +340,88 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
     removing.value = null;
     status.value = "unavailable";
     notice.value = message;
+  }
+  async function recoverFocused(previous: HomeSession) {
+    if (!session.value || previous.destination.kind !== "thread" || privacyKey(previous) !== activePrivacy) {
+      unavailable();
+      return;
+    }
+    const expectedPrivacy = privacyKey(previous);
+    const thread = previous.destination.thread;
+    const routeUnit = /^\/runs\/unit\/([^/?#]+)/.exec(activeRoute)?.[1];
+    let unit = inlineAnswer.value?.unit;
+    if (!unit && routeUnit) {
+      try {
+        unit = decodeURIComponent(routeUnit);
+      } catch {
+        /* An unproved reference is not matched. */
+      }
+    }
+    const affected = (item: AttachedContext) =>
+      (item.kind === "thread" && item.key === thread) || (item.kind === "unit" && item.key === unit);
+    const closedDestination = destinationKey(previous);
+    drafts.delete(closedDestination);
+    retries.delete(closedDestination);
+    for (const [key, draft] of drafts) {
+      if (key.startsWith(expectedPrivacy + "\u0000"))
+        drafts.set(key, { ...draft, context: draft.context.filter((item) => !affected(item)) });
+    }
+    const requestGeneration = ++loadGeneration;
+    generation++;
+    focusGeneration++;
+    submissionGeneration++;
+    source?.close();
+    source = null;
+    broad = null;
+    inlineAnswer.value = null;
+    offer.value = null;
+    recoveringPrivacy.value = JSON.stringify([
+      previous.actor,
+      previous.organization,
+      previous.stream,
+      previous.bindingRevision,
+      previous.accessEpoch,
+    ]);
+    session.value = null;
+    text.value = "";
+    scroll.value = 0;
+    context.value = [];
+    earlierRequests.value = [];
+    sending.value = false;
+    historyLoading.value = false;
+    removing.value = null;
+    status.value = "loading";
+    notice.value = "This thread is unavailable. Checking access to your messages.";
+    revocations.value++;
+    const current = () =>
+      requestGeneration === loadGeneration &&
+      !disposed &&
+      !scopeChanging.value &&
+      recoveringPrivacy.value !== null &&
+      activePrivacy === expectedPrivacy;
+    try {
+      const response = await fetchFn("/home/session", {
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      const value: unknown = await response.json();
+      if (!current()) return;
+      if (
+        !response.ok ||
+        !isHomeSession(value) ||
+        value.destination.kind !== "broad" ||
+        privacyKey(value) !== expectedPrivacy
+      ) {
+        unavailable();
+        return;
+      }
+      adopt(value);
+      broad = value;
+      follow(value);
+      notice.value = "This thread is unavailable. Your messages have been checked.";
+    } catch {
+      if (current()) unavailable();
+    }
   }
   function follow(next: HomeSession) {
     source?.close();
@@ -369,8 +455,11 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
     };
     attached.addEventListener("revoked", () => {
       if (active()) {
-        unavailable();
-        revocations.value++;
+        if (next.destination.kind === "thread") void recoverFocused(session.value ?? next);
+        else {
+          unavailable();
+          revocations.value++;
+        }
       }
     });
     attached.addEventListener("unavailable", () => {
@@ -737,6 +826,23 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
         headers: { "content-type": "application/json" },
         body: JSON.stringify(retry.body),
       });
+      if ([401, 403, 404].includes(response.status)) {
+        // The outer auth gate may return text or no body. Definite denial
+        // cannot depend on decoding that body or affect a newer destination.
+        if (
+          ownGeneration !== generation ||
+          ownPrivacy !== activePrivacy ||
+          !session.value ||
+          destinationKey(session.value) !== draftKey
+        )
+          return;
+        if (s.destination.kind === "thread") await recoverFocused(s);
+        else {
+          unavailable();
+          revocations.value++;
+        }
+        return;
+      }
       const receipt = (await response.json()) as {
         status?: string;
         reason?: string;
@@ -772,8 +878,8 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
         }
       }
       if (ownGeneration !== generation) return;
-      if ([401, 403, 404].includes(response.status)) {
-        unavailable();
+      if (response.ok && !accepted) {
+        notice.value = "The result could not be confirmed. Retry returns the same submission receipt.";
         return;
       }
       if (response.status >= 500) {
@@ -816,6 +922,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
     resetPrivate,
     scopeChanging,
     revocations,
+    recoveringPrivacy,
     beginInlineAnswer,
     preserveInlineAnswer,
     status,

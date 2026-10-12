@@ -1,5 +1,5 @@
 import { analyzeRunFriction } from "../runFriction.js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { InMemoryOrganizationStore } from "./memory.js";
 import { OrganizationService } from "./service.js";
@@ -706,10 +706,23 @@ describe("organization runtime", () => {
     expect(await failing.deleteContent(s.authentication, admitted.receipt.id)).toEqual({ status: "unavailable" });
     expect(await s.store.execute({ action: "owner-clears", organization: "org:test", limit: 10 })).toEqual({
       status: "owner-clears",
-      items: [{ receiptId: admitted.receipt.id, effectKey: admitted.receipt.effectKey }],
+      items: [
+        {
+          receiptId: admitted.receipt.id,
+          effectKey: admitted.receipt.effectKey,
+          expiresAt: admitted.receipt.expiresAt,
+        },
+      ],
     });
+    const clearing = vi.spyOn(s.ledger, "clearIngressContent");
     const replacement = createOrganizationRuntime({ ...s, owner: "replacement" });
     expect(await replacement.reconcile("org:test")).toMatchObject({ status: "state" });
+    expect(clearing.mock.calls).toEqual([
+      [
+        admitted.receipt.effectKey,
+        { receiptTtlMs: s.service.receiptRetentionMs, expiresAt: admitted.receipt.expiresAt },
+      ],
+    ]);
     expect(await s.ledger.readIngress(admitted.receipt.effectKey)).toMatchObject({
       status: "record",
       record: { request: null },

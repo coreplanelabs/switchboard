@@ -1,3 +1,5 @@
+import { NativeMediaHeldError } from "../harness/nativeMedia.js";
+import { RequiredTranscriptError } from "../runLedger/transcript.js";
 import { sourceBinding } from "../references/receipts.js";
 import { freshContext } from "./contextSeed.js";
 import { readOperatorTailContext } from "./operatorTail.js";
@@ -456,6 +458,117 @@ describe("publication of an operator decision", () => {
 });
 
 describe("explicit PR directives at the operator stage", () => {
+  it("binds a self-contained repeat review without reading earlier source context", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-repeat-review-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
+    );
+    const model = vi.fn<RouteModel>(async () => ({
+      tool: OPERATOR_BIND_TOOL,
+      input: {
+        preset: "review",
+        repo: "acme/api",
+        prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+        reason: "Review this updated PR",
+      },
+    }));
+    const readTail = vi.fn(async () => {
+      throw new Error("earlier source access was revoked");
+    });
+    const url = "https://github.com/acme/api/pull/7";
+    const text =
+      `review <${url}|github.com/acme/api/pull/7>\n` +
+      "App notification from App: The author updated the tests.\n" +
+      "Why: The earlier review requested a regression guard.";
+    const result = await operatorStage(
+      {
+        config: new ConfigStore(path, join(dir, "overrides.json")),
+        operatorModel: model,
+      },
+      {
+        msg: { channelId: "slack:CPUBLIC", userId: "slack:UREQUESTER", threadKey: "slack:CPUBLIC:1", text },
+        mode: "on",
+        readTail,
+        thread: [{ finished: true, agent: "review", repo: "acme/api" }],
+      },
+    );
+    expect(readTail).not.toHaveBeenCalled();
+    expect(model).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      outcome: "binds",
+      binds: [{ repo: "acme/api", repoSource: "request", prTarget: { number: 7, quote: url } }],
+    });
+  });
+
+  it.each(["original attachments", "inherited history"] as const)(
+    "rechecks required %s after tail loading before the operator model",
+    async (source) => {
+      const dir = mkdtempSync(join(tmpdir(), "swb-native-operator-"));
+      const path = join(dir, "config.yaml");
+      writeFileSync(
+        path,
+        "organization: acme\nproviders:\n  anthropic: {type: anthropic}\ndefaults:\n  agent: general\n  models: {general: anthropic/general-model}\n",
+      );
+      let available = true;
+      let revoke = false;
+      const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "What next?" } }));
+      const input = {
+        msg: {
+          channelId: "slack:DA",
+          userId: "slack:UA",
+          threadKey: "slack:DA:1",
+          text: "Read the file",
+          ...(source === "original attachments"
+            ? { documents: [{ mediaType: "text/csv", name: "rows.csv", data: "id,total\n7,9" }] }
+            : {}),
+        },
+        mode: "on" as const,
+        ...(source === "inherited history" ? { pending: {} } : {}),
+        readTail: async () => {
+          if (revoke) available = false;
+          return { turns: [], unavailable: [] };
+        },
+        beforeModel: async () => {
+          if (!available) throw new NativeMediaHeldError();
+        },
+      };
+      const deps = { config: new ConfigStore(path, join(dir, "overrides.json")), operatorModel: model };
+      expect(await operatorStage(deps, input)).toMatchObject({ outcome: "question", question: "What next?" });
+      const calls = model.mock.calls.length;
+      revoke = true;
+      await expect(operatorStage(deps, input)).rejects.toThrow("original media input is held");
+      expect(model.mock.calls).toHaveLength(calls);
+    },
+  );
+  it("holds revoked required media before a repaired provider attempt", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "swb-native-repair-"));
+    const path = join(dir, "config.yaml");
+    writeFileSync(
+      path,
+      "organization: acme\nproviders:\n  anthropic: {type: anthropic}\ndefaults:\n  agent: general\n  models: {general: anthropic/general-model}\n",
+    );
+    let available = true;
+    const model = vi.fn<RouteModel>(async () => {
+      available = false;
+      return { tool: OPERATOR_BIND_TOOL, input: { preset: "unavailable", reason: "invalid first proposal" } };
+    });
+    await expect(
+      operatorStage(
+        { config: new ConfigStore(path, join(dir, "overrides.json")), operatorModel: model },
+        {
+          msg: { channelId: "slack:DA", userId: "slack:UA", threadKey: "slack:DA:1", text: "Read the file" },
+          mode: "on",
+          beforeModel: async () => {
+            if (!available) throw new NativeMediaHeldError();
+          },
+        },
+      ),
+    ).rejects.toThrow("original media input is held");
+    expect(model).toHaveBeenCalledTimes(1);
+  });
+
   it("asks the operator about a competing later-line fix instead of taking the early review bind", async () => {
     const dir = mkdtempSync(join(tmpdir(), "swb-ambiguous-review-"));
     const path = join(dir, "config.yaml");
@@ -5495,6 +5608,22 @@ defaults:
 });
 
 describe("operatorThreadTail carries each turn's actor off the assembled transcript", () => {
+  it("holds a required transcript failure instead of falling back to another agent log", async () => {
+    const ledger = {
+      readSessionTail: async () => {
+        throw new RequiredTranscriptError("corrupt chunk");
+      },
+    };
+    await expect(operatorThreadTail(ledger, [{ agent: "general" }], "slack:original:1")).rejects.toThrow(
+      "required transcript: corrupt chunk",
+    );
+    const ordinary = {
+      readSessionTail: async () => {
+        throw new Error("legacy route unavailable");
+      },
+    };
+    expect(await operatorThreadTail(ordinary, [{ agent: "general" }], "slack:original:1")).toEqual([]);
+  });
   it("a turn's actor rides beside its text; a machine turn carries none", async () => {
     const ledger = {
       readSessionTail: async () => ({

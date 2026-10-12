@@ -9,11 +9,15 @@ import { InMemoryOrganizationStore } from "../core/organization/memory.js";
 import { OrganizationService } from "../core/organization/service.js";
 import { createOrganizationAuthentication } from "./organizationAuthentication.js";
 import { createHomeAccessEpoch } from "./homeAccessEpoch.js";
+import { createOrganizationNativeSources } from "./organizationNativeSources.js";
+import { accessVerifier } from "./dashboardAuth.js";
+import { JwksCache, type AccessJwk } from "./accessAuth.js";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { ALL_GRANTS } from "../core/authz/grants.js";
 import { NO_GRANTS } from "../core/authz/types.js";
 import { digestBearer, InMemoryPersonalTokenStore } from "../mcp/personalTokens.js";
 import type { HomeRuntimeContext } from "./homeRuntime.js";
-async function fixture() {
+async function fixture(currentBrowser?: Parameters<typeof createOrganizationAuthentication>[0]["currentBrowser"]) {
   const identity = { issuer: "https://access.test", tenant: null, subject: "alice" };
   const store = new InMemoryOrganizationStore(() => 1);
   const tokens = new InMemoryPersonalTokenStore();
@@ -32,25 +36,28 @@ async function fixture() {
     actor: identity,
     proof: { method: "dual-authentication", version: 1 },
   });
-  let nativeGrants = ALL_GRANTS;
+  let nativeGrants = ALL_GRANTS,
+    browserGrants = ALL_GRANTS;
   const authentication = createOrganizationAuthentication({
     organization: organizationId,
     store,
     directory: store.directory,
     mappings,
-    grantsFor: (id) => (id === "access:alice" ? ALL_GRANTS : id === "mcp:personal:alice" ? nativeGrants : NO_GRANTS),
+    grantsFor: (id) => (id === "access:alice" ? browserGrants : id === "mcp:personal:alice" ? nativeGrants : NO_GRANTS),
     auth: () => ({ tokens: {} }),
     personalTokens: tokens,
-    currentBrowser: async () => ({
-      status: "verified",
-      identity,
-      actorId: "access:alice",
-      kind: "human",
-      organizationMember: true,
-      privateSource: true,
-      epoch: "current-native-proof",
-      access: { sub: "alice" },
-    }),
+    currentBrowser:
+      currentBrowser ??
+      (async () => ({
+        status: "verified",
+        identity,
+        actorId: "access:alice",
+        kind: "human",
+        organizationMember: true,
+        privateSource: true,
+        epoch: "current-native-proof",
+        access: { sub: "alice" },
+      })),
     currentSlack: async () => ({ status: "unavailable" }),
   });
   const organization = new OrganizationService({
@@ -144,6 +151,9 @@ async function fixture() {
     narrowSource: () => {
       nativeGrants = { ...ALL_GRANTS, actions: new Set(["organization:read"]) };
     },
+    revokeBrowser: () => {
+      browserGrants = NO_GRANTS;
+    },
     recreateEpoch: () =>
       createHomeAccessEpoch({
         organizationId,
@@ -155,6 +165,184 @@ async function fixture() {
   };
 }
 describe("complete Home access epoch", () => {
+  it.each([false, true])(
+    "rechecks retained source revisions after the final receiver await before its HTTP snapshot: peer revoked %s",
+    async (revoke) => {
+      const h = await fixture();
+      await h.send("final-peer");
+      const before = await h.epoch(h.context);
+      expect(before).toMatch(/^[0-9a-f]{64}$/);
+      let finalScan = false,
+        receiverChecks = 0,
+        release: () => void = () => {},
+        entered: () => void = () => {};
+      const held = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const resume = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const resolveAuthorization = h.authentication.resolveAuthorization;
+      const receiver = vi.spyOn(h.authentication, "resolveAuthorization").mockImplementation(async (...args) => {
+        const decision = await resolveAuthorization(...args);
+        if (finalScan && ++receiverChecks === 2) {
+          entered();
+          await resume;
+        }
+        return decision;
+      });
+      const handler = createHomeRuntimeHandler({
+        organization: h.organization,
+        directory: h.store.directory,
+        now: () => 1,
+        refresh: async (context) => context,
+        currentEpoch: h.epoch,
+        readThread: async () => undefined,
+        submit: (context, input) => h.organization.admit(context.authentication, input),
+        commands: () => [],
+        currentOffer: async () => {
+          finalScan = true;
+          return undefined;
+        },
+        publicBaseUrl: "https://app.test",
+      });
+      const request = Object.assign(new EventEmitter(), {
+        url: "/home/session",
+        method: "GET",
+        headers: { host: "app.test", accept: "application/json" },
+      }) as unknown as IncomingMessage;
+      let status = 0,
+        body = "",
+        finish: () => void = () => {};
+      const ended = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const response = {
+        writeHead(value: number) {
+          status = value;
+        },
+        end(value = "") {
+          body += value;
+          finish();
+        },
+      } as unknown as ServerResponse;
+      expect(handler(request, response, h.context)).toBe(true);
+      await held;
+      if (revoke) await h.tokens.delete(digestBearer("final-peer"), "personal:alice");
+      const observed = await h.recreateEpoch()(h.context);
+      expect(observed).toMatch(/^[0-9a-f]{64}$/);
+      if (revoke) expect(observed).not.toBe(before);
+      else expect(observed).toBe(before);
+      release();
+      await ended;
+      expect({ status, privateContent: body.includes("private fixture") }).toEqual({
+        status: revoke ? 404 : 200,
+        privateContent: !revoke,
+      });
+      receiver.mockRestore();
+      handler.dispose();
+    },
+  );
+  it.each(["current", "expired", "grants changed"] as const)(
+    "rechecks the signed receiver after the final peer scan before its HTTP snapshot: %s",
+    async (mode) => {
+      let now = 0;
+      const config = { teamDomain: "access.test", aud: "dashboard" };
+      const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+      const jwk: AccessJwk = { ...publicKey.export({ format: "jwk" }), kid: "fixture-key" };
+      const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+      const unsigned = `${encode({ alg: "RS256", kid: "fixture-key" })}.${encode({ iss: "https://access.test", aud: config.aud, sub: "alice", exp: 60 })}`;
+      const token = `${unsigned}.${sign("RSA-SHA256", Buffer.from(unsigned), privateKey).toString("base64url")}`;
+      const native = createOrganizationNativeSources({
+        organization: "installation",
+        access: config,
+        dashboard: accessVerifier(config, { cache: new JwksCache(), now: () => now, fetchJwks: async () => [jwk] }),
+        slack: {
+          auth: { test: async () => ({}) },
+          users: { info: async () => ({}) },
+          conversations: { info: async () => ({}) },
+        },
+      });
+      native.rememberBrowser({ headers: { "cf-access-jwt-assertion": token } }, { sub: "alice" });
+      const h = await fixture(native.currentBrowser);
+      await h.send("peer-source");
+      let finalScan = false,
+        release: () => void = () => {},
+        entered: () => void = () => {};
+      const held = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const resume = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const evaluate = h.authentication.evaluateSourceIdentity;
+      const peer = vi.spyOn(h.authentication, "evaluateSourceIdentity").mockImplementation(async (...args) => {
+        const decision = await evaluate(...args);
+        if (finalScan && args[0].issuer === "installation:mcp") {
+          entered();
+          await resume;
+        }
+        return decision;
+      });
+      const handler = createHomeRuntimeHandler({
+        organization: h.organization,
+        directory: h.store.directory,
+        now: () => 1,
+        refresh: async (context) => {
+          const proof = await native.currentBrowser(context.authentication.identity);
+          return proof.status === "verified" ? context : undefined;
+        },
+        currentEpoch: h.epoch,
+        readThread: async () => undefined,
+        submit: (context, input) => h.organization.admit(context.authentication, input),
+        commands: () => [],
+        currentOffer: async () => {
+          finalScan = true;
+          return undefined;
+        },
+        publicBaseUrl: "https://app.test",
+      });
+      const request = Object.assign(new EventEmitter(), {
+        url: "/home/session",
+        method: "GET",
+        headers: { host: "app.test", accept: "application/json" },
+      }) as unknown as IncomingMessage;
+      let status = 0,
+        body = "",
+        finish: () => void = () => {};
+      const ended = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const response = {
+        writeHead(value: number) {
+          status = value;
+        },
+        end(value = "") {
+          body += value;
+          finish();
+        },
+      } as unknown as ServerResponse;
+      expect(handler(request, response, h.context)).toBe(true);
+      await held;
+      if (mode === "expired") now = 61000;
+      if (mode === "grants changed") h.revokeBrowser();
+      expect(await native.currentBrowser(h.context.authentication.identity)).toMatchObject({
+        status: mode === "expired" ? "fenced" : "verified",
+      });
+      release();
+      await ended;
+      expect({ status, privateContent: body.includes("private fixture") }).toEqual({
+        status: mode === "current" ? 200 : 404,
+        privateContent: mode === "current",
+      });
+      if (mode !== "current") {
+        expect(JSON.parse(body)).toEqual({ status: "not_found" });
+        expect(body).not.toContain("private fixture");
+      } else expect(body).toContain("private fixture");
+      peer.mockRestore();
+      handler.dispose();
+    },
+  );
   it("keeps an existing draft and accepted owner epoch when new valid credential and thread scopes are added", async () => {
     const h = await fixture();
     await h.send("original-key");

@@ -610,12 +610,13 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
                   ),
               ),
               ...(verifiedDirectAudience &&
-              mainWorkAudienceAllowed({
-                agentName: agent.name,
-                actor: chatActorOf(deps.config, msg),
-                message: msg,
+              canOfferMainStart(
+                agent.name,
                 channelVisibility,
-              })
+                msg,
+                chatActorOf(deps.config, msg),
+                deps.commands !== undefined,
+              )
                 ? conversationCommandTools(deps.commands)
                 : []),
             ].filter((tool) => ctx.slackContext !== undefined || tool.name !== "slack_context"),

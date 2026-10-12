@@ -44,7 +44,16 @@ export interface OrganizationAuthorization {
 }
 export type OrganizationAdmissionInput = Pick<
   OrganizationEnvelope,
-  "sourceEvent" | "key" | "destination" | "workload" | "target" | "content" | "context" | "continuation"
+  | "sourceEvent"
+  | "key"
+  | "destination"
+  | "workload"
+  | "target"
+  | "content"
+  | "context"
+  | "continuation"
+  | "nativeMedia"
+  | "nativeMediaDigest"
 >;
 export type ResolvedOrganization = { organization: string; actor: OrganizationActor };
 function sourceFacts(authentication: OrganizationAuthentication) {
@@ -78,6 +87,7 @@ async function payloadDigest(envelope: OrganizationEnvelope): Promise<string> {
       workload: envelope.workload,
       target: envelope.target,
       content: envelope.content,
+      ...(envelope.nativeMediaDigest ? { nativeMediaDigest: envelope.nativeMediaDigest } : {}),
       context: envelope.context,
       ...(reference ? { sourceReference: reference } : {}),
       ...(envelope.continuation ? { continuation: envelope.continuation } : {}),
@@ -196,6 +206,8 @@ export class OrganizationService {
       version: 1,
       source: authentication.source,
       content: input.content,
+      ...(input.nativeMedia ? { nativeMedia: input.nativeMedia } : {}),
+      ...(input.nativeMediaDigest ? { nativeMediaDigest: input.nativeMediaDigest } : {}),
       digest: "0".repeat(64),
       ...(authentication.sourceReference ? { sourceReference: authentication.sourceReference } : {}),
     };
@@ -274,7 +286,10 @@ export class OrganizationService {
   /** Replay is a read of the original disposition, not a new question admission. */
   async replay(
     authentication: OrganizationAuthentication,
-    input: Pick<OrganizationAdmissionInput, "key" | "content" | "context" | "destination" | "continuation"> & {
+    input: Pick<
+      OrganizationAdmissionInput,
+      "key" | "content" | "context" | "destination" | "continuation" | "nativeMediaDigest"
+    > & {
       revision?: number;
     },
   ): Promise<OrganizationResult | undefined> {
@@ -317,6 +332,7 @@ export class OrganizationService {
     const compared = envelopeSchema.safeParse({
       ...original.envelope,
       content: input.content,
+      nativeMediaDigest: input.nativeMediaDigest,
       context: input.context,
       destination: input.destination,
       continuation: input.continuation,

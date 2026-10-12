@@ -1199,7 +1199,7 @@ class ScriptedServe {
         const noId = this.steerAnswersNoId !== undefined && !this.steerAnsweredNoId ? this.steerAnswersNoId : undefined;
         if (noId !== undefined) this.steerAnsweredNoId = true;
         if (noId === "dropped") return j(200, { data: { sessionID: this.sessionID, type: "user", payload: { text } } });
-        const id = `msg_s${this.ordinal++}`;
+        const id = typeof body.id === "string" ? body.id : `msg_s${this.ordinal++}`;
         const inStore = !this.executing;
         if (inStore && this.steerLandsAfterNextPrompt) this.deferredSteerRows.push({ id, text });
         else if (inStore) this.store.push({ id, type: "user", text, time: { created: NOW } });
@@ -1266,7 +1266,7 @@ class ScriptedServe {
         // the continue's echo is elided (the mirror starts from the settlement
         // turn it primed). A fresh run's prompt is the request, a store turn.
         if (!this.script.resume) {
-          promptId = `msg_u${this.store.length}`;
+          promptId = typeof body.id === "string" ? body.id : `msg_u${this.store.length}`;
           this.store.push({ id: promptId, type: "user", text, time: { created: NOW } });
         }
         // A steer held back lands now, after the prompt's row (`steerLandsAfterNextPrompt`).

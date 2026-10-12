@@ -1,3 +1,5 @@
+import { mapLimit } from "../core/mapLimit.js";
+import { HOME_PRIVATE_READ_CONCURRENCY } from "../core/budgets.js";
 import { hasWorkViewScope, workReadPredicate, workViewScopeOf } from "./workViewScope.js";
 import { cancellationFailureMessage } from "../core/runLedger/cancellation.js";
 import { publicationSettlementForRun, publicationSettlementOf } from "../core/publicationSettlement.js";
@@ -667,13 +669,13 @@ export function createLiveViewHandler(
       }
       const visibleTo = readableRuns(ctx.actor);
       const live = index.listActive().filter((s) => !privateWorkerRun(s) && matchesPredicate(visibleTo, s));
-      const render = (firings: FiringsState) => {
+      const render = (firings: FiringsState, coverage?: string) => {
         const t = now();
         const seed: ScheduledSeed = {
           page: "scheduled",
           now: t,
           rows: buildScheduledRows(scheduled.schedules, firings, live, t),
-          ...(firings.ok ? {} : { firingsUnavailable: firings.reason }),
+          ...(coverage ? { firingsUnavailable: coverage } : firings.ok ? {} : { firingsUnavailable: firings.reason }),
         };
         deps.page(req, res, 200, ctx.actor, "Scheduled runs", seed);
       };
@@ -683,7 +685,23 @@ export function createLiveViewHandler(
       }
       // The store is read before the head is written, so the first paint is
       // complete (a firing-store failure is shown as such, never as an empty history).
-      run(res, async () => render(await loadFirings(scheduled.store!)));
+      run(res, async () => {
+        const firings = await loadFirings(scheduled.store!);
+        if (!firings.ok || !hasWorkViewScope(ctx.actor)) return render(firings);
+        // Definitions are installation facts. A firing's reply and trace are
+        // work facts, so a selected browser view needs the recorded run's
+        // current read proof rather than borrowing the schedule's identity.
+        const selected = await mapLimit(firings.firings, HOME_PRIVATE_READ_CONCURRENCY, async (firing) => {
+          if (!firing.runId) return undefined;
+          const found = await service.getRun(firing.runId);
+          return found.ok && matchesPredicate(readableRuns(ctx.actor), found.value) ? firing : undefined;
+        });
+        const readable = selected.filter((firing) => firing !== undefined);
+        render(
+          { ok: true, firings: readable },
+          readable.length === firings.firings.length ? undefined : "History is limited to work you can read.",
+        );
+      });
       return true;
     }
 

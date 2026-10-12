@@ -35,6 +35,16 @@ import { MINUTE_MS, turnLeaseMs } from "../../budgets.js";
 import type { Identity } from "../../../agents/registry.js";
 import type { Effort } from "../../../effort.js";
 import { followUpMessageId, followUpPrompt, followUpSnippet, type FollowUpInput } from "../../threadAdmission.js";
+import {
+  prepareNativeFollowUps,
+  requiresNativeMedia,
+  discardNativeMedia,
+  nativeFollowUpText,
+  guardNativeSource,
+  requiresNativeSource,
+} from "../nativeMedia.js";
+import { openCodeMediaFiles, openCodeMediaId, openCodeMediaAck } from "./media.js";
+import { turnContent } from "../../dispatch/messages.js";
 import { redactAndCap, redactSecrets, type RunEvent, type RunNoteKind } from "../../runEvents.js";
 import {
   identityOrNothing,
@@ -440,6 +450,7 @@ export async function openOpenCodeRun(
         messages: Parameters<typeof openCodeImportBody>[0],
         opts: Parameters<typeof openCodeImportBody>[1],
       ) => {
+        if (requiresNativeSource(run)) await guardNativeSource(run);
         const body = openCodeImportBody(messages, opts);
         // Measured against the pinned binary: the import keeps the ids the body
         // carries (a 260-message import listed back under its own ids), so the
@@ -885,21 +896,59 @@ function drainFollowUps(
           );
           continue;
         }
+        try {
+          if (requiresNativeSource(run)) await guardNativeSource(run);
+        } catch (err) {
+          discardNativeMedia([input]);
+          run.inbox?.requeue([...deferred.splice(0), ...inputs.slice(inputs.indexOf(input))]);
+          throw err;
+        }
+        if (requiresNativeMedia(input) && !(await prepareNativeFollowUps([input], run.prepareFollowUps))) {
+          deferred.push(input);
+          continue;
+        }
         let stagedLine = "";
         if (run.stageFollowUps) {
           try {
             stagedLine = await run.stageFollowUps([input]);
           } catch (err) {
             stagedLine = `Attached files could not be staged: ${err instanceof Error ? err.message : String(err)}`;
+            if (requiresNativeMedia(input)) {
+              discardNativeMedia([input]);
+              deferred.push(input);
+              continue;
+            }
             note("follow_up", `staging the follow-up's files failed: ${redactSecrets(stagedLine)}`);
           }
+        }
+        try {
+          if (requiresNativeSource(run)) await guardNativeSource(run);
+        } catch (err) {
+          discardNativeMedia([input]);
+          run.inbox?.requeue([...deferred.splice(0), ...inputs.slice(inputs.indexOf(input))]);
+          throw err;
+        }
+        if (requiresNativeMedia(input) && !(await prepareNativeFollowUps([input], run.prepareFollowUps))) {
+          deferred.push(input);
+          continue;
         }
         if (!running() || deps.clock() >= (run.deadlineAt ?? Infinity)) {
           run.inbox?.requeue([...deferred.splice(0), ...inputs.slice(inputs.indexOf(input))]);
           return;
         }
-        const prompt = followUpPrompt([input]);
+        const prompt = nativeFollowUpText([input], followUpPrompt([input]));
         const text = stagedLine ? `${prompt}\n\n${stagedLine}` : prompt;
+        const files = requiresNativeMedia(input)
+          ? openCodeMediaFiles(turnContent("", input.images, input.documents))
+          : [];
+        const mediaBody = files.length
+          ? {
+              id: openCodeMediaId(run.runId, text, files, followUpMessageId(input)),
+              text,
+              files,
+              delivery: "steer" as const,
+            }
+          : { text, delivery: "steer" as const };
         // The steer is the delivery: the record says a follow-up was folded in
         // only once the server admitted it. A steer the server never took (the
         // request threw, or it answered outside 2xx) is said on the record as
@@ -1043,10 +1092,20 @@ function drainFollowUps(
               path: routes["session.prompt"].path,
               secretHeaders: auth,
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ text, delivery: "steer" }),
+              body: JSON.stringify(mediaBody),
             });
+            if (files.length && res.status >= 500)
+              throw new OpenCodeWriteUnresolvedError(
+                "the follow-up's steer",
+                "The original media input outcome could not be confirmed.",
+              );
             if (res.status < 200 || res.status >= 300) failure = `the server answered ${res.status}`;
             else {
+              if (files.length && !openCodeMediaAck(res.body, conn.sessionID, mediaBody))
+                throw new OpenCodeWriteUnresolvedError(
+                  "the follow-up's steer",
+                  "The original media input acknowledgment did not confirm its full identity.",
+                );
               const id = parseAnswerId(res.body);
               if (id !== undefined) {
                 conn.knownMessageIds?.add(id);
@@ -1083,6 +1142,12 @@ function drainFollowUps(
               }
             }
           } catch (err) {
+            if (files.length) {
+              throw new OpenCodeWriteUnresolvedError(
+                "the follow-up's steer",
+                "The original media input outcome is unknown; its caption is not delivery proof.",
+              );
+            }
             // A steer the store cannot resolve fails the run by name (below), never a hand-back.
             if (err instanceof OpenCodeWriteUnresolvedError) throw err;
             failure = err instanceof Error ? err.message : String(err);
@@ -1101,19 +1166,21 @@ function drainFollowUps(
           if (err instanceof OpenCodeWriteUnresolvedError) {
             note("harness_error", `${err.message} — the run is stopped`);
             // The loop ends by the failure's name through the connection — no
-            // stop is asked of the run's control, so the record carries no
-            // `stopped` note, the sandbox is released as after any named
-            // failure and the dispatcher's settlement, seeing no stop, hands
-            // the follow-ups handed back below on for the fresh turn.
+            // stop is asked of the run's control. Ordinary text can be handed
+            // back for its existing recovery; possibly admitted binary input
+            // stays owed to its original receipt and is never reposted.
             conn.failure.error = err;
-            // The follow-ups held for the fresh turn, this one, and the batch's
-            // after it, never posted: back to the inbox for the run stage's
-            // fresh-turn path, never dropped. This one may have reached the
-            // server — but the run fails by name here and its session is over,
-            // so a row the server took reaches no model call now; the fresh
-            // turn repeating it is the record's word kept, the harness_error
-            // above naming the steer.
-            run.inbox?.requeue([...deferred.splice(0), ...inputs.slice(inputs.indexOf(input))]);
+            // Ordinary text retains its existing fresh-turn recovery. A media
+            // input may already have reached the model; keep its original
+            // custody unresolved and never repost it under another session.
+            if (files.length) {
+              discardNativeMedia([input]);
+              if (input.ledgerSeq !== undefined) run.inbox?.hold(input.ledgerSeq);
+              // With no receiver sequence, original ingress already remains
+              // uncertain. No local getter can establish durable custody.
+              else run.inbox?.markUntrustedFollowUp();
+              run.inbox?.requeue([...deferred.splice(0), ...inputs.slice(inputs.indexOf(input) + 1)]);
+            } else run.inbox?.requeue([...deferred.splice(0), ...inputs.slice(inputs.indexOf(input))]);
           }
           throw err;
         }

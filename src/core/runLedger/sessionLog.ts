@@ -13,7 +13,7 @@ import {
   type ContextDependencies,
 } from "../references/contextDependencies.js";
 import { DEFAULT_RETENTION_POLICY, utf8ByteLength } from "../runRecord.js";
-import type { StoredRow } from "./transcript.js";
+import { storedAttachmentRefs, type StoredRow } from "./transcript.js";
 
 export { isRunSession, SESSION_KEY_PATTERN, type RunSession } from "../runRecord.js";
 
@@ -411,18 +411,19 @@ export function sessionsToDrop(candidates: readonly DropCandidate[]): Array<{ ke
  *  `dataRef` of each of a tool result's nested parts — so a trimmed result
  *  can take with it what nothing else references (session-log item 5). */
 export function attachmentRefsOf(json: string): string[] {
-  const stored = parseStored(json);
-  if (!stored || "compaction" in stored) return [];
-  const part = stored.part as (ContentPart & { dataRef?: unknown }) | undefined;
-  if (!part) return [];
-  const refs: string[] = [];
-  if (typeof part.dataRef === "string") refs.push(part.dataRef);
-  if (part.type === "tool_result" && Array.isArray(part.content)) {
-    for (const c of part.content as Array<{ dataRef?: unknown }>) {
-      if (typeof c?.dataRef === "string") refs.push(c.dataRef);
+  try {
+    return storedAttachmentRefs(json);
+  } catch (error) {
+    let stored;
+    try {
+      stored = JSON.parse(json);
+    } catch {
+      if (json.includes('"internalTranscript"')) throw error;
+      return [];
     }
+    if (stored?.internalTranscript !== undefined) throw error;
+    return [];
   }
-  return refs;
 }
 
 /** Legacy readers cannot infer reusable source access from a protocol name.

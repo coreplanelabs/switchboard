@@ -11,6 +11,7 @@ import {
   type InstanceFacts,
   type UnitFacts,
 } from "../unitRuns.js";
+import { currentUnitProgress } from "../coordinator/unitProgress.js";
 import type { HomeWeek } from "./week.js";
 
 export interface HomeInventory {
@@ -136,12 +137,13 @@ export interface HomeServiceDeps {
   conditions?: {
     list(unitKey: string, canonicalUnit?: CoordinatorUnit, privateRead?: boolean): Promise<HomeCondition[]>;
   };
-  liveUnitKeys?: (visibleTo: Predicate) => Promise<ReadonlySet<string>>;
+  liveUnitRuns?: (visibleTo: Predicate) => Promise<ReadonlyMap<string, ReadonlySet<string>>>;
   maxPages?: number;
   maxUnits?: number;
   /** Installation-owned persistent key; never a browser value or a generated startup key. */
   historyCursorKey?: Uint8Array;
 }
+type ReadFailurePhase = "live_units" | "inventory_list" | "unit_list" | "unit_conditions" | "inventory_cursor";
 const PAGE_SIZE = 100;
 const DEFAULT_MAX_PAGES = 100;
 const DEFAULT_MAX_UNITS = 20_000;
@@ -177,6 +179,31 @@ function visibleInstance(instance: CoordinatorInstance, unit: CoordinatorUnit): 
     ...(instance.base !== undefined ? { base: instance.base } : {}),
     createdAt: instance.createdAt,
   };
+}
+
+function currentMovement(
+  row: HomeUnit,
+  canonical: CoordinatorUnit,
+  conditionsComplete: boolean,
+  privateRead: boolean,
+  live: ReadonlyMap<string, ReadonlySet<string>>,
+): boolean {
+  const runs = live.get(row.unit.unit);
+  if (!runs?.size || canonical.idle || canonical.ending || canonical.recoveryHold) return false;
+  const progress = currentUnitProgress(canonical);
+  if (row.conditions.length === 0) return !progress;
+  if (!conditionsComplete || row.conditions.length !== 1 || (canonical.workBrief && !privateRead)) return false;
+  const condition = row.conditions[0]!;
+  return (
+    !!progress &&
+    progress.waiting?.kind === "child" &&
+    runs.has(progress.waiting.runId) &&
+    condition.id === `${row.unit.unit}:progress` &&
+    condition.state === "open" &&
+    condition.revision === progress.revision &&
+    condition.owner.kind === "automation" &&
+    condition.owner.class === "Original worker"
+  );
 }
 
 export function createHomeService(deps: HomeServiceDeps): {
@@ -227,6 +254,13 @@ export function createHomeService(deps: HomeServiceDeps): {
         throw new Error();
       return value;
     } catch {
+      try {
+        console.warn(
+          JSON.stringify({ event: "home.read.degraded", phase: "history_cursor", reason: "unavailable_or_invalid" }),
+        );
+      } catch {
+        /* Diagnostics cannot change current read coverage. */
+      }
       throw new Error("Home history cursor is invalid for this reader");
     }
   }
@@ -252,7 +286,12 @@ export function createHomeService(deps: HomeServiceDeps): {
       };
     }
   }
-  async function project(instance: CoordinatorInstance, unit: CoordinatorUnit, input: HomeReader) {
+  async function project(
+    instance: CoordinatorInstance,
+    unit: CoordinatorUnit,
+    input: HomeReader,
+    live: ReadonlyMap<string, ReadonlySet<string>> = new Map(),
+  ) {
     let privateRead = false,
       privateAvailable = true;
     if (unit.workBrief && input.readPrivateUnit) {
@@ -309,7 +348,13 @@ export function createHomeService(deps: HomeServiceDeps): {
         : terminal
           ? ("complete" as const)
           : ("active" as const);
-    return { row, conditionsComplete, terminal, completion };
+    return {
+      row,
+      conditionsComplete,
+      terminal,
+      completion,
+      moving: currentMovement(row, unit, conditionsComplete, privateRead, live),
+    };
   }
 
   function assignedToReader(input: HomeReader, id: string) {
@@ -332,17 +377,20 @@ export function createHomeService(deps: HomeServiceDeps): {
   async function read(input: HomeReader, includeLive = true) {
     const unresolved: HomeUnit[] = [];
     const ended: HomeUnit[] = [];
+    const moving = new Set<string>();
     let status: HomeReadStatus = "complete";
-    let live: ReadonlySet<string> = new Set();
-    const fail = () => {
+    let live: ReadonlyMap<string, ReadonlySet<string>> = new Map();
+    let failure: ReadFailurePhase | undefined;
+    const fail = (phase?: ReadFailurePhase) => {
       status = "partial";
+      failure ??= phase;
     };
-    if (input.visibleTo.kind === "none") return { unresolved, ended, live, status };
-    if (includeLive && deps.liveUnitKeys) {
+    if (input.visibleTo.kind === "none") return { unresolved, ended, moving, status };
+    if (includeLive && deps.liveUnitRuns) {
       try {
-        live = await deps.liveUnitKeys(input.visibleTo);
+        live = await deps.liveUnitRuns(input.visibleTo);
       } catch {
-        fail();
+        fail("live_units");
       }
     }
     const seenCursors = new Set<string>();
@@ -356,12 +404,12 @@ export function createHomeService(deps: HomeServiceDeps): {
       try {
         page = await deps.instances.listInstances({ limit: PAGE_SIZE, ...(cursor ? { cursor } : {}) });
       } catch {
-        fail();
+        fail("inventory_list");
         break;
       }
       const candidates = page.items.filter((instance) => {
         if (seenInstances.has(instance.id)) {
-          fail();
+          fail("inventory_list");
           return false;
         }
         seenInstances.add(instance.id);
@@ -376,7 +424,7 @@ export function createHomeService(deps: HomeServiceDeps): {
         try {
           return { instance, units: await deps.instances.listUnits(instance.id) };
         } catch {
-          fail();
+          fail("unit_list");
           return { instance, units: [] };
         }
       });
@@ -389,12 +437,12 @@ export function createHomeService(deps: HomeServiceDeps): {
           }
           rowsRead++;
           if (unit.instanceId !== instance.id) {
-            fail();
+            fail("unit_list");
             continue;
           }
           const facts = unitFactsOf(unit);
           if (seenUnits.has(facts.unit)) {
-            fail();
+            fail("unit_list");
             continue;
           }
           seenUnits.add(facts.unit);
@@ -412,12 +460,13 @@ export function createHomeService(deps: HomeServiceDeps): {
       );
       const projected = await mapLimit(pending, HOME_PRIVATE_READ_CONCURRENCY, async ({ instance, unit }) => ({
         instance,
-        value: await project(instance, unit, reader),
+        value: await project(instance, unit, reader, live),
       }));
       for (const { instance, value } of projected) {
-        if (!value.conditionsComplete) fail();
+        if (!value.conditionsComplete) fail("unit_conditions");
         if (!inSelectedWork(input, instance, value.row.conditions)) continue;
         (value.terminal ? ended : unresolved).push(value.row);
+        if (value.moving) moving.add(value.row.unit.unit);
       }
       if (rowsRead >= maxUnits && page.cursor !== undefined) {
         fail();
@@ -428,7 +477,7 @@ export function createHomeService(deps: HomeServiceDeps): {
         break;
       }
       if (!page.cursor || seenCursors.has(page.cursor)) {
-        fail();
+        fail("inventory_cursor");
         break;
       }
       seenCursors.add(page.cursor);
@@ -436,7 +485,14 @@ export function createHomeService(deps: HomeServiceDeps): {
     }
     if (!terminalPage) fail();
     if (status !== "complete" && unresolved.length + ended.length === 0) status = "unavailable";
-    return { unresolved, ended, live, status };
+    if (failure) {
+      try {
+        console.warn(JSON.stringify({ event: "home.read.degraded", phase: failure, reason: "unavailable_or_invalid" }));
+      } catch {
+        /* Diagnostics cannot change current read coverage. */
+      }
+    }
+    return { unresolved, ended, moving, status };
   }
 
   return {
@@ -447,6 +503,17 @@ export function createHomeService(deps: HomeServiceDeps): {
         try {
           instance = await deps.instances.get(id);
         } catch {
+          try {
+            console.warn(
+              JSON.stringify({
+                event: "home.read.degraded",
+                phase: "inventory_list",
+                reason: "unavailable_or_invalid",
+              }),
+            );
+          } catch {
+            /* Diagnostics cannot change current read coverage. */
+          }
           return { status: "unavailable" };
         }
         if (instance === null) return { status: "not_found" };
@@ -458,12 +525,36 @@ export function createHomeService(deps: HomeServiceDeps): {
           try {
             page = await deps.instances.listInstances({ limit: PAGE_SIZE, ...(cursor ? { cursor } : {}) });
           } catch {
+            try {
+              console.warn(
+                JSON.stringify({
+                  event: "home.read.degraded",
+                  phase: "inventory_list",
+                  reason: "unavailable_or_invalid",
+                }),
+              );
+            } catch {
+              /* Diagnostics cannot change current read coverage. */
+            }
             return { status: "unavailable" };
           }
           instance = page.items.find((row) => row.id === id);
           if (instance) break;
           if (page.cursor === undefined) return { status: "not_found" };
-          if (!page.cursor || seen.has(page.cursor)) return { status: "unavailable" };
+          if (!page.cursor || seen.has(page.cursor)) {
+            try {
+              console.warn(
+                JSON.stringify({
+                  event: "home.read.degraded",
+                  phase: "inventory_cursor",
+                  reason: "unavailable_or_invalid",
+                }),
+              );
+            } catch {
+              /* Diagnostics cannot change current read coverage. */
+            }
+            return { status: "unavailable" };
+          }
           seen.add(page.cursor);
           cursor = page.cursor;
         }
@@ -482,15 +573,24 @@ export function createHomeService(deps: HomeServiceDeps): {
       try {
         units = await deps.instances.listUnits(instance.id);
       } catch {
+        try {
+          console.warn(
+            JSON.stringify({ event: "home.read.degraded", phase: "unit_list", reason: "unavailable_or_invalid" }),
+          );
+        } catch {
+          /* Diagnostics cannot change current read coverage. */
+        }
         return { status: "unavailable" };
       }
       input = await privateReader(input, [{ instance, units: units.slice(0, maxUnits) }]);
       let status: "complete" | "partial" = "complete";
-      let live: ReadonlySet<string> = new Set();
-      if (deps.liveUnitKeys) {
+      let failure: ReadFailurePhase | undefined;
+      let live: ReadonlyMap<string, ReadonlySet<string>> = new Map();
+      if (deps.liveUnitRuns) {
         try {
-          live = await deps.liveUnitKeys(input.visibleTo);
+          live = await deps.liveUnitRuns(input.visibleTo);
         } catch {
+          failure ??= "live_units";
           status = "partial";
         }
       }
@@ -513,18 +613,21 @@ export function createHomeService(deps: HomeServiceDeps): {
           break;
         }
         if (unit.instanceId !== instance.id) {
+          failure ??= "unit_list";
           status = "partial";
           continue;
         }
         let projected: Awaited<ReturnType<typeof project>>;
         try {
-          projected = await project(instance, unit, input);
+          projected = await project(instance, unit, input, live);
         } catch {
+          failure ??= "unit_conditions";
           status = "partial";
           continue;
         }
         const key = projected.row.unit.unit;
         if (seenUnits.has(key)) {
+          failure ??= "unit_list";
           status = "partial";
           continue;
         }
@@ -533,18 +636,31 @@ export function createHomeService(deps: HomeServiceDeps): {
         // A private worker's provenance stays redacted throughout this entity projection.
         projected.row.instance = shownInstance;
         pipeline.units.push({ ...projected.row, completion: projected.completion });
-        if (!projected.conditionsComplete) status = "partial";
+        if (!projected.conditionsComplete) {
+          failure ??= "unit_conditions";
+          status = "partial";
+        }
         if (projected.completion === "complete") continue;
         pipeline.unresolved++;
-        if (live.has(key)) movingUnitKeys.push(key);
+        const moving = projected.moving;
+        if (moving) movingUnitKeys.push(key);
         const group = projected.row.conditions.some(
           (condition) => condition.owner.kind === "person" && assignedToReader(input, condition.owner.id),
         )
           ? "needsYou"
-          : live.has(key)
+          : moving
             ? "moving"
             : "waiting";
         pipeline[group]++;
+      }
+      if (failure) {
+        try {
+          console.warn(
+            JSON.stringify({ event: "home.read.degraded", phase: failure, reason: "unavailable_or_invalid" }),
+          );
+        } catch {
+          /* Diagnostics cannot change current read coverage. */
+        }
       }
       if (!pipeline.units.length && !readerOwns(input, instance)) return { status: "not_found" };
       return { status, organizationId: deps.organizationId, pipeline, movingUnitKeys };
@@ -566,7 +682,7 @@ export function createHomeService(deps: HomeServiceDeps): {
           (condition) => condition.owner.kind === "person" && assignedToReader(input, condition.owner.id),
         )
           ? "needsYou"
-          : rows.live.has(row.unit.unit)
+          : rows.moving.has(row.unit.unit)
             ? "moving"
             : "waiting";
         result[group].push(row);
@@ -618,6 +734,17 @@ export function createHomeService(deps: HomeServiceDeps): {
               throw new Error();
             after = value as { at: number; key: string };
           } catch {
+            try {
+              console.warn(
+                JSON.stringify({
+                  event: "home.read.degraded",
+                  phase: "history_cursor",
+                  reason: "unavailable_or_invalid",
+                }),
+              );
+            } catch {
+              /* Diagnostics cannot change current read coverage. */
+            }
             throw new Error("Home history cursor is invalid for this reader and week");
           }
         }
@@ -674,7 +801,17 @@ export function createHomeService(deps: HomeServiceDeps): {
       let scanned = 0;
       let inventoryAvailable = false;
       const seenCursors = new Set<string>();
+      let failure: ReadFailurePhase | undefined;
       const finish = (position?: HistoryPosition, bounded = false): HomeHistory => {
+        if (failure) {
+          try {
+            console.warn(
+              JSON.stringify({ event: "home.read.degraded", phase: failure, reason: "unavailable_or_invalid" }),
+            );
+          } catch {
+            /* Diagnostics cannot change current read coverage. */
+          }
+        }
         if (bounded) result.status = inventoryAvailable ? "partial" : "unavailable";
         if (position) {
           const token = encodeCursor(position, input);
@@ -692,6 +829,7 @@ export function createHomeService(deps: HomeServiceDeps): {
             ...(inventory ? { cursor: inventory } : {}),
           });
         } catch {
+          failure ??= "inventory_list";
           return finish(
             inventory
               ? { version: 1, inventory, instance: instanceOffset, ...(afterUnit ? { afterUnit } : {}) }
@@ -722,6 +860,7 @@ export function createHomeService(deps: HomeServiceDeps): {
           try {
             units = [...(await deps.instances.listUnits(instance.id))];
           } catch {
+            failure ??= "unit_list";
             return finish(position(), true);
           }
           units.sort((a, b) => (a.unit < b.unit ? -1 : a.unit > b.unit ? 1 : 0));
@@ -737,11 +876,15 @@ export function createHomeService(deps: HomeServiceDeps): {
               scanned++;
               if (unit.instanceId !== instance.id) {
                 afterUnit = unit.unit;
+                failure ??= "unit_list";
                 result.status = "partial";
                 continue;
               }
               const projected = await project(instance, unit, reader);
-              if (!projected.conditionsComplete) result.status = "partial";
+              if (!projected.conditionsComplete) {
+                failure ??= "unit_conditions";
+                result.status = "partial";
+              }
               if (projected.terminal && result.units.length >= limit) {
                 const next = position();
                 if (!next) result.status = "partial";
@@ -755,7 +898,10 @@ export function createHomeService(deps: HomeServiceDeps): {
           afterUnit = undefined;
         }
         if (page.cursor === undefined) return finish();
-        if (!page.cursor || page.cursor === resume || seenCursors.has(page.cursor)) return finish(undefined, true);
+        if (!page.cursor || page.cursor === resume || seenCursors.has(page.cursor)) {
+          failure ??= "inventory_cursor";
+          return finish(undefined, true);
+        }
         seenCursors.add(page.cursor);
         inventory = page.cursor;
         instanceOffset = 0;

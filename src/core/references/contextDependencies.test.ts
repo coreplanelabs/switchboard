@@ -31,6 +31,45 @@ const known = (refs: SourceReadReference[] = [], revision = 0): ContextDependenc
 const sources = () => testSessionSources({ channelId: "slack:C1", threadKey: "slack:C1:1.0", userId: "slack:U11" });
 
 describe("whole-context dependencies", () => {
+  it("retains a saved native read dependency through merge, hash and checkpoint containment without accepting a downgrade", async () => {
+    const leaf = {
+      executionRunId: "choice-B",
+      executionSequence: 2,
+      reference: {
+        version: 1 as const,
+        kind: "confirmed" as const,
+        sourceRunId: "source-A",
+        sourceSequence: 1,
+        sourceDigest: "a".repeat(64),
+        confirmationId: "saved-choice",
+        intentDigest: "b".repeat(64),
+      },
+    };
+    const context = { ...known(), version: 3 as const, nativeMediaSources: [leaf] };
+    expect(isContextDependencies(context)).toBe(true);
+    expect(isContextDependencies({ ...context, version: 2 })).toBe(false);
+    const { nativeMediaSources, ...without } = context;
+    expect(isContextDependencies({ ...without, savedNativeMediaSources: nativeMediaSources })).toBe(false);
+    expect(isContextDependencies({ ...context, unrecognizedRequiredSource: [leaf] })).toBe(false);
+    expect(isContextDependencies(without)).toBe(false);
+    const merged = mergeContextDependencies(known(), context);
+    expect(merged).toMatchObject({ version: 3, status: "known", nativeMediaSources: [leaf] });
+    expect(contextDependenciesContain(merged, context)).toBe(true);
+    expect(contextDependenciesContain(known(), context)).toBe(false);
+    expect(await contextDependenciesHash(merged)).not.toBe(await contextDependenciesHash(known()));
+    expect(
+      mergeContextDependencies(context, {
+        ...context,
+        nativeMediaSources: [{ ...leaf, reference: { ...leaf.reference, sourceDigest: "c".repeat(64) } }],
+      }),
+    ).toMatchObject({ status: "unknown", reason: "equivocation" });
+    expect(
+      isContextDependencies({
+        ...context,
+        nativeMediaSources: [{ ...leaf, reference: { ...leaf.reference, sourceDigest: "bad" } }],
+      }),
+    ).toBe(false);
+  });
   it("keeps same-run native references in a versioned envelope and rejects downgrade or equivocation", async () => {
     const ref = { runId: "review", callId: "private-read", resultHash: "a".repeat(64), admissionHash: "b".repeat(64) };
     const scoped: ContextDependencies = { ...known(), version: 2, executionGithub: [ref] };

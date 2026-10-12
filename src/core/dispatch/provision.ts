@@ -1463,6 +1463,8 @@ export async function attachWorkspace(
 /** What `mintRunBearer` reads off the dispatch. */
 export interface MintBearerContext {
   runId: string;
+  /** Required before attach; the run loop binds current trusted source proof. */
+  sourceGuardRequired?: boolean;
   agent: AgentDef;
   /** The run's model card (record 0052): rides the grant so the meter row can
    *  name the vendor and price from the card's rate (model-proxy item 6). */
@@ -1495,20 +1497,23 @@ export function mintRunBearer(deps: ProvisionDeps, ctx: MintBearerContext): stri
   const { provider: providerName, model } = parseModelRef(resolved.modelRef);
   const providerCfg = deps.config.config.providers[providerName];
   if (!providerCfg) return undefined;
-  return store.mint({
-    runId,
-    ...(ctx.github ? { github: ctx.github } : {}),
-    modelRef: resolved.modelRef,
-    providerName,
-    providerWire: wireOf(providerCfg),
-    model,
-    ...(ctx.card ? { card: ctx.card } : {}),
-    maxTokens: agent.maxTokens,
-    maxTurns: agent.maxTurns,
-    expiresAt: provisionalBearerExpiresAt(clock(), profile.minutes),
-    span: root,
-    publish: (event) => registry.publish(runId, event),
-  });
+  return store.mint(
+    {
+      runId,
+      ...(ctx.github ? { github: ctx.github } : {}),
+      modelRef: resolved.modelRef,
+      providerName,
+      providerWire: wireOf(providerCfg),
+      model,
+      ...(ctx.card ? { card: ctx.card } : {}),
+      maxTokens: agent.maxTokens,
+      maxTurns: agent.maxTurns,
+      expiresAt: provisionalBearerExpiresAt(clock(), profile.minutes),
+      span: root,
+      publish: (event) => registry.publish(runId, event),
+    },
+    { sourceGuardRequired: ctx.sourceGuardRequired },
+  );
 }
 
 /** The prompt as composed for the first turn: the MCP tools discovered for this

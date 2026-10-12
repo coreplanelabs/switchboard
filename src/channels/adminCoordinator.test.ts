@@ -9740,8 +9740,8 @@ describe("the fold — a unit's thread events reach the pipeline's next step (re
     expect(h.dispatched[0]!.msg.images).toEqual([shot]);
     expect(await h.instances.listEvents(key, true)).toHaveLength(1);
 
-    h.setScript(async (msg, io, opts) => {
-      return registers("run-retry")(msg, io, opts);
+    h.setScript(async (msg, io) => {
+      return registers("run-retry")(msg, io);
     });
     expect((await call(h, "spawn", body)).status).toBe(503);
     expect(h.dispatched).toHaveLength(1);
@@ -11264,6 +11264,30 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
     expect((await h.instances.listUnits(INSTANCE.id))[0]?.recovery).toBeUndefined();
     expect(await callRecovery(h)).toMatchObject({ status: 409, body: { error: "recovery_workflow_failed" } });
+    expect(h.recoveries).toHaveLength(1);
+  });
+
+  it.each([
+    [new TypeError("PRIVATE_RECOVERY_DETAIL"), "type_error"],
+    [new SyntaxError("PRIVATE_RECOVERY_DETAIL"), "syntax_error"],
+    [Object.assign(new Error("PRIVATE_RECOVERY_DETAIL"), { name: "PRIVATE_ERROR_NAME" }), "error"],
+    ["PRIVATE_RECOVERY_DETAIL", "non_error"],
+  ])("keeps recovery snapshot failure responses and logs only a closed error kind %s", async (failure, errorKind) => {
+    const h = harness({ prFacts: exactRecoveryFacts(HEAD) });
+    await h.instances.put(recoveryInstance());
+    await h.instances.putUnits([requestChangesRow()]);
+    await h.store.put(reviewRecord());
+    expect(await callRecovery(h)).toMatchObject({ status: 200 });
+    h.logs.length = 0;
+    vi.spyOn(h.instances, "listUnits").mockResolvedValueOnce([requestChangesRow()]).mockRejectedValueOnce(failure);
+    expect(await callRecovery(h)).toEqual({
+      status: 503,
+      body: { ok: false, error: "recovery_history_unavailable", at: NOW },
+    });
+    expect(h.logs).toEqual([
+      JSON.stringify({ event: "coordinator.read.failed", phase: "recovery_snapshot_reread", errorKind }),
+    ]);
+    expect(JSON.stringify(h.logs)).not.toContain("PRIVATE_");
     expect(h.recoveries).toHaveLength(1);
   });
 

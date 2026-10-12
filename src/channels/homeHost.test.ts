@@ -18,7 +18,11 @@ const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
-async function fixture(nativeChildOffer = false) {
+async function fixture(
+  nativeChildOffer = false,
+  afterHistory?: (request: OrganizationExecutionRequest) => Promise<void>,
+  duringHistoryContext?: () => Promise<void>,
+) {
   const identity = { issuer: "https://fixture.test", tenant: null, subject: "alice" };
   const store = new InMemoryOrganizationStore(() => 1000),
     ledger = new InMemoryRunLedger(() => 1000);
@@ -152,6 +156,7 @@ async function fixture(nativeChildOffer = false) {
     dispatchOwned: async (request) => {
       requests.push(request);
       history.push(await host.privateHistory(request));
+      await afterHistory?.(request);
       await request.io.status({ title: "Working" });
       await request.io.reply("The recorded reply");
       return { status: uncertain ? "uncertain" : "completed" };
@@ -170,6 +175,14 @@ async function fixture(nativeChildOffer = false) {
     readThread: async () => undefined,
     commands: () => [],
     canReadContext: async () => false,
+    ...(duringHistoryContext
+      ? {
+          historyContext: async () => {
+            await duringHistoryContext();
+            return undefined;
+          },
+        }
+      : {}),
     sourceIo: (request) =>
       request.envelope.source === "browser"
         ? new BrowserIo()
@@ -216,6 +229,7 @@ async function fixture(nativeChildOffer = false) {
   };
   return {
     host,
+    ledger,
     authentication,
     tokens,
     store,
@@ -249,6 +263,121 @@ async function fixture(nativeChildOffer = false) {
   };
 }
 describe("Home authenticated host", () => {
+  it.each([false, true])("fences a live owner's copied plain-text history after deletion: %s", async (remove) => {
+    let entered: () => void = () => {},
+      release: () => void = () => {};
+    const copying = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const s = await fixture(false, async (request) => {
+      if (request.envelope.content === "Continue B") {
+        entered();
+        await held;
+      }
+    });
+    await s.send((await s.session()).body, "Private note A");
+    await s.execute();
+    const sourceA = s.requests[0]!;
+    await s.send((await s.session()).body, "Continue B");
+    const executing = s.execute();
+    await copying;
+    const ownerB = s.requests[1]!;
+    let before, after;
+    try {
+      expect(s.history[1]).toEqual([
+        { role: "user", text: "Private note A", user: "access:alice" },
+        { role: "assistant", text: "The recorded reply" },
+      ]);
+      const audience = ownerB.io.organizationPrivateAudience!();
+      if (!audience) throw new Error("The live owner has no private audience.");
+      before = await ownerB.io.verifyOrganizationPrivateAudience!(audience);
+      const unchanged = await s.host.currentEpoch(s.context);
+      expect(await s.runtime.deleteContent(s.context.authentication, "unknown-receipt")).toEqual({
+        status: "ok",
+        removed: 0,
+      });
+      expect(
+        await s.runtime.deleteContent(
+          {
+            ...s.context.authentication,
+            identity: { ...s.context.authentication.identity, subject: "foreign" },
+          },
+          sourceA.receipt.id,
+        ),
+      ).toEqual({ status: "not_found" });
+      expect(await s.host.currentEpoch(s.context)).toBe(unchanged);
+      if (remove)
+        expect(await s.runtime.deleteContent(s.context.authentication, sourceA.receipt.id)).toEqual({
+          status: "ok",
+          removed: 2,
+        });
+      after = await ownerB.io.verifyOrganizationPrivateAudience!(audience);
+    } finally {
+      release();
+      await executing;
+    }
+    expect(before).toEqual({ ok: true });
+    expect(after).toEqual(remove ? { ok: false, code: "direct-audience-unavailable" } : { ok: true });
+    const replay = await s.service.replay(s.context.authentication, {
+      key: ownerB.envelope.key,
+      content: ownerB.envelope.content,
+      context: ownerB.envelope.context,
+      destination: ownerB.envelope.destination,
+      revision: ownerB.envelope.sourceReference?.browserRevision,
+    });
+    expect(replay).toMatchObject({
+      status: "receipt",
+      duplicate: true,
+      receipt: { id: ownerB.receipt.id, ownerRunId: ownerB.runId },
+    });
+    expect(s.requests.map((request) => request.runId)).toEqual([sourceA.runId, ownerB.runId]);
+    if (remove) {
+      const epoch = await s.host.currentEpoch(s.context);
+      expect(await s.runtime.deleteContent(s.context.authentication, sourceA.receipt.id)).toEqual({
+        status: "ok",
+        removed: 0,
+      });
+      expect(await s.host.currentEpoch(s.context)).toBe(epoch);
+      expect(await s.ledger.readIngressByRun(sourceA.runId)).toMatchObject({
+        status: "record",
+        record: { runId: sourceA.runId, request: null },
+      });
+    }
+    expect(await s.ledger.readIngressByRun(ownerB.runId)).toMatchObject({
+      status: "record",
+      record: {
+        runId: ownerB.runId,
+        receiptId: ownerB.receipt.id,
+        request: { envelope: { content: "Continue B" } },
+        origin: { actor: { identity: ownerB.envelope.actor.identity } },
+      },
+    });
+  });
+  it.each([false, true])("fences deletion during private history context loading: %s", async (remove) => {
+    let loading = false,
+      removed = false;
+    const s = await fixture(false, undefined, async () => {
+      if (!loading || removed || !remove) return;
+      removed = true;
+      expect((await s.runtime.deleteContent(s.context.authentication, s.requests[0]!.receipt.id)).status).toBe("ok");
+    });
+    await s.send((await s.session()).body, "Original input");
+    await s.execute();
+    await s.send((await s.session()).body, "New input");
+    await s.execute();
+    loading = true;
+    const history = s.host.privateHistory(s.requests[1]!);
+    if (remove) await expect(history).rejects.toThrow("unavailable");
+    else
+      expect(await history).toEqual([
+        { role: "user", text: "Original input", user: "access:alice" },
+        { role: "assistant", text: "The recorded reply" },
+      ]);
+    expect(s.requests[1]!.envelope.content).toBe("New input");
+  });
   it("keeps opened thread replies and history local while preserving current source checks", async () => {
     const s = await fixture();
     await s.send((await s.session()).body, "Start work");

@@ -214,7 +214,7 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     expect(w.find(".green-page-heading .green-badge").classes()).toContain("text-ok");
   });
 
-  it("names the unit's one thread, phrases the pipeline ordinal, and credits the pipeline before the unit starts", () => {
+  it("names the unit's one thread, phrases the pipeline ordinal, and shows missing retained evidence without inventing a lifecycle", () => {
     const active = mountApp(UnitPage, { seed: seed() });
     expect(active.findAll("li.fold")).toHaveLength(4);
     expect(active.text()).toContain("p · second pipeline");
@@ -222,7 +222,7 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     const notStarted = mountApp(UnitPage, {
       seed: seed({ threads: {}, sourceUrls: {}, ending: undefined, pr: undefined, rounds: [] }, []),
     });
-    expect(notStarted.text()).toContain("This unit has not started");
+    expect(notStarted.text()).toContain("No retained run evidence");
   });
 
   it("a row opens to the run's own timeline in place: the stored replay is read once from the run's events route and folded into the Where the time went card; a Longest-steps link opens the run's page at that row", async () => {
@@ -276,7 +276,7 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     expect(fetchMock.mock.calls.map(([url]) => url)).toContain("/runs/c1/events");
   });
 
-  it("a unit with one thread lists its runs by agent, shows no review thread cell, and searches both sessions on that thread; a unit not started lists nothing and says so", () => {
+  it("a unit with one thread lists its runs by agent, shows no review thread cell, and searches both sessions on that thread; missing run rows keep the unit's recorded facts", () => {
     const codingOnly = mountApp(UnitPage, {
       seed: seed(
         {
@@ -303,8 +303,8 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     const notStarted = mountApp(UnitPage, {
       seed: seed({ threads: {}, sourceUrls: {}, ending: undefined, pr: undefined, rounds: [], title: undefined }, []),
     });
-    expect(notStarted.text()).toContain("This unit has not started");
-    expect(notStarted.find(".green-heading-actions .green-badge").text()).toBe("not started");
+    expect(notStarted.text()).toContain("No retained run evidence");
+    expect(notStarted.find(".green-heading-actions .green-badge").text()).toBe("State not recorded");
     expect(notStarted.find('section[aria-label="Thread search"]').exists()).toBe(false);
     expect(notStarted.text()).toContain("plan/p/the-unit-page");
     expect(notStarted.find('a[href^="/threads/"]').exists()).toBe(false);

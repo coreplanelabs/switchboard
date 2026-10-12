@@ -191,6 +191,54 @@ describe("makePageSender — the shell for a document request, the seed for the 
   const pageSeed = { page: "runNotFound" as const, retentionDays: 30 };
   const viewingAs: Actor = { viewingAs: { id: "slack:UALICE", name: "alice" } } as unknown as Actor;
 
+  it.each([
+    "identities",
+    "fleetHome",
+    "fleetHistory",
+    "fleetPipeline",
+    "runs",
+    "scheduled",
+    "run",
+    "runNotFound",
+    "unit",
+    "residents",
+    "resident",
+    "costs",
+    "metrics",
+    "reviewsMetrics",
+    "plane",
+    "delivery",
+    "settings",
+    "home",
+  ])(
+    "stamps the actual viewer and configured organization for %s, never supplied seed facts or the selected person",
+    (page) => {
+      const render = makePageSender(assets, ALL_CAPABILITIES, { organization: "org:trusted" });
+      const actor = {
+        id: "access:alice",
+        kind: "user",
+        viewingAs: { id: "access:bob" },
+        asUser: { id: "access:bob" },
+      } as unknown as Actor;
+      for (const accept of ["application/json", "text/html"]) {
+        const out = capture();
+        render(request(accept), out.res, 200, actor, "Current page", {
+          page,
+          residents: [],
+          asUser: { id: "access:bob" },
+          pageAccess: { actor: "access:forged", organization: "org:forged" },
+        } as never);
+        const island =
+          accept === "application/json"
+            ? JSON.parse(out.body)
+            : JSON.parse(/id="sb-seed">(.*?)<\/script>/s.exec(out.body)![1]);
+        expect(island.pageAccess).toEqual({ actor: "access:alice", organization: "org:trusted" });
+        expect(island.asUser).toEqual({ id: "access:bob" });
+        expect(island.viewingAs).toEqual({ id: "access:bob" });
+      }
+    },
+  );
+
   it("a document request gets the shell under the HTML headers, at the view's status, title and stamps in the island", () => {
     const out = capture();
     send(request("text/html,*/*;q=0.8"), out.res, 404, undefined, "Run not found", pageSeed);

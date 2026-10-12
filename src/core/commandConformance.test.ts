@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { marked } from "marked";
+import { decodeHTML } from "entities";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -665,6 +667,18 @@ describe("command conformance — catalogue fences", () => {
       "unknown option → `invalid_input`",
     );
     expect(renderVariantCell({ variant: "required-only" })).toBe("required-only");
+  });
+
+  it("renders literal backslashes, pipes and controls without changing table cells", () => {
+    const variant = renderVariantCell({ variant: "path \\| value\r\nnext\tcell" });
+    const html = marked.parse(`| Variant | Other |\n| --- | --- |\n| ${variant} | done |`);
+    expect(html).toContain("<td>path \\| value next cell</td>");
+    expect(html).toContain("<td>done</td>");
+    const matrix = buildConformanceMatrix(CATALOGUE);
+    matrix.commands[0]!.rows[0]!.input = "path \\| `name`\nnext &<node>";
+    const rendered = marked.parse(renderConformanceMatrix(matrix));
+    expect(decodeHTML(String(rendered))).toContain("<code>path \\| `name` next &<node></code>");
+    expect(rendered).toContain("next &amp;&lt;node&gt;</code>");
   });
 
   it("toChatText quotes a token exactly as the tokenizer needs: whitespace, empty, an embedded \" or ' — and round-trips QUOTED_SAMPLE", () => {

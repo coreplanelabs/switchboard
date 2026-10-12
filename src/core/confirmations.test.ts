@@ -311,6 +311,44 @@ contract(
 );
 
 describe("saved organization confirmation provenance", () => {
+  it("stores protected media confirmations as original-owner references without retaining media bytes or private URLs", async () => {
+    const store = new InMemoryConfirmationStore({ clock: () => 1 });
+    const pointer = { ingressRunId: "source-owner", organizationSequence: 7, nativeMediaDigest: "a".repeat(64) };
+    const original = withOriginalOrganizationDispatch(
+      {
+        ...message,
+        nativeMediaDigest: pointer.nativeMediaDigest,
+        images: [{ mediaType: "image/png", data: "x".repeat(3 * 1024 * 1024) }],
+        staged: [
+          {
+            name: "file.zip",
+            type: "application/zip",
+            size: 12,
+            messageId: "1",
+            url: "https://files.slack.com/private",
+          },
+        ],
+      },
+      pointer,
+    );
+    const saved = await store.put(pending("media", { message: original }), TTL);
+    expect(saved.originalOrganization).toEqual(pointer);
+    expect(saved.message.nativeMediaDigest).toBe(pointer.nativeMediaDigest);
+    expect(saved.message.images).toBeUndefined();
+    expect(saved.message.staged).toBeUndefined();
+    expect(saved.message.nativeMedia).toBeUndefined();
+    expect(JSON.stringify(saved).length).toBeLessThan(4096);
+    expect(parseConfirmation(JSON.parse(JSON.stringify(saved)))).toMatchObject({ originalOrganization: pointer });
+    const forged = await store.put(
+      pending("forged", {
+        message: { ...message, nativeMediaDigest: pointer.nativeMediaDigest },
+        originalOrganization: pointer,
+      }),
+      TTL,
+    );
+    expect(forged.originalOrganization).toBeUndefined();
+    expect(forged.message.text).toBe(message.text);
+  });
   it("labels Merge only from the saved canonical action and keeps unknown proposals as Confirm", () => {
     expect(confirmationActionLabel({ kind: "run", command: "pulls.merge" })).toBe("Merge");
     expect(confirmationActionLabel({ kind: "run", command: "config.set" })).toBe("Confirm");
