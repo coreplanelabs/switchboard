@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.296.1](https://github.com/coreplanelabs/switchboard/compare/v1.296.0...v1.296.1) (2026-10-12)
+
+
+### Bug fixes
+
+* **deploy:** wait for same-commit Bot image replacements ([#3029](https://github.com/coreplanelabs/switchboard/issues/3029)) ([119b5e6](https://github.com/coreplanelabs/switchboard/commit/119b5e68b28a2c0036bbd0e8cbd8087e7d83fc87))
+
 ## [1.296.0](https://github.com/coreplanelabs/switchboard/compare/v1.295.1...v1.296.0) (2026-10-12)
 
 
