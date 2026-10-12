@@ -2,6 +2,213 @@ import { describe, expect, it, vi } from "vitest";
 import { BASE_URL_ENV, decide, main, readToken } from "./preflight.mjs";
 
 describe("resident deploy preflight — main()", () => {
+  const operation = (suffix = "first") => ({
+    key: `native-operation:http:fixture:run-original:${suffix}`,
+    recordHash: "a".repeat(64),
+    owner: { runId: "run-original", ownerGen: "generation-original", ownerFence: 3 },
+    recoverable: false,
+    recoveryReason: "original-native-evidence-unavailable",
+    journal: { version: 1, closed: true, threadKey: "http:fixture", pending: { attempt: { kind: "opaque" } } },
+    controls: [],
+  });
+  async function captured(operations, { cursor = null, failDiagnostic = false, unknownRuns = 1 } = {}) {
+    const lines = [],
+      requests = [];
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      requests.push({ url, method: init.method, headers: init.headers });
+      return Response.json(
+        payload([
+          {
+            resource: "repo:acme/api",
+            live: {
+              state: "warm",
+              inFlight: 0,
+              executingRuns: 0,
+              retainedRuns: 0,
+              unknownRuns,
+              nativeOperationReadback: { operations, cursor },
+            },
+          },
+        ]).payload,
+      );
+    });
+    const logger = vi.spyOn(console, "error").mockImplementation((line) => {
+      if (failDiagnostic && line.startsWith("[resident-native-operation-diagnostic]"))
+        throw new Error("synthetic sink failure");
+      lines.push(line);
+    });
+    const normal = vi.spyOn(console, "log").mockImplementation((line) => lines.push(line));
+    try {
+      const code = await main([], {
+        RESIDENT_BASE_URL: "https://resident.example.test",
+        RESIDENT_DRAIN_TOKEN: "synthetic-token",
+      });
+      const line = lines.find((line) => line.startsWith("[resident-native-operation-diagnostic] "));
+      return {
+        code,
+        lines,
+        requests,
+        diagnostic: line ? JSON.parse(line.slice("[resident-native-operation-diagnostic] ".length)) : null,
+      };
+    } finally {
+      fetcher.mockRestore();
+      logger.mockRestore();
+      normal.mockRestore();
+    }
+  }
+
+  it("captures original hashes and unresolved attempt kinds from the same refusal response", async () => {
+    const second = operation("second");
+    second.journal.pending = { attempt: { kind: "process" } };
+    const actual = await captured([operation(), second]);
+    expect(actual.code).toBe(1);
+    expect(actual.requests).toEqual([
+      {
+        url: "https://resident.example.test/deploy-fence",
+        method: "POST",
+        headers: { authorization: "Bearer synthetic-token" },
+      },
+    ]);
+    expect(actual.diagnostic).toEqual({
+      schema: 1,
+      receivedProjectionComplete: true,
+      controlStorageCompleteness: "unverified",
+      omittedResourceCount: 0,
+      resources: [
+        {
+          resource: "repo:acme/api",
+          returnedOperationCount: 2,
+          operationCursor: null,
+          omittedOperationCount: 0,
+          operations: [
+            { ...operation(), controls: undefined, returnedControls: [] },
+            { ...second, controls: undefined, returnedControls: [] },
+          ].map(({ controls: _controls, ...row }) => row),
+        },
+      ],
+    });
+    expect(actual.lines.at(-1)).toContain("preflight REFUSED");
+    expect(actual.lines.join("\n")).not.toContain("synthetic-token");
+  });
+
+  it("retains original process and returned control receipts without exposing extra fields", async () => {
+    const row = operation();
+    const process = { id: "process-original", pid: 42, startedAt: "2026-01-01T00:00:00Z" };
+    row.journal.pending = { attempt: { kind: "process", process } };
+    row.controls = [
+      {
+        process,
+        recordHash: "b".repeat(64),
+        outcome: "kill-unverified",
+        failure: { class: "Error", code: "ECONNRESET" },
+      },
+    ];
+    row.secret = "do-not-retain";
+    row.journal.environment = { TOKEN: "do-not-retain" };
+    const actual = await captured([row]);
+    expect(actual.diagnostic.resources[0].operations[0]).toMatchObject({
+      recordHash: "a".repeat(64),
+      journal: { closed: true, pending: { attempt: { kind: "process", process } } },
+      returnedControls: row.controls,
+    });
+    expect(actual.diagnostic.controlStorageCompleteness).toBe("unverified");
+    expect(actual.lines.join("\n")).not.toContain("do-not-retain");
+  });
+
+  it("reports malformed whole details and received-page omissions as incomplete", async () => {
+    const row = operation();
+    row.journal.pending = { attempt: { kind: "unknown", secret: "do-not-retain" } };
+    const actual = await captured([row, ...Array.from({ length: 5 }, (_, i) => operation(`extra-${i}`))], {
+      cursor: "native-operation:http:fixture:run-original:next",
+    });
+    expect(actual.code).toBe(1);
+    expect(actual.requests).toHaveLength(1);
+    expect(actual.diagnostic).toMatchObject({
+      receivedProjectionComplete: false,
+      resources: [
+        {
+          operationCursor: "native-operation:http:fixture:run-original:next",
+          returnedOperationCount: 6,
+          omittedOperationCount: 1,
+        },
+      ],
+    });
+    expect(actual.diagnostic.resources[0].operations[0]).toEqual({
+      key: row.key,
+      recordHash: row.recordHash,
+      detailUnavailable: "malformed",
+    });
+    expect(actual.diagnostic.resources[0].operations).toHaveLength(5);
+    expect(actual.lines.join("\n")).not.toContain("do-not-retain");
+  });
+
+  it("never truncates a pending map or returned controls into complete evidence", async () => {
+    for (const kind of ["pending", "controls"]) {
+      const row = operation();
+      if (kind === "pending")
+        row.journal.pending = Object.fromEntries(
+          Array.from({ length: 65 }, (_, i) => [`attempt-${i}`, { kind: "opaque" }]),
+        );
+      else
+        row.controls = Array.from({ length: 65 }, () => ({
+          process: { id: "process", pid: 42, startedAt: "2026-01-01T00:00:00Z" },
+          recordHash: "b".repeat(64),
+          outcome: "requested",
+        }));
+      const actual = await captured([row]);
+      expect(actual.code).toBe(1);
+      expect(actual.diagnostic).toMatchObject({
+        receivedProjectionComplete: false,
+        resources: [{ operations: [{ key: row.key, recordHash: row.recordHash, detailUnavailable: "malformed" }] }],
+      });
+    }
+  });
+
+  it("labels all returned controls without claiming complete control storage", async () => {
+    const row = operation();
+    row.controls = Array.from({ length: 64 }, () => ({
+      process: { id: "p", pid: 42, startedAt: "2026-01-01T00:00:00Z" },
+      recordHash: "b".repeat(64),
+      outcome: "requested",
+    }));
+    const actual = await captured([row]);
+    expect(actual.code).toBe(1);
+    expect(actual.diagnostic).toMatchObject({
+      receivedProjectionComplete: true,
+      controlStorageCompleteness: "unverified",
+    });
+    expect(actual.diagnostic.resources[0].operations[0].returnedControls).toEqual(row.controls);
+  });
+
+  it("keeps the capture within its byte budget and marks omitted whole details", async () => {
+    const row = operation();
+    row.journal.pending = Object.fromEntries(
+      Array.from({ length: 64 }, (_, i) => [
+        `attempt-${i}`,
+        { kind: "process", process: { id: "p".repeat(256), pid: 42, startedAt: "2026-01-01T00:00:00Z" } },
+      ]),
+    );
+    const actual = await captured([row]);
+    expect(actual.code).toBe(1);
+    expect(actual.diagnostic).toMatchObject({
+      receivedProjectionComplete: false,
+      resources: [{ operations: [{ key: row.key, recordHash: row.recordHash, detailUnavailable: "byte-limit" }] }],
+    });
+    expect(
+      Buffer.byteLength(actual.lines.find((line) => line.startsWith("[resident-native-operation-diagnostic]"))) + 1,
+    ).toBeLessThanOrEqual(16384);
+  });
+
+  it("preserves refusal when diagnostic writing fails and emits nothing on clean admission", async () => {
+    const failed = await captured([operation()], { failDiagnostic: true });
+    expect(failed.code).toBe(1);
+    expect(failed.lines.at(-1)).toContain("preflight REFUSED");
+    const clean = await captured([], { unknownRuns: 0 });
+    expect(clean.code).toBe(0);
+    expect(clean.lines).toHaveLength(1);
+    expect(clean.lines[0]).toContain("preflight ok");
+    expect(clean.requests).toHaveLength(1);
+  });
   it(`refuses (exit 2) before reading anything when ${BASE_URL_ENV} is not set — the Worker's origin is the deployment profile's, handed over by deploy all`, async () => {
     const errors = [];
     const original = console.error;

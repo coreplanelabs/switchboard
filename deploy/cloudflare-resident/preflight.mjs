@@ -148,6 +148,192 @@ function nativeOperationReadbackText(readback) {
   return `${readback.operations.length}${readback.cursor ? "+" : ""} stored hold(s)${facts.length ? `; ${facts.join("; ")}` : ""}${readback.operations.length > 5 ? "; more details in operation inventory" : ""}`;
 }
 
+/** Project only the received metadata. No further inventory or native read. */
+function nativeOperationDiagnostic(fetched) {
+  const object = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  const identity = (v, max = 512) => typeof v === "string" && v.length <= max && /^[A-Za-z0-9_.:@/+-]+$/.test(v);
+  const hash = (v) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
+  const process = (v) => {
+    if (
+      !object(v) ||
+      !identity(v.id, 256) ||
+      !Number.isSafeInteger(v.pid) ||
+      v.pid <= 0 ||
+      typeof v.startedAt !== "string" ||
+      v.startedAt.length > 64 ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(v.startedAt) ||
+      !Number.isFinite(Date.parse(v.startedAt))
+    )
+      throw new Error("invalid identity");
+    return { id: v.id, pid: v.pid, startedAt: v.startedAt };
+  };
+  const unavailable = (v, reason) => ({
+    ...(identity(v?.key) && v.key.startsWith("native-operation:") ? { key: v.key } : {}),
+    ...(hash(v?.recordHash) ? { recordHash: v.recordHash } : {}),
+    detailUnavailable: reason,
+  });
+  const row = (v) => {
+    try {
+      if (
+        !object(v) ||
+        !identity(v.key) ||
+        !v.key.startsWith("native-operation:") ||
+        !hash(v.recordHash) ||
+        typeof v.recoverable !== "boolean" ||
+        ![
+          "legacy-or-invalid-record",
+          "original-native-evidence-unavailable",
+          "original-process-result-required",
+        ].includes(v.recoveryReason)
+      )
+        throw new Error("invalid row");
+      let owner = null;
+      if (v.owner !== null) {
+        if (!object(v.owner)) throw new Error("invalid owner");
+        if (identity(v.owner.opOwner) && v.owner.opOwner.startsWith("op:")) owner = { opOwner: v.owner.opOwner };
+        else if (
+          identity(v.owner.runId) &&
+          identity(v.owner.ownerGen) &&
+          Number.isSafeInteger(v.owner.ownerFence) &&
+          v.owner.ownerFence > 0
+        )
+          owner = { runId: v.owner.runId, ownerGen: v.owner.ownerGen, ownerFence: v.owner.ownerFence };
+        else throw new Error("invalid owner");
+      }
+      let journal = null;
+      if (v.journal !== null) {
+        const j = v.journal;
+        if (
+          !object(j) ||
+          j.version !== 1 ||
+          typeof j.closed !== "boolean" ||
+          !object(j.pending) ||
+          Object.keys(j.pending).length > 64 ||
+          (j.threadKey !== undefined && !identity(j.threadKey, 256))
+        )
+          throw new Error("invalid journal");
+        const pending = Object.fromEntries(
+          Object.entries(j.pending).map(([key, attempt]) => {
+            if (!identity(key, 256) || !object(attempt) || !["opaque", "process"].includes(attempt.kind))
+              throw new Error("invalid attempt");
+            return [
+              key,
+              { kind: attempt.kind, ...(attempt.process === undefined ? {} : { process: process(attempt.process) }) },
+            ];
+          }),
+        );
+        journal = {
+          version: 1,
+          closed: j.closed,
+          ...(j.threadKey === undefined ? {} : { threadKey: j.threadKey }),
+          pending,
+        };
+      }
+      if (!Array.isArray(v.controls) || v.controls.length > 64) throw new Error("invalid controls");
+      const returnedControls = v.controls.map((control) => {
+        if (
+          !object(control) ||
+          !hash(control.recordHash) ||
+          !["requested", "kill-acknowledged", "kill-unverified"].includes(control.outcome)
+        )
+          throw new Error("invalid control");
+        let failure;
+        if (control.failure !== undefined) {
+          if (
+            !object(control.failure) ||
+            !identity(control.failure.class, 128) ||
+            (control.failure.code !== undefined && !identity(control.failure.code, 128))
+          )
+            throw new Error("invalid failure");
+          failure = {
+            class: control.failure.class,
+            ...(control.failure.code === undefined ? {} : { code: control.failure.code }),
+          };
+        }
+        return {
+          process: process(control.process),
+          recordHash: control.recordHash,
+          outcome: control.outcome,
+          ...(failure ? { failure } : {}),
+        };
+      });
+      return {
+        key: v.key,
+        recordHash: v.recordHash,
+        owner,
+        recoverable: v.recoverable,
+        recoveryReason: v.recoveryReason,
+        journal,
+        returnedControls,
+      };
+    } catch {
+      return unavailable(v, "malformed");
+    }
+  };
+  if (!fetched.ok || !Array.isArray(fetched.payload?.residents)) return null;
+  const held = fetched.payload.residents.filter(
+    (r) =>
+      object(r?.live?.nativeOperationReadback) &&
+      (!Array.isArray(r.live.nativeOperationReadback.operations) ||
+        r.live.nativeOperationReadback.operations.length > 0),
+  );
+  if (!held.length) return null;
+  const snapshot = {
+    schema: 1,
+    receivedProjectionComplete: held.length <= 5,
+    controlStorageCompleteness: "unverified",
+    omittedResourceCount: Math.max(0, held.length - 5),
+    resources: [],
+  };
+  let remaining = 5;
+  for (const r of held.slice(0, 5)) {
+    const readback = r.live.nativeOperationReadback;
+    if (
+      !identity(r.resource, 63) ||
+      !r.resource.startsWith("repo:") ||
+      !Array.isArray(readback.operations) ||
+      readback.operations.length > 25 ||
+      (readback.cursor !== null && (!identity(readback.cursor) || !readback.cursor.startsWith("native-operation:")))
+    ) {
+      snapshot.resources.push({
+        resource: identity(r.resource, 63) ? r.resource : null,
+        detailUnavailable: "malformed",
+      });
+      snapshot.receivedProjectionComplete = false;
+      continue;
+    }
+    const operations = readback.operations.slice(0, remaining).map(row);
+    remaining -= operations.length;
+    const omittedOperationCount = readback.operations.length - operations.length;
+    if (omittedOperationCount || readback.cursor !== null || operations.some((v) => v.detailUnavailable))
+      snapshot.receivedProjectionComplete = false;
+    snapshot.resources.push({
+      resource: r.resource,
+      returnedOperationCount: readback.operations.length,
+      operationCursor: readback.cursor,
+      omittedOperationCount,
+      operations,
+    });
+  }
+  const prefix = "[resident-native-operation-diagnostic] ";
+  const line = () => prefix + JSON.stringify(snapshot);
+  for (const resource of [...snapshot.resources].reverse()) {
+    for (let i = (resource.operations?.length ?? 0) - 1; i >= 0 && Buffer.byteLength(line()) + 1 > 16384; i--) {
+      resource.operations[i] = unavailable(resource.operations[i], "byte-limit");
+      snapshot.receivedProjectionComplete = false;
+    }
+  }
+  return Buffer.byteLength(line()) + 1 <= 16384
+    ? line()
+    : prefix +
+        JSON.stringify({
+          schema: 1,
+          receivedProjectionComplete: false,
+          controlStorageCompleteness: "unverified",
+          detailUnavailable: "byte-limit",
+        });
+}
+
 /**
  * The decision, pure. `fetched` is the result of `fetchResidents`.
  * @returns {{ allow: boolean, forced: boolean, busy: {resource:string,inFlight:number}[], provisioning: {resource:string,state:string}[], interrupting: {resource:string,state:string}[], unknown: {resource:string,error:string}[], message: string }}
@@ -315,6 +501,14 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   }
   const fetched = await fetchResidents(baseUrl, readToken(env));
   const d = decide(fetched, { force });
+  if (!d.allow) {
+    try {
+      const diagnostic = nativeOperationDiagnostic(fetched);
+      if (diagnostic) console.error(diagnostic);
+    } catch {
+      /* Diagnostic failure cannot change deployment admission. */
+    }
+  }
   (d.allow && !d.forced ? console.log : console.error)(`[resident-preflight] ${d.message}`);
   return d.allow ? 0 : 1;
 }
