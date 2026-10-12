@@ -46,21 +46,111 @@ const payload = (residents) => ({
 const resident = (resource, inFlight) => ({ resource, live: { state: "warm", inFlight } });
 
 describe("resident deploy preflight — decide()", () => {
+  it("keeps malformed operation metadata unavailable without relaxing the hold", () => {
+    const result = decide(
+      payload([
+        {
+          resource: "repo:acme/api",
+          live: {
+            state: "warm",
+            inFlight: 1,
+            executingRuns: 0,
+            retainedRuns: 0,
+            unknownRuns: 1,
+            registrationReadback: [],
+            nativeOperationReadback: { operations: [null], cursor: null },
+          },
+        },
+      ]),
+    );
+    expect(result.allow).toBe(false);
+    expect(result.unknown).toEqual([
+      {
+        resource: "repo:acme/api",
+        error: "1 run/operation hold(s) unverified; registration readback: empty; operation readback: unavailable",
+      },
+    ]);
+  });
+
+  it("names the held operation and original process instead of guessing that its run owner is unknown", () => {
+    const result = decide(
+      payload([
+        {
+          resource: "repo:acme/api",
+          live: {
+            state: "warm",
+            inFlight: 1,
+            executingRuns: 0,
+            retainedRuns: 0,
+            unknownRuns: 1,
+            registrationReadback: [],
+            nativeOperationReadback: {
+              operations: [
+                {
+                  key: "native-operation:op:original",
+                  recoveryReason: "original-process-result-required",
+                  journal: { pending: { attempt: { kind: "process", process: { id: "original-process", pid: 42 } } } },
+                },
+              ],
+              cursor: null,
+            },
+          },
+        },
+      ]),
+    );
+    expect(result.allow).toBe(false);
+    expect(result.unknown).toEqual([
+      {
+        resource: "repo:acme/api",
+        error:
+          "1 run/operation hold(s) unverified; registration readback: empty; operation readback: 1 stored hold(s); native-operation:op:original [original-process-result-required; processes=original-process/pid=42]",
+      },
+    ]);
+  });
+
   it.each([
     [
       "unknown",
       "malformed-registration",
-      "1 run owner(s) unverified; registration readback: unknown/malformed-registration=1",
+      "1 run/operation hold(s) unverified; registration readback: unknown/malformed-registration=1",
     ],
-    ["unknown", "owner-unverified", "1 run owner(s) unverified; registration readback: unknown/owner-unverified=1"],
-    ["unknown", "binding-conflict", "1 run owner(s) unverified; registration readback: unknown/binding-conflict=1"],
-    ["unknown", "ledger-unverified", "1 run owner(s) unverified; registration readback: unknown/ledger-unverified=1"],
-    ["legacy", "operation-active", "1 run owner(s) unverified; registration readback: legacy/operation-active=1"],
-    ["legacy", "legacy-protected", "1 run owner(s) unverified; registration readback: legacy/legacy-protected=1"],
-    ["legacy", "protection-elapsed", "1 run owner(s) unverified; registration readback: legacy/protection-elapsed=1"],
-    ["legacy", "legacy-reconciled", "1 run owner(s) unverified; registration readback: legacy/legacy-reconciled=1"],
-    ["owned", "live-owner", "1 run owner(s) unverified; registration readback: owned/live-owner=1"],
-    ["owned", "terminal-owner", "1 run owner(s) unverified; registration readback: owned/terminal-owner=1"],
+    [
+      "unknown",
+      "owner-unverified",
+      "1 run/operation hold(s) unverified; registration readback: unknown/owner-unverified=1",
+    ],
+    [
+      "unknown",
+      "binding-conflict",
+      "1 run/operation hold(s) unverified; registration readback: unknown/binding-conflict=1",
+    ],
+    [
+      "unknown",
+      "ledger-unverified",
+      "1 run/operation hold(s) unverified; registration readback: unknown/ledger-unverified=1",
+    ],
+    [
+      "legacy",
+      "operation-active",
+      "1 run/operation hold(s) unverified; registration readback: legacy/operation-active=1",
+    ],
+    [
+      "legacy",
+      "legacy-protected",
+      "1 run/operation hold(s) unverified; registration readback: legacy/legacy-protected=1",
+    ],
+    [
+      "legacy",
+      "protection-elapsed",
+      "1 run/operation hold(s) unverified; registration readback: legacy/protection-elapsed=1",
+    ],
+    [
+      "legacy",
+      "legacy-reconciled",
+      "1 run/operation hold(s) unverified; registration readback: legacy/legacy-reconciled=1",
+    ],
+    ["owned", "live-owner", "1 run/operation hold(s) unverified; registration readback: owned/live-owner=1"],
+    ["owned", "terminal-owner", "1 run/operation hold(s) unverified; registration readback: owned/terminal-owner=1"],
   ])("renders only registered readback pairs: %s/%s", (category, reason, expected) => {
     const d = decide(
       payload([
@@ -124,7 +214,10 @@ describe("resident deploy preflight — decide()", () => {
       allow: false,
       forced: false,
       unknown: [
-        { resource: "repo:acme/widgets", error: "1 run owner(s) unverified; registration readback: unavailable" },
+        {
+          resource: "repo:acme/widgets",
+          error: "1 run/operation hold(s) unverified; registration readback: unavailable",
+        },
       ],
     });
     expect(d.message).not.toContain("private-");
@@ -149,7 +242,9 @@ describe("resident deploy preflight — decide()", () => {
     );
     expect({ allow: d.allow, unknown: d.unknown }).toEqual({
       allow: false,
-      unknown: [{ resource: "repo:acme/widgets", error: "1 run owner(s) unverified; registration readback: empty" }],
+      unknown: [
+        { resource: "repo:acme/widgets", error: "1 run/operation hold(s) unverified; registration readback: empty" },
+      ],
     });
   });
 
@@ -186,7 +281,7 @@ describe("resident deploy preflight — decide()", () => {
       unknown: [
         {
           resource: "repo:acme/widgets",
-          error: "1 run owner(s) unverified; registration readback: unknown/ledger-unverified=1",
+          error: "1 run/operation hold(s) unverified; registration readback: unknown/ledger-unverified=1",
         },
       ],
     });

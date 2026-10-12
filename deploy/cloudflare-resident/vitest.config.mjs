@@ -44,6 +44,7 @@ export default defineConfig({
       "preflight.test.mjs",
       "gc.test.ts",
       "repoRegistration.test.ts",
+      "reset.test.ts",
       "instanceSizing.test.ts",
       "refresh.test.ts",
       "instanceStep.test.ts",

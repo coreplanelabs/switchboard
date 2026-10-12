@@ -589,7 +589,7 @@ export const repoOffboard = defineCommand({
       return [
         `🧪 *Dry run* — offboarding \`${slug}\` would remove:`,
         `• the registry record + ${n(w.schedules)} pending schedule(s)`,
-        `• ${n(w.backupObjects)} snapshot backup object(s) in R2${ids}`,
+        `• ${n(w.backupObjects)} backup object(s) in R2${ids}`,
         `• ${n(w.r2Objects)} object(s) under the resident's R2 prefix`,
         `• ${n(w.threadBindings)} thread binding(s) and the container (currently \`${String(w.container ?? "?")}\`)`,
         `Nothing was changed. Without \`--dry-run\`, \`repo offboard ${slug}\` performs this removal.`,
@@ -616,18 +616,42 @@ export const repoRebuild = defineCommand({
   id: "repo.rebuild",
   enabledWhen: (caps) => caps.residents,
   args: [slugArg],
-  options: dryRunOptions,
+  options: dryRunOptions.extend({
+    full: flag
+      .optional()
+      .describe(
+        "discard all resident state, workspaces, bindings and backups; recreate from saved settings (for a clean start or stale operation hold)",
+      ),
+  }),
   action: "repo:write",
   effect: "write",
   annotations: {
     destructive: true,
-    risk: (input) => (dryRunRequested(input) ? PLAN_ONLY_RISK : "discards the snapshot and reprovisions"),
+    risk: (input) =>
+      dryRunRequested(input)
+        ? PLAN_ONLY_RISK
+        : input.options?.full === true || input.options?.full === "true"
+          ? "permanently deletes all resident workspaces, bindings, operation records and backups, then recreates it"
+          : "discards the container and snapshot; keeps bindings and operation records",
   },
-  describe: "Discard a resident's snapshot and reprovision it from scratch (admin-gated; --dry-run plans only).",
-  renderChat: (output, display) => (display?.verbosity === "quiet" ? quietRepoOutcome("rebuild", output) : undefined),
+  describe:
+    "Rebuild the container and snapshot to repair provisioning; keep bindings and operation records. --full also clears all resident state and backups for a clean start or stale hold. Both discard container files and keep repo settings. --dry-run plans only (admin-gated).",
+  renderChat: (output, display) =>
+    display?.verbosity === "quiet" && !(output as JsonObject).full ? quietRepoOutcome("rebuild", output) : undefined,
   render: (output) => {
     const o = output as JsonObject;
     const slug = str(o.slug);
+    if (o.full === true) {
+      const removed = obj(o.wouldRemove);
+      const reprovision = obj(o.reprovision);
+      return o.dryRun === true
+        ? [
+            `Full rebuild of \`${slug}\` would delete its container, ${n(removed.threadBindings)} thread binding(s), ${n(removed.backupObjects)} backup object(s), ${n(removed.r2Objects)} prefix object(s), and all stored workspace and operation state.`,
+            `Keep the repo registration and commands; recreate on \`${str(reprovision.defaultRef)}\`.`,
+            "Original operation results remain unknown. Nothing was changed.",
+          ].join("\n")
+        : `Fully rebuilding \`${slug}\`: container destroyed, stored work cleared, ${n(o.backupObjectsDeleted)} backup object(s) and ${n(o.r2ObjectsDeleted)} prefix object(s) deleted. Recreating on \`${str(reprovision.defaultRef)}\`; provisioning has started. Original operation results remain unknown.`;
+    }
     const discards = obj(o.discards);
     const snap = discards.snapshot ? obj(discards.snapshot) : undefined;
     const reprov = obj(o.reprovision);
@@ -640,7 +664,8 @@ export const repoRebuild = defineCommand({
           ? `• discard the snapshot from ${String(snap.createdAt ?? "?")} (${n(discards.backupObjects)} backup object(s); ids ${String(snap.mirrorBackupId ?? "?")}, ${String(snap.checkoutBackupId ?? "?")})`
           : "• discard no snapshot (none recorded)",
         `• reprovision from scratch on \`${String(reprov.defaultRef ?? "?")}\` (budget ${n(reprov.provisioningTimeoutMs)}ms)`,
-        `• keep the registry record and ${n(keeps.threadBindings)} thread binding(s)`,
+        `• replace the container and discard its local workspace files`,
+        `• keep the registry record and ${n(keeps.threadBindings)} thread binding(s) and stored operation records`,
         `Nothing was changed. Without \`--dry-run\`, \`repo rebuild ${slug}\` performs this rebuild.`,
       ].join("\n");
     }
@@ -657,9 +682,33 @@ export const repoRebuild = defineCommand({
   },
   handler: async ({ args, options, deps, span }) => {
     const dryRun = options.dryRun ?? false;
-    const r = await call(async () => (await adminOf(deps, span)).rebuild(repoResourceId(args.slug), dryRun));
-    if (r.status !== 200 && r.status !== 202) throw residentFailure(r);
-    return { ...(r.data as JsonObject), slug: args.slug, dryRun };
+    const full = options.full ?? false;
+    const api = await adminOf(deps, span);
+    const r = await call(() =>
+      full ? api.rebuild(repoResourceId(args.slug), dryRun, true) : api.rebuild(repoResourceId(args.slug), dryRun),
+    );
+    if (r.status !== 200 && r.status !== 202) {
+      const progress =
+        full && r.data.containerStopped === true
+          ? [
+              `Container destruction confirmed; stored work cleared: ${String(r.data.storageCleared === true)}; provisioning unconfirmed. Repo settings retained.`,
+            ]
+          : [];
+      throw residentFailure(r, progress);
+    }
+    if (
+      full &&
+      !dryRun &&
+      (r.status !== 202 ||
+        r.data.containerStopped !== true ||
+        r.data.storageCleared !== true ||
+        r.data.state !== "onboarding")
+    )
+      throw new CommandError(
+        "unavailable",
+        "Full rebuild outcome is unverified; no confirmed teardown and provisioning receipt was returned.",
+      );
+    return { ...(r.data as JsonObject), slug: args.slug, dryRun, full };
   },
 });
 

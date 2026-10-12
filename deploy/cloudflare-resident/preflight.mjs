@@ -113,6 +113,41 @@ function registrationReadbackText(rows) {
   return facts.length ? facts.sort().join(", ") : "empty";
 }
 
+/** Bounded, metadata-only diagnostic. It never relaxes the deployment gate. */
+function nativeOperationReadbackText(readback) {
+  if (!readback || !Array.isArray(readback.operations) || readback.operations.length > 25) return "unavailable";
+  const safe = (value) => typeof value === "string" && /^[A-Za-z0-9_.:-]{1,512}$/.test(value);
+  const facts = [];
+  for (const row of readback.operations.slice(0, 5)) {
+    if (
+      !row ||
+      typeof row !== "object" ||
+      Array.isArray(row) ||
+      !safe(row.key) ||
+      ![
+        "legacy-or-invalid-record",
+        "original-native-evidence-unavailable",
+        "original-process-result-required",
+      ].includes(row.recoveryReason)
+    )
+      return "unavailable";
+    const pending = row.journal?.pending;
+    const processes =
+      pending && typeof pending === "object"
+        ? Object.values(pending)
+            .slice(0, 4)
+            .flatMap((attempt) => {
+              const process = attempt?.process;
+              return safe(process?.id) && Number.isSafeInteger(process.pid) && process.pid > 0
+                ? [`${process.id}/pid=${process.pid}`]
+                : [];
+            })
+        : [];
+    facts.push(`${row.key} [${row.recoveryReason}${processes.length ? `; processes=${processes.join(",")}` : ""}]`);
+  }
+  return `${readback.operations.length}${readback.cursor ? "+" : ""} stored hold(s)${facts.length ? `; ${facts.join("; ")}` : ""}${readback.operations.length > 5 ? "; more details in operation inventory" : ""}`;
+}
+
 /**
  * The decision, pure. `fetched` is the result of `fetchResidents`.
  * @returns {{ allow: boolean, forced: boolean, busy: {resource:string,inFlight:number}[], provisioning: {resource:string,state:string}[], interrupting: {resource:string,state:string}[], unknown: {resource:string,error:string}[], message: string }}
@@ -189,7 +224,7 @@ export function decide(fetched, { force = false } = {}) {
         } else if (live.unknownRuns > 0) {
           unknown.push({
             resource,
-            error: `${live.unknownRuns} run owner(s) unverified; registration readback: ${registrationReadbackText(live.registrationReadback)}`,
+            error: `${live.unknownRuns} run/operation hold(s) unverified; registration readback: ${registrationReadbackText(live.registrationReadback)}${live.nativeOperationReadback ? `; operation readback: ${nativeOperationReadbackText(live.nativeOperationReadback)}` : ""}`,
           });
         } else {
           retained += live.retainedRuns;

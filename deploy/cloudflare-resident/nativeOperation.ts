@@ -3,6 +3,7 @@ import { isWorkspaceOwner, type WorkspaceOwner } from "../../src/core/workspaceS
 
 export const NATIVE_OPERATION_PREFIX = "native-operation:";
 const RECEIPT_PREFIX = "native-operation-receipt:";
+const CONTROL_PREFIX = "native-operation-control:";
 const PAGE_SIZE = 25;
 const ATTEMPT_LIMIT = 64;
 const processIdentity = z.object({
@@ -62,7 +63,27 @@ export type NativeOperationReceipt = {
   outcome: "native-ended";
   processes: NativeTerminal[];
 };
-type Refusal = { error: string; status: 409 | 503 };
+type Refusal = {
+  error: string;
+  status: 409 | 503;
+  details?: { class: string; code?: string };
+  controls?: z.infer<typeof controlSchema>[];
+};
+
+function errorDetails(error: unknown): { class: string; code?: string } {
+  const value = error && typeof error === "object" ? (error as { name?: unknown; code?: unknown }) : {};
+  const safe = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(value);
+  return { class: safe(value.name) ? value.name : "UnknownError", ...(safe(value.code) ? { code: value.code } : {}) };
+}
+
+const controlSchema = z
+  .object({
+    process: processIdentity,
+    recordHash: z.string().regex(/^[a-f0-9]{64}$/),
+    outcome: z.enum(["requested", "kill-acknowledged", "kill-unverified"]),
+    failure: z.object({ class: z.string().max(128), code: z.string().max(128).optional() }).optional(),
+  })
+  .strict();
 function refuse(reason: string): Refusal {
   return { error: `native-operation-recovery-refused: ${reason}`, status: 409 };
 }
@@ -105,6 +126,14 @@ export function unstartedNativeOperator(value: unknown, owner: string): boolean 
 /** The existing DO journal owns admission and settlement; native status supplies evidence only. */
 export class NativeOperationJournal {
   constructor(private readonly storage: NativeOperationStorage) {}
+
+  private async controls(key: string) {
+    const rows = await this.storage.list<unknown>({ prefix: `${CONTROL_PREFIX}${key}:`, limit: ATTEMPT_LIMIT });
+    return [...rows.values()]
+      .map((value) => controlSchema.safeParse(value))
+      .filter((value) => value.success)
+      .map((value) => value.data);
+  }
 
   async open(key: string, owner: WorkspaceOwner | { opOwner: string }, threadKey?: string): Promise<void> {
     const record = {
@@ -176,11 +205,18 @@ export class NativeOperationJournal {
     const operations = await Promise.all(
       page.map(async ([key, value]) => {
         const parsed = recordSchema.safeParse(value);
+        const hash = await recordHash(value);
         return {
           key,
-          recordHash: await recordHash(value),
+          recordHash: hash,
           owner: ownerOf(value),
           recoverable: parsed.success && recoverable(parsed.data),
+          recoveryReason: !parsed.success
+            ? "legacy-or-invalid-record"
+            : !recoverable(parsed.data)
+              ? "original-native-evidence-unavailable"
+              : "original-process-result-required",
+          controls: await this.controls(key),
           journal: parsed.success ? parsed.data.native : null,
         };
       }),
@@ -193,11 +229,14 @@ export class NativeOperationJournal {
     expectedHash: string,
     lookup: (identity: NativeProcessIdentity) => Promise<unknown>,
     ownerMatches: (rows: NativeOperationRows, record: NativeOperationRecord) => Promise<boolean>,
+    terminate?: (identity: NativeProcessIdentity) => Promise<void>,
   ): Promise<NativeOperationReceipt | Refusal> {
     const value = await this.storage.get<unknown>(key);
     if (value === undefined) {
       const saved = await this.storage.get<{ receipt: NativeOperationReceipt }>(RECEIPT_PREFIX + key);
-      return saved?.receipt.recordHash === expectedHash ? saved.receipt : refuse("record-missing-or-changed");
+      if (saved?.receipt.recordHash === expectedHash) return saved.receipt;
+      const controls = (await this.controls(key)).filter((control) => control.recordHash === expectedHash);
+      return { ...refuse("record-missing-or-changed"), ...(controls.length ? { controls } : {}) };
     }
     if ((await recordHash(value)) !== expectedHash) return refuse("record-changed");
     const parsed = recordSchema.safeParse(value);
@@ -206,7 +245,51 @@ export class NativeOperationJournal {
     try {
       for (const attempt of Object.values(parsed.data.native.pending)) {
         const identity = attempt.process!;
-        const result = terminalSchema.safeParse(await lookup(identity));
+        let observed = await lookup(identity);
+        const live = processIdentity.safeParse(observed);
+        if (terminate && (observed as { state?: unknown } | null)?.state === "running") {
+          if (
+            !live.success ||
+            live.data.id !== identity.id ||
+            live.data.pid !== identity.pid ||
+            live.data.startedAt !== identity.startedAt
+          )
+            return refuse("original-process-identity-changed");
+          const controlKey = `${CONTROL_PREFIX}${key}:${identity.id}`;
+          const admitted = await this.storage.transaction(async (rows) => {
+            const current = await rows.get(key);
+            if (
+              current === undefined ||
+              (await recordHash(current)) !== expectedHash ||
+              !(await ownerMatches(rows, parsed.data))
+            )
+              return refuse("record-or-owner-changed");
+            if ((await rows.get(controlKey)) !== undefined)
+              return refuse("termination-already-requested; observe the original process before recovery");
+            await rows.put(controlKey, { process: identity, recordHash: expectedHash, outcome: "requested" });
+            return null;
+          });
+          if (admitted) return admitted;
+          try {
+            await terminate(identity);
+            await this.storage.put(controlKey, {
+              process: identity,
+              recordHash: expectedHash,
+              outcome: "kill-acknowledged",
+            });
+          } catch (error) {
+            const details = errorDetails(error);
+            await this.storage.put(controlKey, {
+              process: identity,
+              recordHash: expectedHash,
+              outcome: "kill-unverified",
+              failure: details,
+            });
+            return { error: "native-operation-recovery-refused: termination-outcome-unverified", status: 503, details };
+          }
+          observed = await lookup(identity);
+        }
+        const result = terminalSchema.safeParse(observed);
         if (
           !result.success ||
           result.data.id !== identity.id ||
@@ -217,8 +300,12 @@ export class NativeOperationJournal {
           return refuse("original-process-not-confirmed-ended");
         processes.push(result.data);
       }
-    } catch {
-      return { error: "native-operation-recovery-refused: native-evidence-unreadable", status: 503 };
+    } catch (error) {
+      return {
+        error: "native-operation-recovery-refused: native-evidence-unreadable",
+        status: 503,
+        details: errorDetails(error),
+      };
     }
     return this.storage.transaction(async (rows) => {
       const current = await rows.get<unknown>(key);

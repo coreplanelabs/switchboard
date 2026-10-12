@@ -111,6 +111,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0100 | [Ordinary MCP confirmation uses the client form](../decisions/0100-mcp-confirmation-uses-the-client-form.md) | One consent policy with native host input | accepted | 2026-10-10 |
 | 0101 | [Native operation recovery requires the original process receipt](../decisions/0101-native-operation-recovery-requires-the-original-process-receipt.md) | Original-owner journal and compare-and-swap settlement | proposed | 2026-10-11 |
 | 0103 | [Context is a bounded view of source-bound work](../decisions/0103-context-is-a-bounded-view-of-source-bound-work.md) | Durable source records with scoped working projections and acknowledged phase artifacts | proposed | 2026-10-11 |
+| 0105 | [Rebuild modes and exact operation termination share existing recovery](../decisions/0105-rebuild-modes-and-exact-operation-termination-share-existing-recovery.md) | Explicit destructive mode and original-runtime process capability | proposed | 2026-10-11 |
 
 <!-- /generated:decision-records -->
 

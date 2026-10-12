@@ -1491,6 +1491,7 @@ function workloadResident(
     emitStepRoot: () => {},
     refusalOutcome: () => "refused",
     DESTROY_UNCONFIRMED_KEY: "destroy-unconfirmed",
+    CLEANUP_PENDING_KEY: "cleanup",
     DEFAULT_EXEC_TIMEOUT_MS: 1000,
     createExtensionProcessSandbox: () => ({
       getProcess: async (id: string) => ({

@@ -749,7 +749,7 @@ describe("repo offboard / rebuild (--dry-run)", () => {
     const { text } = await say(bind({ admin: c }), "repo offboard acme/api --dry-run", admin);
     expect(c.offboard).toHaveBeenCalledWith("repo:acme/api", true);
     expect(text).toContain("🧪 *Dry run* — offboarding `acme/api` would remove:");
-    expect(text).toContain("• 4 snapshot backup object(s) in R2 (ids m1, c1)");
+    expect(text).toContain("• 4 backup object(s) in R2 (ids m1, c1)");
     expect(text).toContain("• 3 thread binding(s) and the container (currently `warm`)");
     expect(text).toContain("Nothing was changed. Without `--dry-run`, `repo offboard acme/api` performs this removal.");
   });
@@ -805,6 +805,75 @@ describe("repo offboard / rebuild (--dry-run)", () => {
       error: "not_found",
       message: "HTTP 404: unknown resource",
     });
+  });
+});
+
+describe("repo rebuild --full", () => {
+  it("distinguishes a completed teardown from unverified provisioning and refuses an incomplete success receipt", async () => {
+    const partial = bind({
+      admin: mockClient({
+        rebuild: ok(
+          { error: "reset-incomplete: backup deletion failed", containerStopped: true, storageCleared: true },
+          503,
+        ),
+      }),
+    });
+    expect(await partial.invoke("repo.rebuild", { args: ["acme/api"], options: { full: true } }, admin)).toMatchObject({
+      ok: false,
+      error: "unavailable",
+      message:
+        "HTTP 503: reset-incomplete: backup deletion failed\nContainer destruction confirmed; stored work cleared: true; provisioning unconfirmed. Repo settings retained.",
+    });
+    const incomplete = bind({ admin: mockClient({ rebuild: ok({ state: "onboarding" }, 202) }) });
+    expect(
+      await incomplete.invoke("repo.rebuild", { args: ["acme/api"], options: { full: true } }, admin),
+    ).toMatchObject({
+      ok: false,
+      error: "unavailable",
+      message: "Full rebuild outcome is unverified; no confirmed teardown and provisioning receipt was returned.",
+    });
+  });
+
+  it("plans full removal through the command and reports recreation after the destructive call", async () => {
+    const plan = mockClient({
+      rebuild: ok({
+        wouldRemove: { threadBindings: 29, backupObjects: 6, r2Objects: 0 },
+        reprovision: { defaultRef: "release" },
+      }),
+    });
+    expect((await say(bind({ admin: plan }), "repo rebuild acme/api --full --dry-run", admin)).text).toBe(
+      "Full rebuild of `acme/api` would delete its container, 29 thread binding(s), 6 backup object(s), 0 prefix object(s), and all stored workspace and operation state.\nKeep the repo registration and commands; recreate on `release`.\nOriginal operation results remain unknown. Nothing was changed.",
+    );
+    expect(plan.rebuild).toHaveBeenCalledWith("repo:acme/api", true, true);
+    const commands = bind({
+      admin: mockClient({
+        rebuild: ok(
+          {
+            state: "onboarding",
+            containerStopped: true,
+            storageCleared: true,
+            backupObjectsDeleted: 6,
+            r2ObjectsDeleted: 0,
+            reprovision: { defaultRef: "release" },
+          },
+          202,
+        ),
+      }),
+    });
+    expect((await say(commands, "repo rebuild acme/api --full", admin)).text).toBe(
+      "Fully rebuilding `acme/api`: container destroyed, stored work cleared, 6 backup object(s) and 0 prefix object(s) deleted. Recreating on `release`; provisioning has started. Original operation results remain unknown.",
+    );
+    expect(await commands.settle("repo.rebuild", { slug: "acme/api", dryRun: false }, admin)).toMatchObject({
+      ok: true,
+    });
+  });
+
+  it("reports an unsupported Worker without falling back to offboard", async () => {
+    const client = mockClient({ rebuild: ok({ error: "not found" }, 404) });
+    expect(
+      await bind({ admin: client }).invoke("repo.rebuild", { args: ["acme/api"], options: { full: true } }, admin),
+    ).toMatchObject({ ok: false, error: "not_found", message: "HTTP 404: not found" });
+    expect(client.offboard).not.toHaveBeenCalled();
   });
 });
 
