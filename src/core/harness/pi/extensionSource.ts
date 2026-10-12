@@ -341,6 +341,20 @@ export default async function switchboardHarness(pi) {
     stage = "tool registration";
     if (read) pi.registerTool(read);
     for (const def of TOOL_DEFINITIONS) pi.registerTool(relayTool(def));
+    // The pinned Anthropic adapter drops root schema unions in non-strict mode.
+    // Restore only this declared constraint on a tool still offered by the request.
+    const check = TOOL_DEFINITIONS.find((def) => def.name === "run_check");
+    if (check && Array.isArray(check.inputSchema.anyOf)) pi.on("before_provider_request", (event) => {
+      const payload = event.payload;
+      if (!payload || !Array.isArray(payload.tools)) return undefined;
+      let changed = false;
+      const tools = payload.tools.map((tool) => {
+        if (!tool || tool.name !== check.name || tool.strict === true || !tool.input_schema || tool.input_schema.type !== "object" || tool.input_schema.anyOf !== undefined) return tool;
+        changed = true;
+        return { ...tool, input_schema: { ...tool.input_schema, anyOf: check.inputSchema.anyOf } };
+      });
+      return changed ? { ...payload, tools } : undefined;
+    });
     pi.on("session_before_compact", compaction);
     initialized = true;
   } catch (err) {

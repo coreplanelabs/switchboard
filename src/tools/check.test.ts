@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { validateToolArguments, type Tool, type ToolCall } from "@earendil-works/pi-ai";
+import { convertResponsesTools } from "@earendil-works/pi-ai/api/openai-responses-shared";
 import { runCheckTool } from "./check.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
 import { notesTool, sessionCapabilityFor } from "./session.js";
@@ -121,6 +123,32 @@ function phaseContext(exitCode = 0) {
 const phaseInput = { command: "node tests/focused.js", purpose: "verification", checkpoint };
 
 describe("run_check phase checkpoints", () => {
+  it("rejects baseline checkpoints in the model-visible schema while accepting valid check intents", () => {
+    const [definition] = convertResponsesTools([
+      {
+        name: runCheckTool.name,
+        description: runCheckTool.description,
+        parameters: JSON.parse(JSON.stringify(runCheckTool.inputSchema)),
+      },
+    ]);
+    if (definition.type !== "function") throw new Error("Expected a function tool");
+    expect(definition.strict).toBe(false);
+    const tool: Tool = {
+      name: definition.name,
+      description: definition.description ?? "",
+      parameters: definition.parameters as Tool["parameters"],
+    };
+    const validate = (input: ToolCall["arguments"]) =>
+      validateToolArguments(tool, { type: "toolCall", id: "schema-check", name: tool.name, arguments: input });
+    expect(() => validate({ ...phaseInput, purpose: "baseline" })).toThrow('Validation failed for tool "run_check"');
+    const validInputs: ToolCall["arguments"][] = [
+      { command: "node tests/focused.js", purpose: "baseline" },
+      { command: "node tests/focused.js", purpose: "verification", timeoutMs: 10_000 },
+      phaseInput,
+    ];
+    for (const input of validInputs) expect(validate(input)).toEqual(input);
+  });
+
   it("saves the working phase with recorded evidence distinct from model-reported progress", async () => {
     const s = phaseContext();
     const result = await runCheckTool.run(phaseInput, s.ctx);
