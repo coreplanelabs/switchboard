@@ -70,6 +70,8 @@ export interface CommandRunOptions {
   source?: "route" | "confirm";
   /** A consumed approval is a separate event from the message that offered it. */
   confirmationId?: string;
+  /** The trusted run/tool-call pair, stable only for replay of that invocation. */
+  invocationId?: string;
   /** Recheck requester and source access before publishing command output. */
   beforePublish?: () => Promise<void>;
   /** Nested commands keep the main run as channel and trace owner. */
@@ -135,7 +137,9 @@ export async function runChatCommand(
   if (!commands) return { ok: false, text: "" };
   const eventId = opts.confirmationId
     ? `confirmation:${opts.confirmationId}`
-    : (msg.messageId ?? `request:${trace.root.traceId}:${trace.root.id}`);
+    : opts.invocationId
+      ? `invocation:${opts.invocationId}`
+      : (msg.messageId ?? `request:${trace.root.traceId}:${trace.root.id}`);
   const persistText = async (text: string, suffix = "") => {
     if (text && deps.runLedger?.sessionPersistence) {
       await opts.beforePublish?.();

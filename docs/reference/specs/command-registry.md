@@ -316,3 +316,5 @@ An offer stores normalized arguments, requester, credential/connection, reposito
 | Item 27: a chat reply over `LONG_COMMAND_REPLY_CHARS` goes to `ChannelIO.attach` (lead = first line, file `<group>-<verb>.md` converted to CommonMark) when the channel offers it; else `reply`; help/usage replies count like any other | `[unit]` `src/core/dispatch/reply.test.ts::replyCommandOutput::*`, `src/core/markdownDocument.test.ts::toMarkdownDocument::*` |
 
 | Adapter-supplied execution authority is rechecked after asynchronous approval-class resolution and before the handler; a revoked requester cannot mutate settings | `[unit]` `src/core/dispatcher.test.ts::dispatch::keeps settings unchanged when requester access changes during command admission` |
+
+| Model-selected commands retain separate initial and settled results under a trusted run/tool-call identity. Exact replay reuses that identity; saved approvals keep `confirmation:<offer-id>` isolation. | `[unit]` `src/core/dispatch/conversationCommand.test.ts::conversation command receipts::*`; `src/core/dispatcher.test.ts::dispatch::persists both same-command results from one requester turn` |

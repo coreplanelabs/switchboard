@@ -305,6 +305,7 @@ export interface RunLoopContext {
     id: string,
     input: import("../commandRegistry.js").CommandInput,
     authority: (currentSource?: boolean) => Promise<boolean>,
+    callId: string,
   ) => Promise<import("../commandChat.js").ChatCommandResult>;
   sourceReads?: SourceReads;
   /** The run's setup result as it was claimed (record 0097), for its record. */
@@ -1874,7 +1875,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     verifiedAtOpen &&
     mainWorkTrusted &&
     ctx.executeCommand
-      ? async (quote, id, input) => {
+      ? async (quote, id, input, callId) => {
           const source = mainSources.select(quote);
           if (source.kind === "refused")
             return { ok: false, text: "This call does not match the latest requester turn." };
@@ -1890,7 +1891,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           return (
             (await mainWorkEffectGate.run(async () => {
               if (!(await authority())) return { ok: false, text: "Requester authority is unavailable; nothing ran." };
-              return ctx.executeCommand!(source.source.msg, id, input, authority);
+              return ctx.executeCommand!(source.source.msg, id, input, authority, callId);
             })) ?? { ok: false, text: "Requester authority was withdrawn; nothing ran." }
           );
         }
