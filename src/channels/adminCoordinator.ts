@@ -9426,6 +9426,7 @@ async function finish(body: Record<string, unknown>, deps: AdminCoordinatorDeps)
         at,
         state: "ended",
         cause: body.outcome === "completed" ? "completed" : "failed",
+        statePatch: { finalStatus: body.outcome },
       });
       if (!ended.ok || !deps.registry.commitLiveState(host.runId, ended))
         throw new Error(`hosted ending was not committed (${ended.ok ? "registry sequence" : ended.reason})`);

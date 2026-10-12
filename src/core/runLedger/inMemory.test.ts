@@ -798,6 +798,55 @@ describe("InMemoryRunLedger", () => {
     expect(seen).toEqual(["run_state"]);
   });
 
+  it("terminal completion atomically fences replay and preserves the result through reclaim", async () => {
+    const ledger = new InMemoryRunLedger(() => 100);
+    await ledger.claim(claimReq("terminal-state", "slack:C1:terminal"));
+    await ledger.assignLiveState("terminal-state", "g1", {
+      expectedSeq: 0,
+      at: 100,
+      state: "admitted",
+      bound: 1_000,
+    });
+    const end = {
+      expectedSeq: 1,
+      at: 200,
+      state: "ended" as const,
+      cause: "failed" as const,
+      statePatch: { finalStatus: "failed", answerOutcome: { version: 1, ending: "unknown", output: "absent" } },
+    };
+    ledger.liveStateFailure.beforeCommit = true;
+    await expect(ledger.assignLiveState("terminal-state", "g1", end)).rejects.toThrow("live-state commit failed");
+    expect((await ledger.listLive())[0]).toMatchObject({
+      phase: "live",
+      liveState: { state: "admitted" },
+      liveStateSeq: 1,
+    });
+    expect((await ledger.readEvents("terminal-state")).map((e) => e.type)).toEqual(["run_state"]);
+    ledger.liveStateFailure.beforeCommit = false;
+    expect(await ledger.assignLiveState("terminal-state", "g1", end)).toMatchObject({ ok: true, liveStateSeq: 2 });
+    expect((await ledger.listLive())[0]).toMatchObject({
+      phase: "finishing",
+      liveState: { state: "ended", since: 200 },
+      state: end.statePatch,
+    });
+    expect(await ledger.finishing("terminal-state", "g1")).toEqual({ ok: true });
+    const [reclaimed] = await ledger.reclaim("g2", 100_000, LEASE_MS);
+    expect(reclaimed).toMatchObject({
+      reclaimedFrom: "finishing",
+      row: { liveState: { state: "ended" }, state: end.statePatch },
+    });
+    expect(await ledger.finishing("terminal-state", "g1")).toEqual({ ok: false, reason: "fenced" });
+    expect(
+      await ledger.assignLiveState("terminal-state", "g2", {
+        expectedSeq: 2,
+        at: 100_000,
+        state: "admitted",
+        bound: 101_000,
+        resumeSegment: true,
+      }),
+    ).toEqual({ ok: false, reason: "terminal" });
+  });
+
   it("an injected failure before commit exposes neither the event nor the live-state projection", async () => {
     const ledger = new InMemoryRunLedger(() => 0);
     await ledger.claim(claimReq("state-fail", "slack:C1:state-fail"));

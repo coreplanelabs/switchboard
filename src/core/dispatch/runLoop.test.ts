@@ -532,6 +532,81 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  it("commits the execution result with ended before channel delivery", async () => {
+    const head = "a".repeat(40);
+    const handoff = { deviations: [], followUps: [], unproven: [] };
+    const dispositions = [{ findingId: "F1", disposition: "fixed" as const, note: "Handled empty input" }];
+    const s = endingIn(
+      async (_container, run) => {
+        run.toolContext.onHandoff?.(handoff);
+        run.toolContext.onDispositions?.(dispositions);
+        return sessionAnswering("Done.");
+      },
+      {
+        coding: true,
+        repoCtx: { repo: "acme/api", ref: "fix/task", baseRef: "main" },
+        executor: {
+          exec: async (cmd) =>
+            cmd.includes("rev-parse --abbrev-ref HEAD")
+              ? "fix/task"
+              : cmd.includes("rev-parse HEAD")
+                ? head
+                : cmd.includes("ls-remote")
+                  ? `${head}\trefs/heads/fix/task`
+                  : "",
+        },
+      },
+    );
+    const inner = new InMemoryRunLedger(() => NOW);
+    const ledger = createLedgerWriteThrough({ ledger: inner, gen: "gen-T", fallback: s.store, warn: () => {} });
+    const opened = await ledger.open({
+      runId: s.run.id,
+      threadKey: s.ctx.msg.threadKey,
+      startedAt: NOW,
+      meta: {
+        agent: "coding",
+        channelId: s.ctx.msg.channelId,
+        userId: s.ctx.msg.userId,
+        threadKey: s.ctx.msg.threadKey,
+      },
+      card: null,
+      system: "test",
+      tools: [],
+      seed: { messages: [{ role: "user", content: [{ type: "text", text: "go" }] }], budgetMs: 60_000 },
+    });
+    if (opened.kind !== "tracked") throw new Error("untracked test");
+    const admitted = await opened.run.assignLiveState({
+      expectedSeq: 0,
+      eventSeq: 1,
+      at: NOW,
+      state: "admitted",
+      bound: NOW + 60_000,
+    });
+    if (!admitted.ok) throw new Error(admitted.reason);
+    s.registry.commitLiveState(s.run.id, admitted);
+    s.registry.subscribe(s.run.id, s.run.token, { onEvent: (event, seq) => opened.run.event(event, seq) });
+    try {
+      expect(answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run })).answer).toBe(
+        "No push was confirmed by this run.\n\nWork report (agent-written; publication claims here are unverified):\nDone.",
+      );
+      expect((await inner.listLive())[0]).toMatchObject({
+        phase: "finishing",
+        liveState: { state: "ended" },
+        state: {
+          finalStatus: "completed",
+          answerOutcome: { version: 1, ending: "answered" },
+          headSha: head,
+          handoff,
+          dispositions,
+        },
+      });
+    } finally {
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      await opened.run.close();
+    }
+  });
+
   it("a completed tool error stays in the run history without a refusal warning on the final card", async () => {
     const observed = watched(piHarness);
     observed.harness.open = async (_deps, run) => {

@@ -1766,6 +1766,8 @@ export class InMemoryRunLedger implements RunLedger {
     row.state = preserved;
     row.liveState = result.liveState;
     row.liveStateSeq = liveStateSeq;
+    // Completion and the no-replay fence are one commit, before channel delivery.
+    if (assignment.state === "ended") row.phase = "finishing";
     return {
       ...result,
       ...(result.event ? { event: { ...result.event, seq: liveStateSeq } } : {}),
@@ -1973,6 +1975,7 @@ export class InMemoryRunLedger implements RunLedger {
     if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
     const fence = checkFence(row, gen);
     if (!fence.ok || !row) return fence;
+    if (row.phase === "finishing" && row.liveState?.state === "ended") return { ok: true };
     if (!phaseTransition(row.phase, "finishing")) return { ok: false, reason: "fenced" };
     row.phase = "finishing";
     return { ok: true };

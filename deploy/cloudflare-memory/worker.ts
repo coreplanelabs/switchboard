@@ -6986,7 +6986,13 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
       if (isContextDependencies(state.contextDependencies))
         this.pinContext(runId, undefined, state.contextDependencies);
-      this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(state), runId);
+      // The terminal event and no-replay phase must survive a restart together.
+      this.sql.exec(
+        `UPDATE live_runs SET state_json = ?, phase = ? WHERE run_id = ?`,
+        JSON.stringify(state),
+        assignment.state === "ended" ? "finishing" : row.phase,
+        runId,
+      );
       out = {
         ...result,
         ...(result.event ? { event: { ...result.event, seq: liveStateSeq } } : {}),
@@ -7227,6 +7233,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         out = fence;
         return;
       }
+      if (row.phase === "finishing" && row.liveState?.state === "ended") return;
       if (!phaseTransition(row.phase, "finishing")) {
         out = { ok: false, reason: "fenced" };
         return;

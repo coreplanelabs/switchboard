@@ -40,12 +40,17 @@ import {
 } from "../runRecord.js";
 import { pipelineOfEvents, type PipelineSummary } from "../pipelineStanding.js";
 import type { RunProfile } from "../../config/profile.js";
-import type { ResearchBrief } from "../research/brief.js";
-import { redactHandoff, type Handoff } from "../ship/handoff.js";
+import { researchBriefFromSubmission, type ResearchBrief } from "../research/brief.js";
+import { acceptedReviewPublication, reviewPublicationOf } from "../reviewPublication.js";
+import { normalizeHead } from "../reviewedHead.js";
+import { isHandoffShape, redactHandoff, type Handoff } from "../ship/handoff.js";
 import {
   redactDispositions,
   redactReviewPost,
   redactVerdict,
+  isReviewVerdictShape,
+  isReviewPostShape,
+  isFindingDispositionsShape,
   type FindingDisposition,
   type ReviewPost,
   type ReviewVerdict,
@@ -215,6 +220,34 @@ export function reclaimedRunRecord(input: {
   finishedAt: number;
 }): RunRecord {
   const { row, events, status, finishedAt } = input;
+  const saved = row.state;
+  const publication = reviewPublicationOf(saved.reviewPublication);
+  if (
+    publication &&
+    (publication.runId !== row.runId ||
+      publication.target.repo !== row.meta.repo ||
+      (row.meta.pr !== undefined && publication.target.number !== row.meta.pr))
+  )
+    throw new Error("the saved review publication does not belong to this run");
+  const verdict = isReviewVerdictShape(saved.verdict) ? saved.verdict : undefined;
+  const dispositions = isFindingDispositionsShape(saved.dispositions) ? saved.dispositions : undefined;
+  const handoff = isHandoffShape(saved.handoff) ? saved.handoff : undefined;
+  if (
+    (saved.verdict !== undefined && verdict === undefined) ||
+    (saved.dispositions !== undefined && dispositions === undefined) ||
+    (saved.handoff !== undefined && handoff === undefined)
+  )
+    throw new Error("the saved terminal artifacts could not be verified");
+  const researchBrief = researchBriefFromSubmission(
+    saved.researchBrief,
+    events,
+    events.every((event, index) => event.seq === index + 1),
+  );
+  if (saved.researchBrief !== undefined && researchBrief === undefined)
+    throw new Error("the saved research brief could not be verified");
+  const reviewPost =
+    (publication && acceptedReviewPublication(publication)) ??
+    (isReviewPostShape(saved.reviewPost) && !saved.reviewPost.posted ? saved.reviewPost : undefined);
   const snap: RunSnapshot = {
     events,
     finished: true,
@@ -225,6 +258,13 @@ export function reclaimedRunRecord(input: {
     truncated: false,
   };
   return assembleRunRecord({
+    verdict,
+    dispositions,
+    handoff,
+    researchBrief,
+    headSha: normalizeHead(saved.headSha),
+    reviewHead: normalizeHead(saved.reviewHead) ?? publication?.target.commitId ?? normalizeHead(verdict?.head),
+    reviewPost,
     audienceRefusal: audienceRefusalOf(row.state.audienceRefusal),
     answerOutcome: answerOutcomeOf(row.state.answerOutcome),
     setup: runSetupOf(row.state.setup),

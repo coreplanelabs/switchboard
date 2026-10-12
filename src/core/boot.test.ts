@@ -277,6 +277,187 @@ describe("reclaimRuns", () => {
     expect(ledger.finished.get("done2")!.status).toBe("completed");
   });
 
+  it("settles terminal completion without resuming execution or claiming delivery", async () => {
+    const { ledger, run } = harness();
+    await ledger.claim(claim("ended", "slack:C1:ended"));
+    await ledger.seed("ended", "g1", [{ idx: 0, message: user("review") }]);
+    await ledger.step("ended", "g1", seedRecord(1), []);
+    await ledger.assignLiveState("ended", "g1", { expectedSeq: 0, at: 1_000, state: "admitted", bound: 10_000 });
+    await ledger.append("ended", "g1", [
+      { type: "review_posted", repo: "acme/api", number: 1, head: "abc", verdict: "approve", seq: 2, at: 1_500 },
+    ]);
+    await ledger.assignLiveState("ended", "g1", {
+      expectedSeq: 1,
+      at: 2_000,
+      state: "ended",
+      cause: "completed",
+      statePatch: { finalStatus: "completed", answerOutcome: { version: 1, ending: "answered", output: "present" } },
+    });
+    const outcome = await run();
+    expect(outcome.closed).toMatchObject([{ runId: "ended", status: "completed", from: "finishing" }]);
+    expect(outcome.resumable).toEqual([]);
+    expect(ledger.finished.get("ended")).toMatchObject({
+      id: "ended",
+      status: "completed",
+      finishedAt: 2_000,
+      answerOutcome: { version: 1, ending: "answered", output: "present" },
+      events: expect.arrayContaining([
+        { type: "review_posted", repo: "acme/api", number: 1, head: "abc", verdict: "approve", seq: 2, at: 1_500 },
+      ]),
+    });
+    expect(ledger.finished.get("ended")?.replyOk).toBeUndefined();
+  });
+
+  it("settles legacy ended rows from their recorded cause instead of resuming them", async () => {
+    const { ledger, run } = harness();
+    for (const [id, phase, cause] of [
+      ["old-done", "live", "completed"],
+      ["old-failed", "handoff", "failed"],
+    ] as const) {
+      await ledger.claim(claim(id, `slack:C1:${id}`));
+      await ledger.seed(id, "g1", [{ idx: 0, message: user("review") }]);
+      await ledger.step(id, "g1", seedRecord(1), []);
+      await ledger.assignLiveState(id, "g1", { expectedSeq: 0, at: 1_000, state: "admitted", bound: 10_000 });
+      await ledger.assignLiveState(id, "g1", { expectedSeq: 1, at: 2_000, state: "ended", cause });
+      // Older writers committed the terminal event separately from the no-replay phase.
+      ledger.live.get(id)!.phase = phase;
+    }
+    const outcome = await run();
+    expect(outcome.closed.map((c) => [c.runId, c.status])).toEqual([
+      ["old-done", "completed"],
+      ["old-failed", "failed"],
+    ]);
+    expect(outcome.resumable).toEqual([]);
+    expect(ledger.finished.get("old-failed")).toMatchObject({ status: "failed", finishedAt: 2_000 });
+  });
+
+  it.each(["live", "handoff", "finishing"] as const)(
+    "preserves typed terminal outputs when recovering the %s phase",
+    async (phase) => {
+      const { ledger, run } = harness();
+      const head = "a".repeat(40);
+      const verdict = {
+        verdict: "request_changes",
+        summary: "Fix one issue",
+        head,
+        findings: [{ id: "F1", severity: "minor", file: "src/a.ts", title: "Handle empty input" }],
+      };
+      const publication = {
+        version: 1,
+        runId: "review-output",
+        target: { repo: "acme/api", number: 42, commitId: head },
+        bodyHash: "b".repeat(64),
+        verdict: "request_changes",
+        state: "accepted",
+      };
+      const req = claim("review-output", "slack:C1:review-output");
+      req.meta.pr = 42;
+      await ledger.claim(req);
+      await ledger.assignLiveState("review-output", "g1", {
+        expectedSeq: 0,
+        at: 1_000,
+        state: "admitted",
+        bound: 10_000,
+      });
+      await ledger.assignLiveState("review-output", "g1", {
+        expectedSeq: 1,
+        at: 2_000,
+        state: "ended",
+        cause: "completed",
+        statePatch: { verdict, reviewPublication: publication, headSha: head },
+      });
+      ledger.live.get("review-output")!.phase = phase;
+      const outcome = await run();
+      expect(outcome.closed).toMatchObject([{ runId: "review-output", status: "completed" }]);
+      expect(ledger.finished.get("review-output")).toMatchObject({
+        status: "completed",
+        headSha: head,
+        verdict,
+        reviewHead: head,
+        reviewPost: { posted: true, target: { repo: "acme/api", number: 42 }, head, verdict: "request_changes" },
+      });
+      expect(outcome.resumable).toEqual([]);
+    },
+  );
+
+  it.each(["completed", "failed"] as const)(
+    "settles an ended hosted parent as %s with its original summary",
+    async (status) => {
+      const { ledger, run } = harness();
+      await ledger.claim(hostedClaim("hosted-end", "slack:C1:hosted-end"));
+      await ledger.setState("hosted-end", "g1", { hosting: { instanceId: "plan-live", until: 1_000_000 } });
+      await ledger.assignLiveState("hosted-end", "g1", { expectedSeq: 0, at: 1_000, state: "admitted", bound: 10_000 });
+      await ledger.append("hosted-end", "g1", [
+        { type: "answer", text: "One unit remains blocked", seq: 2, at: 1_500 },
+      ]);
+      await ledger.assignLiveState("hosted-end", "g1", {
+        expectedSeq: 1,
+        at: 2_000,
+        state: "ended",
+        cause: status,
+        statePatch: { finalStatus: status },
+      });
+      const outcome = await run();
+      expect(outcome.closed).toMatchObject([{ runId: "hosted-end", status }]);
+      expect(outcome.resumable).toEqual([]);
+      expect(ledger.finished.get("hosted-end")).toMatchObject({
+        status,
+        hosted: true,
+        events: expect.arrayContaining([{ type: "answer", text: "One unit remains blocked", seq: 2, at: 1_500 }]),
+      });
+    },
+  );
+
+  it("recovers a legacy local soft stop from its actual stopped event", async () => {
+    const { ledger, run } = harness();
+    await ledger.claim(claim("local-soft", "slack:C1:local-soft"));
+    await ledger.assignLiveState("local-soft", "g1", { expectedSeq: 0, at: 1_000, state: "admitted", bound: 10_000 });
+    await ledger.append("local-soft", "g1", [
+      { type: "run_note", kind: "stopped", mode: "soft", summary: "soft stop", seq: 2, at: 1_500 },
+    ]);
+    await ledger.assignLiveState("local-soft", "g1", { expectedSeq: 1, at: 2_000, state: "ended", cause: "stopped" });
+    ledger.live.get("local-soft")!.phase = "live";
+    expect(ledger.live.get("local-soft")!.stop).toBeNull();
+    const outcome = await run();
+    expect(outcome.closed).toMatchObject([{ runId: "local-soft", status: "stopped_soft" }]);
+    expect(ledger.finished.get("local-soft")).toMatchObject({ status: "stopped_soft", finishedAt: 2_000 });
+    expect(outcome.resumable).toEqual([]);
+  });
+
+  it("does not infer an executed stop from a request without its stopped event", async () => {
+    const { ledger, run } = harness();
+    await ledger.claim(claim("unknown-stop", "slack:C1:unknown-stop"));
+    await ledger.assignLiveState("unknown-stop", "g1", { expectedSeq: 0, at: 1_000, state: "admitted", bound: 10_000 });
+    await ledger.append("unknown-stop", "g1", [
+      { type: "run_note", kind: "stop_requested", mode: "soft", summary: "stop requested", seq: 2, at: 1_500 },
+    ]);
+    await ledger.assignLiveState("unknown-stop", "g1", { expectedSeq: 1, at: 2_000, state: "ended", cause: "stopped" });
+    const outcome = await run();
+    expect(outcome.failed).toEqual([{ runId: "unknown-stop", error: "the terminal stop mode could not be verified" }]);
+    expect(ledger.live.get("unknown-stop")).toMatchObject({ ownerGen: "g2", liveState: { state: "ended" } });
+    expect(outcome.resumable).toEqual([]);
+  });
+
+  it("retains an ended row when its terminal event cannot be verified", async () => {
+    const { ledger, run } = harness();
+    await ledger.claim(claim("missing-end", "slack:C1:missing-end"));
+    await ledger.assignLiveState("missing-end", "g1", { expectedSeq: 0, at: 1_000, state: "admitted", bound: 10_000 });
+    await ledger.assignLiveState("missing-end", "g1", {
+      expectedSeq: 1,
+      at: 2_000,
+      state: "ended",
+      cause: "completed",
+    });
+    ledger.events.set("missing-end", []);
+    const outcome = await run();
+    expect(outcome.failed).toEqual([
+      { runId: "missing-end", error: "the terminal run boundary could not be verified" },
+    ]);
+    expect(outcome.resumable).toEqual([]);
+    expect(ledger.live.get("missing-end")).toMatchObject({ ownerGen: "g2", liveState: { state: "ended" } });
+    expect(ledger.finished.has("missing-end")).toBe(false);
+  });
+
   it("a restart before the final seal retains the missing write-up without claiming delivery", async () => {
     const { ledger, run } = harness();
     const answerOutcome = { version: 1 as const, ending: "time_budget" as const, output: "absent" as const };

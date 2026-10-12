@@ -289,7 +289,50 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
     try {
       let status: RunStatus;
       let why: string;
-      if (run.reclaimedFrom === "finishing") {
+      let terminalEvents: AppendableEvent[] | undefined;
+      let finishedAt: number | undefined;
+      if (row.liveState?.state === "ended") {
+        // Older writers committed ended before fencing replay. Settle that
+        // execution from its durable result, never from transcript completeness.
+        terminalEvents = await ledger.readEvents(row.runId);
+        const boundary = terminalEvents.find((event) => event.seq === row.liveStateSeq);
+        if (boundary?.type !== "run_state" || boundary.state !== "ended")
+          throw new Error("the terminal run boundary could not be verified");
+        const recorded = row.state.finalStatus;
+        const stopped = [...terminalEvents]
+          .reverse()
+          .find(
+            (event) =>
+              event.seq < boundary.seq &&
+              event.type === "run_note" &&
+              event.kind === "stopped" &&
+              (event.mode === "soft" || event.mode === "hard"),
+          );
+        const stopMode = (stopped?.type === "run_note" ? stopped.mode : undefined) ?? row.stop;
+        if (
+          !(typeof recorded === "string" && TERMINAL.has(recorded)) &&
+          boundary.cause === "stopped" &&
+          stopMode !== "soft" &&
+          stopMode !== "hard"
+        )
+          throw new Error("the terminal stop mode could not be verified");
+        status =
+          typeof recorded === "string" && TERMINAL.has(recorded)
+            ? (recorded as RunStatus)
+            : boundary.cause === "completed"
+              ? "completed"
+              : boundary.cause === "failed"
+                ? "failed"
+                : boundary.cause === "stopped"
+                  ? stopMode === "hard"
+                    ? "stopped_hard"
+                    : stopMode === "soft"
+                      ? "stopped_soft"
+                      : "interrupted"
+                  : "interrupted";
+        finishedAt = row.liveState.since;
+        why = "execution ended; reply delivery was not confirmed before the previous generation died";
+      } else if (run.reclaimedFrom === "finishing") {
         // Finishing fences replay before the reply. A crash here does not
         // establish delivery; retain execution status and authored-output facts
         // while leaving replyOk unknown.
@@ -396,8 +439,8 @@ export async function reclaimRuns(opts: ReclaimOptions): Promise<ReclaimOutcome>
         status = "interrupted";
         why = verdict.why;
       }
-      const events = await ledger.readEvents(row.runId);
-      const closed = await closeReclaimed(ledger, gen, { row, events, status, finishedAt: now() });
+      const events = terminalEvents ?? (await ledger.readEvents(row.runId));
+      const closed = await closeReclaimed(ledger, gen, { row, events, status, finishedAt: finishedAt ?? now() });
       if (!closed.ok) {
         // A fence proves the row still exists under another generation. Keep
         // that durable child in its hosted parent's liveness facts just as we
