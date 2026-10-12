@@ -1127,6 +1127,172 @@ describe("mintGeneration", () => {
   });
 });
 
+describe("source context write diagnostics", () => {
+  it("reports an uncertain source write without exposing private bytes or repeating it", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    let fail = false;
+    let writes = 0;
+    const request = await storeRequestWitness("/runs/session/write", "fixture-private-request");
+    const { wt, warnings } = harness({
+      ledger: overriding(ledger, {
+        writeSessionSources: async (...args) => {
+          const result = await ledger.writeSessionSources(...args);
+          if (fail) {
+            writes++;
+            throw new UncertainStoreError("fixture-private-exception", request, {
+              diagnosis: { kind: "http", status: 503 },
+            });
+          }
+          return result;
+        },
+      }),
+    });
+    const run = (await openRun(wt, openReq()))!;
+    const before = (await ledger.readSessionTail(run.session!.key, 1)).sources!;
+    const sources = {
+      ...before,
+      context: {
+        version: 1 as const,
+        status: "known" as const,
+        revision: 0,
+        origins: [],
+        slack: [],
+        mcp: [],
+        githubRepos: ["acme/api"],
+      },
+    };
+    fail = true;
+    expect(await run.writeSources(sources)).toBe(false);
+    expect(warnings).toEqual([
+      "[ledger] slack:C1:1.0 run=r1 source context not written stage=write-sources operation=other failure=http status=503",
+    ]);
+    expect(writes).toBe(1);
+    expect((await ledger.readSessionTail(run.session!.key, 1)).sources?.context?.githubRepos).toEqual(["acme/api"]);
+    expect(ledger.live.get("r1")!.state.contextDependencies).toBeUndefined();
+    expect(run.tracked()).toBe(true);
+    fail = false;
+    await run.close();
+  });
+
+  it.each([
+    ["read-before", "failure=unclassified"],
+    ["write-sources", "failure=refused reason=fenced"],
+    ["read-after", "failure=route-missing"],
+    ["state-ack", "failure=unacknowledged"],
+  ] as const)("reports %s failure without granting source acknowledgement", async (stage, diagnosis) => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    let fail = false;
+    let reads = 0;
+    let writes = 0;
+    const request = await storeRequestWitness("/runs/state", "fixture-private-state");
+    const { wt, warnings } = harness({
+      ledger: overriding(ledger, {
+        readSessionTail: async (...args) => {
+          if (fail) {
+            reads++;
+            if (stage === "read-before" && reads === 1) throw new Error("fixture-private-read");
+            if (stage === "read-after" && reads === 2) throw new RouteMissingError("fixture-private-route");
+          }
+          return ledger.readSessionTail(...args);
+        },
+        writeSessionSources: async (...args) => {
+          if (fail) {
+            writes++;
+            if (stage === "write-sources") return { ok: false, reason: "fenced" };
+          }
+          return ledger.writeSessionSources(...args);
+        },
+        setState: async (...args) => {
+          if (fail && stage === "state-ack")
+            throw new UncertainStoreError("fixture-private-state-error", request, {
+              diagnosis: { kind: "http", status: 503 },
+            });
+          return ledger.setState(...args);
+        },
+      }),
+    });
+    const run = (await openRun(wt, openReq()))!;
+    const before = (await ledger.readSessionTail(run.session!.key, 1)).sources!;
+    fail = true;
+    expect(
+      await run.writeSources({
+        ...before,
+        context: {
+          version: 1,
+          status: "known",
+          revision: 0,
+          origins: [],
+          slack: [],
+          mcp: [],
+          githubRepos: ["acme/api"],
+        },
+      }),
+    ).toBe(false);
+    expect(warnings.at(-1)).toBe(`[ledger] slack:C1:1.0 run=r1 source context not written stage=${stage} ${diagnosis}`);
+    expect(warnings.join(" ")).not.toContain("fixture-private");
+    expect(writes).toBe(stage === "read-before" ? 0 : 1);
+    expect(ledger.live.get("r1")!.state.contextDependencies).toBeUndefined();
+    expect(ledger.live.get("r1")!.state.sourceResults).toBeUndefined();
+    expect(run.tracked()).toBe(true);
+    if (stage === "state-ack")
+      expect(run.writeBoundaryFailure).toMatchObject({
+        kind: "state",
+        runId: "r1",
+        gen: "gen-A",
+        requestDigest: request.digest,
+      });
+    fail = false;
+    await run.close();
+  });
+
+  it("acknowledges a successful source save without a failure warning", async () => {
+    const { ledger, wt, warnings } = harness();
+    const run = (await openRun(wt, openReq()))!;
+    const before = (await ledger.readSessionTail(run.session!.key, 1)).sources!;
+    expect(
+      await run.writeSources({
+        ...before,
+        context: {
+          version: 1,
+          status: "known",
+          revision: 0,
+          origins: [],
+          slack: [],
+          mcp: [],
+          githubRepos: ["acme/api"],
+        },
+      }),
+    ).toBe(true);
+    expect((ledger.live.get("r1")!.state.contextDependencies as { githubRepos: string[] }).githubRepos).toEqual([
+      "acme/api",
+    ]);
+    expect(warnings).toEqual([]);
+    await run.close();
+  });
+
+  it("keeps a refused source write unacknowledged when the warning channel throws", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    let refuse = false;
+    const { wt, warnings } = harness({
+      ledger: overriding(ledger, {
+        writeSessionSources: async (...args) =>
+          refuse ? { ok: false, reason: "fenced" } : ledger.writeSessionSources(...args),
+      }),
+    });
+    const run = (await openRun(wt, openReq()))!;
+    const sources = (await ledger.readSessionTail(run.session!.key, 1)).sources!;
+    const observer = vi.spyOn(warnings, "push").mockImplementation(() => {
+      throw new Error("fixture-private-warning");
+    });
+    refuse = true;
+    expect(await run.writeSources(sources)).toBe(false);
+    expect(run.tracked()).toBe(true);
+    expect(ledger.live.get("r1")!.state.contextDependencies).toBeUndefined();
+    observer.mockRestore();
+    await run.close();
+  });
+});
+
 describe("open — claim and seed", () => {
   it.each([1, 2] as const)(
     "writes admitted GitHub result receipts with their exact mirrored bytes and preserves them in a later seed (v%s)",
