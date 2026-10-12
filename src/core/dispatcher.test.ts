@@ -939,6 +939,57 @@ describe("dispatch", () => {
     return { provider, requests };
   };
 
+  it("persists both same-command results from one requester turn", async () => {
+    let turn = 0;
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(request): Promise<CompletionResult> {
+        requests.push(request);
+        return turn++ === 0
+          ? {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "first",
+                  name: "command_run",
+                  input: {
+                    command: "config.show",
+                    parameters: { channel: "slack:CFIRST" },
+                    sourceMessage: "show both channels",
+                  },
+                },
+                {
+                  type: "tool_use",
+                  id: "second",
+                  name: "command_run",
+                  input: {
+                    command: "config.show",
+                    parameters: { channel: "slack:CSECOND" },
+                    sourceMessage: "show both channels",
+                  },
+                },
+              ],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "Both settings shown." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(mainDmYaml, provider);
+    const ledger = wireChildLedger(deps);
+    await deps.config.setChannelOverride("slack:CFIRST", { effort: "low" });
+    await deps.config.setChannelOverride("slack:CSECOND", { effort: "high" });
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, { ...mainDm("show both channels"), messageId: "1" }, io);
+    const native = replies.filter((text) => text.startsWith("*Effective for you in this channel:*"));
+    expect(native.map((text) => /effort `([^`]+)`/.exec(text)?.[1])).toEqual(["low", "high"]);
+    const session = [...ledger.sessions.values()].find((log) =>
+      log.rows.some((row) => row.json.includes("*Effective for you in this channel:*")),
+    );
+    expect(session?.rows.filter((row) => row.json.includes("*Effective for you in this channel:*")).length).toBe(2);
+    expect(JSON.stringify(requests[1].messages)).not.toContain("*Effective for you in this channel:*");
+  });
+
   it("keeps settings unchanged when requester access changes during command admission", async () => {
     let direct = true;
     const { provider } = commandProvider({ sourceMessage: "reset my config" }, "backend.clear");

@@ -18,6 +18,7 @@ export async function executeConversationCommand(
     trace: RequestTrace;
     ending: RunEnding;
     context: ContextDependencies;
+    invocationId: string;
     check: (currentSource?: boolean) => Promise<AudienceCheck>;
   },
   id: string,
@@ -26,6 +27,7 @@ export async function executeConversationCommand(
   const invocation = { kind: "invoke" as const, id, input };
   const result = await runChatCommand(deps, ctx.msg, ctx.io, invocation, ctx.ending, ctx.trace, {
     contextDependencies: ctx.context,
+    invocationId: ctx.invocationId,
     parentRunId: ctx.trace.runId,
     beforeExecute: async () => {
       if (!(await ctx.check()).ok) throw new Error("The requester's source access could not be verified.");

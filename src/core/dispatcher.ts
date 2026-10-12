@@ -4530,7 +4530,7 @@ export async function dispatch(
     // the settle and the post-steps, the finish. A throw propagates to the
     // outer catch after the workspace is released.
     const ran = await runLoop(deps, {
-      executeCommand: async (message, id, input, authority) =>
+      executeCommand: async (message, id, input, authority, callId) =>
         executeConversationCommand(
           deps,
           {
@@ -4538,6 +4538,7 @@ export async function dispatch(
             io,
             trace,
             ending,
+            invocationId: JSON.stringify([run.id, callId]),
             context: structuredClone(admittedContext),
             check: async (currentSource = true) => {
               if (!(await authority(currentSource))) return { ok: false, code: "direct-audience-denied" };

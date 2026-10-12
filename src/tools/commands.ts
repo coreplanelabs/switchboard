@@ -7,6 +7,7 @@ export type ConversationCommand = (
   sourceMessage: string,
   id: string,
   input: CommandInput,
+  callId: string,
 ) => Promise<ChatCommandResult>;
 
 /** Project the existing registry; the model never supplies an actor or authority. */
@@ -59,7 +60,8 @@ export function conversationCommandTools(commands: ChatCommands | undefined): Ru
           return "error: Parameters must be an object matching command_schema.";
         const bound = namedToInput(command, input.parameters as Record<string, unknown>, "camel");
         if ("error" in bound) return `error: ${bound.error}`;
-        const result = await ctx.command(input.sourceMessage, command.id, bound);
+        if (!ctx.callId) return "error: The command call could not be identified; nothing ran.";
+        const result = await ctx.command(input.sourceMessage, command.id, bound, ctx.callId);
         return result.ok ? result.text : `error: ${result.text}`;
       },
     },
