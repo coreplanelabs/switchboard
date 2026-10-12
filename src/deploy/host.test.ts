@@ -357,7 +357,7 @@ console.log(JSON.stringify(cursor!==null&&process.env.FIXTURE_MODE==='unpaginate
           .split("\n")
           .map((line) => JSON.parse(line));
         const expected = [
-          ["wrangler", "containers", "instances", "owned-fixture-app", "--json", "--per-page", "100"],
+          ["wrangler", "containers", "instances", "owned-fixture-app", "--json", "--per-page", "1000"],
           [
             "wrangler",
             "containers",
@@ -365,7 +365,7 @@ console.log(JSON.stringify(cursor!==null&&process.env.FIXTURE_MODE==='unpaginate
             "owned-fixture-app",
             "--json",
             "--per-page",
-            "100",
+            "1000",
             "--page-token",
             "opaque+/=&%",
           ],
@@ -377,6 +377,49 @@ console.log(JSON.stringify(cursor!==null&&process.env.FIXTURE_MODE==='unpaginate
         process.env = savedEnv;
         rmSync(dir, { recursive: true, force: true });
       }
+    }
+  });
+
+  it("reads a retained instance set larger than the fleet in one page", async () => {
+    const savedEnv = process.env;
+    const dir = mkdtempSync(join(tmpdir(), "paging-retained-set-"));
+    const calls = join(dir, "calls");
+    const app = `fixture-${randomUUID()}`;
+    try {
+      // The producer's measured shape: a page below the application's retained
+      // rows comes back with a continuation that re-serves the same window, so a
+      // small page can only ever refuse an incomplete inventory.
+      writeFileSync(
+        join(dir, "npx"),
+        `#!${process.execPath}
+const fs=require('node:fs'),a=process.argv.slice(2);
+if(a.slice(0,3).join(' ')==='wrangler containers list'){console.log(JSON.stringify([{name:process.env.FIXTURE_APP,id:'owned-fixture-app'}]));}
+else {fs.appendFileSync(process.env.FIXTURE_CALLS,JSON.stringify(a)+'\\n');
+ const per=Number(a[a.indexOf('--per-page')+1]);
+ const rows=Array.from({length:499},(_,n)=>({id:'private-row-'+n,state:'running',version:78}));
+ console.log(JSON.stringify({instances:rows.slice(0,per),result_info:{next_page_token:per>=rows.length?null:'private-cursor'}}));}`,
+        { mode: 0o755 },
+      );
+      process.env = {
+        PATH: dir,
+        CLOUDFLARE_API_TOKEN: "synthetic-no-access",
+        FIXTURE_CALLS: calls,
+        FIXTURE_APP: app,
+      };
+      const result = await defaultSandboxGateDeps.readInstances(
+        "deploy/cloudflare-sandbox",
+        app,
+        undefined,
+        new AbortController().signal,
+      );
+      const rows = (result as { value?: { state: string; version: number | null }[] }).value;
+      expect(rows).toHaveLength(499);
+      expect(rows?.every((row) => row.state === "running" && row.version === 78)).toBe(true);
+      // One page, no cursor: the complete inventory is a single producer answer.
+      expect(readFileSync(calls, "utf8").trim().split("\n")).toHaveLength(1);
+    } finally {
+      process.env = savedEnv;
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
