@@ -39,6 +39,8 @@ The automatic release job deploys all four runtime Workers, then runs bounded an
 
 Configure `STAGING_SMOKE_ORIGIN`, `STAGING_SMOKE_CONFIG` and the existing staging-only bearer as `STAGING_SMOKE_TOKEN` in the staging Environment. The config must declare the disposable repository, known workspace contents and open fixture PR/head. Set `review.expectedVerdict` to `request_changes` for a known-defect fixture or `approve` for a clean fixture; the posted result must match. Model, harness and budgets come from the deployed configuration; the runner's bounded smoke allowance remains. Never use a production bearer or a real repository as the fixture.
 
+The capability Review has a fifteen-minute time budget, including its final answer and publication steps. General and Explore retain four-minute budgets. The CI artifact's `staging-e2e.json` keeps each original run under `scenarios[].evidence.record`, with the complete retained event history, budget timestamps, completion and delivery facts, and posted verdict. `failedChecks` identifies an output refusal; `observationError` identifies a failed read without replacing the last observation. Original event counts and truncation show any history gap. Credentials and content from a mismatched actor or thread are excluded. The existing artifact upload runs even when acceptance fails.
+
 
 Create the `staging` GitHub Environment. Store the following staging secrets under their distinct names; there is no production-token fallback:
 

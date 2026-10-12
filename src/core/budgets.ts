@@ -40,6 +40,8 @@ export const MINUTE_MS = 60_000;
 export const STAGING_VALIDATION_WAIT_MS = 35 * MINUTE_MS;
 /** Observe the already-admitted smoke run; never submit it again. */
 export const AGENT_SMOKE_POLL_MS = 5 * SECOND_MS;
+/** The capability Review keeps useful examination time before its final steps. */
+export const AGENT_SMOKE_REVIEW_MINUTES = 15;
 /** Slack reconnect reads enough history to cover the longest drain and cold start. */
 export const DEFAULT_CATCH_UP_WINDOW_MS = 30 * MINUTE_MS;
 /** How long the review dashboard reuses a report whose range still fills (record 0097): a page left open costs a dozen reads an hour. */
