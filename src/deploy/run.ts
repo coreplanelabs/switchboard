@@ -1,3 +1,4 @@
+import { observePublicInventory, type PublicInventoryObservation } from "./publicInventoryObservation.js";
 import {
   consumerConfigKey,
   parseConfigConsumerIdentity,
@@ -9,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import {
   createPagingObserver,
+  closedReadEvidence,
   nativeReadEvidence,
   type NativeReadEvidence,
   type PagingObserver,
@@ -1257,6 +1259,15 @@ export interface SandboxGateDeps {
     signal?: AbortSignal,
     observePaging?: PagingObserver,
   ): Promise<Read<ContainerInstance[]>>;
+  /** Observation-only public metadata; never substitutes for legacy inventory. */
+  readPublicMetadata?(
+    dir: string,
+    containerApp: string,
+    account: string,
+    config: string | undefined,
+    signal: AbortSignal,
+    observe?: PagingObserver,
+  ): Promise<PublicInventoryObservation>;
   /** The application list Wrangler uses to compute its deploy diff. */
   readListedAppState?(dir: string, containerApp: string, account: string): Promise<Read<AppState>>;
   /** `POST /exec` `echo ok` on the probe thread; the streamed body parsed. */
@@ -1399,6 +1410,57 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
   env: process.env,
   postJson,
   readHealth: (url, bearer, timeoutMs, signal) => readHealthz(url, bearer, timeoutMs, signal),
+  readPublicMetadata: async (dir, containerApp, account, config, signal, observe) => {
+    const unavailable = (reason: string, failure?: unknown): PublicInventoryObservation => ({
+      complete: false,
+      pages: 0,
+      rows: 0,
+      states: {},
+      missingNames: 0,
+      emptyImages: 0,
+      reason,
+      ...(failure ? { failure: closedReadEvidence(failure) } : {}),
+    });
+    try {
+      if (!config || JSON.parse(readFileSync(config, "utf8")).account_id !== account)
+        return unavailable("public metadata selected account is unverified; completeness unverified");
+    } catch {
+      return unavailable("public metadata selected account is unverified; completeness unverified");
+    }
+    try {
+      const id = await resolveContainerAppId(dir, containerApp, config, signal);
+      if ("error" in id)
+        return unavailable("public metadata scope unavailable; completeness unverified", id.diagnostic);
+      const args = ["wrangler", "auth", "token", "--json", "--config", config];
+      const auth = await run("npx", args, {
+        cwd: workerDir(dir),
+        unset: [...UNSET_ENV, "WRANGLER_LOG", "WRANGLER_LOG_PATH"],
+        // auth token logs its output by default, including credentials.
+        set: { WRANGLER_WRITE_LOGS: "false" },
+        signal,
+        ownedReadGroup: true,
+      });
+      if (auth.cancelled || auth.cleanup === "unconfirmed")
+        return unavailable("public metadata auth interrupted; completeness and native outcome unverified", {
+          reason: "interrupted",
+          commandExit: auth.code,
+        });
+      if (auth.code !== 0)
+        return unavailable("public metadata credentials unavailable; completeness unverified", {
+          reason: "command-error",
+          commandExit: auth.code,
+        });
+      return await observePublicInventory(
+        account,
+        id.value,
+        cloudflareReadHeaders(parseWranglerJson(auth.output)),
+        signal,
+        observe,
+      );
+    } catch {
+      return unavailable("public metadata read failed; completeness unverified");
+    }
+  },
   readListedAppState: async (dir, containerApp, account) => {
     // Capture privately: neither successful credentials nor failed auth output
     // may enter a deploy log. Use the same auth modes as Wrangler's upload.
@@ -1439,7 +1501,7 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
     }
     const emit = (event: Parameters<PagingObserver>[0]) => {
       try {
-        observePaging?.(event);
+        observePaging?.({ ...event, perPage: INSTANCES_PER_PAGE });
       } catch {
         /* Diagnostics cannot change readiness. */
       }
@@ -1568,6 +1630,23 @@ export const defaultSandboxGateDeps: SandboxGateDeps = {
   sleep,
 };
 
+/** Same original native auth formats; no credential discovery or replacement. */
+function cloudflareReadHeaders(credentials: unknown): Record<string, string> | undefined {
+  if (typeof credentials !== "object" || credentials === null || Array.isArray(credentials)) return undefined;
+  const auth = credentials as Record<string, unknown>;
+  if ((auth.type === "api_token" || auth.type === "oauth") && typeof auth.token === "string" && auth.token)
+    return { authorization: `Bearer ${auth.token}` };
+  if (
+    auth.type === "api_key" &&
+    typeof auth.key === "string" &&
+    auth.key &&
+    typeof auth.email === "string" &&
+    auth.email
+  )
+    return { "X-Auth-Key": auth.key, "X-Auth-Email": auth.email };
+  return undefined;
+}
+
 /** The raw list used by Wrangler deploy differs from its dashboard-backed CLI list. */
 export async function readRawBotApplication(
   account: string,
@@ -1576,20 +1655,8 @@ export async function readRawBotApplication(
   fetcher: typeof fetch = fetch,
 ): Promise<Read<AppState>> {
   if (!/^[a-f0-9]{32}$/.test(account)) return { error: "raw application list requires the selected account" };
-  if (typeof credentials !== "object" || credentials === null) return { error: "Wrangler credentials unavailable" };
-  const auth = credentials as Record<string, unknown>;
-  let headers: Record<string, string>;
-  if ((auth.type === "api_token" || auth.type === "oauth") && typeof auth.token === "string" && auth.token)
-    headers = { authorization: `Bearer ${auth.token}` };
-  else if (
-    auth.type === "api_key" &&
-    typeof auth.key === "string" &&
-    auth.key &&
-    typeof auth.email === "string" &&
-    auth.email
-  )
-    headers = { "X-Auth-Key": auth.key, "X-Auth-Email": auth.email };
-  else return { error: "Wrangler credentials unavailable" };
+  const headers = cloudflareReadHeaders(credentials);
+  if (!headers) return { error: "Wrangler credentials unavailable" };
   try {
     const response = await fetcher(`https://api.cloudflare.com/client/v4/accounts/${account}/containers/applications`, {
       headers,

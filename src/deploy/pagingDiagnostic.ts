@@ -14,13 +14,27 @@ export interface PagingObservation {
   phase: "before" | "after" | "failure";
   app: string;
   pageIndex: number;
+  perPage?: unknown;
   requestedCursor: string | null;
   cumulativeCount: number;
   producerVersion?: string;
+  producer?: "cloudflare-public-v2";
   page?: unknown;
   commandExit?: number;
   producerLog?: string;
-  reason?: "repeated-cursor" | "malformed-page" | "command-error" | "interrupted";
+  reason?:
+    | "repeated-cursor"
+    | "malformed-page"
+    | "command-error"
+    | "interrupted"
+    | "scope-unavailable"
+    | "credentials-unavailable"
+    | "native-request-error"
+    | "denied"
+    | "native-http-error"
+    | "native-api-error"
+    | "unknown-state";
+  publicMetadata?: { account: string; wireCursor: string | null; httpStatus?: number };
   cycle?: {
     cursor: string;
     firstSeen: Pick<PagingObservation, "pageIndex" | "requestedCursor" | "cumulativeCount">;
@@ -97,6 +111,9 @@ const READ_REASONS = [
   "application-shape",
   "malformed-page",
   "repeated-cursor",
+  "native-http-error",
+  "native-api-error",
+  "denied",
 ] as const;
 const ERROR_CLASSES = ["api-error", "producer-internal"] as const;
 const RESPONSE_FORMATS = ["json", "html", "text", "absent"] as const;
@@ -106,7 +123,7 @@ const numberOrNull = (value: unknown, low: number, high: number) =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= low && value <= high ? value : null;
 
 /** Closed facts only: never copy a producer message, body, URL or header. */
-function closedReadEvidence(value: unknown) {
+export function closedReadEvidence(value: unknown) {
   const evidence = record(value) ? value : {};
   return {
     stage: member(READ_STAGES, evidence.stage),
@@ -204,10 +221,10 @@ export function createPagingObserver(options: {
     expectedCommit: source(options.expectedCommit),
     run: numeric(options.env.GITHUB_RUN_ID),
     attempt: numeric(options.env.GITHUB_RUN_ATTEMPT),
-    producer: "wrangler",
+    producer: "unknown",
     producerVersion: "unknown",
     job: /^[a-zA-Z0-9_-]{1,80}$/.test(options.env.GITHUB_JOB ?? "") ? options.env.GITHUB_JOB : null,
-    cursorEncoding: "opaque argv string; pinned producer uses encodeURIComponent",
+    cursorEncoding: "unavailable; request not started",
     originalError: null,
     truncated: false,
     frames: [] as Record<string, unknown>[],
@@ -251,9 +268,38 @@ export function createPagingObserver(options: {
     if (failed || !["before", "after", "failure"].includes(event.phase)) return;
     if (event.producerVersion && /^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]{1,48})?$/.test(event.producerVersion))
       state.producerVersion = event.producerVersion;
+    const isPublic = event.producer === "cloudflare-public-v2" || !!event.publicMetadata;
+    state.producer = isPublic ? "cloudflare-public-v2" : "wrangler";
+    const cursorEncoding = isPublic
+      ? event.publicMetadata
+        ? "direct GET query; URLSearchParams"
+        : "unavailable; request not started"
+      : "opaque argv string; pinned producer uses encodeURIComponent";
+    state.cursorEncoding = cursorEncoding;
+    const nextCursorProvenance = isPublic
+      ? "public response result_info.next_page_token"
+      : "CLI result_info; pinned producer forwards provider next-page field";
     const frame: Record<string, unknown> = {
       phase: event.phase,
-      argv: { shell: false, perPage: 100, cursorFlag: event.requestedCursor === null ? "absent" : "--page-token" },
+      ...(isPublic
+        ? {
+            request: event.publicMetadata
+              ? {
+                  started: true,
+                  method: "GET",
+                  queryEncoding: "URLSearchParams",
+                  perPage: numberOrNull(event.perPage, 1, Number.MAX_SAFE_INTEGER),
+                  cursorParameter: event.requestedCursor === null ? "absent" : "page_token",
+                }
+              : { started: false },
+          }
+        : {
+            argv: {
+              shell: false,
+              perPage: numberOrNull(event.perPage, 1, Number.MAX_SAFE_INTEGER),
+              cursorFlag: event.requestedCursor === null ? "absent" : "--page-token",
+            },
+          }),
       appHash: digest(event.app),
       pageIndex: event.pageIndex,
       requestedCursorHash: event.requestedCursor === null ? null : digest(event.requestedCursor),
@@ -281,8 +327,8 @@ export function createPagingObserver(options: {
           : 0,
         nextCursorHash: typeof meta?.next_page_token === "string" ? digest(meta.next_page_token) : null,
         reportedCursorHash: typeof meta?.page_token === "string" ? digest(meta.page_token) : null,
-        nextCursorProvenance: "CLI result_info; pinned producer forwards provider next-page field",
-        reportedCursorProvenance: "CLI field; producer may fall back to requested argv",
+        nextCursorProvenance: isPublic && !page ? "unavailable" : nextCursorProvenance,
+        reportedCursorProvenance: isPublic ? "unavailable" : "CLI field; producer may fall back to requested argv",
         rowIdsAvailable: idsAvailable,
         rowIdSetHash: idsAvailable ? digest([...new Set(ids)].sort().join("\0")) : null,
         versionHistogram: Object.fromEntries(versions),
@@ -300,9 +346,79 @@ export function createPagingObserver(options: {
         ...(event.commandExit === undefined ? {} : { commandExit: event.commandExit }),
       });
     }
+    if (event.publicMetadata) {
+      const rows = record(event.page) && Array.isArray(event.page.instances) ? event.page.instances : [];
+      const knownStates = new Set([
+        "provisioning",
+        "running",
+        "failed",
+        "stopping",
+        "stopped",
+        "unhealthy",
+        "inactive",
+        "unknown",
+      ]);
+      const states: Record<string, number> = {};
+      for (const row of rows) {
+        const state =
+          record(row) && typeof row.state === "string" && knownStates.has(row.state) ? row.state : "unknown";
+        states[state] = (states[state] ?? 0) + 1;
+      }
+      frame.http =
+        event.publicMetadata.httpStatus !== undefined
+          ? {
+              available: true,
+              request: {
+                path: "/accounts/<account>/containers/applications/<app>/instances-v2",
+                cursorHash: event.publicMetadata.wireCursor === null ? null : digest(event.publicMetadata.wireCursor),
+                perPage: numberOrNull(event.perPage, 1, Number.MAX_SAFE_INTEGER),
+              },
+              ...(event.publicMetadata.httpStatus === undefined
+                ? {}
+                : { status: numberOrNull(event.publicMetadata.httpStatus, 100, 599) }),
+            }
+          : { available: false };
+      frame.publicMetadata = {
+        accountHash: digest(event.publicMetadata.account),
+        applicationVersionAvailable: false,
+        states,
+        missingNames: rows.filter((r) => !record(r) || typeof r.name !== "string" || !r.name).length,
+        emptyImages: rows.filter((r) => !record(r) || typeof r.image !== "string" || !r.image).length,
+        actorRowsHash: digest(
+          rows
+            .map((r) => (record(r) && typeof r.id === "string" ? r.id : ""))
+            .sort()
+            .join("\0"),
+        ),
+        nameRowsHash: digest(
+          rows
+            .map((r) => (record(r) && typeof r.name === "string" ? r.name : ""))
+            .sort()
+            .join("\0"),
+        ),
+        imageRowsHash: digest(
+          rows
+            .map((r) => (record(r) && typeof r.image === "string" ? r.image : ""))
+            .sort()
+            .join("\0"),
+        ),
+      };
+    }
     if (event.phase === "failure") {
       failed = true;
-      const reason = ["repeated-cursor", "malformed-page", "command-error", "interrupted"].includes(event.reason ?? "")
+      const reason = [
+        "repeated-cursor",
+        "malformed-page",
+        "command-error",
+        "interrupted",
+        "scope-unavailable",
+        "credentials-unavailable",
+        "native-request-error",
+        "denied",
+        "native-http-error",
+        "native-api-error",
+        "unknown-state",
+      ].includes(event.reason ?? "")
         ? event.reason
         : "unknown";
       frame.reason = reason;
@@ -322,7 +438,8 @@ export function createPagingObserver(options: {
             nextCursorHash,
             cumulativeCount: event.cumulativeCount,
           },
-          nextCursorProvenance: "CLI result_info; pinned producer forwards provider next-page field",
+          nextCursorProvenance,
+          cursorEncoding,
         };
       }
       state.originalError = reason;

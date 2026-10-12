@@ -1,3 +1,4 @@
+import type { PublicInventoryObservation } from "./publicInventoryObservation.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -35,19 +36,21 @@ export interface SandboxVerificationResult {
 export interface SandboxInspectionOptions {
   expectedCommit: string;
   inspect: true;
+  publicMetadata?: boolean;
 }
 export interface SandboxInspectionResult {
   ok: boolean;
   live: false;
   targetVerified: false;
   inventoryComplete: boolean;
+  publicMetadata?: PublicInventoryObservation;
   source: string;
   expectedCommit: string;
   appVersion: number | null;
   imageDigest: string | null;
   reason: string;
 }
-type Target = { dir: string; gate: SandboxLiveGate; config?: string; source: string };
+type Target = { account?: string; dir: string; gate: SandboxLiveGate; config?: string; source: string };
 type Snapshot = { health: HealthRead; app: { value: AppState }; instances: { value: ContainerInstance[] } };
 type SnapshotRead = Snapshot | { error: string; app?: Snapshot["app"] };
 const imageDigest = (image: string | null) => image?.match(/(?:^|@)(sha256:[a-f0-9]{64})$/)?.[1] ?? null;
@@ -122,6 +125,31 @@ export async function inspectSandboxOnce(
     return result("inspection requires exact verifier source and Worker commit");
   if (!deps.env[target.gate.bearerEnv]) return result(`${target.gate.bearerEnv} is not set`);
   const budget = readBudget(deps);
+  if (options.publicMetadata) {
+    const health = await deps.readHealth(
+      target.gate.healthUrl,
+      deps.env[target.gate.bearerEnv],
+      undefined,
+      budget.signal,
+    );
+    if (budget.stopped()) return result("public metadata inspection interrupted; completeness unverified");
+    const worker = decideWorker(health, options.expectedCommit);
+    if (!worker.ok) return result(worker.reason);
+    if ("error" in health || health.status !== 200 || worker.commit !== options.expectedCommit)
+      return result("Worker health does not carry HTTP 200 and the exact pinned commit");
+    if (!target.account || !deps.readPublicMetadata)
+      return result("public metadata reader unavailable; completeness unverified");
+    const publicMetadata = await deps.readPublicMetadata(
+      target.dir,
+      target.gate.containerApp,
+      target.account,
+      target.config,
+      budget.signal,
+      observePaging,
+    );
+    if (budget.stopped()) return result("public metadata inspection interrupted; completeness unverified");
+    return { ...result(publicMetadata.reason), ok: publicMetadata.complete, publicMetadata };
+  }
   let observed = await readSnapshot(options.expectedCommit, target, deps, budget, observePaging);
   if (budget.stopped()) observed = { error: "verification interrupted or deadline reached", app: observed.app };
   return result(
@@ -267,7 +295,7 @@ export async function verifySandboxOnHost(
     } catch {
       /* Diagnostic failure cannot alter verification. */
     }
-    const target = { dir: worker.dir, gate: worker.liveGate, config, source };
+    const target = { account: profile.account, dir: worker.dir, gate: worker.liveGate, config, source };
     const deps = { ...defaultSandboxGateDeps, signal: controller.signal };
     return "inspect" in options
       ? await inspectSandboxOnce(options, target, deps, paging?.observe)

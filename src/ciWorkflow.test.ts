@@ -62,6 +62,73 @@ describe("Sandbox verification workflow", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+  it("public inspection uses only the explicit read mode and cannot credit a legacy readiness receipt", () => {
+    const workflow = parse(readFileSync(".github/workflows/verify-sandbox.yml", "utf8"));
+    const script = workflow.jobs.verify.steps.find((step: any) => step.name === "verify without uploading").run;
+    const dir = mkdtempSync(path.join(tmpdir(), "public-inspection-")),
+      calls = path.join(dir, "calls");
+    try {
+      writeFileSync(
+        path.join(dir, "npm"),
+        `#!${process.execPath}\nrequire('node:fs').writeFileSync(process.env.FIXTURE_CALLS, JSON.stringify(process.argv.slice(2)));console.log(process.env.FIXTURE_OBSERVATION);`,
+        { mode: 0o755 },
+      );
+      writeFileSync(path.join(dir, "node"), `#!/bin/sh\nexec "${process.execPath}" "$@"`, { mode: 0o755 });
+      for (const [observation, expected] of [
+        [
+          {
+            ok: true,
+            live: false,
+            targetVerified: false,
+            inventoryComplete: false,
+            appVersion: null,
+            imageDigest: null,
+            publicMetadata: { complete: true },
+          },
+          0,
+        ],
+        [{ ok: true, live: false, targetVerified: false, inventoryComplete: true }, 1],
+        [
+          {
+            ok: false,
+            live: false,
+            targetVerified: false,
+            inventoryComplete: false,
+            publicMetadata: { complete: false },
+          },
+          1,
+        ],
+      ] as const) {
+        const result = spawnSync("bash", ["-c", script], {
+          env: {
+            PATH: `${dir}:/usr/bin:/bin`,
+            RUNNER_TEMP: dir,
+            MODE: "inspect-public",
+            EXPECTED_COMMIT: "a".repeat(40),
+            FIXTURE_CALLS: calls,
+            FIXTURE_OBSERVATION: JSON.stringify(observation),
+          },
+        });
+        expect(result.status).toBe(expected);
+        expect(JSON.parse(readFileSync(calls, "utf8"))).toEqual([
+          "run",
+          "--silent",
+          "cli",
+          "--",
+          "deploy",
+          "inspect",
+          "--public-metadata",
+          "--expected-commit",
+          "a".repeat(40),
+          "--json",
+        ]);
+        expect(JSON.parse(readFileSync(path.join(dir, "sandbox-observation.json"), "utf8"))).toEqual(observation);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("binds verifier and Worker separately and executes only the requested inspection or verification", () => {
     const workflow = parse(readFileSync(".github/workflows/verify-sandbox.yml", "utf8"));
     const job = workflow.jobs.verify;

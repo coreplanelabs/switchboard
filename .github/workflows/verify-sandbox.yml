@@ -12,9 +12,9 @@ on:
         type: string
         required: true
       mode:
-        description: Inspect reports observations only; probe requires a qualified target and authorizes echo
+        description: Inspect modes are read-only; public metadata has no readiness credit; probe authorizes echo
         type: choice
-        options: [inspect, inventory, probe]
+        options: [inspect, inspect-public, inventory, probe]
         default: inspect
       expected-app-version:
         description: Application version pinned after independent image qualification
@@ -54,7 +54,7 @@ jobs:
             exit 1
           fi
           case "$MODE" in
-            inspect) ;;
+            inspect|inspect-public) ;;
             inventory|probe)
               if ! [[ "$EXPECTED_APP_VERSION" =~ ^[0-9]+$ ]] || [ -z "$EXPECTED_IMAGE" ]; then
                 echo "::error::inventory/probe requires independently qualified application version and image pins"
@@ -89,7 +89,10 @@ jobs:
           CONFIG_REPO_TOKEN: ${{ steps.infra-token.outputs.token }}
         run: |
           set -euo pipefail
-          if [ "$MODE" = inspect ]; then
+          if [ "$MODE" = inspect-public ]; then
+            npm run --silent cli -- deploy inspect --public-metadata --expected-commit "$EXPECTED_COMMIT" --json | tee "$RUNNER_TEMP/sandbox-observation.json"
+            node -e 'try { const r = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (r.ok !== true || r.publicMetadata?.complete !== true || r.inventoryComplete !== false || r.live !== false || r.targetVerified !== false || r.appVersion !== null || r.imageDigest !== null) process.exit(1); } catch { process.exit(1); }' "$RUNNER_TEMP/sandbox-observation.json"
+          elif [ "$MODE" = inspect ]; then
             npm run --silent cli -- deploy inspect --expected-commit "$EXPECTED_COMMIT" --json | tee "$RUNNER_TEMP/sandbox-observation.json"
             node -e 'try { const r = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (r.ok !== true || r.inventoryComplete !== true || r.live !== false || r.targetVerified !== false) process.exit(1); } catch { process.exit(1); }' "$RUNNER_TEMP/sandbox-observation.json"
           else
