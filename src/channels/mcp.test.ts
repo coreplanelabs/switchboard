@@ -19,6 +19,7 @@ import { RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
 import { createRunsService } from "../core/runsService.js";
 import { digestBearer, InMemoryPersonalTokenStore } from "../mcp/personalTokens.js";
+import { tokenVerifier, type DashboardVerifier } from "./dashboardAuth.js";
 
 // Feature: docs/reference/specs/mcp-ingress.md — adapter #4 (MCP). A minimal MCP server over
 // streamable-HTTP (JSON-RPC 2.0 over POST /mcp). It reuses http.ts's fail-closed,
@@ -522,8 +523,9 @@ describe("McpIO (single-shot ChannelIO)", () => {
 });
 
 describe("createMcpHandler (node:http wrapper)", () => {
-  function fakeReqRes(method: string, headers: IncomingHttpHeaders, body: string) {
+  function fakeReqRes(method: string, headers: IncomingHttpHeaders, body: string, onRead?: () => void) {
     async function* iter() {
+      onRead?.();
       yield Buffer.from(body, "utf8");
     }
     const req = Object.assign(iter(), {
@@ -585,6 +587,33 @@ describe("createMcpHandler (node:http wrapper)", () => {
     expect(d.calls[0].msg.userId).toBe("mcp:alice");
   });
 
+  it("authenticates SSO before body read and dispatches with the browser account", async () => {
+    GRANTS.set("access:alice", ALL_GRANTS);
+    const d = fakeDispatch("SSO wrapped");
+    const handler = createMcpHandler(deps, {
+      auth: { tokens: {} },
+      sso: tokenVerifier({ token: "sso-token", env: "DASHBOARD_TOKEN", subject: "alice" }),
+      dispatch: d.fn,
+    });
+    let reads = 0;
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "dispatch", arguments: { text: "hello" } },
+    });
+    const denied = fakeReqRes("POST", bearer("wrong"), body, () => ++reads);
+    handler(denied.req, denied.res);
+    await vi.waitFor(() => expect(denied.status()).toBe(401));
+    expect(reads).toBe(0);
+    const accepted = fakeReqRes("POST", bearer("sso-token"), body, () => ++reads);
+    handler(accepted.req, accepted.res);
+    await vi.waitFor(() => expect(accepted.status()).toBe(200));
+    expect(accepted.json().result).toEqual({ content: [{ type: "text", text: "SSO wrapped" }] });
+    expect(d.calls[0].msg).toMatchObject({ userId: "access:alice", authenticatedAs: "access:alice", text: "hello" });
+    expect(reads).toBe(1);
+  });
+
   it("authenticates a personal bearer before reading the request body", async () => {
     const token = "e".repeat(64);
     const store = new InMemoryPersonalTokenStore();
@@ -611,6 +640,50 @@ describe("createMcpHandler (node:http wrapper)", () => {
     createMcpHandler(deps, { auth: { tokens: {} }, personalTokens: store })(t.req, t.res);
     await vi.waitFor(() => expect(t.status()).toBe(200));
     expect(t.json().result.serverInfo.name).toBe("switchboard");
+  });
+
+  it("keeps personal identity and pre-body refusal across bearer spellings beside SSO", async () => {
+    const token = "f".repeat(64);
+    const store = new InMemoryPersonalTokenStore();
+    await store.put({
+      digest: digestBearer(token),
+      subject: "personal:sub-1",
+      email: "person@example.com",
+      userId: "access:person",
+      createdAt: 1,
+    });
+    grant("personal:sub-1", ["dispatch"]);
+    const d = fakeDispatch("personal wrapped");
+    // The transport sees a verified browser identity; signed-JWT checks live in mcpSso.test.ts.
+    const sso: DashboardVerifier = {
+      mode: "access",
+      credentialHeader: "cf-access-jwt-assertion",
+      describe: () => "test SSO",
+      verify: async () => ({ ok: true, identity: { sub: "admin" } }),
+    };
+    const handler = createMcpHandler(deps, { auth: { tokens: {} }, personalTokens: store, sso, dispatch: d.fn });
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "dispatch", arguments: { text: "hello" } },
+    });
+    const spellings = [`Bearer ${token}`, `bearer ${token}`, `Bearer  ${token}`, ` Bearer ${token} `];
+    for (const authorization of spellings) {
+      const accepted = fakeReqRes("POST", { authorization, "cf-access-jwt-assertion": "signed" }, body);
+      handler(accepted.req, accepted.res);
+      await vi.waitFor(() => expect(accepted.status()).toBe(200));
+      expect(accepted.json().result).toEqual({ content: [{ type: "text", text: "personal wrapped" }] });
+      expect(d.calls.at(-1)?.msg).toMatchObject({ userId: "access:person", authenticatedAs: "mcp:personal:sub-1" });
+    }
+    await store.delete(digestBearer(token), "personal:sub-1");
+    for (const authorization of spellings) {
+      let reads = 0;
+      const revoked = fakeReqRes("POST", { authorization, "cf-access-jwt-assertion": "signed" }, body, () => ++reads);
+      handler(revoked.req, revoked.res);
+      await vi.waitFor(() => expect(revoked.status()).toBe(401));
+      expect(reads).toBe(0);
+    }
   });
 
   // An unauthorized caller is rejected from headers without

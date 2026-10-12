@@ -36,7 +36,17 @@ The reply stays in that conversation. For a longer task, describe the outcome yo
 
 The status card links to the run page, where you can watch the work. Your deployment may require a separate dashboard sign-in. [Your first request in Slack](first-request-in-slack.md) walks through more kinds of requests and follow-ups.
 
+## Connect an MCP client with SSO
+
+If your deployment protects MCP with the same SSO as the browser, add `https://switchboard.example.com/mcp` as a remote HTTP MCP server in your client. Connect and complete the browser sign-in. You use the same account, grants and Slack identity link as browser chat. You do not need an ingress token or device approval.
+
+For Cloudflare Access, the operator adds `/mcp` to the existing browser Access application and enables [Managed OAuth](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/) there. Keep the same policies and application AUD. Allow only the callback URIs your MCP clients need; local clients may need localhost or loopback callbacks. Access handles OAuth discovery, registration and token refresh; Switchboard re-verifies the signed assertion with its existing dashboard verifier. Test the client sign-in after the bot change is deployed. Keep machine ingress routes outside the browser rule; if operator bearer clients still need `/mcp`, configure an explicit Access machine policy for them.
+
+The MCP adapter uses the existing `DashboardVerifier` interface, not a Cloudflare-specific login flow. Other installations can supply another verifier behind that interface; the existing `token` strategy supports a proxy or fixed credential. `none` never enables unauthenticated MCP.
+
 ## Connect a local CLI and MCP client
+
+Use this device approval flow for the local CLI or an MCP client without SSO support.
 
 You need Node.js 24, your deployment's host, and dashboard sign-in. You do not need to run a local bot or supply model keys. Replace `switchboard.example.com` with your host:
 

@@ -1168,8 +1168,8 @@ export async function runBot(): Promise<void> {
   // Optional HTTP server. Slack traffic arrives over the outbound Socket Mode
   // websocket, so this port serves (a) a health probe for container platforms
   // (Cloudflare Containers, Fly, k8s) and the two authenticated universal
-  // ingress channels. Static SWITCHBOARD_INGRESS_TOKENS work on both; personal
-  // browser-approved credentials work only on MCP. Both land in dispatch().
+  // ingress channels. Static SWITCHBOARD_INGRESS_TOKENS work on both; dashboard
+  // SSO and browser-approved personal credentials work on MCP. Both land in dispatch().
   // HTTP ingress: POST /ingress; MCP ingress: POST /mcp (JSON-RPC 2.0).
   // Without an authorized credential, each remains fail-closed.
   if (process.env.PORT) {
@@ -1187,15 +1187,6 @@ export async function runBot(): Promise<void> {
     // A token entry's `email` binds it to a person (authorization.md item 15):
     // the same cached reverse lookup the dashboard link uses.
     const ingress = createIngressHandler(deps, { auth, publicBaseUrl: process.env.PUBLIC_BASE_URL, personByEmail });
-    const mcp = createMcpHandler(deps, {
-      auth,
-      personalTokens: personalTokenStore,
-      approvalsEnabled: capabilities.dashboardAuth === "access",
-      commands,
-      grantsFor: (id) => config.grantsFor(id),
-      personByEmail,
-      publicBaseUrl: process.env.PUBLIC_BASE_URL,
-    });
     // The model proxy (docs/reference/specs/model-proxy.md): a run's bearer buys
     // model calls through this process — pinned to its preset's model and caps,
     // metered as its own `model.turn` spans, forwarded to the real provider with
@@ -1697,6 +1688,17 @@ export async function runBot(): Promise<void> {
       access: accessConfig,
       secrets: processSecrets,
       verify: accessVerify,
+      publicBaseUrl,
+    });
+    const mcp = createMcpHandler(deps, {
+      auth,
+      sso: dashboardAuth,
+      personalTokens: personalTokenStore,
+      approvalsEnabled: capabilities.dashboardAuth === "access",
+      commands,
+      grantsFor: (id) => config.grantsFor(id),
+      personByEmail,
+      channelsOf,
       publicBaseUrl,
     });
     if (process.env.ACCESS_DEV_BYPASS !== undefined) {
