@@ -21,6 +21,10 @@ export interface PagingObservation {
   commandExit?: number;
   producerLog?: string;
   reason?: "repeated-cursor" | "malformed-page" | "command-error" | "interrupted";
+  cycle?: {
+    cursor: string;
+    firstSeen: Pick<PagingObservation, "pageIndex" | "requestedCursor" | "cumulativeCount">;
+  };
 }
 export type PagingObserver = (event: PagingObservation) => void;
 
@@ -302,6 +306,25 @@ export function createPagingObserver(options: {
         ? event.reason
         : "unknown";
       frame.reason = reason;
+      if (reason === "repeated-cursor" && typeof event.cycle?.cursor === "string") {
+        const nextCursorHash = digest(event.cycle.cursor);
+        const first = event.cycle.firstSeen;
+        frame.cycleWitness = {
+          firstSeen: {
+            pageIndex: numberOrNull(first.pageIndex, 1, Number.MAX_SAFE_INTEGER),
+            requestedCursorHash: typeof first.requestedCursor === "string" ? digest(first.requestedCursor) : null,
+            nextCursorHash,
+            cumulativeCount: numberOrNull(first.cumulativeCount, 0, Number.MAX_SAFE_INTEGER),
+          },
+          repeated: {
+            pageIndex: event.pageIndex,
+            requestedCursorHash: frame.requestedCursorHash,
+            nextCursorHash,
+            cumulativeCount: event.cumulativeCount,
+          },
+          nextCursorProvenance: "CLI result_info; pinned producer forwards provider next-page field",
+        };
+      }
       state.originalError = reason;
     }
     frames.push(frame);
