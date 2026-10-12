@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { FakeHarnessContainer } from "./testing/fakeContainer.js";
 import { harnessDrivers } from "./testing/drivers.js";
 import { ToolRecovery, ToolRecoveryStoppedError } from "./toolRecovery.js";
 import type { RunnableTool } from "../../tools/runnableTool.js";
@@ -113,6 +114,46 @@ describe.each(drivers.map((d) => [d.harness, d] as const))("conformance — %s",
 });
 
 describe("the table", () => {
+  it("unknown identity refuses a faulted read even when the final output is already buffered", async () => {
+    let emitted!: () => void;
+    const finalOutput = new Promise<void>((resolve) => {
+      emitted = resolve;
+    });
+    const emit = FakeHarnessContainer.prototype.emit;
+    const read = FakeHarnessContainer.prototype.readLog;
+    const emitting = vi.spyOn(FakeHarnessContainer.prototype, "emit").mockImplementation(function (
+      this: FakeHarnessContainer,
+      ...records
+    ) {
+      emit.apply(this, records);
+      if (
+        records.some(
+          (record) => record !== null && typeof record === "object" && "type" in record && record.type === "agent_end",
+        )
+      )
+        emitted();
+    });
+    const reading = vi.spyOn(FakeHarnessContainer.prototype, "readLog").mockImplementation(async function (
+      this: FakeHarnessContainer,
+      ...args
+    ) {
+      if (this.vm === undefined && (this.failReadOnceThenAlive !== undefined || this.failNext?.operation === "read"))
+        await finalOutput;
+      return read.apply(this, args);
+    });
+    try {
+      const row = SCENARIOS.find((row) => row.id === "survival-cold-transport-lost-identity-unknown")!;
+      await runRow(
+        drivers.find((driver) => driver.harness === "pi")!,
+        row,
+      );
+    } finally {
+      emitted();
+      reading.mockRestore();
+      emitting.mockRestore();
+    }
+  });
+
   it("holds the six clauses, each with at least one row, and the parity rows; every id is unique", () => {
     const clauses = new Set(SCENARIOS.map((r) => r.clause));
     for (const c of ["credential", "gate", "relay", "record", "conversation", "survival", "parity"])

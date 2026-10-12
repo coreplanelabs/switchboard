@@ -157,7 +157,8 @@ describe("selective CI", () => {
     expect(planForPaths(["src/deploy/liveGate.ts"]).workers).toContain("deploy/cloudflare");
     const auth = planForPaths(["src/channels/dashboardAuth.ts"]);
     expect(auth.workers).toEqual(["none"]);
-    expect(auth.web).toBe(false);
+    // The web confirmation tests reach dashboard auth through HTTP admission.
+    expect(auth.web).toBe(true);
   });
 
   it("selects the web build and artifacts that include it", () => {

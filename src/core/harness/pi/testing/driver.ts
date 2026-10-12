@@ -289,11 +289,13 @@ export function piDriver(): HarnessDriver {
             script.transportLostWithPidAlive === turn + 1 ||
             script.transportLostWithPidAliveAndIdentityUnknown === turn + 1
           ) {
-            container.failReadOnceThenAlive = new ExecInfraError(
-              "resident /exec: Network connection lost.",
-              "transport-lost",
-            );
-            if (script.transportLostWithPidAliveAndIdentityUnknown === turn + 1) container.vm = undefined;
+            const failure = new ExecInfraError("resident /exec: Network connection lost.", "transport-lost");
+            if (script.transportLostWithPidAliveAndIdentityUnknown === turn + 1) {
+              container.vm = undefined;
+              // This scenario requires an actual failed read, even if a slow
+              // poll finds the final output buffered before the failure.
+              container.failNext = { operation: "read", error: failure };
+            } else container.failReadOnceThenAlive = failure;
           }
           if (script.replacedWordWithPidAlive === turn + 1) {
             container.failReadOnceThenAlive = new HarnessContainerRuntimeReplacedError(
