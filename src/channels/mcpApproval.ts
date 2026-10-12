@@ -10,13 +10,19 @@ import { digestBearer } from "../mcp/personalTokens.js";
 import { boundRequester } from "./requester.js";
 import type { IngressIdentity } from "./http.js";
 import type { McpOptions } from "./mcp.js";
+import type { AccessIdentity } from "./accessAuth.js";
+import { callerIdFor } from "./commandHttp.js";
 
-export type McpIdentity = IngressIdentity & { verifiedUserId?: string };
+export type McpIdentity = IngressIdentity & { verifiedUserId?: string; session?: AccessIdentity };
 
 export async function mcpRequester(
   identity: McpIdentity,
   options: McpOptions,
 ): Promise<import("./requester.js").Requester | undefined> {
+  if (identity.session) {
+    const id = callerIdFor(identity.session);
+    return { ...(await boundRequester(id, identity.session.email, options.personByEmail)), authenticatedAs: id };
+  }
   const credentialId = `mcp:${identity.subject}`;
   if (identity.verifiedUserId?.startsWith("access:"))
     return { userId: identity.verifiedUserId, authenticatedAs: credentialId };
@@ -58,6 +64,7 @@ export function requestHash(name: string, args: unknown): string {
 
 /** This lookup revalidates the exact credential, including durable revocation. */
 export async function connectionIdentity(connectionId: string, options: McpOptions): Promise<McpIdentity | undefined> {
+  if (options.revalidateConnection) return options.revalidateConnection(connectionId);
   for (const [bearer, identity] of Object.entries(options.auth.tokens))
     if (!identity.subject.startsWith("personal:") && digestBearer(bearer) === connectionId) return identity;
   const token = await options.personalTokens?.get(connectionId);
@@ -98,7 +105,8 @@ export async function resumeApproval(
 ): Promise<string> {
   const identity = await connectionIdentity(connectionId, options);
   const requester = identity ? await mcpRequester(identity, options) : undefined;
-  if (!identity || requester?.userId !== row.message.userId || `mcp:${identity.subject}` !== actor.id)
+  const credentialId = identity?.session ? callerIdFor(identity.session) : `mcp:${identity?.subject}`;
+  if (!identity || requester?.userId !== row.message.userId || credentialId !== actor.id)
     return "This connection or its verified identity was revoked; nothing ran.";
   if (!hasConfirmationConsent(row)) return "Client confirmation is still required; nothing ran.";
   await dispatchClick(deps, { kind: "confirm", id: row.id, actor, io, connectionId });

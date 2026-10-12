@@ -36,6 +36,10 @@ import {
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { type PersonLookup, type Requester } from "./requester.js";
 import { digestBearer, type PersonalTokenStore } from "../mcp/personalTokens.js";
+import { redactAndCap } from "../core/redact.js";
+import type { DashboardVerifier } from "./dashboardAuth.js";
+import { callerFor, originAllowed, type CommandHttpOptions } from "./commandHttp.js";
+import { requesterOf } from "./web.js";
 import { dispatchSingleShot, SingleShotIO } from "./singleShotDispatch.js";
 import {
   authorizeRequest,
@@ -67,12 +71,9 @@ import {
 // grants are config's `grants` entry for that id (a token with no entry holds
 // nothing — not even `dispatch`).
 //
-// Auth is REUSED wholesale from the HTTP ingress adapter (http.ts): the same
-// fail-closed, constant-time bearer-token machinery and the same
-// SWITCHBOARD_INGRESS_TOKENS env config (one token map for both surfaces). The
-// only difference is the identity namespace: MCP callers are `mcp:` so they are
-// distinct from `http:` callers, and the existing canUseRepo/canRunAgent gates
-// apply unchanged. See handleMcpRequest below for the gating order.
+// Static bearer auth reuses HTTP ingress. SSO reuses the dashboard verifier
+// and browser actor resolver; those sessions keep their browser grants.
+// Personal bearers remain delegated MCP credentials in the digest store.
 
 const PLATFORM = "mcp";
 const DEFAULT_CHANNEL = "default";
@@ -107,6 +108,11 @@ const AUTH_ERROR = -32001;
 
 export interface McpOptions {
   auth: IngressConfig;
+  /** The existing dashboard identity strategy; `none` never enables remote MCP. */
+  sso?: DashboardVerifier;
+  /** Request-scoped credential recheck for a saved SSO confirmation. */
+  revalidateConnection?: (id: string) => Promise<McpIdentity | undefined>;
+  channelsOf?: CommandHttpOptions["channelsOf"];
   /** True only when the authenticated browser approval route is wired. */
   approvalsEnabled?: boolean;
   /** Browser-approved personal credentials, stored by digest outside the static ingress map. */
@@ -279,7 +285,7 @@ export interface McpRequest {
 }
 
 export interface McpResponse {
-  /** HTTP status. Transport gating uses 405/401/503; everything past the gate
+  /** HTTP status. Transport gating uses 405/401/403/503; everything past the gate
    *  is 200 with a JSON-RPC envelope, except an accepted notification (202,
    *  empty body). */
   status: number;
@@ -337,12 +343,21 @@ async function route(
       const name = req.params.name;
       const rawArgs = req.params.arguments;
       const args = typeof rawArgs === "object" && rawArgs !== null ? (rawArgs as Record<string, unknown>) : {};
-      const requester = await mcpRequester(identity, options);
+      const sessionCaller = identity.session
+        ? await callerFor(identity.session, {
+            grantsFor: lookup,
+            personByEmail: options.personByEmail,
+            channelsOf: options.channelsOf,
+          })
+        : undefined;
+      const requester = sessionCaller
+        ? { ...requesterOf(sessionCaller.actor, identity.session!), authenticatedAs: sessionCaller.id }
+        : await mcpRequester(identity, options);
       if (!requester)
         return err(id, AUTH_ERROR, "The verified person for this connection is unavailable; nothing ran", {
           code: "unauthorized",
         });
-      const caller = toCaller(identity, lookup, requester);
+      const caller = sessionCaller ?? toCaller(identity, lookup, requester);
       if (name === "approval_resume" || name === "approval_cancel") {
         if (typeof args.id !== "string" || Object.keys(args).some((key) => key !== "id"))
           return err(id, INVALID_PARAMS, "Only the saved offer id is accepted");
@@ -390,12 +405,10 @@ async function route(
       if (name !== DISPATCH_TOOL.name) {
         return err(id, INVALID_PARAMS, `unknown tool: ${typeof name === "string" ? name : "(none)"}`);
       }
-      // `dispatch` starts an agent run: only an `mcp:<subject>` actor granted `dispatch`
-      // may call it (fail-closed, before the arguments are looked at). A
-      // registry-only token (`runs:read`, …) gets the same `unauthorized` code
-      // the registry tools answer with.
-      if (!hasDispatch(lookup(`${PLATFORM}:${identity.subject}`))) {
-        return err(id, RPC_CODE_FOR.unauthorized, `${PLATFORM}:${identity.subject} is not allowed to call dispatch`, {
+      // Machines need the transport grant; browser sessions reach the same
+      // agent and repository policy gates as browser chat in core dispatch.
+      if (!identity.session && !hasDispatch(caller.actor.grants)) {
+        return err(id, RPC_CODE_FOR.unauthorized, `${caller.id} is not allowed to call dispatch`, {
           code: "unauthorized",
         });
       }
@@ -483,24 +496,27 @@ async function route(
  * (no socket). Ordering mirrors http.ts's handleIngressRequest and is
  * deliberate:
  *   1. non-POST                -> 405
- *   2. no static or personal credential -> 503/401 (FAIL-CLOSED: never open)
+ *   2. no static, SSO or personal credential -> 503/401 (FAIL-CLOSED: never open)
  *   3. missing/unknown token   -> 401 unauthorized
  *   4. malformed JSON          -> 200 + JSON-RPC parse error (-32700)
  *   5. not a JSON-RPC request  -> 200 + invalid request (-32600)
  *   6. notification (no id)    -> 202, no body (never answered per JSON-RPC)
  *   7. valid request           -> 200 + JSON-RPC result/error from route()
- * Auth is the SAME fail-closed, constant-time bearer machinery as http.ts;
- * only the identity namespace differs (`mcp:`). Body-size enforcement (413)
+ * Bearers reuse HTTP auth; SSO reuses dashboard auth. Body-size enforcement (413)
  * happens upstream in the node wrapper, before the body is ever fully buffered.
  */
 export async function handleMcpRequest(req: McpRequest, deps: CoreDeps, options: McpOptions): Promise<McpResponse> {
-  // Auth gate (method → disabled → bearer) is the SAME decision the HTTP ingress
-  // uses — reuse authorizeRequest so both surfaces share one fail-closed,
-  // constant-time gate with no duplicated logic; map its rejection to the
-  // MCP-shaped JSON-RPC error.
+  // Authenticate before parsing any client input; map refusals to MCP errors.
   const gate = await authorizeMcpRequest(req.method, req.headers, options);
   if (!("status" in gate))
-    return handleMcpMessage(gate.identity, req.body, deps, options, digestBearer(bearerFrom(req.headers)), req.headers);
+    return handleMcpMessage(
+      gate.identity,
+      req.body,
+      deps,
+      { ...options, revalidateConnection: gate.revalidateConnection },
+      gate.connectionId ?? digestBearer(bearerFrom(req.headers)),
+      req.headers,
+    );
   return mcpErrorForStatus(gate.status);
 }
 
@@ -508,22 +524,61 @@ async function authorizeMcpRequest(
   method: string | undefined,
   headers: IncomingHttpHeaders,
   options: McpOptions,
-): Promise<{ identity: McpIdentity } | { status: number }> {
+): Promise<
+  | { identity: McpIdentity; connectionId?: string; revalidateConnection?: McpOptions["revalidateConnection"] }
+  | { status: number }
+> {
   const gate = authorizeRequest(method, headers, options);
   if (!("status" in gate) && !gate.identity.subject.startsWith("personal:")) return gate;
   if ("status" in gate && gate.status === 405) return gate;
-  if (!options.personalTokens) return "status" in gate ? gate : { status: 401 };
-  const raw = headers.authorization;
-  const header = Array.isArray(raw) ? raw[0] : raw;
-  const bearer = typeof header === "string" ? /^Bearer ([a-f0-9]{64})$/.exec(header)?.[1] : undefined;
-  if (!bearer) return { status: 401 };
-  try {
-    const token = await options.personalTokens.get(digestBearer(bearer));
-    if (!token) return { status: 401 };
-    return { identity: { subject: token.subject, email: token.email, verifiedUserId: token.userId } };
-  } catch {
-    return { status: 503 };
+  const sso = options.sso?.mode !== "none" ? options.sso : undefined;
+  const bearer = bearerFrom(headers);
+  const personalBearer = /^[a-f0-9]{64}$/i.test(bearer) ? bearer : undefined;
+  // A personal credential keeps its delegated identity and limits. Its
+  // revocation or store failure must not fall back to a browser assertion.
+  if (personalBearer && options.personalTokens) {
+    try {
+      const token = await options.personalTokens.get(digestBearer(personalBearer));
+      if (token) return { identity: { subject: token.subject, email: token.email, verifiedUserId: token.userId } };
+      // A configured dashboard bearer can itself be 64 hex characters. Only
+      // its token verifier may prove that same bearer; Access cannot replace it.
+      if (sso?.mode !== "token") return { status: 401 };
+    } catch {
+      return { status: 503 };
+    }
   }
+  if (sso) {
+    const raw = sso.credentialHeader ? headers[sso.credentialHeader] : undefined;
+    try {
+      const verdict = await sso.verify({ headers });
+      if (verdict.ok && verdict.identity.sub) {
+        if (!originAllowed({ headers }, options)) return { status: 403 };
+        const credential = bearerFrom(headers) || (Array.isArray(raw) ? raw[0] : raw);
+        if (!credential) return { status: 401 };
+        const connectionId = digestBearer(credential);
+        const identity = { subject: verdict.identity.sub, session: verdict.identity };
+        return {
+          identity,
+          connectionId,
+          revalidateConnection: async (id) => {
+            if (id !== connectionId) return undefined;
+            const current = await sso.verify({ headers });
+            return current.ok && current.identity.sub === identity.subject
+              ? { subject: current.identity.sub, session: current.identity }
+              : undefined;
+          },
+        };
+      }
+    } catch (error) {
+      let message = error instanceof Error ? error.message : String(error);
+      for (const credential of [bearerFrom(headers), ...(Array.isArray(raw) ? raw : [raw])])
+        if (credential) message = message.replaceAll(credential, "«redacted»");
+      console.error(`[mcp] dashboard verifier fault: ${redactAndCap(message).replace(/\s+/g, " ")}`);
+      return { status: 503 };
+    }
+  }
+  if (!options.personalTokens) return sso ? { status: 401 } : "status" in gate ? gate : { status: 401 };
+  return { status: 401 };
 }
 
 /** Map the shared (HTTP-shaped) authorizeRequest rejection status to the
@@ -531,13 +586,14 @@ async function authorizeMcpRequest(
 function mcpErrorForStatus(status: number): McpResponse {
   if (status === 405) return { status, body: err(null, INVALID_REQUEST, "method not allowed; POST only") };
   if (status === 503) return { status, body: err(null, AUTH_ERROR, "MCP access unavailable") };
+  if (status === 403) return { status, body: err(null, AUTH_ERROR, "forbidden") };
   return { status: 401, body: err(null, AUTH_ERROR, "unauthorized") };
 }
 
-/** Parse and route one JSON-RPC message from an already-authed caller. */
+/** Normalize the credential once for personal lookup and connection binding. */
 function bearerFrom(headers: IncomingHttpHeaders): string {
   const value = Array.isArray(headers.authorization) ? headers.authorization[0] : headers.authorization;
-  return value?.replace(/^Bearer /, "") ?? "";
+  return /^Bearer\s+(.+)$/i.exec(value?.trim() ?? "")?.[1] ?? "";
 }
 
 async function handleMcpMessage(
@@ -745,8 +801,7 @@ export function createMcpHandler(deps: CoreDeps, options: McpOptions): (req: Htt
   return (req, res) => {
     void (async () => {
       try {
-        // Authorize from headers BEFORE reading the body (unified with the HTTP
-        // ingress via authorizeRequest): an unauthorized/wrong-method/disabled
+        // Authenticate from headers BEFORE reading the body: an unauthorized/wrong-method/disabled
         // caller is rejected without buffering a body it has no right to send.
         const gate = await authorizeMcpRequest(req.method, req.headers, options);
         if ("status" in gate) {
@@ -768,7 +823,12 @@ export function createMcpHandler(deps: CoreDeps, options: McpOptions): (req: Htt
           write(res, 200, err(null, PARSE_ERROR, "parse error: invalid JSON"));
           return;
         }
-        const handler = sdkHandler(gate.identity, deps, options, digestBearer(bearerFrom(req.headers)));
+        const handler = sdkHandler(
+          gate.identity,
+          deps,
+          { ...options, revalidateConnection: gate.revalidateConnection },
+          gate.connectionId ?? digestBearer(bearerFrom(req.headers)),
+        );
         try {
           await toNodeHandler(handler)(req, res, parsed);
         } finally {

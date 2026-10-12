@@ -50,6 +50,8 @@ export type DashboardVerdict = { ok: true; identity: AccessIdentity } | { ok: fa
 
 export interface DashboardVerifier {
   readonly mode: DashboardAuthMode;
+  /** Credential header used to bind MCP confirmation to a signed-in connection. */
+  readonly credentialHeader?: string;
   /** One clause for the startup log — the mode and what it checks, never a secret. */
   describe(): string;
   verify(req: DashboardRequest): Promise<DashboardVerdict>;
@@ -75,6 +77,7 @@ function header(headers: IncomingHttpHeaders, name: string): string | undefined 
 export function accessVerifier(config: AccessConfig, deps: VerifyDeps): DashboardVerifier {
   return {
     mode: "access",
+    credentialHeader: "cf-access-jwt-assertion",
     describe: () => `access (Cloudflare Access SSO, ${config.teamDomain})`,
     async verify(req) {
       // Node lowercases header keys; Cloudflare injects `Cf-Access-Jwt-Assertion`.
@@ -113,6 +116,7 @@ export interface TokenVerifierOptions {
 export function tokenVerifier(opts: TokenVerifierOptions): DashboardVerifier {
   return {
     mode: "token",
+    credentialHeader: "authorization",
     describe: () => `token (bearer from $${opts.env} → access:${opts.subject})`,
     async verify(req) {
       const auth = header(req.headers, "authorization");

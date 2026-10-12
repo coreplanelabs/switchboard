@@ -26,6 +26,7 @@ import { RunRegistry } from "../core/runRegistry.js";
 import { NullRunHistoryWriter } from "../core/runHistoryWriter.js";
 import { handleMcpRequest, type McpOptions } from "./mcp.js";
 import { createMcpApprovalView } from "./mcpApprovalView.js";
+import { tokenVerifier } from "./dashboardAuth.js";
 
 const APPROVAL_PROTOCOL_VERSION = "2026-07-28";
 const FORM_META = {
@@ -60,9 +61,9 @@ describe("MCP approval parity", () => {
     });
     const commands = bindCommands(registry, {});
     const grantsFor = (id: string) =>
-      id === "mcp:device" || id === "mcp:other-device"
+      id === "mcp:device" || id === "mcp:other-device" || id === "mcp:personal:device"
         ? connectionGrants
-        : id === "slack:UALICE"
+        : id === "slack:UALICE" || id === "access:alice"
           ? personGrants
           : NO_GRANTS;
     const dir = mkdtempSync(join(tmpdir(), "swb-mcp-approval-"));
@@ -97,12 +98,18 @@ describe("MCP approval parity", () => {
       publicBaseUrl: "https://bot.example",
       approvalsEnabled: browser,
     };
-    const call = (name = "repo_offboard", args: unknown = {}, token = "tok", modern?: Record<string, unknown>) =>
+    const call = (
+      name = "repo_offboard",
+      args: unknown = {},
+      token = "tok",
+      modern?: Record<string, unknown>,
+      authorization = `Bearer ${token}`,
+    ) =>
       handleMcpRequest(
         {
           method: "POST",
           headers: {
-            authorization: `Bearer ${token}`,
+            authorization,
             ...(modern
               ? { "mcp-protocol-version": APPROVAL_PROTOCOL_VERSION, "mcp-method": "tools/call", "mcp-name": name }
               : {}),
@@ -218,6 +225,88 @@ describe("MCP approval parity", () => {
     ).toMatchObject({ error: { code: -32001 } });
     expect(f.removed()).toBe(1);
   });
+
+  it("SSO form confirmation stays bound to its authenticated connection and executes once", async () => {
+    const f = fixture();
+    const verifier = (token: string) => tokenVerifier({ token, env: "DASHBOARD_TOKEN", subject: "alice" });
+    f.options.sso = verifier("sso-token");
+    const first = await f.call("repo_offboard", {}, "sso-token", { _meta: FORM_META });
+    expect(first.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "form" } } } } });
+    expect(f.removed()).toBe(0);
+    const requestState = (first.body as { result: { requestState: string } }).result.requestState;
+    const consent = {
+      _meta: FORM_META,
+      requestState,
+      inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+    };
+    f.options.sso = verifier("other-session");
+    expect((await f.call("repo_offboard", {}, "other-session", consent)).body).toMatchObject({
+      error: { code: -32001 },
+    });
+    expect(f.removed()).toBe(0);
+    expect((await f.call("repo_offboard", {}, "sso-token", consent)).status).toBe(401);
+    expect(f.removed()).toBe(0);
+    f.options.sso = verifier("sso-token");
+    expect((await f.call("repo_offboard", {}, "sso-token", consent)).body).toMatchObject({
+      result: { content: [{ text: expect.stringContaining("removed: 1") }] },
+    });
+    expect(f.removed()).toBe(1);
+    expect((await f.call("repo_offboard", {}, "sso-token", consent)).body).toMatchObject({ error: { code: -32001 } });
+    expect(f.removed()).toBe(1);
+  });
+
+  it.each(["bearer sso-token", "Bearer  sso-token", "Bearer sso-token "])(
+    "SSO confirmation normalizes the same credential across header spelling %s",
+    async (authorization) => {
+      const f = fixture();
+      f.options.sso = tokenVerifier({ token: "sso-token", env: "DASHBOARD_TOKEN", subject: "alice" });
+      const first = await f.call("repo_offboard", {}, "sso-token", { _meta: FORM_META }, authorization);
+      expect(first.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "form" } } } } });
+      const requestState = (first.body as { result: { requestState: string } }).result.requestState;
+      const accepted = await f.call("repo_offboard", {}, "sso-token", {
+        _meta: FORM_META,
+        requestState,
+        inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+      });
+      expect(accepted.body).toMatchObject({ result: { content: [{ text: expect.stringContaining("removed: 1") }] } });
+      expect(f.removed()).toBe(1);
+    },
+  );
+
+  it.each(["bearer", "Bearer ", "Bearer"])(
+    "personal confirmation retains stored identity across scheme %s beside SSO",
+    async (scheme) => {
+      const f = fixture();
+      const token = "d".repeat(64);
+      const store = new InMemoryPersonalTokenStore();
+      await store.put({
+        digest: digestBearer(token),
+        subject: "personal:device",
+        email: "alice@example.com",
+        userId: "slack:UALICE",
+        createdAt: 1,
+      });
+      f.options.personalTokens = store;
+      f.options.sso = tokenVerifier({ token, env: "DASHBOARD_TOKEN", subject: "alice" });
+      const first = await f.call("repo_offboard", {}, token, { _meta: FORM_META }, `${scheme} ${token}`);
+      expect(first.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "form" } } } } });
+      const requestState = (first.body as { result: { requestState: string } }).result.requestState;
+      expect(await f.deps.confirmations!.get?.(requestState)).toMatchObject({
+        message: {
+          userId: "slack:UALICE",
+          authenticatedAs: "mcp:personal:device",
+          approvalConnection: { credentialId: "mcp:personal:device" },
+        },
+      });
+      const accepted = await f.call("repo_offboard", {}, token, {
+        _meta: FORM_META,
+        requestState,
+        inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+      });
+      expect(accepted.body).toMatchObject({ result: { content: [{ text: expect.stringContaining("removed: 1") }] } });
+      expect(f.removed()).toBe(1);
+    },
+  );
 
   it("regenerated forms retain the frozen implicit repository and execute that repository", async () => {
     const f = fixture();

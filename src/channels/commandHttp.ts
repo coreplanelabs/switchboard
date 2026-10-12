@@ -274,7 +274,7 @@ function hostOf(url: string | undefined): string | undefined {
   }
 }
 
-function header(req: IncomingMessage, name: string): string | undefined {
+function header(req: Pick<IncomingMessage, "headers">, name: string): string | undefined {
   const v = req.headers[name];
   return Array.isArray(v) ? v[0] : v;
 }
@@ -285,7 +285,10 @@ function header(req: IncomingMessage, name: string): string | undefined {
  *  host and port — a same-host deployment on another port is foreign), or the
  *  Host header's host when no base URL is configured (the scheme is unknown
  *  there). No `Origin` at all (curl, service tokens) is fine. */
-export function originAllowed(req: IncomingMessage, opts: Pick<CommandHttpOptions, "publicBaseUrl">): boolean {
+export function originAllowed(
+  req: Pick<IncomingMessage, "headers">,
+  opts: Pick<CommandHttpOptions, "publicBaseUrl">,
+): boolean {
   const site = header(req, "sec-fetch-site");
   if (site !== undefined && site !== "same-origin" && site !== "none") return false;
   const origin = header(req, "origin");
