@@ -73,6 +73,11 @@ const configSchema = z
 type SmokeConfig = z.infer<typeof configSchema>;
 export const parseSmokeConfig = (value: unknown): SmokeConfig => configSchema.parse(value);
 const buildSchema = z.object({ commit: sha, version: z.string().min(1).max(80).optional() });
+const admissionReceiptSchema = z.object({
+  status: z.enum(["pending", "accepted", "rejected", "stale", "throttled"]),
+  receiptId: z.string().min(1).max(2048),
+  runId: z.string().optional(),
+});
 type SmokeBuild = z.infer<typeof buildSchema>;
 const runSchema = z.object({
   id: z.string(),
@@ -479,13 +484,7 @@ export async function runAgentSmoke(input: {
         await save();
       });
       const object = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-      const known = z
-        .object({
-          status: z.enum(["pending", "accepted", "rejected", "stale", "throttled"]),
-          receiptId: z.string().min(1).max(2048),
-          runId: z.string().optional(),
-        })
-        .safeParse(object.admission);
+      const known = admissionReceiptSchema.safeParse(object.admission);
       if (known.success) {
         row.receiptId = known.data.receiptId;
         row.admissionStatus = known.data.status;
@@ -990,7 +989,13 @@ export function agentSmokeTransport(input: {
         .string()
         .regex(/^[A-Za-z0-9_-]{1,64}$/)
         .safeParse(response.runId ?? (admission.success ? admission.data.runId : undefined));
-      if (!assigned.success) return response;
+      if (!assigned.success) {
+        // HTTP202 may already have admitted work. An unusable owner cannot
+        // prove no agent ran; retain its captured response and stop.
+        if (source === "http" && !admissionReceiptSchema.safeParse(response.admission).success)
+          throw new Error("admission_unproven");
+        return response;
+      }
       deadlines.set(assigned.data, deadline);
       return {
         ...(response.admission === undefined ? {} : { admission: response.admission }),

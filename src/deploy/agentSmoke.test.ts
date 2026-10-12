@@ -1222,7 +1222,7 @@ describe("bounded agent smoke", () => {
           const args = JSON.parse(body),
             id = args.thread.split("-").at(-1);
           const run = (await producer.transport.request(
-            { id, agent: id === "answer" ? "general" : "explore", minutes: 4, text: args.text },
+            { id, agent: id === "answer" ? "general" : "explore", minutes: id === "answer" ? 4 : 15, text: args.text },
             args.thread,
           )) as { run: { id: string } };
           actual.push({ source: "http", userId: "http:smoke", threadKey: `http:smoke:${args.thread}` });
@@ -1393,7 +1393,7 @@ describe("bounded agent smoke", () => {
             {
               id,
               agent: id === "answer" ? "general" : id === "workspace" ? "explore" : "review",
-              minutes: id === "review" ? 15 : 4,
+              minutes: id === "answer" ? 4 : 15,
               text: args.text,
               transport: source,
             },
@@ -1434,7 +1434,7 @@ describe("bounded agent smoke", () => {
         healthUrl: "https://bot.example.test/healthz",
         token: "fixture-only",
         config: selected,
-        fetch,
+        fetch: withReaderProbe(fetch),
       });
       const receipt = await runAgentSmoke({ config: selected, expectedCommit: commit, thread: "release-1", transport });
       expect(receipt.scenarios.map((row) => [row.id, row.outcome, row.reason])).toEqual([
@@ -1483,29 +1483,51 @@ describe("bounded agent smoke", () => {
     },
   );
 
-  it("retains a known pending receipt with no owner and stops without replay or further admissions", async () => {
-    const admissions: unknown[] = [];
-    const transport = fixture().transport;
-    transport.request = async (_scenario, thread) => {
-      admissions.push(thread);
-      return { admission: { status: "pending", receiptId: "original-pending", duplicate: false }, build: { commit } };
-    };
-    const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
-    expect(receipt).toMatchObject({
-      capabilityOutcome: "incomplete",
-      scenarios: [
-        {
-          outcome: "incomplete",
-          reason: "original_owner_pending",
-          receiptId: "original-pending",
-          requestKey: "release-1-answer",
-        },
-        { outcome: "skipped" },
-        { outcome: "skipped" },
-      ],
-    });
-    expect(admissions).toEqual(["release-1-answer"]);
-  });
+  it.each(["injected", "HTTP202"] as const)(
+    "retains a known pending receipt with no owner and stops without replay or further admissions: %s",
+    async (source) => {
+      const admissions: unknown[] = [];
+      const pending = {
+        admission: { status: "pending", receiptId: "original-pending", duplicate: false },
+        build: { commit },
+      };
+      const transport =
+        source === "injected"
+          ? fixture().transport
+          : agentSmokeTransport({
+              origin: "https://bot.example.test",
+              healthUrl: "https://bot.example.test/healthz",
+              token: "fixture-only",
+              config,
+              fetch: withReaderProbe(async (url, init) => {
+                if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: { commit } });
+                const body = JSON.parse(String(init?.body));
+                admissions.push(body.thread);
+                return Response.json(pending, { status: 202 });
+              }),
+            });
+      if (source === "injected")
+        transport.request = async (_scenario, thread) => {
+          admissions.push(thread);
+          return pending;
+        };
+      const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
+      expect(receipt).toMatchObject({
+        capabilityOutcome: "incomplete",
+        scenarios: [
+          {
+            outcome: "incomplete",
+            reason: "original_owner_pending",
+            receiptId: "original-pending",
+            requestKey: "release-1-answer",
+          },
+          { outcome: "skipped" },
+          { outcome: "skipped" },
+        ],
+      });
+      expect(admissions).toEqual(["release-1-answer"]);
+    },
+  );
 });
 
 describe("machine MCP reader authentication", () => {
