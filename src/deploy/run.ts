@@ -1386,8 +1386,14 @@ async function resolveContainerAppId(
   return { value: id };
 }
 
-/** `--per-page` above the fleet's `max_instances` (25); wrangler answers one page per call. */
-const INSTANCES_PER_PAGE = 100;
+/**
+ * `--per-page` above the application's retained instance rows — wrangler lists one
+ * row per durable object and the producer keeps about a week of them (499 measured),
+ * far past the fleet's `max_instances`: the read holds only when one page carries the
+ * whole set, because the producer's continuation re-serves rows and repeats a cursor
+ * while rows are still unserved.
+ */
+const INSTANCES_PER_PAGE = 1000;
 
 export const defaultSandboxGateDeps: SandboxGateDeps = {
   env: process.env,
