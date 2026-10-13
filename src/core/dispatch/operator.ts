@@ -562,14 +562,18 @@ export interface OperatorInput {
   owner?: OperatorThreadOwner;
 }
 
-/** A leading preset directive selects work, not a terminal registry reply.
- * Helper reads still ground that work. Ownership takes precedence so this
- * restriction cannot redirect a follow-up away from its original writer. */
+/** A leading authorized preset selects that work, not another preset or a
+ * terminal registry reply. Helper reads still ground that work. Ownership
+ * takes precedence so a follow-up stays with its original writer. */
 function actionProjection(input: OperatorInput): OperatorProjection {
   if (input.owner) return ownedProjection(input.projection, input.owner);
   const preset = parseDirectives(input.text).agent;
   return preset !== undefined && input.projection.presets.some((offered) => offered.name === preset)
-    ? { ...input.projection, commands: [] }
+    ? {
+        ...input.projection,
+        presets: input.projection.presets.filter((offered) => offered.name === preset),
+        commands: [],
+      }
     : input.projection;
 }
 
@@ -2415,6 +2419,7 @@ export async function runOperator(
     }
   }
   let prompt = buildOperatorPrompt(input);
+  const projection = input.owner ? input.projection : actionProjection(input);
   // The turn parse reads the author's FULL projection even on an owned thread
   // (issue 2027): a call naming a tool the owned turn was not offered is a
   // decision the executor folds into the owner, never a violation the loop
@@ -2427,8 +2432,8 @@ export async function runOperator(
     requestText: input.text,
     ...(input.requesterId !== undefined ? { requesterId: input.requesterId } : {}),
     tail: input.tail,
-    presets: input.projection.presets.map((p) => p.name),
-    commands: input.owner ? input.projection.commands : actionProjection(input).commands,
+    presets: projection.presets.map((p) => p.name),
+    commands: projection.commands,
     ...(input.newestFinishedRun?.repo ? { threadRepo: input.newestFinishedRun.repo } : {}),
     ...requesterTarget,
     ...(input.requesterTarget?.issue && !requesterTarget.requesterRepoConflict

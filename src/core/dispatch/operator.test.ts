@@ -1670,6 +1670,95 @@ channels:
     },
   );
 
+  it("repairs a different preset on an explicit review while preserving its target and budget", async () => {
+    const text =
+      "agent:review budget:15 Review https://github.com/acme/api/pull/7 at head 1111111111111111111111111111111111111111. Publish the review; do not change files or merge.";
+    const prTarget = { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" };
+    const common = {
+      repo: "acme/api",
+      prTarget,
+      budget: 15,
+      settingsEvidence: { budget: { quote: "budget:15", intent: "requested" } },
+      reason: "review the PR",
+    };
+    const model = vi
+      .fn<RouteModel>()
+      .mockResolvedValueOnce({ tool: OPERATOR_BIND_TOOL, input: { ...common, preset: "ship", shipEntry: "review" } })
+      .mockResolvedValueOnce({ tool: OPERATOR_BIND_TOOL, input: { ...common, preset: "review" } });
+    const answer = await runOperator(input({ text, projection: projectionOf(["review", "ship", "general"]) }), model);
+    expect(answer.attempts).toMatchObject([{ outcome: "violation" }, { outcome: "accepted" }]);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ line: text, budget: 15, prTarget }],
+    });
+    expect(model).toHaveBeenCalledTimes(2);
+    const prompt = model.mock.calls[0]![0];
+    const bind = [prompt.tool, ...(prompt.tools ?? [])].find((t) => t.name === OPERATOR_BIND_TOOL)!;
+    expect(bind.inputSchema).toMatchObject({ properties: { preset: { enum: ["review"] } } });
+    expect(prompt.system).toContain("`review`");
+    expect(prompt.system).not.toContain("- `ship`");
+  });
+
+  it.each([false, true])("persistent wrong preset ends without a bind (multi-call: %s)", async (multiCall) => {
+    const wrong = {
+      tool: OPERATOR_BIND_TOOL,
+      input: {
+        preset: "ship",
+        shipEntry: "review",
+        repo: "acme/api",
+        prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+        reason: "review the PR",
+      },
+    };
+    const model = vi.fn<RouteModel>(async () => {
+      if (multiCall) throw new MultiToolCallError([{ tool: OPERATOR_READ_TOOLS.threadState, input: {} }, wrong]);
+      return wrong;
+    });
+    const answer = await runOperator(
+      input({
+        text: "agent:review budget:15 Review https://github.com/acme/api/pull/7 and retain the full request.",
+        projection: projectionOf(["review", "ship", "general"]),
+      }),
+      model,
+    );
+    expect(answer.decision).toMatchObject({ kind: "non_decision" });
+    expect(answer.attempts).toHaveLength(3);
+    expect(model).toHaveBeenCalledTimes(3);
+  });
+
+  it("an explicit review cannot become a PR batch through exhausted repair", async () => {
+    const model = vi.fn<RouteModel>(async () => {
+      throw new MultiToolCallError([
+        { tool: OPERATOR_READ_TOOLS.threadState, input: {} },
+        {
+          tool: OPERATOR_BATCH_TOOL,
+          input: {
+            kind: "ship",
+            targets: ["https://github.com/acme/api/pull/7", "https://github.com/acme/api/pull/8"],
+            actionQuote: "Ship",
+            targetQuotes: ["https://github.com/acme/api/pull/7", "https://github.com/acme/api/pull/8"],
+            reason: "ship the batch",
+          },
+        },
+      ]);
+    });
+    const answer = await runOperator(
+      input({
+        text: "agent:review Ship https://github.com/acme/api/pull/7 and https://github.com/acme/api/pull/8",
+        projection: {
+          ...projectionOf(["review", "ship"]),
+          presets: operatorPresets().filter((p) => ["review", "ship", "conductor"].includes(p.name)),
+        },
+      }),
+      model,
+    );
+    expect(answer.decision).toMatchObject({ kind: "non_decision" });
+    expect(model).toHaveBeenCalledTimes(3);
+    expect([model.mock.calls[0]![0].tool, ...(model.mock.calls[0]![0].tools ?? [])].map((t) => t.name)).not.toContain(
+      OPERATOR_BATCH_TOOL,
+    );
+  });
+
   it("an explicit review cannot accept a listing through exhausted multi-call repair", async () => {
     const model = vi.fn<RouteModel>(async () => {
       throw new MultiToolCallError([
@@ -1755,6 +1844,34 @@ channels:
         ? { kind: "binds", binds: [{ invocation: { id: "repo.list" } }] }
         : { kind: "binds", binds: [{ line: `agent:general ${text}` }] },
     );
+  });
+
+  it("owned threads still accept a full-projection bind for the original owner to fold", async () => {
+    const text = "agent:review budget:15 Continue the original task.";
+    const answer = await runOperator(
+      input({ text, owner: { kind: "live", runId: "original" }, projection: projectionOf(["review", "general"]) }),
+      async () => ({ tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "Follow the original owner." } }),
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ line: "agent:general agent:review budget:15 Continue the original task." }],
+    });
+  });
+
+  it.each([
+    ["Explain agent:review without starting it.", ["review", "general"]],
+    ["`agent:review` is an example to explain.", ["review", "general"]],
+    ["agent:unknown Explain the available agents.", ["review", "general"]],
+    ["agent:review Explain the unavailable agent.", ["general"]],
+  ])("non-selecting markers retain other authorized presets: %s", async (text, allowed) => {
+    const answer = await runOperator(input({ text, projection: projectionOf(allowed) }), async () => ({
+      tool: OPERATOR_BIND_TOOL,
+      input: { preset: "general", reason: "Explain the marker." },
+    }));
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ line: expect.stringMatching(/^agent:general /) }],
+    });
   });
 
   it("owned threads retain their command actions ahead of an explicit preset marker", () => {
