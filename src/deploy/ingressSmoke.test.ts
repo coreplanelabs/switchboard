@@ -13,7 +13,10 @@ describe("production ingress smoke", () => {
     const receipt = await runAgentSmoke({ config, thread: "release-123", transport });
     expect(receipt.capabilityOutcome).toBe("passed");
     expect(receipt.scenarios[0]).toMatchObject({ runId: "run-answer", outcome: "passed" });
-    expect(transport.request).toHaveBeenCalledWith(expect.objectContaining({ agent: "general" }), "release-123-answer");
+    expect((transport.request as ReturnType<typeof vi.fn>).mock.calls[0].slice(0, 2)).toEqual([
+      expect.objectContaining({ agent: "general" }),
+      "release-123-answer",
+    ]);
   });
 
   it("fails when health is green but the Door asks again before starting an agent", async () => {

@@ -5,6 +5,266 @@ import { MCP_PROTOCOL_VERSION } from "../mcp/client.js";
 import { commit, config, fixture, head } from "./testing/agentSmoke.js";
 
 describe("bounded agent smoke", () => {
+  it("redacts credentials in nested JSON-encoded replies before retaining or truncating intake evidence", async () => {
+    for (const detail of ["diagnostic", "x".repeat(20000)]) {
+      const fetch = vi.fn(async (url: string | URL | Request) =>
+        String(url).endsWith("/healthz")
+          ? Response.json({ ok: true, build: { commit } })
+          : Response.json({
+              reply: JSON.stringify({
+                api_token: "opaque-private-value",
+                nested: JSON.stringify(
+                  JSON.stringify({
+                    password: 'private-quoted-"value',
+                    authorization: "Basic private-auth",
+                    cookie: "private-cookie",
+                    callback: "https://auth.example.test/callback?code=private-code#private-state",
+                  }),
+                ),
+                text: "Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxy",
+                transport: "fixture-only",
+                detail,
+              }),
+            }),
+      );
+      const receipt = await runAgentSmoke({
+        config,
+        expectedCommit: commit,
+        thread: "release-1",
+        transport: agentSmokeTransport({
+          origin: "https://bot.example.test",
+          healthUrl: "https://bot.example.test/healthz",
+          token: "fixture-only",
+          config,
+          fetch,
+        }),
+      });
+      expect(receipt.scenarios[0]).toMatchObject({
+        outcome: "failed",
+        reason: "no_agent_run",
+        intake: { response: { status: 200, format: "json", truncated: detail.length > 16000 } },
+      });
+      const response = receipt.scenarios[0]?.intake?.response;
+      const serialized = JSON.stringify(response);
+      for (const secret of [
+        "opaque-private-value",
+        "private-quoted",
+        "private-auth",
+        "private-cookie",
+        "private-code",
+        "private-state",
+        "ghp_abcdefghijklmnopqrstuvwxy",
+        "fixture-only",
+      ])
+        expect(serialized).not.toContain(secret);
+      if (detail === "diagnostic") {
+        expect(JSON.parse((response?.body as { reply: string }).reply)).toMatchObject({
+          api_token: "«redacted»",
+          detail: "diagnostic",
+          transport: "«redacted»",
+        });
+      } else {
+        expect(response?.preview).toHaveLength(16000);
+      }
+    }
+  });
+
+  it("excludes foreign and invalid identities inside JSON-encoded intake replies", async () => {
+    for (const userId of ["http:another-actor", null]) {
+      const fetch = vi.fn(async (url: string | URL | Request) =>
+        String(url).endsWith("/healthz")
+          ? Response.json({ ok: true, build: { commit } })
+          : Response.json({
+              reply: JSON.stringify({ nested: JSON.stringify({ userId, reply: "foreign private content" }) }),
+            }),
+      );
+      const receipt = await runAgentSmoke({
+        config,
+        expectedCommit: commit,
+        thread: "release-1",
+        transport: agentSmokeTransport({
+          origin: "https://bot.example.test",
+          healthUrl: "https://bot.example.test/healthz",
+          token: "fixture-only",
+          config,
+          fetch,
+        }),
+      });
+      expect(receipt.scenarios[0]).toMatchObject({ outcome: "failed", reason: "no_agent_run" });
+      const response = receipt.scenarios[0]?.intake?.response;
+      const reply = JSON.parse((response?.body as { reply: string }).reply);
+      expect(JSON.parse(reply.nested)).toEqual({ excluded: "foreign_identity" });
+      expect(JSON.stringify(receipt)).not.toContain("foreign private content");
+    }
+  });
+
+  it("retains the sanitized original HTTP request and runless reply before refusing acceptance", async () => {
+    const saved: unknown[] = [];
+    const fetch = vi.fn(async (url: string | URL | Request) =>
+      String(url).endsWith("/healthz")
+        ? Response.json({ ok: true, build: { commit } })
+        : Response.json({ reply: "Ship budget status", error: "not_an_agent_run" }),
+    );
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "release-1",
+      transport: agentSmokeTransport({
+        origin: "https://bot.example.test",
+        healthUrl: "https://bot.example.test/healthz",
+        token: "fixture-only",
+        config,
+        fetch,
+      }),
+      onReceipt: async (value) => {
+        saved.push(value);
+      },
+    });
+    expect(receipt.capabilityOutcome).toBe("failed");
+    expect(receipt.scenarios[0]).toMatchObject({
+      outcome: "failed",
+      reason: "no_agent_run",
+      intake: {
+        request: {
+          method: "POST",
+          path: "/ingress",
+          body: {
+            text: "What is 2 + 2? Answer only with the number. budget:4",
+            channel: "smoke",
+            thread: "release-1-answer",
+            async: true,
+          },
+          truncated: false,
+        },
+        response: {
+          status: 200,
+          format: "json",
+          body: { reply: "Ship budget status", error: "not_an_agent_run" },
+          truncated: false,
+        },
+      },
+    });
+    expect(saved).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          scenarios: expect.arrayContaining([
+            expect.objectContaining({
+              reason: "request_ack_unknown",
+              intake: expect.objectContaining({ response: expect.objectContaining({ status: 200 }) }),
+            }),
+          ]),
+        }),
+      ]),
+    );
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      "https://bot.example.test/healthz",
+      "https://bot.example.test/ingress",
+    ]);
+  });
+
+  it("retains failed and malformed HTTP evidence without accepting or repeating an admission", async () => {
+    for (const response of [
+      Response.json({ error: "denied" }, { status: 403 }),
+      new Response("private callback body", { status: 502 }),
+      Response.json({ runId: "bad id" }, { status: 202 }),
+    ]) {
+      const fetch = vi.fn(async (url: string | URL | Request) =>
+        String(url).endsWith("/healthz") ? Response.json({ ok: true, build: { commit } }) : response,
+      );
+      const receipt = await runAgentSmoke({
+        config,
+        expectedCommit: commit,
+        thread: "release-1",
+        transport: agentSmokeTransport({
+          origin: "https://bot.example.test",
+          healthUrl: "https://bot.example.test/healthz",
+          token: "fixture-only",
+          config,
+          fetch,
+        }),
+      });
+      expect(receipt.capabilityOutcome).toBe("incomplete");
+      expect(receipt.scenarios[0]).toMatchObject({
+        outcome: "incomplete",
+        intake: { response: { status: response.status, format: response.status === 502 ? "non-json" : "json" } },
+      });
+      expect(JSON.stringify(receipt)).not.toContain("private callback body");
+      expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+        "https://bot.example.test/healthz",
+        "https://bot.example.test/ingress",
+      ]);
+    }
+  });
+
+  it("redacts transport secrets and URL callback codes before bounded intake capture", async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) =>
+      String(url).endsWith("/healthz")
+        ? Response.json({ ok: true, build: { commit } })
+        : Response.json({
+            reply: "Bearer fixture-only https://auth.example.test/callback?code=private-code&state=private-state",
+            api_token: "private-key",
+            detail: "x".repeat(20000),
+          }),
+    );
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "release-1",
+      transport: agentSmokeTransport({
+        origin: "https://bot.example.test",
+        healthUrl: "https://bot.example.test/healthz",
+        token: "fixture-only",
+        config,
+        fetch,
+      }),
+    });
+    expect(receipt.capabilityOutcome).toBe("failed");
+    expect(receipt.scenarios[0]).toMatchObject({
+      reason: "no_agent_run",
+      intake: { response: { status: 200, truncated: true } },
+    });
+    const serialized = JSON.stringify(receipt);
+    for (const secret of ["fixture-only", "private-key", "private-code", "private-state"])
+      expect(serialized).not.toContain(secret);
+    expect(serialized).toContain("redacted");
+    expect(serialized.length).toBeLessThan(18000);
+  });
+
+  it("excludes a foreign response's content while preserving its refused admission identity", async () => {
+    const fetch = vi.fn(async (url: string | URL | Request) =>
+      String(url).endsWith("/healthz")
+        ? Response.json({ ok: true, build: { commit } })
+        : Response.json(
+            {
+              runId: "foreign-run",
+              threadKey: "http:smoke:foreign-thread",
+              build: { commit },
+              reply: "foreign private content",
+            },
+            { status: 202 },
+          ),
+    );
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "release-1",
+      transport: agentSmokeTransport({
+        origin: "https://bot.example.test",
+        healthUrl: "https://bot.example.test/healthz",
+        token: "fixture-only",
+        config,
+        fetch,
+      }),
+    });
+    expect(receipt.scenarios[0]).toMatchObject({
+      runId: "foreign-run",
+      outcome: "incomplete",
+      reason: "run_identity_mismatch",
+      intake: { response: { status: 202, body: { excluded: "foreign_identity" }, truncated: false } },
+    });
+    expect(JSON.stringify(receipt)).not.toContain("foreign private content");
+  });
+
   it("requests the Explore floor and retains twelve minutes of workspace loop time", async () => {
     const { transport } = fixture();
     const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });

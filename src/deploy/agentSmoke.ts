@@ -8,7 +8,7 @@ import {
   minutesToMs,
 } from "../core/budgets.js";
 import { answerOutcomeOf } from "../core/answerOutcome.js";
-import { redactSecrets } from "../core/redact.js";
+import { redactSecrets, stripAnsi } from "../core/redact.js";
 import { unwrapUntrusted } from "../core/untrusted.js";
 import { StreamableHttpMcpClient } from "../mcp/client.js";
 import { assertSmokeOriginMatchesPlan } from "./ingressSmoke.js";
@@ -169,8 +169,21 @@ export interface SmokeScenario {
 }
 export interface SmokeTransport {
   health(): Promise<unknown>;
-  request(scenario: SmokeScenario, thread: string): Promise<unknown>;
+  request(
+    scenario: SmokeScenario,
+    thread: string,
+    onIntake?: (intake: SmokeIntakeReceipt) => Promise<void>,
+  ): Promise<unknown>;
   readRun(id: string, onRecord?: (record: unknown) => Promise<void>): Promise<unknown>;
+}
+interface SmokeCapture {
+  body?: unknown;
+  preview?: string;
+  truncated: boolean;
+}
+interface SmokeIntakeReceipt {
+  request: SmokeCapture & { method: "POST"; path: "/ingress" };
+  response?: SmokeCapture & { status: number; format: "json" | "non-json" };
 }
 interface ScenarioReceipt {
   id: SmokeScenario["id"];
@@ -191,6 +204,59 @@ interface ScenarioReceipt {
   evidence?: { identityVerified: boolean; record: unknown; unverifiedObservation?: unknown };
   failedChecks?: string[];
   observationError?: { code: string; fields?: Array<{ path: string; code: string }> };
+  intake?: SmokeIntakeReceipt;
+}
+
+/** Intake diagnostics are bounded after redaction; HTML and headers are never retained. */
+function captureIntake(
+  value: unknown,
+  token: string,
+  identity?: { userId: string; threadKey: string; repo: string },
+): SmokeCapture {
+  const sanitize = (item: unknown, depth: number): unknown => {
+    if (depth > 16) return "«redacted-depth-limit»";
+    if (typeof item === "string") {
+      // Replies can themselves contain JSON, including another encoded string.
+      // Redact decoded values before escaping them for the artifact.
+      try {
+        return JSON.stringify(sanitize(JSON.parse(item), depth + 1));
+      } catch {
+        return redactSecrets(stripAnsi(item).replaceAll(token, "«redacted»")).replace(
+          /(https?:\/\/[^\s"<>?#]+)[?#][^\s"<>]*/g,
+          "$1?«redacted»",
+        );
+      }
+    }
+    if (Array.isArray(item)) return item.map((entry) => sanitize(entry, depth + 1));
+    if (item !== null && typeof item === "object") {
+      if (
+        identity &&
+        Object.entries(identity).some(([key, expected]) => key in item && Reflect.get(item, key) !== expected)
+      )
+        return { excluded: "foreign_identity" };
+      return Object.fromEntries(
+        Object.entries(item).map(([key, entry]) => {
+          // Reuse the shared secret-name policy for whole JSON field values.
+          const assignment = `${key}: "capture-value"`;
+          return [
+            key,
+            /^(?:code|state|authorization|cookie|set-cookie)$/i.test(key) || redactSecrets(assignment) !== assignment
+              ? "«redacted»"
+              : sanitize(entry, depth + 1),
+          ];
+        }),
+      );
+    }
+    return item;
+  };
+  const text = JSON.stringify(sanitize(value, 0));
+  const maxChars = 16_000;
+  if (text.length > maxChars) return { preview: text.slice(0, maxChars), truncated: true };
+  try {
+    return { body: JSON.parse(text), truncated: false };
+  } catch {
+    return { preview: text, truncated: false };
+  }
 }
 
 /** Preserve JSON structure and diagnostic text, without credentials from the transport or log. */
@@ -332,7 +398,12 @@ export async function runAgentSmoke(input: {
           threadKey: z.unknown().optional(),
           run: z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), status: z.string() }).optional(),
         })
-        .parse(await input.transport.request(scenario, row.thread));
+        .parse(
+          await input.transport.request(scenario, row.thread, async (intake) => {
+            row.intake = intake;
+            await save();
+          }),
+        );
       // Save the original identity before monitoring; a missing read cannot erase an admitted effect.
       row.runId = response.run?.id;
       row.build = buildSchema.safeParse(response.build).data;
@@ -620,16 +691,38 @@ export function agentSmokeTransport(input: {
         .parse(await response.json());
       return { ...body.build, ...(body.slack ? { slackConnected: body.slack.connected } : {}) };
     },
-    async request(scenario, thread) {
+    async request(scenario, thread, onIntake) {
       const deadline = systemClock() + minutesToMs(scenario.minutes + 1);
+      const requestBody = { text: scenario.text, channel: config.channel, thread, async: true };
+      const intake: SmokeIntakeReceipt = {
+        request: { method: "POST", path: "/ingress", ...captureIntake(requestBody, input.token) },
+      };
+      await onIntake?.(intake);
       const response = await boundedFetch(new URL("/ingress", input.origin), {
         method: "POST",
         headers: { authorization: `Bearer ${input.token}`, "content-type": "application/json" },
-        body: JSON.stringify({ text: scenario.text, channel: config.channel, thread, async: true }),
+        body: JSON.stringify(requestBody),
         signal: AbortSignal.timeout(minutesToMs(scenario.minutes + 1)),
       });
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        intake.response = { status: response.status, format: "non-json", truncated: false };
+        await onIntake?.(intake);
+        throw new Error("ingress_unavailable");
+      }
+      intake.response = {
+        status: response.status,
+        format: "json",
+        ...captureIntake(body, input.token, {
+          userId: `http:${config.subject}`,
+          threadKey: `http:${config.channel}:${thread}`,
+          repo: config.repo,
+        }),
+      };
+      await onIntake?.(intake);
       if (!response.ok) throw new Error("ingress_unavailable");
-      const body = await response.json();
       if (response.status !== 202) return body;
       const admission = z
         .object({
