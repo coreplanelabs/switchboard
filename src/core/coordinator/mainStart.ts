@@ -168,7 +168,8 @@ export function createMainTaskStarter(deps: MainStartDeps) {
       return {
         kind: "pending",
         actId,
-        reply: "I couldn't confirm whether the worker started. This work id stays stable for a safe retry.",
+        reply:
+          "I couldn't confirm whether the task started. Its saved work id stays the same. A Switchboard operator needs to check it before work can continue.",
       };
     }
   };

@@ -62,9 +62,20 @@ function harness(
     physicalMissing?: boolean;
     ownerChangedDuringProbe?: boolean;
     traceMissing?: boolean;
+    processesEnding?: boolean;
+    changedDuringWait?: "tree" | "fence";
+    processResults?: Array<{
+      exitCode: number;
+      stdout: string;
+      stderr?: string;
+      timedOut?: boolean;
+      truncated?: boolean;
+    }>;
   } = {},
 ) {
   const calls: string[] = [];
+  const waits: number[] = [];
+  let processChecks = 0;
   const C = runInNewContext(compiled + "\nUnderTest", {
     decideWorktree,
     shellQuote,
@@ -82,6 +93,12 @@ function harness(
     runRegKey: (s: string) => "reg:" + s,
     runFenceKey: (s: string) => "fence:" + s,
     systemClock: () => 1000,
+    SECOND_MS: 1000,
+    sleep: async (ms: number) => {
+      waits.push(ms);
+      if (options.changedDuringWait === "tree") options.dirty = true;
+      if (options.changedDuringWait === "fence") rows.set("fence:" + binding.threadKey, { ...owner, ownerFence: 8 });
+    },
   });
   const rows = new Map<string, unknown>([
     ["thread:" + binding.threadKey, binding],
@@ -125,13 +142,18 @@ function harness(
       calls.push(step + ":" + argv.join(" "));
       return "";
     },
-    run: async (argv: string[]) => ({
-      exitCode: argv[0] === "pgrep" ? (options.processes ? 0 : 1) : 0,
-      stdout: "",
-      stderr: "",
-      timedOut: false,
-      truncated: false,
-    }),
+    run: async (argv: string[]) => {
+      const sample = argv[0] === "pgrep" ? options.processResults?.shift() : undefined;
+      return {
+        exitCode:
+          argv[0] === "pgrep" ? (options.processes || (options.processesEnding && processChecks++ === 0) ? 0 : 1) : 0,
+        stdout: argv[0] === "pgrep" && options.processesEnding && processChecks === 1 ? "123\n" : "",
+        stderr: "",
+        timedOut: false,
+        truncated: false,
+        ...sample,
+      };
+    },
     threadRun: async (_user: string, _path: string, command: string) => ({
       exitCode: command.includes("merge-base") ? 1 : 0,
       stdout: command.includes("rev-parse") ? (options.head ?? oldHead) : options.dirty ? "M changed" : "",
@@ -141,6 +163,7 @@ function harness(
   });
   return {
     calls,
+    waits,
     trace: () => sanitizeGraftedSteps(trace.steps()),
     refusal: () => instance.guardWorkspaceAdvance(binding, owner),
     advance: () =>
@@ -154,6 +177,50 @@ function harness(
   };
 }
 describe("exact-owner review workspace advance", () => {
+  it("continues the same review after a process exits and all workspace evidence is checked again", async () => {
+    const h = harness({ processesEnding: true });
+    await expect(h.advance()).resolves.toBe(true);
+    expect(h.waits).toEqual([1000]);
+    expect(h.calls.some((call) => call.startsWith("worktree-clone:"))).toBe(true);
+  });
+
+  it.each(["tree", "fence"] as const)(
+    "preserves the workspace when %s evidence changes during process exit grace",
+    async (changedDuringWait) => {
+      const h = harness({ processesEnding: true, changedDuringWait });
+      await expect(h.advance()).rejects.toThrow("workspace-preserved: live owner advance unverified");
+      expect(h.waits).toEqual([1000]);
+      expect(h.calls.some((call) => call.startsWith("worktree-clean:"))).toBe(false);
+    },
+  );
+
+  it("preserves the workspace after the bounded grace when a process still runs", async () => {
+    const h = harness({
+      processResults: [
+        { exitCode: 0, stdout: "123\n" },
+        { exitCode: 0, stdout: "123\n" },
+      ],
+    });
+    await expect(h.advance()).rejects.toThrow("workspace-preserved: live owner advance unverified");
+    expect(h.waits).toEqual([1000]);
+    expect(h.trace()).toEqual([{ name: "advance-process-check", startMs: 1000, durationMs: 0, status: "error" }]);
+    expect(h.calls.some((call) => call.startsWith("worktree-clean:"))).toBe(false);
+  });
+
+  it.each([
+    { exitCode: 0, stdout: "123\n", timedOut: true },
+    { exitCode: 0, stdout: "123\n", truncated: true },
+    { exitCode: 0, stdout: "123\n", stderr: "unverified" },
+    { exitCode: 0, stdout: "unknown\n" },
+  ])("refuses incomplete process evidence without retry: %j", async (processResult) => {
+    const h = harness({ processResults: [processResult] });
+    await expect(h.refusal()).resolves.toEqual({
+      error: "workspace-preserved: live owner advance unverified",
+      status: 409,
+      reason: "workspace-preserved",
+    });
+    expect(h.waits).toEqual([]);
+  });
   it.each([
     [{ fence: 8 }, "advance-owner-check"],
     [{ physicalMissing: true }, "advance-live-binding"],

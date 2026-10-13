@@ -507,7 +507,7 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
     expect(s.refusals).toEqual(["ship_preflight_channel"]);
     expect(s.replies).toHaveLength(1);
-    expect(s.replies[0]).toContain("cannot open a thread of its own");
+    expect(s.replies[0]).toContain("Ship needs to open task threads");
     expect(s.replies[0].toLowerCase()).not.toContain("single-shot");
     expect(s.created).toEqual([]);
   });
@@ -631,9 +631,9 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     expect(JSON.stringify(s.closes[0])).toContain(
       "budget 40 min cannot hold the ship loop (1 review round needs 113 min)",
     );
-    expect(s.replies[0]).toContain("Ship cannot start under a 40-minute budget");
-    expect(s.replies[0]).toContain("needs 113 minutes");
-    expect(s.replies[0]).toContain("the coding child's 90");
+    expect(s.replies[0]).toBe(
+      "🚫 Ship needs at least 113 minutes to set up, code and review this task; this request allows 40 minutes. No work started. An admin can check the time limit for this request.",
+    );
   });
 
   it("a boundary at the fit's sum starts the runner with three review rounds", async () => {
@@ -962,7 +962,7 @@ describe("runShipBranch — the host key and the hosted marker (record 0060)", (
       state: { hosting: { instanceId: s.created[0] } },
     });
     expect(s.replies).toHaveLength(1);
-    expect(s.replies[0]).toContain("not yet confirmed");
+    expect(s.replies[0]).toContain("couldn't confirm whether it started");
     expect(JSON.stringify(s.closes[0])).toContain("⚠️");
   });
 
@@ -981,7 +981,7 @@ describe("runShipBranch — the host key and the hosted marker (record 0060)", (
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
     expect(s.created).toEqual([]); // the runner is never asked
     expect(s.replies).toHaveLength(1);
-    expect(s.replies[0]).toContain("A pipeline is already running in this thread");
+    expect(s.replies[0]).toContain("Ship is already working in this thread, so no second task started");
     expect(JSON.stringify(s.closes[0])).toContain("⚠️");
     expect(s.registry.getById("run-s")).toMatchObject({ finished: true, status: "completed" });
     // The live pipeline's row is untouched.

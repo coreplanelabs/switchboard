@@ -126,7 +126,7 @@ describe("the actor-id mention renderer (mdToMrkdwn, docs/reference/specs/slack-
 
   it("the sibling composers' texts render clean: a refusal sentence and a child thread lead without a display name", () => {
     const refusal = REFUSAL_SENTENCES.agent_allowlist({ agent: "coding", adminsHint: "an admin" });
-    expect(mdToMrkdwn(refusal)).toContain("Ask an admin for access.");
+    expect(mdToMrkdwn(refusal)).toContain("For access, an admin can approve your request.");
     const lead = childThreadLead(
       { agentName: "ship", msg: PARENT_MSG },
       { preset: "coding", prompt: "implement the unit" },

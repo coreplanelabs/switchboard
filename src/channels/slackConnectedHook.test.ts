@@ -137,7 +137,11 @@ describe("connected-hook wiring (Bolt-level harness)", () => {
     expect(api.reactions.add).toHaveBeenCalledWith({ channel: "C1", timestamp: ts, name: ACK_EMOJI });
     // …the late-pickup note in the message's thread…
     expect(api.chat.postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ channel: "C1", thread_ts: ts, text: expect.stringContaining("⏱ Picked up") }),
+      expect.objectContaining({
+        channel: "C1",
+        thread_ts: ts,
+        text: expect.stringContaining("⏱ I picked up your message"),
+      }),
     );
     // …and the hand-off to the core dispatcher, mention stripped, caught up.
     const [, msg] = dispatchMock.mock.calls[0];

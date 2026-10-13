@@ -230,8 +230,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       "ship_preflight_channel",
       "channel",
       "not started (channel cannot open a thread)",
-      `🚫 The ${platform} channel cannot open a thread of its own, so \`agent:ship\` cannot run a pipeline from it — the runner posts its card and opens each unit's thread through the requesting thread's channel. ` +
-        `Start it from a channel that can (Slack, the CLI or the web chat), and watch pipelines on the run page (${page}).`,
+      `🚫 Ship needs to open task threads, which ${platform} cannot do. No work started. Ship can start from Slack, the CLI or web chat. Work appears on the run page (${page}).`,
     );
   }
   // Spec item 2: child rounds never re-enter dispatch(), so without the
@@ -243,9 +242,9 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       "ship_preflight_permission",
       `permission (${missing.join(", ")})`,
       "not started (permissions)",
-      `🚫 Running \`ship\` drives \`coding\` and \`review\` child rounds, and you're not on the allowlist for ${missing
+      `🚫 Ship needs permission to use each agent. You don't have access to ${missing
         .map((a) => `\`${a}\``)
-        .join(", ")}. Ask ${input.gates.adminsHint()} for access.`,
+        .join(", ")}. No work started. For access, ${input.gates.adminsHint()} can approve your request.`,
     );
   }
   const repo = repoCtx.repo;
@@ -336,7 +335,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
       "ship_preflight_pr_unreachable",
       "thread PR unreachable",
       "not started (PR unverifiable)",
-      `🚫 This thread names PR ${repo}#${repoCtx.prUnpostable.number} but it could not be fetched to run ship's entry checks — refusing fail-closed. Retry in a moment, or check the PR on GitHub.`,
+      `🚫 I couldn't read ${repo}#${repoCtx.prUnpostable.number} on GitHub, so Ship did not start. A Switchboard operator can check the GitHub connection.`,
     );
   }
   if (repoCtx.pr !== undefined && !seeded) {
@@ -361,7 +360,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
           "ship_preflight_pr_facts",
           "PR facts unavailable",
           "not started (PR unverifiable)",
-          `🚫 Could not fetch ${where} to run ship's entry checks (open? same-repo head?) — refusing fail-closed. Retry in a moment.`,
+          `🚫 I couldn't check ${where} on GitHub, so Ship did not start. A Switchboard operator can check the GitHub connection.`,
         );
       }
       if (facts.state === "open") {
@@ -372,7 +371,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
             "ship_preflight_fork_head",
             "fork-head PR",
             "not started (fork head)",
-            `🚫 ${where}'s head branch lives on a fork, not on \`${repo}\` — ship cannot drive it.`,
+            `🚫 ${where} uses a branch in a fork. Ship cannot update that branch, so no work started. Ship can update branches in \`${repo}\`.`,
           );
         }
         const branch = facts.headRef;
@@ -381,7 +380,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
             "ship_preflight_head_unknown",
             "head branch unknown",
             "not started (head branch unknown)",
-            `🚫 Could not determine ${where}'s head branch, so ship cannot bind the thread's worktree to it — refusing fail-closed.`,
+            `🚫 I couldn't verify the branch for ${where}, so Ship did not start. A Switchboard operator can check the pull request on GitHub.`,
           );
         }
         const headSha = facts.headSha;
@@ -390,7 +389,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
             "ship_preflight_head_unknown",
             "full head commit unknown",
             "not started (head commit unknown)",
-            `🚫 Could not determine ${where}'s full head commit, so ship cannot fence publication to it — refusing fail-closed.`,
+            `🚫 I couldn't verify the current commit for ${where}, so Ship did not start. A Switchboard operator can check the pull request on GitHub.`,
           );
         }
         if (facts.baseRef === undefined) {
@@ -398,7 +397,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
             "ship_preflight_head_unknown",
             "base branch unknown",
             "not started (base branch unknown)",
-            `🚫 Could not determine ${where}'s base branch, so ship cannot bind publication to it — refusing fail-closed.`,
+            `🚫 I couldn't verify which branch ${where} will merge into, so Ship did not start. A Switchboard operator can check the pull request on GitHub.`,
           );
         }
         // The PR's OWN base wins: a PR opened against a non-default base must
@@ -420,7 +419,7 @@ export async function shipPreflight(input: ShipPreflightInput): Promise<ShipPref
             "ship_preflight_head_unknown",
             "pull request base branch missing",
             "not started (base branch missing)",
-            `🚫 ${where}'s base branch \`${ownBase}\` is not present in \`${repo}\`, so ship cannot establish an exact publication binding — refusing fail-closed.`,
+            `🚫 ${where} targets \`${ownBase}\`, but that branch is missing from \`${repo}\`. Ship did not start. A repository maintainer can correct the pull request's target branch.`,
           );
         }
         const base = resolveBaseRef([ownBase], info?.defaultBranch);

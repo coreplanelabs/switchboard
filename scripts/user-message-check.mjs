@@ -55,6 +55,7 @@ export const PHRASES = {
 
 const TYPESCRIPT_SURFACE_FILES = new Set([
   "src/cli.ts",
+  "src/core/audienceDecision.ts",
   "src/core/boot.ts",
   "src/core/commandChat.ts",
   "src/core/commandRegistry.ts",
@@ -65,8 +66,12 @@ const TYPESCRIPT_SURFACE_FILES = new Set([
   "src/core/metricsService.ts",
   "src/core/pullSweep.ts",
   "src/core/reviewRound.ts",
+  "src/core/refusal.ts",
+  "src/core/reviewVerdict.ts",
   "src/core/runsService.ts",
   "src/core/threadAdmission.ts",
+  "src/core/statusCardFrame.ts",
+  "src/core/statusCardLabel.ts",
 ]);
 const TYPESCRIPT_SURFACE_PREFIXES = [
   "src/channels/",

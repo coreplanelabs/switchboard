@@ -371,7 +371,7 @@ describe("admit — the thread admission claim", () => {
     const [item] = claim.live.inbox.drain();
     expect(item).toMatchObject({ text: "and also the numbers" });
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toMatch(/^↪ Folded into the \*general\* run already in flight in this thread \(6s in\)/);
+    expect(replies[0]).toMatch(/^↪ Added your message to the \*general\* work in this thread \(6s elapsed\)/);
   });
 
   it("a live run with no row yet (still in setup) gets the follow-up in memory only: nothing is pushed to the ledger", async () => {
@@ -405,8 +405,8 @@ describe("admit — the thread admission claim", () => {
     expect(await admit(deps, ctx)).toEqual({ kind: "refused", reason: "follow_up_refused" });
     expect(refusals).toEqual(["follow_up_refused"]);
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toMatch(/^⏳ A \*general\* run is already in flight in this thread/);
-    expect(replies[0]).toContain("An `agent:review` request cannot start beside it");
+    expect(replies[0]).toMatch(/^⏳ \*general\* is already working in this thread/);
+    expect(replies[0]).toContain("No review work started");
   });
 
   // A plain-words steer whose sentence mentions an agent token is
@@ -434,7 +434,7 @@ describe("admit — the thread admission claim", () => {
     const { deps, ctx, replies, refusals } = setup("and also the numbers", { admission, ledger });
     expect(await admit(deps, ctx)).toEqual({ kind: "refused", reason: "live_agent_allowlist" });
     expect(refusals).toEqual(["live_agent_allowlist"]);
-    expect(replies[0]).toContain("not on the allowlist for the `coding` agent, whose run is in flight in this thread");
+    expect(replies[0]).toContain("don't have permission to direct the `coding` agent working in this thread");
     expect(ledger.pushes).toEqual([]);
     expect(claim.live.inbox.size).toBe(0);
   });
@@ -565,7 +565,9 @@ describe("admit — the thread admission claim", () => {
         kind: "refused",
         reason: "elsewhere_agent_allowlist",
       });
-      expect(excluded.replies[0]).toContain("not on the allowlist for the `coding` agent, whose run is in flight");
+      expect(excluded.replies[0]).toContain(
+        "don't have permission to direct the `coding` agent working in this thread",
+      );
       expect(excluded.admission.get(THREAD)).toBeUndefined();
       expect(excluded.ledger.pushes).toEqual([]);
 
@@ -574,7 +576,7 @@ describe("admit — the thread admission claim", () => {
         kind: "refused",
         reason: "elsewhere_follow_up_refused",
       });
-      expect(switched.replies[0]).toMatch(/^⏳ A \*general\* run is already in flight/);
+      expect(switched.replies[0]).toMatch(/^⏳ \*general\* is already working/);
       expect(switched.ledger.pushes).toEqual([]);
     });
 
@@ -1491,7 +1493,9 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
         },
         admission,
       });
-      expect(await sender.send("cross-channel", "preserve the original sender", caller)).toContain("Folded into");
+      expect(await sender.send("cross-channel", "preserve the original sender", caller)).toContain(
+        "Added your message to",
+      );
       const saved = (await ledger.readInbox("cross-channel", 0))[0];
       expect(saved).toMatchObject({
         seq: 1,
@@ -1577,7 +1581,7 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
     const u2 = admission.claim(U2_THREAD, { agent: "general" });
     u2.live.runId = "run-u2";
     const receipt = await sender.send("run-u2", "also cover the docs", requester);
-    expect(receipt).toContain("Folded into the *general* run run-u2");
+    expect(receipt).toContain("Added your message to the *general* work (run-u2)");
     expect(ledger.pushes).toHaveLength(1);
     expect(ledger.pushes[0]).toMatchObject({ runId: "run-u2" });
     const [item] = u2.live.inbox.drain();
@@ -1626,7 +1630,7 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
         asUser: { id: "slack:UREQ" },
       },
     });
-    expect(receipt).toContain("Folded into the *general* run run-u2");
+    expect(receipt).toContain("Added your message to the *general* work (run-u2)");
     expect(ledger.pushes[0].message).toMatchObject({ userId: "slack:UREQ", authenticatedAs: "mcp:alice" });
     expect(u2.live.inbox.drain()[0]).toMatchObject({ userId: "slack:UREQ", authenticatedAs: "mcp:alice" });
   });
@@ -1661,7 +1665,7 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
       id: CLI_ACTOR.id,
       actor: CLI_ACTOR,
     });
-    expect(receipt).toContain("live on another bot generation, through its durable inbox");
+    expect(receipt).toContain("Added your message to the *general* work (run-far). It will read it at its next step");
     expect(await ledger.readInbox("run-far", 0)).toMatchObject([
       { message: { userId: "cli:local", channelId: "slack:CX", text: "also cover the docs" } },
     ]);
@@ -1710,7 +1714,7 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
         grants: { actions: new Set(["runs:write"]), channels: new Set<string>(), repos: new Set<string>() },
       },
     };
-    await expect(granted && sender.send("run-u2", "narrow it", granted)).resolves.toContain("Folded into");
+    await expect(granted && sender.send("run-u2", "narrow it", granted)).resolves.toContain("Added your message to");
   });
 
   it("a steer whose named run ended fails once with the run and its end time — no inbox push and no fresh redispatch", async () => {

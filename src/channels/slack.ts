@@ -159,7 +159,7 @@ const SLACK_SECTION_LIMIT = 3000;
  *  named lines (dispatch/confirm.ts); this one is the adapter's. The offered
  *  line remains visible, but a failed click never delegates recovery. */
 export const CLICK_FAILED_LINE =
-  "this click could not be handled; nothing ran, and the command line remains visible in the offer";
+  "I couldn't confirm the result of your click. A Switchboard operator needs to check the saved approval before the action can continue.";
 
 // Rotating inline-status phrases (assistant.threads.setStatus loading_messages).
 // Switchboard-flavored; Slack cycles through them while a turn runs.
@@ -470,7 +470,7 @@ export function catchUpDelayNote(messageTs: string, nowMs: number): string {
   const lateMs = Math.max(0, nowMs - Number(messageTs) * 1000);
   const mins = Math.round(lateMs / 60_000);
   const late = mins < 1 ? "under a minute" : `${mins} min`;
-  return `⏱ Picked up ${late} after it was posted: the bot was restarting (a deploy or platform move) and Slack does not queue events while it is down. Handling it now — no need to re-send.`;
+  return `⏱ I picked up your message ${late} after it was posted because Switchboard was restarting. I'm handling it now.`;
 }
 
 /** What the catch-up's act did with one missed message (docs/reference/specs/slack-channel.md item 7). */

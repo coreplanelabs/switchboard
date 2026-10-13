@@ -9610,7 +9610,11 @@ export class ResidentDO extends Sandbox<Env> {
   /** Same-owner checkout movement has its own authority: a live owner may
    * advance a clean recorded head, but cannot grant terminal deletion. The
    * caller holds both locks and blocks file operations until attach settles. */
-  private async guardWorkspaceAdvance(binding: ThreadBinding, owner: WorkspaceOwner): Promise<ThreadErr | null> {
+  private async guardWorkspaceAdvance(
+    binding: ThreadBinding,
+    owner: WorkspaceOwner,
+    waitForProcessExit = true,
+  ): Promise<ThreadErr | null> {
     const refuse = (step: ResidentStepLabelKey): ThreadErr => {
       const trace = this.stepTrace.getStore();
       if (trace) {
@@ -9682,6 +9686,20 @@ export class ResidentDO extends Sandbox<Env> {
     )
       return refuse("advance-tree-check");
     const processes = await this.run(["pgrep", "-u", binding.user]);
+    // A completed producer can leave a process briefly exiting. Wait once
+    // only for a complete PID list, then recheck every ownership and tree
+    // condition. No process is signalled and no command is replayed.
+    if (
+      waitForProcessExit &&
+      processes.exitCode === 0 &&
+      /^[1-9]\d*(?:\n[1-9]\d*)*\n?$/.test(processes.stdout) &&
+      processes.stderr === "" &&
+      !processes.timedOut &&
+      !processes.truncated
+    ) {
+      await sleep(SECOND_MS);
+      return this.guardWorkspaceAdvance(binding, owner, false);
+    }
     if (
       processes.exitCode !== 1 ||
       processes.stdout.trim() !== "" ||

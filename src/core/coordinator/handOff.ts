@@ -16,6 +16,7 @@
 // its seams: the file read, the instance store, the create and the status read.
 
 import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
+import { redactSecrets } from "../redact.js";
 import { isUnitContext, type UnitContext } from "../dispatch/unitContext.js";
 import { DEFAULT_GRANT, IDLE_DAYS_DEFAULT, type Grant, type GrantSource } from "../budgets.js";
 import { DEFAULT_VERBOSITY, type Verbosity } from "../verbosity.js";
@@ -228,11 +229,14 @@ const refused = (code: RefusalCode, reply: string): HandOffOutcome => ({
   reply,
   refusal: refusalOf(code, reply),
 });
-const pending = (instanceId: string, reason: string): HandOffOutcome => ({
-  status: "pending",
-  instanceId,
-  reply: `⚠️ Work \`${instanceId}\` is saved, but its Workflow admission is not yet confirmed in the saved record (${reason}). Check this same work id before starting anything else.`,
-});
+const pending = (instanceId: string, reason: string): HandOffOutcome => {
+  console.warn(`[handoff] ${instanceId}: ${redactSecrets(reason)}`);
+  return {
+    status: "pending",
+    instanceId,
+    reply: `⚠️ I saved this task, but couldn't confirm whether it started. A Switchboard operator needs to check work \`${instanceId}\` before it can continue.`,
+  };
+};
 const describe = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 async function confirmCreated(deps: HandOffDeps, instance: CoordinatorInstance): Promise<boolean> {
@@ -263,7 +267,7 @@ async function observeCreateUncertainty(
       status: "completed",
       admission: "existing",
       instanceId: instance.id,
-      reply: `🧭 The saved Workflow \`${instance.id}\` exists (runner: ${status.status}); no second Workflow was created.`,
+      reply: `🧭 This task already exists (${status.status}). I did not start a second task. Work: \`${instance.id}\`.`,
     };
   const detail =
     status.kind === "unanswered"
@@ -417,13 +421,14 @@ async function plan(
       return {
         ok: false,
         code: "setup_failed",
-        reply: "🚫 The Ship request has no task to checkpoint; no worker started.",
+        reply: "🚫 What change should Ship make? No work started.",
       };
     if (text.length > 100_000)
       return {
         ok: false,
         code: "setup_failed",
-        reply: "🚫 The Ship request is too long to checkpoint; no worker started.",
+        reply:
+          "🚫 This request is too long to save as one task, so no work started. A shorter request can name the main change and link to its details.",
       };
     const planId =
       input.mainTask !== undefined

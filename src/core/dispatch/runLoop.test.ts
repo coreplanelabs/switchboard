@@ -115,6 +115,7 @@ import {
   ModelPolicyRefusedError,
   ModelStreamIncompleteError,
   ModelTransientFailureError,
+  ModelTurnBudgetExhaustedError,
   PiContainerReplacedError,
   UNKNOWN_MODEL_TERMINAL_MESSAGE,
   settlementResults,
@@ -3943,55 +3944,61 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     });
   });
 
-  it("a coding child whose transport retry budget is exhausted commits and pushes its interrupted workspace before teardown", async () => {
-    const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
-    const BRANCH = "unit-work";
-    const commands: string[] = [];
-    const s = setup("", {
-      agent: "coding",
-      coding: true,
-      repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
-      binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
-      coordinator: WIP_COORDINATOR,
-      harness: {
-        harnesses: roster({
-          ...watched(piHarness).harness,
-          open: async () => {
-            throw new ModelTransientFailureError(
-              "the model provider did not complete the call before the run's retry budget ended",
-            );
-          },
-        }),
-        registry: new HarnessRegistry(),
-        harnessUrl: "https://bot.example.com",
-        containerFor: () => new FakeHarnessContainer(),
-      },
-      bearer: "sbr_run-l.s3cret",
-      executor: {
-        exec: async (cmd: string) => {
-          commands.push(cmd);
-          if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
-          if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
-          if (/status --porcelain/.test(cmd)) return " M src/work.ts\n";
-          if (/rev-list --count/.test(cmd)) return "0\n";
-          if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
-          return "";
+  it.each(["transport retry budget", "model call limit"] as const)(
+    "a coding child whose %s is exhausted commits and pushes its interrupted workspace before teardown",
+    async (limit) => {
+      const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+      const BRANCH = "unit-work";
+      const commands: string[] = [];
+      const s = setup("", {
+        agent: "coding",
+        coding: true,
+        repoCtx: { repo: "o/r", ref: BRANCH } as RepoContext,
+        binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/u1" },
+        coordinator: WIP_COORDINATOR,
+        harness: {
+          harnesses: roster({
+            ...watched(piHarness).harness,
+            open: async () => {
+              if (limit === "model call limit") throw new ModelTurnBudgetExhaustedError(1, 1);
+              throw new ModelTransientFailureError(
+                "the model provider did not complete the call before the run's retry budget ended",
+              );
+            },
+          }),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          containerFor: () => new FakeHarnessContainer(),
         },
-      },
-    });
-    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow("retry budget ended");
-    expect(commands).toContain("git -C '/srv/wt/u1' add -A");
-    expect(commands).toContain(`git -C '/srv/wt/u1' push origin '${HEAD}:refs/heads/${BRANCH}'`);
-    expect(s.releases).toEqual([]);
-    s.ending.drain(undefined);
-    await s.writer.settled();
-    const rec = (await s.store.get("run-l"))!;
-    expect(rec.pushed).toEqual([{ ref: BRANCH, sha: HEAD, by: "salvage" }]);
-    expect(rec.events).toContainEqual(
-      expect.objectContaining({ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "salvage" }),
-    );
-    expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
-  });
+        bearer: "sbr_run-l.s3cret",
+        executor: {
+          exec: async (cmd: string) => {
+            commands.push(cmd);
+            if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+            if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+            if (/status --porcelain/.test(cmd)) return " M src/work.ts\n";
+            if (/rev-list --count/.test(cmd)) return "0\n";
+            if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+            return "";
+          },
+        },
+      });
+      await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(
+        limit === "model call limit" ? "model call limit" : "retry budget ended",
+      );
+      expect(commands).toContain("git -C '/srv/wt/u1' add -A");
+      expect(commands).toContain(`git -C '/srv/wt/u1' push origin '${HEAD}:refs/heads/${BRANCH}'`);
+      expect(s.releases).toEqual([]);
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      const rec = (await s.store.get("run-l"))!;
+      expect(rec.pushed).toEqual([{ ref: BRANCH, sha: HEAD, by: "salvage" }]);
+      expect(rec.events).toContainEqual(
+        expect.objectContaining({ type: "pushed_head", ref: BRANCH, sha: HEAD, by: "salvage" }),
+      );
+      expect(rec.events).not.toContainEqual(expect.objectContaining({ type: "run_note", kind: "work_left_behind" }));
+    },
+  );
 
   it.each([
     { target: "ordinary branch", adopted: false, latest: "push" },
@@ -10917,12 +10924,12 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
         .map((e) => (e.type === "span_end" ? e.attrs : undefined)),
     ).toEqual([{ outcome: "execution_receipt_missing" }]);
     expect(out.answer).toBe(
-      "I can't safely use earlier source data in this conversation. Please ask me to check the source again.",
+      "I couldn't verify that the earlier source details are still safe to share here, so I withheld them. A Switchboard operator can check the source and conversation access.",
     );
     expect(
       record.events.filter((e) => e.type === "answer").map((e) => (e.type === "answer" ? e.text : undefined)),
     ).toEqual([
-      "I can't safely use earlier source data in this conversation. Please ask me to check the source again.",
+      "I couldn't verify that the earlier source details are still safe to share here, so I withheld them. A Switchboard operator can check the source and conversation access.",
     ]);
   });
 

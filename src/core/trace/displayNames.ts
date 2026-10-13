@@ -69,7 +69,12 @@ export function displayNameOf(name: string): string {
     const leaf = name.slice(name.lastIndexOf(".") + 1);
     return leaf && leaf !== "mcp" ? leaf : GENERIC_STEP_NAME;
   }
-  for (const prefix of ["dispatch.workspace.attach.", "run.command."]) {
+  for (const prefix of [
+    "dispatch.workspace.attach.",
+    "dispatch.gate.attached_head.",
+    "run.command.",
+    "run.settle_reviewed_head.",
+  ]) {
     if (name.startsWith(prefix)) {
       const leaf = name.slice(prefix.length);
       if (leaf in ATTACH_WAIT_NAMES) return ATTACH_WAIT_NAMES[leaf as keyof typeof ATTACH_WAIT_NAMES];

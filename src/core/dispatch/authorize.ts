@@ -155,51 +155,38 @@ function refusalSummary(refusal: ProfileRefusal): string {
 function boundaryOf(scope: BoundaryScope): string {
   switch (scope) {
     case "channel":
-      return "this channel's boundary";
+      return "this channel's limits";
     case "user":
-      return "your own boundary";
+      return "your settings";
     case "defaults":
-      return "the installation's default boundary";
+      return "Switchboard's default limits";
     case "directive":
-      return "this message's own budget";
+      return "the time limits in this request";
     case "parent":
-      return "the parent run's remaining budget";
-  }
-}
-
-/** The unchanged state after a boundary refusal. The reply narrates what
- * Switchboard did instead of delegating the policy change to the person. */
-function boundaryOutcome(scope: BoundaryScope): string {
-  switch (scope) {
-    case "channel":
-      return "Switchboard left this channel's boundary unchanged";
-    case "user":
-      return "Switchboard left your boundary and overrides unchanged";
-    case "defaults":
-      return "Switchboard left the installation's default boundary unchanged";
-    case "directive":
-      return "Switchboard applied this message's budget directive";
-    case "parent":
-      return "Switchboard left the parent run's remaining budget unchanged";
+      return "the original task's time limits";
   }
 }
 
 /** The 🚫 reply of a bounded profile, in record 0026's wording: what the preset
  * needs, what the boundary allows and whose it is, then the resulting state. */
-export function profileRefusalReply(agentName: string, refusal: ProfileRefusal, _adminsHint: string): string {
+export function profileRefusalReply(agentName: string, refusal: ProfileRefusal, adminsHint: string): string {
   if (refusal.axis === "identity") {
-    const outcome = boundaryOutcome(refusal.scope);
-    return `🚫 \`${agentName}\` needs a \`${refusal.needs}\` credential; ${boundaryOf(refusal.scope)} caps runs at \`${refusal.cap}\`. ${outcome} and did not start the run.`;
+    const access = { none: "no account access", read: "read access", write: "write access" };
+    return `🚫 \`${agentName}\` needs ${access[refusal.needs]}, but ${boundaryOf(refusal.scope)} allow ${access[refusal.cap]}. No work started. For access, ${adminsHint} can check these limits.`;
   }
   if (refusal.axis === "minutes") {
-    const outcome = boundaryOutcome(refusal.scope);
-    return `🚫 \`${agentName}\` needs at least ${refusal.needs} minutes — a turn, then its write-up and post-step — and ${boundaryOf(refusal.scope)} gives it ${refusal.have}. ${outcome} and did not start the run.`;
+    return `🚫 \`${agentName}\` needs at least ${refusal.needs} minutes to work and report its result, but ${boundaryOf(refusal.scope)} allow ${refusal.have} minutes. No work started. An admin can check the time limit.`;
   }
   const scopes = refusal.scopes.map(boundaryOf);
-  const who = scopes.length > 1 ? `${scopes.join(" and ")} allow` : `${scopes[0] ?? "the boundary"} allows`;
-  const allowed = refusal.allowed.map((m) => `\`${m}\``).join(", ");
-  const outcomes = refusal.scopes.map(boundaryOutcome).join("; ");
-  return `🚫 \`${agentName}\` runs on a \`${refusal.needs}\` machine; ${who} only ${allowed}. ${outcomes}; it did not start the run.`;
+  const who = `${scopes.join(" and ") || "the configured limits"} allow`;
+  const workspaces = {
+    none: "work without a workspace",
+    blank: "a new workspace",
+    "repo-cold": "a separate repository workspace",
+    "repo-resident": "a prepared repository workspace",
+  };
+  const allowed = refusal.allowed.map((m) => workspaces[m]).join(", ");
+  return `🚫 \`${agentName}\` needs ${workspaces[refusal.needs]}, but ${who} only ${allowed || "work without a workspace"}. No work started. An admin can check which workspaces this request may use.`;
 }
 
 /** Escape a literal for a regular expression. */

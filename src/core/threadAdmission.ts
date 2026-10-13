@@ -281,14 +281,14 @@ const linkSuffix = (live: LiveThread) => (live.runLink ? ` · ${live.runLink}` :
 
 /** The one-line reply a steered follow-up gets: where it went. */
 export function steerAck(live: LiveThread, now: number): string {
-  return `↪ Folded into the *${live.agent}* run already in flight in this thread (${elapsed(live, now)} in) — it picks this up at its next step.${linkSuffix(live)}`;
+  return `↪ Added your message to the *${live.agent}* work in this thread (${elapsed(live, now)} elapsed). It will read it at its next step.${linkSuffix(live)}`;
 }
 
 /** The reply a refused follow-up gets: what is live, why it was not run, what to do. */
 export function refusalReply(live: LiveThread, decision: { requestedAgent: string }, now: number): string {
   return (
-    `⏳ A *${live.agent}* run is already in flight in this thread (${elapsed(live, now)} in).${linkSuffix(live)}\n` +
-    `An \`agent:${decision.requestedAgent}\` request cannot start beside it — one run per thread — so this request was not started.`
+    `⏳ *${live.agent}* is already working in this thread (${elapsed(live, now)} elapsed).${linkSuffix(live)}\n` +
+    `No ${decision.requestedAgent} work started. A separate thread can run a separate task.`
   );
 }
 

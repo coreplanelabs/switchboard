@@ -150,10 +150,12 @@ describe("private audience publication gate", () => {
   });
   it("fails closed on a recovered private run even when no indirect follow-up remains pending", () => {
     expect(recoveredPrivateAudienceLatch(msg, true).revoked).toBe(true);
-    expect(privateAudienceRefusal(recoveredPrivateAudienceLatch(msg, true))).toContain("run restarted");
+    expect(privateAudienceRefusal(recoveredPrivateAudienceLatch(msg, true))).toBe(
+      "This run restarted, so I can't safely reuse its private source details. A new message with the source in your direct Slack chat with Switchboard, outside this thread, starts a fresh check.",
+    );
     expect(recoveredPrivateAudienceLatch(msg, false).revoked).toBe(false);
     expect(recoveredPrivateAudienceLatch({ ...msg, directAudience: undefined }, true).revoked).toBe(false);
-    expect(privateAudienceRefusal({ revoked: true })).toContain("verify this private conversation");
+    expect(privateAudienceRefusal({ revoked: true })).toContain("verify who can read this private conversation");
   });
   it("denies saved Slack reads and unproven session cuts without blocking a fresh seed", () => {
     const clean = {

@@ -183,6 +183,11 @@ it("covers direct chat, card, ending and run-page sources but not tests or inter
   expect(surfaceFor("src/core/commandRegistry.ts")).toBe("typescript");
   expect(surfaceFor("src/core/commandSurface.ts")).toBe("typescript");
   expect(surfaceFor("src/core/dispatch/reply.ts")).toBe("typescript");
+  expect(surfaceFor("src/core/refusal.ts")).toBe("typescript");
+  expect(surfaceFor("src/core/audienceDecision.ts")).toBe("typescript");
+  expect(surfaceFor("src/core/reviewVerdict.ts")).toBe("typescript");
+  expect(surfaceFor("src/core/statusCardFrame.ts")).toBe("typescript");
+  expect(surfaceFor("src/core/statusCardLabel.ts")).toBe("typescript");
   expect(surfaceFor("src/core/ship/coordinator.ts")).toBe("typescript");
   expect(surfaceFor("src/core/commands/runs.ts")).toBe("typescript");
   expect(surfaceFor("src/core/coordinator/driver.ts")).toBe("typescript");

@@ -2,6 +2,7 @@ import { beginHarnessLaunch, sessionPolicyFor, confirmSessionFacts } from "../co
 import { harnessLaunchIntentOf } from "../sessionPolicy.js";
 import { RUN_DEADLINE_RESERVE_MS } from "../../../execution/bashTimeout.js";
 import { HarnessEndingUnconfirmedError } from "../container.js";
+import { RefusalError, refusalOf } from "../../refusal.js";
 // The pi harness (docs/reference/specs/harness-pi.md): what drives every run.
 // It writes pi's files into the run's container, starts pi detached with the
 // run bearer as its only key on a session holding the thread's earlier turns,
@@ -430,12 +431,17 @@ export class ModelStreamIncompleteError extends Error {
 }
 
 /** The original proxy cap refused another call; no provider was contacted. */
-export class ModelTurnBudgetExhaustedError extends Error {
+export class ModelTurnBudgetExhaustedError extends RefusalError {
   constructor(
     readonly turns: number,
     readonly maxTurns: number,
   ) {
-    super(`The run reached its model call limit (${turns} used; ${maxTurns} allowed).`);
+    super(
+      refusalOf(
+        "model_call_budget_exhausted",
+        `The run reached its model call limit (${turns} used; ${maxTurns} allowed).`,
+      ),
+    );
     this.name = "ModelTurnBudgetExhaustedError";
   }
 }

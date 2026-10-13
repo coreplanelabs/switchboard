@@ -64,7 +64,15 @@ import type { LiveThread } from "./threadAdmission.js";
 import type { RecordDeps } from "./dispatch/record.js";
 import { cardLines, errorReply, renderRefusal, replyAck, REFUSAL_SENTENCES } from "./dispatch/reply.js";
 import type { Verbosity } from "./verbosity.js";
-import { causeOf, refusalOf, RefusalError, type Refusal, type RefusalCause, type RefusalCode } from "./refusal.js";
+import {
+  causeOf,
+  refusalOf,
+  RefusalError,
+  userErrorMessage,
+  type Refusal,
+  type RefusalCause,
+  type RefusalCode,
+} from "./refusal.js";
 import {
   admit,
   adoptCarriedRun,
@@ -2579,7 +2587,7 @@ export async function dispatch(
     // crash. Refuse before a saved plan or session can reach the model.
     if (recovered && privateAudienceRequired(msg)) {
       noteAudienceRefusal(audienceTrace, "recovered-provenance-unproved", "recovery", "prompt");
-      await refuse(refusalOf("setup_failed", "This run restarted, so please ask again in a private DM."));
+      await refuse(refusalOf("setup_failed", audienceRefusalText("recovered-provenance-unproved")));
       return ended;
     }
     let originalSession = resume?.row.meta.session ?? restart?.row.meta.session ?? opts.restartCarried?.session;
@@ -4875,7 +4883,8 @@ export async function dispatch(
             agent: original.agent,
             startedAt: original.startedAt,
           });
-        text = "The original terminal outcome is unconfirmed; its saved work and owner remain held.";
+        text =
+          "I couldn't confirm how the original task ended. I kept its saved work and did not start a replacement. A Switchboard operator needs to check that task before it can continue.";
       } else {
         const heldStart =
           reserved?.allocationAck?.startedAt ??
@@ -4886,7 +4895,8 @@ export async function dispatch(
             agent: admitted?.agent,
             startedAt: heldStart,
           });
-        text = "The original claim outcome is unconfirmed; its saved workspace and owner remain held.";
+        text =
+          "I couldn't confirm whether the original task started. I kept its saved workspace and did not start a replacement. A Switchboard operator needs to check that task before it can continue.";
       }
       if (setupCard && setupShell)
         await setupCard
@@ -4905,7 +4915,7 @@ export async function dispatch(
     // `system`/`uncaught` refusal on the trace, counted like any other —
     // unless the throw carried its own `Refusal` (a `RefusalError` from the
     // directive or resolve parsers, a resident attach), whose code and cause
-    // stamp the trace instead. The sentence is the error's message either way.
+    // stamp the trace instead. The record keeps the diagnostic; chat explains it.
     const thrown = err instanceof RefusalError ? err.refusal : undefined;
     ended.refusal ??= thrown?.code ?? "uncaught";
     ended.cause ??= thrown?.cause ?? "system";
@@ -4952,7 +4962,7 @@ export async function dispatch(
         failedCard.done(
           failedShell.close({
             kind: "setup_failed",
-            reason: oneLine(redactAndCap(errMsg, 120)),
+            reason: oneLine(redactAndCap(userErrorMessage(err), 120)),
             ...closeLines(clock(), false),
           }),
         ),

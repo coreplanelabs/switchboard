@@ -2,6 +2,7 @@ import type { AudienceTrace } from "../audienceDecision.js";
 import { createSpanLog } from "../trace/spanLog.js";
 import { booleanAudienceVerifier } from "../testing/audienceVerifier.js";
 import { describe, expect, it, vi } from "vitest";
+import { withResidentTrace } from "../../execution/residentTrace.js";
 import type { ParsedChatCommand } from "../commandChat.js";
 import {
   afterReply,
@@ -10,6 +11,7 @@ import {
   cardActivity,
   composeRunLabel,
   deliverAnswer,
+  errorReply,
   LONG_COMMAND_REPLY_CHARS,
   REFUSAL_SENTENCES,
   renderConfirmationOffer,
@@ -19,6 +21,45 @@ import {
   threadPageLink,
   type ReplyDeps,
 } from "./reply.js";
+
+describe("thread failure messages", () => {
+  it("explains a preserved workspace and the operator action without exposing the internal refusal", async () => {
+    const text = "resident attach failed for repo:acme/widgets: workspace-preserved: live owner advance unverified";
+    const replies: string[] = [];
+    const channel = {
+      ...nullChannelIO("slack:CX:1.0", () => {}),
+      reply: async (line: string) => void replies.push(line),
+    };
+    await renderRefusal(refusalOf("resident_attach_failed", text), channel);
+    expect(replies).toEqual([
+      "I couldn't verify that updating this workspace was safe, so I stopped and kept it unchanged. A Switchboard operator needs to check the workspace before work can continue.",
+    ]);
+    expect(errorReply(new Error(text))).toBe(
+      "⚠️ I couldn't verify that updating this workspace was safe, so I stopped and kept it unchanged. A Switchboard operator needs to check the workspace before work can continue.",
+    );
+  });
+
+  it("keeps unexpected service output out of the thread and names the investigation owner", () => {
+    expect(
+      errorReply(new Error("HTTP 500: upstream stack trace with private request data and workspace-preserved: text")),
+    ).toBe(
+      "⚠️ This is a bug: I couldn't finish this request. A Switchboard operator can investigate the error in the run details.",
+    );
+    expect(
+      errorReply(new RefusalError(refusalOf("command_invalid_input", "Which pull request should I review?"))),
+    ).toBe("⚠️ Which pull request should I review?");
+  });
+
+  it("names the process check when the workspace failure carries its recorded step", () => {
+    const error = withResidentTrace(
+      new Error("resident attach failed for repo:acme/widgets: workspace-preserved: live owner advance unverified"),
+      { steps: [{ name: "advance-process-check", startMs: 0, durationMs: 1, status: "error" }] },
+    );
+    expect(errorReply(error)).toBe(
+      "⚠️ I couldn't confirm that earlier workspace commands had stopped, so I stopped and kept the workspace unchanged. A Switchboard operator can check the remaining activity in the run details.",
+    );
+  });
+});
 
 describe("threadPageLink — tokenless request provenance", () => {
   it("links full Slack and web thread keys without a capability token or viewer-relative lane", () => {
@@ -35,7 +76,43 @@ describe("threadPageLink — tokenless request provenance", () => {
       expect(threadPageLink("slack:C1:1.0", base)).toBeUndefined();
   });
 });
-import { refusalOf, REFUSAL_CODES, type RefusalCode } from "../refusal.js";
+
+describe("unit thread destinations in refusal replies", () => {
+  it("links the actual unit thread when the public base is configured", () => {
+    vi.stubEnv("PUBLIC_BASE_URL", "https://bot.example/");
+    try {
+      expect(
+        REFUSAL_SENTENCES.pipeline_thread_owned({
+          agent: "ship",
+          units: [{ unit: "U12", threadKey: "slack:CX:99.0" }],
+        }),
+      ).toBe(
+        "🚦 *ship* is coordinating work in this thread, so no separate task started here. Each task accepts updates in its own thread: [U12](https://bot.example/threads/slack%3ACX%3A99.0).",
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+  it.each(["", "not a URL", "https://user:secret@bot.example"])(
+    "keeps the known destination when a link is unavailable: %s",
+    (base) => {
+      vi.stubEnv("PUBLIC_BASE_URL", base);
+      try {
+        expect(
+          REFUSAL_SENTENCES.pipeline_thread_owned({
+            agent: "ship",
+            units: [{ unit: "U12", threadKey: "slack:CX:99.0" }],
+          }),
+        ).toBe(
+          "🚦 *ship* is coordinating work in this thread, so no separate task started here. Each task accepts updates in its own thread: U12 (thread `slack:CX:99.0`; link unavailable).",
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+});
+import { refusalOf, RefusalError, REFUSAL_CODES, type RefusalCode } from "../refusal.js";
 import { profileRefusalReply } from "./authorize.js";
 import { refusalReply } from "../threadAdmission.js";
 import { renderOffer } from "../confirmations.js";
@@ -82,11 +159,11 @@ describe("replyAck — acknowledgements speak at verbose and above", () => {
 
   it("quiet: nothing is sent; verbose and debug: the ack goes out as given", async () => {
     const quiet = capture();
-    await replyAck(quiet.io, "quiet", "↪ Folded into the run");
+    await replyAck(quiet.io, "quiet", "↪ Added your message to the run");
     expect(quiet.replies).toEqual([]);
     const verbose = capture();
-    await replyAck(verbose.io, "verbose", "↪ Folded into the run");
-    expect(verbose.replies).toEqual(["↪ Folded into the run"]);
+    await replyAck(verbose.io, "verbose", "↪ Added your message to the run");
+    expect(verbose.replies).toEqual(["↪ Added your message to the run"]);
     const debug = capture();
     await replyAck(debug.io, "debug", "🧭 Handed to the plan runner.");
     expect(debug.replies).toEqual(["🧭 Handed to the plan runner."]);
@@ -199,12 +276,12 @@ describe("replyCommandOutput", () => {
       input: { args: ["run-1", "continue"], options: {} },
     };
     const quiet = io(false);
-    await replyCommandOutput(quiet.io, steer, "↪ Folded into the run", { verbosity: "quiet", ok: true });
+    await replyCommandOutput(quiet.io, steer, "↪ Added your message to the run", { verbosity: "quiet", ok: true });
     expect(quiet.reply).not.toHaveBeenCalled();
     for (const verbosity of ["verbose", "debug"] as const) {
       const visible = io(false);
-      await replyCommandOutput(visible.io, steer, "↪ Folded into the run", { verbosity, ok: true });
-      expect(visible.reply).toHaveBeenCalledWith("↪ Folded into the run");
+      await replyCommandOutput(visible.io, steer, "↪ Added your message to the run", { verbosity, ok: true });
+      expect(visible.reply).toHaveBeenCalledWith("↪ Added your message to the run");
     }
     const failed = io(false);
     await replyCommandOutput(failed.io, steer, "the run ended; nothing to steer", { verbosity: "quiet", ok: false });
@@ -324,19 +401,20 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       {
         code: "agent_allowlist",
         built: REFUSAL_SENTENCES.agent_allowlist({ agent: "coding", adminsHint }),
-        quoted: "🚫 You're not on the allowlist for the `coding` agent. Ask an admin for access.",
+        quoted:
+          "🚫 You don't have permission to use the `coding` agent. For access, an admin can approve your request.",
       },
       {
         code: "live_agent_allowlist",
         built: REFUSAL_SENTENCES.live_agent_allowlist({ agent: "coding", adminsHint }),
         quoted:
-          "🚫 You're not on the allowlist for the `coding` agent, whose run is in flight in this thread. Ask an admin for access.",
+          "🚫 You don't have permission to direct the `coding` agent working in this thread. For access, an admin can approve your request.",
       },
       {
         code: "elsewhere_agent_allowlist",
         built: REFUSAL_SENTENCES.elsewhere_agent_allowlist({ agent: "coding", adminsHint }),
         quoted:
-          "🚫 You're not on the allowlist for the `coding` agent, whose run is in flight in this thread. Ask an admin for access.",
+          "🚫 You don't have permission to direct the `coding` agent working in this thread. For access, an admin can approve your request.",
       },
       {
         code: "profile_bounded",
@@ -346,26 +424,26 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
           adminsHint,
         ),
         quoted:
-          "🚫 `coding` needs a `write` credential; this channel's boundary caps runs at `read`. Switchboard left this channel's boundary unchanged and did not start the run.",
+          "🚫 `coding` needs write access, but this channel's limits allow read access. No work started. For access, an admin can check these limits.",
       },
       {
         code: "repo_not_visible",
         built: REFUSAL_SENTENCES.repo_not_visible({ slug: "o/r", agent: "coding" }),
         quoted:
-          "📦 `o/r` is not a repository this installation can see — GitHub answered 404 — so I did not start a *coding* run for it. " +
-          "The repository is outside the Switchboard GitHub App installation (`github_repos` lists the reachable ones), or the name is wrong.",
+          "📦 I couldn't access `o/r`, so I did not start a *coding* run. " +
+          "The repository name may be wrong, or the Switchboard GitHub App may need access. A repository admin can check the app's access.",
       },
       {
         code: "repo_unverified",
         built: REFUSAL_SENTENCES.repo_unverified({ slug: "o/r", agent: "coding", via: "github" }),
         quoted:
-          "⚠️ This is a bug: I couldn't verify `o/r` against GitHub because it did not answer, so I did not start a *coding* run and no automatic retry was scheduled.",
+          "⚠️ I couldn't check `o/r` because GitHub did not respond. No coding work started. A Switchboard operator can check the GitHub connection.",
       },
       {
         code: "repo_unverified",
         built: REFUSAL_SENTENCES.repo_unverified({ slug: "o/r", agent: "coding", via: "registry" }),
         quoted:
-          "⚠️ This is a bug: I couldn't verify that `o/r` is an onboarded repo because the resident registry did not answer, so I did not start a *coding* run and no automatic fallback was started.",
+          "⚠️ I couldn't check whether `o/r` has a prepared workspace because the workspace service did not respond. No coding work started. A Switchboard operator can check the service.",
       },
       {
         code: "repo_not_onboarded",
@@ -375,40 +453,40 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
           onboardHint: "Onboard it (`repo onboard o/r`)",
         }),
         quoted:
-          "📦 `o/r` is not onboarded as a resident, so I did not start a *coding* run for it. " +
-          "Onboard it (`repo onboard o/r`) for a warm, deps-ready environment, or name the repository by URL " +
-          "(https://github.com/o/r) to run in a cold per-thread sandbox.",
+          "📦 `o/r` has no prepared workspace, so I did not start coding work. " +
+          "An admin can register it with `repo onboard o/r`. Naming " +
+          "https://github.com/o/r in a request uses a separate workspace.",
       },
       {
         code: "repo_access",
         built: REFUSAL_SENTENCES.repo_access({ repo: "o/r", adminsHint }),
-        quoted: "🚫 You're not on the allowlist for the `o/r` repo environment. Ask an admin for access.",
+        quoted:
+          "🚫 You don't have permission to use the `o/r` workspace. For access, an admin can approve your request.",
       },
       {
         code: "pr_target_conflict",
         built: REFUSAL_SENTENCES.pr_target_conflict({ target: "o/r#8", cited: "o/r#7" }),
-        quoted:
-          "⚠️ This request starts with `o/r#8` but also cites `o/r#7`. No run started because the pull request target is ambiguous.",
+        quoted: "⚠️ You named both `o/r#8` and `o/r#7`. Which pull request should I work on? No work started.",
       },
       {
         code: "follow_up_refused",
         built: refusalReply(liveThread, { requestedAgent: "review" }, 120_000),
         quoted:
-          "⏳ A *coding* run is already in flight in this thread (120s in).\n" +
-          "An `agent:review` request cannot start beside it — one run per thread — so this request was not started.",
+          "⏳ *coding* is already working in this thread (120s elapsed).\n" +
+          "No review work started. A separate thread can run a separate task.",
       },
       {
         code: "elsewhere_follow_up_refused",
         built: refusalReply(liveThread, { requestedAgent: "review" }, 120_000),
         quoted:
-          "⏳ A *coding* run is already in flight in this thread (120s in).\n" +
-          "An `agent:review` request cannot start beside it — one run per thread — so this request was not started.",
+          "⏳ *coding* is already working in this thread (120s elapsed).\n" +
+          "No review work started. A separate thread can run a separate task.",
       },
       {
         code: "ship_thread_live",
         built: REFUSAL_SENTENCES.ship_thread_live(),
         quoted:
-          "🚫 A pipeline is already running in this thread — one pipeline per thread. Follow the one in flight here, or start this one in a thread of its own.",
+          "🚫 Ship is already working in this thread, so no second task started. A separate thread can run a separate task.",
       },
       {
         code: "pipeline_thread_owned",
@@ -417,34 +495,41 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
           units: [{ unit: "U12", threadKey: "slack:CX:99.0" }],
         }),
         quoted:
-          "🚦 This thread belongs to the live *ship* pipeline runner — nothing runs beside it here. Reply in the unit's own thread instead: U12 (`slack:CX:99.0`).",
+          "🚦 *ship* is coordinating work in this thread, so no separate task started here. Each task accepts updates in its own thread: U12 (thread `slack:CX:99.0`; link unavailable).",
       },
       {
         code: "which_branch",
         built: REFUSAL_SENTENCES.which_branch({ repo: "o/r" }),
         quoted:
-          "🌿 Which branch of `o/r` should this thread work on? No branch is bound yet; a branch token such as `branch:main` will bind it.",
+          "🌿 Which branch of `o/r` should this thread work on? No work started. You can name a branch, for example `branch:main`.",
       },
       {
         code: "ship_budget",
         built: REFUSAL_SENTENCES.ship_budget({ maxMinutes: 10, maxRounds: 1, need: 25, provision: 5, coding: 15 }),
         quoted:
-          "🚫 Ship cannot start under a 10-minute budget: the loop it allows (1 review round) needs 25 minutes — " +
-          "5 to provision, the coding child's 15, and the reserve for the rounds after it at their floors. " +
-          "Switchboard left the budget and boundary unchanged and did not start either the review loop or a single coding pass.",
+          "🚫 Ship needs at least 25 minutes to set up, code and review this task; this request allows 10 minutes. No work started. An admin can check the time limit for this request.",
       },
       {
         code: "confirmation_expired",
         built: OFFER_EXPIRED_LINE,
         quoted:
-          "this offer expired after ten minutes; nothing ran, and a later request may receive a fresh confirmation",
+          "This approval expired after ten minutes. Nothing ran. A new request can receive a new approval button.",
       },
-      { code: "confirmation_foreign", built: OFFER_FOREIGN_LINE, quoted: "only the requester can confirm this" },
-      { code: "confirmation_used", built: OFFER_USED_LINE, quoted: "this offer was already used" },
+      {
+        code: "confirmation_foreign",
+        built: OFFER_FOREIGN_LINE,
+        quoted: "Only the person who requested this action can approve it. Nothing ran from your click.",
+      },
+      {
+        code: "confirmation_used",
+        built: OFFER_USED_LINE,
+        quoted: "This approval was already used. This click did not run the action again.",
+      },
       {
         code: "confirmation_unreadable",
         built: OFFER_UNREADABLE_LINE,
-        quoted: "this is a bug: the confirmation could not be read, so nothing ran and no replacement offer was minted",
+        quoted:
+          "I couldn't read the saved approval, so nothing ran. A Switchboard operator can check the approval service.",
       },
       // Record 0037: ONE sentence for all eight reference codes.
       ...(
@@ -462,8 +547,7 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       {
         code: "follow_up_dropped",
         built: FOLLOW_UP_DROPPED_BY_STOP,
-        quoted:
-          "⛔ This is a bug: the run was stopped before it read this folded follow-up, and the follow-up was not replayed as a fresh request.",
+        quoted: "⛔ The run was stopped before it read your follow-up. I did not start another task from that message.",
       },
     ];
     // Every code in the closed table is accounted for: rendered here, built by
@@ -527,6 +611,8 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       // dispatcher.test.ts quotes the typed budget outcome and its reply at
       // every expired setup boundary; this refusal is not silent.
       "run_budget_exhausted",
+      // Model-call exhaustion keeps its limit text and checkpoints WIP.
+      "model_call_budget_exhausted",
       // dispatcher.test.ts proves this DM refusal runs before history and
       // session reads and names the verification remedy.
       "slack_direct_audience_unverified",
@@ -563,20 +649,22 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
   it("a `system` refusal renders the text as the error it is and never an offer (no Yes)", async () => {
     const { io, replies, offer } = capture();
     await renderRefusal(refusalOf("uncaught", "⚠️ boom"), io);
-    expect(replies).toEqual(["⚠️ boom"]);
+    expect(replies).toEqual([
+      "This is a bug: I couldn't finish this request. A Switchboard operator can investigate the error in the run details.",
+    ]);
     expect(offer).not.toHaveBeenCalled();
   });
 
   it("a `policy` refusal renders the way forward the producer set, after its text", async () => {
     const { io, replies } = capture();
     await renderRefusal(
-      refusalOf("repo_access", "🚫 You're not on the allowlist for the `o/r` repo environment.", {
+      refusalOf("repo_access", "🚫 You don't have permission to use the `o/r` repo environment.", {
         wayForward: "Ask an admin for access.",
       }),
       io,
     );
     expect(replies).toEqual([
-      "🚫 You're not on the allowlist for the `o/r` repo environment. Ask an admin for access.",
+      "🚫 You don't have permission to use the `o/r` repo environment. Ask an admin for access.",
     ]);
   });
 
@@ -845,7 +933,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
           : ["allowed", "execution_github_access_unproved"],
       );
       expect(s.replies).toEqual([
-        "I can't safely use earlier source data in this conversation. Please ask me to check the source again.",
+        "I couldn't verify that the earlier source details are still safe to share here, so I withheld them. A Switchboard operator can check the source and conversation access.",
       ]);
     },
   );
@@ -1076,7 +1164,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
         prNote: "private PR details",
       });
       expect(s.replies).toHaveLength(1);
-      expect(s.replies[0]).toContain("can't share that answer");
+      expect(s.replies[0]).toContain("withheld the answer");
       expect(s.replies.join("\n")).not.toContain("private source fact");
       expect(s.replies.join("\n")).not.toContain("private PR details");
       expect(audience.refusal).toEqual(receipt);
@@ -1115,7 +1203,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
       } else {
         expect(delivery).toEqual({ kind: "delivered" });
         expect(s.closes).toHaveLength(1);
-        expect(s.replies[0]).toContain("can't share that answer");
+        expect(s.replies[0]).toContain("withheld the answer");
         expect(s.sealed).toEqual(["replyOk=true"]);
       }
       expect(audience.refusal?.code).toBe("direct-audience-denied");
@@ -1207,7 +1295,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
         expect(s.sealed).toEqual([]);
       } else {
         expect(delivery).toEqual({ kind: "delivered" });
-        expect(s.replies[0]).toContain("check the source again");
+        expect(s.replies[0]).toContain("check the source and conversation access");
         expect(s.sealed).toEqual(["replyOk=true"]);
       }
     },
@@ -1314,7 +1402,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
           expect(s.sealed).toEqual(["replyOk=undefined"]);
         } else {
           expect(result.value).toEqual({ kind: "delivered" });
-          expect(s.replies[0]).toContain("can't share that answer");
+          expect(s.replies[0]).toContain("withheld the answer");
           expect(s.sealed).toEqual(["replyOk=true"]);
         }
       }
@@ -1339,7 +1427,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
       prNote: "private PR details",
       publicationCheck: async () => ({ ok: true }),
     });
-    expect(s.replies[0]).toContain("can't share that answer");
+    expect(s.replies[0]).toContain("withheld the answer");
     expect(s.replies.join("\n")).not.toContain("private fact");
     expect(s.replies.join("\n")).not.toContain("private PR details");
     expect(audience.refusal.withheldAt).toBe("answer-event");
@@ -1389,7 +1477,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
       },
     });
     expect(checks).toBe(1);
-    expect(s.replies[0]).toContain("Please ask me to check the source again.");
+    expect(s.replies[0]).toContain("A Switchboard operator can check the source and conversation access.");
     expect(JSON.stringify(s.closes)).not.toContain("private source fact");
   });
 

@@ -30,7 +30,7 @@ import {
   type WakeDecision,
 } from "./residentWake.js";
 import type { ResidentStep } from "./residentStepTrace.js";
-import { sanitizeGraftedSteps, withResidentTrace } from "./residentTrace.js";
+import { graftResidentSteps, residentTraceOf, sanitizeGraftedSteps, withResidentTrace } from "./residentTrace.js";
 import { repoResourceId } from "../core/residentAdmin.js";
 import { EXEC_CALL_MARGIN_MS, attachBoundWithinRun, clampBashTimeout } from "./bashTimeout.js";
 import type { ResidentLiveStateObserver } from "../core/runLiveState.js";
@@ -1571,8 +1571,27 @@ export class ResidentExecutor implements Executor {
    *  rides into the attach and the wake wait a transient refusal begins, so a
    *  stopped round never sits out the wake ceiling. */
   async moveTo(sha: string, opts?: MoveOptions): Promise<{ sha: string }> {
-    const binding = await this.attach(opts?.span, { signal: opts?.signal, targetSha: sha });
-    return { sha: binding.sha };
+    const baseAt = systemClock();
+    const phase = opts?.span?.record().name;
+    const graft = (steps: readonly ResidentStep[], residentTotalMs?: number) => {
+      if (opts?.span && (phase === "dispatch.gate.attached_head" || phase === "run.settle_reviewed_head"))
+        graftResidentSteps(steps, {
+          parent: opts.span,
+          prefix: phase,
+          baseAt,
+          clipAt: systemClock(),
+          ...(residentTotalMs !== undefined ? { residentTotalMs } : {}),
+        });
+    };
+    try {
+      const binding = await this.attach(opts?.span, { signal: opts?.signal, targetSha: sha });
+      graft(binding.trace ?? [], binding.attachMs);
+      return { sha: binding.sha };
+    } catch (err) {
+      const trace = residentTraceOf(err);
+      if (trace) graft(trace.steps, trace.residentMs);
+      throw err;
+    }
   }
 
   /** POST /detach: return this thread's pool user (and remove its worktree)

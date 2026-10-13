@@ -66,7 +66,9 @@ export const STREAMED_PREFIXES = {
   "tool.": "tools",
   "mcp.": "tools",
   "dispatch.workspace.attach.": "getting_ready",
+  "dispatch.gate.attached_head.": "getting_ready",
   "run.command.": "owner",
+  "run.settle_reviewed_head.": "finishing_up",
 } as const satisfies Record<string, Bucket | "owner">;
 
 const STREAMED_SET: ReadonlySet<string> = new Set(STREAMED_SPANS);
@@ -125,9 +127,14 @@ export function classOf(name: string, owner: RunOwner): SpanClass | undefined {
   if (name === "run.command" || name.startsWith("run.command.")) {
     return { kind: "counted", bucket: owner === "command" ? "tools" : "getting_ready" };
   }
-  if (GETTING_READY.has(name) || name.startsWith("dispatch.workspace.attach."))
+  if (
+    GETTING_READY.has(name) ||
+    name.startsWith("dispatch.workspace.attach.") ||
+    name.startsWith("dispatch.gate.attached_head.")
+  )
     return { kind: "counted", bucket: "getting_ready" };
-  if (FINISHING_UP.has(name)) return { kind: "counted", bucket: "finishing_up" };
+  if (FINISHING_UP.has(name) || name.startsWith("run.settle_reviewed_head."))
+    return { kind: "counted", bucket: "finishing_up" };
   if (name.startsWith("tool.") || name.startsWith("mcp.")) return { kind: "counted", bucket: "tools" };
   return undefined;
 }
@@ -174,5 +181,7 @@ export const PARENTS: Readonly<Record<string, readonly string[]>> = {
   "tool.": ["run.agent"],
   "mcp.": ["tool."],
   "dispatch.workspace.attach.": ["dispatch.workspace.attach"],
+  "dispatch.gate.attached_head.": ["dispatch.gate.attached_head"],
   "run.command.": ["run.command"],
+  "run.settle_reviewed_head.": ["run.settle_reviewed_head"],
 };

@@ -590,11 +590,11 @@ describe("reclaimRuns", () => {
     });
     expect(byId["ship-pr"].note).toContain("https://github.com/acme/api/pull/12");
     expect(byId["ship-pr"].note).toContain("did not verify the stopped run's latest commit there");
-    expect(byId["ship-pr"].note).toContain("Next action: start ship again");
+    expect(byId["ship-pr"].note).toContain("A Switchboard operator needs to check the saved branch and pull request");
     expect(byId["ship-pr"].note).not.toMatch(/next reply|continues the review loop/i);
     expect(byId["ship-bare"].prUrl).toBeUndefined();
     expect(byId["ship-bare"].note).toContain("No open pull request was verified");
-    expect(byId["ship-bare"].note).toContain("Next action: start ship again");
+    expect(byId["ship-bare"].note).toContain("A Switchboard operator needs to check the saved branch and pull request");
     expect(byId["ship-bare"].note).not.toMatch(/next reply|starts round 0/i);
     expect(byId.plain.note).toContain("This is a bug");
     expect(byId.replied.note).toBeUndefined();
@@ -1058,7 +1058,7 @@ describe("reclaimRuns — the hosted parent's classification (record 0060)", () 
       status: "interrupted",
       agent: "ship",
       why: expect.stringMatching(/hosted past its deadline/),
-      note: expect.stringContaining("Next action: start ship again"),
+      note: expect.stringContaining("A Switchboard operator needs to check the saved branch and pull request"),
     });
     expect(ledger.finished.get("r-ship")).toMatchObject({ id: "r-ship", threadKey: "web:s:c9", status: "interrupted" });
     expect(ledger.live.has("r-ship")).toBe(false);

@@ -225,9 +225,9 @@ describe("checkPrHeadPreflight (explicit AgentDef, before any model call)", () =
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.where).toBe("acme/api#42");
-      expect(r.reply).toContain("not started");
+      expect(r.reply).toContain("review did not start");
       expect(r.reply).toContain("acme/api#42");
-      expect(r.reply).toContain("This is a bug: no automatic head lookup retry was scheduled");
+      expect(r.reply).toContain("A Switchboard operator can check the GitHub lookup");
     }
   });
 
@@ -311,10 +311,10 @@ describe("guardAttachedHead (before any model call)", () => {
     expect(r.outcome).toBe("refused");
     if (r.outcome === "refused") {
       expect(r.reply).toContain("acme/api#42");
-      expect(r.reply).toContain(`workspace-observed HEAD for patch-1 is at ${OTHER}`);
-      expect(r.reply).toContain(`expected reviewed head is ${HEAD}`);
+      expect(r.reply).toContain(`The workspace is at \`${OTHER.slice(0, 7)}\``);
+      expect(r.reply).toContain(`needs \`${HEAD.slice(0, 7)}\``);
       expect(r.reply).not.toMatch(/branch moved|push|force-push|bug/i);
-      expect(r.reply).toContain("It is not a finding, and nothing was posted to GitHub");
+      expect(r.reply).toContain("No review started or was posted to GitHub");
     }
   });
 
@@ -331,7 +331,7 @@ describe("guardAttachedHead (before any model call)", () => {
       logKey: "t",
     });
     expect(r.outcome).toBe("refused");
-    if (r.outcome === "refused") expect(r.reply).toContain("workspace-observed HEAD for patch-1");
+    if (r.outcome === "refused") expect(r.reply).toContain("Preparing it again did not fix the mismatch");
   });
 
   it("a failed reprovision keeps the initial observation separate from the retry failure", async () => {
@@ -348,8 +348,8 @@ describe("guardAttachedHead (before any model call)", () => {
     });
     expect(r.outcome).toBe("refused");
     if (r.outcome === "refused") {
-      expect(r.reply).toContain(`initial resident binding for patch-1 was at ${OTHER}`);
-      expect(r.reply).toContain("automatic reprovision failed before a retry HEAD could be observed");
+      expect(r.reply).toContain("acme/api#42");
+      expect(r.reply).toContain("setup failed");
       expect(r.reply).not.toContain(`after one automatic reprovision, the resident binding for patch-1 is at ${OTHER}`);
     }
   });
@@ -366,8 +366,8 @@ describe("guardAttachedHead (before any model call)", () => {
     });
     expect(r.outcome).toBe("refused");
     if (r.outcome === "refused") {
-      expect(r.reply).toContain(`initial resident binding for patch-1 was at ${OTHER}`);
-      expect(r.reply).toContain("resident binding for patch-1 could not be read after one automatic reprovision");
+      expect(r.reply).toContain("acme/api#42");
+      expect(r.reply).toContain("verify the workspace version");
       expect(r.reply).not.toContain(`after one automatic reprovision, the resident binding for patch-1 is at ${OTHER}`);
     }
   });
@@ -392,11 +392,9 @@ describe("guardAttachedHead (before any model call)", () => {
     });
     expect(unreadable.outcome).toBe("refused");
     if (unreadable.outcome === "refused") {
-      expect(unreadable.reply).toContain(
-        "workspace-observed HEAD for b could not be read after one automatic reprovision",
-      );
+      expect(unreadable.reply).toContain("verify the workspace version for acme/api#42");
       expect(unreadable.reply).not.toContain("This is a bug");
-      expect(unreadable.reply).toContain("not a finding, and nothing was posted to GitHub");
+      expect(unreadable.reply).toContain("No review started or was posted to GitHub");
     }
     expect(fetchPrHead).not.toHaveBeenCalled();
   });

@@ -152,7 +152,7 @@ export function shipInterruptedNote(prUrl?: string, cause?: InterruptionCause, i
     : "No open pull request was verified for the stopped run's latest commit.";
   const next = idle
     ? "The unit remains live; a reply in this thread is recorded as its continuation action."
-    : "No review was started. Next action: start ship again after the remote branch and pull request state can be verified.";
+    : "No review started. A Switchboard operator needs to check the saved branch and pull request before work can continue.";
   return `${opening} ${saved} ${next}`;
 }
 
@@ -4517,7 +4517,8 @@ function renderUnitReportWithWake(
       // the cause and the person's exact next step.
       if (e.cause === "draft") {
         const link = e.pr !== undefined ? ` — ${e.pr.url}` : "";
-        if (!shows(verbosity, "verbose")) return `⏸️ Held: draft — GitHub still marks the pull request as draft${link}`;
+        if (!shows(verbosity, "verbose"))
+          return `⏸️ Waiting for you: the pull request is a draft. You can mark it ready for review on GitHub${link}`;
         const draftContinuation = `Next action: mark the pull request ready in GitHub, then ${nextAction()
           .replace(/^The unit's dependents in this plan stay blocked\. Next action: /, "")
           .replace(/^Next action: /, "")}`;
@@ -4551,7 +4552,7 @@ function renderUnitReportWithWake(
           shows(verbosity, "verbose") ? levelLine : undefined,
         ]);
       if (!shows(verbosity, "verbose"))
-        return `⏸️ Waiting for you: ${rows}${e.pr !== undefined ? ` — ${e.pr.url}` : ""}`;
+        return `⏸️ Waiting for you: ${rows}. Your reply in this task's thread supplies the answer${e.pr !== undefined ? ` — ${e.pr.url}` : ""}`;
       return join([
         `⏸️ Waiting for a person after ${rounds}${e.pr !== undefined ? `: ${e.pr.url}` : ""} — every finding of review round ${e.round.index} is human-gated, a receipt only a person can produce: ${rows}. The unit stays live; no unanswered fix round was opened.`,
         levelLine,
@@ -4579,7 +4580,7 @@ function renderUnitReportWithWake(
       // non-zero severities (record 0066): `Round cap reached: 2 blockers, 1 major`.
       if (!shows(verbosity, "verbose")) {
         const counts = severityCounts(s.findingsByRound[e.reviewRounds] ?? []);
-        return `🧢 Round cap reached${counts ? `: ${counts}` : ""}${prUrl !== undefined ? ` — ${prUrl}` : ""}`;
+        return `🧢 Review limit reached${counts ? `: ${counts}` : ""}. No automatic fix rounds remain${prUrl !== undefined ? ` — remaining findings: ${prUrl}` : ". A Switchboard operator can check the last review in the run details."}`;
       }
       // The cap bounds fix rounds, never the terminal steps (issue 2023): an
       // approval in the last allowed round still runs the checks step and the
@@ -4601,7 +4602,8 @@ function renderUnitReportWithWake(
       ]);
     }
     case "wall_clock_cap":
-      if (!shows(verbosity, "verbose")) return `🧢 Out of budget — no approval after ${rounds}.${prLine}`;
+      if (!shows(verbosity, "verbose"))
+        return `🧢 Time limit reached after ${rounds}; no approval was recorded. A Switchboard operator can check the saved work before it continues.${prLine}`;
       return join([
         `🧢 Ship stopped at a cap: the remaining pipeline time (~${Math.max(0, Math.round(e.remainingMs / MIN))} min of the ${s.input.caps.maxMinutes}-minute budget) cannot hold another round${e.refused ? ` (the ${e.refused.round} round would get ${e.refused.minutes} min, under its floor of ${e.refused.floor})` : ""} — no approval after ${rounds}.${prLine}`,
         budgetSplitLine(s, e.spent),
@@ -4729,7 +4731,7 @@ function renderUnitReportWithWake(
       ]);
     case "transient":
       if (!shows(verbosity, "verbose"))
-        return `⚠️ Aborted after ${rounds}: this is a bug — the model call failed twice and no automatic retry remains.${prLine}`;
+        return `⚠️ Ship stopped after ${rounds}: the model service failed twice, and no automatic retry remains. A Switchboard operator can check the service and saved work.${prLine}`;
       return join([
         `⚠️ The coding child of round ${e.round.index} (run ${e.runId}) ${e.streamIncomplete ? "ended because the model stream ended before a complete answer" : "died on a provider transient — a model-gateway 5xx or gateway timeout past the harness's retry ladder"} — with nothing pushed, after the round was already re-run once for a retryable model-call failure. The task itself was never the problem.`,
         writeUpPointer(s, e.round.kind, s.lastCodingRunId),
@@ -4753,7 +4755,7 @@ function renderUnitReportWithWake(
       }
       if (!shows(verbosity, "verbose"))
         return join([
-          `⚠️ No verdict from review round ${e.round.index} — aborted after ${rounds}.${prLine}`,
+          `⚠️ Ship stopped because review round ${e.round.index} did not record a verdict. A Switchboard operator can check the review in the run details.${prLine}`,
           spentCapAction(),
         ]);
       return join([
@@ -4771,6 +4773,8 @@ function renderUnitReportWithWake(
     case "idle_expired":
       return "⌛ Idle expired: no reply continued this unit before its idle window closed.";
     case "refused":
+      if (!shows(verbosity, "verbose"))
+        return `🚫 Ship stopped because the ${presetOf(e.round.kind)} task was not allowed to start. A Switchboard admin can check the request's permissions in the run details.${prLine}`;
       return join([
         `🚫 The ${presetOf(e.round.kind)} child of round ${e.round.index} was refused by the authorize stage (${e.refusal})${e.message ? `: ${e.message}` : ""} — every child is authorized as the requesting user, so the pipeline ends here.`,
         aside(nextAction()),

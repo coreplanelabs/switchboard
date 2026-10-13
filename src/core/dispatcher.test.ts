@@ -2432,7 +2432,7 @@ describe("dispatch", () => {
       seed: [{ role: "assistant", text: "Earlier private source said 17 failed." }],
     });
     expect(provider.requests).toHaveLength(0);
-    expect(replies.join(" ")).toContain("ask me to check the source again");
+    expect(replies.join(" ")).toContain("check the source and conversation access");
   });
 
   it("withholds a main answer when its private source disappears before the reply", async () => {
@@ -2457,7 +2457,7 @@ describe("dispatch", () => {
     expect(provider.requests).toHaveLength(1);
     expect(reads).toBe(2);
     expect(replies.join(" ")).not.toContain("17 failed signups");
-    expect(replies.join(" ")).toContain("ask me to check the source again");
+    expect(replies.join(" ")).toContain("check the source and conversation access");
   });
 
   it.each(["general", "orchestrator", "general-dm"] as const)(
@@ -2577,7 +2577,7 @@ describe("dispatch", () => {
       );
       if (revoke) {
         expect(replies.join(" ")).not.toContain("The README says 17");
-        expect(replies.join(" ")).toContain("ask me to check the source again");
+        expect(replies.join(" ")).toContain("check the source and conversation access");
       } else expect(replies).toContain("The README says 17 signups failed.");
     }
   });
@@ -2640,7 +2640,7 @@ describe("dispatch", () => {
     expect(JSON.stringify({ replies, statuses, run: registry.snapshot("main-plane", "private-token") })).not.toContain(
       "private-worker",
     );
-    expect(replies.join(" ")).toContain("ask me to check the source again");
+    expect(replies.join(" ")).toContain("check the source and conversation access");
   });
 
   it("withholds a thread work answer when a linked run disappears after its tool read", async () => {
@@ -2693,7 +2693,7 @@ describe("dispatch", () => {
       code: "thread-work-snapshot-changed",
     });
     expect(replies.join(" ")).not.toContain("The earlier work is complete.");
-    expect(replies.join(" ")).toContain("ask me to check the source again");
+    expect(replies.join(" ")).toContain("check the source and conversation access");
   });
 
   it("publishes a thread work answer when the earlier durable run remains visible", async () => {
@@ -2783,7 +2783,7 @@ describe("dispatch", () => {
     await dispatch(deps, mainDm("which repos can I reach?"), io);
     expect(calls).toBe(2);
     expect(replies.join(" ")).not.toContain("The repository is not-a-repo.");
-    expect(replies.join(" ")).toContain("ask me to check the source again");
+    expect(replies.join(" ")).toContain("check the source and conversation access");
   });
 
   it("withholds a github_repos answer when its listed repo is revoked before publication", async () => {
@@ -2812,7 +2812,7 @@ describe("dispatch", () => {
     await dispatch(deps, mainDm("which repos can I reach?"), io);
     expect(calls).toBe(2);
     expect(replies.join(" ")).not.toContain("You can reach acme/public.");
-    expect(replies.join(" ")).toContain("ask me to check the source again");
+    expect(replies.join(" ")).toContain("check the source and conversation access");
   });
 
   it("refuses an unverified source audience before the main model sees it", async () => {
@@ -2827,7 +2827,7 @@ describe("dispatch", () => {
     const { io, replies } = mainDmIO();
     await dispatch(deps, mainDm("how many signups failed?"), io);
     expect(provider.requests).toHaveLength(0);
-    expect(replies.join(" ")).toContain("one-person Slack DM");
+    expect(replies.join(" ")).toContain("direct Slack message between you and Switchboard");
   });
 
   it("answers config commands inline without calling a model", async () => {
@@ -3267,7 +3267,7 @@ describe("executor provisioning by agent resources", () => {
     const ended = await run;
     expect(ended.status).toBe("stopped");
     expect(second.replies).toHaveLength(2);
-    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this folded follow-up/);
+    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read your follow-up/);
     expect(first.replies).toEqual([]);
     expect(registry.getById("r1")).toMatchObject({ status: "stopped_hard", finished: true });
   });
@@ -3306,7 +3306,7 @@ describe("executor provisioning by agent resources", () => {
     expect(last).toContain("setup failed");
     expect(last).not.toContain("stopped before the run started");
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("RESIDENT_OPERATOR_TOKEN is not set");
+    expect(replies[0]).toContain("A Switchboard operator can investigate the error in the run details");
   });
 
   it("a soft stop keeps the normal release policy (if-idle for coding) and marks the card stopped", async () => {
@@ -3557,7 +3557,7 @@ describe("executor provisioning by agent resources", () => {
     });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
-    expect(replies.join("\n")).toContain("install timed out");
+    expect(replies.join("\n")).toContain("I couldn't open the repository workspace");
     const attach = log.ends.find((e) => e.name === "dispatch.workspace.attach");
     expect(attach?.status).toBe("error");
     const grafts = log.ends.filter((e) => e.name.startsWith("dispatch.workspace.attach."));
@@ -3605,7 +3605,7 @@ describe("executor provisioning by agent resources", () => {
     vi.mocked(makeExecutor).mockRejectedValueOnce(new Error("sandbox worker unreachable"));
     await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(statuses[statuses.length - 1].title).toContain("❌ setup failed");
-    expect(replies.some((r) => r.includes("sandbox worker unreachable"))).toBe(true);
+    expect(replies.some((r) => r.includes("couldn't finish this request"))).toBe(true);
   });
 
   it("an uncaught throw in dispatch() is the catch-all: the ⚠️ reply as today, the outcome carrying `uncaught` and `cause: system` (record 0054)", async () => {
@@ -3615,7 +3615,7 @@ describe("executor provisioning by agent resources", () => {
       throw new Error("history exploded");
     };
     const ended = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
-    expect(replies.some((r) => r.includes("⚠️ history exploded"))).toBe(true);
+    expect(replies.some((r) => r.includes("⚠️ This is a bug: I couldn't finish this request"))).toBe(true);
     expect(ended).toMatchObject({ status: "failed", refusal: "uncaught", cause: "system" });
   });
 
@@ -3638,7 +3638,7 @@ describe("executor provisioning by agent resources", () => {
     expect(title).not.toContain("ghp_");
     expect(title).not.toContain("\n");
     expect(title).not.toContain("second line");
-    expect(replies.some((r) => r.includes("resident attach failed"))).toBe(true);
+    expect(replies.some((r) => r.includes("couldn't open the repository workspace"))).toBe(true);
     expect(replies.every((r) => !r.includes("ghp_abcdefghijklmnop"))).toBe(true);
     expect(replies.every((r) => !r.includes("\x1b"))).toBe(true);
   });
@@ -3662,7 +3662,7 @@ describe("executor provisioning by agent resources", () => {
     expect(last.title).toContain("*coding*");
     expect(last.title).not.toContain("setup failed");
     expect(statuses.some((f) => f.title.includes("setup failed"))).toBe(false); // never relabeled
-    expect(replies.some((r) => r.includes(UNKNOWN_MODEL_TERMINAL_MESSAGE))).toBe(true);
+    expect(replies.some((r) => r.includes("couldn't finish this request"))).toBe(true);
   });
 
   it("a coding ask still selects the configured remote backend", async () => {
@@ -3780,10 +3780,10 @@ describe("resident repo dispatch", () => {
     await dispatch(deps, msg("agent:coding in acme/try-catch: say hi", "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("acme/try-catch");
-    expect(replies[0]).toContain("not onboarded");
+    expect(replies[0]).toContain("has no prepared workspace");
     expect(replies[0]).toContain("repo onboard acme/try-catch");
     expect(replies[0]).not.toContain("Ask "); // an admin can run `repo onboard` themselves
-    expect(replies[0]).toContain("name the repository by URL");
+    expect(replies[0]).toContain("Naming https://github.com/");
     expect(provider.requests).toHaveLength(0); // no model turn
     expect(makeExecutor).not.toHaveBeenCalled(); // no workspace of any kind
     expect(statuses[statuses.length - 1].title).toContain("not started");
@@ -3801,7 +3801,7 @@ describe("resident repo dispatch", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:coding in acme/infra: change the onboarding link", "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("not onboarded");
+    expect(replies[0]).toContain("has no prepared workspace");
     expect(replies[0]).toContain("Did you mean:");
     expect(replies[0]).toContain("`agent:coding in acme/infrastructure: change the onboarding link`");
     expect(replies[0]).toContain("which is onboarded");
@@ -3818,7 +3818,7 @@ describe("resident repo dispatch", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:coding in acme/infra: change the onboarding link", "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("not onboarded");
+    expect(replies[0]).toContain("has no prepared workspace");
     expect(replies[0]).not.toContain("Did you mean:");
     expect(provider.requests).toHaveLength(0);
   });
@@ -3865,7 +3865,7 @@ describe("resident repo dispatch", () => {
         // The question's row lives its own day, not the write's ten minutes.
         expiresAt: w.now() + QUESTION_TTL_MS,
         question: {
-          text: expect.stringContaining("not onboarded"),
+          text: expect.stringContaining("has no prepared workspace"),
           evidence: expect.stringContaining("which is onboarded"),
         },
       });
@@ -3943,7 +3943,9 @@ describe("resident repo dispatch", () => {
       const foreign = fakeIO();
       const refusedOutcome = await dispatchClick(w.deps, { kind: "confirm", id, actor: stranger, io: foreign.io });
       expect(refusedOutcome).toMatchObject({ status: "refused", refusal: "confirmation_foreign" });
-      expect(foreign.replies).toEqual(["only the requester can confirm this"]);
+      expect(foreign.replies).toEqual([
+        "Only the person who requested this action can approve it. Nothing ran from your click.",
+      ]);
       expect(w.store.rows.has(id)).toBe(true); // kept for the requester
       const no = fakeIO();
       const cancelled = await dispatchClick(w.deps, { kind: "cancel", id, actor: requester, io: no.io });
@@ -3964,7 +3966,7 @@ describe("resident repo dispatch", () => {
       expect(foreignRecord?.events.find((e) => e.type === "refusal")).toMatchObject({
         code: "confirmation_foreign",
         cause: "policy",
-        text: "only the requester can confirm this",
+        text: "Only the person who requested this action can approve it. Nothing ran from your click.",
       });
       expect(foreignRecord?.events.find((e) => e.type === "input")).toMatchObject({
         text: "agent:coding in acme/api: say hi",
@@ -4030,11 +4032,11 @@ describe("resident repo dispatch", () => {
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, msg("agent:coding in acme/web: fix the consent page", "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("couldn't verify");
+    expect(replies[0]).toContain("couldn't check");
     expect(replies[0]).toContain("acme/web");
-    expect(replies[0]).not.toContain("not onboarded"); // silence is not a refusal
-    expect(replies[0]).toContain("This is a bug");
-    expect(replies[0]).toContain("no automatic fallback was started");
+    expect(replies[0]).not.toContain("has no prepared workspace"); // silence is not a refusal
+    expect(replies[0]).toContain("A Switchboard operator can check the service");
+    expect(replies[0]).toContain("No coding work started");
     expect(provider.requests).toHaveLength(0);
     expect(makeExecutor).not.toHaveBeenCalled();
     expect(statuses[statuses.length - 1].title).toContain("could not be verified");
@@ -4050,9 +4052,9 @@ describe("resident repo dispatch", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:coding in acme/try-catch: say hi", "slack:UDEV"), io);
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("not onboarded");
-    expect(replies[0]).toContain("Ask an admin to onboard it (`repo onboard acme/try-catch`)");
-    expect(replies[0]).toContain("name the repository by URL"); // the self-serve path stays
+    expect(replies[0]).toContain("has no prepared workspace");
+    expect(replies[0]).toContain("An admin can register it with `repo onboard acme/try-catch`");
+    expect(replies[0]).toContain("Naming https://github.com/"); // the self-serve path stays
     expect(provider.requests).toHaveLength(0);
   });
 
@@ -4836,7 +4838,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(system).toMatch(/never `cd` out of it/i);
     // The coding/review resident preamble names the path too — every resident run, not only reviews.
     expect(system).toMatch(/Your shell starts in the worktree `\/workspace\/threads\/t-9f\/patch-1`/);
-    expect(replies.some((r) => /not started/i.test(r))).toBe(false);
+    expect(replies.some((r) => /No review started|review did not start/i.test(r))).toBe(false);
   });
 
   it("a genuine push during workspace preparation is reprovisioned at the reviewed head and the review runs", async () => {
@@ -4871,7 +4873,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
 
     expect(provider.requests).toHaveLength(2); // the review and its no-verdict follow-up both ran
-    expect(replies.some((r) => /not started/i.test(r))).toBe(false);
+    expect(replies.some((r) => /No review started|review did not start/i.test(r))).toBe(false);
     expect(calls.filter((c) => c.path === "/attach").map((c) => c.body?.sha)).toEqual([head, head]);
   });
 
@@ -4927,7 +4929,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io, { contract });
 
     expect(provider.requests).toHaveLength(2);
-    expect(replies.some((r) => /not started/i.test(r))).toBe(false);
+    expect(replies.some((r) => /No review started|review did not start/i.test(r))).toBe(false);
     expect(calls.find((c) => c.path === "/attach")?.body).toMatchObject({
       refHint: "patch-1",
       sha: head,
@@ -4993,9 +4995,9 @@ describe("repo/ref resolution + resident prompt selection", () => {
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
 
     expect(provider.requests).toHaveLength(0);
-    const reply = replies.find((r) => /not started/i.test(r)) ?? "";
-    expect(reply).toContain(reprovisionedHead);
-    expect(reply).toContain(expectedHead);
+    const reply = replies.find((r) => /No review started|review did not start/i.test(r)) ?? "";
+    expect(reply).toContain(reprovisionedHead.slice(0, 7));
+    expect(reply).toContain(expectedHead.slice(0, 7));
     expect(reply).not.toMatch(/branch moved|push|force-push|bug/i);
     expect(statuses.at(-1)?.title).toMatch(/not started.*workspace head mismatch/i);
     expect(calls.filter((c) => c.path === "/attach").map((c) => c.body?.sha)).toEqual([expectedHead, expectedHead]);
@@ -5064,7 +5066,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
       }),
     );
     expect(system).not.toContain(`Head commit: ${resolvedHead}`);
-    expect(replies.some((r) => /not started/i.test(r))).toBe(false);
+    expect(replies.some((r) => /No review started|review did not start/i.test(r))).toBe(false);
     expect(replies.some((r) => r.includes("reviewed head unknown"))).toBe(false);
     expect(post).toHaveBeenCalledTimes(1);
   });
@@ -5091,10 +5093,10 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(provider.requests).toHaveLength(0);
     expect(post).not.toHaveBeenCalled();
     expect(calls.filter((c) => c.path === "/attach")).toHaveLength(0);
-    const reply = replies.find((r) => /not started/i.test(r)) ?? "";
+    const reply = replies.find((r) => /No review started|review did not start/i.test(r)) ?? "";
     expect(reply).toContain("acme/api#42");
-    expect(reply).toMatch(/head/i);
-    expect(reply).toContain("This is a bug: no automatic head lookup retry was scheduled");
+    expect(reply).toMatch(/current version/i);
+    expect(reply).toContain("A Switchboard operator can check the GitHub lookup");
     expect(statuses[statuses.length - 1].title).toMatch(/not started/);
   });
 
@@ -5109,7 +5111,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review re-review please", "slack:UADMIN"), io);
     expect(provider.requests).toHaveLength(0);
-    expect(replies.find((r) => /not started/i.test(r)) ?? "").toContain("acme/api#42");
+    expect(replies.find((r) => /No review started|review did not start/i.test(r)) ?? "").toContain("acme/api#42");
   });
 
   it("a legacy inherited-PR context without the resolved closed-state fact still runs Slack-only — only an unknown head refuses", async () => {
@@ -5133,7 +5135,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review re-review please", "slack:UADMIN"), io);
     expect(provider.requests).toHaveLength(1);
-    expect(replies.some((r) => /not started/i.test(r))).toBe(false);
+    expect(replies.some((r) => /No review started|review did not start/i.test(r))).toBe(false);
   });
 
   it("a coding run attached at a commit other than the PR head still runs — the pre-run head check is review-only", async () => {
@@ -5168,7 +5170,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
       io,
     );
     expect(provider.requests).toHaveLength(1);
-    expect(replies.some((r) => /not started/i.test(r))).toBe(false);
+    expect(replies.some((r) => /No review started|review did not start/i.test(r))).toBe(false);
   });
 
   it("a sandbox-path review of a resolved PR gets the sandbox variant of the REVIEW TARGET block", async () => {
@@ -6530,7 +6532,7 @@ describe("review post-step", () => {
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review re-review"), io);
     expect(provider.requests).toHaveLength(0);
-    const reply = replies.find((r) => /not started/i.test(r)) ?? "";
+    const reply = replies.find((r) => /No review started|review did not start/i.test(r)) ?? "";
     expect(reply).toContain("acme/api#42");
     expect(reply).not.toMatch(/GitHub was down|could not be reached/); // never claims an outage it cannot prove
   });
@@ -6546,7 +6548,7 @@ describe("review post-step", () => {
     await dispatch(deps, msg("agent:review acme/api#42 — slack only"), io);
     expect(provider.requests).toHaveLength(1);
     expect(spy.fn).not.toHaveBeenCalled();
-    expect(replies.some((r) => /not started/i.test(r))).toBe(false);
+    expect(replies.some((r) => /No review started|review did not start/i.test(r))).toBe(false);
   });
 
   // Feature: docs/reference/specs/agent-review.md item 8 — the reviewed-head guard.
@@ -6601,7 +6603,12 @@ describe("review post-step", () => {
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       expect(spy.fn).not.toHaveBeenCalled();
       expect(makeExecutor).not.toHaveBeenCalled(); // no workspace provisioned, no head probe
-      expect(replies.some((r) => /not started/i.test(r) && /acme\/api#42/.test(r) && /head/i.test(r))).toBe(true);
+      expect(
+        replies.some(
+          (r) =>
+            /No review started|review did not start/i.test(r) && /acme\/api#42/.test(r) && /current version/i.test(r),
+        ),
+      ).toBe(true);
     });
 
     it("no git in the workspace cwd (cold sandbox root) → the agent-reported head decides: match posts, pinned", async () => {
@@ -9329,8 +9336,8 @@ describe("closed-card checklist and review verdict run link", () => {
     const deps = makeDeps(YAML_FIXTURE, provider);
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("hello there"), io);
-    const fail = replies.find((r) => r.includes(UNKNOWN_MODEL_TERMINAL_MESSAGE));
-    expect(fail).toContain(`⚠️ ${UNKNOWN_MODEL_TERMINAL_MESSAGE}`);
+    const fail = replies.find((r) => r.includes("couldn't finish this request"));
+    expect(fail).toContain("⚠️ This is a bug: I couldn't finish this request");
     expect(fail).toMatch(/\[Live run\]\(https:\/\/bot\.example\/runs\/.+\)/);
   });
 
@@ -9350,7 +9357,7 @@ describe("closed-card checklist and review verdict run link", () => {
     await dispatch(deps, msg("hello there"), io);
     const fail = replies.find((r) => r.startsWith("⚠️"));
     expect(fail).toMatch(
-      /^⚠️ The model provider refused the call; the request ended without exposing the provider's response\.\n\n\[Live run\]\(https:\/\/bot\.example\/runs\/.+\)$/,
+      /^⚠️ The model provider refused the call; the request ended without exposing the provider's response\. A Switchboard operator can check the model service\.\n\n\[Live run\]\(https:\/\/bot\.example\/runs\/.+\)$/,
     );
     expect(replies.join("\n")).not.toContain("classifier");
   });
@@ -11885,7 +11892,7 @@ describe("run history write path", () => {
     const rec = await store.get("run-h");
     expect(rec?.status).toBe("failed");
     expect(textEventsOf(rec!.events).map((m) => m.type)).toEqual(["input"]);
-    expect(replies.some((r) => r.includes(UNKNOWN_MODEL_TERMINAL_MESSAGE))).toBe(true);
+    expect(replies.some((r) => r.includes("couldn't finish this request"))).toBe(true);
     expect(activeRunCount()).toBe(0);
   });
 
@@ -12728,7 +12735,7 @@ workspaceDir: __WORKDIR__
     expect(finished).not.toHaveBeenCalled();
     expect(writes.mock.calls.filter(([, options]) => options?.provisional !== true)).toEqual([]);
     expect(fallbackPuts).toEqual([]);
-    expect(replies.join(" ")).toContain("original terminal outcome is unconfirmed");
+    expect(replies.join(" ")).toContain("confirm how the original task ended");
     expect(statuses.some((s) => s.title.includes("✅"))).toBe(false);
   });
 
@@ -12752,7 +12759,7 @@ workspaceDir: __WORKDIR__
     );
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("🚫");
-    expect(replies[0]).toContain("cannot open a thread of its own");
+    expect(replies[0]).toContain("Ship needs to open task threads");
     expect(replies[0]).toContain("/runs");
     expect(provider.requests).toHaveLength(0);
     expect(created).toEqual([]);
@@ -12943,8 +12950,8 @@ workspaceDir: __WORKDIR__
     tight.deps.runRegistry = new RunRegistry({ genId: () => "run-shipt", genToken: () => "tok" });
     const tightIo = fakeIO();
     await dispatch(tight.deps, msg(TASK_MSG, "slack:UADMIN"), tightIo.io);
-    expect(tightIo.replies[0]).toContain("Ship cannot start under a 10-minute budget");
-    expect(tightIo.replies[0]).toContain("needs 113 minutes");
+    expect(tightIo.replies[0]).toContain("this request allows 10 minutes");
+    expect(tightIo.replies[0]).toContain("needs at least 113 minutes");
     expect(tight.created).toEqual([]);
   });
 
@@ -13722,7 +13729,7 @@ workspaceDir: __WORKDIR__
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("🚫");
     expect(replies[0]).toContain("acme/api#42");
-    expect(replies[0]).toContain("could not be fetched");
+    expect(replies[0]).toContain("Ship did not start");
     expect(provider.requests).toHaveLength(0);
     expect(created).toEqual([]);
   });
@@ -13744,7 +13751,7 @@ workspaceDir: __WORKDIR__
     await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), io);
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("🚫");
-    expect(replies[0]).toContain("Could not fetch acme/api#508");
+    expect(replies[0]).toContain("check acme/api#508 on GitHub");
     expect(provider.requests).toHaveLength(0);
     expect(created).toEqual([]);
   });
@@ -13755,10 +13762,10 @@ workspaceDir: __WORKDIR__
     deps.fetchPrFacts = vi.fn(async () => openBotPr({ sameRepoHead: false }));
     const bare = fakeIO();
     await dispatch(deps, msg(`agent:ship ${PR_URL}`, "slack:UADMIN"), bare.io);
-    expect(bare.replies[0]).toContain("lives on a fork");
+    expect(bare.replies[0]).toContain("uses a branch in a fork");
     const adopt = fakeIO();
     await dispatch(deps, msg("agent:ship also add rate limiting", "slack:UADMIN"), adopt.io);
-    expect(adopt.replies[0]).toContain("lives on a fork");
+    expect(adopt.replies[0]).toContain("uses a branch in a fork");
     expect(provider.requests).toHaveLength(0);
     expect(created).toEqual([]);
   });
@@ -14222,7 +14229,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     expect(registry.listActive().map((r) => r.id)).toEqual(["r1"]);
     expect(second.statuses).toEqual([]);
     expect(second.replies).toHaveLength(1);
-    expect(second.replies[0]).toMatch(/^↪ Folded into the \*general\* run already in flight/);
+    expect(second.replies[0]).toMatch(/^↪ Added your message to the \*general\* work/);
     expect(second.replies[0]).toContain(" · https://sb.example/runs/r1?t=t"); // bare URL: the reply path escapes mrkdwn <url|label>
     // The live run reads it at its next step: the answer it was writing is
     // superseded, the follow-up is the next user turn, the run's answer follows it.
@@ -14263,8 +14270,8 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     // sits finished beside it, never a second run.
     expect(registry.listActive().filter((r) => r.agent !== "door")).toHaveLength(1);
     expect(second.statuses).toEqual([]);
-    expect(second.replies[0]).toMatch(/^⏳ A \*general\* run is already in flight/);
-    expect(second.replies[0]).toContain("`agent:research`");
+    expect(second.replies[0]).toMatch(/^⏳ \*general\* is already working/);
+    expect(second.replies[0]).toContain("No research work started");
     settle().answer("done");
     await run;
     expect(requests).toHaveLength(1); // nothing was folded in
@@ -14313,7 +14320,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     // second card, the steer ack with the run link.
     expect(registry.listActive().map((r) => r.id)).toEqual(["r1"]);
     expect(second.statuses).toEqual([]);
-    expect(second.replies).toEqual([expect.stringMatching(/^↪ Folded into the \*review\* run already in flight/)]);
+    expect(second.replies).toEqual([expect.stringMatching(/^↪ Added your message to the \*review\* work/)]);
     expect(second.replies[0]).toContain(" · https://sb.example/runs/r1?t=t");
     await foldedIn(registry, "r1", "also check the migration");
     settle().answer("verdict draft");
@@ -14369,7 +14376,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     await firstStarted;
     const second = fakeIO();
     await dispatch(deps, threadMsg("also fix the tests", "slack:UX"), second.io); // UX may not run coding
-    expect(second.replies[0]).toContain("not on the allowlist");
+    expect(second.replies[0]).toContain("don't have permission");
     expect(deps.admission!.get("slack:CX:1.0")?.inbox.size).toBe(0);
     settle().answer("done");
     await run;
@@ -14394,7 +14401,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     await run;
     // The first run failed and said so; the follow-up was NOT lost with it: it
     // ran as its own turn, on its own sender's channel handle.
-    expect(first.replies.some((r) => r.includes(UNKNOWN_MODEL_TERMINAL_MESSAGE))).toBe(true);
+    expect(first.replies.some((r) => r.includes("couldn't finish this request"))).toBe(true);
     expect(second.replies.at(-1)).toBe("answer 2");
     expect(second.statuses.length).toBeGreaterThan(0); // its own card
     expect(requests).toHaveLength(2);
@@ -14498,7 +14505,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     await run;
     expect(first.replies.some((r) => r.includes("aborted"))).toBe(true);
     expect(second.replies).toHaveLength(2);
-    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this folded follow-up/);
+    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read your follow-up/);
     expect(requests).toHaveLength(1);
     expect(registry.listActive().map((r) => r.id)).toEqual(["r1"]);
   });
@@ -14557,7 +14564,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     settle().fail(new Error("provider exploded"));
     await run;
     expect(requests).toHaveLength(1); // no fresh run
-    expect(a.replies.at(-1)).toContain("not on the allowlist");
+    expect(a.replies.at(-1)).toContain("don't have permission");
     expect(b.replies).toHaveLength(1); // B is told nothing: the ack was their only reply
     // No agent run started for the fresh turn — the one new row is the refusal
     // seam's door record (record 0054), stamped under the FIRST sender.
@@ -14583,7 +14590,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     await run;
     expect(first.replies.some((r) => r.includes(UNKNOWN_MODEL_TERMINAL_MESSAGE))).toBe(true);
     expect(second.replies).toHaveLength(2);
-    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read this folded follow-up/);
+    expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read your follow-up/);
     expect(requests).toHaveLength(1); // no fresh turn
     expect(registry.listActive().map((r) => r.id)).toEqual(["r1"]);
   });
@@ -20288,7 +20295,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const outcome = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     await writer.settled();
     expect(outcome).toMatchObject({ status: "failed", refusal: "uncaught" });
-    expect(replies.at(-1)).toMatch(/could not be durably tracked/i);
+    expect(replies.at(-1)).toContain("A Switchboard operator can investigate the error in the run details");
     expect(vi.mocked(makeExecutor)).not.toHaveBeenCalled();
     expect(provider.requests).toEqual([]);
   });
@@ -20671,7 +20678,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     fail(new Error("provider exploded"));
     await run;
     await writer.settled();
-    expect(a.replies.some((r) => r.includes(UNKNOWN_MODEL_TERMINAL_MESSAGE))).toBe(true);
+    expect(a.replies.some((r) => r.includes("couldn't finish this request"))).toBe(true);
     expect(b.replies.at(-1)).toBe("answer 2");
     // The fresh turn's reservation met run-1's row, waited for its finish, claimed again, and its own finish went through the ledger.
     expect(order).toEqual([
@@ -20772,7 +20779,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const outcome = await run;
     await writer.settled();
     expect(outcome.status).toBe("failed");
-    expect(a.replies.some((r) => r.includes("mcp discovery exploded"))).toBe(true);
+    expect(a.replies.some((r) => r.includes("couldn't finish this request"))).toBe(true);
     // The follow-up was not lost: it ran as its own turn, on its own sender's handle…
     expect(b.replies.at(-1)).toBe("answer 2");
     // The setup run finishes under its own advertised ID; its atomic finish
@@ -21292,7 +21299,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       },
       second.io,
     );
-    expect(second.replies[0]).toMatch(/^↪ Folded into the \*general\* run already in flight/);
+    expect(second.replies[0]).toMatch(/^↪ Added your message to the \*general\* work/);
     // The durable copy: the message with its (small) attachment, under the ledger's seq.
     expect(ledger.inbox.get("run-l")!.map((i) => [i.seq, i.message])).toEqual([
       [
@@ -21350,7 +21357,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(a.statuses).toEqual([]); // no card
     expect(registry.listActive()).toEqual([]); // no run here
     expect(a.replies).toHaveLength(1);
-    expect(a.replies[0]).toMatch(/^↪ Folded into the \*general\* run already in flight in this thread/);
+    expect(a.replies[0]).toMatch(/^↪ Added your message to the \*general\* work in this thread/);
     expect(a.replies[0]).not.toContain(" · "); // no run link: the run page token is the other generation's
     expect(ledger.inbox.get("run-far")!.map((i) => [i.seq, i.message.text, i.message.userName])).toEqual([
       [1, "and also the numbers", "uy"],
@@ -21789,7 +21796,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     // The push landed after the claim, before the registry row; the slot carries the
     // row's ORIGINAL start (5_000), so a steer ack's elapsed time is the run's, not the resume's.
     expect(atPush).toEqual({ slot: true, registryRow: false, slotStartedAt: 5_000 });
-    expect(a.replies).toEqual([expect.stringMatching(/^↪ Folded into the \*general\* run/)]);
+    expect(a.replies).toEqual([expect.stringMatching(/^↪ Added your message to the \*general\* work/)]);
     await resumeRun;
     await wiredDeps.writer.settled();
     // The resumed run got the follow-up exactly once — by the hand-off, since
@@ -22233,7 +22240,7 @@ workspaceDir: __WORKDIR__
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, inChannel("COPEN", "agent:explore budget:3 time the suite"), io);
     expect(replies).toEqual([
-      "🚫 `explore` needs at least 4 minutes — a turn, then its write-up and post-step — and this message's own budget gives it 3. Switchboard applied this message's budget directive and did not start the run.",
+      "🚫 `explore` needs at least 4 minutes to work and report its result, but the time limits in this request allow 3 minutes. No work started. An admin can check the time limit.",
     ]);
     expect(statuses).toEqual([]);
     expect(claim).not.toHaveBeenCalled();
@@ -22258,7 +22265,7 @@ workspaceDir: __WORKDIR__
     const { io, replies, statuses } = fakeIO();
     await dispatch(deps, inChannel("CREAD", "agent:coding fix it"), io);
     expect(replies).toEqual([
-      "🚫 `coding` needs a `write` credential; this channel's boundary caps runs at `read`. Switchboard left this channel's boundary unchanged and did not start the run.",
+      "🚫 `coding` needs write access, but this channel's limits allow read access. No work started. For access, an admin can check these limits.",
     ]);
     expect(statuses).toEqual([]); // refused before the ack card: nothing to close
     expect(claim).not.toHaveBeenCalled(); // no thread claimed
@@ -22284,7 +22291,7 @@ workspaceDir: __WORKDIR__
     const { io, replies } = fakeIO();
     await dispatch(deps, inChannel("CNOMACHINE", "agent:coding fix it"), io);
     expect(replies).toEqual([
-      "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary allows only `none`. Switchboard left this channel's boundary unchanged; it did not start the run.",
+      "🚫 `coding` needs a prepared repository workspace, but this channel's limits allow only work without a workspace. No work started. An admin can check which workspaces this request may use.",
     ]);
     expect(makeExecutor).not.toHaveBeenCalled();
     expect(provider.requests).toHaveLength(0);
@@ -22924,10 +22931,10 @@ workspaceDir: __WORKDIR__
     const { parent, child } = treeIO();
     await dispatch(t.deps, inChannel("CX", "agent:conductor time the suite in acme/api", "slack:UX"), parent.io);
     expect(child.replies).toHaveLength(1);
-    expect(child.replies[0]).toContain("You're not on the allowlist for the `explore` agent");
+    expect(child.replies[0]).toContain("You don't have permission to use the `explore` agent");
     expect(child.statuses).toEqual([]); // refused before any card
     expect(parent.replies[0]).toContain("spawn refused (agent_allowlist)");
-    expect(parent.replies[0]).toContain("not on the allowlist");
+    expect(parent.replies[0]).toContain("don't have permission");
     expect(agentsProvisioned()).toEqual(["conductor"]);
     // The child's gate refusal is a `door` record in the child's thread
     // (record 0054, as amended) — never a child run.
@@ -22940,8 +22947,8 @@ workspaceDir: __WORKDIR__
     const { parent, child } = treeIO();
     await dispatch(t.deps, inChannel("CNONE", "agent:conductor time the suite in acme/api"), parent.io);
     expect(child.replies).toHaveLength(1);
-    expect(child.replies[0]).toContain("`explore` needs a `read` credential");
-    expect(child.replies[0]).toContain("this channel's boundary");
+    expect(child.replies[0]).toContain("`explore` needs read access");
+    expect(child.replies[0]).toContain("this channel's limits");
     expect(parent.replies[0]).toContain("spawn refused (profile_bounded)");
     expect(agentsProvisioned()).toEqual(["conductor"]);
     // The child's gate refusal is a `door` record in the child's thread
@@ -25358,6 +25365,9 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     });
     expect(seeded).toBeUndefined();
     expect(replies.join(" ")).toContain("run restarted");
+    expect(replies.join(" ")).toContain(
+      "A new message with the source in your direct Slack chat with Switchboard, outside this thread, starts a fresh check.",
+    );
   });
 
   it.each([false, true])(
@@ -26659,7 +26669,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     await dispatch(s.deps, request, unknown.io);
     expect(s.deps.operatorModel).toHaveBeenCalledOnce();
     expect(s.deps.resolveRepoContext).toHaveBeenCalledOnce();
-    expect(unknown.replies.join("\n")).toMatch(/not started.*head/);
+    expect(unknown.replies.join("\n")).toMatch(/current version.*review did not start/);
     expect(s.deps.postReviewComment).not.toHaveBeenCalled();
     expect(s.shipBranch).not.toHaveBeenCalled();
     expect(s.provider.requests).toHaveLength(0);
@@ -27621,9 +27631,9 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     });
     expect(ended).toMatchObject({ status: "refused", refusal: "pipeline_thread_owned" });
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("*ship* pipeline");
+    expect(replies[0]).toContain("*ship* is coordinating work");
     expect(replies[0]).toContain("U12");
-    expect(replies[0]).toContain("slack:CX:99.0");
+    expect(replies[0]).toContain("thread `slack:CX:99.0`");
     // No rival run: no model turn, no event appended anywhere.
     expect(provider.requests).toHaveLength(0);
     expect(await instances.listEvents({ instanceId: INSTANCE, unit: "U12" })).toEqual([]);
@@ -27632,7 +27642,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const plain = fakeIO();
     const plainEnded = await dispatch(deps, msg("what about the tests", "slack:UADMIN"), plain.io, { thread });
     expect(plainEnded).toMatchObject({ status: "refused", refusal: "pipeline_thread_owned" });
-    expect(plain.replies[0]).toContain("slack:CX:99.0");
+    expect(plain.replies[0]).toContain("thread `slack:CX:99.0`");
     expect(provider.requests).toHaveLength(0);
   });
 
@@ -27666,7 +27676,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
     await dispatch(s.deps, msg("also remove the auth checks", "slack:UX"), io); // UX may not run coding
     expect(replies).toHaveLength(1);
-    expect(replies[0]).toContain("not on the allowlist");
+    expect(replies[0]).toContain("don't have permission");
     expect(replies[0]).toContain("`coding`");
     expect(await s.instances.listEvents(s.key)).toEqual([]);
     expect(s.sends).toEqual([]);
@@ -28010,7 +28020,7 @@ describe("every refusal is a run record (record 0054, as amended)", () => {
     };
     const ended = await dispatch(deps, msg("agent:coding fix it", "slack:UADMIN"), io);
     expect(ended).toMatchObject({ status: "failed", refusal: "uncaught", cause: "system" });
-    expect(replies.some((r) => r.includes("⚠️ history exploded"))).toBe(true);
+    expect(replies.some((r) => r.includes("⚠️ This is a bug: I couldn't finish this request"))).toBe(true);
     await deps.runHistoryWriter.settled();
     const rec = (await store.get("r1"))!;
     expect(rec).toMatchObject({ agent: "door", status: "completed" });
@@ -29043,7 +29053,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     await dispatch(deps, msg("verbosity:verbose keep going", "slack:UADMIN"), io);
     expect(deps.redispatched).toEqual([]);
     expect(slot.live.inbox.drain()).toMatchObject([{ text: "keep going", userId: "slack:UADMIN" }]);
-    expect(replies.some((r) => r.includes(`Folded into the *coding* run ${owner.id}`))).toBe(true);
+    expect(replies.some((r) => r.includes(`Added your message to the *coding* work (${owner.id})`))).toBe(true);
     expect(replies.some((r) => r.includes(`run ${ended.id} ended`))).toBe(false);
   });
 
@@ -29170,7 +29180,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(deps.invoked).toEqual(["config.show"]);
     expect(slot.live.inbox.size).toBe(0); // nothing folded: the decision, not the slot, said what this event is
     expect(replies.some((r) => r.includes("bound: `config show`"))).toBe(true);
-    expect(replies.some((r) => r.includes("Folded into"))).toBe(false);
+    expect(replies.some((r) => r.includes("Added your message to"))).toBe(false);
   });
 
   it.each(["live", "durable"])(
@@ -29504,7 +29514,9 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         status: "refused",
         refusal: "confirmation_foreign",
       });
-      expect(refused.replies).toContain("only the requester can confirm this");
+      expect(refused.replies).toContain(
+        "Only the person who requested this action can approve it. Nothing ran from your click.",
+      );
       expect((await f.deps.config.scopes("slack:CX", "slack:UADMIN")).user.agent).toBeUndefined();
     }
     await dispatch(f.deps, msg(`confirm ${id}`, "slack:UADMIN"), fakeIO().io);
@@ -29514,7 +29526,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       status: "refused",
       refusal: "confirmation_used",
     });
-    expect(duplicate.replies).toContain("this offer was already used");
+    expect(duplicate.replies).toContain("This approval was already used. This click did not run the action again.");
   });
 
   it("on: text confirmation rechecks permission after the offer", async () => {
@@ -29540,7 +29552,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       refusal: "confirmation_expired",
     });
     expect(refused.replies).toContain(
-      "this offer expired after ten minutes; nothing ran, and a later request may receive a fresh confirmation",
+      "This approval expired after ten minutes. Nothing ran. A new request can receive a new approval button.",
     );
     expect((await f.deps.config.scopes("slack:CX", "slack:UADMIN")).user.agent).toBeUndefined();
   });
@@ -29721,7 +29733,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     await dispatch(deps, msg("also cover the docs", "slack:UADMIN"), io);
     const [item] = slot.live.inbox.drain();
     expect(item).toMatchObject({ text: "also cover the docs", userId: "slack:UADMIN" });
-    expect(replies.some((r) => r.includes("Folded into"))).toBe(true);
+    expect(replies.some((r) => r.includes("Added your message to"))).toBe(true);
     expect(replies.some((r) => r.includes("cannot start beside it"))).toBe(false);
     // No rival run started, and the decision's event rides the live run's record.
     expect(registry.snapshotById("r2")).toBeNull();
@@ -29761,8 +29773,8 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("also cover the docs", "slack:UADMIN"), io);
-    // Folded into the other generation's run: no local slot, no run here.
-    expect(replies.some((r) => r.includes("Folded into"))).toBe(true);
+    // Added your message to the other generation's run: no local slot, no run here.
+    expect(replies.some((r) => r.includes("Added your message to"))).toBe(true);
     expect(ledger.inbox.get("run-far")!.map((i) => i.message.text)).toEqual(["also cover the docs"]);
     expect(provider.requests).toHaveLength(0);
     // The decision's event lands on a door record of its own — no ledger hole.
@@ -29952,7 +29964,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     const { io, replies } = fakeIO();
     const ended = await dispatch(deps, msg("also cover the docs", "slack:UADMIN"), io, { thread: seedThread() });
     expect(ended).toMatchObject({ status: "refused", refusal: "pipeline_thread_owned" });
-    expect(replies.some((r) => r.includes("slack:CX:99.0"))).toBe(true);
+    expect(replies.some((r) => r.includes("thread `slack:CX:99.0`"))).toBe(true);
     // No rival run beside the pipeline: its refusal and decision share a door record.
     expect(provider.requests).toHaveLength(0);
     expect(registry.snapshotById("r1")!.events.find((e) => e.type === "refusal")).toMatchObject({
@@ -30391,7 +30403,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     // the seed refusal naming where to reply (thread-admission item 9).
     expect(ended).toMatchObject({ status: "refused", refusal: "pipeline_thread_owned" });
     expect(deps.invoked).toEqual([]);
-    expect(replies.some((r) => r.includes("slack:CX:99.0"))).toBe(true);
+    expect(replies.some((r) => r.includes("thread `slack:CX:99.0`"))).toBe(true);
     expect(provider.requests).toHaveLength(0);
     // The prompt named a live owner WITHOUT a run id and offered no steer line:
     // the runner takes no inbox, so there is nothing to steer into.
@@ -31164,7 +31176,7 @@ describe("durable operator conversation without an agent run", () => {
           );
           expect(provider.requests).toHaveLength(0);
           expect(deps.invoked).toEqual([]);
-          expect(channel.replies.join(" ")).toContain("ask me to check the source again");
+          expect(channel.replies.join(" ")).toContain("check the source and conversation access");
         } else if (decision === "question") {
           expect(channel.replies.join(" ")).toContain(secret);
         } else if (decision === "route") {
