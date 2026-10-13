@@ -1,3 +1,10 @@
+/** The original research question retained while the unit waits for a person. */
+export interface ResearchGatePending {
+  runId: string;
+  question: string;
+  askedAt: number;
+}
+
 /** Research is advisory context. The requester and original task remain the
  * authority; a model's source claim is not proof that a read occurred. */
 export interface ResearchBrief {

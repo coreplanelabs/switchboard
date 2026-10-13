@@ -88,6 +88,7 @@ import {
   idempotencyKeyFor,
   IDLE_WHY_MAX,
   isHumanGatePending,
+  isResearchGatePending,
   isSavedFindingsPatch,
   INSTANCE_ID_PATTERN,
   isCoordinatorUnit,
@@ -1585,6 +1586,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
         threadKey,
         repo: instance.repo,
         branch: row.branch,
+        unitRecord: row,
         ...(researchContinuationHead ? {} : { headSha: head.sha }),
       })
     )
@@ -3814,6 +3816,7 @@ async function historicalRecoverySpend(
           threadKey: row.threadKey ?? instance.threadKey,
           repo: instance.repo,
           branch: row.branch,
+          unitRecord: row,
         })
       )
         return { reason: "child_identity_mismatch" };
@@ -7452,6 +7455,7 @@ function parseIdle(ending: Record<string, unknown>, runId: unknown, at: number):
   if (typeof ending.why !== "string" || ending.why.length === 0 || ending.why.length > IDLE_WHY_MAX) return undefined;
   if (typeof ending.renewalsLeft !== "number" || !Number.isInteger(ending.renewalsLeft) || ending.renewalsLeft < 0)
     return undefined;
+  if (ending.researchGate !== undefined && !isResearchGatePending(ending.researchGate)) return undefined;
   const from = normalizeHead(ending.from);
   return {
     why: ending.why,
@@ -7462,6 +7466,7 @@ function parseIdle(ending: Record<string, unknown>, runId: unknown, at: number):
     spendUsd: typeof ending.spendUsd === "number" && Number.isFinite(ending.spendUsd) ? ending.spendUsd : null,
     ...(isHandoffShape(ending.handoff) ? { handoff: ending.handoff } : {}),
     ...(isHumanGatePending(ending.humanGate) ? { humanGate: ending.humanGate } : {}),
+    ...(isResearchGatePending(ending.researchGate) ? { researchGate: ending.researchGate } : {}),
     wakes: 0,
   };
 }
@@ -7548,7 +7553,7 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
   // A human-gated question is answered only by input after the verdict that
   // asked it. GitHub rounds comments to seconds, so its boundary includes the
   // reported verdict second; precise channel timestamps keep strict ordering.
-  const askedAt = idle.humanGate?.askedAt;
+  const askedAt = idle.humanGate?.askedAt ?? idle.researchGate?.askedAt;
   const wakeEvents =
     askedAt !== undefined
       ? events.filter((event) =>
@@ -7570,10 +7575,9 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
     answer = { kind: "answered", reply: "Nothing new was waiting for this unit." };
   } else if (idle.wakes + 1 >= IDLE_WAKES_MAX) {
     answer = { kind: "expired" };
-  } else if (idle.humanGate !== undefined) {
-    // A person's answer to a human-gated question resumes the same segment;
-    // it is not a request for another renewal. The fresh lease is the bounded
-    // room needed for the answer's fix round and re-review.
+  } else if (idle.humanGate !== undefined || idle.researchGate !== undefined) {
+    // Answers resume the same segment without a renewal. Research keeps the
+    // remaining original lease; review questions keep the existing fix/review allowance.
     answer = {
       kind: "segment",
       index: row.segments?.at(-1)?.index ?? 1,
@@ -7583,8 +7587,16 @@ async function unitWake(body: Record<string, unknown>, deps: AdminCoordinatorDep
       ...(idle.handoff !== undefined ? { handoff: idle.handoff } : {}),
       texts: wakeEvents.map(attributedText),
       senders,
-      leaseMs: minutesToMs(instance.caps?.maxMinutes ?? resolveShipCaps(undefined).maxMinutes),
-      humanGate: idle.humanGate,
+      leaseMs:
+        idle.researchGate !== undefined
+          ? Math.max(
+              1,
+              minutesToMs(instance.caps?.maxMinutes ?? resolveShipCaps(undefined).maxMinutes) -
+                (idle.at - (row.segments?.at(-1)?.at ?? row.startedAt ?? idle.at)),
+            )
+          : minutesToMs(instance.caps?.maxMinutes ?? resolveShipCaps(undefined).maxMinutes),
+      ...(idle.humanGate !== undefined ? { humanGate: idle.humanGate } : {}),
+      ...(idle.researchGate !== undefined ? { researchGate: idle.researchGate } : {}),
     };
   } else {
     const segmentStart = row.segments?.at(-1)?.at ?? row.startedAt ?? idle.at;
@@ -8084,6 +8096,8 @@ async function unitEnd(
   // — the old kind as `why` and the continuation facts — and no `ending`, so
   // the unit stays unfinished and keeps owning its thread.
   const idle = ending.kind === "idle" ? parseIdle(ending, body.codingRunId, at) : undefined;
+  if (idle?.researchGate !== undefined && idle.researchGate.runId !== row.researchRunId)
+    return json(409, { ok: false, error: "research_source_changed", at });
   if (ending.kind === "idle" && idle === undefined)
     return json(400, { ok: false, error: "an idle ending must carry its why and the renewals left" });
   const segments = row.segments ?? [];

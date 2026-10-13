@@ -1154,6 +1154,7 @@ function unitEndBody(
             spendUsd: ending.spendUsd,
             ...(ending.handoff !== undefined ? { handoff: ending.handoff } : {}),
             ...(ending.humanGate !== undefined ? { humanGate: ending.humanGate } : {}),
+            ...(ending.researchGate !== undefined ? { researchGate: ending.researchGate } : {}),
           }
         : {}),
     },
@@ -1628,6 +1629,7 @@ async function waitOnIdle(
         ...(answer.handoff !== undefined ? { previousHandoff: answer.handoff } : {}),
         ...(answer.texts.length > 0 ? { texts: answer.texts } : {}),
         ...(answer.humanGate !== undefined ? { humanGate: answer.humanGate } : {}),
+        ...(answer.researchGate !== undefined ? { researchGate: answer.researchGate } : {}),
         ...(answer.leaseMs !== undefined
           ? { resume: { leaseMs: answer.leaseMs, attempt: (currentSession?.resume?.attempt ?? 0) + 1 } }
           : {}),

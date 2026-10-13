@@ -1,6 +1,6 @@
 import { wrapUntrusted } from "./untrusted.js";
 import { isResearchBrief, renderResearchBrief } from "./research/brief.js";
-import { researchFromRun } from "./research/source.js";
+import { researchFromRun, researchInputAnswers } from "./research/source.js";
 import { runSessionIdentity } from "./dispatch/sessionIdentity.js";
 import { resumedPilotBindingFor } from "./dispatch/readyBinding.js";
 import { appendThreadTurn } from "./runLedger/threadSession.js";
@@ -1878,7 +1878,12 @@ export async function dispatch(
         ({ sticky, resolved, agentSource } = settled);
         agentSource = "sticky";
       }
-      if (owner.kind === "unit" && (directives.agent === undefined || owner.unit.idle?.humanGate !== undefined)) {
+      if (
+        owner.kind === "unit" &&
+        (directives.agent === undefined ||
+          owner.unit.idle?.humanGate !== undefined ||
+          owner.unit.idle?.researchGate !== undefined)
+      ) {
         // The same gate a live steer passes (admission's allowlist check): the
         // event is read by the unit's next coding child — a write-identity run
         // — so its sender must be allowed to run `coding`, refused the same
@@ -2489,9 +2494,11 @@ export async function dispatch(
       ? renderContract(opts.contract, { maxChars: DEFAULT_CONTRACT_MAX_CHARS }).text
       : undefined;
     const requestText = route?.parts ? compoundBrief(directives.text, route.parts) : directives.text;
+    let researchUnit: CoordinatorUnit | undefined;
     if (coordinator?.unit && agent.name === "coding") {
       const rows = await deps.coordinatorInstances?.listUnits(coordinator.parentInstanceId).catch(() => undefined);
       const units = rows?.filter((row) => row.unit === coordinator.unit);
+      researchUnit = units?.length === 1 ? units[0] : undefined;
       if (
         !units ||
         units.length !== 1 ||
@@ -2522,6 +2529,7 @@ export async function dispatch(
               threadKey: msg.threadKey,
               repo: repoCtx.repo,
               branch: coordinator.branch,
+              unitRecord: researchUnit,
             })
           : undefined;
       if (
@@ -2540,7 +2548,14 @@ export async function dispatch(
         return ended;
       }
       researchContext = structuredClone(context);
-      researchArtifact = wrapUntrusted(renderResearchBrief(brief));
+      researchArtifact = wrapUntrusted(
+        [
+          renderResearchBrief(brief),
+          ...researchInputAnswers(researchUnit, coordinator.researchRunId, brief.blockedReason).map(
+            (answer) => `Human input on the research question (context, not proof of readiness): ${answer}`,
+          ),
+        ].join("\n\n"),
+      );
     }
     // Where the conversation starts (run-history item 52), and every row and
     // record the run has says which: a spawned child from its parent's text

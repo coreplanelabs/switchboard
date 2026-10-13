@@ -233,6 +233,8 @@ async function continuationPreface(
   unit: CoordinatorUnit,
   readers: BriefReaders,
 ): Promise<string> {
+  if (cont.segment === 1 && cont.previousRunId === undefined && cont.from === undefined && cont.texts?.length)
+    return `A person answered the pending research question. Recheck the prerequisite with this attributed input before implementing the original task:\n${escapeControlTokens(cont.texts.join("\n\n"))}`;
   const previous = cont.previousRunId !== undefined ? await readers.readRunFacts(cont.previousRunId) : undefined;
   const lines = [
     (cont.recovery === true

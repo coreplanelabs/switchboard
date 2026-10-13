@@ -35,7 +35,7 @@ import {
 // module reaches nothing but node-free modules — the child presets' budgets
 // arrive in the input rather than from the agent registry.
 
-import { isResearchBrief, type ResearchBrief } from "../research/brief.js";
+import { isResearchBrief, type ResearchBrief, type ResearchGatePending } from "../research/brief.js";
 import type { ShipRoundOutcome } from "../runEvents.js";
 import { shows, type Verbosity } from "../verbosity.js";
 import type { Handoff, HandoffLanded } from "./handoff.js";
@@ -1067,6 +1067,7 @@ export type UnitEnding =
       /** A parked human-gated review is always an idle, independent of the
        * optional idle policy. Its question is the unit's pending state. */
       humanGate?: HumanGatePending;
+      researchGate?: ResearchGatePending;
       parkDays?: number;
     };
 
@@ -1149,6 +1150,7 @@ export interface LeaseSegmentProgress {
   /** The human-gated question those words answer. It resumes as a findings
    * round before another review, without spending a renewal. */
   humanGate?: HumanGatePending;
+  researchGate?: ResearchGatePending;
   /** A stopped segment reopens under the remainder of its cut lease. Each
    *  reopen gets a fresh attempt so its Workflow steps cannot replay the
    *  stopped attempt's cached answers. */
@@ -1436,7 +1438,9 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
   const pending = input.session?.humanGate;
   const base: UnitPipelineState = {
     input,
-    ...(input.researchRunId ? { researchRunId: input.researchRunId } : {}),
+    ...((input.researchRunId ?? input.session?.researchGate?.runId)
+      ? { researchRunId: input.researchRunId ?? input.session?.researchGate?.runId }
+      : {}),
     startedAt: at,
     clock: at,
     phase: { at: "pre-check" },
@@ -1445,7 +1449,7 @@ export function openUnitPipeline(input: UnitPipelineInput, at: number): UnitPipe
     patternContinuations: pending?.patternContinuations ?? 0,
     reviewRestarts: 0,
     spentMs: { coding: 0, review: 0, waiting: 0 },
-    spendUsd: input.session?.spendUsd ?? 0,
+    spendUsd: input.session === undefined ? 0 : input.session.spendUsd,
     findingsByRound: pending ? { [pending.round]: pending.findings } : {},
     postedReviewByRound: pending?.reviewPosted === true ? { [pending.round]: true } : {},
     humanAnswersByRound: pending && input.session?.texts !== undefined ? { [pending.round]: input.session.texts } : {},
@@ -1655,7 +1659,7 @@ function briefFor(s: UnitPipelineState, round: RoundRef): Brief {
               recovery: true as const,
             },
           }
-        : session !== undefined && session.segment > 1
+        : session !== undefined && (session.segment > 1 || session.researchGate !== undefined)
           ? {
               continue: {
                 segment: session.segment,
@@ -2066,7 +2070,8 @@ function capEnding(s: UnitPipelineState, round?: RoundRef, refused?: Carve): Uni
  * dollar cap is spent. Unknown cost is not zero and never resets that cap. */
 function recoveryCostEnding(s: UnitPipelineState): UnitEnding | undefined {
   const cap = s.input.grant?.costCapUsd;
-  if (s.input.recovery === undefined || cap === undefined) return undefined;
+  if ((s.input.recovery === undefined && s.input.session?.researchGate === undefined) || cap === undefined)
+    return undefined;
   if (s.spendUsd !== null && Number.isFinite(s.spendUsd) && s.spendUsd >= 0 && s.spendUsd < cap) return undefined;
   return {
     kind: "aborted",
@@ -3729,6 +3734,34 @@ export function applyReturn(s: UnitPipelineState, ret: StepReturn): Transition {
       if (p.round.kind === "research") {
         const charged = { ...clocked, spendUsd: addSpend(clocked.spendUsd, r.run.costUsd) };
         const brief = r.run.researchBrief;
+        if (r.run.status === "completed" && isResearchBrief(brief) && brief.decision === "blocked") {
+          const held: Extract<UnitEnding, { kind: "held" }> = {
+            kind: "held",
+            cause: "blocked",
+            reason: brief.blockedReason!,
+            round: p.round,
+            runId: p.runId,
+            reviewRounds: s.reviewRounds,
+          };
+          const ending: Extract<UnitEnding, { kind: "idle" }> = {
+            kind: "idle",
+            why: "held",
+            idled: held,
+            renewalsLeft: Math.max(
+              0,
+              (s.input.grant ?? DEFAULT_GRANT).renewals - (s.input.session?.renewalsSpent ?? 0),
+            ),
+            spendUsd: charged.spendUsd,
+            round: p.round,
+            reviewRounds: s.reviewRounds,
+            researchGate: { runId: p.runId, question: brief.blockedReason!, askedAt: r.run.finishedAt ?? r.at },
+            parkDays: IDLE_DAYS_MAX,
+          };
+          return {
+            state: { ...charged, researchRunId: p.runId, phase: ENDED, ending },
+            notes: [roundNote(p.round, "completed"), { type: "ended", ending }],
+          };
+        }
         if (r.run.status !== "completed" || !isResearchBrief(brief) || brief.decision !== "ready")
           return end(
             charged,
@@ -4745,6 +4778,13 @@ function renderUnitReportWithWake(
     case "idle":
       // Keep the old kind's outcome at this copy's level, but render the
       // indexed wake's durable reply action instead of a terminal restart.
+      if (e.researchGate !== undefined)
+        return join([
+          `⏸ Waiting for input: ${e.researchGate.question.replace(/\s+/g, " ").trim()}`,
+          aside(
+            "Reply in this thread to continue the same task. Implementation will recheck the prerequisite with your answer.",
+          ),
+        ]);
       return renderUnitReportWithWake({ ...s, ending: e.idled }, facts, verbosity, s.input.recovery === undefined);
   }
 }

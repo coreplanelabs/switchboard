@@ -561,7 +561,14 @@ describe("dispatch", () => {
       "later_allowed",
       "later_revoked",
       "allowed",
+      "blocked_unanswered",
+      "blocked_answered",
+      "blocked_revoked",
+      "blocked_foreign_answer",
     ] as const) {
+      const sourceBrief = mode.startsWith("blocked_")
+        ? { ...researchBrief, decision: "blocked" as const, blockedReason: "Choose the compliance scope" }
+        : researchBrief;
       const provider = capturingProvider("Session restored.");
       const deps = makeDeps(YAML_FIXTURE, provider);
       if (mode === "registry_finished" || mode === "final_missing") {
@@ -589,7 +596,7 @@ describe("dispatch", () => {
         parentInstanceId: instanceId,
         coordinatorUnit: "U12",
         idempotencyKey: `${instanceId}:U12/0/research`,
-        researchBrief,
+        researchBrief: sourceBrief,
         events: [
           {
             type: "coordinator_tag",
@@ -599,7 +606,7 @@ describe("dispatch", () => {
             branch,
             researchTarget: { repo: "acme/api", headSha: researchBrief.headSha },
           },
-          { type: "research_brief", brief: researchBrief, confirmed: true, seq: 2 },
+          { type: "research_brief", brief: sourceBrief, confirmed: true, seq: 2 },
         ],
         eventCount: 2,
         storedEventCount: 2,
@@ -614,6 +621,25 @@ describe("dispatch", () => {
         branch,
         dependsOn: [],
         rounds: [],
+        ...(mode.startsWith("blocked_") && mode !== "blocked_unanswered"
+          ? {
+              wakes: {
+                "U12/idle/1": {
+                  kind: "segment" as const,
+                  index: 1,
+                  spendUsd: 1,
+                  senders: ["Alice"],
+                  texts: ["Alice: out of scope"],
+                  leaseMs: 60_000,
+                  researchGate: {
+                    runId: mode === "blocked_foreign_answer" ? "run-other" : researchRunId,
+                    question: "Choose the compliance scope",
+                    askedAt: 1,
+                  },
+                },
+              },
+            }
+          : {}),
         ...(mode === "unadmitted_source" || mode === "known_legacy" ? {} : { researchRunId }),
       });
       if (mode === "missing_unit" || mode === "unknown_unit_omitted") deps.coordinatorInstances = undefined;
@@ -642,7 +668,10 @@ describe("dispatch", () => {
       deps.slackContextForRun = (_actor, incoming) => ({
         ...testSlackCapability(incoming, async () => "source"),
         originAudience: async () =>
-          (mode === "revoked" || mode === "later_revoked" || mode === "maintenance_revoked") &&
+          (mode === "revoked" ||
+            mode === "blocked_revoked" ||
+            mode === "later_revoked" ||
+            mode === "maintenance_revoked") &&
           incoming.threadKey === earlier.threadKey
             ? undefined
             : "public",
@@ -651,6 +680,7 @@ describe("dispatch", () => {
       if (
         mode === "registry_finished" ||
         mode === "allowed" ||
+        mode === "blocked_answered" ||
         mode === "changed_head" ||
         mode === "later_allowed" ||
         mode === "maintenance_command" ||
@@ -788,12 +818,18 @@ describe("dispatch", () => {
         expect(JSON.stringify(provider.requests[0]?.messages)).toContain("Restore the login session");
       } else if (
         mode === "allowed" ||
+        mode === "blocked_answered" ||
         mode === "registry_finished" ||
         mode === "later_allowed" ||
         mode === "maintenance_command" ||
         mode === "maintenance_watch"
       ) {
         expect(outcome.status, JSON.stringify(outcome)).toBe("completed");
+        if (mode === "blocked_answered") {
+          expect(provider.requests[0]?.system).toContain("decision: blocked");
+          expect(provider.requests[0]?.system).toContain("Alice: out of scope");
+          expect(provider.requests[0]?.system).toContain("context, not proof of readiness");
+        }
         expect(provider.requests[0]?.system).toContain(
           "Source claims are unverified; recheck them against the current target.",
         );
@@ -27525,41 +27561,48 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(vi.mocked(runPiHarnessOpen).mock.calls.at(-1)?.[1].model.id).toBe("review-model");
   });
 
-  it("a directive reply to a parked human-gated question is still the person's answer — one wake event, never a rival run", async () => {
-    const finding = {
-      id: "F2",
-      severity: "minor" as const,
-      file: "docs/receipt.md",
-      title: "independent receipt missing",
-      humanGated: true as const,
-    };
-    const s = await unitOwnedSetup({
-      idle: {
-        why: "held",
-        at: 1,
-        renewalsLeft: 0,
-        spendUsd: 1,
-        wakes: 0,
-        humanGate: {
-          pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
-          round: 1,
-          findings: [finding],
-          verdict: "request_changes",
+  it.each(["review", "research"] as const)(
+    "a directive reply to a parked %s question is one wake event and never a rival run",
+    async (kind) => {
+      const finding = {
+        id: "F2",
+        severity: "minor" as const,
+        file: "docs/receipt.md",
+        title: "independent receipt missing",
+        humanGated: true as const,
+      };
+      const s = await unitOwnedSetup({
+        idle: {
+          why: "held",
+          at: 1,
+          renewalsLeft: 0,
+          spendUsd: 1,
+          wakes: 0,
+          ...(kind === "research"
+            ? { researchGate: { runId: "run-research", question: "Choose the scope", askedAt: 1 } }
+            : {
+                humanGate: {
+                  pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+                  round: 1,
+                  findings: [finding],
+                  verdict: "request_changes",
+                },
+              }),
         },
-      },
-    });
-    const { io } = fakeIO([{ role: "user", text: "hi" }]);
-    await dispatch(s.deps, msg("agent:coding the independent reader supplied the receipt", "slack:UADMIN"), io);
-    expect(await s.instances.listEvents(s.key)).toEqual([
-      expect.objectContaining({
-        sender: "slack:UADMIN",
-        text: "the independent reader supplied the receipt",
-        mode: "wake",
-      }),
-    ]);
-    expect(s.sends).toHaveLength(1);
-    expect(s.provider.requests).toHaveLength(0);
-  });
+      });
+      const { io } = fakeIO([{ role: "user", text: "hi" }]);
+      await dispatch(s.deps, msg("agent:coding the independent reader supplied the receipt", "slack:UADMIN"), io);
+      expect(await s.instances.listEvents(s.key)).toEqual([
+        expect.objectContaining({
+          sender: "slack:UADMIN",
+          text: "the independent reader supplied the receipt",
+          mode: "wake",
+        }),
+      ]);
+      expect(s.sends).toHaveLength(1);
+      expect(s.provider.requests).toHaveLength(0);
+    },
+  );
 
   it("a directive reply in a live pipeline's seed thread is refused naming the unit thread — never a rival run beside the runner (issue 2010)", async () => {
     const provider = capturingProvider();

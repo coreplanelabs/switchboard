@@ -906,6 +906,58 @@ describe("research source at implementation admission", () => {
     },
   };
 
+  it.each(["missing", "answered", "foreign", "other-question"] as const)(
+    "a blocked original research source requires its own durable answer: %s",
+    async (mode) => {
+      const h = harness();
+      const blocked = { ...researchBrief, decision: "blocked" as const, blockedReason: "Choose the compliance scope" };
+      await source(h, {
+        researchBrief: blocked,
+        events: [
+          {
+            type: "coordinator_tag",
+            seq: 1,
+            parentInstanceId: INSTANCE.id,
+            unit: "u12",
+            branch: INSTANCE.branch,
+            researchTarget: { repo: INSTANCE.repo, headSha },
+          },
+          { type: "research_brief", brief: blocked, confirmed: true, seq: 2 },
+        ],
+      });
+      const unit = (await h.instances.listUnits(INSTANCE.id))[0]!;
+      seedCoordinatorUnit(h.instances, {
+        ...unit,
+        wakes:
+          mode === "missing"
+            ? {}
+            : {
+                "u12/idle/1": {
+                  kind: "segment",
+                  index: 1,
+                  spendUsd: 1,
+                  leaseMs: minutesToMs(200),
+                  senders: ["Alice"],
+                  texts: ["Alice: out of scope"],
+                  researchGate: {
+                    runId: mode === "foreign" ? "run-other" : "run-research",
+                    question: mode === "other-question" ? "Another decision" : blocked.blockedReason,
+                    askedAt: NOW,
+                  },
+                },
+              },
+      });
+      const response = await handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}spawn`, request), h.deps);
+      expect(response).toMatchObject(
+        mode === "answered"
+          ? { status: 200, body: { runId: "run-child" } }
+          : { status: 403, body: { error: "research_source_changed" } },
+      );
+      if (mode === "answered")
+        expect(h.dispatched[0]?.opts?.coordinator).toMatchObject({ researchRunId: "run-research" });
+    },
+  );
+
   it("carries only the canonical original research run into implementation", async () => {
     const h = harness();
     await source(h);
@@ -7446,6 +7498,59 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0].wakes?.["U10/idle/1"]).toEqual(
       (first.body as { answer: unknown }).answer,
     );
+  });
+
+  it("a research question persists and the next reply resumes its original lease with no renewal", async () => {
+    const h = await planHarness();
+    const key = { instanceId: PLAN_INSTANCE.id, unit: "U10" };
+    const researchGate = { runId: "run-research", question: "Choose the compliance scope", askedAt: NOW - 1 };
+    seedCoordinatorUnit(
+      h.instances,
+      unitRow("U10", { threadKey: "slack:C1:2.0", researchRunId: "run-research", startedAt: NOW - minutesToMs(10) }),
+    );
+    expect(
+      await call(h, "unit-end", {
+        parentInstanceId: PLAN_INSTANCE.id,
+        unit: "U10",
+        ending: { kind: "idle", why: "held", report: "Waiting for input", renewalsLeft: 0, spendUsd: 1, researchGate },
+      }),
+    ).toMatchObject({ status: 200 });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toMatchObject({
+      idle: { researchGate, renewalsLeft: 0 },
+    });
+    await h.instances.appendEvent(key, {
+      sender: PLAN_INSTANCE.userId,
+      senderName: "Alice",
+      text: "old input",
+      mode: "wake",
+      at: NOW - 2,
+    });
+    await h.instances.appendEvent(key, {
+      sender: PLAN_INSTANCE.userId,
+      senderName: "Alice",
+      text: "out of scope",
+      mode: "wake",
+      at: NOW + 1,
+    });
+    const body = { parentInstanceId: PLAN_INSTANCE.id, unit: "U10", waitId: "U10/idle/1" };
+    const response = await call(h, "unit-wake", body);
+    expect(response).toMatchObject({
+      status: 200,
+      body: {
+        answer: {
+          kind: "segment",
+          index: 1,
+          texts: ["Alice: out of scope"],
+          spendUsd: 1,
+          leaseMs: minutesToMs(35),
+          researchGate,
+        },
+      },
+    });
+    expect(await call(h, "unit-wake", body)).toEqual(response);
+    const current = (await h.instances.listUnits(PLAN_INSTANCE.id))[0]!;
+    expect(current.wakes?.[body.waitId]).toEqual((response.body as { answer: unknown }).answer);
+    expect(current.segments ?? []).toEqual([]);
   });
 
   it("a same-second GitHub answer to a parked human-gated finding resumes its segment without spending a renewal", async () => {
