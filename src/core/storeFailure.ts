@@ -20,7 +20,7 @@ export interface StoreRequestWitness {
   readonly digest: string;
 }
 
-/** Observed transport facts only; no response body or private exception text. */
+/** Observed transport facts and redacted operator diagnostics, never response bodies. */
 export type UncertainStoreDiagnosis =
   | { readonly kind: "transport" }
   | { readonly kind: "http"; readonly status: number; readonly stateWrite?: StateWriteFailure }

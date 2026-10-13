@@ -279,6 +279,21 @@ export class WorkerRunLedger implements RunLedger {
         path === "/runs/state" && res.status >= 500
           ? stateWriteDiagnosticFromHeader(res.headers.get(STATE_WRITE_DIAGNOSTIC_HEADER), request.digest)
           : undefined;
+      if (path === "/runs/state" && kind === "write" && res.status >= 500)
+        console.warn(
+          JSON.stringify({
+            event: "state.write.failure",
+            message: "State write request failed",
+            runId: body.runId,
+            ownerGen: body.gen,
+            requestDigest: request.digest,
+            httpStatus: res.status,
+            failure: stateWrite,
+            rayId: /^[a-f0-9]{16}(?:-[A-Z]{3})?$/.test(res.headers.get("cf-ray") ?? "")
+              ? res.headers.get("cf-ray")
+              : undefined,
+          }),
+        );
       if (kind === "write")
         throw new UncertainStoreError(`run ledger ${path}: mutation outcome unknown (HTTP ${res.status})`, request, {
           diagnosis: { kind: "http", status: res.status, ...(stateWrite ? { stateWrite } : {}) },

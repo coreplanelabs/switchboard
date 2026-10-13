@@ -11869,6 +11869,143 @@ describe("state-write holds across Durable Object RPC", () => {
       },
     });
   }
+  it.each(["before", "after"] as const)(
+    "recovers a retryable RPC failure %s commit on the original run",
+    async (when) => {
+      const key = "runs:rpc-state-retry:" + when;
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      expect((await stub.claim(claim(), 1)).ok).toBe(true);
+      await runInDurableObject(stub, (_instance, ctx) => {
+        ctx.storage.sql.exec(`CREATE TABLE state_write_count (n INTEGER); INSERT INTO state_write_count VALUES (0);
+          CREATE TRIGGER count_state_write AFTER UPDATE OF state_json ON live_runs
+          BEGIN UPDATE state_write_count SET n = n + 1; END;`);
+      });
+      let calls = 0;
+      const routed = routedEnv(stub, (name) =>
+        name === "setState"
+          ? async (...args: unknown[]) => {
+              calls++;
+              if (calls === 1) {
+                if (when === "after") expect(await Reflect.apply(stub.setState, stub, args)).toEqual({ ok: true });
+                throw Object.assign(new Error("Durable Object reset"), { retryable: true, remote: true });
+              }
+              return Reflect.apply(stub.setState, stub, args);
+            }
+          : undefined,
+      );
+      const response = await memoryWorker.fetch(request(key), routed);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true });
+      expect((await stub.listLive())[0].state).toEqual(state);
+      expect(calls).toBe(2);
+      expect(
+        await runInDurableObject(
+          stub,
+          (_instance, ctx) => ctx.storage.sql.exec<{ n: number }>("SELECT n FROM state_write_count").one().n,
+        ),
+      ).toBe(1);
+    },
+  );
+  it("refuses a retry after another state write instead of restoring the old snapshot", async () => {
+    const key = "runs:rpc-state-retry-moved";
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    expect((await stub.claim(claim(), 1)).ok).toBe(true);
+    let calls = 0;
+    const routed = routedEnv(stub, (name) =>
+      name === "setState"
+        ? async (...args: unknown[]) => {
+            calls++;
+            if (calls === 1) {
+              expect(await stub.setState(id, gen, { notepad: "newer state" })).toEqual({ ok: true });
+              throw Object.assign(new Error("Durable Object reset"), { retryable: true });
+            }
+            return Reflect.apply(stub.setState, stub, args);
+          }
+        : undefined,
+    );
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+    let response: Response;
+    try {
+      response = await memoryWorker.fetch(request(key), routed);
+    } finally {
+      log.mockRestore();
+    }
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ ok: false, reason: "fenced" });
+    expect((await stub.listLive())[0].state).toEqual({ notepad: "newer state" });
+    expect(
+      logs
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line))
+        .find((line) => line.event === "state.write.guard_refused"),
+    ).toMatchObject({
+      runId: id,
+      ownerGen: gen,
+      reason: "fenced",
+      stage: "state-rpc",
+      requestDigest: (await storeRequestWitness("/runs/state", await request(key).text())).digest,
+    });
+    expect(logs.join("\n")).not.toContain("newer state");
+  });
+  it.each(["exhausted", "overloaded", "ordinary"] as const)(
+    "records %s failure details and bounds the RPC attempts",
+    async (mode) => {
+      const key = "runs:rpc-state-retry-limit:" + mode;
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      expect((await stub.claim(claim(), 1)).ok).toBe(true);
+      let calls = 0;
+      const routed = routedEnv(stub, (name) =>
+        name === "setState"
+          ? async () => {
+              calls++;
+              throw Object.assign(
+                new Error("Durable Object reset because its code was updated. token=fixture-credential"),
+                {
+                  retryable: mode !== "ordinary",
+                  overloaded: mode === "overloaded",
+                  remote: true,
+                },
+              );
+            }
+          : undefined,
+      );
+      const logs: string[] = [];
+      const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+      let response: Response;
+      try {
+        response = await memoryWorker.fetch(request(key), routed);
+      } finally {
+        log.mockRestore();
+      }
+      expect(response.status).toBe(500);
+      const diagnostic = JSON.parse(response.headers.get(STATE_WRITE_DIAGNOSTIC_HEADER)!);
+      expect(diagnostic.failure).toMatchObject({
+        stage: "state-rpc",
+        attempts: mode === "exhausted" ? 3 : 1,
+        exception: {
+          name: "Error",
+          message: "Durable Object reset because its code was updated. token=«redacted»",
+          retryable: mode !== "ordinary",
+          overloaded: mode === "overloaded",
+          remote: true,
+        },
+      });
+      expect(calls).toBe(mode === "exhausted" ? 3 : 1);
+      expect((await stub.listLive())[0].state).toEqual({});
+      const failures = logs
+        .filter((line) => line.startsWith("{"))
+        .map((line) => JSON.parse(line))
+        .filter((line) => line.event === "state.write.failure");
+      expect(failures.at(-1)).toMatchObject({
+        runId: id,
+        ownerGen: gen,
+        retry: false,
+        failure: { attempts: mode === "exhausted" ? 3 : 1 },
+      });
+      expect(JSON.stringify(failures)).not.toContain("fixture-credential");
+    },
+  );
   it.each(["promotion-preflight", "state-rpc-before", "state-rpc-after", "acknowledgment"] as const)(
     "binds bounded %s failure facts to the exact wire request without acknowledging or replaying state",
     async (stage) => {
@@ -11886,7 +12023,7 @@ describe("state-write holds across Durable Object RPC", () => {
             if (stage === "state-rpc-after")
               expect(await Reflect.apply(stub.setState, stub, args)).toEqual({ ok: true });
             if (stage === "acknowledgment") return { ok: true, privateCause: "private reply bytes" };
-            throw new TypeError("private request and exception bytes");
+            throw new TypeError("RPC validation failed token=fixture-credential");
           };
         return undefined;
       });
@@ -11912,7 +12049,7 @@ describe("state-write holds across Durable Object RPC", () => {
       }
       expect(response.status).toBe(500);
       const diagnosis = JSON.parse(response.headers.get(STATE_WRITE_DIAGNOSTIC_HEADER)!);
-      expect(diagnosis).toEqual({
+      expect(diagnosis).toMatchObject({
         version: 1,
         requestDigest: digest,
         failure:
@@ -11926,6 +12063,12 @@ describe("state-write holds across Durable Object RPC", () => {
       const body = await response.text();
       expect(body).not.toContain("private");
       expect(JSON.stringify(diagnosis)).not.toContain("private");
+      expect(JSON.stringify(diagnosis)).not.toContain("fixture-credential");
+      if (stage !== "acknowledgment")
+        expect(diagnosis.failure.exception).toMatchObject({
+          name: "TypeError",
+          message: "RPC validation failed token=«redacted»",
+        });
       expect(calls).toBe(1);
       const trace = logs
         .map((line) => {
@@ -11947,7 +12090,7 @@ describe("state-write holds across Durable Object RPC", () => {
       expect(trace.errorMessage).toBe(
         stage === "acknowledgment"
           ? "run state RPC returned an invalid acknowledgement"
-          : "private request and exception bytes",
+          : "RPC validation failed token=«redacted»",
       );
       const current = (await stub.listLive())[0];
       expect(current.ownerGen).toBe(gen);

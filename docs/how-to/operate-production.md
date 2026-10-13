@@ -216,12 +216,23 @@ Three runs cover the shared capability families: ordinary answer; workspace read
 The JSON artifact records `capabilityOutcome`, passed/failed/incomplete/skipped scenarios, original run/actor/thread, served commit and exact review artifact. Its separate `productAcceptance` stays `incomplete` while the private route is unproven. The workflow reports upload/readiness separately. The private question → Fix it → draft-PR path remains a live gap because its attested Slack DM boundary is unavailable through HTTP/MCP. It needs a separately authorized disposable DM procedure and original unit/draft artifact receipts. Scripted CI, route probes and these three capability checks cannot prove it.
 
 A failed initial policy checkpoint can report a bounded `/runs/state` failure
-stage: `promotion-preflight`, `state-rpc`, or `acknowledgment`. The server binds
+stage: `promotion-preflight`, `state-read`, `state-rpc`, or `acknowledgment`. The server binds
 that diagnostic to the exact request bytes; a missing, malformed or foreign
 diagnostic leaves the generic HTTP failure. Preserve the original uncertain
 request. Neither the stage nor HTTP500 proves whether the mutation committed,
 and neither permits replay. The original exception remains in the private
-`state.fetch` trace for a qualified cause comparison. An archived-record refusal
+`state.fetch` trace for a qualified cause comparison. Operator logs also retain
+`state.write.failure` events with the original run, owner, request digest,
+serving build, try number, redacted exception message, stack, cause and Cloudflare
+`retryable`, `overloaded` and `remote` flags. The client mirrors a valid,
+digest-matched failure and its Cloudflare Ray ID without reading the error body.
+The Worker retries a marked retryable RPC twice after the existing store backoff
+and obtains a fresh stub each time. A captured state guard prevents overwriting
+newer state; an identical committed snapshot is acknowledged without rewriting
+it. Overloads, application errors and uncertain HTTP requests are not replayed.
+`state.write.recovered` records a later successful RPC call.
+`state.write.guard_refused` records the refusal stage, reason, original run,
+owner, digest and build without state contents. An archived-record refusal
 and a state-write failure are separate observations until their original facts
 are correlated.
 
