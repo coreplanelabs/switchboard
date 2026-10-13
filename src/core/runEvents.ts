@@ -126,6 +126,7 @@ export type RunNoteKind =
    *  Published by the run loop's catch, before the finish. */
   | "run_failed"
   | "provider_failure"
+  | "storage_failure"
   /** The model answered, but the final context cursor could not be confirmed;
    * the live row stays recoverable and no answer or review was published. */
   | "checkpoint_deferred"
@@ -365,6 +366,7 @@ export const RUN_NOTE_KINDS = [
   "head_moved",
   "run_failed",
   "provider_failure",
+  "storage_failure",
   "checkpoint_deferred",
   "mcp_unavailable",
   "follow_up",
@@ -673,6 +675,8 @@ export type RunEvent =
       summary: string;
       /** Redacted provider evidence captured before a harness flattens its error. */
       providerFailure?: ProviderFailureDetails & { cause: ProviderFailureCause };
+      /** Redacted request-bound storage diagnosis; never a mutation receipt. */
+      storageFailure?: import("./storageFailureDiagnostic.js").StorageFailureDiagnostic;
       /** Closed observation only; never a command outcome or recovery receipt. */
       executionDiagnostic?: import("../execution/typedExecutionDiagnostic.js").TypedExecutionDiagnostic;
       /** A bounded private source decision; never includes a message, actor or repository. */

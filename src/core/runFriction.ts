@@ -581,6 +581,9 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
           eventIndex: index,
         });
         return;
+      case "storage_failure":
+        findings.push({ category: "infra_failure", severity: "high", summary: ev.summary, eventIndex: index });
+        return;
       case "drain_wait":
         // The run was admitted onto a drained fleet (resident-repos item 69;
         // issue 2044): the wait is the deploy's, its own category — a verdict

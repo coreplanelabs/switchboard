@@ -117,7 +117,7 @@ export interface AttrDomain {
   host: string;
   httpStatus: number;
   /** State-write failure facts; identifiers and closed vocabulary, no request bytes. */
-  stateWriteStage: "promotion-preflight" | "state-read" | "state-rpc" | "acknowledgment";
+  stateWriteStage: "promotion-preflight" | "state-read" | "state-rpc" | "acknowledgment" | "request";
   requestDigest: string;
   // mcp.*
   bytes: number;

@@ -60,7 +60,11 @@ import { createLedgerWriteThrough } from "../../src/core/runLedger/writeThrough.
 import { UnknownAllocationClaimError } from "../../src/core/runLedger/allocationAck.ts";
 import { PROMOTION_BODY_BYTES, promotionBytes, promotionBodyOf } from "../../src/core/runLedger/promotion.ts";
 import { deployRegistrationState } from "../cloudflare-resident/runRegistration.ts";
-import { STATE_WRITE_DIAGNOSTIC_HEADER } from "../../src/core/runStateWriteDiagnostic.ts";
+import {
+  STATE_WRITE_DIAGNOSTIC_HEADER,
+  stateWriteDiagnosticFromHeader,
+} from "../../src/core/runStateWriteDiagnostic.ts";
+import { STORAGE_FAILURE_DIAGNOSTIC_HEADER } from "../../src/core/storageFailureDiagnostic.ts";
 import { storeRequestWitness } from "../../src/core/storeResponse.ts";
 
 // The check producer imports the unused LocalExecutor environment helper.
@@ -4232,6 +4236,31 @@ describe("cross-channel named steer custody", () => {
 });
 
 describe("closed SQLite inbox segment admission", () => {
+  async function expectStorageFailure(path: string, body: unknown, message: string) {
+    const payload = JSON.stringify(body);
+    const witness = await storeRequestWitness(path, payload);
+    const receipt = await fetchMemoryTest(
+      `${BASE}${path}`,
+      {
+        method: "POST",
+        headers: { ...AUTH, "content-length": String(new TextEncoder().encode(payload).byteLength) },
+        body: payload,
+      },
+      async (response) => ({
+        status: response.status,
+        data: await response.json(),
+        failure: stateWriteDiagnosticFromHeader(
+          response.headers.get(STORAGE_FAILURE_DIAGNOSTIC_HEADER),
+          witness.digest,
+        ),
+      }),
+    );
+    expect(receipt).toMatchObject({
+      status: 500,
+      data: { error: "storage request failed" },
+      failure: { stage: "request", exception: { message: expect.stringContaining(message) } },
+    });
+  }
   it("holds an oversized supported prior archive using SQLite UTF-8 bytes while retaining every original row", async () => {
     const key = storeKey();
     const id = "oversized-prior";
@@ -4269,7 +4298,7 @@ describe("closed SQLite inbox segment admission", () => {
       expect(size.chars).toBeLessThan(1.5 * 1024 * 1024);
       expect(size.bytes).toBeGreaterThan(1.5 * 1024 * 1024);
     });
-    await expect(post("/runs/abandon", { storeKey: key, runId: id, gen: "g2" })).rejects.toThrow("unreadable");
+    await expectStorageFailure("/runs/abandon", { storeKey: key, runId: id, gen: "g2" }, "unreadable");
     expect((await post("/runs/inbox/read", { storeKey: key, runId: id, gen: "g2", peek: true })).data).toEqual({
       ok: false,
       reason: "incomplete",
@@ -4312,9 +4341,11 @@ describe("closed SQLite inbox segment admission", () => {
         await runInDurableObject(stub, (_owner: RunHistoryDO, state) => {
           state.storage.sql.exec("INSERT INTO run_steps(run_id,step,json) VALUES(?,?,?)", id, 1, originalStep);
         });
-        await expect(
-          post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: record(id, thread) }),
-        ).rejects.toThrow("byte limit");
+        await expectStorageFailure(
+          "/runs/finish",
+          { storeKey: key, runId: id, gen: "g1", record: record(id, thread) },
+          "byte limit",
+        );
         await runInDurableObject(stub, (_owner: RunHistoryDO, state) => {
           expect(
             state.storage.sql.exec<{ json: string }>("SELECT json FROM run_steps WHERE run_id=? AND step=1", id).one()
@@ -4342,7 +4373,7 @@ describe("closed SQLite inbox segment admission", () => {
       await runInDurableObject(stub, (_owner: RunHistoryDO, state) => {
         state.storage.sql.exec("INSERT INTO run_steps(run_id,step,json) VALUES(?,?,?)", id, keyValue, original);
       });
-      await expect(post("/runs/abandon", { storeKey: key, runId: id, gen: "g1" })).rejects.toThrow("unreadable");
+      await expectStorageFailure("/runs/abandon", { storeKey: key, runId: id, gen: "g1" }, "unreadable");
       expect((await post("/runs/inbox/read", { storeKey: key, runId: id })).data.items).toEqual([]);
       expect((await post("/runs/inbox/read", { storeKey: key, runId: id, gen: "g1", peek: true })).data).toEqual({
         ok: false,
@@ -11869,6 +11900,70 @@ describe("state-write holds across Durable Object RPC", () => {
       },
     });
   }
+  it.each(["readInbox", "append"] as const)(
+    "captures non-state RPC exceptions from %s without replay or private bodies",
+    async (method) => {
+      const key = "runs:shared-failure:" + method;
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      const routed = routedEnv(stub, (name) =>
+        name === (method === "append" ? "appendEvents" : method)
+          ? async () => {
+              const error = Object.assign(new Error("Durable Object unavailable token=fixture-credential"), {
+                remote: true,
+                retryable: true,
+                code: "E_STORAGE",
+              });
+              error.stack = "Error: storage unavailable at worker.ts:1:2";
+              throw error;
+            }
+          : undefined,
+      );
+      const notices: unknown[] = [];
+      let calls = 0;
+      const wire = new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "test-token",
+        storeKey: key,
+        onFailure: (notice) => notices.push(notice),
+        fetch: async (url, init) => {
+          calls++;
+          const payload = String(init?.body);
+          const headers = new Headers(init?.headers);
+          headers.set("content-length", String(new TextEncoder().encode(payload).length));
+          return memoryWorker.fetch(new Request(String(url), { ...init, headers }), routed);
+        },
+      });
+      const outcome =
+        method === "readInbox"
+          ? await wire.readInbox(id, 0).catch(() => "failed")
+          : await wire
+              .append(id, gen, [{ seq: 1, type: "assistant", text: "private request bytes" }])
+              .catch(() => "held");
+      expect(outcome).toBe(method === "readInbox" ? "failed" : "held");
+      expect(notices).toMatchObject([
+        {
+          runIds: [id],
+          diagnostic: {
+            operation: method === "readInbox" ? "/runs/inbox/read" : "/runs/append",
+            phase: "http",
+            httpStatus: 500,
+            server: {
+              stage: "request",
+              exception: {
+                message: "Durable Object unavailable token=«redacted»",
+                remote: true,
+                retryable: true,
+                code: "E_STORAGE",
+              },
+            },
+          },
+        },
+      ]);
+      expect(calls).toBe(1);
+      expect(JSON.stringify(notices)).not.toMatch(/fixture-credential|private request/);
+    },
+  );
+
   it.each(["before", "after"] as const)(
     "recovers a retryable RPC failure %s commit on the original run",
     async (when) => {

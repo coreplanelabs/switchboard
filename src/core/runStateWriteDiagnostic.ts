@@ -14,7 +14,7 @@ export interface StateWriteException {
 /** Operator diagnosis. None of these facts acknowledge a state mutation. */
 export type StateWriteFailure =
   | {
-      stage: "promotion-preflight" | "state-read" | "state-rpc";
+      stage: "promotion-preflight" | "state-read" | "state-rpc" | "request";
       errorKind: "syntax" | "type" | "error" | "non-error";
       exception?: StateWriteException;
       attempts?: number;
@@ -38,7 +38,7 @@ function exceptionCode(value: unknown): string | undefined {
     : undefined;
 }
 
-function exceptionOf(value: unknown, depth = 0): StateWriteException | undefined {
+export function exceptionOf(value: unknown, depth = 0): StateWriteException | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value) || depth > 2) return;
   const v = value as Record<string, unknown>;
   if (
@@ -67,7 +67,7 @@ function exceptionOf(value: unknown, depth = 0): StateWriteException | undefined
   }) as unknown as StateWriteException;
 }
 
-function captureException(error: unknown, depth = 0): StateWriteException {
+export function captureException(error: unknown, depth = 0): StateWriteException {
   const e = error && typeof error === "object" ? (error as Record<string, unknown>) : undefined;
   const code = exceptionCode(e?.code);
   return {
@@ -104,7 +104,8 @@ export function stateWriteFailureOf(value: unknown): StateWriteFailure | undefin
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const v = value as Record<string, unknown>;
   if (
-    (v.stage === "promotion-preflight" || v.stage === "state-read" || v.stage === "state-rpc") &&
+    typeof v.stage === "string" &&
+    ["promotion-preflight", "state-read", "state-rpc", "request"].includes(v.stage) &&
     Object.keys(v).every((key) => ["stage", "errorKind", "exception", "attempts"].includes(key)) &&
     typeof v.errorKind === "string" &&
     ["syntax", "type", "error", "non-error"].includes(v.errorKind)
@@ -117,7 +118,7 @@ export function stateWriteFailureOf(value: unknown): StateWriteFailure | undefin
     )
       return;
     return {
-      stage: v.stage,
+      stage: v.stage as Extract<StateWriteFailure, { errorKind: string }>["stage"],
       errorKind: v.errorKind as "syntax" | "type" | "error" | "non-error",
       ...(exception ? { exception } : {}),
       ...(v.attempts !== undefined ? { attempts: v.attempts as number } : {}),
@@ -159,7 +160,7 @@ export function stateWriteDiagnosticFromHeader(
 }
 
 export function stateWriteException(
-  stage: "promotion-preflight" | "state-read" | "state-rpc",
+  stage: "promotion-preflight" | "state-read" | "state-rpc" | "request",
   error: unknown,
   attempts?: number,
 ): StateWriteFailure {

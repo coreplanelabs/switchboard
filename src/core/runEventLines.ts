@@ -1,3 +1,4 @@
+import { storageFailureDiagnosticOf } from "./storageFailureDiagnostic.js";
 import { isPublicationSettlement } from "./publicationSettlement.js";
 import { typedExecutionDiagnosticFrom } from "../execution/typedExecutionDiagnostic.js";
 import { RUN_NOTE_KINDS, type RunEvent, type RunNoteKind } from "./runEvents.js";
@@ -37,6 +38,12 @@ export function parseRunEventLines(text: string): { events: RunEvent[]; skipped:
       continue;
     }
     if (isRunEvent(parsed)) {
+      if (parsed.type === "run_note" && Object.hasOwn(parsed, "storageFailure")) {
+        const diagnostic =
+          parsed.kind === "storage_failure" ? storageFailureDiagnosticOf(parsed.storageFailure) : undefined;
+        if (diagnostic) parsed.storageFailure = diagnostic;
+        else delete parsed.storageFailure;
+      }
       if (parsed.type === "run_note" && Object.hasOwn(parsed, "executionDiagnostic")) {
         const diagnostic =
           parsed.kind === "run_failed" ? typedExecutionDiagnosticFrom(parsed.executionDiagnostic) : undefined;

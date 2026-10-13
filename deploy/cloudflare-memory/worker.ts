@@ -1,3 +1,4 @@
+import { STORAGE_FAILURE_DIAGNOSTIC_HEADER, storageFailureNotice } from "../../src/core/storageFailureDiagnostic.ts";
 import { hasConfirmationConsent, type ConfirmationConsentSource } from "../../src/core/confirmationConsent.ts";
 import {
   prepareCancellation,
@@ -13082,21 +13083,52 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
   }
 
   let body: unknown;
-  if (url.pathname === "/runs/promotion/prepare" || url.pathname === "/runs/claim" || url.pathname === "/runs/state") {
-    const header = url.pathname === "/runs/state" ? null : request.headers.get(EXPECTED_SEED_HEADER);
-    const expectedSeed = header === null ? undefined : decodeExpectedSeedHeader(header);
+  if (url.pathname.startsWith("/runs/")) {
+    const needsSeed = url.pathname === "/runs/promotion/prepare" || url.pathname === "/runs/claim";
+    const seedHeader = needsSeed ? request.headers.get(EXPECTED_SEED_HEADER) : null;
+    const expectedSeed = seedHeader === null ? undefined : decodeExpectedSeedHeader(seedHeader);
     if (
-      header !== null &&
+      seedHeader !== null &&
       (url.pathname !== "/runs/promotion/prepare" ||
         !expectedSeed ||
         requestHeaderBytes(request.headers) > WORKER_REQUEST_HEADER_BYTES)
     )
       return json({ error: "invalid expected seed header" }, 400);
+    let originalBody: string;
     try {
-      const originalBody = await request.text();
-      return handleLedger(url.pathname, JSON.parse(originalBody), env, originalBody, expectedSeed);
+      originalBody = await request.text();
+      body = JSON.parse(originalBody);
     } catch {
       return json({ error: "body must be valid JSON" }, 400);
+    }
+    try {
+      return await (needsSeed || url.pathname === "/runs/state"
+        ? handleLedger(url.pathname, body, env, originalBody, expectedSeed)
+        : handleRuns(url.pathname, body, env));
+    } catch (error) {
+      if (error instanceof PromotionPendingError) throw error;
+      const request = await storeRequestWitness(url.pathname, originalBody);
+      const diagnostic =
+        error instanceof StateWriteBoundaryError
+          ? error.diagnostic
+          : { version: 1 as const, requestDigest: request.digest, failure: stateWriteException("request", error) };
+      // POST alone does not tell the Worker whether the client asked to read
+      // or write. Keep that client-owned classification absent here.
+      const notice = storageFailureNotice(request, undefined, "http", error, undefined, diagnostic.failure);
+      try {
+        console.log(
+          JSON.stringify({
+            event: "storage.request.failure",
+            side: "worker",
+            ...notice,
+            diagnostic: { ...notice.diagnostic, httpStatus: 500 },
+            build: BUILD,
+          }),
+        );
+      } catch {
+        /* Logging cannot replace the original storage exception. */
+      }
+      throw error instanceof StateWriteBoundaryError ? error : new StateWriteBoundaryError(diagnostic, error);
     }
   }
   try {
@@ -13120,7 +13152,6 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
     console.log(`[schedules/latest] -> ${firings.length} schedules`);
     return json({ firings });
   }
-  if (url.pathname.startsWith("/runs/")) return handleRuns(url.pathname, body, env);
   if (url.pathname.startsWith("/plane/")) return handlePlane(url.pathname, body, env);
   if (url.pathname.startsWith("/config/")) return handleConfig(url.pathname, body, env);
   if (url.pathname.startsWith("/delivery/")) return handleDelivery(url.pathname, body, env);
@@ -13206,8 +13237,11 @@ export default {
           stateWriteStage: err.diagnostic.failure.stage,
           requestDigest: err.diagnostic.requestDigest,
         });
-        const response = json({ error: "run state mutation outcome unknown" }, 500);
-        response.headers.set(STATE_WRITE_DIAGNOSTIC_HEADER, stateWriteDiagnosticHeader(err.diagnostic));
+        const response = json({ error: "storage request failed" }, 500);
+        response.headers.set(STORAGE_FAILURE_DIAGNOSTIC_HEADER, stateWriteDiagnosticHeader(err.diagnostic));
+        // Existing state clients can still read their original wire contract.
+        if (url.pathname === "/runs/state")
+          response.headers.set(STATE_WRITE_DIAGNOSTIC_HEADER, stateWriteDiagnosticHeader(err.diagnostic));
         return response;
       }
       if (err instanceof PromotionPendingError) {

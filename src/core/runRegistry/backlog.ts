@@ -67,7 +67,8 @@ export function appendToBacklog(run: BacklogState, bounds: BacklogBounds, publis
     run.backlog.length === run.headLen && isHeadMaterial(published) && run.headBytes < HEAD_BUDGET_BYTES;
   // A head event is capped at publish (docs/reference/specs/tracing.md): the cap is the
   // record's per-event cap, so what the head holds is what a record would.
-  const diagnostic = published.type === "run_note" && published.kind === "provider_failure";
+  const diagnostic =
+    published.type === "run_note" && (published.kind === "provider_failure" || published.kind === "storage_failure");
   const stamped = headEligible || diagnostic ? capEvent(published, MAX_EVENT_BYTES).event : published;
   const bytes = utf8ByteLength(serializedOnce(stamped)); // memoized: the SSE frame reuses this string
   run.backlog.push(stamped);

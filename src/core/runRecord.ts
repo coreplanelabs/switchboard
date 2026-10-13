@@ -1704,7 +1704,7 @@ export function isRunWorkEvidence(value: {
 /** The JSON size of one event, after which its `text`/`summary` is truncated. */
 export const MAX_EVENT_BYTES = 64 * KIB;
 
-/** The newest provider notes retain at most one event budget of diagnostics,
+/** The newest provider and storage notes retain one shared event budget of diagnostics,
  * independently of the setup head. Live and stored trimming share this rule. */
 export function protectedProviderFailureNoteIndices(
   events: readonly RunEvent[],
@@ -1715,7 +1715,7 @@ export function protectedProviderFailureNoteIndices(
   let remaining = Math.min(MAX_EVENT_BYTES, Math.max(0, budget));
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i];
-    if (event.type !== "run_note" || event.kind !== "provider_failure") continue;
+    if (event.type !== "run_note" || (event.kind !== "provider_failure" && event.kind !== "storage_failure")) continue;
     const bytes = sizes[i] ?? utf8ByteLength(JSON.stringify(event));
     if (bytes > remaining) break;
     remaining -= bytes;
@@ -1770,7 +1770,7 @@ export function capEvent(event: RunEvent, maxBytes: number): { event: RunEvent; 
  * dropped from the MIDDLE: the kept set is a head and a tail grown alternately
  * (head first) from the two ends until the next event would not fit, so the
  * request/context/first tool steps and the terminal notes survive and the
- * oldest middle steps go. Recent provider diagnostic notes get a bounded
+ * oldest middle steps go. Recent provider and storage diagnostic notes get a bounded
  * reservation before ordinary head/tail selection. `truncated` is set when any event was dropped,
  * `eventCount` is left as published, `storedEventCount` is the kept length.
  * Never mutates `record`.

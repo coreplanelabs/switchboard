@@ -40,6 +40,144 @@ function response(mode: string): Response {
 }
 
 describe("original uncertain write diagnostics", () => {
+  it("keeps the source-save owner visible when the session write fails", async () => {
+    const notices: unknown[] = [];
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://state.invalid",
+      token: "fixture",
+      storeKey: "fixture",
+      onFailure: (notice) => notices.push(notice),
+      fetch: async () => new Response("private", { status: 503 }),
+    });
+    expect(
+      await wire
+        .writeSessionSources("slack:C1:1:general", id, gen, { version: 1, status: "unknown" })
+        .catch(() => "held"),
+    ).toBe("held");
+    expect(notices).toMatchObject([
+      { runIds: [id], diagnostic: { operation: "/runs/session/write", ownerGen: gen, phase: "http", httpStatus: 503 } },
+    ]);
+  });
+  it("reports a caught checkpoint exception with its original request and redacted remote cause", async () => {
+    const notices: unknown[] = [];
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://state.invalid",
+      token: "fixture",
+      storeKey: "fixture",
+      onFailure: (notice) => notices.push(notice),
+      fetch: async (_url, init) => {
+        const request = await storeRequestWitness("/runs/state", String(init?.body));
+        const error = Object.assign(new Error("Durable Object reset token=fixture-credential"), {
+          remote: true,
+          retryable: true,
+          cause: Object.assign(new Error("storage unavailable"), { code: "E_STORAGE" }),
+        });
+        error.stack = "Error: reset at setState (worker.ts:1:2)";
+        error.cause.stack = "Error: storage unavailable";
+        return new Response("private response body", {
+          status: 500,
+          headers: {
+            [STATE_WRITE_DIAGNOSTIC_HEADER]: stateWriteDiagnosticHeader({
+              version: 1,
+              requestDigest: request.digest,
+              failure: stateWriteException("state-rpc", error, 3),
+            }),
+            "cf-ray": "a49d0ab74f2e09ac-DFW",
+          },
+        });
+      },
+    });
+    const result = await wire.setState(id, gen, { notepad: "private request bytes" }).catch(() => "held");
+    expect(result).toBe("held");
+    expect(notices).toMatchObject([
+      {
+        runIds: [id],
+        diagnostic: {
+          version: 1,
+          operation: "/runs/state",
+          ownerGen: gen,
+          kind: "write",
+          phase: "http",
+          httpStatus: 500,
+          rayId: "a49d0ab74f2e09ac-DFW",
+          server: {
+            stage: "state-rpc",
+            attempts: 3,
+            exception: {
+              message: "Durable Object reset token=«redacted»",
+              remote: true,
+              retryable: true,
+              cause: { message: "storage unavailable", code: "E_STORAGE" },
+            },
+          },
+        },
+      },
+    ]);
+    expect(JSON.stringify(notices)).not.toMatch(/fixture-credential|private request|private response/);
+  });
+
+  it("captures read transport failures and malformed write acknowledgments at the shared boundary", async () => {
+    const notices: unknown[] = [];
+    let calls = 0;
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://state.invalid",
+      token: "fixture",
+      storeKey: "fixture",
+      onFailure: (notice) => notices.push(notice),
+      fetch: async () => {
+        if (++calls === 1)
+          throw Object.assign(new Error("connection reset token=fixture-credential"), { code: "ECONNRESET" });
+        return Response.json({ unexpected: "private acknowledgment" });
+      },
+    });
+    expect(await wire.readInbox(id, 0).catch(() => "failed")).toBe("failed");
+    expect(await wire.setState(id, gen, {}).catch(() => "held")).toBe("held");
+    expect(notices).toMatchObject([
+      {
+        runIds: [id],
+        diagnostic: {
+          operation: "/runs/inbox/read",
+          kind: "read",
+          phase: "transport",
+          exception: { message: "connection reset token=«redacted»", code: "ECONNRESET" },
+        },
+      },
+      {
+        runIds: [id],
+        diagnostic: { operation: "/runs/state", kind: "write", phase: "acknowledgement", httpStatus: 200 },
+      },
+    ]);
+    expect(calls).toBe(2);
+    expect(JSON.stringify(notices)).not.toMatch(/fixture-credential|private acknowledgment/);
+  });
+
+  it("does not turn failed diagnostic appends or a throwing telemetry sink into another write", async () => {
+    const notices: unknown[] = [];
+    let calls = 0;
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://state.invalid",
+      token: "fixture",
+      storeKey: "fixture",
+      onFailure: (notice) => {
+        notices.push(notice);
+        throw new Error("broken telemetry sink");
+      },
+      fetch: async () => {
+        calls++;
+        return new Response("private", { status: 503 });
+      },
+    });
+    expect(await wire.setState(id, gen, {}).catch(() => "held")).toBe("held");
+    expect(
+      await wire
+        .append(id, gen, [{ seq: 1, type: "run_note", kind: "storage_failure", summary: "failure" }])
+        .catch(() => "held"),
+    ).toBe("held");
+    expect(notices).toMatchObject([{ runIds: [id], diagnostic: { phase: "http", httpStatus: 503 } }]);
+    expect(notices).toHaveLength(1);
+    expect(calls).toBe(2);
+  });
+
   it("mirrors the digest-bound remote exception and Ray ID into operator telemetry", async () => {
     const logs: string[] = [];
     const log = vi.spyOn(console, "warn").mockImplementation((line) => logs.push(String(line)));
@@ -88,23 +226,29 @@ describe("original uncertain write diagnostics", () => {
     });
     expect(logs.map((line) => JSON.parse(line))).toEqual([
       {
-        event: "state.write.failure",
-        message: "State write request failed",
-        runId: id,
-        ownerGen: gen,
-        httpStatus: 500,
-        requestDigest: (failure as UncertainStoreError).request.digest,
-        rayId: "a49d0ab74f2e09ac-DFW",
-        failure: {
-          stage: "state-rpc",
-          errorKind: "error",
-          attempts: 3,
-          exception: {
-            name: "Error",
-            message: "Durable Object reset token=«redacted»",
-            remote: true,
-            retryable: true,
-            stack: "Error: Durable Object reset token=«redacted»\n at setState (worker.ts:1:2)",
+        event: "storage.request.failure",
+        side: "client",
+        runIds: [id],
+        diagnostic: {
+          version: 1,
+          operation: "/runs/state",
+          kind: "write",
+          phase: "http",
+          ownerGen: gen,
+          httpStatus: 500,
+          requestDigest: (failure as UncertainStoreError).request.digest,
+          rayId: "a49d0ab74f2e09ac-DFW",
+          server: {
+            stage: "state-rpc",
+            errorKind: "error",
+            attempts: 3,
+            exception: {
+              name: "Error",
+              message: "Durable Object reset token=«redacted»",
+              remote: true,
+              retryable: true,
+              stack: "Error: Durable Object reset token=«redacted»\n at setState (worker.ts:1:2)",
+            },
           },
         },
       },
