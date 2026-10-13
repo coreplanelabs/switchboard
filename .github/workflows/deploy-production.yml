@@ -149,6 +149,12 @@ on:
       SMOKE_INGRESS_TOKEN:
         required: false
         description: "a dedicated disposable-scope bearer: HTTP dispatch/agent grants and MCP runs:read; never all or merge/deploy grants"
+      SMOKE_ACCESS_CLIENT_ID:
+        required: false
+        description: "optional Access Service Auth client ID for the canonical MCP reader; requires SMOKE_ACCESS_CLIENT_SECRET"
+      SMOKE_ACCESS_CLIENT_SECRET:
+        required: false
+        description: "optional paired Access Service Auth secret; stays in CI, never in an agent request or receipt"
       DOOR_SMOKE_OPENAI_API_KEY:
         required: false
         description: the OpenAI key for the candidate Door preflight, used before any production image copy or deploy
@@ -221,6 +227,8 @@ jobs:
       MEMORY_TOKEN: ${{ secrets.MEMORY_TOKEN }}
       SANDBOX_TOKEN: ${{ secrets.SANDBOX_TOKEN }}
       SMOKE_INGRESS_TOKEN: ${{ secrets.SMOKE_INGRESS_TOKEN }}
+      SMOKE_ACCESS_CLIENT_ID: ${{ secrets.SMOKE_ACCESS_CLIENT_ID }}
+      SMOKE_ACCESS_CLIENT_SECRET: ${{ secrets.SMOKE_ACCESS_CLIENT_SECRET }}
       SMOKE_INGRESS_ORIGIN: ${{ vars.SMOKE_INGRESS_ORIGIN }}
       SMOKE_INGRESS_CONFIG: ${{ vars.SMOKE_INGRESS_CONFIG }}
       SMOKE_REQUIRE_SLACK_CONNECTION: ${{ vars.SMOKE_REQUIRE_SLACK_CONNECTION }}
@@ -347,6 +355,8 @@ jobs:
           if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_TOKEN" ]; then echo "::error::SMOKE_INGRESS_TOKEN is not set — add the dedicated ingress bearer before deploying a release"; exit 1; fi
           if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_ORIGIN" ]; then echo "::error::SMOKE_INGRESS_ORIGIN is not set — configure the trusted production bot origin before deploying a release"; exit 1; fi
           if [ "$SMOKE" = "true" ] && [ -z "$SMOKE_INGRESS_CONFIG" ]; then echo "::error::SMOKE_INGRESS_CONFIG is not set — configure a disposable fixture before enabling acceptance"; exit 1; fi
+          if [ "$SMOKE" = "true" ] && [ -n "$SMOKE_ACCESS_CLIENT_ID" ] && [ -z "$SMOKE_ACCESS_CLIENT_SECRET" ]; then echo "::error::SMOKE_ACCESS_CLIENT_SECRET is not set"; exit 1; fi
+          if [ "$SMOKE" = "true" ] && [ -n "$SMOKE_ACCESS_CLIENT_SECRET" ] && [ -z "$SMOKE_ACCESS_CLIENT_ID" ]; then echo "::error::SMOKE_ACCESS_CLIENT_ID is not set"; exit 1; fi
           if [ "$SMOKE" = "true" ] && [ "$CLI_MODE" = "package" ]; then echo "::error::required capability smoke needs the checked-out runner; package mode cannot silently skip it"; exit 1; fi
       - name: the selection
         id: selection

@@ -45,6 +45,10 @@ try {
     origin: process.env.SMOKE_INGRESS_ORIGIN ?? "",
     healthUrl,
     token: process.env.SMOKE_INGRESS_TOKEN ?? "",
+    access: {
+      clientId: process.env.SMOKE_ACCESS_CLIENT_ID,
+      clientSecret: process.env.SMOKE_ACCESS_CLIENT_SECRET,
+    },
     config,
   });
   const slackConfig = process.env.SMOKE_SLACK_CONFIG

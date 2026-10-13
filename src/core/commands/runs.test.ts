@@ -311,6 +311,81 @@ describe("runs.* registrations", () => {
 });
 
 describe("runs.list", () => {
+  it("proves exact HTTP read scope from the existing policy even when history is empty", async () => {
+    const { deps } = await setup();
+    const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
+    registerRunsCommands(registry);
+    for (const [channels, allowed] of [
+      [set("mcp:smoke"), false],
+      [set("http:smoke"), true],
+      [set(), false],
+    ] as const) {
+      const caller: Caller = {
+        kind: "mcp",
+        id: "mcp:scope-reader",
+        actor: actor("service", "mcp:scope-reader", set("runs:read"), channels),
+      };
+      const out = value(
+        await registry.invoke(
+          "runs.list",
+          {
+            options: {
+              channel: "http:smoke",
+              status: "all",
+              limit: 1,
+              readUser: "http:smoke",
+              readRepo: "acme/smoke",
+            },
+          },
+          caller,
+          deps,
+        ),
+      );
+      expect(out).toEqual({
+        runs: [],
+        readScope: { channelId: "http:smoke", userId: "http:smoke", repo: "acme/smoke", allowed },
+      });
+    }
+  });
+
+  it("refuses incomplete or unsupported HTTP scope requests", async () => {
+    const { registry, deps } = await setup();
+    for (const scope of [
+      { channel: "http:smoke", readUser: "http:smoke" },
+      { channel: "http:smoke", readRepo: "acme/smoke" },
+      { channel: "slack:C_PUB", readUser: "http:smoke", readRepo: "acme/smoke" },
+      { channel: "http:smoke", readUser: "slack:UALICE", readRepo: "acme/smoke" },
+      { channel: "http:smoke", readUser: "http:smoke", readRepo: "not-a-repo" },
+    ]) {
+      const out = await registry.invoke("runs.list", { options: { status: "all", ...scope } }, reader, deps);
+      expect(out).toMatchObject({ ok: false, error: "invalid_input" });
+    }
+  });
+
+  it("a revoked command grant cannot obtain a scope proof", async () => {
+    const { deps } = await setup();
+    const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
+    registerRunsCommands(registry);
+    const caller: Caller = {
+      kind: "mcp",
+      id: "mcp:scope-reader",
+      actor: actor("service", "mcp:scope-reader", set(), set("http:smoke")),
+    };
+    expect(
+      await registry.invoke(
+        "runs.list",
+        {
+          options: {
+            channel: "http:smoke",
+            readUser: "http:smoke",
+            readRepo: "acme/smoke",
+          },
+        },
+        caller,
+        deps,
+      ),
+    ).toMatchObject({ ok: false, error: "unauthorized", status: 403 });
+  });
   it("returns metadata only: no message text, no token", async () => {
     const { reg, registry, deps } = await setup();
     const { id } = reg.create("coding · acme/live", {

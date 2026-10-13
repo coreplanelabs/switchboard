@@ -11,6 +11,7 @@ import { answerOutcomeOf } from "../core/answerOutcome.js";
 import { redactSecrets, stripAnsi } from "../core/redact.js";
 import { unwrapUntrusted } from "../core/untrusted.js";
 import { StreamableHttpMcpClient } from "../mcp/client.js";
+import { McpError } from "../mcp/types.js";
 import { assertSmokeOriginMatchesPlan } from "./ingressSmoke.js";
 import { systemClock } from "../core/trace/clock.js";
 import { parseModelRef } from "../core/provider.js";
@@ -169,6 +170,7 @@ export interface SmokeScenario {
 }
 export interface SmokeTransport {
   health(): Promise<unknown>;
+  readerReady?(): Promise<void>;
   request(
     scenario: SmokeScenario,
     thread: string,
@@ -203,8 +205,20 @@ interface ScenarioReceipt {
   artifact?: { repo: string; number: number; head: string; verdict?: "approve" | "request_changes" };
   evidence?: { identityVerified: boolean; record: unknown; unverifiedObservation?: unknown };
   failedChecks?: string[];
-  observationError?: { code: string; fields?: Array<{ path: string; code: string }> };
+  observationError?: SmokeObservationError;
   intake?: SmokeIntakeReceipt;
+}
+
+interface SmokeObservationError {
+  code: string;
+  fields?: Array<{ path: string; code: string }>;
+  http?: { status: number; authChallenge: boolean };
+}
+
+class SmokeReaderError extends Error {
+  constructor(readonly observation: SmokeObservationError) {
+    super(observation.code);
+  }
 }
 
 /** Intake diagnostics are bounded after redaction; HTML and headers are never retained. */
@@ -434,6 +448,9 @@ export async function runAgentSmoke(input: {
         await save();
         break;
       }
+      row.reason = "reader_unproven";
+      await save();
+      await input.transport.readerReady?.();
       row.reason = "request_ack_unknown";
       await save();
       const response = z
@@ -686,15 +703,17 @@ export async function runAgentSmoke(input: {
         "run_deadline_exceeded",
       ];
       row.observationError =
-        error instanceof z.ZodError
-          ? {
-              code: "record_invalid",
-              fields: error.issues.map((issue) => ({ path: issue.path.join("."), code: issue.code })),
-            }
-          : {
-              code:
-                error instanceof Error && knownErrors.includes(error.message) ? error.message : "observation_failed",
-            };
+        error instanceof SmokeReaderError
+          ? error.observation
+          : error instanceof z.ZodError
+            ? {
+                code: "record_invalid",
+                fields: error.issues.map((issue) => ({ path: issue.path.join("."), code: issue.code })),
+              }
+            : {
+                code:
+                  error instanceof Error && knownErrors.includes(error.message) ? error.message : "observation_failed",
+              };
       break;
     }
   }
@@ -713,18 +732,63 @@ export function agentSmokeTransport(input: {
   healthUrl: string;
   token: string;
   config: unknown;
+  access?: { clientId?: string; clientSecret?: string };
   fetch?: typeof globalThis.fetch;
 }): SmokeTransport {
   assertSmokeOriginMatchesPlan(input.origin, input.healthUrl);
   if (!input.token) throw new Error("SMOKE_INGRESS_TOKEN is not set");
+  const clientId = input.access?.clientId;
+  const clientSecret = input.access?.clientSecret;
+  if (clientId?.trim() && !clientSecret?.trim()) throw new Error("SMOKE_ACCESS_CLIENT_SECRET is not set");
+  if (clientSecret?.trim() && !clientId?.trim()) throw new Error("SMOKE_ACCESS_CLIENT_ID is not set");
   const config = parseSmokeConfig(input.config);
   const fetch = input.fetch ?? globalThis.fetch;
   const boundedFetch: typeof fetch = (url, init) => fetch(url, { ...init, redirect: "error" });
+  const mcpUrl = new URL("/mcp", input.origin).href;
+  let http: SmokeObservationError["http"];
   const mcp = new StreamableHttpMcpClient({
-    url: new URL("/mcp", input.origin).href,
-    headers: { authorization: `Bearer ${input.token}` },
-    fetch: boundedFetch,
+    url: mcpUrl,
+    headers: {
+      authorization: `Bearer ${input.token}`,
+      ...(clientId?.trim() && clientSecret?.trim()
+        ? { "cf-access-client-id": clientId, "cf-access-client-secret": clientSecret }
+        : {}),
+    },
+    fetch: async (url, init) => {
+      if (url !== mcpUrl) throw new Error("mcp_destination_refused");
+      const response = await boundedFetch(url, init);
+      // Only closed facts are retained. Bodies, challenge values and headers
+      // can contain credentials or untrusted prose and never enter the receipt.
+      http = { status: response.status, authChallenge: response.headers.has("www-authenticate") };
+      return response;
+    },
   });
+  const readerCall = async (name: string, args: Record<string, unknown>, signal: AbortSignal) => {
+    http = undefined;
+    try {
+      return await mcp.callTool(name, args, { signal });
+    } catch (error) {
+      // The asynchronous fetch callback updates this closure after the reset.
+      const observedHttp = http as SmokeObservationError["http"];
+      const code =
+        observedHttp?.status === 401
+          ? "mcp_auth_required"
+          : observedHttp?.status === 403
+            ? "mcp_access_denied"
+            : observedHttp && observedHttp.status >= 400
+              ? "mcp_http_failed"
+              : error instanceof McpError && error.code === -32001
+                ? "mcp_read_unauthorized"
+                : error instanceof McpError && typeof error.code === "number"
+                  ? "mcp_rpc_failed"
+                  : error instanceof McpError && error.code === "timeout"
+                    ? "mcp_timeout"
+                    : error instanceof McpError && error.code === "protocol"
+                      ? "mcp_protocol_mismatch"
+                      : "mcp_transport_failed";
+      throw new SmokeReaderError({ code, ...(observedHttp ? { http: observedHttp } : {}) });
+    }
+  };
   const deadlines = new Map<string, number>();
   return {
     async health() {
@@ -734,6 +798,60 @@ export function agentSmokeTransport(input: {
         .object({ ok: z.literal(true), build: buildSchema, slack: z.object({ connected: z.boolean() }).optional() })
         .parse(await response.json());
       return { ...body.build, ...(body.slack ? { slackConnected: body.slack.connected } : {}) };
+    },
+    async readerReady() {
+      const result = await readerCall(
+        "runs_list",
+        {
+          channel: `http:${config.channel}`,
+          status: "all",
+          limit: 1,
+          readUser: `http:${config.subject}`,
+          readRepo: config.repo,
+        },
+        AbortSignal.timeout(minutesToMs(0.5)),
+      );
+      if (result.isError) throw new SmokeReaderError({ code: "mcp_read_refused", ...(http ? { http } : {}) });
+      const block = result.content[0];
+      const prefix = "runs.list: ok\n";
+      try {
+        if (
+          result.content.length !== 1 ||
+          block?.type !== "text" ||
+          typeof block.text !== "string" ||
+          !block.text.startsWith(prefix)
+        )
+          throw new Error("invalid reader result");
+        const page = z
+          .object({
+            storeUnavailable: z.boolean().optional(),
+            ledgerUnavailable: z.boolean().optional(),
+            readScope: z.unknown().optional(),
+            runs: z
+              .array(
+                z.object({
+                  channelId: z.literal(`http:${config.channel}`),
+                  userId: z.literal(`http:${config.subject}`),
+                }),
+              )
+              .max(1),
+          })
+          .parse(JSON.parse(block.text.slice(prefix.length)));
+        if (page.storeUnavailable || page.ledgerUnavailable)
+          throw new SmokeReaderError({ code: "mcp_reader_unavailable", ...(http ? { http } : {}) });
+        const scope = z
+          .object({
+            channelId: z.literal(`http:${config.channel}`),
+            userId: z.literal(`http:${config.subject}`),
+            repo: z.literal(config.repo),
+            allowed: z.boolean(),
+          })
+          .parse(page.readScope);
+        if (!scope.allowed) throw new SmokeReaderError({ code: "mcp_read_scope_denied", ...(http ? { http } : {}) });
+      } catch (error) {
+        if (error instanceof SmokeReaderError) throw error;
+        throw new SmokeReaderError({ code: "mcp_protocol_mismatch", ...(http ? { http } : {}) });
+      }
     },
     async request(scenario, thread, onIntake) {
       const deadline = systemClock() + minutesToMs(scenario.minutes + 1);
@@ -787,7 +905,7 @@ export function agentSmokeTransport(input: {
       if (deadline === undefined) throw new Error("admission_unproven");
       while (systemClock() < deadline) {
         const signal = AbortSignal.timeout(deadline - systemClock());
-        const result = await mcp.callTool("runs_get", { id, include: "messages" }, { signal });
+        const result = await readerCall("runs_get", { id, include: "messages" }, signal);
         if (result.isError || result.content.length !== 1) throw new Error("record_unavailable");
         const block = result.content[0];
         const prefix = "runs.get: ok\n";
