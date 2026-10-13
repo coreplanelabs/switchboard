@@ -1,11 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WorkerRunLedger } from "../runLedgerWorker.js";
 import { UncertainStoreError, uncertainStoreSummary } from "../storeFailure.js";
 import { sourceHash } from "../references/receipts.js";
 import { createLedgerWriteThrough } from "./writeThrough.js";
 import { InMemoryRunLedger } from "./inMemory.js";
 import { InMemoryRunStore } from "../runStore.js";
-import { STATE_WRITE_DIAGNOSTIC_HEADER } from "../runStateWriteDiagnostic.js";
+import {
+  STATE_WRITE_DIAGNOSTIC_HEADER,
+  stateWriteException,
+  stateWriteDiagnosticHeader,
+} from "../runStateWriteDiagnostic.js";
 import { storeRequestWitness } from "../storeResponse.js";
 
 const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
@@ -36,6 +40,77 @@ function response(mode: string): Response {
 }
 
 describe("original uncertain write diagnostics", () => {
+  it("mirrors the digest-bound remote exception and Ray ID into operator telemetry", async () => {
+    const logs: string[] = [];
+    const log = vi.spyOn(console, "warn").mockImplementation((line) => logs.push(String(line)));
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://state.invalid",
+      token: "fixture",
+      storeKey: "fixture",
+      fetch: async (_url, init) => {
+        const request = await storeRequestWitness("/runs/state", String(init?.body));
+        const error = Object.assign(new Error("Durable Object reset token=fixture-credential"), {
+          retryable: true,
+          remote: true,
+        });
+        error.stack = "Error: Durable Object reset token=fixture-credential\n at setState (worker.ts:1:2)";
+        const response = new Response("private response body", {
+          status: 500,
+          headers: {
+            [STATE_WRITE_DIAGNOSTIC_HEADER]: stateWriteDiagnosticHeader({
+              version: 1,
+              requestDigest: request.digest,
+              failure: stateWriteException("state-rpc", error, 3),
+            }),
+            "cf-ray": "a49d0ab74f2e09ac-DFW",
+          },
+        });
+        response.text = async () => {
+          throw new Error("error bodies must not be read");
+        };
+        return response;
+      },
+    });
+    let failure: unknown;
+    try {
+      failure = await wire.setState(id, gen, { notepad: "private request bytes" }).catch((error) => error);
+    } finally {
+      log.mockRestore();
+    }
+    expect((failure as UncertainStoreError).diagnosis).toMatchObject({
+      kind: "http",
+      status: 500,
+      stateWrite: {
+        stage: "state-rpc",
+        attempts: 3,
+        exception: { message: "Durable Object reset token=«redacted»", remote: true, retryable: true },
+      },
+    });
+    expect(logs.map((line) => JSON.parse(line))).toEqual([
+      {
+        event: "state.write.failure",
+        message: "State write request failed",
+        runId: id,
+        ownerGen: gen,
+        httpStatus: 500,
+        requestDigest: (failure as UncertainStoreError).request.digest,
+        rayId: "a49d0ab74f2e09ac-DFW",
+        failure: {
+          stage: "state-rpc",
+          errorKind: "error",
+          attempts: 3,
+          exception: {
+            name: "Error",
+            message: "Durable Object reset token=«redacted»",
+            remote: true,
+            retryable: true,
+            stack: "Error: Durable Object reset token=«redacted»\n at setState (worker.ts:1:2)",
+          },
+        },
+      },
+    ]);
+    expect(logs.join("\n")).not.toMatch(/fixture-credential|private request|private response/);
+  });
   it("keeps missing, malformed, truncated, foreign and non-state 5xx diagnostics generic and unknown", async () => {
     for (const mode of ["missing", "malformed", "truncated", "foreign", "extra", "step"]) {
       let calls = 0;

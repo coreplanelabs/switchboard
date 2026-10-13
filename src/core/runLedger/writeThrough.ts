@@ -1,4 +1,5 @@
 import { buildExpectedSeedManifest } from "./seedManifest.js";
+import { STORE_RETRY_BACKOFFS_MS } from "../budgets.js";
 import { PromotionPendingError, PromotionIdentityRefusal } from "./promotion.js";
 import { sourceSeedReferenceMatches, type SourceSeedReference } from "./seedVerification.js";
 import { UNKNOWN_CONTEXT_DEPENDENCIES } from "../references/contextDependencies.js";
@@ -783,7 +784,7 @@ export class NullLedgerRun implements LedgerRun {
 }
 
 /** Backoff before a retry: the claim gets both, a step or state write the first. */
-const RETRY_MS: readonly number[] = [200, 800];
+const RETRY_MS: readonly number[] = STORE_RETRY_BACKOFFS_MS;
 
 /** How many finishes landed in this process the write-through remembers
  *  (item 54; the `landed` set): the newest ones, oldest out. A row naming an

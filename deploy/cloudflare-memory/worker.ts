@@ -16,6 +16,7 @@ import {
   StateWriteBoundaryError,
   stateWriteException,
   stateWriteReplyShape,
+  stateWriteDiagnosticHeader,
 } from "../../src/core/runStateWriteDiagnostic.ts";
 import { isConfigPublicationSnapshotKey, type ConfigSourcePrecondition } from "../../src/configPublicationProtocol.js";
 import { DO_MAX_BOUND_PARAMETERS, RUN_EVENT_INSERT_BATCH } from "../../src/memorySqlLimits.js";
@@ -324,6 +325,7 @@ import {
   minutesToMs,
   PLANE,
   RANGE_PIN_RPC_SLOW_MS,
+  STORE_RETRY_BACKOFFS_MS,
 } from "../../src/core/budgets.ts";
 import { PROVIDER_FAILURE_CAUSES, type ProviderFailureCause } from "../../src/core/provider.ts";
 import { holdBackgroundTask } from "./backgroundTasks.ts";
@@ -2095,6 +2097,8 @@ type LiveRow = {
   tools_json: string;
   state_json: string;
 };
+
+type StateWriteGuard = { ok: true; before: string } | { ok: false; reason: "fenced" | "unknown-run" };
 
 function rowToLive(r: LiveRow): LiveRunRow {
   const state = JSON.parse(r.state_json) as RunState;
@@ -7002,7 +7006,15 @@ export class RunHistoryDO extends DurableObject<Env> {
     return out;
   }
 
-  async setState(runId: string, gen: string, state: RunState): Promise<FenceResult | PromotionHold> {
+  stateWriteGuard(runId: string, gen: string): StateWriteGuard {
+    const row = this.liveRow(runId);
+    const fence = checkFence(row, gen);
+    if (!fence.ok) return fence;
+    if (!row) return { ok: false, reason: "unknown-run" };
+    return { ok: true, before: canonicalSeedJson(row.state) };
+  }
+
+  async setState(runId: string, gen: string, state: RunState, before?: string): Promise<FenceResult | PromotionHold> {
     // A known precondition crosses RPC as data. A remote exception cannot keep
     // the custom class that the HTTP handler would otherwise need to catch.
     const pending = (): PromotionHold => ({ kind: "held", reason: "promotion_pending", runId });
@@ -7028,6 +7040,13 @@ export class RunHistoryDO extends DurableObject<Env> {
       const preserved = preserveCheckpointState(row.state, state, mintSeed);
       if (!preserved || !workEvidenceBelongsToRun(preserved, { id: row.runId, ...row.meta }))
         return { ok: false, reason: "fenced" };
+      // A retry may follow a committed write with a lost RPC reply. An exact
+      // current snapshot needs no mutation; a moved prior state is never reset.
+      if (before !== undefined) {
+        const current = canonicalSeedJson(row.state);
+        if (current === canonicalSeedJson(preserved)) return { ok: true };
+        if (current !== before) return { ok: false, reason: "fenced" };
+      }
       const receipt = preserved.unitSeedReceipt as UnitSeedReceipt | undefined;
       if (mintSeed && receipt) {
         const checkpoint = row.state.contextCheckpoint as { key?: string; through?: number } | undefined;
@@ -7056,10 +7075,18 @@ export class RunHistoryDO extends DurableObject<Env> {
           return { ok: false, reason: "fenced" };
       }
       let promotionRefused = false;
+      let stateMoved = false;
       this.ctx.storage.transactionSync(() => {
         if (this.promotionHeld(runId, gen)) {
           promotionRefused = true;
           return;
+        }
+        if (before !== undefined) {
+          const current = this.liveRow(runId);
+          if (!checkFence(current, gen).ok || canonicalSeedJson(current?.state) !== canonicalSeedJson(row.state)) {
+            stateMoved = true;
+            return;
+          }
         }
         if (isContextDependencies(preserved.contextDependencies))
           this.pinContext(runId, undefined, preserved.contextDependencies);
@@ -7067,6 +7094,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(preserved), runId);
       });
       if (promotionRefused) return pending();
+      if (stateMoved) return { ok: false, reason: "fenced" };
       return { ok: true };
     });
   }
@@ -12212,15 +12240,66 @@ async function handleLedger(
     pathname === "/runs/state" && originalBody !== undefined
       ? await storeRequestWitness(pathname, originalBody)
       : undefined;
+  const stateRpc = async <T>(
+    stage: "promotion-preflight" | "state-read" | "state-rpc",
+    call: () => Promise<T>,
+  ): Promise<T> => {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const result = await call();
+        if (stateWitness && attempt > 1)
+          console.log(
+            JSON.stringify({
+              event: "state.write.recovered",
+              message: "State write RPC recovered",
+              runId: b.runId,
+              ownerGen: b.gen,
+              requestDigest: stateWitness.digest,
+              stage,
+              attempts: attempt,
+              build: BUILD,
+            }),
+          );
+        return result;
+      } catch (error) {
+        if (!stateWitness) throw error;
+        const failure = stateWriteException(stage, error, attempt);
+        const exception = "exception" in failure ? failure.exception : undefined;
+        const retry =
+          exception?.retryable === true &&
+          exception.overloaded !== true &&
+          "errorKind" in failure &&
+          failure.errorKind === "error" &&
+          attempt <= STORE_RETRY_BACKOFFS_MS.length;
+        console.log(
+          JSON.stringify({
+            event: "state.write.failure",
+            message: "State write RPC failed",
+            runId: b.runId,
+            ownerGen: b.gen,
+            requestDigest: stateWitness.digest,
+            build: BUILD,
+            failure,
+            retry,
+          }),
+        );
+        if (!retry)
+          throw new StateWriteBoundaryError({ version: 1, requestDigest: stateWitness.digest, failure }, error);
+        await new Promise((resolve) => setTimeout(resolve, STORE_RETRY_BACKOFFS_MS[attempt - 1]));
+      }
+    }
+  };
   if (["/runs/state", "/runs/live-state", "/runs/finishing", "/runs/finish", "/runs/abandon"].includes(pathname)) {
     const id = parseRunId(b.runId),
       owner = gen(b.gen);
     if (id.ok && owner.ok) {
       let pending: PromotionHold | null;
       try {
-        pending = await stub.promotionHold(id.value, owner.value);
+        pending = await stateRpc("promotion-preflight", () =>
+          env.RUNS.get(env.RUNS.idFromName(key.value)).promotionHold(id.value, owner.value),
+        );
       } catch (error) {
-        if (!stateWitness) throw error;
+        if (!stateWitness || error instanceof StateWriteBoundaryError) throw error;
         throw new StateWriteBoundaryError(
           {
             version: 1,
@@ -12750,11 +12829,42 @@ async function handleLedger(
   }
   if (pathname === "/runs/state") {
     if (typeof b.state !== "object" || b.state === null) return json({ error: "state must be an object" }, 400);
+    const guardRefused = (result: Extract<StateWriteGuard, { ok: false }>, stage: "state-read" | "state-rpc") => {
+      console.log(
+        JSON.stringify({
+          event: "state.write.guard_refused",
+          message: "State write guard refused",
+          runId: runId.value,
+          ownerGen: g.value,
+          requestDigest: stateWitness?.digest,
+          reason: result.reason,
+          stage,
+          build: BUILD,
+        }),
+      );
+      return fenced(result);
+    };
     let result: FenceResult | PromotionHold;
     try {
-      result = await stub.setState(runId.value, g.value, b.state as RunState);
+      const baseline = await stateRpc<StateWriteGuard>(
+        "state-read",
+        async () =>
+          (await env.RUNS.get(env.RUNS.idFromName(key.value)).stateWriteGuard(runId.value, g.value)) as StateWriteGuard,
+      );
+      if (!baseline.ok) return guardRefused(baseline, "state-read");
+      const before = baseline.before;
+      result = await stateRpc<FenceResult | PromotionHold>(
+        "state-rpc",
+        async () =>
+          (await env.RUNS.get(env.RUNS.idFromName(key.value)).setState(
+            runId.value,
+            g.value,
+            b.state as RunState,
+            before,
+          )) as FenceResult | PromotionHold,
+      );
     } catch (error) {
-      if (!stateWitness) throw error;
+      if (!stateWitness || error instanceof StateWriteBoundaryError) throw error;
       throw new StateWriteBoundaryError(
         {
           version: 1,
@@ -12780,7 +12890,7 @@ async function handleLedger(
             (result.reason === "fenced" || result.reason === "unknown-run") &&
             Object.keys(result).every((key) => ["ok", "reason"].includes(key))))
       )
-        return fenced(result);
+        return result.ok ? fenced(result) : guardRefused(result, "state-rpc");
     }
     const invalid = new Error("run state RPC returned an invalid acknowledgement");
     if (!stateWitness) throw invalid;
@@ -13097,7 +13207,7 @@ export default {
           requestDigest: err.diagnostic.requestDigest,
         });
         const response = json({ error: "run state mutation outcome unknown" }, 500);
-        response.headers.set(STATE_WRITE_DIAGNOSTIC_HEADER, JSON.stringify(err.diagnostic));
+        response.headers.set(STATE_WRITE_DIAGNOSTIC_HEADER, stateWriteDiagnosticHeader(err.diagnostic));
         return response;
       }
       if (err instanceof PromotionPendingError) {

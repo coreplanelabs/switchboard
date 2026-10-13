@@ -276,6 +276,9 @@ export const PULL_SWEEP = { leaseMinutes: 15, spendCapUsd: 5 } as const;
 export const PROVIDER_RETRY_BACKOFFS_MS = [5_000, 15_000] as const;
 export const PROVIDER_RETRY_WAIT_MS = MINUTE_MS;
 
+/** Two retries for a known retryable store operation, inside its HTTP deadline. */
+export const STORE_RETRY_BACKOFFS_MS = [200, 800] as const;
+
 /** How often the model proxy writes an SSE comment while the provider is
  *  reasoning silently. The public container hop has cut an otherwise healthy
  *  stream at about thirty seconds of silence; a comment inside half that

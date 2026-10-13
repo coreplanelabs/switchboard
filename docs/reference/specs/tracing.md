@@ -45,7 +45,7 @@ Publication context validation runs under `run.publication_context_check`. Its c
 
 | Criterion | Proof |
 | --- | --- |
-| A state-write failure root retains its original private exception and adds only the exact wire digest, closed failing stage and HTTP500. The diagnostic response contains no exception or request bytes and proves no mutation acknowledgment. | `[unit]` `deploy/cloudflare-memory/runLedger.test.ts::state-write holds across Durable Object RPC::binds bounded*` |
+| A state-write failure root retains its original private exception and adds the exact wire digest, closed failing stage and HTTP500. Its digest-bound diagnostic header carries bounded, redacted exception details for operator telemetry; the response body remains generic and includes no request bytes or mutation acknowledgment. Known guard refusals separately log the original run, generation, request digest, refusal stage, reason and build without state contents. | `[unit]` `deploy/cloudflare-memory/runLedger.test.ts::state-write holds across Durable Object RPC::binds bounded*`, `::refuses a retry after another state write*`; `src/core/runLedger/writeFailureDiagnostics.test.ts::original uncertain write diagnostics::mirrors the digest-bound remote exception and Ray ID into operator telemetry` |
 
 | Criterion | Proof |
 |---|---|
