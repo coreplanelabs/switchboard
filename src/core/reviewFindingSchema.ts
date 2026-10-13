@@ -48,6 +48,14 @@ const finding = {
 
 const { invariant, cases, ...singleProperties } = finding.properties;
 const text = { type: "string", minLength: 1, pattern: "\\S" };
+const caseInput = {
+  ...cases.items,
+  properties: {
+    scenario: { ...cases.items.properties.scenario, ...text },
+    expected: { ...cases.items.properties.expected, ...text },
+  },
+  additionalProperties: false,
+};
 
 /** Discriminated alternatives prevent a single issue from advertising a pattern matrix. */
 export const reviewFindingInputSchema = {
@@ -67,18 +75,56 @@ export const reviewFindingInputSchema = {
         cases: {
           ...cases,
           minItems: 1,
-          items: {
-            ...cases.items,
-            properties: {
-              scenario: { ...cases.items.properties.scenario, ...text },
-              expected: { ...cases.items.properties.expected, ...text },
-            },
-            additionalProperties: false,
-          },
+          items: caseInput,
         },
       },
       required: [...finding.required, "invariant", "cases"],
       additionalProperties: false,
     },
+    {
+      type: "object",
+      description:
+        "Re-raise an outstanding finding by its exact scoped ID. Original metadata and cases are preserved; cases here are new additions only. Assess every prior case in caseAssessments.",
+      properties: {
+        id: { type: "string", pattern: "^review:", description: "Exact scoped ID from outstandingFindings" },
+        cases: {
+          ...cases,
+          items: caseInput,
+          description: "New cases only; do not copy prior cases or supply case IDs",
+        },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
   ],
+};
+
+export const caseAssessmentInputSchema = {
+  type: "array",
+  description:
+    "One assessment for every case of every outstanding finding, including findings you resolve. Original case text is preserved by the tool.",
+  items: {
+    type: "object",
+    properties: {
+      findingId: { ...text, description: "Exact scoped finding ID from outstandingFindings" },
+      caseId: {
+        type: "string",
+        pattern: "^C[1-9]\\d*$",
+        description: "Exact case ID from that finding's cases, such as C1",
+      },
+      outcome: {
+        type: "string",
+        enum: ["open", "fixed", "declined"],
+        description:
+          "open if still failing; fixed after verifying the repair; declined after verifying the case does not apply",
+      },
+      note: {
+        ...text,
+        description:
+          "Evidence at the reviewed head: checked paths or tests, observed result and reason for this outcome",
+      },
+    },
+    required: ["findingId", "caseId", "outcome", "note"],
+    additionalProperties: false,
+  },
 };

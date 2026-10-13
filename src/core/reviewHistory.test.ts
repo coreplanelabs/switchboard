@@ -44,66 +44,20 @@ describe("review finding history", () => {
     },
   );
 
-  it("requires the literal original head-binding cases when widening the same finding after a substantive move", () => {
-    const original = [
-      {
-        scenario: "A bound verdict supplies the schema-valid string 'HEAD', which normalizeHead drops.",
-        expected: "Reject the verdict before invoking onVerdict; a missing parsed head cannot skip snapshot binding.",
-      },
-      {
-        scenario:
-          "A bound verdict lacks a usable head while a snapshot from head A survives a substantive worktree move to head B.",
-        expected:
-          "Require a valid B head and a fresh complete B history read; workspace observation at publication must not rescue stale history.",
-      },
-      {
-        scenario: "A bound verdict supplies a valid head different from the snapshot head.",
-        expected: "Reject and require a refreshed matching history snapshot.",
-      },
-      {
-        scenario: "A bound verdict supplies a valid head equal to the complete snapshot head.",
-        expected: "Accept only after prior-finding outcome coverage also passes.",
-      },
-    ];
-    const added = [
-      {
-        scenario:
-          "The substantive-move re-review supplies the valid old SHA A, matching the surviving A snapshot, while the dispatcher has moved the worktree and publication target to B.",
-        expected:
-          "Reject before recording or publishing the verdict and require complete B history; observing B must not authorize a verdict bound to A history.",
-      },
-      {
-        scenario:
-          "The verdict-only follow-up after a substantive-move re-review supplies valid old SHA A against cached A history, with the workspace observed at B.",
-        expected:
-          "Do not publish an approving verdict at B from stale A history; require a valid B verdict with complete B history or remain not approving.",
-      },
-    ];
-    const previous: Finding = {
+  it("keeps case IDs stable when later history reorders a widened matrix", () => {
+    const repeated: Finding = {
       ...finding,
-      id: "F2",
-      invariant:
-        "A bound PR verdict must identify a valid reviewed head equal to its complete history snapshot's head.",
-      cases: original,
+      id: "review:1:F1",
+      cases: [
+        { id: "C2", scenario: "A retry after rollback", expected: "Keep the replacement" },
+        { id: "C1", scenario: "Two writes have the same timestamp", expected: "Keep the newer write" },
+      ],
     };
-    const prior = outstandingReviewFindings([review(1, { findings: [previous] })]);
-    const repeated: Finding = { ...previous, id: "review:1:F2", cases: [...original, ...added] };
-    const verdict: ReviewVerdict = { verdict: "request_changes", summary: "Still open", head, findings: [repeated] };
-    expect(validateReviewFollowup(verdict, prior)).toBeUndefined();
-    expect(
-      outstandingReviewFindings([review(1, { findings: [previous] }), review(2, verdict)])[0]?.finding.cases,
-    ).toEqual([...original, ...added]);
-    const changed = original.map((row, index) =>
-      index === 3
-        ? {
-            ...row,
-            scenario: "A bound verdict supplies a valid current reviewed head equal to the complete snapshot head.",
-          }
-        : row,
-    );
-    expect(
-      validateReviewFollowup({ ...verdict, findings: [{ ...repeated, cases: [...changed, ...added] }] }, prior),
-    ).toContain(JSON.stringify(original[3]));
+    const prior = outstandingReviewFindings([review(1), review(2, { findings: [repeated] })]);
+    expect(prior[0]?.finding.cases).toEqual([
+      { id: "C2", scenario: "A retry after rollback", expected: "Keep the replacement" },
+      { id: "C1", scenario: "Two writes have the same timestamp", expected: "Keep the newer write" },
+    ]);
   });
 
   it("keeps reused legacy IDs separate and never treats omission as closure", () => {
@@ -113,7 +67,9 @@ describe("review finding history", () => {
       review(3, { verdict: "approve", findings: [] }),
     ]);
     expect(prior.map((f) => f.finding.id)).toEqual(["review:1:F1", "review:2:F1"]);
-    expect(prior[0].finding.cases).toEqual(finding.cases);
+    expect(prior[0].finding.cases).toEqual([
+      { id: "C1", scenario: "Two writes have the same timestamp", expected: "Keep the newer write" },
+    ]);
   });
 
   it("closes only explicit resolutions by the original reviewer and preserves re-raised cases", () => {
@@ -159,8 +115,40 @@ describe("review finding history", () => {
         note: "Checked both timestamp-collision paths against unique IDs",
       },
     ];
-    expect(validateReviewFollowup({ ...clean, resolutions }, prior)).toBeUndefined();
-    expect(validateReviewFollowup({ ...clean, findings: [{ ...finding, id: "review:1:F1" }] }, prior)).toBeUndefined();
+    expect(
+      validateReviewFollowup(
+        {
+          ...clean,
+          resolutions,
+          caseAssessments: [
+            {
+              findingId: "review:1:F1",
+              caseId: "C1",
+              outcome: "fixed",
+              note: "Checked both timestamp-collision paths against unique IDs",
+            },
+          ],
+        },
+        prior,
+      ),
+    ).toBeUndefined();
+    expect(
+      validateReviewFollowup(
+        {
+          ...clean,
+          findings: [prior[0].finding],
+          caseAssessments: [
+            {
+              findingId: "review:1:F1",
+              caseId: "C1",
+              outcome: "open",
+              note: "Collision still deletes the newer write at this head",
+            },
+          ],
+        },
+        prior,
+      ),
+    ).toBeUndefined();
     expect(
       validateReviewFollowup(
         {
@@ -169,7 +157,7 @@ describe("review finding history", () => {
         },
         prior,
       ),
-    ).toMatch(/previous case/);
+    ).toMatch(/identity or text/);
     expect(
       validateReviewFollowup(
         {
@@ -178,7 +166,7 @@ describe("review finding history", () => {
         },
         prior,
       ),
-    ).toContain(JSON.stringify(finding.cases![0]));
+    ).toContain("prior case identity or text changed");
     for (const entries of [
       [{ ...resolutions[0], findingId: "other" }],
       [resolutions[0], resolutions[0]],
