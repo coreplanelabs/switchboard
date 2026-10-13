@@ -27,6 +27,7 @@ import { NullRunHistoryWriter } from "../core/runHistoryWriter.js";
 import { handleMcpRequest, type McpOptions } from "./mcp.js";
 import { createMcpApprovalView } from "./mcpApprovalView.js";
 import { tokenVerifier } from "./dashboardAuth.js";
+import type { AccessIdentity } from "./accessAuth.js";
 
 const APPROVAL_PROTOCOL_VERSION = "2026-07-28";
 const FORM_META = {
@@ -34,6 +35,7 @@ const FORM_META = {
   [CLIENT_INFO_META_KEY]: { name: "personal-client", version: "1" },
   [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { form: {} } },
 };
+const URL_META = { ...FORM_META, [CLIENT_CAPABILITIES_META_KEY]: { elicitation: { url: {} } } };
 
 // Feature: docs/reference/specs/mcp-ingress.md — delegated authority and human approval.
 describe("MCP approval parity", () => {
@@ -129,6 +131,7 @@ describe("MCP approval parity", () => {
       action?: string,
       email = "alice@example.com",
       origin: string | null = "https://bot.example",
+      identity?: AccessIdentity,
     ) => {
       async function* chunks() {
         yield Buffer.from(action ? `action=${action}` : "");
@@ -154,7 +157,7 @@ describe("MCP approval parity", () => {
           text = s;
         },
       };
-      createMcpApprovalView(deps, options)(req as never, res as never, { sub: "signed-in", email });
+      createMcpApprovalView(deps, options)(req as never, res as never, identity ?? { sub: "signed-in", email });
       await vi.waitFor(() => expect(status).not.toBe(0));
       return { status, text, headers };
     };
@@ -224,6 +227,164 @@ describe("MCP approval parity", () => {
       ).body,
     ).toMatchObject({ error: { code: -32001 } });
     expect(f.removed()).toBe(1);
+  });
+
+  it("URL elicitation reuses browser consent and resumes the saved action once", async () => {
+    const f = fixture(ALL_GRANTS, true);
+    const first = await f.call("repo_offboard", {}, "tok", { _meta: URL_META });
+    expect(first.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "url" } } } } });
+    const id = (first.body as { result: { requestState: string } }).result.requestState;
+    expect(first.body).toMatchObject({
+      result: { inputRequests: { approval: { params: { url: `https://bot.example/settings/approve?id=${id}` } } } },
+    });
+    const opened = await f.call("repo_offboard", {}, "tok", {
+      _meta: URL_META,
+      requestState: id,
+      inputResponses: { approval: { action: "accept" } },
+    });
+    expect(opened.body).toMatchObject({ result: { requestState: id } });
+    expect(f.removed()).toBe(0);
+    expect((await f.browserCall(id, "approve")).status).toBe(200);
+    expect(f.removed()).toBe(0);
+    expect((await f.call("approval_resume", { id }, "tok", { _meta: URL_META })).body).toMatchObject({
+      result: { content: [{ text: expect.stringContaining("removed: 1") }] },
+    });
+    expect((await f.call("approval_resume", { id })).body).toMatchObject({ error: { code: -32003 } });
+    expect(f.removed()).toBe(1);
+  });
+
+  it("a client without elicitation receives the same saved browser link until consent", async () => {
+    const f = fixture(ALL_GRANTS, true, true);
+    const first = await f.call();
+    expect(first.body).toMatchObject({
+      result: { content: [{ text: expect.stringContaining("https://bot.example/settings/approve?id=") }] },
+    });
+    const text = (first.body as { result: { content: { text: string }[] } }).result.content[0]!.text;
+    const id = /\/settings\/approve\?id=([A-Za-z0-9_-]+)/.exec(text)![1]!;
+    const pending = await f.call("approval_resume", { id });
+    expect(pending.body).toEqual(first.body);
+    expect(f.removed()).toBe(0);
+    expect((await f.browserCall(id, "approve")).status).toBe(200);
+    f.restart();
+    await Promise.all([f.call("approval_resume", { id }), f.call("approval_resume", { id })]);
+    f.restart();
+    expect((await f.call("approval_resume", { id })).body).toMatchObject({ error: { code: -32003 } });
+    expect(f.removed()).toBe(1);
+  });
+
+  it("SSO browser consent binds the same subject and person without replacing the native credential", async () => {
+    const f = fixture(ALL_GRANTS, true);
+    f.options.sso = {
+      mode: "access",
+      describe: () => "test SSO",
+      verify: async ({ headers }) =>
+        headers.authorization === "Bearer native-oauth"
+          ? { ok: true, identity: { sub: "alice", email: "alice@example.com" } }
+          : { ok: false, status: 401, body: "unauthorized" },
+    };
+    const first = await f.call("repo_offboard", {}, "native-oauth", { _meta: URL_META });
+    expect(first.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "url" } } } } });
+    const id = (first.body as { result: { requestState: string } }).result.requestState;
+    expect(
+      (await f.browserCall(id, "approve", undefined, undefined, { sub: "other", email: "alice@example.com" })).status,
+    ).toBe(403);
+    expect(
+      (await f.browserCall(id, "approve", undefined, undefined, { sub: "alice", email: "bob@example.com" })).status,
+    ).toBe(404);
+    expect(
+      (await f.browserCall(id, "approve", undefined, undefined, { sub: "alice", email: "alice@example.com" })).status,
+    ).toBe(200);
+    expect(f.removed()).toBe(0);
+    expect((await f.browserCall(id, "approve", undefined, undefined, { sub: "", commonName: "machine" })).status).toBe(
+      404,
+    );
+    expect((await f.call("approval_resume", { id }, "different-oauth")).status).toBe(401);
+    expect((await f.call("approval_resume", { id }, "native-oauth", { _meta: URL_META })).body).toMatchObject({
+      result: { content: [{ text: expect.stringContaining("removed: 1") }] },
+    });
+    expect(f.removed()).toBe(1);
+  });
+
+  it("SSO browser consent cannot execute after the original credential or permission is revoked", async () => {
+    const f = fixture(ALL_GRANTS, true);
+    const verifier = tokenVerifier({ token: "native-oauth", env: "DASHBOARD_TOKEN", subject: "alice" });
+    f.options.sso = verifier;
+    const first = await f.call("repo_offboard", {}, "native-oauth", { _meta: URL_META });
+    expect(first.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "url" } } } } });
+    const id = (first.body as { result: { requestState: string } }).result.requestState;
+    expect(
+      (await f.browserCall(id, "approve", undefined, undefined, { sub: "alice", email: "alice@example.com" })).status,
+    ).toBe(200);
+    f.options.sso = tokenVerifier({ token: "replacement", env: "DASHBOARD_TOKEN", subject: "alice" });
+    expect((await f.call("approval_resume", { id }, "native-oauth")).status).toBe(401);
+    expect((await f.call("approval_resume", { id }, "replacement")).body).toMatchObject({ error: { code: -32003 } });
+    f.options.sso = {
+      ...verifier,
+      verify: async () => {
+        throw new Error("identity provider unavailable");
+      },
+    };
+    expect((await f.call("approval_resume", { id }, "native-oauth")).status).toBe(503);
+    f.options.sso = verifier;
+    f.revoke();
+    expect((await f.call("approval_resume", { id }, "native-oauth")).body).toMatchObject({
+      result: { content: [{ text: expect.stringContaining("restricted") }] },
+    });
+    expect(f.removed()).toBe(0);
+  });
+
+  it("a browser-bound offer cannot switch to form consent or change its saved arguments", async () => {
+    const f = fixture(ALL_GRANTS, true);
+    const first = await f.call("repo_offboard", {}, "tok", { _meta: URL_META });
+    expect(first.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "url" } } } } });
+    const id = (first.body as { result: { requestState: string } }).result.requestState;
+    const consent = {
+      _meta: FORM_META,
+      requestState: id,
+      inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+    };
+    expect((await f.call("repo_offboard", {}, "tok", consent)).body).toMatchObject({
+      result: { content: [{ text: expect.stringContaining("https://bot.example/settings/approve?id=") }] },
+    });
+    expect((await f.call("repo_offboard", { target: "other" }, "tok", consent)).body).toMatchObject({
+      error: { code: -32001 },
+    });
+    expect(f.removed()).toBe(0);
+    expect((await f.browserCall(id, "approve")).status).toBe(200);
+    expect((await f.call("approval_resume", { id }, "tok", { _meta: FORM_META })).body).toMatchObject({
+      result: { content: [{ text: expect.stringContaining("removed: 1") }] },
+    });
+    expect(f.removed()).toBe(1);
+  });
+
+  it("personal browser consent retains token revocation and refuses an unusable browser URL", async () => {
+    const f = fixture(ALL_GRANTS, true);
+    const token = "e".repeat(64);
+    const store = new InMemoryPersonalTokenStore();
+    const row = {
+      digest: digestBearer(token),
+      subject: "personal:device",
+      email: "alice@example.com",
+      userId: "slack:UALICE",
+      createdAt: 1,
+    };
+    await store.put(row);
+    f.options.personalTokens = store;
+    f.options.publicBaseUrl = "http://remote.example";
+    expect((await f.call("repo_offboard", {}, token)).body).toMatchObject({ error: { code: -32004 } });
+    expect(f.removed()).toBe(0);
+    f.options.publicBaseUrl = "https://bot.example";
+    const first = await f.call("repo_offboard", {}, token, { _meta: URL_META });
+    expect(first.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "url" } } } } });
+    const id = (first.body as { result: { requestState: string } }).result.requestState;
+    await store.delete(row.digest, row.subject);
+    const browserIdentity = { sub: "device", email: "alice@example.com" };
+    expect((await f.browserCall(id, "approve", undefined, undefined, browserIdentity)).status).toBe(403);
+    await store.put(row);
+    expect((await f.browserCall(id, "approve", undefined, undefined, browserIdentity)).status).toBe(200);
+    await store.delete(row.digest, row.subject);
+    expect((await f.call("approval_resume", { id }, token)).status).toBe(401);
+    expect(f.removed()).toBe(0);
   });
 
   it("SSO form confirmation stays bound to its authenticated connection and executes once", async () => {
@@ -357,7 +518,7 @@ describe("MCP approval parity", () => {
   });
 
   it("URL-only and unsupported clients do not mint ordinary approval or execute", async () => {
-    const f = fixture(ALL_GRANTS, true);
+    const f = fixture(ALL_GRANTS, false);
     expect(
       (
         await f.call("repo_offboard", {}, "tok", {

@@ -10,7 +10,7 @@ import { connectionIdentity, mcpRequester, MCP_APPROVAL_PATH } from "./mcpApprov
 import type { McpOptions } from "./mcp.js";
 import { SingleShotIO } from "./singleShotDispatch.js";
 import { readBody } from "./http.js";
-import { originAllowed } from "./commandHttp.js";
+import { callerIdFor, originAllowed } from "./commandHttp.js";
 import { FORM_PAGE_CSP, WEB_HTML_HEADERS } from "./webShell.js";
 import { escapeHtml } from "./liveView/html.js";
 
@@ -48,15 +48,27 @@ export function createMcpApprovalView(core: CoreDeps, options: McpOptions) {
         : (await options.personByEmail?.(identity.email))?.id;
       if (!row || !userId || userId !== row.message.userId) return page(404, "This offer is unavailable; nothing ran.");
       if (connection) {
-        const credential = await connectionIdentity(connection.id, options);
-        const requester = credential && (await mcpRequester(credential, options));
-        if (
-          !credential ||
-          `mcp:${credential.subject}` !== connection.credentialId ||
-          requester?.userId !== userId ||
-          (credential.subject.startsWith("personal:") && credential.subject !== `personal:${identity.sub}`)
-        )
-          return page(403, "The connection or its verified identity was revoked; nothing ran.");
+        if (connection.credentialId.startsWith("access:")) {
+          // The browser records consent only. The originating MCP request must
+          // still revalidate its own credential before consuming this action.
+          const browserId = callerIdFor(identity);
+          if (
+            connection.mode !== undefined ||
+            connection.credentialId !== browserId ||
+            row.message.authenticatedAs !== browserId
+          )
+            return page(403, "This offer belongs to another connection; nothing ran.");
+        } else {
+          const credential = await connectionIdentity(connection.id, options);
+          const requester = credential && (await mcpRequester(credential, options));
+          if (
+            !credential ||
+            `mcp:${credential.subject}` !== connection.credentialId ||
+            requester?.userId !== userId ||
+            (credential.subject.startsWith("personal:") && credential.subject !== `personal:${identity.sub}`)
+          )
+            return page(403, "The connection or its verified identity was revoked; nothing ran.");
+        }
       } else if (
         row.message.authenticatedAs !== `access:${identity.sub}` &&
         !(
