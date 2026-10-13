@@ -37,6 +37,7 @@ import { classifyProviderFailure, type ProviderFailure } from "../../provider.js
 import type { Clock, Span } from "../../trace/types.js";
 import { type Disposition, SAID_ONCE_SUFFIX } from "../contract.js";
 import { MODEL_CALL_IN_FLIGHT } from "../windDown.js";
+import type { ToolRecovery } from "../toolRecovery.js";
 import { POINTER_SUMMARY_PREFIX } from "./compactionFallback.js";
 import { BLOCKED_AT_DOOR_PREFIX, BLOCKED_UNAVAILABLE_PREFIX } from "./extensionSource.js";
 import { piAnsweredWithoutRunning, type PiEvent } from "./protocol.js";
@@ -168,6 +169,7 @@ export interface BridgeObservation {
 }
 
 export interface BridgeDeps {
+  recovery?: ToolRecovery;
   /** The run whose proxy evidence this bridge may consume. */
   runId?: string;
   emit: (event: RunEvent) => void;
@@ -266,8 +268,9 @@ export class PiBridge {
    *  may run on; a clean end in the abort's window is the command's own exit. */
   private readonly cutCalls = new Set<string>();
   /** The calls the gate saw — the extension asked `/harness/authorize` for
-   *  them (`gateSaw`) — not yet ended. */
-  private readonly vetted = new Set<string>();
+   *  them (`gateSaw`) — not yet ended. True marks a lifecycle refusal, which
+   *  must retain the existing ending rather than spend task recovery. */
+  private readonly vetted = new Map<string, boolean>();
   /** Whether a call starting now is judged against the gate when it ends.
    *  The harness turns it off while catching up on a re-attach: those calls
    *  were vetted by the bot generation that died, and this one never heard. */
@@ -307,8 +310,8 @@ export class PiBridge {
   /** The gate saw this call: the extension's `tool_call` hook asked the bot
    *  for it, whatever the answer. Called from the authorize route, before pi
    *  runs the tool — so it always precedes the call's `tool_execution_end`. */
-  gateSaw(callId: string): void {
-    this.vetted.add(callId);
+  gateSaw(callId: string, lifecycleRefused = false): void {
+    this.vetted.set(callId, lifecycleRefused || this.vetted.get(callId) === true);
   }
 
   /** The run's answer as it stands: the last text-only assistant message, else a held bookkeeping text. */
@@ -564,6 +567,17 @@ export class PiBridge {
     // item 13: a `cut` result is a command that may run on). Only a marked
     // call's failed end is the abort's.
     const cut = marked && !ok;
+    // Native command exits are task evidence. Call IDs deduplicate relay
+    // receipts while also covering SDK refusals that never reached the relay.
+    // Replay has no live gate classification; only this generation owns fresh failures.
+    if (
+      open &&
+      (open.judged || this.vetted.has(callId)) &&
+      !cut &&
+      this.vetted.get(callId) !== true &&
+      (ok || exit.exitCode === undefined)
+    )
+      void this.deps.recovery?.record(callId, tool, open.input, ok ? undefined : { text });
     this.emit({
       type: "tool_result",
       tool,
@@ -656,6 +670,10 @@ export class PiBridge {
    *  end: what a relayed request that arrived ahead of the poll waits for. */
   callOpen(callId: string): boolean {
     return this.openTools.has(callId);
+  }
+  /** The gate can precede the polled start; both sets must settle before a model call. */
+  hasPendingTools(): boolean {
+    return this.openTools.size > 0 || this.vetted.size > 0;
   }
 
   checkSignal(callId: string): AbortSignal | undefined {

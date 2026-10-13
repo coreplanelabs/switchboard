@@ -100,8 +100,11 @@ export const runCheckTool: RunnableTool = {
   },
   failsInText: true,
   async run(input, ctx) {
-    if (!ctx.checkExecution || !ctx.callId)
+    if (!ctx.checkExecution || !ctx.callId) {
+      ctx.reportToolFailure?.({ code: "capability_unavailable", recovery: "correct" });
       return "error: recorded checks are unavailable for this run; command did not start";
+    }
+    ctx.reportToolFailure?.({ code: "invalid_input", recovery: "correct" });
     const parsed = inputSchema.safeParse(input);
     if (!parsed.success)
       return "error: invalid check input; provide command, purpose, optional timeoutMs and optional complete checkpoint";
@@ -139,6 +142,23 @@ export const runCheckTool: RunnableTool = {
       /* Optional observation cannot change the original tool result. */
     }
     const diagnosticText = diagnostic ? `\nExecution diagnostic: ${JSON.stringify(diagnostic)}` : "";
+    if (response.kind === "unavailable") {
+      const invalid = ["invalid_input", "command_refused"].includes(response.reason);
+      const missing = ["recording_unavailable", "unsupported_executor", "workspace_unavailable"].includes(
+        response.reason,
+      );
+      const lifecycle = ["budget_exhausted", "stopped"].includes(response.reason);
+      ctx.reportToolFailure?.({
+        code: lifecycle
+          ? "lifecycle"
+          : invalid
+            ? "invalid_input"
+            : missing
+              ? "capability_unavailable"
+              : "outcome_unknown",
+        recovery: lifecycle || invalid || missing ? "correct" : "stop",
+      });
+    }
     if (response.kind === "unavailable" && response.reason === "recording_unavailable")
       return "error: recording capability unavailable; command did not start";
     if (response.kind === "unavailable")
@@ -146,6 +166,16 @@ export const runCheckTool: RunnableTool = {
         response.metadataFailure ? `\nMetadata diagnostic: ${JSON.stringify(response.metadataFailure)}` : ""
       }`;
     const receipt = response.receipt;
+    if (receipt.outcome.kind !== "completed")
+      ctx.reportToolFailure?.({
+        code:
+          receipt.outcome.kind === "not_started"
+            ? receipt.outcome.reason === "command_refused"
+              ? "invalid_input"
+              : "lifecycle"
+            : "outcome_unknown",
+        recovery: receipt.outcome.kind === "not_started" ? "correct" : "stop",
+      });
     let checkpointResult = "";
     if (workingNotes) {
       if (response.replayed)

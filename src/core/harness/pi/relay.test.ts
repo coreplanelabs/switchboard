@@ -82,6 +82,28 @@ const executor: Executor = {
   writeFile: async () => "",
 };
 
+describe("relayed tool failure outcomes", () => {
+  it("reports a declared text refusal as an error while preserving ordinary source text", async () => {
+    const { harness } = live();
+    const refusal: RunnableTool = {
+      name: "submit_verdict",
+      description: "verdict",
+      inputSchema: {},
+      failsInText: true,
+      run: async () => "error: unknown prior finding; no verdict recorded",
+    };
+    harness.tools = [refusal, { ...refusal, name: "github_file", failsInText: undefined }];
+    expect(await runRelayedTool(harness, { toolCallId: "bad", tool: "submit_verdict", input: {} })).toEqual({
+      content: [{ type: "text", text: "error: unknown prior finding; no verdict recorded" }],
+      isError: true,
+    });
+    expect(await runRelayedTool(harness, { toolCallId: "source", tool: "github_file", input: {} })).toEqual({
+      content: [{ type: "text", text: "error: unknown prior finding; no verdict recorded" }],
+      isError: false,
+    });
+  });
+});
+
 function live(
   opts: { blocked?: string; withSpan?: boolean; identity?: "none" | "read" | "write"; loopEndsIn?: () => number } = {},
 ) {
@@ -653,7 +675,7 @@ describe("runRelayedTool — the verdict path", () => {
     const bad = { verdict: "ship it", summary: "x", head: HEAD };
     const answer = await runRelayedTool(harness, { toolCallId: "c4", tool: "submit_verdict", input: bad });
     const nativeText = await submitVerdict.run(bad, { executor });
-    expect(answer).toEqual({ content: [{ type: "text", text: nativeText }], isError: false });
+    expect(answer).toEqual({ content: [{ type: "text", text: nativeText }], isError: true });
     expect(nativeText).toMatch(/^error: verdict must be exactly/);
     expect(relayed).toEqual([]);
   });

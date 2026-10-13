@@ -18,6 +18,7 @@
 
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { MODEL_STREAM_HEARTBEAT_MS, RESPONSES_VALIDATION_LIMITS } from "../core/budgets.js";
+import { ToolRecoveryStoppedError } from "../core/harness/toolRecovery.js";
 import {
   authenticateProxyProviderFailure,
   authenticateProxyTurnBudgetExhausted,
@@ -114,6 +115,7 @@ export type ProxyRefusalCode =
   | "body_too_large"
   | "invalid_body"
   | "turn_budget_exhausted"
+  | "tool_recovery_exhausted"
   | "provider_unconfigured"
   | "provider_key_missing"
   | "upstream_unreachable"
@@ -863,6 +865,16 @@ export async function handleAdmitted(
       ),
       requestBodyDisposition: "unread",
     };
+  // Waiting for a native result must not hold scarce model transport/CPU
+  // capacity: that result may depend on another run completing.
+  const stopped = await deps.bearers.settleRecovery(grant.runId);
+  if (stopped) {
+    (deps.log ?? console.log)(`[model-proxy] 403 tool_recovery_exhausted run=${grant.runId} reason=${stopped.reason}`);
+    return {
+      ...refusalResponse(shape, 403, "tool_recovery_exhausted", new ToolRecoveryStoppedError(stopped).message),
+      requestBodyDisposition: "unread",
+    };
+  }
   if (shape !== "openai-responses") return handleAdmittedCall(door, req, deps);
   const capacity = deps.responsesCapacity ?? responsesValidationCapacity;
   const logCapacity = (action: "admitted" | "released") => {
@@ -1107,7 +1119,12 @@ async function handleAdmittedCall(
     return { schemaShaped, payload, offered };
   };
   const { schemaShaped, payload, offered } = consumer ? await consumer.withParsing(async () => prepare()) : prepare();
+  await deps.bearers.settleRecovery(grant.runId, false);
   const turn = deps.bearers.consumeTurn(grant.runId);
+  if (!turn.ok && turn.reason === "tool_recovery") {
+    log(`[model-proxy] 403 tool_recovery_exhausted run=${grant.runId} reason=${turn.stop.reason}`);
+    return refusalResponse(shape, 403, "tool_recovery_exhausted", new ToolRecoveryStoppedError(turn.stop).message);
+  }
   if (!turn.ok && turn.reason === "ended") {
     // The run ended between the door and here: its bearer verified a moment
     // ago and is revoked now. The same answer the door gives, no budget note.

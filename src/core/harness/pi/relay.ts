@@ -27,7 +27,10 @@ import type { ToolDef } from "../../provider.js";
 import type { RunnableTool, ToolContext } from "../../../tools/runnableTool.js";
 import { sleepUnlessAborted } from "../../dispatch/awaitChildren.js";
 import type { Backend } from "../../trace/attrs.js";
-import { redactAndCap, type RunEvent } from "../../runEvents.js";
+import { redactAndCap, toolTextFailed, type RunEvent } from "../../runEvents.js";
+import type { ToolFailure } from "../toolRecovery.js";
+import { ToolRecoveryStoppedError } from "../toolRecovery.js";
+import { UncertainStoreError } from "../../storeFailure.js";
 import type { Span } from "../../trace/types.js";
 import { pointerSummary, type CompactionAnswer, type CompactionAsk } from "./compactionFallback.js";
 import { judgeToolCall, literalPushSource, publicationAttributionRefusal, type ToolRuleContext } from "./toolRules.js";
@@ -60,7 +63,7 @@ export interface LiveHarness {
   /** The gate saw this call — the extension asked for it, whatever the
    *  answer. The bridge keeps the ids, so a call that ends without one is
    *  known to have run unvetted (or to have been answered by pi itself). */
-  gateSaw: (callId: string) => void;
+  gateSaw: (callId: string, lifecycleRefused?: boolean) => void;
   /** The reason every tool is refused right now — the write-up — or nothing. */
   toolsBlocked: () => string | undefined;
   /** The observed native check call's cancellation and originating turn's
@@ -337,8 +340,10 @@ export function relayedToolDefinitions(harness: LiveHarness): ToolDef[] {
  *  the reason the model reads. Whatever the answer, the harness is told the
  *  gate saw the call first. */
 export function authorizeToolCall(harness: LiveHarness, ask: ToolCallAsk): AuthorizeAnswer | Promise<AuthorizeAnswer> {
-  harness.gateSaw(ask.toolCallId);
-  const blocked = harness.toolsBlocked();
+  const ending = harness.toolsBlocked();
+  const recoveryStopped = harness.toolContext.recovery?.stopped !== undefined;
+  harness.gateSaw(ask.toolCallId, !recoveryStopped && ending !== undefined);
+  const blocked = recoveryStopped ? "tool recovery is exhausted" : ending;
   const refuse = (reason: string): AuthorizeAnswer => {
     harness.emit({
       type: "run_note",
@@ -435,8 +440,14 @@ export async function runRelayedTool(
   ask: ToolCallAsk,
   opts: { signal?: AbortSignal } = {},
 ): Promise<RelayedToolAnswer> {
+  const stopped = harness.toolContext.recovery?.stopped;
+  if (stopped) return errorAnswerOf(new ToolRecoveryStoppedError(stopped));
   const tool = harness.tools.find((t) => t.name === ask.tool);
-  if (!tool) return { content: [{ type: "text", text: `Unknown tool: ${ask.tool}` }], isError: true };
+  if (!tool) {
+    const text = `Unknown tool: ${ask.tool}`;
+    await harness.toolContext.recovery?.record(ask.toolCallId, ask.tool, ask.input, { text });
+    return { content: [{ type: "text", text }], isError: true };
+  }
   let checkControl: ReturnType<NonNullable<LiveHarness["checkControl"]>>;
   if (ask.tool === "run_check" && harness.commandPolicy === "hosted-review") {
     try {
@@ -469,6 +480,7 @@ export async function runRelayedTool(
   const span = harness.toolSpan(ask.toolCallId);
   const base = harness.toolContext;
   const readConversation = base.conversation;
+  let failure: ToolFailure | undefined;
   const ctx: ToolContext = {
     ...(span
       ? {
@@ -495,12 +507,39 @@ export async function runRelayedTool(
       : {}),
     // After the spreads, so the call's own id can never be shadowed by one on the base context.
     callId: ask.toolCallId,
+    reportToolFailure: (detail) => {
+      failure = detail;
+    },
   };
   try {
     const input = typeof ask.input === "object" && ask.input !== null ? (ask.input as Record<string, unknown>) : {};
     const output = await tool.run(input, ctx);
-    return { content: piContentOf(capToolResultContent(output)), isError: false };
+    const content = piContentOf(capToolResultContent(output));
+    const text = content
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("\n");
+    const isError = tool.failsInText === true && toolTextFailed(text);
+    if (isError && failure?.code === "lifecycle") harness.gateSaw(ask.toolCallId, true);
+    await base.recovery?.record(
+      ask.toolCallId,
+      ask.tool,
+      input,
+      isError ? { text, detail: failure } : undefined,
+      tool.failsInText === true && tool.sideEffectFree !== true,
+    );
+    return { content, isError };
   } catch (err) {
+    const detail: ToolFailure | undefined =
+      err instanceof UncertainStoreError
+        ? { code: "outcome_unknown", recovery: "stop" }
+        : failure?.recovery === "stop"
+          ? failure
+          : undefined;
+    await base.recovery?.record(ask.toolCallId, ask.tool, ask.input, {
+      text: err instanceof Error ? err.message : String(err),
+      detail,
+    });
     return errorAnswerOf(err);
   }
 }

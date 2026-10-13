@@ -568,6 +568,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     return new ModelPolicyRefusedError(failure);
   };
   const bridge = new PiBridge({
+    recovery: run.toolContext.recovery,
     runId: run.runId,
     emit,
     onProgress: run.onProgress,
@@ -766,7 +767,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           Math.min(remainingMs?.() ?? deadline - now(), (loopEndsIn?.() ?? 0) + RUN_DEADLINE_RESERVE_MS),
       };
     },
-    gateSaw: (callId) => bridge.gateSaw(callId),
+    gateSaw: (callId, closing) => bridge.gateSaw(callId, closing),
     toolsBlocked,
     takeCompactionFailure: () => {
       const failure = compactionFailure;
@@ -911,6 +912,13 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   /** How many follow-up turns were prompted on the session, for their command ids. */
   let followUps = 0;
   let sessionEnded = false;
+  run.toolContext.recovery?.bindNativeDrain(async () => {
+    while (bridge.hasPendingTools()) {
+      if (sessionEnded || now() >= deadline || run.control?.hardSignal.aborted)
+        throw new Error("native tool outcome unavailable");
+      await deps.sleep(deps.pollMs ?? seenTick);
+    }
+  });
   /** The end of the session (item 14): the transport closed, the spans a
    *  stopped pi left open ended, the facts saved, the run forgotten on the
    *  relay, pi killed and its directory removed — pi has ended, and nothing
@@ -1727,6 +1735,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         hardStop();
         return;
       }
+      run.toolContext.recovery?.throwIfStopped();
       askOwedAbort();
       if (writeUp) {
         if ((writeUpAt !== undefined && now() - writeUpAt >= lease.finaleMs) || now() >= (run.deadlineAt ?? Infinity)) {
@@ -2467,6 +2476,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
      *  initial loop, so a restart retains the post-turn too. Ordinary thread
      *  follow-ups wait for the run's end, as on the native loop's post-turns. */
     const followUp: FollowUpTurn = async (input) => {
+      run.toolContext.recovery?.throwIfStopped();
       if (sessionEnded) throw new Error("the pi session has ended: no follow-up turn can run on it");
       if (run.deadlineAt !== undefined && now() >= run.deadlineAt)
         throw new Error("The admitted run deadline ended before the follow-up turn.");
@@ -2475,6 +2485,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       bridge.under(turnSpan);
       bridge.newPrompt();
       const runContext = live.toolContext;
+      input.toolContext.recovery = runContext.recovery;
       live.toolContext = input.toolContext;
       // The turn's lease is carved from the run's: the lesser of its ask and
       // what the lease still holds, never under a minute (decision 0046); a
@@ -2587,6 +2598,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           hardStop();
           return;
         }
+        run.toolContext.recovery?.throwIfStopped();
         askOwedAbort();
         if (writeUp) {
           if (

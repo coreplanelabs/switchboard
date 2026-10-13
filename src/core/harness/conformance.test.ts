@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, expect, it } from "vitest";
 import { harnessDrivers } from "./testing/drivers.js";
+import { ToolRecovery, ToolRecoveryStoppedError } from "./toolRecovery.js";
+import type { RunnableTool } from "../../tools/runnableTool.js";
 import { openCodeDriver, type MutatedClause } from "./opencode/testing/driver.js";
 import {
   assertReadsRecord,
@@ -24,6 +26,74 @@ import {
 // the fake container and the scripted double.
 
 const drivers = harnessDrivers();
+
+describe.each(drivers.map((d) => [d.harness, d] as const))("tool recovery — %s", (_name, driver) => {
+  it("keeps a soft stop and its write-up after late relayed calls", async () => {
+    const recovery = new ToolRecovery();
+    let effects = 0;
+    const status: RunnableTool = {
+      name: "update_status",
+      description: "status",
+      inputSchema: { type: "object" },
+      run: async () => {
+        effects++;
+        return "status updated";
+      },
+    };
+    const run = await driver.run({
+      recovery,
+      relayed: [status],
+      softStopBeforeModelCall: 2,
+      turns: [
+        { content: [{ type: "tool_use", id: "early", name: "update_status", input: {} }], stopReason: "tool_use" },
+        {
+          content: [
+            { type: "tool_use", id: "late-one", name: "update_status", input: {} },
+            { type: "tool_use", id: "late-two", name: "update_status", input: {} },
+          ],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "The remaining work did not run." }], stopReason: "end_turn" },
+      ],
+    });
+    expect(run.outcome.kind).toBe("answered");
+    expect(recovery.snapshot().failures).toEqual([]);
+    expect(recovery.stopped).toBeUndefined();
+    expect(effects).toBe(1);
+    expect(run.events.some((event) => event.type === "run_note" && event.kind === "stopped")).toBe(true);
+  });
+  it("ends repeated bot-tool failures without a model write-up or operator stop", async () => {
+    const recovery = new ToolRecovery();
+    const refusal: RunnableTool = {
+      name: "submit_verdict",
+      description: "verdict",
+      inputSchema: { type: "object", properties: {} },
+      failsInText: true,
+      run: async () => "error: invalid finding; no verdict recorded",
+    };
+    const run = await driver.run({
+      recovery,
+      relayed: [refusal],
+      turns: [
+        { content: [{ type: "tool_use", id: "one", name: "submit_verdict", input: {} }], stopReason: "tool_use" },
+        { content: [{ type: "tool_use", id: "two", name: "submit_verdict", input: {} }], stopReason: "tool_use" },
+        {
+          content: [{ type: "text", text: "A third model call must not write a success summary." }],
+          stopReason: "end_turn",
+        },
+      ],
+    });
+    expect(run.outcome.kind).toBe("failed");
+    if (run.outcome.kind !== "failed") throw new Error("Expected recovery failure");
+    expect(run.outcome.error).toBeInstanceOf(ToolRecoveryStoppedError);
+    expect(run.outcome.error.message).toBe(
+      "Stopped after 2 failed tool attempts (submit_verdict). Further model calls were blocked; the task remains incomplete.",
+    );
+    expect(run.modelCalls).toHaveLength(2);
+    expect(run.stopRequested).toBeUndefined();
+    expect(run.progress.some((p) => /writing up|write-up/.test(p))).toBe(false);
+  });
+});
 
 describe.each(drivers.map((d) => [d.harness, d] as const))("conformance — %s", (_name, driver) => {
   for (const row of SCENARIOS) {

@@ -94,6 +94,7 @@ export const submitVerdictTool: RunnableTool = {
     required: ["verdict", "summary", "head"],
   },
   async run(input, ctx) {
+    ctx.reportToolFailure?.({ code: "invalid_input", recovery: "correct" });
     const materialized = materializeReviewFollowup(input, ctx.reviewHistory?.snapshot?.findings ?? []);
     if (materialized.error) return `error: ${materialized.error}; no verdict recorded`;
     input = materialized.input;
