@@ -153,6 +153,7 @@ function harness(
     ["resource", "repo:owner/name"],
   ]);
   const events: string[] = [];
+  const warnings: string[] = [];
   let ackLost = options.lostAck;
   let acknowledged = 0;
   const fetch = vi.fn(async (url: URL, init: RequestInit) => {
@@ -329,7 +330,7 @@ function harness(
     threadBindingKey: (s: string) => "thread:" + s,
     runRegKey: (s: string) => "runReg:" + s,
     runFenceKey: (s: string) => "runFence:" + s,
-    console: { warn: () => {}, log: () => {} },
+    console: { warn: (message: string) => warnings.push(message), log: () => {} },
   });
   const instance = new C();
   Object.assign(instance, {
@@ -380,7 +381,7 @@ function harness(
       throw new Error("metadata reconciliation must not wake a VM");
     }),
   });
-  return { instance, rows, events, fetch, ackedRevision: () => acknowledged };
+  return { instance, rows, events, warnings, fetch, ackedRevision: () => acknowledged };
 }
 
 describe("resident cancellation admission", () => {
@@ -721,12 +722,15 @@ describe("resident cancellation admission", () => {
       const commands: string[][] = [];
       h.instance.run = Object.getPrototypeOf(h.instance).run;
       h.instance.waitForThreadDrain = Object.getPrototypeOf(h.instance).waitForThreadDrain;
+      h.instance.ctx.container.exec = async (argv: string[]) => {
+        if (argv.some((v) => v.includes("kill -9 -1"))) complete();
+        return { exitCode: Promise.resolve(0) };
+      };
       h.instance.processSandbox = {
         exec: async (argv: string[]) => {
           commands.push(argv);
           const publishing = argv.some((v) => v.startsWith("https://door.example/"));
           if (publishing) entered();
-          if (argv.some((v) => v.includes("kill -9 -1"))) complete();
           return {
             output: async () => {
               if (publishing) await settled;
@@ -785,6 +789,10 @@ describe("resident cancellation admission", () => {
       };
       h.instance.run = Object.getPrototypeOf(h.instance).run;
       const commands: string[][] = [];
+      h.instance.ctx.container.exec = async (argv: string[]) => {
+        if (argv.some((v) => v.includes("kill -9 -1"))) commands.push(argv);
+        return { exitCode: Promise.resolve(0) };
+      };
       h.instance.processSandbox = {
         exec: async (argv: string[]) => {
           commands.push(argv);
@@ -809,9 +817,13 @@ describe("resident cancellation admission", () => {
       expect(await data).toMatchObject({ error: "run cancelled", status: 409 });
       expect(commands).toEqual([
         [
+          "/usr/bin/timeout",
+          "-s",
+          "KILL",
+          "1",
           "/bin/sh",
           "-c",
-          'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; exec /usr/bin/su -s /bin/bash "$2" -c "kill -9 -1"',
+          'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; /usr/bin/su -s /bin/bash "$2" -c "kill -9 -1"; case "$?" in 0|137) exit 0;; *) exit 1;; esac',
           "--",
           "vm-a",
           "worker2",
@@ -826,9 +838,18 @@ describe("resident cancellation admission", () => {
   );
   it("requires an independent native UID and physical-container observation after the final kill", async () => {
     const h = harness();
-    h.instance.run = async () => ({ exitCode: 137, timedOut: false, truncated: false });
-    h.instance.ctx.container.exec = async () => ({ exitCode: Promise.resolve(2) });
-    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: false });
+    const nativeCommands: string[][] = [];
+    h.instance.ctx.container.exec = async (argv: string[]) => {
+      nativeCommands.push(argv);
+      return { exitCode: Promise.resolve(argv.some((arg) => arg.includes("/usr/bin/pgrep")) ? 2 : 0) };
+    };
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: false,
+      cancellationId: ticket.id,
+      refusal: { phase: "resident", cause: "native-observation-unconfirmed" },
+    });
+    expect(nativeCommands).toHaveLength(3);
+    expect(nativeCommands.at(-1)?.slice(-2)).toEqual(["vm-a", "worker2"]);
     h.instance.ctx.container.exec = async () => ({ exitCode: Promise.resolve(0) });
     expect(await h.instance.cancelRun(ticket, physical)).toEqual({
       stopped: true,
@@ -839,6 +860,33 @@ describe("resident cancellation admission", () => {
 });
 
 describe("resident run cancellation", () => {
+  it("stops the original UID through native control when SDK execution is unavailable", async () => {
+    const h = harness();
+    const ticket = {
+      version: 1,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      runId: owner.runId,
+      threadKey,
+      ownerGen: owner.ownerGen,
+      startedAt: 1,
+      actor: { kind: "chat", id: "slack:operator" },
+    };
+    const before = structuredClone(h.rows.get("thread:" + threadKey));
+    h.instance.waitForThreadDrain = async () => 0;
+    h.instance.run = async () => {
+      throw new Error("SDK control is unavailable");
+    };
+    h.instance.ctx.container.exec = async () => ({ exitCode: Promise.resolve(0) });
+
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: true,
+      cancellationId: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      disposition: "processes-stopped",
+    });
+    expect(h.rows.get("thread:" + threadKey)).toEqual({ ...before, lastRunOwner: h.rows.get("runReg:" + threadKey) });
+    expect(h.rows.get("runFence:" + threadKey)).toEqual({ runId: "run-old", ownerGen: "gen-old", ownerFence: 7 });
+    expect(h.warnings).toEqual([]);
+  });
   it("kills only the exact registered UID and keeps its files and spend ownership", async () => {
     const h = harness();
     const runId = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
@@ -862,9 +910,10 @@ describe("resident run cancellation", () => {
       waitForThreadDrain: async () => 0,
     });
     const commands: unknown[] = [];
-    h.instance.run = async (command: unknown) => {
-      commands.push(command);
-      return { exitCode: 137, timedOut: false, truncated: false };
+    h.instance.ctx.container.exec = async (command: string[]) => {
+      const kill = command.some((v) => v.includes("kill -9 -1"));
+      if (kill) commands.push(command);
+      return { exitCode: Promise.resolve(0) };
     };
     expect(await h.instance.cancelRun(ticket, { ...physical, ownerFence: 8 })).toMatchObject({ stopped: false });
     expect(h.rows.get("runReg:" + threadKey)).toEqual(registration);
@@ -875,17 +924,25 @@ describe("resident run cancellation", () => {
     });
     expect(commands).toEqual([
       [
+        "/usr/bin/timeout",
+        "-s",
+        "KILL",
+        "1",
         "/bin/sh",
         "-c",
-        'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; exec /usr/bin/su -s /bin/bash "$2" -c "kill -9 -1"',
+        'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; /usr/bin/su -s /bin/bash "$2" -c "kill -9 -1"; case "$?" in 0|137) exit 0;; *) exit 1;; esac',
         "--",
         "vm-a",
         "worker2",
       ],
       [
+        "/usr/bin/timeout",
+        "-s",
+        "KILL",
+        "1",
         "/bin/sh",
         "-c",
-        'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; exec /usr/bin/su -s /bin/bash "$2" -c "kill -9 -1"',
+        'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; /usr/bin/su -s /bin/bash "$2" -c "kill -9 -1"; case "$?" in 0|137) exit 0;; *) exit 1;; esac',
         "--",
         "vm-a",
         "worker2",
@@ -917,48 +974,94 @@ describe("resident run cancellation", () => {
       poolUserOwnerMatches: async () => true,
       workspaceExclusiveOpsInFlight: new Set(),
       waitForThreadDrain: async () => 0,
-      run: async () => ({ exitCode: 137, timedOut: true, truncated: false }),
     });
+    h.instance.ctx.container.exec = async () => ({ exitCode: Promise.reject(new Error("native result lost")) });
     expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: false });
     expect(h.rows.get("runReg:" + threadKey)).toMatchObject(owner);
     expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toMatchObject({
       cancellation: { id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb" },
     });
+    expect(h.warnings.map((line) => JSON.parse(line))).toEqual([
+      {
+        event: "resident.uid-kill.unconfirmed",
+        cause: "native-exec-failed",
+        phase: "exit",
+        user: "worker2",
+        threadKey: "slack:C1:123",
+      },
+    ]);
   });
 });
 
 describe("resident force detach shutdown", () => {
-  it.each(["wrong boot", "timeout", "lost response", "truncated", "missing boot"])(
-    "keeps the workspace when shutdown is unconfirmed: %s",
-    async (outcome) => {
-      const h = harness();
-      if (outcome === "missing boot") delete h.rows.get("thread:" + threadKey).container;
-      h.instance.threadOpsInFlight.set(threadKey, 1);
-      h.instance.waitForThreadDrain = async () => {
-        h.instance.threadOpsInFlight.delete(threadKey);
-        return 0;
-      };
-      h.instance.isRuntimeActive = async () => true;
-      h.instance.evictBinding = async () => {
-        h.rows.delete("thread:" + threadKey);
-        return "removed";
-      };
-      h.instance.run = async (argv: string[]) => {
-        if (outcome === "lost response") throw new Error("native reply lost");
+  it.each([
+    "wrong boot",
+    "timeout",
+    "lost response",
+    "launch timeout",
+    "native timeout exit",
+    "missing boot",
+    "stopped runtime",
+    "runtime stopped after exit",
+  ])("keeps the workspace when shutdown is unconfirmed: %s", async (outcome) => {
+    const h = harness();
+    if (outcome === "missing boot") delete h.rows.get("thread:" + threadKey).container;
+    if (outcome === "stopped runtime") h.instance.ctx.container.running = false;
+    h.instance.threadOpsInFlight.set(threadKey, 1);
+    h.instance.waitForThreadDrain = async () => {
+      h.instance.threadOpsInFlight.delete(threadKey);
+      return 0;
+    };
+    h.instance.isRuntimeActive = async () => true;
+    h.instance.evictBinding = async () => {
+      h.rows.delete("thread:" + threadKey);
+      return "removed";
+    };
+    h.instance.ctx.container.exec = async () => {
+      if (outcome === "lost response") throw new Error("native reply lost: Bearer fixture-private-token");
+      if (outcome === "launch timeout") return new Promise(() => {});
+      if (outcome === "runtime stopped after exit")
         return {
-          exitCode:
-            outcome === "wrong boot" && argv.some((v) => v.includes("/proc/sys/kernel/random/boot_id")) ? 2 : 137,
-          timedOut: outcome === "timeout",
-          truncated: outcome === "truncated",
+          exitCode: Promise.resolve().then(() => {
+            h.instance.ctx.container.running = false;
+            return 0;
+          }),
         };
+      return {
+        exitCode:
+          outcome === "timeout" ? new Promise(() => {}) : Promise.resolve(outcome === "native timeout exit" ? 137 : 2),
       };
-      expect(
-        await h.instance.detachThread(threadKey, true, [], owner.runId, owner.ownerGen, owner.ownerFence),
-      ).toMatchObject({ status: 503, error: "runtime-stop-unconfirmed: force detach kept the workspace" });
-      expect(h.rows.get("thread:" + threadKey)).toMatchObject({ user: "worker2", worktreePath: physical.workspace });
-      expect(h.rows.get("runReg:" + threadKey)).toMatchObject(owner);
-    },
-  );
+    };
+    expect(
+      await h.instance.detachThread(threadKey, true, [], owner.runId, owner.ownerGen, owner.ownerFence),
+    ).toMatchObject({ status: 503, error: "runtime-stop-unconfirmed: force detach kept the workspace" });
+    expect(h.rows.get("thread:" + threadKey)).toMatchObject({ user: "worker2", worktreePath: physical.workspace });
+    expect(h.rows.get("runReg:" + threadKey)).toMatchObject(owner);
+    expect(h.warnings.map((line) => JSON.parse(line))).toEqual([
+      {
+        event: "resident.uid-kill.unconfirmed",
+        user: "worker2",
+        threadKey: "slack:C1:123",
+        ...(outcome === "runtime stopped after exit"
+          ? { phase: "exit", cause: "runtime-unavailable", exitCode: 0 }
+          : outcome === "missing boot"
+            ? { phase: "guard", cause: "target-unverified" }
+            : outcome === "stopped runtime"
+              ? { phase: "guard", cause: "runtime-unavailable" }
+              : outcome === "launch timeout"
+                ? { phase: "launch", cause: "timeout" }
+                : outcome === "timeout"
+                  ? { phase: "exit", cause: "timeout" }
+                  : outcome === "lost response"
+                    ? { phase: "launch", cause: "native-exec-failed" }
+                    : {
+                        phase: "exit",
+                        cause: "exit-unconfirmed",
+                        exitCode: outcome === "native timeout exit" ? 137 : 2,
+                      }),
+      },
+    ]);
+  });
   it("continues to the workspace preservation decision after a confirmed kill and drain", async () => {
     const h = harness();
     h.instance.threadOpsInFlight.set(threadKey, 1);
