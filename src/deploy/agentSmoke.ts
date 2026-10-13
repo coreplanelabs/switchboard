@@ -221,7 +221,50 @@ function captureIntake(
       try {
         return JSON.stringify(sanitize(JSON.parse(item), depth + 1));
       } catch {
-        return redactSecrets(stripAnsi(item).replaceAll(token, "«redacted»")).replace(
+        // A reply may prefix or suffix JSON with prose. Inspect each structured
+        // fragment as data; a partial fragment is excluded rather than guessed.
+        let text = "";
+        let cursor = 0;
+        for (let start = 0; start < item.length; start++) {
+          const first = item[start];
+          if (first !== "{" && first !== "[" && first !== '"') continue;
+          const closes = first === "{" ? ["}"] : first === "[" ? ["]"] : [];
+          let quoted = first === '"';
+          let escaped = false;
+          let end = start + 1;
+          for (; end < item.length; end++) {
+            const char = item[end];
+            if (quoted) {
+              if (escaped) escaped = false;
+              else if (char === "\\") escaped = true;
+              else if (char === '"') {
+                quoted = false;
+                if (!closes.length) {
+                  end++;
+                  break;
+                }
+              }
+            } else if (char === '"') quoted = true;
+            else if (char === "{" || char === "[") closes.push(char === "{" ? "}" : "]");
+            else if (char === "}" || char === "]") {
+              const expected = closes.pop();
+              if (char !== expected || !closes.length) {
+                end++;
+                break;
+              }
+            }
+          }
+          text += item.slice(cursor, start);
+          try {
+            text += JSON.stringify(sanitize(JSON.parse(item.slice(start, end)), depth + 1));
+          } catch {
+            text += "«redacted-json-fragment»";
+          }
+          cursor = end;
+          start = end - 1;
+        }
+        text += item.slice(cursor);
+        return redactSecrets(stripAnsi(text).replaceAll(token, "«redacted»")).replace(
           /(https?:\/\/[^\s"<>?#]+)[?#][^\s"<>]*/g,
           "$1?«redacted»",
         );
@@ -239,8 +282,9 @@ function captureIntake(
           // Reuse the shared secret-name policy for whole JSON field values.
           const assignment = `${key}: "capture-value"`;
           return [
-            key,
-            /^(?:code|state|authorization|cookie|set-cookie)$/i.test(key) || redactSecrets(assignment) !== assignment
+            sanitize(key, depth + 1),
+            /^(?:code|state|authorization|cookie|set-cookie)$/i.test(key) ||
+            redactSecrets(assignment).endsWith('"«redacted»"')
               ? "«redacted»"
               : sanitize(entry, depth + 1),
           ];
