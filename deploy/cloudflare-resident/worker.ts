@@ -2675,8 +2675,8 @@ export class ResidentDO extends Sandbox<Env> {
     }
     // The spawn is the proof the control port answers: a persisted count of
     // unanswered connects ends here, whatever the command goes on to do.
-    await this.clearRuntimeUnreachable();
     await nativeAttempt.launched(proc);
+    await this.clearRuntimeUnreachable();
     try {
       const out = await proc.output({ encoding: "utf8", timeout: timeout + 30_000 });
       if (Number.isSafeInteger(out.exitCode) && out.exitCode >= 0) await nativeAttempt.settle();
@@ -8395,7 +8395,62 @@ export class ResidentDO extends Sandbox<Env> {
     let settled = false;
     return {
       launched: async (process: { status(): Promise<unknown> }) => {
-        if (scope && id) await journal.launched(scope.key, id, await process.status());
+        if (!scope || !id) return;
+        let status: unknown;
+        try {
+          status = await process.status();
+        } catch (error) {
+          // Only a failed observation on an acknowledged capability may leave
+          // collection running. Lost runtime, authority and storage remain refusals.
+          const forbidden = [...selfAndCauses(error)].some((link) => {
+            const value = link as {
+              name?: unknown;
+              code?: unknown;
+              status?: unknown;
+              statusCode?: unknown;
+              httpStatus?: unknown;
+            };
+            return (
+              isControlReset(link) ||
+              isRuntimeReplacement(link) ||
+              link instanceof OperationInterruptedError ||
+              /Auth|Security|Permission|Access|Cancel|Owner|Fence|Stale|Runtime|Interrupt|Reset|Recreate/i.test(
+                String(value?.name ?? ""),
+              ) ||
+              /AUTH|PERMISSION|DENIED|REVOKED|OWNER|FENCE|RUNTIME|INTERRUPT|RESET|RECREATE/i.test(
+                String(value?.code ?? ""),
+              ) ||
+              [value?.status, value?.statusCode, value?.httpStatus].some((status) => status === 401 || status === 403)
+            );
+          });
+          if (
+            forbidden ||
+            !(error instanceof RPCTransportError) ||
+            !["invalid_frame", "protocol_error"].includes(error.kind) ||
+            thread?.attachment
+          )
+            throw error;
+          if (!scope.active) ended();
+          await this.assertThreadOperationAllowed();
+          try {
+            console.warn(
+              `[native-identity-observation] ${JSON.stringify({
+                phase: "status",
+                class: "RPCTransportError",
+                code: error.code,
+                kind: error.kind,
+                operation: scope.key,
+                attempt: id,
+              })}`,
+            );
+          } catch {
+            /* Observation logging cannot abandon the original process. */
+          }
+          return;
+        }
+        // Parsing and persistence are outside the observation catch. Their
+        // uncertainty cannot be mistaken for an unavailable status read.
+        await journal.launched(scope.key, id, status);
       },
       settle: async () => {
         if (settled) return;

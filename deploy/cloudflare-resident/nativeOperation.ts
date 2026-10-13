@@ -150,26 +150,50 @@ export class NativeOperationJournal {
 
   async begin(key: string, kind: "process" | "opaque"): Promise<string> {
     const id = crypto.randomUUID();
-    await this.storage.transaction(async (rows) => {
-      const record = recordSchema.parse(await rows.get(key));
-      if (record.native.closed) throw new Error("native operation already closed");
-      if (Object.keys(record.native.pending).length >= ATTEMPT_LIMIT)
-        throw new Error("too many pending native attempts");
-      record.native.pending[id] = { kind };
-      await rows.put(key, record);
-    });
+    try {
+      await this.storage.transaction(async (rows) => {
+        const record = recordSchema.parse(await rows.get(key));
+        if (record.native.closed) throw new Error("native operation already closed");
+        if (Object.keys(record.native.pending).length >= ATTEMPT_LIMIT)
+          throw new Error("too many pending native attempts");
+        record.native.pending[id] = { kind };
+        await rows.put(key, record);
+      });
+    } catch (error) {
+      // An uncertain write is not a new admission. Read only this locally
+      // retained ID; the caller still checks scope closure before submission.
+      const saved = recordSchema.safeParse(await this.storage.get(key));
+      const attempt = saved.success ? saved.data.native.pending[id] : undefined;
+      if (!attempt || attempt.kind !== kind || attempt.process) throw error;
+    }
     return id;
   }
 
   async launched(key: string, id: string, status: unknown): Promise<void> {
     const process = processIdentity.parse(status);
-    await this.storage.transaction(async (rows) => {
-      const record = recordSchema.parse(await rows.get(key));
-      const attempt = record.native.pending[id];
-      if (!attempt || attempt.kind !== "process" || attempt.process) throw new Error("native launch identity changed");
-      attempt.process = process;
-      await rows.put(key, record);
-    });
+    try {
+      await this.storage.transaction(async (rows) => {
+        const record = recordSchema.parse(await rows.get(key));
+        const attempt = record.native.pending[id];
+        if (!attempt || attempt.kind !== "process" || attempt.process)
+          throw new Error("native launch identity changed");
+        attempt.process = process;
+        await rows.put(key, record);
+      });
+    } catch (error) {
+      // Qualify a committed original tuple without repeating native work or
+      // overwriting identity. Missing or unreadable evidence remains unknown.
+      const saved = recordSchema.safeParse(await this.storage.get(key));
+      const attempt = saved.success ? saved.data.native.pending[id] : undefined;
+      const original = attempt?.kind === "process" ? attempt.process : undefined;
+      if (
+        !original ||
+        original.id !== process.id ||
+        original.pid !== process.pid ||
+        original.startedAt !== process.startedAt
+      )
+        throw error;
+    }
   }
 
   async settle(key: string, id: string): Promise<void> {

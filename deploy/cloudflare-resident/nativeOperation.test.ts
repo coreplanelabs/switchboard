@@ -54,6 +54,125 @@ async function lostProcess(h: ReturnType<typeof fixture>, close = true) {
   return (await h.journal.list()).operations[0]!;
 }
 
+describe("native launch storage acknowledgements", () => {
+  function lostAck(h: ReturnType<typeof fixture>, commit: boolean, readable = true) {
+    return new NativeOperationJournal({
+      ...h.storage,
+      get: async <T>(key: string) => {
+        if (!readable) throw new Error("readback unavailable");
+        return h.storage.get<T>(key);
+      },
+      transaction: async (action) => {
+        if (commit) await h.storage.transaction(action);
+        throw new Error("transaction acknowledgement lost");
+      },
+    });
+  }
+
+  it("returns the exact committed admission after its acknowledgement is lost", async () => {
+    const h = fixture();
+    await h.journal.open(key, { opOwner: "op:original" });
+    const attempt = await lostAck(h, true).begin(key, "process");
+    expect(await h.storage.get(key)).toEqual({
+      opOwner: "op:original",
+      native: { version: 1, closed: false, pending: { [attempt]: { kind: "process" } } },
+    });
+    // The returned admission belongs to this original journal after restart.
+    await new NativeOperationJournal(h.storage).launched(key, attempt, identity);
+    await h.journal.close(key);
+    const saved = (await h.journal.list()).operations[0]!;
+    expect(await h.journal.recover(key, saved.recordHash, async () => terminal, matches)).toEqual({
+      key,
+      recordHash: saved.recordHash,
+      outcome: "native-ended",
+      processes: [terminal],
+    });
+  });
+
+  it("requires admission readback and preserves committed unknown evidence", async () => {
+    const h = fixture();
+    await h.journal.open(key, { opOwner: "op:original" });
+    await expect(lostAck(h, false).begin(key, "process")).rejects.toThrow();
+    expect(await h.storage.get(key)).toEqual({
+      opOwner: "op:original",
+      native: { version: 1, closed: false, pending: {} },
+    });
+    await expect(lostAck(h, true, false).begin(key, "process")).rejects.toThrow();
+    await h.journal.close(key);
+    const saved = (await h.journal.list()).operations[0]!;
+    expect(saved).toMatchObject({
+      key,
+      owner: { opOwner: "op:original" },
+      recoverable: false,
+      recoveryReason: "original-native-evidence-unavailable",
+      journal: { version: 1, closed: true },
+    });
+    expect(Object.values(saved.journal!.pending)).toEqual([{ kind: "process" }]);
+    expect(await h.journal.recover(key, saved.recordHash, async () => terminal, matches)).toEqual({
+      error: "native-operation-recovery-refused: original-native-evidence-unavailable",
+      status: 409,
+    });
+  });
+
+  it("qualifies only the original full identity after its write acknowledgement is lost", async () => {
+    const h = fixture();
+    await h.journal.open(key, { opOwner: "op:original" });
+    const attempt = await h.journal.begin(key, "process");
+    await lostAck(h, true).launched(key, attempt, identity);
+    await h.journal.close(key);
+    const saved = (await new NativeOperationJournal(h.storage).list()).operations[0]!;
+    expect(saved.journal!.pending).toEqual({ [attempt]: { kind: "process", process: identity } });
+    expect(saved.recoverable).toBe(true);
+    expect(await h.journal.recover(key, saved.recordHash, async () => terminal, matches)).toEqual({
+      key,
+      recordHash: saved.recordHash,
+      outcome: "native-ended",
+      processes: [terminal],
+    });
+  });
+
+  it("does not credit an absent identity or replace an original tuple", async () => {
+    const h = fixture();
+    await h.journal.open(key, { opOwner: "op:original" });
+    const attempt = await h.journal.begin(key, "process");
+    await expect(lostAck(h, false).launched(key, attempt, identity)).rejects.toThrow();
+    expect((await h.journal.list()).operations[0]!.journal!.pending).toEqual({ [attempt]: { kind: "process" } });
+    await h.journal.launched(key, attempt, identity);
+    for (const changed of [
+      { ...identity, id: "other-process" },
+      { ...identity, pid: 43 },
+      { ...identity, startedAt: "2026-10-11T00:00:02.000Z" },
+    ]) {
+      await expect(lostAck(h, true).launched(key, attempt, changed)).rejects.toThrow();
+    }
+    await expect(lostAck(h, false, false).launched(key, attempt, identity)).rejects.toThrow();
+    await h.journal.close(key);
+    const saved = (await h.journal.list()).operations[0]!;
+    expect(saved.journal!.pending).toEqual({ [attempt]: { kind: "process", process: identity } });
+    expect(await h.journal.recover(key, saved.recordHash, async () => terminal, matches)).toMatchObject({
+      outcome: "native-ended",
+      processes: [terminal],
+    });
+  });
+  it("does not qualify process-shaped evidence on an opaque attempt", async () => {
+    const h = fixture();
+    await h.journal.open(key, { opOwner: "op:original" });
+    const attempt = await h.journal.begin(key, "opaque");
+    const record = {
+      opOwner: "op:original",
+      native: { version: 1, closed: true, pending: { [attempt]: { kind: "opaque", process: identity } } },
+    };
+    await h.storage.put(key, record);
+    await expect(lostAck(h, true).launched(key, attempt, identity)).rejects.toThrow("native launch identity changed");
+    expect(await h.storage.get(key)).toEqual(record);
+    const saved = (await h.journal.list()).operations[0]!;
+    expect(await h.journal.recover(key, saved.recordHash, async () => terminal, matches)).toEqual({
+      error: "native-operation-recovery-refused: original-native-evidence-unavailable",
+      status: 409,
+    });
+  });
+});
+
 describe("native operation journal", () => {
   it("an audit-write failure preserves the entire unresolved record", async () => {
     const h = fixture();

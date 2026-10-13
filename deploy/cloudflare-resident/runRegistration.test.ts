@@ -1,4 +1,5 @@
 import { NativeOperationJournal, unstartedNativeOperator } from "./nativeOperation.js";
+import { ErrorCode, OperationInterruptedError, RPCTransportError } from "@cloudflare/sandbox/errors";
 import { levelPosts, memorySide, mergeOutbox, seatSide } from "./levels.js";
 import { uidLedger, uidOwner, issuedUidCount, claimUid, reserveUid } from "./uidOwnership";
 import { provisionUidCommand } from "./uidProvision";
@@ -1433,7 +1434,18 @@ function workloadResident(
       .join("\n")} }`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
   ).outputText;
-  const native = { loseOutput: false, accountCommands: false };
+  const native = {
+    loseOutput: false,
+    accountCommands: false,
+    statusError: undefined as Error | undefined,
+    statusValue: undefined as unknown,
+    onStatus: undefined as (() => void) | undefined,
+    execCount: 0,
+    outputCount: 0,
+    logs: [] as string[],
+    failLog: false,
+    launchError: undefined as Error | undefined,
+  };
   const owners = new Map<string, unknown>();
   const Native = runInNewContext(`${compiled}\nResident`, {
     uidLedger,
@@ -1504,32 +1516,55 @@ function workloadResident(
           exit: { code: 0, timedOut: false },
         }),
       }),
-      exec: async (argv: readonly string[]) => ({
-        status: async () => ({
-          id: "original-process",
-          pid: 42,
-          startedAt: "2026-10-11T00:00:00.000Z",
-          state: "running",
-        }),
-        output: async () => {
-          if (native.loseOutput) throw new Error("native output lost");
-          return {
-            stdout: native.accountCommands
-              ? argv[0] === "/bin/sh"
-                ? "account-ready\n"
-                : "root\nworker1\n"
-              : "completed",
-            stderr: "",
-            exitCode: 0,
-            timedOut: false,
-            truncated: false,
-          };
-        },
-      }),
+      exec: async (argv: readonly string[]) => {
+        native.execCount++;
+        if (native.launchError) throw native.launchError;
+        return {
+          status: async () => {
+            native.onStatus?.();
+            if (native.statusError) throw native.statusError;
+            return (
+              native.statusValue ?? {
+                id: "original-process",
+                pid: 42,
+                startedAt: "2026-10-11T00:00:00.000Z",
+                state: "running",
+              }
+            );
+          },
+          output: async () => {
+            native.outputCount++;
+            if (native.loseOutput) throw new Error("native output lost");
+            return {
+              stdout: native.accountCommands
+                ? argv[0] === "/bin/sh"
+                  ? "account-ready\n"
+                  : "root\nworker1\n"
+                : "completed",
+              stderr: "",
+              exitCode: 0,
+              timedOut: false,
+              truncated: false,
+            };
+          },
+        };
+      },
     }),
     isControlReset: () => false,
     isRuntimeReplacement: () => false,
+    isRuntimeBusy: () => false,
+    isRuntimeUnreachable: () => false,
     ProcessWaitTimeoutError: class extends Error {},
+    RPCTransportError,
+    OperationInterruptedError,
+    selfAndCauses: (error: unknown) => [error, (error as { cause?: unknown })?.cause].filter(Boolean),
+    console: {
+      log: () => {},
+      warn: (line: string) => {
+        if (native.failLog) throw new Error("diagnostic sink unavailable");
+        native.logs.push(line);
+      },
+    },
   });
   const instance = new Native();
   const rows = new Map<string, unknown>();
@@ -1632,6 +1667,279 @@ function workloadResident(
     storageLock.run("storage", () => fn(instance.ctx.storage));
   return { instance, rows, native, lifecycle };
 }
+
+function statusObservationFailure(kind: "invalid_frame" | "protocol_error" = "invalid_frame") {
+  return new RPCTransportError({
+    code: ErrorCode.RPC_TRANSPORT_ERROR,
+    httpStatus: 500,
+    timestamp: "2026-10-11T00:00:00.000Z",
+    message: "synthetic-private-status",
+    context: { kind, originalMessage: "synthetic-private-status", errorName: "TypeError" },
+  });
+}
+describe("native process identity collection", () => {
+  const execute = (h: ReturnType<typeof workloadResident>) =>
+    h.instance.withOpNativeOperation("op:identity-test", () =>
+      Object.getPrototypeOf(h.instance).run.call(h.instance, ["/bin/echo", "fixture"]),
+    );
+  it("retains the full original identity before unrelated memo cleanup can fail", async () => {
+    const h = workloadResident();
+    h.instance.clearRuntimeUnreachable = async () => {
+      throw new Error("memo cleanup unavailable");
+    };
+    await expect(execute(h)).rejects.toThrow("memo cleanup unavailable");
+    const rows = (await new NativeOperationJournal(h.instance.ctx.storage).list()).operations;
+    expect(rows).toMatchObject([{ recoverable: true, journal: { closed: true } }]);
+    expect(Object.values(rows[0]!.journal!.pending).map((attempt) => attempt.process)).toEqual([
+      { id: "original-process", pid: 42, startedAt: "2026-10-11T00:00:00.000Z" },
+    ]);
+  });
+  it.each(["invalid_frame", "protocol_error"] as const)(
+    "collects the same acknowledged handle after observational %s without replay",
+    async (kind) => {
+      const h = workloadResident();
+      h.native.statusError = statusObservationFailure(kind);
+      expect(await execute(h)).toEqual({
+        stdout: "completed",
+        stderr: "",
+        exitCode: 0,
+        timedOut: false,
+        truncated: false,
+      });
+      expect({
+        exec: h.native.execCount,
+        output: h.native.outputCount,
+        holds: (await new NativeOperationJournal(h.instance.ctx.storage).list()).operations.length,
+      }).toEqual({ exec: 1, output: 1, holds: 0 });
+      expect(h.native.logs.join("\n")).toContain("RPCTransportError");
+      expect(h.native.logs.join("\n")).not.toContain("synthetic-private-status");
+    },
+  );
+  it("keeps the missing identity held when the original collector also loses its result", async () => {
+    const h = workloadResident();
+    h.native.statusError = statusObservationFailure();
+    h.native.loseOutput = true;
+    await expect(execute(h)).rejects.toThrow("native output lost");
+    expect((await new NativeOperationJournal(h.instance.ctx.storage).list()).operations).toMatchObject([
+      { recoverable: false, recoveryReason: "original-native-evidence-unavailable", journal: { closed: true } },
+    ]);
+    expect({ exec: h.native.execCount, output: h.native.outputCount }).toEqual({ exec: 1, output: 1 });
+  });
+  it("does not reinterpret identity parsing or journal persistence failure as observation", async () => {
+    for (const mode of ["shape", "store"] as const) {
+      const h = workloadResident();
+      if (mode === "shape") h.native.statusValue = { id: "malformed", pid: 0 };
+      else {
+        const put = h.instance.ctx.storage.put;
+        h.instance.ctx.storage.put = async (key: string, value: any) => {
+          if (value?.native && Object.values(value.native.pending).some((attempt: any) => attempt.process))
+            throw statusObservationFailure();
+          return put(key, value);
+        };
+      }
+      await expect(execute(h)).rejects.toThrow();
+      expect({
+        exec: h.native.execCount,
+        output: h.native.outputCount,
+        holds: (await new NativeOperationJournal(h.instance.ctx.storage).list()).operations.length,
+      }).toEqual({ exec: 1, output: 0, holds: 1 });
+    }
+  });
+  it("does not abandon collection when observation logging fails", async () => {
+    const h = workloadResident();
+    h.native.statusError = statusObservationFailure();
+    h.native.failLog = true;
+    expect(await execute(h)).toEqual({
+      stdout: "completed",
+      stderr: "",
+      exitCode: 0,
+      timedOut: false,
+      truncated: false,
+    });
+    expect({
+      exec: h.native.execCount,
+      output: h.native.outputCount,
+      holds: (await new NativeOperationJournal(h.instance.ctx.storage).list()).operations.length,
+    }).toEqual({ exec: 1, output: 1, holds: 0 });
+  });
+  it("rechecks the current authority before collecting after an observation failure", async () => {
+    const h = workloadResident();
+    h.native.statusError = statusObservationFailure();
+    h.native.onStatus = () => {
+      h.instance.assertThreadOperationAllowed = async () => {
+        throw new Error("owner changed");
+      };
+    };
+    await expect(execute(h)).rejects.toThrow("owner changed");
+    expect({
+      exec: h.native.execCount,
+      output: h.native.outputCount,
+      holds: (await new NativeOperationJournal(h.instance.ctx.storage).list()).operations.length,
+    }).toEqual({ exec: 1, output: 0, holds: 1 });
+  });
+  it("retains uncertain runtime and unclassified status faults without collecting or replay", async () => {
+    for (const error of [
+      new RPCTransportError({
+        code: ErrorCode.RPC_TRANSPORT_ERROR,
+        httpStatus: 500,
+        timestamp: "2026-10-11T00:00:00.000Z",
+        message: "peer lost",
+        context: { kind: "peer_closed", originalMessage: "peer lost", errorName: "Error" },
+      }),
+      new Error("unclassified status fault"),
+    ]) {
+      const h = workloadResident();
+      h.native.statusError = error;
+      await expect(execute(h)).rejects.toThrow();
+      expect({
+        exec: h.native.execCount,
+        output: h.native.outputCount,
+        holds: (await new NativeOperationJournal(h.instance.ctx.storage).list()).operations.length,
+      }).toEqual({ exec: 1, output: 0, holds: 1 });
+    }
+  });
+  it("refuses status failures carrying authentication or ownership denial", async () => {
+    for (const cause of [{ status: 403 }, { code: "OWNER_MISMATCH" }, { code: "FENCE_MISMATCH" }]) {
+      const h = workloadResident();
+      h.native.statusError = statusObservationFailure();
+      (h.native.statusError as Error & { cause: unknown }).cause = cause;
+      await expect(execute(h)).rejects.toThrow();
+      expect({
+        exec: h.native.execCount,
+        output: h.native.outputCount,
+        holds: (await new NativeOperationJournal(h.instance.ctx.storage).list()).operations.length,
+      }).toEqual({ exec: 1, output: 0, holds: 1 });
+    }
+  });
+});
+
+describe("resident launch acknowledgement recovery", () => {
+  const key = "native-operation:op:ack-loss";
+  const result = { stdout: "completed", stderr: "", exitCode: 0, timedOut: false, truncated: false };
+  const execute = (h: ReturnType<typeof workloadResident>) => {
+    h.instance.run = Object.getPrototypeOf(h.instance).run;
+    return h.instance.withOpNativeOperation("op:ack-loss", () => h.instance.run(["true"]));
+  };
+  function failTransaction(
+    h: ReturnType<typeof workloadResident>,
+    phase: "admission" | "identity",
+    commit: boolean,
+    readable = true,
+    close = false,
+  ) {
+    const storage = h.instance.ctx.storage;
+    const transaction = storage.transaction;
+    const get = storage.get;
+    let count = 0;
+    let failed = false;
+    storage.transaction = async (action: (rows: unknown) => Promise<unknown>) => {
+      if (++count !== (phase === "admission" ? 2 : 3)) return transaction(action);
+      if (commit) await transaction(action);
+      if (close) h.instance.opOperationScope.getStore().active = false;
+      failed = true;
+      throw new Error("storage acknowledgement lost");
+    };
+    storage.get = async (rowKey: string) => {
+      if (failed && !readable && rowKey === key) {
+        failed = false;
+        throw new Error("readback unavailable");
+      }
+      return get(rowKey);
+    };
+  }
+  it.each(["admission", "identity"] as const)(
+    "collects one original command after committed %s acknowledgement loss",
+    async (phase) => {
+      const h = workloadResident();
+      h.rows.set("private-evidence", "private uncommitted work");
+      failTransaction(h, phase, true);
+      expect(await execute(h)).toEqual(result);
+      expect(h.native.execCount).toBe(1);
+      expect(h.native.outputCount).toBe(1);
+      expect(await h.instance.getNativeOperations()).toEqual({ operations: [], cursor: null });
+      expect(h.rows.get("private-evidence")).toBe("private uncommitted work");
+    },
+  );
+  it("does not submit when admission rolls back or its committed readback is unavailable", async () => {
+    for (const commit of [false, true]) {
+      const h = workloadResident();
+      failTransaction(h, "admission", commit, false);
+      await expect(execute(h)).rejects.toThrow("readback unavailable");
+      expect(h.native.execCount).toBe(0);
+      const inventory = await h.instance.getNativeOperations();
+      if (commit) {
+        expect(inventory.operations).toMatchObject([
+          {
+            key,
+            recoverable: false,
+            recoveryReason: "original-native-evidence-unavailable",
+            journal: { closed: true },
+          },
+        ]);
+        expect(Object.values(inventory.operations[0].journal.pending)).toEqual([{ kind: "process" }]);
+      } else expect(inventory).toEqual({ operations: [], cursor: null });
+    }
+    expect(await execute(workloadResident())).toEqual(result);
+  });
+  it("settles only a never-submitted admission when its scope closes during lost acknowledgement", async () => {
+    const h = workloadResident();
+    h.rows.set("native-operation:op:unrelated", { opOwner: "op:unrelated" });
+    failTransaction(h, "admission", true, true, true);
+    await expect(execute(h)).rejects.toThrow("operator command ended");
+    expect(h.native.execCount).toBe(0);
+    expect(h.rows.get(key)).toBeUndefined();
+    expect(h.rows.get("native-operation:op:unrelated")).toEqual({ opOwner: "op:unrelated" });
+    expect(await execute(workloadResident())).toEqual(result);
+  });
+  it("retains identity after committed write when readback and collection remain unacknowledged", async () => {
+    const h = workloadResident();
+    failTransaction(h, "identity", true, false);
+    await expect(execute(h)).rejects.toThrow("readback unavailable");
+    const inventory = await h.instance.getNativeOperations();
+    expect(inventory.operations).toMatchObject([
+      {
+        key,
+        recoverable: true,
+        journal: { closed: true },
+      },
+    ]);
+    expect(Object.values(inventory.operations[0].journal.pending)).toEqual([
+      { kind: "process", process: { id: "original-process", pid: 42, startedAt: "2026-10-11T00:00:00.000Z" } },
+    ]);
+    const receipt = await h.instance.recoverNativeOperation(key, inventory.operations[0].recordHash);
+    expect(receipt).toMatchObject({
+      key,
+      outcome: "native-ended",
+      processes: [
+        {
+          id: "original-process",
+          pid: 42,
+          startedAt: "2026-10-11T00:00:00.000Z",
+          state: "exited",
+          endedAt: "2026-10-11T00:00:01.000Z",
+          exit: { code: 0, timedOut: false },
+        },
+      ],
+    });
+    expect(h.native.execCount).toBe(1);
+  });
+  it("keeps a lost native launch acknowledgement unknown without replay", async () => {
+    const h = workloadResident();
+    h.native.launchError = new Error("original launch acknowledgement lost");
+    await expect(execute(h)).rejects.toThrow("original launch acknowledgement lost");
+    const inventory = await h.instance.getNativeOperations();
+    expect(inventory.operations).toMatchObject([
+      { key, recoverable: false, recoveryReason: "original-native-evidence-unavailable", journal: { closed: true } },
+    ]);
+    expect(Object.values(inventory.operations[0].journal.pending)).toEqual([{ kind: "process" }]);
+    expect(await h.instance.recoverNativeOperation(key, inventory.operations[0].recordHash)).toEqual({
+      error: "native-operation-recovery-refused: original-native-evidence-unavailable",
+      status: 409,
+    });
+    expect(h.native.execCount).toBe(1);
+    expect(await execute(workloadResident())).toEqual(result);
+  });
+});
 
 describe("resident workload admission", () => {
   it("refuses operation recovery while a request is active or its thread owner changed", async () => {
