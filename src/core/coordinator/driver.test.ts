@@ -3961,9 +3961,9 @@ describe("the plan runner's driver — a step that throws inside the walk become
       round: 1,
     });
     expect(end!.ending.threadReport).toContain("Review did not restart");
-    expect(end!.ending.threadReport).toContain(`the existing pull request is ${PR_URL}`);
-    expect(end!.ending.threadReport).toContain("current branch and exact head were not verified");
-    expect(end!.ending.threadReport).toContain("No review was started. Next action: retry ship");
+    expect(end!.ending.threadReport).toContain(`The existing pull request is ${PR_URL}`);
+    expect(end!.ending.threadReport).toContain("its current version is unverified");
+    expect(end!.ending.threadReport).toContain("A Switchboard operator needs to check the task's saved state");
     expect(end!.ending.threadReport).not.toMatch(/coding child|interrupted work|ended because|next reply/i);
     expect(b.of("spawn")).toHaveLength(3);
   });

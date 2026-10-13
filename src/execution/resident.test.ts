@@ -30,6 +30,8 @@ import { BASH_TIMEOUT_MS } from "./bashTimeout.js";
 import { residentTraceOf } from "./residentTrace.js";
 import { createTracer } from "../core/trace/tracer.js";
 import { recordingSink } from "../core/testing/recordingSink.js";
+import { createRunStreamSink, type SpanStreamEvent } from "../core/trace/runStreamSink.js";
+import { classOf } from "../core/trace/streamSpans.js";
 import { configureInternalHosts, internalHostsOf, NO_INTERNAL_HOSTS } from "../core/trace/internalHosts.js";
 import { parseTraceparent } from "../core/trace/traceparent.js";
 
@@ -1674,6 +1676,61 @@ describe("ResidentExecutor.release — return the thread's pool user when a run 
 // is one more /attach carrying that sha — the resident's own fetch-on-attach
 // (item 51) does the rest. The new sha sticks for every later attach.
 describe("ResidentExecutor.moveTo", () => {
+  it.each([
+    ["dispatch.gate.attached_head", false, "dispatch.gate.attached_head.worktree-clone", "getting_ready"],
+    ["dispatch.gate.attached_head", true, "dispatch.gate.attached_head.advance-tree-check", "getting_ready"],
+    ["run.settle_reviewed_head", false, "run.settle_reviewed_head.worktree-clone", "finishing_up"],
+    ["run.settle_reviewed_head", true, "run.settle_reviewed_head.advance-tree-check", "finishing_up"],
+  ] as const)("keeps attach steps in the calling phase (%s; refused: %s)", async (phase, refused, child, bucket) => {
+    const next = "b".repeat(40);
+    stubFetch(
+      { body: ATTACH_OK },
+      {
+        body: {
+          ...(refused
+            ? { error: "workspace-preserved: live owner advance unverified", status: 409 }
+            : { ...ATTACH_OK, sha: next }),
+          trace: [
+            {
+              name: refused ? "advance-tree-check" : "worktree-clone",
+              startMs: 0,
+              durationMs: 0,
+              status: refused ? "error" : "ok",
+            },
+          ],
+        },
+      },
+    );
+    const ex = await ResidentExecutor.open({ ...OPTS, refHint: "master", readonly: true });
+    const log = recordingSink();
+    const events: SpanStreamEvent[] = [];
+    const stream = createRunStreamSink({ clock: () => Date.now() });
+    stream.bindRun("review-original", (event) => events.push(event));
+    const span = createTracer({ clock: () => Date.now() }).start(phase, { sinks: [log, stream] });
+    const moving = ex.moveTo(next, { span });
+    if (refused) await expect(moving).rejects.toThrow("workspace-preserved: live owner advance unverified");
+    else await expect(moving).resolves.toEqual({ sha: next });
+    expect(log.ends.map(({ name, parentSpanId, status }) => ({ name, parentSpanId, status }))).toEqual([
+      expect.objectContaining({ name: "http.client", parentSpanId: span.record().spanId, status: "ok" }),
+      {
+        name: child,
+        parentSpanId: span.record().spanId,
+        status: refused ? "error" : "ok",
+      },
+    ]);
+    expect(events.filter((event) => event.type === "span_end")).toEqual([
+      expect.objectContaining({
+        name: child,
+        parentSpanId: span.record().spanId,
+        status: refused ? "error" : "ok",
+      }),
+    ]);
+    const measured = events.find((event) => event.type === "span_end" && event.name === child);
+    expect(classOf(measured?.type === "span_end" ? measured.name : "missing", "agent")).toEqual({
+      kind: "counted",
+      bucket,
+    });
+  });
   it("an explicit move overrides resumed reuse for that attach, then restores ordinary recovery reuse", async () => {
     const next = "b".repeat(40);
     const { calls } = stubFetch(

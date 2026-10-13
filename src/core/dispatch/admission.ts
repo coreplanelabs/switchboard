@@ -453,7 +453,7 @@ export async function admit(deps: AdmissionDeps, ctx: AdmissionContext): Promise
 /** The queued card's line (record 0064, "The queue"): the position, what it
  *  waits on, and the withdraw lever — the one thing said in the thread. */
 export function queuedReply(answer: Extract<PlaneAskAnswer, { kind: "queued" }>): string {
-  return `⏸ queued at position ${answer.position} — waiting on ${waitingWords(answer.waiting)}; it starts on that event. \`runs stop ${answer.id}\` withdraws it.`;
+  return `⏸ Your request is queued at position ${answer.position}, waiting for ${waitingWords(answer.waiting)}. It starts when that is ready. You can cancel it with \`runs stop ${answer.id}\`.`;
 }
 
 async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<AdmissionOutcome> {
@@ -929,7 +929,7 @@ export function createSteerSender(deps: {
       );
       switch (out.kind) {
         case "steered":
-          return `↪ Folded into the *${run.agent}* run ${runId} — it picks this up at its next step${out.where === "elsewhere" ? " (live on another bot generation, through its durable inbox)" : ""}.`;
+          return `↪ Added your message to the *${run.agent}* work (${runId}). It will read it at its next step.`;
         case "refused":
           throw new CommandError(
             "unauthorized",

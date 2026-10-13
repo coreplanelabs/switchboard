@@ -142,15 +142,17 @@ describe("the named lines and the clicker's ids", () => {
     expect(refusalLine("foreign")).toBe(OFFER_FOREIGN_LINE);
     expect(refusalLine("used")).toBe(OFFER_USED_LINE);
     expect(OFFER_EXPIRED_LINE).toBe(
-      "this offer expired after ten minutes; nothing ran, and a later request may receive a fresh confirmation",
+      "This approval expired after ten minutes. Nothing ran. A new request can receive a new approval button.",
     );
     expect(QUESTION_EXPIRED_LINE).toBe(
-      "this question expired after one day; nothing ran, and a later request may receive a fresh question",
+      "This question expired after one day. Nothing ran. A new request can receive a new question.",
     );
-    expect(OFFER_FOREIGN_LINE).toBe("only the requester can confirm this");
-    expect(OFFER_USED_LINE).toBe("this offer was already used");
+    expect(OFFER_FOREIGN_LINE).toBe(
+      "Only the person who requested this action can approve it. Nothing ran from your click.",
+    );
+    expect(OFFER_USED_LINE).toBe("This approval was already used. This click did not run the action again.");
     expect(OFFER_UNREADABLE_LINE).toBe(
-      "this is a bug: the confirmation could not be read, so nothing ran and no replacement offer was minted",
+      "I couldn't read the saved approval, so nothing ran. A Switchboard operator can check the approval service.",
     );
     expect(OFFER_CANCELLED_LINE).toBe("Cancelled; nothing ran");
   });
@@ -545,7 +547,7 @@ describe("consumeAndRun — the stored input runs once, as the requester, throug
     expect(d.audits).toEqual([]);
   });
 
-  it("a clicker whose id and `self` miss the requester reads `only the requester can confirm this`; the row stays for the requester", async () => {
+  it("a clicker whose id and `self` miss the requester reads `Only the person who requested this action can approve it. Nothing ran from your click.`; the row stays for the requester", async () => {
     const d = deps();
     await d.store.put(pending("c1"), CONFIRMATION_TTL_MS);
     const { io, ending, trace } = request(d);

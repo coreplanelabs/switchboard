@@ -491,7 +491,7 @@ describe("catchUpDelayNote", () => {
     const note = catchUpDelayNote(String(posted), (posted + 449) * 1000); // picked up 05:17:21Z
     expect(note).toContain("7 min after it was posted");
     expect(note).toMatch(/restarting/);
-    expect(note).toMatch(/no need to re-send/i);
+    expect(note).toContain("I'm handling it now");
   });
   it("sub-minute and clock-skewed (negative) delays render as 'under a minute'", () => {
     expect(catchUpDelayNote("1000.5", 1000_500 + 20_000)).toContain("under a minute");
@@ -1499,7 +1499,7 @@ describe("handleConfirmClick — the action intake (docs/reference/specs/slack-c
     expect(blocks.some((b) => b.type === "actions")).toBe(false);
     expect(blocks.at(-1)!.text!.text).toBe(CLICK_FAILED_LINE);
     expect(CLICK_FAILED_LINE).toBe(
-      "this click could not be handled; nothing ran, and the command line remains visible in the offer",
+      "I couldn't confirm the result of your click. A Switchboard operator needs to check the saved approval before the action can continue.",
     );
   });
 

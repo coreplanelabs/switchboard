@@ -137,7 +137,7 @@ describe("authorizeAgent — the agent gate, against the resolved agent", () => 
     expect(excluded.refusals).toEqual(["agent_allowlist"]);
     expect(excluded.replies).toHaveLength(1);
     expect(excluded.replies[0]).toMatch(
-      /^🚫 You're not on the allowlist for the `coding` agent\. Ask .+ for access\.$/,
+      /^🚫 You don't have permission to use the `coding` agent\. For access, .+ can approve your request\.$/,
     );
   });
 
@@ -221,7 +221,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
     expect(admin.refusals).toEqual(["repo_not_onboarded"]);
     expect(closedReasons(admin.closes).join("\n")).toContain("repo not onboarded");
     expect(admin.replies[0]).toContain(
-      "📦 `acme/new` is not onboarded as a resident, so I did not start a *coding* run for it. Onboard it (`repo onboard acme/new`)",
+      "📦 `acme/new` has no prepared workspace, so I did not start coding work. An admin can register it with `repo onboard acme/new`.",
     );
 
     const dev = setup({ user: "slack:UDEV" });
@@ -233,7 +233,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
       needsRepo: true,
       repoCtx,
     });
-    expect(dev.replies[0]).toMatch(/Ask .+ to onboard it \(`repo onboard acme\/new`\)/);
+    expect(dev.replies[0]).toContain("An admin can register it with `repo onboard acme/new`");
   });
 
   it("without a resident fleet there is nothing to onboard: the not-onboarded gate does not apply", async () => {
@@ -348,7 +348,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
     });
     expect(refusals).toEqual(["repo_unverified"]);
     expect(closedReasons(closes).join("\n")).toContain("repo could not be verified");
-    expect(replies[0]).toContain("⚠️ This is a bug: I couldn't verify that `acme/api` is an onboarded repo");
+    expect(replies[0]).toContain("⚠️ I couldn't check whether `acme/api` has a prepared workspace");
   });
 
   it("a restricted repository refuses a user without a grant for it by name; a granted one, and an unrestricted repository, pass", async () => {
@@ -365,7 +365,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
     ).toEqual({ kind: "refused", reason: "repo_access" });
     expect(excluded.refusals).toEqual(["repo_access"]);
     expect(closedReasons(excluded.closes).join("\n")).toContain("repo access");
-    expect(excluded.replies[0]).toMatch(/^🚫 You're not on the allowlist for the `acme\/secret` repo environment\./);
+    expect(excluded.replies[0]).toMatch(/^🚫 You don't have permission to use the `acme\/secret` workspace\./);
 
     const granted = setup({ user: "slack:UDEV" });
     expect(
@@ -441,8 +441,8 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
         expect(closedReasons(closes).join("\n")).toContain("repo not visible");
         expect(replies).toHaveLength(1);
         expect(replies[0]).toBe(
-          "📦 `acme/hidden` is not a repository this installation can see — GitHub answered 404 — so I did not start an *explore* run for it. " +
-            "The repository is outside the Switchboard GitHub App installation (`github_repos` lists the reachable ones), or the name is wrong.",
+          "📦 I couldn't access `acme/hidden`, so I did not start an *explore* run. " +
+            "The repository name may be wrong, or the Switchboard GitHub App may need access. A repository admin can check the app's access.",
         );
         expect(replies[0]).not.toContain("onboard");
       }
@@ -467,7 +467,7 @@ describe("authorizeRepo — the repository gates, once the target has landed", (
       expect(refusals).toEqual(["repo_unverified"]);
       expect(closedReasons(closes).join("\n")).toContain("repo could not be verified");
       expect(replies[0]).toBe(
-        "⚠️ This is a bug: I couldn't verify `acme/api` against GitHub because it did not answer, so I did not start an *explore* run and no automatic retry was scheduled.",
+        "⚠️ I couldn't check `acme/api` because GitHub did not respond. No explore work started. A Switchboard operator can check the GitHub connection.",
       );
       expect(replies[0]).not.toContain("resident registry");
     });
@@ -515,7 +515,7 @@ describe("authorizePrHead — the PR head preflight", () => {
     expect(out).toEqual({ kind: "refused", reason: "pr_head_unknown" });
     expect(refusals).toEqual(["pr_head_unknown"]);
     expect(closedReasons(closes).join("\n")).toContain("PR head unknown");
-    expect(replies[0]).toMatch(/^🔀 Review of acme\/api#41 not started: GitHub did not give me a usable head commit/);
+    expect(replies[0]).toMatch(/^🔀 I couldn't verify the current version of acme\/api#41/);
   });
 
   it("a coordinator review cannot resolve another pull or head than its durable publication", async () => {
@@ -670,7 +670,7 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
     });
     expect(commands.filter((command) => command === "git rev-parse HEAD")).toHaveLength(2);
     expect(releases).toEqual(["always"]);
-    expect(s.replies[0]).toContain(`workspace-observed HEAD for feature/x is at ${SHA_B}`);
+    expect(s.replies[0]).toContain(`The workspace is at \`${SHA_B.slice(0, 7)}\``);
   });
 
   it("a push raced the request and the worktree sits at the PR's current head: adopted — the repo context takes that head and the caller re-publishes the run meta", async () => {
@@ -755,8 +755,8 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
     expect(s.refusals).toEqual(["workspace_head_mismatch"]);
     expect(releases).toEqual(["always"]);
     expect(closedReasons(s.closes).join("\n")).toContain("workspace head mismatch");
-    expect(s.replies[0]).toContain(SHA_B);
-    expect(s.replies[0]).toContain(`expected reviewed head is ${SHA_A}`);
+    expect(s.replies[0]).toContain(SHA_B.slice(0, 7));
+    expect(s.replies[0]).toContain(`needs \`${SHA_A.slice(0, 7)}\``);
     expect(s.replies[0]).not.toMatch(/branch moved|push|force-push|bug/i);
   });
 
@@ -772,8 +772,8 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
       reason: "workspace_head_mismatch",
     });
     expect(releases).toEqual(["always"]);
-    expect(s.replies[0]).toContain(`initial workspace-observed HEAD for feature/x was at ${SHA_B}`);
-    expect(s.replies[0]).toContain("automatic reprovision failed before a retry HEAD could be observed");
+    expect(s.replies[0]).toContain("The workspace did not match acme/api#41");
+    expect(s.replies[0]).toContain("setup failed");
     expect(s.replies[0]).not.toContain(
       `after one automatic reprovision, the resident binding for feature/x is at ${SHA_B}`,
     );
@@ -790,7 +790,7 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
     });
     expect(commands.filter((command) => command === "git rev-parse HEAD")).toHaveLength(2);
     expect(releases).toEqual(["always"]);
-    expect(s.replies[0]).toContain(`workspace-observed HEAD for feature/x is at ${SHA_B}`);
+    expect(s.replies[0]).toContain(`The workspace is at \`${SHA_B.slice(0, 7)}\``);
   });
 
   it("a successful retry publishes the observed checkout HEAD instead of moveTo metadata", async () => {
@@ -858,8 +858,8 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
       ),
     ).toEqual({ kind: "refused", reason: "workspace_head_mismatch" });
     expect(elsewhere.releases).toEqual(["always"]);
-    expect(mismatched.replies[0]).toContain(`workspace-observed HEAD for feature/x is at ${SHA_B}`);
-    expect(mismatched.replies[0]).toContain(`expected reviewed head is ${SHA_A}`);
+    expect(mismatched.replies[0]).toContain(`The workspace is at \`${SHA_B.slice(0, 7)}\``);
+    expect(mismatched.replies[0]).toContain(`needs \`${SHA_A.slice(0, 7)}\``);
   });
 
   it("a hard stop during cold review checkout ends setup without a retry or refusal", async () => {
@@ -933,9 +933,7 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
       reason: "workspace_head_mismatch",
     });
     expect(noSha.releases).toEqual(["always"]);
-    expect(unknown.replies[0]).toContain(
-      "workspace-observed HEAD for feature/x could not be read after one automatic reprovision",
-    );
+    expect(unknown.replies[0]).toContain("verify the workspace version for acme/api#41");
 
     const asked: unknown[] = [];
     const deps: AuthorizeDeps = {
@@ -986,17 +984,17 @@ describe("authorizeProfile — the profile gate, before the thread is claimed", 
       {
         scope: "channel" as const,
         reply:
-          "🚫 `coding` needs a `write` credential; this channel's boundary caps runs at `read`. Switchboard left this channel's boundary unchanged and did not start the run.",
+          "🚫 `coding` needs write access, but this channel's limits allow read access. No work started. For access, an admin can check these limits.",
       },
       {
         scope: "user" as const,
         reply:
-          "🚫 `coding` needs a `write` credential; your own boundary caps runs at `read`. Switchboard left your boundary and overrides unchanged and did not start the run.",
+          "🚫 `coding` needs write access, but your settings allow read access. No work started. For access, an admin can check these limits.",
       },
       {
         scope: "defaults" as const,
         reply:
-          "🚫 `coding` needs a `write` credential; the installation's default boundary caps runs at `read`. Switchboard left the installation's default boundary unchanged and did not start the run.",
+          "🚫 `coding` needs write access, but Switchboard's default limits allow read access. No work started. For access, an admin can check these limits.",
       },
     ];
     for (const { scope, reply } of cases) {
@@ -1016,19 +1014,19 @@ describe("authorizeProfile — the profile gate, before the thread is claimed", 
   it("the minutes axis names the minimum, the lease and whose clip it was, then closes on the unchanged state", () => {
     const hint = "slack:UADMIN";
     expect(profileRefusalReply("explore", { axis: "minutes", needs: 4, have: 3, scope: "directive" }, hint)).toBe(
-      "🚫 `explore` needs at least 4 minutes — a turn, then its write-up and post-step — and this message's own budget gives it 3. Switchboard applied this message's budget directive and did not start the run.",
+      "🚫 `explore` needs at least 4 minutes to work and report its result, but the time limits in this request allow 3 minutes. No work started. An admin can check the time limit.",
     );
     expect(profileRefusalReply("coding", { axis: "minutes", needs: 9, have: 5, scope: "user" }, hint)).toBe(
-      "🚫 `coding` needs at least 9 minutes — a turn, then its write-up and post-step — and your own boundary gives it 5. Switchboard left your boundary and overrides unchanged and did not start the run.",
+      "🚫 `coding` needs at least 9 minutes to work and report its result, but your settings allow 5 minutes. No work started. An admin can check the time limit.",
     );
     expect(profileRefusalReply("review", { axis: "minutes", needs: 7, have: 5, scope: "channel" }, hint)).toBe(
-      "🚫 `review` needs at least 7 minutes — a turn, then its write-up and post-step — and this channel's boundary gives it 5. Switchboard left this channel's boundary unchanged and did not start the run.",
+      "🚫 `review` needs at least 7 minutes to work and report its result, but this channel's limits allow 5 minutes. No work started. An admin can check the time limit.",
     );
     expect(profileRefusalReply("general", { axis: "minutes", needs: 4, have: 2, scope: "defaults" }, hint)).toBe(
-      "🚫 `general` needs at least 4 minutes — a turn, then its write-up and post-step — and the installation's default boundary gives it 2. Switchboard left the installation's default boundary unchanged and did not start the run.",
+      "🚫 `general` needs at least 4 minutes to work and report its result, but Switchboard's default limits allow 2 minutes. No work started. An admin can check the time limit.",
     );
     expect(profileRefusalReply("research", { axis: "minutes", needs: 4, have: 2, scope: "parent" }, hint)).toBe(
-      "🚫 `research` needs at least 4 minutes — a turn, then its write-up and post-step — and the parent run's remaining budget gives it 2. Switchboard left the parent run's remaining budget unchanged and did not start the run.",
+      "🚫 `research` needs at least 4 minutes to work and report its result, but the original task's time limits allow 2 minutes. No work started. An admin can check the time limit.",
     );
   });
 
@@ -1043,7 +1041,7 @@ describe("authorizeProfile — the profile gate, before the thread is claimed", 
       },
     });
     expect(one.replies).toEqual([
-      "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary allows only `none`. Switchboard left this channel's boundary unchanged; it did not start the run.",
+      "🚫 `coding` needs a prepared repository workspace, but this channel's limits allow only work without a workspace. No work started. An admin can check which workspaces this request may use.",
     ]);
     const two = setup();
     await authorizeProfile(two.deps, {
@@ -1055,7 +1053,7 @@ describe("authorizeProfile — the profile gate, before the thread is claimed", 
       },
     });
     expect(two.replies).toEqual([
-      "🚫 `coding` runs on a `repo-resident` machine; this channel's boundary and your own boundary allow only `none`, `blank`. Switchboard left this channel's boundary unchanged; Switchboard left your boundary and overrides unchanged; it did not start the run.",
+      "🚫 `coding` needs a prepared repository workspace, but this channel's limits and your settings allow only work without a workspace, a new workspace. No work started. An admin can check which workspaces this request may use.",
     ]);
     expect(two.refusals).toEqual(["profile_bounded"]);
   });

@@ -5090,7 +5090,7 @@ describe("the round verdict — the checks step at the reviewed head (record 005
     held.answer({ type: "checks", checks: { total: 3, pending: [], failed: [] }, draft: true, at: T0 + 81 * MIN });
     expect(held.state.ending).toMatchObject({ kind: "held", cause: "draft", pr: { number: 7 } });
     expect(renderUnitReport(held.state, undefined, "quiet")).toContain(
-      "Held: draft — GitHub still marks the pull request as draft",
+      "Waiting for you: the pull request is a draft. You can mark it ready for review on GitHub",
     );
     expect(renderUnitReport(held.state)).toContain("the pull request is a draft");
 
@@ -6212,7 +6212,7 @@ describe("the idle ending — an idling kind maps to `idle` when ship.idleDays i
     // The cap's aside — the budget split — is verbose material in the thread's copy.
     expect(renderUnitReport(idle.state)).toContain("Budget split (240 min):");
     const quiet = renderUnitReport(idle.state, undefined, "quiet");
-    expect(quiet).toContain("🧢 Out of budget");
+    expect(quiet).toContain("🧢 Time limit reached");
     expect(quiet).not.toContain("Renewals:");
     expect(quiet).not.toContain("Budget split");
   });
@@ -6553,7 +6553,9 @@ describe("the quiet thread report — the ending is ONE line in the user's words
     );
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "round_cap" } });
     const quiet = renderUnitReport(d.state, undefined, "quiet");
-    expect(quiet).toBe(`🧢 Round cap reached: 2 blockers, 1 major, 2 minor, 3 nits — ${PR_URL}`);
+    expect(quiet).toBe(
+      `🧢 Review limit reached: 2 blockers, 1 major, 2 minor, 3 nits. No automatic fix rounds remain — remaining findings: ${PR_URL}`,
+    );
     expect(quiet).not.toContain("round_cap");
     expect(renderUnitReport(d.state, undefined, "verbose")).toBe(renderUnitReport(d.state));
     expect(renderUnitReport(d.state)).toContain("🧢 Ship stopped at a cap: the 1-round cap");
@@ -6576,7 +6578,9 @@ describe("the quiet thread report — the ending is ONE line in the user's words
     );
     expect(d.action).toMatchObject({ type: "end", ending: { kind: "idle", why: "held" } });
     const quiet = renderUnitReport(d.state, undefined, "quiet");
-    expect(quiet).toBe(`⏸️ Waiting for you: F1 (minor) — the entry replay receipt is human-gated — ${PR_URL}`);
+    expect(quiet).toBe(
+      `⏸️ Waiting for you: F1 (minor) — the entry replay receipt is human-gated. Your reply in this task's thread supplies the answer — ${PR_URL}`,
+    );
     expect(renderUnitReport(d.state, undefined, "verbose")).toBe(renderUnitReport(d.state));
     expect(renderUnitReport(d.state)).toContain(
       "The next reply in this unit thread or authorized pull request comment becomes the fix round's answer",

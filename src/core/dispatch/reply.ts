@@ -44,7 +44,7 @@ import type { RunEnding } from "../runEnding.js";
 import type { CardShell } from "../statusCardFrame.js";
 import type { Span } from "../trace/types.js";
 import type { HistoryItem, IncomingMessage, StatusActivity, StatusHandle } from "../types.js";
-import { refusalLine, type Refusal } from "../refusal.js";
+import { refusalLine, userErrorMessage, type Refusal } from "../refusal.js";
 import type { ProvisionDeps } from "./provision.js";
 import type { ProviderTable } from "../harness/piAi.js";
 import {
@@ -428,7 +428,7 @@ export const STATUS_PREFIXES = ["⏳", "✅", "◐", "◓", "◑", "◒"];
 /** The one shape a dispatch failure is reported in — the outer handler's reply
  *  and a failed inline run's `answer` are built from it, so they cannot drift. */
 export function errorReply(err: unknown): string {
-  return `⚠️ ${err instanceof Error ? err.message : String(err)}`;
+  return `⚠️ ${userErrorMessage(err)}`;
 }
 
 /** The receipt of an operator bind (record 0057; the one-door plan's receipt
@@ -444,9 +444,9 @@ export function renderOperatorReceipt(line: string, radius: string, reason: stri
 
 /**
  * The one place a `Refusal` becomes what the person reads (record 0054):
- * the text is the producer's own sentence, byte-identical to what the site
- * said before the seam — the renderer adds nothing the producer did not put
- * in `text` or `wayForward`. A `policy` refusal appends its way forward when
+ * request and policy text is the producer's own sentence. Known system
+ * errors use the plain-language projection in `refusalLine`; their original
+ * diagnostic stays on the record. A `policy` refusal appends its way forward when
  * the producer set one apart from the text; a `system` refusal renders the
  * text as the error it is and never an offer or a Yes; a `request` refusal
  * without a guess renders the text — which names what the door needs.
@@ -565,7 +565,7 @@ export async function renderConfirmationOffer(io: ChannelIO, offer: Confirmation
 }
 /**
  * The gate sentences, keyed by refusal code (record 0054): each builder
- * returns the exact bytes the gate said before the seam — the producing site
+ * returns the gate's user-facing sentence — the producing site
  * calls its builder, the byte-identity test diffs the builders against the
  * inventory's quotes, and a drifted sentence fails there instead of shipping.
  * Codes missing here carry producer-built text on the `Refusal` instead:
@@ -579,43 +579,46 @@ export async function renderConfirmationOffer(io: ChannelIO, offer: Confirmation
  */
 export const REFUSAL_SENTENCES = {
   agent_allowlist: (p: { agent: string; adminsHint: string }) =>
-    `🚫 You're not on the allowlist for the \`${p.agent}\` agent. Ask ${p.adminsHint} for access.`,
+    `🚫 You don't have permission to use the \`${p.agent}\` agent. For access, ${p.adminsHint} can approve your request.`,
   live_agent_allowlist: (p: { agent: string; adminsHint: string }) =>
-    `🚫 You're not on the allowlist for the \`${p.agent}\` agent, whose run is in flight in this thread. Ask ${p.adminsHint} for access.`,
+    `🚫 You don't have permission to direct the \`${p.agent}\` agent working in this thread. For access, ${p.adminsHint} can approve your request.`,
   elsewhere_agent_allowlist: (p: { agent: string; adminsHint: string }) =>
-    `🚫 You're not on the allowlist for the \`${p.agent}\` agent, whose run is in flight in this thread. Ask ${p.adminsHint} for access.`,
+    `🚫 You don't have permission to direct the \`${p.agent}\` agent working in this thread. For access, ${p.adminsHint} can approve your request.`,
   repo_not_visible: (p: { slug: string; agent: string }) =>
-    `📦 \`${p.slug}\` is not a repository this installation can see — GitHub answered 404 — so I did not start ${aRun(p.agent)} for it. ` +
-    `The repository is outside the Switchboard GitHub App installation (\`github_repos\` lists the reachable ones), or the name is wrong.`,
+    `📦 I couldn't access \`${p.slug}\`, so I did not start ${aRun(p.agent)}. ` +
+    `The repository name may be wrong, or the Switchboard GitHub App may need access. A repository admin can check the app's access.`,
   repo_unverified: (p: { slug: string; agent: string; via: "github" | "registry" }) =>
     p.via === "github"
-      ? `⚠️ This is a bug: I couldn't verify \`${p.slug}\` against GitHub because it did not answer, so I did not start ${aRun(p.agent)} and no automatic retry was scheduled.`
-      : `⚠️ This is a bug: I couldn't verify that \`${p.slug}\` is an onboarded repo because the resident registry did not answer, so I did not start a *${p.agent}* run and no automatic fallback was started.`,
+      ? `⚠️ I couldn't check \`${p.slug}\` because GitHub did not respond. No ${p.agent} work started. A Switchboard operator can check the GitHub connection.`
+      : `⚠️ I couldn't check whether \`${p.slug}\` has a prepared workspace because the workspace service did not respond. No ${p.agent} work started. A Switchboard operator can check the service.`,
   repo_not_onboarded: (p: { slug: string; agent: string; onboardHint: string }) =>
-    `📦 \`${p.slug}\` is not onboarded as a resident, so I did not start a *${p.agent}* run for it. ` +
-    `${p.onboardHint} for a warm, deps-ready environment, or name the repository by URL ` +
-    `(https://github.com/${p.slug}) to run in a cold per-thread sandbox.`,
+    `📦 \`${p.slug}\` has no prepared workspace, so I did not start ${p.agent} work. ` +
+    `An admin can register it with \`repo onboard ${p.slug}\`. Naming https://github.com/${p.slug} in a request uses a separate workspace.`,
   pr_target_conflict: (p: { target: string; cited: string }) =>
-    `⚠️ This request starts with \`${p.target}\` but also cites \`${p.cited}\`. No run started because the pull request target is ambiguous.`,
+    `⚠️ You named both \`${p.target}\` and \`${p.cited}\`. Which pull request should I work on? No work started.`,
   repo_access: (p: { repo: string; adminsHint: string }) =>
-    `🚫 You're not on the allowlist for the \`${p.repo}\` repo environment. Ask ${p.adminsHint} for access.`,
+    `🚫 You don't have permission to use the \`${p.repo}\` workspace. For access, ${p.adminsHint} can approve your request.`,
   which_branch: (p: { repo: string | undefined }) =>
     `🌿 Which branch of \`${p.repo}\` should this thread work on? ` +
-    `No branch is bound yet; a branch token such as \`branch:main\` will bind it.`,
+    `No work started. You can name a branch, for example \`branch:main\`.`,
   ship_thread_live: () =>
-    "🚫 A pipeline is already running in this thread — one pipeline per thread. " +
-    "Follow the one in flight here, or start this one in a thread of its own.",
+    "🚫 Ship is already working in this thread, so no second task started. A separate thread can run a separate task.",
   pipeline_thread_owned: (p: { agent: string; units: ReadonlyArray<{ unit: string; threadKey?: string }> }) =>
-    `🚦 This thread belongs to the live *${p.agent}* pipeline runner — nothing runs beside it here. ` +
+    `🚦 *${p.agent}* is coordinating work in this thread, so no separate task started here. ` +
     (p.units.length > 0
-      ? `Reply in the unit's own thread instead: ${p.units
-          .map((u) => `${u.unit}${u.threadKey !== undefined ? ` (\`${u.threadKey}\`)` : ""}`)
+      ? `Each task accepts updates in its own thread: ${p.units
+          .map((u) => {
+            const link = u.threadKey === undefined ? undefined : threadPageLink(u.threadKey);
+            if (link) return `[${u.unit}](${link})`;
+            return u.threadKey === undefined
+              ? `${u.unit} (thread unavailable)`
+              : `${u.unit} (thread \`${u.threadKey}\`; link unavailable)`;
+          })
           .join(", ")}.`
-      : "Reply in the unit's own thread instead."),
+      : "Each task accepts updates in its own thread."),
   ship_budget: (p: { maxMinutes: number; maxRounds: number; need: number; provision: number; coding: number }) =>
-    `🚫 Ship cannot start under a ${p.maxMinutes}-minute budget: the loop it allows (${p.maxRounds} review ${p.maxRounds === 1 ? "round" : "rounds"}) needs ${p.need} minutes — ` +
-    `${p.provision} to provision, the coding child's ${p.coding}, and the reserve for the rounds after it at their floors. ` +
-    `Switchboard left the budget and boundary unchanged and did not start either the review loop or a single coding pass.`,
+    `🚫 Ship needs at least ${p.need} minutes to set up, code and review this task; this request allows ${p.maxMinutes} minutes. ` +
+    `No work started. An admin can check the time limit for this request.`,
 } as const;
 
 /** `a *coding* run`, `an *explore* run`: the agent's name with its article. */

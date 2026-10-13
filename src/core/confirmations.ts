@@ -149,7 +149,7 @@ export function newConfirmationId(): string {
  *  cannot read in full is not a confirmation (record 0069's table: a chat
  *  surface's mint failure is a refusal naming why, never a line to retype). */
 export const UNSHOWABLE_LINE =
-  "this command carries a value that cannot be shown, so no confirmation can be offered; nothing ran";
+  "I couldn't show this action for approval because one of its values may be a secret. Nothing ran.";
 
 /** The refusal when the confirmation store cannot mint the click — the store
  *  threw, or the process holds none — on a chat surface, where the click is
@@ -157,7 +157,7 @@ export const UNSHOWABLE_LINE =
  *  why and the person's next message re-asks the door; never the line to
  *  retype. */
 export const STORE_UNREACHABLE_LINE =
-  "this command needs a confirmation click, and the confirmation store could not be reached; nothing ran — ask again for the button";
+  "This action needs your approval, but I couldn't create the approval button. Nothing ran. A Switchboard operator can check the approval service.";
 
 /** The refusal for a write bind whose thread already holds a pending
  *  confirmation from the same decision (record 0044's one-row-per-thread
@@ -165,7 +165,7 @@ export const STORE_UNREACHABLE_LINE =
  *  bind minted, and this one is refused naming the pending row — minting it
  *  would silently replace the row the person is looking at. */
 export function pendingRowLine(line: string): string {
-  return `a confirmation is already pending on this thread (\`${line}\`); click or cancel it first — one write is offered at a time`;
+  return `An action is already waiting for your approval in this thread: \`${line}\`. You can approve or cancel it with its buttons. This second action did not run.`;
 }
 
 /** The offer as text — the line, the risk when the command declares one:

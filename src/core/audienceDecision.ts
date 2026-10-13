@@ -129,10 +129,10 @@ export function noteAudienceRefusal(
 export function audienceRefusalText(code: AudienceRefusalCode): string {
   switch (code) {
     case "recovered-provenance-unproved":
-      return "This run restarted, so please ask again in a private DM.";
+      return "This run restarted, so I can't safely reuse its private source details. A new message with the source in your direct Slack chat with Switchboard, outside this thread, starts a fresh check.";
     case "slack-source-unverified":
     case "source-check-timeout":
-      return "I need to check the Slack source again before using earlier details. Please start a new DM message with the source.";
+      return "I couldn't verify the Slack source, so I did not use its earlier details. A Switchboard operator can check source access.";
     case "direct-address-unproved":
     case "direct-address-mismatch":
     case "direct-audience-denied":
@@ -142,14 +142,14 @@ export function audienceRefusalText(code: AudienceRefusalCode): string {
     case "followup-address-unproved":
     case "followup-address-mismatch":
     case "followup-unverified":
-      return "I can no longer verify this private conversation, so I can't share that answer here.";
+      return "I couldn't verify who can read this private conversation, so I withheld the answer. A Switchboard operator can check conversation access.";
     case "mcp-audience-unproved":
-      return "I can read this private source only in your one-person Slack DM. Please ask me there.";
+      return "This private source can be used only in a direct Slack message between you and Switchboard. I did not share its details here.";
     case "mcp-check-unavailable":
     case "github-check-unavailable":
     case "plane-check-unavailable":
     case "thread-work-check-unavailable":
-      return "I can't verify this source's sharing permissions right now. Please ask me to check it again.";
+      return "I couldn't verify this source's sharing permissions, so I withheld its details. A Switchboard operator can check source access.";
     case "saved-context-unproved":
     case "parent-context-unproved":
     case "artifact-context-unproved":
@@ -161,6 +161,6 @@ export function audienceRefusalText(code: AudienceRefusalCode): string {
     case "plane-identity-unproved":
     case "plane-row-no-longer-visible":
     case "thread-work-snapshot-changed":
-      return "I can't safely use earlier source data in this conversation. Please ask me to check the source again.";
+      return "I couldn't verify that the earlier source details are still safe to share here, so I withheld them. A Switchboard operator can check the source and conversation access.";
   }
 }

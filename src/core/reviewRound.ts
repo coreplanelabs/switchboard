@@ -290,9 +290,7 @@ export function checkPrHeadPreflight(input: {
   return {
     ok: false,
     where,
-    reply:
-      `🔀 Review of ${where} not started: GitHub did not give me a usable head commit for the PR (the lookup failed, or answered without a well-formed SHA), ` +
-      `so I cannot pin a review to it. This is a bug: no automatic head lookup retry was scheduled, and nothing was posted to GitHub.`,
+    reply: `🔀 I couldn't verify the current version of ${where}, so the review did not start and nothing was posted to GitHub. A Switchboard operator can check the GitHub lookup.`,
   };
 }
 
@@ -390,9 +388,7 @@ export async function guardAttachedHead(input: {
     );
     return {
       outcome: "refused",
-      reply:
-        `🔀 Review of ${where} not started: ${initial}, and the automatic reprovision failed before a retry HEAD could be observed; the expected reviewed head is ${expected}. ` +
-        `It is not a finding, and nothing was posted to GitHub.`,
+      reply: `🔀 The workspace did not match ${where}. I tried to prepare it again, but setup failed. No review started or was posted to GitHub. A Switchboard operator can check the workspace setup.`,
     };
   }
 
@@ -403,9 +399,7 @@ export async function guardAttachedHead(input: {
     );
     return {
       outcome: "refused",
-      reply:
-        `🔀 Review of ${where} not started: ${initial}, and the ${source} could not be read after one automatic reprovision, so it could not be verified; the expected reviewed head is ${expected}. ` +
-        `It is not a finding, and nothing was posted to GitHub.`,
+      reply: `🔀 I couldn't verify the workspace version for ${where} after preparing it again. No review started or was posted to GitHub. A Switchboard operator can check the workspace.`,
     };
   }
   console.log(
@@ -413,9 +407,7 @@ export async function guardAttachedHead(input: {
   );
   return {
     outcome: "refused",
-    reply:
-      `🔀 Review of ${where} not started: after one automatic reprovision, the ${source} is at ${checked}, but the expected reviewed head is ${expected}. ` +
-      `It is not a finding, and nothing was posted to GitHub.`,
+    reply: `🔀 The workspace is at \`${checked.slice(0, 7)}\`, but ${where} needs \`${expected.slice(0, 7)}\`. Preparing it again did not fix the mismatch. No review started or was posted to GitHub. A Switchboard operator can check the workspace.`,
   };
 }
 

@@ -30,7 +30,7 @@ import { graftResidentSteps, sanitizeGraftedSteps } from "../../execution/reside
 import { residentOnboardedProbe, residentSlugsLister } from "../../execution/factory.js";
 import { resolveRepoContext, type RepoContext } from "../repoContext.js";
 import { redactAndCap, redactSecrets, type RunEvent } from "../runEvents.js";
-import { refusalLine, type Refusal } from "../refusal.js";
+import type { Refusal } from "../refusal.js";
 import { ROUTE_RECEIPT_CAP } from "./route.js";
 import type { RunStatus } from "../runRecord.js";
 import { analyzeRunFriction } from "../runFriction.js";
@@ -326,7 +326,7 @@ async function recordDoorDecision(
       type: "refusal",
       code: decision.refusal.code,
       cause: decision.refusal.cause,
-      text: redactAndCap(refusalLine(decision.refusal), ROUTE_RECEIPT_CAP),
+      text: redactAndCap(decision.refusal.text, ROUTE_RECEIPT_CAP),
       at: clock(),
     });
   // A bounded operator that could not decide is a failed door, even though no

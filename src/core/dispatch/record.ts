@@ -11,7 +11,7 @@ import type { IncomingMessage } from "../types.js";
 import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
 import { contextRefusalsOf } from "../mainContextRefusal.js";
 import { privateMainEvent } from "../privateMainEvent.js";
-import { refusalLine, type Refusal } from "../refusal.js";
+import type { Refusal } from "../refusal.js";
 import { redactAndCap } from "../runEvents.js";
 import type { ChannelDirectory, ChannelVisibility } from "../authz/types.js";
 import { STATIC_CHANNEL_DIRECTORY } from "../authz/channelDirectory.js";
@@ -758,7 +758,7 @@ export function finishSetupRun(
   },
 ): void {
   const { registry, runId, finishedAt, refusal, status, ending } = ctx;
-  const reason = refusalLine(refusal);
+  const reason = refusal.text;
   registry.publish(runId, {
     type: "refusal",
     code: refusal.code,

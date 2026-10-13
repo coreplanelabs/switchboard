@@ -20,7 +20,7 @@ import { defaultAdmission, type AdmissionDeps, type DispatchFollowUp } from "./a
 /** The note a follow-up's sender gets when the run it was folded into was
  *  stopped by an operator before its next step read it. */
 export const FOLLOW_UP_DROPPED_BY_STOP =
-  "⛔ This is a bug: the run was stopped before it read this folded follow-up, and the follow-up was not replayed as a fresh request.";
+  "⛔ The run was stopped before it read your follow-up. I did not start another task from that message.";
 
 /** What the settle stage reads off the dispatch when the request is over. */
 export interface SettleContext {

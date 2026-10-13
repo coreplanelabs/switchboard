@@ -511,7 +511,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     });
     const out = await handOffToCoordinator(h.deps, input());
     expect(out).toMatchObject({ status: "pending", instanceId: "plan-fixture" });
-    expect(out.reply).toContain("reports running");
+    expect(out.reply).toContain("couldn't confirm whether it started");
     expect((await h.instances.get("plan-fixture"))?.admission).toBe("unreconciled");
     expect(h.created).toEqual(["plan-fixture"]);
     expect(h.statusAsked).toEqual(["plan-fixture"]);
@@ -700,7 +700,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
       input({ entry: { repo: "acme/api", base: "main" }, requestText: "" }),
     );
     expect(out.status).toBe("aborted");
-    expect(out.reply).toContain("no task to checkpoint");
+    expect(out.reply).toContain("What change should Ship make?");
     expect(h.created).toEqual([]);
   });
 
@@ -1619,7 +1619,7 @@ describe("handOffToCoordinator — the ship request as a plan runner instance (i
     const dup = harness({ create: { kind: "duplicate", id: "plan-fixture", status: "complete" } });
     const out = await handOffToCoordinator(dup.deps, input());
     expect(out).toMatchObject({ status: "pending", instanceId: "plan-fixture" });
-    expect(out.reply).toContain("ownership needs reconciliation");
+    expect(out.reply).toContain("operator needs to check work");
     const silent = harness({
       create: { kind: "not_attempted", reason: "PUBLIC_BASE_URL is not set — the bot cannot address its own shim" },
     });

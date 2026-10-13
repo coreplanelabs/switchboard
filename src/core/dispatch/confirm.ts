@@ -34,17 +34,19 @@ import { parseDirectives } from "../../directives.js";
 import { shows } from "../verbosity.js";
 
 export const OFFER_EXPIRED_LINE =
-  "this offer expired after ten minutes; nothing ran, and a later request may receive a fresh confirmation";
+  "This approval expired after ten minutes. Nothing ran. A new request can receive a new approval button.";
 /** A question's Yes lives `QUESTION_TTL_MS` (a day), not the write's ten
  *  minutes, so its expired click names the window it missed. */
 export const QUESTION_EXPIRED_LINE =
-  "this question expired after one day; nothing ran, and a later request may receive a fresh question";
-export const OFFER_FOREIGN_LINE = "only the requester can confirm this";
-export const OFFER_USED_LINE = "this offer was already used";
+  "This question expired after one day. Nothing ran. A new request can receive a new question.";
+export const OFFER_FOREIGN_LINE =
+  "Only the person who requested this action can approve it. Nothing ran from your click.";
+export const OFFER_USED_LINE = "This approval was already used. This click did not run the action again.";
 export const OFFER_UNREADABLE_LINE =
-  "this is a bug: the confirmation could not be read, so nothing ran and no replacement offer was minted";
+  "I couldn't read the saved approval, so nothing ran. A Switchboard operator can check the approval service.";
 export const OFFER_CANCELLED_LINE = "Cancelled; nothing ran";
-export const OFFER_CONTEXT_LINE = "This confirmation's saved context is no longer available.";
+export const OFFER_CONTEXT_LINE =
+  "I couldn't verify the information saved with this approval, so nothing ran. A Switchboard operator can check the saved request.";
 
 /** The reason a confirmed run's `route` event gives on the record. */
 export const CONFIRMED_REASON = "confirmed after offer";

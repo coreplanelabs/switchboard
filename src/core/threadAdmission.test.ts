@@ -247,8 +247,8 @@ describe("replies", () => {
 
   it("the agent-mismatch refusal names the requested agent and says one run per thread", () => {
     const text = refusalReply(live, { requestedAgent: "review" }, 20_000);
-    expect(text).toContain("`agent:review`");
-    expect(text).toContain("one run per thread");
+    expect(text).toContain("No review work started");
+    expect(text).toContain("A separate thread can run a separate task");
     expect(text).toContain("*coding*");
   });
 });

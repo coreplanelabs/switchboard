@@ -6,6 +6,8 @@
 // door report count refusals by the same names.
 import type { IncomingMessage } from "./types.js";
 import type { PrWorkBinding } from "./ship/prWorkBinding.js";
+import { ProviderFailure, renderProviderFailure } from "./provider.js";
+import { residentTraceOf } from "../execution/residentTrace.js";
 
 /** Why the bot refused, in the record's three classes: a different sentence
  *  from the person would work (`request`), the person may not (`policy`), or
@@ -69,6 +71,7 @@ const CAUSE_OF = {
   ship_thread_live: "request",
   setup_failed: "system",
   run_budget_exhausted: "system",
+  model_call_budget_exhausted: "system",
   publication_ownership_unknown: "system",
   // the click on a confirmation (confirm.ts)
   confirmation_used: "request",
@@ -152,8 +155,7 @@ export function causeOf(code: RefusalCode): RefusalCause {
 /** Every code the table knows, for tests and reports. */
 export const REFUSAL_CODES: readonly RefusalCode[] = Object.keys(CAUSE_OF) as RefusalCode[];
 
-/** One refusal: the cause, the code, the sentence the person reads (built by
- *  the producing site, byte-identical to what it said before the seam), the
+/** One refusal: the cause, the code, the producer's sentence or diagnostic, the
  *  best guess when the site holds one, and the way forward when the cause is
  *  `policy` and the text does not already carry it. */
 export interface Refusal {
@@ -169,12 +171,38 @@ export function refusalOf(code: RefusalCode, text: string, extra?: Pick<Refusal,
   return { cause: causeOf(code), code, text, ...(extra ?? {}) };
 }
 
-/** The one line a `Refusal` reads as, shared by the async renderer and the
- *  string-shaped surfaces (`chatErrorLine`): the producer's own text, plus the
- *  way forward when the cause is `policy` and one was set apart. */
+/** Chat copy for a refusal. Known system errors are explained here; records
+ *  retain the producer's diagnostic. Policy replies also name the way forward. */
 export function refusalLine(refusal: Refusal): string {
+  if (refusal.code === "command_internal")
+    return "This is a bug: I couldn't complete this command. A Switchboard operator can investigate the error in the run details.";
+  if (refusal.code === "resident_attach_failed" || refusal.code === "uncaught") return failureMessage(refusal.text);
   if (refusal.cause === "policy" && refusal.wayForward) return `${refusal.text} ${refusal.wayForward}`;
   return refusal.text;
+}
+
+/** Chat explains the task impact; the run record retains the original error. */
+function failureMessage(message: string): string {
+  if (/^(?:resident attach failed for repo:[\w.-]+\/[\w.-]+:\s*)?workspace-preserved:/.test(message))
+    return "I couldn't verify that updating this workspace was safe, so I stopped and kept it unchanged. A Switchboard operator needs to check the workspace before work can continue.";
+  if (/^resident attach(?: failed)?(?:\s|:)/.test(message))
+    return "I couldn't open the repository workspace, so this run stopped. A Switchboard operator can check the workspace error in the run details.";
+  return "This is a bug: I couldn't finish this request. A Switchboard operator can investigate the error in the run details.";
+}
+
+/** A typed refusal already has a user sentence; unexpected errors do not. */
+export function userErrorMessage(error: unknown): string {
+  if (residentTraceOf(error)?.steps.some((step) => step.name === "advance-process-check" && step.status === "error"))
+    return "I couldn't confirm that earlier workspace commands had stopped, so I stopped and kept the workspace unchanged. A Switchboard operator can check the remaining activity in the run details.";
+  if (error instanceof RefusalError) return refusalLine(error.refusal);
+  const provider =
+    error instanceof ProviderFailure
+      ? error
+      : error instanceof Error && "providerFailure" in error && error.providerFailure instanceof ProviderFailure
+        ? error.providerFailure
+        : undefined;
+  if (provider) return `${renderProviderFailure(provider.cause)} A Switchboard operator can check the model service.`;
+  return failureMessage(error instanceof Error ? error.message : String(error));
 }
 
 /** A typed command's error code as a refusal code with its one cause. */

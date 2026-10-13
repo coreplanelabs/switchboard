@@ -331,7 +331,7 @@ describe("shipPreflight — the entry cases (agent-ship item 10) and the auto-me
       input({ repoCtx: { repo: "acme/api", prUnpostable: { number: 7, reason: "unreachable" } }, prFacts }),
     );
     expect(task.ok).toBe(false);
-    if (!task.ok) expect(task.reply).toContain("could not be fetched");
+    if (!task.ok) expect(task.reply).toContain("Ship did not start");
   });
 
   it("fork head refused on adopt and on resume", async () => {
@@ -524,7 +524,7 @@ describe("shipPreflight — the channel capability (agent-ship item 1, record 00
       expect(res.ok, channelId).toBe(false);
       if (res.ok) continue;
       expect(res.refusal.code, channelId).toBe("ship_preflight_channel");
-      expect(res.reply, channelId).toContain("cannot open a thread of its own");
+      expect(res.reply, channelId).toContain("Ship needs to open task threads");
       expect(res.reply, channelId).toContain(channelId.split(":")[0]);
       expect(res.reply, channelId).toContain("https://bot.example/runs");
       expect(res.reply.toLowerCase(), channelId).not.toContain("single-shot");

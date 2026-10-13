@@ -1100,7 +1100,7 @@ async function tellStepThrew(
       step: at.step,
       ...(at.round !== undefined ? { round: at.round.index } : {}),
       report,
-      threadReport: report,
+      threadReport: `${findingsReconcile ? "⚠️ Review did not restart because I couldn't read the pull request after the fixes." : "⚠️ Ship stopped because an operation failed."}${pr?.url ? ` The existing pull request is ${pr.url}; its current version is unverified.` : ""} No continuation was scheduled. A Switchboard operator needs to check the task's saved state before it can continue.`,
     },
     ...(pr !== undefined ? { pr } : {}),
   };
