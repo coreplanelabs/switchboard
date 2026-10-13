@@ -1,3 +1,4 @@
+import type { ResearchGatePending } from "../research/brief.js";
 // The ship coordinator's contract (docs/decisions/0029-durable-objects-store-workflows-schedule.md,
 // docs/decisions/0031-the-coordinator-runs-a-plan-not-a-pull-request.md;
 // docs/reference/specs/run-history.md items 47–48; docs/reference/specs/http-ingress.md
@@ -866,6 +867,7 @@ export interface UnitIdle {
   handoff?: Handoff;
   /** The human-gated question this idle is waiting on. */
   humanGate?: HumanGatePending;
+  researchGate?: ResearchGatePending;
   wakes: number;
 }
 
@@ -885,6 +887,7 @@ export type UnitWakeAnswer =
       senders: string[];
       leaseMs?: number;
       humanGate?: HumanGatePending;
+      researchGate?: ResearchGatePending;
     }
   | { kind: "answered"; reply: string }
   | { kind: "stopped" }
@@ -1526,6 +1529,9 @@ export const isHumanGatePending = (v: unknown): v is HumanGatePending =>
   (v.headSha === undefined || isText(v.headSha)) &&
   (v.askedAt === undefined || isFinite(v.askedAt));
 
+export const isResearchGatePending = (v: unknown): v is ResearchGatePending =>
+  isObject(v) && isText(v.runId) && isText(v.question, 2048) && isFinite(v.askedAt);
+
 const isUnitIdle = (v: unknown): boolean =>
   isObject(v) &&
   isText(v.why, IDLE_WHY_MAX) &&
@@ -1536,6 +1542,7 @@ const isUnitIdle = (v: unknown): boolean =>
   (v.spendUsd === null || isFinite(v.spendUsd)) &&
   (v.handoff === undefined || isHandoffShape(v.handoff)) &&
   (v.humanGate === undefined || isHumanGatePending(v.humanGate)) &&
+  (v.researchGate === undefined || isResearchGatePending(v.researchGate)) &&
   isCount(v.wakes);
 
 const isSegment = (v: unknown): boolean =>
@@ -1565,7 +1572,8 @@ export const isUnitWakeAnswer = (v: unknown): v is UnitWakeAnswer => {
     Array.isArray(v.senders) &&
     v.senders.every((sender) => isText(sender)) &&
     (v.leaseMs === undefined || (isFinite(v.leaseMs) && v.leaseMs > 0)) &&
-    (v.humanGate === undefined || isHumanGatePending(v.humanGate))
+    (v.humanGate === undefined || isHumanGatePending(v.humanGate)) &&
+    (v.researchGate === undefined || isResearchGatePending(v.researchGate))
   );
 };
 

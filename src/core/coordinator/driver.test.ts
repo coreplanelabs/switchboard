@@ -203,7 +203,7 @@ describe("Ship research phase", () => {
     expect(b.of("spawn")[0]?.budget).toBe(8);
   });
 
-  it("ends a blocked research result before starting an implementation child", async () => {
+  it("parks blocked research for input before starting an implementation child", async () => {
     const s = steps({ "U10/0/research/wait/1": "event" });
     const b = bot({
       plan: [planAnswer([row("U10")], T0, "person", { research: true })],
@@ -216,6 +216,7 @@ describe("Ship research phase", () => {
             id: "run-research",
             finished: true,
             status: "completed",
+            finishedAt: T0 + MIN,
             researchBrief: {
               ...researchBrief,
               complexity: "complex",
@@ -229,15 +230,124 @@ describe("Ship research phase", () => {
       ],
       "pr-check": [prNone()],
       round: [acked(), acked()],
-      "unit-end": [ok({ ok: true, told: true })],
+      "unit-end": [ok({ ok: true, told: true }, T0 + MIN), acked()],
       finish: [ok({ ok: true })],
     });
-    expect(await runPlan(s.runner, b.client, INSTANCE)).toMatchObject({ outcome: "failed", units: { U10: "aborted" } });
+    expect(await runPlan(s.runner, b.client, INSTANCE)).toMatchObject({
+      outcome: "failed",
+      units: { U10: "idle_expired" },
+    });
     expect(b.of("spawn").map((body) => body.preset)).toEqual(["research"]);
     expect((b.of("unit-end")[0]?.ending as { report: string })?.report).toContain(
-      "Research blocked: Retention policy is unknown",
+      "Waiting for input: Retention policy is unknown",
     );
+    expect(b.of("unit-end")[0]?.ending).toMatchObject({
+      threadReport: "⏸ Waiting for input: Retention policy is unknown",
+      kind: "idle",
+      researchGate: { runId: "run-research", question: "Retention policy is unknown", askedAt: T0 + MIN },
+    });
   });
+  it.each(["available", "exhausted", "unknown"] as const)(
+    "the research answer resumes the original unit without another producer or renewal and keeps its cost cap: %s",
+    async (mode) => {
+      const spendUsd = mode === "unknown" ? null : 1;
+      const researchGate = { runId: "run-research", question: "Retention policy is unknown", askedAt: T0 + MIN };
+      const s = steps({
+        "U10/0/research/wait/1": "event",
+        "U10/idle/1": "event",
+        "U10/r1/0/coding/wait/1": "event",
+        "U10/r1/1/review/wait/1": "event",
+      });
+      const b = bot({
+        plan: [
+          planAnswer([row("U10")], T0, "runner", {
+            research: true,
+            idleDays: 0,
+            grant: { renewals: 0, costCapUsd: mode === "exhausted" ? 1 : 50 },
+          }),
+        ],
+        "unit-start": [started("U10"), started("U10", T0 + 2 * MIN)],
+        branch: [branched("U10"), branched("U10", T0 + 2 * MIN)],
+        spawn: [spawned("run-research"), spawned("run-c0", T0 + 2 * MIN), spawned("run-r1", T0 + 10 * MIN)],
+        "read-record": [
+          record(
+            {
+              id: "run-research",
+              finished: true,
+              status: "completed",
+              costUsd: spendUsd,
+              researchBrief: { ...researchBrief, decision: "blocked", blockedReason: researchGate.question },
+            },
+            T0 + MIN,
+          ),
+          record(
+            {
+              id: "run-c0",
+              finished: true,
+              status: "completed",
+              costUsd: 1,
+              pr: { number: 7, url: PR_URL, created: true },
+              handoff: true,
+            },
+            T0 + 10 * MIN,
+          ),
+          record(
+            {
+              id: "run-r1",
+              finished: true,
+              status: "completed",
+              costUsd: 1,
+              verdict: { verdict: "approve", summary: "clean", findings: [] },
+              reviewPosted: true,
+              reviewHead: HEAD,
+            },
+            T0 + 20 * MIN,
+          ),
+        ],
+        "pr-check": [prNone(), prNone(T0 + 2 * MIN), prOpen(T0 + 10 * MIN)],
+        round: Array.from({ length: 6 }, () => acked()),
+        "unit-end": [acked(T0 + MIN), acked(T0 + 21 * MIN)],
+        "unit-wake": [
+          ok(
+            {
+              ok: true,
+              answer: {
+                kind: "segment",
+                index: 1,
+                spendUsd,
+                texts: ["Alice: out of scope"],
+                senders: ["Alice"],
+                leaseMs: 239 * MIN,
+                researchGate,
+              },
+            },
+            T0 + 2 * MIN,
+          ),
+        ],
+        merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+        finish: [acked(T0 + 21 * MIN)],
+      });
+      expect(await runPlan(s.runner, b.client, INSTANCE)).toMatchObject({
+        outcome: mode === "available" ? "completed" : "failed",
+        units: { U10: mode === "available" ? "merged" : "aborted" },
+      });
+      expect(b.of("spawn").map((body) => body.preset)).toEqual(
+        mode === "available" ? ["research", "coding", "review"] : ["research"],
+      );
+      if (mode !== "available") {
+        expect(JSON.stringify(b.of("unit-end")[1]?.ending)).toContain("cost cap");
+        return;
+      }
+      expect(b.of("spawn")[1]?.brief).toEqual({
+        kind: "contract",
+        unit: "U10",
+        researchRunId: "run-research",
+        rebase: { branch: "plan/fixture/u10", onto: "main" },
+        continue: { segment: 1, texts: ["Alice: out of scope"] },
+      });
+      expect(b.of("unit-end")[0]?.ending).toMatchObject({ kind: "idle", renewalsLeft: 0, spendUsd, researchGate });
+    },
+  );
 });
 
 describe("runOriginalUnitRecovery", () => {
