@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as githubApp from "../execution/githubApp.js";
 import {
   currentPrHeadSha,
   explicitPrOf,
@@ -37,13 +38,187 @@ function stubFetch(...responses: Array<{ status?: number; body?: unknown; reject
 const msg = (text: string) => ({ text });
 
 beforeEach(() => {
-  // Deterministic credential path: no GitHub App mint, no ambient GH_TOKEN.
+  // Deterministic read credential: no GitHub App mint or ambient token.
   vi.stubEnv("GITHUB_APP_ID", "");
-  vi.stubEnv("GH_TOKEN", "");
+  vi.stubEnv("GH_TOKEN", "repo-context-fixture-token");
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
+});
+
+describe("resolveRepoContext: read-scoped PR lookup", () => {
+  it("resolves the current PR with a read credential when a write credential is unavailable", async () => {
+    vi.spyOn(githubApp, "resolveGithubToken").mockImplementation(async (scope) => {
+      if (scope !== "read") throw new Error("write mint unavailable");
+      return "read-only-token";
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: unknown, init?: RequestInit) => {
+        const authorized = new Headers(init?.headers).get("authorization") === "Bearer read-only-token";
+        return Response.json(
+          authorized
+            ? {
+                state: "open",
+                title: "Fix login",
+                body: null,
+                head: { sha: "a".repeat(40), repo: null },
+                base: { ref: "main" },
+                changed_files: 2,
+                additions: 3,
+                deletions: 1,
+              }
+            : { message: "credential missing" },
+          { status: authorized ? 200 : 403 },
+        );
+      }),
+    );
+    expect(await resolveRepoContext(msg("https://github.com/acme/api/pull/7"))).toEqual({
+      repo: "acme/api",
+      pr: 7,
+      prFromMessage: true,
+      headSha: "a".repeat(40),
+      baseRef: "main",
+      prSize: { changedFiles: 2, additions: 3, deletions: 1 },
+      prDescription: { title: "Fix login", body: "", truncated: false },
+    });
+  });
+
+  it("keeps the target unverified without a credential instead of using a public fallback", async () => {
+    vi.stubEnv("GH_TOKEN", "");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { calls } = stubFetch({ body: { state: "open", head: { sha: "a".repeat(40) } } });
+    expect(await resolveRepoContext(msg("https://github.com/acme/api/pull/7"))).toEqual({
+      repo: "acme/api",
+      pr: 7,
+      prFromMessage: true,
+    });
+    expect(calls).toEqual([]);
+    expect(warn.mock.calls).toEqual([
+      [
+        JSON.stringify({
+          event: "github.pr_head.failure",
+          stage: "credential",
+          code: "credential_unavailable",
+          httpStatus: 401,
+        }),
+      ],
+    ]);
+  });
+
+  it("records only closed HTTP failure facts and bounded GitHub correlation", async () => {
+    vi.stubEnv("GH_TOKEN", "read-fixture-token");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          { message: "private-source-body secret-read-fixture-token" },
+          { status: 403, headers: { "x-github-request-id": "AB12:34CD:5678" } },
+        ),
+      ),
+    );
+    expect(await resolveRepoContext(msg("https://github.com/acme/api/pull/7"))).toEqual({
+      repo: "acme/api",
+      pr: 7,
+      prFromMessage: true,
+    });
+    expect(warn.mock.calls).toEqual([
+      [
+        JSON.stringify({
+          event: "github.pr_head.failure",
+          stage: "read",
+          code: "http_failed",
+          httpStatus: 403,
+          requestId: "AB12:34CD:5678",
+        }),
+      ],
+    ]);
+  });
+
+  it("records invalid JSON without printing the provider response", async () => {
+    vi.stubEnv("GH_TOKEN", "read-fixture-token");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("private-source-body", {
+            status: 200,
+            headers: { "x-github-request-id": "AB12:34CD:5678" },
+          }),
+      ),
+    );
+    expect(await resolveRepoContext(msg("https://github.com/acme/api/pull/7"))).toEqual({
+      repo: "acme/api",
+      pr: 7,
+      prFromMessage: true,
+    });
+    expect(warn.mock.calls).toEqual([
+      [
+        JSON.stringify({
+          event: "github.pr_head.failure",
+          stage: "decode",
+          code: "invalid_response",
+          httpStatus: 200,
+          requestId: "AB12:34CD:5678",
+        }),
+      ],
+    ]);
+  });
+
+  it("records a credential resolver failure without exposing its message or using a public fallback", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.spyOn(githubApp, "resolveGithubToken").mockRejectedValue(new Error("private-mint-url credential-bytes"));
+    const { calls } = stubFetch({ body: { state: "open", head: { sha: "a".repeat(40) } } });
+    expect(await resolveRepoContext(msg("https://github.com/acme/api/pull/7"))).toEqual({
+      repo: "acme/api",
+      pr: 7,
+      prFromMessage: true,
+    });
+    expect(calls).toEqual([]);
+    expect(warn.mock.calls).toEqual([
+      [
+        JSON.stringify({
+          event: "github.pr_head.failure",
+          stage: "credential",
+          code: "credential_failed",
+        }),
+      ],
+    ]);
+  });
+
+  it("does not coerce malformed head, branch, description or count fields into authority", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    stubFetch({
+      body: {
+        state: "open",
+        title: 42,
+        body: ["private-source-body"],
+        head: { sha: "A".repeat(40), ref: 123, repo: { full_name: "acme/api" } },
+        base: { ref: 456 },
+        changed_files: "2",
+        additions: 3,
+        deletions: 1,
+      },
+    });
+    expect(await resolveRepoContext(msg("https://github.com/acme/api/pull/7"))).toEqual({
+      repo: "acme/api",
+      pr: 7,
+      prFromMessage: true,
+    });
+    expect(warn.mock.calls).toEqual([
+      [
+        JSON.stringify({
+          event: "github.pr_head.failure",
+          stage: "head",
+          code: "head_unknown",
+        }),
+      ],
+    ]);
+  });
 });
 
 describe("currentPrHeadSha — the review post transition guard", () => {
@@ -1947,7 +2122,7 @@ describe("PR size for the digest-coverage guard", () => {
     const TIP = "d".repeat(40);
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     stubFetch(
-      { body: { head: { ref: "p1", sha: SHA, repo: { full_name: "acme/api" } }, ...size } },
+      { body: { state: "open", head: { ref: "p1", sha: SHA, repo: { full_name: "acme/api" } }, ...size } },
       { body: { ref: "refs/heads/p1", object: { sha: TIP, type: "commit" } } },
     );
     const ctx = await resolveRepoContext(msg("https://github.com/acme/api/pull/3"), []);

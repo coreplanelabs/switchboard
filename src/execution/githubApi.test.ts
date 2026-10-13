@@ -581,6 +581,7 @@ describe("RestGithubApi — pull request reads", () => {
       updatedAt: "2026-09-29T00:00:00Z",
       head: { repo: "acme/api", ref: "fix/login", sha: "a".repeat(40) },
       base: { repo: "acme/api", ref: "main" },
+      headFacts: { title: "Fix login", body: "Keep this context", merged: false },
     });
     expect(calls).toHaveLength(2);
     expect(calls.every((c) => c.headers.authorization === "Bearer tok-read")).toBe(true);

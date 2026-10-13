@@ -6,6 +6,7 @@ import { redactAndCap } from "../core/redact.js";
 import { MINUTE_MS } from "../core/budgets.js";
 import { validRef } from "../core/residentAdmin.js";
 import { preferRefTip } from "./githubPulls.js";
+import type { PrSize } from "../core/digestCoverage.js";
 
 // The GitHub capability behind the `github_*` agent tools
 // (docs/reference/specs/github-tools.md): repository reads (files, trees, code search, the
@@ -125,6 +126,14 @@ export interface PullSummary {
   updatedAt: string;
   head: { repo: string; ref: string; sha: string };
   base: { repo: string; ref: string };
+  /** Validated PR-object facts; counts apply only when its SHA is the selected head. */
+  headFacts?: {
+    merged: boolean;
+    title?: string;
+    body?: string;
+    size?: PrSize;
+    requestId?: string;
+  };
 }
 
 export interface NewIssueInput {
@@ -257,6 +266,7 @@ export class GithubApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly requestId?: string,
   ) {
     super(message);
     this.name = "GithubApiError";
@@ -491,7 +501,12 @@ export class RestGithubApi implements GithubApi {
 
   async getPullRequest(repo: string, number: number): Promise<PullSummary> {
     const res = await this.request("read", "GET", "pull", `/repos/${repo}/pulls/${number}`);
-    const row = (await res.json()) as Record<string, unknown>;
+    const decoded: unknown = await res.json().catch(() => {
+      throw new GithubResponseDecodeError(res.status, githubRequestId(res));
+    });
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded))
+      throw new GithubResponseDecodeError(res.status, githubRequestId(res));
+    const row = decoded as Record<string, unknown>;
     const head = (row.head ?? {}) as Record<string, unknown>;
     const base = (row.base ?? {}) as Record<string, unknown>;
     const headRepo = (head.repo ?? {}) as Record<string, unknown>;
@@ -529,6 +544,8 @@ export class RestGithubApi implements GithubApi {
       }
       sha = preferRefTip(`${repo}#${number}`, sha, refTip, ref)!;
     }
+    const size = sha === head.sha ? prSizeOf(row) : undefined;
+    const requestId = githubRequestId(res);
     return {
       number: Number(row.number),
       title: String(row.title ?? ""),
@@ -540,11 +557,21 @@ export class RestGithubApi implements GithubApi {
       author: String(user.login ?? ""),
       updatedAt: String(row.updated_at ?? ""),
       head: {
-        repo: String(headRepo.full_name ?? ""),
-        ref: String(head.ref ?? ""),
+        repo: typeof headRepo.full_name === "string" ? headRepo.full_name : "",
+        ref: typeof head.ref === "string" ? head.ref : "",
         sha,
       },
-      base: { repo: String(baseRepo.full_name ?? ""), ref: String(base.ref ?? "") },
+      base: {
+        repo: typeof baseRepo.full_name === "string" ? baseRepo.full_name : "",
+        ref: typeof base.ref === "string" ? base.ref : "",
+      },
+      headFacts: {
+        merged: row.merged === true,
+        ...(typeof row.title === "string" ? { title: row.title } : {}),
+        ...(typeof row.body === "string" ? { body: row.body } : {}),
+        ...(size ? { size } : {}),
+        ...(requestId ? { requestId } : {}),
+      },
     };
   }
 
@@ -749,8 +776,13 @@ export class RestGithubApi implements GithubApi {
     accept = "application/vnd.github+json",
     opts: { redirect?: "manual" } = {},
   ): Promise<Response> {
-    const token = await this.token(scope, this.parent);
-    if (!token) throw new GithubApiError(401, "no GitHub credential available (configure the GitHub App or GH_TOKEN)");
+    let token: string | null;
+    try {
+      token = await this.token(scope, this.parent);
+    } catch {
+      throw new GithubCredentialUnavailable("failed");
+    }
+    if (!token) throw new GithubCredentialUnavailable();
     // One `github.rest` span under the view's parent (docs/reference/specs/tracing.md item
     // 23): the route word, the method and the status — never the path. GitHub
     // is not one of our hosts, so no trace context leaves with the request.
@@ -785,12 +817,54 @@ export class RestGithubApi implements GithubApi {
       // Classified for the spans above it (docs/reference/specs/tracing.md item 2): the
       // status is the peer's own discriminator, the body never an attr.
       throw classifyError(
-        new GithubApiError(res.status, `GitHub ${method} ${path} failed: HTTP ${res.status} ${detail}`.trim()),
+        new GithubApiError(
+          res.status,
+          `GitHub ${method} ${path} failed: HTTP ${res.status} ${detail}`.trim(),
+          githubRequestId(res),
+        ),
         { kind: "http", code: String(res.status) },
       );
     }
     return res;
   }
+}
+
+/** Distinguishes a missing local credential from a GitHub HTTP 401. */
+export class GithubCredentialUnavailable extends GithubApiError {
+  constructor(readonly reason: "missing" | "failed" = "missing") {
+    super(
+      reason === "missing" ? 401 : 503,
+      reason === "missing"
+        ? "no GitHub credential available (configure the GitHub App or GH_TOKEN)"
+        : "GitHub credential resolution failed",
+    );
+  }
+}
+
+/** Retains only header-time facts when the PR response cannot be decoded. */
+export class GithubResponseDecodeError extends SyntaxError {
+  constructor(
+    readonly httpStatus: number,
+    readonly requestId?: string,
+  ) {
+    super("Invalid pull request response");
+  }
+}
+
+function githubRequestId(res: Response): string | undefined {
+  const id = res.headers.get("x-github-request-id");
+  return id && /^[0-9A-Fa-f:]{1,64}$/.test(id) ? id : undefined;
+}
+
+/** Counts describe one complete PR object, never a partial or stale size. */
+export function prSizeOf(data: {
+  changed_files?: unknown;
+  additions?: unknown;
+  deletions?: unknown;
+}): PrSize | undefined {
+  const n = (x: unknown): x is number => typeof x === "number" && Number.isInteger(x) && x >= 0;
+  if (!n(data.changed_files) || !n(data.additions) || !n(data.deletions)) return undefined;
+  return { changedFiles: data.changed_files, additions: data.additions, deletions: data.deletions };
 }
 
 /** `updatedAt` as epoch ms for ordering; an unparseable seed sorts oldest. */

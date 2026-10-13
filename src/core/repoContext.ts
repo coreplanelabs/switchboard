@@ -1,5 +1,10 @@
 import { resolveGithubToken } from "../execution/githubApp.js";
-import { headRefTipSha, preferRefTip } from "../execution/githubPulls.js";
+import {
+  GithubApiError,
+  GithubCredentialUnavailable,
+  GithubResponseDecodeError,
+  RestGithubApi,
+} from "../execution/githubApi.js";
 import { validRef } from "./residentAdmin.js";
 import type { PrCommitList } from "./headMoved.js";
 import { normalizeHead } from "./reviewedHead.js";
@@ -80,10 +85,9 @@ import type { PrSize } from "./digestCoverage.js";
 // attach either reuses the resident's sticky binding or answers needs-ref (the
 // dispatcher then asks ONE clarifying question).
 //
-// PR head refs are resolved via the GitHub REST API authenticated with
-// resolveGithubToken() — NEVER a `gh` shell-out (no host gh credential in
-// prod; AGENTS.md invariant 5). Unauthenticated works for public repos; any
-// fetch failure degrades gracefully to repo-only.
+// PR heads use the existing read-scoped GitHub facade, never a `gh` shell-out
+// (AGENTS.md invariant 5). Missing credentials stop before a request; there
+// is no unauthenticated fallback. An unreadable head stays unresolved.
 
 /** `RepoContext.prDescription`: the PR's own words, as facts. */
 export interface PrFacts {
@@ -1531,89 +1535,67 @@ async function prHead(pr: { repo: string; number: number }): Promise<
     }
   | undefined
 > {
-  const headers: Record<string, string> = {
-    accept: "application/vnd.github+json",
-    "user-agent": "switchboard",
-  };
-  const token = await resolveGithubToken().catch(() => null);
-  if (token) headers.authorization = `Bearer ${token}`;
-  const res = await fetch(`https://api.github.com/repos/${pr.repo}/pulls/${pr.number}`, {
-    headers,
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!res.ok) return undefined;
-  const data = (await res.json().catch(() => ({}))) as {
-    state?: string;
-    merged?: unknown;
-    merged_at?: unknown;
-    title?: unknown;
-    body?: unknown;
-    head?: { ref?: string; sha?: string; repo?: { full_name?: string } };
-    base?: { ref?: string };
-    changed_files?: unknown;
-    additions?: unknown;
-    deletions?: unknown;
-  };
-  // The PR's own words, as facts: a title is required for them to count (an
-  // answer without one described nothing); a null body is an empty body.
+  let data;
+  try {
+    data = await new RestGithubApi().getPullRequest(pr.repo, pr.number);
+  } catch (error) {
+    const credential = error instanceof GithubCredentialUnavailable;
+    const http = error instanceof GithubApiError;
+    const decode = error instanceof SyntaxError;
+    const timeout = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+    console.warn(
+      JSON.stringify({
+        event: "github.pr_head.failure",
+        stage: credential ? "credential" : decode ? "decode" : "read",
+        code: credential
+          ? error.reason === "missing"
+            ? "credential_unavailable"
+            : "credential_failed"
+          : http
+            ? "http_failed"
+            : decode
+              ? "invalid_response"
+              : timeout
+                ? "timeout"
+                : "transport_failed",
+        ...(http && (!credential || error.reason === "missing") ? { httpStatus: error.status } : {}),
+        ...(error instanceof GithubResponseDecodeError ? { httpStatus: error.httpStatus } : {}),
+        ...((http || error instanceof GithubResponseDecodeError) && error.requestId
+          ? { requestId: error.requestId }
+          : {}),
+      }),
+    );
+    return undefined;
+  }
   const facts =
-    typeof data.title === "string" ? prFacts(data.title, typeof data.body === "string" ? data.body : "") : undefined;
-  // Base branch: validated like every ref candidate (never partial garbage).
-  const base = typeof data.base?.ref === "string" ? validRef(data.base.ref) : undefined;
-  const prSha = typeof data.head?.sha === "string" && /^[0-9a-f]{40}$/.test(data.head.sha) ? data.head.sha : undefined;
-  const headRepo = data.head?.repo?.full_name?.toLowerCase();
-  // Require a POSITIVE same-repo match for the REF: a null head.repo (deleted
-  // fork) must not bind the base repo's ref to a fork PR. Dropping the
-  // `headRepo &&` short-circuit makes a missing/mismatched head repo leave the
-  // ref undefined.
-  const ref = data.head?.ref && headRepo === pr.repo ? validRef(data.head.ref) : undefined;
+    data.headFacts?.title !== undefined ? prFacts(data.headFacts.title, data.headFacts.body ?? "") : undefined;
+  const base = validRef(data.base.ref);
+  const sha = /^[0-9a-f]{40}$/.test(data.head.sha) ? data.head.sha : undefined;
+  const ref = data.head.repo.toLowerCase() === pr.repo.toLowerCase() ? validRef(data.head.ref) : undefined;
   const state = data.state === "open" || data.state === "closed" ? data.state : undefined;
   const mergedAt =
-    typeof data.merged_at === "string" && !Number.isNaN(Date.parse(data.merged_at))
-      ? new Date(data.merged_at).toISOString()
+    typeof data.mergedAt === "string" && !Number.isNaN(Date.parse(data.mergedAt))
+      ? new Date(data.mergedAt).toISOString()
       : undefined;
-  // The head sha every reader pins to (the attach, the reviewed-head guard,
-  // the head-moved settle and note): the REF's tip when the head lives on this
-  // repo and the ref can be read, else the PR object's — GitHub's PR object
-  // lags the ref after a force-push (githubPulls.ts `headRefTipSha`; issue
-  // shape: a re-review attached at the lagging head and refused). Best-effort:
-  // an unreadable ref keeps the PR object's sha. A closed pull request is
-  // frozen at the head GitHub recorded for it — its branch may have moved on
-  // since the merge, or be gone — so its own sha stands and no ref tip is read:
-  // a body edited on a merged pull request renders at the merge-time head,
-  // never at a commit the pull request never held.
-  const sha =
-    ref !== undefined && state !== "closed"
-      ? preferRefTip(`${pr.repo}#${pr.number}`, prSha, await headRefTipSha(pr.repo, ref, headers), ref)
-      : prSha;
-  // The PR's size, only while the PR object describes the head being reviewed:
-  // after a force-push the object (and its counts) lags the ref the sha was
-  // taken from, and a stale size would refuse a digest that covered the new
-  // head in full. The title and body are facts about the PR, not the head —
-  // they ride along whenever the answer carried a title.
-  const size = sha === prSha ? prSizeOf(data) : undefined;
+  if (sha === undefined)
+    console.warn(
+      JSON.stringify({
+        event: "github.pr_head.failure",
+        stage: "head",
+        code: "head_unknown",
+        ...(data.headFacts?.requestId ? { requestId: data.headFacts.requestId } : {}),
+      }),
+    );
   return {
     ref,
     sha,
     base,
-    ...(size ? { size } : {}),
     state,
-    merged: data.merged === true,
+    merged: data.headFacts?.merged === true,
+    ...(data.headFacts?.size ? { size: data.headFacts.size } : {}),
     ...(mergedAt !== undefined ? { mergedAt } : {}),
     ...(facts ? { facts } : {}),
   };
-}
-
-/** `changed_files` / `additions` / `deletions` as a `PrSize`, when all three
- *  are non-negative integers; undefined otherwise (never a partial size). */
-export function prSizeOf(data: {
-  changed_files?: unknown;
-  additions?: unknown;
-  deletions?: unknown;
-}): PrSize | undefined {
-  const n = (x: unknown): x is number => typeof x === "number" && Number.isInteger(x) && x >= 0;
-  if (!n(data.changed_files) || !n(data.additions) || !n(data.deletions)) return undefined;
-  return { changedFiles: data.changed_files, additions: data.additions, deletions: data.deletions };
 }
 
 /** Cap the body at `PR_BODY_CAP` chars without splitting a surrogate pair (a

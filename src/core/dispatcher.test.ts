@@ -4540,6 +4540,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
   // record's PR binds the ref, and rides the attach as the reason for the hint,
   // so the resident may move a default-bound thread onto it; the card says so.
   it("a follow-up in a thread whose newest finished run opened a pull request attaches with that PR as ownPr beside its head branch, and the card says the resident rebound the thread", async () => {
+    vi.stubEnv("GH_TOKEN", "dispatcher-fixture-token");
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
     vi.stubEnv("GITHUB_APP_ID", "");
@@ -28345,6 +28346,8 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
   });
 
   it("a review target stays separate from the accepted operation repository and channel default", async () => {
+    vi.stubEnv("GH_TOKEN", "dispatcher-fixture-token");
+    vi.stubEnv("GITHUB_APP_ID", "");
     const { deps, registry } = operatorDeps(ON_YAML);
     await deps.config.setChannelOverride("slack:CX", { repo: "acme/api" });
     deps.operatorModel = decides({
