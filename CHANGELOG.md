@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.297.1](https://github.com/coreplanelabs/switchboard/compare/v1.297.0...v1.297.1) (2026-10-13)
+
+
+### Bug fixes
+
+* **core:** explain thread failures and recheck review workspaces ([#3052](https://github.com/coreplanelabs/switchboard/issues/3052)) ([b08ca1e](https://github.com/coreplanelabs/switchboard/commit/b08ca1e144de23b2f7c30c92cb0aa6ec0f222b57))
+* **deploy:** retain smoke intake refusal evidence ([#3057](https://github.com/coreplanelabs/switchboard/issues/3057)) ([82b5706](https://github.com/coreplanelabs/switchboard/commit/82b57061828bfb4825b2e31f719535dfce3fcceb))
+* **mcp:** reuse browser approval for clients without forms ([#3056](https://github.com/coreplanelabs/switchboard/issues/3056)) ([44747d4](https://github.com/coreplanelabs/switchboard/commit/44747d4b732efeff3777bd376dc91ec1e0c6fb1c))
+* **runs:** recover state checkpoints after Cloudflare resets ([#3055](https://github.com/coreplanelabs/switchboard/issues/3055)) ([12c1528](https://github.com/coreplanelabs/switchboard/commit/12c15282df6895fd4d7681cff4339cc581daf253))
+
 ## [1.297.0](https://github.com/coreplanelabs/switchboard/compare/v1.296.1...v1.297.0) (2026-10-13)
 
 
