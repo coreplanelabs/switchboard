@@ -1,3 +1,4 @@
+import { parseStoredJson } from "../storedJson.js";
 // The transcript on the wire (docs/reference/specs/run-history.md item 32). The runner's
 // `messages` array is append-only, so the durable form is one row per content
 // part: no row nears the Durable Object's 2 MB limit, a step writes only its
@@ -177,7 +178,7 @@ export function assembleTranscript(
     const idx = row.idx - base;
     let parts = byTurn.get(idx);
     if (!parts) byTurn.set(idx, (parts = new Map()));
-    parts.set(row.part, JSON.parse(row.json) as StoredRow);
+    parts.set(row.part, parseStoredJson(row.json) as StoredRow);
   }
   const messages: ChatMessage[] = [];
   const compactions: AssembledCompaction[] = [];

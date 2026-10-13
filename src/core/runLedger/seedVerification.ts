@@ -1,3 +1,4 @@
+import { parseStoredJson } from "../storedJson.js";
 import { minutesToMs } from "../budgets.js";
 import type { ExpectedSeedManifest } from "./seedManifest.js";
 import { canonicalSeedJson, seedContentHash } from "./seedManifest.js";
@@ -169,7 +170,7 @@ export function authenticatedSeedExpectation(
     !body ||
     expected.mode !== "session" ||
     expected.key !== key ||
-    JSON.parse(actual.preparation.bodyJson).storeKey !== ref.storeKey
+    parseStoredJson(actual.preparation.bodyJson).storeKey !== ref.storeKey
   )
     return;
   return structuredClone(expected);
@@ -195,12 +196,16 @@ export async function verifiedSourceSeedHashes(
   if (!assembly.complete || assembly.turns !== expected.count || assembly.compactions.length) return;
   const hashes: SourceSeedHashes = {
     messagesHash: await seedContentHash(assembly.messages),
-    rowsHash: await seedContentHash(rows.map((r) => ({ ...r, json: canonicalSeedJson(JSON.parse(r.json)) }))),
+    rowsHash: await seedContentHash(rows.map((r) => ({ ...r, json: canonicalSeedJson(parseStoredJson(r.json)) }))),
     attachmentsHash: await seedContentHash(
       [...snapshot.attachments].sort((a, b) => (a.ref < b.ref ? -1 : a.ref > b.ref ? 1 : 0)),
     ),
     actorsHash: await seedContentHash(
-      rows.map((r) => ({ idx: r.idx, part: r.part, actor: (JSON.parse(r.json) as { actor?: unknown }).actor ?? null })),
+      rows.map((r) => ({
+        idx: r.idx,
+        part: r.part,
+        actor: (parseStoredJson(r.json) as { actor?: unknown }).actor ?? null,
+      })),
     ),
     contextHash: await contextDependenciesHash(snapshot.context),
     notepadHash: await seedContentHash(snapshot.notepad),
@@ -310,7 +315,7 @@ export function confirmationMatchesPreparation(
     value.postedBy === preparation.receipt.postedBy &&
     value.bodySha256 === preparation.receipt.bodySha256 &&
     value.expectedSeedSha256 === preparation.receipt.expectedSeedSha256 &&
-    value.storeKey === JSON.parse(preparation.bodyJson).storeKey &&
+    value.storeKey === parseStoredJson(preparation.bodyJson).storeKey &&
     value.key === expected.key &&
     value.budgetMs === expected.budgetMs &&
     value.systemHash === expected.systemHash &&

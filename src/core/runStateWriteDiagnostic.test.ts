@@ -11,6 +11,48 @@ describe("closed state-write failure evidence", () => {
   const original = { version: 1, requestDigest: digest, failure: { stage: "state-rpc", errorKind: "type" } };
   const read = (value: unknown) => stateWriteDiagnosticFromHeader(JSON.stringify(value), digest);
 
+  it("excludes direct and nested decoder prose from captures and remote headers while retaining error identity", () => {
+    const decoder = Object.assign(new SyntaxError("PRIVATE_STORED_PAYLOAD"), { remote: true, code: "E_JSON" });
+    decoder.stack = "SyntaxError: PRIVATE_STORED_PAYLOAD";
+    const outer = new Error("wrapper PRIVATE_STORED_PAYLOAD", { cause: decoder });
+    outer.stack = "Error: wrapper PRIVATE_STORED_PAYLOAD";
+    for (const error of [decoder, outer]) {
+      const failure = stateWriteException("request", error);
+      expect(failure).toMatchObject({
+        stage: "request",
+        exception: { name: error.name, message: "Stored JSON is unreadable" },
+      });
+      expect(JSON.stringify(failure)).not.toContain("PRIVATE");
+    }
+    const remote = read({
+      ...original,
+      failure: {
+        stage: "request",
+        errorKind: "error",
+        exception: {
+          name: "Error",
+          message: "wrapper PRIVATE_STORED_PAYLOAD",
+          stack: "PRIVATE_STORED_PAYLOAD",
+          cause: {
+            name: "SyntaxError",
+            message: "PRIVATE_STORED_PAYLOAD",
+            stack: "PRIVATE_STORED_PAYLOAD",
+            remote: true,
+            code: "E_JSON",
+          },
+        },
+      },
+    });
+    expect(remote).toMatchObject({
+      exception: {
+        name: "Error",
+        message: "Stored JSON is unreadable",
+        cause: { name: "SyntaxError", message: "Stored JSON is unreadable", remote: true, code: "E_JSON" },
+      },
+    });
+    expect(JSON.stringify(remote)).not.toContain("PRIVATE");
+  });
+
   it("keeps Unicode exception evidence readable within the HTTP header budget", () => {
     const error = Object.assign(new Error("storage reset — λ"), { retryable: true });
     error.stack = "界".repeat(1500);
@@ -91,7 +133,7 @@ describe("closed state-write failure evidence", () => {
     expect(stateWriteException("promotion-preflight", new SyntaxError("invalid input"))).toMatchObject({
       stage: "promotion-preflight",
       errorKind: "syntax",
-      exception: { name: "SyntaxError", message: "invalid input" },
+      exception: { name: "SyntaxError", message: "Stored JSON is unreadable" },
     });
     expect(stateWriteException("state-rpc", "private thrown bytes")).toEqual({
       stage: "state-rpc",

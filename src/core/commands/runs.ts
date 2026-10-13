@@ -160,6 +160,30 @@ function wrapOperator<T extends { providerFailureDetails?: ProviderFailureDetail
     : operator;
 }
 
+function wrapStorageException(
+  exception: import("../runStateWriteDiagnostic.js").StateWriteException,
+): import("../runStateWriteDiagnostic.js").StateWriteException {
+  return {
+    ...exception,
+    message: wrapUntrusted(exception.message),
+    ...(exception.stack === undefined ? {} : { stack: wrapUntrusted(exception.stack) }),
+    ...(exception.cause ? { cause: wrapStorageException(exception.cause) } : {}),
+  };
+}
+
+function wrapStorageFailure(
+  diagnostic: import("../storageFailureDiagnostic.js").StorageFailureDiagnostic,
+): import("../storageFailureDiagnostic.js").StorageFailureDiagnostic {
+  const server = diagnostic.server;
+  return {
+    ...diagnostic,
+    ...(diagnostic.exception ? { exception: wrapStorageException(diagnostic.exception) } : {}),
+    ...(server && "exception" in server && server.exception
+      ? { server: { ...server, exception: wrapStorageException(server.exception) } }
+      : {}),
+  };
+}
+
 function wrapRunView<T extends RunView>(view: T): T {
   return view.operator ? { ...view, operator: wrapOperator(view.operator) } : view;
 }
@@ -187,6 +211,7 @@ export function wrapEvent(e: RunEvent): RunEvent {
         ...e,
         summary: wrapUntrusted(e.summary),
         ...(e.providerFailure ? { providerFailure: wrapProviderFailure(e.providerFailure) } : {}),
+        ...(e.storageFailure ? { storageFailure: wrapStorageFailure(e.storageFailure) } : {}),
       };
     case "operator":
       return wrapOperator(e);
