@@ -114,6 +114,46 @@ describe("settlementFor — D4", () => {
 });
 
 describe("planResume", () => {
+  it.each([
+    ["description", "Description resubmitted.", "Completed coding report."],
+    ["verdict", "Verdict recorded.", "Substantive review reasoning."],
+    ["re-review then verdict", "Verdict recorded.", "New-head review reasoning."],
+  ])("finish retains the selected report after an ancillary %s turn", (_kind, ack, publicationAnswer) => {
+    const messages = [
+      user("work"),
+      { role: "assistant" as const, content: [text(publicationAnswer)] },
+      user("ancillary task"),
+      { role: "assistant" as const, content: [text(ack)] },
+    ];
+    expect(
+      planResume({ transcript: complete(messages), lastStep: step({ turnIndex: 4, publicationAnswer }), tools: [] }),
+    ).toMatchObject({ kind: "finish", answer: publicationAnswer, messages });
+  });
+  it("resume retains the selected report while an ancillary call is in flight", () => {
+    const messages = [user("work"), assistantCalling(call("a", "submit_verdict"))];
+    expect(
+      planResume({
+        transcript: complete(messages),
+        lastStep: step({
+          publicationAnswer: "Substantive review reasoning.",
+          inFlight: [{ callId: "a", tool: "submit_verdict" }],
+        }),
+        tools: TOOLS,
+      }),
+    ).toMatchObject({ kind: "resume", publicationAnswer: "Substantive review reasoning." });
+  });
+  it("refuses an uncommitted post-turn selection rather than publishing the wrong report", () => {
+    const messages = [
+      user("work"),
+      { role: "assistant" as const, content: [text("Acknowledged.")] },
+      user("correct answer"),
+      { role: "assistant" as const, content: [text("Corrected report.")] },
+    ];
+    expect(
+      planResume({ transcript: complete(messages), lastStep: step({ publicationAnswer: "Prior report." }), tools: [] }),
+    ).toEqual({ kind: "interrupted", why: "the next post-turn's answer selection was not committed" });
+  });
+
   it("resume: the step's record landed and its calls were in flight — every call of the last assistant turn is settled by the D4 rule, the record's counters carry over", () => {
     const messages = [
       user("go"),

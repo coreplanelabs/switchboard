@@ -55,10 +55,12 @@ import {
   type Harness,
   type HarnessDeps,
   type HarnessResume,
+  type HarnessRecord,
   type HarnessRun,
   type HarnessSession,
   type OpenCodeHarnessFacts,
 } from "../contract.js";
+import type { ChatMessage } from "../../chatMessage.js";
 import type { RunBearerStore } from "../../modelProxy/runBearers.js";
 import type { WindDownEnding } from "../windDown.js";
 import { OPENCODE_EVENT_DISPOSITION } from "./dispositions.js";
@@ -571,11 +573,17 @@ export async function openOpenCodeRun(
     let answer: string;
     let ending: WindDownEnding | undefined;
     let remainingMs: () => number;
+    let record: () => HarnessRecord;
     let hardStopped: boolean;
     let drained: unknown;
     try {
       let storeIds: string[];
-      ({ answer, ending, remainingMs, storeIds, hardStopped } = await driveOpenCode(deps, run, conn));
+      ({ answer, ending, remainingMs, storeIds, hardStopped, record } = await driveOpenCode(
+        deps,
+        run,
+        conn,
+        harnessLaunchIntentOf(run.launchIntent)?.clockKind ?? "loop",
+      ));
       for (const id of storeIds) known.add(id);
     } finally {
       draining = false;
@@ -585,6 +593,7 @@ export async function openOpenCodeRun(
 
     return {
       answer,
+      record: () => record(),
       ...(ending ? { ending } : {}),
       followUp: async (input) => {
         if (run.deadlineAt !== undefined && deps.clock() >= run.deadlineAt)
@@ -595,6 +604,8 @@ export async function openOpenCodeRun(
         // tools read the turn's own context for its duration.
         const turnEnd = await feedEndFrom(deps.container, conn.paths.feed, conn.feedOffset);
         const previous = live.toolContext;
+        const prior = structuredClone(record());
+        const request: ChatMessage = { role: "user", content: [{ type: "text", text: input.text }] };
         live.toolContext = input.toolContext;
         // The turn's lease is carved from the run's: the lesser of its ask and
         // what the lease still holds, never under a minute (decision 0046).
@@ -602,25 +613,59 @@ export async function openOpenCodeRun(
         // The turn's tools, marked for the proxy for the turn's duration (model-proxy item 6).
         deps.bearers?.markTurn(run.runId, input.tools);
         try {
+          if (input.publicationAnswer !== undefined && run.onStep)
+            await run.onStep({
+              turns: [],
+              firstIdx: prior.messages.length + prior.compactions.length,
+              publicationAnswer: input.publicationAnswer,
+              inFlight: [],
+              turn: prior.turn,
+              iteration: 0,
+              remainingMs: Math.max(0, prior.deadline - deps.clock()),
+              inboxConsumedSeq: prior.inboxConsumedSeq,
+              ...(prior.inboxDeferredSeqs?.length ? { inboxDeferredSeqs: prior.inboxDeferredSeqs } : {}),
+            });
           const turn = await driveOpenCode(
             deps,
             {
               ...run,
-              messages: [{ role: "user", content: [{ type: "text", text: input.text }] }],
+              messages: [request],
               agent: { ...run.agent, maxTurns: input.maxTurns, maxMinutes: turnMinutes },
               toolContext: input.toolContext,
               ...(input.span ? { span: input.span } : {}),
               resume: undefined,
+              publicationAnswer: input.publicationAnswer,
               inbox: undefined,
-              // The post-turn is not mirrored to the ledger — the loop's
-              // transcript is the record — but the bridge needs a step sink to
-              // read the answer, so a discard stands in.
-              onStep: async () => {},
+              onStep: async (report) => {
+                if (!run.onStep) return;
+                await run.onStep({
+                  ...report,
+                  turns: report.firstIdx === 1 ? [request, ...report.turns] : report.turns,
+                  firstIdx:
+                    prior.messages.length + prior.compactions.length + (report.firstIdx === 1 ? 0 : report.firstIdx),
+                  turn: prior.turn + report.turn,
+                  inboxConsumedSeq: prior.inboxConsumedSeq,
+                });
+              },
             },
             { ...conn, feedOffset: turnEnd, saveOffset: undefined, reattach: undefined, knownMessageIds: known },
             "turn",
           );
           for (const id of turn.storeIds) known.add(id);
+          record = () => {
+            const later = turn.record();
+            return {
+              ...later,
+              messages: [...prior.messages, ...later.messages],
+              compactions: [
+                ...prior.compactions,
+                ...later.compactions.map((entry) => ({ ...entry, before: prior.messages.length + entry.before })),
+              ],
+              turn: prior.turn + later.turn,
+              inboxConsumedSeq: prior.inboxConsumedSeq,
+              deadline: prior.deadline,
+            };
+          };
           return turn.answer;
         } finally {
           deps.bearers?.clearTurn(run.runId);

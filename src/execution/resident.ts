@@ -993,6 +993,7 @@ export type ResidentRestoreWait =
 const CONTROL_RESET_REISSUE_ROUTES = new Set(["/read", "/write"]);
 
 export class ResidentExecutor implements Executor {
+  readonly moveRequiresIdleProducer = true;
   /** Consecutive `runtime-replaced` answers on the idempotent routes (/read,
    *  /write) with no successful op between them. One is a deploy that swapped
    *  the resident isolate under a call (routine: re-attach and re-issue); two

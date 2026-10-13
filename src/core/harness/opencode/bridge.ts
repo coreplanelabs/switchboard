@@ -463,6 +463,7 @@ export interface OpenCodeBridgeDeps {
   relayedToolNames: ReadonlySet<string>;
   commandPolicy?: HarnessCommandPolicy;
   onStep?: (report: StepReport) => Promise<void>;
+  publicationAnswer?: string;
   /** The ledger rows the transcript holds before the first step (the seed). */
   seedLength: number;
   /** The store rows the seed occupies — what the store projection skips.
@@ -698,6 +699,7 @@ export class OpenCodeBridge {
       seedLength: deps.seedLength,
       remainingMs: deps.remainingMs,
     });
+    this.mirror.publicationAnswer = deps.publicationAnswer;
   }
 
   /** The run's answer as it stands: the last text-only assistant turn. */
@@ -967,6 +969,8 @@ export class OpenCodeBridge {
       })),
       turn: this.turns,
       inboxConsumedSeq: this.mirror.inboxConsumedSeq,
+      ...(this.mirror.deferredInboxSeqs?.length ? { inboxDeferredSeqs: this.mirror.deferredInboxSeqs } : {}),
+      ...(this.mirror.publicationAnswer !== undefined ? { publicationAnswer: this.mirror.publicationAnswer } : {}),
       deadline,
     };
   }
@@ -2194,6 +2198,7 @@ export async function driveOpenCode(
   remainingMs: () => number;
   storeIds: string[];
   hardStopped: boolean;
+  record: () => HarnessRecord;
 }> {
   const now = () => deps.clock();
   const agentSpan = run.span?.start("run.agent");
@@ -2238,6 +2243,7 @@ export async function driveOpenCode(
     relayedToolNames: new Set(run.tools.map((t) => t.name)),
     ...(run.commandPolicy ? { commandPolicy: run.commandPolicy } : {}),
     ...(run.onStep ? { onStep: run.onStep } : {}),
+    publicationAnswer: run.publicationAnswer ?? run.resume?.publicationAnswer,
     // The mirror skips the seed's rows: a fresh run's is the thread's turns plus
     // the request (`run.messages`); a rebuild's is the record it imported (its
     // transcript and every compaction row), which the store holds and the
@@ -2426,8 +2432,8 @@ export async function driveOpenCode(
   // The base of the record a relaunch rebuilds from: the seed with its request,
   // or the resumed transcript, which the mirror's rows follow.
   const recordBase = {
-    messages: run.resume?.messages ?? run.messages,
-    compactions: run.resume?.compactions ?? [],
+    messages: [...(run.resume?.messages ?? run.messages)],
+    compactions: [...(run.resume?.compactions ?? [])],
   };
 
   /** A request whose answer the loop does not wait on — a steer, the
@@ -3463,7 +3469,7 @@ export async function driveOpenCode(
   }
   const remaining = () => deadline - now();
   // What the next turn on this session inherits: the store as this loop knew it.
-  const handOver = () => ({ storeIds: bridge.storeIds() });
+  const handOver = () => ({ storeIds: bridge.storeIds(), record: () => bridge.record(recordBase, deadline) });
   if (ended === "failed" && conn.failure.error !== undefined) throw conn.failure.error;
   if (ended === "failed" && windDownFailed !== undefined) throw windDownFailed;
   if (ended === "hard") return { answer: HARD_STOP_MESSAGE, remainingMs: remaining, hardStopped: true, ...handOver() };

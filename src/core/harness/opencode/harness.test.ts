@@ -1346,6 +1346,50 @@ describe("the post-turn on the run's session — refused, answered by silence, o
   const notes = (events: RunEvent[]) =>
     events.filter((e): e is Extract<RunEvent, { type: "run_note" }> => e.type === "run_note");
   const oneTurn: RunScript = { turns: [{ content: [{ type: "text", text: "done" }], stopReason: "end_turn" }] };
+  it.each([5, 10])("a successor remains able to use tools inside its %i-minute post-turn lease", async (minutes) => {
+    const script: RunScript = {
+      turns: [
+        {
+          content: [{ type: "tool_use", id: "clock-1", name: "update_status", input: { text: "first" } }],
+          stopReason: "tool_use",
+        },
+        {
+          content: [{ type: "tool_use", id: "clock-2", name: "update_status", input: { text: "second" } }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "Reviewed current head." }], stopReason: "end_turn" },
+      ],
+    };
+    const w = openRun({}, script, undefined, NOW + minutes * MINUTE_MS, (run, clock) => {
+      run.agent = { ...run.agent, name: "review", maxMinutes: minutes };
+      run.launchIntent = {
+        version: 1,
+        harness: "opencode",
+        phase: "prepared",
+        ordinal: 1,
+        sessionPolicy: { version: 1, commandRoute: "native", identity: "write" },
+        clockKind: "turn",
+      };
+      run.saveLaunchIntent = async () => true;
+      run.saveFacts = async () => true;
+      run.tools = [
+        {
+          ...updateStatusTool,
+          run: async (input, ctx) => {
+            if (input.text === "first") clock.now += minutes === 5 ? 60_000 : 300_000;
+            return updateStatusTool.run(input, ctx);
+          },
+        },
+      ];
+    });
+    const session = await w.opened;
+    expect(w.events.filter((e) => e.type === "tool_result").map((e) => [e.callId, e.ok])).toEqual([
+      ["clock-1", true],
+      ["clock-2", true],
+    ]);
+    expect(session.answer).toBe("Reviewed current head.");
+    await session.end();
+  });
   const hung: RunScript = {
     turns: [
       {
@@ -2857,6 +2901,7 @@ describe("hosted Review originating lifecycle", () => {
         return true;
       },
     });
+    const steps: import("../../runLedger/stepReport.js").StepReport[] = [];
     const run: HarnessRun = {
       runId: "run-p",
       agent,
@@ -2872,7 +2917,9 @@ describe("hosted Review originating lifecycle", () => {
       },
       rules: { checkout: "/work/repo" },
       control,
-      onStep: async () => {},
+      onStep: async (report) => {
+        steps.push(structuredClone(report));
+      },
     };
     const deps: HarnessDeps = {
       container,
@@ -2885,30 +2932,104 @@ describe("hosted Review originating lifecycle", () => {
       tickMs: 5,
     };
     const session = await openThroughSeam(new OpenCodeHarness(), deps, run);
-    return { session, saved, timeouts, executions, run, script, registry, command };
+    return { session, saved, timeouts, executions, run, script, registry, command, steps, container };
   }
+  it("holds the first ancillary prompt until its selection is acknowledged", async () => {
+    const w = await openCheck(false);
+    w.script.turns.splice(0, w.script.turns.length, {
+      content: [{ type: "text", text: "Ancillary acknowledgement." }],
+      stopReason: "end_turn",
+    });
+    const write = w.run.onStep!;
+    w.run.onStep = async (report) => {
+      if (report.publicationAnswer !== undefined) throw new Error("selection acknowledgement unavailable");
+      await write(report);
+    };
+    await expect(
+      w.session.followUp({
+        text: "record the verdict",
+        publicationAnswer: "first review",
+        maxTurns: 2,
+        maxMinutes: 2,
+        toolContext: w.run.toolContext,
+      }),
+    ).rejects.toThrow("selection acknowledgement unavailable");
+    expect(w.container.requests.filter((q) => q.method === "POST" && q.path.endsWith("/prompt"))).toHaveLength(1);
+    expect(w.session.record?.().messages.at(-1)?.content).toEqual([{ type: "text", text: "first review" }]);
+    await w.session.end();
+  });
+
   it("cuts the original observed check before a late pending ACK permits dispatch", async () => {
     const w = await openCheck(true);
     expect(w.executions).toBe(1);
     expect(w.saved.at(-1)?.receipts[0]?.outcome).toEqual({ kind: "not_started", reason: "stopped" });
     await w.session.end();
   });
-  it("binds a fresh same-session follow-up check to that turn's narrower clock", async () => {
-    const w = await openCheck(false);
-    w.script.turns.splice(
-      0,
-      w.script.turns.length,
-      {
-        content: [{ type: "tool_use", id: "fresh-check", name: "run_check", input: w.command }],
-        stopReason: "tool_use",
-      },
-      { content: [{ type: "text", text: "fresh review" }], stopReason: "end_turn" },
-    );
-    await w.session.followUp({ text: "review new head", maxTurns: 5, maxMinutes: 2, toolContext: w.run.toolContext });
-    expect(w.timeouts).toHaveLength(1);
-    expect(w.timeouts[0]).toBeLessThanOrEqual(2 * MINUTE_MS);
-    expect(w.timeouts[0]).toBeGreaterThan(0);
-    expect(w.saved.at(-1)?.receipts[0]?.outcome.kind).toBe("completed");
-    await w.session.end();
-  });
+  it.each([
+    [false, undefined],
+    [true, undefined],
+    [false, "original review report"],
+    [true, "original review report"],
+  ] as const)(
+    "binds a fresh same-session follow-up check to that turn's narrower clock (caller appended turn: %s, publication answer: %s)",
+    async (appended, publicationAnswer) => {
+      const w = await openCheck(false);
+      w.script.turns.splice(
+        0,
+        w.script.turns.length,
+        {
+          content: [{ type: "tool_use", id: "fresh-check", name: "run_check", input: w.command }],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "fresh review" }], stopReason: "end_turn" },
+      );
+      if (appended)
+        w.run.messages.push(
+          { role: "assistant", content: [{ type: "text", text: w.session.answer }] },
+          { role: "user", content: [{ type: "text", text: "review new head" }] },
+        );
+      const before = w.steps.length;
+      expect(
+        await w.session.followUp({
+          text: "review new head",
+          publicationAnswer,
+          maxTurns: 5,
+          maxMinutes: 2,
+          toolContext: w.run.toolContext,
+        }),
+      ).toBe("fresh review");
+      expect(w.steps[before]?.firstIdx).toBe(2);
+      expect(w.steps.at(-1)?.publicationAnswer).toBe(publicationAnswer);
+      expect(w.session.record?.().publicationAnswer).toBe(publicationAnswer);
+      if (publicationAnswer !== undefined)
+        expect(w.steps[before]).toMatchObject({ turns: [], firstIdx: 2, publicationAnswer });
+      expect(w.steps[before + (publicationAnswer === undefined ? 0 : 1)]?.turns[0]).toEqual({
+        role: "user",
+        content: [{ type: "text", text: "review new head" }],
+      });
+      expect(w.steps.at(-1)?.turns.at(-1)?.content).toEqual([{ type: "text", text: "fresh review" }]);
+      expect(w.session.record?.().messages.at(-1)?.content).toEqual([{ type: "text", text: "fresh review" }]);
+      expect(w.timeouts).toHaveLength(1);
+      expect(w.timeouts[0]).toBeLessThanOrEqual(2 * MINUTE_MS);
+      expect(w.timeouts[0]).toBeGreaterThan(0);
+      expect(w.saved.at(-1)?.receipts[0]?.outcome.kind).toBe("completed");
+      if (publicationAnswer !== undefined) {
+        w.script.turns.splice(0, w.script.turns.length, {
+          content: [{ type: "text", text: "Corrected report." }],
+          stopReason: "end_turn",
+        });
+        expect(
+          await w.session.followUp({
+            text: "correct the report",
+            maxTurns: 2,
+            maxMinutes: 2,
+            toolContext: w.run.toolContext,
+          }),
+        ).toBe("Corrected report.");
+        expect(w.steps.at(-1)?.publicationAnswer).toBeUndefined();
+        expect(w.session.record?.().publicationAnswer).toBeUndefined();
+      }
+      await w.session.end();
+    },
+  );
 });

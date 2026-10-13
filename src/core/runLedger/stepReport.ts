@@ -15,6 +15,8 @@ export interface StepReport {
    *  the first): the previous step's results turn and this step's assistant
    *  turn — every turn the model has seen, without gaps. */
   turns: ChatMessage[];
+  /** An ancillary turn preserves the selected substantive report. */
+  publicationAnswer?: string;
   /** The index of `turns[0]` in the run's conversation (the seed counts from 0). */
   firstIdx: number;
   /** pi's compaction entry, when the harness saw one since the previous report

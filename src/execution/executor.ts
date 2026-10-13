@@ -99,6 +99,8 @@ export interface Executor {
    *  review ran (agent-review.md item 12) — fetching as needed, and answer the
    *  commit the workspace is now at (which may differ if the ref moved again).
    *  Absence refuses re-review before another model turn. */
+  /** Checkout replacement requires the caller to end its owned producer first. */
+  readonly moveRequiresIdleProducer?: boolean;
   moveTo?(sha: string, opts?: MoveOptions): Promise<{ sha: string }>;
 }
 

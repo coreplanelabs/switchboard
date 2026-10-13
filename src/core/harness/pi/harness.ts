@@ -606,7 +606,12 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     run.resume?.remainingMs ?? run.agent.maxMinutes * MINUTE_MS,
     run.deadlineAt === undefined ? Infinity : Math.max(0, run.deadlineAt - startedAt),
   );
-  const lease = loopClock(startedAt, remainingMs, run.agent.name);
+  const lease = loopClock(
+    startedAt,
+    remainingMs,
+    run.agent.name,
+    harnessLaunchIntentOf(run.launchIntent)?.clockKind ?? "loop",
+  );
   const { deadline, loopEnd, warnAt } = lease;
   run.toolContext.remainingMs = () => deadline - now();
   // The bearer outlives the lease by its grace, measured from here — not from
@@ -655,6 +660,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     owedInboxSeqs: () => [...(run.inbox?.pendingSeqs ?? []), ...unechoedSeqs()],
   });
   mirror.inboxConsumedSeq = run.resume?.inboxConsumedSeq ?? 0;
+  mirror.publicationAnswer = run.publicationAnswer ?? run.resume?.publicationAnswer;
   placed = (event) => {
     const logIndexOf = run.logIndexOf;
     if (!logIndexOf || (event.type !== "tool_call" && event.type !== "tool_result")) return event;
@@ -831,8 +837,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
    *  turn is not here: it is primed into the mirror and lands as the first of
    *  its rows, so the record holds it once. */
   const recordBase: { messages: readonly ChatMessage[]; compactions: readonly AssembledCompaction[] } = {
-    messages: run.resume?.messages ?? run.messages,
-    compactions: run.resume?.compactions ?? [],
+    messages: [...(run.resume?.messages ?? run.messages)],
+    compactions: [...(run.resume?.compactions ?? [])],
   };
   /** How the relay settled each call in flight at a relaunch (item 8), by call id; how many still run there. */
   const relaySettled = new Map<string, RelaySettlement>();
@@ -855,6 +861,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       settlements: calls.map((toolUse) => ({ toolUse, action: "synthetic", text: replacedCallNote(toolUse.name) })),
       turn: bridge.turns,
       inboxConsumedSeq: mirror.inboxConsumedSeq,
+      ...(mirror.deferredInboxSeqs?.length ? { inboxDeferredSeqs: mirror.deferredInboxSeqs } : {}),
+      ...(mirror.publicationAnswer !== undefined ? { publicationAnswer: mirror.publicationAnswer } : {}),
       deadline,
     };
   };
@@ -2449,11 +2457,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     /** One more `prompt` on this session (item 14): the same transport, bridge
      *  and relay entry as the loop, its own budget and its own `run.agent`
      *  under the caller's span, the relayed tools reading the turn's context
-     *  while it runs. Its rows are not mirrored: the ledger's transcript is the
-     *  loop's — a kill mid-turn resumes from it, as on the native loop
-     *  (pr-description item 5) — so nothing here is a step and the row's
-     *  offset stands. The inbox is not drained: a follow-up in the thread waits
-     *  for the run's end, as it does on the native loop's post-turns. */
+     *  while it runs. Its rows use the same durable mirror and offset as the
+     *  initial loop, so a restart retains the post-turn too. Ordinary thread
+     *  follow-ups wait for the run's end, as on the native loop's post-turns. */
     const followUp: FollowUpTurn = async (input) => {
       if (sessionEnded) throw new Error("the pi session has ended: no follow-up turn can run on it");
       if (run.deadlineAt !== undefined && now() >= run.deadlineAt)
@@ -2632,7 +2638,9 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
       // The turn's tools, marked for the proxy for the turn's duration
       // (model-proxy item 6): the list trimmed to them, or the whole table.
       deps.bearers?.markTurn(run.runId, input.tools);
+      mirror.publicationAnswer = input.publicationAnswer;
       try {
+        if (input.publicationAnswer !== undefined) await mirror.checkpointInbox();
         sends.send({ id, type: "prompt", message: input.text });
         turnCheck();
         for (;;) {
@@ -2698,6 +2706,8 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
           }
           reattaches = 0; // a record read: a re-attach made progress
           const obs = bridge.observe(event);
+          if (obs.message && (await mirror.onMessage(obs.message, bridge.turns))) held();
+          if (obs.compaction && (await mirror.onCompaction(obs.compaction, bridge.turns))) held();
           if (obs.message?.role === "assistant" && obs.terminalFailure === undefined) {
             turnRetries = 0;
             turnRetryUntil = undefined;
@@ -2917,7 +2927,14 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
         turnSpan?.end(hardStopped || bypass || turnFailed ? "error" : "ok");
       }
     };
-    return { answer, ...(ending ? { ending } : {}), followUp, remainingMs: () => deadline - now(), end };
+    return {
+      answer,
+      ...(ending ? { ending } : {}),
+      record: recordNow,
+      followUp,
+      remainingMs: () => deadline - now(),
+      end,
+    };
   } catch (err) {
     // A loop that throws — a refused prompt, a dead pi, a failed model call, a
     // gate bypass — is a failed loop, and its span says so. The follow-ups it

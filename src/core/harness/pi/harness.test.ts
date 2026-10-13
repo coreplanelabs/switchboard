@@ -41,6 +41,7 @@ import {
 import type { StepReport } from "../../runLedger/stepReport.js";
 import { WorkerRunLedger } from "../../runLedgerWorker.js";
 import { messageFromInbox } from "../../runLedger/inboxMessage.js";
+import { planResume } from "../../runLedger/resume.js";
 import type { InboxItem } from "../../runLedger/types.js";
 import { createLedgerWriteThrough, deliverPlaneSteer } from "../../runLedger/writeThrough.js";
 import type { RunnableTool } from "../../../tools/runnableTool.js";
@@ -1779,99 +1780,124 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
   // while a post-loop local retry is in flight is durably consumed when that
   // retry wins. A restart must keep an ordinary row beside it deferred without
   // replaying the provider-up row into a later hold, and the session transcript
-  // remains the loop's rather than absorbing the follow-up turn.
-  it("a provider-up buffered during a successful follow-up retry stays consumed across a process restart while an ordinary follow-up beside it survives", async () => {
-    const { ledger, externalRow, providerUp, reclaimWithLease } = await memoryFixture();
-    const wt = createLedgerWriteThrough({
-      ledger,
-      gen: "gen-A",
-      fallback: { put: async () => {}, abandoned: () => {} },
-      warn: () => {},
-      sleep: async () => {},
-      setInterval: () => ({ unref() {} }),
-      clearInterval: () => {},
-      schedule: () => ({ cancel() {} }),
-    });
-    const w = world({ providerPark: true, sleep: async () => new Promise<void>((resolve) => setImmediate(resolve)) });
-    const opened = await wt.open({
-      runId: "run-7",
-      threadKey: "slack:C1:1.0",
-      startedAt: NOW,
-      meta: { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1.0", agent: "coding", model: "p/m" },
-      system: "You are the coding agent.",
-      tools: [],
-      seed: { messages: w.run.messages, budgetMs: 600_000 },
-    });
-    if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
-    const ledgerRun = opened.run;
-    w.run.onStep = ledgerRun.step.bind(ledgerRun);
-    const ordinary = { text: "also bump the changelog", userId: "slack:UALICE", at: NOW };
-    const ordinaryRow = await externalRow(ordinary),
-      controlRow = await providerUp();
-    const up = controlRow.input,
-      ordinarySeq = ordinaryRow.row.seq,
-      upSeq = controlRow.row.seq;
-    expect(upSeq).toBeGreaterThan(ordinarySeq);
+  // includes the completed follow-up turn for recovery.
+  it.each([undefined, "loop done"])(
+    "a provider-up buffered during a successful follow-up retry stays consumed across a process restart while an ordinary follow-up beside it survives (publication answer: %s)",
+    async (publicationAnswer) => {
+      const { ledger, externalRow, providerUp, reclaimWithLease } = await memoryFixture();
+      const wt = createLedgerWriteThrough({
+        ledger,
+        gen: "gen-A",
+        fallback: { put: async () => {}, abandoned: () => {} },
+        warn: () => {},
+        sleep: async () => {},
+        setInterval: () => ({ unref() {} }),
+        clearInterval: () => {},
+        schedule: () => ({ cancel() {} }),
+      });
+      const w = world({ providerPark: true, sleep: async () => new Promise<void>((resolve) => setImmediate(resolve)) });
+      const opened = await wt.open({
+        runId: "run-7",
+        threadKey: "slack:C1:1.0",
+        startedAt: NOW,
+        meta: {
+          channelId: "slack:C1",
+          userId: "slack:UALICE",
+          threadKey: "slack:C1:1.0",
+          agent: "coding",
+          model: "p/m",
+        },
+        system: "You are the coding agent.",
+        tools: [],
+        seed: { key: `pi-follow-up-${randomUUID()}`, messages: w.run.messages, budgetMs: 600_000 },
+      });
+      if (opened.kind !== "tracked") throw new Error(`the run was not tracked: ${opened.kind}`);
+      const ledgerRun = opened.run;
+      w.run.onStep = ledgerRun.step.bind(ledgerRun);
+      const ordinary = { text: "also bump the changelog", userId: "slack:UALICE", at: NOW };
+      const ordinaryRow = await externalRow(ordinary),
+        controlRow = await providerUp();
+      const up = controlRow.input,
+        ordinarySeq = ordinaryRow.row.seq,
+        upSeq = controlRow.row.seq;
+      expect(upSeq).toBeGreaterThan(ordinarySeq);
 
-    let prompts = 0;
-    w.container.onStdin = (line) => {
-      const cmd = JSON.parse(line) as Record<string, unknown>;
-      if (cmd.type === "set_auto_retry")
-        w.container.emit({ id: cmd.id, type: "response", command: "set_auto_retry", success: true });
-      if (cmd.type === "get_state")
-        w.container.emit({
-          id: cmd.id,
-          type: "response",
-          command: "get_state",
-          success: true,
-          data: { sessionFile: `${paths.sessionDir}/s.jsonl`, sessionId: "sid", isStreaming: false },
-        });
-      if (cmd.type !== "prompt") return;
+      let prompts = 0;
+      w.container.onStdin = (line) => {
+        const cmd = JSON.parse(line) as Record<string, unknown>;
+        if (cmd.type === "set_auto_retry")
+          w.container.emit({ id: cmd.id, type: "response", command: "set_auto_retry", success: true });
+        if (cmd.type === "get_state")
+          w.container.emit({
+            id: cmd.id,
+            type: "response",
+            command: "get_state",
+            success: true,
+            data: { sessionFile: `${paths.sessionDir}/s.jsonl`, sessionId: "sid", isStreaming: false },
+          });
+        if (cmd.type !== "prompt") return;
 
-      const prompt = prompts++;
-      if (prompt === 2) {
-        w.inbox.push(ordinaryRow.input);
-        w.inbox.push({ ...up, ledgerSeq: upSeq });
-        // One ordinary loop iteration drains the live inbox while the local
-        // retry's prompt response is still pending.
-        w.container.emit({ type: "queue_update" });
-      }
-      w.container.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
-      if (prompt === 0) finalTurn(w.container, "loop done");
-      else if (prompt === 1)
-        w.container.emit(
-          {
-            type: "message_end",
-            message: {
-              role: "assistant",
-              content: [],
-              stopReason: "error",
-              errorMessage: proxyFailure("transient"),
+        const prompt = prompts++;
+        if (prompt === 2) {
+          w.inbox.push(ordinaryRow.input);
+          w.inbox.push({ ...up, ledgerSeq: upSeq });
+          // One ordinary loop iteration drains the live inbox while the local
+          // retry's prompt response is still pending.
+          w.container.emit({ type: "queue_update" });
+        }
+        w.container.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+        if (prompt === 0) finalTurn(w.container, "loop done");
+        else if (prompt === 1)
+          w.container.emit(
+            {
+              type: "message_end",
+              message: {
+                role: "assistant",
+                content: [],
+                stopReason: "error",
+                errorMessage: proxyFailure("transient"),
+              },
             },
-          },
-          { type: "agent_settled" },
-        );
-      else if (prompt === 2) finalTurn(w.container, "follow-up recovered on the local retry");
-    };
+            { type: "agent_settled" },
+          );
+        else if (prompt === 2) finalTurn(w.container, "follow-up recovered on the local retry");
+      };
 
-    const session = await w.open();
-    const loopTranscript = await ledger.readSession(ledgerRun.session!.key, 0);
-    await expect(
-      session.followUp({ text: "write the PR description", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
-    ).resolves.toBe("follow-up recovered on the local retry");
-    expect(await ledger.readSession(ledgerRun.session!.key, 0)).toEqual(loopTranscript);
+      const session = await w.open();
+      const loopTranscript = await ledger.readSession(ledgerRun.session!.key, 0);
+      await expect(
+        session.followUp({
+          text: "write the PR description",
+          maxTurns: 4,
+          maxMinutes: 5,
+          toolContext: { executor },
+          publicationAnswer,
+        }),
+      ).resolves.toBe("follow-up recovered on the local retry");
+      const completed = await ledger.readSession(ledgerRun.session!.key, 0);
+      expect(completed).toMatchObject({ complete: true, turns: 3 });
+      expect(completed.messages.slice(0, loopTranscript.messages.length)).toEqual(loopTranscript.messages);
+      expect(completed.messages.at(-1)).toEqual({
+        role: "assistant",
+        content: [{ type: "text", text: "follow-up recovered on the local retry" }],
+      });
 
-    // The bot process dies here; reclaim must use the durable cursor, not the
-    // in-process relaunch record, and offer only the ordinary deferred row.
-    const [reclaimed] = await reclaimWithLease();
-    // Local cursor/echo proof is not native consumption: SQLite retains the exact raw rows.
-    expect(await ledger.readInbox("run-7", 0)).toEqual([ordinaryRow.row, controlRow.row]);
-    expect(reclaimed?.lastStep?.inboxConsumedSeq).toBe(upSeq);
-    expect(reclaimed?.lastStep?.inboxDeferredSeqs).toEqual([ordinarySeq]);
-    expect(reclaimed!.inbox.map((item) => item.seq)).toEqual([ordinarySeq]);
-    expect(reclaimed!.inbox[0]!.message.text).toBe(ordinary.text);
-    await session.end();
-  });
+      // The bot process dies here; reclaim must use the durable cursor, not the
+      // in-process relaunch record, and offer only the ordinary deferred row.
+      const [reclaimed] = await reclaimWithLease();
+      expect(planResume({ transcript: completed, lastStep: reclaimed!.lastStep!, tools: [] })).toMatchObject({
+        kind: "finish",
+        answer: publicationAnswer ?? "follow-up recovered on the local retry",
+      });
+      // Local cursor/echo proof is not native consumption: SQLite retains the exact raw rows.
+      expect(await ledger.readInbox("run-7", 0)).toEqual([ordinaryRow.row, controlRow.row]);
+      expect(reclaimed?.lastStep?.inboxConsumedSeq).toBe(upSeq);
+      expect(reclaimed?.lastStep?.inboxDeferredSeqs).toEqual([ordinarySeq]);
+      expect(reclaimed!.inbox.map((item) => item.seq)).toEqual([ordinarySeq]);
+      expect(reclaimed!.inbox[0]!.message.text).toBe(ordinary.text);
+      await session.end();
+    },
+  );
 
   // Feature: docs/reference/specs/harness-pi.md item 6 — one drain hands pi an
   // ordinary follow-up (a steer) and the plane's provider-up row (the reissue
@@ -7311,6 +7337,121 @@ describe("runPiHarness — the deployment's compaction thresholds in pi's settin
 // budget; then the caller ends pi. The closed form (`runPiHarness`) is the
 // same loop with the end at once, as every test above drives it.
 describe("runPiHarnessOpen — the session stays open for one more turn", () => {
+  it("holds the first ancillary prompt until its selection is acknowledged", async () => {
+    const w = world();
+    const write = w.run.onStep!;
+    w.run.onStep = async (report) => {
+      if (report.publicationAnswer !== undefined) throw new Error("selection acknowledgement unavailable");
+      await write(report);
+    };
+    scriptedPi(w.container, (n, c) => finalTurn(c, n === 0 ? "Substantive report." : "Ancillary acknowledgement."));
+    const session = await w.open();
+    await expect(
+      session.followUp({
+        text: "describe the PR",
+        publicationAnswer: "Substantive report.",
+        maxTurns: 2,
+        maxMinutes: 2,
+        toolContext: w.run.toolContext,
+      }),
+    ).rejects.toThrow("selection acknowledgement unavailable");
+    expect(w.container.commands().filter((cmd) => cmd.type === "prompt")).toHaveLength(1);
+    expect(w.steps.at(-1)?.turns.at(-1)).toEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "Substantive report." }],
+    });
+    expect(await w.container.alive(w.container.pid)).toBe(true);
+    await session.end();
+  });
+
+  it("a substantive answer correction clears the ancillary publication selection", async () => {
+    const w = world();
+    scriptedPi(w.container, (n, c) =>
+      finalTurn(c, n === 0 ? "Original report." : n === 1 ? "Description resubmitted." : "Corrected report."),
+    );
+    const session = await w.open();
+    await session.followUp({
+      text: "describe the PR",
+      publicationAnswer: "Original report.",
+      maxTurns: 2,
+      maxMinutes: 2,
+      toolContext: w.run.toolContext,
+    });
+    expect(w.steps.at(-1)?.publicationAnswer).toBe("Original report.");
+    expect(
+      await session.followUp({
+        text: "correct the report",
+        maxTurns: 2,
+        maxMinutes: 2,
+        toolContext: w.run.toolContext,
+      }),
+    ).toBe("Corrected report.");
+    expect(w.steps.at(-1)?.publicationAnswer).toBeUndefined();
+    expect(session.record?.().publicationAnswer).toBeUndefined();
+    expect(w.steps.at(-1)?.turns.at(-1)).toEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "Corrected report." }],
+    });
+    await session.end();
+  });
+
+  it.each([
+    [5, 300_000],
+    [10, 600_000],
+  ])("a successor retains all %i minutes of its post-turn clock", async (minutes, expected) => {
+    const w = world({ providerPark: true, agent: { name: "review", maxMinutes: minutes } });
+    w.run.launchIntent = {
+      version: 1,
+      harness: "pi",
+      phase: "prepared",
+      ordinal: 1,
+      sessionPolicy: { version: 1, commandRoute: "native", identity: "write" },
+      clockKind: "turn",
+    };
+    w.run.saveLaunchIntent = async () => true;
+    let usable: number | undefined;
+    scriptedPi(w.container, (_n, c) => {
+      usable = w.registry.get("run-7")!.rules.loopEndsIn?.();
+      finalTurn(c, "Reviewed current head.");
+    });
+    const session = await w.open();
+    expect(usable).toBe(expected);
+    expect(session.answer).toBe("Reviewed current head.");
+    await session.end();
+  });
+  it.each([false, true])(
+    "records the follow-up after its original seed (caller appended turn: %s)",
+    async (appended) => {
+      const w = world();
+      scriptedPi(w.container, (n, c) => {
+        c.emit({
+          type: "message_end",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: n === 0 ? "fix the failing test" : "review new head" }],
+          },
+        });
+        finalTurn(c, n === 0 ? "Initial review." : "Updated review.");
+      });
+      const session = await w.open();
+      if (appended)
+        w.run.messages.push(
+          { role: "assistant", content: [{ type: "text", text: "Initial review." }] },
+          { role: "user", content: [{ type: "text", text: "review new head" }] },
+        );
+      expect(session.record?.().messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+      expect(
+        await session.followUp({ text: "review new head", maxTurns: 5, maxMinutes: 2, toolContext: w.run.toolContext }),
+      ).toBe("Updated review.");
+      expect(w.steps[1]?.firstIdx).toBe(2);
+      expect(w.steps[1]?.turns).toEqual([
+        { role: "user", content: [{ type: "text", text: "review new head" }] },
+        { role: "assistant", content: [{ type: "text", text: "Updated review." }] },
+      ]);
+      expect(session.record?.().messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+      await session.end();
+    },
+  );
   it("a follow-up turn marks the tools it may call on the run's bearer entry for its duration and clears them after, so the proxy trims the turn's requests and the checkpoint's none is lifted (model-proxy item 6)", async () => {
     const w = world();
     let during: unknown;
@@ -7338,7 +7479,7 @@ describe("runPiHarnessOpen — the session stays open for one more turn", () => 
   });
   const sent = (c: FakeHarnessContainer) => c.stdin.map((l) => JSON.parse(l) as Record<string, unknown>);
 
-  it("hands back the loop's answer with pi alive; a follow-up prompts the same session with its text, its tool call is on the stream under a run.agent of the caller's span, the relayed tools read the turn's context, no step is mirrored for it, and end() kills pi and removes the root once", async () => {
+  it("hands back the loop's answer with pi alive; a follow-up prompts the same session with its text, its tool call is on the stream under a run.agent of the caller's span, the relayed tools read the turn's context, its steps are mirrored, and end() kills pi and removes the root once", async () => {
     const w = world({ withSpans: true });
     let contextDuringTurn: unknown;
     scriptedPi(w.container, (n, c) => {
@@ -7392,8 +7533,8 @@ describe("runPiHarnessOpen — the session stays open for one more turn", () => 
     // the relayed tools read the turn's context while it ran, and the run's again after
     expect(contextDuringTurn).toBe(turnContext);
     expect(w.registry.get("run-7")!.toolContext).toBe(w.run.toolContext);
-    // nothing mirrored: the turn's rows are not the ledger's (pr-description item 5)
-    expect(w.steps).toHaveLength(stepsAfterLoop);
+    expect(w.steps).toHaveLength(4);
+    expect(w.steps.at(-1)?.turns.at(-1)?.content).toEqual([{ type: "text", text: "Description resubmitted." }]);
     // the end, once
     await session.end();
     await session.end();

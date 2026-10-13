@@ -42,5 +42,42 @@ describe("durable harness launch in SQLite", () => {
     }
     expect(await client.setState(id, "foreign", { harnessLaunch: begun })).toEqual({ ok: false, reason: "fenced" });
     expect(await client.peekInbox(id, "g1", 0)).toEqual(saved);
+    const producer = {
+      harness,
+      pid: 42,
+      logOffset: 0,
+      launchOrdinal: 0,
+      sessionPolicy: policy,
+      root: "/workspace/owned",
+      container: "vm-original",
+      processBirth: "original",
+    };
+    expect(await client.setState(id, "g1", { harnessLaunch: begun, harness: producer })).toEqual({ ok: true });
+    const ended = { ...producer, ended: true };
+    expect(await client.setState(id, "g1", { harnessLaunch: begun, harness: ended })).toEqual({ ok: true });
+    const confirmed = await client.peekInbox(id, "g1", 0);
+    for (const stale of [producer, { ...ended, pid: 43 }, { ...ended, processBirth: "foreign" }]) {
+      expect(await client.setState(id, "g1", { harnessLaunch: begun, harness: stale })).toEqual({
+        ok: false,
+        reason: "fenced",
+      });
+      expect(await client.peekInbox(id, "g1", 0)).toEqual(confirmed);
+    }
+    const postTurn = { ...prepared, ordinal: 1, clockKind: "turn" };
+    expect(await client.setState(id, "g1", { harnessLaunch: postTurn })).toEqual({ ok: true });
+    const successor = await client.peekInbox(id, "g1", 0);
+    if (!successor.ok) throw new Error("successor state unavailable");
+    expect(successor.boundary.state.harness).toMatchObject({ pid: 42, ended: true });
+    expect(successor.boundary.state.harnessLaunch).toMatchObject({
+      phase: "prepared",
+      ordinal: 1,
+      clockKind: "turn",
+      sessionPolicy: { version: 1, commandRoute: "hosted-review", identity: "read" },
+    });
+    expect(await client.setState(id, "g1", { harnessLaunch: { ...prepared, ordinal: 1 } })).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(await client.peekInbox(id, "g1", 0)).toEqual(successor);
   });
 });

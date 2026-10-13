@@ -11820,6 +11820,8 @@ function parseStep(v: unknown): Validated<StepRecord> {
       !s.inboxDeferredSeqs.every((seq) => typeof seq === "number" && Number.isInteger(seq) && seq > 0))
   )
     return invalid("record.inboxDeferredSeqs must be an array of positive integers");
+  if (s.publicationAnswer !== undefined && typeof s.publicationAnswer !== "string")
+    return invalid("record.publicationAnswer must be a string");
   if (!Array.isArray(s.inFlight)) return invalid("record.inFlight must be an array");
   for (const c of s.inFlight) {
     const call = c as Record<string, unknown>;

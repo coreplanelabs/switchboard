@@ -1,4 +1,5 @@
 import type { CheckExecutionReceipt } from "../checkExecutionTypes.js";
+import { preparedHarnessLaunch } from "../harness/sessionPolicy.js";
 import { CloudflareSandboxExecutor } from "../../execution/cloudflareSandbox.js";
 import { ExecHarnessContainer } from "../harness/container.js";
 import { HarnessEndingUnconfirmedError } from "../harness/container.js";
@@ -58,6 +59,7 @@ import { planResume, transcriptSource } from "../runLedger/resume.js";
 import { localWorkspaceDir, type ExecutorSelection } from "../../execution/factory.js";
 import { reattachWorkspace } from "./provision.js";
 import { authenticateProxyUnknownTerminal } from "../modelProxy/providerFailureAuth.js";
+import { shapeTools } from "../../channels/modelProxy.js";
 import { bearerHashOf, RunBearerStore } from "../modelProxy/runBearers.js";
 import { GitBindings, type GitPublicationClaim } from "../modelProxy/gitBindings.js";
 import { RUN_BEARER_ENV } from "../harness/pi/process.js";
@@ -161,9 +163,19 @@ async function trackedCodingContext(
   ctx: RunLoopContext = s.ctx,
   ledgerThreadKey = ctx.msg.threadKey,
   captureLedger?: (ledger: InMemoryRunLedger) => void,
+  seed = false,
 ): Promise<RunLoopContext> {
   if ((!ctx.isCodingPrRun && ctx.agent.name !== "review") || ctx.ledgerRun !== undefined) return ctx;
   const state = {
+    ...(seed
+      ? {
+          harnessLaunch: preparedHarnessLaunch(
+            "pi",
+            ctx.agent.identity,
+            ctx.agent.name === "review" ? "hosted-review" : "native",
+          ),
+        }
+      : {}),
     ...(ctx.resume?.row.state ?? {}),
     branchPublication: {
       version: 1,
@@ -203,6 +215,15 @@ async function trackedCodingContext(
     system: ctx.system,
     tools: [],
     state,
+    ...(seed
+      ? {
+          seed: {
+            messages: ctx.messages,
+            budgetMs: 25 * 60_000,
+            context: { version: 1 as const, status: "known" as const, revision: 0, origins: [], slack: [], mcp: [] },
+          },
+        }
+      : {}),
   });
   if (opened.kind !== "tracked") throw new Error("untracked coding fixture");
   s.ctx.ledgerRun = opened.run;
@@ -5721,6 +5742,51 @@ describe("runLoop — the model turn and everything that rides on it", () => {
 describe("the pi harness — every preset's runs, in the run's container", () => {
   const PI_YAML = YAML + "harness:\n  coding: pi\n";
 
+  it("retains a completed producer while its final context checkpoint is unavailable", async () => {
+    const container = new FakeHarnessContainer();
+    const registry = new HarnessRegistry();
+    let failState = false;
+    scriptPiFromProvider(container, {
+      registry,
+      provider: {
+        name: "fake",
+        complete: async () => {
+          failState = true;
+          return { content: [{ type: "text", text: "Saved result." }], stopReason: "end_turn" };
+        },
+      },
+    });
+    const s = setup("", {
+      agent: "coding",
+      yaml: PI_YAML,
+      harness: { harnesses: roster(), registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
+      bearer: "sbr_run-l.s3cret",
+    });
+    let inner!: InMemoryRunLedger;
+    const ctx = await trackedCodingContext(
+      s,
+      { ...s.ctx, isCodingPrRun: true },
+      s.ctx.msg.threadKey,
+      (ledger) => {
+        inner = ledger;
+      },
+      true,
+    );
+    const setState = inner.setState.bind(inner);
+    inner.setState = async (id, gen, state) => {
+      if (failState && state.contextCheckpoint) throw new TransientStoreError("temporary state timeout");
+      return setState(id, gen, state);
+    };
+    expect(await runLoop(s.deps, { ...ctx, isCodingPrRun: false })).toMatchObject({
+      kind: "paused",
+      reason: "checkpoint_unavailable",
+      handedOff: true,
+    });
+    expect(await container.alive(container.pid)).toBe(true);
+    expect(s.published.filter((event) => event.startsWith("answer:"))).toEqual([]);
+    expect(inner.live.get("run-l")?.phase).toBe("handoff");
+  });
+
   /** A pi that answers the harness's first prompt with one bash turn and a
    *  final text — its extension asking the gate for the call, as the real one does. */
   function scriptedPi(container: FakeHarnessContainer, registry: HarnessRegistry, finalText: string) {
@@ -6380,167 +6446,207 @@ describe("the pi harness — every preset's runs, in the run's container", () =>
 
   // The recorder commits an accepted head before the loop answers. Only that
   // write can start the second prompt; remote equality alone cannot.
-  it("a coding run on pi whose push landed on an open PR without a description gets its description turn as a prompt on the same session: the relayed submit_pr_description lands, the PR is edited, the note and the description are on the record, pi is ended once after the turn", async () => {
-    const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
-    const BRANCH = "dependabot/github_actions/actions-4c45254bbe";
-    const DESCRIPTION: PrDescription = {
-      title: "ci(deps): bump the action, refresh its hygiene allowlist",
-      tldr: "Bumps the action and refreshes the allowlist lines its pin moved. CI is green again.",
-      why: "Dependabot moved the pin; the allowlist matches lines by content.",
-      pointers: [
-        {
-          label: "The allowlist",
-          text: "Three entries at the new pin.",
-          anchor: { path: "scripts/a", from: 1, to: 3 },
+  it.each([false, true])(
+    "a coding run on pi whose push landed on an open PR without a description preserves its report and gates the description prompt on a saved selection (checkpoint held: %s)",
+    async (held) => {
+      const HEAD = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+      const BRANCH = "dependabot/github_actions/actions-4c45254bbe";
+      const DESCRIPTION: PrDescription = {
+        title: "ci(deps): bump the action, refresh its hygiene allowlist",
+        tldr: "Bumps the action and refreshes the allowlist lines its pin moved. CI is green again.",
+        why: "Dependabot moved the pin; the allowlist matches lines by content.",
+        pointers: [
+          {
+            label: "The allowlist",
+            text: "Three entries at the new pin.",
+            anchor: { path: "scripts/a", from: 1, to: 3 },
+          },
+        ],
+        feedbackWanted: "Nothing in particular.",
+        verified: "See validation.",
+        decisions: [{ title: "Keep dependabot's notes", rationale: "They are still true; they moved into why." }],
+        risk: "none",
+        validation: { criteria: [{ criterion: "hygiene:check", proof: "ok — 201 files" }] },
+      };
+      const container = new FakeHarnessContainer();
+      const registry = new HarnessRegistry();
+      const bindings = new GitBindings();
+      bindings.register("run-l", { repo: "acme/api", ref: BRANCH }, undefined, async () => true);
+      const inner = new InMemoryRunLedger(() => NOW);
+      const setState = inner.setState.bind(inner);
+      inner.setState = async (...args) => {
+        if (
+          held &&
+          args[2].contextCheckpoint !== undefined &&
+          inner.steps.get("run-l")?.at(-1)?.publicationAnswer !== undefined
+        )
+          throw new TransientStoreError("selection checkpoint unavailable");
+        return setState(...args);
+      };
+      const ledger = createLedgerWriteThrough({
+        ledger: inner,
+        gen: "gen-T",
+        fallback: { put: async () => {}, abandoned: () => {} },
+        warn: () => {},
+      });
+      const tracked = await ledger.open({
+        runId: "run-l",
+        threadKey: THREAD,
+        startedAt: NOW,
+        meta: { agent: "coding", channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD },
+        card: null,
+        system: "test",
+        tools: [],
+        seed: { messages: [{ role: "user", content: [{ type: "text", text: "fix" }] }], budgetMs: 60_000 },
+      });
+      if (tracked.kind !== "tracked") throw new Error("untracked test");
+      // The workspace as the post-step observes it: on the pushed branch, its tip on the remote.
+      const executor = {
+        exec: async (cmd: string) => {
+          if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
+          if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
+          if (/rev-parse @\{u\}/.test(cmd)) return `${HEAD}\n`;
+          if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
+          return "";
         },
-      ],
-      feedbackWanted: "Nothing in particular.",
-      verified: "See validation.",
-      decisions: [{ title: "Keep dependabot's notes", rationale: "They are still true; they moved into why." }],
-      risk: "none",
-      validation: { criteria: [{ criterion: "hygiene:check", proof: "ok — 201 files" }] },
-    };
-    const container = new FakeHarnessContainer();
-    const registry = new HarnessRegistry();
-    const bindings = new GitBindings();
-    bindings.register("run-l", { repo: "acme/api", ref: BRANCH }, undefined, async () => true);
-    const inner = new InMemoryRunLedger(() => NOW);
-    const ledger = createLedgerWriteThrough({
-      ledger: inner,
-      gen: "gen-T",
-      fallback: { put: async () => {}, abandoned: () => {} },
-      warn: () => {},
-    });
-    const tracked = await ledger.open({
-      runId: "run-l",
-      threadKey: THREAD,
-      startedAt: NOW,
-      meta: { agent: "coding", channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD },
-      card: null,
-      system: "test",
-      tools: [],
-      seed: { messages: [{ role: "user", content: [{ type: "text", text: "fix" }] }], budgetMs: 60_000 },
-    });
-    if (tracked.kind !== "tracked") throw new Error("untracked test");
-    // The workspace as the post-step observes it: on the pushed branch, its tip on the remote.
-    const executor = {
-      exec: async (cmd: string) => {
-        if (/rev-parse --abbrev-ref HEAD/.test(cmd)) return `${BRANCH}\n`;
-        if (/rev-parse HEAD/.test(cmd)) return `${HEAD}\n`;
-        if (/rev-parse @\{u\}/.test(cmd)) return `${HEAD}\n`;
-        if (/ls-remote --exit-code origin/.test(cmd)) return `${HEAD}\trefs/heads/${BRANCH}\n`;
-        return "";
-      },
-    };
-    const killedWhenPrompted: number[][] = [];
-    // A coding pi answering TWO prompts on one session: the request with a bare
-    // answer (no description), then the description turn's follow-up with the
-    // relayed submit_pr_description and a line back.
-    let prompts = 0;
-    container.onStdin = (line, c) => {
-      const cmd = JSON.parse(line) as Record<string, unknown>;
-      if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
-        c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
-      if (cmd.type !== "prompt") return;
-      const n = prompts++;
-      killedWhenPrompted.push([...container.killed]);
-      c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
-      const settle = (text: string) => {
-        const done = { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" };
+      };
+      const killedWhenPrompted: number[][] = [];
+      // A coding pi answering TWO prompts on one session: the request with a bare
+      // answer (no description), then the description turn's follow-up with the
+      // relayed submit_pr_description and a line back.
+      let prompts = 0;
+      container.onStdin = (line, c) => {
+        const cmd = JSON.parse(line) as Record<string, unknown>;
+        if (cmd.type === "set_auto_retry" || cmd.type === "get_state")
+          c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
+        if (cmd.type !== "prompt") return;
+        const n = prompts++;
+        killedWhenPrompted.push([...container.killed]);
+        c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
+        const settle = (text: string) => {
+          const done = { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" };
+          c.emit(
+            { type: "message_end", message: done },
+            { type: "turn_end", message: done, toolResults: [] },
+            { type: "agent_settled" },
+          );
+        };
+        if (n === 0) {
+          void bindings
+            .beginBranch("run-l", {
+              ref: `refs/heads/${BRANCH}`,
+              old: "b".repeat(40),
+              next: HEAD,
+            })
+            .then(async (claim) => {
+              expect(claim).toBeDefined();
+              expect(await claim!.finish("accepted")).toBe(true);
+              settle("Refreshed the allowlist.");
+            });
+          return;
+        }
+        const live = registry.get("run-l")!;
+        const call = {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "d1", name: "submit_pr_description", arguments: DESCRIPTION }],
+          stopReason: "toolUse",
+        };
         c.emit(
-          { type: "message_end", message: done },
-          { type: "turn_end", message: done, toolResults: [] },
-          { type: "agent_settled" },
+          { type: "message_end", message: call },
+          { type: "tool_execution_start", toolCallId: "d1", toolName: "submit_pr_description", args: DESCRIPTION },
+        );
+        authorizeToolCall(live, { toolCallId: "d1", tool: "submit_pr_description", input: DESCRIPTION });
+        void runRelayedTool(live, { toolCallId: "d1", tool: "submit_pr_description", input: DESCRIPTION }).then(
+          (answer) => {
+            c.emit(
+              {
+                type: "tool_execution_end",
+                toolCallId: "d1",
+                toolName: "submit_pr_description",
+                result: { content: answer.content },
+                isError: answer.isError,
+              },
+              { type: "turn_end", message: call, toolResults: [] },
+            );
+            settle("Description resubmitted.");
+          },
         );
       };
-      if (n === 0) {
-        void bindings
-          .beginBranch("run-l", {
-            ref: `refs/heads/${BRANCH}`,
-            old: "b".repeat(40),
-            next: HEAD,
-          })
-          .then(async (claim) => {
-            expect(claim).toBeDefined();
-            expect(await claim!.finish("accepted")).toBe(true);
-            settle("Refreshed the allowlist.");
-          });
+      const s = setup("", {
+        agent: "coding",
+        provider: provider("unused"),
+        yaml: PI_YAML,
+        harness: {
+          harnesses: roster(),
+          registry,
+          harnessUrl: "https://bot.example.com",
+          containerFor: () => container,
+        },
+        bearer: "sbr_run-l.s3cret",
+        repoCtx: { repo: "acme/api", ref: BRANCH, baseRef: "main" } as RepoContext,
+        binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/t", user: "worker2" },
+        executor,
+        coding: true,
+      });
+      s.deps.githubBindings = bindings;
+      s.deps.runLedger = ledger;
+      const opened: Array<Record<string, unknown>> = [];
+      s.deps.findOpenPrByHead = vi.fn(async () => ({ number: 700, htmlUrl: "https://github.com/acme/api/pull/700" }));
+      s.deps.openPullRequest = async (target) => {
+        const lastStep = inner.steps.get("run-l")!.at(-1)!;
+        const transcript = await inner.readSession(
+          tracked.run.session!.key,
+          tracked.run.session!.seedFrom,
+          tracked.run.session!.seedFrom + lastStep.turnIndex - 1,
+        );
+        expect(planResume({ transcript, lastStep, tools: [] })).toMatchObject({
+          kind: "finish",
+          answer: "Refreshed the allowlist.",
+        });
+        opened.push({ ...target });
+        return { number: 700, htmlUrl: "https://github.com/acme/api/pull/700", created: false };
+      };
+      s.deps.fetchRepoShipInfo = async () => ({ defaultBranch: "main" });
+      const result = await runLoop(s.deps, { ...s.ctx, ledgerRun: tracked.run });
+      if (held) {
+        expect(result).toMatchObject({ kind: "paused", reason: "checkpoint_unavailable" });
+        expect(prompts).toBe(1);
+        expect(opened).toEqual([]);
+        expect(container.killed).toEqual([]);
+        expect(container.removed).toEqual([]);
+        expect(await container.alive(container.pid)).toBe(true);
+        expect(inner.steps.get("run-l")!.at(-1)!).toMatchObject({ publicationAnswer: "Refreshed the allowlist." });
         return;
       }
-      const live = registry.get("run-l")!;
-      const call = {
-        role: "assistant",
-        content: [{ type: "toolCall", id: "d1", name: "submit_pr_description", arguments: DESCRIPTION }],
-        stopReason: "toolUse",
-      };
-      c.emit(
-        { type: "message_end", message: call },
-        { type: "tool_execution_start", toolCallId: "d1", toolName: "submit_pr_description", args: DESCRIPTION },
-      );
-      authorizeToolCall(live, { toolCallId: "d1", tool: "submit_pr_description", input: DESCRIPTION });
-      void runRelayedTool(live, { toolCallId: "d1", tool: "submit_pr_description", input: DESCRIPTION }).then(
-        (answer) => {
-          c.emit(
-            {
-              type: "tool_execution_end",
-              toolCallId: "d1",
-              toolName: "submit_pr_description",
-              result: { content: answer.content },
-              isError: answer.isError,
-            },
-            { type: "turn_end", message: call, toolResults: [] },
-          );
-          settle("Description resubmitted.");
-        },
-      );
-    };
-    const s = setup("", {
-      agent: "coding",
-      provider: provider("unused"),
-      yaml: PI_YAML,
-      harness: { harnesses: roster(), registry, harnessUrl: "https://bot.example.com", containerFor: () => container },
-      bearer: "sbr_run-l.s3cret",
-      repoCtx: { repo: "acme/api", ref: BRANCH, baseRef: "main" } as RepoContext,
-      binding: { ref: BRANCH, sha: HEAD, workspace: "/srv/wt/t", user: "worker2" },
-      executor,
-      coding: true,
-    });
-    s.deps.githubBindings = bindings;
-    const opened: Array<Record<string, unknown>> = [];
-    s.deps.findOpenPrByHead = vi.fn(async () => ({ number: 700, htmlUrl: "https://github.com/acme/api/pull/700" }));
-    s.deps.openPullRequest = async (target) => {
-      opened.push({ ...target });
-      return { number: 700, htmlUrl: "https://github.com/acme/api/pull/700", created: false };
-    };
-    s.deps.fetchRepoShipInfo = async () => ({ defaultBranch: "main" });
-    const out = answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: tracked.run }));
-    expect(container.starts).toHaveLength(1);
-    expect(prompts).toBe(2);
-    expect(killedWhenPrompted).toEqual([[], []]);
-    expect(s.deps.findOpenPrByHead).toHaveBeenCalledWith("acme/api", BRANCH);
-    expect(out.answer).toContain(`Published \`${BRANCH}\` at \`${HEAD}\``);
-    expect(out.answer).toContain("Refreshed the allowlist.");
-    expect(out.answer).toContain("PR updated: https://github.com/acme/api/pull/700");
-    expect(opened).toHaveLength(1);
-    expect(opened[0]).toMatchObject({ repo: "acme/api", headBranch: BRANCH, base: "main", title: DESCRIPTION.title });
-    expect(String(opened[0].body)).toContain(`blob/${HEAD}/`);
-    expect(out.prNote).toBeUndefined();
-    // pi ended once, after the turn
-    expect(container.killed).toEqual([4242]);
-    expect(container.removed).toEqual(["/var/tmp/switchboard-pi-run-l"]);
-    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
-    s.ending.drain(true);
-    await s.writer.settled();
-    const rec = inner.finished.get("run-l");
-    if (!rec) throw new Error("tracked run did not finish");
-    const notes = rec.events.filter((e) => e.type === "run_note").map((e) => (e as { kind: string }).kind);
-    expect(notes).toContain("description_turn");
-    expect(rec.events.some((e) => e.type === "pr_description")).toBe(true);
-    expect(rec.events.find((e) => e.type === "pr_opened")).toMatchObject({ number: 700, created: false });
-    expect(rec.events.filter((e) => e.type === "tool_call").map((e) => (e as { tool: string }).tool)).toEqual([
-      "submit_pr_description",
-    ]);
-  });
+      const out = answered(result);
+      expect(container.starts).toHaveLength(1);
+      expect(prompts).toBe(2);
+      expect(killedWhenPrompted).toEqual([[], []]);
+      expect(s.deps.findOpenPrByHead).toHaveBeenCalledWith("acme/api", BRANCH);
+      expect(out.answer).toContain(`Published \`${BRANCH}\` at \`${HEAD}\``);
+      expect(out.answer).toContain("Refreshed the allowlist.");
+      expect(out.answer).toContain("PR updated: https://github.com/acme/api/pull/700");
+      expect(opened).toHaveLength(1);
+      expect(opened[0]).toMatchObject({ repo: "acme/api", headBranch: BRANCH, base: "main", title: DESCRIPTION.title });
+      expect(String(opened[0].body)).toContain(`blob/${HEAD}/`);
+      expect(out.prNote).toBeUndefined();
+      // pi ended once, after the turn
+      expect(container.killed).toEqual([4242]);
+      expect(container.removed).toEqual(["/var/tmp/switchboard-pi-run-l"]);
+      expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+      s.ending.drain(true);
+      await s.writer.settled();
+      const rec = inner.finished.get("run-l");
+      if (!rec) throw new Error("tracked run did not finish");
+      const notes = rec.events.filter((e) => e.type === "run_note").map((e) => (e as { kind: string }).kind);
+      expect(notes).toContain("description_turn");
+      expect(rec.events.some((e) => e.type === "pr_description")).toBe(true);
+      expect(rec.events.find((e) => e.type === "pr_opened")).toMatchObject({ number: 700, created: false });
+      expect(rec.events.filter((e) => e.type === "tool_call").map((e) => (e as { tool: string }).tool)).toEqual([
+        "submit_pr_description",
+      ]);
+    },
+  );
 
   // The resident's attach names the pool user every /exec runs as, and the
   // run's pi files go under the run's own root all the same: the root never
@@ -8210,30 +8316,50 @@ describe("the pi harness — the review preset", () => {
   });
 
   // harness-pi item 14, agent-review item 12: the PR's head moves substantively
-  // while pi reviews it. The settle's one more turn is a `prompt` on the same
-  // pi session — the process that reviewed, still alive on its transcript —
-  // never a second pi and never the native loop; the second verdict, relayed
-  // through the same registry entry under the turn's own capture, is the one
-  // posted, pinned to the new head; pi is ended once the settle is done.
-  it.each(["fresh matching history", "stale history in verdict-only follow-up"])(
-    "a substantive head move mid-review on pi re-reviews as a prompt on the same pi session: the old SHA cannot authorize the new head (%s)",
+  // while pi reviews it. An in-place move keeps the session; checkout
+  // replacement ends the original and starts one successor from the saved
+  // conversation. Both paths reject stale history and publish at the new head.
+  it.each([
+    "fresh matching history",
+    "stale history in verdict-only follow-up",
+    "resident requires an idle workspace",
+    "resident adopts current head",
+    "resident after wind-down",
+  ])(
+    "a substantive head move mid-review on pi preserves the conversation and refuses stale approval across workspace transitions (%s)",
     async (mode) => {
       const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
-      const container = new FakeHarnessContainer();
+      let container = new FakeHarnessContainer();
+      const originalContainer = container;
+      const adoption = mode === "resident adopts current head";
+      const forced = mode === "resident after wind-down";
+      let nativeLedger: InMemoryRunLedger | undefined;
+      const toolChoices: string[] = [];
+      const bearers = new RunBearerStore({ clock: () => NOW });
+      const requiresIdle = mode === "resident requires an idle workspace" || adoption || forced;
+      const replaced = requiresIdle && !adoption;
       const registry = new HarnessRegistry();
-      let worktreeHead = HEAD;
+      let worktreeHead = adoption ? NEW : HEAD;
       const moves: string[] = [];
       const executor = {
+        moveRequiresIdleProducer: requiresIdle,
         exec: async (command: string) => (command.includes("rev-parse") ? `${worktreeHead}\n` : ""),
         execResult: async () => ({ exitCode: 0, stdout: worktreeHead + "\n", stderr: "", truncated: false }),
         moveTo: async (sha: string) => {
+          if (requiresIdle && (await container.alive(container.pid)))
+            throw new Error("workspace-preserved: live owner advance unverified");
           moves.push(sha);
           worktreeHead = sha;
+          if (requiresIdle) {
+            container = new FakeHarnessContainer();
+            container.pid = 5151;
+            container.onStdin = originalContainer.onStdin;
+          }
           return { sha };
         },
       };
       let historyHead = HEAD;
-      const refresh = mode === "fresh matching history";
+      const refresh = mode !== "stale history in verdict-only follow-up";
       const killedWhenPrompted: number[][] = [];
       // A review's pi answering TWO prompts on one session: the request with a
       // verdict at the pinned head, then the re-review's follow-up with a verdict
@@ -8245,6 +8371,15 @@ describe("the pi harness — the review preset", () => {
           c.emit({ id: cmd.id, type: "response", command: cmd.type, success: true, data: { sessionFile: "s.jsonl" } });
         if (cmd.type !== "prompt") return;
         const n = prompts++;
+        if (n === 0 && forced) bearers.markLoopEnded("run-l");
+        if (n === 1)
+          toolChoices.push(
+            shapeTools(
+              "anthropic-messages",
+              { tools: [{ name: "read" }], tool_choice: { type: "auto" } },
+              bearers.marksOf("run-l"),
+            ).toolChoice,
+          );
         killedWhenPrompted.push([...container.killed]);
         const live = registry.get("run-l")!;
         c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
@@ -8280,7 +8415,10 @@ describe("the pi harness — the review preset", () => {
           await reject(HEAD, "error: reviewed head differs from the required review head");
         }
         if (!refresh && n > 0) {
-          const done = assistant([{ type: "text", text: "Second review: no valid verdict." }], "stop");
+          const done = assistant(
+            [{ type: "text", text: n === 2 ? "Verdict acknowledgement." : "Second review: no valid verdict." }],
+            "stop",
+          );
           c.emit(
             { type: "message_end", message: done },
             { type: "turn_end", message: done, toolResults: [] },
@@ -8343,6 +8481,16 @@ describe("the pi harness — the review preset", () => {
         review: {
           head: HEAD,
           post: async (target, body) => {
+            const transcript = await nativeLedger!.readSession(
+              ctx.ledgerRun!.session!.key,
+              ctx.ledgerRun!.session!.seedFrom,
+            );
+            expect(
+              planResume({ transcript, lastStep: nativeLedger!.steps.get("run-l")!.at(-1)!, tools: [] }),
+            ).toMatchObject({
+              kind: "finish",
+              answer: refresh ? "Second review: the new test is wrong." : "Second review: no valid verdict.",
+            });
             posts.push({ target, body });
             return { state: "accepted" as const };
           },
@@ -8351,18 +8499,35 @@ describe("the pi harness — the review preset", () => {
             sha === HEAD ? list(["feat: the change"]) : list(["feat: the change", "fix: review nits"]),
         },
       });
+      s.deps.runBearers = bearers;
+      s.ctx.bearer = mintFor(bearers, s);
       seedReviewHistory(s.deps, () => historyHead);
-      const out = answered(await runLoop(s.deps, await trackedReviewContext(s)));
+      const ctx = await trackedCodingContext(
+        s,
+        s.ctx,
+        s.ctx.msg.threadKey,
+        (inner) => {
+          nativeLedger = inner;
+        },
+        true,
+      );
+      const out = answered(await runLoop(s.deps, ctx));
+      expect(bearers.marksOf("run-l")).not.toHaveProperty("turn");
+      expect(toolChoices).toEqual(["auto"]);
       // One pi survives the re-review and, if needed, the verdict-only prompt.
       expect(container.starts).toHaveLength(1);
+      if (replaced) expect(originalContainer.killed).toEqual([4242]);
       expect(prompts).toBe(refresh ? 2 : 3);
       expect(killedWhenPrompted).toEqual(refresh ? [[], []] : [[], [], []]);
-      expect(moves).toEqual([NEW]);
+      expect(moves).toEqual(adoption ? [] : [NEW]);
       const followUp = container.stdin
         .map((l) => JSON.parse(l) as Record<string, unknown>)
-        .filter((c) => c.type === "prompt")[1];
-      expect(String(followUp.message)).toContain("moved from a1b2c3d to d75b5a5");
-      expect(String(followUp.message)).toContain("Switchboard has already moved your worktree to d75b5a5");
+        .filter((c) => c.type === "prompt")[replaced ? 0 : 1];
+      const reviewRequest = replaced ? [...container.files.values()].join("\n") : String(followUp.message);
+      if (!adoption) {
+        expect(reviewRequest).toContain("moved from a1b2c3d to d75b5a5");
+        expect(reviewRequest).toContain("Switchboard has already moved your worktree to d75b5a5");
+      }
       // the second verdict and answer are the run's; posted once, pinned to the new head
       const answer = refresh ? "Second review: the new test is wrong." : "Second review: no valid verdict.";
       expect(out.answer).toBe(answer);
@@ -8379,9 +8544,9 @@ describe("the pi harness — the review preset", () => {
         ),
       ).toBe(true);
       expect(s.published).toEqual([`answer:${answer}`]);
-      expect(s.replies.some((r) => r.startsWith("🔀 o/r#42 moved during the run"))).toBe(true);
-      // pi ended once, after the settle
-      expect(container.killed).toEqual([4242]);
+      if (!adoption) expect(s.replies.some((r) => r.startsWith("🔀 o/r#42 moved during the run"))).toBe(true);
+      // The successor is ended after settlement; replacement already ended the original.
+      expect(container.killed).toEqual([replaced ? 5151 : 4242]);
       expect(container.removed).toEqual(["/var/tmp/switchboard-pi-run-l"]);
       expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
       s.ending.drain(true);
@@ -11200,7 +11365,6 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       }
       const out = answered(await running);
       expect(out.answer).toBe("Saved final answer.");
-      expect(checkpoints).toBe(2);
       const saved = await ledger.readSessionTail(opened.run.session!.threadSession!, 8192);
       expect(JSON.stringify(saved.transcript)).toContain("Saved final answer.");
       if (agent === "review") expect(posts).toHaveLength(1);
@@ -12660,6 +12824,46 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
   });
 
+  it.each(["pi", "opencode"] as const)(
+    "a confirmed %s ending recovers the saved answer without a producer",
+    async (harness) => {
+      const container = new FakeHarnessContainer();
+      const s = setup("", {
+        agent: "coding",
+        provider: neverCalled(),
+        harness: {
+          harnesses: roster(),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          containerFor: () => container,
+        },
+      });
+      const resume = finishing("Saved completed work.", {
+        agent: "coding",
+        state: {
+          harness: {
+            harness,
+            pid: 777,
+            port: 41000,
+            sessionID: "original",
+            logOffset: 10,
+            root: "/var/tmp/original",
+            container: "vm-original",
+            ended: true,
+          },
+        },
+      });
+      const out = answered(
+        await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+      );
+      expect(out.answer).toBe("Saved completed work.");
+      expect(s.published).toEqual(["answer:Saved completed work."]);
+      expect(s.registry.getById("run-l")).toMatchObject({ status: "completed" });
+      expect(container.starts).toEqual([]);
+      expect(container.killed).toEqual([]);
+    },
+  );
+
   it("on the pi harness a foreign original finish retains its workspace without ending the producer", async () => {
     const container = new FakeHarnessContainer();
     const s = setup("", {
@@ -12677,14 +12881,16 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       agent: "coding",
       state: { harness: { pid: 777, logOffset: 10, root: "/var/tmp/switchboard-pi-run-l", container: "vm-old" } },
     });
-    await expect(
-      runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
-    ).rejects.toThrow(/original pi producer/);
+    const out = answered(
+      await runLoop(s.deps, await trackedCodingContext(s, { ...s.ctx, resume, messages: resume.plan.messages })),
+    );
+    expect(out.answer).toBe("Done: pushed the fix.");
+    await out.releaseWorkspace();
     expect(container.killed).toEqual([]);
     expect(container.removed).toEqual([]);
     expect(container.starts).toEqual([]);
     expect(s.releases).toEqual([]);
-    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "failed" });
+    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
   });
 
   // docs/reference/specs/harness.md item 8: the row's word wins. A resumed row
@@ -13963,7 +14169,7 @@ describe("tracked Review command receipt binding", () => {
     expect(answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: canonical.ledgerRun, resume, messages })).answer).toBe(
       "original native route",
     );
-    expect(canonical.inner.live.get(s.run.id)?.state.harness).toEqual(original);
+    expect(canonical.inner.live.get(s.run.id)?.state.harness).toEqual({ ...original, ended: true });
   });
 
   it.each(["pi", "opencode"] as const)("binds hosted %s Review through its original canonical ledger", async (name) => {

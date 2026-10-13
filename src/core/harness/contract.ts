@@ -63,6 +63,8 @@ export const SAID_ONCE_SUFFIX = " (said once: later events of this kind are not 
 /** What a run's row remembers about its pi (harness-pi.md item 8), so the next
  *  bot generation finds it: read by `harnessFactsOf`, written by pi's loop. */
 export interface PiHarnessFacts {
+  /** The owning run confirmed teardown, distinct from sampled process absence. */
+  ended?: true;
   /** The accepted launch this producer receipt belongs to, not a custody grant. */
   launchOrdinal?: number;
   /** Original logical launch policy, acknowledged with this producer's facts. */
@@ -129,6 +131,7 @@ export interface PiHarnessFacts {
  *  hash, the container and the relaunch count. Nothing in this tree writes one
  *  yet; the union carries it so the seam is read against two shapes, not one. */
 export interface OpenCodeHarnessFacts {
+  ended?: true;
   launchOrdinal?: number;
   workspaceScratch?: true;
   /** Original logical launch policy; never an effective native-table attestation. */
@@ -350,6 +353,10 @@ export const RELAUNCH_CEILING = 2;
  *  `HarnessResume` short of its facts and its budget, which the run loop fills
  *  once the bearer is rotated and the workspace re-attached. */
 export interface HarnessRecord {
+  /** Deferred inbox rows remain deferred through a zero-row answer-selection step. */
+  inboxDeferredSeqs?: number[];
+  /** Ancillary work keeps this substantive report selected for publication. */
+  publicationAnswer?: string;
   messages: ChatMessage[];
   compactions: AssembledCompaction[];
   settlements: Settlement[];
@@ -416,6 +423,8 @@ export class HarnessContainerReplacedError extends HarnessInterruptedError {
  *  (`turnLeaseMs`, decision 0046) — and its tool spans hang under a
  *  `run.agent` opened under `span`. The system prompt stays the session's. */
 export interface FollowUpTurnInput {
+  /** Ancillary work keeps this substantive report selected for publication. */
+  publicationAnswer?: string;
   text: string;
   maxTurns: number;
   /** The turn's ask, in minutes; the harness carves the lesser of it and the lease's remainder. */
@@ -435,6 +444,8 @@ export type FollowUpTurn = (input: FollowUpTurnInput) => Promise<string>;
  *  it — the caller's duty once the post-turns are done or the run failed.
  *  Ending is idempotent; a follow-up after it throws. */
 export interface HarnessSession {
+  /** Recovery projection at an idle turn; persistence still requires a ledger ACK. */
+  record?: () => HarnessRecord;
   answer: string;
   /** The wind-down that labelled `answer`, when one did (harness-pi.md item
    *  6): the run loop composes the thread's answer from it again once its
@@ -453,6 +464,8 @@ export interface HarnessSession {
  *  the ledger held it, the calls in flight at the death, the budget left, and
  *  the row's facts when the previous generation wrote them. */
 export interface HarnessResume {
+  /** Ancillary work keeps this substantive report selected for publication. */
+  publicationAnswer?: string;
   /** The transcript the ledger held, as `planResume` assembled it. */
   messages: ChatMessage[];
   /** The compaction entries among those messages (session-log item 6), rendered
@@ -581,7 +594,7 @@ export function nextHarnessLaunch(
   runId: string,
   raw: unknown,
   facts: HarnessFacts | undefined,
-  replaced: HarnessContainerReplacedError,
+  replaced: HarnessContainerReplacedError | "ended",
 ): HarnessLaunchIntent {
   const intent = harnessLaunchIntentOf(raw);
   if (
@@ -591,13 +604,18 @@ export function nextHarnessLaunch(
     facts.launchOrdinal !== intent.ordinal ||
     facts.harness !== intent.harness ||
     !sameOriginalSessionPolicy(facts.sessionPolicy, intent.sessionPolicy) ||
-    (replaced.was !== undefined && facts.container !== replaced.was) ||
+    (replaced === "ended" ? facts.ended !== true : replaced.was !== undefined && facts.container !== replaced.was) ||
     !Number.isSafeInteger(intent.ordinal + 1)
   ) {
     const held = new HarnessContainerError("resume", "The original producer cannot qualify another launch attempt.");
     throw new HarnessEndingUnconfirmedError(runId, held, held);
   }
-  return { ...intent, phase: "prepared", ordinal: intent.ordinal + 1 };
+  return {
+    ...intent,
+    phase: "prepared",
+    ordinal: intent.ordinal + 1,
+    ...(replaced === "ended" ? { clockKind: "turn" as const } : {}),
+  };
 }
 
 /** One run as the loop hands it to a harness: the preset and its budget, the
@@ -605,6 +623,8 @@ export function nextHarnessLaunch(
  *  sinks the record is written through, and a resume. Nothing here names a
  *  harness. */
 export interface HarnessRun {
+  /** Ancillary work keeps this substantive report selected for publication. */
+  publicationAnswer?: string;
   runId: string;
   /** Raw original row evidence, validated before any producer effect. */
   launchIntent?: unknown;
@@ -760,7 +780,7 @@ export interface Harness {
  *  `harness_error` note and on the card as a progress line, then thrown as
  *  `HarnessMismatchError` before the harness is asked anything; otherwise the
  *  harness opens the run with deps and run handed through untouched. */
-export function openThroughSeam(harness: Harness, deps: HarnessDeps, run: HarnessRun): Promise<HarnessSession> {
+export async function openThroughSeam(harness: Harness, deps: HarnessDeps, run: HarnessRun): Promise<HarnessSession> {
   const facts = run.resume?.facts;
   if (facts !== undefined && !factsBelongTo(harness, facts)) {
     const mismatch = new HarnessMismatchError(harness.name, facts.harness);
@@ -768,5 +788,11 @@ export function openThroughSeam(harness: Harness, deps: HarnessDeps, run: Harnes
     run.onEvent?.({ type: "run_note", kind: "harness_error", summary: mismatch.message });
     return Promise.reject(mismatch);
   }
-  return harness.open(deps, run);
+  const postTurn = harnessLaunchIntentOf(run.launchIntent)?.clockKind === "turn";
+  if (postTurn) deps.bearers?.markTurn(run.runId);
+  try {
+    return await harness.open(deps, run);
+  } finally {
+    if (postTurn) deps.bearers?.clearTurn(run.runId);
+  }
 }
