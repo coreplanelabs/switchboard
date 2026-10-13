@@ -8315,6 +8315,146 @@ describe("the pi harness — the review preset", () => {
     });
   });
 
+  it("keeps deferred input across a replacement checkpoint pause and successor reclaim", async () => {
+    const nextHead = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
+    let currentHead = HEAD;
+    let ended = false;
+    let opens = 0;
+    let inner!: InMemoryRunLedger;
+    const originalReview = {
+      role: "assistant" as const,
+      content: [{ type: "text" as const, text: "Original review." }],
+    };
+    const policy = { version: 1 as const, commandRoute: "hosted-review" as const, identity: "read" as const };
+    const sourceHarness = watched(piHarness).harness;
+    // The completed producer snapshot has consumed row 2, with user input 1 still deferred.
+    sourceHarness.open = async (_deps, run) => {
+      opens++;
+      await run.saveLaunchIntent!({ version: 1, harness: "pi", phase: "begun", ordinal: 0, sessionPolicy: policy });
+      await run.saveFacts!({
+        harness: "pi",
+        pid: 4242,
+        root: "/var/tmp/switchboard-pi-run-l",
+        logOffset: 0,
+        relaunches: 0,
+        launchOrdinal: 0,
+        sessionPolicy: policy,
+      });
+      await run.onStep!({
+        turns: [originalReview],
+        firstIdx: run.messages.length,
+        inFlight: [],
+        turn: 1,
+        iteration: 0,
+        remainingMs: 1_500_000,
+        inboxConsumedSeq: 2,
+        inboxDeferredSeqs: [1],
+      });
+      return {
+        answer: "Original review.",
+        remainingMs: () => 1_500_000,
+        followUp: async () => "unreachable successor",
+        end: async () => {
+          ended = true;
+        },
+        record: () => ({
+          messages: [...run.messages, originalReview],
+          compactions: [],
+          settlements: [],
+          turn: 1,
+          inboxConsumedSeq: 2,
+          inboxDeferredSeqs: [1],
+          deadline: NOW + 1_500_000,
+        }),
+      };
+    };
+    const s = setup("", {
+      agent: "review",
+      yaml: REVIEW_PI_YAML,
+      provider: provider(new Error("the native provider is outside this harness fixture")),
+      bearer: "sbr_run-l.s3cret",
+      repoCtx: prThread.repoCtx,
+      binding: prThread.binding,
+      executor: {
+        moveRequiresIdleProducer: true,
+        exec: async () => `${currentHead}\n`,
+        execResult: async () => ({ exitCode: 0, stdout: `${currentHead}\n`, stderr: "", truncated: false }),
+        moveTo: async (sha) => {
+          if (!ended) throw new Error("original producer is still live");
+          currentHead = sha;
+          return { sha };
+        },
+      },
+      harness: {
+        harnesses: roster(sourceHarness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      review: {
+        head: HEAD,
+        post: async () => {
+          throw new Error("a held checkpoint cannot publish a review");
+        },
+        currentHead: nextHead,
+        commits: (sha) => ({
+          commits: (sha === HEAD ? ["original"] : ["original", "changed"]).map((message, i) => ({
+            sha: `${i + 1}`.repeat(40),
+            message,
+          })),
+          files: ["src/x.ts"],
+          filesTruncated: false,
+        }),
+      },
+    });
+    const ctx = await trackedCodingContext(
+      s,
+      s.ctx,
+      s.ctx.msg.threadKey,
+      (ledger) => {
+        inner = ledger;
+      },
+      true,
+    );
+    expect(
+      await inner.pushInbox("run-l", {
+        channelId: "slack:CX",
+        threadKey: THREAD,
+        userId: "slack:UX",
+        text: "deferred request",
+      }),
+    ).toMatchObject({ ok: true, seq: 1 });
+    expect(
+      await inner.pushInbox("run-l", {
+        channelId: "slack:CX",
+        threadKey: THREAD,
+        userId: "slack:UX",
+        text: "consumed message",
+      }),
+    ).toMatchObject({ ok: true, seq: 2 });
+    expect((await inner.readInbox("run-l", 0)).map((item) => item.seq)).toEqual([1, 2]);
+    const setState = inner.setState.bind(inner);
+    // Pause after the successor request lands, before a new producer can repair its inbox snapshot.
+    inner.setState = async (...args) => {
+      const launch = inner.live.get("run-l")?.state.harnessLaunch as { ordinal?: number } | undefined;
+      if (launch?.ordinal === 1 && args[2].contextCheckpoint !== undefined)
+        throw new TransientStoreError("replacement checkpoint unavailable");
+      return setState(...args);
+    };
+    expect(await runLoop(s.deps, ctx)).toMatchObject({
+      kind: "paused",
+      reason: "checkpoint_unavailable",
+      handedOff: true,
+    });
+    expect(currentHead).toBe(nextHead);
+    expect(opens).toBe(1);
+    const [successor] = await inner.reclaim("gen-successor", NOW, 30_000);
+    expect(successor?.lastStep?.inboxConsumedSeq).toBe(2);
+    expect(successor?.inbox.map((item) => ({ seq: item.seq, text: item.message.text }))).toEqual([
+      { seq: 1, text: "deferred request" },
+    ]);
+  });
+
   // harness-pi item 14, agent-review item 12: the PR's head moves substantively
   // while pi reviews it. An in-place move keeps the session; checkout
   // replacement ends the original and starts one successor from the saved

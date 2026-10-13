@@ -3264,6 +3264,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           turn: record.turn,
           iteration: 0,
           inboxConsumedSeq: record.inboxConsumedSeq,
+          ...(record.inboxDeferredSeqs?.length ? { inboxDeferredSeqs: record.inboxDeferredSeqs } : {}),
           remainingMs: record.deadline - clock(),
         });
         await checkpointBeforeTransition();
