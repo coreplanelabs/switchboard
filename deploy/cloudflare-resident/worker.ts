@@ -10422,28 +10422,72 @@ export class ResidentDO extends Sandbox<Env> {
   /** Both shutdown paths kill only the recorded boot and pool user —
    *  `kill -9 -1` sent AS THAT USER reaches exactly its own processes (the
    *  thread's `su … bash -c` shell, the command, anything it backgrounded),
-   *  nothing else in the container, and needs no procps. The shell kills
-   *  itself too, so su exits 137. Lost, timed-out or foreign-boot results do
+   *  nothing else in the container, and needs no procps. Native control
+   *  bypasses an unresponsive SDK and cannot wake a replacement VM. The
+   *  shell kills itself too, so su exits 137; the outer shell converts only
+   *  that observed result to success. A timeout killing the wrapper cannot
+   *  masquerade as that result. Lost, timed-out or foreign-boot results do
    *  not acknowledge a kill. Callers still drain and apply their own ending
    *  or workspace-preservation policy after this physical operation. */
   private async killThreadUserProcesses(user: string, threadKey: string, container?: string): Promise<boolean> {
-    if (!container || !isResidentPoolUser(user) || !(await this.poolUserOwnerMatches(user, `thread:${threadKey}`)))
+    let phase: "guard" | "launch" | "exit" = "guard";
+    const unconfirmed = (
+      cause: "target-unverified" | "runtime-unavailable" | "timeout" | "exit-unconfirmed" | "native-exec-failed",
+      exitCode?: number,
+    ): false => {
+      // Native failures can carry commands or credentials. Record only the
+      // control phase and closed cause, never exception text or output.
+      console.warn(
+        JSON.stringify({
+          event: "resident.uid-kill.unconfirmed",
+          cause,
+          phase,
+          user,
+          threadKey,
+          ...(exitCode !== undefined ? { exitCode } : {}),
+        }),
+      );
       return false;
+    };
+    if (!container || !isResidentPoolUser(user) || !(await this.poolUserOwnerMatches(user, `thread:${threadKey}`)))
+      return unconfirmed("target-unverified");
+    if (this.ctx.container?.running !== true) return unconfirmed("runtime-unavailable");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    phase = "launch";
     try {
-      const result = await this.run(
-        [
+      const nativeKill = (async () => {
+        const process = await this.ctx.container!.exec([
+          "/usr/bin/timeout",
+          "-s",
+          "KILL",
+          String(FORCE_DETACH_KILL_TIMEOUT_MS / SECOND_MS),
           "/bin/sh",
           "-c",
-          'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; exec /usr/bin/su -s /bin/bash "$2" -c "kill -9 -1"',
+          'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; /usr/bin/su -s /bin/bash "$2" -c "kill -9 -1"; case "$?" in 0|137) exit 0;; *) exit 1;; esac',
           "--",
           container,
           user,
-        ],
-        { timeoutMs: FORCE_DETACH_KILL_TIMEOUT_MS },
-      );
-      return !result.timedOut && !result.truncated && [0, 137].includes(result.exitCode);
+        ]);
+        phase = "exit";
+        return process.exitCode;
+      })();
+      const exit = await Promise.race([
+        nativeKill,
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), FORCE_DETACH_KILL_TIMEOUT_MS);
+        }),
+      ]);
+      if (exit !== 0)
+        return unconfirmed(
+          exit === null ? "timeout" : "exit-unconfirmed",
+          typeof exit === "number" && Number.isSafeInteger(exit) ? exit : undefined,
+        );
+      if (this.ctx.container?.running !== true) return unconfirmed("runtime-unavailable", exit);
+      return true;
     } catch {
-      return false;
+      return unconfirmed("native-exec-failed");
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
