@@ -770,6 +770,7 @@ function isRunPullRequestShape(v: unknown): v is RunPullRequest {
  *  head within the original unit's lease. A failure without
  *  a name here leaves the record without the field. */
 export const RUN_FAILURE_KINDS = [
+  "tool_recovery_exhausted",
   "policy_refusal",
   "provider_transient",
   "model_stream_incomplete",

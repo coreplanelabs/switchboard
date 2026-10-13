@@ -87,6 +87,8 @@ export interface RunScript {
   request?: string;
   /** The relayed tools the run holds; the status tool alone unless said. */
   relayed?: RunnableTool[];
+  /** Shared run guard injected through the production tool context. */
+  recovery?: import("../toolRecovery.js").ToolRecovery;
   /** A resume, with the row's facts the previous generation wrote. */
   resume?: HarnessResume;
   /** A broken harness: its own tools run without asking the gate. The row expects the run to fail closed. */

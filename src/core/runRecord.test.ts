@@ -1276,6 +1276,8 @@ describe("isRunRecord — the failure field", () => {
     expect(isRunRecord(JSON.parse(JSON.stringify(stream)))).toBe(true);
     const capacity = record({ status: "failed", failure: { kind: "sandbox_fleet_busy" } });
     expect(isRunRecord(JSON.parse(JSON.stringify(capacity)))).toBe(true);
+    const recovery = record({ status: "failed", failure: { kind: "tool_recovery_exhausted" } });
+    expect(isRunRecord(JSON.parse(JSON.stringify(recovery)))).toBe(true);
     expect("failure" in record()).toBe(false);
     expect(isRunRecord(record())).toBe(true);
   });

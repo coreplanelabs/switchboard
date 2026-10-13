@@ -27,6 +27,7 @@ import type { Wire } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
 import type { Clock, Span } from "../trace/types.js";
 import { bearerExpiresAt } from "../budgets.js";
+import type { ToolRecovery, ToolRecoveryState } from "../harness/toolRecovery.js";
 
 export const BEARER_PREFIX = "sbr_";
 const SECRET_BYTES = 32;
@@ -74,6 +75,7 @@ export type BearerVerdict =
 export type TurnVerdict =
   | { ok: true; turn: number }
   | { ok: false; reason: "ended" }
+  | { ok: false; reason: "tool_recovery"; stop: NonNullable<ToolRecoveryState["stopped"]> }
   | { ok: false; reason: "budget"; turns: number; maxTurns: number };
 
 /** How a rotation ended: the run's new bearer on its unchanged expiry, or the
@@ -93,6 +95,7 @@ export type RunBearerFacts = Omit<RunBearerGrant, "span" | "publish"> & {
 };
 
 interface Entry {
+  recovery?: ToolRecovery;
   grant: RunBearerGrant;
   /** The SHA-256 of every secret that buys this run's calls: the provision's
    *  mint, an operator's `issue`, and a previous generation's bearer a pi
@@ -124,6 +127,17 @@ export class RunBearerStore {
   private readonly entries = new Map<string, Entry>();
 
   constructor(private readonly opts: RunBearerStoreOptions) {}
+
+  bindRecovery(runId: string, recovery: ToolRecovery): void {
+    const entry = this.entries.get(runId);
+    if (entry && !entry.revoked) entry.recovery = recovery;
+  }
+
+  async settleRecovery(runId: string, joinNative = true): Promise<ToolRecoveryState["stopped"]> {
+    const recovery = this.entries.get(runId)?.recovery;
+    await recovery?.settled(joinNative);
+    return recovery?.stopped;
+  }
 
   /** The run's first bearer. A second mint for the same run replaces the
    *  entry — the earlier bearers stop verifying — so a resumed run under a new
@@ -272,6 +286,7 @@ export class RunBearerStore {
   consumeTurn(runId: string): TurnVerdict {
     const entry = this.entries.get(runId);
     if (!entry || entry.revoked) return { ok: false, reason: "ended" };
+    if (entry.recovery?.stopped) return { ok: false, reason: "tool_recovery", stop: entry.recovery.stopped };
     if (entry.turns >= entry.grant.maxTurns) {
       return { ok: false, reason: "budget", turns: entry.turns, maxTurns: entry.grant.maxTurns };
     }

@@ -1,5 +1,7 @@
+import { createSpanLog } from "../trace/spanLog.js";
 import type { CheckExecutionReceipt } from "../checkExecutionTypes.js";
 import { preparedHarnessLaunch } from "../harness/sessionPolicy.js";
+import { ToolRecovery, ToolRecoveryStoppedError } from "../harness/toolRecovery.js";
 import { CloudflareSandboxExecutor } from "../../execution/cloudflareSandbox.js";
 import { ExecHarnessContainer } from "../harness/container.js";
 import { HarnessEndingUnconfirmedError } from "../harness/container.js";
@@ -554,6 +556,183 @@ function setup(
 }
 
 describe("runLoop — the model turn and everything that rides on it", () => {
+  it.each(["first", "repeated", "varied", "unavailable", "unknown", "thrown", "native"] as const)(
+    "holds the original run when its %s tool recovery checkpoint is unconfirmed",
+    async (mode) => {
+      const s = endingIn(async (_deps, run) => {
+        const recovery = run.toolContext.recovery!;
+        if (mode === "native") {
+          // Native bridge notifications enqueue saves without awaiting them.
+          void recovery.record("one", "read", { path: "missing" }, { text: "file does not exist" });
+          void recovery.record("two", "read", { path: "missing" }, { text: "file does not exist" });
+          recovery.throwIfStopped();
+        }
+        if (mode === "repeated") await recovery.record("one", "submit_verdict", {}, { text: "error: invalid finding" });
+        if (mode === "varied")
+          for (let i = 0; i < 5; i++) await recovery.record("call" + i, "tool" + i, {}, { text: "error: refused" });
+        await recovery.record(
+          "last",
+          "submit_verdict",
+          {},
+          {
+            text: "error: invalid finding",
+            ...(mode === "unavailable"
+              ? { detail: { code: "capability_unavailable" as const, recovery: "stop" as const } }
+              : mode === "unknown"
+                ? { detail: { code: "outcome_unknown" as const, recovery: "stop" as const } }
+                : {}),
+          },
+        );
+        return sessionAnswering("Partial work.");
+      });
+      const inner = new InMemoryRunLedger(() => NOW);
+      const ledger = createLedgerWriteThrough({ ledger: inner, gen: "gen-T", fallback: s.store, warn: () => {} });
+      const opened = await ledger.open({
+        runId: s.run.id,
+        threadKey: s.ctx.msg.threadKey,
+        startedAt: NOW,
+        meta: {
+          agent: "coding",
+          channelId: s.ctx.msg.channelId,
+          userId: s.ctx.msg.userId,
+          threadKey: s.ctx.msg.threadKey,
+        },
+        card: null,
+        system: "test",
+        tools: [],
+        seed: { messages: [{ role: "user", content: [{ type: "text", text: "work" }] }], budgetMs: 60_000 },
+      });
+      if (opened.kind !== "tracked") throw new Error("Expected a tracked run");
+      const save = opened.run.setStateAndFlush.bind(opened.run);
+      vi.spyOn(opened.run, "setStateAndFlush").mockImplementation((state) =>
+        state.toolRecovery === undefined ||
+        (state.toolRecovery as { failures: { count: number }[] }).failures.reduce((n, f) => n + f.count, 0) <
+          (mode === "repeated" || mode === "native" ? 2 : mode === "varied" ? 6 : 1)
+          ? save(state)
+          : mode === "thrown"
+            ? Promise.reject(new Error("private checkpoint payload"))
+            : Promise.resolve(false),
+      );
+      const spanLog = createSpanLog();
+      const root = startRequestRoot(
+        { clock: () => NOW, spanLog },
+        { channel: "slack", receivedAt: NOW, attrs: { runId: s.run.id } },
+      ).root;
+      const result = await runLoop(s.deps, { ...s.ctx, root, ledgerRun: opened.run });
+      const checkpoints = spanLog.read({ runId: s.run.id, span: "recovery.checkpoint" }).lines;
+      expect(checkpoints.filter((line) => line.status === "error")).toMatchObject([
+        {
+          span: mode === "native" ? "recovery.checkpoint.read" : "recovery.checkpoint.submit_verdict",
+          errorKind: "infra",
+          errorCode: mode === "thrown" ? "state_write_threw" : "ack_unconfirmed",
+        },
+      ]);
+      expect(checkpoints.at(-1)).not.toHaveProperty("errorMessage");
+      expect(JSON.stringify(checkpoints)).not.toContain("private checkpoint payload");
+      expect(result).toMatchObject({
+        kind: "paused",
+        reason: "checkpoint_unavailable",
+        message: "The tool recovery checkpoint could not be confirmed; original work remains held.",
+      });
+      expect(s.releases).toEqual([]);
+      expect((await inner.listLive())[0]?.runId).toBe("run-l");
+      expect(s.registry.getById("run-l")).toBeNull();
+    },
+  );
+  it("preserves a hard stop already honored after repeated tool refusals", async () => {
+    const s = endingIn(async (_deps, run) => {
+      await run.toolContext.recovery!.record("one", "submit_verdict", {}, { text: "error: invalid finding" });
+      await run.toolContext.recovery!.record("two", "submit_verdict", {}, { text: "error: invalid finding" });
+      run.control?.requestStop("hard");
+      return sessionAnswering("⛔ Run aborted by an operator (hard stop).");
+    });
+    const out = answered(await runLoop(s.deps, s.ctx));
+    expect(out.answer).toBe("⛔ Run aborted by an operator (hard stop).");
+    await out.releaseWorkspace();
+    expect(s.releases).toEqual(["hard"]);
+    s.ending.drain(false);
+    await s.writer.settled();
+    expect((await s.store.get("run-l"))?.status).toBe("stopped_hard");
+  });
+  it.each(["initial", "verdict"] as const)(
+    "persists tool recovery failure in %s and blocks review publication",
+    async (stage) => {
+      const head = "a".repeat(40);
+      let postTurns = 0;
+      const post = vi.fn(async () => {});
+      const s = endingIn(
+        async (_deps, run) => {
+          const recovery = run.toolContext.recovery!;
+          if (stage === "initial") {
+            await recovery.record("one", "submit_verdict", {}, { text: "error: invalid finding" });
+            await recovery.record("two", "submit_verdict", {}, { text: "error: invalid finding" });
+          }
+          return sessionAnswering(
+            "A partial review.",
+            async () => {},
+            async (input) => {
+              postTurns++;
+              input.toolContext.onVerdict?.({ verdict: "approve", summary: "Checked", head, findings: [] });
+              await recovery.record("one", "submit_verdict", {}, { text: "error: invalid finding" });
+              await recovery.record("two", "submit_verdict", {}, { text: "error: invalid finding" });
+              recovery.throwIfStopped();
+              return "A new verdict";
+            },
+          );
+        },
+        {
+          agent: "review",
+          yaml: YAML + "harness:\n  review: pi\n",
+          repoCtx: { repo: "acme/api", pr: 42, ref: "work", baseRef: "main" },
+          review: { head, post },
+          executor: { exec: async () => head },
+        },
+      );
+      const inner = new InMemoryRunLedger(() => NOW);
+      const ledger = createLedgerWriteThrough({ ledger: inner, gen: "gen-T", fallback: s.store, warn: () => {} });
+      const opened = await ledger.open({
+        runId: s.run.id,
+        threadKey: s.ctx.msg.threadKey,
+        startedAt: NOW,
+        meta: {
+          agent: "review",
+          channelId: s.ctx.msg.channelId,
+          userId: s.ctx.msg.userId,
+          threadKey: s.ctx.msg.threadKey,
+        },
+        card: null,
+        system: "test",
+        tools: [],
+        seed: { messages: [{ role: "user", content: [{ type: "text", text: "review" }] }], budgetMs: 60_000 },
+      });
+      if (opened.kind !== "tracked") throw new Error("Expected a tracked run");
+      const admitted = await opened.run.assignLiveState({
+        expectedSeq: 0,
+        eventSeq: 1,
+        at: NOW,
+        state: "admitted",
+        bound: NOW + 60_000,
+      });
+      if (!admitted.ok) throw new Error(admitted.reason);
+      s.registry.commitLiveState(s.run.id, admitted);
+      s.registry.subscribe(s.run.id, s.run.token, { onEvent: (event, seq) => opened.run.event(event, seq) });
+      try {
+        await expect(runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run })).rejects.toThrow(ToolRecoveryStoppedError);
+        const row = (await inner.listLive())[0]!;
+        expect(row.state).toMatchObject({
+          finalStatus: "failed",
+          failure: { kind: "tool_recovery_exhausted" },
+          toolRecovery: { stopped: { tool: "submit_verdict", attempts: 2, reason: "repeated_failure" } },
+        });
+        expect(() => new ToolRecovery(row.state.toolRecovery).throwIfStopped()).toThrow(ToolRecoveryStoppedError);
+        expect(postTurns).toBe(stage === "initial" ? 0 : 1);
+        expect(post).not.toHaveBeenCalled();
+      } finally {
+        s.ending.drain(false);
+        await s.writer.settled();
+      }
+    },
+  );
   it("commits the execution result with ended before channel delivery", async () => {
     const head = "a".repeat(40);
     const handoff = { deviations: [], followUps: [], unproven: [] };
@@ -8534,10 +8713,10 @@ describe("the pi harness — the review preset", () => {
           n === 0 ? VERDICT : { verdict: "request_changes", summary: "the new test is wrong", head: NEW, findings: [] };
         const reject = async (head: string, error: string) => {
           const args = { ...verdict, verdict: "approve", head };
-          const callId = `stale-${n}-${head}-${error.length}`;
-          authorizeToolCall(live, { toolCallId: callId, tool: "submit_verdict", input: args });
-          const rejected = await runRelayedTool(live, { toolCallId: callId, tool: "submit_verdict", input: args });
-          expect(JSON.stringify(rejected.content)).toContain(error);
+          // Probe independent head/history preconditions, not a scripted agent
+          // retry loop. Actual model submissions below still cross the relay.
+          const rejected = await submitVerdictTool.run(args, live.toolContext);
+          expect(rejected).toContain(error);
           expect(posts).toEqual([]);
         };
         if (n === 1) {

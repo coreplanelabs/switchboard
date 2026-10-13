@@ -339,7 +339,7 @@ export function piDriver(): HarnessDriver {
           { role: "user", content: [{ type: "text", text: script.request ?? "do the thing" }] },
         ],
         tools: script.relayed ?? [updateStatusTool],
-        toolContext: { executor, reportProgress: (list) => void statusReports.push(list) },
+        toolContext: { executor, recovery: script.recovery, reportProgress: (list) => void statusReports.push(list) },
         rules: { checkout: "/workspace/threads/t/main", protectedBranches: ["main"] },
         control,
         inbox,

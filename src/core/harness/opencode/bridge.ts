@@ -1,6 +1,7 @@
 import { RUN_DEADLINE_RESERVE_MS } from "../../../execution/bashTimeout.js";
 import { OP_TIMEOUT_MS } from "../container.js";
 import type { LiveHarness } from "../pi/relay.js";
+import type { ToolRecovery } from "../toolRecovery.js";
 import type { HarnessCommandPolicy } from "../contract.js";
 // The OpenCode bridge (docs/reference/specs/harness.md items 2 and 4): the gate
 // and the record for the OpenCode harness. It reads the run's feed — the JSONL
@@ -452,6 +453,7 @@ export function judgeOpenCodeAsk(
 }
 
 export interface OpenCodeBridgeDeps {
+  recovery?: ToolRecovery;
   emit: (event: RunEvent) => void;
   onProgress?: (note: string) => void;
   clock: Clock;
@@ -505,15 +507,19 @@ export class OpenCodeBridge {
   /** callId → the tool name the model gave it (from `session.tool.input.started`). */
   private readonly toolNames = new Map<string, string>();
   /** The open calls' spans, by callId. */
-  private readonly openTools = new Map<string, { span: Span | undefined; tool: string; cancel: AbortController }>();
+  private readonly openTools = new Map<
+    string,
+    { span: Span | undefined; tool: string; input?: Record<string, unknown>; cancel: AbortController }
+  >();
   /** The calls whose `tool_call` line is on the record (`openCall`), open or
    *  settled since: what a later ask cannot amend. A call the stream only named
    *  (`toolNames`, from `session.tool.input.started`) has no line yet. */
   private readonly announced = new Set<string>();
-  /** callId → the bot's decision for its ask, `once` or `reject`. A settled
+  /** callId → the bot's decision; `lifecycle` is a known ending refusal, not
+   *  a task failure. A settled
    *  call not among these ran with no decision; a success for a call the bot
    *  rejected ran against the reject. Both are bypasses. */
-  private readonly answered = new Map<string, "once" | "reject">();
+  private readonly answered = new Map<string, "once" | "reject" | "lifecycle">();
   /** stepID → the calls of that step the gate refused, in the order refused:
    *  what explains a sibling ask the server withdrew (`askWithdrawn`). A
    *  step's entry is dropped when the step ends or fails, so the map never
@@ -780,6 +786,11 @@ export class OpenCodeBridge {
   callOpen(callId: string): boolean {
     return this.openTools.has(callId);
   }
+  hasPendingTools(): boolean {
+    // A confirmed cut belongs to the old execution; keep its record open,
+    // but do not make the write-up wait for its late result.
+    return [...this.openTools.keys()].some((id) => !(this.cutLanded && this.cutCalls.has(id)));
+  }
 
   checkSignal(callId: string): AbortSignal | undefined {
     const open = this.openTools.get(callId);
@@ -991,6 +1002,11 @@ export class OpenCodeBridge {
 
   private emit(event: RunEvent): void {
     this.deps.emit(event.at === undefined ? { ...event, at: this.deps.clock() } : event);
+  }
+
+  /** The relay's lifecycle denial is stronger than a native allowance. */
+  gateSaw(callId: string, lifecycleRefused = false): void {
+    if (lifecycleRefused && this.answered.get(callId) !== "reject") this.answered.set(callId, "lifecycle");
   }
 
   observe(record: OpenCodeFeedRecord): OpenCodeBridgeObservation {
@@ -1279,7 +1295,7 @@ export class OpenCodeBridge {
   private openCall(callId: string, name: string, input: Record<string, unknown> | undefined): void {
     const tool = openCodeToolNameWord(name);
     const span = this.deps.agentSpan?.start(`tool.${tool}`);
-    this.openTools.set(callId, { span, tool, cancel: new AbortController() });
+    this.openTools.set(callId, { span, tool, input, cancel: new AbortController() });
     this.announced.add(callId);
     this.toolCalls++;
     if (this.pendingNarration) {
@@ -1369,6 +1385,14 @@ export class OpenCodeBridge {
     const failedInText = this.deps.textFailing?.has(tool) === true && toolTextFailed(text);
     const exit = tool === "bash" ? piBashExit(text, !ok) : { failed: !ok || failedInText };
     const settledOk = !exit.failed;
+    if (
+      open &&
+      !cut &&
+      this.answered.get(callId) !== "lifecycle" &&
+      this.observing !== "catching-up" &&
+      (settledOk || exit.exitCode === undefined)
+    )
+      void this.deps.recovery?.record(callId, tool, open.input, settledOk ? undefined : { text });
     this.emit({
       type: "tool_result",
       tool,
@@ -1448,7 +1472,7 @@ export class OpenCodeBridge {
         );
     } else if (decision === undefined) {
       this.bypass(out, `OpenCode ran ${tool} (call ${callId}) with no ask the bot answered — a call with no ask`);
-    } else if (decision === "reject" && ok) {
+    } else if ((decision === "reject" || decision === "lifecycle") && ok) {
       this.bypass(
         out,
         `OpenCode ran ${tool} (call ${callId}) after the bot's reject — a success after the bot's refusal`,
@@ -1610,7 +1634,8 @@ export class OpenCodeBridge {
     // by a later allowance (the tool's own ask after the repeat guard's), so a
     // success executed anyway is still the gate bypassed; a later refusal does
     // overwrite an allowance.
-    if (this.answered.get(callId) !== "reject") this.answered.set(callId, verdict.reply);
+    if (this.answered.get(callId) !== "reject" && this.answered.get(callId) !== "lifecycle")
+      this.answered.set(callId, verdict.reply);
     const authority = this.deps.rules.publication?.authority;
     const push =
       openCodeToolWord(request.action) === "bash" && request.resources?.length === 1
@@ -1675,7 +1700,7 @@ export class OpenCodeBridge {
       // that follows is judged against it as against this generation's own.
       if (reply === "once" || reply === "reject") {
         decided.reply = reply;
-        this.answered.set(decided.callId, reply);
+        if (this.answered.get(decided.callId) !== "lifecycle") this.answered.set(decided.callId, reply);
       }
       decided.echoed = true;
       return;
@@ -2235,6 +2260,7 @@ export async function driveOpenCode(
   /** Which request this loop's prompt is, for the record: the fresh run's, a resume's continue, a post-turn's. */
   const promptPhase = kind === "turn" ? "follow-up turn's prompt" : run.resume !== undefined ? "continue" : "prompt";
   const bridge = new OpenCodeBridge({
+    recovery: run.toolContext.recovery,
     emit,
     ...(run.onProgress ? { onProgress: run.onProgress } : {}),
     clock: deps.clock,
@@ -2259,6 +2285,14 @@ export async function driveOpenCode(
     remainingMs: () => deadline - now(),
     textFailing: new Set(run.tools.filter((t) => t.failsInText).map((t) => t.name)),
   });
+  run.toolContext.recovery?.bindNativeDrain(async () => {
+    while (bridge.hasPendingTools()) {
+      if (left || now() >= deadline || run.control?.hardSignal.aborted)
+        throw new Error("native tool outcome unavailable");
+      await deps.sleep(pollMs);
+    }
+  });
+  if (conn.relay) conn.relay.gateSaw = (id, closing) => bridge.gateSaw(id, closing);
   if (conn.relay && run.commandPolicy === "hosted-review") {
     conn.relay.checkControl = (callId) => {
       const signal = bridge.checkSignal(callId);
@@ -2726,6 +2760,13 @@ export async function driveOpenCode(
         void interrupt({ ending: "an operator's hard stop" });
       }
       return;
+    }
+    if (run.toolContext.recovery?.stopped) {
+      try {
+        run.toolContext.recovery.throwIfStopped();
+      } catch (err) {
+        conn.failure.error ??= err instanceof Error ? err : new Error(String(err));
+      }
     }
     if (conn.failure.error !== undefined) {
       // The follow-up drainer failed the run by name (its `harness_error` is on

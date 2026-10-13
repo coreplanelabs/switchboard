@@ -72,6 +72,7 @@ const CAUSE_OF = {
   setup_failed: "system",
   run_budget_exhausted: "system",
   model_call_budget_exhausted: "system",
+  tool_recovery_exhausted: "system",
   publication_ownership_unknown: "system",
   // the click on a confirmation (confirm.ts)
   confirmation_used: "request",

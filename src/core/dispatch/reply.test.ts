@@ -1,4 +1,5 @@
 import type { AudienceTrace } from "../audienceDecision.js";
+import { ToolRecoveryStoppedError } from "../harness/toolRecovery.js";
 import { createSpanLog } from "../trace/spanLog.js";
 import { booleanAudienceVerifier } from "../testing/audienceVerifier.js";
 import { describe, expect, it, vi } from "vitest";
@@ -398,6 +399,12 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
     const adminsHint = "an admin";
     const liveThread = { agent: "coding", startedAt: 0, inbox: [] } as unknown as Parameters<typeof refusalReply>[0];
     const table: ReadonlyArray<{ code: RefusalCode; built: string; quoted: string }> = [
+      {
+        code: "tool_recovery_exhausted",
+        built: new ToolRecoveryStoppedError({ tool: "bash", attempts: 2, reason: "repeated_failure" }).message,
+        quoted:
+          "Stopped after 2 failed tool attempts (bash). Further model calls were blocked; the task remains incomplete.",
+      },
       {
         code: "agent_allowlist",
         built: REFUSAL_SENTENCES.agent_allowlist({ agent: "coding", adminsHint }),

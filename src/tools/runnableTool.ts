@@ -44,6 +44,9 @@ import type { WebCapability } from "./web.js";
 import type { SourceReadOperation, SourceReads } from "../mcp/sourceRead.js";
 
 export interface ToolContext {
+  /** Run-owned correction guard; source text cannot set its terminal reason. */
+  recovery?: import("../core/harness/toolRecovery.js").ToolRecovery;
+  reportToolFailure?: (failure: import("../core/harness/toolRecovery.js").ToolFailure) => void;
   /** Registered commands bound to the latest verified requester turn. */
   command?: ConversationCommand;
   /** Exact PR whose prior findings a review must verify before submitting. */

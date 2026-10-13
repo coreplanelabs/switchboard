@@ -272,11 +272,8 @@ function unionMs(intervals: ReadonlyArray<{ start: number; end: number }>): numb
   return total;
 }
 
-/** One tool call's identity for retry/streak accounting: the tool name plus
- *  the call's one-line summary (which carries the arguments — a bash command,
- *  a path, a url). Shared with the runner's stuck-loop guard
- *  (the stuck-loop guard the native loop had; the pi harness's gap, docs/reference/specs/harness-pi.md), so both count "the same call"
- *  identically. */
+/** Display grouping for diagnosis. A summary can omit or redact arguments;
+ * enforcement uses the original request and failure hashes in ToolRecovery. */
 export const callSignature = (tool: string, summary: string): string => `${tool} ${summary}`;
 
 /** Analyze a run's event stream. Pure and deterministic; never mutates `events`. */

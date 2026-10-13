@@ -596,6 +596,7 @@ export async function openOpenCodeRun(
       record: () => record(),
       ...(ending ? { ending } : {}),
       followUp: async (input) => {
+        run.toolContext.recovery?.throwIfStopped();
         if (run.deadlineAt !== undefined && deps.clock() >= run.deadlineAt)
           throw new Error("The admitted run deadline ended before the follow-up turn.");
         // One more turn on the same session (the post-turns: the coding
@@ -606,6 +607,7 @@ export async function openOpenCodeRun(
         const previous = live.toolContext;
         const prior = structuredClone(record());
         const request: ChatMessage = { role: "user", content: [{ type: "text", text: input.text }] };
+        input.toolContext.recovery = run.toolContext.recovery;
         live.toolContext = input.toolContext;
         // The turn's lease is carved from the run's: the lesser of its ask and
         // what the lease still holds, never under a minute (decision 0046).
@@ -631,7 +633,7 @@ export async function openOpenCodeRun(
               ...run,
               messages: [request],
               agent: { ...run.agent, maxTurns: input.maxTurns, maxMinutes: turnMinutes },
-              toolContext: input.toolContext,
+              toolContext: live.toolContext,
               ...(input.span ? { span: input.span } : {}),
               resume: undefined,
               publicationAnswer: input.publicationAnswer,

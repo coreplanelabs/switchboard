@@ -203,6 +203,7 @@ import type { RunEnding } from "../runEnding.js";
 import type { FollowUpInput, LiveThread } from "../threadAdmission.js";
 import type { ChannelVisibility } from "../authz/types.js";
 import type { Clock, Span } from "../trace/types.js";
+import { classifyError } from "../trace/classify.js";
 import { publicEnv } from "../../secrets.js";
 import type { ChannelIO, IncomingMessage, StatusActivity, StatusHandle } from "../types.js";
 import type { DispatchFollowUp, ResumeContext } from "./admission.js";
@@ -605,6 +606,29 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // the checklist the card shows, the verdict/description already submitted,
   // the branch already pushed.
   const restored = resume?.row.state ?? {};
+  const recovery = new ToolRecovery(restored.toolRecovery, async (state, tool) => {
+    if (!ledgerTrackedAtEntry) return true;
+    return root.span(`recovery.checkpoint.${tool}`, async () => {
+      let confirmed: boolean;
+      try {
+        confirmed = ledgerRun?.tracked() === true && (await ledgerRun.setStateAndFlush({ toolRecovery: state }));
+      } catch {
+        throw classifyError(new Error("Recovery checkpoint unavailable"), { kind: "infra", code: "state_write_threw" });
+      }
+      if (!confirmed)
+        throw classifyError(new Error("Recovery checkpoint unavailable"), {
+          kind: "infra",
+          code: ledgerRun?.writeBoundaryFailure?.diagnosis?.kind ?? "ack_unconfirmed",
+        });
+      return true;
+    });
+  });
+  deps.runBearers?.bindRecovery(run.id, recovery);
+  const checkRecovery = async () => {
+    await recovery.settled(false);
+    if (run.control.requested !== "hard" || recovery.stopped?.reason === "checkpoint_unavailable")
+      recovery.throwIfStopped();
+  };
   let reviewPublication = restored.reviewPublication as ReviewPublicationReceipt | undefined;
   let branchPublication: BranchPublication | undefined = branchPublicationOf(restored.branchPublication, repoCtx.repo);
   if (resume === undefined && (isCodingPrRun || agent.name === "review") && ledgerRun?.tracked())
@@ -2228,6 +2252,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       ? { target: { repo: repoCtx.repo, number: repoCtx.pr } }
       : undefined;
   const toolContext = {
+    recovery,
     ...(command ? { command } : {}),
     ...(ctx.captureParentContext
       ? {
@@ -2387,6 +2412,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     });
   }
   try {
+    await checkRecovery();
     const identityBaseline = await startStateRead;
     if (identityBaseline?.invalid)
       throw new Error("The original branch identity baseline is invalid; publication remains held.");
@@ -3456,6 +3482,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         HARD_STOP_MESSAGE;
       if (harnessSession?.ending !== undefined) windDownEnding = harnessSession.ending;
     }
+    await checkRecovery();
     clearStoppedReviewTail();
     // Reviewed-head settle (docs/reference/specs/agent-review.md items 8 + 12,
     // settleReviewedHead in reviewRound.ts): for a PR review, read the
@@ -3558,6 +3585,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       !tailSkipped() &&
       postedBefore === undefined &&
       verdict === undefined &&
+      recovery.stopped === undefined &&
       !reviewPostOptedOut(ctx.requestText)
     ) {
       const reviewOf = { repo: repoCtx.repo, number: repoCtx.pr };
@@ -3582,6 +3610,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       );
       if (turned.verdict !== undefined) verdict = turned.verdict;
     }
+    await checkRecovery();
     // PR post-step observation (docs/reference/specs/pr-description.md item 5): for a
     // writable coding run, read the workspace's head branch — the one the
     // run's `git push` named, else the checkout — its tip, and the remote's
@@ -3731,6 +3760,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // actual last model turn so its dirty tree or unpushed commit cannot reach
     // release as work_left_behind. A clean turn remains eligible for the PR
     // post-step; a pushed checkpoint marks the child unfinished as usual.
+    await checkRecovery();
     if (descriptionTurnRan) await preserveCodingChildWork("completion");
     // The last prompt on the run's pi has been sent: pi ends here, before the
     // post-step and before the workspace it runs in can be released; what its
@@ -3750,8 +3780,10 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             })
         : undefined,
     );
+    await checkRecovery();
     await checkpointBeforeTransition();
     await endHarness();
+    await checkRecovery();
     // The last model turn and its checkpoint are finished. Close the Git door
     // before any PR lookup or edit: a delayed receive-pack request otherwise
     // could begin after the post-step's one-time pending check. A forwarded
@@ -4244,8 +4276,16 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         }),
       );
   } catch (openingFailure) {
+    // Native observations may have selected the stop before their save settled.
+    await recovery.settled(false);
     const openingEnding = openingFailure instanceof HarnessEndingUnconfirmedError ? openingFailure : undefined;
-    const err = openingEnding === undefined ? openingFailure : openingEnding.openingError;
+    const originalError = openingEnding === undefined ? openingFailure : openingEnding.openingError;
+    const err =
+      recovery.stopped?.reason === "checkpoint_unavailable"
+        ? new ContextCheckpointDeferred(
+            "The tool recovery checkpoint could not be confirmed; original work remains held.",
+          )
+        : originalError;
     if (err instanceof ContextCheckpointDeferred) {
       events.publish({ type: "run_note", kind: "checkpoint_deferred", summary: err.message, at: clock() });
       await events.drain();
@@ -4275,6 +4315,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         events.publish({ type: "refusal", code, cause, text });
       }
       if (err instanceof ModelPolicyRefusedError) failure = { kind: "policy_refusal" };
+      else if (err instanceof ToolRecoveryStoppedError) failure = { kind: "tool_recovery_exhausted" };
       else if (err instanceof ModelTransientFailureError) failure = { kind: "provider_transient" };
       else if (err instanceof ModelStreamIncompleteError) failure = { kind: "model_stream_incomplete" };
       // The record must say why a failed run failed even when the reply is
@@ -4410,6 +4451,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                   cause: causeOfClose(status, interrupted !== undefined),
                   statePatch: {
                     finalStatus: status,
+                    ...(failure !== undefined ? { failure } : {}),
                     answerOutcome,
                     ...(observedHead !== undefined ? { headSha: observedHead } : {}),
                     ...(verdict !== undefined ? { verdict } : {}),
@@ -4670,3 +4712,4 @@ function unknownHarnessWordOf(state: unknown): { word: string; pid: string; cont
     container: typeof container === "string" ? container : "unknown",
   };
 }
+import { ToolRecovery, ToolRecoveryStoppedError } from "../harness/toolRecovery.js";

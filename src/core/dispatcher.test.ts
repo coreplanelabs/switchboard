@@ -22463,9 +22463,12 @@ workspaceDir: __WORKDIR__
     await dispatch(deps, inChannel("CX", "agent:explore budget:4 in acme/api: run one timeout drill"), io);
     await writer.settled();
 
-    expect(replies.at(-1)).toContain("The drill did not run");
+    expect(replies.at(-1)).toBe(
+      "⚠️ Stopped after 2 failed tool attempts (bash). Further model calls were blocked; the task remains incomplete.",
+    );
+    expect(turn).toBe(3); // Status, first refusal, correction; no model-written ending.
     const last = statuses.at(-1);
-    expect(last?.title).toContain("⚠️");
+    expect(last?.title).toContain("❌");
     expect(last?.detail).toContain("✓ Read the repository head\n✱ Run one timeout drill");
     const events = (await store.get("run-refused"))!.events;
     expect(events.filter((event) => event.type === "tool_call" && event.tool === "bash")).toHaveLength(2);

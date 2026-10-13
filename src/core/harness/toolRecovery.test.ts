@@ -1,0 +1,460 @@
+import { createCheckExecution } from "../checkExecution.js";
+import { describe, expect, it } from "vitest";
+import { ToolRecovery, ToolRecoveryStoppedError } from "./toolRecovery.js";
+import { authorizeToolCall, runRelayedTool, type LiveHarness } from "./pi/relay.js";
+import { RunBearerStore } from "../modelProxy/runBearers.js";
+import { createTracer } from "../trace/tracer.js";
+import { submitVerdictTool } from "../../tools/submit.js";
+import { runCheckTool } from "../../tools/check.js";
+import type { RunnableTool } from "../../tools/runnableTool.js";
+import { UncertainStoreError } from "../storeFailure.js";
+import { PiBridge } from "./pi/bridge.js";
+import { OpenCodeBridge } from "./opencode/bridge.js";
+
+function fixture(tools: RunnableTool[] = [submitVerdictTool], previous?: unknown) {
+  const saved: unknown[] = [];
+  const recovery = new ToolRecovery(previous, async (state) => {
+    saved.push(state);
+    return true;
+  });
+  const bearers = new RunBearerStore({ clock: () => 1000 });
+  bearers.mint({
+    runId: "r",
+    modelRef: "openai/test",
+    providerName: "openai",
+    providerWire: "openai-responses",
+    model: "test",
+    maxTokens: 1000,
+    maxTurns: 100,
+    expiresAt: 60000,
+    span: createTracer({ clock: () => 1000 }).start("request", { sinks: [] }),
+    publish: () => {},
+  });
+  bearers.bindRecovery("r", recovery);
+  const harness: LiveHarness = {
+    runId: "r",
+    tools,
+    toolContext: {
+      recovery,
+      executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" },
+      reviewHistory: { target: { repo: "acme/api", number: 1 }, snapshot: { head: "a".repeat(40), findings: [] } },
+    },
+    rules: { identity: "read", checkout: "/work" },
+    toolsBlocked: () => undefined,
+    emit: () => {},
+    toolSpan: () => undefined,
+    gateSaw: () => {},
+  };
+  const call = (id: string, tool: string, input: Record<string, unknown>) =>
+    runRelayedTool(harness, { toolCallId: id, tool, input });
+  return { recovery, bearers, harness, saved, call };
+}
+const badVerdict = {
+  verdict: "approve",
+  summary: "checked",
+  head: "a".repeat(40),
+  findings: [{ id: "review:acme/api:1:r:F1", kind: "single", severity: "minor", file: "a.ts", title: "Broken" }],
+};
+
+describe("run-owned tool recovery", () => {
+  it("keeps definitive command-budget refusals out of task failure recovery", async () => {
+    const f = fixture([runCheckTool]);
+    const bridge = new PiBridge({ clock: () => 1000, emit: () => {}, recovery: f.recovery });
+    f.harness.gateSaw = (id, closing) => bridge.gateSaw(id, closing);
+    let executions = 0;
+    f.harness.toolContext.checkExecution = createCheckExecution({
+      executor: () => ({
+        execResult: async () => {
+          executions++;
+          return { exitCode: 0, stdout: "", stderr: "", truncated: false };
+        },
+      }),
+      workspace: () => "/work",
+      recordingAvailable: true,
+      owner: { runId: "r", requester: "mcp:owner", threadKey: "mcp:thread", repo: "acme/api" },
+      authorizeCommand: () => true,
+      save: async () => true,
+      remainingMs: () => 1000,
+      signal: new AbortController().signal,
+      clock: () => 1000,
+    });
+    const input = { command: "true", purpose: "verification" };
+    for (const id of ["one", "two"]) {
+      const answer = await f.call(id, "run_check", input);
+      expect(answer.isError).toBe(true);
+      bridge.observe({ type: "tool_execution_start", toolCallId: id, toolName: "run_check", args: input });
+      bridge.observe({
+        type: "tool_execution_end",
+        toolCallId: id,
+        toolName: "run_check",
+        result: { content: answer.content },
+        isError: true,
+      });
+    }
+    await f.recovery.settled(false);
+    expect(executions).toBe(0);
+    expect(f.recovery.snapshot().failures).toEqual([]);
+    expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+  });
+  it("retains an uncertain write and refuses another execution of it", async () => {
+    let effects = 0;
+    const write: RunnableTool = {
+      name: "write_result",
+      description: "",
+      inputSchema: {},
+      run: async () => {
+        effects++;
+        throw new UncertainStoreError("write outcome unknown", {
+          version: 1,
+          operation: "/runs/state",
+          payload: "private bytes",
+          digest: "a".repeat(64),
+        });
+      },
+    };
+    const f = fixture([write]);
+    expect(await f.call("write", "write_result", {})).toEqual({
+      content: [{ type: "text", text: "Error: write outcome unknown" }],
+      isError: true,
+    });
+    expect(f.bearers.consumeTurn("r")).toEqual({
+      ok: false,
+      reason: "tool_recovery",
+      stop: { tool: "write_result", attempts: 1, reason: "outcome_unknown" },
+    });
+    expect(await f.call("retry", "write_result", {})).toEqual({
+      content: [
+        {
+          type: "text",
+          text: "Error: The write_result outcome is unknown. Further model calls were blocked; the original operation remains held.",
+        },
+      ],
+      isError: true,
+    });
+    expect(effects).toBe(1);
+  });
+  it("allows permitted fallback after a known missing check capability but stops repeated refusals", async () => {
+    const f = fixture([runCheckTool]);
+    expect(await f.call("check", "run_check", { command: "npm test", purpose: "verification" })).toEqual({
+      content: [{ type: "text", text: "error: recorded checks are unavailable for this run; command did not start" }],
+      isError: true,
+    });
+    expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+    await f.call("retry", "run_check", { command: "npm test", purpose: "verification" });
+    expect(f.bearers.consumeTurn("r")).toEqual({
+      ok: false,
+      reason: "tool_recovery",
+      stop: { tool: "run_check", attempts: 2, reason: "repeated_failure" },
+    });
+  });
+  it.each([
+    "invalid_input",
+    "command_refused",
+    "recording_unavailable",
+    "unsupported_executor",
+    "workspace_unavailable",
+    "not_started",
+  ] as const)("allows correction after a definitive %s check refusal", async (reason) => {
+    const f = fixture([runCheckTool]);
+    f.harness.toolContext.checkExecution = {
+      run: async () =>
+        reason === "not_started"
+          ? { kind: "recorded", receipt: { outcome: { kind: "not_started", reason: "command_refused" } } as never }
+          : { kind: "unavailable", reason },
+    };
+    expect((await f.call("refused", "run_check", { command: "true", purpose: "verification" })).isError).toBe(true);
+    expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+    f.harness.toolContext.checkExecution = {
+      run: async () => ({ kind: "recorded", receipt: { outcome: { kind: "completed", exitCode: 1 } } as never }),
+    };
+    expect((await f.call("corrected", "run_check", { command: "npm test", purpose: "verification" })).isError).toBe(
+      false,
+    );
+    expect(f.recovery.snapshot().failures).toEqual([]);
+  });
+  it.each(["reconciliation_required", "persistence_failed", "unknown"] as const)(
+    "blocks model admission after %s check uncertainty",
+    async (reason) => {
+      const f = fixture([runCheckTool]);
+      f.harness.toolContext.checkExecution = {
+        run: async () =>
+          reason === "unknown"
+            ? { kind: "recorded", receipt: { outcome: { kind: "unknown", reason: "transport" } } as never }
+            : { kind: "unavailable", reason },
+      };
+      expect((await f.call("uncertain", "run_check", { command: "true", purpose: "verification" })).isError).toBe(true);
+      expect(f.bearers.consumeTurn("r")).toEqual({
+        ok: false,
+        reason: "tool_recovery",
+        stop: { tool: "run_check", attempts: 1, reason: "outcome_unknown" },
+      });
+    },
+  );
+  it("allows one correction and blocks the next model call after the repeated verdict refusal", async () => {
+    const f = fixture();
+    expect(await f.call("one", "submit_verdict", badVerdict)).toEqual({
+      content: [
+        {
+          type: "text",
+          text: "error: unknown prior finding review:acme/api:1:r:F1; read complete review history first; no verdict recorded",
+        },
+      ],
+      isError: true,
+    });
+    expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+    // Changing incidental prose cannot buy a fresh recovery allowance.
+    await f.call("two", "submit_verdict", { ...badVerdict, summary: "still checked" });
+    expect(f.bearers.consumeTurn("r")).toEqual({
+      ok: false,
+      reason: "tool_recovery",
+      stop: { tool: "submit_verdict", attempts: 2, reason: "repeated_failure" },
+    });
+    expect(() => f.recovery.throwIfStopped()).toThrow("Stopped after 2 failed tool attempts (submit_verdict).");
+    expect(await f.call("three", "submit_verdict", { ...badVerdict, findings: [] })).toEqual({
+      content: [
+        {
+          type: "text",
+          text: "Error: Stopped after 2 failed tool attempts (submit_verdict). Further model calls were blocked; the task remains incomplete.",
+        },
+      ],
+      isError: true,
+    });
+  });
+
+  it("accepts a corrected finding and clears only the completed deliverable's failures", async () => {
+    const f = fixture();
+    await f.call("bad", "submit_verdict", badVerdict);
+    const corrected = { ...badVerdict, findings: [{ ...badVerdict.findings[0], id: "F1" }] };
+    expect(await f.call("fixed", "submit_verdict", corrected)).toEqual({
+      content: [
+        {
+          type: "text",
+          text: "verdict recorded: request_changes (downgraded from approve: finding F1 (minor) at or above minor, the severity to address; 1 finding)",
+        },
+      ],
+      isError: false,
+    });
+    expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+  });
+
+  it("retains the allowance and settled call identities across reconstruction", async () => {
+    const first = fixture();
+    await first.call("same-call", "submit_verdict", badVerdict);
+    const resumed = fixture(undefined, JSON.parse(JSON.stringify(first.saved.at(-1))));
+    await resumed.call("same-call", "submit_verdict", badVerdict);
+    expect(resumed.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+    await resumed.call("new-call", "submit_verdict", badVerdict);
+    const stopped = fixture(undefined, resumed.saved.at(-1));
+    expect(stopped.bearers.consumeTurn("r")).toEqual({
+      ok: false,
+      reason: "tool_recovery",
+      stop: { tool: "submit_verdict", attempts: 2, reason: "repeated_failure" },
+    });
+  });
+
+  it("unrelated successful reads and status calls cannot clear a failed operation", async () => {
+    const tool = (name: string): RunnableTool => ({ name, description: "", inputSchema: {}, run: async () => "read" });
+    const f = fixture([submitVerdictTool, tool("github_file"), tool("update_status")]);
+    await f.call("bad", "submit_verdict", badVerdict);
+    await f.call("read", "github_file", {});
+    await f.call("status", "update_status", {});
+    await f.call("bad-again", "submit_verdict", badVerdict);
+    expect(f.bearers.consumeTurn("r")).toEqual({
+      ok: false,
+      reason: "tool_recovery",
+      stop: { tool: "submit_verdict", attempts: 2, reason: "repeated_failure" },
+    });
+  });
+
+  it("a successful read of another resource cannot reset the failed read", async () => {
+    const read: RunnableTool = {
+      name: "read_source",
+      description: "",
+      inputSchema: {},
+      failsInText: true,
+      sideEffectFree: true,
+      run: async (input) => (input.path === "missing" ? "error: not found" : "source found"),
+    };
+    const f = fixture([read]);
+    await f.call("bad", "read_source", { path: "missing" });
+    expect(await f.call("other", "read_source", { path: "present" })).toEqual({
+      content: [{ type: "text", text: "source found" }],
+      isError: false,
+    });
+    await f.call("bad-again", "read_source", { path: "missing" });
+    expect(f.bearers.consumeTurn("r")).toEqual({
+      ok: false,
+      reason: "tool_recovery",
+      stop: { tool: "read_source", attempts: 2, reason: "repeated_failure" },
+    });
+  });
+
+  it("bounds varied failures and stores no argument or exception content", async () => {
+    const f = fixture();
+    for (let i = 0; i < 6; i++)
+      await f.recovery.record("c" + i, "tool" + i, { private: "SECRET" }, { text: "private failure SECRET" + i });
+    expect(f.bearers.consumeTurn("r")).toEqual({
+      ok: false,
+      reason: "tool_recovery",
+      stop: { tool: "tool5", attempts: 6, reason: "recovery_limit" },
+    });
+    expect(JSON.stringify(f.saved)).not.toContain("SECRET");
+  });
+
+  it("fails closed on refused checkpoints and malformed retained state", async () => {
+    const recovery = new ToolRecovery(undefined, async () => false);
+    await recovery.record("one", "submit_verdict", {}, { text: "error: rejected" });
+    expect(() => recovery.throwIfStopped()).toThrow("The submit_verdict recovery checkpoint could not be confirmed.");
+    expect(() => new ToolRecovery({ version: 1, failures: [] }).throwIfStopped()).toThrow(
+      "The tool operation could not continue safely.",
+    );
+    expect(() => new ToolRecovery({ version: 1, failures: [], settled: [], stopped: false }).throwIfStopped()).toThrow(
+      "The tool operation could not continue safely.",
+    );
+  });
+});
+
+describe.each(["pi", "opencode"] as const)("native tool recovery — %s", (name) => {
+  if (name === "pi")
+    it("does not reclassify replayed lifecycle refusals after reconstruction", async () => {
+      const saved = new ToolRecovery().snapshot();
+      const recovery = new ToolRecovery(JSON.parse(JSON.stringify(saved)));
+      const bridge = new PiBridge({ clock: () => 1000, emit: () => {}, recovery });
+      const failed = (id: string, text: string) => {
+        bridge.observe({
+          type: "tool_execution_start",
+          toolCallId: id,
+          toolName: "read",
+          args: { path: "/work/missing" },
+        });
+        bridge.observe({
+          type: "tool_execution_end",
+          toolCallId: id,
+          toolName: "read",
+          result: { content: [{ type: "text", text }] },
+          isError: true,
+        });
+      };
+      bridge.judgeGate = false; // The recorded assistant offset precedes these old tool rows.
+      failed("replayed-one", "the run is writing its final answer");
+      failed("replayed-two", "the run is writing its final answer");
+      await recovery.settled(false);
+      expect(recovery.snapshot()).toEqual(saved);
+      bridge.gateSaw("live-one"); // A fresh gate can be handled before replay finishes.
+      failed("live-one", "file does not exist");
+      await recovery.settled(false);
+      expect(recovery.snapshot().failures).toMatchObject([{ tool: "read", count: 1 }]);
+      bridge.judgeGate = true;
+      failed("live-two", "file does not exist");
+      await recovery.settled(false);
+      expect(recovery.stopped).toEqual({ tool: "read", attempts: 2, reason: "repeated_failure" });
+    });
+  it.each(["time budget", "turn guard", "soft stop"])(
+    "preserves %s lifecycle refusals without clearing earlier task failures",
+    async (ending) => {
+      const f = fixture();
+      const pi = new PiBridge({ clock: () => 1000, emit: () => {}, recovery: f.recovery });
+      const openCode = new OpenCodeBridge({
+        clock: () => 1000,
+        emit: () => {},
+        recovery: f.recovery,
+        rules: f.harness.rules,
+        relayedToolNames: new Set(),
+        seedLength: 0,
+        remainingMs: () => 60000,
+      });
+      f.harness.gateSaw = (id, closing) => {
+        if (name === "pi") pi.gateSaw(id, closing);
+        else openCode.gateSaw(id, closing);
+      };
+      const failed = async (id: string) => {
+        const input = { path: "/work/missing" };
+        const answer = await authorizeToolCall(f.harness, { toolCallId: id, tool: "read", input });
+        if (name === "pi") {
+          pi.observe({ type: "tool_execution_start", toolCallId: id, toolName: "read", args: input });
+          pi.observe({
+            type: "tool_execution_end",
+            toolCallId: id,
+            toolName: "read",
+            result: { content: [{ type: "text", text: "file does not exist" }] },
+            isError: true,
+          });
+        } else {
+          for (const [type, data] of [
+            ["session.tool.input.started", { name: "read" }],
+            ["session.tool.called", { input }],
+            ["session.tool.failed", { error: { message: "file does not exist" } }],
+          ] as const)
+            openCode.observe({
+              feed: "event",
+              at: 1000,
+              event: {
+                id: id + type,
+                type,
+                created: 1000,
+                data: { sessionID: "s", id, assistantMessageID: "m", ...data },
+              },
+            });
+        }
+        await f.recovery.settled(false);
+        return answer;
+      };
+      expect(await failed("earlier-task-failure")).toEqual({ allow: true });
+      const earlier = f.recovery.snapshot().failures;
+      expect(earlier).toHaveLength(1);
+      f.harness.toolsBlocked = () => ending;
+      expect(await failed("closed-one")).toEqual({ allow: false, reason: ending });
+      expect(await failed("closed-two")).toEqual({ allow: false, reason: ending });
+      expect(f.recovery.snapshot().failures).toEqual(earlier);
+      expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+    },
+  );
+  it("keeps nonzero command exits as evidence and stops repeated native tool exceptions", async () => {
+    const recovery = new ToolRecovery();
+    const pi = new PiBridge({ clock: () => 1000, emit: () => {}, recovery });
+    const openCode = new OpenCodeBridge({
+      clock: () => 1000,
+      emit: () => {},
+      recovery,
+      rules: { identity: "read", checkout: "/work" },
+      relayedToolNames: new Set(),
+      seedLength: 0,
+      remainingMs: () => 60000,
+    });
+    const call = (id: string, tool: string, input: Record<string, unknown>, text: string) => {
+      if (name === "pi") {
+        pi.observe({ type: "tool_execution_start", toolCallId: id, toolName: tool, args: input });
+        pi.observe({
+          type: "tool_execution_end",
+          toolCallId: id,
+          toolName: tool,
+          result: { content: [{ type: "text", text }] },
+          isError: true,
+        });
+      } else {
+        const event = (type: string, data: Record<string, unknown>) =>
+          openCode.observe({
+            feed: "event",
+            at: 1000,
+            event: {
+              id: "evt_" + id + type,
+              type,
+              created: 1000,
+              data: { sessionID: "ses_c", id, assistantMessageID: "msg", ...data },
+            },
+          });
+        event("session.tool.input.started", { name: tool });
+        event("session.tool.called", { input });
+        event("session.tool.failed", { error: { message: text } });
+      }
+    };
+    call("red1", "bash", { command: "npm test" }, "exit 1: test failed");
+    call("red2", "bash", { command: "npm test" }, "exit 1: test failed");
+    expect(recovery.snapshot()).toEqual({ version: 1, settled: [], failures: [] });
+    call("read1", "read", { path: "/work/missing" }, "file does not exist");
+    call("read2", "read", { path: "/work/missing" }, "file does not exist");
+    await recovery.settled();
+    expect(() => recovery.throwIfStopped()).toThrow(ToolRecoveryStoppedError);
+    expect(recovery.stopped).toEqual({ tool: "read", attempts: 2, reason: "repeated_failure" });
+  });
+});

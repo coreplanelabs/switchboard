@@ -720,3 +720,5 @@ export const MODEL_CAPACITY_BENCHMARK = {
 
 /** Refresh a run served from the durable ledger rather than the local registry. */
 export const RUN_VIEW_POLL_MS = 3 * SECOND_MS;
+/** One correction of a repeated failure; varied failures share the same run bound. */
+export const TOOL_RECOVERY = { sameFailure: 2, totalFailures: 6, receipts: 256 } as const;
