@@ -13,6 +13,51 @@ import { call, result, seq, spanEnd, testRegistry } from "./testing.js";
 // and the protected head (item 2; docs/reference/specs/tracing.md), proven through
 // the registry that owns the buffer.
 
+describe("storage diagnostic retention", () => {
+  it("retains a storage exception through backlog trimming and final record assembly", () => {
+    const { reg } = testRegistry();
+    const run = reg.create();
+    reg.publish(run.id, { type: "input", messageId: "m1", text: "go" });
+    reg.publish(run.id, call("start"));
+    reg.publish(run.id, {
+      type: "run_note",
+      kind: "storage_failure",
+      summary: "Storage request failed",
+      storageFailure: {
+        version: 1,
+        operation: "/runs/state",
+        requestDigest: "a".repeat(64),
+        kind: "write",
+        phase: "http",
+        httpStatus: 500,
+        server: {
+          stage: "state-rpc",
+          errorKind: "error",
+          exception: { name: "Error", message: "Durable Object reset" },
+        },
+      },
+    });
+    for (let i = 0; i < 5; i++) reg.publish(run.id, result(true, "x".repeat(1024 * 1024)));
+    reg.publish(run.id, { type: "answer", text: "held" });
+    const snap = reg.snapshot(run.id, run.token)!;
+    const saved = assembleRunRecord({
+      run,
+      snap,
+      msg: { channelId: "mcp:test", userId: "mcp:reader", threadKey: "mcp:test:t" },
+      channelVisibility: "machine",
+      finishedAt: 10,
+      status: "interrupted",
+      diagnosis: analyzeRunFriction(snap.events),
+    });
+    expect(saved.events.find((event) => event.type === "run_note" && event.kind === "storage_failure")).toMatchObject({
+      seq: 3,
+      storageFailure: { operation: "/runs/state", server: { exception: { message: "Durable Object reset" } } },
+    });
+    expect(saved.truncated).toBe(true);
+    expect(saved.diagnosis?.byCategory.infra_failure.count).toBe(1);
+  });
+});
+
 describe("provider diagnostic retention", () => {
   it("retains a post-start provider failure through backlog trimming and final record assembly", () => {
     const { reg } = testRegistry();

@@ -170,7 +170,18 @@ import {
 import type { Secrets } from "../secrets.js";
 import { UncertainStoreError, type StoreRequestWitness } from "./storeFailure.js";
 import { readStoreResponse, storeRequestWitness, type StoreOperationKind } from "./storeResponse.js";
-import { STATE_WRITE_DIAGNOSTIC_HEADER, stateWriteDiagnosticFromHeader } from "./runStateWriteDiagnostic.js";
+import {
+  STORAGE_FAILURE_DIAGNOSTIC_HEADER,
+  storageFailureNotice,
+  isStorageDiagnosticAppend,
+  type StorageFailureDiagnostic,
+  type StorageFailureNotice,
+} from "./storageFailureDiagnostic.js";
+import {
+  STATE_WRITE_DIAGNOSTIC_HEADER,
+  stateWriteDiagnosticFromHeader,
+  type StateWriteFailure,
+} from "./runStateWriteDiagnostic.js";
 
 export interface WorkerRunLedgerOptions {
   baseUrl: string;
@@ -187,6 +198,8 @@ export interface WorkerRunLedgerOptions {
    *  docs/reference/specs/run-metrics.md). Absent: the list prices alone. */
   prices?: ModelPriceTable;
   fetch?: typeof fetch;
+  /** Best-effort diagnostic delivery; never grants acknowledgement or retries. */
+  onFailure?: (notice: StorageFailureNotice) => void;
 }
 
 /** The ledger client for the configured run history, or null when history is
@@ -196,7 +209,7 @@ export interface WorkerRunLedgerOptions {
 export function buildRunLedger(
   cfg: RunHistoryConfig | undefined,
   secrets: Secrets,
-  deps: { fetch?: typeof fetch; prices?: ModelPriceTable } = {},
+  deps: Pick<WorkerRunLedgerOptions, "fetch" | "prices" | "onFailure"> = {},
 ): WorkerRunLedger | null {
   if (!cfg || cfg.store === "file") return null;
   const worker = cfg.worker;
@@ -212,6 +225,7 @@ export function buildRunLedger(
     sessionLogMaxBytes: retentionPolicyOf(cfg).sessionLogMaxBytes,
     ...(deps.prices ? { prices: deps.prices } : {}),
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
+    ...(deps.onFailure ? { onFailure: deps.onFailure } : {}),
   });
 }
 
@@ -257,81 +271,117 @@ export class WorkerRunLedger implements RunLedger {
       if (requestHeaderBytes(sized) > WORKER_REQUEST_HEADER_BYTES)
         throw new PermanentStoreError("run ledger: request headers exceed the platform limit");
     }
-    let res: Response;
+    let res: Response | undefined;
+    let phase: StorageFailureDiagnostic["phase"] = "transport";
+    let server: StateWriteFailure | undefined;
     try {
-      res = await this.fetchImpl(`${this.baseUrl}${path}`, {
-        method: "POST",
-        headers: expectedSeedHeader === undefined ? ordinaryHeaders : headers,
-        body: payload,
-        signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
-      });
-    } catch (err) {
-      if (kind === "write")
-        throw new UncertainStoreError(`run ledger ${path}: transport outcome unknown`, request, {
-          cause: err,
-          diagnosis: { kind: "transport" },
+      try {
+        res = await this.fetchImpl(`${this.baseUrl}${path}`, {
+          method: "POST",
+          headers: expectedSeedHeader === undefined ? ordinaryHeaders : headers,
+          body: payload,
+          signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
         });
-      throw new TransientStoreError(`run ledger ${path}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    if (res.status === 404) throw new RouteMissingError(`run ledger ${path}: route missing (older state Worker)`);
-    if (res.status >= 500 || res.status === 408 || res.status === 429) {
-      const stateWrite =
-        path === "/runs/state" && res.status >= 500
-          ? stateWriteDiagnosticFromHeader(res.headers.get(STATE_WRITE_DIAGNOSTIC_HEADER), request.digest)
+      } catch (err) {
+        if (kind === "write")
+          throw new UncertainStoreError(`run ledger ${path}: transport outcome unknown`, request, {
+            cause: err,
+            diagnosis: { kind: "transport" },
+          });
+        throw new TransientStoreError(`run ledger ${path}: transport failed`, { cause: err });
+      }
+      phase = "http";
+      server =
+        res.status >= 500
+          ? stateWriteDiagnosticFromHeader(
+              res.headers.get(STORAGE_FAILURE_DIAGNOSTIC_HEADER) ??
+                (path === "/runs/state" ? res.headers.get(STATE_WRITE_DIAGNOSTIC_HEADER) : null),
+              request.digest,
+            )
           : undefined;
-      if (path === "/runs/state" && kind === "write" && res.status >= 500)
-        console.warn(
-          JSON.stringify({
-            event: "state.write.failure",
-            message: "State write request failed",
-            runId: body.runId,
-            ownerGen: body.gen,
-            requestDigest: request.digest,
-            httpStatus: res.status,
-            failure: stateWrite,
-            rayId: /^[a-f0-9]{16}(?:-[A-Z]{3})?$/.test(res.headers.get("cf-ray") ?? "")
-              ? res.headers.get("cf-ray")
-              : undefined,
-          }),
-        );
-      if (kind === "write")
-        throw new UncertainStoreError(`run ledger ${path}: mutation outcome unknown (HTTP ${res.status})`, request, {
-          diagnosis: { kind: "http", status: res.status, ...(stateWrite ? { stateWrite } : {}) },
-        });
-      throw new TransientStoreError(`run ledger ${path}: HTTP ${res.status}`);
-    }
-    const data = await readStoreResponse(res, kind, request);
-    const askedRun =
-      typeof body.runId === "string"
-        ? body.runId
-        : body.run && typeof body.run === "object"
-          ? (body.run as Record<string, unknown>).runId
-          : body.record && typeof body.record === "object"
-            ? (body.record as Record<string, unknown>).id
+      if (res.status === 404) throw new RouteMissingError(`run ledger ${path}: route missing (older state Worker)`);
+      if (res.status >= 500 || res.status === 408 || res.status === 429) {
+        const stateWrite =
+          path === "/runs/state" && res.status >= 500
+            ? stateWriteDiagnosticFromHeader(res.headers.get(STATE_WRITE_DIAGNOSTIC_HEADER), request.digest)
             : undefined;
-    if (
-      res.status === 423 &&
-      data.kind === "held" &&
-      data.reason === "source_seed_pending" &&
-      typeof data.key === "string" &&
-      data.key === body.key &&
-      typeof data.runId === "string" &&
-      Object.keys(data).every((k) => ["kind", "reason", "key", "runId"].includes(k))
-    )
-      throw new SourceSeedPendingError(data.key, data.runId);
-    if (
-      res.status === 423 &&
-      data.kind === "held" &&
-      (data.reason === "promotion_pending" || data.reason === "promotion_corrupt") &&
-      Object.keys(data).every((k) => ["kind", "reason", "runId"].includes(k)) &&
-      typeof data.runId === "string" &&
-      RUN_ID_PATTERN.test(data.runId) &&
-      data.runId === askedRun
-    )
-      throw new PromotionPendingError(data.runId, data.reason === "promotion_corrupt" ? "corrupt" : "prepared");
-    if (res.status === 409 || res.ok || (acceptBadRequest && res.status === 400))
-      return { status: res.status, data, request };
-    throw new PermanentStoreError(`run ledger ${path}: HTTP ${res.status} ${String(data.error ?? "")}`.trim());
+        if (kind === "write")
+          throw new UncertainStoreError(`run ledger ${path}: mutation outcome unknown (HTTP ${res.status})`, request, {
+            diagnosis: { kind: "http", status: res.status, ...(stateWrite ? { stateWrite } : {}) },
+          });
+        throw new TransientStoreError(`run ledger ${path}: HTTP ${res.status}`);
+      }
+      phase = "response";
+      const data = await readStoreResponse(res, kind, request);
+      const askedRun =
+        typeof body.runId === "string"
+          ? body.runId
+          : body.run && typeof body.run === "object"
+            ? (body.run as Record<string, unknown>).runId
+            : body.record && typeof body.record === "object"
+              ? (body.record as Record<string, unknown>).id
+              : undefined;
+      if (
+        res.status === 423 &&
+        data.kind === "held" &&
+        data.reason === "source_seed_pending" &&
+        typeof data.key === "string" &&
+        data.key === body.key &&
+        typeof data.runId === "string" &&
+        Object.keys(data).every((k) => ["kind", "reason", "key", "runId"].includes(k))
+      )
+        throw new SourceSeedPendingError(data.key, data.runId);
+      if (
+        res.status === 423 &&
+        data.kind === "held" &&
+        (data.reason === "promotion_pending" || data.reason === "promotion_corrupt") &&
+        Object.keys(data).every((k) => ["kind", "reason", "runId"].includes(k)) &&
+        typeof data.runId === "string" &&
+        RUN_ID_PATTERN.test(data.runId) &&
+        data.runId === askedRun
+      )
+        throw new PromotionPendingError(data.runId, data.reason === "promotion_corrupt" ? "corrupt" : "prepared");
+      if (res.status === 409 || res.ok || (acceptBadRequest && res.status === 400))
+        return { status: res.status, data, request };
+      phase = "http";
+      throw new PermanentStoreError(`run ledger ${path}: HTTP ${res.status} ${String(data.error ?? "")}`.trim());
+    } catch (error) {
+      // Expected holds describe ownership, not a storage exception.
+      if (!(error instanceof SourceSeedPendingError) && !(error instanceof PromotionPendingError))
+        this.reportFailure(request, kind, phase, error, res, server);
+      throw error;
+    }
+  }
+
+  private reportFailure(
+    request: StoreRequestWitness,
+    kind: StoreOperationKind,
+    phase: StorageFailureDiagnostic["phase"],
+    error: unknown,
+    response?: Response,
+    server?: StateWriteFailure,
+  ): void {
+    try {
+      const notice = storageFailureNotice(request, kind, phase, error, response, server);
+      try {
+        console.warn(JSON.stringify({ event: "storage.request.failure", side: "client", ...notice }));
+      } catch {
+        /* Keep the event sink independent of logging. */
+      }
+      if (!isStorageDiagnosticAppend(request)) this.opts.onFailure?.(notice);
+    } catch {
+      // Telemetry must never replace the original exception or change retries.
+    }
+  }
+
+  private unknownAcknowledgement(message: string, request: StoreRequestWitness, status?: number): UncertainStoreError {
+    const error = new UncertainStoreError(
+      message,
+      request,
+      status === undefined ? undefined : { diagnosis: { kind: "acknowledgement", status } },
+    );
+    this.reportFailure(request, "write", "acknowledgement", error);
+    return error;
   }
 
   private read(path: string, body: Record<string, unknown>) {
@@ -342,10 +392,10 @@ export class WorkerRunLedger implements RunLedger {
     if (r.status === 409 && r.data.ok === false && (r.data.reason === "fenced" || r.data.reason === "unknown-run"))
       return { ok: false, reason: r.data.reason };
     if (r.status === 200 && r.data.ok === true) return { ok: true };
-    throw new UncertainStoreError(
+    throw this.unknownAcknowledgement(
       `run ledger ${r.request.operation}: invalid acknowledgement (HTTP ${r.status})`,
       r.request,
-      { diagnosis: { kind: "acknowledgement", status: r.status } },
+      r.status,
     );
   }
 
@@ -778,10 +828,10 @@ export class WorkerRunLedger implements RunLedger {
       (body.reason === "fenced" || body.reason === "unknown-run" || body.reason === "checkpoint-unavailable")
     )
       return { ok: false, reason: body.reason };
-    throw new UncertainStoreError(
+    throw this.unknownAcknowledgement(
       `run ledger /runs/session/checkpoint: invalid acknowledgement (HTTP ${result.status})`,
       result.request,
-      { diagnosis: { kind: "acknowledgement", status: result.status } },
+      result.status,
     );
   }
 
@@ -1083,10 +1133,10 @@ export class WorkerRunLedger implements RunLedger {
       (data.liveStateSeq as number) >= 0
     )
       return data as unknown as LiveStateAssignResult;
-    throw new UncertainStoreError(
+    throw this.unknownAcknowledgement(
       `run ledger /runs/live-state: invalid acknowledgement (HTTP ${r.status})`,
       r.request,
-      { diagnosis: { kind: "acknowledgement", status: r.status } },
+      r.status,
     );
   }
 
@@ -1101,7 +1151,7 @@ export class WorkerRunLedger implements RunLedger {
     if (r.status === 200 && r.data.ok === false && r.data.seq === undefined) return { ok: false };
     if (r.status === 200 && r.data.ok === true && Number.isSafeInteger(r.data.seq) && Number(r.data.seq) > 0)
       return { ok: true, seq: Number(r.data.seq) };
-    throw new UncertainStoreError("run ledger /runs/inbox: invalid storage acknowledgement", r.request);
+    throw this.unknownAcknowledgement("run ledger /runs/inbox: invalid storage acknowledgement", r.request, r.status);
   }
 
   async readInbox(runId: string, afterSeq: number): Promise<InboxItem[]> {
@@ -1201,7 +1251,11 @@ export class WorkerRunLedger implements RunLedger {
       row.runId !== runId ||
       row.ownerGen !== cancellation.ownerGen
     )
-      throw new UncertainStoreError("run cancellation preparation acknowledgment is malformed", result.request);
+      throw this.unknownAcknowledgement(
+        "run cancellation preparation acknowledgment is malformed",
+        result.request,
+        result.status,
+      );
     return { ok: true, cancellation, row };
   }
   async finishCancellation(cancellation: RunCancellation, record: RunRecord): Promise<FinishResult> {
@@ -1215,7 +1269,11 @@ export class WorkerRunLedger implements RunLedger {
       const fence = this.fenceResult(result);
       if (!fence.ok) return fence;
       if (result.data.stored !== true)
-        throw new UncertainStoreError("run cancellation terminal acknowledgment is malformed", result.request);
+        throw this.unknownAcknowledgement(
+          "run cancellation terminal acknowledgment is malformed",
+          result.request,
+          result.status,
+        );
       return { ok: true, stored: true };
     } catch (error) {
       if (error instanceof UncertainStoreError) {

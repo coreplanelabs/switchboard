@@ -1,3 +1,4 @@
+import { storageFailureNote } from "./core/storageFailureDiagnostic.js";
 import { createRunStop } from "./execution/runStop.js";
 import { readImageConfigConsumerIdentity, type ConfigConsumerIdentity } from "./configConsumer.js";
 import "./loadEnv.js";
@@ -498,6 +499,10 @@ export async function runBot(): Promise<void> {
     : undefined;
   const ledgerClient = capabilities.runLedger
     ? buildRunLedger(runHistoryCfg, processSecrets, {
+        onFailure: ({ runIds, diagnostic }) => {
+          for (const runId of runIds)
+            defaultRunRegistry.publish(runId, { ...storageFailureNote(diagnostic), at: systemClock() });
+        },
         ...(costsCfg?.prices ? { prices: costsCfg.prices } : {}),
       })
     : null;
