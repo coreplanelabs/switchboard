@@ -4746,6 +4746,7 @@ export async function dispatch(
       slackContext,
       privateAudienceLatch,
       verdict: ran.verdict,
+      reviewIncomplete: ran.reviewIncomplete,
       reviewPost: ran.reviewPost,
       reviewStoppedBeforeStart: ran.reviewStoppedBeforeStart,
       verbosity: resolved.verbosity,

@@ -34,7 +34,7 @@
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { normalizeHead } from "./reviewedHead.js";
 import { toolResultText, type ChatMessage } from "./chatMessage.js";
-import { redactSecrets } from "./redact.js";
+import { redactAndCap, redactSecrets } from "./redact.js";
 import { shows, type Verbosity } from "./verbosity.js";
 
 export type ReviewVerdictKind = "approve" | "request_changes";
@@ -177,6 +177,77 @@ export interface ReviewVerdict {
   downgraded?: { findings: string[]; level: AddressSeverity };
 }
 
+/** Private run-owned proposal journal. Public records carry only the failure
+ * sentence; raw arguments never enter the public verdict or event projection. */
+export type ReviewRejectionStage = "input" | "reference" | "history" | "head";
+export type ReviewSubmission =
+  | {
+      status: "pending" | "rejected";
+      proposal?: Record<string, unknown>;
+      reason?: string;
+      callId?: string;
+      stage?: ReviewRejectionStage;
+    }
+  | { status: "accepted"; proposal?: Record<string, unknown>; verdict: ReviewVerdict; callId?: string };
+
+export function reviewSubmissionOf(value: unknown): ReviewSubmission | undefined {
+  if (!isRecordLike(value) || !["pending", "rejected", "accepted"].includes(String(value.status))) return undefined;
+  if (Object.keys(value).some((key) => !["status", "proposal", "reason", "verdict", "callId", "stage"].includes(key)))
+    return undefined;
+  if (value.status !== "accepted" && value.verdict !== undefined) return undefined;
+  if (value.status === "accepted" && (value.stage !== undefined || value.reason !== undefined)) return undefined;
+  if (value.callId !== undefined && (typeof value.callId !== "string" || !value.callId || value.callId.length > 512))
+    return undefined;
+  if (value.stage !== undefined && !["input", "reference", "history", "head"].includes(String(value.stage)))
+    return undefined;
+  if (value.proposal !== undefined && !isRecordLike(value.proposal)) return undefined;
+  if (value.reason !== undefined && typeof value.reason !== "string") return undefined;
+  if (value.status === "accepted" && (!isReviewVerdictShape(value.verdict) || !completeReviewVerdict(value.verdict)))
+    return undefined;
+  return structuredClone(value) as ReviewSubmission;
+}
+
+export function reviewSubmissionFailure(value: ReviewSubmission | undefined): string | undefined {
+  if (!value || value.status === "accepted") return undefined;
+  if (value.status === "pending") return "The latest review submission was not confirmed.";
+  const reasons = {
+    input: "The review findings did not match the required format.",
+    reference: "The review contains finding references that were not issued by the current history.",
+    history: "Complete current-head review history could not validate this report.",
+    head: "The report does not cover the required current head.",
+  };
+  return value.stage ? reasons[value.stage] : "The review submission was rejected; no current verdict was accepted.";
+}
+
+/** Recover proposal identity and acceptance from the same authorized transcript.
+ * A later failure or missing result cannot revive an older accepted verdict. */
+export function reviewSubmissionFromTranscript(
+  messages: readonly ChatMessage[],
+  opts: { addressSeverity?: AddressSeverity } = {},
+): ReviewSubmission | undefined {
+  let last: { id: string; proposal?: Record<string, unknown> } | undefined;
+  let result: string | undefined;
+  for (const message of messages)
+    for (const part of message.content) {
+      if (message.role === "assistant" && part.type === "tool_use" && part.name === "submit_verdict") {
+        last = { id: part.id, ...(isRecordLike(part.input) ? { proposal: part.input } : {}) };
+        result = undefined;
+      } else if (message.role === "user" && part.type === "tool_result" && part.toolUseId === last?.id) {
+        result = toolResultText(part.content);
+      }
+    }
+  if (!last) return undefined;
+  const verdict = recordedVerdictFromTranscript(messages, opts);
+  return verdict
+    ? { status: "accepted", callId: last.id, proposal: last.proposal, verdict }
+    : {
+        status: result === undefined ? "pending" : "rejected",
+        callId: last.id,
+        proposal: last.proposal,
+        reason: result ?? "The latest review submission was not confirmed.",
+      };
+}
+
 export const LGTM_TOKEN = "LGTM:";
 export const CHANGES_TOKEN = "Changes requested:";
 export const NO_VERDICT_LINE = "No verdict submitted — not approving.";
@@ -236,6 +307,10 @@ export function parseVerdictInput(
       out.summary = oneLine(`${out.summary} [downgraded from approve: ${downgradeNote(out.downgraded)}]`);
     }
   }
+  if (out.findings === undefined && !out.droppedFindings?.length)
+    out.droppedFindings = ["findings: a complete review requires a findings array"];
+  if (out.verdict === "request_changes" && !out.findings?.length && !out.droppedFindings?.length)
+    out.droppedFindings = [...(out.droppedFindings ?? []), "findings: changes requested requires validated findings"];
   return out;
 }
 
@@ -248,14 +323,27 @@ export function recordedVerdictFromTranscript(
 ): ReviewVerdict | undefined {
   const pending = new Map<string, unknown>();
   let recorded: ReviewVerdict | undefined;
+  let latestCall: string | undefined;
   for (const message of messages) {
     for (const part of message.content) {
-      if (message.role === "assistant" && part.type === "tool_use" && part.name === "submit_verdict")
+      if (message.role === "assistant" && part.type === "tool_use" && part.name === "submit_verdict") {
         pending.set(part.id, part.input);
+        latestCall = part.id;
+        // Earlier accepted facts remain in the transcript. They cannot stand
+        // for the latest proposal while its acceptance is absent or rejected.
+        recorded = undefined;
+      }
       if (message.role !== "user" || part.type !== "tool_result") continue;
       const input = pending.get(part.toolUseId);
       pending.delete(part.toolUseId);
-      if (part.isError || typeof input !== "object" || input === null || Array.isArray(input)) continue;
+      if (
+        part.toolUseId !== latestCall ||
+        part.isError ||
+        typeof input !== "object" ||
+        input === null ||
+        Array.isArray(input)
+      )
+        continue;
       const result = toolResultText(part.content);
       const [ack, canonical] = result.split("\nRecorded verdict: ");
       let accepted = input as Record<string, unknown>;
@@ -271,7 +359,7 @@ export function recordedVerdictFromTranscript(
       }
       const verdict = parseVerdictInput(accepted, opts);
       const receipt = verdict && `verdict recorded: ${verdict.verdict}`;
-      if (receipt && !verdict.droppedFindings?.length && (ack === receipt || ack.startsWith(`${receipt} (`)))
+      if (receipt && completeReviewVerdict(verdict) && (ack === receipt || ack.startsWith(`${receipt} (`)))
         recorded = verdict;
     }
   }
@@ -362,9 +450,23 @@ function oneLine(s: string): string {
   return s.replace(/\s*\n+\s*/g, " ").trim();
 }
 
+export const INCOMPLETE_REVIEW_LINE = "Review incomplete — findings not validated.";
+
+/** Completeness is a domain invariant, separate from publication success.
+ * Old empty negative reports and rejected finding lists cannot authorize a verdict. */
+export function completeReviewVerdict(verdict: ReviewVerdict | undefined): boolean {
+  return (
+    verdict !== undefined &&
+    Array.isArray(verdict.findings) &&
+    !verdict.droppedFindings?.length &&
+    !(verdict.verdict === "request_changes" && !verdict.findings?.length)
+  );
+}
+
 /** The exact first line of the posted body for a verdict (or its absence). */
 export function verdictLine(verdict: ReviewVerdict | undefined): string {
   if (!verdict) return NO_VERDICT_LINE;
+  if (!completeReviewVerdict(verdict)) return INCOMPLETE_REVIEW_LINE;
   const token = verdict.verdict === "approve" ? LGTM_TOKEN : CHANGES_TOKEN;
   const summary = oneLine(verdict.summary);
   return summary ? `${token} ${summary}` : token;
@@ -386,6 +488,7 @@ function severityCount(sev: FindingSeverity, n: number): string {
  *  and the finding bullets are `verbose` material and stay on the pull
  *  request, where the post-step put them. */
 export function verdictCountsLine(verdict: ReviewVerdict): string {
+  if (!completeReviewVerdict(verdict)) return INCOMPLETE_REVIEW_LINE;
   if (verdict.verdict === "approve") return "LGTM";
   const counts = severityCounts(verdict.findings ?? []);
   return counts ? `Changes requested: ${counts}` : "Changes requested";
@@ -477,6 +580,7 @@ function escapeReviewHtml(markdown: string): string {
 
 function reviewHeadline(verdict: ReviewVerdict | undefined): string {
   if (!verdict) return NO_VERDICT_LINE;
+  if (!completeReviewVerdict(verdict)) return INCOMPLETE_REVIEW_LINE;
   const findings = verdict.findings;
   const count =
     findings === undefined
@@ -557,8 +661,10 @@ export function buildReviewPostBody(
   answer: string,
   verdict: ReviewVerdict | undefined,
   target?: ReviewBodyTarget,
+  failure?: string,
 ): string {
-  const fixedParts = [reviewHeadline(verdict)];
+  if (failure !== undefined) verdict = undefined;
+  const fixedParts = [failure !== undefined ? INCOMPLETE_REVIEW_LINE : reviewHeadline(verdict)];
   const findings = verdict?.findings ?? [];
   if (findings.length) {
     const ranked = FINDING_SEVERITIES.flatMap((severity) => findings.filter((f) => f.severity === severity));
@@ -574,6 +680,7 @@ export function buildReviewPostBody(
   const head = target?.head ?? verdict?.head;
   if (head) fixedParts.push(`_Reviewed at \`${head.slice(0, 7)}\`._`);
   const agentParts: string[] = [];
+  if (failure) agentParts.push(`**Validation:** ${redactAndCap(failure, 600)}`);
   if (verdict?.summary) agentParts.push(`**Rationale:** ${oneLine(verdict.summary)}`);
   if (findings.length > 0) {
     agentParts.push(
@@ -597,7 +704,7 @@ export function buildReviewPostBody(
     }
   }
 
-  const marker = verdictMarker(verdict, target);
+  const marker = verdictMarker(completeReviewVerdict(verdict) ? verdict : undefined, target);
   if (verdict?.caseAssessments?.length) {
     agentParts.push(
       [
@@ -659,7 +766,8 @@ export function buildReviewPostBody(
  * along only when it landed nowhere else — no GitHub post (Slack-only, an
  * opt-out, a guard refusal) or findings not itemized (a list that says
  * nothing is no substitute) — so the review's text is always somewhere a
- * person reads it. No verdict → the bare answer with the link, as before.
+ * person reads it. An incomplete submission retains its warning and report,
+ * with the available run link. Legacy callers without a failure flag keep the answer.
  *
  * The request's verbosity decides how much of the verdict the thread hears
  * (routing-and-config item 28, record 0066): below `verbose`, a verdict whose
@@ -676,12 +784,15 @@ export function buildReviewChannelReply(input: {
   liveUrl: string | undefined;
   /** The request's level (default `verbose`: the full render, the row's shape). */
   verbosity?: Verbosity;
+  failure?: string;
 }): string {
-  const { answer, verdict, posted, liveUrl } = input;
+  const { answer, posted, liveUrl } = input;
+  const verdict = input.failure !== undefined ? undefined : input.verdict;
   if (
     !shows(input.verbosity ?? "verbose", "verbose") &&
     verdict !== undefined &&
     verdict.findings !== undefined &&
+    completeReviewVerdict(verdict) &&
     posted !== undefined
   ) {
     return `${verdictCountsLine(verdict)} — https://github.com/${posted.repo}/pull/${posted.number}`;
@@ -691,10 +802,12 @@ export function buildReviewChannelReply(input: {
     ...(liveUrl ? [`[Live run](${liveUrl})`] : []),
   ].join(" · ");
   const blocks: string[] = [];
-  if (!verdict) blocks.push(answer);
+  if (input.failure !== undefined)
+    blocks.push(`${INCOMPLETE_REVIEW_LINE} ${redactAndCap(input.failure, 600)}\n\n${answer}`);
+  else if (!verdict) blocks.push(answer);
   else {
     blocks.push([verdictLine(verdict), ...(verdict.findings ?? []).map((f) => `- ${formatFinding(f)}`)].join("\n"));
-    const compact = posted !== undefined && verdict.findings !== undefined;
+    const compact = posted !== undefined && verdict.findings !== undefined && completeReviewVerdict(verdict);
     if (!compact && answer.trim()) blocks.push(answer.trim());
   }
   if (tail) blocks.push(tail);
@@ -895,6 +1008,7 @@ export function redactVerdict(v: ReviewVerdict, redact: (s: string) => string = 
   return {
     verdict: v.verdict,
     summary: redact(v.summary),
+    ...(v.droppedFindings?.length ? { droppedFindings: v.droppedFindings.map(redact) } : {}),
     ...(v.head !== undefined ? { head: v.head } : {}),
     ...(v.resolutions !== undefined ? { resolutions: redactDispositions(v.resolutions, redact) } : {}),
     ...(v.caseAssessments !== undefined

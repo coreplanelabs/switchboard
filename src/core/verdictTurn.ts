@@ -1,7 +1,7 @@
 // The review run's verdict turn (docs/reference/specs/agent-review.md item 5):
 // the prompt requires `submit_verdict` before the final message, and the
 // posted body is built fail-closed — no call, and the review posts as
-// `No verdict submitted — not approving.` whatever its prose concluded. A
+// an incomplete-review warning whatever its prose concluded. A
 // prompt rule alone can be skipped: a run has written `Verdict: approve` in
 // its write-up and never called the tool, so the auto-approve workflow (which
 // keys on the `LGTM:` token the tool produces) sat out a review that approved
@@ -17,7 +17,7 @@
 // and its tool events join the run record like any other. The turn asks for
 // the verdict alone: the write-up stands, the diff is not re-read, and the
 // turn's own reply is dropped. Fail-closed is untouched: a turn that still
-// submits nothing posts the no-verdict line as before. A run with no session
+// submits nothing retains the incomplete-review warning and report. A run with no session
 // to prompt — a `finish` plan, whose loop answered in a previous bot
 // generation and whose pi is gone — runs no turn and reports nothing.
 
@@ -49,7 +49,7 @@ export interface VerdictTurnTarget {
  *  call must carry, and what the turn must not do. */
 export function verdictFollowUp(t: VerdictTurnTarget): string {
   return [
-    `Your review of ${t.repo}#${t.number} ended without calling submit_verdict. Switchboard writes the verdict as the first line of the posted review from that call alone — without it the review posts as "No verdict submitted — not approving", whatever your write-up concluded.`,
+    `Your review of ${t.repo}#${t.number} ended without an accepted complete submit_verdict. Switchboard writes the verdict as the first line of the posted review from that accepted call alone — without it the review posts as "Review incomplete — findings not validated", whatever your write-up concluded.`,
     "Call submit_verdict now, exactly once, with the verdict your write-up already states: `approve` when you found no blocking issue (nits alone are not blocking), otherwise `request_changes`; a one-line summary; `head` = the output of `git rev-parse HEAD` in the checkout you reviewed; and `findings` — one structured entry per issue your write-up reports, with the ids you used (F1, F2, …), a severity of exactly blocking|major|minor|nit, the file (plus line when it points at one) and a one-line title.",
     "Do not re-read the diff and do not rewrite the review — your write-up stands as the review's text; only the verdict is missing. Then reply in one line.",
   ].join("\n");
@@ -105,6 +105,11 @@ export async function runVerdictTurn(input: {
   let submitted: ReviewVerdict | undefined;
   const toolContext: ToolContext = {
     ...turn.toolContext,
+    onReviewSubmission: async (submission) => {
+      submitted = undefined;
+      await turn.toolContext.onReviewSubmission?.(submission);
+      if (submission.status === "accepted") submitted = submission.verdict;
+    },
     onVerdict: (v) => {
       submitted = v;
       turn.toolContext.onVerdict?.(v);

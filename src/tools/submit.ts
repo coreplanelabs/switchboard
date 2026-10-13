@@ -27,6 +27,21 @@ import { parseHandoff } from "../core/ship/handoff.js";
 import { materializeReviewFollowup, validateReviewFollowup, withFindingCaseIds } from "../core/reviewHistory.js";
 import type { RunnableTool } from "./runnableTool.js";
 
+const freshFindingSchema = {
+  ...reviewFindingInputSchema,
+  anyOf: reviewFindingInputSchema.anyOf.map((variant) => ({
+    ...variant,
+    properties: {
+      ...variant.properties,
+      id: {
+        type: "string",
+        pattern: "^F[1-9][0-9]*$",
+        description: "A fresh finding ID in this report: F1, F2, …; never a run or prior-review ID",
+      },
+    },
+  })),
+};
+
 export const submitVerdictTool: RunnableTool = {
   name: "submit_verdict",
   failsInText: true,
@@ -50,7 +65,7 @@ export const submitVerdictTool: RunnableTool = {
     "Set `humanGated: true` on a finding ONLY when its remedy is a receipt no run can produce — a replay needing a credential " +
     "no sandbox holds, a procedure a person runs live — so the ship loop can hold the unit for a person instead of opening a fix round that can change nothing. " +
     "Before a PR verdict, read github_pull_get with includeReviewHistory: true and every returned historyPage in order. Verify every outstanding finding and all its cases at this head. " +
-    "Re-raise it in findings with its exact scoped ID; the tool preserves its original metadata and case text. Supply cases only to append new cases, never to copy prior rows. " +
+    "Re-raise it in priorFindings with its exact scoped findingId; the tool preserves its original metadata and case text. Supply cases only to append new cases, never to copy prior rows. " +
     "For every prior case, submit caseAssessments with findingId, caseId, outcome (open|fixed|declined) and current-head evidence in note. " +
     "Alternatively record a resolution: fixed after verifying the change, declined after verifying why the finding does not apply. A closure has no open cases; fixed requires a fixed case, declined requires every case to be declined. " +
     "Each resolution requires an evidence note naming the checked paths or cases. Author assertions and absence from this round are not proof. New findings use fresh F1, F2, … IDs.",
@@ -66,13 +81,38 @@ export const submitVerdictTool: RunnableTool = {
       findings: {
         type: "array",
         description: "Every issue you report, one entry each, in the order reported — rendered under the verdict line",
-        items: reviewFindingInputSchema,
+        items: freshFindingSchema,
+      },
+      priorFindings: {
+        type: "array",
+        description: "Re-raise controller-issued prior findings by exact identity; fresh findings belong in findings.",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["findingId"],
+          properties: {
+            findingId: {
+              type: "string",
+              description: "One exact issued finding ID from complete current-head review history",
+            },
+            cases: {
+              type: "array",
+              description: "Optional new invariant cases; omit controller-issued case IDs",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["scenario", "expected"],
+                properties: { scenario: { type: "string" }, expected: { type: "string" } },
+              },
+            },
+          },
+        },
       },
       caseAssessments: caseAssessmentInputSchema,
       resolutions: {
         type: "array",
         description:
-          "Explicit reviewer-verified closures of outstanding findings from github_pull_get; re-raised findings remain in findings instead",
+          "Explicit reviewer-verified closures of outstanding findings from github_pull_get; re-raised findings belong in priorFindings instead",
         items: {
           type: "object",
           properties: {
@@ -91,91 +131,178 @@ export const submitVerdictTool: RunnableTool = {
         },
       },
     },
-    required: ["verdict", "summary", "head"],
+    required: ["verdict", "summary", "head", "findings"],
   },
   async run(input, ctx) {
-    ctx.reportToolFailure?.({ code: "invalid_input", recovery: "correct" });
-    const materialized = materializeReviewFollowup(input, ctx.reviewHistory?.snapshot?.findings ?? []);
-    if (materialized.error) return `error: ${materialized.error}; no verdict recorded`;
-    input = materialized.input;
-    // The level in force rides the context (the dispatcher resolved it for
-    // the run); absent — a CLI, a unit test — the parser holds the default.
-    const verdict = parseVerdictInput(input, {
-      ...(ctx.addressSeverity !== undefined ? { addressSeverity: ctx.addressSeverity } : {}),
-    });
-    if (!verdict)
-      return "error: verdict must be exactly approve|request_changes; resolutions and caseAssessments require unique exact IDs, valid outcomes and non-empty evidence notes; no verdict recorded";
-    const rawFindings = input.findings;
-    if (rawFindings !== undefined && !Array.isArray(rawFindings))
-      return "error: findings must be an array; no verdict recorded";
-    if (Array.isArray(rawFindings)) {
-      const untyped = rawFindings.flatMap((raw, index) =>
-        typeof raw === "object" &&
-        raw !== null &&
-        !Array.isArray(raw) &&
-        ((raw as Record<string, unknown>).kind === "single" || (raw as Record<string, unknown>).kind === "pattern")
-          ? []
-          : [`findings[${index}]: declare kind single or pattern`],
-      );
-      if (untyped.length) return `error: ${untyped.join("; ")}; no verdict recorded`;
-    }
-    const invalidCases = verdict.droppedFindings?.filter((reason) =>
-      /dropped — (invariant and a non-empty cases array|each case needs|a single finding cannot carry)/.test(reason),
+    const proposal = structuredClone(input);
+    const identity = ctx.callId !== undefined ? { callId: ctx.callId } : {};
+    await ctx.onReviewSubmission?.({ status: "pending", proposal, ...identity });
+    const result = await validateVerdictSubmission(input, ctx);
+    await ctx.onReviewSubmission?.(
+      result.accepted
+        ? { status: "accepted", proposal, verdict: result.verdict, ...identity }
+        : { status: "rejected", proposal, reason: result.receipt, stage: result.stage, ...identity },
     );
-    if (invalidCases?.length)
-      return `error: invalid invariant case table; ${invalidCases.join("; ")}; no verdict recorded`;
-    if (verdict.droppedFindings?.length)
-      return `error: invalid findings; ${verdict.droppedFindings.join("; ")}; no verdict recorded`;
-    if (
-      Array.isArray(rawFindings) &&
-      (verdict.findings?.some((finding, i) => finding.id !== (rawFindings[i] as Record<string, unknown>)?.id) ||
-        new Set(verdict.findings?.map((finding) => finding.id)).size !== verdict.findings?.length)
-    )
-      return "error: findings require unique exact IDs; no verdict recorded";
-    for (const finding of verdict.findings ?? []) {
-      const retained =
-        ctx.reviewHistory?.snapshot?.findings.find((row) => row.finding.id === finding.id)?.finding.cases?.length ?? 0;
-      const seen = new Set<string>();
-      for (const [index, row] of (finding.cases ?? []).entries()) {
-        const key = JSON.stringify([row.scenario, row.expected]);
-        if (index >= retained && seen.has(key))
-          return `error: new cases for ${finding.id} repeat a prior or new case; assess prior IDs in caseAssessments; no verdict recorded`;
-        seen.add(key);
-      }
-    }
-    if (verdict.findings) verdict.findings = verdict.findings.map(withFindingCaseIds);
-    if (ctx.reviewHistory) {
-      if (!verdict.head)
-        return "error: a valid reviewed commit head is required for a bound PR verdict; run git rev-parse HEAD and refresh complete history at that head; no verdict recorded";
-      if (ctx.reviewHistory.requiredHead !== undefined && verdict.head !== ctx.reviewHistory.requiredHead)
-        return "error: reviewed head differs from the required review head; refresh complete PR history and submit at that head; no verdict recorded";
-      const snapshot = ctx.reviewHistory.snapshot;
-      if (!snapshot)
-        return "error: read complete PR history with github_pull_get and includeReviewHistory: true before submitting; no verdict recorded";
-      if (verdict.head !== snapshot.head)
-        return "error: reviewed head differs from the history snapshot; refresh github_pull_get with includeReviewHistory: true at the reviewed head; no verdict recorded";
-      const invalid = validateReviewFollowup(verdict, snapshot.findings);
-      if (invalid) return `error: ${invalid}; no verdict recorded`;
-    } else if (verdict.resolutions?.length || verdict.caseAssessments?.length)
-      return "error: prior finding history is unavailable; no verdict recorded";
-    const notes: string[] = [];
-    if (verdict.downgraded) notes.push(`downgraded from approve: ${downgradeNote(verdict.downgraded)}`);
-    if (verdict.findings) notes.push(`${verdict.findings.length} finding${verdict.findings.length === 1 ? "" : "s"}`);
-    if (verdict.droppedFindings?.length) notes.push(`dropped: ${verdict.droppedFindings.join("; ")}`);
-    const receipt = notes.length
-      ? `verdict recorded: ${verdict.verdict} (${notes.join("; ")})`
-      : `verdict recorded: ${verdict.verdict}`;
-    // Replay cannot reconstruct controller-preserved cases from an ID-only model call.
-    const result =
-      verdict.caseAssessments !== undefined || verdict.findings?.some((f) => f.cases || f.id.startsWith("review:"))
-        ? `${receipt}\nRecorded verdict: ${JSON.stringify(verdict)}`
-        : receipt;
-    if (result.length > MAX_TOOL_RESULT_CHARS)
-      return "error: the complete verdict receipt exceeds the tool result limit; shorten evidence notes; no verdict recorded";
-    ctx.onVerdict?.(verdict);
-    return result;
+    if (result.accepted) ctx.onVerdict?.(result.verdict);
+    return result.receipt;
   },
 };
+
+type VerdictSubmissionOutcome =
+  | { accepted: true; verdict: import("../core/reviewVerdict.js").ReviewVerdict; receipt: string }
+  | { accepted: false; stage: import("../core/reviewVerdict.js").ReviewRejectionStage; receipt: string };
+const rejectedVerdict = (
+  stage: import("../core/reviewVerdict.js").ReviewRejectionStage,
+  receipt: string,
+): VerdictSubmissionOutcome => ({ accepted: false, stage, receipt });
+
+async function validateVerdictSubmission(
+  input: Record<string, unknown>,
+  ctx: import("./runnableTool.js").ToolContext,
+): Promise<VerdictSubmissionOutcome> {
+  ctx.reportToolFailure?.({ code: "invalid_input", recovery: "correct" });
+  if (input.priorFindings !== undefined) {
+    if (
+      !Array.isArray(input.priorFindings) ||
+      !Array.isArray(input.findings) ||
+      input.priorFindings.some(
+        (row) =>
+          !row ||
+          typeof row !== "object" ||
+          Array.isArray(row) ||
+          typeof row.findingId !== "string" ||
+          !row.findingId ||
+          Object.keys(row).some((key) => key !== "findingId" && key !== "cases"),
+      )
+    )
+      return rejectedVerdict(
+        "reference",
+        "error: priorFindings require exact issued findingId and optional new cases; no verdict recorded",
+      );
+    const prior = ctx.reviewHistory?.snapshot?.findings ?? [];
+    for (const row of input.priorFindings as Record<string, unknown>[])
+      if (!prior.some((issued) => issued.finding.id === row.findingId))
+        return rejectedVerdict(
+          "reference",
+          "error: priorFindings contains an unissued identity; read complete current-head history; no verdict recorded",
+        );
+    input = {
+      ...input,
+      findings: [
+        ...input.findings,
+        ...input.priorFindings.map((row) => ({
+          id: row.findingId,
+          ...(row.cases !== undefined ? { cases: row.cases } : {}),
+        })),
+      ],
+    };
+  }
+  const materialized = materializeReviewFollowup(input, ctx.reviewHistory?.snapshot?.findings ?? []);
+  if (materialized.error) return rejectedVerdict("reference", `error: ${materialized.error}; no verdict recorded`);
+  input = materialized.input;
+  // The level in force rides the context (the dispatcher resolved it for
+  // the run); absent — a CLI, a unit test — the parser holds the default.
+  const verdict = parseVerdictInput(input, {
+    ...(ctx.addressSeverity !== undefined ? { addressSeverity: ctx.addressSeverity } : {}),
+  });
+  if (!verdict)
+    return rejectedVerdict(
+      "reference",
+      "error: verdict must be exactly approve|request_changes; resolutions and caseAssessments require unique exact IDs, valid outcomes and non-empty evidence notes; no verdict recorded",
+    );
+  const rawFindings = input.findings;
+  if (rawFindings !== undefined && !Array.isArray(rawFindings))
+    return rejectedVerdict("input", "error: findings must be an array; no verdict recorded");
+  if (Array.isArray(rawFindings)) {
+    const untyped = rawFindings.flatMap((raw, index) =>
+      typeof raw === "object" &&
+      raw !== null &&
+      !Array.isArray(raw) &&
+      ((raw as Record<string, unknown>).kind === "single" || (raw as Record<string, unknown>).kind === "pattern")
+        ? []
+        : [`findings[${index}]: declare kind single or pattern`],
+    );
+    if (untyped.length) return rejectedVerdict("input", `error: ${untyped.join("; ")}; no verdict recorded`);
+  }
+  const invalidCases = verdict.droppedFindings?.filter((reason) =>
+    /dropped — (invariant and a non-empty cases array|each case needs|a single finding cannot carry)/.test(reason),
+  );
+  if (invalidCases?.length)
+    return rejectedVerdict(
+      "input",
+      `error: invalid invariant case table; ${invalidCases.join("; ")}; no verdict recorded`,
+    );
+  if (verdict.droppedFindings?.length)
+    return rejectedVerdict(
+      "input",
+      `error: invalid findings; ${verdict.droppedFindings.join("; ")}; no verdict recorded`,
+    );
+  if (
+    Array.isArray(rawFindings) &&
+    (verdict.findings?.some((finding, i) => finding.id !== (rawFindings[i] as Record<string, unknown>)?.id) ||
+      new Set(verdict.findings?.map((finding) => finding.id)).size !== verdict.findings?.length)
+  )
+    return rejectedVerdict("reference", "error: findings require unique exact IDs; no verdict recorded");
+  for (const finding of verdict.findings ?? []) {
+    const retained =
+      ctx.reviewHistory?.snapshot?.findings.find((row) => row.finding.id === finding.id)?.finding.cases?.length ?? 0;
+    const seen = new Set<string>();
+    for (const [index, row] of (finding.cases ?? []).entries()) {
+      const key = JSON.stringify([row.scenario, row.expected]);
+      if (index >= retained && seen.has(key))
+        return rejectedVerdict(
+          "input",
+          `error: new cases for ${finding.id} repeat a prior or new case; assess prior IDs in caseAssessments; no verdict recorded`,
+        );
+      seen.add(key);
+    }
+  }
+  if (verdict.findings) verdict.findings = verdict.findings.map(withFindingCaseIds);
+  if (ctx.reviewHistory) {
+    if (!verdict.head)
+      return rejectedVerdict(
+        "head",
+        "error: a valid reviewed commit head is required for a bound PR verdict; run git rev-parse HEAD and refresh complete history at that head; no verdict recorded",
+      );
+    if (ctx.reviewHistory.requiredHead !== undefined && verdict.head !== ctx.reviewHistory.requiredHead)
+      return rejectedVerdict(
+        "head",
+        "error: reviewed head differs from the required review head; refresh complete PR history and submit at that head; no verdict recorded",
+      );
+    const snapshot = ctx.reviewHistory.snapshot;
+    if (!snapshot)
+      return rejectedVerdict(
+        "history",
+        "error: read complete PR history with github_pull_get and includeReviewHistory: true before submitting; no verdict recorded",
+      );
+    if (verdict.head !== snapshot.head)
+      return rejectedVerdict(
+        "head",
+        "error: reviewed head differs from the history snapshot; refresh github_pull_get with includeReviewHistory: true at the reviewed head; no verdict recorded",
+      );
+    const invalid = validateReviewFollowup(verdict, snapshot.findings);
+    if (invalid) return rejectedVerdict("history", `error: ${invalid}; no verdict recorded`);
+  } else if (verdict.resolutions?.length || verdict.caseAssessments?.length)
+    return rejectedVerdict("history", "error: prior finding history is unavailable; no verdict recorded");
+  const notes: string[] = [];
+  if (verdict.downgraded) notes.push(`downgraded from approve: ${downgradeNote(verdict.downgraded)}`);
+  if (verdict.findings) notes.push(`${verdict.findings.length} finding${verdict.findings.length === 1 ? "" : "s"}`);
+  if (verdict.droppedFindings?.length) notes.push(`dropped: ${verdict.droppedFindings.join("; ")}`);
+  const receipt = notes.length
+    ? `verdict recorded: ${verdict.verdict} (${notes.join("; ")})`
+    : `verdict recorded: ${verdict.verdict}`;
+  // Replay cannot reconstruct controller-preserved cases from an ID-only model call.
+  const result =
+    verdict.caseAssessments !== undefined || verdict.findings?.some((f) => f.cases || f.id.startsWith("review:"))
+      ? `${receipt}\nRecorded verdict: ${JSON.stringify(verdict)}`
+      : receipt;
+  if (result.length > MAX_TOOL_RESULT_CHARS)
+    return rejectedVerdict(
+      "input",
+      "error: the complete verdict receipt exceeds the tool result limit; shorten evidence notes; no verdict recorded",
+    );
+  return { accepted: true, verdict, receipt: result };
+}
 
 // A coding run's answer to the issued findings (agent-ship item 6): validate
 // against the exact IDs the coordinator bound to this child before replacing

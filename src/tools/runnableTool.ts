@@ -170,6 +170,8 @@ export interface ToolContext {
    *  Injected by the dispatcher for review runs; the last call wins. The
    *  dispatcher turns it into the deterministic first line of the GitHub post
    *  (src/core/reviewVerdict.ts). Absent → the tool still accepts the call. */
+  /** Persist the original private proposal and its validation before acknowledging it. */
+  onReviewSubmission?: (submission: import("../core/reviewVerdict.js").ReviewSubmission) => Promise<void>;
   onVerdict?: (verdict: ReviewVerdict) => void;
   /** The severity to address in force for this run (docs/reference/specs/agent-review.md
    *  item 5a), resolved by the dispatcher — directive > user > channel > org —

@@ -22,7 +22,7 @@ import { SlackConversationReader } from "../channels/slack/references.js";
 import type { SlackContextRequest } from "../tools/slackContext.js";
 import { ASKS, bearerExpiresAt, HOSTED_DEADLINE_MARGIN_MINUTES, minutesToMs } from "./budgets.js";
 import { contractFromPlan, DEFAULT_CONTRACT_MAX_CHARS, renderContract } from "./ship/contract.js";
-import { NO_VERDICT_LINE } from "./reviewVerdict.js";
+import { INCOMPLETE_REVIEW_LINE } from "./reviewVerdict.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
 import { SELF_DESCRIPTION_HEADER, selfDescriptionBlock } from "./selfDescription.js";
 import { InMemoryGithubApi } from "../execution/githubApi.js";
@@ -5575,10 +5575,10 @@ describe("review post-step", () => {
     deps.postReviewComment = spy.fn;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
-    expect(replies).toContain("answer"); // Slack still gets the review
+    expect(replies).toContainEqual(expect.stringContaining("answer")); // Slack still gets the review
     // No submit_verdict call → fail-closed: the body leads with the explicit
     // non-approving line, never "LGTM".
-    expect(spy.calls[0].body.startsWith(`${NO_VERDICT_LINE}\n\n_Reviewed at \`e8e43f4\`._`)).toBe(true);
+    expect(spy.calls[0].body.startsWith(`${INCOMPLETE_REVIEW_LINE}\n\n_Reviewed at \`e8e43f4\`._`)).toBe(true);
     expect(spy.calls).toEqual([
       {
         target: { repo: "acme/api", number: 42, commitId: PR_HEAD },
@@ -5609,7 +5609,7 @@ describe("review post-step", () => {
                 type: "tool_use",
                 id: "v2",
                 name: "submit_verdict",
-                input: { verdict: "approve", summary: "the change is sound", head: PR_HEAD },
+                input: { findings: [], verdict: "approve", summary: "the change is sound", head: PR_HEAD },
               },
             ],
             stopReason: "tool_use",
@@ -5634,8 +5634,8 @@ describe("review post-step", () => {
         body: expect.stringContaining("### Full review\n\nVerdict: approve — the change is sound.\n\n</details>"),
       },
     ]);
-    expect(spy.calls[0].body.startsWith("LGTM: issues not itemized\n\n")).toBe(true);
-    expect(replies.some((r) => r.includes("Verdict: approve — the change is sound."))).toBe(true);
+    expect(spy.calls[0].body.startsWith("LGTM: no issues found\n\n")).toBe(true);
+    expect(replies.some((r) => r.includes("LGTM: the change is sound"))).toBe(true);
     expect(replies.some((r) => r.includes("Verdict submitted."))).toBe(false);
     const events = registry.snapshot("rv1", "tv1")?.events ?? [];
     const turnNotes = events.filter((e) => e.type === "run_note" && e.kind === "verdict_turn");
@@ -5920,7 +5920,27 @@ describe("review post-step", () => {
             pendingAnswer = t.answer;
             return {
               content: [
-                { type: "tool_use", id: `v${i}`, name: "submit_verdict", input: { ...t.verdict, summary: "ok" } },
+                {
+                  type: "tool_use",
+                  id: `v${i}`,
+                  name: "submit_verdict",
+                  input: {
+                    findings:
+                      t.verdict.verdict === "approve"
+                        ? []
+                        : [
+                            {
+                              id: "F1",
+                              kind: "single",
+                              severity: "major",
+                              file: "src/x.ts",
+                              title: "The reported issue remains",
+                            },
+                          ],
+                    ...t.verdict,
+                    summary: "ok",
+                  },
+                },
               ],
               stopReason: "tool_use",
             };
@@ -6017,7 +6037,7 @@ describe("review post-step", () => {
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: OTHER_HEAD });
       expect(spy.calls[0].body).toMatch(
-        /^LGTM: issues not itemized\n\n_Reviewed at `d75b5a5`\._[\s\S]*### Full review\n\nLooks solid\.\n\n<\/details>\n\n<!-- switchboard:verdict [^\n]* -->\n\n_Reviewed at e8e43f4; the head moved to d75b5a5 during the review — a rebase of the same 2 commits — so this review is posted against d75b5a5\._$/,
+        /^LGTM: no issues found\n\n_Reviewed at `d75b5a5`\._[\s\S]*### Full review\n\nLooks solid\.\n\n<\/details>\n\n<!-- switchboard:verdict [^\n]* -->\n\n_Reviewed at e8e43f4; the head moved to d75b5a5 during the review — a rebase of the same 2 commits — so this review is posted against d75b5a5\._$/,
       );
       expect(commitAsks).toEqual([
         { base: "main", sha: PR_HEAD },
@@ -6063,17 +6083,16 @@ describe("review post-step", () => {
       // Posted once, pinned to the new head, with the SECOND verdict and answer — the first approve is void.
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: OTHER_HEAD });
-      expect(spy.calls[0].body.startsWith("Changes requested: issues not itemized\n\n_Reviewed at `d75b5a5`")).toBe(
-        true,
-      );
+      expect(spy.calls[0].body.split("\n")[0]).toBe("Changes requested: 1 issue");
+      expect(spy.calls[0].body).toContain("_Reviewed at `d75b5a5`._");
       expect(spy.calls[0].body).toContain("### Full review\n\nSecond review: the new test is wrong.\n\n</details>");
       // The thread: the 🔀 note at detection, the second answer as the reply, no stale-pin note.
       expect(replies).toContain(
         "🔀 acme/api#42 moved during the run: reviewed e8e43f4, head is now d75b5a5 — 1 → 2 commits (+ “fix: review nits”). Re-reviewing at d75b5a5 before posting.",
       );
-      // The reply is rendered from the verdict (item 5b); with no itemized
-      // findings the second write-up rides along — the first never reaches the thread.
-      expect(replies.some((r) => r.includes("Second review: the new test is wrong."))).toBe(true);
+      // The accepted finding reaches the reply; the full second write-up
+      // remains on the PR, and the first approval never reaches the thread.
+      expect(replies.some((r) => r.includes("The reported issue remains"))).toBe(true);
       expect(replies.some((r) => r.includes("First review: approve."))).toBe(false);
       expect(replies.some((r) => r.includes("re-request"))).toBe(false);
       // The card said so while it happened, and the run stream carries the note.
@@ -6283,7 +6302,19 @@ describe("review post-step", () => {
                   verdict,
                   summary,
                   ...(head ? { head } : {}),
-                  ...(findings ? { findings } : {}),
+                  findings:
+                    findings ??
+                    (verdict === "approve"
+                      ? []
+                      : [
+                          {
+                            id: "F1",
+                            kind: "single",
+                            severity: "major",
+                            file: "src/x.ts",
+                            title: "The reported issue remains",
+                          },
+                        ]),
                 },
               },
             ],
@@ -6308,7 +6339,7 @@ describe("review post-step", () => {
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
     expect(spy.calls).toHaveLength(1);
-    expect(spy.calls[0].body.startsWith("LGTM: issues not itemized\n\n_Reviewed at `ccccccc`")).toBe(true);
+    expect(spy.calls[0].body.startsWith("LGTM: no issues found\n\n_Reviewed at `ccccccc`")).toBe(true);
     expect(spy.calls[0].body).toContain("### Full review\n\nLooks solid.\n- nit: naming\n\n</details>");
     // pinned to the reviewed head so the workflow's stale-review guard can bite
     expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: "c".repeat(40) });
@@ -6326,7 +6357,7 @@ describe("review post-step", () => {
     deps.postReviewComment = spy.fn;
     const { io } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
-    expect(spy.calls[0].body.startsWith("Changes requested: issues not itemized\n\n")).toBe(true);
+    expect(spy.calls[0].body.startsWith("Changes requested: 1 issue\n\n")).toBe(true);
     expect(spy.calls[0].body.startsWith("LGTM")).toBe(false);
     expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: PR_HEAD });
   });
@@ -6469,7 +6500,7 @@ describe("review post-step", () => {
     deps.postReviewComment = spy.fn;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review acme/api#42 — don't post, slack only"), io);
-    expect(replies).toContain("answer");
+    expect(replies).toContainEqual(expect.stringContaining("answer"));
     expect(spy.fn).not.toHaveBeenCalled();
   });
 
@@ -6483,7 +6514,7 @@ describe("review post-step", () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review look at the diff in acme/api"), io);
-    expect(replies).toContain("answer");
+    expect(replies).toContainEqual(expect.stringContaining("answer"));
     expect(spy.fn).not.toHaveBeenCalled();
     // The skip is never silent: a review that lands only in Slack says why.
     expect(log.mock.calls.map((c) => c.map(String).join(" "))).toContainEqual(
@@ -6500,7 +6531,7 @@ describe("review post-step", () => {
     deps.postReviewComment = spy.fn;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review re-review"), io);
-    expect(replies).toContain("answer");
+    expect(replies).toContainEqual(expect.stringContaining("answer"));
     expect(spy.fn).not.toHaveBeenCalled();
     expect(replies.some((r) => /not posted to acme\/api#42/.test(r) && /closed/.test(r))).toBe(true);
   });
@@ -6514,7 +6545,7 @@ describe("review post-step", () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review re-review, slack only"), io);
-    expect(replies).toContain("answer");
+    expect(replies).toContainEqual(expect.stringContaining("answer"));
     expect(spy.fn).not.toHaveBeenCalled();
     expect(replies.some((r) => /not posted to/.test(r))).toBe(false);
     expect(log.mock.calls.map((c) => c.map(String).join(" "))).toContainEqual(
@@ -6622,7 +6653,7 @@ describe("review post-step", () => {
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: PR_HEAD });
-      expect(spy.calls[0].body.startsWith("LGTM: issues not itemized")).toBe(true);
+      expect(spy.calls[0].body.startsWith("LGTM: no issues found")).toBe(true);
     });
 
     it("no git in the cwd and the reported head mismatches → no post", async () => {
@@ -6695,7 +6726,7 @@ describe("review post-step", () => {
     deps.postReviewComment = vi.fn(async () => ({ state: "refused" as const, status: 403 }));
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review acme/api#42"), io);
-    expect(replies).toContain("answer");
+    expect(replies).toContainEqual(expect.stringContaining("answer"));
     expect(replies).toContain(
       "ℹ️ Review not posted to acme/api#42: the review publication was refused — this verdict is Slack-only.",
     );
@@ -6719,7 +6750,7 @@ describe("review post-step", () => {
     });
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review acme/api#42"), io);
-    expect(replies).toContain("answer");
+    expect(replies).toContainEqual(expect.stringContaining("answer"));
     expect(deps.postReviewComment).toHaveBeenCalledTimes(1);
     expect(replies.some((reply) => reply.includes("could not confirm whether the review posted to acme/api#42"))).toBe(
       true,
@@ -8306,7 +8337,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
                 type: "tool_use",
                 id: "v1",
                 name: "submit_verdict",
-                input: { verdict: "approve", summary: "ok", head: HEAD },
+                input: { findings: [], verdict: "approve", summary: "ok", head: HEAD },
               },
             ],
             stopReason: "tool_use",
@@ -9292,7 +9323,10 @@ describe("closed-card checklist and review verdict run link", () => {
     deps.runRegistry = spy;
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
-    expect(replies).toContain("answer\n\n[Live run](https://bot.example/runs/run-x?t=tok-x)");
+    expect(replies).toContainEqual(
+      expect.stringContaining("answer\n\n[Live run](https://bot.example/runs/run-x?t=tok-x)"),
+    );
+    expect(replies.join(" ")).toContain(INCOMPLETE_REVIEW_LINE);
     const answerEvent = events.find((e) => e.type === "answer");
     if (answerEvent?.type !== "answer") throw new Error("unreachable");
     expect(answerEvent.text).toBe("answer"); // the run record is the source of truth, link-free
@@ -9362,11 +9396,13 @@ describe("closed-card checklist and review verdict run link", () => {
     expect(replies.join("\n")).not.toContain("classifier");
   });
 
-  it("a review with no PUBLIC_BASE_URL replies the bare answer (graceful degradation)", async () => {
+  it("a review with no PUBLIC_BASE_URL retains its incomplete report without a run link", async () => {
     const deps = reviewRunDeps(capturingProvider());
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
-    expect(replies).toContain("answer");
+    expect(replies).toContainEqual(expect.stringContaining("answer"));
+    expect(replies.join(" ")).toContain(INCOMPLETE_REVIEW_LINE);
+    expect(replies.join(" ")).not.toContain("Live run");
   });
 });
 
@@ -9721,7 +9757,7 @@ describe("skill loading / progressive disclosure", () => {
     const deps: CoreDeps = { ...makeDeps(YAML_FIXTURE, provider), skills: skillStore() };
     const { io, replies } = fakeIO();
     await dispatch(deps, msg("agent:review load the review skill"), io);
-    expect(replies).toContain("done");
+    expect(replies).toContainEqual(expect.stringContaining("done"));
     // The 2nd model call sees the loaded skill body in the tool result.
     expect(JSON.stringify(provider.requests[1].messages)).toContain("REVIEW SKILL BODY");
   });
@@ -13347,24 +13383,20 @@ workspaceDir: __WORKDIR__
         return { repo: "acme/api", pr: 7, prFromMessage: true, headSha: HEAD_A, baseRef: "main" };
       });
       deps.fetchPrFacts = vi.fn(async () => openBotPr());
-      deps.operatorModel = vi.fn<RouteModel>(async () =>
-        request.startsWith("agent:")
-          ? { tool: "ask", input: { text: "Which repository?", proposalSettings: {}, reason: "missing" } }
-          : {
-              tool: "bind_preset",
-              input: {
-                preset: "ship",
-                shipEntry: "review",
-                repo: "acme/api",
-                prTarget: { number: 7, source: "request", quote: PR_URL },
-                reason: "review the named PR",
-              },
-            },
-      );
+      deps.operatorModel = vi.fn<RouteModel>(async () => ({
+        tool: "bind_preset",
+        input: {
+          preset: "ship",
+          shipEntry: "review",
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: PR_URL },
+          reason: "review the named PR",
+        },
+      }));
       deps.runRegistry = new RunRegistry({ genId: () => "run-ship-review-entry", genToken: () => "tok" });
       const { io } = fakeIO();
       await dispatch(deps, msg(request, "slack:UADMIN"), io);
-      expect(deps.operatorModel).toHaveBeenCalledTimes(request.startsWith("agent:") ? 0 : 1);
+      expect(deps.operatorModel).toHaveBeenCalledOnce();
       expect(created).toHaveLength(1);
       const { unit } = await handed(instances, "run-ship-review-entry");
       expect(unit).toMatchObject({ resume: { pr: 7, headSha: HEAD_A } });
@@ -13386,8 +13418,14 @@ workspaceDir: __WORKDIR__
       return { repo: "acme/api", pr: 7, prFromMessage: true, headSha: HEAD_A, baseRef: "main" };
     });
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
-      tool: "ask",
-      input: { text: "Which repository?", proposalSettings: {}, reason: "missed PR route" },
+      tool: "bind_preset",
+      input: {
+        preset: "ship",
+        repo: "acme/api",
+        shipEntry: "review",
+        prTarget: { number: 7, source: "request", quote: PR_URL },
+        reason: "review this PR before shipping",
+      },
     }));
     deps.runRegistry = new RunRegistry({ genId: () => "run-private-ship-review", genToken: () => "tok" });
     const directAudience = {
@@ -13409,7 +13447,7 @@ workspaceDir: __WORKDIR__
       },
       io,
     );
-    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(deps.operatorModel).toHaveBeenCalledOnce();
     expect(provider.requests).toEqual([]);
     expect(created).toHaveLength(1);
     const { unit } = await handed(instances, "run-private-ship-review");
@@ -15412,7 +15450,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       gen: "gen-T",
       meta: { userId: request.userId, repo, ref, pr, headSha: current },
     });
-    expect(h.registry.getById("run-old")).toMatchObject({ finished: true, status: "completed" });
+    expect(h.registry.getById("run-old")).toMatchObject({ finished: true, status: "failed" });
     expect(h.ledger.finished.get("run-old")).toMatchObject({
       startedAt,
       userId: request.userId,
@@ -21880,7 +21918,19 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
                 type: "tool_use",
                 id: "v1",
                 name: "submit_verdict",
-                input: { verdict: "request_changes", summary: "two findings" },
+                input: {
+                  findings: [
+                    {
+                      id: "F1",
+                      kind: "single",
+                      severity: "major",
+                      file: "src/x.ts",
+                      title: "The reported issue remains",
+                    },
+                  ],
+                  verdict: "request_changes",
+                  summary: "two findings",
+                },
               },
             ],
             stopReason: "tool_use",
@@ -24614,7 +24664,7 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
     expect({
       status: saved.status,
       failure: saved.events.filter((event) => event.type === "run_note" && event.kind === "run_failed"),
-    }).toEqual({ status: "completed", failure: [] });
+    }).toEqual({ status: "failed", failure: [] });
     expect({
       key: saved.session?.key,
       seedFrom: saved.session?.seedFrom,
@@ -26728,7 +26778,7 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     await dispatch(s.deps, msg("agent:ship continue https://github.com/acme/api/pull/7", "slack:UADMIN"), io, {
       thread: [s.shipParent],
     });
-    expect(s.operator).not.toHaveBeenCalled();
+    expect(s.operator).toHaveBeenCalledOnce();
     expect(s.deps.recoverOriginalUnit).toHaveBeenCalledWith(
       { instanceId: INSTANCE, unit: "U12" },
       expect.objectContaining({ userId: "slack:UADMIN", threadKey: THREAD }),
@@ -28164,6 +28214,75 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     });
   });
 
+  it.each([false, true])(
+    "a formal Review choice repairs a wrong Ship proposal or ends with no Ship effects: exhausted=%s",
+    async (exhausted) => {
+      vi.stubEnv("SANDBOX_TOKEN", "tok");
+      vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const { deps, provider, registry } = operatorDeps(
+        RESIDENT_YAML_FIXTURE.replace("routing: { operator: off }\n", "routing: { operator: on }\n"),
+      );
+      const url = "https://github.com/acme/api/pull/7";
+      const head = "a".repeat(40);
+      residentFetchStub({
+        attach: () =>
+          Response.json({ workspace: "/workspace/threads/t/main", ref: "patch-1", sha: head, user: "worker3" }),
+      });
+      const request = `agent:review effort:high budget:15 Review ${url}`;
+      let turns = 0;
+      deps.operatorModel = vi.fn<RouteModel>(async () => ({
+        tool: "bind_preset",
+        input: {
+          preset: exhausted || turns++ === 0 ? "ship" : "review",
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: url },
+          effort: "high",
+          budget: 15,
+          settingsEvidence: {
+            effort: { quote: "effort:high", intent: "requested" },
+            budget: { quote: "budget:15", intent: "requested" },
+          },
+          reason: "requested Review",
+        },
+      }));
+      deps.resolveRepoContext = vi.fn(() => ({
+        repo: "acme/api",
+        ref: "patch-1",
+        pr: 7,
+        headSha: head,
+        baseRef: "main",
+        refFromPr: true,
+      }));
+      deps.fetchPrHead = async () => head;
+      await dispatch(deps, msg(request, "slack:UADMIN"), fakeIO().io);
+      expect(deps.invoked).toEqual([]);
+      expect(registry.getById("r1")?.agent === "ship").toBe(false);
+      if (exhausted) {
+        expect(provider.requests).toEqual([]);
+        expect(deps.resolveRepoContext).not.toHaveBeenCalled();
+        expect(registry.getById("r1")?.agent === "review").toBe(false);
+      } else {
+        expect(deps.operatorModel).toHaveBeenCalledTimes(2);
+        expect(registry.getById("r1")).toMatchObject({ agent: "review" });
+        expect(registry.snapshotById("r1")?.events.find((event) => event.type === "operator")).toMatchObject({
+          binds: [{ preset: "review", effort: "high", budget: 15 }],
+        });
+        expect(provider.requests[0]?.effort).toBe("high");
+        expect(provider.requests[0]?.system).toContain("Budget: 15 min");
+        expect(JSON.stringify(provider.requests[0]?.messages)).toContain(`effort:high budget:15 Review ${url}`);
+        expect(deps.resolveRepoContext).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.anything(),
+          undefined,
+          expect.anything(),
+          true,
+          { repo: "acme/api", prTarget: { number: 7, source: "request", quote: url } },
+        );
+      }
+    },
+  );
+
   it.each(["Use model:anthropic/coding-model to answer this.", "`model:anthropic/coding-model` answer this."])(
     "on: an exact requested model ref reaches the run with its text intact: %s",
     async (request) => {
@@ -28400,17 +28519,22 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
   });
 
   it.each(["", "/changes", "/files?diff=split#diff-abc"])(
-    "a requester-authored Review PR URL reaches preflight even when the model would ask for its repository",
+    "a typed Review proposal carries its exact requester-authored PR URL into preflight",
     async (suffix) => {
       const { deps } = operatorDeps(ON_YAML);
       const url = `https://github.com/acme/api/pull/7${suffix}`;
       deps.operatorModel = vi.fn<RouteModel>(async () => ({
-        tool: "ask",
-        input: { text: "Which repository?", proposalSettings: {}, reason: "missing" },
+        tool: "bind_preset",
+        input: {
+          preset: "review",
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: url },
+          reason: "review this PR",
+        },
       }));
       deps.resolveRepoContext = vi.fn(() => ({ repo: "acme/api", pr: 7, closedPr: { number: 7, merged: true } }));
       await dispatch(deps, msg(`agent:review Please review pull request ${url}`, "slack:UADMIN"), fakeIO().io);
-      expect(deps.operatorModel).not.toHaveBeenCalled();
+      expect(deps.operatorModel).toHaveBeenCalledOnce();
       expect(deps.resolveRepoContext).toHaveBeenCalledWith(
         expect.anything(),
         expect.anything(),
@@ -28430,8 +28554,13 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       "App notification from App: The author updated the tests.\n" +
       "Why: The earlier review requested a regression guard.";
     deps.operatorModel = vi.fn<RouteModel>(async () => ({
-      tool: "ask",
-      input: { text: "Which repository?", reason: "older source unavailable" },
+      tool: "bind_preset",
+      input: {
+        preset: "review",
+        repo: "acme/api",
+        prTarget: { number: 7, source: "request", quote: url },
+        reason: "review this updated PR",
+      },
     }));
     const tail = vi.spyOn(deps.runLedger, "readSessionTail").mockRejectedValue(new Error("older source unavailable"));
     deps.resolveRepoContext = vi.fn(() => ({ repo: "acme/api", pr: 7, closedPr: { number: 7, merged: true } }));
@@ -28452,7 +28581,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
         },
       ],
     });
-    expect(deps.operatorModel).not.toHaveBeenCalled();
+    expect(deps.operatorModel).toHaveBeenCalledOnce();
     expect(tail).not.toHaveBeenCalled();
     expect(deps.resolveRepoContext).toHaveBeenCalledWith(
       expect.anything(),
@@ -31153,7 +31282,12 @@ describe("durable operator conversation without an agent run", () => {
           originAudience: async () =>
             incoming.threadKey === MEMORY_PRODUCER.threadKey && !visible ? undefined : "public",
         });
+        let contextRead = false;
         deps.operatorModel = vi.fn<RouteModel>(async (prompt) => {
+          if (!contextRead) {
+            contextRead = true;
+            return { tool: "thread_state", input: {} };
+          }
           // Even a positive semantic claim cannot revive a revoked source.
           if (prompt.tool.name === "verify")
             return { tool: "verify", input: { agrees: true, reason: "scripted semantic claim" } };
@@ -31167,7 +31301,7 @@ describe("durable operator conversation without an agent run", () => {
         const channel = fakeIO();
         await dispatch(deps, msg("What is the deploy command?", "slack:UADMIN"), channel.io);
         await deps.runHistoryWriter.settled();
-        expect(deps.operatorModel).toHaveBeenCalledTimes(decision === "command" ? 2 : 1);
+        expect(deps.operatorModel).toHaveBeenCalledTimes(decision === "command" ? 3 : 2);
         expect(JSON.stringify(vi.mocked(deps.operatorModel).mock.calls)).toContain(
           "the deploy command is npm run deploy",
         );
@@ -31207,9 +31341,15 @@ describe("durable operator conversation without an agent run", () => {
           incoming.threadKey === MEMORY_PRODUCER.threadKey && !visible ? undefined : "public",
       });
       const prompts: unknown[] = [];
+      let contextRead = false;
+      let decisions = 0;
       deps.operatorModel = vi.fn<RouteModel>(async (request) => {
         prompts.push(structuredClone(request));
-        return prompts.length === 1
+        if (!contextRead) {
+          contextRead = true;
+          return { tool: "thread_state", input: {} };
+        }
+        return decisions++ === 0
           ? { tool: "ask", input: { text: secret, proposal: "runs list", reason: "a preference" } }
           : { tool: "ask", input: { text: "What should the new report cover?", reason: "a preference" } };
       });
@@ -31239,13 +31379,21 @@ describe("durable operator conversation without an agent run", () => {
       const deps = makeDeps(yaml, capturingProvider());
       deps.runStore = store;
       deps.runLedger = createLedgerWriteThrough({ ledger, gen, fallback: store, warn: () => {} });
-      deps.operatorModel = vi.fn<RouteModel>(async () => ({
-        tool: "ask",
-        input: {
-          text: gen === "first" ? "Should the report cover all connected repositories?" : "I have the earlier answer.",
-          reason: "request preference",
-        },
-      }));
+      let contextRead = false;
+      deps.operatorModel = vi.fn<RouteModel>(async () => {
+        if (!contextRead) {
+          contextRead = true;
+          return { tool: "thread_state", input: {} };
+        }
+        return {
+          tool: "ask",
+          input: {
+            text:
+              gen === "first" ? "Should the report cover all connected repositories?" : "I have the earlier answer.",
+            reason: "request preference",
+          },
+        };
+      });
       return deps;
     };
     const first = setup("first");

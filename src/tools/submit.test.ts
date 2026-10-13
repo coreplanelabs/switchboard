@@ -177,8 +177,9 @@ describe("submit_verdict tool", () => {
       verdict: "request_changes",
       summary: "Retry remains unsafe",
       head: f.head,
-      findings: [
-        { id: "review:1:F1", cases: [{ scenario: "A retry after rollback", expected: "Keep the replacement" }] },
+      findings: [],
+      priorFindings: [
+        { findingId: "review:1:F1", cases: [{ scenario: "A retry after rollback", expected: "Keep the replacement" }] },
       ],
       caseAssessments: f.assessments,
     };
@@ -435,6 +436,30 @@ describe("submit_verdict tool", () => {
     },
   );
 
+  it("keeps fresh findings separate from explicitly re-raised canonical prior references", async () => {
+    const { head, ctx, recorded } = caseReview("single");
+    const input = {
+      verdict: "request_changes",
+      summary: "Both boundaries remain",
+      head,
+      findings: [
+        { id: "F2", kind: "single", severity: "minor", file: "src/new.ts", title: "The new path drops its guard" },
+      ],
+      priorFindings: [{ findingId: "review:1:F1" }],
+    };
+    expect(await submitVerdictTool.run(input, ctx)).toContain("verdict recorded: request_changes (2 findings)");
+    expect(recorded[0].findings).toMatchObject([
+      { id: "F2", title: "The new path drops its guard" },
+      { id: "review:1:F1", title: "Retry drops new work" },
+    ]);
+    expect(
+      await submitVerdictTool.run({ ...input, priorFindings: [{ findingId: "review:current-run:F3" }] }, ctx),
+    ).toBe(
+      "error: priorFindings contains an unissued identity; read complete current-head history; no verdict recorded",
+    );
+    expect(recorded).toHaveLength(1);
+  });
+
   it("is in the review (readonly) toolset only — coding and research never emit verdicts", () => {
     const names = (key: string) => (TOOLSETS[key] ?? []).map((t) => t.name);
     expect(names("readonly")).toContain("submit_verdict");
@@ -445,20 +470,22 @@ describe("submit_verdict tool", () => {
   it("forwards a valid verdict to the context and acknowledges it", async () => {
     const got: unknown[] = [];
     const out = await submitVerdictTool.run(
-      { verdict: "approve", summary: "clean" },
+      { verdict: "approve", summary: "clean", findings: [] },
       ctxWith((v) => got.push(v)),
     );
-    expect(got).toEqual([{ verdict: "approve", summary: "clean" }]);
-    expect(out).toBe("verdict recorded: approve");
+    expect(got).toEqual([{ verdict: "approve", summary: "clean", findings: [] }]);
+    expect(out).toBe("verdict recorded: approve (0 findings)");
   });
 
   it("forwards the reported head (the commit the agent reviewed) alongside the verdict", async () => {
     const got: unknown[] = [];
     await submitVerdictTool.run(
-      { verdict: "approve", summary: "clean", head: "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3" },
+      { verdict: "approve", summary: "clean", head: "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3", findings: [] },
       ctxWith((v) => got.push(v)),
     );
-    expect(got).toEqual([{ verdict: "approve", summary: "clean", head: "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3" }]);
+    expect(got).toEqual([
+      { verdict: "approve", summary: "clean", head: "e8e43f480a09b76989b85ebe6a2a254d99a4d2a3", findings: [] },
+    ]);
     expect(submitVerdictTool.inputSchema.required).toContain("head");
   });
 
@@ -474,8 +501,17 @@ describe("submit_verdict tool", () => {
 
   it("tolerates a context with no verdict sink", async () => {
     await expect(
-      submitVerdictTool.run({ verdict: "request_changes", summary: "bug" }, ctxWith(undefined)),
-    ).resolves.toBe("verdict recorded: request_changes");
+      submitVerdictTool.run(
+        {
+          verdict: "request_changes",
+          summary: "bug",
+          findings: [
+            { id: "F1", kind: "single", severity: "major", file: "src/x.ts", title: "The result drops findings" },
+          ],
+        },
+        ctxWith(undefined),
+      ),
+    ).resolves.toBe("verdict recorded: request_changes (1 finding)");
   });
 
   // Feature: docs/reference/specs/agent-review.md item 5a — the severity gate
@@ -539,7 +575,7 @@ describe("submit_verdict tool", () => {
   // as typed entries with stable ids; the tool text is where the review agent
   // learns the id and severity contract.
   describe("findings (agent-ship item 6)", () => {
-    it("declares `findings` in the input schema — optional, with the finding field shapes and the severity vocabulary", () => {
+    it("declares required `findings` in the input schema, with the finding field shapes and the severity vocabulary", () => {
       const props = submitVerdictTool.inputSchema.properties as Record<string, any>;
       expect(props.findings?.type).toBe("array");
       const item = props.findings.items.anyOf[0];
@@ -547,7 +583,7 @@ describe("submit_verdict tool", () => {
       expect(item.required).not.toContain("line");
       expect(item.properties.severity.enum).toEqual(["blocking", "major", "minor", "nit"]);
       expect(item.properties.line.type).toBe("integer");
-      expect(submitVerdictTool.inputSchema.required).not.toContain("findings");
+      expect(submitVerdictTool.inputSchema.required).toContain("findings");
     });
 
     it("exposes a typed invariant and case matrix for pattern findings, with concrete push axes in the tool contract", async () => {
@@ -1210,3 +1246,64 @@ describe("submit_pr_description tool", () => {
 // default 5 min, model-requestable up to the 20-min ceiling, clamped at the
 // tool layer before any executor sees it. No timeoutMs → exactly the old call
 // shape, so every executor behaves as before.
+
+describe("review submission acceptance state", () => {
+  it.each(["pending", "accepted"])("a failed %s checkpoint cannot announce an accepted verdict", async (failure) => {
+    const accepted: ReviewVerdict[] = [];
+    const checkpoints: unknown[] = [];
+    const proposal = { verdict: "approve", summary: "No findings", head: "a".repeat(40), findings: [] };
+    const ctx = {
+      executor: {},
+      callId: "original-call",
+      onVerdict: (value: ReviewVerdict) => accepted.push(value),
+      onReviewSubmission: async (value: { status: string }) => {
+        checkpoints.push(value);
+        if (value.status === failure) throw new Error("checkpoint unavailable");
+      },
+    } as unknown as ToolContext;
+    await expect(submitVerdictTool.run(proposal, ctx)).rejects.toThrow("checkpoint unavailable");
+    expect(accepted).toEqual([]);
+    expect(checkpoints[0]).toEqual({ status: "pending", proposal, callId: "original-call" });
+  });
+
+  it("keeps the original proposal and rejection separate from the accepted verdict", async () => {
+    const seen: unknown[] = [];
+    const accepted: ReviewVerdict[] = [];
+    const ctx = {
+      executor: {},
+      onVerdict: (v: ReviewVerdict) => accepted.push(v),
+      onReviewSubmission: async (value: unknown) => {
+        seen.push(value);
+      },
+    } as unknown as ToolContext;
+    const proposal = {
+      verdict: "request_changes",
+      summary: "The original report remains",
+      head: "a".repeat(40),
+      findings: [
+        {
+          id: "review:current-run:F2",
+          kind: "single",
+          severity: "major",
+          file: "src/x.ts",
+          title: "A reported defect remains",
+        },
+      ],
+    };
+    const result = await submitVerdictTool.run(proposal, ctx);
+    expect(result).toContain("unknown prior finding review:current-run:F2");
+    expect(seen).toMatchObject([
+      { status: "pending", proposal },
+      { status: "rejected", proposal, reason: expect.stringContaining("unknown prior finding") },
+    ]);
+    const correction = { ...proposal, findings: [{ ...proposal.findings[0], id: "F1" }] };
+    expect(await submitVerdictTool.run(correction, ctx)).toContain("verdict recorded: request_changes (1 finding)");
+    expect(seen.slice(2)).toMatchObject([
+      { status: "pending", proposal: correction },
+      { status: "accepted", proposal: correction, verdict: { verdict: "request_changes", findings: [{ id: "F1" }] } },
+    ]);
+    expect(accepted).toMatchObject([
+      { verdict: "request_changes", findings: [{ id: "F1", title: "A reported defect remains" }] },
+    ]);
+  });
+});

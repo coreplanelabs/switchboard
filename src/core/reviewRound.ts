@@ -45,7 +45,7 @@ import {
   type PrCommitList,
 } from "./headMoved.js";
 import { decideReviewPost, reviewPostIntended, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
-import { buildReviewPostBody, type ReviewPost, type ReviewVerdict } from "./reviewVerdict.js";
+import { buildReviewPostBody, completeReviewVerdict, type ReviewPost, type ReviewVerdict } from "./reviewVerdict.js";
 import { checkReviewedHead, normalizeHead, sameCommit } from "./reviewedHead.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
 import { checkDigestCoverage, type PrSize } from "./digestCoverage.js";
@@ -916,6 +916,7 @@ export async function runReviewPostStep(
     /** The pinned head and the workspace HEAD observed after the turn. */
     heads: { reviewHead: string | undefined; observedHead: string | undefined };
     verdict: ReviewVerdict | undefined;
+    reviewIncomplete?: string;
     /** The last diff digest the round's agent computed (`diff_digest` →
      *  `onDigest`), or undefined when it never called the tool. */
     digest: DigestReport | undefined;
@@ -953,7 +954,8 @@ export async function runReviewPostStep(
       }
   ),
 ): Promise<ReviewPostOutcome> {
-  const { agent, repoCtx, verdict, carried, logKey } = input;
+  const { agent, repoCtx, carried, logKey } = input;
+  const verdict = input.reviewIncomplete !== undefined ? undefined : input.verdict;
   const { reviewHead, observedHead } = input.heads;
   // The record's fact (item 18): what a review round leaves behind about its
   // post. A non-review round posts nothing and records nothing; a hard-stopped
@@ -1122,7 +1124,12 @@ export async function runReviewPostStep(
     const target: ReviewCommentTarget = { ...postTarget, commitId: pinned };
     // The verdict line is built here, by code — the model's prose never
     // decides whether the body starts with "LGTM:" (auto-approve contract).
-    const rendered = buildReviewPostBody(input.answer, verdict, { repo: postTarget.repo, head: pinned });
+    const rendered = buildReviewPostBody(
+      input.answer,
+      verdict,
+      { repo: postTarget.repo, head: pinned },
+      input.reviewIncomplete,
+    );
     const body = carried ? `${rendered}\n\n${carriedFooter(carried)}` : rendered;
     const where = `${postTarget.repo}#${postTarget.number}`;
     const uncertain = async (): Promise<ReviewPostOutcome> => {
@@ -1142,7 +1149,7 @@ export async function runReviewPostStep(
       runId: journal.runId,
       target,
       bodyHash: await sourceHash(body),
-      ...(verdict ? { verdict: verdict.verdict } : {}),
+      ...(completeReviewVerdict(verdict) ? { verdict: verdict!.verdict } : {}),
       state: "pending",
     });
     if (!pending) return record({ posted: false, reason: "the complete review publication target was not confirmed" });
@@ -1209,7 +1216,7 @@ export async function runReviewPostStep(
       posted: true,
       target: { repo: postTarget.repo, number: postTarget.number },
       head: pinned,
-      ...(verdict !== undefined ? { verdict: verdict.verdict } : {}),
+      ...(completeReviewVerdict(verdict) ? { verdict: verdict!.verdict } : {}),
     });
   }
   return record({ posted: false, reason: skipReason });

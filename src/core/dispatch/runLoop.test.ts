@@ -933,7 +933,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       if (mode === "newer owner" || mode === "failed") {
         expect(inner.live.has(s.run.id)).toBe(true);
         if (mode === "newer owner") expect(inner.live.get(s.run.id)!.ownerGen).toBe("successor");
-        expect(await s.store.get(s.run.id)).toMatchObject({ id: s.run.id, status: "completed" });
+        expect(await s.store.get(s.run.id)).toMatchObject({ id: s.run.id, status: "failed" });
         expect(s.releases).toEqual([]);
       } else {
         expect(inner.live.has(s.run.id)).toBe(false);
@@ -8270,6 +8270,114 @@ describe("the pi harness — the review preset", () => {
     stopReason,
   });
 
+  it("a fresh same-head review cannot inherit a seeded approval from another run", async () => {
+    const observed = watched(piHarness);
+    const report = "Current review did not submit a verdict.";
+    observed.harness.open = async () => ({
+      answer: report,
+      followUp: async () => report,
+      remainingMs: () => 240_000,
+      end: async () => {},
+      record: () => ({
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "other-run-call",
+                name: "submit_verdict",
+                input: { verdict: "approve", summary: "Earlier review", head: HEAD, findings: [] },
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", toolUseId: "other-run-call", content: "verdict recorded: approve (0 findings)" },
+            ],
+          },
+          { role: "user", content: [{ type: "text", text: "Review this head again" }] },
+          { role: "assistant", content: [{ type: "text", text: report }] },
+        ],
+        compactions: [],
+        settlements: [],
+        turn: 1,
+        inboxConsumedSeq: 0,
+        deadline: NOW + 240_000,
+      }),
+    });
+    const s = setup("", {
+      agent: "review",
+      ...prThread,
+      yaml: REVIEW_PI_YAML,
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      review: { head: HEAD, post: async () => ({ state: "accepted" as const }) },
+    });
+    seedReviewHistory(s.deps, () => HEAD);
+    const out = answered(await runLoop(s.deps, await trackedCodingContext(s, s.ctx)));
+    expect({ report: out.answer, verdict: out.verdict?.verdict ?? "incomplete" }).toEqual({
+      report,
+      verdict: "incomplete",
+    });
+  });
+
+  it("a verdict follow-up cannot restore approval after its latest submission is rejected", async () => {
+    const observed = watched(piHarness);
+    const report = "The review report remains available.";
+    observed.harness.open = async (_deps, run) => ({
+      answer: report,
+      followUp: async ({ toolContext }) => {
+        if (toolContext.reviewHistory) toolContext.reviewHistory.snapshot = { head: HEAD, findings: [] };
+        const submit = run.tools.find((tool) => tool.name === "submit_verdict")!;
+        expect(
+          await submit.run({ verdict: "approve", summary: "Earlier approval", head: HEAD, findings: [] }, toolContext),
+        ).toContain("verdict recorded: approve");
+        expect(
+          await submit.run(
+            { verdict: "request_changes", summary: "The latest report is incomplete", head: HEAD, findings: [] },
+            toolContext,
+          ),
+        ).toContain("changes requested requires validated findings");
+        return "The latest submission was refused.";
+      },
+      remainingMs: () => 240_000,
+      end: async () => {},
+    });
+    const s = setup("", {
+      agent: "review",
+      ...prThread,
+      yaml: REVIEW_PI_YAML,
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+      review: { head: HEAD, post: async () => ({ state: "accepted" as const }) },
+    });
+    seedReviewHistory(s.deps, () => HEAD);
+    const out = answered(await runLoop(s.deps, await trackedCodingContext(s, s.ctx)));
+    expect({
+      report: out.answer,
+      verdict: out.verdict?.verdict ?? "incomplete",
+      postedVerdict: out.reviewPost?.posted === true ? (out.reviewPost.verdict ?? "none") : "none",
+    }).toEqual({ report, verdict: "incomplete", postedVerdict: "none" });
+    expect(out.reviewIncomplete).toBe("The review findings did not match the required format.");
+    s.ending.drain(true);
+    await s.writer.settled();
+    const stored = (await s.store.get("run-l"))!;
+    expect({ status: stored.status, verdict: stored.verdict?.verdict ?? "none" }).toEqual({
+      status: "failed",
+      verdict: "none",
+    });
+  });
+
   function seedReviewHistory(deps: RunDeps, currentHead: () => string) {
     const gh = new InMemoryGithubApi({
       "o/r": {
@@ -8710,12 +8818,27 @@ describe("the pi harness — the review preset", () => {
         const live = registry.get("run-l")!;
         c.emit({ id: cmd.id, type: "response", command: "prompt", success: true }, { type: "agent_start" });
         const verdict =
-          n === 0 ? VERDICT : { verdict: "request_changes", summary: "the new test is wrong", head: NEW, findings: [] };
+          n === 0
+            ? VERDICT
+            : {
+                verdict: "request_changes",
+                summary: "the new test is wrong",
+                head: NEW,
+                findings: [
+                  {
+                    id: "F1",
+                    kind: "single",
+                    severity: "major",
+                    file: "src/x.ts",
+                    title: "The new test omits the required boundary",
+                  },
+                ],
+              };
         const reject = async (head: string, error: string) => {
           const args = { ...verdict, verdict: "approve", head };
           // Probe independent head/history preconditions, not a scripted agent
           // retry loop. Actual model submissions below still cross the relay.
-          const rejected = await submitVerdictTool.run(args, live.toolContext);
+          const rejected = await submitVerdictTool.run(args, { ...live.toolContext, onReviewSubmission: undefined });
           expect(rejected).toContain(error);
           expect(posts).toEqual([]);
         };
@@ -8866,7 +8989,7 @@ describe("the pi harness — the review preset", () => {
       ]);
       expect(
         posts[0].body.startsWith(
-          refresh ? "Changes requested: no issues found\n" : "No verdict submitted — not approving.",
+          refresh ? "Changes requested: 1 issue\n" : "Review incomplete — findings not validated.",
         ),
       ).toBe(true);
       expect(s.published).toEqual([`answer:${answer}`]);
@@ -8874,7 +8997,7 @@ describe("the pi harness — the review preset", () => {
       // The successor is ended after settlement; replacement already ended the original.
       expect(container.killed).toEqual([replaced ? 5151 : 4242]);
       expect(container.removed).toEqual(["/var/tmp/switchboard-pi-run-l"]);
-      expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "completed" });
+      expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: refresh ? "completed" : "failed" });
       s.ending.drain(true);
       await s.writer.settled();
       const rec = (await s.store.get("run-l"))!;
@@ -10328,6 +10451,40 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
           followUp: async () => "",
           remainingMs: () => 240_000,
           end: async () => {},
+          record: () => ({
+            messages: [
+              {
+                role: "assistant",
+                content: [
+                  {
+                    type: "tool_use",
+                    id: "old-review-call",
+                    name: "submit_verdict",
+                    input: { verdict: "approve", summary: "old acceptance", head: PIN, findings: [] },
+                  },
+                ],
+              },
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "tool_result",
+                    toolUseId: "old-review-call",
+                    content: "verdict recorded: approve (0 findings)",
+                  },
+                ],
+              },
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "Old approval cannot settle the refreshed source" }],
+              },
+            ],
+            compactions: [],
+            settlements: [],
+            turn: 1,
+            inboxConsumedSeq: 0,
+            deadline: NOW + 240_000,
+          }),
         };
       expect(
         await run.tools
@@ -10376,7 +10533,7 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     }
     const out = answered(await result);
     if (mode === "changed history with cached approval") {
-      expect(bodies[0]?.split("\n")[0]).toBe("No verdict submitted — not approving.");
+      expect(bodies[0]?.split("\n")[0]).toBe("Review incomplete — findings not validated.");
       expect(validation).toMatchObject({ validation: { head: PIN, matched: false } });
       return;
     }
@@ -11345,13 +11502,13 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       expect(ctx.ledgerRun!.tracked()).toBe(false);
       return read(target);
     };
-    const out = answered(await runLoop(s.deps, ctx));
-    expect(out.reviewPost).toMatchObject({ posted: false, uncertain: true });
+    const out = await runLoop(s.deps, ctx);
+    expect(out).toMatchObject({ kind: "paused", reason: "checkpoint_unavailable" });
     expect(post).not.toHaveBeenCalled();
     expect(
       s.registry
         .snapshot(s.run.id, s.run.token)
-        ?.events.some((event) => event.type === "run_note" && event.kind === "review_not_posted"),
+        ?.events.some((event) => event.type === "run_note" && event.kind === "review_not_posted") ?? false,
     ).toBe(false);
   });
 
@@ -11439,6 +11596,129 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
     expect(changed).toBe(true);
     expect(post).not.toHaveBeenCalled();
   });
+
+  it.each(["rejected", "pending"])(
+    "a latest %s review submission cannot revive a cached approval during finish replay",
+    async (state) => {
+      const posts: string[] = [];
+      const report = "The reported defect remains; findings could not be validated.";
+      const s = setup("", {
+        agent: "review",
+        provider: neverCalled(),
+        ...prThread,
+        executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+        review: {
+          head: HEAD,
+          post: async (_target, body) => {
+            posts.push(body);
+            return { state: "accepted" as const };
+          },
+        },
+      });
+      const proposal = {
+        verdict: "request_changes",
+        head: HEAD,
+        summary: "Unresolved report",
+        findings: [
+          {
+            id: "review:current-run:F2",
+            kind: "single",
+            severity: "major",
+            file: "src/x.ts",
+            title: "The reported defect remains",
+          },
+        ],
+      };
+      const resume = finishing(report, { agent: "review", state: { verdict: VERDICT }, repoCtx: prThread.repoCtx });
+      if (resume.plan.kind !== "finish") throw new Error("not a finish replay");
+      resume.plan.messages.splice(
+        1,
+        0,
+        { role: "assistant", content: [{ type: "tool_use", id: "rejected", name: "submit_verdict", input: proposal }] },
+        ...(state === "rejected"
+          ? [
+              {
+                role: "user" as const,
+                content: [
+                  {
+                    type: "tool_result" as const,
+                    toolUseId: "rejected",
+                    content: "error: unknown prior finding review:current-run:F2; no verdict recorded",
+                  },
+                ],
+              },
+            ]
+          : []),
+      );
+      const out = answered(
+        await runLoop(
+          s.deps,
+          await trackedCodingContext(s, { ...s.ctx, reviewHead: HEAD, resume, messages: resume.plan.messages }),
+        ),
+      );
+      expect(out.verdict ?? "incomplete").toBe("incomplete");
+      expect(out.answer).toBe(report);
+      expect(out.reviewIncomplete).toBe(
+        state === "rejected"
+          ? "The review submission was rejected; no current verdict was accepted."
+          : "The latest review submission was not confirmed.",
+      );
+      expect({ posted: out.reviewPost?.posted, posts: posts.length }).toEqual({ posted: false, posts: 0 });
+      s.ending.drain(true);
+      await s.writer.settled();
+      const stored = (await s.store.get("run-l"))!;
+      expect({ status: stored.status, verdict: stored.verdict ?? "incomplete" }).toEqual({
+        status: "failed",
+        verdict: "incomplete",
+      });
+    },
+  );
+
+  it.each(["same", "different"])(
+    "a lost review reply restores only its acknowledged original call: %s identity",
+    async (identity) => {
+      const s = setup("", {
+        agent: "review",
+        provider: neverCalled(),
+        ...prThread,
+        executor: { exec: async (command: string) => (command.includes("rev-parse") ? `${HEAD}\n` : "") },
+        review: { head: HEAD, post: async () => ({ state: "accepted" as const }) },
+      });
+      const proposal = { verdict: "approve", summary: "No findings", head: HEAD, findings: [] };
+      const accepted = { verdict: "approve" as const, summary: "No findings", head: HEAD, findings: [] };
+      const resume = finishing("Original report", {
+        agent: "review",
+        state: {
+          verdict: accepted,
+          reviewSubmission: { status: "accepted", proposal, verdict: accepted, callId: "original-call" },
+        },
+        repoCtx: prThread.repoCtx,
+      });
+      if (resume.plan.kind !== "finish") throw new Error("not a finish replay");
+      resume.plan.messages.splice(1, 0, {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: identity === "same" ? "original-call" : "later-call",
+            name: "submit_verdict",
+            input: proposal,
+          },
+        ],
+      });
+      const out = answered(
+        await runLoop(
+          s.deps,
+          await trackedCodingContext(s, { ...s.ctx, reviewHead: HEAD, resume, messages: resume.plan.messages }),
+        ),
+      );
+      expect({ verdict: out.verdict?.verdict ?? "incomplete", report: out.answer }).toEqual({
+        verdict: identity === "same" ? "approve" : "incomplete",
+        report: "Original report",
+      });
+      expect(out.toolCalls).toBe(0);
+    },
+  );
 
   it("a review resumed with its answer in hand runs its post-steps: the verdict restored from the row is settled at the pinned head and posted, once", async () => {
     const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
@@ -11537,6 +11817,39 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
                   ],
                 },
               ] as ChatMessage[])
+            : []),
+        );
+        resume.events.push(
+          { type: "tool_call", tool: "submit_verdict", callId: "c1", summary: "Original verdict", at: NOW, seq: 2 },
+          {
+            type: "tool_result",
+            tool: "submit_verdict",
+            callId: "c1",
+            ok: true,
+            summary: "Verdict acknowledged",
+            at: NOW,
+            seq: 3,
+          },
+          ...(persistentFailure
+            ? [
+                {
+                  type: "tool_call" as const,
+                  tool: "submit_verdict",
+                  callId: "c2",
+                  summary: "Original corrected verdict",
+                  at: NOW,
+                  seq: 4,
+                },
+                {
+                  type: "tool_result" as const,
+                  tool: "submit_verdict",
+                  callId: "c2",
+                  ok: true,
+                  summary: "Verdict acknowledged",
+                  at: NOW,
+                  seq: 5,
+                },
+              ]
             : []),
         );
         resume.durableTurns = resume.plan.messages.length;
@@ -14798,6 +15111,10 @@ describe("tracked Review command receipt binding", () => {
       });
       const { ledgerRun } = recordingLedgerRun();
       ledgerRun.tracked = () => true;
+      ledgerRun.setStateAndFlush = async (patch) => {
+        ledgerRun.setState(patch);
+        return true;
+      };
       expect(answered(await runLoop(s.deps, { ...s.ctx, ledgerRun })).answer).toBe("binding held");
       expect(execResult).not.toHaveBeenCalled();
     },

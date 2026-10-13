@@ -272,6 +272,8 @@ export interface RunRecord {
    *  redacted like every stored string — what a coordinator's `read-record`
    *  answers for a review child. Present only on a run that submitted one. */
   verdict?: ReviewVerdict;
+  /** The review remains incomplete; raw proposals stay in private run state. */
+  reviewIncomplete?: string;
   /** The head a review run reviewed and posted against (7 to 40 lowercase hex),
    *  after the settle; present only on a review run that pinned one. */
   reviewHead?: string;
@@ -593,6 +595,8 @@ export interface RunOperatorDecision {
   binds?: {
     line: string;
     reason: string;
+    preset?: string;
+    request?: string;
     model?: string;
     effort?: Effort;
     budget?: number;
@@ -626,6 +630,8 @@ export interface RunOperatorDecision {
     renewals?: number;
     verbosity?: Verbosity;
   };
+  proposalPreset?: string;
+  proposalRequest?: string;
   confirmablePreset?: true;
   /** A question's original ask — what the person's next words join back onto
    *  (`joinedAnswerRequest`). */
@@ -665,6 +671,8 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
           binds: e.binds.map((b) => ({
             line: b.line,
             reason: b.reason,
+            ...(b.preset !== undefined ? { preset: b.preset } : {}),
+            ...(b.request !== undefined ? { request: b.request } : {}),
             ...(b.model !== undefined ? { model: b.model } : {}),
             ...(b.effort !== undefined ? { effort: b.effort } : {}),
             ...(b.budget !== undefined ? { budget: b.budget } : {}),
@@ -696,6 +704,8 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
     ...(e.questionWriter !== undefined ? { questionWriter: e.questionWriter } : {}),
     ...(e.proposal !== undefined ? { proposal: e.proposal } : {}),
     ...(e.proposalSettings !== undefined ? { proposalSettings: e.proposalSettings } : {}),
+    ...(e.proposalPreset !== undefined ? { proposalPreset: e.proposalPreset } : {}),
+    ...(e.proposalRequest !== undefined ? { proposalRequest: e.proposalRequest } : {}),
     ...(e.confirmablePreset === true ? { confirmablePreset: true as const } : {}),
     ...(e.request !== undefined ? { request: e.request } : {}),
     ...(e.refusalCause !== undefined ? { refusalCause: e.refusalCause } : {}),
@@ -1342,6 +1352,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
   }
   // The review's verdict and head and the fix round's dispositions (item 2):
   // shape only, like the handoff — redaction may lengthen a stored string.
+  if (r.reviewIncomplete !== undefined && typeof r.reviewIncomplete !== "string") return false;
   if (r.verdict !== undefined && !isReviewVerdictShape(r.verdict)) return false;
   if (r.reviewHead !== undefined && (typeof r.reviewHead !== "string" || !REVIEW_HEAD_PATTERN.test(r.reviewHead)))
     return false;

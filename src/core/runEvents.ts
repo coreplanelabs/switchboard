@@ -1207,6 +1207,9 @@ export type RunEvent =
       binds?: ReadonlyArray<{
         line: string;
         reason: string;
+        /** Accepted preset identity, separate from the display line. */
+        preset?: string;
+        request?: string;
         model?: string;
         effort?: Effort;
         budget?: number;
@@ -1248,6 +1251,8 @@ export type RunEvent =
       };
       /** The question was classified as a confirmable preset when saved.
        *  Absence fails closed even if the command catalogue later changes. */
+      proposalPreset?: string;
+      proposalRequest?: string;
       confirmablePreset?: true;
       /** A question's original ask, redacted and capped: the request the
        *  question interrupted, kept so the person's next words in the thread

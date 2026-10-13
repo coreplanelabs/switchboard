@@ -154,7 +154,11 @@ import { parseHandoff, type Handoff } from "../ship/handoff.js";
 import {
   parseDispositionsInput,
   parseVerdictInput,
-  recordedVerdictFromTranscript,
+  completeReviewVerdict,
+  reviewSubmissionOf,
+  reviewSubmissionFromTranscript,
+  reviewSubmissionFailure,
+  type ReviewSubmission,
   type AddressSeverity,
   type AddressSeveritySource,
   type FindingDisposition,
@@ -235,6 +239,7 @@ export interface RunOutcome {
   /** The verdict the review submitted, and how its post-step ended — the
    *  reply stage renders the channel reply from them (agent-review.md item 5b). */
   verdict: ReviewVerdict | undefined;
+  reviewIncomplete?: string;
   reviewPost: ReviewPostOutcome | undefined;
   /** A stop landed before the review used any substantive tool. The reply is
    *  the stop sentence itself, not the normal verdict projection. */
@@ -606,12 +611,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // the checklist the card shows, the verdict/description already submitted,
   // the branch already pushed.
   const restored = resume?.row.state ?? {};
+  let reviewSubmission: ReviewSubmission | undefined;
   const recovery = new ToolRecovery(restored.toolRecovery, async (state, tool) => {
     if (!ledgerTrackedAtEntry) return true;
     return root.span(`recovery.checkpoint.${tool}`, async () => {
       let confirmed: boolean;
       try {
-        confirmed = ledgerRun?.tracked() === true && (await ledgerRun.setStateAndFlush({ toolRecovery: state }));
+        confirmed =
+          ledgerRun?.tracked() === true &&
+          (await ledgerRun.setStateAndFlush({
+            toolRecovery: state,
+            ...(tool === "submit_verdict" && reviewSubmission ? { reviewSubmission } : {}),
+          }));
       } catch {
         throw classifyError(new Error("Recovery checkpoint unavailable"), { kind: "infra", code: "state_write_threw" });
       }
@@ -1021,6 +1032,34 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     );
   };
   const onEvent = (e: RunEvent) => {
+    if (
+      agent.name === "review" &&
+      e.type === "tool_call" &&
+      e.tool === "submit_verdict" &&
+      (!e.callId || reviewSubmission?.callId !== e.callId)
+    ) {
+      // A harness may reject arguments before the tool body runs. The public
+      // event identifies the proposal, but supplies no private raw arguments.
+      reviewSubmission = {
+        status: "pending",
+        ...(e.callId ? { callId: e.callId } : {}),
+        reason: "The latest review submission has not been validated.",
+      };
+      verdict = undefined;
+    }
+    if (
+      agent.name === "review" &&
+      e.type === "tool_result" &&
+      e.tool === "submit_verdict" &&
+      !e.ok &&
+      !e.cut &&
+      !e.infra &&
+      reviewSubmission?.status === "pending" &&
+      (!e.callId || reviewSubmission.callId === e.callId)
+    ) {
+      reviewSubmission = { ...reviewSubmission, status: "rejected", reason: e.output ?? e.summary };
+      verdict = undefined;
+    }
     observeToolEffect(e);
     // Authorization precedes execution, while streamed results and their local
     // ref reads may lag behind it. Close both harness gates synchronously so
@@ -1190,17 +1229,93 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           addressSeverity: ctx.addressSeverity.level,
         }) ?? undefined)
       : undefined;
-  const recoveredVerdict =
+  const storedSubmission = reviewSubmissionOf(restored.reviewSubmission);
+  const replayedSubmission =
     agent.name === "review" && resume?.plan.kind === "finish"
-      ? recordedVerdictFromTranscript(resume.plan.messages, { addressSeverity: ctx.addressSeverity.level })
+      ? reviewSubmissionFromTranscript(resume.plan.messages, { addressSeverity: ctx.addressSeverity.level })
       : undefined;
-  // The complete transcript orders accepted tool results. A state snapshot can
-  // predate its last accepted verdict when the final state write timed out.
-  let verdict: ReviewVerdict | undefined = recoveredVerdict ?? storedVerdict;
-  if (recoveredVerdict) ledgerRun?.setState({ verdict: recoveredVerdict });
+  // Source seeds can contain another review's accepted tool receipt. A legacy
+  // receipt grants acceptance only when this original run recorded both its
+  // admitted call and successful result; otherwise the private journal rules.
+  const originalReviewCalls = new Set(
+    resume?.events.flatMap((event) =>
+      event.type === "tool_call" && event.tool === "submit_verdict" && event.callId ? [event.callId] : [],
+    ),
+  );
+  const originalReviewResults = new Set(
+    resume?.events.flatMap((event) =>
+      event.type === "tool_result" &&
+      event.tool === "submit_verdict" &&
+      event.ok === true &&
+      !event.cut &&
+      !event.infra &&
+      event.callId
+        ? [event.callId]
+        : [],
+    ),
+  );
+  const acceptedReplay =
+    replayedSubmission?.status === "accepted" &&
+    replayedSubmission.callId !== undefined &&
+    originalReviewCalls.has(replayedSubmission.callId) &&
+    originalReviewResults.has(replayedSubmission.callId);
+  reviewSubmission =
+    (replayedSubmission?.status !== "accepted" || acceptedReplay ? replayedSubmission : undefined) ??
+    storedSubmission ??
+    (restored.reviewSubmission !== undefined
+      ? { status: "rejected", reason: "The saved review submission could not be verified." }
+      : undefined);
+  // An acknowledged private acceptance survives a lost tool reply only for
+  // the same proposal. This authorizes no repeated invocation.
+  if (
+    replayedSubmission?.status === "pending" &&
+    storedSubmission?.status === "accepted" &&
+    replayedSubmission.callId !== undefined &&
+    replayedSubmission.callId === storedSubmission.callId &&
+    JSON.stringify(replayedSubmission.proposal) === JSON.stringify(storedSubmission.proposal)
+  )
+    reviewSubmission = storedSubmission;
+  let verdict: ReviewVerdict | undefined = reviewSubmission
+    ? reviewSubmission.status === "accepted"
+      ? reviewSubmission.verdict
+      : undefined
+    : completeReviewVerdict(storedVerdict)
+      ? storedVerdict
+      : undefined;
+  const persistReviewSubmission = async (submission: ReviewSubmission) => {
+    reviewSubmission =
+      submission.status === "accepted"
+        ? { status: "pending", proposal: submission.proposal, callId: submission.callId }
+        : submission;
+    verdict = undefined;
+    if (ledgerTrackedAtEntry && !ledgerRun?.tracked())
+      throw new ContextCheckpointDeferred(
+        "The original review owner is unavailable; its submission remains unconfirmed.",
+      );
+    let confirmed = !ledgerRun?.tracked();
+    if (ledgerRun?.tracked()) {
+      try {
+        confirmed = await ledgerRun.setStateAndFlush({
+          reviewSubmission: submission,
+          verdict: submission.status === "accepted" ? submission.verdict : undefined,
+        });
+      } catch {
+        confirmed = false;
+      }
+    }
+    if (!confirmed)
+      throw new ContextCheckpointDeferred(
+        "The review submission checkpoint could not be confirmed; the review remains incomplete.",
+      );
+    reviewSubmission = submission;
+    verdict = submission.status === "accepted" ? submission.verdict : undefined;
+  };
   const onVerdict = (v: ReviewVerdict) => {
-    verdict = v;
-    ledgerRun?.setState({ verdict: v });
+    verdict = completeReviewVerdict(v) ? v : undefined;
+    if (!verdict) reviewSubmission = { status: "rejected", reason: "The review findings were not validated." };
+    else if (reviewSubmission?.status !== "accepted" || reviewSubmission.verdict !== v)
+      reviewSubmission = { status: "accepted", verdict: v };
+    ledgerRun?.setState({ verdict: v, reviewSubmission });
   };
   // The review's diff digest, set only through the diff_digest tool (the last
   // call wins); the post-step holds its totals against the PR's size and
@@ -1349,7 +1464,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           ? "stopped_hard"
           : stopped === "soft"
             ? "stopped_soft"
-            : "completed";
+            : agent.name === "review" && reviewSubmissionFailure(reviewSubmission) !== undefined
+              ? "failed"
+              : "completed";
   };
   /** The harness session's end, once: the process ended (a no-op when the
    *  harness handed no session over), then what its ending left running read
@@ -2298,6 +2415,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ...(wait ? { wait } : {}),
     ...(session ? { session } : {}),
     onVerdict,
+    onReviewSubmission: persistReviewSubmission,
     ...(reviewHistory ? { reviewHistory } : {}),
     addressSeverity: ctx.addressSeverity.level,
     onDigest,
@@ -2724,9 +2842,27 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           const invalidate = verdict?.head !== head;
           const saved = await ledgerRun.setStateAndFlush({
             reviewHistory: { target: reviewHistory.target, requiredHead: head },
-            ...(invalidate ? { verdict: undefined } : {}),
+            ...(invalidate
+              ? {
+                  verdict: undefined,
+                  reviewSubmission: {
+                    status: "rejected",
+                    proposal: reviewSubmission?.proposal,
+                    callId: reviewSubmission?.callId,
+                    reason: "The review target changed; a current verdict is required.",
+                  },
+                }
+              : {}),
           });
-          if (saved && invalidate) verdict = undefined;
+          if (saved && invalidate) {
+            verdict = undefined;
+            reviewSubmission = {
+              status: "rejected",
+              proposal: reviewSubmission?.proposal,
+              callId: reviewSubmission?.callId,
+              reason: "The review target changed; a current verdict is required.",
+            };
+          }
           return saved;
         };
         if (reviewHistory.requiredHead && !(await reviewHistory.commitRequiredHead(reviewHistory.requiredHead)))
@@ -2787,9 +2923,25 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               verdict.head !== reviewHistory.snapshot.head ||
               validateReviewFollowup(verdict, reviewHistory.snapshot.findings))
           ) {
-            if (!(await ledgerRun.setStateAndFlush({ verdict: undefined })))
+            if (
+              !(await ledgerRun.setStateAndFlush({
+                verdict: undefined,
+                reviewSubmission: {
+                  status: "rejected",
+                  proposal: reviewSubmission?.proposal,
+                  callId: reviewSubmission?.callId,
+                  reason: "Current review history could not validate the saved verdict.",
+                },
+              }))
+            )
               throw new Error("The stale review verdict could not be invalidated before model work.");
             verdict = undefined;
+            reviewSubmission = {
+              status: "rejected",
+              proposal: reviewSubmission?.proposal,
+              callId: reviewSubmission?.callId,
+              reason: "Current review history could not validate the saved verdict.",
+            };
           }
         }
       }
@@ -3561,10 +3713,18 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       });
       answer = settled.answer;
       verdict = settled.verdict;
+      if (reviewSubmission?.status === "accepted" && verdict === undefined)
+        reviewSubmission = {
+          status: "rejected",
+          proposal: reviewSubmission.proposal,
+          callId: reviewSubmission.callId,
+          reason: "The reviewed head changed without a current accepted verdict.",
+        };
       reviewHead = settled.reviewHead;
       observedHead = settled.observedHead;
       carried = settled.carried;
     }
+    if (agent.name === "review" && reviewSubmission !== undefined) await persistReviewSubmission(reviewSubmission);
     // The verdict turn (agent-review item 5, verdictTurn.ts): the review prompt
     // requires submit_verdict before the final message and the post step is
     // fail-closed without it, but a prompt rule alone can be skipped — a run
@@ -3576,8 +3736,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // the same onVerdict hook the loop fed (so the ledger row sees it) and is
     // also returned. A hard stop asks nothing; a request that opted out of the
     // GitHub post has no body to lead and asks nothing; a `finish` plan has no
-    // session and asks nothing — the body then carries the no-verdict line as
-    // before.
+    // session and asks nothing — the body retains the incomplete-review warning.
     if (
       isPrReview &&
       repoCtx.repo &&
@@ -3585,11 +3744,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       !tailSkipped() &&
       postedBefore === undefined &&
       verdict === undefined &&
+      !(reviewSubmission?.status === "pending" && reviewSubmission.proposal !== undefined) &&
       recovery.stopped === undefined &&
       !reviewPostOptedOut(ctx.requestText)
     ) {
       const reviewOf = { repo: repoCtx.repo, number: repoCtx.pr };
-      const turned = await root.span("run.verdict_turn", (span) =>
+      await root.span("run.verdict_turn", (span) =>
         runVerdictTurn({
           span,
           target: reviewOf,
@@ -3608,9 +3768,13 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           logKey: msg.threadKey,
         }),
       );
-      if (turned.verdict !== undefined) verdict = turned.verdict;
+      verdict = reviewSubmission?.status === "accepted" ? reviewSubmission.verdict : undefined;
     }
     await checkRecovery();
+    if (agent.name === "review" && verdict === undefined && !tailSkipped()) {
+      reviewSubmission ??= { status: "rejected", reason: "No accepted review verdict was recorded." };
+      await persistReviewSubmission(reviewSubmission);
+    }
     // PR post-step observation (docs/reference/specs/pr-description.md item 5): for a
     // writable coding run, read the workspace's head branch — the one the
     // run's `git push` named, else the checkout — its tip, and the remote's
@@ -4213,6 +4377,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           repoCtx,
           heads: { reviewHead, observedHead },
           verdict,
+          reviewIncomplete: reviewSubmissionFailure(reviewSubmission),
           digest,
           answer,
           carried,
@@ -4455,6 +4620,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                     answerOutcome,
                     ...(observedHead !== undefined ? { headSha: observedHead } : {}),
                     ...(verdict !== undefined ? { verdict } : {}),
+                    ...(reviewSubmissionFailure(reviewSubmission)
+                      ? { reviewIncomplete: reviewSubmissionFailure(reviewSubmission) }
+                      : {}),
                     ...(reviewHead !== undefined ? { reviewHead } : {}),
                     ...(dispositions !== undefined ? { dispositions } : {}),
                     ...(handoff !== undefined ? { handoff } : {}),
@@ -4568,6 +4736,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         ...(handoff !== undefined ? { handoff } : {}),
         ...(researchBrief !== undefined ? { researchBrief } : {}),
         ...(verdict !== undefined ? { verdict } : {}),
+        ...(reviewSubmissionFailure(reviewSubmission)
+          ? { reviewIncomplete: reviewSubmissionFailure(reviewSubmission) }
+          : {}),
         ...(reviewHead !== undefined ? { reviewHead } : {}),
         ...(dispositions !== undefined ? { dispositions } : {}),
         ...(reviewPublication !== undefined ? { reviewPublication } : {}),
@@ -4625,6 +4796,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     reviewHead,
     verdict,
     reviewPost,
+    reviewIncomplete: reviewSubmissionFailure(reviewSubmission),
     reviewStoppedBeforeStart,
     prNote,
     toolCalls,
