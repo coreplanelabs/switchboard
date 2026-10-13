@@ -18,7 +18,14 @@ import { startRequestRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
 import type { IncomingMessage, ConfirmationOffer } from "../core/types.js";
 import { withCommandConfirmation } from "../core/commandConfirmations.js";
-import { mcpRequester, type McpIdentity, ownApproval, resumeApproval, requestHash } from "./mcpApproval.js";
+import {
+  approvalUrl,
+  mcpRequester,
+  type McpIdentity,
+  ownApproval,
+  resumeApproval,
+  requestHash,
+} from "./mcpApproval.js";
 import {
   Server,
   WebStandardStreamableHTTPServerTransport,
@@ -391,7 +398,10 @@ async function route(
         const io = new McpIO(
           [],
           msg.threadKey,
-          !!msg.authenticatedAs && supportsForm(ctx) && !!deps.confirmations?.approve && !!deps.confirmations.get
+          !!msg.authenticatedAs &&
+            (supportsForm(ctx) || !!approvalUrl(options, "")) &&
+            !!deps.confirmations?.approve &&
+            !!deps.confirmations.get
             ? (offer) => `Nothing ran. Confirm the saved action ${offer.line} in your MCP client.`
             : undefined,
         );
@@ -462,7 +472,10 @@ async function route(
       const io = new McpIO(
         [],
         msg.threadKey,
-        !!msg.authenticatedAs && supportsForm(ctx) && !!deps.confirmations?.approve && !!deps.confirmations.get
+        !!msg.authenticatedAs &&
+          (supportsForm(ctx) || !!approvalUrl(options, "")) &&
+          !!deps.confirmations?.approve &&
+          !!deps.confirmations.get
           ? (offer) => `Nothing ran. Confirm the saved action ${offer.line} in your MCP client.`
           : undefined,
       );
@@ -683,9 +696,38 @@ function supportsForm(ctx?: ServerContext): boolean {
 function offeredResult(
   id: JsonRpcId,
   offer: ConfirmationOffer,
-  _options: McpOptions,
+  options: McpOptions,
   ctx?: ServerContext,
+  form = supportsForm(ctx),
 ): JsonRpcResultBody | JsonRpcErrorBody {
+  if (!form) {
+    const url = approvalUrl(options, offer.id);
+    if (!url) return err(id, -32004, "This connection cannot show the required approval; nothing ran");
+    const capabilities = (
+      ctx?.mcpReq.envelope as { [CLIENT_CAPABILITIES_META_KEY]?: ClientCapabilities } | undefined
+    )?.[CLIENT_CAPABILITIES_META_KEY];
+    if (capabilities?.elicitation && "url" in capabilities.elicitation)
+      return ok(
+        id,
+        inputRequired({
+          requestState: offer.id,
+          inputRequests: {
+            approval: inputRequired.elicitUrl({
+              url,
+              message: `Review this saved Switchboard action in your signed-in browser: ${offer.line}${offer.risk ? "\n" + offer.risk : ""}`,
+            }),
+          },
+        }),
+      );
+    return ok(id, {
+      content: [
+        {
+          type: "text",
+          text: `Nothing ran. Review ${url}. After browser approval, resume saved action ${offer.id}. Expires: ${new Date(offer.expiresAt).toISOString()}`,
+        },
+      ],
+    });
+  }
   if (!supportsForm(ctx)) return err(id, -32004, "This client cannot show the required confirmation; nothing ran");
   return ok(
     id,
@@ -742,8 +784,6 @@ async function approvalResult(
   if (row.expiresAt <= (deps.clock ?? systemClock)())
     return err(id, -32003, "The saved confirmation expired; nothing ran");
   if (!hasConfirmationConsent(row)) {
-    if (row.message.approvalConnection?.mode !== "form")
-      return err(id, -32004, "This saved action still requires its original approval; nothing ran");
     if (
       decision?.decision === "approve" &&
       ctx?.mcpReq.requestState<string>() === row.id &&
@@ -768,6 +808,7 @@ async function approvalResult(
         },
         options,
         ctx,
+        row.message.approvalConnection?.mode === "form",
       );
     }
   }
