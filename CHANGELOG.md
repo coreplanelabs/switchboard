@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.297.0](https://github.com/coreplanelabs/switchboard/compare/v1.296.1...v1.297.0) (2026-10-13)
+
+
+### Features
+
+* **deploy:** inspect public metadata without readiness credit ([#3038](https://github.com/coreplanelabs/switchboard/issues/3038)) ([0f2a951](https://github.com/coreplanelabs/switchboard/commit/0f2a9519aa8d8f408a807fe2ed9f2f6f537490e8))
+* **mcp:** use the browser sign-in and access rules ([#3039](https://github.com/coreplanelabs/switchboard/issues/3039)) ([c98c57a](https://github.com/coreplanelabs/switchboard/commit/c98c57a7c4b0e8c1447082bb7164971eab9bc456))
+
+
+### Bug fixes
+
+* **core:** preserve completed work across session transitions ([#3045](https://github.com/coreplanelabs/switchboard/issues/3045)) ([fba1c70](https://github.com/coreplanelabs/switchboard/commit/fba1c70ab843efb0995b668bccf2f5238afc5a72))
+* **core:** retain deferred messages during checkout replacement ([#3053](https://github.com/coreplanelabs/switchboard/issues/3053)) ([316100d](https://github.com/coreplanelabs/switchboard/commit/316100d81da7052866b83ea027efd734e2781c1a))
+* **deploy:** read the sandbox instance inventory in one page ([#3037](https://github.com/coreplanelabs/switchboard/issues/3037)) ([3a22f20](https://github.com/coreplanelabs/switchboard/commit/3a22f208992b1b0dd799eef0820d6317e1cd3763))
+* **deploy:** retain both receipts for repeated inventory cursors ([#3034](https://github.com/coreplanelabs/switchboard/issues/3034)) ([3ae5b6b](https://github.com/coreplanelabs/switchboard/commit/3ae5b6b7127edfc6c8e9006cc3c36f20d92f5303))
+* **deploy:** retain native operation details in failed preflights ([#3044](https://github.com/coreplanelabs/switchboard/issues/3044)) ([b785eb4](https://github.com/coreplanelabs/switchboard/commit/b785eb45407a179b9fea976b89805fcdb8d16d22))
+* **deploy:** use the Explore floor for workspace smoke ([#3040](https://github.com/coreplanelabs/switchboard/issues/3040)) ([96e34de](https://github.com/coreplanelabs/switchboard/commit/96e34deed3727980949c001870786dbf162ef972))
+* **resident:** recover launch storage acknowledgements ([#3050](https://github.com/coreplanelabs/switchboard/issues/3050)) ([451c354](https://github.com/coreplanelabs/switchboard/commit/451c354bd43021076ec3f368d74301b749524bc6))
+* **resident:** stop run processes without SDK control ([#3049](https://github.com/coreplanelabs/switchboard/issues/3049)) ([a720093](https://github.com/coreplanelabs/switchboard/commit/a720093842ad370fc0d672b6ee455ea8d6c23ceb))
+* **review:** preserve prior cases by ID across review rounds ([#3048](https://github.com/coreplanelabs/switchboard/issues/3048)) ([8aef2d7](https://github.com/coreplanelabs/switchboard/commit/8aef2d7ae020e3f3bd8ffad1c12c813d2e5e1bfc))
+* **runs:** preserve completed runs across restart ([#3043](https://github.com/coreplanelabs/switchboard/issues/3043)) ([3538fd4](https://github.com/coreplanelabs/switchboard/commit/3538fd40775d8eb5d6f663b79a79612fa91bb0b2))
+* **runs:** report failed source context save stages ([#3042](https://github.com/coreplanelabs/switchboard/issues/3042)) ([764fb19](https://github.com/coreplanelabs/switchboard/commit/764fb1903c458b0c136f412a1e27a04c28145ee2))
+* **runs:** restore search access to recorded session logs ([#3047](https://github.com/coreplanelabs/switchboard/issues/3047)) ([13336b5](https://github.com/coreplanelabs/switchboard/commit/13336b566292d06da54dd77c5fd398409d57abb8))
+* **ship:** wait for human input after blocked research ([#3051](https://github.com/coreplanelabs/switchboard/issues/3051)) ([8b1a981](https://github.com/coreplanelabs/switchboard/commit/8b1a98103d776029326279f4777918db516d1226))
+* **tools:** reject baseline checkpoints in check schemas ([#3046](https://github.com/coreplanelabs/switchboard/issues/3046)) ([0ae231b](https://github.com/coreplanelabs/switchboard/commit/0ae231b83a6a9a7f565b6e496da21565b81a1377))
+
+
+### Documentation
+
+* **deploy:** document the workspace smoke Explore floor ([#3041](https://github.com/coreplanelabs/switchboard/issues/3041)) ([7957551](https://github.com/coreplanelabs/switchboard/commit/79575511618169e26e26e7635c64efc3e3bcdef7))
+
 ## [1.296.1](https://github.com/coreplanelabs/switchboard/compare/v1.296.0...v1.296.1) (2026-10-12)
 
 
