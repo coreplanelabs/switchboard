@@ -8,7 +8,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { createBashToolDefinition, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, type ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { normalizeContext, validateToolArguments, type Model, type Tool, type ToolCall } from "@earendil-works/pi-ai";
 import { stream as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { judgeToolCall } from "./toolRules.js";
@@ -306,7 +306,7 @@ describe("the harness extension", () => {
       expect(scratch.startsWith(`${root}/`)).toBe(true);
       expect(scratch.startsWith(`${checkout}/`)).toBe(false);
       let exitCode = 0;
-      const context = { cwd: checkout } as ExtensionContext;
+      const context = { cwd: checkout } as ExtensionToolContext;
       const bash = createBashToolDefinition(checkout, {
         exposeSessionEnvironment: false,
         operations: {
@@ -350,11 +350,9 @@ describe("the harness extension", () => {
         content: [{ type: "text", text: "ordinary checkout read" }],
       });
       exitCode = 1;
-      const failure = await bash
-        .execute("bash-failed", { command: "fixture failure" }, undefined, undefined, context)
-        .catch((error: Error) => error);
-      expect(failure).toBeInstanceOf(Error);
-      const failedPath = (failure as Error).message.match(/Full output: ([^\]]+)/)![1];
+      const failure = await bash.execute("bash-failed", { command: "fixture failure" }, undefined, undefined, context);
+      expect(failure.isError).toBe(true);
+      const failedPath = (failure.details as { fullOutputPath: string }).fullOutputPath;
       expect(failedPath.startsWith(`${scratch}/`)).toBe(true);
       expect(await readAt(failedPath)).toMatchObject({
         content: [{ type: "text", text: expect.stringContaining("row 1\nrow 2") }],

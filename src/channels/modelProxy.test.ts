@@ -3338,8 +3338,12 @@ describe("Responses stream failure boundary", () => {
       "data: [DONE]\n\n" +
       frame(failed("server_error"));
     const h = harness({ answer: () => streamingResponse([text], h.clock, 1) });
-    const message = await throughPi(h);
-    expect(message.stopReason).toBe("stop");
+    const token = h.bearers.mint(h.responsesGrant("run-1"));
+    const response = await handleModelProxyRequest(
+      request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: responsesRequest() }).req,
+      h.deps,
+    );
+    expect(await new Response(response.body).text()).toBe(text);
     expect(h.ends.find((s) => s.name === "model.turn")?.attrs.stopReason).toBe("end_turn");
     expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe("ok");
   });
@@ -3574,7 +3578,7 @@ describe("Responses stream failure boundary", () => {
     );
     const h = harness({ answer: () => streamingResponse(events.map(frame), h.clock, 1) });
     const message = await throughPi(h);
-    expect(message.stopReason).toBe("toolUse");
+    expect(message.stopReason, message.errorMessage).toBe("toolUse");
     expect(message.content).toEqual([expect.objectContaining({ type: "toolCall", name: "bash", arguments: args })]);
     expect(h.calls).toHaveLength(1);
     expect(h.ends.find((s) => s.name === "model.turn")?.status).toBe("ok");
@@ -3741,7 +3745,7 @@ describe("Responses stream failure boundary", () => {
     ];
     const h = harness({ answer: () => streamingResponse(events.map(frame), h.clock, 1) });
     const message = await throughPi(h);
-    expect(message.stopReason).toBe("toolUse");
+    expect(message.stopReason, message.errorMessage).toBe("toolUse");
     const call = message.content.find((part) => part.type === "toolCall");
     expect(call?.type).toBe("toolCall");
     if (call?.type !== "toolCall") throw new Error("missing actual SDK tool call");
@@ -4049,6 +4053,17 @@ describe("createModelProxyHandler — the node adapter", () => {
         ...(!rejected
           ? [
               {
+                type: "response.output_item.done",
+                output_index: 0,
+                item: {
+                  type: "function_call",
+                  id: "item",
+                  call_id: "call",
+                  name: "bash",
+                  arguments: '{"command":"echo ok"}',
+                },
+              },
+              {
                 type: "response.completed",
                 response: { status: "completed", output: [], usage: { input_tokens: 20, output_tokens: 10 } },
               },
@@ -4123,7 +4138,7 @@ describe("createModelProxyHandler — the node adapter", () => {
           expect(levels).toEqual([]);
           settleCancel();
         } else {
-          expect(message.stopReason).toBe("toolUse");
+          expect(message.stopReason, message.errorMessage).toBe("toolUse");
           expect(message.content).toMatchObject([
             { type: "toolCall", name: "bash", arguments: { command: "echo ok" } },
           ]);
@@ -4175,6 +4190,17 @@ describe("createModelProxyHandler — the node adapter", () => {
           arguments: accepted ? '{"command":"echo ok"}' : "[object Object]x",
         },
         {
+          type: "response.output_item.done",
+          output_index: 0,
+          item: {
+            type: "function_call",
+            id: "item",
+            call_id: "call",
+            name: "bash",
+            arguments: accepted ? '{"command":"echo ok"}' : "[object Object]x",
+          },
+        },
+        {
           type: "response.completed",
           response: { status: "completed", output: [], usage: { input_tokens: 20, output_tokens: 10 } },
         },
@@ -4207,7 +4233,7 @@ describe("createModelProxyHandler — the node adapter", () => {
             new Response(input.text(), { headers: { "content-type": "text/event-stream" } })) as typeof fetch,
         }).result();
         if (accepted) {
-          expect(message.stopReason).toBe("toolUse");
+          expect(message.stopReason, message.errorMessage).toBe("toolUse");
           expect(message.content).toMatchObject([
             { type: "toolCall", id: "call|item", name: "bash", arguments: { command: "echo ok" } },
           ]);

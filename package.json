@@ -92,7 +92,7 @@
     "staging:validate": "tsx scripts/staging-validate.ts"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-ai": "1.0.4",
     "@modelcontextprotocol/node": "2.1.1",
     "@modelcontextprotocol/server": "2.3.1",
     "@slack/bolt": "^5.1.0",
@@ -104,7 +104,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@earendil-works/pi-coding-agent": "1.0.4",
     "@eslint/js": "^10.0.1",
     "@opencode/cli": "2.0.24",
     "@opencode/protocol": "2.0.24",
@@ -123,5 +123,14 @@
     "typescript-eslint": "^8.71.1",
     "vitest": "^5.0.0",
     "vue-eslint-parser": "^10.4.1"
+  },
+  "overrides": {
+    "@earendil-works/chord": "1.0.4",
+    "@earendil-works/pi-agent-core": "1.0.4",
+    "@earendil-works/pi-codemode": "1.0.4",
+    "@earendil-works/pi-mcp": "1.0.4",
+    "@earendil-works/pi-tui": "1.0.4",
+    "@earendil-works/pi-telemetry": "1.0.4",
+    "@earendil-works/pi-ai": "$@earendil-works/pi-ai"
   }
 }

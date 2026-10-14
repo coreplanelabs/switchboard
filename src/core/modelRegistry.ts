@@ -14,6 +14,8 @@ import type { Wire } from "./provider.js";
 
 /** One card as pi's registry files carry it (only the fields the bot reads). */
 export interface RegistryCard {
+  /** The registry may include non-chat modalities beside chat models. */
+  type?: string;
   id?: string;
   name?: string;
   /** pi's own wire word (`anthropic-messages`, `openai-completions`, `openai-responses`). */

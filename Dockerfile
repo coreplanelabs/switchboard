@@ -85,9 +85,10 @@ RUN command -v meat >/dev/null && meat -h >/dev/null 2>&1
 # so the BUILD fails, not a run. Dark until a deployment sets
 # `harness: { general: pi }`: nothing here starts pi on its own, and a run's
 # pi on this host holds none of pi's own shell or file tools.
-RUN npm install -g @earendil-works/pi-coding-agent@0.87.1 \
+RUN npm install -g @earendil-works/pi-coding-agent@1.0.4 \
+  @earendil-works/pi-ai@1.0.4 @earendil-works/chord@1.0.4 @earendil-works/pi-agent-core@1.0.4 @earendil-works/pi-codemode@1.0.4 @earendil-works/pi-mcp@1.0.4 @earendil-works/pi-tui@1.0.4 @earendil-works/pi-telemetry@1.0.4 \
   && npm cache clean --force \
-  && pi --version | grep -qx '0.87.1' \
+  && pi --version | grep -qx '1.0.4' \
   && pi --help | grep -q -- '--mode <mode>'
 
 # OpenCode, the second harness (docs/reference/specs/harness.md): `@opencode/cli`
