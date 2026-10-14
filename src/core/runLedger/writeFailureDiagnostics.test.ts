@@ -11,12 +11,17 @@ import {
   stateWriteDiagnosticHeader,
 } from "../runStateWriteDiagnostic.js";
 import { storeRequestWitness } from "../storeResponse.js";
-import { STORAGE_FAILURE_DIAGNOSTIC_HEADER, storageFailureNote } from "../storageFailureDiagnostic.js";
+import {
+  STORAGE_FAILURE_DIAGNOSTIC_HEADER,
+  STORAGE_REQUEST_ID_HEADER,
+  storageFailureNote,
+} from "../storageFailureDiagnostic.js";
 import { testRegistry } from "../runRegistry/testing.js";
 import type { RunEvent } from "../runEvents.js";
 import { assembleRunRecord } from "../dispatch/record.js";
 import { analyzeRunFriction } from "../runFriction.js";
 import { parseRunEventLines } from "../runEventLines.js";
+import * as clock from "../trace/clock.js";
 
 const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const gen = "diagnostic-owner";
@@ -46,6 +51,113 @@ function response(mode: string): Response {
 }
 
 describe("original uncertain write diagnostics", () => {
+  it("distinguishes identical requests with malformed acknowledgments by their original transport observations", async () => {
+    const now = vi.spyOn(clock, "systemClock").mockReturnValue(1000);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const ids = vi
+      .spyOn(crypto, "randomUUID")
+      .mockReturnValueOnce("11111111-1111-4111-a111-111111111111")
+      .mockReturnValueOnce("22222222-2222-4222-a222-222222222222");
+    const notices: Parameters<typeof storageFailureNote>[0][] = [];
+    let calls = 0;
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://state.invalid",
+      token: "fixture",
+      storeKey: "fixture",
+      onFailure: ({ diagnostic }) => notices.push(diagnostic),
+      fetch: async () => {
+        calls++;
+        now.mockReturnValue(calls === 1 ? 1005 : 1010);
+        return Response.json({ unexpected: "PRIVATE_ACK" });
+      },
+    });
+    try {
+      for (let i = 0; i < 2; i++) {
+        const failure = await wire.setState(id, gen, { notepad: "PRIVATE_REQUEST" }).catch((error) => error);
+        expect(failure).toMatchObject({ name: "UncertainStoreError", outcome: "unknown" });
+      }
+      const captured = parseRunEventLines(notices.map((d) => JSON.stringify(storageFailureNote(d))).join("\n"));
+      expect(captured.events).toMatchObject([
+        {
+          storageFailure: {
+            phase: "acknowledgement",
+            requestId: "11111111-1111-4111-a111-111111111111",
+            timing: { elapsedMs: 5, timeoutMs: 10000, deadlineExceeded: false },
+          },
+        },
+        {
+          storageFailure: {
+            phase: "acknowledgement",
+            requestId: "22222222-2222-4222-a222-222222222222",
+            timing: { elapsedMs: 5, timeoutMs: 10000, deadlineExceeded: false },
+          },
+        },
+      ]);
+      expect(notices[0].requestDigest).toBe(notices[1].requestDigest);
+      expect(calls).toBe(2);
+      expect(JSON.stringify(captured)).not.toContain("PRIVATE_");
+    } finally {
+      now.mockRestore();
+      warn.mockRestore();
+      ids.mockRestore();
+    }
+  });
+  it.each(["deadline", "remote-timeout", "response-body"] as const)(
+    "retains elapsed time and deadline evidence for %s without replay",
+    async (mode) => {
+      const controller = new AbortController();
+      const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+      const now = vi.spyOn(clock, "systemClock").mockReturnValue(1000);
+      const notices: Parameters<typeof storageFailureNote>[0][] = [];
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      let calls = 0;
+      let requestId: string | null = null;
+      const wire = new WorkerRunLedger({
+        baseUrl: "https://state.invalid",
+        token: "fixture",
+        storeKey: "fixture",
+        onFailure: ({ diagnostic }) => notices.push(diagnostic),
+        fetch: async (_url, init) => {
+          calls++;
+          requestId = new Headers(init?.headers).get(STORAGE_REQUEST_ID_HEADER);
+          const error = new DOMException("The operation timed out", "TimeoutError");
+          const fail = () => {
+            now.mockReturnValue(11000);
+            if (mode !== "remote-timeout") controller.abort(error);
+            throw error;
+          };
+          if (mode !== "response-body") return fail();
+          const response = Response.json({ ok: true });
+          response.text = async () => fail();
+          return response;
+        },
+      });
+      try {
+        const failure = await wire.setState(id, gen, { notepad: "PRIVATE_REQUEST" }).catch((error) => error);
+        expect(failure).toMatchObject({ name: "UncertainStoreError", outcome: "unknown" });
+        const captured = parseRunEventLines(JSON.stringify(storageFailureNote(notices[0])));
+        expect(captured.events).toMatchObject([
+          {
+            kind: "storage_failure",
+            storageFailure: {
+              operation: "/runs/state",
+              requestId: expect.stringMatching(/^[a-f0-9-]{36}$/),
+              phase: mode === "response-body" ? "response-body" : "transport",
+              timing: { elapsedMs: 10000, timeoutMs: 10000, deadlineExceeded: mode !== "remote-timeout" },
+            },
+          },
+        ]);
+        expect(calls).toBe(1);
+        expect(notices[0].requestId).toBe(requestId);
+        expect(JSON.stringify(captured)).not.toContain("PRIVATE_REQUEST");
+      } finally {
+        timeout.mockRestore();
+        now.mockRestore();
+        warn.mockRestore();
+      }
+    },
+  );
+
   it("retains a closed append rejection through private backlog trimming and final record assembly", async () => {
     const { reg } = testRegistry({ genId: () => id, backlogLimit: 4 });
     const run = reg.create("private", {
@@ -360,7 +472,9 @@ describe("original uncertain write diagnostics", () => {
           ownerGen: gen,
           httpStatus: 500,
           requestDigest: (failure as UncertainStoreError).request.digest,
+          requestId: expect.stringMatching(/^[a-f0-9-]{36}$/),
           rayId: "a49d0ab74f2e09ac-DFW",
+          timing: { elapsedMs: expect.any(Number), timeoutMs: 10000, deadlineExceeded: false },
           server: {
             stage: "state-rpc",
             errorKind: "error",
