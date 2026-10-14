@@ -234,13 +234,13 @@ RUN npm install -g @earendil-works/pi-coding-agent@0.87.1 \
 # at the EXACT pin held by src/deploy/imageOpenCodeHarness.test.ts, beside pi.
 # The wrapper's postinstall hard-links the platform binary into place, so it
 # is the one install script allowed by name; the grep proves the binary on
-# PATH prints the pin's version text (`opencode v2.0.18`, exactly); the npm
+# PATH prints the pin's version text (`opencode v2.0.24`, exactly); the npm
 # cache (a 200 MB tarball) is dropped in the same layer, and the proof runs
 # again as worker1 below. Dark until a deployment names it: nothing here
 # starts it on its own.
-RUN npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.18 \
+RUN npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.24 \
   && npm cache clean --force \
-  && opencode --version | grep -qx 'opencode v2.0.18'
+  && opencode --version | grep -qx 'opencode v2.0.24'
 
 # Agent commands never run as root (repo code runs unprivileged, one user per
 # thread — docs/reference/specs/resident-repos.md). The SDK's exec has no user/uid option
@@ -286,7 +286,7 @@ RUN su -s /bin/bash worker1 -c "pi --version | grep -qx '0.87.1'"
 # user through the same `su`, so the BUILD proves an unprivileged user finds
 # the pin on PATH and the binary runs without a writable home (its roots are
 # the run's own, named by the XDG variables at start).
-RUN su -s /bin/bash worker1 -c "opencode --version | grep -qx 'opencode v2.0.18'"
+RUN su -s /bin/bash worker1 -c "opencode --version | grep -qx 'opencode v2.0.24'"
 
 # bun once more, as worker1: a thread's `bun install` runs as the thread's user
 # through the same `su`, whose PATH is /etc/environment's rather than this

@@ -278,18 +278,10 @@ export function openCodeRunWire(spec: { model: { providerType: ProviderConfig["t
  *  aggregator's package speaks the aggregator's own protocol through the proxy
  *  — it asks for `usage.cost` on the final chunk (`usage: { include: true }`)
  *  and spells reasoning `reasoning: { effort }` — where the generic package
- *  asks for none. Its per-block cache breakpoints do NOT ride from the write:
- *  measured against the pinned 2.0.3 binary through the real proxy, the binary
- *  exempts the openrouter route from its per-block cache placement (`auto`
- *  places hints on its Anthropic-family routes only) and no configuration key
- *  reaches the request's own `cache` option — so a `markers` card rides the
- *  aggregator's OTHER documented spelling instead: one top-level
- *  `cache_control: { type: "ephemeral" }` on the request (OpenRouter's
- *  "automatic caching", honoured on its Anthropic, Vertex, Azure, Bedrock and
- *  Claude-on-AWS routes), written as the provider's `settings.extraBody`,
- *  which the binary's native providers merge into every request body
- *  (`openCodeConfig`; a model-level `options` entry does NOT reach the body,
- *  measured). The Responses wire maps to `@ai-sdk/openai`,
+ *  asks for none. A markers card also supplies the aggregator's top-level
+ *  `cache_control: { type: "ephemeral" }` through `settings.extraBody`.
+ *  The pinned binary adds per-block markers; the real-driver test captures
+ *  both forms through the proxy. The Responses wire maps to `@ai-sdk/openai`,
  *  but a Responses block on OpenCode is refused at dispatch by name until that
  *  package is measured against the logging fake (record 0052; the matrix's
  *  `cannot`). */
@@ -451,15 +443,8 @@ export function openCodeConfig(spec: OpenCodeLaunchSpec): Record<string, unknown
     wire === "openai-chat" && (card?.capField === "max_completion_tokens" || card?.capField === "max_tokens")
       ? card.capField
       : undefined;
-  // A `markers` card on a biller the harness table names caches the
-  // aggregator's own way (record 0052's amendment, U44): the pinned binary
-  // exempts the openrouter route from per-block `cache_control` placement, so
-  // the write spells OpenRouter's other documented form — one top-level
-  // `cache_control: { type: "ephemeral" }` ("automatic caching", honoured on
-  // its Anthropic-family routes) — as the provider's `settings.extraBody`,
-  // which the binary merges into every request body. A model-level `options`
-  // entry does NOT reach the body (measured against 2.0.3 through the real
-  // proxy, `opencode/testing/realDriver.test.ts`).
+  // Keep the configured top-level caching hint alongside the per-block
+  // markers the aggregator provider places itself.
   const aggregatorMarkers =
     wire === "openai-chat" && card?.cache === "markers" && billerHarnessProvider(card.block) !== undefined;
   return {

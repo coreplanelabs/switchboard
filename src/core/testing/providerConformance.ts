@@ -148,9 +148,8 @@ export function piCapturedBody(card: ModelCard, asked: AskedControls): Record<st
  *  `reasoning: { effort }`, record 0052's amendment) — the provider's
  *  `settings.extraBody` merged into every request body, the way the binary's
  *  native providers do: OpenRouter's top-level
- *  `cache_control: { type: "ephemeral" }` (its "automatic caching"), since the
- *  pinned binary exempts the openrouter route from per-block placement
- *  (measured against 2.0.3, `opencode/testing/realDriver.test.ts`). */
+ *  `cache_control: { type: "ephemeral" }`. The real-driver test also verifies
+ *  the per-block markers that the binary adds to this configured body. */
 export function openCodeCapturedBody(card: ModelCard, asked: AskedControls): Record<string, unknown> {
   const spec: OpenCodeLaunchSpec = {
     runId: "conformance",

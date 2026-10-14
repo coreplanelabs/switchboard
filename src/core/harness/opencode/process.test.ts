@@ -407,8 +407,8 @@ describe("the configuration writer", () => {
   // The aggregator speaks its own protocol through the proxy (record 0052's
   // amendment, U44): the biller's package asks for usage.cost and spells
   // reasoning its own way, and a markers card caches the aggregator's own way
-  // — the top-level `cache_control` as `settings.extraBody`, since the pinned
-  // binary exempts the openrouter route from per-block placement; the proxy
+  // — the top-level `cache_control` as `settings.extraBody`; the binary adds
+  // per-block markers, verified by the real-driver test. The proxy
   // stays the base URL and the bearer the key.
   it("an aggregator block writes the biller's own package under the proxy's /v1, a markers card's cache_control as settings.extraBody and its variants spelling reasoning: { effort }, and a generic biller keeps the generic package with reasoning_effort and no extraBody", () => {
     const aggregatorCard = cardOf({
