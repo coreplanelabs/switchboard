@@ -1,3 +1,9 @@
+import { RecordedCheckOperation, type CheckOperationContext } from "./checkOperation.js";
+import {
+  checkOperationSchema,
+  reportCheckResultFailure,
+  type CheckOperation,
+} from "../../src/execution/checkOperation.js";
 import {
   NativeOperationJournal,
   unstartedNativeOperator,
@@ -8649,8 +8655,9 @@ export class ResidentDO extends Sandbox<Env> {
     owner: WorkspaceOwner,
     fn: () => Promise<T>,
     attachment = false,
+    admittedKey?: string,
   ): Promise<T> {
-    const key = `native-operation:${threadKey}:${owner.runId}:${crypto.randomUUID()}`;
+    const key = admittedKey ?? `native-operation:${threadKey}:${owner.runId}:${crypto.randomUUID()}`;
     const scope = { key, threadKey, owner, attachment, active: true };
     const identity = workspaceOwnerKey(owner);
     this.runNativeScopes.set(identity, (this.runNativeScopes.get(identity) ?? 0) + 1);
@@ -8702,6 +8709,7 @@ export class ResidentDO extends Sandbox<Env> {
     threadKey: string,
     fn: () => Promise<T>,
     requestOwner?: WorkspaceOwner | null,
+    nativeKey?: string,
   ): Promise<T | ThreadErr> {
     if (this.workspaceExclusiveOpsInFlight.has(threadKey))
       return { error: "workspace is busy", status: 409, reason: "busy", cause: "system" };
@@ -8730,7 +8738,7 @@ export class ResidentDO extends Sandbox<Env> {
         if (this.workspaceExclusiveOpsInFlight.has(threadKey) || (await this.cancellationPending(threadKey)))
           return { error: "workspace is busy", status: 409, reason: "busy", cause: "system" } satisfies ThreadErr;
         return requestOwner !== undefined && isWorkspaceOwner(last)
-          ? this.withOwnedNativeOperation(threadKey, requestOwner ?? last, fn)
+          ? this.withOwnedNativeOperation(threadKey, requestOwner ?? last, fn, false, nativeKey)
           : fn();
       });
     } catch (error) {
@@ -8744,6 +8752,46 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
+  private async checkOperationContext(
+    threadKey: string,
+    owner: WorkspaceOwner | null,
+    rows: NativeOperationRows = this.ctx.storage,
+  ): Promise<CheckOperationContext | undefined> {
+    if (!isWorkspaceOwner(owner)) return undefined;
+    const registration = await rows.get<RunRegistration>(runRegKey(threadKey));
+    const binding = await rows.get<ThreadBinding>(threadBindingKey(threadKey));
+    const fence = await rows.get<WorkspaceOwner>(runFenceKey(threadKey));
+    if (
+      !isWorkspaceOwner(fence) ||
+      workspaceOwnerKey(fence) !== workspaceOwnerKey(owner) ||
+      (await rows.get(`discarding:${threadKey}`)) ||
+      (await rows.get(`discarded:${threadKey}:${owner.runId}`))
+    )
+      return undefined;
+    if (
+      !registeredRunOwnsRelease(registration, owner.runId, owner.ownerGen, owner.ownerFence) ||
+      !binding?.container ||
+      binding.threadKey !== threadKey ||
+      registration?.threadKey !== threadKey ||
+      binding.evicted ||
+      (await rows.get(`cancelled:${threadKey}:${owner.runId}`)) ||
+      (await rows.get(`cancelled-thread:${threadKey}`))
+    )
+      return undefined;
+    return { threadKey, ...owner, incarnation: binding.container };
+  }
+
+  async inspectCheckResult(threadKey: string, operation: CheckOperation, owner: WorkspaceOwner | null) {
+    const context = await this.checkOperationContext(threadKey, owner);
+    if (!context) return { kind: "unknown" as const };
+    return new RecordedCheckOperation(this.ctx.storage).inspect(
+      context,
+      operation,
+      async (rows) =>
+        JSON.stringify(await this.checkOperationContext(threadKey, owner, rows)) === JSON.stringify(context),
+    );
+  }
+
   async execThread(
     threadKey: string,
     command: string,
@@ -8751,17 +8799,54 @@ export class ResidentDO extends Sandbox<Env> {
     traceparent?: string,
     env?: Record<string, string>,
     requestOwner: WorkspaceOwner | null = null,
+    checkOperation?: CheckOperation,
   ): Promise<{ stdout: string; stderr: string; exitCode: number; truncated: boolean } | ThreadErr> {
     const queuedAt = systemClock();
     let startedAt = queuedAt;
-    const res = await this.withThreadBusy(
-      threadKey,
-      () => {
-        startedAt = systemClock();
-        return this.execThreadImpl(threadKey, command, timeoutMs, env);
-      },
-      requestOwner,
-    );
+    let refusal: ThreadErr | undefined;
+    const execute = async (nativeKey?: string) => {
+      const answer = await this.withThreadBusy(
+        threadKey,
+        () => {
+          startedAt = systemClock();
+          return this.execThreadImpl(threadKey, command, timeoutMs, env);
+        },
+        requestOwner,
+        nativeKey,
+      );
+      if ("error" in answer) refusal = answer;
+      return answer;
+    };
+    const context = checkOperation ? await this.checkOperationContext(threadKey, requestOwner) : undefined;
+    const saved =
+      checkOperation && context
+        ? await new RecordedCheckOperation(this.ctx.storage).execute(
+            context,
+            checkOperation,
+            { command, timeoutMs, env },
+            async (rows) =>
+              JSON.stringify(await this.checkOperationContext(threadKey, requestOwner, rows)) ===
+              JSON.stringify(context),
+            execute,
+          )
+        : undefined;
+    if (checkOperation && context && saved?.kind !== "completed" && !refusal)
+      reportCheckResultFailure(
+        saved?.kind === "not_started" ? "check_capacity" : "operation_result_unavailable",
+        context,
+        checkOperation,
+      );
+    const res = checkOperation
+      ? saved?.kind === "completed"
+        ? saved.result
+        : (refusal ??
+          ({
+            error: "check operation outcome unavailable",
+            status: 409,
+            reason: saved?.kind === "not_started" ? "check-capacity" : "busy",
+            cause: "system",
+          } satisfies ThreadErr))
+      : await execute();
     // The command as the resident's own `resident.exec` root (docs/reference/specs/tracing.md
     // item 22): started when the command did, the wait for the thread's turn an attr.
     emitStepRoot("resident.exec", startedAt, [], traceparent, "error" in res ? refusalOutcome(res) : "ok", {
@@ -10139,6 +10224,16 @@ export class ResidentDO extends Sandbox<Env> {
       // The run's registration goes with its binding (item 44): released here,
       // never on a give-way above — a re-attach has re-registered it anyway.
       await this.ctx.storage.delete(runRegKey(binding.threadKey));
+      try {
+        await new RecordedCheckOperation(this.ctx.storage).retire(binding.threadKey, async (context, rows) => {
+          const current = await rows.get<RunRegistration>(runRegKey(context.threadKey));
+          return !registeredRunOwnsRelease(current, context.runId, context.ownerGen, context.ownerFence);
+        });
+      } catch {
+        // Optional output cleanup cannot turn completed workspace removal into
+        // an unknown release. Retained aliases still refuse repeat execution.
+        console.warn("check result cleanup unavailable");
+      }
       if (recordedTree)
         console.log(`${logCtx}: ${binding.threadKey} evicted (${why}) — ${evictedTreeSentence(recordedTree)}`);
       return "evicted";
@@ -13144,6 +13239,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/detach": { scope: "operator", method: "POST" },
   "/cancel-run": { scope: "operator", method: "POST" },
   "/exec": { scope: "operator", method: "POST" },
+  "/exec-result": { scope: "operator", method: "POST" },
   "/inspect-credentials": { scope: "operator", method: "POST" },
   "/publish": { scope: "operator", method: "POST" },
   "/read": { scope: "operator", method: "POST" },
@@ -13363,6 +13459,13 @@ export default {
           }
           case "/detach":
             return await handleDetach(env, body);
+          case "/exec-result": {
+            const operation = checkOperationSchema.safeParse(body.checkOperation);
+            if (!operation.success) return json({ kind: "unknown" }, 400);
+            const ctx = await resolveThreadRoute(env, body);
+            if (ctx instanceof Response) return ctx;
+            return json(await ctx.stub.inspectCheckResult(ctx.threadKey, operation.data, requestWorkspaceOwner(body)));
+          }
           case "/exec":
             return await handleExec(env, body, traceparent);
           case "/inspect-credentials":
@@ -14352,10 +14455,20 @@ async function handleExec(env: Env, body: Record<string, unknown>, traceparent?:
   // read from the body alone through the one validated reader the sandbox
   // Worker uses, and handed to the exec's env option, never onto the command.
   const execEnv = envFromRequest({ body });
+  const operation = body.checkOperation === undefined ? undefined : checkOperationSchema.safeParse(body.checkOperation);
+  if (operation && !operation.success) return json({ error: "invalid check operation" }, 400);
   return streamThreadExec(
     withLevels(
       ctx.stub,
-      ctx.stub.execThread(ctx.threadKey, body.command, timeoutMs, traceparent, execEnv, requestWorkspaceOwner(body)),
+      ctx.stub.execThread(
+        ctx.threadKey,
+        body.command,
+        timeoutMs,
+        traceparent,
+        execEnv,
+        requestWorkspaceOwner(body),
+        operation?.success ? operation.data : undefined,
+      ),
     ),
   );
 }

@@ -1,3 +1,4 @@
+import { RecordedCheckOperation } from "./checkOperation.js";
 import { isResidentPoolUser } from "../../src/execution/residentPoolSpends.js";
 import {
   isWorkspaceOwner,
@@ -208,6 +209,7 @@ function probe(
   const observeAbsentPrivateTree = vi.fn(async () => options.absentPrivateTree === true);
   const markPoolUserSpent = vi.fn(async () => options.spendAccepted !== false);
   const Scope = runInNewContext(`${compiled}\nPreservationUnderTest`, {
+    RecordedCheckOperation,
     isWorkspaceOwner,
     isAcknowledgedWorkspaceOwner,
     workspaceOwnerKey,

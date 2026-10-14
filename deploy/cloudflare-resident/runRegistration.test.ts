@@ -1,3 +1,4 @@
+import { RecordedCheckOperation } from "./checkOperation.js";
 import { NativeOperationJournal, unstartedNativeOperator } from "./nativeOperation.js";
 import { ErrorCode, OperationInterruptedError, RPCTransportError } from "@cloudflare/sandbox/errors";
 import { levelPosts, memorySide, mergeOutbox, seatSide } from "./levels.js";
@@ -1139,6 +1140,7 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
       provisionUidCommand,
       crypto: webcrypto,
       NativeOperationJournal,
+      RecordedCheckOperation,
       unstartedNativeOperator,
       TextEncoder,
       THREADS_DIR: "/workspace/threads",
@@ -1458,6 +1460,7 @@ function workloadResident(
     provisionUidCommand,
     crypto: webcrypto,
     NativeOperationJournal,
+    RecordedCheckOperation,
     unstartedNativeOperator,
     registeredRunOwnsRelease,
     URL,

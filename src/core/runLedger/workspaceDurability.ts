@@ -713,7 +713,7 @@ function settledRecordedCheck(row: LiveRunRow, callId: string, receipt: unknown)
     return false;
   const outcome = receipt.outcome;
   if (outcome.kind === "not_started")
-    return ["command_refused", "budget_exhausted", "stopped"].includes(String(outcome.reason));
+    return ["command_refused", "budget_exhausted", "stopped", "capacity"].includes(String(outcome.reason));
   return (
     outcome.kind === "completed" &&
     Number.isInteger(outcome.exitCode) &&
@@ -824,6 +824,7 @@ export function deriveWorkspaceDisposition(
   const checks = row.state.checkExecutions;
   if (checks !== undefined && (!object(checks) || checks.version !== 1 || !Array.isArray(checks.receipts)))
     return hold("tool-effect-custody-unverified");
+  if (object(checks) && checks.metadata !== undefined) return hold("tool-effect-custody-unverified");
   const receipts = object(checks) && Array.isArray(checks.receipts) ? checks.receipts : [];
   if (
     new Set(receipts.map((r) => (object(r) ? r.callId : undefined))).size !== receipts.length ||

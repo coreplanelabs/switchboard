@@ -44,6 +44,430 @@ function setup(previous?: unknown) {
 }
 
 describe("recorded coding checks", () => {
+  it("holds a restored preflight when the checkout head or fingerprint may have changed at the same path", async () => {
+    for (const changed of ["head", "fingerprint"]) {
+      const original = setup();
+      original.binding.executor = () => ({
+        inspectCheckResult: async () => undefined,
+        execResult: async () => {
+          throw new Error("preflight reply lost");
+        },
+      });
+      expect(await original.capability().run(input, "original")).toMatchObject({
+        kind: "unavailable",
+        reason: "metadata_unavailable",
+      });
+      const saved = structuredClone(original.saved.at(-1)!);
+      saved.metadata!.result = metadata;
+      const currentMetadata = {
+        ...metadata,
+        stdout: `/work/repo\n${(changed === "head" ? "c" : "a").repeat(40)}\n${(changed === "fingerprint" ? "d" : "b").repeat(40)}\n`,
+      };
+      const restored = setup(saved);
+      const effects: string[] = [];
+      restored.binding.executor = () => ({
+        inspectCheckResult: async () => metadata,
+        execResult: async (command) => {
+          effects.push(command);
+          return { ...currentMetadata, stdout: "command ran against changed checkout" };
+        },
+      });
+      expect(await restored.capability().run(input, "original")).toEqual({
+        kind: "unavailable",
+        reason: "metadata_revalidation_required",
+      });
+      expect(effects).toEqual([]);
+      expect(restored.saved.at(-1)?.metadata?.result).toEqual(metadata);
+      expect(restored.saved.at(-1)?.receipts).toEqual([]);
+      const failures: Array<{ code: string; recovery: string }> = [];
+      const text = await runCheckTool.run({ ...input }, {
+        checkExecution: restored.capability(),
+        callId: "original",
+        reportToolFailure: (failure) => {
+          failures.push(failure);
+        },
+      } as Parameters<typeof runCheckTool.run>[1]);
+      expect(text).toBe(
+        "error: original metadata completed; selected command did not start because checkout freshness is unverified. The saved metadata remains retained.",
+      );
+      expect(failures.at(-1)).toEqual({ code: "capability_unavailable", recovery: "stop" });
+      expect(effects).toEqual([]);
+    }
+  });
+
+  it("reports metadata capacity before start and preserves other held command identities", async () => {
+    const prior = setup();
+    prior.execResult
+      .mockReset()
+      .mockResolvedValueOnce(metadata)
+      .mockRejectedValueOnce(new ExecInfraError("original unknown", "transport-lost"));
+    expect(await prior.capability().run(input, "held-original")).toMatchObject({
+      receipt: { outcome: { kind: "unknown" } },
+    });
+    const retained = prior.saved.at(-1)!;
+    const s = setup(retained);
+    let requests = 0;
+    s.binding.executor = () =>
+      new ResidentExecutor({
+        baseUrl: "https://resident.example",
+        token: "fixture",
+        resource: "repo:acme/repo",
+        threadKey: "t1",
+        runId: "r1",
+        ownerGen: "g1",
+        ownerFence: 1,
+      });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        requests++;
+        return Response.json({ error: "capacity", reason: "check-capacity", status: 409 });
+      }),
+    );
+    try {
+      const cap = s.capability();
+      const result = await runCheckTool.run({ ...input, command: "different command" }, {
+        checkExecution: cap,
+        callId: "new-call",
+      } as Parameters<typeof runCheckTool.run>[1]);
+      expect(result).toBe("error: recorded check capacity exhausted; command did not start");
+      expect(requests).toBe(1);
+      expect(s.saved.at(-1)).toEqual(retained);
+      expect(await cap.run(input, "new-identity-for-held-command")).toEqual({
+        kind: "unavailable",
+        reason: "reconciliation_required",
+      });
+      expect(requests).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("holds metadata admission or result persistence failure before the selected command starts", async () => {
+    for (const phase of ["admission", "result"] as const) {
+      const s = setup();
+      const effects: string[] = [];
+      s.binding.executor = () => ({
+        inspectCheckResult: async () => metadata,
+        execResult: async (command) => {
+          effects.push(command);
+          return metadata;
+        },
+      });
+      s.binding.save = async (state) => phase === "result" && !state.metadata?.result;
+      const cap = s.capability();
+      expect(await cap.run(input, "original")).toEqual({ kind: "unavailable", reason: "persistence_failed" });
+      expect(effects.length).toBe(phase === "admission" ? 0 : 1);
+      expect(await cap.run(input, "original")).toEqual({ kind: "unavailable", reason: "persistence_failed" });
+      expect(effects.length).toBe(phase === "admission" ? 0 : 1);
+    }
+  });
+
+  it("inspects retained metadata without dispatch while inputs and foreign owners stay held", async () => {
+    const s = setup();
+    s.binding.executor = () => ({
+      inspectCheckResult: async () => undefined,
+      execResult: async () => {
+        throw new Error("lost metadata");
+      },
+    });
+    expect(await s.capability().run(input, "original")).toMatchObject({
+      kind: "unavailable",
+      reason: "metadata_unavailable",
+    });
+    const saved = s.saved.at(-1)!;
+    expect(saved).toMatchObject({ receipts: [], metadata: { callId: "original", workspace: "/work/repo" } });
+    const restored = setup(saved);
+    const effects: string[] = [];
+    restored.binding.executor = () => ({
+      inspectCheckResult: async () => metadata,
+      execResult: async (command) => {
+        effects.push(command);
+        return { ...ok, stdout: "business only" };
+      },
+    });
+    const cap = restored.capability();
+    expect(await cap.run(input, "different-call")).toEqual({ kind: "unavailable", reason: "reconciliation_required" });
+    expect(await cap.run({ ...input, command: "different" }, "original")).toEqual({
+      kind: "unavailable",
+      reason: "reconciliation_required",
+    });
+    expect(await cap.run(input, "original")).toEqual({ kind: "unavailable", reason: "metadata_revalidation_required" });
+    expect(effects).toEqual([]);
+    expect(restored.saved.at(-1)?.metadata?.result).toEqual(metadata);
+    const foreign = setup(saved);
+    foreign.binding.owner = { ...foreign.binding.owner, runId: "foreign" };
+    expect(await foreign.capability().run(input, "original")).toEqual({ kind: "unavailable", reason: "invalid_state" });
+    expect(foreign.execResult).not.toHaveBeenCalled();
+  });
+
+  it("recovers the original metadata reply before starting the selected command", async () => {
+    const s = setup();
+    const requests: string[] = [];
+    const identities: unknown[] = [];
+    let original: unknown;
+    s.binding.executor = () =>
+      new ResidentExecutor({
+        baseUrl: "https://resident.example",
+        token: "fixture",
+        resource: "repo:acme/repo",
+        threadKey: "t1",
+        runId: "r1",
+        ownerGen: "g1",
+        ownerFence: 1,
+      });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init: RequestInit) => {
+        const path = new URL(String(url)).pathname;
+        const body = JSON.parse(String(init.body));
+        requests.push(path);
+        if (requests.length === 1) {
+          original = body.checkOperation;
+          identities.push(original);
+          throw new Error("metadata reply lost");
+        }
+        if (path === "/exec-result")
+          return Response.json({ kind: "completed", checkOperation: original, result: metadata });
+        identities.push(body.checkOperation);
+        return Response.json({ ...ok, stdout: "selected command executed once" });
+      }),
+    );
+    try {
+      expect(await s.capability().run(input, "metadata-recovery")).toMatchObject({
+        kind: "recorded",
+        receipt: { outcome: { kind: "completed", stdout: "selected command executed once" } },
+      });
+      expect(requests).toEqual(["/exec", "/exec-result", "/exec"]);
+      expect(identities[0]).toMatchObject({ key: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      expect(identities[1]).not.toEqual(identities[0]);
+      expect(s.saved[0]).toMatchObject({
+        receipts: [],
+        metadata: { callId: "metadata-recovery", checkOperation: identities[0] },
+      });
+      expect(s.saved.at(-1)?.receipts[0]?.outcome).toEqual({
+        kind: "completed",
+        ...ok,
+        stdout: "selected command executed once",
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reports an unavailable result read without exposing response or error text", async () => {
+    const operation = { key: "a".repeat(64), commandHash: "b".repeat(64) };
+    const executor = new ResidentExecutor({
+      baseUrl: "https://resident.example",
+      token: "private-token",
+      resource: "repo:acme/repo",
+      threadKey: "t1",
+      runId: "r1",
+      ownerGen: "g1",
+      ownerFence: 1,
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ kind: "unknown", error: "Cookie: private-response" })),
+    );
+    try {
+      expect(await executor.inspectCheckResult(operation)).toBeUndefined();
+      expect(warn.mock.calls.map((args) => [args[0], JSON.parse(String(args[1]))])).toEqual([
+        [
+          "[check-result]",
+          {
+            version: 1,
+            code: "result_not_completed",
+            threadKey: "t1",
+            runId: "r1",
+            ownerFence: 1,
+            operationKey: "a".repeat(64),
+          },
+        ],
+      ]);
+    } finally {
+      warn.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("records a definite Resident capacity refusal as not started", async () => {
+    const s = setup();
+    let requests = 0;
+    s.binding.executor = () =>
+      new ResidentExecutor({
+        baseUrl: "https://resident.example",
+        token: "fixture",
+        resource: "repo:acme/repo",
+        threadKey: "t1",
+        runId: "r1",
+        ownerGen: "g1",
+        ownerFence: 1,
+      });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        ++requests === 1
+          ? Response.json(metadata)
+          : Response.json({ error: "check capacity", status: 409, reason: "check-capacity" }),
+      ),
+    );
+    try {
+      expect(await s.capability().run(input, "capacity")).toMatchObject({
+        kind: "recorded",
+        receipt: { outcome: { kind: "not_started", reason: "capacity" } },
+      });
+      expect(requests).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("holds unreadable or mismatched result inspection and a failed recovery receipt write", async () => {
+    for (const fault of ["unreadable", "wrong-key", "wrong-command", "not-saved"]) {
+      const s = setup();
+      let requests = 0;
+      let op: { key: string; commandHash: string };
+      s.binding.executor = () =>
+        new ResidentExecutor({
+          baseUrl: "https://resident.example",
+          token: "fixture",
+          resource: "repo:acme/repo",
+          threadKey: "t1",
+          runId: "r1",
+          ownerGen: "g1",
+          ownerFence: 1,
+        });
+      const save = s.binding.save;
+      if (fault === "not-saved")
+        s.binding.save = async (state) =>
+          (state.receipts.length === 0 || state.receipts[0]?.outcome.kind === "pending") && (await save(state));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url, init: RequestInit) => {
+          const path = new URL(String(url)).pathname;
+          if (++requests === 1) return Response.json(metadata);
+          if (path === "/exec") {
+            op = JSON.parse(String(init.body)).checkOperation;
+            throw new Error("reply lost");
+          }
+          if (fault === "unreadable") throw new Error("result read lost");
+          return Response.json({
+            kind: "completed",
+            checkOperation: {
+              ...op,
+              ...(fault === "wrong-key"
+                ? { key: "f".repeat(64) }
+                : fault === "wrong-command"
+                  ? { commandHash: "f".repeat(64) }
+                  : {}),
+            },
+            result: ok,
+          });
+        }),
+      );
+      try {
+        const answer = await s.capability().run(input, "held");
+        expect(answer).toMatchObject(
+          fault === "not-saved"
+            ? { kind: "unavailable", reason: "persistence_failed" }
+            : { kind: "recorded", receipt: { outcome: { kind: "unknown" } } },
+        );
+        expect(requests).toBe(3);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    }
+  });
+
+  it("inspects a retained unknown check on the same identity without redispatch and holds mismatches", async () => {
+    const s = setup();
+    const inspector = vi.fn().mockResolvedValue(undefined);
+    s.execResult
+      .mockReset()
+      .mockResolvedValueOnce(metadata)
+      .mockRejectedValueOnce(new ExecInfraError("lost", "transport-lost"));
+    s.binding.executor = () => ({ execResult: s.execResult, inspectCheckResult: inspector });
+    expect(await s.capability().run(input, "original")).toMatchObject({
+      receipt: {
+        outcome: { kind: "unknown" },
+        checkOperation: { commandHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
+      },
+    });
+    const saved = structuredClone(s.saved.at(-1)!);
+    const restored = setup(saved);
+    restored.binding.executor = () => ({
+      execResult: restored.execResult,
+      inspectCheckResult: async () => ({ ...ok, stdout: "original process result" }),
+    });
+    const cap = restored.capability();
+    expect(await cap.run({ ...input, command: "different" }, "original")).toEqual({
+      kind: "unavailable",
+      reason: "call_mismatch",
+    });
+    expect(await cap.run(input, "different-id")).toEqual({ kind: "unavailable", reason: "reconciliation_required" });
+    expect(await cap.run(input, "original")).toMatchObject({
+      kind: "recorded",
+      replayed: true,
+      receipt: { outcome: { kind: "completed", stdout: "original process result", exitCode: 0 } },
+    });
+    expect(restored.execResult).not.toHaveBeenCalled();
+    expect(restored.saved.at(-1)?.receipts[0]?.outcome).toEqual({
+      kind: "completed",
+      ...ok,
+      stdout: "original process result",
+    });
+    const legacy = structuredClone(saved);
+    delete legacy.receipts[0]!.checkOperation;
+    const old = setup(legacy);
+    old.binding.executor = restored.binding.executor;
+    expect(await old.capability().run(input, "original")).toMatchObject({ receipt: { outcome: { kind: "unknown" } } });
+  });
+
+  it("recovers a saved Resident command result after a lost reply without repeating execution", async () => {
+    const s = setup();
+    const requests: string[] = [];
+    let key: unknown;
+    const executor = new ResidentExecutor({
+      baseUrl: "https://resident.example",
+      token: "fixture",
+      resource: "repo:acme/repo",
+      threadKey: "t1",
+      runId: "r1",
+      ownerGen: "g1",
+      ownerFence: 1,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init: RequestInit) => {
+        const path = new URL(String(url)).pathname;
+        const body = JSON.parse(String(init.body));
+        requests.push(path);
+        if (requests.length === 1) return Response.json(metadata);
+        if (path === "/exec") {
+          key = body.checkOperation;
+          throw new TypeError("reply lost");
+        }
+        if (path === "/exec-result")
+          return Response.json({ kind: "completed", checkOperation: key, result: { ...ok, stdout: "one execution" } });
+        throw new Error("unexpected route");
+      }),
+    );
+    s.binding.executor = () => executor;
+    try {
+      const result = await s.capability().run(input, "recoverable-call");
+      expect(result).toMatchObject({
+        kind: "recorded",
+        receipt: { outcome: { kind: "completed", stdout: "one execution", exitCode: 0 } },
+      });
+      expect(requests).toEqual(["/exec", "/exec", "/exec-result"]);
+      expect(s.saved.at(-1)?.receipts[0]?.outcome).toEqual({ kind: "completed", ...ok, stdout: "one execution" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("retains a typed command failure on durable replay without dispatch or prose classification", async () => {
     for (const typed of [true, false]) {
       const w = setup();
@@ -84,6 +508,7 @@ describe("recorded coding checks", () => {
           vi.stubGlobal(
             "fetch",
             vi.fn(async (_url, init: RequestInit) => {
+              if (new URL(String(_url)).pathname === "/exec-result") return Response.json({ kind: "unknown" });
               wires.push(JSON.parse(String(init.body)));
               if (wires.length === 1) return new Response(JSON.stringify(metadata));
               return new Response(
@@ -143,7 +568,7 @@ describe("recorded coding checks", () => {
             command: "cd -- '/work/repo' && bash -c 'git rev-parse HEAD'",
             timeoutMs: 1000,
           });
-          expect(s.saved.map((state) => state.receipts[0]?.outcome.kind)).toEqual([
+          expect(s.saved.flatMap((state) => (state.receipts[0] ? [state.receipts[0].outcome.kind] : []))).toEqual([
             "pending",
             ending === "delivered" ? "completed" : "unknown",
           ]);
@@ -184,7 +609,10 @@ describe("recorded coding checks", () => {
           outcome: { kind: "completed", stdout: "short check passed", stderr: "", exitCode: 0, truncated: false },
         },
       });
-      expect(s.saved.map((state) => state.receipts[0]?.outcome.kind)).toEqual(["pending", "completed"]);
+      expect(s.saved.flatMap((state) => (state.receipts[0] ? [state.receipts[0].outcome.kind] : []))).toEqual([
+        "pending",
+        "completed",
+      ]);
     } finally {
       vi.clearAllTimers();
       vi.useRealTimers();
@@ -221,6 +649,7 @@ describe("recorded coding checks", () => {
         vi.stubGlobal(
           "fetch",
           vi.fn(async (_url, init: RequestInit) => {
+            if (new URL(String(_url)).pathname === "/exec-result") return Response.json({ kind: "unknown" });
             wires.push(JSON.parse(String(init.body)));
             if (!pendingBody)
               return new Response(
@@ -270,7 +699,10 @@ describe("recorded coding checks", () => {
           ...ok,
           stdout: "private completed output",
         });
-        expect(s.saved.map((state) => state.receipts[0]?.outcome.kind)).toEqual(["pending", "completed"]);
+        expect(s.saved.flatMap((state) => (state.receipts[0] ? [state.receipts[0].outcome.kind] : []))).toEqual([
+          "pending",
+          "completed",
+        ]);
         expect(wires[1]?.command).toContain("node tests/focused.js");
         const savedBytes = JSON.stringify(s.saved);
         vi.clearAllTimers();
@@ -298,7 +730,11 @@ describe("recorded coding checks", () => {
         );
         expect(wires).toHaveLength(1);
         expect(wires[0]?.command).not.toBe(selected.command);
-        expect(JSON.stringify(s.saved)).toBe(savedBytes);
+        if (backend === "resident") {
+          expect(s.saved.at(-1)?.receipts).toEqual(JSON.parse(savedBytes).at(-1).receipts);
+          expect(s.saved.at(-1)?.metadata).toMatchObject({ callId: "call-pending", workspace: "/work/repo" });
+          expect(s.saved.at(-1)?.metadata?.result).toBeUndefined();
+        } else expect(JSON.stringify(s.saved)).toBe(savedBytes);
         expect(output).not.toContain("private");
         if (typeof output !== "string") throw new Error("Expected string result");
         expect(JSON.parse(output.split("Metadata diagnostic: ")[1]!)).toEqual({
@@ -378,7 +814,10 @@ describe("recorded coding checks", () => {
         outcome: { kind: "completed", exitCode: 1 },
       },
     });
-    expect(s.saved.map((state) => state.receipts[0]?.outcome.kind)).toEqual(["pending", "completed"]);
+    expect(s.saved.flatMap((state) => (state.receipts[0] ? [state.receipts[0].outcome.kind] : []))).toEqual([
+      "pending",
+      "completed",
+    ]);
     expect(s.execResult.mock.calls[1]?.[0]).toContain("cd -- '/work/repo'");
   });
 

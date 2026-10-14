@@ -1,4 +1,11 @@
 import {
+  CheckCapacityError,
+  checkOperationSchema,
+  reportCheckResultFailure,
+  type CheckOperation,
+  type CheckResultFailure,
+} from "./checkOperation.js";
+import {
   emptyCredentialInspection,
   parseCredentialInspection,
   type CredentialInspection,
@@ -2106,6 +2113,46 @@ export class ResidentExecutor implements Executor {
     return renderCommandResult(await this.execResult(command, opts));
   }
 
+  async inspectCheckResult(operation: CheckOperation, opts?: ExecOptions): Promise<ExecResult | undefined> {
+    if (!checkOperationSchema.safeParse(operation).success || opts?.signal?.aborted) return undefined;
+    let response: Awaited<ReturnType<ResidentExecutor["call"]>>;
+    try {
+      response = await this.call(
+        "/exec-result",
+        { checkOperation: operation },
+        opts?.timeoutMs,
+        opts?.signal,
+        opts?.span,
+      );
+    } catch (error) {
+      reportCheckResultFailure("lookup_transport_unavailable", this.opts, operation);
+      throw error;
+    }
+    const { status, data } = response;
+    const saved = checkOperationSchema.safeParse(data.checkOperation);
+    const result = data.result as Partial<ExecResult> | undefined;
+    const unavailable = (code: CheckResultFailure) => {
+      reportCheckResultFailure(code, this.opts, operation);
+      return undefined;
+    };
+    if (status !== 200) return unavailable("lookup_refused");
+    if (data.kind !== "completed") return unavailable("result_not_completed");
+    if (!saved.success || saved.data.key !== operation.key || saved.data.commandHash !== operation.commandHash)
+      return unavailable("result_identity_mismatch");
+    if (
+      !result ||
+      typeof result.stdout !== "string" ||
+      typeof result.stderr !== "string" ||
+      typeof result.exitCode !== "number" ||
+      !Number.isInteger(result.exitCode) ||
+      result.exitCode < 0 ||
+      result.exitCode > 255 ||
+      typeof result.truncated !== "boolean"
+    )
+      return unavailable("result_invalid");
+    return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, truncated: result.truncated };
+  }
+
   async execResult(command: string, opts?: ExecOptions): Promise<ExecResult> {
     // Per-call budget (docs/reference/specs/execution.md item 11). It rides in the body
     // only when the caller asked for one, so an older resident Worker sees the
@@ -2115,7 +2162,10 @@ export class ResidentExecutor implements Executor {
     // resident's own streamed exit-124 answer arrives instead of the client
     // aborting the transport at the same instant.
     const timeoutMs = clampBashTimeout(opts?.timeoutMs);
-    const body: Record<string, unknown> = { command };
+    const body: Record<string, unknown> = {
+      command,
+      ...(opts?.checkOperation ? { checkOperation: opts.checkOperation } : {}),
+    };
     if (opts?.timeoutMs !== undefined) body.timeoutMs = timeoutMs;
     // A caller's extra environment (docs/reference/specs/harness-pi.md item 4)
     // rides in the body as `env`, the same convention as timeoutMs: only when
@@ -2147,6 +2197,8 @@ export class ResidentExecutor implements Executor {
     if (status === 400 && typeof data.error === "string" && data.error && data.needs === undefined) {
       throw new Error(`resident /exec: ${data.error}`);
     }
+    if (opts?.checkOperation && answeredStatus(status, data) === 409 && data.reason === "check-capacity")
+      throw new CheckCapacityError("recorded check capacity exhausted; command did not start");
     if (typeof data.error === "string" && data.error) {
       // post-validation failure (exitCode 127 shape) — legible, never retried.
       // Infra (the exec transport failed), not a command exit: counts toward

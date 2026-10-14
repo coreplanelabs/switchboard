@@ -1,3 +1,9 @@
+import { runInNewContext } from "node:vm";
+import ts from "typescript";
+import { envFromRequest } from "./sandboxEnv.js";
+import { checkOperationSchema } from "./checkOperation.js";
+import { isWorkspaceOwner } from "../core/workspaceSettlement.js";
+import { clampBashTimeout } from "./bashTimeout.js";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,18 +15,58 @@ const ROOT = resolve(import.meta.dirname, "../..");
 // carries a caller's extra environment for one `/exec` the way the sandbox
 // Worker does: read from the body alone through the one validated reader,
 // handed to the SDK's per-exec env option, never onto the command text. The
-// Worker cannot run under vitest (a Durable Object over a container), so this
-// mirrors the sandbox Worker's static guard: read the source and require the
-// seam to be wired, so dropping it goes red here, not in a run.
-describe("resident Worker /exec env (static)", () => {
+// handler runs with a receiver fixture; adjacent static guards cover the
+// SDK environment merge and the absence of a header credential channel.
+describe("resident Worker /exec env", () => {
   const worker = readFileSync(resolve(ROOT, "deploy/cloudflare-resident/worker.ts"), "utf8");
 
-  it("reads the env map from the body through envFromRequest and hands it to execThread", () => {
-    expect(worker).toMatch(/import \{ envFromRequest \} from "\.\.\/\.\.\/src\/execution\/sandboxEnv\.js";/);
-    expect(worker).toMatch(/const execEnv = envFromRequest\(\{ body \}\);/);
-    expect(worker).toMatch(
-      /execThread\(\s*ctx\.threadKey,\s*body\.command,\s*timeoutMs,\s*traceparent,\s*execEnv,\s*requestWorkspaceOwner\(body\),?\s*\)/,
+  it("reads the env map from the body through envFromRequest and hands it to execThread", async () => {
+    const source = ts.createSourceFile("worker.ts", worker, ts.ScriptTarget.Latest, true);
+    const handler = ts.transpileModule(
+      source.statements
+        .filter(
+          (node) =>
+            ts.isFunctionDeclaration(node) && ["handleExec", "requestWorkspaceOwner"].includes(node.name?.text ?? ""),
+        )
+        .map((node) => node.getText(source))
+        .join("\n"),
+      { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+    ).outputText;
+    const calls: unknown[][] = [];
+    const ctx = {
+      threadKey: "thread",
+      stub: {
+        execThread: async (...args: unknown[]) => {
+          calls.push(args);
+          return { stdout: "received", stderr: "", exitCode: 0, truncated: false };
+        },
+      },
+    };
+    const run = runInNewContext(`${handler}\nhandleExec`, {
+      Response,
+      envFromRequest,
+      checkOperationSchema,
+      isWorkspaceOwner,
+      clampBashTimeout,
+      MAX_EXEC_COMMAND_LENGTH: 10000,
+      resolveThreadRoute: async () => ctx,
+      withLevels: async (_stub: unknown, result: Promise<unknown>) => ({ result: await result }),
+      streamThreadExec: async (pending: Promise<{ result: unknown }>) => Response.json((await pending).result),
+      json: (body: unknown, status = 200) => Response.json(body, { status }),
+    }) as (env: unknown, body: unknown, trace: string) => Promise<Response>;
+    const operation = { key: "a".repeat(64), commandHash: "b".repeat(64) };
+    const owner = { runId: "run", ownerGen: "generation", ownerFence: 1 };
+    const response = await run(
+      {},
+      { command: "echo env", timeoutMs: 1000, env: { TEST_VALUE: "from-body" }, ...owner, checkOperation: operation },
+      "trace",
     );
+    expect(await response.json()).toEqual({ stdout: "received", stderr: "", exitCode: 0, truncated: false });
+    expect(calls).toEqual([["thread", "echo env", 1000, "trace", { TEST_VALUE: "from-body" }, owner, operation]]);
+    const invalid = await run({}, { command: "echo env", checkOperation: { ...operation, key: "invalid" } }, "trace");
+    expect(await invalid.json()).toEqual({ error: "invalid check operation" });
+    expect(invalid.status).toBe(400);
+    expect(calls).toHaveLength(1);
   });
 
   it("threads the env through to the thread run, merged under the Worker's own injected variables and validated by name", () => {

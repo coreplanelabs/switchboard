@@ -1,3 +1,4 @@
+import type { CheckOperation } from "./checkOperation.js";
 import { advanceWorkspace } from "./workspaceAdvance.js";
 import type { CredentialInspection, CredentialInspectionInput } from "./credentialInspection.js";
 import type { ExecResult } from "./execResult.js";
@@ -67,6 +68,8 @@ export interface Executor {
   /** Structured command outcome for runner decisions. Human-readable `exec`
    * output is presentation, never an authority or success signal. Backends
    * without this result cannot perform effects that require it. */
+  /** Read only the original saved check result. Missing evidence never permits execution. */
+  inspectCheckResult?(operation: CheckOperation, opts?: ExecOptions): Promise<ExecResult | undefined>;
   execResult?(command: string, opts?: ExecOptions): Promise<ExecResult>;
   /** Optional trusted Git transport. Implementations must keep `bearer` out
    * of the model shell's UID, process environment and writable repository
@@ -115,6 +118,7 @@ export interface PublicationTransport extends ExecTraceOptions {
 }
 
 export interface ExecOptions extends ExecTraceOptions {
+  checkOperation?: CheckOperation;
   /** Controller-only delivery policy for the fixed harness log reader. This
    * permits waiting only on a fresh, qualified refusal before execution. */
   busyObservation?: "harness_log";

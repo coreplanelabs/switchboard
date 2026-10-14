@@ -157,8 +157,14 @@ export const runCheckTool: RunnableTool = {
       return text;
     };
     if (response.kind === "unavailable") {
+      if (response.reason === "metadata_revalidation_required") {
+        ctx.reportToolFailure?.({ code: "capability_unavailable", recovery: "stop" });
+        return retainFailure(
+          "error: original metadata completed; selected command did not start because checkout freshness is unverified. The saved metadata remains retained.",
+        );
+      }
       const invalid = ["invalid_input", "command_refused"].includes(response.reason);
-      const missing = ["recording_unavailable", "unsupported_executor", "workspace_unavailable"].includes(
+      const missing = ["recording_unavailable", "unsupported_executor", "workspace_unavailable", "capacity"].includes(
         response.reason,
       );
       const lifecycle = ["budget_exhausted", "stopped"].includes(response.reason);
@@ -172,6 +178,7 @@ export const runCheckTool: RunnableTool = {
               : "outcome_unknown",
         recovery: lifecycle || invalid || missing ? "correct" : "stop",
       });
+      if (response.reason === "capacity") return "error: recorded check capacity exhausted; command did not start";
       if (response.reason === "recording_unavailable")
         return "error: recording capability unavailable; command did not start";
       const text = `error: recorded check unavailable (${response.reason}); no completion receipt was returned${diagnosticText}${

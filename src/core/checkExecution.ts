@@ -1,3 +1,4 @@
+import { CheckCapacityError, checkOperationSchema, type CheckOperation } from "../execution/checkOperation.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
@@ -52,6 +53,7 @@ const ownerSchema = z
 const receiptSchema = z
   .object({
     callId: z.string().min(1).max(200),
+    checkOperation: checkOperationSchema.optional(),
     inputHash: z.string().regex(/^[a-f0-9]{64}$/),
     commandHash: z.string().regex(/^[a-f0-9]{64}$/),
     command: z.string().max(COMMAND_CAP),
@@ -64,7 +66,10 @@ const receiptSchema = z
     outcome: z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("pending") }).strict(),
       z
-        .object({ kind: z.literal("not_started"), reason: z.enum(["command_refused", "budget_exhausted", "stopped"]) })
+        .object({
+          kind: z.literal("not_started"),
+          reason: z.enum(["command_refused", "budget_exhausted", "stopped", "capacity"]),
+        })
         .strict(),
       storedResultSchema.extend({ kind: z.literal("completed") }).strict(),
       z
@@ -80,10 +85,26 @@ const receiptSchema = z
   .strict();
 export { receiptSchema as checkExecutionReceiptSchema };
 
-const stateSchema = z.object({ version: z.literal(1), receipts: z.array(receiptSchema).max(RECEIPT_CAP) }).strict();
+const stateSchema = z
+  .object({
+    version: z.literal(1),
+    receipts: z.array(receiptSchema).max(RECEIPT_CAP),
+    metadata: z
+      .object({
+        callId: z.string().min(1).max(200),
+        inputHash: z.string().regex(/^[a-f0-9]{64}$/),
+        owner: ownerSchema,
+        workspace: z.string().min(1).max(4096),
+        checkOperation: checkOperationSchema,
+        result: storedResultSchema.optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
 
 export interface CheckExecutionBinding {
-  executor: () => Pick<Executor, "execResult">;
+  executor: () => Pick<Executor, "execResult" | "inspectCheckResult">;
   workspace: () => string | undefined;
   /** Owned run scratch, supplied by the harness rather than model input. */
   temporaryDirectory?: () => string | undefined;
@@ -150,14 +171,16 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
   const parsed = stateSchema.safeParse(binding.previous ?? { version: 1, receipts: [] });
   const parsedOwner = ownerSchema.safeParse(binding.owner);
   const owner = { ...binding.owner };
+  const sameOwner = (candidate: CheckExecutionOwner) =>
+    (["runId", "requester", "threadKey", "repo", "unit"] as const).every((key) => candidate[key] === owner[key]) &&
+    Object.hasOwn(candidate, "unit") === Object.hasOwn(owner, "unit");
   const valid =
     parsedOwner.success &&
     parsed.success &&
+    (!parsed.data.metadata || sameOwner(parsed.data.metadata.owner)) &&
     parsed.data.receipts.every(
       (receipt) =>
-        (["runId", "requester", "threadKey", "repo"] as const).every((key) => receipt.owner[key] === owner[key]) &&
-        Object.hasOwn(receipt.owner, "unit") === Object.hasOwn(owner, "unit") &&
-        receipt.owner.unit === owner.unit &&
+        sameOwner(receipt.owner) &&
         (receipt.outcome.kind === "pending" || Number.isFinite(receipt.completedAt)) &&
         (receipt.outcome.kind !== "completed" || ![124, 137, 143].includes(receipt.outcome.exitCode)),
     ) &&
@@ -187,6 +210,56 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
     }
   };
 
+  const operationKey = (callId: string, inputHash: string) =>
+    hash(
+      JSON.stringify([
+        owner.runId,
+        owner.requester,
+        owner.threadKey,
+        owner.repo,
+        owner.unit ?? null,
+        callId,
+        inputHash,
+      ]),
+    );
+
+  async function inspectResult(
+    operation: CheckOperation,
+    signal: AbortSignal,
+    control: CheckExecutionControl,
+  ): Promise<ExecResult | undefined> {
+    if (signal.aborted || !binding.recordingAvailable) return undefined;
+    const budget = bashBudgetWithinRun(
+      FIRST_TEST_PREFLIGHT_MS,
+      Math.min(binding.remainingMs(), control.remainingMs?.() ?? Infinity),
+    );
+    if (budget.kind === "exhausted") return undefined;
+    try {
+      const timeoutMs = budget.kind === "clipped" ? budget.timeoutMs : FIRST_TEST_PREFLIGHT_MS;
+      const result = boundedResult(
+        await binding
+          .executor()
+          .inspectCheckResult?.(operation, { signal: execDeadline(timeoutMs, signal), timeoutMs }),
+      );
+      return signal.aborted ? undefined : result;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function inspect(
+    receipt: CheckExecutionReceipt,
+    signal: AbortSignal,
+    control: CheckExecutionControl,
+  ): Promise<boolean> {
+    if (!receipt.checkOperation) return false;
+    const result = await inspectResult(receipt.checkOperation, signal, control);
+    if (!result || [124, 137, 143].includes(result.exitCode)) return false;
+    receipt.outcome = { kind: "completed", ...result };
+    receipt.completedAt = binding.clock();
+    return true;
+  }
+
   async function run(
     input: CheckExecutionInput,
     callId: string,
@@ -211,10 +284,22 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
     const requestedTimeout = clampBashTimeout(input.timeoutMs);
     const inputHash = hash(JSON.stringify([input.command, input.purpose, input.timeoutMs]));
     const prior = state.receipts.find((receipt) => receipt.callId === callId);
-    if (prior)
-      return prior.inputHash === inputHash
-        ? { kind: "recorded", receipt: structuredClone(prior), replayed: true }
-        : unavailable("call_mismatch");
+    if (prior) {
+      if (prior.inputHash !== inputHash) return unavailable("call_mismatch");
+      if (
+        prior.checkOperation &&
+        (prior.checkOperation.key !== operationKey(callId, inputHash) ||
+          prior.checkOperation.commandHash !==
+            hash(`cd -- ${shellQuote(prior.workspace.cwd)} && bash -c ${shellQuote(input.command)}`))
+      )
+        return unavailable("invalid_state");
+      if (["pending", "unknown"].includes(prior.outcome.kind) && (await inspect(prior, signal, control))) {
+        if (!(await persist())) return unavailable("persistence_failed");
+      }
+      return { kind: "recorded", receipt: structuredClone(prior), replayed: true };
+    }
+    if (state.metadata && (state.metadata.callId !== callId || state.metadata.inputHash !== inputHash))
+      return unavailable("reconciliation_required");
     const commandHash = hash(input.command);
     // A new tool id is not permission to retry a command whose response was lost.
     // Do not grow a second recovery loop: existing executor recovery owns quiescence.
@@ -244,49 +329,101 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
     const metadataBudget = budget(FIRST_TEST_PREFLIGHT_MS);
     if (metadataBudget.kind === "exhausted") return unavailable("budget_exhausted");
     const metadataTimeout = metadataBudget.kind === "clipped" ? metadataBudget.timeoutMs : FIRST_TEST_PREFLIGHT_MS;
+    const command = metadataCommand(workspace);
+    const retainedMetadata = state.metadata;
+    if (
+      retainedMetadata &&
+      (retainedMetadata.workspace !== workspace ||
+        retainedMetadata.checkOperation.key !== hash(JSON.stringify([operationKey(callId, inputHash), "metadata"])) ||
+        retainedMetadata.checkOperation.commandHash !== hash(command))
+    )
+      return unavailable("invalid_state");
+    if (executor.inspectCheckResult && !retainedMetadata) {
+      state.metadata = {
+        callId,
+        inputHash,
+        owner: { ...owner },
+        workspace,
+        checkOperation: {
+          key: hash(JSON.stringify([operationKey(callId, inputHash), "metadata"])),
+          commandHash: hash(command),
+        },
+      };
+      if (!(await persist())) return unavailable("persistence_failed");
+    }
     let observed: ExecResult | undefined;
     let metadataSignal: AbortSignal | undefined;
     try {
-      const command = metadataCommand(workspace);
-      metadataSignal = execDeadline(metadataTimeout, signal);
-      observed = boundedResult(
-        await executor.execResult(command, {
-          timeoutMs: metadataTimeout,
-          signal: metadataSignal,
-        }),
-      );
-    } catch (error) {
-      annotateExecutionDiagnostic(error, { caller: "check", operation: "metadata" });
-      const executionDiagnostic = typedExecutionDiagnosticOf(error);
-      const infrastructureReason = infrastructureReasonOf(error);
-      let abortSource: CheckMetadataFailure["abortSource"];
-      if (infrastructureReason === "aborted") {
-        abortSource = "unknown";
-        try {
-          if (metadataSignal?.aborted) {
-            const runAborted = binding.signal.aborted;
-            const callAborted = control.signal?.aborted === true;
-            if (!runAborted && !callAborted) abortSource = "metadata_deadline";
-            else if (runAborted && callAborted) abortSource = "ambiguous";
-            else {
-              const parent = runAborted ? binding.signal : control.signal;
-              abortSource =
-                metadataSignal.reason === parent?.reason ? (runAborted ? "run_control" : "call_control") : "ambiguous";
-            }
-          }
-        } catch {
-          // Optional signal observation cannot replace the original failure.
+      if (retainedMetadata) {
+        observed = retainedMetadata.result ?? (await inspectResult(retainedMetadata.checkOperation, signal, control));
+        if (!observed) return unavailable("metadata_unavailable", { phase: "execute", kind: "thrown" });
+      } else {
+        const dispatchBudget = budget(metadataTimeout);
+        if (signal.aborted || dispatchBudget.kind === "exhausted") {
+          delete state.metadata;
+          if (!(await persist())) return unavailable("persistence_failed");
+          return unavailable(signal.aborted ? "stopped" : "budget_exhausted");
         }
+        const timeoutMs = dispatchBudget.kind === "clipped" ? dispatchBudget.timeoutMs : metadataTimeout;
+        metadataSignal = execDeadline(timeoutMs, signal);
+        observed = boundedResult(
+          await executor.execResult(command, {
+            timeoutMs,
+            signal: metadataSignal,
+            ...(state.metadata ? { checkOperation: state.metadata.checkOperation } : {}),
+          }),
+        );
       }
-      return {
-        ...unavailable("metadata_unavailable", {
-          phase: "execute",
-          kind: "thrown",
-          ...(infrastructureReason ? { infrastructureReason } : {}),
-          ...(abortSource ? { abortSource, effectiveTimeoutMs: metadataTimeout } : {}),
-        }),
-        ...(executionDiagnostic ? { executionDiagnostic } : {}),
-      };
+    } catch (error) {
+      if (error instanceof CheckCapacityError && !retainedMetadata) {
+        // The receiver refused before admitting this new preflight. Clear only
+        // this known-unstarted intent; older uncertain commands stay held.
+        delete state.metadata;
+        if (!(await persist())) return unavailable("persistence_failed");
+        return unavailable("capacity");
+      }
+      if (state.metadata) observed = await inspectResult(state.metadata.checkOperation, signal, control);
+      if (!observed) {
+        annotateExecutionDiagnostic(error, { caller: "check", operation: "metadata" });
+        const executionDiagnostic = typedExecutionDiagnosticOf(error);
+        const infrastructureReason = infrastructureReasonOf(error);
+        let abortSource: CheckMetadataFailure["abortSource"];
+        if (infrastructureReason === "aborted") {
+          abortSource = "unknown";
+          try {
+            if (metadataSignal?.aborted) {
+              const runAborted = binding.signal.aborted;
+              const callAborted = control.signal?.aborted === true;
+              if (!runAborted && !callAborted) abortSource = "metadata_deadline";
+              else if (runAborted && callAborted) abortSource = "ambiguous";
+              else {
+                const parent = runAborted ? binding.signal : control.signal;
+                abortSource =
+                  metadataSignal.reason === parent?.reason
+                    ? runAborted
+                      ? "run_control"
+                      : "call_control"
+                    : "ambiguous";
+              }
+            }
+          } catch {
+            // Optional signal observation cannot replace the original failure.
+          }
+        }
+        return {
+          ...unavailable("metadata_unavailable", {
+            phase: "execute",
+            kind: "thrown",
+            ...(infrastructureReason ? { infrastructureReason } : {}),
+            ...(abortSource ? { abortSource, effectiveTimeoutMs: metadataTimeout } : {}),
+          }),
+          ...(executionDiagnostic ? { executionDiagnostic } : {}),
+        };
+      }
+    }
+    if (state.metadata && observed) {
+      state.metadata.result = observed;
+      if (!(await persist())) return unavailable("persistence_failed");
     }
     if (!observed) return unavailable("metadata_unavailable", { phase: "result", kind: "invalid_result" });
     if (observed.exitCode !== 0 || observed.truncated)
@@ -313,6 +450,10 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
         fingerprintValid: sha.safeParse(fields[2]).success,
       });
     if (signal.aborted) return unavailable("stopped");
+    // A retained observation says where the old preflight ran, not what is at
+    // that path now. Keep its result without starting a command against a
+    // potentially replaced checkout; only this invocation's observation may proceed.
+    if (retainedMetadata) return unavailable("metadata_revalidation_required");
     const nextBudget = budget();
     if (nextBudget.kind === "exhausted") return unavailable("budget_exhausted");
     const timeoutMs = nextBudget.kind === "clipped" ? nextBudget.timeoutMs : requestedTimeout;
@@ -327,8 +468,17 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
       timeoutMs,
       startedAt: binding.clock(),
       outcome: { kind: "pending" },
+      ...(executor.inspectCheckResult
+        ? {
+            checkOperation: {
+              key: operationKey(callId, inputHash),
+              commandHash: hash(`cd -- ${shellQuote(fields[0]!)} && bash -c ${shellQuote(input.command)}`),
+            },
+          }
+        : {}),
     };
     state.receipts.push(receipt);
+    delete state.metadata;
     if (!(await persist())) return unavailable("persistence_failed");
     const dispatchAllowed = await authorized(input.command, timeoutMs);
     let executionDiagnostic: TypedExecutionDiagnostic | undefined;
@@ -357,6 +507,7 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
             {
               timeoutMs: receipt.timeoutMs,
               signal: commandSignal,
+              ...(receipt.checkOperation ? { checkOperation: receipt.checkOperation } : {}),
               ...(temporaryDirectory ? { env: { TMPDIR: temporaryDirectory } } : {}),
             },
           ),
@@ -370,13 +521,17 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
         annotateExecutionDiagnostic(error, { caller: "check", operation: "command" });
         executionDiagnostic = typedExecutionDiagnosticOf(error);
         const infrastructureReason = infrastructureReasonOf(error);
-        receipt.outcome = {
-          kind: "unknown",
-          reason: commandSignal.aborted ? "interrupted" : "transport",
-          ...(infrastructureReason ? { infrastructureReason } : {}),
-        };
+        receipt.outcome =
+          error instanceof CheckCapacityError
+            ? { kind: "not_started", reason: "capacity" }
+            : {
+                kind: "unknown",
+                reason: commandSignal.aborted ? "interrupted" : "transport",
+                ...(infrastructureReason ? { infrastructureReason } : {}),
+              };
       }
     }
+    if (receipt.outcome.kind === "unknown" && !receipt.outcome.result) await inspect(receipt, signal, control);
     receipt.completedAt = binding.clock();
     if (!(await persist())) return unavailable("persistence_failed");
     return {
