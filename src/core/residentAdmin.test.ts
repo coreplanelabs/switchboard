@@ -74,6 +74,20 @@ describe("makeResidentAdminClient (real fetch client)", () => {
   }
   const route = (c: { url: string }) => new URL(c.url).pathname;
 
+  it("reads workload evidence through the existing debug route without retry or a mutation fallback", async () => {
+    const report = { schema: 1, resource: "repo:acme/api", used: 16, complete: false, owners: [] };
+    const { calls } = stubFetch({ body: report }, { status: 400, body: { error: "unknown debug operation" } });
+    const client = makeResidentAdminClient("https://resident.example", "read-token");
+    expect(await client.workload("repo:acme/api")).toEqual({ status: 200, data: report });
+    expect(await client.workload("repo:acme/api")).toEqual({ status: 400, data: { error: "unknown debug operation" } });
+    expect(
+      calls.map((c) => ({ route: route(c), method: c.init.method, body: JSON.parse(String(c.init.body)) })),
+    ).toEqual([
+      { route: "/debug", method: "POST", body: { op: "workload-audit", resource: "repo:acme/api" } },
+      { route: "/debug", method: "POST", body: { op: "workload-audit", resource: "repo:acme/api" } },
+    ]);
+  });
+
   it("full reset uses its dedicated route and never retries an unsupported or uncertain request", async () => {
     const { calls } = stubFetch(
       { status: 200, body: { dryRun: true } },
@@ -281,6 +295,7 @@ describe("NullResidentAdminClient — the admin plane of a process without resid
     const client = new NullResidentAdminClient();
     const off = { status: 503, data: { error: RESIDENTS_OFF_MESSAGE } };
     expect(await client.residents()).toEqual(off);
+    expect(await client.workload("repo:o/r")).toEqual(off);
     expect(await client.onboard({ resource: "repo:o/r" })).toEqual(off);
     expect(await client.offboard("repo:o/r", true)).toEqual(off);
     expect(await client.reconfigure({ resource: "repo:o/r" })).toEqual(off);

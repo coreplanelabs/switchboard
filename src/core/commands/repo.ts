@@ -25,6 +25,7 @@ import { formatDiskGauge } from "../../execution/residentDiskBudget.js";
 import type { RepoInspector } from "../../execution/githubRepoInspect.js";
 import { nearMatch, type NearMatch } from "../nearMatch.js";
 import type { Span } from "../trace/types.js";
+import type { Actor } from "../authz/types.js";
 
 // The `repo.*` registrations: the whole repo surface on
 // ONE typed model.
@@ -62,7 +63,7 @@ export interface RepoCommandDeps {
      *  exists (a per-thread remote backend has no op surface). */
     operations(caller: Caller): Promise<Operations | null>;
     /** Per-repo access for resident environments (open-when-absent). */
-    canUseRepo(callerId: string, slug: string): Promise<boolean>;
+    canUseRepo(caller: string | Actor, slug: string): Promise<boolean>;
     /** Reads the repo root before `onboard` chooses a command table (item 52).
      *  Absent, or a named failure → the npm fallback table WITH a warning in
      *  the reply; the table is never silently assumed. */
@@ -319,6 +320,69 @@ export const repoList = defineCommand({
         `repo list failed (HTTP ${res.status}): ${String(res.data.error ?? "unknown error")}`,
       );
     return res.data as JsonValue;
+  },
+});
+
+const workloadReport = z
+  .object({
+    schema: z.literal(1),
+    resource: z.string(),
+    residentId: z.string(),
+    workloadLimit: z.number().int().positive(),
+    used: z.number().int().nonnegative().nullable(),
+    complete: z.boolean(),
+    owners: z.array(
+      z
+        .object({
+          key: z.string().min(1),
+          sources: z.array(z.object({ kind: z.string().min(1) }).passthrough()).min(1),
+        })
+        .passthrough(),
+    ),
+    issues: z.array(z.string()),
+  })
+  .passthrough();
+
+export const repoWorkload = defineCommand({
+  id: "repo.workload",
+  enabledWhen: (caps) => caps.residents,
+  args: [slugArg],
+  action: "repo:read",
+  effect: "read",
+  describe:
+    "Read the primary resident's workload count, owner records and missing evidence. Does not change or release work.",
+  render: (output) => {
+    const o = workloadReport.parse(output);
+    return [
+      `Workload audit for \`${o.resource.replace(/^repo:/, "")}\`: ${o.used ?? "unknown"}/${o.workloadLimit} owners.`,
+      `Resident: \`${o.residentId}\`.`,
+      `Capture: ${o.complete ? "complete" : "incomplete"}. This does not prove that every owner is valid.`,
+      ...o.owners.map(
+        (owner) => `• \`${owner.key}\`: ${[...new Set(owner.sources.map((source) => source.kind))].join(", ")}`,
+      ),
+      ...o.issues.map((issue) => `Evidence note: ${issue}.`),
+    ].join("\n");
+  },
+  handler: async ({ args, caller, deps, span }) => {
+    if (!(await deps.repo.canUseRepo(caller.actor, args.slug)))
+      throw new CommandError("unauthorized", `You do not have access to the \`${args.slug}\` repo environment.`);
+    const resource = repoResourceId(args.slug);
+    const response = await call(async () => (await adminOf(deps, span)).workload(resource));
+    if (response.status !== 200)
+      throw new CommandError("unavailable", "The resident workload audit is unavailable on this Worker.");
+    const parsed = workloadReport.safeParse(response.data);
+    if (!parsed.success)
+      throw new CommandError("unavailable", "The resident workload audit reply is incomplete or unsupported.");
+    const report = parsed.data;
+    if (
+      report.resource !== resource ||
+      report.residentId !== resource ||
+      (report.used !== null && report.used < report.owners.length) ||
+      (report.complete && (report.used === null || report.used !== report.owners.length)) ||
+      new Set(report.owners.map((owner) => owner.key)).size !== report.owners.length
+    )
+      throw new CommandError("unavailable", "The resident workload audit does not match the requested resident.");
+    return response.data as JsonValue;
   },
 });
 
@@ -896,6 +960,7 @@ export const repoBuild = defineOp("build");
 
 export const repoCommands: readonly CommandDef<RepoCommandDeps>[] = [
   repoList,
+  repoWorkload,
   repoOnboard,
   repoOffboard,
   repoReconfigure,

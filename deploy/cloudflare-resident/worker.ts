@@ -466,6 +466,7 @@ import {
   type DepsStoreListing,
 } from "../../src/execution/residentDepsStore.js";
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
+import type { WorkloadAudit, WorkloadAuditCapture, WorkloadAuditSource } from "./workloadAudit.js";
 import {
   admissionRecordHash,
   recoveryEvidenceUrl,
@@ -3040,7 +3041,7 @@ export class ResidentDO extends Sandbox<Env> {
    *  waitable SandboxProcess surface (output/waitForExit). */
   private async run(
     argv: readonly string[],
-    opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string> } = {},
+    opts: { cwd?: string; timeoutMs?: number; env?: Record<string, string>; runtimeRecovery?: "observe" } = {},
   ): Promise<{ stdout: string; stderr: string; exitCode: number; timedOut: boolean; truncated?: boolean }> {
     if ((await this.ctx.storage.get(CLEANUP_PENDING_KEY)) !== undefined)
       throw new Error("full-rebuild-cleanup-incomplete: runtime work is paused until cleanup completes");
@@ -3083,11 +3084,14 @@ export class ResidentDO extends Sandbox<Env> {
         }
         // The control port never answered the SDK's connect (its 30 s abort,
         // raised inside the wake path): no process started and nothing about
-        // the repository is known. Count it in storage — the ladder of item 64
-        // reads the count — and name it, so no reason ever carries the bare
+        // the repository is known. Ordinary steps count it in storage for the
+        // recovery ladder. Manual inspection preserves that row and names the
+        // observation, so no reason ever carries the bare
         // `The operation was aborted`.
         if (isRuntimeUnreachable(err)) {
           await nativeAttempt.settle();
+          if (opts.runtimeRecovery === "observe")
+            throw new RuntimeUnreachableError((await this.runtimeUnreachableRow())?.count ?? 1, err);
           throw new RuntimeUnreachableError((await this.noteRuntimeUnreachable()).count, err);
         }
         throw err;
@@ -3134,10 +3138,10 @@ export class ResidentDO extends Sandbox<Env> {
       nativeAttempt = await this.beginThreadNativeOperation("process");
       proc = await createExtensionProcessSandbox(this).exec(argv as unknown as SandboxCommand, launch);
     }
-    // The spawn is the proof the control port answers: a persisted count of
-    // unanswered connects ends here, whatever the command goes on to do.
+    // Ordinary execution accounts for recovery. Manual inspection preserves
+    // the existing recovery history, even when the probe connects successfully.
     await nativeAttempt.launched(proc);
-    await this.clearRuntimeUnreachable();
+    if (opts.runtimeRecovery !== "observe") await this.clearRuntimeUnreachable();
     try {
       const out = await proc.output({ encoding: "utf8", timeout: timeout + 30_000 });
       if (Number.isSafeInteger(out.exitCode) && out.exitCode >= 0) await nativeAttempt.settle();
@@ -6767,8 +6771,22 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Count active owners, not historical UID spends or retained private files.
    * Native operations and current UID processes remain occupied after a reset. */
-  private async activeWorkloadOwners(probeProcesses = true, observeCanonical = true): Promise<Set<string>> {
+  private async activeWorkloadOwners(
+    probeProcesses = true,
+    observeCanonical = true,
+    audit?: WorkloadAuditCapture,
+    runtimeRecovery: "account" | "observe" = "account",
+  ): Promise<Set<string>> {
     const owners = new Set([...this.workloadReservations, ...this.opUsersInUse.values()]);
+    if (audit) audit.owners = owners;
+    const record = (key: string, source: WorkloadAuditSource) => {
+      if (!audit) return;
+      const sources = audit.sources.get(key) ?? [];
+      sources.push(source);
+      audit.sources.set(key, sources);
+    };
+    for (const key of this.workloadReservations) record(key, { kind: "reservation" });
+    for (const [user, key] of this.opUsersInUse) record(key, { kind: "operator", user });
     const [bindings, registrations, native] = await Promise.all([
       this.liveBindings(),
       this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX }),
@@ -6783,7 +6801,16 @@ export class ResidentDO extends Sandbox<Env> {
     await Promise.all(
       bindings.map(async (binding) => {
         const key = `thread:${binding.threadKey}`;
-        if (owners.has(key)) return;
+        if (owners.has(key)) {
+          record(key, {
+            kind: "binding",
+            threadKey: binding.threadKey,
+            user: binding.user,
+            reason: "already-reserved",
+            lastAttachAt: binding.lastAttachAt,
+          });
+          return;
+        }
         const registration = registrations.get(runRegKey(binding.threadKey));
         const [fence, owner, claimants, recordedOwner] = await Promise.all([
           this.ctx.storage.get(runFenceKey(binding.threadKey)),
@@ -6806,7 +6833,7 @@ export class ResidentDO extends Sandbox<Env> {
           this.ctx.storage.get(poolBindingKey(binding.user)),
           this.ctx.storage.transaction((txn) => uidOwner(txn, binding.user)),
         ]);
-        const { state, category } = classifyDeployRegistrationWithLedger({
+        const { state, category, reason } = classifyDeployRegistrationWithLedger({
           threadKey: binding.threadKey,
           registration,
           fence,
@@ -6822,26 +6849,92 @@ export class ResidentDO extends Sandbox<Env> {
           user: binding.user,
           pool: undefined,
         });
+        record(key, {
+          kind: "binding",
+          threadKey: binding.threadKey,
+          user: binding.user,
+          runId: registration?.runId,
+          ownerGen: registration?.ownerGen,
+          ownerFence: registration?.ownerFence,
+          registeredAt: registration?.registeredAt,
+          deadlineAt: registration?.deadlineAt,
+          lastAttachAt: binding.lastAttachAt,
+          state,
+          category,
+          reason,
+          canonicalKind:
+            audit && registration
+              ? (this.workloadOwnerObservation(registration, owner)?.kind ?? "unknown")
+              : "unavailable",
+        });
         // Only positively terminal ownership removes a held tree from this
         // workload count. A binding without a run registration is still unknown.
         if (state !== "retained" || category !== "owned") owners.add(key);
       }),
     );
     for (const [key, owner] of native) {
-      if (typeof owner?.opOwner === "string" && /^op:\S+$/.test(owner.opOwner)) {
-        owners.add(owner.opOwner);
-        continue;
-      }
       const end = validRunOwner(owner?.runId, owner?.ownerGen, owner?.ownerFence)
         ? key.lastIndexOf(`:${owner.runId}:`)
         : -1;
       const thread = end > "native-operation:".length ? key.slice("native-operation:".length, end) : "";
+      const ownerKey =
+        typeof owner?.opOwner === "string" && /^op:\S+$/.test(owner.opOwner)
+          ? owner.opOwner
+          : THREAD_KEY_RE.test(thread)
+            ? `thread:${thread}`
+            : `native:${key}`;
+      if (audit) {
+        const original = owner as {
+          native?: {
+            closed?: unknown;
+            pending?: Record<string, { process?: { id?: unknown; pid?: unknown; startedAt?: unknown } }>;
+          };
+        };
+        const pending = original?.native?.pending;
+        const attempts = pending && typeof pending === "object" ? Object.values(pending) : [];
+        const processes = attempts.flatMap((attempt) => {
+          const p = attempt?.process;
+          return p &&
+            typeof p.id === "string" &&
+            p.id.length <= 256 &&
+            Number.isSafeInteger(p.pid) &&
+            Number(p.pid) > 0 &&
+            typeof p.startedAt === "string" &&
+            Number.isFinite(Date.parse(p.startedAt))
+            ? [{ id: p.id, pid: Number(p.pid), startedAt: p.startedAt }]
+            : [];
+        });
+        audit.nativeRecords.set(key, owner);
+        if (processes.length > 64) {
+          audit.complete = false;
+          audit.issues.push("native-process-identities-omitted");
+        }
+        record(ownerKey, {
+          kind: "native-operation",
+          key,
+          runId: owner?.runId,
+          ownerGen: owner?.ownerGen,
+          ownerFence: owner?.ownerFence,
+          ...(THREAD_KEY_RE.test(thread) ? { threadKey: thread } : {}),
+          ...(typeof original?.native?.closed === "boolean" ? { closed: original.native.closed } : {}),
+          pendingAttempts: attempts.length,
+          processes: processes.slice(0, 64),
+        });
+      }
+      if (typeof owner?.opOwner === "string" && /^op:\S+$/.test(owner.opOwner)) {
+        owners.add(owner.opOwner);
+        continue;
+      }
       owners.add(THREAD_KEY_RE.test(thread) ? `thread:${thread}` : `native:${key}`);
     }
     if (probeProcesses && (await this.isRuntimeActive())) {
-      const processes = await this.run(["ps", "-eo", "user="]);
+      const processes = await this.run(
+        ["ps", "-eo", "user="],
+        runtimeRecovery === "observe" ? { runtimeRecovery: "observe" } : {},
+      );
       if (processes.exitCode !== 0 || processes.timedOut || processes.truncated || processes.stderr !== "")
         throw new Error("resident process observation is incomplete");
+      if (audit) audit.processes = "identities-only";
       for (const name of new Set(
         processes.stdout
           .split("\n")
@@ -6860,21 +6953,264 @@ export class ResidentDO extends Sandbox<Env> {
         if (isResidentPoolUser(user)) {
           const recorded = await this.ctx.storage.transaction((txn) => uidOwner(txn, user));
           owners.add(recorded ?? `uid:${user}`);
+          record(recorded ?? `uid:${user}`, {
+            kind: "process",
+            user,
+            reason: recorded === null ? "uid-owner-unverified" : "identity-observed",
+          });
         }
       }
+    } else if (probeProcesses && audit) {
+      audit.processes = "runtime-inactive";
     }
     return owners;
   }
 
+  private async workloadRecordHash(value: unknown): Promise<string> {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(value)));
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  private async hashWorkloadAudit(owners: Set<string>, audit: WorkloadAuditCapture): Promise<void> {
+    // Hash the retained original rows only when a report is needed. Successful
+    // admissions keep the counter's indexed reads and avoid this extra await.
+    for (const owner of [...owners].sort().slice(0, 128)) {
+      for (const source of (audit.sources.get(owner) ?? []).slice(0, 16)) {
+        if (source.kind !== "native-operation" || !source.key) continue;
+        try {
+          source.recordHash = await this.workloadRecordHash(audit.nativeRecords.get(source.key));
+        } catch {
+          audit.complete = false;
+          audit.issues.push("native-record-hash-unavailable");
+        }
+      }
+    }
+  }
+
+  private workloadAuditReport(
+    resource: string,
+    owners: Set<string> | null,
+    audit: WorkloadAuditCapture,
+  ): WorkloadAudit {
+    const entries = [...(owners ?? audit.owners ?? [])].sort();
+    const selected = entries.slice(0, 128);
+    let sourcesOmitted = 0;
+    const rows = selected.map((key) => {
+      const sources = audit.sources.get(key) ?? [];
+      sourcesOmitted += Math.max(0, sources.length - 16);
+      return { key, sources: sources.slice(0, 16) };
+    });
+    const ownersOmitted = Math.max(0, entries.length - rows.length);
+    const issues = [...new Set(audit.issues)];
+    const report: WorkloadAudit = {
+      schema: 1,
+      resource,
+      residentId: resource,
+      build: injectedBuildStamp(),
+      asOf: audit.asOf,
+      finishedAt: new Date(systemClock()).toISOString(),
+      incarnation: this.incarnation,
+      boot: { id: this.containerIdMemo ?? null, observation: this.containerIdMemo ? "cached" : "unknown" },
+      consistency: "best-effort",
+      workloadLimit: RESIDENT_WORKLOAD_LIMIT,
+      used: owners?.size ?? null,
+      complete: owners !== null && ownersOmitted === 0 && sourcesOmitted === 0 && audit.complete,
+      ownersOmitted,
+      sourcesOmitted,
+      detailsOmitted: 0,
+      processes: audit.processes,
+      issues,
+      uidHistory: audit.uidHistory ?? { issued: null, complete: false },
+      owners: rows,
+    };
+    // Preserve compact identities first, then spend the remaining UTF-8 budget
+    // on source detail. Never serialize one giant document to find its size.
+    const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    const budget = 60 * 1024;
+    const fullSize = bytes({ ...report, owners: [] }) + rows.reduce((n, row) => n + bytes(row) + 1, 0);
+    if (fullSize > budget - 128) {
+      report.complete = false;
+      report.issues.push("workload-details-omitted");
+      report.owners = rows.map(({ key, sources }) => ({
+        key,
+        sources: sources.map(({ kind, recordHash }) => ({ kind, ...(recordHash ? { recordHash } : {}) })),
+      }));
+      while (report.owners.length && bytes(report) > budget - 128) {
+        const removed = report.owners.pop()!;
+        report.ownersOmitted++;
+        report.sourcesOmitted += removed.sources.length;
+      }
+      let size = bytes(report);
+      for (let i = 0; i < report.owners.length; i++) {
+        for (let j = 0; j < report.owners[i].sources.length; j++) {
+          const delta = bytes(rows[i].sources[j]) - bytes(report.owners[i].sources[j]);
+          if (size + delta <= budget - 128) {
+            report.owners[i].sources[j] = rows[i].sources[j];
+            size += delta;
+          } else report.detailsOmitted++;
+        }
+      }
+    }
+    return report;
+  }
+
+  /** Read the admission algorithm's evidence without allocating an identity,
+   * starting an inactive VM, or interpreting an unknown hold as leaked work. */
+  async getWorkloadAudit(resource: string): Promise<WorkloadAudit> {
+    const audit: WorkloadAuditCapture = {
+      asOf: new Date(systemClock()).toISOString(),
+      sources: new Map(),
+      nativeRecords: new Map(),
+      complete: true,
+      processes: "not-observed",
+      issues: [],
+    };
+    let owners: Set<string>;
+    try {
+      owners = await this.workloadAdmissions.run("workload", () =>
+        this.activeWorkloadOwners(true, true, audit, "observe"),
+      );
+    } catch (error) {
+      audit.complete = false;
+      audit.processes = "unavailable";
+      audit.issues.push("workload-observation-unavailable");
+      try {
+        const name = (error as { name?: unknown } | null)?.name;
+        console.warn(
+          `[workload] ${JSON.stringify({ event: "workload-observation-unavailable", resource, errorType: typeof name === "string" && /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/.test(name) ? name : typeof error })}`,
+        );
+      } catch {
+        /* A failed warning cannot replace the captured partial report. */
+      }
+      return this.workloadAuditReport(resource, null, audit);
+    }
+    // The captured counter is stable evidence. Optional enrichment must not
+    // hold admission while waiting for historical owners or UID metadata.
+    await this.hashWorkloadAudit(owners, audit);
+    const observedOwners = new Map<string, Promise<unknown>>();
+    const selected = [...owners]
+      .sort()
+      .slice(0, 128)
+      .flatMap((key) => (audit.sources.get(key) ?? []).slice(0, 16));
+    await Promise.all(
+      selected.map(async (source) => {
+        if (
+          source.kind !== "native-operation" ||
+          !source.threadKey ||
+          !validRunOwner(source.runId, source.ownerGen, source.ownerFence)
+        )
+          return;
+        const owner = {
+          threadKey: source.threadKey,
+          runId: source.runId!,
+          ownerGen: source.ownerGen!,
+          ownerFence: source.ownerFence!,
+        };
+        const key = JSON.stringify(owner);
+        let pending = observedOwners.get(key);
+        if (!pending) {
+          pending = this.observeRunForEviction(owner).then((view) => this.workloadOwnerObservation(owner, view));
+          observedOwners.set(key, pending);
+        }
+        const observation = (await pending) as {
+          kind?: string;
+          revision?: number;
+          record?: { status?: string };
+        } | null;
+        source.canonicalKind = observation?.kind ?? "unknown";
+        source.canonicalRevision = observation?.revision;
+        source.canonicalStatus = observation?.record?.status;
+        source.canonicalObservedAt = new Date(systemClock()).toISOString();
+      }),
+    );
+    // The full generation read is diagnostic only. Normal admission keeps
+    // its indexed UID lookups and never counts historical allocations.
+    try {
+      const ledger = await this.currentUidLedger();
+      const byUser = new Map(ledger.map(({ user, owner }) => [user, owner]));
+      audit.uidHistory = { issued: ledger.length, complete: true };
+      for (const { user, owner } of ledger) {
+        if (!owners.has(owner)) continue;
+        const sources = audit.sources.get(owner) ?? [];
+        let reason = "recorded-owner";
+        if (owner.startsWith("thread:")) {
+          const claims = parsePoolBindings(await this.ctx.storage.get(poolBindingKey(user)));
+          if (!claims || claims.length > 1 || (claims.length === 1 && owner !== `thread:${claims[0]}`)) {
+            reason = "uid-claims-unverified";
+            audit.issues.push(reason);
+          } else if (claims.length === 0) reason = "no-current-binding";
+        }
+        sources.push({ kind: "uid-allocation", user, reason });
+        audit.sources.set(owner, sources);
+      }
+      for (const owner of owners) {
+        for (const source of audit.sources.get(owner) ?? []) {
+          if (source.user && byUser.get(source.user) !== owner) {
+            source.reason = "uid-owner-unverified";
+            audit.issues.push("uid-owner-unverified");
+          }
+        }
+      }
+    } catch {
+      audit.complete = false;
+      audit.uidHistory = { issued: null, complete: false };
+      audit.issues.push("uid-history-unavailable");
+    }
+    return this.workloadAuditReport(resource, owners, audit);
+  }
+
   /** Serialize the capacity read and reservation, not the clone or command.
    * A successful attach records its durable owner before releasing this slot. */
+  private async logWorkloadRefusal(
+    requestedOwner: string,
+    reason: "workload-full" | "workload-unverified",
+    owners: Set<string> | null,
+    audit: WorkloadAuditCapture,
+  ): Promise<void> {
+    // Preserve the original observation. Neither a failed sink nor evidence
+    // hashing can change the refusal or release any original obligation.
+    try {
+      await this.hashWorkloadAudit(owners ?? audit.owners ?? new Set(), audit);
+      const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "unknown";
+      console.log(
+        `[workload] ${JSON.stringify({ event: "admission-refused", reason, requestedOwner, ...this.workloadAuditReport(resource, owners, audit) })}`,
+      );
+    } catch (error) {
+      try {
+        const name = (error as { name?: unknown } | null)?.name;
+        console.warn(
+          `[workload] ${JSON.stringify({
+            event: "refusal-diagnostics-unavailable",
+            reason,
+            requestedOwner,
+            errorType: typeof name === "string" && /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/.test(name) ? name : typeof error,
+          })}`,
+        );
+      } catch {
+        /* Admission remains refused even if both diagnostic sinks fail. */
+      }
+    }
+  }
+
   private async reserveWorkloadSlot(owner: string): Promise<ThreadErr | null> {
     const key = "workload";
     return this.workloadAdmissions.run(key, async () => {
       let owners: Set<string>;
+      const audit: WorkloadAuditCapture = {
+        asOf: new Date(systemClock()).toISOString(),
+        sources: new Map(),
+        nativeRecords: new Map(),
+        complete: true,
+        processes: "not-observed",
+        issues: [],
+      };
       try {
-        owners = await this.activeWorkloadOwners();
+        owners = await this.activeWorkloadOwners(true, true, audit);
       } catch {
+        audit.complete = false;
+        audit.processes = "unavailable";
+        audit.issues.push("workload-observation-unavailable");
+        await this.logWorkloadRefusal(owner, "workload-unverified", null, audit);
         return {
           error: "resident workload could not be verified",
           status: 503,
@@ -6882,13 +7218,15 @@ export class ResidentDO extends Sandbox<Env> {
           cause: "system",
         };
       }
-      if (!owners.has(owner) && owners.size >= RESIDENT_WORKLOAD_LIMIT)
+      if (!owners.has(owner) && owners.size >= RESIDENT_WORKLOAD_LIMIT) {
+        await this.logWorkloadRefusal(owner, "workload-full", owners, audit);
         return {
           error: `resident workload is full (${owners.size}/${RESIDENT_WORKLOAD_LIMIT} active owners)`,
           status: 503,
           reason: "workload-full",
           cause: "system",
         };
+      }
       this.workloadReservations.add(owner);
       return null;
     });
@@ -10134,7 +10472,63 @@ export class ResidentDO extends Sandbox<Env> {
   /** The state Worker answers one exact run, with live ownership taking
    *  precedence over a provisional or retained history row. An unavailable
    *  answer cannot authorize deletion. */
-  private async observeRunForEviction(registration: RunRegistration, _binding: ThreadBinding): Promise<unknown> {
+  private workloadOwnerObservation(
+    expected: Pick<RunRegistration, "threadKey" | "runId" | "ownerGen" | "ownerFence">,
+    observed: unknown,
+  ) {
+    if (!validRunOwner(expected.runId, expected.ownerGen, expected.ownerFence)) return null;
+    const view = observed as {
+      kind?: unknown;
+      record?: Record<string, unknown>;
+      row?: Record<string, unknown>;
+      owner?: unknown;
+      revision?: unknown;
+      settlement?: { owner?: { runId?: unknown; ownerGen?: unknown; ownerFence?: unknown } };
+    } | null;
+    if (
+      view?.kind === "terminal" &&
+      view.record &&
+      view.record.id === expected.runId &&
+      view.record.threadKey === expected.threadKey &&
+      view.record.provisional !== true &&
+      (view.settlement === undefined ||
+        (view.settlement?.owner &&
+          view.settlement.owner.runId === expected.runId &&
+          view.settlement.owner.ownerGen === expected.ownerGen &&
+          view.settlement.owner.ownerFence === expected.ownerFence)) &&
+      ["completed", "stopped_soft", "stopped_hard", "failed", "interrupted"].includes(String(view.record.status))
+    )
+      return {
+        kind: "terminal",
+        record: {
+          id: expected.runId,
+          threadKey: expected.threadKey,
+          status: String(view.record.status),
+          provisional: false,
+        },
+      };
+    const owner = { runId: expected.runId!, ownerGen: expected.ownerGen!, ownerFence: expected.ownerFence! };
+    if (isAcknowledgedWorkspaceOwner(view, owner))
+      return { kind: "acknowledged", owner, revision: view!.revision as number };
+    const binding = view?.row?.binding as { ownerGen?: unknown; ownerFence?: unknown } | undefined;
+    if (
+      view?.kind === "live" &&
+      view.row &&
+      view.row.runId === expected.runId &&
+      view.row.ownerGen === expected.ownerGen &&
+      binding &&
+      binding.ownerGen === expected.ownerGen &&
+      binding.ownerFence === expected.ownerFence &&
+      (view.row.workspaceThreadKey ?? view.row.threadKey) === expected.threadKey
+    )
+      return { kind: "live" };
+    return null;
+  }
+
+  private async observeRunForEviction(
+    registration: Pick<RunRegistration, "threadKey" | "runId" | "ownerGen" | "ownerFence"> & { registeredAt?: string },
+    _binding?: ThreadBinding,
+  ): Promise<unknown> {
     const url = this.env.STATE_WORKER_URL;
     const token = this.env.MEMORY_TOKEN;
     if (!url || !token || !registration.runId) return null;
@@ -10153,33 +10547,20 @@ export class ResidentDO extends Sandbox<Env> {
       const observed = res.ok ? await res.json() : null;
       // Passive response levels reuse the last canonical observation. This
       // cache is only a capacity hint; admission and custody still read fresh.
-      const view = observed as {
-        kind?: unknown;
-        record?: Record<string, unknown>;
-        owner?: unknown;
-        revision?: unknown;
-      } | null;
-      const observation =
-        view?.kind === "terminal" && view.record && typeof view.record === "object"
-          ? {
-              kind: view.kind,
-              record: {
-                id: view.record.id,
-                threadKey: view.record.threadKey,
-                status: view.record.status,
-                provisional: view.record.provisional,
-              },
-            }
-          : view?.kind === "acknowledged"
-            ? { kind: view.kind, owner: view.owner, revision: view.revision }
-            : null;
+      const projected = this.workloadOwnerObservation(registration, observed);
+      const observation = projected?.kind === "live" ? null : projected;
       if (validRunOwner(registration.runId, registration.ownerGen, registration.ownerFence))
         await this.ctx.storage
-          .put(`resident:workloadOwner:${registration.threadKey}`, {
-            runId: registration.runId,
-            ownerGen: registration.ownerGen,
-            ownerFence: registration.ownerFence,
-            observation,
+          .transaction(async (txn) => {
+            const current = await txn.get<RunRegistration>(runRegKey(registration.threadKey));
+            if (!registeredRunOwnsRelease(current, registration.runId, registration.ownerGen, registration.ownerFence))
+              return;
+            await txn.put(`resident:workloadOwner:${registration.threadKey}`, {
+              runId: registration.runId,
+              ownerGen: registration.ownerGen,
+              ownerFence: registration.ownerFence,
+              observation,
+            });
           })
           .catch(() => {});
       return observed;
@@ -13415,8 +13796,9 @@ function hasScope(env: Env, token: string | null, scope: Scope): boolean {
   return have === scope;
 }
 
-/** /debug ops a read-scope bearer may run: pure reads of DO storage/schedules. */
-const READ_DEBUG_OPS = new Set(["info", "schedules", "threads", "deps-backups", "native-operations"]);
+/** Read-only diagnostics. Workload inspection observes the canonical owner and
+ * identities in an already active VM; it never starts a VM or controls work. */
+const READ_DEBUG_OPS = new Set(["info", "schedules", "threads", "deps-backups", "native-operations", "workload-audit"]);
 
 // ---------------------------------------------------------------------------
 // Request validation
@@ -15268,6 +15650,8 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);
   let threadSelection: { threadKey: string; runId: string } | undefined;
+  if (op === "workload-audit" && (body.residentId !== undefined || body.placementId !== undefined))
+    return json({ error: "Workload inspection supports the primary resident only." }, 400);
   if (op === "threads" && (body.threadKey !== undefined || body.runId !== undefined)) {
     const thread = parseThreadKey(body.threadKey);
     if ("error" in thread || typeof body.runId !== "string" || !RUN_ID_PATTERN.test(body.runId))
@@ -15283,6 +15667,8 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
   }
   const stub = residentStub(env, resource.resource);
   switch (op) {
+    case "workload-audit":
+      return json(await stub.getWorkloadAudit(resource.resource));
     case "info":
       return json(await stub.getResidentInfo());
     case "schedules":

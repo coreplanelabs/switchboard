@@ -18,6 +18,7 @@ import {
 } from "./repo.js";
 import type { RepoInspector } from "../../execution/githubRepoInspect.js";
 import { createTracer } from "../trace/tracer.js";
+import type { Actor } from "../authz/types.js";
 
 // Feature: docs/reference/specs/resident-repos.md (items 32, 41) / docs/reference/specs/command-registry.md
 // (phase 4b): the whole `repo.*` group as registry commands — `repo.list` (open,
@@ -88,6 +89,7 @@ function mockClient(
       ),
     ),
     residents: answer("residents", ok(TWO_RESIDENTS)),
+    workload: answer("workload", ok({ error: "not configured" }, 503)),
     status: answer("status", ok({ state: "warm", reason: "", inFlight: 0 })),
   };
 }
@@ -106,7 +108,7 @@ function fakeOps(result: OperationResult | (() => Promise<OperationResult>)) {
 interface BindOptions {
   admin?: ResidentAdminClient | { unavailable: string };
   ops?: Operations | null;
-  canUseRepo?: (callerId: string, slug: string) => boolean;
+  canUseRepo?: (caller: string | Actor, slug: string) => boolean;
   inspect?: RepoInspector;
   sleep?: (ms: number) => Promise<void>;
   installationRepos?: () => Promise<string[] | undefined>;
@@ -118,7 +120,8 @@ function depsOf(opts: BindOptions = {}): RepoCommandDeps {
     repo: {
       admin: async () => admin,
       operations: async () => (opts.ops === undefined ? null : opts.ops),
-      canUseRepo: async (callerId: string, slug: string) => (opts.canUseRepo ? opts.canUseRepo(callerId, slug) : true),
+      canUseRepo: async (callerId: string | Actor, slug: string) =>
+        opts.canUseRepo ? opts.canUseRepo(callerId, slug) : true,
       ...(opts.inspect ? { inspect: opts.inspect } : {}),
       ...(opts.sleep ? { sleep: opts.sleep } : {}),
       ...(opts.installationRepos ? { installationRepos: opts.installationRepos } : {}),
@@ -335,6 +338,81 @@ describe("repo.list", () => {
     });
     expect((await commands.invoke("repo.list", {}, mcp("repo:read"))).ok).toBe(true);
     expect(repoList).toMatchObject({ action: "repo:read", effect: "read" });
+  });
+});
+
+describe("repo.workload", () => {
+  const report = {
+    schema: 1,
+    resource: "repo:acme/api",
+    residentId: "repo:acme/api",
+    asOf: "2026-01-01T00:00:00.000Z",
+    workloadLimit: 16,
+    used: 1,
+    complete: true,
+    owners: [{ key: "thread:mcp:ops:one", sources: [{ kind: "binding", user: "worker2", reason: "owner-live" }] }],
+    issues: [],
+  };
+
+  it("returns the exact owner evidence through the read command and renders capture completeness", async () => {
+    const workload = vi.fn(async () => ok(report));
+    const commands = bind({ admin: { ...mockClient(), workload } });
+    const result = await commands.invoke("repo.workload", { args: ["acme/api"] }, mcp("repo:read"));
+    expect(result).toEqual({ ok: true, value: report });
+    expect(workload.mock.calls).toEqual([["repo:acme/api"]]);
+    expect(renderText(commands.get("repo.workload")!, result.ok ? result.value : null)).toBe(
+      "Workload audit for `acme/api`: 1/16 owners.\nResident: `repo:acme/api`.\nCapture: complete. This does not prove that every owner is valid.\n• `thread:mcp:ops:one`: binding",
+    );
+  });
+
+  it("refuses callers without read access or repository access before reading owner evidence", async () => {
+    const workload = vi.fn(async () => ok(report));
+    const commands = bind({ admin: { ...mockClient(), workload }, canUseRepo: () => false });
+    expect(await commands.invoke("repo.workload", { args: ["acme/api"] }, mcp("dispatch"))).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
+    expect(await commands.invoke("repo.workload", { args: ["acme/api"] }, mcp("repo:read"))).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
+    expect(workload.mock.calls).toEqual([]);
+    const allowed = bind({ admin: { ...mockClient(), workload } });
+    expect(await allowed.invoke("repo.workload", { args: ["acme/api"] }, mcp("repo:read"))).toEqual({
+      ok: true,
+      value: report,
+    });
+  });
+
+  it("keeps unsupported Workers and foreign or incomplete replies distinct from an empty audit", async () => {
+    const replies = [
+      ok({ error: "unknown debug operation" }, 400),
+      ok({ ...report, resource: "repo:other/api" }),
+      ok({ ...report, residentId: "replica:other" }),
+      ok({ ...report, schema: 0 }),
+      ok({ ...report, used: 2 }),
+      ok({ ...report, used: 2, owners: [report.owners[0], report.owners[0]] }),
+      ok({ ...report, complete: false, used: 2 }),
+      ok({ ...report, complete: false, used: null }),
+    ];
+    const workload = vi.fn(async () => replies.shift()!);
+    const commands = bind({ admin: { ...mockClient(), workload } });
+    for (let i = 0; i < 6; i++) {
+      expect(await commands.invoke("repo.workload", { args: ["acme/api"] }, mcp("repo:read"))).toMatchObject({
+        ok: false,
+        error: "unavailable",
+      });
+    }
+    const partial = await commands.invoke("repo.workload", { args: ["acme/api"] }, mcp("repo:read"));
+    expect(partial).toEqual({ ok: true, value: { ...report, complete: false, used: 2 } });
+    expect(renderText(commands.get("repo.workload")!, partial.ok ? partial.value : null)).toContain(
+      "Capture: incomplete.",
+    );
+    const unknown = await commands.invoke("repo.workload", { args: ["acme/api"] }, mcp("repo:read"));
+    expect(unknown).toEqual({ ok: true, value: { ...report, complete: false, used: null } });
+    expect(renderText(commands.get("repo.workload")!, unknown.ok ? unknown.value : null)).toContain(
+      "unknown/16 owners.",
+    );
   });
 });
 

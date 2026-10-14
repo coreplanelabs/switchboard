@@ -84,6 +84,7 @@ const names = [
   "reconcileWorkspaceSettlements",
   "reconcileWorkspaceBinding",
   "observeRunForEviction",
+  "workloadOwnerObservation",
   "ackWorkspaceSettlement",
 ];
 const compiled = ts.transpileModule(
