@@ -223,6 +223,189 @@ describe("resident deploy preflight — main()", () => {
   });
 });
 
+describe("resident deploy admission diagnostic", () => {
+  const id = "00000000-0000-4000-8000-000000000001";
+  const row = {
+    id,
+    startedAt: 1000,
+    schema: 1,
+    kind: "watchdog",
+    component: "scheduler",
+    build: "a".repeat(40),
+    workerVersion: "00000000-0000-4000-8000-000000000002",
+    resource: null,
+    sourceId: null,
+    traceId: "b".repeat(32),
+    requesterScope: null,
+  };
+  async function captured(body, responseStatus = 200) {
+    const lines = [],
+      requests = [];
+    const log = vi.spyOn(console, "error").mockImplementation((line) => lines.push(String(line)));
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      requests.push(init.method);
+      return responseStatus === 200
+        ? Response.json(body)
+        : new Response("private-token /workspace/private raw exception", { status: responseStatus });
+    });
+    try {
+      const code = await main([], {
+        RESIDENT_BASE_URL: "https://resident.example.test",
+        RESIDENT_DRAIN_TOKEN: "synthetic-token",
+      });
+      const line = lines.find((v) => v.startsWith("[resident-deploy-admission-diagnostic] "));
+      return {
+        code,
+        lines,
+        requests,
+        diagnostic: line ? JSON.parse(line.slice("[resident-deploy-admission-diagnostic] ".length)) : null,
+      };
+    } finally {
+      log.mockRestore();
+      fetcher.mockRestore();
+    }
+  }
+  const refused = (rows) => ({
+    ...payload([]).payload,
+    activeAdmissions: rows.length,
+    fenceReady: false,
+    admissionReadback: { schema: 1, observedAt: 2000, observedActiveCount: rows.length, omittedCount: 0, rows },
+  });
+
+  it("names an internal permit on the first refusal without inventing a model run", async () => {
+    const result = await captured(refused([row]));
+    expect({ code: result.code, requests: result.requests }).toEqual({ code: 1, requests: ["POST"] });
+    expect(result.diagnostic).toMatchObject({
+      schema: 1,
+      receivedProjectionComplete: true,
+      observedActiveCount: 1,
+      rows: [
+        {
+          id,
+          kind: "watchdog",
+          component: "scheduler",
+          startedAt: 1000,
+          resource: null,
+          traceId: "b".repeat(32),
+          requesterScope: null,
+          requestEnd: "unobserved",
+          nativeOutcome: "unverified",
+          expiry: "none",
+        },
+      ],
+    });
+  });
+
+  it("retains the blocking snapshot when the final admission count becomes zero", async () => {
+    const body = refused([row]);
+    body.activeAdmissions = 0;
+    const result = await captured(body);
+    expect({ code: result.code, requests: result.requests }).toEqual({ code: 1, requests: ["POST"] });
+    expect(result.diagnostic).toMatchObject({
+      gateActiveCount: 0,
+      observedActiveCount: 1,
+      countMatchesGate: false,
+      receivedProjectionComplete: false,
+      rows: [{ id, startedAt: 1000, kind: "watchdog" }],
+    });
+  });
+
+  it("marks legacy and missing metadata explicitly while retaining refusal", async () => {
+    const result = await captured(refused([{ id, startedAt: 1000, kind: "unknown" }]));
+    expect({ code: result.code, row: result.diagnostic?.rows[0] }).toEqual({
+      code: 1,
+      row: { id, startedAt: 1000, detailUnavailable: "legacy" },
+    });
+    const missing = await captured({ ...payload([]).payload, activeAdmissions: 1, fenceReady: false });
+    expect(missing.diagnostic).toMatchObject({ receivedProjectionComplete: false, detailUnavailable: "not-reported" });
+  });
+
+  it("does not release old or foreign permits and states snapshot mismatch", async () => {
+    const body = refused([{ ...row, startedAt: 1, workerVersion: "00000000-0000-4000-8000-000000000003" }]);
+    body.activeAdmissions = 2;
+    body.draining.until = new Date(0).toISOString();
+    const result = await captured(body);
+    expect({ code: result.code, requests: result.requests }).toEqual({ code: 1, requests: ["POST"] });
+    expect(result.diagnostic).toMatchObject({
+      receivedProjectionComplete: false,
+      countMatchesGate: false,
+      rows: [{ id, startedAt: 1, expiry: "none", workerVersion: "00000000-0000-4000-8000-000000000003" }],
+    });
+  });
+
+  it("bounds and redacts the diagnostic instead of copying arbitrary metadata", async () => {
+    const rows = Array.from({ length: 8 }, () => ({
+      ...row,
+      token: "private-token",
+      exception: "private-error",
+      path: "/workspace/private",
+    }));
+    rows[0].sourceId = "/workspace/private";
+    const result = await captured(refused(rows));
+    expect(result.diagnostic).toMatchObject({ receivedProjectionComplete: false, omittedCount: 3 });
+    expect(result.diagnostic.rows).toHaveLength(5);
+    expect(result.diagnostic.rows[0]).toEqual({ id, startedAt: 1000, detailUnavailable: "malformed" });
+    expect(result.lines.join("\n")).not.toContain("private-");
+    expect(result.lines.join("\n")).not.toContain("/workspace/");
+    expect(Buffer.byteLength(JSON.stringify(result.diagnostic))).toBeLessThanOrEqual(8192);
+  });
+
+  it("keeps refusal when the global diagnostic sink fails", async () => {
+    const body = refused([row]);
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(body));
+    const lines = [];
+    const logger = vi.spyOn(console, "error").mockImplementation((line) => {
+      if (String(line).startsWith("[resident-deploy-admission-diagnostic]")) throw new Error("private-sink-error");
+      lines.push(String(line));
+    });
+    try {
+      expect(
+        await main([], { RESIDENT_BASE_URL: "https://resident.example.test", RESIDENT_DRAIN_TOKEN: "synthetic-token" }),
+      ).toBe(1);
+      expect(lines.at(-1)).toContain("1 resident operation(s) admitted before the fence remain active");
+    } finally {
+      fetcher.mockRestore();
+      logger.mockRestore();
+    }
+    const incomplete = await captured(refused([{ ...row, kind: null }]));
+    expect(incomplete.diagnostic.rows[0]).toEqual({ id, startedAt: 1000, detailUnavailable: "incomplete" });
+  });
+
+  it("keeps malformed successful responses closed without printing private error data", async () => {
+    const result = await captured({
+      ...payload([]).payload,
+      fenceReady: false,
+      residents: [
+        { resource: "repo:acme/api", live: { error: "private-token /workspace/private" } },
+        {
+          resource: "/workspace/private",
+          live: {
+            state: "private-token",
+            inFlight: 0,
+            runsInFlight: 0,
+            executingRuns: 0,
+            retainedRuns: 0,
+            unknownRuns: 0,
+          },
+        },
+      ],
+    });
+    expect(result.code).toBe(1);
+    expect(result.lines.join("\n")).toContain("resident-view-unavailable");
+    expect(result.lines.join("\n")).not.toContain("private-token");
+    expect(result.lines.join("\n")).not.toContain("/workspace/private");
+  });
+
+  it("reports a closed HTTP failure without response bytes or the credential", async () => {
+    const result = await captured(null, 403);
+    expect({ code: result.code, requests: result.requests }).toEqual({ code: 1, requests: ["POST"] });
+    expect(result.lines.join("\n")).toContain("http-status:403");
+    expect(result.lines.join("\n")).not.toContain("private-");
+    expect(result.lines.join("\n")).not.toContain("/workspace/");
+    expect(result.lines.join("\n")).not.toContain("synthetic-token");
+  });
+});
+
 const payload = (residents) => ({
   ok: true,
   payload: {
@@ -745,7 +928,10 @@ describe("resident deploy preflight — decide()", () => {
     expect(d.allow).toBe(false);
     expect(d.provisioning).toEqual([]);
     expect(d.unknown).toEqual([
-      { resource: "repo:x/y", error: expect.stringContaining('unrecognized state "hibernating"') },
+      {
+        resource: "repo:x/y",
+        error: "live view carries an unrecognized state (vocabulary drift — update preflight.mjs)",
+      },
     ]);
   });
 
@@ -761,9 +947,9 @@ describe("resident deploy preflight — decide()", () => {
       payload([resident("repo:jshttp/vary", 0), { resource: "repo:x/y", live: { error: "DO timed out" } }]),
     );
     expect(d.allow).toBe(false);
-    expect(d.unknown).toEqual([{ resource: "repo:x/y", error: "DO timed out" }]);
+    expect(d.unknown).toEqual([{ resource: "repo:x/y", error: "resident-view-unavailable" }]);
     expect(d.message).toContain("repo:x/y");
-    expect(d.message).toContain("DO timed out");
+    expect(d.message).toContain("resident-view-unavailable");
   });
 
   it("a payload without per-resident inFlight (old Worker) is unknown → refuse", () => {

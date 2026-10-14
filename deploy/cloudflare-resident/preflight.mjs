@@ -69,14 +69,14 @@ export async function fetchResidents(baseUrl, token, { timeoutMs = 15_000 } = {}
       signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await res.text();
-    if (!res.ok) return { ok: false, error: `POST ${url} → HTTP ${res.status}: ${text.slice(0, 200)}` };
+    if (!res.ok) return { ok: false, error: `http-status:${res.status}` };
     try {
       return { ok: true, payload: JSON.parse(text) };
     } catch {
-      return { ok: false, error: `POST ${url} → non-JSON body: ${text.slice(0, 200)}` };
+      return { ok: false, error: "malformed-json" };
     }
   } catch (err) {
-    return { ok: false, error: `POST ${url} failed: ${err instanceof Error ? err.message : String(err)}` };
+    return { ok: false, error: err?.name === "TimeoutError" || err?.name === "AbortError" ? "timeout" : "transport" };
   }
 }
 
@@ -334,6 +334,111 @@ function nativeOperationDiagnostic(fetched) {
         });
 }
 
+/** The global permit is a request obligation, separate from native journals.
+ * Only already-returned metadata is projected; age never proves settlement. */
+function deployAdmissionDiagnostic(fetched) {
+  if (fetched?.ok !== true) return null;
+  const readback = fetched.payload?.admissionReadback;
+  if (
+    fetched.payload?.activeAdmissions === 0 &&
+    (!readback ||
+      (readback.observedActiveCount === 0 &&
+        Array.isArray(readback.rows) &&
+        readback.rows.length === 0 &&
+        readback.omittedCount === 0))
+  )
+    return null;
+  const prefix = "[resident-deploy-admission-diagnostic] ";
+  const uuid = (v) => typeof v === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(v);
+  const integer = (v) => Number.isSafeInteger(v) && v >= 0;
+  const nullable = (v, check) => v === null || check(v);
+  const identity = (v) => typeof v === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(v);
+  const unavailable = (v, reason) => ({
+    ...(uuid(v?.id) ? { id: v.id } : {}),
+    ...(integer(v?.startedAt) ? { startedAt: v.startedAt } : {}),
+    detailUnavailable: reason,
+  });
+  const snapshot = {
+    schema: 1,
+    receivedProjectionComplete: false,
+    storageObservation: "registry-permits-only",
+    gateActiveCount: Number.isSafeInteger(fetched.payload?.activeAdmissions) ? fetched.payload.activeAdmissions : null,
+    fenceReady: typeof fetched.payload?.fenceReady === "boolean" ? fetched.payload.fenceReady : null,
+    nativeOutcome: "unverified",
+    requestEnd: "unobserved",
+  };
+  if (!readback) return prefix + JSON.stringify({ ...snapshot, detailUnavailable: "not-reported" });
+  if (
+    readback.schema !== 1 ||
+    !integer(readback.observedAt) ||
+    !integer(readback.observedActiveCount) ||
+    !integer(readback.omittedCount) ||
+    !Array.isArray(readback.rows) ||
+    readback.rows.length > 25 ||
+    readback.observedActiveCount !== readback.rows.length + readback.omittedCount
+  )
+    return prefix + JSON.stringify({ ...snapshot, detailUnavailable: "malformed" });
+  const seen = new Set();
+  const rows = readback.rows.slice(0, 5).map((v) => {
+    if (!uuid(v?.id) || !integer(v?.startedAt) || seen.has(v.id)) return unavailable(v, "malformed");
+    seen.add(v.id);
+    if (v.schema !== 1) return unavailable(v, v.schema === undefined ? "legacy" : "malformed");
+    if (v.kind === null || v.component === null) return unavailable(v, "incomplete");
+    if (
+      !["resident-call", "refresh-step", "fleet-lifecycle", "reconcile", "watchdog"].includes(v.kind) ||
+      !["resident", "http", "workflow", "scheduler"].includes(v.component) ||
+      !nullable(
+        v.build,
+        (x) =>
+          typeof x === "string" && /^[a-f0-9]{7,40}(?:@\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z)?$/.test(x),
+      ) ||
+      !nullable(v.workerVersion, uuid) ||
+      !nullable(
+        v.resource,
+        (x) => typeof x === "string" && /^repo:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(x) && x.length <= 63,
+      ) ||
+      !nullable(v.sourceId, identity) ||
+      !nullable(v.traceId, (x) => typeof x === "string" && /^[a-f0-9]{32}$/.test(x) && !/^0+$/.test(x)) ||
+      !nullable(v.requesterScope, (x) => ["admin", "operator", "read", "drain"].includes(x))
+    )
+      return unavailable(v, "malformed");
+    return {
+      id: v.id,
+      schema: 1,
+      startedAt: v.startedAt,
+      kind: v.kind,
+      component: v.component,
+      build: v.build,
+      workerVersion: v.workerVersion,
+      resource: v.resource,
+      sourceId: v.sourceId,
+      traceId: v.traceId,
+      requesterScope: v.requesterScope,
+      requestEnd: "unobserved",
+      nativeOutcome: "unverified",
+      expiry: "none",
+      lastProgress: "not-recorded",
+      runIdentity: "not-recorded",
+      actorIdentity: "not-recorded",
+    };
+  });
+  const omittedCount = readback.omittedCount + readback.rows.length - rows.length;
+  const countMatchesGate = readback.observedActiveCount === fetched.payload.activeAdmissions;
+  const diagnostic = {
+    ...snapshot,
+    observedAt: readback.observedAt,
+    observedActiveCount: readback.observedActiveCount,
+    countMatchesGate,
+    omittedCount,
+    rows,
+    receivedProjectionComplete: countMatchesGate && omittedCount === 0 && rows.every((v) => !v.detailUnavailable),
+  };
+  const line = prefix + JSON.stringify(diagnostic);
+  return Buffer.byteLength(line) + 1 <= 8192
+    ? line
+    : prefix + JSON.stringify({ ...snapshot, detailUnavailable: "byte-limit" });
+}
+
 /**
  * The decision, pure. `fetched` is the result of `fetchResidents`.
  * @returns {{ allow: boolean, forced: boolean, busy: {resource:string,inFlight:number}[], provisioning: {resource:string,state:string}[], interrupting: {resource:string,state:string}[], unknown: {resource:string,error:string}[], message: string }}
@@ -373,10 +478,15 @@ export function decide(fetched, { force = false } = {}) {
       problems.push("resident Worker answered without a `residents` array (malformed /residents payload)");
     } else {
       for (const r of residents) {
-        const resource = typeof r?.resource === "string" ? r.resource : "<unnamed resident>";
+        const resource =
+          typeof r?.resource === "string" &&
+          r.resource.length <= 63 &&
+          /^repo:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(r.resource)
+            ? r.resource
+            : "<unnamed resident>";
         const live = r?.live;
         if (!live || typeof live !== "object" || typeof live.error === "string") {
-          unknown.push({ resource, error: live?.error ?? "no live view" });
+          unknown.push({ resource, error: "resident-view-unavailable" });
         } else if (typeof live.inFlight !== "number") {
           unknown.push({
             resource,
@@ -394,7 +504,7 @@ export function decide(fetched, { force = false } = {}) {
         ) {
           unknown.push({
             resource,
-            error: `live view carries an impossible runsInFlight=${live.runsInFlight} (counter bug)`,
+            error: `live view carries an impossible runsInFlight=${typeof live.runsInFlight === "number" ? live.runsInFlight : "invalid"} (counter bug)`,
           });
         } else if (
           ![live.executingRuns, live.retainedRuns, live.unknownRuns].every(
@@ -431,7 +541,7 @@ export function decide(fetched, { force = false } = {}) {
             // A state this script does not know: fail closed rather than assume settled.
             unknown.push({
               resource,
-              error: `live view carries an unrecognized state ${JSON.stringify(live.state)} (vocabulary drift — update preflight.mjs)`,
+              error: "live view carries an unrecognized state (vocabulary drift — update preflight.mjs)",
             });
           }
         }
@@ -502,6 +612,12 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const fetched = await fetchResidents(baseUrl, readToken(env));
   const d = decide(fetched, { force });
   if (!d.allow) {
+    try {
+      const diagnostic = deployAdmissionDiagnostic(fetched);
+      if (diagnostic) console.error(diagnostic);
+    } catch {
+      /* Diagnostic failure cannot change deployment admission. */
+    }
     try {
       const diagnostic = nativeOperationDiagnostic(fetched);
       if (diagnostic) console.error(diagnostic);
