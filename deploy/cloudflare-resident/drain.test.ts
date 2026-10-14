@@ -3,7 +3,7 @@ import ts from "typescript";
 import { runInNewContext } from "node:vm";
 import { webcrypto } from "node:crypto";
 import { sanitizeResidentBody } from "../../src/execution/residentText.js";
-import { recoveryEvidenceUrl, recoveryViewsAreIdle } from "./admissionRecovery";
+import { admissionRecordHash, recoveryEvidenceUrl, recoveryQuote, recoveryViewsAreIdle } from "./admissionRecovery";
 import {
   DRAIN_DEFAULT_MINUTES,
   DRAIN_MAX_MINUTES,
@@ -43,10 +43,32 @@ describe("global deploy admission evidence", () => {
             "endTrackedDeployAdmission",
             "workerVersionTimestamp",
             "handleDeployFence",
+            "handleRecoverAdmission",
+            "handleDeployAdmissions",
+            "bearerToken",
+            "timingSafeEqual",
+            "tokenScope",
+            "hasScope",
             "json",
           ].includes(node.name?.text ?? ""),
       )
       .map((node) => node.getText(ast));
+    const routeDeclaration = ast.statements.find(
+      (node) =>
+        ts.isVariableStatement(node) &&
+        node.declarationList.declarations.some((declaration) => declaration.name.getText(ast) === "ROUTES"),
+    )!;
+    const workerExport = ast.statements.find(ts.isExportAssignment)!;
+    let workerObject = workerExport.expression;
+    while (
+      ts.isSatisfiesExpression(workerObject) ||
+      ts.isAsExpression(workerObject) ||
+      ts.isParenthesizedExpression(workerObject)
+    )
+      workerObject = workerObject.expression;
+    const fetchMethod = (workerObject as ts.ObjectLiteralExpression).properties.find(
+      (node) => ts.isMethodDeclaration(node) && node.name.getText(ast) === "fetch",
+    )!;
     const methods = [
       "beginDeployAdmission",
       "beginDeployReconcileAdmission",
@@ -59,11 +81,18 @@ describe("global deploy admission evidence", () => {
       "activeDeployAdmissions",
       "setDeployFence",
       "clearDeployFence",
+      "recoverDeployAdmission",
+      "recoverQuotedDeployAdmission",
+      "getDeployAdmissionRecoveryQuote",
+      "readDeployAdmissionRecoveryReceipt",
     ]
       .map((name) => methodOf(registry, name) ?? "")
       .join("\n");
     const compiled = ts.transpileModule(
       helpers.join("\n") +
+        "\n" +
+        routeDeclaration.getText(ast) +
+        `\nconst Worker = { ${fetchMethod.getText(ast)} };` +
         `\nclass Registry { ${methods} } class Resident { ${methodOf(source.slice(source.indexOf("export class ResidentDO")), "withDeployAdmission")} }`,
       {
         compilerOptions: { target: ts.ScriptTarget.ES2022 },
@@ -74,11 +103,16 @@ describe("global deploy admission evidence", () => {
     let now = 1000,
       failDelete = false,
       loseDeleteAck = false,
-      failOrigin = false;
+      failOrigin = false,
+      loseRecoveryAck = false,
+      failAuditWrite = false;
+    let onRecoveryProbe = () => {};
+    let recoveryView = { state: "warm", executingRuns: 0, unknownRuns: 0 };
     const storage = {
       get: async (key: string) => rows.get(key),
       put: async (key: string, value: unknown) => {
         if (failOrigin) throw new Error("private-origin-error");
+        if (failAuditWrite && key.startsWith("deploy:recovered:")) throw new Error("audit-write-failed");
         rows.set(key, value);
       },
       delete: async (key: string) => {
@@ -102,19 +136,39 @@ describe("global deploy admission evidence", () => {
           loseDeleteAck = false;
           throw new Error("private-delete-ack-error");
         }
+        if (loseRecoveryAck && [...rows.keys()].some((key) => key.startsWith("deploy:recovered:"))) {
+          loseRecoveryAck = false;
+          throw new Error("lost-recovery-commit-reply");
+        }
         return value;
       },
     };
-    const { Registry, Resident, beginTracked, endTracked, fenceHandler } = runInNewContext(
+    const {
+      Registry,
+      Resident,
+      beginTracked,
+      endTracked,
+      fenceHandler,
+      recoveryHandler,
+      inventoryHandler,
+      Worker,
+      routes,
+    } = runInNewContext(
       compiled +
-        "\n({Registry, Resident, beginTracked: typeof beginTrackedDeployAdmission === 'function' ? beginTrackedDeployAdmission : null, endTracked: typeof endTrackedDeployAdmission === 'function' ? endTrackedDeployAdmission : null, fenceHandler: handleDeployFence})",
+        "\n({Registry, Resident, Worker, routes: ROUTES, beginTracked: typeof beginTrackedDeployAdmission === 'function' ? beginTrackedDeployAdmission : null, endTracked: typeof endTrackedDeployAdmission === 'function' ? endTrackedDeployAdmission : null, fenceHandler: handleDeployFence, recoveryHandler: handleRecoverAdmission, inventoryHandler: handleDeployAdmissions})",
       {
         crypto: webcrypto,
         Response,
+        Request,
+        URL,
         sanitizeResidentBody,
         registryStub: () => api,
         residentStub: () => ({
-          getResidentDeployInfo: async () => ({ state: "warm", executingRuns: 0, unknownRuns: 0 }),
+          getResidentDeployInfo: async () => recoveryView,
+          getResidentRecoveryProbe: async () => {
+            onRecoveryProbe();
+            return { activeProcesses: 0 };
+          },
         }),
         TextEncoder,
         Uint8Array,
@@ -122,19 +176,84 @@ describe("global deploy admission evidence", () => {
         liveDrain,
         postUploadVersion,
         deployFenceReady,
+        recoveryEvidenceUrl,
+        recoveryViewsAreIdle,
+        admissionRecordHash,
+        recoveryQuote,
+        STREAMED_ROUTES: new Set(),
+        tracer: {},
+        traceSinks: [],
+        startAdoptedRoot: () => ({ end: () => {} }),
+        catchAllErr: () => ({ error: "request failed" }),
         DRAIN_KEY: "drain",
         DEPLOY_ADMISSION_KEY_PREFIX: "deploy:admission:",
         BUILD_ID: "a".repeat(40),
         RESOURCE_KEY: "resource",
         DEPLOY_RELEASE_RECEIPTS_KEY: "deploy:release-receipts",
-        console: { log: (line: string) => events.push(JSON.parse(line.slice("[resident-deploy-admission] ".length))) },
+        DEPLOY_RECOVERY_KEY_PREFIX: "deploy:recovered:",
+        console: {
+          log: (line: string) => {
+            if (line.startsWith("[resident-deploy-admission] "))
+              events.push(JSON.parse(line.slice("[resident-deploy-admission] ".length)));
+          },
+        },
       },
     );
     const api = new Registry();
     api.ctx = { storage };
     api.list = async () => [{ resource: "repo:acme/api" }];
+    let recoveryMutations = 0;
+    const recoverOriginal = api.recoverQuotedDeployAdmission.bind(api);
+    api.recoverQuotedDeployAdmission = (...args: unknown[]) => {
+      recoveryMutations++;
+      return recoverOriginal(...args);
+    };
     return {
       api,
+      inventory: (id?: string) =>
+        inventoryHandler({}, new URL(`https://example.com/deploy-admissions${id ? `?id=${id}` : ""}`)),
+      recoveryMutations: () => recoveryMutations,
+      failAuditWrite: () => {
+        failAuditWrite = true;
+      },
+      setRecoveryView: (view: typeof recoveryView) => {
+        recoveryView = view;
+      },
+      recover: async (
+        body: Record<string, unknown>,
+        probe = () => {},
+        http?: { path: string; token?: string; olderRoutes?: boolean },
+      ) => {
+        onRecoveryProbe = probe;
+        rows.set("drain", {
+          since: "1970-01-01T00:00:00.000Z",
+          until: "1970-01-01T01:00:00.000Z",
+          by: "deploy",
+          reason: "release",
+        });
+        const env = {
+          CF_VERSION_METADATA: { id: "00000000-0000-4000-8000-000000000002" },
+          RESIDENT_ADMIN_TOKEN: "admin-fixture",
+          RESIDENT_READ_TOKEN: "read-fixture",
+          RESIDENT_OPERATOR_TOKEN: "operator-fixture",
+          RESIDENT_DRAIN_TOKEN: "drain-fixture",
+        };
+        if (http) {
+          if (http.olderRoutes) delete routes["/recover-quoted-admission"];
+          return Worker.fetch(
+            new Request(`https://example.com${http.path}`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${http.token ?? "admin-fixture"}`, "content-type": "application/json" },
+              body: JSON.stringify(body),
+            }),
+            env,
+          );
+        }
+        return recoveryHandler(env, body);
+      },
+      loseRecoveryAck: () => {
+        loseRecoveryAck = true;
+      },
       fence: async (failRead = false) => {
         rows.set("drain", {
           since: "1970-01-01T00:00:00.000Z",
@@ -209,6 +328,293 @@ describe("global deploy admission evidence", () => {
   };
 
   const identity = { id: "00000000-0000-4000-8000-000000000011", requestHash: "c".repeat(64) };
+  const recoveryRequest = {
+    id: "00000000-0000-4000-8000-000000000012",
+    evidence: "https://example.com/receipts/original-request-ended",
+    expectedStartedAt: 1000,
+    expectedRecordSha256: "a81747d391ba39d7ed7e15e4b633483a6104f8c6f9318d5548a2589a3f22ab6a",
+  };
+
+  it("keeps an abandonment request held even with an upload URL and caller assertions", async () => {
+    const h = fixture();
+    h.rows.set(`deploy:admission:${recoveryRequest.id}`, { startedAt: 1000, kind: "watchdog" });
+    const response = await h.recover({
+      ...recoveryRequest,
+      disposition: "operator-abandoned",
+      requestEnd: "unobserved",
+      containmentVerified: true,
+    });
+    expect(response.status).toBe(409);
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+    expect(h.rows.get(`deploy:admission:${recoveryRequest.id}`)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    expect(h.rows.has(`deploy:recovered:${recoveryRequest.id}`)).toBe(false);
+  });
+
+  it("refuses the operator's stale quote and a row changed during the independent probes", async () => {
+    const h = fixture();
+    const key = `deploy:admission:${recoveryRequest.id}`;
+    h.rows.set(key, { startedAt: 1000, kind: "watchdog" });
+    const stale = await h.recover({ ...recoveryRequest, expectedStartedAt: 999 });
+    expect(stale.status).toBe(409);
+    expect(h.rows.get(key)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    const changed = await h.recover(recoveryRequest, () => h.rows.set(key, { startedAt: 1000, kind: "reconcile" }));
+    expect(changed.status).toBe(409);
+    expect(h.rows.get(key)).toEqual({ startedAt: 1000, kind: "reconcile" });
+    expect(h.rows.has(`deploy:recovered:${recoveryRequest.id}`)).toBe(false);
+  });
+
+  it("archives the exact original record without claiming native ending or changing a neighbor", async () => {
+    const h = fixture();
+    h.rows.set(`deploy:admission:${recoveryRequest.id}`, { startedAt: 1000, kind: "watchdog" });
+    h.rows.set("deploy:admission:neighbor", { startedAt: 500, kind: "unknown" });
+    const response = await h.recover(recoveryRequest);
+    expect(response.status).toBe(200);
+    expect(h.rows.get(`deploy:recovered:${recoveryRequest.id}`)).toMatchObject({
+      schema: 1,
+      disposition: "request-ended",
+      requestEnd: "operator-attested",
+      nativeOutcome: "unverified",
+      independentObligations: "unchanged",
+      originalRecord: { startedAt: 1000, kind: "watchdog" },
+      originalRecordSha256: recoveryRequest.expectedRecordSha256,
+    });
+    expect(h.rows.get("deploy:admission:neighbor")).toEqual({ startedAt: 500, kind: "unknown" });
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+  });
+
+  it("qualifies a lost recovery commit reply through its exact audit without another deletion", async () => {
+    const h = fixture();
+    h.rows.set(`deploy:admission:${recoveryRequest.id}`, { startedAt: 1000, kind: "watchdog" });
+    h.loseRecoveryAck();
+    const response = await h.recover(recoveryRequest);
+    expect(response.status).toBe(200);
+    expect(await h.api.activeDeployAdmissions()).toBe(0);
+    expect(h.recoveryMutations()).toBe(1);
+    expect(h.rows.get(`deploy:recovered:${recoveryRequest.id}`)).toMatchObject({
+      originalRecord: { startedAt: 1000, kind: "watchdog" },
+      originalRecordSha256: recoveryRequest.expectedRecordSha256,
+      requestEnd: "operator-attested",
+      nativeOutcome: "unverified",
+    });
+  });
+
+  it("reports an uncertain recovery without printing raw errors or receipt URLs", async () => {
+    const h = fixture();
+    h.rows.set(`deploy:admission:${recoveryRequest.id}`, { startedAt: 1000, kind: "watchdog" });
+    h.api.recoverQuotedDeployAdmission = async () => {
+      throw new Error("https://example.com/private?receipt=hidden");
+    };
+    expect((await h.recover(recoveryRequest)).status).toBe(503);
+    expect(h.events).toEqual([
+      {
+        schema: 1,
+        phase: "recovery-commit",
+        id: recoveryRequest.id,
+        workerVersion: "00000000-0000-4000-8000-000000000002",
+        observedAt: 1000,
+        commit: "unverified",
+        failure: "storage-or-rpc",
+        nativeOutcome: "unverified",
+      },
+    ]);
+    expect(h.rows.get(`deploy:admission:${recoveryRequest.id}`)).toEqual({ startedAt: 1000, kind: "watchdog" });
+  });
+
+  it("quotes the complete original record read-only while retaining the compact inventory", async () => {
+    const h = fixture();
+    const key = `deploy:admission:${recoveryRequest.id}`;
+    h.rows.set(key, { startedAt: 1000, kind: "watchdog" });
+    expect(await (await h.inventory()).json()).toEqual({
+      admissions: [{ id: recoveryRequest.id, startedAt: 1000, kind: "watchdog" }],
+    });
+    expect(await (await h.inventory(recoveryRequest.id)).json()).toEqual({
+      admission: { id: recoveryRequest.id, startedAt: 1000, recordSha256: recoveryRequest.expectedRecordSha256 },
+    });
+    expect(h.rows.get(key)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+    h.rows.set(key, { kind: "watchdog", startedAt: 1000 });
+    expect(await h.api.getDeployAdmissionRecoveryQuote(recoveryRequest.id)).toEqual({
+      startedAt: 1000,
+      recordSha256: recoveryRequest.expectedRecordSha256,
+    });
+    h.rows.set(key, { startedAt: 1000, kind: "watchdog", delayedEffect: { unknown: true } });
+    expect((await h.inventory(recoveryRequest.id)).status).toBe(409);
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+  });
+
+  it("refuses the legacy mutation protocol even when passed a valid quote", async () => {
+    const h = fixture();
+    h.rows.set(`deploy:admission:${recoveryRequest.id}`, { startedAt: 1000, kind: "watchdog" });
+    h.rows.set("drain", {
+      since: "1970-01-01T00:00:00.000Z",
+      until: "1970-01-01T01:00:00.000Z",
+      swapFence: true,
+      swapVersion: "00000000-0000-4000-8000-000000000002",
+      by: "deploy",
+      reason: "release",
+    });
+    expect(
+      await h.api.recoverDeployAdmission(
+        recoveryRequest.id,
+        "1970-01-01T00:00:00.000Z",
+        "1970-01-01T01:00:00.000Z",
+        "00000000-0000-4000-8000-000000000002",
+        "d".repeat(64),
+        { startedAt: 1000, recordSha256: recoveryRequest.expectedRecordSha256 },
+      ),
+    ).toBe(false);
+    expect(h.rows.get(`deploy:admission:${recoveryRequest.id}`)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    expect(h.rows.has(`deploy:recovered:${recoveryRequest.id}`)).toBe(false);
+  });
+
+  it("recovers through the separate admin HTTP address and refuses the legacy address", async () => {
+    const h = fixture();
+    const key = `deploy:admission:${recoveryRequest.id}`;
+    h.rows.set(key, { startedAt: 1000, kind: "watchdog" });
+    expect((await h.recover(recoveryRequest, () => {}, { path: "/recover-admission" })).status).toBe(409);
+    expect(h.rows.get(key)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    expect(h.recoveryMutations()).toBe(0);
+    expect(
+      (
+        await h.recover({ id: recoveryRequest.id, evidence: recoveryRequest.evidence }, () => {}, {
+          path: "/recover-quoted-admission",
+        })
+      ).status,
+    ).toBe(400);
+    expect(h.rows.get(key)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    expect((await h.recover(recoveryRequest, () => {}, { path: "/recover-quoted-admission" })).status).toBe(200);
+    expect(await h.api.activeDeployAdmissions()).toBe(0);
+    expect(h.rows.get(`deploy:recovered:${recoveryRequest.id}`)).toMatchObject({
+      originalRecord: { startedAt: 1000, kind: "watchdog" },
+      nativeOutcome: "unverified",
+    });
+  });
+
+  it("keeps changed data when an older HTTP route table receives the quoted request", async () => {
+    const h = fixture();
+    const key = `deploy:admission:${recoveryRequest.id}`;
+    h.rows.set(key, { startedAt: 1000, kind: "watchdog" });
+    const quote = await (await h.inventory(recoveryRequest.id)).json();
+    expect(quote.admission.recordSha256).toBe(recoveryRequest.expectedRecordSha256);
+    h.rows.set(key, { startedAt: 1000, kind: "reconcile" });
+    const response = await h.recover(recoveryRequest, () => {}, {
+      path: "/recover-quoted-admission",
+      olderRoutes: true,
+    });
+    expect(response.status).toBe(404);
+    expect(h.rows.get(key)).toEqual({ startedAt: 1000, kind: "reconcile" });
+    expect(h.recoveryMutations()).toBe(0);
+    expect(h.rows.has(`deploy:recovered:${recoveryRequest.id}`)).toBe(false);
+  });
+
+  it("requires the admin bearer before accepting either recovery address", async () => {
+    const h = fixture();
+    const key = `deploy:admission:${recoveryRequest.id}`;
+    h.rows.set(key, { startedAt: 1000, kind: "watchdog" });
+    for (const token of ["read-fixture", "operator-fixture", "drain-fixture", "not-a-token"]) {
+      for (const path of ["/recover-admission", "/recover-quoted-admission"]) {
+        expect((await h.recover(recoveryRequest, () => {}, { path, token })).status).toBe(401);
+      }
+    }
+    expect(h.rows.get(key)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    expect(h.recoveryMutations()).toBe(0);
+  });
+
+  it("does not fall back to an older unchecked Registry after the quote was read", async () => {
+    const h = fixture();
+    const key = `deploy:admission:${recoveryRequest.id}`;
+    h.rows.set(key, { startedAt: 1000, kind: "watchdog" });
+    const response = await h.recover(recoveryRequest, () => {
+      h.api.recoverQuotedDeployAdmission = async () => {
+        throw new Error("quoted-method-unavailable");
+      };
+      h.api.recoverDeployAdmission = async () => {
+        h.rows.delete(key);
+        return true;
+      };
+    });
+    expect(response.status).toBe(503);
+    expect(h.rows.get(key)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    expect(h.rows.has(`deploy:recovered:${recoveryRequest.id}`)).toBe(false);
+  });
+
+  it("holds an unquoted request and unknown native ownership without creating an audit", async () => {
+    const h = fixture();
+    const key = `deploy:admission:${recoveryRequest.id}`;
+    h.rows.set(key, { startedAt: 1000, kind: "watchdog" });
+    expect((await h.recover({ id: recoveryRequest.id, evidence: recoveryRequest.evidence })).status).toBe(400);
+    h.setRecoveryView({ state: "warm", executingRuns: 0, unknownRuns: 1 });
+    expect((await h.recover(recoveryRequest)).status).toBe(409);
+    expect(h.rows.get(key)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    expect(h.recoveryMutations()).toBe(0);
+    expect(h.rows.has(`deploy:recovered:${recoveryRequest.id}`)).toBe(false);
+  });
+
+  it("preserves the original row when audit storage or the delete fails", async () => {
+    for (const failure of ["audit", "delete"] as const) {
+      const h = fixture();
+      h.rows.set(`deploy:admission:${recoveryRequest.id}`, { startedAt: 1000, kind: "watchdog" });
+      if (failure === "audit") h.failAuditWrite();
+      else h.failDelete();
+      expect((await h.recover(recoveryRequest)).status).toBe(503);
+      expect(h.rows.get(`deploy:admission:${recoveryRequest.id}`)).toEqual({ startedAt: 1000, kind: "watchdog" });
+      expect(h.rows.has(`deploy:recovered:${recoveryRequest.id}`)).toBe(false);
+      expect(h.recoveryMutations()).toBe(1);
+    }
+  });
+
+  it("does not overwrite a prior audit or admit another caller under its recovered identity", async () => {
+    const h = fixture();
+    const key = `deploy:admission:${recoveryRequest.id}`;
+    const auditKey = `deploy:recovered:${recoveryRequest.id}`;
+    h.rows.set(key, { startedAt: 1000, kind: "watchdog" });
+    h.rows.set(auditKey, { recoveredAt: 500, evidenceHash: "legacy" });
+    expect((await h.recover(recoveryRequest)).status).toBe(409);
+    expect(h.rows.get(key)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    expect(h.rows.get(auditKey)).toEqual({ recoveredAt: 500, evidenceHash: "legacy" });
+    await expect(h.api.beginDeployAdmission(origin, { ...identity, id: recoveryRequest.id })).rejects.toThrow(
+      "deploy-admission-identity-used-or-unverified",
+    );
+  });
+
+  it("leaves a replaced fence intact and treats unreadable or altered commit evidence as unknown", async () => {
+    const h = fixture();
+    const key = `deploy:admission:${recoveryRequest.id}`;
+    h.rows.set(key, { startedAt: 1000, kind: "watchdog" });
+    const replacement = {
+      since: "1970-01-01T00:00:00.000Z",
+      until: "1970-01-01T01:00:00.000Z",
+      by: "deploy",
+      reason: "new-release",
+      swapFence: true,
+      swapVersion: "foreign",
+    };
+    expect((await h.recover(recoveryRequest, () => h.rows.set("drain", replacement))).status).toBe(409);
+    expect(h.rows.get("drain")).toEqual(replacement);
+    expect(h.rows.get(key)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    for (const failure of ["read", "altered"] as const) {
+      const r = fixture();
+      r.rows.set(key, { startedAt: 1000, kind: "watchdog" });
+      const readOriginal = r.api.readDeployAdmissionRecoveryReceipt.bind(r.api);
+      r.api.readDeployAdmissionRecoveryReceipt = async (...args: unknown[]) => {
+        if (failure === "read") throw new Error("audit-read-unavailable");
+        const audit = r.rows.get(`deploy:recovered:${recoveryRequest.id}`) as Record<string, unknown>;
+        r.rows.set(`deploy:recovered:${recoveryRequest.id}`, {
+          ...audit,
+          originalRecord: { startedAt: 1000, kind: "reconcile" },
+        });
+        return readOriginal(...args);
+      };
+      r.loseRecoveryAck();
+      expect((await r.recover(recoveryRequest)).status).toBe(503);
+      expect(r.recoveryMutations()).toBe(1);
+      expect(await r.api.activeDeployAdmissions()).toBe(0);
+      expect(r.rows.get(`deploy:recovered:${recoveryRequest.id}`)).toMatchObject({
+        requestEnd: "operator-attested",
+        nativeOutcome: "unverified",
+      });
+    }
+  });
 
   it("reads a committed begin after a lost reply without repeating admission or work", async () => {
     const h = fixture();
