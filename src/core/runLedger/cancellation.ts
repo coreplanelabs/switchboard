@@ -43,8 +43,58 @@ export interface CancellationRefusal {
   phase: CancellationPhase;
   cause: (typeof CANCELLATION_REFUSAL_CAUSES)[number];
 }
+export interface CancellationObservation {
+  step: "initial-kill" | "final-kill";
+  phase: "guard" | "launch" | "exit";
+  cause: "target-unverified" | "runtime-unavailable" | "timeout" | "exit-unconfirmed" | "native-exec-failed";
+  exitCode?: number;
+  retirement?: RetirementBlock;
+}
+const RETIREMENT_BLOCKS = [
+  "destroying",
+  "hydration-unconfirmed",
+  "runtime-unavailable",
+  "lifecycle-transition",
+  "recreate-held",
+  "operations-busy",
+  "operation-uid-active",
+  "uid-owner-unverified",
+  "native-outcome-unknown",
+  "boot-unconfirmed",
+  "boot-read-unconfirmed",
+  "original-runtime-present",
+  "uid-presence-unconfirmed",
+  "native-observation-unconfirmed",
+  "timeout",
+  "native-exec-failed",
+] as const;
+export type RetirementBlock = (typeof RETIREMENT_BLOCKS)[number];
 export type RuntimeStopResult =
-  { stopped: true; disposition: CancellationDisposition } | { stopped: false; refusal?: CancellationRefusal };
+  | { stopped: true; disposition: CancellationDisposition }
+  | { stopped: false; refusal?: CancellationRefusal; observation?: CancellationObservation };
+
+export function cancellationObservationOf(value: unknown): CancellationObservation | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const v = value as Record<string, unknown>;
+  if (
+    Object.keys(v).some((key) => !["step", "phase", "cause", "exitCode", "retirement"].includes(key)) ||
+    !["initial-kill", "final-kill"].includes(v.step as string) ||
+    !["guard", "launch", "exit"].includes(v.phase as string) ||
+    !["target-unverified", "runtime-unavailable", "timeout", "exit-unconfirmed", "native-exec-failed"].includes(
+      v.cause as string,
+    ) ||
+    (v.exitCode !== undefined && (typeof v.exitCode !== "number" || !Number.isSafeInteger(v.exitCode))) ||
+    (v.retirement !== undefined && !RETIREMENT_BLOCKS.includes(v.retirement as RetirementBlock))
+  )
+    return;
+  return {
+    step: v.step as CancellationObservation["step"],
+    phase: v.phase as CancellationObservation["phase"],
+    cause: v.cause as CancellationObservation["cause"],
+    ...(v.exitCode !== undefined ? { exitCode: v.exitCode as number } : {}),
+    ...(v.retirement !== undefined ? { retirement: v.retirement as RetirementBlock } : {}),
+  };
+}
 
 /** Only the closed diagnostic crosses the runtime boundary, never its body. */
 export function cancellationRefusalOf(value: unknown): CancellationRefusal | undefined {
@@ -60,7 +110,10 @@ export function cancellationRefusalOf(value: unknown): CancellationRefusal | und
   return { phase: v.phase as CancellationPhase, cause: v.cause as CancellationRefusal["cause"] };
 }
 
-export function cancellationFailureMessage(refusal?: CancellationRefusal): string {
+export function cancellationFailureMessage(
+  refusal?: CancellationRefusal,
+  observation?: CancellationObservation,
+): string {
   switch (refusal?.cause) {
     case "state-unconfigured":
       return "The shutdown service is unavailable.";
@@ -88,6 +141,8 @@ export function cancellationFailureMessage(refusal?: CancellationRefusal): strin
     case "runtime-http-refusal":
       return "The runtime refused the shutdown request.";
     case "kill-unconfirmed":
+      if (observation?.phase === "exit" && observation.cause === "exit-unconfirmed" && observation.exitCode === 2)
+        return "The original machine's identity could not be confirmed.";
       return "Process shutdown was not confirmed.";
     case "destroy-unconfirmed":
       return "Workspace shutdown was not confirmed.";

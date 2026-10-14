@@ -425,23 +425,79 @@ describe("resident cancellation admission", () => {
     });
     expect(h.rows.get("runReg:" + threadKey)).toMatchObject(owner);
   });
-  it.each(["unknown native operation", "busy", "same boot", "invalid boot", "changed boot", "cold", "foreign fence"])(
-    "retains the original cancellation when retirement is unconfirmed: %s",
-    async (outcome) => {
-      const h = harness();
-      h.instance.hydration = null;
-      h.instance.getStatus = async () => ({ state: "warm" });
-      h.instance.recreateAdmission = { blocked: async () => false };
-      h.instance.run = async () => ({ exitCode: 2, timedOut: false, truncated: false });
-      const marker = `native-operation:${threadKey}:${owner.runId}:old`;
-      if (outcome === "unknown native operation") h.rows.set(marker, owner);
-      if (outcome === "busy") h.instance.threadOpsInFlight.set(threadKey, 1);
-      if (outcome === "cold") h.instance.ctx.container.running = false;
-      if (outcome === "foreign fence") h.rows.set("runFence:" + threadKey, { ...owner, ownerFence: 8 });
-      let probes = 0;
-      h.instance.ctx.container.exec = async () => ({
+  it("retires the original runtime while unrelated refresh work continues", async () => {
+    const h = harness();
+    h.instance.hydration = null;
+    h.instance.getStatus = async () => ({ state: "refreshing" });
+    h.instance.recreateAdmission = { blocked: async () => false };
+    h.instance.threadOpsInFlight.set("slack:other:1", 1);
+    h.instance.opUsersInUse.set("worker4", "op:other");
+    const otherNative = "native-operation:slack:other:1:other-run:pending";
+    h.rows.set(otherNative, { runId: "other-run", ownerGen: "other-gen", ownerFence: 9 });
+    h.instance.ctx.container.exec = async (argv: string[]) => {
+      const retiredObservation = argv[6].startsWith("boot=");
+      const exitCode = retiredObservation ? 0 : 2;
+      return {
+        exitCode: Promise.resolve(exitCode),
         output: async () => ({
-          exitCode: 0,
+          exitCode,
+          stdout: new TextEncoder().encode("cccccccc-cccc-4ccc-8ccc-cccccccccccc\n").buffer,
+          stderr: new ArrayBuffer(0),
+        }),
+      };
+    };
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "runtime-retired",
+    });
+    expect(h.rows.get("thread:" + threadKey)).toMatchObject({ user: "worker2", container: "vm-a" });
+    expect(h.rows.get(otherNative)).toEqual({ runId: "other-run", ownerGen: "other-gen", ownerFence: 9 });
+    expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toMatchObject({
+      stopped: true,
+      disposition: "runtime-retired",
+    });
+  });
+  it.each([
+    "unknown native operation",
+    "busy",
+    "same boot",
+    "invalid boot",
+    "changed boot",
+    "cold",
+    "foreign fence",
+    "hydration",
+    "recreate held",
+    "original operation UID",
+    "running original UID",
+    "destroying",
+    "onboarding",
+    "restoring",
+    "down",
+  ])("retains the original cancellation when retirement is unconfirmed: %s", async (outcome) => {
+    const h = harness();
+    h.instance.hydration = null;
+    h.instance.getStatus = async () => ({
+      state: ["onboarding", "restoring", "down"].includes(outcome) ? outcome : "warm",
+    });
+    h.instance.recreateAdmission = { blocked: async () => false };
+    h.instance.run = async () => ({ exitCode: 2, timedOut: false, truncated: false });
+    const marker = `native-operation:${threadKey}:${owner.runId}:old`;
+    if (outcome === "unknown native operation") h.rows.set(marker, owner);
+    if (outcome === "busy") h.instance.threadOpsInFlight.set(threadKey, 1);
+    if (outcome === "cold") h.instance.ctx.container.running = false;
+    if (outcome === "foreign fence") h.rows.set("runFence:" + threadKey, { ...owner, ownerFence: 8 });
+    if (outcome === "hydration") h.instance.hydration = { phase: "restore" };
+    if (outcome === "recreate held") h.instance.recreateAdmission = { blocked: async () => true };
+    if (outcome === "original operation UID") h.instance.opUsersInUse.set("worker2", "op:original");
+    if (outcome === "destroying") h.instance.destroying = true;
+    let probes = 0;
+    h.instance.ctx.container.exec = async (argv: string[]) => {
+      const exitCode = argv[6].startsWith("boot=") ? (outcome === "running original UID" ? 3 : 0) : 2;
+      return {
+        exitCode: Promise.resolve(exitCode),
+        output: async () => ({
+          exitCode,
           stdout: new TextEncoder().encode(
             (outcome === "same boot"
               ? "vm-a"
@@ -453,13 +509,13 @@ describe("resident cancellation admission", () => {
           ).buffer,
           stderr: new ArrayBuffer(0),
         }),
-      });
-      expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: false });
-      expect(h.rows.get("thread:" + threadKey)).toMatchObject({ user: "worker2", container: "vm-a" });
-      expect(h.rows.get("runReg:" + threadKey)).toMatchObject(owner);
-      if (outcome === "unknown native operation") expect(h.rows.get(marker)).toEqual(owner);
-    },
-  );
+      };
+    };
+    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: false });
+    expect(h.rows.get("thread:" + threadKey)).toMatchObject({ user: "worker2", container: "vm-a" });
+    expect(h.rows.get("runReg:" + threadKey)).toMatchObject(owner);
+    if (outcome === "unknown native operation") expect(h.rows.get(marker)).toEqual(owner);
+  });
   it("counts admission before its first wait and refuses a delayed cancelled command", async () => {
     const h = harness();
     let enter!: () => void;
@@ -860,6 +916,163 @@ describe("resident cancellation admission", () => {
 });
 
 describe("resident run cancellation", () => {
+  it("keeps a runtime observation fault under the fenced ticket without leaking its error", async () => {
+    const h = harness();
+    const ticket = {
+      version: 1 as const,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      runId: owner.runId,
+      threadKey,
+      ownerGen: owner.ownerGen,
+      startedAt: 1,
+      actor: { kind: "chat" as const, id: "slack:operator" },
+    };
+    h.instance.hydration = null;
+    h.instance.getStatus = async () => {
+      throw new Error("Bearer fixture-private-token");
+    };
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: false,
+      cancellationId: ticket.id,
+      refusal: { phase: "resident", cause: "runtime-unconfirmed" },
+    });
+    expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toEqual({
+      cancellation: ticket,
+      failure: { phase: "resident", cause: "runtime-unconfirmed" },
+    });
+    expect(h.rows.get(`cancelled-thread:${threadKey}`)).toBe(true);
+  });
+  it("keeps the stop pending when saving its runtime failure also fails", async () => {
+    const h = harness();
+    const ticket = {
+      version: 1 as const,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      runId: owner.runId,
+      threadKey,
+      ownerGen: owner.ownerGen,
+      startedAt: 1,
+      actor: { kind: "chat" as const, id: "slack:operator" },
+    };
+    h.instance.hydration = null;
+    h.instance.getStatus = async () => {
+      h.instance.ctx.storage.transaction = async () => {
+        throw new Error("Bearer fixture-storage-token");
+      };
+      throw new Error("Bearer fixture-runtime-token");
+    };
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: false,
+      cancellationId: ticket.id,
+      refusal: { phase: "resident", cause: "runtime-unconfirmed" },
+    });
+    expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toEqual({ cancellation: ticket });
+    expect(h.rows.get(`cancelled-thread:${threadKey}`)).toBe(true);
+    expect(h.rows.get(`thread:${threadKey}`).user).toBe("worker2");
+  });
+  it("does not downgrade a committed shutdown receipt while recording a runtime fault", async () => {
+    const h = harness();
+    const ticket = {
+      version: 1 as const,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      runId: owner.runId,
+      threadKey,
+      ownerGen: owner.ownerGen,
+      startedAt: 1,
+      actor: { kind: "chat" as const, id: "slack:operator" },
+    };
+    const receipt = { cancellation: ticket, stopped: true, disposition: "runtime-retired" };
+    h.instance.hydration = null;
+    h.instance.getStatus = async () => {
+      h.rows.set(`cancelled:${threadKey}:${owner.runId}`, receipt);
+      throw new Error("runtime reply lost after shutdown committed");
+    };
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "runtime-retired",
+    });
+    expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toEqual(receipt);
+  });
+  it("does not accept corrupt or foreign cached shutdown state", async () => {
+    const h = harness();
+    const ticket = {
+      version: 1 as const,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      runId: owner.runId,
+      threadKey,
+      ownerGen: owner.ownerGen,
+      startedAt: 1,
+      actor: { kind: "chat" as const, id: "slack:operator" },
+    };
+    const key = `cancelled:${threadKey}:${owner.runId}`;
+    h.rows.set(key, { cancellation: ticket, stopped: 42, disposition: "processes-stopped" });
+    h.instance.ctx.container.exec = async () => ({ exitCode: Promise.resolve(2) });
+    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({
+      stopped: false,
+      refusal: { phase: "resident", cause: "kill-unconfirmed" },
+    });
+    const foreign = { cancellation: { ...ticket, id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" }, stopped: true };
+    h.rows.set(key, foreign);
+    h.instance.ctx.container.exec = async () => {
+      throw new Error("foreign ticket must not reach native control");
+    };
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: false,
+      cancellationId: ticket.id,
+      refusal: { phase: "resident", cause: "ticket-conflict" },
+    });
+    expect(h.rows.get(key)).toEqual(foreign);
+    h.rows.set(key, { cancellation: ticket, stopped: true, disposition: "runtime-retired" });
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "runtime-retired",
+    });
+  });
+  it.each(["boot guard", "native exception"])(
+    "retains the exact failed kill observation under its original ticket: %s",
+    async (failure) => {
+      const h = harness();
+      const ticket = {
+        version: 1 as const,
+        id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+        runId: owner.runId,
+        threadKey,
+        ownerGen: owner.ownerGen,
+        startedAt: 1,
+        actor: { kind: "chat" as const, id: "slack:operator" },
+      };
+      h.instance.ctx.container.exec = async () => {
+        if (failure === "native exception") throw new Error("Bearer fixture-private-token");
+        return { exitCode: Promise.resolve(2) };
+      };
+      const observation =
+        failure === "boot guard"
+          ? {
+              step: "initial-kill",
+              phase: "exit",
+              cause: "exit-unconfirmed",
+              exitCode: 2,
+              retirement: "hydration-unconfirmed",
+            }
+          : { step: "initial-kill", phase: "launch", cause: "native-exec-failed", retirement: "hydration-unconfirmed" };
+      const result = await h.instance.cancelRun(ticket, physical);
+      expect(result).toEqual({
+        stopped: false,
+        cancellationId: ticket.id,
+        refusal: { phase: "resident", cause: "kill-unconfirmed" },
+        observation,
+      });
+      const durable = JSON.parse(JSON.stringify(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)));
+      expect(durable).toEqual({
+        cancellation: ticket,
+        failure: { phase: "resident", cause: "kill-unconfirmed" },
+        observation,
+      });
+      expect(JSON.stringify([result, durable])).not.toContain("fixture-private-token");
+      expect(h.rows.get("runReg:" + threadKey)).toMatchObject(owner);
+    },
+  );
   it("stops the original UID through native control when SDK execution is unavailable", async () => {
     const h = harness();
     const ticket = {
@@ -886,6 +1099,100 @@ describe("resident run cancellation", () => {
     expect(h.rows.get("thread:" + threadKey)).toEqual({ ...before, lastRunOwner: h.rows.get("runReg:" + threadKey) });
     expect(h.rows.get("runFence:" + threadKey)).toEqual({ runId: "run-old", ownerGen: "gen-old", ownerFence: 7 });
     expect(h.warnings).toEqual([]);
+  });
+  it("reconciles the same failed ticket after restart from verified runtime retirement", async () => {
+    const h = harness();
+    const ticket = {
+      version: 1 as const,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      runId: owner.runId,
+      threadKey,
+      ownerGen: owner.ownerGen,
+      startedAt: 1,
+      actor: { kind: "chat" as const, id: "slack:operator" },
+    };
+    h.instance.ctx.container.exec = async () => ({ exitCode: Promise.resolve(2) });
+    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({
+      stopped: false,
+      observation: { step: "initial-kill", phase: "exit", exitCode: 2 },
+    });
+    const restored = harness();
+    restored.rows.clear();
+    for (const [key, value] of JSON.parse(JSON.stringify([...h.rows]))) restored.rows.set(key, value);
+    restored.instance.hydration = null;
+    restored.instance.getStatus = async () => ({ state: "warm" });
+    restored.instance.recreateAdmission = { blocked: async () => false };
+    restored.instance.ctx.container.exec = async () => ({
+      exitCode: Promise.resolve(0),
+      output: async () => ({
+        exitCode: 0,
+        stdout: new TextEncoder().encode("cccccccc-cccc-4ccc-8ccc-cccccccccccc\n").buffer,
+        stderr: new ArrayBuffer(0),
+      }),
+    });
+    expect(await restored.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "runtime-retired",
+    });
+    expect(restored.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toMatchObject({
+      cancellation: ticket,
+      stopped: true,
+      disposition: "runtime-retired",
+      observation: { step: "initial-kill", phase: "exit", cause: "exit-unconfirmed", exitCode: 2 },
+    });
+    restored.instance.ctx.container.exec = async () => {
+      throw new Error("closed receipt must not signal again");
+    };
+    expect(await restored.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "runtime-retired",
+    });
+    expect(restored.rows.get("runReg:" + threadKey)).toMatchObject(owner);
+  });
+  it.each([
+    { exitCode: 10, retirement: "boot-read-unconfirmed" },
+    { exitCode: 12, retirement: "original-runtime-present" },
+    { exitCode: 3, retirement: "uid-presence-unconfirmed" },
+  ])("records why retirement was unconfirmed without inventing a native ending: %j", async (failure) => {
+    const h = harness();
+    const ticket = {
+      version: 1 as const,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      runId: owner.runId,
+      threadKey,
+      ownerGen: owner.ownerGen,
+      startedAt: 1,
+      actor: { kind: "chat" as const, id: "slack:operator" },
+    };
+    h.instance.hydration = null;
+    h.instance.getStatus = async () => ({ state: "warm" });
+    h.instance.recreateAdmission = { blocked: async () => false };
+    h.instance.ctx.container.exec = async (argv: string[]) => {
+      const exitCode = argv[6].startsWith("boot=") ? failure.exitCode : 2;
+      return {
+        exitCode: Promise.resolve(exitCode),
+        output: async () => ({ exitCode, stdout: new ArrayBuffer(0), stderr: new ArrayBuffer(0) }),
+      };
+    };
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: false,
+      cancellationId: ticket.id,
+      refusal: { phase: "resident", cause: "kill-unconfirmed" },
+      observation: {
+        step: "initial-kill",
+        phase: "exit",
+        cause: "exit-unconfirmed",
+        exitCode: 2,
+        retirement: failure.retirement,
+      },
+    });
+    expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toMatchObject({
+      cancellation: ticket,
+      failure: { phase: "resident", cause: "kill-unconfirmed" },
+      observation: { retirement: failure.retirement },
+    });
   });
   it("kills only the exact registered UID and keeps its files and spend ownership", async () => {
     const h = harness();
