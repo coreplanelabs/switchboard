@@ -40,6 +40,7 @@ declare module 'vue' {
     ReplyBlock: typeof import('./src/components/run/ReplyBlock.vue')['default']
     ResidentRow: typeof import('./src/components/residents/ResidentRow.vue')['default']
     ResidentUidGauge: typeof import('./src/components/residents/ResidentUidGauge.vue')['default']
+    ReviewFeedback: typeof import('./src/components/metrics/ReviewFeedback.vue')['default']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']
     RunChildrenBlock: typeof import('./src/components/run/RunChildrenBlock.vue')['default']

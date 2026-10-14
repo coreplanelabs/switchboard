@@ -12,6 +12,7 @@ import { METRICS_OFF_MESSAGE, type MetricsService } from "../metricsService.js";
 import { DAY_MS, MINUTE_MS } from "../budgets.js";
 import type { ReviewsService } from "../reviewsService.js";
 import { systemClock } from "../trace/clock.js";
+import type { ReviewFeedbackReport } from "../reviewFeedbackReport.js";
 
 // `metrics.trend` (docs/reference/specs/run-metrics.md item 9): the run trend
 // over the Analytics Engine dataset every finished run's point lands in — the
@@ -68,9 +69,30 @@ function renderTrend(output: JsonValue): string {
     `• ${String(r.agent)} — ${num(r.runs)} runs · failed ${num(r.failed)} (${pct(num(r.runs) > 0 ? num(r.failed) / num(r.runs) : 0)})` +
     ` · p50 ${wall(r.p50WallMs)} · p95 ${wall(r.p95WallMs)} · LLM ${money(r.usd)} · turns ${num(r.turns)}`;
   const footer = `bucketed by ${String(range.bucket)} · priced ${String(range.pricing)} · counted ${String(range.completeness)} · kept ${String(range.retentionDays)} days`;
-  return [head, tileLine, ...(byAgent.length === 0 ? ["(no runs in this range)"] : byAgent.map(line)), footer].join(
-    "\n",
-  );
+  return [
+    head,
+    tileLine,
+    ...(byAgent.length === 0 ? ["(no runs in this range)"] : byAgent.map(line)),
+    ...feedbackLines(o.feedback as unknown as ReviewFeedbackReport | undefined),
+    footer,
+  ].join("\n");
+}
+
+function feedbackLines(report: ReviewFeedbackReport | undefined): string[] {
+  if (!report) return [];
+  if (report.status === "unavailable") return ["• Human review feedback is unavailable."];
+  if (report.status === "not_applicable") return ["• Human review feedback applies to the review agent."];
+  const c = report.total;
+  const score = c.helpfulClearShare === null ? "—" : pct(c.helpfulClearShare);
+  return [
+    `• Review feedback: ${c.positiveOnly} positive-only reviews · ${c.negativeOnly} negative-only · ${c.mixed} mixed`,
+    `• Helpful among clear ratings: ${score} (${c.positiveOnly}/${c.positiveOnly + c.negativeOnly}); rating coverage ${c.ratedReviews}/${c.freshComplete}; current reads ${c.freshComplete}/${c.eligible}; ${c.distinctRaters} raters on ${c.distinctPrs} PRs`,
+    ...report.weekly.map(
+      (g) =>
+        `• Published ${g.key}: ${g.counts.positiveOnly} positive-only · ${g.counts.negativeOnly} negative-only · ${g.counts.mixed} mixed · ${g.counts.freshComplete}/${g.counts.eligible} checked`,
+    ),
+    "Current ratings of reviews published in each week; later votes and removals revise the trend.",
+  ];
 }
 
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);

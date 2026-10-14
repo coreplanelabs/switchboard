@@ -8,12 +8,15 @@ import {
   type MetricsSource,
 } from "./metrics.js";
 import { systemClock } from "./trace/clock.js";
+import type { ReviewFeedbackStore } from "./reviewFeedback.js";
+import { buildReviewFeedbackReport, type ReviewFeedbackReport } from "./reviewFeedbackReport.js";
+import { redactAndCap } from "./redact.js";
 
 // The metrics service (docs/reference/specs/run-metrics.md): what `metrics
 // trend`, the /metrics page and its JSON twin talk to. One `report` per read —
-// the three queries against the source, the pure builder over their rows; no
-// snapshot and no refresh loop, because the SQL API answers three sub-second
-// queries per read. A process without the reader hands the Null Object.
+// three SQL queries for run metrics and optional retained snapshots for human
+// feedback. GitHub collection happens outside page loads. A process without
+// the run-metrics reader hands the Null Object.
 
 export const METRICS_OFF_MESSAGE =
   "Metrics by run aren't configured — metrics.dataset in config (beside the costs block's Cloudflare account and analytics token) enables this view.";
@@ -37,7 +40,7 @@ function utcDayStart(ms: number): number {
 export function createMetricsService(
   cfg: MetricsConfig,
   source: MetricsSource,
-  deps: { now?: () => number } = {},
+  deps: { now?: () => number; feedback?: ReviewFeedbackStore; warn?: (message: string) => void } = {},
 ): MetricsService {
   const now = deps.now ?? systemClock;
   return {
@@ -51,14 +54,33 @@ export function createMetricsService(
       const sinceMs = untilMs - days * DAY_MS;
       const range = { sinceMs, untilMs, ...(opts.agent !== undefined ? { agent: opts.agent } : {}) };
       const queries = metricsQueries(range, cfg.dataset);
-      const [byDayStatus, byAgent, byDayAgentP50] = await Promise.all([
+      const feedbackRead = async (): Promise<ReviewFeedbackReport | undefined> => {
+        if (!cfg.feedback?.enabled) return undefined;
+        const asOf = now();
+        if (opts.agent !== undefined && opts.agent !== "review") return { status: "not_applicable", asOf };
+        try {
+          if (!deps.feedback) throw new Error("Feedback storage unavailable");
+          const stored = await deps.feedback.list(sinceMs, untilMs);
+          return buildReviewFeedbackReport(stored, range, now(), cfg.feedback);
+        } catch (error) {
+          const reason = redactAndCap(
+            error instanceof Error ? `${error.name}: ${error.message}` : "Unknown error",
+            200,
+          ).replace(/\s+/g, " ");
+          deps.warn?.(`Human review feedback unavailable: ${reason}`);
+          return { status: "unavailable", asOf };
+        }
+      };
+      const [byDayStatus, byAgent, byDayAgentP50, feedback] = await Promise.all([
         source.query(queries.byDayStatus),
         source.query(queries.byAgent),
         source.query(queries.byDayAgentP50),
+        feedbackRead(),
       ]);
       return {
         dataset: cfg.dataset,
         ...buildMetricsReport({ byDayStatus, byAgent, byDayAgentP50 }, { ...range, days }),
+        ...(feedback ? { feedback } : {}),
       };
     },
   };

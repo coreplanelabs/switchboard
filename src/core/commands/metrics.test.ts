@@ -6,6 +6,7 @@ import { DAY_MS } from "../budgets.js";
 import { buildReviewsReport } from "../reviewsReport.js";
 import { NullReviewsService, type ReviewsService } from "../reviewsService.js";
 import { metricsReviews, metricsTrend } from "./metrics.js";
+import { buildReviewFeedbackReport } from "../reviewFeedbackReport.js";
 
 // `metrics trend` (docs/reference/specs/run-metrics.md item 9): the trend
 // report on every surface — its refusals (off, a failing source) and its text
@@ -78,6 +79,17 @@ const invoke = (svc: MetricsService, options: Record<string, unknown> = {}) =>
   metricsTrend.handler({ args: [], options, caller, deps: { metrics: { service: async () => svc } } } as never);
 
 describe("metrics.trend", () => {
+  it("carries exact feedback into JSON and distinguishes an unrated cohort from unavailable feedback in text", async () => {
+    const feedback = buildReviewFeedbackReport({ entries: [] }, REPORT.range, UNTIL - 1);
+    const complete = { ...REPORT, feedback };
+    expect(await invoke(service(async () => complete))).toEqual(complete);
+    expect(metricsTrend.render!(complete as unknown as JsonValue)).toContain(
+      "Helpful among clear ratings: — (0/0); rating coverage 0/0; current reads 0/0",
+    );
+    expect(
+      metricsTrend.render!({ ...REPORT, feedback: { status: "unavailable", asOf: UNTIL - 1 } } as unknown as JsonValue),
+    ).toContain("Human review feedback is unavailable.");
+  });
   it("answers the service's report — the JSON twin's shape — passing --days and --agent through", async () => {
     const asked: unknown[] = [];
     const svc = service(async () => REPORT);

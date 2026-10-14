@@ -28,7 +28,9 @@ import { buildCostsByReport, type CostDimension, type CostsByReport } from "../s
 import { DIMENSION_OF_VIEW, type CostsByView, type CostsView } from "../src/channels/costsView.js";
 import type { CostsSnapshotStatus } from "../src/core/costsSnapshot.js";
 import { buildMetricsReport, type MetricsReport, type MetricsRow } from "../src/core/metrics.js";
-import { DAY_MS } from "../src/core/budgets.js";
+import { buildReviewFeedbackReport } from "../src/core/reviewFeedbackReport.js";
+import type { ReviewFeedbackEntry, ReviewFeedbackVote } from "../src/core/reviewFeedback.js";
+import { DAY_MS, MINUTE_MS } from "../src/core/budgets.js";
 import type { RunUsage, UsageRow } from "../src/core/runUsage.js";
 import { buildDeliveryReport, resolveDeliveryRange, type PullRequestFacts } from "../src/core/delivery.js";
 import { FAVICON_ICO_SVG } from "../src/channels/favicon.js";
@@ -1308,6 +1310,64 @@ const METRICS: MetricsReport = (() => {
     ...buildMetricsReport(
       { byDayStatus, byAgent, byDayAgentP50 },
       { sinceMs: METRICS_SINCE, untilMs: METRICS_UNTIL, days: METRICS_DAYS },
+    ),
+    feedback: buildReviewFeedbackReport(
+      {
+        collectionStartedAt: METRICS_SINCE,
+        entries: Array.from({ length: 12 }, (_, i): ReviewFeedbackEntry => {
+          const publishedAt = NOW - (i === 9 ? 1 : i + 1) * DAY_MS;
+          const repo = i < 8 ? "acme/api" : "acme/web";
+          const votes: ReviewFeedbackVote[] =
+            i === 6
+              ? []
+              : i === 5
+                ? [{ id: "reaction-unknown", actorType: "Unknown", content: "down" }]
+                : (i === 2 || i === 4
+                    ? (["up", "down"] as const)
+                    : ([i === 1 || i === 11 ? "down" : "up"] as const)
+                  ).map((content, j) => ({
+                    id: `reaction-${i}-${j}`,
+                    actorType: "User",
+                    actorId: `person-${i}-${i === 4 ? 0 : j}`,
+                    content,
+                  }));
+          const last = NOW - (i === 9 ? 3 * 60 * MINUTE_MS : 30 * MINUTE_MS);
+          return {
+            publication: {
+              runId: `preview-review-${i}`,
+              repo,
+              pr: i + 20,
+              head: "a".repeat(40),
+              bodyHash: "b".repeat(64),
+              format: 1,
+              findings: i % 4 === 0 ? 0 : 1,
+              publishedAt,
+              ...(i === 7
+                ? {}
+                : {
+                    review: {
+                      id: String(200 + i),
+                      nodeId: `PRR_sample_${i}`,
+                      url: `https://github.com/${repo}/pull/${i + 20}#pullrequestreview-${200 + i}`,
+                      publishedAt,
+                    },
+                  }),
+            },
+            ...(i === 7
+              ? {}
+              : {
+                  snapshot: {
+                    status: i === 8 ? "unavailable" : i === 11 ? "content_changed" : "complete",
+                    checkedAt: last,
+                    completedAt: last,
+                    votes,
+                  },
+                }),
+          };
+        }),
+      },
+      { sinceMs: METRICS_SINCE, untilMs: METRICS_UNTIL },
+      NOW,
     ),
   };
 })();

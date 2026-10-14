@@ -62,7 +62,7 @@
     "scripts/screenshot-output-worker.mts": "4183d9c7909ebb82903a8caa715b4facc48076eb2d9238c8706cacf35862003b",
     "scripts/screenshots.mts": "f62f9806ba5d836ff6a5f789dc2b348ed5526763dbba3f95333b66a0eda34044",
     "scripts/web-preview-reading-diff.ts": "24dea75cb4b61c011fa75878b138dde75e8a260d3c5b06c05c1e6fe2f2a58649",
-    "scripts/web-preview.ts": "43f471439f4074689921d153e91829b6deb9dc8e33af46c4e3362d26a423a9d1",
+    "scripts/web-preview.ts": "1e93541480f178fd5aeba235b356ca100591aadd2e930f744c75306abd7a463c",
     "src/agents/defaults.json": "f6fbe3d390a8aca3edf622d7494658145dca9590642183294d36e004c64760d8",
     "src/agents/registry.ts": "d33d181fa950c3f39088041348ee344a9c9c6477247c067a311ddb5e5c3d428a",
     "src/agents/resourceLifetime.ts": "3e1394c21439e9c53b4d13aa23b0f2e3fd67365dfc0ab4bcf1fa28e3494f5847",
@@ -130,7 +130,7 @@
     "src/core/memory/provenance.ts": "ca423e4ab31390a42ef1dc0df58cef8fb9f79c21e197785d4ce9dfe306f6b18b",
     "src/core/memory/scorer.ts": "17e9384196a6ad5b62d21f5e3672b863da405bd65c972710eeaeb912d2d5640e",
     "src/core/mergeWatch.ts": "09fa7c422cd5f78c6eced30bdf99916995d6049ae70e36cb5b255941ca5e09d9",
-    "src/core/metrics.ts": "b9fa6c18998e0fed5e69d43f654c4271f613159aae4ef08e6e7e0408126f0a0b",
+    "src/core/metrics.ts": "5bfc5598524e4100c47e78dd228b86722670d6205628af71cc0375b534b015fa",
     "src/core/modelPricing.ts": "341bb29f20113ef579bbc54d2232018794804277fde2fae16a590381c1118192",
     "src/core/modelRegistry.ts": "400e04993da661ad09b111525ec4e5e986f1d3207ef9bbcd8e0a0465c95647b7",
     "src/core/names.ts": "85ac837cbf8b1e7eb4663c7f4c53f17501b5b5cca7aad70dcfcf33b6d4c8bd42",
@@ -148,6 +148,8 @@
     "src/core/references/sourceReceipt.ts": "03a4fc0fe383095f85ef21a56d03a6ba5fc3f863ccf0e1ac3bd08f198c48b647",
     "src/core/references/unitStatusReference.ts": "a7d07aa188ec78fcfd8763a3d6f1ae3a814e5aa50f3c8d55edc085a3b9203084",
     "src/core/research/brief.ts": "aad30e37d5be5980b597cd2889979f1a5a4dade2b56ca5c707bbf158ba5136fb",
+    "src/core/reviewFeedback.ts": "bc5a51842b17017e97ce7456588c049c0a45200f36b792ff12d4e35b34038f4e",
+    "src/core/reviewFeedbackReport.ts": "309d4621a73c407b170f05ff21ee5a8a299660e7fa885a75e380179f9fe71ed5",
     "src/core/reviewHumanFindings.ts": "a42adb4a05b6aad503845f7e09baa0dda9dcff6eca00824e27a2f426c86ab77f",
     "src/core/reviewPublication.ts": "e538c45598b2dbd42608694badeb3d64fe0a49fe41589db8881df24859f3645a",
     "src/core/reviewVerdict.ts": "72d5648e0d53f657c064453911e66fa46e6f926e990f65b6c959403495529a99",
@@ -223,6 +225,7 @@
     "web/src/components/ThemeToggle.vue": "025a9a0c7ccc2983772c1888f7426ec161feb3ffaea87c914c65d15bdfd740d3",
     "web/src/components/ViewAsBanner.vue": "c31f753d698c3c9df6f7643fdff78eee122c2a5bacff2d71e2899dd841b9f474",
     "web/src/components/costs/CostChart.vue": "568a5a27631bd31ea75a91a4b56fcf7681a2e9655d4a1828c7940f52acf40f67",
+    "web/src/components/metrics/ReviewFeedback.vue": "471a7a2f0330a68db828358504dcbee0ab0d3194b479cff438aeecb933a3bde6",
     "web/src/components/metrics/TrendLineChart.vue": "bc4909d1cf643ab470e32be7c6002f83b3515bb0c7d837d7fa0666ff93ac4422",
     "web/src/lib/browser.ts": "c624264b160468cebfb6bcc4bc389f07fd8b24e1e700e1c0e318102b5a229c08",
     "web/src/lib/capabilities.ts": "0e485825f48786605345f6a7298763790b7468595d9a828b615a245ab4a6aecd",
@@ -236,7 +239,7 @@
     "web/src/lib/uiTheme.ts": "ecfe9b9da372426af79e2eac87dc12b28e75c403ec2df9aa395da12c2aa6f4fd",
     "web/src/lib/viewAs.ts": "7907b58fbf6464532a1c3f2ba880b7ea791971ea3f4ce15efaf98da8b4219187",
     "web/src/main.ts": "84ca021b55e606fcfd533c2612e66dc777af04760e2153ed1ecfe483810e0827",
-    "web/src/pages/MetricsPage.vue": "7395cfe73b825142bf57da1220ef45b57c448caf8a5f205712549f9d4bc255c0",
+    "web/src/pages/MetricsPage.vue": "a30bebb2875cc87aca819d1de31c961c5129f66e6d0170239d82ebe396f65f04",
     "web/src/routes.ts": "0c0ce42eec94dd818944b640ac2157294abf0826f71c3ec3bf2c8ac5253a6693",
     "web/vite.config.ts": "448df7a321d76dcd79e25bf32ce574d83cdc9260996e40457caa0be7a0e910bb"
   },
@@ -244,6 +247,10 @@
     "requests": [
       {
         "path": "/assets/2214c6757184cdc4.js",
+        "accept": "*/*"
+      },
+      {
+        "path": "/assets/30519f187e29203c.js",
         "accept": "*/*"
       },
       {
@@ -292,15 +299,16 @@
       "src/docs/screenshotOutputPinned.ts": "be4be6869229593070c35867166a8fd60928504178f0c0f028a64759f82b0992",
       "src/docs/screenshotRenderedInputs.ts": "5b474d753207f6a2f72622cc9f872e99d1f6526252de2b981b883b4bd8f2259f",
       "response:*/*:/assets/2214c6757184cdc4.js": "087de57e6200247d39dc42a0f93c9b77ee0063c16742a8b8371d68a6892d14c8",
+      "response:*/*:/assets/30519f187e29203c.js": "19cf39bd88aeb9bb011fad6de45813fde5232df9535a780d3ae066f2ea1ff3a8",
       "response:*/*:/assets/4bc9835edd11b53c.woff2": "117a54f5e0a35fa3c994d46f9f3596c4029817f06b45b546594c6671d68f1149",
-      "response:*/*:/assets/4fab5baaca5c14d2.js": "4dfe810a3d1769d29879d4e1b668d444a9ee61009774af24ec388cf407363940",
-      "response:*/*:/assets/5fab31c79ffd8a76.js": "c3dae13582a67b7ff5fa3da0994123ba805717ab15f136f96909a7d49678a3f6",
+      "response:*/*:/assets/4fab5baaca5c14d2.js": "7444d1e890b028f093f11b99968c39ac2e727a503dfc5fcfbd87843f1fc8dd5a",
+      "response:*/*:/assets/5fab31c79ffd8a76.js": "89136b3152b76570c8169722f4de92c8892a60b57e336b24ae0793886c632efe",
       "response:*/*:/assets/5fd1e101e29ae073.js": "684922d286cbc3a1c5fc6d313421e6f262d0d379a9767aec686d3dc6c9a68d06",
       "response:*/*:/assets/8c63b478a250d0ad.js": "0bb63afe412092021f6e45906fddafea37f4b7f365d04622b8845323139db66f",
       "response:*/*:/assets/9825f6c791051da3.woff2": "8242759635f72b65d7a1eae10ef8a97fe59a8b60d3d7f5a6f65e67d72693540e",
       "response:*/*:/assets/bc15820bff947ca4.js": "ea6353bf60034775dbccbcf3094eb9d014259670f290242bf60ad9d18bd66536",
-      "response:*/*:/assets/main.css": "184c3335288efa68e8b92d390f485f665cb1880e7eaf6d8a855e291746b3793c",
-      "response:*/*:/metrics": "327f3e2b95668d80cbd3ec44669a2ac7c85127968b907e981a79f752130c84b1"
+      "response:*/*:/assets/main.css": "279d9a506eac5342ca37c6503bfba0d9ea7f9e44a7256c82fd1f9c98691bdee8",
+      "response:*/*:/metrics": "ac30a5b4bbff05178ca53d06dd065a683753e6a5ef0152c0eb561192f2b83e5e"
     }
   }
 }

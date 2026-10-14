@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { DAY_MS } from "@core/core/budgets.js";
 import { buildMetricsReport, type MetricsReport } from "@core/core/metrics.js";
+import { buildReviewFeedbackReport } from "@core/core/reviewFeedbackReport.js";
+import type { ReviewFeedbackEntry } from "@core/core/reviewFeedback.js";
 import type { MetricsSeed } from "@core/channels/webSeed.js";
 import MetricsPage from "./MetricsPage.vue";
 import { footerSentencesOf } from "../lib/metrics";
@@ -61,6 +63,65 @@ function report(days = 7): MetricsReport {
 const seed = (r: MetricsReport = report()): MetricsSeed => ({ page: "metrics", report: r });
 
 describe("MetricsPage", () => {
+  it("shows exact review-level ratings, coverage and native drilldown links from the seed", () => {
+    const now = UNTIL_MS - 1;
+    const entries: ReviewFeedbackEntry[] = [["up"], ["down"], ["up", "down"]].map((votes, i) => ({
+      publication: {
+        runId: `review-${i}`,
+        repo: "acme/api",
+        pr: 7,
+        head: "a".repeat(40),
+        bodyHash: "b".repeat(64),
+        format: 1,
+        findings: i === 0 ? 0 : 1,
+        publishedAt: now - DAY_MS,
+        review: {
+          id: String(100 + i),
+          nodeId: `PRR_sample_${i}`,
+          url: `https://github.com/acme/api/pull/7#pullrequestreview-${100 + i}`,
+          publishedAt: now - DAY_MS,
+        },
+      },
+      snapshot: {
+        status: "complete",
+        completedAt: now,
+        checkedAt: now,
+        votes: votes.map((sign, j) => ({
+          id: `reaction-${i}-${j}`,
+          actorId: `person-${i}-${j}`,
+          actorType: "User",
+          content: sign as "up" | "down",
+        })),
+      },
+    }));
+    const r = report();
+    r.feedback = buildReviewFeedbackReport({ entries, collectionStartedAt: now - DAY_MS }, r.range, now);
+    const wrapper = mountApp(MetricsPage, { seed: seed(r) });
+    expect(wrapper.findAll("[data-feedback-distribution] .text-2xl").map((e) => e.text())).toEqual(["1", "1", "1"]);
+    expect(wrapper.find("[data-feedback-score]").text()).toContain("50% (1 of 2 reviews). Mixed: 1.");
+    expect(wrapper.find("[data-feedback-coverage]").text()).toContain("3 / 3 fully checked reviews (100%)");
+    expect(wrapper.findAll("[data-feedback-reviews] a").map((a) => a.attributes("href"))).toEqual([
+      "https://github.com/acme/api/pull/7#pullrequestreview-100",
+      "https://github.com/acme/api/pull/7#pullrequestreview-101",
+      "https://github.com/acme/api/pull/7#pullrequestreview-102",
+    ]);
+    expect(wrapper.findAll("[data-feedback-groups]")).toHaveLength(3);
+    expect(wrapper.text()).toContain("Later votes and removals revise these rows");
+    expect(wrapper.findAll("[data-metrics-tiles] > div")).toHaveLength(8);
+  });
+  it("keeps zero ratings distinct from unavailable feedback and preserves run metrics", () => {
+    const empty = report();
+    empty.feedback = buildReviewFeedbackReport({ entries: [] }, empty.range, UNTIL_MS - 1);
+    const zero = mountApp(MetricsPage, { seed: seed(empty) });
+    expect(zero.find("[data-review-feedback]").text()).toContain("No tracked reviews in this range.");
+    expect(zero.find("[data-feedback-score]").text()).toContain("Helpful among clear ratings: —");
+    const failed = mountApp(MetricsPage, {
+      seed: seed({ ...report(), feedback: { status: "unavailable", asOf: UNTIL_MS - 1 } }),
+    });
+    expect(failed.find("[data-review-feedback]").text()).toContain("Human review feedback is unavailable.");
+    expect(failed.find("[data-feedback-distribution]").exists()).toBe(false);
+    expect(failed.findAll("[data-metrics-tiles] > div")).toHaveLength(8);
+  });
   it("renders the eight tiles, the three charts and the by-agent table from the seed, and asks the network for nothing", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     const wrapper = mountApp(MetricsPage, { seed: seed() });

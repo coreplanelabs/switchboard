@@ -39,6 +39,7 @@ import { parseCostsConfig } from "./costs.js";
 import { costsFromConfig, NullCostsService, type CostsService } from "./costsService.js";
 import { AnalyticsEngineSqlSource, parseMetricsConfig } from "./metrics.js";
 import { createMetricsService, NullMetricsService, type MetricsService } from "./metricsService.js";
+import { buildReviewFeedbackStore } from "./reviewFeedbackWorker.js";
 import { createReviewsService, NullReviewsService, type ReviewsService } from "./reviewsService.js";
 import { createPlaneService, type PlaneService } from "./planeService.js";
 import type { MergeDoorService } from "./commands/merge.js";
@@ -359,7 +360,11 @@ export function buildCoreCommands(
     return createMetricsService(
       metricsCfg,
       new AnalyticsEngineSqlSource({ accountId: costsCfg.cloudflareAccountId, token: token.reveal() }),
-      { ...(wiring.now ? { now: wiring.now } : {}) },
+      {
+        ...(wiring.now ? { now: wiring.now } : {}),
+        warn: (message) => wiring.warn(`[metrics] ${message}`),
+        ...(metricsCfg.feedback?.enabled ? { feedback: buildReviewFeedbackStore(config, wiring.secrets) } : {}),
+      },
     );
   });
   // ONE review report service per binding (record 0097): the same dataset and
