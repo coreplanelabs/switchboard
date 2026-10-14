@@ -107,6 +107,14 @@ const physical = {
   ownerGen: owner.ownerGen,
   ownerFence: owner.ownerFence,
 };
+const shutdownTarget = {
+  ref: "main",
+  user: "worker2",
+  container: "vm-a",
+  workspace: "/workspace/threads/t/main",
+  ownerGen: "gen-old",
+  ownerFence: 7,
+};
 const ending = {
   version: 1 as const,
   revision: 1,
@@ -916,6 +924,108 @@ describe("resident cancellation admission", () => {
 });
 
 describe("resident run cancellation", () => {
+  it("binds an unfinished legacy stop only after the original target is verified", async () => {
+    const h = harness();
+    const ticket = {
+      version: 1 as const,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      runId: owner.runId,
+      threadKey,
+      ownerGen: owner.ownerGen,
+      startedAt: 1,
+      actor: { kind: "chat" as const, id: "slack:operator" },
+    };
+    const key = `cancelled:${threadKey}:${owner.runId}`;
+    h.rows.set(key, { cancellation: ticket, failure: { phase: "resident", cause: "kill-unconfirmed" } });
+    h.instance.ctx.container.exec = async () => ({ exitCode: Promise.resolve(0) });
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "processes-stopped",
+    });
+    expect(h.rows.get(key)).toEqual({
+      cancellation: ticket,
+      target: shutdownTarget,
+      failure: { phase: "resident", cause: "kill-unconfirmed" },
+      stopped: true,
+      disposition: "processes-stopped",
+    });
+    h.rows.delete(`thread:${threadKey}`);
+    h.rows.delete(`runReg:${threadKey}`);
+    h.instance.ctx.container.exec = async () => {
+      throw new Error("confirmed original stop must not signal again");
+    };
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "processes-stopped",
+    });
+  });
+  it("does not bind an old stop to ownership that changes during admission", async () => {
+    const h = harness();
+    const ticket = {
+      version: 1 as const,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      runId: owner.runId,
+      threadKey,
+      ownerGen: owner.ownerGen,
+      startedAt: 1,
+      actor: { kind: "chat" as const, id: "slack:operator" },
+    };
+    const key = `cancelled:${threadKey}:${owner.runId}`;
+    const intent = { cancellation: ticket };
+    h.rows.set(key, intent);
+    h.instance.poolUserOwnerMatches = async () => {
+      h.rows.set(`runFence:${threadKey}`, { ...owner, ownerFence: 8 });
+      return true;
+    };
+    h.instance.ctx.container.exec = async () => {
+      throw new Error("changed ownership must not reach native control");
+    };
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: false,
+      cancellationId: ticket.id,
+      refusal: { phase: "resident", cause: "target-changed" },
+    });
+    expect(h.rows.get(key)).toEqual(intent);
+    expect(h.rows.get(`runFence:${threadKey}`)).toEqual({ runId: "run-old", ownerGen: "gen-old", ownerFence: 8 });
+  });
+  it.each([
+    { ref: "another-ref" },
+    { user: "worker3" },
+    { container: "another-machine" },
+    { workspace: "/workspace/another-target" },
+    { ownerGen: "another-generation" },
+    { ownerFence: 8 },
+  ])("does not reuse a saved shutdown for a different physical target: %j", async (changed) => {
+    const h = harness();
+    const ticket = {
+      version: 1 as const,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      runId: owner.runId,
+      threadKey,
+      ownerGen: owner.ownerGen,
+      startedAt: 1,
+      actor: { kind: "chat" as const, id: "slack:operator" },
+    };
+    const key = `cancelled:${threadKey}:${owner.runId}`;
+    h.instance.ctx.container.exec = async () => ({ exitCode: Promise.resolve(0) });
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "processes-stopped",
+    });
+    const receipt = structuredClone(h.rows.get(key));
+    h.instance.ctx.container.exec = async () => {
+      throw new Error("a changed target must not reach native control");
+    };
+    expect(await h.instance.cancelRun(ticket, { ...physical, ...changed })).toEqual({
+      stopped: false,
+      cancellationId: ticket.id,
+      refusal: { phase: "resident", cause: "target-changed" },
+    });
+    expect(h.rows.get(key)).toEqual(receipt);
+  });
   it("keeps a runtime observation fault under the fenced ticket without leaking its error", async () => {
     const h = harness();
     const ticket = {
@@ -938,6 +1048,7 @@ describe("resident run cancellation", () => {
     });
     expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toEqual({
       cancellation: ticket,
+      target: shutdownTarget,
       failure: { phase: "resident", cause: "runtime-unconfirmed" },
     });
     expect(h.rows.get(`cancelled-thread:${threadKey}`)).toBe(true);
@@ -965,7 +1076,10 @@ describe("resident run cancellation", () => {
       cancellationId: ticket.id,
       refusal: { phase: "resident", cause: "runtime-unconfirmed" },
     });
-    expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toEqual({ cancellation: ticket });
+    expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toEqual({
+      cancellation: ticket,
+      target: shutdownTarget,
+    });
     expect(h.rows.get(`cancelled-thread:${threadKey}`)).toBe(true);
     expect(h.rows.get(`thread:${threadKey}`).user).toBe("worker2");
   });
@@ -980,7 +1094,7 @@ describe("resident run cancellation", () => {
       startedAt: 1,
       actor: { kind: "chat" as const, id: "slack:operator" },
     };
-    const receipt = { cancellation: ticket, stopped: true, disposition: "runtime-retired" };
+    const receipt = { cancellation: ticket, target: shutdownTarget, stopped: true, disposition: "runtime-retired" };
     h.instance.hydration = null;
     h.instance.getStatus = async () => {
       h.rows.set(`cancelled:${threadKey}:${owner.runId}`, receipt);
@@ -1024,6 +1138,12 @@ describe("resident run cancellation", () => {
     expect(h.rows.get(key)).toEqual(foreign);
     h.rows.set(key, { cancellation: ticket, stopped: true, disposition: "runtime-retired" });
     expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: false,
+      cancellationId: ticket.id,
+      refusal: { phase: "resident", cause: "custody-unverified" },
+    });
+    h.rows.set(key, { cancellation: ticket, target: shutdownTarget, stopped: true, disposition: "runtime-retired" });
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
       stopped: true,
       cancellationId: ticket.id,
       disposition: "runtime-retired",
@@ -1066,6 +1186,7 @@ describe("resident run cancellation", () => {
       const durable = JSON.parse(JSON.stringify(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)));
       expect(durable).toEqual({
         cancellation: ticket,
+        target: shutdownTarget,
         failure: { phase: "resident", cause: "kill-unconfirmed" },
         observation,
       });
@@ -1870,6 +1991,7 @@ describe("explicit absent-workspace discard", () => {
     };
     expect(
       await instance.cancelRun(ticket, {
+        ref: physical.ref,
         user: "worker3",
         workspace: physical.workspace,
         container: "vm-new",

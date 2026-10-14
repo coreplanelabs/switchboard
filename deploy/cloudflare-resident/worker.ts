@@ -10308,7 +10308,14 @@ export class ResidentDO extends Sandbox<Env> {
 
   async cancelRun(
     cancellation: RunCancellation,
-    expected: { user?: string; ownerGen?: string; ownerFence?: number; container?: string; workspace?: string },
+    expected: {
+      ref?: string;
+      user?: string;
+      ownerGen?: string;
+      ownerFence?: number;
+      container?: string;
+      workspace?: string;
+    },
   ) {
     const threadKey = cancellation.threadKey;
     return this.withDeployAdmission(() =>
@@ -10316,21 +10323,53 @@ export class ResidentDO extends Sandbox<Env> {
         const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
         const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
         const key = `cancelled:${threadKey}:${cancellation.runId}`;
+        const target = {
+          ref: expected.ref,
+          user: expected.user,
+          container: expected.container,
+          workspace: expected.workspace,
+          ownerGen: expected.ownerGen,
+          ownerFence: expected.ownerFence,
+        };
+        const matchesTarget = (value: unknown): boolean => {
+          if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+          const saved = value as typeof target;
+          return (
+            typeof saved.ref === "string" &&
+            saved.ref.length > 0 &&
+            typeof saved.user === "string" &&
+            isResidentPoolUser(saved.user) &&
+            typeof saved.container === "string" &&
+            saved.container.length > 0 &&
+            typeof saved.workspace === "string" &&
+            saved.workspace.length > 0 &&
+            validRunOwner(cancellation.runId, saved.ownerGen, saved.ownerFence) &&
+            saved.ownerGen === cancellation.ownerGen &&
+            Object.keys(target).every(
+              (field) => saved[field as keyof typeof target] === target[field as keyof typeof target],
+            )
+          );
+        };
         const prior = await this.ctx.storage.get<{
           cancellation: RunCancellation;
+          target?: typeof target;
           stopped?: true;
           disposition?: "processes-stopped" | "runtime-retired";
           failure?: CancellationRefusal;
           observation?: CancellationObservation;
         }>(key);
-        if (sameCancellation(prior?.cancellation, cancellation) && prior?.stopped === true)
+        if (prior && !sameCancellation(prior.cancellation, cancellation))
+          return cancellationFailure(cancellation, "resident", "ticket-conflict");
+        if (prior?.target !== undefined && !matchesTarget(prior.target))
+          return cancellationFailure(cancellation, "resident", "target-changed");
+        if (prior?.stopped === true) {
+          if (!matchesTarget(prior.target)) return cancellationFailure(cancellation, "resident", "custody-unverified");
           return {
             stopped: true,
             cancellationId: cancellation.id,
             disposition: prior.disposition ?? "processes-stopped",
           };
-        if (prior && !sameCancellation(prior.cancellation, cancellation))
-          return cancellationFailure(cancellation, "resident", "ticket-conflict");
+        }
         const refuse = async (
           cause: CancellationRefusal["cause"],
           observation?: CancellationObservation,
@@ -10340,6 +10379,8 @@ export class ResidentDO extends Sandbox<Env> {
             const current = await txn.get<typeof prior>(key);
             if (!current || !sameCancellation(current.cancellation, cancellation))
               return cancellationFailure(cancellation, "resident", "ticket-conflict");
+            if (!matchesTarget(current.target))
+              return cancellationFailure(cancellation, "resident", "custody-unverified");
             if (current.stopped === true)
               return {
                 stopped: true as const,
@@ -10358,6 +10399,7 @@ export class ResidentDO extends Sandbox<Env> {
           binding.evicted ||
           this.destroying ||
           this.ctx.container?.running !== true ||
+          binding.ref !== expected.ref ||
           binding.user !== expected.user ||
           binding.container !== expected.container ||
           binding.worktreePath !== expected.workspace ||
@@ -10376,13 +10418,31 @@ export class ResidentDO extends Sandbox<Env> {
             const current = await txn.get<typeof prior>(key);
             if (current && !sameCancellation(current.cancellation, cancellation))
               return cancellationFailure(cancellation, "resident", "ticket-conflict");
+            if (current?.target !== undefined && !matchesTarget(current.target))
+              return cancellationFailure(cancellation, "resident", "target-changed");
+            if (current?.stopped === true && !matchesTarget(current.target))
+              return cancellationFailure(cancellation, "resident", "custody-unverified");
             if (current?.stopped === true)
               return {
                 stopped: true as const,
                 cancellationId: cancellation.id,
                 disposition: current.disposition ?? ("processes-stopped" as const),
               };
-            await txn.put(key, { ...current, cancellation });
+            const currentBinding = await txn.get<ThreadBinding>(threadBindingKey(threadKey));
+            const currentOwner = await txn.get<RunRegistration>(runRegKey(threadKey));
+            const currentFence = await txn.get<unknown>(runFenceKey(threadKey));
+            if (
+              !currentBinding ||
+              currentBinding.evicted ||
+              ["ref", "user", "container", "worktreePath"].some(
+                (field) => currentBinding[field as keyof ThreadBinding] !== binding[field as keyof ThreadBinding],
+              ) ||
+              !registeredRunOwnsRelease(currentOwner, cancellation.runId, expected.ownerGen, expected.ownerFence) ||
+              !isWorkspaceOwner(currentFence) ||
+              workspaceOwnerKey(currentFence) !== workspaceOwnerKey(registration!)
+            )
+              return cancellationFailure(cancellation, "resident", "target-changed");
+            await txn.put(key, { ...current, cancellation, target });
             await txn.put(`cancelled-thread:${threadKey}`, true);
             return null;
           });
@@ -10477,6 +10537,8 @@ export class ResidentDO extends Sandbox<Env> {
             const current = await txn.get<typeof prior>(key);
             if (!current || !sameCancellation(current.cancellation, cancellation))
               return cancellationFailure(cancellation, "resident", "ticket-conflict");
+            if (!matchesTarget(current.target))
+              return cancellationFailure(cancellation, "resident", "custody-unverified");
             await txn.put(threadBindingKey(threadKey), { ...currentBinding, lastRunOwner: currentRegistration });
             await txn.put(key, {
               ...current,
