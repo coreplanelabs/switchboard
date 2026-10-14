@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.297.3](https://github.com/coreplanelabs/switchboard/compare/v1.297.2...v1.297.3) (2026-10-14)
+
+
+### Bug fixes
+
+* **core:** require complete fresh review findings ([#3075](https://github.com/coreplanelabs/switchboard/issues/3075)) ([b4794bc](https://github.com/coreplanelabs/switchboard/commit/b4794bcaa61585478a8c800f8aa7f2d63a3e49ba))
+* **runs:** report unavailable shutdown targets after restart ([#3074](https://github.com/coreplanelabs/switchboard/issues/3074)) ([f53d75c](https://github.com/coreplanelabs/switchboard/commit/f53d75c09735339c2ac03246bb915e899f14b215))
+* **tracing:** explain GitHub publication access failures ([#3071](https://github.com/coreplanelabs/switchboard/issues/3071)) ([e6b0950](https://github.com/coreplanelabs/switchboard/commit/e6b0950dc19c6c07705571375054ba9dde54ad51))
+* **tracing:** retain GitHub response body failure facts ([#3073](https://github.com/coreplanelabs/switchboard/issues/3073)) ([9b8cedb](https://github.com/coreplanelabs/switchboard/commit/9b8cedbcb7c3f7c5e187b186419dee22fa35d6f6))
+
 ## [1.297.2](https://github.com/coreplanelabs/switchboard/compare/v1.297.1...v1.297.2) (2026-10-14)
 
 
