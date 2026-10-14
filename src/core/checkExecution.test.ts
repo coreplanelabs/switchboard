@@ -44,6 +44,28 @@ function setup(previous?: unknown) {
 }
 
 describe("recorded coding checks", () => {
+  it("retains a typed command failure on durable replay without dispatch or prose classification", async () => {
+    for (const typed of [true, false]) {
+      const w = setup();
+      const error = typed
+        ? new Error("PRIVATE wrapper", { cause: new ExecInfraError("PRIVATE command failure", "transport-lost") })
+        : Object.assign(new Error("PRIVATE transport-lost"), { name: "ExecInfraError", reason: "transport-lost" });
+      // The metadata observation precedes the command failure.
+      w.execResult.mockReset().mockResolvedValueOnce(metadata).mockRejectedValueOnce(error);
+      const result = await w.capability().run(input, "original");
+      const expected = typed
+        ? { kind: "unknown", reason: "transport", infrastructureReason: "transport-lost" }
+        : { kind: "unknown", reason: "transport" };
+      expect(result).toMatchObject({ kind: "recorded", receipt: { outcome: expected } });
+      expect(w.saved.at(-1)?.receipts[0]?.outcome).toEqual(expected);
+      const restored = setup(w.saved.at(-1));
+      const replay = await restored.capability().run(input, "original");
+      expect(replay).toMatchObject({ kind: "recorded", replayed: true, receipt: { outcome: expected } });
+      expect(JSON.stringify([result, replay])).not.toContain("PRIVATE");
+      expect(restored.execResult).not.toHaveBeenCalled();
+    }
+  });
+
   it.each(["resident", "sandbox"] as const)(
     "keeps the process timeout while awaiting its %s response and honors the original controls",
     async (backend) => {
