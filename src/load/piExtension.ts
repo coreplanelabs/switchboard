@@ -1,14 +1,16 @@
+import { reviewFindingInputSchema } from "../core/reviewFindingSchema.js";
+
 // The extension pi loads for `load:pi` (docs/reference/specs/load-harness.md,
 // the pi driver items). pi starts it with `-e <this file>` and every other
 // discovery off, so it is the whole tool surface the harness adds: the two
 // terminal tools a Switchboard child ends with, and a `tool_call` hook that
-// reports every call the model asked for. It imports nothing — pi's own loader
-// (jiti) runs it as written, and its tool schemas are plain JSON Schema, which
+// reports every call the model asked for. Its shared finding schema is plain
+// JSON Schema with no runtime dependencies; pi's own loader (jiti) loads it and
 // pi validates without TypeBox (packages/ai/src/utils/validation.ts,
 // `validateToolArguments`). Because pi holds the model to the schema it is
 // served, the two definitions are the bot's own — the native table's
-// description and schema (src/tools/submit.ts), transcribed since nothing
-// can be imported here and held equal by piExtension.test.ts — so the model
+// description and schema (src/tools/submit.ts), with the finding schema shared
+// directly and the other declarations held equal by piExtension.test.ts — so the model
 // is asked for exactly what the production relay asks it for: a verdict whose
 // `head` is required, a description whose every field is named. Its one
 // channel back to the driver is pi's `notify` UI request: in RPC mode that is
@@ -207,156 +209,7 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
       findings: {
         type: "array",
         description: "Every issue you report, one entry each, in the order reported — rendered under the verdict line",
-        items: {
-          anyOf: [
-            {
-              type: "object",
-              properties: {
-                id: {
-                  type: "string",
-                  pattern: "^F[1-9][0-9]*$",
-                  description: "A fresh finding ID in this report: F1, F2, …; never a run or prior-review ID",
-                },
-                severity: {
-                  type: "string",
-                  enum: ["blocking", "major", "minor", "nit"],
-                  description: "blocking | major | minor | nit",
-                },
-                file: {
-                  type: "string",
-                  description: "Repo-relative file the finding points at",
-                },
-                line: {
-                  type: "integer",
-                  description: "1-based line number, when the finding points at one",
-                },
-                title: {
-                  type: "string",
-                  description:
-                    "One concise sentence, at most 180 characters, stating what fails and its impact in plain language; put paths, spec numbers and implementation detail in file/line or the evidence",
-                },
-                kind: {
-                  type: "string",
-                  enum: ["single"],
-                },
-                humanGated: {
-                  type: "boolean",
-                  description:
-                    "true ONLY when the remedy is a receipt only a person can produce (a credential-gated replay, a live procedure) — never for work a fix round could do",
-                },
-              },
-              required: ["id", "severity", "file", "title", "kind"],
-              additionalProperties: false,
-            },
-            {
-              type: "object",
-              properties: {
-                id: {
-                  type: "string",
-                  pattern: "^F[1-9][0-9]*$",
-                  description: "A fresh finding ID in this report: F1, F2, …; never a run or prior-review ID",
-                },
-                severity: {
-                  type: "string",
-                  enum: ["blocking", "major", "minor", "nit"],
-                  description: "blocking | major | minor | nit",
-                },
-                file: {
-                  type: "string",
-                  description: "Repo-relative file the finding points at",
-                },
-                line: {
-                  type: "integer",
-                  description: "1-based line number, when the finding points at one",
-                },
-                title: {
-                  type: "string",
-                  description:
-                    "One concise sentence, at most 180 characters, stating what fails and its impact in plain language; put paths, spec numbers and implementation detail in file/line or the evidence",
-                },
-                kind: {
-                  type: "string",
-                  enum: ["pattern"],
-                },
-                humanGated: {
-                  type: "boolean",
-                  description:
-                    "true ONLY when the remedy is a receipt only a person can produce (a credential-gated replay, a live procedure) — never for work a fix round could do",
-                },
-                invariant: {
-                  type: "string",
-                  description: "The shared safety/correctness rule this pattern must hold",
-                  minLength: 1,
-                  pattern: "\\S",
-                },
-                cases: {
-                  type: "array",
-                  description:
-                    "All independently checkable cases of the invariant found in this diff, including selection and execution paths",
-                  items: {
-                    type: "object",
-                    properties: {
-                      scenario: {
-                        type: "string",
-                        description: "Concrete input or path through the invariant",
-                        minLength: 1,
-                        pattern: "\\S",
-                      },
-                      expected: {
-                        type: "string",
-                        description: "Required behavior on that path",
-                        minLength: 1,
-                        pattern: "\\S",
-                      },
-                    },
-                    required: ["scenario", "expected"],
-                    additionalProperties: false,
-                  },
-                  minItems: 1,
-                },
-              },
-              required: ["id", "severity", "file", "title", "kind", "invariant", "cases"],
-              additionalProperties: false,
-            },
-            {
-              type: "object",
-              description:
-                "Re-raise an outstanding finding by its exact scoped ID. Original metadata and cases are preserved; cases here are new additions only. Assess every prior case in caseAssessments.",
-              properties: {
-                id: {
-                  type: "string",
-                  pattern: "^F[1-9][0-9]*$",
-                  description: "A fresh finding ID in this report: F1, F2, …; never a run or prior-review ID",
-                },
-                cases: {
-                  type: "array",
-                  description: "New cases only; do not copy prior cases or supply case IDs",
-                  items: {
-                    type: "object",
-                    properties: {
-                      scenario: {
-                        type: "string",
-                        description: "Concrete input or path through the invariant",
-                        minLength: 1,
-                        pattern: "\\S",
-                      },
-                      expected: {
-                        type: "string",
-                        description: "Required behavior on that path",
-                        minLength: 1,
-                        pattern: "\\S",
-                      },
-                    },
-                    required: ["scenario", "expected"],
-                    additionalProperties: false,
-                  },
-                },
-              },
-              required: ["id"],
-              additionalProperties: false,
-            },
-          ],
-        },
+        items: reviewFindingInputSchema,
       },
       priorFindings: {
         type: "array",

@@ -4,7 +4,8 @@ const finding = {
   properties: {
     id: {
       type: "string",
-      description: 'Stable id assigned in order: "F1", "F2", … — dispositions reference it',
+      pattern: "^F[1-9][0-9]*$",
+      description: "A fresh finding ID in this report: F1, F2, …; never a run or prior-review ID",
     },
     severity: {
       type: "string",
@@ -79,21 +80,6 @@ export const reviewFindingInputSchema = {
         },
       },
       required: [...finding.required, "invariant", "cases"],
-      additionalProperties: false,
-    },
-    {
-      type: "object",
-      description:
-        "Re-raise an outstanding finding by its exact scoped ID. Original metadata and cases are preserved; cases here are new additions only. Assess every prior case in caseAssessments.",
-      properties: {
-        id: { type: "string", pattern: "^review:", description: "Exact scoped ID from outstandingFindings" },
-        cases: {
-          ...cases,
-          items: caseInput,
-          description: "New cases only; do not copy prior cases or supply case IDs",
-        },
-      },
-      required: ["id"],
       additionalProperties: false,
     },
   ],
