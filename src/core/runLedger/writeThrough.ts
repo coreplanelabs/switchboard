@@ -17,7 +17,13 @@ import {
   type ContextCheckpointReceipt,
   type ContextCheckpointResult,
 } from "../references/contextCheckpoint.js";
-import { mergeSessionSources, sourceBinding, sourceHash, type SessionSources } from "../references/receipts.js";
+import {
+  mergeSessionSources,
+  sameSourceBinding,
+  sourceBinding,
+  sourceHash,
+  type SessionSources,
+} from "../references/receipts.js";
 import {
   isSourceResultReceipt,
   withSourceResults,
@@ -26,6 +32,7 @@ import {
 import {
   contextDependenciesOf,
   contextDependenciesHash,
+  contextDependenciesContain,
   isContextDependencies,
   mergeContextDependencies,
   type ContextDependencies,
@@ -1346,6 +1353,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private lastSeq: number;
     private state: RunState;
     private stateSending: Promise<void> = Promise.resolve();
+    private sourceSending: Promise<boolean> = Promise.resolve(true);
     private boundarySending: Promise<void> = Promise.resolve();
     private trackBoundary<T>(send: (prior: Promise<void>) => Promise<T>): Promise<T> {
       const prior = this.boundarySending;
@@ -1686,7 +1694,17 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       }
     }
 
-    async writeSources(sources: SessionSources): Promise<boolean> {
+    writeSources(sources: SessionSources): Promise<boolean> {
+      // Parallel tool results must merge against the prior acknowledged union,
+      // not two copies of the same stale snapshot. This queue never retries a
+      // refused or unknown write; every caller keeps its own frozen evidence.
+      const frozen = structuredClone(sources);
+      const sending = this.sourceSending.then(() => this.saveSources(frozen));
+      this.sourceSending = sending.catch(() => false);
+      return sending;
+    }
+
+    private async saveSources(sources: SessionSources): Promise<boolean> {
       if (this.detached || !this.sessionRow) return false;
       let stage = "checkpoint";
       const diagnose = (facts: string): void => {
@@ -1701,10 +1719,21 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         if (isContextCheckpointReceipt(receipt)) {
           sources = { ...sources, context: applyContextCheckpoint(contextDependenciesOf(sources), receipt) };
         }
+        const recordsRevocation = sources.status === "revoked" || sources.context?.status === "revoked";
+        const revoked = (current: SessionSources | undefined): boolean =>
+          !recordsRevocation && (current?.status === "revoked" || current?.context?.status === "revoked");
         stage = "read-before";
         const before = await ledger.readSessionTail(this.sessionRow.key, 1);
         stage = "merge-sources";
         const merged = mergeSessionSources(before.sources, sources, before.from === 0 && before.transcript.turns === 0);
+        const bindingMismatch =
+          sources.status === "known" &&
+          before.sources?.status === "known" &&
+          !sameSourceBinding(sources.binding, before.sources.binding);
+        if (bindingMismatch || revoked(before.sources)) {
+          diagnose(`failure=unavailable reason=${bindingMismatch ? "binding-mismatch" : "revoked"}`);
+          return false;
+        }
         stage = "write-sources";
         const written = await ledger.writeSessionSources(this.sessionRow.key, this.runId, gen, merged);
         if (!written.ok) {
@@ -1715,10 +1744,32 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         }
         stage = "read-after";
         const saved = await ledger.readSessionTail(this.sessionRow.key, 1);
+        // The local queue cannot serialize an external revocation. A write ACK
+        // alone does not prove that this caller's known source survived readback.
+        const retainsSource = (current: SessionSources | undefined): boolean =>
+          current !== undefined &&
+          !revoked(current) &&
+          (merged.status !== "known" ||
+            (current.status === "known" && sameSourceBinding(merged.binding, current.binding))) &&
+          (merged.context?.status !== "known" ||
+            contextDependenciesContain(contextDependenciesOf(current), merged.context));
+        if (!retainsSource(saved.sources)) {
+          diagnose(`failure=unavailable reason=${revoked(saved.sources) ? "revoked" : "provenance-unproved"}`);
+          return false;
+        }
         stage = "state-ack";
         const committed = await this.setStateAndFlush({ contextDependencies: contextDependenciesOf(saved.sources) });
-        if (!committed) diagnose("failure=unacknowledged");
-        return committed;
+        if (!committed) {
+          diagnose("failure=unacknowledged");
+          return false;
+        }
+        stage = "read-committed";
+        const current = await ledger.readSessionTail(this.sessionRow.key, 1);
+        if (!retainsSource(current.sources)) {
+          diagnose(`failure=unavailable reason=${revoked(current.sources) ? "revoked" : "provenance-unproved"}`);
+          return false;
+        }
+        return true;
       } catch (error) {
         diagnose(
           error instanceof UncertainStoreError
@@ -2424,7 +2475,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
 
     async close(): Promise<void> {
       this.stopHeartbeat();
-      await Promise.all([this.stateSending, this.boundarySending]);
+      await Promise.all([this.sourceSending, this.stateSending, this.boundarySending]);
       await this.flusher.close();
     }
   }
