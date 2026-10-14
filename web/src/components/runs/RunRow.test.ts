@@ -251,7 +251,7 @@ describe("RunRow", () => {
     expect(done.find(".actions").exists()).toBe(true);
     expect(menuItems(done).map((i) => i.label)).toEqual(["Open thread"]);
     const stopping = mountRow(row({ stop: { mode: "soft", state: "stopping" } }));
-    expect(menuItems(stopping).map((i) => i.label)).toEqual(["Open thread"]);
+    expect(menuItems(stopping).map((i) => i.label)).toEqual(["Open thread", "Kill (hard)"]);
     // A row with no thread key and no source has no menu at all.
     const bare = mountRow(finished("completed", { threadKey: undefined }));
     expect(menu(bare).exists()).toBe(false);
@@ -260,17 +260,54 @@ describe("RunRow", () => {
     expect(item(doneWithThread, "Open in Slack")?.to).toBe("https://acme.slack.com/archives/C1/p1");
   });
 
+  it.each(["soft", "hard"] as const)(
+    "keeps Kill available on an unfinished %s stop and sends the same hard-stop URL",
+    async (mode) => {
+      vi.spyOn(browser, "confirm").mockReturnValue(true);
+      const w = mountRow(row({ token: "tok-1", stop: { mode, state: "stopping" } }));
+      expect(menuItems(w).map((i) => i.label)).toEqual(["Open thread", "Kill (hard)"]);
+      item(w, "Kill (hard)")!.onSelect!();
+      item(w, "Kill (hard)")!.onSelect!();
+      await w.vm.$nextTick();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      await vi.waitFor(() => expect(item(w, "Kill (hard)")?.disabled).toBe(false));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("Stop POSTs the token-scoped soft stop; the item disables while in flight", async () => {
+    let settle!: (response: { ok: boolean }) => void;
+    fetchMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
+    vi.spyOn(browser, "confirm").mockReturnValue(true);
     const w = mountRow(row({ token: "tok-1" }));
     expect(item(w, "Stop (soft)")?.disabled).toBe(false);
     item(w, "Stop (soft)")!.onSelect!();
+    item(w, "Kill (hard)")!.onSelect!();
     await w.vm.$nextTick();
     expect(fetchMock).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=soft", {
       method: "POST",
       credentials: "same-origin",
     });
     expect(item(w, "Stop (soft)")?.disabled).toBe(true);
+    expect(item(w, "Kill (hard)")?.disabled).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    settle({ ok: true });
+    await vi.waitFor(() => expect(menuItems(w).map((i) => i.label)).toEqual(["Open thread", "Kill (hard)"]));
     expect(item(w, "Kill (hard)")?.disabled).toBe(false);
+    item(w, "Kill (hard)")!.onSelect!();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(fetchMock).toHaveBeenLastCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
+      method: "POST",
+      credentials: "same-origin",
+    });
   });
 
   it("Kill confirms first (destructive), POSTs mode=hard on yes, does nothing on no; a failed POST re-enables the item", async () => {

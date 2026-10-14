@@ -1164,7 +1164,14 @@ describe("RunPage — live mode", () => {
       await wrapper.vm.$nextTick();
       expect(wrapper.find("#state").text()).toBe("disconnected");
       expect(es().closed).toBe(true);
-      expect(wrapper.find("#actions").exists()).toBe(false);
+      expect(wrapper.findAll("#actions button").map((button) => button.text())).toEqual(["Kill"]);
+      vi.spyOn(browser, "confirm").mockReturnValue(true);
+      await wrapper.find("#actions button").trigger("click");
+      await flushPromises();
+      expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
+        method: "POST",
+        credentials: "same-origin",
+      });
       vi.advanceTimersByTime(60_000);
       await wrapper.vm.$nextTick();
       expect(wrapper.find("#timeline .lede .shape").text()).toBe("3s");
@@ -1627,7 +1634,35 @@ describe("RunPage — live mode", () => {
     await wrapper.vm.$nextTick();
     expect(wrapper.find("#state").text()).toBe("disconnected");
     expect(wrapper.find("#tail").exists()).toBe(false);
+    expect(wrapper.findAll("#actions button").map((b) => b.text())).toEqual(["Kill"]);
   });
+
+  it.each(["soft", "hard"] as const)(
+    "keeps Kill on the details of an unfinished %s stop, including after refusal",
+    async (mode) => {
+      const { created, factory } = fakeEventSourceFactory();
+      const wrapper = mountApp(RunPage, {
+        seed: { ...liveSeed, stop: { mode, state: "stopping" } },
+        eventSource: factory,
+      });
+      created[0].emitOpen();
+      await wrapper.vm.$nextTick();
+      vi.spyOn(browser, "confirm").mockReturnValue(true);
+      expect(wrapper.findAll("#actions button").map((b) => b.text())).toEqual(["Kill"]);
+      (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: false, status: 503 });
+      await wrapper.find("#actions button").trigger("click");
+      await flushPromises();
+      expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      expect((wrapper.find("#actions button").element as HTMLButtonElement).disabled).toBe(false);
+      expect(wrapper.find("#state").text()).toContain("stop failed: HTTP 503");
+      created[0].emitNamed("finished", JSON.stringify({ finishedAt: 9000 }));
+      await wrapper.vm.$nextTick();
+      expect(wrapper.find("#actions").exists()).toBe(false);
+    },
+  );
 
   it("Stop POSTs mode=soft on the run's stop URL and reads `stopping (soft)`; the end then says stopped early", async () => {
     const { wrapper, es } = mountLive();
@@ -1642,7 +1677,7 @@ describe("RunPage — live mode", () => {
     // handler, then the render): flushPromises awaits exactly that, where a
     // time-bounded wait flaked on saturated CI shards.
     await flushPromises();
-    expect(wrapper.find("#actions").exists()).toBe(false); // one request is enough
+    expect(wrapper.findAll("#actions button").map((b) => b.text())).toEqual(["Kill"]);
     expect(wrapper.find("#state").text()).toBe("stopping (soft)");
     es().emitNamed("end");
     await wrapper.vm.$nextTick();
@@ -1675,7 +1710,8 @@ describe("RunPage — live mode", () => {
       credentials: "same-origin",
     });
     await flushPromises();
-    expect(wrapper.find("#actions").exists()).toBe(false);
+    expect(wrapper.findAll("#actions button").map((b) => b.text())).toEqual(["Kill"]);
+    expect((wrapper.find("#actions button").element as HTMLButtonElement).disabled).toBe(false);
     es().emitNamed("end");
     await wrapper.vm.$nextTick();
     expect(wrapper.find(".conn .chip").text()).toBe("killed");
@@ -1721,7 +1757,7 @@ describe("RunPage — live mode", () => {
     );
     await wrapper.vm.$nextTick();
     expect(wrapper.find("#state").text()).toBe("stopping (soft)");
-    expect(wrapper.find("#actions").exists()).toBe(false);
+    expect(wrapper.findAll("#actions button").map((b) => b.text())).toEqual(["Kill"]);
   });
 });
 
