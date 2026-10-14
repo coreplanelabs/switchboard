@@ -70,7 +70,7 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 | Command | What it does | Who can run it |
 |---|---|---|
 | `runs list [--status <active\|finished\|all>] [--agent <string>] [--channel <string>] [--thread <string>] [--parent <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>] [--mine] [--read-user <string>] [--read-repo <string>]` | List runs (live and persisted, newest first) — metadata only, never message text. | admins |
-| `runs stop <id> --mode <soft\|hard>` | Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). A pipeline refuses soft — `--mode hard` seals it failed and releases its thread. Records the caller as the requester. | admins |
+| `runs stop <id> --mode <soft\|hard>` | Stop your own live run, or another run with operator permission (`--mode soft` = finish the current step; `hard` = abort now). A pipeline refuses soft — `--mode hard` seals it failed and releases its thread. Records the caller as the requester. | anyone |
 | `runs unit <unit>` | A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read. | admins |
 | `runs children <id>` | The runs one run spawned — a conductor's children, live and finished — oldest started first. | admins |
 | `runs findings <pr>` | A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone. | admins |

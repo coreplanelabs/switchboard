@@ -236,7 +236,7 @@ describe("authorize: fail-closed", () => {
     throw new Error(`no fixture for ${String(ruleTarget(rule))}`);
   }
 
-  it("NO_GRANTS user: denied on every row except the open ones a person may pass — the shared org memory read, the config write commands and the MCP write commands (a person's own scope and tier are theirs; the channel and org scopes are separate rows)", () => {
+  it("NO_GRANTS user: denied on every row except the open ones a person may pass — the shared org memory read and the config, MCP and stop command doors (the resource rows still limit each write)", () => {
     const seen: string[] = [];
     for (const rule of POLICY) {
       const target = ruleTarget(rule)!;
@@ -248,6 +248,7 @@ describe("authorize: fail-closed", () => {
       "config:write command",
       "mcp:write command",
       "memory:read memory-scope/org",
+      "stop:write command",
     ]);
   });
   it("a NO_GRANTS credential (service) is denied on every command row — the user-only open row does not admit it", () => {
@@ -479,6 +480,10 @@ describe("record 0042 — the self set is identity, not authority", () => {
       const decision = (a: Actor) => authorize(a, action, { type: "command", id: "x" }).allow;
       expect(decision(linked), action).toBe(decision(unlinked));
     }
+    expect(authorize(linked, "stop:write", own)).toEqual({ allow: true });
+    expect(authorize(linked, "stop:write", other)).toEqual({ allow: false, reason: "not-self" });
+    expect(authorize(unlinked, "stop:write", own).allow).toBe(false);
+    expect(authorize(linked, "runs:write", own).allow).toBe(false);
     expect(effectiveGrants(linked)).toEqual(effectiveGrants(unlinked));
   });
 });

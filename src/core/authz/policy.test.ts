@@ -13,7 +13,8 @@ import type { Actor, ChannelVisibility, Condition, Resource, Rule } from "./type
 // fail that row and be denied by the whole table.
 
 function describeCondition(c: Condition): string {
-  return c.kind === "has-grant" ? `has-grant(${c.grant})` : c.kind;
+  if (c.kind === "has-grant") return `has-grant(${c.grant})`;
+  return c.kind === "acts-as-person" && c.includeAccess ? "acts-as-person(access)" : c.kind;
 }
 
 export function ruleKey(rule: Rule): string {
@@ -48,6 +49,12 @@ const channel = (c: { id: string; visibility: ChannelVisibility }): Resource => 
 });
 
 const A = ACTORS;
+const cancellationCredential: Actor = {
+  kind: "service",
+  id: "mcp:requester",
+  grants: { ...A.noGrants.grants, actions: new Set(["dispatch"]) },
+  self: ["mcp:requester", A.noGrants.id],
+};
 const foreignPrivRun = run({ channel: "priv", userId: "slack:UERIN" });
 /** The actor the `conversation:read` row is asked for: `principal` pointing from `origin`. */
 const pointing = (principal: Actor, origin: keyof typeof CHANNELS): Actor =>
@@ -150,6 +157,34 @@ const CASES: Record<string, { allow: readonly Case[]; deny: readonly Case[] }> =
       [A.schedule, foreignPrivRun],
       [A.reader, run({ channel: "pub1", userId: "slack:UERIN" })],
     ],
+  },
+  "stop:write command [acts-as-person(access)] kinds=user": {
+    allow: [[A.noGrants, command("runs.stop")]],
+    deny: [[A.dispatchOnly, command("runs.stop")]],
+  },
+  "stop:write command [has-grant(dispatch) & acts-as-person(access)] kinds=service": {
+    allow: [[cancellationCredential, command("runs.stop")]],
+    deny: [[A.dispatchOnly, command("runs.stop")]],
+  },
+  "stop:write command [has-grant(runs:write)]": {
+    allow: [[A.admin, command("runs.stop")]],
+    deny: [[A.dispatchOnly, command("runs.stop")]],
+  },
+  "stop:write run [acts-as-person(access) & is-self] kinds=user": {
+    allow: [[A.noGrants, run({ channel: "dm", userId: A.noGrants.id })]],
+    deny: [[A.noGrants, run({ channel: "dm", userId: A.admin.id })]],
+  },
+  "stop:write run [has-grant(dispatch) & acts-as-person(access) & is-self] kinds=service": {
+    allow: [[cancellationCredential, run({ channel: "dm", userId: A.noGrants.id })]],
+    deny: [[cancellationCredential, run({ channel: "dm", userId: A.admin.id })]],
+  },
+  "stop:write run [has-grant(runs:write) & member-of]": {
+    allow: [[A.member, run({ channel: "pub1", userId: A.admin.id })]],
+    deny: [[A.member, run({ channel: "dm", userId: A.admin.id })]],
+  },
+  "stop:write run [has-grant(runs:write) & all-channels]": {
+    allow: [[A.admin, run({ channel: "dm", userId: A.noGrants.id })]],
+    deny: [[A.reader, run({ channel: "dm", userId: A.admin.id })]],
   },
   "main-task:stop run [is-self] kinds=user|agent": {
     allow: [
@@ -833,5 +868,47 @@ describe("main task stop authorization", () => {
     const visibleTo = predicateFor(A.noGrants, "main-task:stop", "run");
     expect(matchesPredicate(visibleTo, own)).toBe(true);
     expect(matchesPredicate(visibleTo, foreign)).toBe(false);
+  });
+});
+
+describe("requester stop authorization", () => {
+  it("Access accounts are cancellation-only identity facts, not service prefixes or unrelated write grants", () => {
+    const person: Actor = { ...A.noGrants, id: "access:account" };
+    const caller: Actor = {
+      ...cancellationCredential,
+      self: ["mcp:requester", person.id],
+      onBehalfOf: { ...person, self: ["mcp:requester", person.id] },
+    };
+    const own = run({ channel: "dm", userId: person.id });
+    const foreign = run({ channel: "dm", userId: "access:other" });
+    expect(authorize(caller, "stop:write", own)).toEqual({ allow: true });
+    expect(authorize(caller, "stop:write", foreign).allow).toBe(false);
+    expect(matchesPredicate(predicateFor(caller, "stop:write", "run"), own)).toBe(true);
+    expect(matchesPredicate(predicateFor(caller, "stop:write", "run"), foreign)).toBe(false);
+    expect(authorize(person, "mcp:write", command("mcp.add")).allow).toBe(false);
+    expect(authorize(caller, "runs:write", own).allow).toBe(false);
+    for (const id of ["access:svc:account", "access:", "mcp:access:account"]) {
+      const unlinked: Actor = { ...cancellationCredential, id, self: [id] };
+      expect(authorize(unlinked, "stop:write", run({ userId: id })).allow).toBe(false);
+      expect(matchesPredicate(predicateFor(unlinked, "stop:write", "run"), run({ userId: id }))).toBe(false);
+    }
+  });
+
+  it("linked requester scope agrees with the store predicate without lending other run writes", () => {
+    const caller: Actor = {
+      ...cancellationCredential,
+      onBehalfOf: { ...A.noGrants, self: [cancellationCredential.id, A.noGrants.id] },
+    };
+    const own = run({ channel: "dm", userId: A.noGrants.id });
+    const foreign = run({ channel: "dm", userId: A.admin.id });
+    expect(authorize(caller, "stop:write", own)).toEqual({ allow: true });
+    expect(authorize(caller, "stop:write", foreign).allow).toBe(false);
+    const visible = predicateFor(caller, "stop:write", "run");
+    expect(matchesPredicate(visible, own)).toBe(true);
+    expect(matchesPredicate(visible, foreign)).toBe(false);
+    expect(authorize(caller, "runs:write", own).allow).toBe(false);
+    expect(authorize(caller, "runs:write", command("plane.stop")).allow).toBe(false);
+    expect(authorize({ ...caller, grants: A.noGrants.grants }, "stop:write", own).allow).toBe(false);
+    expect(authorize({ ...caller, kind: "agent" }, "stop:write", own).allow).toBe(false);
   });
 });

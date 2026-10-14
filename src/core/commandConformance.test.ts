@@ -863,7 +863,13 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
       if ("error" in input) throw new Error(input.error);
       const admitted = authorize(nobody.actor, cmd.action, resourceOf(cmd, input, nobody)).allow;
       const out = await runOn(chat, f, cmd, happy.named, "nobody");
-      expect(out.ok, `${cmd.id} (${cmd.action}): nobody admitted=${admitted}, got ${out.wire}`).toBe(admitted);
+      if (cmd.id === "runs.stop") {
+        // A person passes the stop door, but this fixture's run is somebody else's.
+        expect(admitted).toBe(true);
+        expect(out).toMatchObject({ ok: false, code: "not_found" });
+      } else {
+        expect(out.ok, `${cmd.id} (${cmd.action}): nobody admitted=${admitted}, got ${out.wire}`).toBe(admitted);
+      }
       if (!admitted) {
         expect(out.code).toBe("unauthorized");
         expect(out.text).toMatch(/^🚫 `.+` is restricted\. Ask /);

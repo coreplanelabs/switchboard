@@ -569,17 +569,33 @@ describe("createCommandHttpHandler — hard stop after restart", () => {
 });
 
 describe("createCommandHttpHandler — caller resolution", () => {
-  it("a browser identity without an operators entry: 200 on runs.list, 403 on POST runs.stop before the body is read", async () => {
+  it("a browser account without an operator grant lists runs and stops only its own run", async () => {
     const { handler, reg, live } = await fixture();
     const list = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all" });
     await handler(list.req, list.res, browser);
     expect(list.status).toBe(200);
     const stop = stopPost(live.id);
     await handler(stop.req, stop.res, browser);
-    expect(stop.status).toBe(403);
-    expect(stop.json().code).toBe("unauthorized");
-    expect(stop.bodyRead).toBe(false);
+    expect(stop.status).toBe(404);
+    expect(stop.json().code).toBe("not_found");
+    expect(stop.bodyRead).toBe(true);
     expect(stopNotes(reg, live.id)).toHaveLength(0);
+    const missing = stopPost("missing-run");
+    await handler(missing.req, missing.res, browser);
+    expect(missing.status).toBe(404);
+    expect(missing.json()).toEqual(stop.json());
+    const own = reg.create("review", {
+      userId: "access:user-1",
+      channelId: "mcp:default",
+      threadKey: "mcp:default:own",
+      channelVisibility: "machine",
+    });
+    const allowed = stopPost(own.id);
+    await handler(allowed.req, allowed.res, browser);
+    expect(allowed.status).toBe(200);
+    expect(allowed.json()).toEqual({ id: own.id, mode: "soft", state: "stopping" });
+    expect(own.control.requested).toBe("soft");
+    expect(live.control.requested).toBeUndefined();
   });
 
   // Feature: docs/decisions/0053 — a write from a session viewing as a person is refused in the one sentence, whatever the person's grants say.

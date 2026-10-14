@@ -17,7 +17,7 @@
 // holds the grants of the commands the `open` chat gate admitted
 // (`CHAT_OPEN_ACTIONS` in grants.ts), an Access browser session every
 // `<group>:read`, an admin everything, a token or service token exactly its
-// scopes — so a `dispatch`-only token is refused on every registry command and
+// scopes — so an unlinked `dispatch`-only token is refused on every registry command and
 // a `runs:write` token on `friction:write` by the same row that lets an
 // operator through. Where a handler's refusal depends on the DATA (the
 // `channel` scope of `config set`, the tier of `mcp add`), the handler asks the
@@ -42,6 +42,7 @@ const grant = (g: string): Condition => ({ kind: "has-grant", grant: g });
 const MEMBER_OF: Condition = { kind: "member-of" };
 const IS_SELF: Condition = { kind: "is-self" };
 const ACTS_AS_PERSON: Condition = { kind: "acts-as-person" };
+const VERIFIED_ACCOUNT: Condition = { kind: "acts-as-person", includeAccess: true };
 const OWNER_OF: Condition = { kind: "owner-of" };
 const REPO_ACCESS: Condition = { kind: "repo-access" };
 const ALL_CHANNELS: Condition = { kind: "all-channels" };
@@ -53,9 +54,24 @@ export const POLICY: readonly Rule[] = [
   { action: "runs:read", resource: "run", when: [MEMBER_OF] },
   { action: "runs:read", resource: "run", when: [ALL_CHANNELS] },
   { action: "runs:read", resource: "run", when: [IS_SELF] },
-  // Stopping a run needs the write grant AND visibility of the run.
+  // General run controls need the write grant AND visibility of the run.
   { action: "runs:write", resource: "run", when: [grant("runs:write"), MEMBER_OF] },
   { action: "runs:write", resource: "run", when: [grant("runs:write"), ALL_CHANNELS] },
+  // Cancellation is narrower than runs:write: a person can stop their own
+  // request without gaining plane controls or other run writes. A machine
+  // credential must also be allowed to dispatch and be linked to a person.
+  { action: "stop:write", resource: "command", actorKinds: ["user"], when: [VERIFIED_ACCOUNT] },
+  { action: "stop:write", resource: "command", actorKinds: ["service"], when: [grant("dispatch"), VERIFIED_ACCOUNT] },
+  { action: "stop:write", resource: "command", when: [grant("runs:write")] },
+  { action: "stop:write", resource: "run", actorKinds: ["user"], when: [VERIFIED_ACCOUNT, IS_SELF] },
+  {
+    action: "stop:write",
+    resource: "run",
+    actorKinds: ["service"],
+    when: [grant("dispatch"), VERIFIED_ACCOUNT, IS_SELF],
+  },
+  { action: "stop:write", resource: "run", when: [grant("runs:write"), MEMBER_OF] },
+  { action: "stop:write", resource: "run", when: [grant("runs:write"), ALL_CHANNELS] },
   // A main conversation may stop only its own linked work. The service
   // verifies the thread and unit link before this point decision.
   { action: "main-task:stop", resource: "run", actorKinds: ["user", "agent"], when: [IS_SELF] },
@@ -380,6 +396,8 @@ export function validatePolicy(rules: readonly Rule[]): void {
         throw new PolicyError("condition is not an object", rule);
       const c = condition as Condition;
       if (!CONDITION_KINDS.includes(c.kind)) throw new PolicyError(`unknown condition ${String(c.kind)}`, rule);
+      if (c.kind === "acts-as-person" && c.includeAccess !== undefined && c.includeAccess !== true)
+        throw new PolicyError("acts-as-person includeAccess must be true when present", rule);
       const needs = REQUIRED_ATTRIBUTE[c.kind];
       if (needs && !carried.includes(needs))
         throw new PolicyError(`${c.kind} needs ${needs}, which ${target} cannot carry`, rule);
