@@ -3,6 +3,7 @@ import type { ContextDependencies } from "../references/contextDependencies.js";
 import type { MemoryRecord } from "../memory/types.js";
 import { answerOutcomeDetail, type AnswerOutcome } from "../answerOutcome.js";
 import {
+  audienceCheckAttrs,
   audienceRefusalText,
   noteAudienceRefusal,
   type AudienceCheck,
@@ -789,14 +790,14 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
   const traceCheck = (check: () => Promise<AudienceCheck>): Promise<AudienceCheck> =>
     root.span("run.publication_context_check", async (span) => {
       const result = await check();
-      span.setAttrs({ outcome: result.ok ? "allowed" : (result.check ?? result.code) });
+      span.setAttrs(audienceCheckAttrs(result));
       return result;
     });
   const privateCheck = async (): Promise<AudienceCheck> =>
     privateRun ? traceCheck(() => privateRunAudienceDecision(msg, io, latch, ctx.slackContext)) : { ok: true };
   const fenced = new Error("reply ownership changed");
   const commitRefusal = async (check: Extract<AudienceCheck, { ok: false }>) => {
-    const receipt = noteAudienceRefusal(audience, check.code, "reply", "reply", check.check);
+    const receipt = noteAudienceRefusal(audience, check.code, "reply", "reply", check.check, check.githubAccess);
     if (ledgerRun && (await ledgerRun.commitState({ audienceRefusal: receipt })) === "fenced") {
       ending.drop(run.id);
       throw fenced;

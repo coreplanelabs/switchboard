@@ -892,6 +892,15 @@ describe("deliverAnswer — the answer reaches the thread", () => {
   it.each(["public", "private"])(
     "traces the failed context check first seen during %s delivery",
     async (visibility) => {
+      const githubAccess = {
+        tool: "github_file",
+        stage: "tool-read",
+        operation: "readFile",
+        route: "contents",
+        reason: "http",
+        httpStatus: 404,
+        sourceCallHash: "b".repeat(64),
+      } as const;
       const s = finishedRun();
       const log = createSpanLog();
       const trace = startRequestRoot({ clock: () => NOW, spanLog: log }, { channel: "slack", receivedAt: NOW });
@@ -904,6 +913,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
               ok: false as const,
               code: "saved-context-unproved" as const,
               check: "execution_github_access_unproved" as const,
+              githubAccess,
             };
       await deliverAnswer({
         ...s.ctx,
@@ -928,6 +938,7 @@ describe("deliverAnswer — the answer reaches the thread", () => {
         causeAt: "reply",
         withheldAt: "reply",
         check: "execution_github_access_unproved",
+        githubAccess,
       });
       expect(
         log
@@ -939,6 +950,21 @@ describe("deliverAnswer — the answer reaches the thread", () => {
           ? ["execution_github_access_unproved"]
           : ["allowed", "execution_github_access_unproved"],
       );
+      expect(
+        log
+          .read()
+          .lines.filter((line) => line.span === "run.publication_context_check")
+          .at(-1)?.attrs,
+      ).toEqual({
+        outcome: "execution_github_access_unproved",
+        githubStage: "tool-read",
+        githubReason: "http",
+        githubTool: "github_file",
+        githubOperation: "readFile",
+        route: "contents",
+        httpStatus: 404,
+        sourceCallHash: "b".repeat(64),
+      });
       expect(s.replies).toEqual([
         "I couldn't verify that the earlier source details are still safe to share here, so I withheld them. A Switchboard operator can check the source and conversation access.",
       ]);

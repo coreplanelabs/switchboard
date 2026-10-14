@@ -8,6 +8,53 @@ import {
 } from "./audienceDecision.js";
 
 describe("audience refusal diagnostics", () => {
+  it("retains the first GitHub read failure across serialization and rejects private extras", () => {
+    const githubAccess = {
+      tool: "github_file",
+      stage: "tool-read",
+      operation: "readFile",
+      reason: "http",
+      httpStatus: 403,
+      requestId: "A1:B2",
+      route: "contents",
+      sourceCallHash: "a".repeat(64),
+    };
+    const trace: AudienceTrace = {};
+    noteAudienceRefusal(
+      trace,
+      "saved-context-unproved",
+      "answer-event",
+      "answer-event",
+      "execution_github_access_unproved",
+      githubAccess as never,
+    );
+    const expected = {
+      version: 1,
+      causeAt: "answer-event",
+      withheldAt: "answer-event",
+      code: "saved-context-unproved",
+      check: "execution_github_access_unproved",
+      githubAccess: { ...githubAccess },
+    };
+    githubAccess.httpStatus = 404;
+    noteAudienceRefusal(trace, "saved-context-unproved", "reply", "reply", "execution_github_access_unproved", {
+      ...githubAccess,
+      reason: "unknown",
+    } as never);
+    expect(audienceRefusalOf(JSON.parse(JSON.stringify(trace.refusal)))).toEqual(expected);
+    for (const diagnostic of [
+      { ...expected.githubAccess, body: "private code" },
+      { ...expected.githubAccess, tool: "private repo" },
+      { ...expected.githubAccess, stage: "private path" },
+      { ...expected.githubAccess, reason: "secret" },
+      { ...expected.githubAccess, operation: "createIssue" },
+      { ...expected.githubAccess, httpStatus: 999 },
+      { ...expected.githubAccess, requestId: "secret query" },
+      { ...expected.githubAccess, route: "private/path" },
+      { ...expected.githubAccess, sourceCallHash: "raw call id" },
+    ])
+      expect(audienceRefusalOf({ ...expected, githubAccess: diagnostic })).toBeUndefined();
+  });
   it("retains a closed context check without accepting source content", () => {
     const trace: AudienceTrace = {};
     const check = "execution_receipt_missing";

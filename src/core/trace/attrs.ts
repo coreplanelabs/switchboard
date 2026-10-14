@@ -1,3 +1,5 @@
+import type { GithubAccessDiagnostic } from "../references/githubAccessDiagnostic.js";
+
 /** Span attributes: one flat key union with a value domain per key, and the
  *  keys each span name may carry (docs/reference/specs/tracing.md). Literal unions,
  *  numbers and booleans only; the string-valued keys (`host`, `route`,
@@ -40,6 +42,12 @@ export interface AttrDomain {
   intakeReceipt: "inserted" | "existing" | "failed" | "absent";
   // dispatch.* / run.* / post.*
   outcome: string;
+  githubStage: GithubAccessDiagnostic["stage"];
+  githubReason: GithubAccessDiagnostic["reason"];
+  githubTool: GithubAccessDiagnostic["tool"];
+  githubOperation: GithubAccessDiagnostic["operation"];
+  sourceCallHash: string;
+  githubRequestId: string;
   /** The refusal's code (src/core/refusal.ts) — on the `dispatch.refuse` span
    *  and the request's root, so refusals are countable from the trace alone. */
   refusal: string;
@@ -159,6 +167,12 @@ const IDENTIFIER_KEYS: ReadonlySet<SpanAttrKey> = new Set<SpanAttrKey>([
   "restartOfRunId",
   "runId",
   "outcome",
+  "githubStage",
+  "githubReason",
+  "githubTool",
+  "githubOperation",
+  "sourceCallHash",
+  "githubRequestId",
   "refusal",
   "cause",
   "operatorOutcome",
@@ -207,6 +221,12 @@ export function invalidAttrKeys(attrs: SpanAttrs): string[] {
 /** The runtime type of each key — the one place the domain is spelled twice
  *  (type and value), kept adjacent so they cannot drift. */
 const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
+  githubStage: "string",
+  githubReason: "string",
+  githubTool: "string",
+  githubOperation: "string",
+  sourceCallHash: "string",
+  githubRequestId: "string",
   channel: "string",
   status: "string",
   queuedBeforeMs: "number",

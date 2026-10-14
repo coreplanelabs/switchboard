@@ -531,7 +531,17 @@ describe("channel visibility (authorization.md items 5–7)", () => {
       version: 1 as const,
       causeAt: "reply" as const,
       withheldAt: "reply" as const,
-      code: "github-access-lost" as const,
+      code: "saved-context-unproved" as const,
+      check: "execution_github_access_unproved" as const,
+      githubAccess: {
+        tool: "github_pull_get",
+        stage: "tool-read",
+        operation: "getPullRequestFeedback",
+        reason: "http",
+        httpStatus: 403,
+        requestId: "A1:B2",
+        sourceCallHash: "a".repeat(64),
+      } as const,
     };
     await store.put(
       record("private-audience", NOW, {
@@ -543,8 +553,25 @@ describe("channel visibility (authorization.md items 5–7)", () => {
     );
     const request = { args: ["private-audience"], options: { include: "audience" } };
     const allowed = await registry.invoke("runs.get", request, reader, deps);
-    expect(allowed.ok).toBe(true);
-    expect(JSON.stringify(allowed)).toContain('"code":"github-access-lost"');
+    expect(value<{ audience: unknown }>(allowed).audience).toEqual({
+      status: "recorded",
+      refusal: {
+        version: 1,
+        causeAt: "reply",
+        withheldAt: "reply",
+        code: "saved-context-unproved",
+        check: "execution_github_access_unproved",
+        githubAccess: {
+          tool: "github_pull_get",
+          stage: "tool-read",
+          operation: "getPullRequestFeedback",
+          reason: "http",
+          httpStatus: 403,
+          requestId: "A1:B2",
+          sourceCallHash: "a".repeat(64),
+        },
+      },
+    });
     const denied = await registry.invoke("runs.get", request, pinnedX, deps);
     const missing = await registry.invoke("runs.get", { ...request, args: ["unknown"] }, pinnedX, deps);
     expect(denied).toEqual(missing);

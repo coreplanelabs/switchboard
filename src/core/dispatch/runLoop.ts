@@ -27,7 +27,12 @@ import type { ParentContext } from "./handoff.js";
 import type { UnitContext } from "./unitContext.js";
 import { answerOutcomeOf, captureAnswerOutcome, type AnswerOutcome } from "../answerOutcome.js";
 import type { RunSetup } from "../runSetup.js";
-import { audienceRefusalText, noteAudienceRefusal, type AudienceRefusalCode } from "../audienceDecision.js";
+import {
+  audienceCheckAttrs,
+  audienceRefusalText,
+  noteAudienceRefusal,
+  type AudienceRefusalCode,
+} from "../audienceDecision.js";
 // The run stage's loop (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // the model turn and everything that rides on it. The card frame the loop
 // paints (checklist, activity line, the shutdown notice); the run on the pi
@@ -4291,7 +4296,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           : ctx.publicationContextCheck
             ? await ctx.publicationContextCheck()
             : { ok: true as const };
-        span.setAttrs({ outcome: result.ok ? "allowed" : (result.check ?? result.code) });
+        span.setAttrs(audienceCheckAttrs(result));
         return result;
       });
       if (!checked.ok) {
@@ -4301,6 +4306,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           "answer-event",
           "answer-event",
           checked.check,
+          checked.githubAccess,
         );
         ledgerRun?.setState({ audienceRefusal: receipt });
         answer = audienceRefusalText(receipt.code);

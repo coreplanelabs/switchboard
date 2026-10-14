@@ -3,6 +3,14 @@ import type { LiveRunMeta } from "../runLedger/types.js";
 import { sourceHash } from "../references/receipts.js";
 import { GITHUB_READ_TOOLS, type GithubCapability } from "../../tools/github.js";
 import type { ChatMessage } from "../chatMessage.js";
+import { GithubApiError, GithubCredentialUnavailable, GithubResponseDecodeError } from "../../execution/githubApi.js";
+import { classificationOf } from "../trace/classify.js";
+import {
+  GITHUB_ACCESS_OPERATIONS,
+  GITHUB_ACCESS_ROUTES,
+  GITHUB_ACCESS_TOOLS,
+  type GithubAccessDiagnostic,
+} from "../references/githubAccessDiagnostic.js";
 import {
   isSourceResultReceipt,
   withSourceResults,
@@ -84,33 +92,110 @@ export async function currentGithubReadCapability(
   input: Record<string, unknown>,
   github: GithubCapability,
   agentName: string,
-): Promise<boolean> {
+): Promise<{ ok: true } | { ok: false; githubAccess: GithubAccessDiagnostic }> {
   const tool = GITHUB_READ_TOOLS.find((tool) => tool.name === receipt.tool);
-  if (!tool) return false;
-  let called = 0,
-    failed = false;
+  const sourceCallHash = await sourceHash(receipt.callId);
+  let stage: GithubAccessDiagnostic["stage"] = "tool-family";
+  let operation: GithubAccessDiagnostic["operation"] = "none";
+  const denied = (
+    reason: GithubAccessDiagnostic["reason"],
+    facts: Pick<GithubAccessDiagnostic, "httpStatus" | "requestId" | "route"> = {},
+    failedOperation = operation,
+  ) => ({
+    ok: false as const,
+    githubAccess: {
+      tool: (GITHUB_ACCESS_TOOLS as readonly string[]).includes(receipt.tool)
+        ? (receipt.tool as GithubAccessDiagnostic["tool"])
+        : ("unknown" as const),
+      stage,
+      operation: failedOperation,
+      reason,
+      sourceCallHash,
+      ...facts,
+    },
+  });
+  const failedRead = (error: unknown, failedOperation = operation) => {
+    if (error instanceof GithubCredentialUnavailable)
+      return denied(error.reason === "missing" ? "credential-missing" : "credential-failed", {}, failedOperation);
+    const status =
+      error instanceof GithubApiError
+        ? error.status
+        : error instanceof GithubResponseDecodeError
+          ? error.httpStatus
+          : undefined;
+    const requestId =
+      error instanceof GithubApiError || error instanceof GithubResponseDecodeError ? error.requestId : undefined;
+    const classification = classificationOf(error);
+    const originalRoute =
+      error instanceof GithubApiError || error instanceof GithubResponseDecodeError
+        ? error.route
+        : classification?.code;
+    const route = (GITHUB_ACCESS_ROUTES as readonly unknown[]).includes(originalRoute)
+      ? (originalRoute as GithubAccessDiagnostic["route"])
+      : undefined;
+    const reason =
+      error instanceof GithubApiError
+        ? route
+          ? "http"
+          : "api"
+        : error instanceof SyntaxError
+          ? "decode"
+          : classification?.kind === "transport"
+            ? "transport"
+            : classification?.kind === "timeout" ||
+                (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name))
+              ? "timeout"
+              : "unknown";
+    return denied(
+      reason,
+      {
+        ...(route && status !== undefined && Number.isInteger(status) && status >= 100 && status <= 599
+          ? { httpStatus: status }
+          : {}),
+        ...(requestId && /^[0-9A-Fa-f:]{1,64}$/.test(requestId) ? { requestId } : {}),
+        ...(route ? { route } : {}),
+      },
+      failedOperation,
+    );
+  };
+  if (!tool) return denied("unsupported-tool");
+  let called = 0;
+  let firstFailure: ReturnType<typeof failedRead> | undefined;
   const api = new Proxy(github.api, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver);
       if (typeof value !== "function") return value;
       return async (...args: unknown[]) => {
         called++;
+        const readOperation = (GITHUB_ACCESS_OPERATIONS as readonly unknown[]).includes(property)
+          ? (property as GithubAccessDiagnostic["operation"])
+          : "none";
         try {
           return await value.apply(target, args);
         } catch (error) {
-          failed = true;
+          firstFailure ??= failedRead(error, readOperation);
           throw error;
         }
       };
     },
   });
   try {
+    stage = "catalog";
+    operation = "listRepos";
     const current = await github.api.listRepos();
-    if (receipt.repos.some((repo) => !current.some((row) => row.fullName.toLowerCase() === repo))) return false;
-    if (receipt.tool === "github_search_code") for (const repo of receipt.repos) await github.api.listTree(repo);
+    stage = "repository";
+    if (receipt.repos.some((repo) => !current.some((row) => row.fullName.toLowerCase() === repo)))
+      return denied("repository-missing");
+    if (receipt.tool === "github_search_code") {
+      stage = "contents";
+      operation = "listTree";
+      for (const repo of receipt.repos) await github.api.listTree(repo);
+    }
+    stage = "tool-read";
+    operation = "none";
     await tool.run(input, { executor: {} as never, agentName, github: { ...github, api } });
-    return called > 0 && !failed;
-  } catch {
-    return false;
+    return firstFailure ?? (called > 0 ? { ok: true } : denied("no-api-call"));
+  } catch (error) {
+    return firstFailure ?? failedRead(error);
   }
 }

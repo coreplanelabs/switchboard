@@ -1,7 +1,7 @@
 import { tracedFetch } from "../core/trace/tracedFetch.js";
 import type { Span } from "../core/trace/types.js";
 import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
-import { classifyError } from "../core/trace/classify.js";
+import { classificationOf, classifyError } from "../core/trace/classify.js";
 import { redactAndCap } from "../core/redact.js";
 import { MINUTE_MS } from "../core/budgets.js";
 import { validRef } from "../core/residentAdmin.js";
@@ -267,6 +267,7 @@ export class GithubApiError extends Error {
     readonly status: number,
     message: string,
     readonly requestId?: string,
+    readonly route?: GithubRoute,
   ) {
     super(message);
     this.name = "GithubApiError";
@@ -341,7 +342,10 @@ export class RestGithubApi implements GithubApi {
         "installation_repos",
         `/installation/repositories?per_page=100&page=${page}`,
       );
-      const body = (await res.json()) as { repositories?: Array<Record<string, unknown>>; total_count?: number };
+      const body = (await githubJson(res, "installation_repos")) as {
+        repositories?: Array<Record<string, unknown>>;
+        total_count?: number;
+      };
       for (const r of body.repositories ?? []) {
         out.push({
           fullName: String(r.full_name),
@@ -373,7 +377,7 @@ export class RestGithubApi implements GithubApi {
       if (error instanceof GithubApiError && error.status === 404) return null;
       throw error;
     }
-    const body = (await res.json()) as Record<string, unknown>;
+    const body = (await githubJson(res, "repository_user_permission")) as Record<string, unknown>;
     const user = typeof body.user === "object" && body.user !== null ? (body.user as Record<string, unknown>) : {};
     if (typeof body.permission !== "string" || typeof user.login !== "string" || !Number.isSafeInteger(user.id))
       return null;
@@ -384,7 +388,7 @@ export class RestGithubApi implements GithubApi {
     const maxChars = opts?.maxChars ?? MAX_FILE_CHARS;
     const q = ref ? `?ref=${encodeURIComponent(ref)}` : "";
     const res = await this.request("read", "GET", "contents", `/repos/${repo}/contents/${encodePath(path)}${q}`);
-    const body = (await res.json()) as Record<string, unknown>;
+    const body = (await githubJson(res, "contents")) as Record<string, unknown>;
     if (Array.isArray(body)) throw new GithubApiError(400, `${path} is a directory — list it with github_tree`);
     if (body.type !== "file") throw new GithubApiError(400, `${path} is a ${String(body.type)}, not a file`);
     const size = Number(body.size ?? 0);
@@ -420,7 +424,7 @@ export class RestGithubApi implements GithubApi {
   async listTree(repo: string, path = "", ref?: string): Promise<TreeEntry[]> {
     const q = ref ? `?ref=${encodeURIComponent(ref)}` : "";
     const res = await this.request("read", "GET", "contents", `/repos/${repo}/contents/${encodePath(path)}${q}`);
-    const body = (await res.json()) as unknown;
+    const body = await githubJson(res, "contents");
     if (!Array.isArray(body)) throw new GithubApiError(400, `${path || "/"} is a file — read it with github_file`);
     return (body as Array<Record<string, unknown>>).map((e) => ({
       path: String(e.path),
@@ -439,7 +443,7 @@ export class RestGithubApi implements GithubApi {
       undefined,
       "application/vnd.github.text-match+json",
     );
-    const body = (await res.json()) as { items?: Array<Record<string, unknown>> };
+    const body = (await githubJson(res, "search_code")) as { items?: Array<Record<string, unknown>> };
     return (body.items ?? []).map((it) => ({
       repo: String((it.repository as Record<string, unknown> | undefined)?.full_name ?? ""),
       path: String(it.path),
@@ -470,7 +474,7 @@ export class RestGithubApi implements GithubApi {
       });
       if (opts.labels?.length) params.set("labels", opts.labels.join(","));
       const res = await this.request("read", "GET", "issues", `/repos/${repo}/issues?${params.toString()}`);
-      const rows = (await res.json()) as Array<Record<string, unknown>>;
+      const rows = (await githubJson(res, "issues")) as Array<Record<string, unknown>>;
       for (const r of rows) if (!("pull_request" in r)) out.push(toIssue(r));
       if (rows.length < 100) break;
     }
@@ -479,7 +483,7 @@ export class RestGithubApi implements GithubApi {
 
   async getIssue(repo: string, number: number): Promise<{ issue: IssueSummary; comments: IssueComment[] }> {
     const res = await this.request("read", "GET", "issue", `/repos/${repo}/issues/${number}`);
-    const row = (await res.json()) as Record<string, unknown>;
+    const row = (await githubJson(res, "issue")) as Record<string, unknown>;
     if ("pull_request" in row) throw new GithubApiError(400, `#${number} is a pull request, not an issue`);
     const issue = toIssue(row);
     let comments: IssueComment[] = [];
@@ -490,7 +494,7 @@ export class RestGithubApi implements GithubApi {
         "issue_comments",
         `/repos/${repo}/issues/${number}/comments?per_page=30`,
       );
-      comments = ((await c.json()) as Array<Record<string, unknown>>).map((x) => ({
+      comments = ((await githubJson(c, "issue_comments")) as Array<Record<string, unknown>>).map((x) => ({
         author: String((x.user as Record<string, unknown> | undefined)?.login ?? "?"),
         createdAt: String(x.created_at ?? ""),
         body: String(x.body ?? ""),
@@ -501,9 +505,7 @@ export class RestGithubApi implements GithubApi {
 
   async getPullRequest(repo: string, number: number): Promise<PullSummary> {
     const res = await this.request("read", "GET", "pull", `/repos/${repo}/pulls/${number}`);
-    const decoded: unknown = await res.json().catch(() => {
-      throw new GithubResponseDecodeError(res.status, githubRequestId(res));
-    });
+    const decoded = await githubJson(res, "pull");
     if (!decoded || typeof decoded !== "object" || Array.isArray(decoded))
       throw new GithubResponseDecodeError(res.status, githubRequestId(res));
     const row = decoded as Record<string, unknown>;
@@ -532,7 +534,7 @@ export class RestGithubApi implements GithubApi {
           "head_ref",
           `/repos/${repo}/git/ref/heads/${ref.split("/").map(encodeURIComponent).join("/")}`,
         );
-        const data = (await tip.json()) as { object?: { type?: unknown; sha?: unknown } } | null;
+        const data = (await githubJson(tip, "head_ref")) as { object?: { type?: unknown; sha?: unknown } } | null;
         if (
           data?.object?.type === "commit" &&
           typeof data.object.sha === "string" &&
@@ -581,7 +583,7 @@ export class RestGithubApi implements GithubApi {
       // A bounded complete read: exhausting the bound is an error, never an empty or partial history.
       for (let page = 1; page <= 20; page++) {
         const res = await this.request("read", "GET", route, `${path}?per_page=100&page=${page}`);
-        const data: unknown = await res.json();
+        const data = await githubJson(res, route);
         if (!Array.isArray(data) || data.some((r) => !r || typeof r !== "object" || Array.isArray(r)))
           throw new GithubApiError(502, "Invalid pull request feedback page");
         rows.push(...(data as Record<string, unknown>[]));
@@ -704,7 +706,7 @@ export class RestGithubApi implements GithubApi {
 
   async getActionsRun(repo: string, runId: number): Promise<{ run: ActionsRun; jobs: ActionsJob[] }> {
     const res = await this.request("read", "GET", "actions_run", `/repos/${repo}/actions/runs/${runId}`);
-    const run = toActionsRun((await res.json()) as Record<string, unknown>);
+    const run = toActionsRun((await githubJson(res, "actions_run")) as Record<string, unknown>);
     const jobs: ActionsJob[] = [];
     for (let page = 1; page <= MAX_JOB_PAGES; page++) {
       const j = await this.request(
@@ -713,7 +715,7 @@ export class RestGithubApi implements GithubApi {
         "actions_run_jobs",
         `/repos/${repo}/actions/runs/${runId}/jobs?per_page=100&page=${page}`,
       );
-      const body = (await j.json()) as { jobs?: Array<Record<string, unknown>> };
+      const body = (await githubJson(j, "actions_run_jobs")) as { jobs?: Array<Record<string, unknown>> };
       const rows = body.jobs ?? [];
       jobs.push(...rows.map(toActionsJob));
       if (rows.length < 100) break;
@@ -723,7 +725,7 @@ export class RestGithubApi implements GithubApi {
 
   async getActionsJob(repo: string, jobId: number): Promise<ActionsJob> {
     const res = await this.request("read", "GET", "actions_job", `/repos/${repo}/actions/jobs/${jobId}`);
-    return toActionsJob((await res.json()) as Record<string, unknown>);
+    return toActionsJob((await githubJson(res, "actions_job")) as Record<string, unknown>);
   }
 
   async getActionsJobLog(repo: string, jobId: number, maxChars = ACTIONS_LOG_MAX_CHARS): Promise<ActionsJobLog> {
@@ -753,13 +755,23 @@ export class RestGithubApi implements GithubApi {
         location,
         { method: "GET", headers: { "user-agent": "switchboard" }, signal: AbortSignal.timeout(LOG_TIMEOUT_MS) },
         { route: "actions_job_logs_blob", name: "github.rest", fetchImpl: this.fetchImpl },
-      );
+      ).catch((error: unknown) => {
+        throw githubTransportError(error, "actions_job_logs_blob");
+      });
       if (!res.ok) {
         await res.body?.cancel().catch(() => undefined);
-        throw classifyError(new GithubApiError(res.status, `the job log's blob URL answered HTTP ${res.status}`), {
-          kind: "http",
-          code: String(res.status),
-        });
+        throw classifyError(
+          new GithubApiError(
+            res.status,
+            `the job log's blob URL answered HTTP ${res.status}`,
+            undefined,
+            "actions_job_logs_blob",
+          ),
+          {
+            kind: "http",
+            code: String(res.status),
+          },
+        );
       }
     }
     return readTailCapped(res, maxChars);
@@ -802,7 +814,9 @@ export class RestGithubApi implements GithubApi {
         ...(opts.redirect ? { redirect: opts.redirect } : {}),
       },
       { route, name: "github.rest", fetchImpl: this.fetchImpl },
-    );
+    ).catch((error: unknown) => {
+      throw githubTransportError(error, route);
+    });
     const redirected = opts.redirect === "manual" && res.status >= 300 && res.status < 400;
     if (!res.ok && !redirected) {
       const text = await res.text().catch(() => "");
@@ -821,6 +835,7 @@ export class RestGithubApi implements GithubApi {
           res.status,
           `GitHub ${method} ${path} failed: HTTP ${res.status} ${detail}`.trim(),
           githubRequestId(res),
+          route,
         ),
         { kind: "http", code: String(res.status) },
       );
@@ -846,9 +861,25 @@ export class GithubResponseDecodeError extends SyntaxError {
   constructor(
     readonly httpStatus: number,
     readonly requestId?: string,
+    readonly route: GithubRoute = "pull",
   ) {
-    super("Invalid pull request response");
+    super("Invalid GitHub response");
   }
+}
+
+/** Preserve observed headers when JSON syntax fails; no body text is retained. */
+async function githubJson(response: Response, route: GithubRoute): Promise<unknown> {
+  return response.json().catch(() => {
+    throw new GithubResponseDecodeError(response.status, githubRequestId(response), route);
+  });
+}
+
+/** Keep failure facts on the same error, including calls without a parent span. */
+function githubTransportError<E>(error: E, route: GithubRoute): E {
+  const kind =
+    classificationOf(error)?.kind ??
+    (error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name) ? "timeout" : "transport");
+  return classifyError(error, { kind, code: route });
 }
 
 function githubRequestId(res: Response): string | undefined {

@@ -11349,6 +11349,16 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
   });
 
   it("retains the failed context check and traces it when review publication is withheld", async () => {
+    const githubAccess = {
+      tool: "github_pull_get",
+      stage: "tool-read",
+      reason: "http",
+      operation: "getPullRequestFeedback",
+      route: "pull_reviews",
+      httpStatus: 403,
+      requestId: "A1:B2",
+      sourceCallHash: "a".repeat(64),
+    } as const;
     const s = setup("", {
       agent: "review",
       provider: neverCalled(),
@@ -11376,7 +11386,8 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       publicationContextCheck: async () => ({
         ok: false,
         code: "saved-context-unproved",
-        check: "execution_receipt_missing",
+        check: "execution_github_access_unproved",
+        githubAccess,
       }),
     });
     const out = answered(await runLoop(s.deps, ctx));
@@ -11392,13 +11403,26 @@ describe("a resume with the answer in hand (the `finish` plan)", () => {
       causeAt: "answer-event",
       withheldAt: "answer-event",
       code: "saved-context-unproved",
-      check: "execution_receipt_missing",
+      check: "execution_github_access_unproved",
+      githubAccess,
     });
     expect(
       record.events
         .filter((e) => e.type === "span_end" && e.name === "run.publication_context_check")
         .map((e) => (e.type === "span_end" ? e.attrs : undefined)),
-    ).toEqual([{ outcome: "execution_receipt_missing" }]);
+    ).toEqual([
+      {
+        outcome: "execution_github_access_unproved",
+        githubStage: "tool-read",
+        githubReason: "http",
+        githubTool: "github_pull_get",
+        githubOperation: "getPullRequestFeedback",
+        route: "pull_reviews",
+        sourceCallHash: "a".repeat(64),
+        httpStatus: 403,
+        githubRequestId: "A1:B2",
+      },
+    ]);
     expect(out.answer).toBe(
       "I couldn't verify that the earlier source details are still safe to share here, so I withheld them. A Switchboard operator can check the source and conversation access.",
     );

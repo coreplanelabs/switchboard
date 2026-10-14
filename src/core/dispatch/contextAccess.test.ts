@@ -539,6 +539,17 @@ describe("message-bound context access", () => {
       ],
     };
     expect(await execution.validateDependencies(context)).toEqual({ ok: true });
+    const originalRead = f.deps.githubApi.readFile;
+    f.deps.githubApi.readFile = async () => {
+      throw new Error("private provider response");
+    };
+    expect(await execution.validateDependencies(context)).toMatchObject({
+      ok: false,
+      code: "saved-context-unproved",
+      check: "execution_github_access_unproved",
+      githubAccess: { tool: "github_file", stage: "tool-read", operation: "readFile", reason: "unknown" },
+    });
+    f.deps.githubApi.readFile = originalRead;
     row.state.sourceResults = [];
     expect(await execution.validateDependencies(context)).toEqual({
       ok: false,

@@ -64,7 +64,7 @@ export type ContextAccessDeps = Pick<
   | "githubApi"
   | "coordinatorInstances"
 >;
-const denied = (check?: ContextRefusalCheck): AudienceCheck => ({
+const denied = (check?: ContextRefusalCheck): Extract<AudienceCheck, { ok: false }> => ({
   ok: false,
   code: "saved-context-unproved",
   ...(check !== undefined ? { check } : {}),
@@ -411,8 +411,8 @@ function buildContextAccess(
           if (!receipt) return denied("execution_receipt_missing");
           const original = await recordedGithubRead(retained.messages, receipt);
           if (!original) return denied("execution_call_result_unproved");
-          if (!(await currentGithubReadCapability(receipt, original, github, current.meta.agent!)))
-            return denied("execution_github_access_unproved");
+          const access = await currentGithubReadCapability(receipt, original, github, current.meta.agent!);
+          if (!access.ok) return { ...denied("execution_github_access_unproved"), githubAccess: access.githubAccess };
         }
         const final = (await deps.runLedger.readLiveRuns()).find((row) => row.runId === current.runId);
         if (
