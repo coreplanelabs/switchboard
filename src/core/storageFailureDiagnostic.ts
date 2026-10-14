@@ -139,7 +139,12 @@ export function isStorageDiagnosticAppend(request: StoreRequestWitness): boolean
 export function storageFailureNote(diagnostic: StorageFailureDiagnostic): RunEvent {
   const exception =
     diagnostic.server && "exception" in diagnostic.server ? diagnostic.server.exception : diagnostic.exception;
-  const cause = exception ? `: ${exception.name}: ${exception.message}` : "";
+  const cause =
+    diagnostic.server && "reason" in diagnostic.server
+      ? `: ${diagnostic.server.reason}`
+      : exception
+        ? `: ${exception.name}: ${exception.message}`
+        : "";
   return {
     type: "run_note",
     kind: "storage_failure",

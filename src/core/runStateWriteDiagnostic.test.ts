@@ -11,6 +11,22 @@ describe("closed state-write failure evidence", () => {
   const original = { version: 1, requestDigest: digest, failure: { stage: "state-rpc", errorKind: "type" } };
   const read = (value: unknown) => stateWriteDiagnosticFromHeader(JSON.stringify(value), digest);
 
+  it("accepts only digest-bound closed rejection reasons without payload fields", () => {
+    const rejection = {
+      version: 1,
+      requestDigest: digest,
+      failure: { stage: "request", errorKind: "rejection", reason: "append_seq_invalid" },
+    };
+    expect(read(rejection)).toEqual({ stage: "request", errorKind: "rejection", reason: "append_seq_invalid" });
+    for (const invalid of [
+      { ...rejection, requestDigest: "b".repeat(64) },
+      { ...rejection, failure: { ...rejection.failure, reason: "PRIVATE_PAYLOAD" } },
+      { ...rejection, failure: { ...rejection.failure, body: "PRIVATE_PAYLOAD" } },
+      { ...rejection, failure: { ...rejection.failure, reason: ["append_seq_invalid"] } },
+    ])
+      expect(read(invalid)).toBeUndefined();
+  });
+
   it("excludes direct and nested decoder prose from captures and remote headers while retaining error identity", () => {
     const decoder = Object.assign(new SyntaxError("PRIVATE_STORED_PAYLOAD"), { remote: true, code: "E_JSON" });
     decoder.stack = "SyntaxError: PRIVATE_STORED_PAYLOAD";

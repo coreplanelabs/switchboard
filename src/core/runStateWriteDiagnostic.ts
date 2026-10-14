@@ -12,8 +12,12 @@ export interface StateWriteException {
   cause?: StateWriteException;
 }
 
+const appendRejectionReasons = ["append_events_not_array", "append_seq_invalid", "append_event_too_large"] as const;
+export type AppendRejectionReason = (typeof appendRejectionReasons)[number];
+
 /** Operator diagnosis. None of these facts acknowledge a state mutation. */
 export type StateWriteFailure =
+  | { stage: "request"; errorKind: "rejection"; reason: AppendRejectionReason }
   | {
       stage: "promotion-preflight" | "state-read" | "state-rpc" | "request";
       errorKind: "syntax" | "type" | "error" | "non-error";
@@ -125,6 +129,14 @@ export function stateWriteDiagnosticHeader(diagnostic: StateWriteDiagnostic): st
 export function stateWriteFailureOf(value: unknown): StateWriteFailure | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const v = value as Record<string, unknown>;
+  if (
+    v.stage === "request" &&
+    v.errorKind === "rejection" &&
+    Object.keys(v).length === 3 &&
+    typeof v.reason === "string" &&
+    appendRejectionReasons.includes(v.reason as AppendRejectionReason)
+  )
+    return { stage: "request", errorKind: "rejection", reason: v.reason as AppendRejectionReason };
   if (
     typeof v.stage === "string" &&
     ["promotion-preflight", "state-read", "state-rpc", "request"].includes(v.stage) &&
