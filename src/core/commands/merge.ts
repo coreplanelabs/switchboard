@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { principalOf } from "../authz/authorize.js";
 import {
   CommandError,
   commandDefiner,
@@ -264,7 +265,9 @@ export const pullsMerge = defineCommand({
   handler: async ({ args, options, caller, deps }) => {
     const door = await doorOf(deps);
     const target = await resolveTarget({ pr: args.pr, repo: options.repo, originRepo: () => caller.origin?.repo?.() });
-    const fenced = await fencedTarget({ door, ...target, userId: caller.id, refusePending: true });
+    const person = principalOf(caller.actor);
+    const userId = person.asUser?.id ?? person.id;
+    const fenced = await fencedTarget({ door, ...target, userId, refusePending: true });
     if ("kind" in fenced) return fenced as unknown as JsonObject;
     const merged = await door.merge(
       { repo: fenced.repo, number: fenced.number },
@@ -284,7 +287,7 @@ export const pullsMerge = defineCommand({
       repo: fenced.repo,
       number: fenced.number,
       sha: merged.sha,
-      by: { user: caller.id, login: fenced.login },
+      by: { user: userId, login: fenced.login },
     };
     return report as unknown as JsonObject;
   },
@@ -312,7 +315,9 @@ export const pullsEnqueue = defineCommand({
     const door = await doorOf(deps);
     const target = await resolveTarget({ pr: args.pr, repo: options.repo, originRepo: () => caller.origin?.repo?.() });
     // A check still running passes here: running the checks is the queue's job.
-    const fenced = await fencedTarget({ door, ...target, userId: caller.id, refusePending: false });
+    const person = principalOf(caller.actor);
+    const userId = person.asUser?.id ?? person.id;
+    const fenced = await fencedTarget({ door, ...target, userId, refusePending: false });
     if ("kind" in fenced) return fenced as unknown as JsonObject;
     const queued = await door.enqueue({ repo: fenced.repo, number: fenced.number }, { sha: fenced.headSha });
     if (!queued.ok)
@@ -321,7 +326,7 @@ export const pullsEnqueue = defineCommand({
       kind: "enqueued",
       repo: fenced.repo,
       number: fenced.number,
-      by: { user: caller.id, login: fenced.login },
+      by: { user: userId, login: fenced.login },
     };
     return report as unknown as JsonObject;
   },

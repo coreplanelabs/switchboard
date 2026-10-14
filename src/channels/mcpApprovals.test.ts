@@ -5,6 +5,7 @@ import type { Caller } from "../core/commandRegistry.js";
 import { principalOf } from "../core/authz/authorize.js";
 import { InMemoryPersonalTokenStore, digestBearer } from "../mcp/personalTokens.js";
 import { createCommandHttpHandler } from "./commandHttp.js";
+import { registerMergeCommands, type MergeCommandDeps, type MergeDoorService } from "../core/commands/merge.js";
 import { buildCoreCommands } from "../core/commandCatalogue.js";
 import { secretsFrom } from "../secrets.js";
 import {
@@ -39,12 +40,12 @@ const URL_META = { ...FORM_META, [CLIENT_CAPABILITIES_META_KEY]: { elicitation: 
 
 // Feature: docs/reference/specs/mcp-ingress.md — delegated authority and human approval.
 describe("MCP approval parity", () => {
-  function fixture(person: Grants = ALL_GRANTS, browser = false, persistent = false) {
+  function fixture(person: Grants = ALL_GRANTS, browser = false, persistent = false, merge?: MergeDoorService) {
     let removed = 0;
     let now = 10_000;
     let personGrants = person;
     let connectionGrants: Grants = ALL_GRANTS;
-    const registry = new CommandRegistry({ audit: () => {}, confirmationClass: () => "destructive" });
+    const registry = new CommandRegistry<MergeCommandDeps>({ audit: () => {}, confirmationClass: () => "destructive" });
     registry.register({
       id: "repo.offboard",
       action: "repo:write",
@@ -61,7 +62,8 @@ describe("MCP approval parity", () => {
       describe: "Update the repository configuration",
       handler: async () => ({ saved: "configuration" }),
     });
-    const commands = bindCommands(registry, {});
+    if (merge) registerMergeCommands(registry);
+    const commands = bindCommands(registry, merge ? { merge: { service: async () => merge } } : {});
     const grantsFor = (id: string) =>
       id === "mcp:device" || id === "mcp:other-device" || id === "mcp:personal:device"
         ? connectionGrants
@@ -161,8 +163,8 @@ describe("MCP approval parity", () => {
       await vi.waitFor(() => expect(status).not.toBe(0));
       return { status, text, headers };
     };
-    const offeredId = async () => {
-      const result = await call("repo_offboard", {}, "tok", { _meta: FORM_META });
+    const offeredId = async (name = "repo_offboard", args: Record<string, unknown> = {}) => {
+      const result = await call(name, args, "tok", { _meta: FORM_META });
       expect(result.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "form" } } } } });
       return (result.body as { result: { requestState: string } }).result.requestState;
     };
@@ -189,6 +191,52 @@ describe("MCP approval parity", () => {
       },
     };
   }
+  it.each(["merge", "enqueue"] as const)(
+    "a browser-approved MCP %s uses the linked person's GitHub binding",
+    async (action) => {
+      const head = "a".repeat(40);
+      const writes: unknown[] = [];
+      const door: MergeDoorService = {
+        githubLogin: async (userId) => (userId === "slack:UALICE" ? "alice-dev" : undefined),
+        facts: async () => ({ state: "open", headSha: head, headRef: "feature", title: "fix(core): keep the result" }),
+        checks: async () => ({ total: 1, pending: [], failed: [] }),
+        reviews: async () => [{ state: "APPROVED", commitId: head }],
+        merge: async (pr, options) => {
+          writes.push({ pr, options });
+          return { ok: true, sha: "b".repeat(40) };
+        },
+        enqueue: async (pr, options) => {
+          writes.push({ pr, options });
+          return { ok: true };
+        },
+      };
+      const f = fixture(ALL_GRANTS, true, false, door);
+      const id = await f.offeredId(`pulls_${action}`, { pr: "acme/api#42" });
+      expect(writes).toEqual([]);
+      expect((await f.browserCall(id, "approve")).status).toBe(200);
+      const result = await f.call("approval_resume", { id });
+      expect(result.body).toMatchObject({
+        result: { content: [{ text: expect.stringContaining("alice-dev (slack:UALICE)") }] },
+      });
+      expect(writes).toEqual([
+        {
+          pr: { repo: "acme/api", number: 42 },
+          options:
+            action === "merge"
+              ? { sha: head, title: "fix(core): keep the result", mergedBy: "alice-dev" }
+              : { sha: head },
+        },
+      ]);
+      expect(f.deps.runRegistry!.getById("approval-run")).toMatchObject({
+        userId: "slack:UALICE",
+        authenticatedAs: "mcp:device",
+        status: "completed",
+      });
+      expect((await f.call("approval_resume", { id })).body).toMatchObject({ error: { code: -32003 } });
+      expect(writes).toHaveLength(1);
+    },
+  );
+
   it("client form confirmation executes the saved action once without a browser", async () => {
     const f = fixture(ALL_GRANTS, false);
     const _meta = {

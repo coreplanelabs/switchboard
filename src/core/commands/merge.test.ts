@@ -114,6 +114,27 @@ describe("pulls merge and pulls enqueue — the merge door as commands (record 0
     expect(calls).toEqual(["login web:alice"]);
   });
 
+  it.each(["pulls.merge", "pulls.enqueue"])(
+    "%s attributes a linked browser to its person while retaining credential authorization",
+    async (command) => {
+      const { registry, deps, calls, mergedWith, enqueuedWith } = setup();
+      const caller = callerWith("access", "access:session", ["merge:write"]);
+      caller.actor = { ...caller.actor, asUser: { id: "slack:UALICE" }, self: ["access:session", "slack:UALICE"] };
+      const result = await registry.invoke(command, { args: ["acme/api#42"], options: {} }, caller, deps);
+      expect(result).toMatchObject({ ok: true, value: { by: { user: "slack:UALICE", login: "ivy-dev" } } });
+      expect(calls[0]).toBe("login slack:UALICE");
+      expect([...mergedWith, ...enqueuedWith]).toHaveLength(1);
+
+      const denied = callerWith("access", "access:session", []);
+      denied.actor = { ...denied.actor, asUser: { id: "slack:UALICE" } };
+      expect(await registry.invoke(command, { args: ["acme/api#42"], options: {} }, denied, deps)).toMatchObject({
+        ok: false,
+        error: "unauthorized",
+      });
+      expect([...mergedWith, ...enqueuedWith]).toHaveLength(1);
+    },
+  );
+
   it("merges an approved green head at exactly its sha, the person's bound login on the merge itself and in the answer", async () => {
     const { registry, deps, mergedWith } = setup();
     const res = await registry.invoke("pulls.merge", { args: ["acme/api#42"], options: {} }, person(), deps);
