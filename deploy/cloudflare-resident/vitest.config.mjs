@@ -66,6 +66,7 @@ export default defineConfig({
       "releaseAtRunEnd.test.ts",
       "pausedWorkspace.test.ts",
       "nativeOperation.test.ts",
+      "checkOperation.test.ts",
       "runRegistration.test.ts",
       "workspaceSettlement.test.ts",
       "workspaceAdvance.test.ts",

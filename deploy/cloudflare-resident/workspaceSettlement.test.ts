@@ -1,3 +1,5 @@
+import { RecordedCheckOperation } from "./checkOperation.js";
+import { checkCommandHash, reportCheckResultFailure } from "../../src/execution/checkOperation.js";
 import { NativeOperationJournal, unstartedNativeOperator } from "./nativeOperation.js";
 import { isResidentPoolUser } from "../../src/execution/residentPoolSpends.js";
 import { releasePoolBinding, claimPoolBinding } from "../../src/execution/residentPoolSpends";
@@ -60,6 +62,8 @@ const names = [
   "assertThreadOperationAllowed",
   "beginThreadNativeOperation",
   "execThread",
+  "checkOperationContext",
+  "inspectCheckResult",
   "execThreadBody",
   "run",
   "waitForThreadDrain",
@@ -259,6 +263,8 @@ function harness(
     AsyncLocalStorage,
     crypto: webcrypto,
     NativeOperationJournal,
+    RecordedCheckOperation,
+    reportCheckResultFailure,
     unstartedNativeOperator,
     RunCancelledError: class RunCancelledError extends Error {},
     createExtensionProcessSandbox: (instance: any) => ({
@@ -2598,5 +2604,76 @@ describe("explicit absent-workspace discard", () => {
     instance.observeAbsentPrivateTree = async () => true;
     expect(await instance.discardAbsentBinding(input)).toMatchObject({ discarded: true });
     expect(rows.get("runFence:" + threadKey)).toEqual(owner);
+  });
+});
+
+describe("Resident recorded check result lookup", () => {
+  it("reports the held check identity when substituting an unavailable result", async () => {
+    const h = harness();
+    const operation = { key: "c".repeat(64), commandHash: await checkCommandHash("echo private") };
+    h.instance.execThreadImpl = async () => {
+      throw new Error("Cookie: private-failure");
+    };
+    await expect(
+      h.instance.execThread(threadKey, "echo private", 1000, undefined, undefined, owner, operation),
+    ).rejects.toThrow("private-failure");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(
+        await h.instance.execThread(threadKey, "echo private", 1000, undefined, undefined, owner, operation),
+      ).toMatchObject({ status: 409, error: "check operation outcome unavailable" });
+      expect(warn.mock.calls.map((args) => [args[0], JSON.parse(String(args[1]))])).toEqual([
+        [
+          "[check-result]",
+          {
+            version: 1,
+            code: "operation_result_unavailable",
+            threadKey,
+            runId: owner.runId,
+            ownerFence: owner.ownerFence,
+            operationKey: "c".repeat(64),
+          },
+        ],
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("preserves the original execution refusal while holding its operation alias", async () => {
+    const h = harness();
+    const operation = { key: "b".repeat(64), commandHash: await checkCommandHash("echo held") };
+    const refusal = { error: "original runtime unavailable", status: 503, reason: "runtime-replaced", cause: "system" };
+    h.instance.execThreadImpl = async () => refusal;
+    expect(await h.instance.execThread(threadKey, "echo held", 1000, undefined, undefined, owner, operation)).toEqual(
+      refusal,
+    );
+    expect(await h.instance.inspectCheckResult(threadKey, operation, owner)).toEqual({ kind: "unknown" });
+  });
+
+  it("settles the saved command by original identity and refuses changed owner or workspace evidence", async () => {
+    const h = harness();
+    const operation = { key: "a".repeat(64), commandHash: await checkCommandHash("echo once") };
+    const result = await h.instance.execThread(threadKey, "echo once", 1000, undefined, undefined, owner, operation);
+    expect(result).toEqual({ stdout: "ran", stderr: "", exitCode: 0, truncated: false });
+    expect(await h.instance.inspectCheckResult(threadKey, operation, owner)).toMatchObject({
+      kind: "completed",
+      checkOperation: operation,
+      result,
+    });
+    const nativeKeys = [...h.rows.entries()].filter(([key]) => key.startsWith("check-result:"));
+    expect(nativeKeys[0][1].nativeKey).toMatch(/^native-operation:/);
+    expect(h.rows.has(nativeKeys[0][1].nativeKey)).toBe(false);
+    for (const key of ["runReg:" + threadKey, "runFence:" + threadKey, "thread:" + threadKey]) {
+      const saved = structuredClone(h.rows.get(key));
+      h.rows.set(key, {
+        ...saved,
+        ...(key.startsWith("thread:") ? { container: "other-runtime" } : { ownerFence: 99 }),
+      });
+      expect(await h.instance.inspectCheckResult(threadKey, operation, owner)).toEqual({ kind: "unknown" });
+      h.rows.set(key, saved);
+    }
+    h.rows.set(`cancelled:${threadKey}:${owner.runId}`, true);
+    expect(await h.instance.inspectCheckResult(threadKey, operation, owner)).toEqual({ kind: "unknown" });
   });
 });

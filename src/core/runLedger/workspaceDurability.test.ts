@@ -477,6 +477,25 @@ describe("canonical scratch custody disposition", () => {
       });
     }
   });
+  it("keeps retained preflight evidence from certifying scratch custody closure", async () => {
+    for (const retained of [false, true]) {
+      const { store, record } = await closureFixture();
+      const original = store.live.get(id)!;
+      const allocation = original.meta.workspaceAllocation!;
+      if (retained)
+        expect(
+          await store.setState(id, "g1", {
+            ...original.state,
+            checkExecutions: { version: 1, receipts: [], metadata: { callId: "original-pending" } },
+          }),
+        ).toMatchObject({ ok: true });
+      expect(await store.finish(id, "g1", record)).toMatchObject({ ok: true });
+      expect(await store.workspaceDisposition(allocation)).toMatchObject({
+        kind: "terminal",
+        disposition: { kind: retained ? "retained" : "scratch-custody-closed" },
+      });
+    }
+  });
   it("accepts real recorded nonzero completion and not-started refusal while unknown or missing receipts hold", async () => {
     for (const outcome of [
       "nonzero",

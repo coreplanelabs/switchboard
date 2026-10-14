@@ -1,3 +1,4 @@
+import type { CheckOperation } from "./checkOperation.js";
 import {
   emptyCredentialInspection,
   parseCredentialInspection,
@@ -31,6 +32,7 @@ export class TracingExecutor implements Executor {
   moveTo?: (sha: string, opts?: MoveOptions) => Promise<{ sha: string }>;
   readBytes?: (path: string) => Promise<Uint8Array>;
   publishBranch?: (input: PublicationTransport) => Promise<string>;
+  inspectCheckResult?: (operation: CheckOperation, opts?: ExecOptions) => Promise<ExecResult | undefined>;
   execResult?: (command: string, opts?: ExecOptions) => Promise<ExecResult>;
   publishBranchResult?: (input: PublicationTransport) => Promise<ExecResult>;
 
@@ -61,6 +63,8 @@ export class TracingExecutor implements Executor {
     if (innerPublishBranch)
       this.publishBranch = (input) =>
         this.timed("exec.publish_branch", (s) => innerPublishBranch({ ...input, span: s }));
+    if (inner.inspectCheckResult)
+      this.inspectCheckResult = (operation, opts) => inner.inspectCheckResult!(operation, opts);
     const innerExecResult = inner.execResult?.bind(inner);
     if (innerExecResult)
       this.execResult = (command, opts) =>

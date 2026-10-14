@@ -1,3 +1,4 @@
+import type { CheckOperation } from "../execution/checkOperation.js";
 import type { ExecInfraReason } from "../execution/executor.js";
 import type { ExecResult } from "../execution/execResult.js";
 import type { TypedExecutionDiagnostic } from "../execution/typedExecutionDiagnostic.js";
@@ -20,6 +21,7 @@ export interface CheckExecutionOwner {
 /** An observation of the checkout before the command, not an immutable snapshot. */
 export interface CheckExecutionReceipt {
   callId: string;
+  checkOperation?: CheckOperation;
   inputHash: string;
   commandHash: string;
   command: string;
@@ -31,7 +33,7 @@ export interface CheckExecutionReceipt {
   completedAt?: number;
   outcome:
     | { kind: "pending" }
-    | { kind: "not_started"; reason: "command_refused" | "budget_exhausted" | "stopped" }
+    | { kind: "not_started"; reason: "command_refused" | "budget_exhausted" | "stopped" | "capacity" }
     | ({ kind: "completed" } & ExecResult)
     | {
         kind: "unknown";
@@ -41,9 +43,20 @@ export interface CheckExecutionReceipt {
       };
 }
 
+export interface CheckMetadataExecution {
+  callId: string;
+  inputHash: string;
+  owner: CheckExecutionOwner;
+  workspace: string;
+  checkOperation: CheckOperation;
+  result?: ExecResult;
+}
+
 export interface CheckExecutionState {
   version: 1;
   receipts: CheckExecutionReceipt[];
+  /** Original preflight identity, retained until the selected command intent is saved. */
+  metadata?: CheckMetadataExecution;
 }
 
 /** Safe observations of a refused metadata read, never command/ACK authority. */
@@ -86,7 +99,9 @@ export type CheckExecutionResponse =
         | "persistence_failed"
         | "call_mismatch"
         | "reconciliation_required"
-        | "receipt_limit";
+        | "receipt_limit"
+        | "capacity"
+        | "metadata_revalidation_required";
     };
 
 export interface CheckExecutionCapability {
