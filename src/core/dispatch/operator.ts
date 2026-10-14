@@ -590,6 +590,8 @@ function formalSettings(text: string): OperatorRequestSettings {
   const settings: OperatorRequestSettings = {};
   for (const [index, token] of text.trimStart().split(/\s+/).entries()) {
     if (index === 0 && (token.startsWith("agent:") || token.startsWith("agent="))) continue;
+    // The deterministic review preflight owns this pin, not the router's settings.
+    if (/^review-head[:=]/.test(token)) continue;
     const parsed = parseDirectives(token);
     const { text: rest, agent: _agent, interpreter: _interpreter, ...control } = parsed;
     if (rest || Object.keys(control).length !== 1) break;

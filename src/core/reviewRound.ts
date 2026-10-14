@@ -611,6 +611,8 @@ export interface SettleReviewedHeadInput {
   checkout?: () => string | undefined;
   /** Canonical child permission stays at this exact head through settlement. */
   publication?: ExistingPrPublicationBinding;
+  /** A standalone request's immutable commit pin. */
+  pinnedHead?: string;
   /** A destructive checkout move first checkpoints and ends the owned producer. */
   beforeWorkspaceAdvance?: () => Promise<void>;
   /** The parent span, when the run is traced. */
@@ -680,18 +682,20 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
   let observedHead = await probeHead();
   const outcome = (): SettledReviewHead => ({ answer, verdict, reviewHead, observedHead, carried });
   if (stopped()) return outcome();
-  if (input.publication) {
+  if (input.publication || input.pinnedHead !== undefined) {
     const bound = input.publication;
+    const pinnedHead = bound?.expectedHeadSha ?? input.pinnedHead!;
     if (
-      pr.repo.toLowerCase() !== bound.repo.toLowerCase() ||
-      pr.number !== bound.pr ||
-      input.baseRef !== bound.baseRef ||
-      !sameCommit(reviewHead ?? "", bound.expectedHeadSha) ||
-      !sameCommit(observedHead ?? "", bound.expectedHeadSha) ||
-      (verdict?.head !== undefined && !sameCommit(verdict.head, bound.expectedHeadSha))
+      (bound !== undefined &&
+        (pr.repo.toLowerCase() !== bound.repo.toLowerCase() ||
+          pr.number !== bound.pr ||
+          input.baseRef !== bound.baseRef)) ||
+      !sameCommit(reviewHead ?? "", pinnedHead) ||
+      !sameCommit(observedHead ?? "", pinnedHead) ||
+      (verdict?.head !== undefined && !sameCommit(verdict.head, pinnedHead))
     )
-      throw new ReviewWorkspaceAdvanceError(bound.expectedHeadSha, "the saved review target was not confirmed");
-    // The existing post gate rechecks the remote. A moved head requires a new canonical action.
+      throw new ReviewWorkspaceAdvanceError(pinnedHead, "the saved review target was not confirmed");
+    // The post gate rechecks the remote. A moved head requires a new request.
     return outcome();
   }
   const where = `${pr.repo}#${pr.number}`;
@@ -913,6 +917,7 @@ export async function runReviewPostStep(
     requestText: string;
     repoCtx: Pick<RepoContext, "repo" | "pr" | "prUnpostable" | "prSize" | "ref" | "baseRef">;
     publication?: ExistingPrPublicationBinding;
+    pinnedHead?: string;
     /** The pinned head and the workspace HEAD observed after the turn. */
     heads: { reviewHead: string | undefined; observedHead: string | undefined };
     verdict: ReviewVerdict | undefined;
@@ -996,17 +1001,19 @@ export async function runReviewPostStep(
   // Why nothing was posted, carried into the typed outcome — every path that
   // leaves `postTarget` null fills it (the hard-stop skip is the default).
   const bound = input.publication;
+  const pinnedHead = bound?.expectedHeadSha ?? input.pinnedHead;
   if (
-    bound &&
-    (repoCtx.repo?.toLowerCase() !== bound.repo.toLowerCase() ||
-      repoCtx.pr !== bound.pr ||
-      repoCtx.ref !== bound.headRef ||
-      repoCtx.baseRef !== bound.baseRef ||
-      !sameCommit(reviewHead ?? "", bound.expectedHeadSha) ||
-      !sameCommit(observedHead ?? "", bound.expectedHeadSha) ||
-      (verdict?.head !== undefined && !sameCommit(verdict.head, bound.expectedHeadSha)) ||
+    pinnedHead !== undefined &&
+    ((bound !== undefined &&
+      (repoCtx.repo?.toLowerCase() !== bound.repo.toLowerCase() ||
+        repoCtx.pr !== bound.pr ||
+        repoCtx.ref !== bound.headRef ||
+        repoCtx.baseRef !== bound.baseRef)) ||
+      !sameCommit(reviewHead ?? "", pinnedHead) ||
+      !sameCommit(observedHead ?? "", pinnedHead) ||
+      (verdict?.head !== undefined && !sameCommit(verdict.head, pinnedHead)) ||
       (carried !== undefined &&
-        (!sameCommit(carried.reviewed, bound.expectedHeadSha) || !sameCommit(carried.current, bound.expectedHeadSha))))
+        (!sameCommit(carried.reviewed, pinnedHead) || !sameCommit(carried.current, pinnedHead))))
   )
     return record({ posted: false, reason: "the saved review target was not confirmed" });
   let skipReason = "the round was hard-stopped — nothing is posted after an abort";
@@ -1081,7 +1088,7 @@ export async function runReviewPostStep(
       postTarget = null;
     }
   }
-  if ((input.guardTransition === true || bound !== undefined) && postTarget && reviewHead) {
+  if ((input.guardTransition === true || pinnedHead !== undefined) && postTarget && reviewHead) {
     // Final transition guard immediately before the write: one fresh facts
     // read must prove the pull request is open, its head ref still exists and
     // that ref is at the commit this verdict covers. A head-only read can keep

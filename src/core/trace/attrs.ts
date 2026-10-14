@@ -24,6 +24,8 @@ export interface AttrDomain {
    *  wait out of its lifetime. On the root at start, like the queued numbers. */
   restartOfRunId: string;
   runId: string;
+  /** The explicit full commit pin for this review request. */
+  reviewPinnedHead: string;
   // slack.receive
   caughtUp: boolean;
   files: number;
@@ -209,6 +211,7 @@ export function invalidAttrKeys(attrs: SpanAttrs): string[] {
       if (typeof value !== "string") bad.push(key);
       else if (IDENTIFIER_KEYS.has(key as SpanAttrKey) && !IDENTIFIER_RE.test(value)) bad.push(key);
       else if (key === "instanceId" && !INSTANCE_ID_RE.test(value)) bad.push(key);
+      else if (key === "reviewPinnedHead" && !/^[a-f0-9]{40}$/i.test(value)) bad.push(key);
     } else if (typeof value !== expected) {
       bad.push(key);
     } else if (typeof value === "number" && !Number.isFinite(value)) {
@@ -233,6 +236,7 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   queuedBehindMs: "number",
   restartOfRunId: "string",
   runId: "string",
+  reviewPinnedHead: "string",
   caughtUp: "boolean",
   files: "number",
   resolvedFiles: "number",

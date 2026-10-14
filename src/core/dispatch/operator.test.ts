@@ -1098,6 +1098,43 @@ channels:
     }
   });
 
+  it("a review pin preserves later formal controls and the authored request through routing", () => {
+    const url = "https://github.com/acme/api/pull/42";
+    const requestText = `agent:review review-head:${"a".repeat(40)} effort:high ${url}`;
+    const turn = parseOperatorTurn(
+      {
+        tool: OPERATOR_BIND_TOOL,
+        input: {
+          preset: "review",
+          repo: "acme/api",
+          prTarget: { number: 42, source: "request", quote: url },
+          effort: "high",
+          settingsEvidence: { effort: { quote: "effort:high", intent: "requested" } },
+          reason: "review",
+        },
+      },
+      ctxOf({ requestText, presets: ["review"] }),
+    );
+    expect(turn).toMatchObject({
+      kind: "decision",
+      decision: { kind: "binds", binds: [{ preset: "review", effort: "high", line: requestText }] },
+    });
+    expect(
+      parseOperatorTurn(
+        {
+          tool: OPERATOR_BIND_TOOL,
+          input: {
+            preset: "review",
+            repo: "acme/api",
+            prTarget: { number: 42, source: "request", quote: url },
+            reason: "review",
+          },
+        },
+        ctxOf({ requestText, presets: ["review"] }),
+      ),
+    ).toMatchObject({ kind: "violation" });
+  });
+
   it("directive settings with requested intent retain all five controls", () => {
     const settings = { effort: "high", budget: 25, severity: "major", renewals: 2, verbosity: "debug" };
     const requestText = "Ship this with effort:high budget:25 severity:major renewals:2 verbosity:debug";

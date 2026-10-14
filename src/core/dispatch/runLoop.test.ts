@@ -7457,9 +7457,13 @@ describe("the pi harness — the container replaced under a living bot: the rela
     }
   });
 
-  it.each(["moved", "failed", "truncated", "stderr"])(
-    "a canonical review rejects an unverified %s workspace before reopening its harness after container replacement",
-    async (kind) => {
+  it.each(
+    ["canonical", "pinned"].flatMap((role) =>
+      ["moved", "failed", "truncated", "stderr"].map((kind) => [role, kind] as const),
+    ),
+  )(
+    "a %s review rejects an unverified %s workspace before reopening its harness after container replacement",
+    async (role, kind) => {
       const head = "a".repeat(40),
         moved = "b".repeat(40),
         ref = "fix/bound";
@@ -7488,6 +7492,7 @@ describe("the pi harness — the container replaced under a living bot: the rela
       const exec = vi
         .spyOn(LocalExecutor.prototype, "exec")
         .mockImplementation(async (command) => (command.includes("rev-parse HEAD") ? moved : ""));
+      const logs = vi.spyOn(console, "log").mockImplementation(() => {});
       try {
         let opens = 0;
         const s = setup("unused", {
@@ -7496,18 +7501,23 @@ describe("the pi harness — the container replaced under a living bot: the rela
           harness: harnessOver(registry, () => (opens++ === 0 ? old : replacement)),
           repoCtx: { repo: "o/r", pr: 42, ref, baseRef: "main", headSha: head },
           binding: { ref, sha: head, workspace: "/workspace/old-checkout" },
-          coordinator: {
-            parentInstanceId: "coord-p",
-            idempotencyKey: "coord-p:ONE/1/review",
-            base: "main",
-            publication,
-          },
+          ...(role === "canonical"
+            ? {
+                coordinator: {
+                  parentInstanceId: "coord-p",
+                  idempotencyKey: "coord-p:ONE/1/review",
+                  base: "main",
+                  publication,
+                },
+              }
+            : {}),
           executor: {
             exec: async (command) => (command.includes("rev-parse HEAD") ? head : ""),
             execResult: async () => ({ exitCode: 0, stdout: head, stderr: "", truncated: false }),
           },
           review: { head, post: async () => ({ state: "accepted" as const }) },
         });
+        if (role === "pinned") s.ctx.requestText = `review-head:${head} review o/r#42`;
         s.deps.fetchPrFacts = async () => ({
           state: "open",
           headRef: ref,
@@ -7519,9 +7529,16 @@ describe("the pi harness — the container replaced under a living bot: the rela
         });
         await expect(runLoop(s.deps, await trackedReviewContext(s))).rejects.toThrow("saved review target");
         expect(replacement.commands().filter((command) => command.type === "prompt")).toEqual([]);
+        if (role === "pinned") {
+          expect(s.ctx.root.record().attrs.reviewPinnedHead).toBe(head);
+          expect(logs.mock.calls.map(([message]) => message)).toContain(
+            `[review] pinned head ${head} vs reattached HEAD ${kind === "moved" ? moved : "unreadable"}`,
+          );
+        }
       } finally {
         exec.mockRestore();
         probe.mockRestore();
+        logs.mockRestore();
       }
     },
   );
@@ -7594,53 +7611,71 @@ describe("the pi harness — the container replaced under a living bot: the rela
     });
   });
 
-  it("the worktree refused by name: no relaunch — the run closes interrupted with the refusal workspace_lost, the record saying why after pi's verdict, the relay forgotten, the workspace released, the card 🔁 — and the request runs again as a new run", async () => {
-    const registry = new HarnessRegistry();
-    const a = new FakeHarnessContainer();
-    a.onStdin = piThatMeetsTheRoll(registry);
-    const s = setup("unused", {
-      agent: "coding",
-      yaml: YAML + "harness:\n  coding: pi\n",
-      harness: harnessOver(registry, () => a),
-      binding: {
-        ref: "main",
-        sha: "0123456",
-        workspace: "/workspace/threads/t/main",
-        user: "worker2",
-      } as ResidentBinding,
-    });
-    // The round ran on a resident this process has no configuration for: the recorded binding cannot be re-attached here.
-    const round = { ...s.ctx.round, selection: { ...s.ctx.round.selection, backend: "resident" as const } };
-    const out = await runLoop(s.deps, { ...s.ctx, round });
-    expect(out).toEqual({
-      kind: "interrupted",
-      reason: "workspace lost with the replaced container; restarting from the request",
-      refusal: "workspace_lost",
-      note: "the run's workspace could not be re-attached in the replacement container (no resident backend is configured in this process); the run restarts from its request under the same run id",
-      restart: { request: s.ctx.msg, restartOf: "run-l" },
-    });
-    expect(a.starts).toHaveLength(1);
-    expect(a.killed).toEqual([]);
-    expect(a.removed).toEqual([]);
-    expect(registry.get("run-l")).toBeUndefined();
-    expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "interrupted" });
-    expect(s.releases).toEqual(["paired"]);
-    const close = JSON.stringify(s.closes[0]);
-    expect(close).toContain("🔁");
-    expect(close).toContain("workspace lost with the replaced container; restarting from the request");
-    expect(close).not.toContain("❌");
-    s.ending.drain(undefined);
-    await s.writer.settled();
-    const record = (await s.store.get("run-l"))!;
-    expect(record.status).toBe("interrupted");
-    // The verdict, then the outcome, both the floor's kind: never a `resumed` note on a run that is not resumed.
-    const notes = notesOf(record);
-    expect(notes.map((n) => n.kind)).toEqual(["sandbox_restarted", "sandbox_restarted"]);
-    expect(notes[0]!.summary).toBe(
-      "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s))",
-    );
-    expect(notes[1]!.summary).toBe((out as { note: string }).note);
-  });
+  it.each(["coding", "pinned review"])(
+    "the worktree refused by name: no relaunch — the run closes interrupted with the refusal workspace_lost, the record saying why after pi's verdict, the relay forgotten, the workspace released, the card 🔁 — and the request runs again as a new run (%s)",
+    async (mode) => {
+      const registry = new HarnessRegistry();
+      const a = new FakeHarnessContainer();
+      a.onStdin = piThatMeetsTheRoll(registry);
+      const s = setup("unused", {
+        agent: mode === "coding" ? "coding" : "review",
+        yaml: YAML + "harness:\n  coding: pi\n",
+        harness: harnessOver(registry, () => a),
+        binding: {
+          ref: "main",
+          sha: "0123456",
+          workspace: "/workspace/threads/t/main",
+          user: "worker2",
+        } as ResidentBinding,
+        ...(mode === "pinned review"
+          ? {
+              review: { head: "a".repeat(40), post: async () => ({ state: "accepted" as const }) },
+              repoCtx: { repo: "o/r", pr: 42, ref: "main", headSha: "a".repeat(40) },
+              executor: {
+                execResult: async () => ({ exitCode: 0, stdout: "a".repeat(40), stderr: "", truncated: false }),
+              },
+            }
+          : {}),
+      });
+      if (mode === "pinned review") {
+        s.ctx.requestText = `review-head:${"a".repeat(40)} review o/r#42`;
+        s.ctx.msg = { ...s.ctx.msg, text: `agent:review ${s.ctx.requestText}` };
+      }
+      // The round ran on a resident this process has no configuration for: the recorded binding cannot be re-attached here.
+      const round = { ...s.ctx.round, selection: { ...s.ctx.round.selection, backend: "resident" as const } };
+      const out = await runLoop(s.deps, { ...s.ctx, round });
+      expect(out).toEqual({
+        kind: "interrupted",
+        reason: "workspace lost with the replaced container; restarting from the request",
+        refusal: "workspace_lost",
+        note: "the run's workspace could not be re-attached in the replacement container (no resident backend is configured in this process); the run restarts from its request under the same run id",
+        restart: { request: s.ctx.msg, restartOf: "run-l" },
+      });
+      if (mode === "pinned review" && out.kind === "interrupted")
+        expect(out.restart.request.text).toBe(`agent:review review-head:${"a".repeat(40)} review o/r#42`);
+      expect(a.starts).toHaveLength(1);
+      expect(a.killed).toEqual([]);
+      expect(a.removed).toEqual([]);
+      expect(registry.get("run-l")).toBeUndefined();
+      expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: "interrupted" });
+      expect(s.releases).toEqual(["paired"]);
+      const close = JSON.stringify(s.closes[0]);
+      expect(close).toContain("🔁");
+      expect(close).toContain("workspace lost with the replaced container; restarting from the request");
+      expect(close).not.toContain("❌");
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      const record = (await s.store.get("run-l"))!;
+      expect(record.status).toBe("interrupted");
+      // The verdict, then the outcome, both the floor's kind: never a `resumed` note on a run that is not resumed.
+      const notes = notesOf(record);
+      expect(notes.map((n) => n.kind)).toEqual(["sandbox_restarted", "sandbox_restarted"]);
+      expect(notes[0]!.summary).toBe(
+        "the container running pi was replaced (vm-fake → vm-new; the executor said: the sandbox restarted under the run (waited 42 s))",
+      );
+      expect(notes[1]!.summary).toBe((out as { note: string }).note);
+    },
+  );
 
   it("pauses a coding run on mid-run reattach refusal without finishing or releasing its recorded worktree", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");

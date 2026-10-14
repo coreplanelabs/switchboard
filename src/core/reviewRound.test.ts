@@ -633,6 +633,43 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
     },
   );
 
+  it("a pinned standalone review posts only while the remote still holds its requested head", async () => {
+    for (const sameRepoHead of [true, false])
+      for (const remote of [OTHER, HEAD]) {
+        const h = harness();
+        const out = await runReviewPostStep({
+          agent: AGENTS.review,
+          requestText: `review-head:${HEAD} review acme/api#42`,
+          repoCtx: { repo: "acme/api", pr: 42 },
+          pinnedHead: HEAD,
+          heads: { reviewHead: HEAD, observedHead: HEAD },
+          verdict,
+          digest: undefined,
+          answer,
+          carried: undefined,
+          hardStopped: false,
+          guardTransition: true,
+          fetchPrFacts: async () => ({ state: "open", headSha: remote, headBranchExists: true, sameRepoHead }),
+          post: h.post,
+          publicationJournal: h.publicationJournal,
+          fetchPrHead: async () => remote,
+          reply: h.reply,
+          logKey: "t",
+        });
+        expect(out).toEqual(
+          remote === HEAD
+            ? { posted: true, target: { repo: "acme/api", number: 42 }, head: HEAD, verdict: "approve" }
+            : {
+                posted: false,
+                reason: `the PR head moved to ${OTHER.slice(0, 7)} after the review of ${HEAD.slice(0, 7)}`,
+              },
+        );
+        expect(h.posts.map((p) => p.target)).toEqual(
+          remote === HEAD ? [{ repo: "acme/api", number: 42, commitId: HEAD }] : [],
+        );
+      }
+  });
+
   it("a standalone review with a verified head posts exactly as before, with only the post-publication head read", async () => {
     const h = harness();
     let headReads = 0;
@@ -1189,6 +1226,23 @@ describe("settleReviewedHead — the head-move re-review", () => {
     };
     return { input, executor, events, replies, labels, moves };
   }
+
+  it("an explicit standalone pin prevents adopting or re-reviewing a moved head and refuses a changed checkout", async () => {
+    const w = moved({ followUp: async () => "must not review another head" });
+    const out = await settleReviewedHead({ ...w.input, pinnedHead: HEAD });
+    expect(out).toEqual({
+      answer: "First review: approve.",
+      verdict: { verdict: "approve", summary: "ok", head: HEAD, findings: [] },
+      reviewHead: HEAD,
+      observedHead: HEAD,
+      carried: undefined,
+    });
+    expect(w.moves).toEqual([]);
+    w.executor.execResult = async () => ({ exitCode: 0, stdout: `${OTHER}\n`, stderr: "", truncated: false });
+    await expect(settleReviewedHead({ ...w.input, pinnedHead: HEAD })).rejects.toThrow(
+      `Review workspace could not advance to ${HEAD}`,
+    );
+  });
 
   it.each(["substantive", "rebase"])(
     "a canonical review never follows or carries a %s move outside its saved publication",

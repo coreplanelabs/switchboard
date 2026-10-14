@@ -15,6 +15,8 @@ Everything below works identically as a bare mention, a DM, or a thread follow-u
 
 Placed right after the mention, before the request text:
 
+To review one exact commit, use `agent:review review-head:<full 40-character SHA> <PR URL>`. Put the pin before task prose. A moved or unreadable head, or an invalid or duplicate pin, stops before review starts and posts nothing. A matching pin stays fixed through publication and restart; a fresh request without the pin can review a newer head. This prefix works on Slack, the CLI, HTTP and MCP.
+
 | Directive | Example | Effect |
 |---|---|---|
 | `agent:<name>` | `agent:review` | force this agent for this message; without it a plain message picks its own agent and the card says why — the router, on by default; `routing: { auto: false }` turns it off ([Turn features on and off](../how-to/turn-features-on-and-off.md)) and a plain message then runs the default. `coding` is never picked for you: name it — a routed change request runs `ship`, the coding → review loop a person merges |

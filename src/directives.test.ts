@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { lastThreadDirectives, parseDirectives, stripDirectiveTokens } from "./directives.js";
+import { lastThreadDirectives, parseDirectives, reviewHeadOf, stripDirectiveTokens } from "./directives.js";
 
 // Feature: docs/reference/specs/routing-and-config.md — per-request directives & thread stickiness.
+
+describe("reviewHeadOf — explicit request prefix", () => {
+  it("retains one authored pin through directive stripping and ignores prose examples", () => {
+    const head = "a".repeat(40);
+    const text = `agent:review effort:high review-head:${head} budget:25 review acme/api#42`;
+    expect(reviewHeadOf(text)).toBe(head);
+    expect(reviewHeadOf(parseDirectives(text).text)).toBe(head);
+    expect(reviewHeadOf(`Explain review-head:${head}`)).toBeUndefined();
+    expect(reviewHeadOf(`"review-head:${head}" is an example`)).toBeUndefined();
+    expect(reviewHeadOf("review-head: review acme/api#42")).toBe("");
+    expect(reviewHeadOf(`review-head:${head} review-head:${head} review acme/api#42`)).toBe(`${head},${head}`);
+  });
+});
 
 describe("parseDirectives", () => {
   it("extracts agent and model and strips them from the text", () => {

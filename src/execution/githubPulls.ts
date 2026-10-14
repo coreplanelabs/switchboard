@@ -653,7 +653,7 @@ export interface PullRequestFacts {
    * object's head and one successful commit-ref read agree exactly; consumers
    * that must fail closed use this instead of combining best-effort fields. */
   verifiedHead?: { repo: string; ref: string; sha: string };
-  /** Whether a same-repository head ref still exists. False is distinct from
+  /** Whether the verified head ref still exists (fork verification is opt-in). False is distinct from
    * an unreadable or malformed lookup. This field is compatibility state, not
    * proof of a tip; exact-head consumers require `verifiedHead`. */
   headBranchExists?: boolean;
@@ -834,10 +834,13 @@ export async function commitsOverBase(repo: string, base: string, branch: string
  *  fetch fails or the state is unrecognizable. The head sha is the head REF's
  *  tip when that can be read and the head lives on the base repo (see
  *  `headRefTipSha`), else the PR object's. Never throws. */
-export async function fetchPullRequestFacts(pr: {
-  repo: string;
-  number: number;
-}): Promise<PullRequestFacts | undefined> {
+export async function fetchPullRequestFacts(
+  pr: {
+    repo: string;
+    number: number;
+  },
+  options: { verifyForkHead?: boolean } = {},
+): Promise<PullRequestFacts | undefined> {
   const token = await resolveGithubToken().catch(() => null);
   const headers = apiHeaders(token); // no credential → unauthenticated (public repos answer)
   let res: Response;
@@ -871,18 +874,22 @@ export async function fetchPullRequestFacts(pr: {
   const prSha = typeof data.head?.sha === "string" && /^[0-9a-f]{40}$/.test(data.head.sha) ? data.head.sha : undefined;
   const sameRepoHead = headRepo === pr.repo.toLowerCase();
   const headRef = typeof data.head?.ref === "string" && data.head.ref ? data.head.ref : undefined;
+  const verifyHeadRef = sameRepoHead || options.verifyForkHead === true;
   // One ref read owns both existence and tip. A separate successful existence
   // read must never make a failed tip read look verified.
-  const headRead = sameRepoHead && headRef !== undefined ? await readHeadRef(pr.repo, headRef, headers) : undefined;
+  const headRead =
+    verifyHeadRef && headRepo !== undefined && /^[\w.-]+\/[\w.-]+$/.test(headRepo) && headRef !== undefined
+      ? await readHeadRef(headRepo, headRef, headers)
+      : undefined;
   const headBranchExists = headRead?.kind === "verified" ? true : headRead?.kind === "missing" ? false : undefined;
   const refTip = headRead?.kind === "verified" ? headRead.sha : undefined;
   // Ordinary readers still prefer a positively read ref tip over a lagging PR
   // object. The fail-closed receipt below exists only when both sources agree.
   const sha =
-    sameRepoHead && headRef !== undefined ? preferRefTip(`${pr.repo}#${pr.number}`, prSha, refTip, headRef) : prSha;
+    verifyHeadRef && headRef !== undefined ? preferRefTip(`${pr.repo}#${pr.number}`, prSha, refTip, headRef) : prSha;
   const verifiedHead =
-    sameRepoHead && headRef !== undefined && prSha !== undefined && refTip === prSha
-      ? { repo: pr.repo, ref: headRef, sha: refTip }
+    verifyHeadRef && headRepo !== undefined && headRef !== undefined && prSha !== undefined && refTip === prSha
+      ? { repo: headRepo, ref: headRef, sha: refTip }
       : undefined;
   let closedBy = typeof data.closed_by?.login === "string" ? data.closed_by.login : undefined;
   // Pull-request responses consistently carry `merged_by` but older GitHub

@@ -14,7 +14,7 @@ import type { ExistingPrPublicationBinding } from "../coordinator/contract.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
 import type { BoundaryScope, ProfileRefusal, ProfileResolution, RunProfile } from "../../config/profile.js";
-import type { RequestDirectives } from "../../directives.js";
+import { reviewHeadOf, type RequestDirectives } from "../../directives.js";
 import type { Capabilities } from "../capabilities.js";
 import type { ExecutorSelection } from "../../execution/factory.js";
 import { currentPrHeadSha, type RepoContext, type ResidentSlugs } from "../repoContext.js";
@@ -377,6 +377,26 @@ export async function authorizePrHead(
     },
 ): Promise<Gate<"pr_head_unknown" | "workspace_head_mismatch">> {
   const { msg, refuse, card, shell, closeLines, clock, agent, directives, repoCtx } = ctx;
+  const requestedHead = reviewHeadOf(directives.text);
+  if (
+    requestedHead !== undefined &&
+    (agent.name !== "review" ||
+      !/^[0-9a-f]{40}$/i.test(requestedHead) ||
+      repoCtx.repo === undefined ||
+      repoCtx.pr === undefined ||
+      repoCtx.headSha?.toLowerCase() !== requestedHead.toLowerCase())
+  ) {
+    const reason =
+      agent.name !== "review" || !/^[0-9a-f]{40}$/i.test(requestedHead)
+        ? "review-head requires one full commit SHA on a review request."
+        : `Requested review head \`${requestedHead}\` does not match the current head \`${repoCtx.headSha ?? "unknown"}\`.`;
+    await refuse(refusalOf("workspace_head_mismatch", `${reason} No review started or was posted to GitHub.`), () =>
+      card.done(
+        shell.close({ kind: "not_started", icon: "🔀", reason: "review head mismatch", ...closeLines(clock(), false) }),
+      ),
+    );
+    return { kind: "refused", reason: "workspace_head_mismatch" };
+  }
   // Unknown-head check (docs/reference/specs/agent-review.md item 11): a review whose PR
   // head could not be resolved is a guaranteed refusal downstream — not
   // started instead, before any attach, one named reply (the decision and
@@ -515,8 +535,9 @@ export async function authorizeAttachedHead(
   // model to turn an infrastructure failure into a finding.
   let verifiedAtAttach = false;
   let headAdopted = false;
+  const requestedHead = reviewHeadOf(msg.text);
   if (
-    (!resume || ctx.publication !== undefined) &&
+    (!resume || ctx.publication !== undefined || requestedHead !== undefined) &&
     agent.name === "review" &&
     repoCtx.pr !== undefined &&
     repoCtx.repo
@@ -611,8 +632,8 @@ export async function authorizeAttachedHead(
     if (stopSignal.aborted || guard.outcome === "stopped") return { kind: "stopped" };
     if (
       guard.outcome === "adopted" &&
-      ctx.publication &&
-      guard.headSha.toLowerCase() !== ctx.publication.expectedHeadSha.toLowerCase()
+      (ctx.publication !== undefined || requestedHead !== undefined) &&
+      guard.headSha.toLowerCase() !== (ctx.publication?.expectedHeadSha ?? requestedHead)!.toLowerCase()
     )
       guard = { outcome: "refused", reply: "The attached review head changed from its saved commit." };
     if (guard.outcome === "verified") {

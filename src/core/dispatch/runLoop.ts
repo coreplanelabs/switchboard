@@ -5,6 +5,8 @@ import {
   type HarnessLaunchIntent,
 } from "../harness/sessionPolicy.js";
 import { runCheckTool } from "../../tools/check.js";
+import { reviewHeadOf } from "../../directives.js";
+import { gitInCheckout } from "../../execution/workspaceAdvance.js";
 import type { ToolContext } from "../../tools/runnableTool.js";
 import { PUSHED_MAX } from "../../execution/residentRebind.js";
 import {
@@ -483,6 +485,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     coordinator,
     seed,
   } = ctx;
+  const pinnedHead = reviewHeadOf(ctx.requestText);
+  if (pinnedHead !== undefined) root.setAttrs({ reviewPinnedHead: pinnedHead });
 
   const ledgerTrackedAtEntry = ledgerRun?.tracked() === true;
   // A private tool's result can reach model-authored progress before the final
@@ -3174,6 +3178,25 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       let openingToolContext: ToolContext = toolContext;
       const openRun = async () => {
         ctx.assertAdmissionBudget();
+        if (agent.name === "review" && pinnedHead !== undefined) {
+          const probe = await executor
+            .execResult?.(`${gitInCheckout(currentCheckout)} rev-parse HEAD`, {
+              timeoutMs: Math.min(30_000, ctx.admissionRemainingMs?.() ?? 30_000),
+              signal: run.control.hardSignal,
+            })
+            .catch(() => undefined);
+          const head =
+            probe?.exitCode === 0 && probe.truncated === false && /^[a-f0-9]{40}$/i.test(probe.stdout.trim())
+              ? probe.stdout.trim().toLowerCase()
+              : undefined;
+          if (head !== pinnedHead.toLowerCase()) {
+            console.log(`[review] pinned head ${pinnedHead} vs reattached HEAD ${head ?? "unreadable"}`);
+            throw new RefusalError(
+              refusalOf("workspace_head_mismatch", "The reattached workspace does not match the saved review target."),
+            );
+          }
+          ctx.assertAdmissionBudget();
+        }
         if (agent.name === "review" && coordinator?.publication !== undefined) {
           const publication = coordinator.publication;
           const workspace = currentCheckout;
@@ -3657,6 +3680,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // gate (agent-review item 10).
     if (isPrReview && repoCtx.repo && repoCtx.pr !== undefined && !tailSkipped() && postedBefore === undefined) {
       const settled = await settleReviewedHead({
+        pinnedHead,
         ...(currentCheckout !== undefined ? { checkout: () => checkoutOfSelection(firstTestSelection) } : {}),
         ...(coordinator?.publication ? { publication: coordinator.publication } : {}),
         span: root,
@@ -4383,6 +4407,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     else if (agent.name === "review" && !tailSkipped())
       reviewPost = await root.span("run.review_post_step", () =>
         runReviewPostStep({
+          pinnedHead,
           ...(coordinator?.publication ? { publication: coordinator.publication } : {}),
           agent,
           requestText: ctx.requestText,
@@ -4394,10 +4419,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           answer,
           carried,
           hardStopped: false,
-          ...(coordinator !== undefined
+          ...(coordinator !== undefined || pinnedHead !== undefined
             ? {
                 guardTransition: true as const,
-                fetchPrFacts: deps.fetchPrFacts ?? fetchPullRequestFacts,
+                fetchPrFacts:
+                  deps.fetchPrFacts ??
+                  ((pr) => fetchPullRequestFacts(pr, { verifyForkHead: pinnedHead !== undefined })),
               }
             : { guardTransition: false as const }),
           publicationJournal: {

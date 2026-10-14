@@ -914,6 +914,41 @@ describe("githubPulls", () => {
       head: { ref: "ship/fix-x-abc123", sha: "c".repeat(40), repo: { full_name: "acme/api" } },
     };
 
+    it("an opted-in fork head verifies its own ref and reports moves, missing refs and unreadable targets", async () => {
+      stubToken();
+      for (const mode of ["matching", "moved", "missing", "unreadable", "deleted"] as const) {
+        const calls = stubFetch((url) =>
+          String(url).includes("/git/ref/heads/")
+            ? mode === "missing"
+              ? new Response("missing", { status: 404 })
+              : mode === "unreadable"
+                ? new Response("unavailable", { status: 503 })
+                : Response.json({ object: { type: "commit", sha: (mode === "moved" ? "d" : "c").repeat(40) } })
+            : Response.json({
+                ...openPr,
+                head: { ...openPr.head, repo: mode === "deleted" ? null : { full_name: "other/fork" } },
+              }),
+        );
+        const facts = await fetchPullRequestFacts({ repo: "acme/api", number: 7 }, { verifyForkHead: true });
+        expect(facts?.sameRepoHead).toBe(false);
+        expect(facts?.headSha).toBe((mode === "moved" ? "d" : "c").repeat(40));
+        expect(facts?.headBranchExists).toBe(
+          mode === "matching" || mode === "moved" ? true : mode === "missing" ? false : undefined,
+        );
+        expect(facts?.verifiedHead).toEqual(
+          mode === "matching" ? { repo: "other/fork", ref: "ship/fix-x-abc123", sha: "c".repeat(40) } : undefined,
+        );
+        expect(calls.map((c) => c.url)).toEqual(
+          mode === "deleted"
+            ? ["https://api.github.com/repos/acme/api/pulls/7"]
+            : [
+                "https://api.github.com/repos/acme/api/pulls/7",
+                "https://api.github.com/repos/other/fork/git/ref/heads/ship/fix-x-abc123",
+              ],
+        );
+      }
+    });
+
     it("parses state, author login+id, head ref/sha, and a POSITIVE same-repo head match", async () => {
       stubToken();
       const calls = stubFetch((url) =>

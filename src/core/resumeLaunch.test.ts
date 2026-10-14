@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { parseDirectives, reviewHeadOf } from "../directives.js";
 import type { AgentDef } from "../agents/registry.js";
 import { adoptLiveCard, isLiveCard, liveCardKey, liveCards } from "../channels/slack/statusCard.js";
 import { findOrphanedCards, type SlackHistoryMessage } from "../channels/slackCatchUp.js";
@@ -86,6 +87,14 @@ const resumable = (over: Partial<ResumeRun> = {}): ResumeRun => ({
 const reviewAgent = { toolset: "readonly", identity: "read" } as AgentDef;
 
 describe("the pure pieces", () => {
+  it("restores a standalone review pin from the original recorded request", () => {
+    const head = "a".repeat(40);
+    const original = parseDirectives(`agent:review review-head:${head} effort:high acme/api#12`).text;
+    const events = [{ type: "input", text: original }];
+    const resumed = resumeMessage(row(), inputTextOf(events));
+    expect(resumed.text).toBe(`agent:review review-head:${head} acme/api#12`);
+    expect(reviewHeadOf(parseDirectives(resumed.text).text)).toBe(head);
+  });
   it("knownToolsFor names the toolset the bot relays with its side-effect-free flags, plus pi's own workspace tools for the identity — reads side-effect-free, the shell not, no write tool for a read identity; a preset without a workspace has the relayed ones alone", () => {
     const tools = knownToolsFor({ toolset: "readonly", identity: "read" });
     expect(tools.find((t) => t.name === "web_fetch")).toEqual({ name: "web_fetch", sideEffectFree: true });
