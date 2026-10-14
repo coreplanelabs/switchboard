@@ -26,3 +26,13 @@ Keep the retention count and the workspaces intact. During a normal deploy, requ
 - Delete terminal workspaces based on their checked-out commit: that SHA does not prove private files or commits were saved remotely.
 - Ignore retained registrations in the old count: that would weaken container and cleanup protection.
 - Use the ordinary drain alone: its registered reattach exception leaves an admission race during the isolate swap.
+
+## Amended 2026-10-14
+
+**Re-evaluation.** The fence was accepted because a quiet snapshot must exclude every admitted request while protecting terminal workspaces. A durable permit still represents that request obligation. Caller-side `finally` cannot settle it after a crash, and a lost admission reply previously left the caller without the Registry-created ID.
+
+New callers create the permit UUID and a hash of normalized original provenance before the first RPC. An uncertain reply permits one exact stored read, never another admission or native submission. Only the original living stack can continue after positively matching its admitted record. Caller death and unknown legacy debt remain held for separately verified recovery.
+
+The Registry atomically writes an exact release receipt and deletes the permit. An uncertain end reply qualifies only through that receipt; absence alone stays unknown. The latest 128 identity-bearing receipts bound storage. Eviction narrows acknowledgement recovery without granting work or retiring active debt. Request cleanup is not native completion.
+
+The original fence predicates and recovery authority remain intact. Legacy callers reaching the upgraded Registry can release only legacy records; keyed releases require the exact hash. Old Registry code cannot enforce this boundary, so rollback with keyed debt requires separate migration/recovery qualification. Producer identity and withdrawn-fence/readback status keep consumer diagnostics honest during rollout.

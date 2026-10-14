@@ -1572,6 +1572,8 @@ const TEST_OVERRIDES_KEY = "testOverrides";
  *  why the record carries its own end. */
 const DRAIN_KEY = "drain";
 const DEPLOY_ADMISSION_KEY_PREFIX = "deploy:admission:";
+const DEPLOY_RELEASE_RECEIPTS_KEY = "deploy:release-receipts";
+
 /** Safe request provenance, never an authority or a native completion receipt. */
 function deployAdmissionOrigin(input: unknown) {
   const row = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
@@ -1615,6 +1617,121 @@ function emitDeployAdmission(event: Record<string, unknown>): void {
   } catch {
     /* A log sink cannot change request admission or settlement. */
   }
+}
+
+type DeployAdmissionIdentity = { id: string; requestHash: string };
+type DeployReleaseReceipt = DeployAdmissionIdentity & { startedAt: number; releasedAt: number };
+
+function validDeployAdmissionIdentity(value: unknown): value is DeployAdmissionIdentity {
+  if (!value || typeof value !== "object") return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.id === "string" &&
+    /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(row.id) &&
+    typeof row.requestHash === "string" &&
+    /^[a-f0-9]{64}$/.test(row.requestHash)
+  );
+}
+
+function validDeployReleaseReceipts(value: unknown): value is DeployReleaseReceipt[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 128 &&
+    new Set(value.map((row) => row?.id)).size === value.length &&
+    value.every((row) => {
+      const startedAt = row?.startedAt,
+        releasedAt = row?.releasedAt;
+      return (
+        validDeployAdmissionIdentity(row) &&
+        Number.isSafeInteger(startedAt) &&
+        startedAt >= 0 &&
+        Number.isSafeInteger(releasedAt) &&
+        releasedAt >= startedAt
+      );
+    })
+  );
+}
+
+/** Only the original living stack may qualify a lost reply. Never repeat the mutation. */
+async function beginTrackedDeployAdmission(
+  registry: Pick<
+    ResidentRegistryDO,
+    "beginDeployAdmission" | "beginDeployReconcileAdmission" | "readDeployAdmissionReceipt"
+  >,
+  origin: unknown,
+  reconcile?: { versionId: string | null; versionTimestamp: string | null },
+): Promise<DeployAdmissionIdentity | null> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(JSON.stringify([deployAdmissionOrigin(origin), reconcile ?? null])),
+  );
+  const identity = {
+    id: crypto.randomUUID(),
+    requestHash: [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join(""),
+  };
+  emitDeployAdmission({
+    phase: "admission-requested",
+    ...identity,
+    observedAt: systemClock(),
+    ...deployAdmissionOrigin(origin),
+  });
+  try {
+    const result = reconcile
+      ? await registry.beginDeployReconcileAdmission(reconcile.versionId, reconcile.versionTimestamp, identity)
+      : await registry.beginDeployAdmission(origin, identity);
+    if (result === null) return null;
+    if (result === identity.id) return identity;
+  } catch {
+    /* A committed admission can outlive its reply. */
+  }
+  const receipt = await registry.readDeployAdmissionReceipt(identity).catch(() => null);
+  if (
+    receipt?.state === "admitted" &&
+    receipt.id === identity.id &&
+    receipt.requestHash === identity.requestHash &&
+    Number.isSafeInteger(receipt.startedAt) &&
+    Number(receipt.startedAt) >= 0
+  )
+    return identity;
+  emitDeployAdmission({
+    phase: "admission-unverified",
+    ...identity,
+    observedAt: systemClock(),
+    failure: "storage-or-rpc",
+  });
+  throw new Error("deploy-admission-unverified");
+}
+
+async function endTrackedDeployAdmission(
+  registry: Pick<ResidentRegistryDO, "endDeployAdmission" | "readDeployAdmissionReceipt">,
+  identity: DeployAdmissionIdentity,
+): Promise<void> {
+  try {
+    await registry.endDeployAdmission(identity.id, identity.requestHash);
+    return;
+  } catch {
+    /* Absence alone cannot qualify the original release. */
+  }
+  const receipt = await registry.readDeployAdmissionReceipt(identity).catch(() => null);
+  if (
+    receipt?.state === "released" &&
+    receipt.id === identity.id &&
+    receipt.requestHash === identity.requestHash &&
+    Number.isSafeInteger(receipt.startedAt) &&
+    Number(receipt.startedAt) >= 0 &&
+    Number.isSafeInteger(receipt.releasedAt) &&
+    Number(receipt.releasedAt) >= Number(receipt.startedAt)
+  )
+    return;
+  emitDeployAdmission({
+    phase: "permit-release",
+    id: identity.id,
+    observedAt: systemClock(),
+    commit: "unverified",
+    failure: "storage-or-rpc",
+    nativeOutcome: "unverified",
+  });
+  throw new Error("deploy-release-unverified");
 }
 
 /** Resident-DO key (issue 1931): set when a deploy's reconcile could not
@@ -1744,11 +1861,27 @@ export class ResidentRegistryDO extends DurableObject<Env> {
   /** A durable permit closes the gap between an admitted call and the
    * resident's in-memory counters. The swap fence and permit use the same
    * registry transaction boundary. An orphaned permit refuses deployment. */
-  async beginDeployAdmission(origin?: unknown): Promise<string | null> {
+  async beginDeployAdmission(origin?: unknown, identity?: DeployAdmissionIdentity): Promise<string | null> {
+    if (identity !== undefined && !validDeployAdmissionIdentity(identity))
+      throw new Error("deploy-admission-identity-invalid");
     const admitted = await this.ctx.storage.transaction(async (txn) => {
       if (liveDrain(await txn.get(DRAIN_KEY), systemClock())?.swapFence) return null;
-      const id = crypto.randomUUID();
-      const record = { schema: 1, startedAt: systemClock(), ...deployAdmissionOrigin(origin) };
+      const id = identity?.id ?? crypto.randomUUID();
+      if (identity) {
+        const receipts = (await txn.get(DEPLOY_RELEASE_RECEIPTS_KEY)) ?? [];
+        if (
+          !validDeployReleaseReceipts(receipts) ||
+          (await txn.get(`${DEPLOY_ADMISSION_KEY_PREFIX}${id}`)) !== undefined ||
+          receipts.some((row) => row.id === id)
+        )
+          throw new Error("deploy-admission-identity-used-or-unverified");
+      }
+      const record = {
+        schema: 1,
+        startedAt: systemClock(),
+        ...deployAdmissionOrigin(origin),
+        ...(identity ? { requestHash: identity.requestHash } : {}),
+      };
       await txn.put(`${DEPLOY_ADMISSION_KEY_PREFIX}${id}`, record);
       return { id, record };
     });
@@ -1763,13 +1896,26 @@ export class ResidentRegistryDO extends DurableObject<Env> {
   async beginDeployReconcileAdmission(
     versionId: string | null,
     versionTimestamp: string | null,
+    identity?: DeployAdmissionIdentity,
   ): Promise<string | null> {
+    if (identity !== undefined && !validDeployAdmissionIdentity(identity))
+      throw new Error("deploy-admission-identity-invalid");
     const admitted = await this.ctx.storage.transaction(async (txn) => {
       const record = liveDrain(await txn.get(DRAIN_KEY), systemClock());
       if (record?.swapFence && !postUploadVersion(record, versionId, versionTimestamp)) return null;
-      const id = crypto.randomUUID();
+      const id = identity?.id ?? crypto.randomUUID();
+      if (identity) {
+        const receipts = (await txn.get(DEPLOY_RELEASE_RECEIPTS_KEY)) ?? [];
+        if (
+          !validDeployReleaseReceipts(receipts) ||
+          (await txn.get(`${DEPLOY_ADMISSION_KEY_PREFIX}${id}`)) !== undefined ||
+          receipts.some((row) => row.id === id)
+        )
+          throw new Error("deploy-admission-identity-used-or-unverified");
+      }
       const permit = {
         schema: 1,
+        ...(identity ? { requestHash: identity.requestHash } : {}),
         startedAt: systemClock(),
         ...deployAdmissionOrigin({ kind: "reconcile", component: "http", build: BUILD_ID, workerVersion: versionId }),
       };
@@ -1781,9 +1927,34 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     return admitted?.id ?? null;
   }
 
-  async endDeployAdmission(id: string): Promise<void> {
+  async endDeployAdmission(id: string, requestHash?: string): Promise<void> {
     try {
-      const deleted = await this.ctx.storage.delete(`${DEPLOY_ADMISSION_KEY_PREFIX}${id}`);
+      const deleted = await this.ctx.storage.transaction(async (txn) => {
+        const key = `${DEPLOY_ADMISSION_KEY_PREFIX}${id}`;
+        const row = await txn.get<{ schema?: number; startedAt?: number; requestHash?: string }>(key);
+        if (requestHash !== undefined) {
+          const identity = { id, requestHash };
+          if (!validDeployAdmissionIdentity(identity)) throw new Error("deploy-release-identity-invalid");
+          const receipts = (await txn.get(DEPLOY_RELEASE_RECEIPTS_KEY)) ?? [];
+          if (!validDeployReleaseReceipts(receipts)) throw new Error("deploy-release-receipts-unverified");
+          if (row === undefined) {
+            if (receipts.some((receipt) => receipt.id === id && receipt.requestHash === requestHash)) return false;
+            throw new Error("deploy-release-unverified");
+          }
+          if (
+            row?.schema !== 1 ||
+            row.requestHash !== requestHash ||
+            !Number.isSafeInteger(row.startedAt) ||
+            Number(row.startedAt) < 0
+          )
+            throw new Error("deploy-release-identity-mismatch");
+          await txn.put(DEPLOY_RELEASE_RECEIPTS_KEY, [
+            ...receipts.slice(-127),
+            { id, requestHash, startedAt: row.startedAt, releasedAt: systemClock() },
+          ]);
+        } else if (row && Object.hasOwn(row, "requestHash")) throw new Error("deploy-release-identity-required");
+        return txn.delete(key);
+      });
       emitDeployAdmission({
         phase: "permit-release",
         id,
@@ -1802,6 +1973,28 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       });
       throw error;
     }
+  }
+
+  /** Exact storage read, never a recovery or a native process observation. */
+  async readDeployAdmissionReceipt(identity: DeployAdmissionIdentity) {
+    const unknown = { state: "unknown" as const };
+    if (!validDeployAdmissionIdentity(identity)) return unknown;
+    return this.ctx.storage.transaction(async (txn) => {
+      const row = await txn.get<{ schema?: number; startedAt?: number; requestHash?: string }>(
+        `${DEPLOY_ADMISSION_KEY_PREFIX}${identity.id}`,
+      );
+      if (row !== undefined)
+        return row?.schema === 1 &&
+          row.requestHash === identity.requestHash &&
+          Number.isSafeInteger(row.startedAt) &&
+          Number(row.startedAt) >= 0
+          ? { state: "admitted" as const, ...identity, startedAt: row.startedAt }
+          : unknown;
+      const receipts = (await txn.get(DEPLOY_RELEASE_RECEIPTS_KEY)) ?? [];
+      if (!validDeployReleaseReceipts(receipts)) return unknown;
+      const receipt = receipts.find((row) => row.id === identity.id && row.requestHash === identity.requestHash);
+      return receipt ? { state: "released" as const, ...receipt, nativeOutcome: "unverified" as const } : unknown;
+    });
   }
 
   /** Annotation runs after admission. It never resurrects a released permit. */
@@ -4855,7 +5048,7 @@ export class ResidentDO extends Sandbox<Env> {
     const startedAt = systemClock();
     const trace = createStepTrace(startedAt);
     const registry = this.registry();
-    const admission = await registry.beginDeployAdmission({
+    const admission = await beginTrackedDeployAdmission(registry, {
       kind: "refresh-step",
       component: "workflow",
       sourceId: instance,
@@ -4877,11 +5070,11 @@ export class ResidentDO extends Sandbox<Env> {
     try {
       await this.ctx.storage
         .get(RESOURCE_KEY)
-        .then((resource) => registry.recordDeployAdmissionResource(admission, resource))
+        .then((resource) => registry.recordDeployAdmissionResource(admission.id, resource))
         .catch(() =>
           emitDeployAdmission({
             phase: "origin-unverified",
-            id: admission,
+            id: admission.id,
             observedAt: systemClock(),
             failure: "storage-or-rpc",
           }),
@@ -4958,7 +5151,7 @@ export class ResidentDO extends Sandbox<Env> {
       await this.recordInstanceStep(instance, step, outcome).catch((err) =>
         console.log(`refresh instance ${instance}: recording ${step} failed: ${errMsg(err)}`),
       );
-      await registry.endDeployAdmission(admission);
+      await endTrackedDeployAdmission(registry, admission);
     }
   }
 
@@ -8515,7 +8708,7 @@ export class ResidentDO extends Sandbox<Env> {
 
   private async withDeployAdmission<T>(fn: () => Promise<T>): Promise<T | ThreadErr> {
     const registry = this.registry();
-    const id = await registry.beginDeployAdmission({
+    const id = await beginTrackedDeployAdmission(registry, {
       kind: "resident-call",
       component: "resident",
       build: BUILD_ID,
@@ -8532,13 +8725,18 @@ export class ResidentDO extends Sandbox<Env> {
     try {
       await this.ctx.storage
         .get(RESOURCE_KEY)
-        .then((resource) => registry.recordDeployAdmissionResource(id, resource))
+        .then((resource) => registry.recordDeployAdmissionResource(id.id, resource))
         .catch(() =>
-          emitDeployAdmission({ phase: "origin-unverified", id, observedAt: systemClock(), failure: "storage-or-rpc" }),
+          emitDeployAdmission({
+            phase: "origin-unverified",
+            id: id.id,
+            observedAt: systemClock(),
+            failure: "storage-or-rpc",
+          }),
         );
       return await fn();
     } finally {
-      await registry.endDeployAdmission(id);
+      await endTrackedDeployAdmission(registry, id);
     }
   }
 
@@ -13157,20 +13355,18 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
  * commands; a failed registry read refuses rather than opening a gap. */
 async function withFleetAdmission(env: Env, work: () => Promise<Response>, origin?: unknown): Promise<Response> {
   const registry = registryStub(env);
-  const id = await registry
-    .beginDeployAdmission({
-      ...deployAdmissionOrigin(origin),
-      kind: "fleet-lifecycle",
-      component: "http",
-      build: BUILD_ID,
-      workerVersion: workerVersionId(env),
-    })
-    .catch(() => null);
+  const id = await beginTrackedDeployAdmission(registry, {
+    ...deployAdmissionOrigin(origin),
+    kind: "fleet-lifecycle",
+    component: "http",
+    build: BUILD_ID,
+    workerVersion: workerVersionId(env),
+  }).catch(() => null);
   if (!id) return json({ error: "deploy-fence: resident fleet admission is closed" }, 503);
   try {
     return await work();
   } finally {
-    await registry.endDeployAdmission(id);
+    await endTrackedDeployAdmission(registry, id);
   }
 }
 
@@ -13913,6 +14109,12 @@ async function handleDeployFence(env: Env): Promise<Response> {
       fenceReady: safe,
       activeAdmissions,
       admissionReadback,
+      deployDiagnostic: {
+        schema: 1,
+        producer: { build: BUILD_ID, workerVersion: versionId },
+        fenceDisposition: safe ? "retained" : "withdrawn",
+        admissionReadback: admissionReadback === null ? "unavailable" : "reported",
+      },
       residents: enriched,
     });
   } catch {
@@ -13980,7 +14182,11 @@ async function handleRecoverAdmission(env: Env, body: Record<string, unknown>): 
  *  drain, so the fleet reopens only on that container's later report. */
 async function handleReconcile(env: Env): Promise<Response> {
   const registry = registryStub(env);
-  const admission = await registry.beginDeployReconcileAdmission(workerVersionId(env), workerVersionTimestamp(env));
+  const admission = await beginTrackedDeployAdmission(
+    registry,
+    { kind: "reconcile", component: "http", build: BUILD_ID, workerVersion: workerVersionId(env) },
+    { versionId: workerVersionId(env), versionTimestamp: workerVersionTimestamp(env) },
+  );
   if (!admission) return json({ error: "deploy-fence: reconcile waits for the uploaded Worker" }, 409);
   try {
     const residents = await registry.list();
@@ -14002,7 +14208,7 @@ async function handleReconcile(env: Env): Promise<Response> {
     console.log(`[reconcile] deploy image reconcile: ${JSON.stringify(reconciled)}`);
     return json({ reconciled });
   } finally {
-    await registry.endDeployAdmission(admission);
+    await endTrackedDeployAdmission(registry, admission);
   }
 }
 
@@ -14772,7 +14978,7 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
  *  due (item 7). */
 async function runWatchdog(env: Env, parent?: TraceSpan): Promise<WatchdogSummary> {
   const registry = registryStub(env);
-  const admission = await registry.beginDeployAdmission({
+  const admission = await beginTrackedDeployAdmission(registry, {
     kind: "watchdog",
     component: parent ? "scheduler" : "http",
     traceId: parent?.traceId,
@@ -14817,7 +15023,7 @@ async function runWatchdog(env: Env, parent?: TraceSpan): Promise<WatchdogSummar
     });
     return { cap: (await registry.limits()).cap, count: residents.length, results };
   } finally {
-    await registry.endDeployAdmission(admission);
+    await endTrackedDeployAdmission(registry, admission);
   }
 }
 

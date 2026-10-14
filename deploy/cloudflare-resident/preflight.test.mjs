@@ -317,7 +317,10 @@ describe("resident deploy admission diagnostic", () => {
       row: { id, startedAt: 1000, detailUnavailable: "legacy" },
     });
     const missing = await captured({ ...payload([]).payload, activeAdmissions: 1, fenceReady: false });
-    expect(missing.diagnostic).toMatchObject({ receivedProjectionComplete: false, detailUnavailable: "not-reported" });
+    expect(missing.diagnostic).toMatchObject({
+      receivedProjectionComplete: false,
+      detailUnavailable: "producer-field-absent",
+    });
   });
 
   it("does not release old or foreign permits and states snapshot mismatch", async () => {
@@ -394,6 +397,48 @@ describe("resident deploy admission diagnostic", () => {
     expect(result.lines.join("\n")).toContain("resident-view-unavailable");
     expect(result.lines.join("\n")).not.toContain("private-token");
     expect(result.lines.join("\n")).not.toContain("/workspace/private");
+  });
+
+  it("distinguishes omitted producer metadata from a failed read without claiming upgrade", async () => {
+    const missing = await captured({ ...payload([]).payload, activeAdmissions: 1, fenceReady: false });
+    expect(missing.diagnostic).toMatchObject({
+      detailUnavailable: "producer-field-absent",
+      producer: { state: "unverified" },
+    });
+    const failed = await captured({
+      ...payload([]).payload,
+      activeAdmissions: 1,
+      fenceReady: false,
+      admissionReadback: null,
+      deployDiagnostic: {
+        schema: 1,
+        producer: { build: "a".repeat(40), workerVersion: "00000000-0000-4000-8000-000000000002" },
+        fenceDisposition: "withdrawn",
+        admissionReadback: "unavailable",
+      },
+    });
+    expect(failed.diagnostic).toMatchObject({
+      detailUnavailable: "readback-unavailable",
+      fenceDisposition: "withdrawn",
+      producer: { state: "reported", build: "a".repeat(40) },
+    });
+  });
+
+  it("names a withdrawn fence without turning that metadata into upload authority", async () => {
+    const body = refused([row]);
+    body.draining.swapFence = false;
+    body.deployDiagnostic = {
+      schema: 1,
+      producer: { build: "a".repeat(40), workerVersion: "00000000-0000-4000-8000-000000000002" },
+      fenceDisposition: "withdrawn",
+      admissionReadback: "reported",
+    };
+    const result = await captured(body);
+    expect(result.code).toBe(1);
+    expect(result.lines.join("\n")).toContain("deploy fence was withdrawn after the activity check refused upload");
+    expect(result.lines.join("\n")).not.toContain("missing or invalid");
+    body.fenceReady = true;
+    expect(decide({ ok: true, payload: body }).allow).toBe(false);
   });
 
   it("reports a closed HTTP failure without response bytes or the credential", async () => {

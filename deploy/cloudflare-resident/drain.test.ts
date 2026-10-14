@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import ts from "typescript";
 import { runInNewContext } from "node:vm";
 import { webcrypto } from "node:crypto";
+import { sanitizeResidentBody } from "../../src/execution/residentText.js";
 import { recoveryEvidenceUrl, recoveryViewsAreIdle } from "./admissionRecovery";
 import {
   DRAIN_DEFAULT_MINUTES,
@@ -32,17 +33,32 @@ describe("global deploy admission evidence", () => {
       .filter(
         (node) =>
           ts.isFunctionDeclaration(node) &&
-          ["deployAdmissionOrigin", "emitDeployAdmission", "workerVersionId"].includes(node.name?.text ?? ""),
+          [
+            "deployAdmissionOrigin",
+            "emitDeployAdmission",
+            "workerVersionId",
+            "validDeployAdmissionIdentity",
+            "validDeployReleaseReceipts",
+            "beginTrackedDeployAdmission",
+            "endTrackedDeployAdmission",
+            "workerVersionTimestamp",
+            "handleDeployFence",
+            "json",
+          ].includes(node.name?.text ?? ""),
       )
       .map((node) => node.getText(ast));
     const methods = [
       "beginDeployAdmission",
       "beginDeployReconcileAdmission",
       "endDeployAdmission",
+      "readDeployAdmissionReceipt",
       "listDeployAdmissions",
       "getDeployAdmissionReadback",
       "recordDeployAdmissionResource",
       "verifyDeployFence",
+      "activeDeployAdmissions",
+      "setDeployFence",
+      "clearDeployFence",
     ]
       .map((name) => methodOf(registry, name) ?? "")
       .join("\n");
@@ -68,29 +84,79 @@ describe("global deploy admission evidence", () => {
       delete: async (key: string) => {
         if (failDelete) throw new Error("private-delete-error");
         const deleted = rows.delete(key);
-        if (loseDeleteAck) throw new Error("private-delete-ack-error");
+
         return deleted;
       },
       list: async ({ prefix }: { prefix: string }) => new Map([...rows].filter(([key]) => key.startsWith(prefix))),
-      transaction: async <T>(fn: (store: unknown) => Promise<T>): Promise<T> => fn(storage),
+      transaction: async <T>(fn: (store: unknown) => Promise<T>): Promise<T> => {
+        const before = new Map(rows);
+        let value: T;
+        try {
+          value = await fn(storage);
+        } catch (error) {
+          rows.clear();
+          for (const [key, row] of before) rows.set(key, row);
+          throw error;
+        }
+        if (loseDeleteAck) {
+          loseDeleteAck = false;
+          throw new Error("private-delete-ack-error");
+        }
+        return value;
+      },
     };
-    const { Registry, Resident } = runInNewContext(compiled + "\n({Registry, Resident})", {
-      crypto: webcrypto,
-      systemClock: () => now,
-      liveDrain,
-      postUploadVersion,
-      deployFenceReady,
-      DRAIN_KEY: "drain",
-      DEPLOY_ADMISSION_KEY_PREFIX: "deploy:admission:",
-      BUILD_ID: "a".repeat(40),
-      RESOURCE_KEY: "resource",
-      console: { log: (line: string) => events.push(JSON.parse(line.slice("[resident-deploy-admission] ".length))) },
-    });
+    const { Registry, Resident, beginTracked, endTracked, fenceHandler } = runInNewContext(
+      compiled +
+        "\n({Registry, Resident, beginTracked: typeof beginTrackedDeployAdmission === 'function' ? beginTrackedDeployAdmission : null, endTracked: typeof endTrackedDeployAdmission === 'function' ? endTrackedDeployAdmission : null, fenceHandler: handleDeployFence})",
+      {
+        crypto: webcrypto,
+        Response,
+        sanitizeResidentBody,
+        registryStub: () => api,
+        residentStub: () => ({
+          getResidentDeployInfo: async () => ({ state: "warm", executingRuns: 0, unknownRuns: 0 }),
+        }),
+        TextEncoder,
+        Uint8Array,
+        systemClock: () => now,
+        liveDrain,
+        postUploadVersion,
+        deployFenceReady,
+        DRAIN_KEY: "drain",
+        DEPLOY_ADMISSION_KEY_PREFIX: "deploy:admission:",
+        BUILD_ID: "a".repeat(40),
+        RESOURCE_KEY: "resource",
+        DEPLOY_RELEASE_RECEIPTS_KEY: "deploy:release-receipts",
+        console: { log: (line: string) => events.push(JSON.parse(line.slice("[resident-deploy-admission] ".length))) },
+      },
+    );
     const api = new Registry();
     api.ctx = { storage };
+    api.list = async () => [{ resource: "repo:acme/api" }];
     return {
       api,
-      resident: (failure: "read" | "rpc") => {
+      fence: async (failRead = false) => {
+        rows.set("drain", {
+          since: "1970-01-01T00:00:00.000Z",
+          until: "1970-01-01T01:00:00.000Z",
+          by: "deploy",
+          reason: "release",
+        });
+        if (failRead)
+          api.getDeployAdmissionReadback = async () => {
+            throw new Error("private-read-error");
+          };
+        return (
+          await fenceHandler({
+            CF_VERSION_METADATA: { id: "00000000-0000-4000-8000-000000000002", timestamp: "1970-01-01T00:00:00.000Z" },
+          })
+        ).json();
+      },
+      beginTracked: (store: unknown = api) => beginTracked(store, origin),
+      beginReconcile: (store: unknown = api) =>
+        beginTracked(store, origin, { versionId: origin.workerVersion, versionTimestamp: "1970-01-01T00:00:02.000Z" }),
+      endTracked: (store: unknown, identity: unknown) => endTracked(store, identity),
+      resident: (failure: "read" | "rpc" | "begin-reply" | "end-reply") => {
         const instance = new Resident();
         instance.env = {};
         instance.ctx = {
@@ -102,8 +168,16 @@ describe("global deploy admission evidence", () => {
           },
         };
         instance.registry = () => ({
-          beginDeployAdmission: (origin: unknown) => api.beginDeployAdmission(origin),
-          endDeployAdmission: (id: string) => api.endDeployAdmission(id),
+          beginDeployAdmission: async (origin: unknown, identity?: unknown) => {
+            const id = await api.beginDeployAdmission(origin, identity);
+            if (failure === "begin-reply") throw new Error("lost-begin-reply");
+            return id;
+          },
+          endDeployAdmission: async (id: string, hash?: string) => {
+            await api.endDeployAdmission(id, hash);
+            if (failure === "end-reply") throw new Error("lost-end-reply");
+          },
+          readDeployAdmissionReceipt: (identity: unknown) => api.readDeployAdmissionReceipt(identity),
           recordDeployAdmissionResource: async () => {
             throw new Error("private-rpc-error");
           },
@@ -133,6 +207,272 @@ describe("global deploy admission evidence", () => {
     workerVersion: "00000000-0000-4000-8000-000000000001",
     traceId: "b".repeat(32),
   };
+
+  const identity = { id: "00000000-0000-4000-8000-000000000011", requestHash: "c".repeat(64) };
+
+  it("reads a committed begin after a lost reply without repeating admission or work", async () => {
+    const h = fixture();
+    let calls = 0,
+      work = 0;
+    const store = {
+      beginDeployAdmission: async (origin: unknown, key: unknown) => {
+        calls++;
+        await h.api.beginDeployAdmission(origin, key);
+        throw new Error("lost-begin-reply");
+      },
+      readDeployAdmissionReceipt: (key: unknown) => h.api.readDeployAdmissionReceipt(key),
+    };
+    const admitted = await h.beginTracked(store);
+    if (admitted) work++;
+    expect({ calls, work }).toEqual({ calls: 1, work: 1 });
+    expect(h.rows.get(`deploy:admission:${admitted.id}`)).toMatchObject({
+      requestHash: admitted.requestHash,
+      startedAt: 1000,
+    });
+    expect(await h.api.readDeployAdmissionReceipt(admitted)).toEqual({
+      state: "admitted",
+      id: admitted.id,
+      requestHash: admitted.requestHash,
+      startedAt: 1000,
+    });
+  });
+
+  it("recovers committed storage acknowledgements and reconcile replies through exact reads", async () => {
+    const h = fixture();
+    h.loseDeleteAck();
+    const admitted = await h.beginTracked();
+    expect(await h.api.readDeployAdmissionReceipt(admitted)).toEqual({
+      state: "admitted",
+      ...admitted,
+      startedAt: 1000,
+    });
+    h.loseDeleteAck();
+    await h.endTracked(h.api, admitted);
+    expect(await h.api.readDeployAdmissionReceipt(admitted)).toEqual({
+      state: "released",
+      ...admitted,
+      startedAt: 1000,
+      releasedAt: 1000,
+      nativeOutcome: "unverified",
+    });
+    let calls = 0;
+    const store = {
+      beginDeployReconcileAdmission: async (version: string, stamp: string, key: unknown) => {
+        calls++;
+        await h.api.beginDeployReconcileAdmission(version, stamp, key);
+        throw new Error("lost-reconcile-reply");
+      },
+      readDeployAdmissionReceipt: (key: unknown) => h.api.readDeployAdmissionReceipt(key),
+    };
+    const reconcile = await h.beginReconcile(store);
+    expect(calls).toBe(1);
+    expect(h.rows.get(`deploy:admission:${reconcile.id}`)).toMatchObject({
+      requestHash: reconcile.requestHash,
+      kind: "reconcile",
+      workerVersion: origin.workerVersion,
+    });
+  });
+
+  it.each(["begin-reply", "end-reply"] as const)(
+    "keeps original Resident work once after a lost %s",
+    async (failure) => {
+      const h = fixture();
+      let work = 0;
+      expect(
+        await h.resident(failure).withDeployAdmission(async () => {
+          work++;
+          return "original-work-completed";
+        }),
+      ).toBe("original-work-completed");
+      expect(work).toBe(1);
+      const id = h.events.find((row) => row.phase === "admission-requested")?.id;
+      expect(h.events.filter((row) => row.phase === "admitted")).toHaveLength(1);
+      expect(h.events.filter((row) => row.phase === "permit-release")).toEqual([
+        {
+          schema: 1,
+          phase: "permit-release",
+          id,
+          observedAt: 1000,
+          commit: "acknowledged",
+          nativeOutcome: "unverified",
+        },
+      ]);
+      expect(await h.api.activeDeployAdmissions()).toBe(0);
+    },
+  );
+
+  it("holds caller death debt, including foreign, legacy and expired evidence", async () => {
+    const h = fixture();
+    expect(await h.api.beginDeployAdmission(origin, identity)).toBe(identity.id);
+    h.advance();
+    h.rows.set("drain", {
+      since: "1970-01-01T00:00:00.000Z",
+      until: "1970-01-01T00:00:01.001Z",
+      by: "deploy",
+      reason: "release",
+      swapFence: true,
+    });
+    expect(await h.api.readDeployAdmissionReceipt({ ...identity, requestHash: "d".repeat(64) })).toEqual({
+      state: "unknown",
+    });
+    expect(await h.api.readDeployAdmissionReceipt(identity)).toEqual({
+      state: "admitted",
+      ...identity,
+      startedAt: 1000,
+    });
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+    await expect(h.api.endDeployAdmission(identity.id, "d".repeat(64))).rejects.toThrow();
+    await expect(h.api.endDeployAdmission(identity.id)).rejects.toThrow();
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+    h.rows.set(`deploy:admission:${identity.id}`, { startedAt: 1 });
+    expect(await h.api.readDeployAdmissionReceipt(identity)).toEqual({ state: "unknown" });
+  });
+
+  it("qualifies only an atomic matching release receipt after a lost end acknowledgement", async () => {
+    const h = fixture();
+    await h.api.beginDeployAdmission(origin, identity);
+    let calls = 0;
+    const store = {
+      endDeployAdmission: async (id: string, hash: string) => {
+        calls++;
+        await h.api.endDeployAdmission(id, hash);
+        throw new Error("lost-end-reply");
+      },
+      readDeployAdmissionReceipt: (key: unknown) => h.api.readDeployAdmissionReceipt(key),
+    };
+    await h.endTracked(store, identity);
+    expect(calls).toBe(1);
+    expect(await h.api.readDeployAdmissionReceipt(identity)).toEqual({
+      state: "released",
+      ...identity,
+      startedAt: 1000,
+      releasedAt: 1000,
+      nativeOutcome: "unverified",
+    });
+    expect(await h.api.activeDeployAdmissions()).toBe(0);
+    expect(await h.api.readDeployAdmissionReceipt({ ...identity, requestHash: "d".repeat(64) })).toEqual({
+      state: "unknown",
+    });
+  });
+
+  it("refuses uncommitted begin and failed end without repeating either mutation", async () => {
+    const h = fixture();
+    let begins = 0,
+      ends = 0;
+    const beginStore = {
+      beginDeployAdmission: async () => {
+        begins++;
+        throw new Error("uncommitted");
+      },
+      readDeployAdmissionReceipt: (key: unknown) => h.api.readDeployAdmissionReceipt(key),
+    };
+    await expect(h.beginTracked(beginStore)).rejects.toThrow("deploy-admission-unverified");
+    expect(begins).toBe(1);
+    await h.api.beginDeployAdmission(origin, identity);
+    h.failDelete();
+    const endStore = {
+      endDeployAdmission: (id: string, hash: string) => {
+        ends++;
+        return h.api.endDeployAdmission(id, hash);
+      },
+      readDeployAdmissionReceipt: (key: unknown) => h.api.readDeployAdmissionReceipt(key),
+    };
+    await expect(h.endTracked(endStore, identity)).rejects.toThrow("deploy-release-unverified");
+    expect(ends).toBe(1);
+    expect(await h.api.readDeployAdmissionReceipt(identity)).toEqual({
+      state: "admitted",
+      ...identity,
+      startedAt: 1000,
+    });
+  });
+
+  it("preserves unknown receipts after eviction, corruption and foreign cleanup", async () => {
+    const h = fixture();
+    await h.api.beginDeployAdmission(origin, identity);
+    await h.api.endDeployAdmission(identity.id, identity.requestHash);
+    for (let i = 0; i < 128; i++) {
+      const key = { id: `00000000-0000-4000-8000-${String(i + 100).padStart(12, "0")}`, requestHash: "e".repeat(64) };
+      await h.api.beginDeployAdmission(origin, key);
+      await h.api.endDeployAdmission(key.id, key.requestHash);
+    }
+    expect(h.rows.get("deploy:release-receipts")).toHaveLength(128);
+    expect(await h.api.readDeployAdmissionReceipt(identity)).toEqual({ state: "unknown" });
+    const alive = { ...identity, id: "00000000-0000-4000-8000-000000000999" };
+    await h.api.beginDeployAdmission(origin, alive);
+    h.rows.set("deploy:release-receipts", "private-corrupt-data");
+    await expect(h.api.endDeployAdmission(alive.id, alive.requestHash)).rejects.toThrow(
+      "deploy-release-receipts-unverified",
+    );
+    expect(await h.api.readDeployAdmissionReceipt(alive)).toEqual({ state: "admitted", ...alive, startedAt: 1000 });
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+  });
+
+  it("cannot credit absent storage as release or launch work from foreign or unavailable readback", async () => {
+    const h = fixture();
+    let begins = 0,
+      ends = 0;
+    const foreign = {
+      beginDeployAdmission: async () => {
+        begins++;
+        throw new Error("lost");
+      },
+      readDeployAdmissionReceipt: async () => ({ state: "admitted", ...identity, startedAt: 1000 }),
+    };
+    await expect(h.beginTracked(foreign)).rejects.toThrow("deploy-admission-unverified");
+    expect(begins).toBe(1);
+    const empty = {
+      endDeployAdmission: async () => {
+        ends++;
+        throw new Error("lost");
+      },
+      readDeployAdmissionReceipt: (key: unknown) => h.api.readDeployAdmissionReceipt(key),
+    };
+    await expect(h.endTracked(empty, identity)).rejects.toThrow("deploy-release-unverified");
+    expect(ends).toBe(1);
+    const unreadable = {
+      beginDeployAdmission: async () => {
+        throw new Error("lost");
+      },
+      readDeployAdmissionReceipt: async () => {
+        throw new Error("private-read-error");
+      },
+    };
+    await expect(h.beginTracked(unreadable)).rejects.toThrow("deploy-admission-unverified");
+  });
+
+  it("reports withdrawn fence and failed readback through the production fenced handler", async () => {
+    const h = fixture();
+    await h.api.beginDeployAdmission(origin, identity);
+    const refused = await h.fence();
+    expect(refused).toMatchObject({
+      activeAdmissions: 1,
+      fenceReady: false,
+      draining: { swapFence: false },
+      deployDiagnostic: {
+        schema: 1,
+        producer: { build: "a".repeat(40), workerVersion: "00000000-0000-4000-8000-000000000002" },
+        fenceDisposition: "withdrawn",
+        admissionReadback: "reported",
+      },
+      admissionReadback: { rows: [{ id: identity.id }], observedActiveCount: 1 },
+    });
+    const failed = await h.fence(true);
+    expect(failed).toMatchObject({
+      activeAdmissions: 1,
+      fenceReady: false,
+      admissionReadback: null,
+      deployDiagnostic: { fenceDisposition: "withdrawn", admissionReadback: "unavailable" },
+    });
+    expect(JSON.stringify(failed)).not.toContain("private-read-error");
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+    const fresh = fixture();
+    expect(await fresh.fence()).toMatchObject({
+      fenceReady: true,
+      activeAdmissions: 0,
+      draining: { swapFence: true },
+      deployDiagnostic: { fenceDisposition: "retained", admissionReadback: "reported" },
+    });
+  });
 
   it.each(["read", "rpc"] as const)(
     "reports unavailable origin after %s failure while preserving the work result",
@@ -715,7 +1055,8 @@ describe("the Worker's wiring (by scan)", () => {
       source.indexOf("async function handleResidents("),
     );
     expect(handler).toMatch(/const residents = await registry\.list\(\)/);
-    expect(handler).toMatch(/beginDeployReconcileAdmission\(workerVersionId\(env\), workerVersionTimestamp\(env\)\)/);
+    expect(handler).toContain("beginTrackedDeployAdmission(");
+    expect(handler).toContain("versionId: workerVersionId(env), versionTimestamp: workerVersionTimestamp(env)");
     expect(handler).toMatch(/residentStub\(env, record\.resource\)\.reconcileForDeploy\(record\.resource\)/);
     // A failing resident degrades to its own error row, never its neighbors'.
     expect(handler).toMatch(/Promise\.allSettled/);
