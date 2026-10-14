@@ -1,3 +1,4 @@
+import { selectedResidentMember } from "../../src/execution/residentMembers";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
@@ -25,6 +26,8 @@ describe("durable full cleanup hold", () => {
       REASON_KEY: "reason",
       DESTROY_UNCONFIRMED_KEY: "destroy",
       CLEANUP_PENDING_KEY: "cleanup",
+      RESIDENT_ID_KEY: "resident:instanceId",
+      RESIDENT_RETIRED_KEY: "member-retired",
       ResidentDownError: Error,
       SNAPSHOT_KEY: "snapshot",
       countR2Prefix: async () => prefixObjects,
@@ -228,6 +231,8 @@ describe("full rebuild backup cleanup", () => {
         SNAPSHOT_KEY: "snapshot",
         RESOURCE_KEY: "resource",
         CLEANUP_PENDING_KEY: "cleanup",
+        RESIDENT_ID_KEY: "resident:instanceId",
+        RESIDENT_RETIRED_KEY: "member-retired",
         DESTROY_UNCONFIRMED_KEY: "destroy",
         countR2Prefix: async () => 0,
         r2Prefix: (target: string) => `resident/${target}/`,
@@ -311,15 +316,18 @@ function fixture(
     destroyFails?: boolean;
     cleanupFails?: boolean;
     prefixFails?: boolean;
+    residentId?: string;
   } = {},
 ) {
   const compiled = ts.transpileModule(
-    `class Resident { ${["reset", "rebuild", "withRecreateSafeAdmin", "recreateRefusal", "confirmCleanup"].map((name) => methodOf(source, name) ?? "").join("\n")} }`,
+    `class Resident { ${["reset", "rebuild", "residentIdentity", "withRecreateSafeAdmin", "recreateRefusal", "confirmCleanup"].map((name) => methodOf(source, name) ?? "").join("\n")} }`,
     {
       compilerOptions: { target: ts.ScriptTarget.ES2022 },
     },
   ).outputText;
   const Resident = runInNewContext(`${compiled}\nResident`, {
+    RESOURCE_KEY: "resource",
+    RESIDENT_ID_KEY: "residentId",
     CLEANUP_PENDING_KEY: "cleanup",
     DESTROY_UNCONFIRMED_KEY: "destroy",
     SNAPSHOT_KEY: "snapshot",
@@ -349,7 +357,13 @@ function fixture(
   resident.hydration = null;
   resident.setResidentState = async () => {};
   resident.env = { BACKUP_BUCKET: {} };
-  resident.ctx = { storage: { get: async () => undefined, delete: async () => {} } };
+  resident.ctx = {
+    storage: {
+      get: async (key: string) =>
+        key === "resource" ? resource : key === "residentId" ? options.residentId : undefined,
+      delete: async () => {},
+    },
+  };
   resident.recordedBackupIds = async () => [];
   resident.allDepsBackups = async () => [];
   resident.teardownPlan = async () => ({
@@ -375,15 +389,25 @@ function fixture(
       errors: options.cleanupFails ? ["backup deletion failed"] : [],
     };
   };
-  resident.initResident = async (target: string, timeout: number) => {
+  const initializations: unknown[] = [];
+  resident.initResident = async (target: string, timeout: number, rebuilding?: boolean, residentId?: string) => {
+    initializations.push({ target, timeout, rebuilding, residentId });
     if (target !== resource || timeout !== 300000 || state.container !== "destroyed")
       throw new Error("incorrect restoration");
     state.provisioned = true;
   };
-  return { resident, state };
+  return { resident, state, initializations };
 }
 
 describe("full resident reset", () => {
+  it("keeps the selected replica address after full teardown clears its stored state", async () => {
+    const { resident, state, initializations } = fixture({ residentId: "resident-secondary" });
+    expect(await resident.reset(resource, "release", 300000, false)).toMatchObject({ state: "onboarding" });
+    expect(state.provisioned).toBe(true);
+    expect(initializations).toEqual([
+      { target: resource, timeout: 300000, rebuilding: false, residentId: "resident-secondary" },
+    ]);
+  });
   it("plans complete removal and recreation without changing the resident", async () => {
     const { resident, state } = fixture();
     expect(await resident.reset(resource, "release", 300000, true)).toEqual({
@@ -519,6 +543,8 @@ describe("full resident reset", () => {
       SNAPSHOT_KEY: "snapshot",
       RESOURCE_KEY: "resource",
       CLEANUP_PENDING_KEY: "cleanup",
+      RESIDENT_ID_KEY: "resident:instanceId",
+      RESIDENT_RETIRED_KEY: "member-retired",
       DESTROY_UNCONFIRMED_KEY: "destroy",
       countR2Prefix: async () => 0,
       r2Prefix: (target: string) => `resident/${target}/`,
@@ -576,6 +602,7 @@ describe("full resident reset", () => {
     };
     const { resident, state } = fixture({ destroyFails: true });
     const endpoint = runInNewContext(`${compiled}\nhandleReset`, {
+      selectedResidentMember,
       parseResource: (value: string) => ({ resource: value }),
       registryStub: () => ({ getRepository: async () => record }),
       residentStub: () => resident,

@@ -189,6 +189,22 @@ describe("repo.list", () => {
     expect(c.residents).toHaveBeenCalledTimes(2);
   });
 
+  it("shows reserved slots separately from active and pending replicas", async () => {
+    const residents = [{ resource: "repo:acme/api", defaultRef: "main", live: { state: "warm" } }];
+    for (const [count, pendingReplicas, reservedCount, expected] of [
+      [1, 4, 5, "*Resident repos* (5/5 resident slots reserved; 1 active; 4 pending):"],
+      [3, 0, undefined, "*Resident repos* (3/5 resident slots reserved; 3 active; 0 pending):"],
+      [1, 2, 5, "*Resident repos* (5/5 resident slots reserved; 1 active; 2 pending):"],
+      [1, undefined, 5, "*Resident repos* (5/5 resident slots reserved; 1 active):"],
+    ] as const) {
+      const commands = bind({
+        admin: mockClient({ residents: ok({ cap: 5, count, pendingReplicas, reservedCount, residents }) }),
+      });
+      const { text } = await say(commands, "repo list", chat("slack:UALICE"));
+      expect(text.split("\n")[0]).toBe(expected);
+    }
+  });
+
   it("issue 2044: a drained fleet leads the reply and every row says `drained — attach refused` with a pending image report named — never a bare `warm` no attach can reach", async () => {
     const drained = bind({
       admin: mockClient({
@@ -249,13 +265,14 @@ describe("repo.list", () => {
       residents: ok({
         cap: 1,
         count: 0,
+        pendingReplicas: 0,
         residents: [],
         repositories: [{ resource: "repo:acme/api", noResident: true, defaultRef: "develop", live: { state: "cold" } }],
         draining: { until: "later", reason: "deploy" },
       }),
     });
     const { text } = await say(bind({ admin: c }), "repo list", chat("slack:UALICE"));
-    expect(text).toContain("0/1 resident slots");
+    expect(text).toContain("0/1 resident slots reserved; 0 active; 0 pending; 1 cold");
     expect(text).toContain("1 cold");
     expect(text).toContain("• `acme/api` — *cold* · ref `develop`");
     expect(text).not.toContain("cold (drained");
@@ -1098,6 +1115,14 @@ describe("provisioning follow-up (item 52): repo onboard / repo rebuild settle",
 });
 
 describe("repo reconfigure", () => {
+  it("requests a warm pool without reporting pending replicas as active", async () => {
+    const c = mockClient({ reconfigure: ok({ warmReplicas: 3, activeReplicas: 1 }) });
+    const { text } = await say(bind({ admin: c }), "repo reconfigure acme/api --warm-residents 3", admin);
+    expect(c.reconfigure).toHaveBeenCalledWith({ resource: "repo:acme/api", warmReplicas: 3 });
+    expect(text).toBe(
+      "🔧 Warm residents for `acme/api`: requested 3; 1 registered. New replicas activate during deployment maintenance.",
+    );
+  });
   it("merges command overrides onto the current table (the resident replaces whole tables)", async () => {
     const c = mockClient({
       residents: ok({

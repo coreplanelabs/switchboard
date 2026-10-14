@@ -575,7 +575,8 @@ export const COMMAND_FIXTURES: Readonly<
   },
   "repo.reconfigure": {
     baseline: { ref: "main" },
-    why: "at least one change is required (a bare `repo reconfigure <slug>` is `nothing to reconfigure`)",
+    variants: { "all-options-set": { omit: ["warmResidents"] } },
+    why: "at least one change is required; warm resident count changes are separate from branch and command changes",
   },
   "memory.forget": {
     hints: { id: FIXTURE.ownMemoryRecord },

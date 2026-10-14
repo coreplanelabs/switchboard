@@ -207,13 +207,17 @@ async function onboardedSlugs(deps: RepoCommandDeps, span?: Span): Promise<strin
       ...((list.data.residents as Array<Record<string, unknown>> | undefined) ?? []),
       ...((list.data.repositories as Array<Record<string, unknown>> | undefined) ?? []),
     ];
-    return residents
-      .map((rec) =>
-        String(rec.resource ?? "")
-          .replace(/^repo:/, "")
-          .toLowerCase(),
-      )
-      .filter(Boolean);
+    return [
+      ...new Set(
+        residents
+          .map((rec) =>
+            String(rec.resource ?? "")
+              .replace(/^repo:/, "")
+              .toLowerCase(),
+          )
+          .filter(Boolean),
+      ),
+    ];
   } catch {
     return undefined;
   }
@@ -267,7 +271,9 @@ export function renderResidentList(data: Record<string, unknown>): string {
   const drained = typeof draining.until === "string";
   const lines = residents.map((rec) => {
     const live = obj(rec.live);
-    const slug = String(rec.resource ?? "").replace(/^repo:/, "");
+    const slug =
+      String(rec.resource ?? "").replace(/^repo:/, "") +
+      (typeof rec.replicaOrdinal === "number" ? ` · resident ${rec.replicaOrdinal + 1}` : "");
     const rawState = String(live.state ?? "unknown");
     const report = typeof live.imageReport === "string" ? live.imageReport : undefined;
     const state = `${rawState}${drained && rec.noResident !== true ? " (drained — attach refused)" : ""}${report === "pending" ? " · image report pending" : ""}`;
@@ -285,10 +291,21 @@ export function renderResidentList(data: Record<string, unknown>): string {
     return `• \`${slug}\` — *${state}*${reason ? ` (${reason})` : ""} · ref \`${String(rec.defaultRef ?? "?")}\`${sha}${refreshed}${disk}`;
   });
   const cold = residents.filter((rec) => rec.noResident === true).length;
-  const title =
-    cold > 0
-      ? `*Repos* (${n(data.count)}/${n(data.cap)} resident slots; ${cold} cold)`
-      : `*Resident repos* (${n(data.count)}/${n(data.cap)})`;
+  const pending =
+    typeof data.pendingReplicas === "number" && Number.isSafeInteger(data.pendingReplicas) && data.pendingReplicas >= 0
+      ? data.pendingReplicas
+      : null;
+  const reserved =
+    typeof data.reservedCount === "number" && Number.isSafeInteger(data.reservedCount) && data.reservedCount >= 0
+      ? data.reservedCount
+      : typeof data.count === "number" && Number.isSafeInteger(data.count) && data.count >= 0 && pending !== null
+        ? data.count + pending
+        : null;
+  const capacity =
+    reserved !== null
+      ? `${reserved}/${n(data.cap)} resident slots reserved; ${n(data.count)} active${pending !== null ? `; ${pending} pending` : ""}`
+      : `${n(data.count)}/${n(data.cap)}${cold > 0 ? " resident slots" : ""}`;
+  const title = `${cold > 0 ? "*Repos*" : "*Resident repos*"} (${capacity}${cold > 0 ? `; ${cold} cold` : ""})`;
   const head = drained
     ? `${title} — ⚠️ fleet drained for ${str(draining.reason)} (ends by ${str(draining.until)}): new ${cold > 0 ? "resident " : ""}runs wait at their attach`
     : `${title}:`;
@@ -575,7 +592,11 @@ function listWords(words: readonly string[]): string {
  * `SETTLE_MAX_MS`; a resident still onboarding then is reported as such (not
  * silently dropped), and every transport/404 outcome is a sentence too.
  */
-export async function settleProvisioning(deps: RepoCommandDeps, slug: string): Promise<{ ok: boolean; text: string }> {
+export async function settleProvisioning(
+  deps: RepoCommandDeps,
+  slug: string,
+  resident?: number,
+): Promise<{ ok: boolean; text: string }> {
   const sleep = deps.repo.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const resource = repoResourceId(slug);
   const hint = (reason: string): string =>
@@ -589,7 +610,7 @@ export async function settleProvisioning(deps: RepoCommandDeps, slug: string): P
       return { ok: false, text: `⚠️ Cannot follow \`${slug}\`'s provisioning: ${api.unavailable}` };
     let r: ResidentAdminResponse;
     try {
-      r = await api.status(resource);
+      r = await (resident === undefined ? api.status(resource) : api.status(resource, resident));
     } catch (err) {
       return {
         ok: false,
@@ -681,6 +702,13 @@ export const repoRebuild = defineCommand({
   enabledWhen: (caps) => caps.residents,
   args: [slugArg],
   options: dryRunOptions.extend({
+    resident: z.coerce
+      .number()
+      .int()
+      .positive()
+      .safe()
+      .optional()
+      .describe("resident number from the resident listing; required for a pool"),
     full: flag
       .optional()
       .describe(
@@ -701,10 +729,12 @@ export const repoRebuild = defineCommand({
   describe:
     "Rebuild the container and snapshot to repair provisioning; keep bindings and operation records. --full also clears all resident state and backups for a clean start or stale hold. Both discard container files and keep repo settings. --dry-run plans only (admin-gated).",
   renderChat: (output, display) =>
-    display?.verbosity === "quiet" && !(output as JsonObject).full ? quietRepoOutcome("rebuild", output) : undefined,
+    display?.verbosity === "quiet" && !(output as JsonObject).full && (output as JsonObject).resident === undefined
+      ? quietRepoOutcome("rebuild", output)
+      : undefined,
   render: (output) => {
     const o = output as JsonObject;
-    const slug = str(o.slug);
+    const slug = `${str(o.slug)}${o.resident === undefined ? "" : ` · resident ${str(o.resident)}`}`;
     if (o.full === true) {
       const removed = obj(o.wouldRemove);
       const reprovision = obj(o.reprovision);
@@ -742,14 +772,20 @@ export const repoRebuild = defineCommand({
   // A dry run changed nothing, so there is nothing to follow.
   settle: (output, { deps }) => {
     const o = output as JsonObject;
-    return o.dryRun === true ? Promise.resolve(undefined) : settleProvisioning(deps, str(o.slug));
+    return o.dryRun === true
+      ? Promise.resolve(undefined)
+      : settleProvisioning(deps, str(o.slug), typeof o.resident === "number" ? o.resident : undefined);
   },
   handler: async ({ args, options, deps, span }) => {
     const dryRun = options.dryRun ?? false;
     const full = options.full ?? false;
     const api = await adminOf(deps, span);
     const r = await call(() =>
-      full ? api.rebuild(repoResourceId(args.slug), dryRun, true) : api.rebuild(repoResourceId(args.slug), dryRun),
+      options.resident !== undefined
+        ? api.rebuild(repoResourceId(args.slug), dryRun, full, options.resident)
+        : full
+          ? api.rebuild(repoResourceId(args.slug), dryRun, true)
+          : api.rebuild(repoResourceId(args.slug), dryRun),
     );
     if (r.status !== 200 && r.status !== 202) {
       const progress =
@@ -772,7 +808,13 @@ export const repoRebuild = defineCommand({
         "unavailable",
         "Full rebuild outcome is unverified; no confirmed teardown and provisioning receipt was returned.",
       );
-    return { ...(r.data as JsonObject), slug: args.slug, dryRun, full };
+    return {
+      ...(r.data as JsonObject),
+      slug: args.slug,
+      dryRun,
+      full,
+      ...(options.resident === undefined ? {} : { resident: options.resident }),
+    };
   },
 });
 
@@ -783,6 +825,13 @@ export const repoReconfigure = defineCommand({
   enabledWhen: (caps) => caps.residents,
   args: [slugArg],
   options: z.object({
+    warmResidents: z.coerce
+      .number()
+      .int()
+      .positive()
+      .safe()
+      .optional()
+      .describe("desired warm resident count; new replicas activate during deployment maintenance"),
     ref: gitRef.optional().describe("new default branch"),
     test: command.optional().describe("new test command"),
     build: command.optional().describe("new build command"),
@@ -791,13 +840,15 @@ export const repoReconfigure = defineCommand({
   action: "repo:write",
   effect: "write",
   // Reversible by a second `repo reconfigure`.
-  annotations: { destructive: false, risk: () => "changes the resident's branch or commands" },
+  annotations: { destructive: false, risk: () => "changes the resident's branch, commands or billable warm capacity" },
   describe:
-    "Change a registered repo's default branch and/or command table (admin-gated; resident changes take effect on refresh/attach).",
+    "Change a registered repo's branch, commands or warm resident count (admin-gated; additional warm capacity is billable).",
   renderChat: (output, display) =>
     display?.verbosity === "quiet" ? quietRepoOutcome("reconfigure", output) : undefined,
   render: (output) => {
     const o = output as JsonObject;
+    if (o.warmReplicas !== undefined)
+      return `🔧 Warm residents for \`${str(o.slug)}\`: requested ${str(o.warmReplicas)}; ${str(o.activeReplicas)} registered. New replicas activate during deployment maintenance.`;
     const changed = Object.entries(obj(o.changed)).map(([k, v]) => `${k} → \`${str(v)}\``);
     return `🔧 Reconfigured \`${str(o.slug)}\`: ${changed.join(", ")}. Takes effect on the next refresh/attach.`;
   },
@@ -805,6 +856,31 @@ export const repoReconfigure = defineCommand({
     const commands: Record<string, string> = {};
     for (const key of ["test", "build", "install"] as const)
       if (options[key] !== undefined) commands[key] = options[key];
+    if (options.warmResidents !== undefined) {
+      if (Object.keys(commands).length > 0 || options.ref !== undefined)
+        throw new CommandError(
+          "invalid_input",
+          "Configure the warm resident count separately from branch and command changes.",
+        );
+      const api = await adminOf(deps, span);
+      const r = await call(() =>
+        api.reconfigure({ resource: repoResourceId(args.slug), warmReplicas: options.warmResidents }),
+      );
+      if (r.status !== 200) throw residentFailure(r);
+      const active = r.data.activeReplicas;
+      if (
+        typeof active !== "number" ||
+        !Number.isSafeInteger(active) ||
+        active < 1 ||
+        r.data.warmReplicas !== options.warmResidents
+      )
+        throw residentFailure({ status: 502, data: { error: "resident configuration answer could not be verified" } });
+      return {
+        slug: args.slug,
+        warmReplicas: options.warmResidents,
+        activeReplicas: active,
+      };
+    }
     if (Object.keys(commands).length === 0 && options.ref === undefined) {
       throw new CommandError("invalid_input", "nothing to reconfigure: pass --ref and/or --test / --build / --install");
     }

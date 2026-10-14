@@ -2,7 +2,13 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { runInNewContext } from "node:vm";
-import { stepTimeoutMs } from "../../src/execution/residentInstanceId";
+import ts from "typescript";
+import {
+  stepTimeoutMs,
+  refreshBucket,
+  refreshInstanceId,
+  refreshCycleBlocked,
+} from "../../src/execution/residentInstanceId";
 
 // The refresh cycle as a Workflow instance lives in refresh.ts, not in the
 // Worker's entry — and the Workflows binding resolves its class by name on the
@@ -26,6 +32,42 @@ function boundClassName(): string {
 }
 
 describe("the refresh module — the Workflow entrypoint leaves worker.ts, which re-exports it for the binding", () => {
+  it("creates separate refresh instances and payloads for two residents of one repository", async () => {
+    const parsed = ts.createSourceFile("refresh.ts", read("refresh.ts"), ts.ScriptTarget.ES2022, true);
+    const names = ["bucketInstanceId", "createInstance", "refreshInstanceExists", "createRefreshInstanceNow"];
+    const body = parsed.statements
+      .filter((n) => ts.isFunctionDeclaration(n) && names.includes(n.name?.text ?? ""))
+      .map((n) => n.getText(parsed).replace(/^export /, ""))
+      .join("\n");
+    const created: unknown[] = [];
+    const create = runInNewContext(
+      `${ts.transpileModule(body, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText}\ncreateRefreshInstanceNow`,
+      {
+        console,
+        systemClock: () => 0,
+        refreshBucket,
+        refreshInstanceId,
+        refreshCycleBlocked,
+      },
+    );
+    const env = {
+      RESIDENT_REFRESH: {
+        create: async (value: unknown) => {
+          created.push(value);
+        },
+      },
+    };
+    const stub = {
+      refreshRow: async () => ({ state: "warm", refreshingAt: null, instance: null }),
+      recordRefreshInstance: async () => {},
+    };
+    expect((await create(env, stub, "repo:acme/api")).action).toBe("created");
+    expect((await create(env, stub, "repo:acme/api", "resident-b")).action).toBe("created");
+    expect(created).toEqual([
+      { id: "refresh_acme-api_0", params: { resource: "repo:acme/api" } },
+      { id: "refresh__replica_resident-b_0", params: { resource: "repo:acme/api", residentId: "resident-b" } },
+    ]);
+  });
   it("the sweep timeout covers its configured page budget without platform clamping", () => {
     const shared = read("shared.ts")
       .match(/^export const (?:DEFAULT_EXEC_TIMEOUT_MS|GIT_NETWORK_TIMEOUT_MS|WORKTREE_SWEEP_BATCH_SIZE) = .*;$/gm)

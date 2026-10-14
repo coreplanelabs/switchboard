@@ -815,6 +815,7 @@ describe("makeExecutor resident selection", () => {
       );
       await makeExecutor(residentOpts(), { ...repoCtx(), ref: "fix/x", headSha: SHA, ownPr });
       expect(bodies[1]).toEqual({
+        replicaRouting: 1,
         resource: "repo:jshttp/vary",
         threadKey: "slack:CX:1.0",
         refHint: "fix/x",
@@ -1123,6 +1124,41 @@ describe("makeExecutor resident selection", () => {
       },
     };
 
+    it.each([false, true])(
+      "restores the thread's saved secondary while the primary is down (resumed: %s)",
+      async (resumed) => {
+        stubEnvs();
+        const address = { residentId: "resident-secondary", placementId: "cf5c0a88-820b-45f2-b689-4432d93fbdce" };
+        const context = repoCtx();
+        const requests: Array<{ path: string; selector: Record<string, unknown> }> = [];
+        vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+          const target = new URL(url);
+          const selector = init?.body ? JSON.parse(String(init.body)) : Object.fromEntries(target.searchParams);
+          requests.push({ path: target.pathname, selector });
+          if (target.pathname === "/attach") return Response.json({ ...attachOk.body, ...address });
+          const onSecondary =
+            selector.threadKey === context.threadKey &&
+            (!resumed || (selector.residentId === address.residentId && selector.placementId === address.placementId));
+          return Response.json({
+            state: onSecondary ? (target.pathname === "/status" ? "restoring" : "warm") : "down",
+            reason: "",
+          });
+        });
+        const selection = await makeExecutor(residentOpts(), {
+          ...context,
+          ...(resumed ? { reattach: { backend: "resident" as const, ...address } } : {}),
+        });
+        expect(selection.backend).toBe("resident");
+        expect(selection.binding).toMatchObject({ ref: "master", ...address });
+        expect(requests.map(({ path }) => path)).toEqual(["/status", "/await-restore", "/attach"]);
+        expect(requests[1].selector).toEqual({
+          resource: "repo:jshttp/vary",
+          threadKey: context.threadKey,
+          ...(resumed ? address : {}),
+        });
+      },
+    );
+
     it("the first resident probe cannot outlast the original run remainder or provision a fallback afterward", async () => {
       vi.useFakeTimers();
       try {
@@ -1162,7 +1198,7 @@ describe("makeExecutor resident selection", () => {
       expect(executor).toBeInstanceOf(ResidentExecutor);
       expect(resident).toBe(true);
       expect(calls).toEqual(["/status", "/await-restore", "/attach"]);
-      expect(bodies[1]).toEqual({ resource: "repo:jshttp/vary" });
+      expect(bodies[1]).toEqual({ resource: "repo:jshttp/vary", threadKey: repoCtx().threadKey });
       expect(note).toBe("resident · jshttp/vary · master@47c4230 · after waiting for the resident's restore");
     });
 
@@ -2485,12 +2521,16 @@ describe("makeExecutor resident selection", () => {
 
     it("a recorded resident binding attaches with reuse:true and answers the resident executor, its binding carrying the container", async () => {
       stubEnvs();
-      const { calls, bodies } = stubFetch({ body: { state: "warm", reason: "" } }, attachOk());
+      const { calls, bodies, fn } = stubFetch({ body: { state: "warm", reason: "" } }, attachOk());
       const sel = await makeExecutor(residentOpts(), { ...repoCtx(), reattach: recorded });
       expect(sel.executor).toBeInstanceOf(ResidentExecutor);
       expect(sel.resident).toBe(true);
       expect(calls).toEqual(["/status", "/attach"]);
       expect(bodies[1]).toMatchObject({ reuse: true, refHint: "master" });
+      expect(Object.fromEntries(new URL(String(fn.mock.calls[0][0])).searchParams)).toEqual({
+        resource: "repo:jshttp/vary",
+        threadKey: repoCtx().threadKey,
+      });
       expect(sel.binding?.container).toBe("vm-1");
       expect(workspaceBindingFor(sel)).toEqual({
         ...recorded,
@@ -2804,7 +2844,7 @@ describe("makeExecutor resident selection", () => {
         expect(sel.executor).toBeInstanceOf(ResidentExecutor);
         expect(sel.resident).toBe(true);
         expect(calls).toEqual(["/status", "/await-restore", "/attach"]);
-        expect(bodies[1]).toEqual({ resource: "repo:jshttp/vary" });
+        expect(bodies[1]).toEqual({ resource: "repo:jshttp/vary", threadKey: repoCtx().threadKey });
         expect(bodies[2]).toMatchObject({ reuse: true });
         expect(sel.note).toBe(
           "resident · jshttp/vary · master@1220b9c · re-attached to the run's worktree · after waiting for the resident's restore",

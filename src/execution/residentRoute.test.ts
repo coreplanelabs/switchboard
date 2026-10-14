@@ -5,7 +5,7 @@ import { residentRouteOf } from "./residentRoute.js";
 import { terminalWorkspaceSettlement } from "../core/workspaceSettlement.js";
 import type { LiveRunRow } from "../core/runLedger/types.js";
 import type { RunRecord } from "../core/runRecord.js";
-import { ResidentExecutor } from "./resident.js";
+import { DRAIN_POLL_MS, ResidentExecutor } from "./resident.js";
 
 const route = { residentId: "resident-secondary", placementId: "cf5c0a88-820b-45f2-b689-4432d93fbdce" };
 const binding = {
@@ -20,7 +20,10 @@ const binding = {
 };
 
 describe("resident runtime address", () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
 
   const options = {
     baseUrl: "https://resident.example",
@@ -36,6 +39,71 @@ describe("resident runtime address", () => {
     container: binding.container,
     ...route,
   };
+
+  it.each([false, true])(
+    "recovers a committed secondary before attach acknowledges its address (drain first: %s)",
+    async (drainFirst) => {
+      vi.useFakeTimers();
+      let placementSaved = false;
+      let drainPending = drainFirst;
+      let transientPending = true;
+      const selectors: Record<string, unknown>[] = [];
+      vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+        const target = new URL(url);
+        const selector = init?.body ? JSON.parse(String(init.body)) : Object.fromEntries(target.searchParams);
+        if (target.pathname === "/status") {
+          selectors.push(selector);
+          return Response.json({
+            state: placementSaved && selector.threadKey === options.threadKey ? "warm" : "down",
+            reason: "",
+          });
+        }
+        if (target.pathname === "/attach") {
+          if (drainPending) {
+            drainPending = false;
+            return Response.json(
+              {
+                error: "draining",
+                status: 503,
+                draining: {
+                  since: "2026-09-18T05:00:00.000Z",
+                  until: "2026-09-18T06:00:00.000Z",
+                  by: "deploy all",
+                  reason: "deploy",
+                },
+              },
+              { status: 503 },
+            );
+          }
+          placementSaved = true;
+          if (transientPending) {
+            transientPending = false;
+            return Response.json(
+              { error: "attach-failed: Network connection lost.", transient: true },
+              { status: 500 },
+            );
+          }
+          return Response.json(attachAnswer);
+        }
+        return Response.json({
+          stdout:
+            selector.residentId === route.residentId && selector.placementId === route.placementId
+              ? "secondary workspace"
+              : "wrong workspace",
+          stderr: "",
+          exitCode: 0,
+          truncated: false,
+        });
+      });
+      const opening = ResidentExecutor.open(options);
+      const outcome = opening.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(drainFirst ? DRAIN_POLL_MS : 0);
+      expect(((await outcome) as ResidentExecutor).binding).toMatchObject(route);
+      const executor = await opening;
+      expect(await executor.exec("pwd")).toBe("secondary workspace");
+      expect(selectors).toEqual([{ resource: options.resource, threadKey: options.threadKey }]);
+    },
+  );
 
   it("sends the acknowledged address on commands and later reattachments", async () => {
     const calls: Record<string, unknown>[] = [];
@@ -57,9 +125,28 @@ describe("resident runtime address", () => {
 
   it("rejects an attachment answer that changes or drops the saved address", async () => {
     let answer: Record<string, unknown> = attachAnswer;
-    vi.stubGlobal("fetch", async () => Response.json(answer));
+    let transientPending = true;
+    const probes: Record<string, string>[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      const target = new URL(url);
+      if (target.pathname === "/status") {
+        const selector = Object.fromEntries(target.searchParams);
+        probes.push(selector);
+        const exact =
+          selector.threadKey === options.threadKey &&
+          selector.residentId === route.residentId &&
+          selector.placementId === route.placementId;
+        return Response.json({ state: exact ? "warm" : "down", reason: "" });
+      }
+      if (transientPending) {
+        transientPending = false;
+        return Response.json({ error: "attach-failed: Network connection lost.", transient: true }, { status: 500 });
+      }
+      return Response.json(answer);
+    });
     const executor = await ResidentExecutor.open({ ...options, ...route });
     expect(executor.binding).toMatchObject(route);
+    expect(probes).toEqual([{ resource: options.resource, threadKey: options.threadKey, ...route }]);
     answer = { ...attachAnswer, residentId: "another-resident" };
     await expect(executor.attach()).rejects.toThrow("resident address mismatch");
     const { residentId: _id, placementId: _placement, ...legacy } = attachAnswer;

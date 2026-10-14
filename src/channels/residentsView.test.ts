@@ -230,6 +230,25 @@ describe("createResidentsViewHandler", () => {
     expect(calls).toBe(2);
   });
 
+  it("carries pending replicas into the initial seed without changing the active count", async () => {
+    const h = handler(
+      fakeClient(() =>
+        Promise.resolve(ok({ cap: 5, count: 1, pendingReplicas: 4, reservedCount: 5, residents: [WARM] })),
+      ),
+    );
+    const io = fakeReqRes("GET", "/residents");
+    h(io.req, io.res, ADMIN);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(seedOf(io.body())).toMatchObject({
+      page: "residents",
+      cap: 5,
+      count: 1,
+      pendingReplicas: 4,
+      reservedCount: 5,
+      residents: [WARM],
+    });
+  });
+
   it("carries the live deploy drain into the index seed", async () => {
     const draining = { reason: "deploy abc1234", holds: ["repo:acme/api"], holdsUntil: "2026-09-29T07:00:00Z" };
     const h = handler(fakeClient(() => Promise.resolve(ok({ ...LISTING, draining } as never))));
@@ -275,6 +294,22 @@ describe("createResidentsViewHandler", () => {
     expect(h(io.req, io.res, ADMIN)).toBe(true);
     expect(io.status).toBe(405);
     expect(io.headers.allow).toBe("GET");
+  });
+
+  it("opens the selected replica and refuses an unknown address without showing its sibling", async () => {
+    const primary = { ...WARM, residentId: WARM.resource, replicaOrdinal: 0 };
+    const secondary = { ...WARM, residentId: "resident-b", replicaOrdinal: 1, live: { state: "degraded" } };
+    const h = handler(fakeClient(async () => ok({ ...LISTING, residents: [primary, secondary] })));
+    const hit = fakeReqRes("GET", "/residents/jshttp/vary?resident=resident-b");
+    h(hit.req, hit.res, ADMIN);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(hit.status).toBe(200);
+    expect((seedOf(hit.body()) as ResidentDetailSeed).record).toEqual(secondary);
+    const miss = fakeReqRes("GET", "/residents/jshttp/vary?resident=unknown");
+    h(miss.req, miss.res, ADMIN);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(miss.status).toBe(404);
+    expect(miss.body()).toContain("not onboarded");
   });
 
   it("503s with a plain explanation when the process has no residents (the null admin client carries the reason)", async () => {
@@ -470,7 +505,7 @@ describe("createResidentsViewHandler — the runs on residents and the live feed
     const h = handler(
       fakeClient(() => {
         reads++;
-        return Promise.resolve(ok(LISTING as never));
+        return Promise.resolve(ok({ ...LISTING, pendingReplicas: 3, reservedCount: 5 }));
       }),
       undefined,
       f.registry,
@@ -513,6 +548,8 @@ describe("createResidentsViewHandler — the runs on residents and the live feed
       type: "residents",
       cap: 5,
       count: 2,
+      pendingReplicas: 3,
+      reservedCount: 5,
       residents: [WARM, DOWN],
       repositories: [COLD],
     });

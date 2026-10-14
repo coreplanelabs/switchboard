@@ -6,6 +6,24 @@ const row = { resource: "repo:acme/api", live: { imageReport: "current" } };
 const ready = { draining: null, count: 1, residents: [row] };
 
 describe("resident readiness evidence", () => {
+  it("checks each physical replica when several members share one repository", () => {
+    const members = [row, { ...row, residentId: "resident-2" }];
+    expect(
+      reconciledResources({
+        status: 200,
+        body: { reconciled: members.map((r) => ({ ...r, result: "current", verified: true })) },
+      }),
+    ).toEqual([row.resource, "resident-2"]);
+    expect(
+      residentRegistryProblem({ status: 200, body: { draining: null, count: 2, residents: members } }, [
+        row.resource,
+        "resident-2",
+      ]),
+    ).toBeUndefined();
+    expect(residentRegistryProblem({ status: 200, body: ready }, [row.resource, "resident-2"])).toBe(
+      "resident-2: missing from registry readback",
+    );
+  });
   it("requires exact healthy Worker identity, not a short or missing commit", () => {
     expect(residentWorkerProblem({ status: 200, body: { ok: true, build: { commit: HEAD } } }, HEAD)).toBeUndefined();
     for (const commit of [undefined, "unknown", HEAD.slice(0, 7), "b".repeat(40)])
@@ -26,6 +44,8 @@ describe("resident readiness evidence", () => {
     { ...ready, draining: undefined },
     { ...ready, draining: { holds: [row.resource] } },
     { ...ready, count: 2 },
+    { ...ready, pendingReplicas: 1 },
+    { ...ready, residents: [{ ...row, resource: "", residentId: "resident-b" }] },
     { ...ready, count: 2, residents: [row, row] },
     { ...ready, residents: [{ live: row.live }] },
     { ...ready, residents: [{ ...row, live: { imageReport: "pending" } }] },

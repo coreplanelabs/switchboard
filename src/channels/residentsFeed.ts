@@ -90,6 +90,8 @@ export function serveResidentsFeed(
             type: "residents",
             cap: r.cap,
             count: r.count,
+            pendingReplicas: r.pendingReplicas,
+            reservedCount: r.reservedCount,
             draining: r.draining,
             residents: r.residents,
             repositories: r.repositories,

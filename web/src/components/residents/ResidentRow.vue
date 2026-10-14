@@ -23,6 +23,8 @@ import {
   residentImageReport,
   residentLive,
   residentSlug,
+  residentLabel,
+  residentDetailHref,
   residentStateTone,
   residentThreads,
   str,
@@ -65,14 +67,14 @@ function onToggle(ev: Event): void {
 }
 
 const slug = computed(() => residentSlug(props.record));
-const display = computed(() => slug.value || str(props.record.resource) || "?");
+const display = computed(() => residentLabel(props.record));
 const live = computed(() => residentLive(props.record));
 const cold = computed(() => props.record.noResident === true);
 const imageReport = computed(() => residentImageReport(props.record));
 const tone = computed(() =>
   live.value.state === "warm" && imageReport.value === "pending" ? "amber" : residentStateTone(live.value.state),
 );
-const href = computed(() => (!cold.value && RESIDENT_SLUG_RE.test(slug.value) ? `/residents/${slug.value}` : null));
+const href = computed(() => residentDetailHref(props.record));
 const ghRepo = computed(() => (RESIDENT_SLUG_RE.test(slug.value) ? `https://github.com/${slug.value}` : undefined));
 const commitHref = (sha: string): string | undefined =>
   ghRepo.value && /^[0-9a-f]{7,40}$/.test(sha) ? `${ghRepo.value}/commit/${sha}` : undefined;

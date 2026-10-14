@@ -78,7 +78,7 @@ Every registered command has an HTTP twin behind the same dashboard gate, plus a
 | `/api/repo.workload` | `GET`, `POST` | `repo:read` | Read the primary resident's workload count, owner records and missing evidence. Does not change or release work. |
 | `/api/repo.onboard` | `POST` | `repo:write` | Register a repo, optionally without a resident (--no-resident); resident provisioning is billable and admin-gated. |
 | `/api/repo.offboard` | `POST` | `repo:write` | Remove a repo registration and tear down its resident when present (admin-gated; --dry-run plans only). |
-| `/api/repo.reconfigure` | `POST` | `repo:write` | Change a registered repo's default branch and/or command table (admin-gated; resident changes take effect on refresh/attach). |
+| `/api/repo.reconfigure` | `POST` | `repo:write` | Change a registered repo's branch, commands or warm resident count (admin-gated; additional warm capacity is billable). |
 | `/api/repo.rebuild` | `POST` | `repo:write` | Rebuild the container and snapshot to repair provisioning; keep bindings and operation records. --full also clears all resident state and backups for a clean start or stale hold. Both discard container files and keep repo settings. --dry-run plans only (admin-gated). |
 | `/api/repo.test` | `POST` | `repo:exec` | Executes the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch). |
 | `/api/repo.build` | `POST` | `repo:exec` | Executes the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch). |

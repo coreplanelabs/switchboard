@@ -1049,10 +1049,14 @@ const RESIDENTS = {
     { resource: "repo:acme/infrastructure", noResident: true, defaultRef: "main", live: { state: "cold" } },
   ],
   cap: 6,
-  count: 2,
+  count: 3,
+  reservedCount: 4,
+  pendingReplicas: 1,
   residents: [
     {
       resource: "repo:acme/web",
+      residentId: "repo:acme/web",
+      replicaOrdinal: 0,
       commands: { install: "npm ci", build: "npm run build", test: "npm test" },
       effects: { test: "readonly" },
       defaultRef: "main",
@@ -1120,6 +1124,20 @@ const RESIDENTS = {
       },
     },
     {
+      resource: "repo:acme/web",
+      residentId: "resident-web-2",
+      replicaOrdinal: 1,
+      defaultRef: "main",
+      live: {
+        state: "warm",
+        imageReport: "current",
+        reason: "",
+        poolUsersSpent: 1,
+        uidAllocation: "dynamic",
+        threads: [{ threadKey: "mcp:review-second", ref: "fix/cache", user: "worker1", evicted: false }],
+      },
+    },
+    {
       resource: "repo:acme/api",
       commands: { test: "npm test" },
       defaultRef: "main",
@@ -1142,6 +1160,16 @@ const RESIDENT_RUNS: RunIndexRowSeed[] = [
     sourceUrl: "https://example.slack.com/archives/C1/p1787954209398379",
     startedAt: NOW - 7 * 60_000 - 40_000,
     eventCount: 42,
+  }),
+  row({
+    id: "replica-review",
+    token: "tok-replica-review",
+    label: "review · acme/web · Check cache isolation",
+    repo: "acme/web",
+    threadKey: "mcp:review-second",
+    activity: "$ npm test -- cache",
+    startedAt: NOW - 3 * 60_000,
+    eventCount: 8,
   }),
 ];
 
@@ -2687,8 +2715,16 @@ function page(
     return { title: "Run not found", seed: { page: "runNotFound", retentionDays: 30 }, status: 404 };
   if (pathname === "/residents")
     return { title: "(1) Repositories", seed: { page: "residents", ...RESIDENTS, now: NOW, runs: RESIDENT_RUNS } };
-  if (pathname.startsWith("/residents/"))
-    return { title: "acme/web", seed: { page: "resident", slug: "acme/web", record: RESIDENTS.residents[0] } };
+  if (pathname.startsWith("/residents/")) {
+    const member = new URLSearchParams(search).get("resident");
+    const record = RESIDENTS.residents.find(
+      (r) =>
+        r.resource === `repo:${pathname.slice("/residents/".length)}` && (member === null || r.residentId === member),
+    );
+    return record
+      ? { title: "Resident", seed: { page: "resident", slug: record.resource.slice(5), record } }
+      : { title: "Resident not found", seed: { page: "runNotFound", retentionDays: 30 }, status: 404 };
+  }
   if (pathname === "/plane") {
     // The plane's table over the index rows (docs/reference/specs/orchestration-plane.md): one
     // instance with a waiting unit and a merge-ready unit whose pull request is still open.

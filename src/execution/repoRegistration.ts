@@ -1,7 +1,11 @@
+import { reservedResidentCount, type ResidentPool } from "./residentMembers.js";
+
 /** Registration is durable metadata. Only entries with a resident spend fleet capacity. */
 export interface RepositoryRegistration {
   resource: string;
   noResident?: boolean;
+  pool?: ResidentPool;
+  offboarding?: true;
 }
 
 export const REPOSITORY_KEY_PREFIX = "resident:";
@@ -26,12 +30,12 @@ export async function registerRepository<T extends RepositoryRegistration>(
   const key = repositoryKey(record.resource);
   if (await storage.get(key)) return { ok: false, status: 409, error: `${record.resource} is already onboarded` };
   if (record.noResident !== true) {
-    const existing = residentRecords([...(await storage.list({ prefix: REPOSITORY_KEY_PREFIX })).values()]);
-    if (existing.length >= cap)
+    const existing = reservedResidentCount([...(await storage.list({ prefix: REPOSITORY_KEY_PREFIX })).values()]);
+    if (existing >= cap)
       return {
         ok: false,
         status: 429,
-        error: `resident cap reached (${existing.length}/${cap}); offboard a resident first, or onboard with evictColdest:true to make room`,
+        error: `resident cap reached (${existing}/${cap}); offboard a resident first, or onboard with evictColdest:true to make room`,
       };
   }
   await storage.put(key, record);

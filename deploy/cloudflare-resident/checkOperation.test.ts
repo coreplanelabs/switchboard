@@ -848,6 +848,7 @@ function inspectionHttpFixture(reads: unknown[], data = fixture()) {
     checkSourceIdentityHash,
     residentRouteOf,
     sameResidentRoute,
+    registryStub: () => ({ readThreadPlacement: async () => undefined }),
     RecordedCheckOperation,
     RUN_STORE_KEY,
     RUN_STORE_TIMEOUT_MS,

@@ -592,6 +592,80 @@ describe("resident deployment readiness", () => {
 });
 
 describe("resident application target", () => {
+  it.each([
+    { status: 500, body: { ...currentRegistry, pendingReplicas: 1 } },
+    {
+      status: 200,
+      body: {
+        ...currentRegistry,
+        pendingReplicas: 1,
+        count: 2,
+        residents: [currentRegistry.residents[0], currentRegistry.residents[0]],
+      },
+    },
+    {
+      status: 200,
+      body: {
+        ...currentRegistry,
+        pendingReplicas: 1,
+        residents: [{ resource: "repo:acme/api", live: { error: "read failed" } }],
+      },
+    },
+    { status: 200, body: { ...currentRegistry, pendingReplicas: 1.5 } },
+  ])("pending activation cannot bypass failed registry evidence: %j", async (registry) => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
+    h.deps.readAppState = async () => app;
+    const read = h.deps.readHealth;
+    h.deps.readHealth = async (url, bearer, timeoutMs) =>
+      url.endsWith("/residents") ? registry : read(url, bearer, timeoutMs);
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result).toMatchObject({ ok: false });
+    expect(h.calls.map((c) => c.args[0])).toEqual(["https://switchboard-resident.example.test/drain", undefined]);
+  });
+  it("reconciles pending pool members even when the uploaded application is unchanged", async () => {
+    const member = { resource: "repo:acme/api", residentId: "resident-b", live: { imageReport: "current" } };
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [
+      drained,
+      {
+        status: 200,
+        body: {
+          reconciled: [
+            { resource: "repo:acme/api", result: "current", verified: true },
+            { ...member, result: "current", verified: true },
+          ],
+        },
+      },
+      lifted,
+    ]);
+    h.deps.readAppState = async () => app;
+    const read = h.deps.readHealth;
+    let listings = 0;
+    h.deps.readHealth = async (url, bearer, timeoutMs) =>
+      url.endsWith("/residents")
+        ? {
+            status: 200,
+            body:
+              listings++ === 0
+                ? { ...currentRegistry, pendingReplicas: 1 }
+                : {
+                    ...currentRegistry,
+                    count: 2,
+                    pendingReplicas: 0,
+                    residents: [...currentRegistry.residents, member],
+                  },
+          }
+        : read(url, bearer, timeoutMs);
+    expect(await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0))).toMatchObject({
+      ok: true,
+      live: "live",
+    });
+    expect(h.calls.map((c) => c.args[0])).toEqual([
+      "https://switchboard-resident.example.test/drain",
+      undefined,
+      "https://switchboard-resident.example.test/reconcile",
+      "https://switchboard-resident.example.test/undrain",
+    ]);
+  });
   it("unchanged named application skips image reconcile while retaining terminal workspaces", async () => {
     const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, lifted]);
     const reads: string[] = [];

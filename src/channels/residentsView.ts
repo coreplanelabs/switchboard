@@ -131,7 +131,17 @@ async function readListing(client: ResidentAdminClient): Promise<ListingResult> 
   }
   const residents = Array.isArray(r.data.residents) ? (r.data.residents as ResidentRecordView[]) : [];
   const repositories = Array.isArray(r.data.repositories) ? (r.data.repositories as ResidentRecordView[]) : [];
-  return { listing: { cap: r.data.cap, count: r.data.count, draining: r.data.draining, residents, repositories } };
+  return {
+    listing: {
+      cap: r.data.cap,
+      count: r.data.count,
+      pendingReplicas: r.data.pendingReplicas,
+      reservedCount: r.data.reservedCount,
+      draining: r.data.draining,
+      residents,
+      repositories,
+    },
+  };
 }
 
 /**
@@ -222,6 +232,8 @@ export function createResidentsViewHandler(
           page: "residents",
           cap: listing.cap,
           count: listing.count,
+          pendingReplicas: listing.pendingReplicas,
+          reservedCount: listing.reservedCount,
           draining: listing.draining,
           residents: listing.residents,
           repositories: listing.repositories,
@@ -232,7 +244,10 @@ export function createResidentsViewHandler(
         finish(200);
         return;
       }
-      const record = listing.residents.find((x) => residentSlug(x) === route.slug);
+      const member = url.searchParams.get("resident");
+      const record = listing.residents.find(
+        (x) => residentSlug(x) === route.slug && (member === null || x.residentId === member),
+      );
       if (!record) {
         plainEnd(404, `${route.slug} is not onboarded as a resident`);
         return;

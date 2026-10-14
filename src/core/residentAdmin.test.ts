@@ -60,6 +60,26 @@ describe("parseSlug / validRef / repoResourceId", () => {
 });
 
 describe("makeResidentAdminClient (real fetch client)", () => {
+  it("uses dedicated pool and selected-member routes that old Workers cannot silently ignore", async () => {
+    const { calls } = stubFetch(
+      { body: { warmReplicas: 3, activeReplicas: 1 } },
+      { body: { state: "onboarding" } },
+      { body: { state: "warm" } },
+    );
+    const client = makeResidentAdminClient("https://resident.example", "operator");
+    expect(await client.reconfigure({ resource: "repo:acme/api", warmReplicas: 3 })).toEqual({
+      status: 200,
+      data: { warmReplicas: 3, activeReplicas: 1 },
+    });
+    expect(await client.rebuild("repo:acme/api", false, true, 2)).toEqual({
+      status: 200,
+      data: { state: "onboarding" },
+    });
+    expect(await client.status("repo:acme/api", 2)).toEqual({ status: 200, data: { state: "warm" } });
+    expect(calls.map((c) => new URL(c.url).pathname)).toEqual(["/replicas", "/replica-reset", "/replica-status"]);
+    expect(JSON.parse(String(calls[1].init.body))).toEqual({ resource: "repo:acme/api", resident: 2 });
+    expect(new URL(calls[2].url).searchParams.get("resident")).toBe("2");
+  });
   function stubFetch(...responses: Array<{ status?: number; body?: unknown; reject?: string }>) {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const fn = vi.fn(async (url: unknown, init?: RequestInit) => {
