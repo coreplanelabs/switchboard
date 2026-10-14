@@ -120,6 +120,8 @@ commands:
   runs get             — One run's record and cost in dollars per model (or unpriced); \`--include messages\` adds events with free text wrapped as untrusted content; \`--include audience\` adds a structural refusal diagnostic when recorded.
   runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
   runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
+  runs check           — Inspect an original recorded check without running it again; saved output is wrapped as untrusted content.
+  runs settlecheck     — Retire one original check after its run finishes, only when saved proof verifies that the original process ended.
   runs stop            — Stop your own live run, or another run with operator permission (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.
   runs unit            — A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read.
   runs children        — The runs one run spawned — a conductor's children, live and finished — oldest started first.
@@ -218,6 +220,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "repo.test",
   "review.abridge",
   "review.status",
+  "runs.check",
   "runs.children",
   "runs.events",
   "runs.findings",
@@ -225,6 +228,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "runs.get",
   "runs.list",
   "runs.search",
+  "runs.settlecheck",
   "runs.stop",
   "runs.unit",
   "schedule.list",
@@ -279,6 +283,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "repo_test",
   "review_abridge",
   "review_status",
+  "runs_check",
   "runs_children",
   "runs_events",
   "runs_findings",
@@ -286,6 +291,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "runs_get",
   "runs_list",
   "runs_search",
+  "runs_settlecheck",
   "runs_stop",
   "runs_unit",
   "schedule_list",
@@ -433,6 +439,8 @@ commands:
   runs get             — One run's record and cost in dollars per model (or unpriced); \`--include messages\` adds events with free text wrapped as untrusted content; \`--include audience\` adds a structural refusal diagnostic when recorded.
   runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
   runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
+  runs check           — Inspect an original recorded check without running it again; saved output is wrapped as untrusted content.
+  runs settlecheck     — Retire one original check after its run finishes, only when saved proof verifies that the original process ended.
   runs stop            — Stop your own live run, or another run with operator permission (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.
   runs unit            — A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read.
   runs children        — The runs one run spawned — a conductor's children, live and finished — oldest started first.
@@ -508,6 +516,7 @@ exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> rout
   "pulls.rebase",
   "repo.build",
   "repo.test",
+  "runs.check",
   "runs.children",
   "runs.events",
   "runs.findings",
@@ -515,6 +524,7 @@ exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> rout
   "runs.get",
   "runs.list",
   "runs.search",
+  "runs.settlecheck",
   "runs.stop",
   "runs.unit",
   "status.show",
@@ -557,6 +567,7 @@ exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
   "pulls_rebase",
   "repo_build",
   "repo_test",
+  "runs_check",
   "runs_children",
   "runs_events",
   "runs_findings",
@@ -564,6 +575,7 @@ exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
   "runs_get",
   "runs_list",
   "runs_search",
+  "runs_settlecheck",
   "runs_stop",
   "runs_unit",
   "status_show",
@@ -694,6 +706,8 @@ commands:
   runs get             — One run's record and cost in dollars per model (or unpriced); \`--include messages\` adds events with free text wrapped as untrusted content; \`--include audience\` adds a structural refusal diagnostic when recorded.
   runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
   runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
+  runs check           — Inspect an original recorded check without running it again; saved output is wrapped as untrusted content.
+  runs settlecheck     — Retire one original check after its run finishes, only when saved proof verifies that the original process ended.
   runs stop            — Stop your own live run, or another run with operator permission (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.
   runs unit            — A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read.
   runs children        — The runs one run spawned — a conductor's children, live and finished — oldest started first.
@@ -740,12 +754,14 @@ exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes 
   "providers.check",
   "repo.build",
   "repo.test",
+  "runs.check",
   "runs.children",
   "runs.events",
   "runs.friction",
   "runs.get",
   "runs.list",
   "runs.search",
+  "runs.settlecheck",
   "runs.stop",
   "runs.unit",
   "status.show",
@@ -774,12 +790,14 @@ exports[`capability surfaces — minimal > MCP tools/list names 1`] = `
   "providers_check",
   "repo_build",
   "repo_test",
+  "runs_check",
   "runs_children",
   "runs_events",
   "runs_friction",
   "runs_get",
   "runs_list",
   "runs_search",
+  "runs_settlecheck",
   "runs_stop",
   "runs_unit",
   "status_show",

@@ -2348,7 +2348,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   const canRecordReview =
     ledgerRun?.tracked() === true &&
     commandRouteForLaunch(agent.name, profile.identity, repoCtx.repo, currentCheckout) === "hosted-review";
-  const reviewOwner = canRecordReview ? await originalPublicationOwner().catch(() => undefined) : undefined;
+  // Request-only restarts have no resume context, but their same-ID claim
+  // restores canonical check receipts. Read those before exposing a producer;
+  // an unreadable owner must never become an empty history that permits replay.
+  const checkSourceOwner =
+    checkOwner && (agent.name === "coding" || canRecordReview)
+      ? await originalPublicationOwner().catch(() => undefined)
+      : undefined;
+  const reviewOwner = canRecordReview ? checkSourceOwner : undefined;
   const reviewCheckReady =
     canRecordReview &&
     reviewOwner?.meta.agent === "review" &&
@@ -2373,7 +2380,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     : canRecordReview
       ? ("hosted-review" as const)
       : undefined;
-  const checkExecution =
+  const checkProducer =
     checkOwner &&
     ((agent.name === "coding" && profile.identity === "write") ||
       (reviewCheckReady && commandPolicy === "hosted-review"))
@@ -2382,7 +2389,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           workspace: () => currentCheckout,
           temporaryDirectory: () =>
             lastFacts?.workspaceScratch === true && lastFacts.root ? `${lastFacts.root}/scratch` : undefined,
-          recordingAvailable: ledgerRun?.tracked() === true,
+          recordingAvailable: ledgerRun?.tracked() === true && checkSourceOwner !== undefined,
           authorizeCommand: (command) => {
             const rules = {
               identity: profile.identity,
@@ -2398,7 +2405,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             );
           },
           owner: checkOwner,
-          previous: ctx.resume?.row.state.checkExecutions,
+          previous: checkSourceOwner?.state.checkExecutions,
           save: async (state) =>
             ledgerRun?.tracked() === true && (await ledgerRun.setStateAndFlush({ checkExecutions: state })),
           remainingMs: () => run.control.remainingMs() ?? 0,
@@ -2406,6 +2413,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           clock,
         })
       : undefined;
+  // Missing tracked history is an unknown original operation, not permission
+  // to fall back to an unrecorded shell command.
+  const checkExecution =
+    checkProducer && ledgerRun?.tracked() === true && checkSourceOwner === undefined
+      ? { run: async () => ({ kind: "unavailable", reason: "reconciliation_required" }) as const }
+      : checkProducer;
   const reviewHistory: ReviewHistoryContext | undefined =
     isPrReview && repoCtx.repo && repoCtx.pr !== undefined
       ? { target: { repo: repoCtx.repo, number: repoCtx.pr } }

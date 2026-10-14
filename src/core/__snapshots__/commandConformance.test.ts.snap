@@ -1643,6 +1643,40 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "required": true,
         "type": "string",
       },
+      {
+        "name": "call",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "read",
+    "id": "runs.check",
+    "options": [
+      {
+        "name": "phase",
+        "required": true,
+        "type": "enum",
+        "values": [
+          "metadata",
+          "command",
+        ],
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "runs:read",
+    "args": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
     ],
     "effect": "read",
     "id": "runs.children",
@@ -1855,6 +1889,40 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "name": "limit",
         "required": false,
         "type": "integer",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "runs:write",
+    "args": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+      {
+        "name": "call",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "runs.settlecheck",
+    "options": [
+      {
+        "name": "phase",
+        "required": true,
+        "type": "enum",
+        "values": [
+          "metadata",
+          "command",
+        ],
       },
     ],
     "resource": "command",

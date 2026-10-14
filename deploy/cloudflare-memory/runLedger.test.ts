@@ -1,3 +1,5 @@
+import { checkStateFixture } from "../../src/core/testing/checkState.ts";
+import type { CheckExecutionState } from "../../src/core/checkExecutionTypes.ts";
 import { cancellationRecordMatches } from "../../src/core/runLedger/cancellation.ts";
 import { isRunRecord } from "../../src/core/runRecord.ts";
 import { reclaimedRunRecord } from "../../src/core/dispatch/record.ts";
@@ -13020,5 +13022,566 @@ describe("append rejection diagnostics", () => {
     expect(response.status).toBe(401);
     expect(response.headers.get(STORAGE_FAILURE_DIAGNOSTIC_HEADER)).toBeNull();
     expect(await response.json()).toEqual({ error: "unauthorized" });
+  });
+});
+
+describe("cancelled check terminal custody in real SQLite", () => {
+  const id = "cancelled-check",
+    thread = "slack:private:cancelled-check";
+  const owner = { runId: id, requester: "slack:UALICE", threadKey: thread, repo: "fixture/repo" };
+  const selector = { runId: id, callId: "call-1", phase: "command" as const };
+  async function prepared(checks: unknown) {
+    const key = storeKey();
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, id, thread, "g1", {
+            meta: {
+              agent: "review",
+              userId: owner.requester,
+              channelId: "slack:private",
+              channelVisibility: "private",
+              threadKey: thread,
+              repo: owner.repo,
+              selection: "resident",
+            },
+            state: { checkExecutions: checks },
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(await client.requestStop(id, "hard")).toMatchObject({ ok: true });
+    const stop = await client.prepareCancellation(id, { kind: "chat", id: "slack:operator" });
+    if (!stop.ok) throw new Error("cancellation not prepared");
+    const ending = reclaimedRunRecord({ row: stop.row, events: [], status: "stopped_hard", finishedAt: Date.now() });
+    ending.cancellation = {
+      version: 1,
+      actor: stop.cancellation.actor,
+      cancellation: stop.cancellation,
+      disposition: "processes-stopped",
+    };
+    return { key, client, cancellation: stop.cancellation, ending };
+  }
+  it("keeps the original unknown check as a sealed private source after cancellation", async () => {
+    const checks = await checkStateFixture(owner, { unknown: true });
+    const { client, cancellation, ending } = await prepared(checks);
+    expect(await client.finishCancellation(cancellation, ending)).toEqual({ ok: true, stored: true });
+    expect(await client.readCheckSource(selector)).toMatchObject({
+      kind: "source",
+      source: {
+        state: "terminal",
+        resource: { channelVisibility: "private", channelId: "slack:private" },
+        operation: checks.receipts[0].checkOperation,
+      },
+    });
+    expect(await client.listLive()).toEqual([]);
+    expect(await client.finishCancellation(cancellation, ending)).toEqual({ ok: true, stored: true });
+  });
+  it.each(["malformed", "oversized"] as const)(
+    "refuses %s check evidence without deleting live custody",
+    async (fault) => {
+      let checks: unknown = { version: 1, receipts: [{ callId: "preserve" }] };
+      if (fault === "oversized") {
+        let valid: CheckExecutionState | undefined;
+        for (let index = 0; index < 31; index++)
+          valid = await checkStateFixture(owner, {
+            initial: valid,
+            callId: `call-${index + 1}`,
+            output: "x".repeat(4000),
+            stderr: "y".repeat(4000),
+          });
+        checks = await checkStateFixture(owner, { initial: valid, callId: "call-32", unknown: true });
+      }
+      const { key, client, cancellation, ending } = await prepared(checks);
+      if (fault === "oversized") {
+        ending.events = [
+          {
+            type: "tool_result",
+            tool: "fixture",
+            ok: true,
+            summary: "saved result",
+            output: "é".repeat(680000),
+            seq: 1,
+          },
+        ];
+        expect(new TextEncoder().encode(JSON.stringify(ending)).byteLength).toBeLessThan(MAX_RECORD_BYTES);
+      }
+      if (fault === "oversized") {
+        await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (ledger) => {
+          await expect(ledger.finishCancellation(cancellation, ending)).rejects.toThrow(
+            "check evidence exceeds record byte limit",
+          );
+        });
+      } else {
+        expect((await post("/runs/cancellation/finish", { storeKey: key, cancellation, record: ending })).status).toBe(
+          500,
+        );
+      }
+      expect((await client.listLive())[0]).toMatchObject({ runId: id, state: { checkExecutions: checks } });
+      expect((await post("/runs/get", { storeKey: key, id })).data).toEqual({ record: null });
+    },
+  );
+});
+
+describe.each(["sealed", "restart"] as const)("archived check claim authority in real SQLite: %s", (stage) => {
+  const id = "private-archive-check",
+    thread = "slack:private:archive-check";
+  const owner = { runId: id, requester: "slack:UALICE", threadKey: thread, repo: "fixture/repo" };
+  const selector = { runId: id, callId: "call-1", phase: "command" as const };
+  const meta = {
+    agent: "review",
+    userId: owner.requester,
+    channelId: "slack:private",
+    channelVisibility: "private",
+    threadKey: thread,
+    repo: owner.repo,
+  };
+  async function archived(unknown = false) {
+    const key = storeKey();
+    const checks = await checkStateFixture(owner, { unknown, output: "original private output" });
+    expect(
+      (await post("/runs/claim", claimBody(key, id, thread, "g1", { meta, state: { checkExecutions: checks } })))
+        .status,
+    ).toBe(200);
+    expect(
+      (
+        await post("/runs/finish", {
+          storeKey: key,
+          runId: id,
+          gen: "g1",
+          record: {
+            ...record(id, thread),
+            ...meta,
+            ...(stage === "restart" ? { restarting: true, restartUntil: Date.now() + 60000 } : {}),
+          },
+        })
+      ).status,
+    ).toBe(200);
+    return { key, checks };
+  }
+  const archiveBytes = (key: string) =>
+    runInDurableObject(
+      env.RUNS.get(env.RUNS.idFromName(key)),
+      async (_instance, state) =>
+        state.storage.sql
+          .exec<{ work_evidence_json: string }>("SELECT work_evidence_json FROM runs WHERE run_id = ?", id)
+          .one().work_evidence_json,
+    );
+  it.each([
+    { field: "channelId", unknown: false },
+    { field: "channelId", unknown: true },
+    { field: "channelVisibility", unknown: false },
+    { field: "channelVisibility", unknown: true },
+  ] as const)(
+    "refuses changed $field while preserving original unknown=$unknown evidence",
+    async ({ field, unknown }) => {
+      const { key, checks } = await archived(unknown);
+      const before = await archiveBytes(key);
+      const source = (await post("/runs/check-source", { storeKey: key, selector })).data;
+      const changed =
+        field === "channelId" ? { ...meta, channelId: "slack:public" } : { ...meta, channelVisibility: "public" };
+      expect((await post("/runs/claim", claimBody(key, id, thread, "g2", { meta: changed }))).status).toBe(500);
+      expect(await archiveBytes(key)).toBe(before);
+      expect(JSON.parse(before)).toMatchObject({
+        checkArchive: {
+          identity: { channelId: "slack:private", channelVisibility: "private" },
+          checks: { receipts: [{ checkOperation: checks.receipts[0].checkOperation }] },
+        },
+      });
+      expect((await post("/runs/live", { storeKey: key })).data).toEqual({ runs: [] });
+      expect((await post("/runs/check-source", { storeKey: key, selector })).data).toEqual(source);
+    },
+  );
+  it("restores original private output when the full claim resource is unchanged", async () => {
+    const { key, checks } = await archived();
+    const before = await archiveBytes(key);
+    expect((await post("/runs/claim", claimBody(key, id, thread, "g2", { meta }))).status).toBe(200);
+    expect((await post("/runs/check-source", { storeKey: key, selector })).data).toMatchObject({
+      kind: "source",
+      source: {
+        state: "live",
+        resource: { channelId: "slack:private", channelVisibility: "private" },
+        operation: checks.receipts[0].checkOperation,
+        result: { stdout: "original private output" },
+      },
+    });
+    expect(await archiveBytes(key)).toBe(before);
+  });
+});
+
+describe("live check claim authority in real SQLite", () => {
+  const id = "private-live-check",
+    thread = "slack:private:live-check";
+  const owner = { runId: id, requester: "slack:UALICE", threadKey: thread, repo: "fixture/repo" };
+  const meta = {
+    agent: "review",
+    userId: owner.requester,
+    channelId: "slack:private",
+    channelVisibility: "private",
+    threadKey: thread,
+    repo: owner.repo,
+  };
+  async function current(metadata = false) {
+    const key = storeKey();
+    const checks = await checkStateFixture(owner, metadata ? { metadataUnknown: true } : { unknown: true });
+    expect(
+      (await post("/runs/claim", claimBody(key, id, thread, "g1", { meta, state: { checkExecutions: checks } })))
+        .status,
+    ).toBe(200);
+    const selector = { runId: id, callId: "call-1", phase: metadata ? "metadata" : "command" };
+    return { key, selector };
+  }
+  const liveBytes = (key: string) =>
+    runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_instance, state) =>
+      JSON.stringify(state.storage.sql.exec("SELECT * FROM live_runs WHERE run_id = ?", id).one()),
+    );
+  it.each([
+    { field: "channelId", metadata: false },
+    { field: "channelId", metadata: true },
+    { field: "channelVisibility", metadata: false },
+    { field: "channelVisibility", metadata: true },
+  ] as const)(
+    "refuses same-generation attaching $field mutation before changing metadata=$metadata custody",
+    async ({ field, metadata }) => {
+      const { key, selector } = await current(metadata);
+      const before = await liveBytes(key);
+      const source = (await post("/runs/check-source", { storeKey: key, selector })).data;
+      expect(source).toMatchObject({
+        kind: "source",
+        source: { state: "live", resource: { channelId: "slack:private", channelVisibility: "private" } },
+      });
+      const changed =
+        field === "channelId"
+          ? { ...meta, channelId: "slack:public", restartOf: id }
+          : { ...meta, channelVisibility: "public", restartOf: id };
+      expect(
+        (await post("/runs/claim", claimBody(key, id, thread, "g1", { phase: "attaching", meta: changed, state: {} })))
+          .status,
+      ).toBe(500);
+      expect(await liveBytes(key)).toBe(before);
+      expect((await post("/runs/check-source", { storeKey: key, selector })).data).toEqual(source);
+    },
+  );
+  it("accepts same-generation attaching with the unchanged private resource", async () => {
+    const { key, selector } = await current();
+    const source = (await post("/runs/check-source", { storeKey: key, selector })).data;
+    expect(
+      (
+        await post(
+          "/runs/claim",
+          claimBody(key, id, thread, "g1", { phase: "attaching", meta: { ...meta, restartOf: id }, state: {} }),
+        )
+      ).status,
+    ).toBe(200);
+    expect((await post("/runs/check-source", { storeKey: key, selector })).data).toEqual(source);
+    expect((await post("/runs/live", { storeKey: key })).data).toMatchObject({
+      runs: [{ runId: id, ownerGen: "g1", meta: { channelId: "slack:private", channelVisibility: "private" } }],
+    });
+  });
+});
+
+describe("recorded check abandon custody in real SQLite", () => {
+  it.each(["unknown-command", "pending-metadata", "malformed", "absent", "empty"] as const)(
+    "preserves admitted evidence and permits only unstarted state: %s",
+    async (kind) => {
+      const key = storeKey();
+      const id = "abandon-check",
+        thread = "slack:private:abandon-check";
+      const owner = { runId: id, requester: "slack:UALICE", threadKey: thread, repo: "fixture/repo" };
+      const checks =
+        kind === "unknown-command"
+          ? await checkStateFixture(owner, { unknown: true })
+          : kind === "pending-metadata"
+            ? await checkStateFixture(owner, { metadataUnknown: true })
+            : kind === "malformed"
+              ? { version: 1, receipts: [{ callId: "preserve" }] }
+              : kind === "empty"
+                ? { version: 1, receipts: [] }
+                : undefined;
+      expect(
+        (
+          await post(
+            "/runs/claim",
+            claimBody(key, id, thread, "g1", {
+              meta: {
+                agent: "review",
+                userId: owner.requester,
+                channelId: "slack:private",
+                channelVisibility: "private",
+                threadKey: thread,
+                repo: owner.repo,
+              },
+              state: checks === undefined ? {} : { checkExecutions: checks },
+            }),
+          )
+        ).status,
+      ).toBe(200);
+      const before = (await post("/runs/live", { storeKey: key })).data;
+      const abandoned = await post("/runs/abandon", { storeKey: key, runId: id, gen: "g1" });
+      if (kind === "absent" || kind === "empty") {
+        expect(abandoned).toMatchObject({ status: 200, data: { ok: true } });
+        expect((await post("/runs/live", { storeKey: key })).data).toEqual({ runs: [] });
+      } else {
+        expect(abandoned).toMatchObject({ status: 409, data: { ok: false, reason: "fenced" } });
+        expect((await post("/runs/live", { storeKey: key })).data).toEqual(before);
+      }
+    },
+  );
+});
+
+describe("recorded check terminal custody in real SQLite", () => {
+  const id = "check-custody",
+    thread = "slack:private:check";
+  const owner = { runId: id, requester: "slack:UALICE", threadKey: thread, repo: "fixture/repo" };
+  const selector = { runId: id, callId: "call-1", phase: "command" };
+  const meta = {
+    agent: "review",
+    channelId: "slack:private",
+    channelVisibility: "private",
+    userId: owner.requester,
+    threadKey: thread,
+    repo: owner.repo,
+  };
+  const terminal = (): RunRecord => ({ ...record(id, thread), ...meta, sealedAt: Date.now() - 500 });
+  const read = (key: string, callId = "call-1") =>
+    post("/runs/check-source", { storeKey: key, selector: { ...selector, callId } });
+  async function setup(state?: unknown) {
+    const key = storeKey();
+    expect(
+      (await post("/runs/claim", claimBody(key, id, thread, "g1", { meta, ...(state === undefined ? {} : { state }) })))
+        .status,
+    ).toBe(200);
+    return key;
+  }
+  it("freezes final private authority, keeps stdout private and accounts for serialized evidence bytes", async () => {
+    const checks = await checkStateFixture(owner, { output: "saved é output" });
+    const key = await setup({
+      checkExecutions: checks,
+      doorPublicationPending: { version: 99, note: "retained é evidence" },
+    });
+    expect(
+      (
+        await post("/runs/finish", {
+          storeKey: key,
+          runId: id,
+          gen: "g1",
+          record: { ...terminal(), channelId: "slack:public", channelVisibility: "public" },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await read(key)).data).toMatchObject({
+      kind: "source",
+      source: {
+        state: "terminal",
+        resource: { channelId: "slack:private", channelVisibility: "private" },
+        result: { stdout: "saved é output" },
+      },
+    });
+    expect(JSON.stringify((await post("/runs/get", { storeKey: key, id })).data)).not.toContain("saved é output");
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_instance: RunHistoryDO, state) => {
+      const row = state.storage.sql
+        .exec<{ work_evidence_json: string; bytes: number }>(
+          "SELECT work_evidence_json,bytes FROM runs WHERE run_id = ?",
+          id,
+        )
+        .one();
+      const evidence = JSON.parse(row.work_evidence_json);
+      expect(evidence.checkArchive.checks.receipts[0].outcome.stdout).toBe("saved é output");
+      expect(evidence.doorPublicationPending).toEqual({ version: 99, note: "retained é evidence" });
+      expect(row.bytes).toBeGreaterThan(new TextEncoder().encode(row.work_evidence_json).byteLength);
+    });
+  });
+  it("never captures provisional puts and seals the latest checks after a restart", async () => {
+    const early = await checkStateFixture(owner);
+    const key = await setup({ checkExecutions: early });
+    expect((await post("/runs/put", { storeKey: key, record: { ...terminal(), provisional: true } })).status).toBe(200);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_instance: RunHistoryDO, state) => {
+      expect(
+        state.storage.sql
+          .exec<{ work_evidence_json: string | null }>("SELECT work_evidence_json FROM runs WHERE run_id = ?", id)
+          .one().work_evidence_json,
+      ).toBeNull();
+    });
+    expect(
+      (
+        await post("/runs/finish", {
+          storeKey: key,
+          runId: id,
+          gen: "g1",
+          record: { ...terminal(), restarting: true, restartUntil: Date.now() + 60000 },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await read(key)).data).toEqual({ kind: "unavailable" });
+    expect((await post("/runs/claim", claimBody(key, id, thread, "g2", { meta }))).status).toBe(200);
+    const latest = await checkStateFixture(owner, { initial: early, callId: "call-2", output: "latest output" });
+    expect(
+      (await post("/runs/state", { storeKey: key, runId: id, gen: "g2", state: { checkExecutions: latest } })).status,
+    ).toBe(200);
+    expect((await post("/runs/finish", { storeKey: key, runId: id, gen: "g2", record: terminal() })).status).toBe(200);
+    expect((await read(key, "call-2")).data).toMatchObject({
+      kind: "source",
+      source: { state: "terminal", result: { stdout: "latest output" } },
+    });
+    expect((await post("/runs/put", { storeKey: key, record: { ...terminal(), eventCount: 2 } })).status).toBe(200);
+    expect((await read(key, "call-2")).data).toMatchObject({
+      kind: "source",
+      source: { result: { stdout: "latest output" } },
+    });
+  });
+  it("keeps newer unknown checks when a later state update omits checks", async () => {
+    const early = await checkStateFixture(owner);
+    const key = await setup({ checkExecutions: early });
+    expect(
+      (
+        await post("/runs/finish", {
+          storeKey: key,
+          runId: id,
+          gen: "g1",
+          record: { ...terminal(), restarting: true, restartUntil: Date.now() + 60000 },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await post("/runs/claim", claimBody(key, id, thread, "g2", { meta }))).status).toBe(200);
+    const latest = await checkStateFixture(owner, { initial: early, callId: "call-2", unknown: true });
+    expect(
+      (
+        await post("/runs/state", {
+          storeKey: key,
+          runId: id,
+          gen: "g2",
+          state: { checkExecutions: latest },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await post("/runs/state", {
+          storeKey: key,
+          runId: id,
+          gen: "g2",
+          state: { digest: "unrelated state update" },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await read(key, "call-2")).data).toMatchObject({
+      kind: "source",
+      source: { state: "live", operation: latest.receipts[1].checkOperation },
+    });
+    expect((await post("/runs/finish", { storeKey: key, runId: id, gen: "g2", record: terminal() })).status).toBe(200);
+    const retained = (await read(key, "call-2")).data;
+    expect(retained).toMatchObject({
+      kind: "source",
+      source: { state: "terminal", operation: latest.receipts[1].checkOperation },
+    });
+    expect(retained.source).not.toHaveProperty("result");
+  });
+  it("the unclaimed restart alarm seals original identity without inventing a native ending", async () => {
+    const checks = await checkStateFixture(owner, { unknown: true });
+    const key = await setup({ checkExecutions: checks });
+    expect(
+      (
+        await post("/runs/finish", {
+          storeKey: key,
+          runId: id,
+          gen: "g1",
+          record: {
+            ...record(id, thread),
+            ...meta,
+            status: "interrupted",
+            restarting: true,
+            restartUntil: Date.now() - 1000,
+          },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await read(key)).data).toEqual({ kind: "unavailable" });
+    expect(await runDurableObjectAlarm(env.RUNS.get(env.RUNS.idFromName(key)))).toBe(true);
+    const retained = (await read(key)).data;
+    expect(retained).toMatchObject({
+      kind: "source",
+      source: {
+        state: "terminal",
+        resource: { channelId: "slack:private", channelVisibility: "private" },
+        operation: checks.receipts[0].checkOperation,
+      },
+    });
+    expect(retained.source).not.toHaveProperty("result");
+    expect((await post("/runs/get", { storeKey: key, id })).data).toMatchObject({
+      record: { status: "interrupted", failure: { kind: "restart_unclaimed" } },
+    });
+  });
+  it("refuses malformed or caller-forged archives without deleting canonical unknown state", async () => {
+    const checks = await checkStateFixture(owner, { unknown: true });
+    const key = await setup({ checkExecutions: checks });
+    for (const path of ["/runs/put", "/runs/finish"])
+      for (const field of ["checkArchive", "checkExecutions"]) {
+        expect(
+          (
+            await post(path, {
+              storeKey: key,
+              runId: id,
+              gen: "g1",
+              record: { ...terminal(), [field]: { sealed: true, stdout: "forged output" } },
+            })
+          ).status,
+        ).toBe(500);
+      }
+    expect((await read(key)).data).toMatchObject({
+      kind: "source",
+      source: { state: "live", operation: checks.receipts[0].checkOperation },
+    });
+    const invalid = { version: 1, receipts: [{ callId: "preserve" }] };
+    const malformedKey = await setup({ checkExecutions: invalid });
+    expect(
+      (await post("/runs/finish", { storeKey: malformedKey, runId: id, gen: "g1", record: terminal() })).status,
+    ).toBe(500);
+    expect((await post("/runs/live", { storeKey: malformedKey })).data).toMatchObject({
+      runs: [{ state: { checkExecutions: invalid } }],
+    });
+  });
+  it("refuses combined UTF-8 archive overflow before closing or deleting unknown evidence", async () => {
+    let checks: CheckExecutionState | undefined;
+    for (let index = 0; index < 31; index++)
+      checks = await checkStateFixture(owner, {
+        initial: checks,
+        callId: `call-${index + 1}`,
+        output: "x".repeat(4000),
+        stderr: "y".repeat(4000),
+      });
+    checks = await checkStateFixture(owner, { initial: checks, callId: "call-32", unknown: true });
+    const key = await setup({ checkExecutions: checks });
+    const finish = {
+      ...terminal(),
+      events: [
+        {
+          type: "tool_result" as const,
+          tool: "fixture",
+          ok: true,
+          summary: "saved result",
+          output: "é".repeat(680000),
+          seq: 1,
+        },
+      ],
+    };
+    expect(new TextEncoder().encode(JSON.stringify(finish)).byteLength).toBeLessThan(MAX_RECORD_BYTES);
+    expect((await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: finish })).status).toBe(500);
+    expect((await read(key, "call-32")).data).toMatchObject({
+      kind: "source",
+      source: { state: "live", operation: checks.receipts[31].checkOperation },
+    });
+    expect((await post("/runs/get", { storeKey: key, id })).data).toEqual({ record: null });
+    expect((await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: terminal() })).status).toBe(200);
+    expect((await read(key, "call-32")).data).toMatchObject({
+      kind: "source",
+      source: { state: "terminal", operation: checks.receipts[31].checkOperation },
+    });
   });
 });

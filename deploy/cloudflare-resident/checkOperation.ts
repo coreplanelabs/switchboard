@@ -7,7 +7,8 @@ import {
   type CheckOperation,
 } from "../../src/execution/checkOperation.js";
 import type { ExecResult } from "../../src/execution/execResult.js";
-import type { NativeOperationRows, NativeOperationStorage } from "./nativeOperation.js";
+import type { CheckInspection, CheckSource } from "../../src/core/checkInspection.js";
+import { NativeOperationJournal, type NativeOperationRows, type NativeOperationStorage } from "./nativeOperation.js";
 
 const contextSchema = z
   .object({
@@ -36,6 +37,10 @@ const recordSchema = z
     nativeKey: z.string().min(1).max(512),
     result: resultSchema.extend({ stdout: z.string().max(4_000), stderr: z.string().max(4_000) }).optional(),
     retired: z.literal(true).optional(),
+    endingHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
   })
   .strict();
 type CheckOperationRows = NativeOperationRows & Pick<NativeOperationStorage, "list">;
@@ -47,6 +52,8 @@ export type CheckOperationAnswer =
   | { kind: "not_started"; reason: "capacity" }
   | { kind: "completed"; checkOperation: CheckOperation; nativeKey: string; result: ExecResult };
 const unknown = (): CheckOperationAnswer => ({ kind: "unknown" });
+// These exits carry only partial output, matching the core check recorder.
+const interruptedResult = (result: ExecResult): boolean => [124, 137, 143].includes(result.exitCode);
 
 /** A request alias for one native operation, never permission to launch a second.
  * Native journal settlement and physical shutdown keep their existing owners. */
@@ -67,7 +74,13 @@ export class RecordedCheckOperation {
     await this.storage.transaction(async (rows) => {
       for (const [key, value] of await rows.list<unknown>({ prefix, limit: 64 })) {
         const parsed = recordSchema.safeParse(value);
-        if (!parsed.success || !parsed.data.result || !(await inactive(parsed.data.context, rows))) continue;
+        if (
+          !parsed.success ||
+          !parsed.data.result ||
+          interruptedResult(parsed.data.result) ||
+          !(await inactive(parsed.data.context, rows))
+        )
+          continue;
         const { result: _result, ...record } = parsed.data;
         await rows.put(key, { ...record, retired: true });
       }
@@ -76,6 +89,81 @@ export class RecordedCheckOperation {
 
   private async key(context: CheckOperationContext, operation: CheckOperation): Promise<string> {
     return `${await this.prefix(context.threadKey)}${await checkCommandHash(JSON.stringify([context.runId, context.ownerGen, context.ownerFence, operation.key]))}`;
+  }
+
+  /** The receiver supplies a canonical Memory read, never a caller's owner or key.
+   * Historical proof does not require or replace the current registration. */
+  async inspectRecorded(source: CheckSource, settle = false): Promise<CheckInspection> {
+    if (settle && source.state !== "terminal") return { kind: "unavailable", reason: "live" };
+    if (!settle && source.result) return { kind: "known", source: "canonical", result: source.result };
+    const operation = source.operation;
+    if (!operation) return { kind: "unavailable", reason: "identity" };
+    const prefix = await this.prefix(source.threadKey);
+    const inspect = async (rows: CheckOperationRows, write: boolean, readback = false): Promise<CheckInspection> => {
+      const inventory = await rows.list<unknown>({ prefix, limit: 65 });
+      if (inventory.size > 64) return { kind: "unavailable", reason: "identity" };
+      const matches: Array<[string, z.infer<typeof recordSchema>]> = [];
+      for (const [key, value] of inventory) {
+        const parsed = recordSchema.safeParse(value);
+        if (
+          !parsed.success ||
+          parsed.data.context.threadKey !== source.threadKey ||
+          key !== (await this.key(parsed.data.context, parsed.data.checkOperation)) ||
+          !parsed.data.nativeKey.startsWith(`native-operation:${source.threadKey}:${parsed.data.context.runId}:`) ||
+          (parsed.data.retired &&
+            parsed.data.result !== undefined &&
+            (!parsed.data.endingHash || !interruptedResult(parsed.data.result))) ||
+          (parsed.data.endingHash !== undefined && !parsed.data.retired)
+        )
+          return { kind: "unavailable", reason: "identity" };
+        if (parsed.data.context.runId === source.selector.runId && parsed.data.checkOperation.key === operation.key)
+          matches.push([key, parsed.data]);
+      }
+      if (matches.length !== 1) return { kind: "unavailable", reason: "identity" };
+      const [key, record] = matches[0]!;
+      if (record.checkOperation.commandHash !== operation.commandHash)
+        return { kind: "unavailable", reason: "identity" };
+      if (record.result && !interruptedResult(record.result))
+        return { kind: "known", source: "resident", result: record.result };
+      const ending = await new NativeOperationJournal(this.storage).readEnding(record.nativeKey, rows);
+      if (ending.kind === "missing") {
+        if (record.retired && !record.endingHash) return { kind: "retired", reason: "output_retired" };
+        return record.endingHash
+          ? { kind: "unavailable", reason: "proof" }
+          : { kind: "pending", reason: "native_ending_unproven" };
+      }
+      if (
+        ending.kind !== "ended" ||
+        !("runId" in ending.original) ||
+        ending.original.runId !== record.context.runId ||
+        ending.original.ownerGen !== record.context.ownerGen ||
+        ending.original.ownerFence !== record.context.ownerFence ||
+        ending.original.native.threadKey !== record.context.threadKey ||
+        (await rows.get(record.nativeKey)) !== undefined
+      )
+        return { kind: "unavailable", reason: "proof" };
+      const proofHash = await checkCommandHash(JSON.stringify(ending.receipt));
+      if (record.endingHash !== undefined && record.endingHash !== proofHash)
+        return { kind: "unavailable", reason: "proof" };
+      if (readback && record.endingHash !== proofHash) return { kind: "unavailable", reason: "backend" };
+      if (write && record.endingHash === undefined) {
+        await rows.put(key, { ...record, retired: true, endingHash: proofHash });
+      }
+      return { kind: "retired", reason: "native_ended", proofHash };
+    };
+    try {
+      return await this.storage.transaction((rows) => inspect(rows, settle));
+    } catch {
+      // A lost ACK is read back only. Repeating an uncertain mutation is unnecessary.
+      if (settle) {
+        try {
+          return await this.storage.transaction((rows) => inspect(rows, false, true));
+        } catch {
+          /* Unreadable custody remains unavailable. */
+        }
+      }
+      return { kind: "unavailable", reason: "backend" };
+    }
   }
 
   async inspect(
@@ -140,7 +228,7 @@ export class RecordedCheckOperation {
           old.success &&
           old.data.context.threadKey === context.threadKey &&
           old.data.context.ownerFence < context.ownerFence &&
-          (old.data.result || old.data.retired)
+          ((old.data.result && !interruptedResult(old.data.result)) || old.data.retired)
         ) {
           await rows.delete(oldKey);
           retained--;

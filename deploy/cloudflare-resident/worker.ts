@@ -1,5 +1,13 @@
 import { RecordedCheckOperation, type CheckOperationContext } from "./checkOperation.js";
 import {
+  checkSelectorSchema,
+  checkSourceReadOf,
+  checkSourceIdentityHash,
+  type CheckInspection,
+  type CheckSelector,
+  type CheckSourceRead,
+} from "../../src/core/checkInspection.js";
+import {
   checkOperationSchema,
   reportCheckResultFailure,
   type CheckOperation,
@@ -8990,6 +8998,28 @@ export class ResidentDO extends Sandbox<Env> {
     );
   }
 
+  /** Re-read original Memory custody after routing; the public request cannot
+   * supply a check key, workspace owner, result or native proof. */
+  async inspectRecordedCheck(
+    selector: CheckSelector,
+    settle: boolean,
+    expectedThreadKey: string,
+  ): Promise<{ sourceHash: string; inspection: CheckInspection } | Extract<CheckInspection, { kind: "unavailable" }>> {
+    const selected = await readRecordedCheckSource(this.env, selector);
+    if (selected.kind !== "source" || selected.source.threadKey !== expectedThreadKey)
+      return { kind: "unavailable", reason: "source" };
+    try {
+      if ((await this.ctx.storage.get<string>(RESOURCE_KEY)) !== `repo:${selected.source.resource.repo}`)
+        return { kind: "unavailable", reason: "source" };
+      return {
+        sourceHash: await checkSourceIdentityHash(selected.source),
+        inspection: await new RecordedCheckOperation(this.ctx.storage).inspectRecorded(selected.source, settle),
+      };
+    } catch {
+      return { kind: "unavailable", reason: "backend" };
+    }
+  }
+
   async execThread(
     threadKey: string,
     command: string,
@@ -13438,6 +13468,8 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/cancel-run": { scope: "operator", method: "POST" },
   "/exec": { scope: "operator", method: "POST" },
   "/exec-result": { scope: "operator", method: "POST" },
+  "/inspect-check": { scope: "operator", method: "POST" },
+  "/settle-check": { scope: "operator", method: "POST" },
   "/inspect-credentials": { scope: "operator", method: "POST" },
   "/publish": { scope: "operator", method: "POST" },
   "/read": { scope: "operator", method: "POST" },
@@ -13662,6 +13694,9 @@ export default {
             if (ctx instanceof Response) return ctx;
             return json(await ctx.stub.inspectCheckResult(ctx.threadKey, operation.data, requestWorkspaceOwner(body)));
           }
+          case "/inspect-check":
+          case "/settle-check":
+            return await handleRecordedCheck(env, body, url.pathname === "/settle-check");
           case "/exec":
             return await handleExec(env, body, traceparent);
           case "/inspect-credentials":
@@ -14421,6 +14456,45 @@ async function withLevels<T>(
 }
 
 // -- thread data plane handlers -----------------------------------------------
+
+async function readRecordedCheckSource(env: Env, selector: CheckSelector): Promise<CheckSourceRead> {
+  if (!env.STATE_WORKER_URL || !env.MEMORY_TOKEN || !checkSelectorSchema.safeParse(selector).success)
+    return { kind: "unavailable" };
+  try {
+    const response = await fetch(new URL("/runs/check-source", env.STATE_WORKER_URL), {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.MEMORY_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ storeKey: RUN_STORE_KEY, selector }),
+      signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+    });
+    return response.ok ? checkSourceReadOf(await response.json(), selector) : { kind: "unavailable" };
+  } catch {
+    return { kind: "unavailable" };
+  }
+}
+
+async function handleRecordedCheck(env: Env, body: unknown, settle: boolean): Promise<Response> {
+  const selector = checkSelectorSchema.safeParse(body);
+  if (!selector.success) return json({ kind: "unavailable", reason: "identity" }, 400);
+  const selected = await readRecordedCheckSource(env, selector.data);
+  if (selected.kind !== "source") return json({ kind: "unavailable", reason: "source" });
+  if (settle && selected.source.state !== "terminal") return json({ kind: "unavailable", reason: "live" });
+  if (!settle && selected.source.result)
+    return json({
+      sourceHash: await checkSourceIdentityHash(selected.source),
+      inspection: { kind: "known", source: "canonical", result: selected.source.result },
+    });
+  try {
+    const route = await resolveThreadRoute(env, {
+      resource: `repo:${selected.source.resource.repo}`,
+      threadKey: selected.source.threadKey,
+    });
+    if (route instanceof Response) return json({ kind: "unavailable", reason: "source" });
+    return json(await route.stub.inspectRecordedCheck(selector.data, settle, route.threadKey));
+  } catch {
+    return json({ kind: "unavailable", reason: "backend" });
+  }
+}
 
 /** Shared front half of the thread routes: validate resource + threadKey (P1:
  *  BEFORE anything derives a path or a git argument) and hand back the stub.

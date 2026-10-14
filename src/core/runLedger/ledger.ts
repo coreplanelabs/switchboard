@@ -128,6 +128,11 @@ export function mergeRequesterTarget(prior: RequesterTarget | null, next: Reques
 }
 
 export interface RunLedger {
+  /** Canonical live or sealed terminal check source. Never accepts source facts from a caller. */
+  readCheckSource?(
+    selector: import("../checkInspection.js").CheckSelector,
+  ): Promise<import("../checkInspection.js").CheckSourceRead>;
+
   prepareCancellation?(
     runId: string,
     actor: import("./cancellation.js").CancellationActor,

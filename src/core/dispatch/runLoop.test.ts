@@ -1,6 +1,8 @@
 import { createSpanLog } from "../trace/spanLog.js";
 import { humanReview } from "../testing/humanReview.js";
 import type { CheckExecutionReceipt } from "../checkExecutionTypes.js";
+import { checkStateFixture } from "../testing/checkState.js";
+import { analyzeRunFriction } from "../runFriction.js";
 import { preparedHarnessLaunch } from "../harness/sessionPolicy.js";
 import { ToolRecovery, ToolRecoveryStoppedError } from "../harness/toolRecovery.js";
 import { CloudflareSandboxExecutor } from "../../execution/cloudflareSandbox.js";
@@ -14810,18 +14812,266 @@ describe("runLoop adaptive coding checks", () => {
           loopbackUrl: "http://127.0.0.1:8080",
         },
       });
-      const { ledgerRun } = recordingLedgerRun();
-      ledgerRun.tracked = () => true;
-      ledgerRun.setStateAndFlush = async (state) => {
-        states.push(structuredClone(state));
-        return true;
-      };
-      expect(answered(await runLoop(s.deps, { ...s.ctx, ledgerRun })).answer).toBe("choose a scoped check");
+      const inner = new InMemoryRunLedger(() => NOW);
+      const ledger = createLedgerWriteThrough({
+        ledger: inner,
+        gen: "checks-current",
+        fallback: s.store,
+        warn: () => {},
+      });
+      s.deps.runLedger = ledger;
+      const opened = await ledger.open({
+        runId: s.run.id,
+        threadKey: s.ctx.msg.threadKey,
+        startedAt: NOW,
+        meta: {
+          agent: "coding",
+          channelId: s.ctx.msg.channelId,
+          userId: s.ctx.msg.userId,
+          threadKey: s.ctx.msg.threadKey,
+          repo: s.ctx.repoCtx.repo,
+        },
+        system: s.ctx.system,
+        tools: [],
+      });
+      if (opened.kind !== "tracked") throw new Error("canonical coding check owner unavailable");
+      const setState = inner.setState.bind(inner);
+      vi.spyOn(inner, "setState").mockImplementation(async (...args) => {
+        const result = await setState(...args);
+        if (result.ok && args[2].checkExecutions) states.push(structuredClone(args[2]));
+        return result;
+      });
+      try {
+        expect(answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: opened.run })).answer).toBe(
+          "choose a scoped check",
+        );
+      } finally {
+        await opened.run.close();
+      }
     },
   );
 });
 
 describe("tracked Review command receipt binding", () => {
+  it("holds unreadable tracked check history at the tool boundary without fallback authority", async () => {
+    const observed = watched(piHarness);
+    const execResult = vi.fn(async () => ({
+      stdout: "unexpected execution",
+      stderr: "",
+      exitCode: 0,
+      truncated: false,
+    }));
+    const s = setup("unused", {
+      agent: "coding",
+      repoCtx: { repo: "acme/api", ref: "work" },
+      executor: { execResult },
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example",
+      },
+    });
+    const canonical = await canonicalOwner(s);
+    const original = await checkStateFixture(
+      {
+        runId: s.run.id,
+        requester: s.ctx.msg.userId,
+        threadKey: s.ctx.msg.threadKey,
+        repo: "acme/api",
+      },
+      { unknown: true },
+    );
+    expect(await canonical.ledgerRun.setStateAndFlush({ checkExecutions: original })).toBe(true);
+    s.deps.runLedger.readLiveRuns = async () => {
+      throw new Error("canonical history unavailable");
+    };
+    observed.harness.open = async (_deps, request) => {
+      request.onEvent?.({ type: "lease", startedAt: NOW, endsAt: NOW + 600_000, loopEndsAt: NOW + 600_000, at: NOW });
+      const live: LiveHarness = {
+        runId: request.runId,
+        tools: request.tools,
+        toolContext: request.toolContext,
+        rules: { ...request.rules, identity: "write" },
+        emit: () => {},
+        toolSpan: () => undefined,
+        gateSaw: () => {},
+        toolsBlocked: () => undefined,
+      };
+      const recovery = request.toolContext.recovery!;
+      const record = vi.spyOn(recovery, "record");
+      const input = { command: "printf fixture", purpose: "verification", timeoutMs: 1000 };
+      const text = "error: recorded check unavailable (reconciliation_required); no completion receipt was returned";
+      expect(await runRelayedTool(live, { toolCallId: "new-call", tool: "run_check", input })).toEqual({
+        content: [{ type: "text", text }],
+        isError: true,
+      });
+      expect(record).toHaveBeenCalledWith(
+        "new-call",
+        "run_check",
+        input,
+        {
+          text,
+          detail: { code: "outcome_unknown", recovery: "stop" },
+        },
+        true,
+      );
+      expect(recovery.snapshot().stopped).toEqual({ tool: "run_check", attempts: 1, reason: "outcome_unknown" });
+      expect(
+        await runRelayedTool(live, { toolCallId: "fallback-call", tool: "bash", input: { command: "printf fixture" } }),
+      ).toEqual({
+        content: [
+          {
+            type: "text",
+            text: "Error: The run_check outcome is unknown. Further model calls were blocked; the original operation remains held.",
+          },
+        ],
+        isError: true,
+      });
+      return { answer: "must remain held", followUp: async () => "", remainingMs: () => 60_000, end: async () => {} };
+    };
+    try {
+      await expect(runLoop(s.deps, { ...s.ctx, ledgerRun: canonical.ledgerRun })).rejects.toThrow(
+        ToolRecoveryStoppedError,
+      );
+      expect(canonical.inner.live.get(s.run.id)?.state).toMatchObject({
+        checkExecutions: original,
+        toolRecovery: { stopped: { tool: "run_check", attempts: 1, reason: "outcome_unknown" } },
+      });
+      expect(execResult).not.toHaveBeenCalled();
+    } finally {
+      await canonical.ledgerRun.close();
+    }
+  });
+
+  it.each(["completed", "unknown"] as const)(
+    "hydrates %s checks from canonical state on a same-ID request-only restart",
+    async (outcome) => {
+      const observed = watched(piHarness);
+      const executed: string[] = [];
+      const execResult = vi.fn(async (command: string) => {
+        executed.push(command);
+        return {
+          stdout: command.startsWith("set -eu")
+            ? `/workspace/threads/t/work\n${"a".repeat(40)}\n${"b".repeat(40)}\n`
+            : "new command output",
+          stderr: "",
+          exitCode: 0,
+          truncated: false,
+        };
+      });
+      const s = setup("unused", {
+        agent: "coding",
+        executor: { execResult, inspectCheckResult: async () => undefined },
+        repoCtx: { repo: "acme/api", ref: "work" },
+        binding: {
+          ref: "work",
+          sha: "a".repeat(40),
+          workspace: "/workspace/threads/t/work",
+          user: "worker1",
+          container: "vm1",
+          depsKey: "deps1",
+        },
+        harness: {
+          harnesses: roster(observed.harness),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example",
+          loopbackUrl: "http://127.0.0.1:8080",
+        },
+      });
+      const canonical = await canonicalOwner(s);
+      const original = await checkStateFixture(
+        {
+          runId: s.run.id,
+          requester: s.ctx.msg.userId,
+          threadKey: s.ctx.msg.threadKey,
+          repo: "acme/api",
+        },
+        { callId: "original-call", unknown: outcome === "unknown" },
+      );
+      expect(await canonical.ledgerRun.setStateAndFlush({ checkExecutions: original })).toBe(true);
+      const row = structuredClone(canonical.inner.live.get(s.run.id)!);
+      await canonical.ledgerRun.close();
+      expect(
+        await canonical.inner.finish(row.runId, row.ownerGen, {
+          id: row.runId,
+          userId: row.meta.userId,
+          channelId: row.meta.channelId,
+          channelVisibility: row.meta.channelVisibility ?? "unknown",
+          threadKey: row.threadKey,
+          repo: row.meta.repo,
+          startedAt: row.startedAt,
+          finishedAt: NOW,
+          status: "interrupted",
+          restarting: true,
+          restartUntil: NOW + 60_000,
+          events: [],
+          eventCount: 0,
+          storedEventCount: 0,
+          truncated: false,
+          diagnosis: analyzeRunFriction([]),
+        }),
+      ).toEqual({ ok: true, stored: true });
+      const reopened = await s.deps.runLedger!.open({
+        runId: row.runId,
+        threadKey: row.threadKey,
+        startedAt: row.startedAt,
+        meta: { ...row.meta, restartOf: row.runId },
+        system: s.ctx.system,
+        tools: [],
+        state: {},
+      });
+      if (reopened.kind !== "tracked") throw new Error("same-ID restart did not claim its original row");
+      expect(canonical.inner.live.get(s.run.id)?.state.checkExecutions).toEqual(original);
+      observed.harness.open = async (_deps, request) => {
+        request.onEvent?.({ type: "lease", startedAt: NOW, endsAt: NOW + 600_000, loopEndsAt: NOW + 600_000, at: NOW });
+        const input = { command: "printf fixture", purpose: "verification" as const, timeoutMs: 1000 };
+        const check = request.toolContext.checkExecution!;
+        const next = await check.run(input, "new-call");
+        expect(next).toMatchObject(
+          outcome === "completed"
+            ? {
+                kind: "recorded",
+                receipt: {
+                  callId: "new-call",
+                  outcome: { kind: "completed", stdout: "new command output", exitCode: 0 },
+                },
+              }
+            : { kind: "unavailable", reason: "reconciliation_required" },
+        );
+        expect(await check.run(input, "original-call")).toMatchObject({
+          kind: "recorded",
+          replayed: true,
+          receipt: { callId: "original-call", outcome: { kind: outcome } },
+        });
+        return {
+          answer: "original check history preserved",
+          followUp: async () => "",
+          remainingMs: () => 60_000,
+          end: async () => {},
+        };
+      };
+      try {
+        expect(answered(await runLoop(s.deps, { ...s.ctx, ledgerRun: reopened.run })).answer).toBe(
+          "original check history preserved",
+        );
+        const checks = canonical.inner.live.get(s.run.id)!.state.checkExecutions as {
+          receipts: CheckExecutionReceipt[];
+        };
+        expect(checks.receipts.map((receipt) => [receipt.callId, receipt.outcome.kind])).toEqual(
+          outcome === "completed"
+            ? [
+                ["original-call", "completed"],
+                ["new-call", "completed"],
+              ]
+            : [["original-call", "unknown"]],
+        );
+        expect(executed.length).toBe(outcome === "completed" ? 2 : 0);
+      } finally {
+        await reopened.run.close();
+      }
+    },
+  );
+
   it.each(["pi", "opencode"] as const)(
     "recovers prepared %s permissions and allowance without producer facts",
     async (name) => {

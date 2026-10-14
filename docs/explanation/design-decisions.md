@@ -118,3 +118,5 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 <!-- /generated:decision-records -->
 
 The dated implementation plans under [`docs/plans/`](../plans/) are records of the same kind — proposals that were reviewed, built, and then frozen with their final status — and are held to the same check. They are working documents for the repository and are not published on this site.
+
+[Recorded check inspection proposal](../plans/2026-10-14-002-feat-recorded-check-inspection-plan.md) preserves original-operation identity for read-only inspection and bounded receipt-based retirement.

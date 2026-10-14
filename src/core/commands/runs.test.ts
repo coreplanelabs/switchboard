@@ -280,9 +280,10 @@ describe("provider diagnostics in machine history", () => {
 });
 
 describe("runs.* registrations", () => {
-  it("registers the nine commands with the declared actions and chat opt-outs", () => {
+  it("registers run commands with the declared actions and chat opt-outs", () => {
     const byId = Object.fromEntries(runsCommands.map((c) => [c.id, c]));
     expect(Object.keys(byId).sort()).toEqual([
+      "runs.check",
       "runs.children",
       "runs.events",
       "runs.findings",
@@ -290,6 +291,7 @@ describe("runs.* registrations", () => {
       "runs.get",
       "runs.list",
       "runs.search",
+      "runs.settlecheck",
       "runs.stop",
       "runs.unit",
     ]);
@@ -302,11 +304,13 @@ describe("runs.* registrations", () => {
       "runs.children",
       "runs.findings",
       "runs.search",
+      "runs.check",
     ]) {
       expect(byId[id].action).toBe("runs:read");
       expect(byId[id].effect).toBe("read");
     }
     expect(byId["runs.stop"]).toMatchObject({ action: "stop:write", effect: "write" });
+    expect(byId["runs.settlecheck"]).toMatchObject({ action: "runs:write", effect: "write" });
     // The findings ledger reads finished records: it needs run history and says so; every other read is always on.
     expect(byId["runs.findings"].enabledWhen).toBeDefined();
     for (const id of Object.keys(byId).filter((id) => id !== "runs.findings"))

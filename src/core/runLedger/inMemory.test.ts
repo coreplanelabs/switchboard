@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { checkStateFixture } from "../testing/checkState.js";
+import type { CheckExecutionState } from "../checkExecutionTypes.js";
+import { reclaimedRunRecord } from "../dispatch/record.js";
+import { MAX_RECORD_BYTES } from "../runRecord.js";
+import { createCheckExecution } from "../checkExecution.js";
+import { CheckCapacityError } from "../../execution/checkOperation.js";
 import { sourceHash } from "../references/receipts.js";
 import { testSessionSources } from "../testing/slackSources.js";
 import type { ChatMessage } from "../chatMessage.js";
@@ -95,6 +101,342 @@ const record = (id: string): RunRecord =>
     events: [],
     diagnosis: { eventCount: 0, toolCalls: 0, byCategory: {}, findings: [], verdict: "none" },
   }) as unknown as RunRecord;
+
+describe("cancelled check terminal custody", () => {
+  const id = "cancelled-check",
+    thread = "slack:C1:1.0";
+  const owner = { runId: id, requester: "slack:UALICE", threadKey: thread, repo: "fixture/repo" };
+  const selector = { runId: id, callId: "call-1", phase: "command" as const };
+  async function prepared(checks: unknown) {
+    const ledger = new InMemoryRunLedger(() => 20_000);
+    const claim = claimReq(id, thread);
+    claim.meta = { ...claim.meta, repo: owner.repo, selection: "resident", channelVisibility: "private" };
+    claim.state = { checkExecutions: checks };
+    expect(await ledger.claim(claim)).toMatchObject({ ok: true });
+    expect(await ledger.requestStop(id, "hard")).toMatchObject({ ok: true });
+    const stop = await ledger.prepareCancellation(id, { kind: "chat", id: "slack:operator" });
+    if (!stop.ok) throw new Error("cancellation not prepared");
+    const ending = reclaimedRunRecord({ row: stop.row, events: [], status: "stopped_hard", finishedAt: 20_000 });
+    ending.cancellation = {
+      version: 1,
+      actor: stop.cancellation.actor,
+      cancellation: stop.cancellation,
+      disposition: "processes-stopped",
+    };
+    return { ledger, cancellation: stop.cancellation, ending };
+  }
+  it("keeps the original unknown check as a sealed private source after cancellation", async () => {
+    const checks = await checkStateFixture(owner, { unknown: true });
+    const { ledger, cancellation, ending } = await prepared(checks);
+    expect(await ledger.finishCancellation(cancellation, ending)).toEqual({ ok: true, stored: true });
+    expect(await ledger.readCheckSource(selector)).toMatchObject({
+      kind: "source",
+      source: {
+        state: "terminal",
+        resource: { channelVisibility: "private", channelId: "slack:C1" },
+        operation: checks.receipts[0].checkOperation,
+      },
+    });
+    expect(ledger.live.has(id)).toBe(false);
+    expect(ledger.finished.get(id)).not.toHaveProperty("checkArchive");
+    expect(await ledger.finishCancellation(cancellation, ending)).toEqual({ ok: true, stored: true });
+  });
+  it.each(["malformed", "oversized"] as const)(
+    "refuses %s check evidence without deleting live custody",
+    async (fault) => {
+      let checks: unknown = { version: 1, receipts: [{ callId: "preserve" }] };
+      if (fault === "oversized") {
+        let valid: CheckExecutionState | undefined;
+        for (let index = 0; index < 31; index++)
+          valid = await checkStateFixture(owner, {
+            initial: valid,
+            callId: `call-${index + 1}`,
+            output: "x".repeat(4000),
+            stderr: "y".repeat(4000),
+          });
+        checks = await checkStateFixture(owner, { initial: valid, callId: "call-32", unknown: true });
+      }
+      const { ledger, cancellation, ending } = await prepared(checks);
+      if (fault === "oversized") {
+        ending.events = [
+          {
+            type: "tool_result",
+            tool: "fixture",
+            ok: true,
+            summary: "saved result",
+            output: "é".repeat(680000),
+            seq: 1,
+          },
+        ];
+        expect(new TextEncoder().encode(JSON.stringify(ending)).byteLength).toBeLessThan(MAX_RECORD_BYTES);
+      }
+      await expect(ledger.finishCancellation(cancellation, ending)).rejects.toThrow(
+        fault === "malformed" ? "canonical check state is unreadable" : "check evidence exceeds record byte limit",
+      );
+      expect((await ledger.listLive())[0]).toMatchObject({ runId: id, state: { checkExecutions: checks } });
+      expect(ledger.finished.has(id)).toBe(false);
+    },
+  );
+});
+
+describe("restarted check terminal custody", () => {
+  it("clears a definitely unadmitted metadata intent after a real producer capacity refusal", async () => {
+    const ledger = new InMemoryRunLedger(() => 20_000);
+    const id = "capacity-check",
+      thread = "slack:C1:1.0";
+    const claim = claimReq(id, thread);
+    claim.meta = { ...claim.meta, repo: "fixture/repo", channelVisibility: "private" };
+    expect(await ledger.claim(claim)).toMatchObject({ ok: true });
+    const check = createCheckExecution({
+      owner: { runId: id, requester: "slack:UALICE", threadKey: thread, repo: "fixture/repo" },
+      executor: () => ({
+        inspectCheckResult: async () => undefined,
+        execResult: async () => {
+          throw new CheckCapacityError("fixture refused before admission");
+        },
+      }),
+      workspace: () => "/work/repo",
+      recordingAvailable: true,
+      authorizeCommand: () => true,
+      save: async (state) => (await ledger.setState(id, "g1", { checkExecutions: state })).ok,
+      remainingMs: () => 120_000,
+      signal: new AbortController().signal,
+      clock: () => 20_000,
+    });
+    expect(await check.run({ command: "printf fixture", purpose: "verification", timeoutMs: 1000 }, "call-1")).toEqual({
+      kind: "unavailable",
+      reason: "capacity",
+    });
+    expect((await ledger.listLive())[0]).toMatchObject({
+      runId: id,
+      state: { checkExecutions: { version: 1, receipts: [] } },
+    });
+    expect((await ledger.listLive())[0].state.checkExecutions).not.toHaveProperty("metadata");
+  });
+  it("refuses the changed-resource reclaim before cancellation can replace a sealed private archive", async () => {
+    const ledger = new InMemoryRunLedger(() => 20_000);
+    const id = "sealed-check",
+      thread = "slack:C1:1.0";
+    const owner = { runId: id, requester: "slack:UALICE", threadKey: thread, repo: "fixture/repo" };
+    const checks = await checkStateFixture(owner, { unknown: true });
+    const claim = claimReq(id, thread);
+    claim.meta = { ...claim.meta, repo: owner.repo, selection: "resident", channelVisibility: "private" };
+    claim.state = { checkExecutions: checks };
+    expect(await ledger.claim(claim)).toMatchObject({ ok: true });
+    expect(await ledger.finish(id, "g1", { ...record(id), repo: owner.repo, channelVisibility: "private" })).toEqual({
+      ok: true,
+      stored: true,
+    });
+    const original = structuredClone(ledger.finishedWorkEvidence.get(id));
+    await expect(
+      ledger.claim({
+        ...claim,
+        gen: "g2",
+        state: {},
+        meta: { ...claim.meta, channelId: "slack:public", channelVisibility: "public" },
+      }),
+    ).rejects.toThrow("checkpoint state is immutable");
+    expect(ledger.finishedWorkEvidence.get(id)).toEqual(original);
+    expect(ledger.finishedWorkEvidence.get(id)).toMatchObject({
+      checkArchive: { sealed: true, identity: { channelId: "slack:C1", channelVisibility: "private" } },
+    });
+    expect(await ledger.listLive()).toEqual([]);
+    expect(await ledger.readCheckSource({ runId: id, callId: "call-1", phase: "command" })).toMatchObject({
+      kind: "source",
+      source: {
+        state: "terminal",
+        resource: { channelId: "slack:C1", channelVisibility: "private" },
+        operation: checks.receipts[0].checkOperation,
+      },
+    });
+  });
+  it("keeps newer unknown checks when a later state update omits checks", async () => {
+    const ledger = new InMemoryRunLedger(() => 20_000);
+    const id = "restarted-check",
+      thread = "slack:C1:1.0";
+    const owner = { runId: id, requester: "slack:UALICE", threadKey: thread, repo: "fixture/repo" };
+    const early = await checkStateFixture(owner);
+    const claim = claimReq(id, thread);
+    claim.meta = { ...claim.meta, repo: owner.repo, channelVisibility: "private" };
+    claim.state = { checkExecutions: early };
+    expect(await ledger.claim(claim)).toMatchObject({ ok: true });
+    const ending = { ...record(id), repo: owner.repo, channelVisibility: "private" as const };
+    expect(await ledger.finish(id, "g1", { ...ending, restarting: true, restartUntil: 30_000 })).toEqual({
+      ok: true,
+      stored: true,
+    });
+    expect(await ledger.claim({ ...claim, gen: "g2", state: {} })).toMatchObject({ ok: true });
+    const latest = await checkStateFixture(owner, { initial: early, callId: "call-2", unknown: true });
+    expect(await ledger.setState(id, "g2", { checkExecutions: latest })).toEqual({ ok: true });
+    expect(await ledger.setState(id, "g2", { digest: "unrelated state update" })).toEqual({ ok: true });
+    const selector = { runId: id, callId: "call-2", phase: "command" as const };
+    expect(await ledger.readCheckSource(selector)).toMatchObject({
+      kind: "source",
+      source: { state: "live", operation: latest.receipts[1].checkOperation },
+    });
+    expect(await ledger.finish(id, "g2", ending)).toEqual({ ok: true, stored: true });
+    const retained = await ledger.readCheckSource(selector);
+    expect(retained).toMatchObject({
+      kind: "source",
+      source: { state: "terminal", operation: latest.receipts[1].checkOperation },
+    });
+    if (retained.kind !== "source") throw new Error("original source missing");
+    expect(retained.source).not.toHaveProperty("result");
+  });
+});
+
+describe.each(["sealed", "restart"] as const)("archived check claim authority: %s", (stage) => {
+  const id = "private-archive-check",
+    thread = "slack:C1:1.0";
+  const owner = { runId: id, requester: "slack:UALICE", threadKey: thread, repo: "fixture/repo" };
+  const selector = { runId: id, callId: "call-1", phase: "command" as const };
+  async function archived(unknown = false) {
+    const ledger = new InMemoryRunLedger(() => 20_000);
+    const checks = await checkStateFixture(owner, { unknown, output: "original private output" });
+    const claim = claimReq(id, thread);
+    claim.meta = { ...claim.meta, repo: owner.repo, channelVisibility: "private" };
+    claim.state = { checkExecutions: checks };
+    expect(await ledger.claim(claim)).toMatchObject({ ok: true });
+    expect(
+      await ledger.finish(id, "g1", {
+        ...record(id),
+        repo: owner.repo,
+        channelVisibility: "private",
+        ...(stage === "restart" ? { restarting: true, restartUntil: 30_000 } : {}),
+      }),
+    ).toEqual({ ok: true, stored: true });
+    return { ledger, claim, checks };
+  }
+  it.each([
+    { field: "channelId", unknown: false },
+    { field: "channelId", unknown: true },
+    { field: "channelVisibility", unknown: false },
+    { field: "channelVisibility", unknown: true },
+  ] as const)(
+    "refuses changed $field while preserving original unknown=$unknown evidence",
+    async ({ field, unknown }) => {
+      const { ledger, claim, checks } = await archived(unknown);
+      const before = JSON.stringify(ledger.finishedWorkEvidence.get(id));
+      const source = await ledger.readCheckSource(selector);
+      const meta =
+        field === "channelId"
+          ? { ...claim.meta, channelId: "slack:public" }
+          : { ...claim.meta, channelVisibility: "public" as const };
+      await expect(ledger.claim({ ...claim, gen: "g2", state: {}, meta })).rejects.toThrow(
+        "checkpoint state is immutable",
+      );
+      expect(JSON.stringify(ledger.finishedWorkEvidence.get(id))).toBe(before);
+      expect(ledger.finishedWorkEvidence.get(id)).toMatchObject({
+        checkArchive: {
+          identity: { channelId: "slack:C1", channelVisibility: "private" },
+          checks: { receipts: [{ checkOperation: checks.receipts[0].checkOperation }] },
+        },
+      });
+      expect(await ledger.listLive()).toEqual([]);
+      expect(await ledger.readCheckSource(selector)).toEqual(source);
+    },
+  );
+  it("restores original private output when the full claim resource is unchanged", async () => {
+    const { ledger, claim, checks } = await archived();
+    const before = JSON.stringify(ledger.finishedWorkEvidence.get(id));
+    expect(await ledger.claim({ ...claim, gen: "g2", state: {} })).toMatchObject({ ok: true });
+    expect(await ledger.readCheckSource(selector)).toMatchObject({
+      kind: "source",
+      source: {
+        state: "live",
+        resource: { channelId: "slack:C1", channelVisibility: "private" },
+        operation: checks.receipts[0].checkOperation,
+        result: { stdout: "original private output" },
+      },
+    });
+    expect(JSON.stringify(ledger.finishedWorkEvidence.get(id))).toBe(before);
+  });
+});
+
+describe("live check claim authority", () => {
+  const id = "private-live-check",
+    thread = "slack:C1:1.0";
+  const owner = { runId: id, requester: "slack:UALICE", threadKey: thread, repo: "fixture/repo" };
+  async function current(metadata = false) {
+    const ledger = new InMemoryRunLedger(() => 20_000);
+    const checks = await checkStateFixture(owner, metadata ? { metadataUnknown: true } : { unknown: true });
+    const claim = claimReq(id, thread);
+    claim.meta = { ...claim.meta, repo: owner.repo, channelVisibility: "private" };
+    claim.state = { checkExecutions: checks };
+    expect(await ledger.claim(claim)).toMatchObject({ ok: true });
+    const selector = { runId: id, callId: "call-1", phase: metadata ? ("metadata" as const) : ("command" as const) };
+    return { ledger, claim, selector };
+  }
+  it.each([
+    { field: "channelId", metadata: false },
+    { field: "channelId", metadata: true },
+    { field: "channelVisibility", metadata: false },
+    { field: "channelVisibility", metadata: true },
+  ] as const)(
+    "refuses same-generation attaching $field mutation before changing metadata=$metadata custody",
+    async ({ field, metadata }) => {
+      const { ledger, claim, selector } = await current(metadata);
+      const before = JSON.stringify(await ledger.listLive());
+      const source = await ledger.readCheckSource(selector);
+      expect(source).toMatchObject({
+        kind: "source",
+        source: { state: "live", resource: { channelId: "slack:C1", channelVisibility: "private" } },
+      });
+      const changed =
+        field === "channelId"
+          ? { ...claim.meta, channelId: "slack:public", restartOf: id }
+          : { ...claim.meta, channelVisibility: "public" as const, restartOf: id };
+      await expect(ledger.claim({ ...claim, phase: "attaching", state: {}, meta: changed })).rejects.toThrow();
+      expect(JSON.stringify(await ledger.listLive())).toBe(before);
+      expect(await ledger.readCheckSource(selector)).toEqual(source);
+    },
+  );
+  it("accepts same-generation attaching with the unchanged private resource", async () => {
+    const { ledger, claim, selector } = await current();
+    const source = await ledger.readCheckSource(selector);
+    expect(
+      await ledger.claim({ ...claim, phase: "attaching", state: {}, meta: { ...claim.meta, restartOf: id } }),
+    ).toMatchObject({ ok: true });
+    expect(await ledger.readCheckSource(selector)).toEqual(source);
+    expect(await ledger.listLive()).toMatchObject([
+      { runId: id, ownerGen: "g1", meta: { channelId: "slack:C1", channelVisibility: "private" } },
+    ]);
+  });
+});
+
+describe("recorded check abandon custody", () => {
+  it.each(["unknown-command", "pending-metadata", "malformed", "absent", "empty"] as const)(
+    "preserves admitted evidence and permits only unstarted state: %s",
+    async (kind) => {
+      const ledger = new InMemoryRunLedger(() => 20_000);
+      const id = "abandon-check",
+        thread = "slack:C1:1.0";
+      const owner = { runId: id, requester: "slack:UALICE", threadKey: thread, repo: "fixture/repo" };
+      const checks =
+        kind === "unknown-command"
+          ? await checkStateFixture(owner, { unknown: true })
+          : kind === "pending-metadata"
+            ? await checkStateFixture(owner, { metadataUnknown: true })
+            : kind === "malformed"
+              ? { version: 1, receipts: [{ callId: "preserve" }] }
+              : kind === "empty"
+                ? { version: 1, receipts: [] }
+                : undefined;
+      const claim = claimReq(id, thread);
+      claim.meta = { ...claim.meta, repo: owner.repo, channelVisibility: "private" };
+      claim.state = checks === undefined ? {} : { checkExecutions: checks };
+      expect(await ledger.claim(claim)).toMatchObject({ ok: true });
+      const before = structuredClone((await ledger.listLive())[0]);
+      if (kind === "absent" || kind === "empty") {
+        expect(await ledger.abandon(id, "g1")).toEqual({ ok: true });
+        expect(await ledger.listLive()).toEqual([]);
+      } else {
+        expect(await ledger.abandon(id, "g1")).toEqual({ ok: false, reason: "fenced" });
+        expect(await ledger.listLive()).toEqual([before]);
+      }
+    },
+  );
+});
 
 describe("durable inbox terminal custody", () => {
   it("peeks only under the original owner fence and preserves exact row witnesses without consuming", async () => {

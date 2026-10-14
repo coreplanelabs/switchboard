@@ -72,6 +72,8 @@ One table per group, in registration order. "Surfaces" is where that command can
 | `runs get <id> [--include <messages\|audience>]` | One run's record and cost in dollars per model (or unpriced); `--include messages` adds events with free text wrapped as untrusted content; `--include audience` adds a structural refusal diagnostic when recorded. | CLI · HTTP · MCP |
 | `runs events <id> [--after-seq <integer>] [--limit <integer>]` | A page of one run's events after `--after-seq` (server-capped); free text wrapped as untrusted content. | CLI · HTTP · MCP |
 | `runs friction <id>` | One run's friction diagnosis (live: computed now; persisted: as stored). | CLI · HTTP · MCP |
+| `runs check <id> <call> --phase <metadata\|command>` | Inspect an original recorded check without running it again; saved output is wrapped as untrusted content. | CLI · HTTP · MCP |
+| `runs settlecheck <id> <call> --phase <metadata\|command>` | Retire one original check after its run finishes, only when saved proof verifies that the original process ended. | CLI · HTTP · MCP |
 | `runs stop <id> --mode <soft\|hard>` | Stop your own live run, or another run with operator permission (`--mode soft` = finish the current step; `hard` = abort now). A pipeline refuses soft — `--mode hard` seals it failed and releases its thread. Records the caller as the requester. | every surface |
 | `runs unit <unit>` | A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read. | every surface |
 | `runs children <id>` | The runs one run spawned — a conductor's children, live and finished — oldest started first. | every surface |

@@ -482,13 +482,35 @@ describe("canonical scratch custody disposition", () => {
       const { store, record } = await closureFixture();
       const original = store.live.get(id)!;
       const allocation = original.meta.workspaceAllocation!;
-      if (retained)
-        expect(
-          await store.setState(id, "g1", {
-            ...original.state,
-            checkExecutions: { version: 1, receipts: [], metadata: { callId: "original-pending" } },
+      if (retained) {
+        const control = new AbortController();
+        const checks = createCheckExecution({
+          owner: {
+            runId: id,
+            requester: allocation.requester,
+            threadKey: allocation.threadKey,
+            repo: allocation.repo!,
+          },
+          executor: () => ({
+            execResult: async () => {
+              throw new Error("fixture lost metadata reply");
+            },
+            inspectCheckResult: async () => undefined,
           }),
-        ).toMatchObject({ ok: true });
+          workspace: () => "/workspace/checkout",
+          recordingAvailable: true,
+          authorizeCommand: () => true,
+          remainingMs: () => 120_000,
+          clock: () => 10,
+          signal: control.signal,
+          save: async (state) => (await store.setState(id, "g1", { ...original.state, checkExecutions: state })).ok,
+        });
+        expect(await checks.run({ command: "exit 7", purpose: "verification" }, "original-pending")).toMatchObject({
+          kind: "unavailable",
+          reason: "metadata_unavailable",
+        });
+        control.abort();
+      }
       expect(await store.finish(id, "g1", record)).toMatchObject({ ok: true });
       expect(await store.workspaceDisposition(allocation)).toMatchObject({
         kind: "terminal",
@@ -576,6 +598,13 @@ describe("canonical scratch custody disposition", () => {
         record.events.push(...calls);
         record.eventCount += 2;
         record.storedEventCount += 2;
+        if (outcome === "foreign-owner") {
+          const retained = structuredClone(store.live.get(id)!.state);
+          await expect(store.finish(id, "g1", record)).rejects.toThrow("canonical check state is unreadable");
+          expect(store.live.get(id)!.state).toEqual(retained);
+          expect(await store.workspaceDisposition(allocation)).toEqual({ kind: "held", reason: "live" });
+          continue;
+        }
         expect(await store.finish(id, "g1", record)).toMatchObject({ ok: true });
         const result = await store.workspaceDisposition(allocation);
         expect(result, JSON.stringify(result)).toMatchObject({

@@ -74,6 +74,11 @@ export type NativeOperationReceipt = {
   outcome: "native-ended";
   processes: NativeTerminal[];
 };
+export type NativeEndingRead =
+  | { kind: "missing" }
+  | { kind: "unavailable" }
+  | { kind: "ended"; original: NativeOperationRecord; receipt: NativeOperationReceipt };
+
 type Refusal = {
   error: string;
   status: 409 | 503;
@@ -365,6 +370,48 @@ export class NativeOperationJournal {
       }),
     );
     return { operations, cursor: rows.size > PAGE_SIZE ? page.at(-1)![0] : null };
+  }
+
+  /** Read a stored ending only; never look up or signal a native process. */
+  async readEnding(key: string, rows: Pick<NativeOperationRows, "get"> = this.storage): Promise<NativeEndingRead> {
+    if (!validNativeOperationKey(key)) return { kind: "unavailable" };
+    const archived = await rows.get<unknown>(RECEIPT_PREFIX + key);
+    if (archived === undefined) return { kind: "missing" };
+    if (!archived || typeof archived !== "object" || Array.isArray(archived)) return { kind: "unavailable" };
+    const value = archived as { original?: unknown; receipt?: unknown };
+    const original = recordSchema.safeParse(value.original);
+    const saved = z
+      .object({
+        key: z.string(),
+        recordHash: z.string().regex(/^[a-f0-9]{64}$/),
+        outcome: z.literal("native-ended"),
+        processes: z.array(terminalSchema).max(ATTEMPT_LIMIT),
+      })
+      .strict()
+      .safeParse(value.receipt);
+    if (
+      !original.success ||
+      !recoverable(original.data) ||
+      !saved.success ||
+      saved.data.key !== key ||
+      saved.data.recordHash !== (await recordHash(value.original))
+    )
+      return { kind: "unavailable" };
+    const attempts = Object.values(original.data.native.pending);
+    if (
+      saved.data.processes.length !== attempts.length ||
+      attempts.some((attempt, i) => {
+        const terminal = saved.data.processes[i]!;
+        return (
+          terminal.id !== attempt.process!.id ||
+          terminal.pid !== attempt.process!.pid ||
+          terminal.startedAt !== attempt.process!.startedAt ||
+          Date.parse(terminal.endedAt) < Date.parse(terminal.startedAt)
+        );
+      })
+    )
+      return { kind: "unavailable" };
+    return { kind: "ended", original: original.data, receipt: saved.data };
   }
 
   async recover(
