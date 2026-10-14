@@ -10,7 +10,7 @@ Read this first. Details: [README.md](README.md), [docs](docs/README.md) at <htt
 2. **A failing test, then the code.** Unit tests are the default proof. The loop is `npx vitest run` on the test files you touched, by name, once before the push — never `--changed`, never a directory: on a moving base `--changed` is most of the suite. CI runs the full suite and typecheck when the change needs them. Local human session: `npm test` before pushing.
 3. **`npm run fix`, then the checks the change needs.** `fix` regenerates every generated artifact and repairs lint and formatting. CI selects checks and builds from the push's inputs, so a pipeline agent validates its own change at the changed-set scope (`npx prettier --check` on the changed files, `tsc --noEmit -p` the touched tsconfig under `NODE_OPTIONS=--max-old-space-size=6144`, `npm run hygiene:check`, `npm run specs:check`) and uses judgement beyond that. Local human session: `npm run verify` before requesting review — it runs every CI gate locally, and a unit test holds the workflow to those scripts.
 4. **A PR written for the reader.** The title is the changelog line, 72 characters at most: `type(scope): what a reader can now do or expect`, scope from the code map's Areas, `!` plus a migration note when it breaks ([the rule](CONTRIBUTING.md#the-pr-title-is-the-changelog-line)); a required check refuses the rest. Body: the fixed-size map of [pr-description.md](docs/reference/specs/pr-description.md); decisions and receipts fold below. Docs for changed behavior change in the same PR.
-5. **Switchboard reviews it, in the open.** The PR is posted to `agent:review`; findings are addressed or declined with a reason, the branch rewritten into reviewable commits, review re-requested at the new head. `LGTM:` auto-approves where the repo has opted in; a person merges.
+5. **Always use Switchboard for PR reviews unless the user explicitly instructs otherwise.** Request `agent:review` through MCP; address or decline findings with a reason, rewrite reviewable commits, and re-request at the new head. `LGTM:` auto-approves where the repo has opted in; a person merges.
 6. **Squash-merge, release, deploy.** The title is the commit. release-please accumulates a release PR; merging it tags the version and CI deploys only the Workers whose inputs changed.
 
 ## Invariants
@@ -112,7 +112,7 @@ Each workspace has its own `verify` (`-w web|docs|deploy/<worker>|packages/switc
 
 ## Switchboard develops Switchboard
 
-Start work and reply to or steer runs in the configured chat channel so asks stay visible and dogfood the product. Use Switchboard MCP for deterministic run facts, health and diagnostics; see [MCP ingress](docs/reference/specs/mcp-ingress.md) and [operating guidance](docs/how-to/operate-production.md).
+Always use native Switchboard MCP for all Switchboard actions unless the user explicitly instructs otherwise. If MCP is unavailable, report the blocker. See [MCP ingress](docs/reference/specs/mcp-ingress.md) and [operating guidance](docs/how-to/operate-production.md).
 
 ## Working locally
 
