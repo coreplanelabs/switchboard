@@ -340,19 +340,19 @@ describe("deploy registration activity", () => {
     expect(methodOf(registry, "setDrain")).toContain("swapFence");
     expect(methodOf(registry, "clearDrain")).toContain("postUploadVersion(record, versionId, versionTimestamp)");
     expect(methodOf(registry, "clearDrain")).toContain("DEPLOY_ADMISSION_KEY_PREFIX");
-    expect(source.slice(source.indexOf("async function handleReconcile"))).toContain("beginDeployReconcileAdmission");
+    expect(source.slice(source.indexOf("async function handleReconcile"))).toContain("beginTrackedDeployAdmission");
   });
 
   it("admits scheduled refresh steps and watchdog lifecycle work before either can start after the quiet read", () => {
     const step = method("runInstanceStep");
-    expect(step).toContain("beginDeployAdmission");
-    expect(step).toContain("endDeployAdmission");
-    expect(step.indexOf("beginDeployAdmission")).toBeLessThan(step.indexOf("refreshAdmissionsInFlight++"));
-    expect(step.indexOf("endDeployAdmission")).toBeGreaterThan(step.indexOf("fn({ count })"));
+    expect(step).toContain("beginTrackedDeployAdmission");
+    expect(step).toContain("endTrackedDeployAdmission");
+    expect(step.indexOf("beginTrackedDeployAdmission")).toBeLessThan(step.indexOf("refreshAdmissionsInFlight++"));
+    expect(step.indexOf("endTrackedDeployAdmission")).toBeGreaterThan(step.indexOf("fn({ count })"));
     const watchdog = source.slice(source.indexOf("async function runWatchdog("), source.indexOf("function json("));
-    expect(watchdog).toContain("beginDeployAdmission");
-    expect(watchdog).toContain("endDeployAdmission");
-    expect(watchdog.indexOf("beginDeployAdmission")).toBeLessThan(watchdog.indexOf("createRefreshInstance("));
+    expect(watchdog).toContain("beginTrackedDeployAdmission");
+    expect(watchdog).toContain("endTrackedDeployAdmission");
+    expect(watchdog.indexOf("beginTrackedDeployAdmission")).toBeLessThan(watchdog.indexOf("createRefreshInstance("));
   });
 
   it("admits reconcile before its drain read and distinguishes the deployed Worker version", () => {
@@ -364,9 +364,9 @@ describe("deploy registration activity", () => {
       source.indexOf("async function handleReconcile("),
       source.indexOf("async function handleResidents("),
     );
-    expect(reconcile).toContain("beginDeployReconcileAdmission");
-    expect(reconcile.indexOf("beginDeployReconcileAdmission")).toBeLessThan(reconcile.indexOf("registry.list()"));
-    expect(reconcile).toContain("endDeployAdmission");
+    expect(reconcile).toContain("beginTrackedDeployAdmission");
+    expect(reconcile.indexOf("beginTrackedDeployAdmission")).toBeLessThan(reconcile.indexOf("registry.list()"));
+    expect(reconcile).toContain("endTrackedDeployAdmission");
     expect(methodOf(registry, "beginDeployReconcileAdmission")).toContain(
       "postUploadVersion(record, versionId, versionTimestamp)",
     );

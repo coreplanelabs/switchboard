@@ -334,6 +334,25 @@ function nativeOperationDiagnostic(fetched) {
         });
 }
 
+/** Closed producer projection; consumer schema is never a producer acknowledgement. */
+function deployProducerDiagnostic(payload) {
+  const data = payload?.deployDiagnostic;
+  const valid =
+    data?.schema === 1 &&
+    typeof data.producer?.build === "string" &&
+    /^[a-f0-9]{7,40}(?:@\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z)?$/.test(data.producer.build) &&
+    typeof data.producer.workerVersion === "string" &&
+    /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(data.producer.workerVersion) &&
+    ["retained", "withdrawn"].includes(data.fenceDisposition) &&
+    ["reported", "unavailable"].includes(data.admissionReadback);
+  return valid
+    ? {
+        producer: { state: "reported", build: data.producer.build, workerVersion: data.producer.workerVersion },
+        fenceDisposition: data.fenceDisposition,
+      }
+    : { producer: { state: "unverified" }, fenceDisposition: "unavailable" };
+}
+
 /** The global permit is a request obligation, separate from native journals.
  * Only already-returned metadata is projected; age never proves settlement. */
 function deployAdmissionDiagnostic(fetched) {
@@ -362,12 +381,17 @@ function deployAdmissionDiagnostic(fetched) {
     schema: 1,
     receivedProjectionComplete: false,
     storageObservation: "registry-permits-only",
+    ...deployProducerDiagnostic(fetched.payload),
     gateActiveCount: Number.isSafeInteger(fetched.payload?.activeAdmissions) ? fetched.payload.activeAdmissions : null,
     fenceReady: typeof fetched.payload?.fenceReady === "boolean" ? fetched.payload.fenceReady : null,
     nativeOutcome: "unverified",
     requestEnd: "unobserved",
   };
-  if (!readback) return prefix + JSON.stringify({ ...snapshot, detailUnavailable: "not-reported" });
+  if (!Object.hasOwn(fetched.payload, "admissionReadback"))
+    return prefix + JSON.stringify({ ...snapshot, detailUnavailable: "producer-field-absent" });
+  if (readback === null) return prefix + JSON.stringify({ ...snapshot, detailUnavailable: "readback-unavailable" });
+  if (!readback || typeof readback !== "object")
+    return prefix + JSON.stringify({ ...snapshot, detailUnavailable: "malformed" });
   if (
     readback.schema !== 1 ||
     !integer(readback.observedAt) ||
@@ -462,8 +486,14 @@ export function decide(fetched, { force = false } = {}) {
       !Number.isFinite(Date.parse(drain.since)) ||
       !Number.isFinite(Date.parse(drain.until)) ||
       Date.parse(drain.until) <= Date.parse(drain.since)
-    )
-      problems.push("deploy fence is missing or invalid (registered owners may reattach)");
+    ) {
+      const disposition = deployProducerDiagnostic(fetched.payload).fenceDisposition;
+      problems.push(
+        drain?.swapFence === false && fetched.payload?.fenceReady === false && disposition === "withdrawn"
+          ? "deploy fence was withdrawn after the activity check refused upload"
+          : "deploy fence is missing or invalid (registered owners may reattach)",
+      );
+    }
     const activeAdmissions = fetched.payload?.activeAdmissions;
     if (!Number.isSafeInteger(activeAdmissions) || activeAdmissions < 0)
       problems.push("deploy admission count is missing or invalid");
