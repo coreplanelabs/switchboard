@@ -3735,8 +3735,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // fail-closed without it, but a prompt rule alone can be skipped — a run
     // has approved in prose and never called the tool. So a review that will
     // post to a pull request and still has NO verdict after the head settle
-    // (whose re-review turn asks for a fresh verdict itself, so a moved head
-    // is never nudged twice) gets ONE bounded extra model turn asking for the
+    // gets ONE bounded extra model turn asking for the
     // call, before the post step builds the body. The verdict arrives through
     // the same onVerdict hook the loop fed (so the ledger row sees it) and is
     // also returned. A hard stop asks nothing; a request that opted out of the
@@ -3750,6 +3749,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       postedBefore === undefined &&
       verdict === undefined &&
       !(reviewSubmission?.status === "pending" && reviewSubmission.proposal !== undefined) &&
+      // A new history head cannot be reviewed by a verdict-only prompt in this checkout.
+      !(
+        reviewSubmission?.status === "rejected" &&
+        reviewSubmission.stage === "head" &&
+        observedHead !== undefined &&
+        toolContext.reviewHistory?.snapshot !== undefined &&
+        toolContext.reviewHistory.snapshot.head !== observedHead
+      ) &&
       recovery.stopped === undefined &&
       !reviewPostOptedOut(ctx.requestText)
     ) {
