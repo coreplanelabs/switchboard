@@ -4,6 +4,10 @@ import { bearerHashOf, RunBearerStore } from "../core/modelProxy/runBearers.js";
 import { GIT_RECEIVE_PACK_FORWARD_TIMEOUT_MS } from "../core/budgets.js";
 import { GitBindings } from "../core/modelProxy/gitBindings.js";
 import { createGithubDoorHandler, type GithubDoorDeps } from "./githubDoor.js";
+import { createTracer } from "../core/trace/tracer.js";
+import { createSpanLog } from "../core/trace/spanLog.js";
+import { createRunStreamSink } from "../core/trace/runStreamSink.js";
+import type { SpanStreamEvent } from "../core/trace/runStreamSink.js";
 
 const grant = {
   runId: "12345678-1234-1234-1234-123456789abc",
@@ -14,14 +18,22 @@ const grant = {
   maxTokens: 100,
   maxTurns: 10,
   expiresAt: 2_000,
-  span: {} as never,
+  span: createTracer({ clock: () => 1_000 }).start("request", { sinks: [] }),
   publish: () => {},
   github: { identity: "write" as const, repo: "o/r", ref: "fix" },
 };
 
 async function fixture(bindings?: GitBindings, token?: GithubDoorDeps["token"]) {
   const bearers = new RunBearerStore({ clock: () => 1_000 });
-  const bearer = bearers.mint(grant);
+  const log = createSpanLog();
+  const events: SpanStreamEvent[] = [];
+  const stream = createRunStreamSink({ clock: () => 1_000 });
+  stream.bindRun(grant.runId, (event) => events.push(event));
+  const root = createTracer({ clock: () => 1_000 }).start("request", {
+    sinks: [log.sink, stream],
+    attrs: { runId: grant.runId },
+  });
+  const bearer = bearers.mint({ ...grant, span: root });
   const upstream = vi.fn(async (url: string, _init?: RequestInit) => {
     if (url.includes("info/refs")) {
       const line = Buffer.from(`${"1".repeat(40)} refs/heads/main\0report-status side-band-64k push-options\n`);
@@ -51,11 +63,124 @@ async function fixture(bindings?: GitBindings, token?: GithubDoorDeps["token"]) 
     bearer,
     bearers,
     upstream,
+    log,
+    events,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
 
 describe("GitHub run-bearer door", () => {
+  it("records a scoped CLI refusal on the original run with zero upstream attempts and no request content", async () => {
+    const f = await fixture();
+    try {
+      const response = await fetch(`${f.url}/api/graphql?secret=private-query`, {
+        method: "POST",
+        headers: { authorization: `token ${f.bearer}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          query: 'query { repository(owner:"o", name:"r") { pullRequest(number:1) { headRefOid } } }',
+        }),
+      });
+      expect(response.status).toBe(403);
+      expect(await response.text()).toBe("API read is outside this run's repository binding");
+      const line = f.log.read({ runId: grant.runId, span: "github.door" }).lines[0];
+      expect(line?.attrs).toEqual({
+        route: "graphql",
+        method: "POST",
+        attempts: 0,
+        outcome: "scope_refused",
+        httpStatus: 403,
+      });
+      expect(f.events.find((event) => event.type === "span_end" && event.name === "github.door")).toMatchObject({
+        status: "ok",
+        attrs: { outcome: "scope_refused", attempts: 0, httpStatus: 403 },
+      });
+      expect(JSON.stringify(line)).not.toMatch(/private-query|headRefOid|pullRequest|repository|sbr_/);
+      expect(f.upstream).not.toHaveBeenCalled();
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("distinguishes an upstream 403 from a local refusal and retains only a safe request ID without retry", async () => {
+    const f = await fixture();
+    try {
+      f.upstream.mockResolvedValueOnce(
+        new Response("private upstream body", { status: 403, headers: { "x-github-request-id": "ABCD:1234" } }),
+      );
+      const response = await fetch(`${f.url}/api/v3/repos/o/r?secret=private-query`, {
+        headers: { authorization: `token ${f.bearer}` },
+      });
+      expect(response.status).toBe(403);
+      expect(await response.text()).toBe("private upstream body");
+      const line = f.log.read({ runId: grant.runId, span: "github.door" }).lines[0];
+      expect(line?.attrs).toEqual({
+        route: "rest",
+        method: "GET",
+        attempts: 1,
+        outcome: "upstream",
+        githubRequestId: "ABCD:1234",
+        httpStatus: 403,
+      });
+      expect(f.log.read({ runId: grant.runId, span: "github.rest" }).lines[0]?.attrs).toEqual({
+        host: "api.github.com",
+        route: "rest",
+        method: "GET",
+        httpStatus: 403,
+      });
+      expect(JSON.stringify(line)).not.toMatch(/private|sbr_|read:o|authorization|\/repos/);
+      expect(f.upstream).toHaveBeenCalledTimes(1);
+      const sent = new Headers(f.upstream.mock.calls[0]?.[1]?.headers);
+      expect(sent.has("traceparent")).toBe(false);
+      f.upstream.mockResolvedValueOnce(
+        new Response("accepted", { headers: { "x-github-request-id": "private-secret" } }),
+      );
+      const accepted = await fetch(`${f.url}/api/v3/repos/o/r`, { headers: { authorization: `token ${f.bearer}` } });
+      expect(accepted.status).toBe(200);
+      expect(await accepted.text()).toBe("accepted");
+      expect(f.log.read({ runId: grant.runId, span: "github.door" }).lines[1]?.attrs).toEqual({
+        route: "rest",
+        method: "GET",
+        attempts: 1,
+        outcome: "upstream",
+        httpStatus: 200,
+      });
+    } finally {
+      await f.close();
+    }
+  });
+
+  it("records token and transport failures at their original attempt count without retaining exception text", async () => {
+    const f = await fixture(undefined, async () => {
+      throw new Error("private token details");
+    });
+    const transport = await fixture();
+    try {
+      const denied = await fetch(`${f.url}/api/v3/repos/o/r`, { headers: { authorization: `token ${f.bearer}` } });
+      expect(denied.status).toBe(502);
+      expect(await denied.text()).toBe("GitHub door unavailable");
+      expect(f.log.read({ runId: grant.runId, span: "github.door" }).lines[0]).toMatchObject({
+        status: "error",
+        errorKind: "infra",
+        attrs: { outcome: "token_unavailable", attempts: 0, httpStatus: 502 },
+      });
+      transport.upstream.mockRejectedValueOnce(new Error("private peer URL and credentials"));
+      const failed = await fetch(`${transport.url}/api/v3/repos/o/r`, {
+        headers: { authorization: `token ${transport.bearer}` },
+      });
+      expect(failed.status).toBe(502);
+      expect(await failed.text()).toBe("GitHub door unavailable");
+      expect(transport.log.read({ runId: grant.runId, span: "github.door" }).lines[0]).toMatchObject({
+        status: "error",
+        errorKind: "transport",
+        attrs: { outcome: "upstream_unavailable", attempts: 1, httpStatus: 502 },
+      });
+      expect(JSON.stringify([...f.log.read().lines, ...transport.log.read().lines])).not.toMatch(/private|credentials/);
+    } finally {
+      await f.close();
+      await transport.close();
+    }
+  });
+
   it.each([false, true])(
     "closed model transport refuses discovery and push without borrowing authorization: PR=%s",
     async (existingPr) => {
@@ -121,10 +246,8 @@ describe("GitHub run-bearer door", () => {
     try {
       const ok = await fetch(`${f.url}/api/v3/repos/o/r`, { headers: { authorization: `token ${f.bearer}` } });
       expect(ok.status).toBe(200);
-      expect(f.upstream).toHaveBeenCalledWith(
-        "https://api.github.com/repos/o/r",
-        expect.objectContaining({ headers: expect.objectContaining({ authorization: "Bearer read:o/r" }) }),
-      );
+      expect(f.upstream.mock.calls[0]?.[0]).toBe("https://api.github.com/repos/o/r");
+      expect(new Headers(f.upstream.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer read:o/r");
       const count = f.upstream.mock.calls.length;
       const denied = await fetch(`${f.url}/api/v3/repos/o/r`, {
         method: "PATCH",
@@ -196,10 +319,8 @@ describe("GitHub run-bearer door", () => {
         { owner: "o", name: "r" },
       );
       expect(allowed.status).toBe(200);
-      expect(f.upstream).toHaveBeenCalledWith(
-        "https://api.github.com/graphql",
-        expect.objectContaining({ headers: expect.objectContaining({ authorization: "Bearer read:o/r" }) }),
-      );
+      expect(f.upstream.mock.calls[0]?.[0]).toBe("https://api.github.com/graphql");
+      expect(new Headers(f.upstream.mock.calls[0]?.[1]?.headers).get("authorization")).toBe("Bearer read:o/r");
       const withFragment = await graphql(
         "query Named($owner:String!,$name:String!){repo:repository(owner:$owner,name:$name){...RepoBits}} fragment RepoBits on Repository { nameWithOwner }",
         { owner: "o", name: "r" },

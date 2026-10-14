@@ -53,6 +53,7 @@ export const STREAMED_SPANS = [
   "run.pr_description_join",
   "model.turn",
   "model.capacity_wait",
+  "github.door",
   "ship.round",
   "post.card_close",
   "post.reply",
@@ -116,7 +117,7 @@ const UNCOUNTED: ReadonlySet<string> = new Set([
   "post.card_close",
   "post.reply",
 ]);
-const BACKGROUND: ReadonlySet<string> = new Set(["run.reading_diff"]);
+const BACKGROUND: ReadonlySet<string> = new Set(["run.reading_diff", "github.door"]);
 
 /** The class of a streamed name under `owner`. A name that is not streamed has
  *  no class (log-only spans never reach the partition). */
@@ -175,6 +176,7 @@ export const PARENTS: Readonly<Record<string, readonly string[]>> = {
   "run.pr_description_join": ["request", "ship.round"],
   "model.turn": ["run.agent"],
   "model.capacity_wait": ["request", "run.agent"],
+  "github.door": ["request", "run.agent"],
   "ship.round": ["request"],
   "post.card_close": ["request"],
   "post.reply": ["request"],

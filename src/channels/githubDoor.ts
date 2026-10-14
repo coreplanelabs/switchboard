@@ -7,6 +7,9 @@ import type { GitBinding, GitBindings, GitPublicationClaim } from "../core/model
 import { authorizePushRefs, inspectReceivePackPrefix, type PushPrefix } from "./gitPushPolicy.js";
 import { GIT_DOOR_PATH, isGithubDoorPath } from "./githubDoorPaths.js";
 import { scopedGraphqlRead, scopedRestRead } from "./githubDoorApiScope.js";
+import { tracedFetch } from "../core/trace/tracedFetch.js";
+import { classificationOf, classifyError } from "../core/trace/classify.js";
+import type { Span } from "../core/trace/types.js";
 export { isGithubDoorPath } from "./githubDoorPaths.js";
 
 type Scope = "read" | "write";
@@ -263,6 +266,14 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
   const fetcher = deps.fetcher ?? fetch;
   const refs = new Map<string, { ref: string; confirmed: boolean }>();
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    let apiSpan: Span | undefined;
+    let attempts = 0;
+    let outcome = "unavailable";
+    let failed = false;
+    const refuseApi = (status: number, reason: string, code: string): void => {
+      outcome = code;
+      answer(res, status, reason);
+    };
     try {
       const url = new URL(req.url ?? "/", "http://door.invalid");
       if (!isGithubDoorPath(url.pathname)) return answer(res, 404, "not found");
@@ -278,17 +289,31 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
               : 403,
           verdict.reason,
         );
+      // The authenticated run owns this request. Its API telemetry joins the
+      // existing trace and stream, including a refusal before any GitHub call.
+      if (url.pathname.startsWith("/api/")) {
+        const method = req.method ?? "GET";
+        apiSpan = verdict.grant.span.start("github.door", {
+          attrs: {
+            route: url.pathname === "/api/graphql" ? "graphql" : "rest",
+            ...(["GET", "POST", "PATCH", "PUT", "DELETE"].includes(method)
+              ? { method: method as "GET" | "POST" | "PATCH" | "PUT" | "DELETE" }
+              : {}),
+          },
+        });
+      }
       const gitGrant = verdict.grant.github;
-      if (!gitGrant || gitGrant.identity === "none") return answer(res, 403, "GitHub identity is absent for this run");
+      if (!gitGrant || gitGrant.identity === "none")
+        return refuseApi(403, "GitHub identity is absent for this run", "identity_absent");
       const recorded = deps.bindings?.get(verdict.grant.runId);
       const bindingGeneration = deps.bindings?.generationOf(verdict.grant.runId);
       const publication = deps.bindings?.publicationOf(verdict.grant.runId);
-      if (deps.bindings && !recorded) return answer(res, 403, "GitHub binding is absent for this run");
+      if (deps.bindings && !recorded) return refuseApi(403, "GitHub binding is absent for this run", "binding_absent");
       // The run grant comes from dispatch's resolved repository. A model may
       // never choose an installed repository by asking for Git discovery.
       const boundRepo = gitGrant.repo;
       if (!boundRepo || (recorded?.repo && recorded.repo.toLowerCase() !== boundRepo.toLowerCase()))
-        return answer(res, 403, "repository binding is required for GitHub access");
+        return refuseApi(403, "repository binding is required for GitHub access", "repository_binding_required");
       const stillAuthorized = (binding: GitBinding | undefined): boolean => {
         const current = deps.bearers.verify(presented ?? "");
         if (!current.ok || current.grant.runId !== verdict.grant.runId) return false;
@@ -310,13 +335,15 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
       if (url.pathname.startsWith("/api/")) {
         const graphql = url.pathname === "/api/graphql";
         if (graphql ? method !== "POST" : method !== "GET" && method !== "HEAD")
-          return answer(res, 405, "GitHub API writes are unavailable to model commands");
+          return refuseApi(405, "GitHub API writes are unavailable to model commands", "method_refused");
         const path = graphql ? "/graphql" : url.pathname.slice("/api/v3".length);
         const body = graphql ? await limitedBody(req) : undefined;
         if (graphql ? !body || !scopedGraphqlRead(body, boundRepo) : !scopedRestRead(path, boundRepo))
-          return answer(res, 403, "API read is outside this run's repository binding");
+          return refuseApi(403, "API read is outside this run's repository binding", "scope_refused");
+        outcome = "token_unavailable";
         const token = await deps.token("read", boundRepo);
-        if (!stillAuthorized(recorded)) return answer(res, 403, "GitHub authority is no longer valid for this request");
+        if (!stillAuthorized(recorded))
+          return refuseApi(403, "GitHub authority is no longer valid for this request", "authority_invalid");
         const init = {
           method,
           headers: upstreamHeaders(req, token, false),
@@ -324,8 +351,18 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
           ...(graphql ? { body } : {}),
         } as RequestInit;
         const origin = deps.baseUrl ?? `http://${req.headers.host}`;
-        const upstream = await fetcher(githubUrl("api.github.com", path, url.search), init);
-        if (upstream.status >= 300 && upstream.status < 400) return answer(res, 502, "GitHub redirect refused");
+        outcome = "upstream_unavailable";
+        attempts++;
+        const upstream = await tracedFetch(apiSpan, githubUrl("api.github.com", path, url.search), init, {
+          route: graphql ? "graphql" : "rest",
+          name: "github.rest",
+          fetchImpl: (input, options) => fetcher(String(input), options),
+        });
+        const requestId = upstream.headers.get("x-github-request-id");
+        if (requestId && /^[0-9A-Fa-f:]{1,64}$/.test(requestId)) apiSpan?.setAttrs({ githubRequestId: requestId });
+        if (upstream.status >= 300 && upstream.status < 400)
+          return refuseApi(502, "GitHub redirect refused", "redirect_refused");
+        outcome = "upstream";
         return await proxyResponse(res, upstream, origin);
       }
       const match = GIT_DOOR_PATH.exec(url.pathname);
@@ -497,9 +534,18 @@ export function createGithubDoorHandler(deps: GithubDoorDeps) {
         );
       }
       return await proxyResponse(res, upstream);
-    } catch {
+    } catch (error) {
+      failed = true;
+      apiSpan?.fail(
+        classifyError(
+          new Error("GitHub door unavailable"),
+          classificationOf(error) ?? { kind: attempts ? "transport" : "infra" },
+        ),
+      );
       if (!res.headersSent) answer(res, 502, "GitHub door unavailable");
       else res.destroy();
+    } finally {
+      apiSpan?.end(failed ? "error" : "ok", { attempts, outcome, httpStatus: res.statusCode });
     }
   };
 }
