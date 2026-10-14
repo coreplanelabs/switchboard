@@ -8756,6 +8756,9 @@ describe("the pi harness — the review preset", () => {
   it.each([
     "fresh matching history",
     "stale history in verdict-only follow-up",
+    "head moves again during re-review",
+    "malformed finding correction",
+    "reported head correction",
     "resident requires an idle workspace",
     "resident adopts current head",
     "resident after wind-down",
@@ -8763,6 +8766,9 @@ describe("the pi harness — the review preset", () => {
     "a substantive head move mid-review on pi preserves the conversation and refuses stale approval across workspace transitions (%s)",
     async (mode) => {
       const NEW = "d75b5a51aba97d43c64a42c96e580dd9abbfd78e";
+      const THIRD = "0123456789abcdef0123456789abcdef01234567";
+      const secondPush = mode === "head moves again during re-review";
+      const correction = mode === "malformed finding correction" || mode === "reported head correction";
       let container = new FakeHarnessContainer();
       const originalContainer = container;
       const adoption = mode === "resident adopts current head";
@@ -8794,6 +8800,12 @@ describe("the pi harness — the review preset", () => {
       };
       let historyHead = HEAD;
       const refresh = mode !== "stale history in verdict-only follow-up";
+      const accepted = refresh && !secondPush;
+      const finalAnswer = secondPush
+        ? "Second review: head moved again."
+        : refresh
+          ? "Second review: the new test is wrong."
+          : "Second review: no valid verdict.";
       const killedWhenPrompted: number[][] = [];
       // A review's pi answering TWO prompts on one session: the request with a
       // verdict at the pinned head, then the re-review's follow-up with a verdict
@@ -8854,9 +8866,9 @@ describe("the pi harness — the review preset", () => {
           expect(live.toolContext.reviewHistory?.snapshot?.head).toBe(HEAD);
           await reject(HEAD, "error: reviewed head differs from the required review head");
           await reject(NEW, "error: reviewed head differs from the history snapshot");
-          if (refresh) historyHead = NEW;
+          if (refresh) historyHead = secondPush ? THIRD : NEW;
         }
-        if (n === 2) {
+        if (n === 2 && !refresh) {
           // The verdict-only prompt uses the original context, not the re-review's
           // copied sink. Its required head must still be B despite cached A history.
           expect(worktreeHead).toBe(NEW);
@@ -8876,14 +8888,20 @@ describe("the pi harness — the review preset", () => {
           return;
         }
         await scriptedHistoryRead(c, live, `history-${n}`);
+        const submitted =
+          n === 1 && correction
+            ? mode === "reported head correction"
+              ? { ...verdict, head: HEAD }
+              : { ...verdict, findings: [{ id: "F1", kind: "single" }] }
+            : verdict;
         const id = `v${n}`;
-        const t = assistant([{ type: "toolCall", id, name: "submit_verdict", arguments: verdict }]);
+        const t = assistant([{ type: "toolCall", id, name: "submit_verdict", arguments: submitted }]);
         c.emit(
           { type: "message_end", message: t },
-          { type: "tool_execution_start", toolCallId: id, toolName: "submit_verdict", args: verdict },
+          { type: "tool_execution_start", toolCallId: id, toolName: "submit_verdict", args: submitted },
         );
-        authorizeToolCall(live, { toolCallId: id, tool: "submit_verdict", input: verdict });
-        void runRelayedTool(live, { toolCallId: id, tool: "submit_verdict", input: verdict }).then((answer) => {
+        authorizeToolCall(live, { toolCallId: id, tool: "submit_verdict", input: submitted });
+        void runRelayedTool(live, { toolCallId: id, tool: "submit_verdict", input: submitted }).then((answer) => {
           c.emit(
             {
               type: "tool_execution_end",
@@ -8894,10 +8912,7 @@ describe("the pi harness — the review preset", () => {
             },
             { type: "turn_end", message: t, toolResults: [] },
           );
-          const done = assistant(
-            [{ type: "text", text: n === 0 ? "First review: approve." : "Second review: the new test is wrong." }],
-            "stop",
-          );
+          const done = assistant([{ type: "text", text: n === 0 ? "First review: approve." : finalAnswer }], "stop");
           c.emit(
             { type: "message_end", message: done },
             { type: "turn_end", message: done, toolResults: [] },
@@ -8938,7 +8953,7 @@ describe("the pi harness — the review preset", () => {
               planResume({ transcript, lastStep: nativeLedger!.steps.get("run-l")!.at(-1)!, tools: [] }),
             ).toMatchObject({
               kind: "finish",
-              answer: refresh ? "Second review: the new test is wrong." : "Second review: no valid verdict.",
+              answer: finalAnswer,
             });
             posts.push({ target, body });
             return { state: "accepted" as const };
@@ -8949,6 +8964,7 @@ describe("the pi harness — the review preset", () => {
         },
       });
       s.deps.runBearers = bearers;
+      if (secondPush) s.deps.fetchPrHead = async () => (historyHead === THIRD ? THIRD : NEW);
       s.ctx.bearer = mintFor(bearers, s);
       seedReviewHistory(s.deps, () => historyHead);
       const ctx = await trackedCodingContext(
@@ -8966,8 +8982,8 @@ describe("the pi harness — the review preset", () => {
       // One pi survives the re-review and, if needed, the verdict-only prompt.
       expect(container.starts).toHaveLength(1);
       if (replaced) expect(originalContainer.killed).toEqual([4242]);
-      expect(prompts).toBe(refresh ? 2 : 3);
-      expect(killedWhenPrompted).toEqual(refresh ? [[], []] : [[], [], []]);
+      expect(prompts).toBe(refresh && !correction ? 2 : 3);
+      expect(killedWhenPrompted).toEqual(refresh && !correction ? [[], []] : [[], [], []]);
       expect(moves).toEqual(adoption ? [] : [NEW]);
       const followUp = container.stdin
         .map((l) => JSON.parse(l) as Record<string, unknown>)
@@ -8978,7 +8994,7 @@ describe("the pi harness — the review preset", () => {
         expect(reviewRequest).toContain("Switchboard has already moved your worktree to d75b5a5");
       }
       // the second verdict and answer are the run's; posted once, pinned to the new head
-      const answer = refresh ? "Second review: the new test is wrong." : "Second review: no valid verdict.";
+      const answer = finalAnswer;
       expect(out.answer).toBe(answer);
       expect(out.reviewHead).toBe(NEW);
       expect(posts).toEqual([
@@ -8989,7 +9005,7 @@ describe("the pi harness — the review preset", () => {
       ]);
       expect(
         posts[0].body.startsWith(
-          refresh ? "Changes requested: 1 issue\n" : "Review incomplete — findings not validated.",
+          accepted ? "Changes requested: 1 issue\n" : "Review incomplete — findings not validated.",
         ),
       ).toBe(true);
       expect(s.published).toEqual([`answer:${answer}`]);
@@ -8997,7 +9013,7 @@ describe("the pi harness — the review preset", () => {
       // The successor is ended after settlement; replacement already ended the original.
       expect(container.killed).toEqual([replaced ? 5151 : 4242]);
       expect(container.removed).toEqual(["/var/tmp/switchboard-pi-run-l"]);
-      expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: refresh ? "completed" : "failed" });
+      expect(s.registry.getById("run-l")).toMatchObject({ finished: true, status: accepted ? "completed" : "failed" });
       s.ending.drain(true);
       await s.writer.settled();
       const rec = (await s.store.get("run-l"))!;
@@ -9006,18 +9022,24 @@ describe("the pi harness — the review preset", () => {
         "submit_verdict",
         "github_pull_get",
         ...(refresh ? ["github_pull_get", "submit_verdict"] : []),
+        ...(correction ? ["github_pull_get", "submit_verdict"] : []),
       ]);
-      if (!refresh) {
+      if (!accepted) {
         expect(rec.verdict).toBeUndefined();
         expect(posts[0].body).not.toMatch(/^LGTM:/);
         expect(rec.reviewPost).not.toHaveProperty("verdict");
+      }
+      if (secondPush) {
+        expect(out.reviewIncomplete).toBe("The report does not cover the required current head.");
+        expect(s.replies.some((reply) => reply.includes("0123456") && reply.includes("re-request"))).toBe(true);
+        expect(rec.events.filter((event) => event.type === "run_note" && event.kind === "verdict_turn")).toEqual([]);
       }
       expect(rec.events.some((e) => e.type === "run_note" && (e as { kind: string }).kind === "head_moved")).toBe(true);
       expect(rec.events.filter((e) => e.type === "review_posted")).toEqual([
         expect.objectContaining({
           type: "review_posted",
           head: NEW,
-          ...(refresh ? { verdict: "request_changes" } : {}),
+          ...(accepted ? { verdict: "request_changes" } : {}),
         }),
       ]);
     },
