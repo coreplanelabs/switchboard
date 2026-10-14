@@ -387,14 +387,17 @@ describe("deploy registration activity", () => {
     );
     expect(source).toContain('"/deploy-admissions": { scope: "admin", method: "GET" }');
     expect(source).toContain('"/recover-admission": { scope: "admin", method: "POST" }');
+    expect(source).toContain('"/recover-quoted-admission": { scope: "admin", method: "POST" }');
     expect(handler).toContain("recoveryEvidenceUrl(evidence)");
     expect(handler.indexOf("registry.setDeployFence(versionId)")).toBeLessThan(
       handler.indexOf("getResidentRecoveryProbe()"),
     );
     expect(handler.indexOf("getResidentRecoveryProbe()")).toBeLessThan(handler.indexOf("recoveryViewsAreIdle(views)"));
-    expect(handler.indexOf("recoveryViewsAreIdle(views)")).toBeLessThan(handler.indexOf("recoverDeployAdmission(id"));
+    expect(handler.indexOf("recoveryViewsAreIdle(views)")).toBeLessThan(
+      handler.indexOf("registry.recoverQuotedDeployAdmission("),
+    );
     expect(handler).toContain("registry.clearDeployFence(fence.since, fence.until, versionId)");
-    const recover = methodOf(registry, "recoverDeployAdmission")!;
+    const recover = methodOf(registry, "recoverQuotedDeployAdmission")!;
     expect(recover).toContain("this.ctx.storage.transaction");
     expect(recover).toContain("fence.swapVersion !== versionId");
     expect(recover).toContain("await txn.delete(key)");

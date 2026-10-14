@@ -47,7 +47,7 @@ import { RUN_ID_PATTERN } from "../../src/core/runIdentity.js";
 // note '/' rules the id out of hostname-based preview URLs, use tunnels).
 //
 // Route surface (JSON in/out; every route below requires a bearer secret):
-//   admin scope     POST /register /onboard /offboard /reconfigure /rebuild /reset /debug (all ops) /recover-admission /recover-native-operation
+//   admin scope     POST /register /onboard /offboard /reconfigure /rebuild /reset /debug (all ops) /recover-admission /recover-quoted-admission /recover-native-operation
 //                   GET /deploy-admissions
 //   drain scope     POST /drain /deploy-fence /reconcile /undrain (admin implied)
 //   read scope      GET /residents   POST /debug ops info|schedules|threads|deps-backups|native-operations (admin implied)
@@ -466,7 +466,13 @@ import {
   type DepsStoreListing,
 } from "../../src/execution/residentDepsStore.js";
 import { buildId, injectedBuildStamp } from "../../src/deploy/buildStamp.js";
-import { recoveryEvidenceUrl, recoveryViewsAreIdle } from "./admissionRecovery.js";
+import {
+  admissionRecordHash,
+  recoveryEvidenceUrl,
+  recoveryQuote,
+  recoveryViewsAreIdle,
+  type AdmissionRecoveryQuote,
+} from "./admissionRecovery.js";
 import { createRefreshInstance, createRefreshInstanceNow, type RefreshInstanceParams } from "./refresh";
 import {
   deployFenceReady,
@@ -1593,6 +1599,7 @@ const TEST_OVERRIDES_KEY = "testOverrides";
 const DRAIN_KEY = "drain";
 const DEPLOY_ADMISSION_KEY_PREFIX = "deploy:admission:";
 const DEPLOY_RELEASE_RECEIPTS_KEY = "deploy:release-receipts";
+const DEPLOY_RECOVERY_KEY_PREFIX = "deploy:recovered:";
 
 /** Safe request provenance, never an authority or a native completion receipt. */
 function deployAdmissionOrigin(input: unknown) {
@@ -1921,6 +1928,8 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     const admitted = await this.ctx.storage.transaction(async (txn) => {
       if (liveDrain(await txn.get(DRAIN_KEY), systemClock())?.swapFence) return null;
       const id = identity?.id ?? crypto.randomUUID();
+      if ((await txn.get(`${DEPLOY_RECOVERY_KEY_PREFIX}${id}`)) !== undefined)
+        throw new Error("deploy-admission-identity-used-or-unverified");
       if (identity) {
         const receipts = (await txn.get(DEPLOY_RELEASE_RECEIPTS_KEY)) ?? [];
         if (
@@ -1958,6 +1967,8 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       const record = liveDrain(await txn.get(DRAIN_KEY), systemClock());
       if (record?.swapFence && !postUploadVersion(record, versionId, versionTimestamp)) return null;
       const id = identity?.id ?? crypto.randomUUID();
+      if ((await txn.get(`${DEPLOY_RECOVERY_KEY_PREFIX}${id}`)) !== undefined)
+        throw new Error("deploy-admission-identity-used-or-unverified");
       if (identity) {
         const receipts = (await txn.get(DEPLOY_RELEASE_RECEIPTS_KEY)) ?? [];
         if (
@@ -2105,24 +2116,105 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     }));
   }
 
-  /** Delete one permit only while this recovery's fence still stands. The
+  async getDeployAdmissionRecoveryQuote(id: string): Promise<AdmissionRecoveryQuote | null> {
+    const record = await this.ctx.storage.get(`${DEPLOY_ADMISSION_KEY_PREFIX}${id}`);
+    const recordSha256 = await admissionRecordHash(record);
+    return recordSha256 === null ? null : recoveryQuote((record as { startedAt: number }).startedAt, recordSha256);
+  }
+
+  /** Legacy callers have no observed-record contract. Keep their RPC closed
+   * during mixed-version rollout instead of accepting ignored extra arguments. */
+  async recoverDeployAdmission(): Promise<false> {
+    return false;
+  }
+
+  /** Delete one observed permit only while this recovery's fence still stands. The
    * handler checks independent resident and process evidence before calling. */
-  async recoverDeployAdmission(
+  async recoverQuotedDeployAdmission(
     id: string,
     since: string,
     until: string,
     versionId: string,
     evidenceHash: string,
+    expected: AdmissionRecoveryQuote,
   ): Promise<boolean> {
     return this.ctx.storage.transaction(async (txn) => {
-      const fence = liveDrain(await txn.get(DRAIN_KEY), systemClock());
+      const now = systemClock();
+      const fence = liveDrain(await txn.get(DRAIN_KEY), now);
       if (!fence?.swapFence || fence.since !== since || fence.until !== until || fence.swapVersion !== versionId)
         return false;
       const key = `${DEPLOY_ADMISSION_KEY_PREFIX}${id}`;
-      if ((await txn.get(key)) === undefined) return false;
+      const originalRecord = await txn.get(key);
+      if (
+        !recoveryQuote(expected?.startedAt, expected?.recordSha256) ||
+        now < expected.startedAt ||
+        !/^[0-9a-f]{64}$/.test(evidenceHash) ||
+        (originalRecord as { startedAt?: number } | undefined)?.startedAt !== expected.startedAt ||
+        (await admissionRecordHash(originalRecord)) !== expected.recordSha256 ||
+        (await txn.get(`${DEPLOY_RECOVERY_KEY_PREFIX}${id}`)) !== undefined
+      )
+        return false;
+      await txn.put(`${DEPLOY_RECOVERY_KEY_PREFIX}${id}`, {
+        schema: 1,
+        id,
+        disposition: "request-ended",
+        requestEnd: "operator-attested",
+        nativeOutcome: "unverified",
+        independentObligations: "unchanged",
+        originalRecord,
+        originalRecordSha256: expected.recordSha256,
+        recoveredAt: now,
+        evidenceHash,
+        fence: { since, until, versionId },
+      });
       await txn.delete(key);
-      await txn.put(`deploy:recovered:${id}`, { recoveredAt: systemClock(), evidenceHash, versionId });
       return true;
+    });
+  }
+
+  /** Read the original committed disposition, never repeat recovery. */
+  async readDeployAdmissionRecoveryReceipt(
+    id: string,
+    since: string,
+    until: string,
+    versionId: string,
+    evidenceHash: string,
+    expected: AdmissionRecoveryQuote,
+  ): Promise<boolean> {
+    if (!recoveryQuote(expected?.startedAt, expected?.recordSha256) || !/^[0-9a-f]{64}$/.test(evidenceHash))
+      return false;
+    return this.ctx.storage.transaction(async (txn) => {
+      if ((await txn.get(`${DEPLOY_ADMISSION_KEY_PREFIX}${id}`)) !== undefined) return false;
+      const audit = await txn.get<{
+        schema?: number;
+        id?: string;
+        disposition?: string;
+        requestEnd?: string;
+        nativeOutcome?: string;
+        independentObligations?: string;
+        originalRecord?: { startedAt?: number };
+        originalRecordSha256?: string;
+        recoveredAt?: number;
+        evidenceHash?: string;
+        fence?: { since?: string; until?: string; versionId?: string };
+      }>(`${DEPLOY_RECOVERY_KEY_PREFIX}${id}`);
+      return (
+        audit?.schema === 1 &&
+        audit.id === id &&
+        audit.disposition === "request-ended" &&
+        audit.requestEnd === "operator-attested" &&
+        audit.nativeOutcome === "unverified" &&
+        audit.independentObligations === "unchanged" &&
+        audit.originalRecord?.startedAt === expected.startedAt &&
+        audit.originalRecordSha256 === expected.recordSha256 &&
+        (await admissionRecordHash(audit.originalRecord)) === expected.recordSha256 &&
+        Number.isSafeInteger(audit.recoveredAt) &&
+        Number(audit.recoveredAt) >= expected.startedAt &&
+        audit.evidenceHash === evidenceHash &&
+        audit.fence?.since === since &&
+        audit.fence.until === until &&
+        audit.fence.versionId === versionId
+      );
     });
   }
 
@@ -13496,7 +13588,8 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/deploy-fence": { scope: "drain", method: "POST" }, // fence reattach and read executing activity
   "/deploy-admissions": { scope: "admin", method: "GET" }, // targeted recovery inventory, never a drain-bearer route
   "/recover-native-operation": { scope: "admin", method: "POST" }, // exact journal plus original native receipt
-  "/recover-admission": { scope: "admin", method: "POST" }, // exact permit plus independent operator evidence
+  "/recover-admission": { scope: "admin", method: "POST" }, // legacy requests refuse without mutation
+  "/recover-quoted-admission": { scope: "admin", method: "POST" }, // original record plus operator evidence
   "/undrain": { scope: "drain", method: "POST" }, // reopen it
   "/reconcile": { scope: "drain", method: "POST" }, // reconcile every container onto the current image, inside the drain window
   "/residents": { scope: "read", method: "GET" }, // admin implied; read-only bearer allowed
@@ -13655,7 +13748,7 @@ export default {
           case "/deploy-fence":
             return await handleDeployFence(env);
           case "/deploy-admissions":
-            return await handleDeployAdmissions(env);
+            return await handleDeployAdmissions(env, url);
           case "/recover-native-operation": {
             const resource = parseResource(body.resource);
             if ("error" in resource) return json({ error: resource.error }, 400);
@@ -13675,6 +13768,8 @@ export default {
             return json(result, "error" in result ? result.status : 200);
           }
           case "/recover-admission":
+            return json({ error: "legacy permit recovery is unavailable" }, 409);
+          case "/recover-quoted-admission":
             return await handleRecoverAdmission(env, body);
           case "/undrain":
             return await handleUndrain(env);
@@ -14307,7 +14402,15 @@ async function handleDeployFence(env: Env): Promise<Response> {
 
 /** The existing Admin inventory retains its compact legacy shape. Deployment
  * readback carries a separate bounded projection of safe request provenance. */
-async function handleDeployAdmissions(env: Env): Promise<Response> {
+async function handleDeployAdmissions(env: Env, url: URL): Promise<Response> {
+  if (url.searchParams.has("id")) {
+    const id = url.searchParams.get("id")!;
+    if (!/^[0-9a-f-]{36}$/.test(id)) return json({ error: "invalid admission id" }, 400);
+    const quote = await registryStub(env).getDeployAdmissionRecoveryQuote(id);
+    return quote
+      ? json({ admission: { id, ...quote } })
+      : json({ error: "admission missing or cannot be quoted" }, 409);
+  }
   return json({ admissions: await registryStub(env).listDeployAdmissions() });
 }
 
@@ -14318,15 +14421,25 @@ async function handleDeployAdmissions(env: Env): Promise<Response> {
 async function handleRecoverAdmission(env: Env, body: Record<string, unknown>): Promise<Response> {
   const id = body.id;
   const evidence = body.evidence;
+  if (body.disposition === "operator-abandoned" || body.requestEnd === "unobserved")
+    return json({ error: "operator abandonment is unavailable: independently qualified containment is required" }, 409);
+  if (
+    (body.disposition !== undefined && body.disposition !== "request-ended") ||
+    (body.requestEnd !== undefined && body.requestEnd !== "operator-attested")
+  )
+    return json({ error: "invalid recovery disposition" }, 400);
   if (typeof id !== "string" || !/^[0-9a-f-]{36}$/.test(id)) return json({ error: "invalid admission id" }, 400);
   const evidenceUrl = recoveryEvidenceUrl(evidence);
   if (!evidenceUrl)
     return json({ error: "an HTTPS link to an independently verified request-end receipt is required" }, 400);
+  const expected = recoveryQuote(body.expectedStartedAt, body.expectedRecordSha256);
+  if (!expected) return json({ error: "a fresh admission recovery quote is required" }, 400);
   const versionId = workerVersionId(env);
   if (!versionId) return json({ error: "Worker version metadata is unavailable" }, 503);
   const registry = registryStub(env);
-  if (!(await registry.listDeployAdmissions()).some((row) => row.id === id))
-    return json({ error: "admission id not found" }, 404);
+  const current = await registry.getDeployAdmissionRecoveryQuote(id);
+  if (!current || current.startedAt !== expected.startedAt || current.recordSha256 !== expected.recordSha256)
+    return json({ error: "recovery quote changed or is unavailable; nothing removed" }, 409);
   const fence = await registry.setDeployFence(versionId);
   if (!fence) return json({ error: "recovery requires an unfenced live fleet drain with upload time remaining" }, 409);
   try {
@@ -14345,10 +14458,42 @@ async function handleRecoverAdmission(env: Env, body: Record<string, unknown>): 
     const bytes = new TextEncoder().encode(evidenceUrl);
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     const evidenceHash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-    const recovered = await registry.recoverDeployAdmission(id, fence.since, fence.until, versionId, evidenceHash);
+    let recovered: boolean;
+    try {
+      recovered = await registry.recoverQuotedDeployAdmission(
+        id,
+        fence.since,
+        fence.until,
+        versionId,
+        evidenceHash,
+        expected,
+      );
+    } catch {
+      emitDeployAdmission({
+        phase: "recovery-commit",
+        id,
+        workerVersion: versionId,
+        observedAt: systemClock(),
+        commit: "unverified",
+        failure: "storage-or-rpc",
+        nativeOutcome: "unverified",
+      });
+      recovered = await registry
+        .readDeployAdmissionRecoveryReceipt(id, fence.since, fence.until, versionId, evidenceHash, expected)
+        .catch(() => false);
+      if (!recovered) return json({ error: "recovery outcome is unverified" }, 503);
+    }
     if (!recovered) return json({ error: "recovery fence or admission changed; nothing removed" }, 409);
     console.log(`[deploy] recovered one admission ${id} after an admin-supplied independent receipt and idle probes`);
-    return json({ recovered: id, evidenceSha256: evidenceHash });
+    return json({
+      recovered: id,
+      evidenceSha256: evidenceHash,
+      originalRecordSha256: expected.recordSha256,
+      disposition: "request-ended",
+      requestEnd: "operator-attested",
+      nativeOutcome: "unverified",
+      independentObligations: "unchanged",
+    });
   } finally {
     await registry.clearDeployFence(fence.since, fence.until, versionId);
   }
