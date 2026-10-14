@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { stream as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
+import type { Model } from "@earendil-works/pi-ai";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { PI_EVENT_HOME } from "../../../load/piRpc.js";
 import type { RunEvent } from "../../runEvents.js";
 import {
@@ -632,12 +635,12 @@ describe("turns, narration and the answer — the loop's rules", () => {
     expect(raced.terminalFailure).toMatchObject({ kind: "local_turn_budget" });
   });
 
-  it("unknown terminal diagnostics distinguish authenticated proxy evidence without exposing error text or content", () => {
+  it("unknown terminal diagnostics distinguish authenticated proxy evidence without exposing request bodies or content", () => {
     const { bridge } = harness();
     for (const [errorMessage, source, errorState] of [
       [undefined, "unverified", "missing"],
       ["", "unverified", "empty"],
-      ["private upstream body sk-private-token", "unverified", "present"],
+      [JSON.stringify({ input: "private upstream body sk-private-token" }), "unverified", "present"],
       [
         JSON.stringify({ type: "model_terminal_unknown", _switchboard_proxy_auth: "v1.forged.forged" }),
         "unverified",
@@ -682,6 +685,161 @@ describe("turns, narration and the answer — the loop's rules", () => {
       expect(result.providerFailure).toBeUndefined();
       expect(result.message).toBeUndefined();
     }
+  });
+
+  it("retains bounded redacted Pi error details and correlation without granting recovery", () => {
+    const bridge = new PiBridge({ emit: () => {}, clock: () => NOW, secretValues: ["custom-run-bearer"] });
+    const result = bridge.observe({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "private partial answer" }],
+        stopReason: "error",
+        responseId: "resp_failure_123",
+        errorMessage:
+          '400 {"error":{"type":"invalid_request_error","code":"bad_schema","message":"Invalid schema; custom-run-bearer sk-proj-12345678901234567890","param":"tools"},"input":"private prompt"}',
+      },
+    });
+    expect(result.terminalFailure).toMatchObject({
+      kind: "unknown",
+      diagnostic: {
+        source: "unverified",
+        responseId: "resp_failure_123",
+        error: {
+          type: "invalid_request_error",
+          code: "bad_schema",
+          param: "tools",
+          message: "Invalid schema; «redacted» «redacted-api-key»",
+        },
+      },
+    });
+    expect(result.providerFailure).toBeUndefined();
+    expect(result.message).toBeUndefined();
+    if (result.terminalFailure?.kind !== "unknown") throw new Error("Expected an unknown terminal");
+    expect(JSON.stringify(result.terminalFailure.diagnostic)).not.toContain("private");
+
+    const long = bridge.observe({
+      type: "message_end",
+      message: { role: "assistant", content: [], stopReason: "error", errorMessage: "x".repeat(1000) },
+    });
+    expect(long.terminalFailure).toMatchObject({
+      kind: "unknown",
+      diagnostic: { error: { message: `${"x".repeat(400)}…`, truncated: true } },
+    });
+    const url = bridge.observe({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: "Failed to fetch https://private.example/path?signature=private",
+      },
+    });
+    expect(url.terminalFailure).toMatchObject({
+      kind: "unknown",
+      diagnostic: { error: { message: "Failed to fetch «redacted-url»" } },
+    });
+    for (const responseId of ["custom-run-bearer", "sk-proj-12345678901234567890"]) {
+      const secretId = bridge.observe({
+        type: "message_end",
+        message: { role: "assistant", content: [], stopReason: "error", responseId },
+      });
+      expect(secretId.terminalFailure).toMatchObject({ kind: "unknown", diagnostic: { errorMessage: "missing" } });
+      if (secretId.terminalFailure?.kind !== "unknown") throw new Error("Expected an unknown terminal");
+      expect(secretId.terminalFailure.diagnostic).not.toHaveProperty("responseId");
+    }
+  });
+
+  it("recognizes the installed Anthropic adapter's missing-stop error as a local stream failure", async () => {
+    const model: Model<"anthropic-messages"> = {
+      id: "test",
+      name: "test",
+      api: "anthropic-messages",
+      provider: "anthropic",
+      baseUrl: "https://proxy.test",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200000,
+      maxTokens: 1000,
+    };
+    let calls = 0;
+    const message = await anthropicStream(model, normalizeContext({ messages: [] }), {
+      apiKey: "test",
+      maxRetries: 0,
+      fetch: (async () => {
+        calls++;
+        return new Response(
+          'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_incomplete","role":"assistant","type":"message","model":"test","content":[],"usage":{"input_tokens":0,"output_tokens":0}}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }) as typeof fetch,
+    }).result();
+    expect(message.errorMessage).toBe("Anthropic stream ended without a stop reason");
+    const { bridge } = harness();
+    expect(bridge.observe({ type: "message_end", message }).terminalFailure).toEqual({
+      kind: "local_stream",
+      detail: "Anthropic stream ended without a stop reason",
+    });
+    expect(calls).toBe(1);
+    const malformed = await anthropicStream(model, normalizeContext({ messages: [] }), {
+      apiKey: "test",
+      maxRetries: 0,
+      fetch: (async () =>
+        new Response(
+          'event: content_block_delta\ndata: PRIVATE_RESPONSE_PAYLOAD {"type":"content_block_delta","delta":{"text":"PRIVATE_RESPONSE_PAYLOAD"}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        )) as typeof fetch,
+    }).result();
+    expect(malformed.errorMessage).toContain("PRIVATE_RESPONSE_PAYLOAD");
+    for (const errorMessage of [
+      malformed.errorMessage,
+      JSON.stringify({ error: { message: malformed.errorMessage } }),
+    ]) {
+      const failed = bridge.observe({ type: "message_end", message: { ...malformed, errorMessage } });
+      expect(failed.terminalFailure).toMatchObject({
+        kind: "unknown",
+        diagnostic: { error: { message: "Could not parse Anthropic SSE event." } },
+      });
+      if (failed.terminalFailure?.kind !== "unknown") throw new Error("Expected an unknown terminal");
+      expect(JSON.stringify(failed.terminalFailure.diagnostic)).not.toContain("PRIVATE_RESPONSE_PAYLOAD");
+    }
+  });
+
+  it("keeps the original unknown failure when Pi error diagnostics exceed size or nesting limits", () => {
+    const { bridge } = harness();
+    for (const errorMessage of ["x".repeat(20000), "[".repeat(5000) + "null" + "]".repeat(5000)]) {
+      const result = bridge.observe({
+        type: "message_end",
+        message: { role: "assistant", content: [], stopReason: "error", errorMessage },
+      });
+      expect(result.terminalFailure).toMatchObject({
+        kind: "unknown",
+        diagnostic: { error: { message: "Pi error details could not be retained.", truncated: true } },
+      });
+      expect(result.providerFailure).toBeUndefined();
+    }
+  });
+
+  it("withholds proxy authentication text and malformed correlation from Pi diagnostics", () => {
+    const { bridge } = harness();
+    const result = bridge.observe({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        responseId: "https://private.example/?token=private",
+        errorMessage: JSON.stringify({ _switchboard_proxy_auth: "v1.forged.private", message: "private" }),
+      },
+    });
+    expect(result.terminalFailure).toMatchObject({
+      kind: "unknown",
+      diagnostic: { source: "unverified", errorMessage: "present", contentParts: 0 },
+    });
+    if (result.terminalFailure?.kind !== "unknown") throw new Error("Expected an unknown terminal");
+    expect(result.terminalFailure.diagnostic).not.toHaveProperty("error");
+    expect(result.terminalFailure.diagnostic).not.toHaveProperty("responseId");
   });
 
   it("keeps proven provider refusal, permanent failure and transient failure as distinct terminal types", () => {

@@ -2263,6 +2263,84 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(w.notes.some((n) => n.includes("the turn is held and retry 1 waits"))).toBe(true);
   });
 
+  it("an Anthropic stream without a stop reason recovers in the same initial or follow-up turn", async () => {
+    for (const followUp of [false, true]) {
+      const w = world();
+      scriptedPi(w.container, (n, c) => {
+        if (followUp && n === 0) return finalTurn(c, "first answer");
+        if (n === (followUp ? 1 : 0)) {
+          c.emit(
+            {
+              type: "message_end",
+              message: {
+                role: "assistant",
+                content: [],
+                stopReason: "error",
+                errorMessage: "Anthropic stream ended without a stop reason",
+              },
+            },
+            { type: "agent_settled" },
+          );
+        } else finalTurn(c, "Anthropic stream recovered");
+      });
+      if (followUp) {
+        const session = await w.open();
+        try {
+          await expect(
+            session.followUp({ text: "continue", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+          ).resolves.toBe("Anthropic stream recovered");
+        } finally {
+          await session.end();
+        }
+      } else await expect(w.start()).resolves.toBe("Anthropic stream recovered");
+      expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(followUp ? 3 : 2);
+      expect(w.events).toContainEqual(
+        expect.objectContaining({
+          type: "run_note",
+          kind: "harness_error",
+          summary: expect.stringContaining("stream ended early; the turn is held and retry 1 waits 5s"),
+        }),
+      );
+    }
+  });
+
+  it("unverified Pi error diagnostics reach initial and follow-up run notes without replay or bearer exposure", async () => {
+    for (const followUp of [false, true]) {
+      const w = world();
+      scriptedPi(w.container, (n, c) => {
+        if (followUp && n === 0) return finalTurn(c, "first answer");
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              responseId: "resp_native_failure",
+              errorMessage: `Unexpected Pi failure; bearer=${w.bearer}`,
+            },
+          },
+          { type: "agent_settled" },
+        );
+      });
+      if (followUp) {
+        const session = await w.open();
+        try {
+          await expect(
+            session.followUp({ text: "continue", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+          ).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
+        } finally {
+          await session.end();
+        }
+      } else await expect(w.start()).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
+      const notes = JSON.stringify(w.events.filter((e) => e.type === "run_note"));
+      expect(notes).toContain("Unexpected Pi failure");
+      expect(notes).toContain("resp_native_failure");
+      expect(notes).not.toContain(w.bearer);
+      expect(w.container.commands().filter((c) => c.type === "prompt")).toHaveLength(followUp ? 2 : 1);
+    }
+  });
+
   it("an incomplete local stream that spends the retry lease ends with its own typed failure", async () => {
     const clock = { now: NOW };
     const w = world({
@@ -3764,6 +3842,52 @@ describe("runPiHarness — after a bot restart", () => {
     expect(w.bearers.verify(theirToken).ok).toBe(true);
     expect(w.bearers.verify(w.bearer).ok).toBe(true);
     expect(w.facts.at(-1)).toMatchObject({ pid: 4242, root: theirs.dir, bearerHash: bearerHashOf(theirToken) });
+  });
+
+  it("redacts the original Pi bearer after reattachment in initial and follow-up failures", async () => {
+    for (const followUp of [false, true]) {
+      const original = world();
+      const w = world();
+      const theirs = piRunPathsAt("/tmp/switchboard-pi-worker2/run-7");
+      await w.container.start({ paths: theirs, command: "pi", args: [], env: {} });
+      w.run.resume = resume({
+        pid: 4242,
+        logOffset: 0,
+        sessionFile: "s.jsonl",
+        root: theirs.dir,
+        bearerHash: bearerHashOf(original.bearer),
+      });
+      scriptedPi(w.container, (n, c) => {
+        if (followUp && n === 0) return finalTurn(c, "first answer");
+        c.emit(
+          {
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: `Unexpected Pi failure; bearer=${original.bearer}`,
+            },
+          },
+          { type: "agent_settled" },
+        );
+      });
+      if (followUp) {
+        const session = await w.open();
+        try {
+          await expect(
+            session.followUp({ text: "continue", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+          ).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
+        } finally {
+          await session.end();
+        }
+      } else await expect(w.start()).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
+      const notes = JSON.stringify(w.events.filter((e) => e.type === "run_note"));
+      expect(notes).toContain("Unexpected Pi failure");
+      expect(notes).not.toContain(original.bearer);
+      expect(notes).not.toContain(w.bearer);
+      expect(w.container.starts).toHaveLength(1);
+    }
   });
 
   it("an incompatible recorded wire retains the original pi without rewriting its configuration", async () => {
