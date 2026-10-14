@@ -5,7 +5,7 @@
 import { AGENTS, type Identity, type MachineClass } from "../../agents/registry.js";
 import { HAND_BACK_PREFIX } from "./handBack.js";
 import type { StructuredAnswerMode } from "../../config/validate.js";
-import type { Provider, ToolDef } from "../provider.js";
+import type { Provider, ToolDef, TokenUsage } from "../provider.js";
 import type { ChatMessage } from "../chatMessage.js";
 import { oneLine, redactAndCap, redactSecrets } from "../redact.js";
 import { ROUTE_REASON_PREFIX } from "../statusCardFrame.js";
@@ -262,8 +262,11 @@ export class MultiToolCallError extends Error {
  *  (`providerStructuredModel`); tests script one. */
 export type RouteModel = (
   prompt: RoutePrompt,
-  opts: { maxTokens: number; signal: AbortSignal },
+  opts: { maxTokens: number; signal: AbortSignal; observe?: (value: RouteModelObservation) => void },
 ) => Promise<RouteToolCall | string>;
+
+import type { RoutingModelObservation as RouteModelObservation } from "../routingTelemetry.js";
+export type { RoutingModelObservation as RouteModelObservation } from "../routingTelemetry.js";
 
 /** The request text quoted as data: a tag the text carries is bent so it
  *  cannot close the quote, and the text is cut at the cap with a note.
@@ -475,10 +478,22 @@ function tidyReason(reason: string): string {
 export function providerStructuredModel(
   provider: Provider,
   model: string,
-  opts: { answer?: StructuredAnswerMode; effort?: TurnEffortRequest } = {},
+  opts: {
+    answer?: StructuredAnswerMode;
+    effort?: TurnEffortRequest;
+    price?: (usage: TokenUsage | undefined) => import("../modelPricing.js").TurnPrice;
+  } = {},
 ): RouteModel {
   const forced = (opts.answer ?? "tool") === "tool";
   return async (prompt, call) => {
+    const observe = (value: RouteModelObservation) => {
+      try {
+        call.observe?.(value);
+      } catch {
+        /* Diagnostics never change the provider result. */
+      }
+    };
+    observe({ provider: provider.name, model: `${provider.name}/${model}`, ...opts.effort });
     // One tool is forced by name; several force any one of them. An open
     // operator turn lets the model answer without a call.
     const tools = [prompt.tool, ...(prompt.tools ?? [])];
@@ -506,11 +521,18 @@ export function providerStructuredModel(
       messages,
       maxTokens: call.maxTokens,
       signal: call.signal,
+      ...(call.observe ? { observer: { onResponse: (requestId: string) => observe({ requestId }) } } : {}),
       // The caller's configured effort, card-decided (`turnEffort`): intake's
       // `intake.effort` or the operator's `defaults.efforts.general`. Absent →
       // the model's own default.
       ...(opts.effort ? { effort: opts.effort.effort, effortWord: opts.effort.effortWord } : {}),
       ...(forced ? { tools, toolChoice } : {}),
+    });
+    observe({
+      usage: result.usage,
+      stopReason: result.stopReason,
+      requestId: result.requestId,
+      ...(opts.price ? opts.price(result.usage) : {}),
     });
     if (result.stopReason === "max_tokens") throw new OutputCapError(call.maxTokens);
     const calls = result.content.filter(

@@ -13,6 +13,110 @@ import {
 // Streams below are synthetic: one per friction category, plus edges.
 
 const T0 = 1_700_000_000_000;
+it.each([
+  { mode: "on", phase: "model" },
+  { mode: "shadow", phase: "model" },
+  { mode: "shadow", phase: "command_fulfillment" },
+  { mode: "shadow", phase: "context" },
+  { mode: "shadow", phase: "helper" },
+  { mode: "shadow", phase: "catalogue" },
+] as const)(
+  "unions overlapping routing and agent slow-model intervals in $mode mode, $phase phase",
+  ({ mode, phase }) => {
+    const diagnosis = analyzeRunFriction(
+      [
+        {
+          type: "span_end",
+          name: "model.turn",
+          spanId: "agent",
+          startedAt: T0,
+          durationMs: 180_000,
+          status: "ok",
+          at: T0 + 180_000,
+          attrs: {},
+        },
+        {
+          type: "operator",
+          mode,
+          outcome: "binds",
+          reason: "follow-up",
+          at: T0 + 180_000,
+          telemetry: {
+            schema: 1,
+            startedAt: T0 + 120_000,
+            deadlineAt: T0 + 180_000,
+            finishedAt: T0 + 180_000,
+            steps: [
+              {
+                index: 1,
+                phase,
+                startedAt: T0 + 120_000,
+                finishedAt: T0 + 180_000,
+                durationMs: 60_000,
+                remainingMs: 0,
+                outcome: "completed",
+              },
+            ],
+          },
+        },
+      ],
+      { finished: true, window: { start: T0, end: T0 + 180_000 } },
+    );
+    expect(diagnosis.byCategory.slow_model_turn).toEqual({
+      count: phase === "model" || phase === "command_fulfillment" ? 2 : 1,
+      durationMs: 180_000,
+    });
+    expect(diagnosis.modelTimeMs).toBe(180_000);
+  },
+);
+it("attributes recorded routing phases and diagnoses a routing deadline", () => {
+  const diagnosis = analyzeRunFriction(
+    [
+      {
+        type: "operator",
+        mode: "on",
+        outcome: "refusal",
+        reason: "operator_timeout",
+        refusalCause: "timeout",
+        latencyMs: 60_000,
+        at: T0 + 60_000,
+        telemetry: {
+          schema: 1,
+          startedAt: T0,
+          deadlineAt: T0 + 60_000,
+          finishedAt: T0 + 60_000,
+          timeout: { phase: "model", step: 2, at: T0 + 60_000 },
+          steps: [
+            {
+              index: 1,
+              phase: "context",
+              startedAt: T0,
+              finishedAt: T0 + 10_000,
+              durationMs: 10_000,
+              remainingMs: 50_000,
+              outcome: "completed",
+            },
+            {
+              index: 2,
+              phase: "model",
+              startedAt: T0 + 10_000,
+              finishedAt: T0 + 60_000,
+              durationMs: 50_000,
+              remainingMs: 0,
+              outcome: "timeout",
+            },
+          ],
+        },
+      },
+    ],
+    { finished: true, owner: "command", window: { start: T0, end: T0 + 60_000 } },
+  );
+  expect(diagnosis.modelTimeMs).toBe(50_000);
+  expect(diagnosis.shape).toMatchObject({ gettingReadyMs: 10_000, thinkingMs: 50_000, overheadMs: 0 });
+  expect(diagnosis.findings).toContainEqual(
+    expect.objectContaining({ category: "budget_hit", summary: "routing deadline expired during model (step 2)" }),
+  );
+});
 // The pair key the runner stamps on both halves: `call` mints a `callId`, and
 // `result` takes the oldest open one of its tool — the runner's own order — so
 // a fixture reads as call/result prose while every pair is keyed like a real

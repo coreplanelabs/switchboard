@@ -18,6 +18,7 @@ import { answerChatCommand } from "./fastPath.js";
 import {
   isInlineRunCommand,
   recordRefusal,
+  recordOperatorDecision,
   recordRoutedDecision,
   runChatCommand,
   type RouteEventFields,
@@ -555,6 +556,39 @@ describe("runChatCommand — the recording rule widens to a routed decision with
 // code as the label's lead, completed, no surface told, the redacted request
 // and one `refusal` event carrying the code, the cause and the capped sentence.
 describe("recordRefusal — every refusal is a run record (record 0054, as amended)", () => {
+  it("persists routing timeouts and provider refusals as failed while policy refusals complete", async () => {
+    for (const cause of ["timeout", "provider", "request"] as const) {
+      const d = deps();
+      const kept = keepingWriter();
+      d.runHistoryWriter = kept.writer;
+      const s = request("review PR #7", d);
+      await recordOperatorDecision(
+        d,
+        s.message,
+        {
+          mode: "on",
+          outcome: "refusal",
+          reason: cause === "timeout" ? "operator_timeout" : cause,
+          refusalCause: cause,
+          latencyMs: 60_000,
+          outputTokens: 0,
+        },
+        s.ending,
+        s.trace,
+      );
+      s.ending.drain(undefined);
+      expect(kept.records()[0]).toMatchObject({ status: cause === "request" ? "completed" : "failed" });
+      if (cause === "timeout") {
+        expect(kept.records()[0]?.diagnosis?.findings).toContainEqual(
+          expect.objectContaining({
+            category: "budget_hit",
+            summary: "routing deadline expired",
+          }),
+        );
+      }
+    }
+  });
+
   it("writes one `door` record: completed, the code leading the label, input + refusal as its content events, and neither runStarted nor runFinished", async () => {
     const d = deps();
     const kept = keepingWriter();

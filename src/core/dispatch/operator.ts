@@ -108,6 +108,7 @@ import { recordOperatorDecision, runChatCommand, type OperatorEventFields } from
 import { renderOperatorReceipt, replyCommandOutput } from "./reply.js";
 import { OPERATOR_TAIL_BYTES, operatorTail, type OperatorTailTurn } from "./seed.js";
 import { operatorCompletion } from "./operatorCompletion.js";
+import { RoutingRecorder, type RoutingTelemetry } from "./operatorTelemetry.js";
 import { newestFinishedRunOf, type NewestFinishedRun } from "./thread.js";
 import {
   OutputCapError,
@@ -1161,7 +1162,7 @@ export function quoteTurn(text: string): string {
 export type OperatorTurn =
   | { kind: "decision"; decision: OperatorDecision }
   | { kind: "read"; tool: string; filter?: string; repo?: string }
-  | { kind: "violation"; violation: string };
+  | { kind: "violation"; violation: string; validationCode?: string };
 
 /** What the turn parse reads beside the answer: the person's request (a
  *  `bind_preset` call routes those words, never the model's copy), the
@@ -1589,9 +1590,12 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         kind: "violation",
         violation: `the requester's issue ${ctx.requesterIssue} already established repository ${ctx.requesterRepo}; continue that request`,
       };
-    if (typeof proposal === "string" && proposal.trim().length > 0 && !runnableProposal(proposal, ctx))
+    const proposalFailure =
+      typeof proposal === "string" && proposal.trim().length > 0 ? proposalViolation(proposal, ctx) : undefined;
+    if (proposalFailure)
       return {
         kind: "violation",
+        validationCode: proposalFailure,
         violation:
           "an ask whose proposal is not a runnable bind from this turn's commands, presets and repository facts",
       };
@@ -1714,20 +1718,21 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
  * accepted by the projected grammar (display-only), or a preset with non-empty task
  * words and (for repository machines) either an inline target or one of the
  * thread/channel repository facts. */
-function runnableProposal(proposal: string, ctx: OperatorTurnContext): boolean {
+function proposalViolation(proposal: string, ctx: OperatorTurnContext): string | undefined {
   const line = proposal.trim();
   const parsed = parseChatCommand(line, { list: () => ctx.commands.map((command) => command.def) });
-  if (parsed?.kind === "invoke") return true;
+  if (parsed?.kind === "invoke") return undefined;
   const preset = confirmablePresetOf(line, ctx.presets, ctx.commands);
   const request = preset === undefined ? undefined : presetRequestOf(line);
-  if (preset === undefined || request === undefined) return false;
+  if (preset === undefined) return "proposal_unknown_action";
+  if (request === undefined) return "proposal_empty_request";
   const agent = AGENTS[preset];
-  if (agent === undefined || !machineNeedsRepo(agent.machine)) return true;
-  if (ctx.requesterRepoConflict && explicitRepoOf(request) === undefined) return false;
-  return (
-    (ctx.repositories?.length ?? 0) > 0 ||
+  if (agent === undefined || !machineNeedsRepo(agent.machine)) return undefined;
+  if (ctx.requesterRepoConflict && explicitRepoOf(request) === undefined) return "proposal_repo_conflict";
+  return (ctx.repositories?.length ?? 0) > 0 ||
     /https?:\/\/github\.com\/[\w.-]+\/[\w.-]+|(?:^|\s)[\w.-]+\/[\w.-]+(?:\s|[:#]|$)/i.test(request)
-  );
+    ? undefined
+    : "proposal_missing_repo";
 }
 
 /** Whether an owned thread's decision runs as bound (issue 2027;
@@ -1996,6 +2001,7 @@ export interface OperatorAllowance {
  *  when the seam carries no usage) — the replay's median
  *  rows read both off the shadow log. */
 export interface OperatorAnswer {
+  telemetry?: RoutingTelemetry;
   decision: OperatorDecision;
   latencyMs: number;
   outputTokens: number;
@@ -2316,6 +2322,7 @@ export async function runOperator(
     maxOutputTokens?: number;
     includeAllowance?: boolean;
     smokeDiagnosticScope?: "candidate-smoke-v1";
+    recorder?: RoutingRecorder;
     /** Read saved context only when the same proposal or a helper needs it. */
     readContext?: () => Promise<OperatorInput>;
   } = {},
@@ -2325,6 +2332,7 @@ export async function runOperator(
   const smokeDiagnostic = candidateSmokeDiagnostic(opts.smokeDiagnosticScope);
   const timeoutMs = opts.timeoutMs ?? OPERATOR_TIMEOUT_MS;
   const signal = opts.signal ?? AbortSignal.timeout(timeoutMs);
+  const recorder = opts.recorder ?? new RoutingRecorder(now, started, started + timeoutMs, signal);
   const expired = () => signal.aborted || now() - started >= timeoutMs;
   const withinDeadline = <T>(value: Promise<T>) => withinOperatorDeadline(value, signal);
   let offered = actionProjection(input);
@@ -2365,7 +2373,7 @@ export async function runOperator(
       (turn.kind === "decision" && !independent);
     if (!contextLoaded && needsContext) {
       contextLoaded = true;
-      input = await withinDeadline(opts.readContext!());
+      input = await recorder.during("context", () => withinDeadline(opts.readContext!()));
       offered = actionProjection(input);
       Object.assign(ctx, operatorTurnContext(input, offered));
       ctx.commands = ctx.commands.filter((command) => !withdrawnTools.has(command.tool.name));
@@ -2382,6 +2390,7 @@ export async function runOperator(
   const attempts: StructuredAttempt[] = [];
   const helperNames: OperatorAllowance["helpers"] = [];
   const answered = (decision: OperatorDecision, operatorDiagnostic?: string): OperatorAnswer => ({
+    telemetry: recorder.snapshot(),
     decision,
     latencyMs: now() - started,
     outputTokens: Math.ceil(chars / 3),
@@ -2470,18 +2479,21 @@ export async function runOperator(
     sourceTurns.push(input.text);
     let answer: RouteToolCall | string;
     try {
-      answer = await model(
-        commandFulfillmentPrompt({
-          turns: sourceTurns,
-          command: {
-            id: invocation.id,
-            input: invocation.input,
-            tool: command.tool,
-            argumentNames: command.def.args?.map((arg) => arg.name) ?? [],
-          },
-        }),
-        { maxTokens: maxOutputTokens, signal },
+      answer = await recorder.during("command_fulfillment", (observe) =>
+        model(
+          commandFulfillmentPrompt({
+            turns: sourceTurns,
+            command: {
+              id: invocation.id,
+              input: invocation.input,
+              tool: command.tool,
+              argumentNames: command.def.args?.map((arg) => arg.name) ?? [],
+            },
+          }),
+          { maxTokens: maxOutputTokens, signal, observe },
+        ),
       );
+      recorder.annotate(recorder.latestModel(), answer);
     } catch (err) {
       const carried = attemptsOfThrow(err);
       if (carried) attempts.push(...carried);
@@ -2517,7 +2529,9 @@ export async function runOperator(
     for (;;) {
       let answer: RouteToolCall | string;
       try {
-        answer = await model({ ...prompt, retries: turns }, { maxTokens: maxOutputTokens, signal });
+        answer = await recorder.during("model", (observe) =>
+          model({ ...prompt, retries: turns }, { maxTokens: maxOutputTokens, signal, observe }),
+        );
       } catch (err) {
         // A cap cut is recoverable shape, not a provider refusal: retry once
         // with a materially larger ceiling. A second cut ends at the door.
@@ -2590,36 +2604,29 @@ export async function runOperator(
         chars += calls.length;
         const violation = `the answer carried ${err.calls.length} tool calls; one tool call per turn`;
         attempts.push({ outcome: "violation", violation });
+        if (expired()) return answered({ kind: "non_decision", reason: "operator_timeout" });
         if (violations >= STRUCTURED_RETRIES_MAX) {
           const actions = err.calls.filter((c) => !isOperatorReadTool(c.tool));
-          const taken = actions.length === 1 ? await parseTurn(actions[0]!) : undefined;
-          if (taken?.kind === "decision") {
-            const catalogueViolation = await withinDeadline(
-              decisionModelRefViolation(taken.decision, input.providerModels),
-            );
-            if (catalogueViolation !== undefined) {
-              attempts.push({ outcome: "violation", violation: catalogueViolation });
-              return answered({ kind: "non_decision", reason: tidy(catalogueViolation) });
-            }
-            const beforeCheck = attempts.length;
-            const fulfillmentViolation = await commandCheck(taken.decision);
-            if (fulfillmentViolation !== undefined)
-              return answered({ kind: "non_decision", reason: fulfillmentViolation.violation });
-            if (taken.decision.kind !== "non_decision" && attempts.length === beforeCheck)
-              attempts.push({ outcome: "accepted" });
-            return answered(taken.decision);
-          }
-          return answered({ kind: "non_decision", reason: tidy(violation) });
+          if (actions.length !== 1) return answered({ kind: "non_decision", reason: tidy(violation) });
+          // The sole recovered action uses the ordinary instrumented admission
+          // path, including the same context, catalogue and deadline checks.
+          answer = actions[0]!;
+        } else {
+          if (!reAskAction(calls, violation)) return answered({ kind: "non_decision", reason: tidy(violation) });
+          continue;
         }
-        if (!reAskAction(calls, violation)) return answered({ kind: "non_decision", reason: tidy(violation) });
-        continue;
       }
       const answerText =
         typeof answer === "string" ? answer : JSON.stringify({ tool: answer.tool, input: answer.input });
       chars += (typeof answer === "string" ? answer : JSON.stringify(answer.input)).length;
+      const modelStep = recorder.latestModel();
+      recorder.annotate(modelStep, answer);
+      if (expired()) return answered({ kind: "non_decision", reason: "operator_timeout" });
       const turn = await parseTurn(answer);
+      if (expired()) return answered({ kind: "non_decision", reason: "operator_timeout" });
       if (turn.kind === "decision" && turn.decision.kind === "non_decision") {
         const violation = turn.decision.reason;
+        recorder.annotate(modelStep, answer, violation, "no_action");
         if (noCallTurns > 0) {
           attempts.push({ outcome: "violation", violation });
           return answered({ kind: "non_decision", reason: tidy(violation) });
@@ -2650,33 +2657,40 @@ export async function runOperator(
           result = !turn.repo ? "invalid_arguments" : !input.repositoryBriefs ? "reader_unavailable" : "unknown";
         if (turn.tool === OPERATOR_READ_TOOLS.providerModels && input.providerModels === undefined)
           result = "reader_unavailable";
-        const read =
-          turn.tool === OPERATOR_READ_TOOLS.repositoryBrief
-            ? turn.repo && input.repositoryBriefs
-              ? await input.repositoryBriefs
-                  .read(turn.repo)
-                  .then((brief) => {
-                    result = brief ? "reply" : "not_found";
-                    if (smokeDiagnostic && brief) {
-                      try {
-                        const sources = Object.getOwnPropertyDescriptor(brief, "sources")?.value;
-                        if (Array.isArray(sources) && sources.length === 0) result = "metadata_only";
-                      } catch {
-                        result = "unknown";
-                      }
-                    }
-                    return brief
-                      ? renderRepositoryBrief(brief)
-                      : "That repository brief is unavailable to this requester.";
-                  })
-                  .catch(() => {
-                    result = "read_error";
-                    return "The repository brief could not be read; other context remains available.";
-                  })
-              : "Pass a repository from the connected catalog."
-            : turn.tool === OPERATOR_READ_TOOLS.providerModels && input.providerModels !== undefined
-              ? await readProviderModels(input.providerModels, turn.filter)
-              : answerOperatorRead(turn.tool, input);
+        const read = await recorder.during(
+          "helper",
+          () =>
+            withinDeadline(
+              (async () =>
+                turn.tool === OPERATOR_READ_TOOLS.repositoryBrief
+                  ? turn.repo && input.repositoryBriefs
+                    ? await input.repositoryBriefs
+                        .read(turn.repo)
+                        .then((brief) => {
+                          result = brief ? "reply" : "not_found";
+                          if (smokeDiagnostic && brief) {
+                            try {
+                              const sources = Object.getOwnPropertyDescriptor(brief, "sources")?.value;
+                              if (Array.isArray(sources) && sources.length === 0) result = "metadata_only";
+                            } catch {
+                              result = "unknown";
+                            }
+                          }
+                          return brief
+                            ? renderRepositoryBrief(brief)
+                            : "That repository brief is unavailable to this requester.";
+                        })
+                        .catch(() => {
+                          result = "read_error";
+                          return "The repository brief could not be read; other context remains available.";
+                        })
+                    : "Pass a repository from the connected catalog."
+                  : turn.tool === OPERATOR_READ_TOOLS.providerModels && input.providerModels !== undefined
+                    ? await readProviderModels(input.providerModels, turn.filter)
+                    : answerOperatorRead(turn.tool, input))(),
+            ),
+          turn.tool,
+        );
         finishDiagnostic?.(result);
         turns.push({ answer: answerText, violation: read });
         continue;
@@ -2689,7 +2703,9 @@ export async function runOperator(
       // never the bind: the parse already held the ref's provider.
       const catalogueViolation =
         turn.kind === "decision"
-          ? await withinDeadline(decisionModelRefViolation(turn.decision, input.providerModels))
+          ? await recorder.during("catalogue", () =>
+              withinDeadline(decisionModelRefViolation(turn.decision, input.providerModels)),
+            )
           : undefined;
       if (turn.kind === "read" || turn.kind === "violation" || catalogueViolation !== undefined) {
         // A read past the budget is a violation too: the turn must act.
@@ -2702,6 +2718,7 @@ export async function runOperator(
                 ? turn.violation
                 : "";
         attempts.push({ outcome: "violation", violation });
+        recorder.annotate(modelStep, answer, violation, turn.kind === "violation" ? turn.validationCode : undefined);
         // Read exhaustion still permits bounded action repair. A command already
         // withdrawn by fulfillment cannot spend that repair after reads are gone.
         const withdrawnCommand =
@@ -2724,6 +2741,7 @@ export async function runOperator(
           return answered({ kind: "non_decision", reason: fulfillmentViolation.violation });
         continue;
       }
+      if (expired()) return answered({ kind: "non_decision", reason: "operator_timeout" });
       if (turn.decision.kind !== "non_decision" && attempts.length === beforeCheck)
         attempts.push({ outcome: "accepted" });
       return answered(turn.decision);
@@ -2796,6 +2814,8 @@ export function operatorEventOf(
   intake?: { verdict: string; reason: string };
   latencyMs: number;
   outputTokens: number;
+  outputTokensSource?: "estimate";
+  telemetry?: RoutingTelemetry;
 } {
   const d = answer.decision;
   const event = {
@@ -2839,9 +2859,11 @@ export function operatorEventOf(
       ? { providerFailure: d.providerFailure, providerFailureDetails: d.providerFailureDetails }
       : {}),
     ...(answer.attempts ? { attempts: answer.attempts } : {}),
+    ...(answer.telemetry ? { telemetry: answer.telemetry } : {}),
     ...(intake ? { intake: { verdict: intake.verdict, reason: intake.reason } } : {}),
     latencyMs: answer.latencyMs,
     outputTokens: answer.outputTokens,
+    outputTokensSource: "estimate" as const,
   } satisfies ReturnType<typeof operatorEventOf>;
   const invocation = d.kind === "binds" ? d.binds[0]?.invocation : undefined;
   if (invocation) operatorInvocations.set(event, invocation);
@@ -2987,6 +3009,17 @@ export async function operatorStage(
   const now = deps.clock ?? Date.now;
   const startedAt = now();
   const signal = AbortSignal.timeout(OPERATOR_TIMEOUT_MS);
+  const recorder = new RoutingRecorder(now, startedAt, startedAt + OPERATOR_TIMEOUT_MS, signal, (step) =>
+    console.log(
+      JSON.stringify({
+        type: "routing_step",
+        threadKey: msg.threadKey,
+        messageId: msg.messageId,
+        routingStartedAt: startedAt,
+        ...step,
+      }),
+    ),
+  );
   const expired = () => signal.aborted || now() - startedAt >= OPERATOR_TIMEOUT_MS;
   const timeout = () =>
     operatorEventOf(
@@ -2995,20 +3028,28 @@ export async function operatorStage(
         decision: { kind: "non_decision", reason: "operator_timeout" },
         latencyMs: now() - startedAt,
         outputTokens: 0,
+        telemetry: recorder.snapshot(),
       },
       ctx.intake,
     );
   const cfg = deps.config.config;
   let model = deps.operatorModel;
   let maxOutputTokens: number | undefined;
-  const unavailable = () =>
-    mode === "on"
+  const unavailable = () => {
+    const telemetry = recorder.snapshot();
+    return mode === "on"
       ? operatorEventOf(
           mode,
-          { decision: { kind: "non_decision", reason: "operator_unavailable" }, latencyMs: 0, outputTokens: 0 },
+          {
+            decision: { kind: "non_decision", reason: "operator_unavailable" },
+            latencyMs: now() - startedAt,
+            outputTokens: 0,
+            telemetry,
+          },
           ctx.intake,
         )
       : undefined;
+  };
   if (!model) {
     const modelRef = settingsForAgent(cfg, "operator").model;
     if (!modelRef || !deps.completions) {
@@ -3282,7 +3323,7 @@ export async function operatorStage(
   let initialInput: OperatorInput;
   try {
     initialInput = needsSavedContext
-      ? await readContext()
+      ? await recorder.during("context", () => readContext())
       : {
           text: msg.text,
           projection,
@@ -3326,6 +3367,7 @@ export async function operatorStage(
             now,
             startedAt,
             signal,
+            recorder,
             ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
             ...(!needsSavedContext ? { readContext } : {}),
           });
@@ -3394,6 +3436,7 @@ export async function operatorStage(
   const threadRepo =
     (targetStoreUnavailable ? undefined : requesterRepoContext(tail, msg.userId, requesterTarget).requesterRepo) ??
     newestFinishedRun?.repo;
+  answer.telemetry ??= recorder.snapshot();
   const event: OperatorEventFields = operatorEventOf(mode, answer, ctx.intake);
   event.repoContext = {
     organization: cfg.organization,

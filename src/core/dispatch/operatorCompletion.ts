@@ -6,6 +6,7 @@ import { resolveModelCard } from "../modelCard.js";
 import { parseModelRef } from "../provider.js";
 import { providerStructuredModel, type RouteModel } from "./route.js";
 import { turnEffort } from "./turnEffort.js";
+import { parseModelPrices, priceTurn } from "../modelPricing.js";
 
 export interface OperatorCompletion {
   modelRef: string;
@@ -27,10 +28,13 @@ export function operatorCompletion(
   const card = resolveModelCard(modelRef, config.providers, installedModelRegistry);
   const effort = turnEffort(modelRef, settings.effort, config.providers);
   if (effort.note) log(effort.note);
+  const prices = parseModelPrices((config.costs as { prices?: unknown } | undefined)?.prices);
   return {
     modelRef,
     capField: card.capField,
     model: providerStructuredModel(completions.get(ref.provider), ref.model, {
+      price: (usage) =>
+        priceTurn({ ref: modelRef, price: card.price, pricedBy: card.provenance.price }, undefined, usage, prices),
       ...(effort.request ? { effort: effort.request } : {}),
     }),
   };

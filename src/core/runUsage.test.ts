@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RunEvent } from "./runEvents.js";
+import { normalizeSpans } from "./normalizeSpans.js";
 import {
   addUsage,
   aggregateUsage,
@@ -37,6 +38,53 @@ const turn = (model: string | undefined, attrs: Record<string, unknown>, seq: nu
   }) as unknown as RunEvent;
 
 describe("usageOfEvents", () => {
+  it("counts measured routing usage once alongside agent turns without using output estimates", () => {
+    const event: RunEvent = {
+      type: "operator",
+      mode: "on",
+      outcome: "non_decision",
+      reason: "operator_timeout",
+      outputTokens: 634,
+      outputTokensSource: "estimate",
+      telemetry: {
+        schema: 1,
+        startedAt: 1_000,
+        deadlineAt: 61_000,
+        finishedAt: 61_000,
+        steps: [
+          {
+            index: 1,
+            phase: "model",
+            startedAt: 1_000,
+            finishedAt: 16_000,
+            durationMs: 15_000,
+            remainingMs: 45_000,
+            outcome: "completed",
+            model: "example/router",
+            usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 50 },
+          },
+          {
+            index: 2,
+            phase: "model",
+            startedAt: 16_000,
+            finishedAt: 61_000,
+            durationMs: 45_000,
+            remainingMs: 0,
+            outcome: "timeout",
+            model: "example/router",
+          },
+        ],
+      },
+    };
+    const expected = {
+      turns: 2,
+      byModel: {
+        "example/router": { turns: 2, inputTokens: 100, outputTokens: 20, cacheReadTokens: 50, cacheWriteTokens: 0 },
+      },
+    };
+    expect(usageOfEvents([event])).toEqual(expected);
+    expect(usageOfEvents(normalizeSpans([event]))).toEqual(expected);
+  });
   it("sums the token attrs of every model.turn span per model, and ignores every other event", () => {
     const events: RunEvent[] = [
       { type: "input", text: "go", seq: 1 } as RunEvent,

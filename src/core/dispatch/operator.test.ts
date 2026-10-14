@@ -2739,6 +2739,157 @@ restrict:
 });
 
 describe("runOperator — the loop over a scripted model", () => {
+  it("refuses a valid action returned after the shared deadline", async () => {
+    let clock = 1_000;
+    const answer = await runOperator(
+      input(),
+      async () => {
+        clock = 61_000;
+        return { tool: OPERATOR_ASK_TOOL, input: { text: "Which listing?", reason: "fork" } };
+      },
+      { now: () => clock, startedAt: 1_000, timeoutMs: 60_000 },
+    );
+    expect(operatorEventOf("on", answer)).toMatchObject({
+      outcome: "non_decision",
+      reason: "operator_timeout",
+      telemetry: { timeout: { phase: "model", step: 1, at: 61_000 } },
+    });
+  });
+  it("records a stalled context read at cancellation and excludes registry arguments", async () => {
+    let clock = 1_000;
+    const controller = new AbortController();
+    const answer = await runOperator(
+      input(),
+      async () => ({
+        tool: OPERATOR_ASK_TOOL,
+        input: { text: "Confirm?", reason: "context" },
+      }),
+      {
+        now: () => clock,
+        startedAt: 1_000,
+        timeoutMs: 60_000,
+        signal: controller.signal,
+        readContext: () => {
+          clock = 61_000;
+          controller.abort();
+          return new Promise(() => {});
+        },
+      },
+    );
+    expect(operatorEventOf("on", answer)).toMatchObject({
+      outcome: "non_decision",
+      reason: "operator_timeout",
+      telemetry: {
+        timeout: { phase: "context", step: 2, at: 61_000 },
+        steps: [
+          { phase: "model", outcome: "completed", tool: OPERATOR_ASK_TOOL },
+          { phase: "context", outcome: "timeout", durationMs: 60_000 },
+        ],
+      },
+    });
+    const secret = "custom-sensitive-command-key";
+    const commands = [command("help.show")];
+    const other = await runOperator(input({ projection: { presets: [], commands } }), async () => ({
+      tool: commands[0]!.tool.name,
+      input: { key: secret },
+    }));
+    expect(other.telemetry?.steps[0]?.tool).toBe(commands[0]!.tool.name);
+    expect(JSON.stringify(other.telemetry)).not.toContain(secret);
+  });
+
+  it("retains timed rejected proposals and the model call active at the deadline", async () => {
+    let clock = 1_000;
+    let calls = 0;
+    const controller = new AbortController();
+    const model = providerStructuredModel(
+      {
+        name: "example",
+        complete: async () => {
+          calls++;
+          clock += calls === 3 ? 30_000 : 15_000;
+          if (calls === 3) {
+            controller.abort();
+            throw new DOMException("cancelled", "AbortError");
+          }
+          return {
+            stopReason: "tool_use",
+            usage: { inputTokens: 100, outputTokens: 20 },
+            requestId: `req_${calls}`,
+            content: [
+              {
+                type: "tool_use",
+                id: "ask",
+                name: OPERATOR_ASK_TOOL,
+                input: {
+                  text: "Confirm?",
+                  proposal: "review-only ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+                  reason: "confirm",
+                },
+              },
+            ],
+          };
+        },
+      },
+      "router",
+    );
+    const answer = await runOperator(input(), model, {
+      now: () => clock,
+      startedAt: 1_000,
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+    expect(answer.decision).toMatchObject({ kind: "refusal", reason: "operator_timeout" });
+    const event = operatorEventOf("on", answer);
+    expect(event.telemetry).toMatchObject({
+      startedAt: 1_000,
+      deadlineAt: 61_000,
+      finishedAt: 61_000,
+      timeout: { phase: "model", step: 3, at: 61_000 },
+      steps: [
+        {
+          index: 1,
+          phase: "model",
+          startedAt: 1_000,
+          finishedAt: 16_000,
+          durationMs: 15_000,
+          remainingMs: 45_000,
+          outcome: "completed",
+          provider: "example",
+          model: "example/router",
+          tool: OPERATOR_ASK_TOOL,
+          question: "Confirm?",
+          validationCode: "proposal_unknown_action",
+          usage: { inputTokens: 100, outputTokens: 20 },
+          requestId: "req_1",
+        },
+        {
+          index: 2,
+          phase: "model",
+          startedAt: 16_000,
+          finishedAt: 31_000,
+          durationMs: 15_000,
+          remainingMs: 30_000,
+          outcome: "completed",
+          validationCode: "proposal_unknown_action",
+        },
+        {
+          index: 3,
+          phase: "model",
+          startedAt: 31_000,
+          finishedAt: 61_000,
+          durationMs: 30_000,
+          remainingMs: 0,
+          outcome: "timeout",
+          provider: "example",
+          model: "example/router",
+        },
+      ],
+    });
+    expect(event.outputTokensSource).toBe("estimate");
+    expect(event.telemetry?.steps[0]?.proposal).toBe("review-only «redacted-github-token»");
+    expect(JSON.stringify(event)).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz");
+  });
+
   it("a typed flattened review batch binds conductor with exact cross-repository targets", async () => {
     const text = "review these: • https://github.com/acme/cli/pull/120 • https://github.com/acme/api/pull/3927";
     const answer = await runOperator(
@@ -3433,8 +3584,11 @@ describe("runOperator — the loop over a scripted model", () => {
     let now = 1000;
     const answer = await runOperator(
       input(),
-      async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "Which listing?", reason: "fork" } }),
-      { now: () => (now += 250) },
+      async () => {
+        now += 250;
+        return { tool: OPERATOR_ASK_TOOL, input: { text: "Which listing?", reason: "fork" } };
+      },
+      { now: () => now },
     );
     expect(answer.decision.kind).toBe("question");
     expect(answer.latencyMs).toBe(250);
@@ -3628,6 +3782,68 @@ describe("runOperator — the loop over a scripted model", () => {
 });
 
 describe("long asks and multi-call answers (issue 2099)", () => {
+  it.each(["late", "context", "catalogue"] as const)(
+    "recovered sole actions keep deadline and phase evidence: %s",
+    async (phase) => {
+      let clock = 1_000;
+      let calls = 0;
+      const controller = new AbortController();
+      const answer = await runOperator(
+        input({
+          projection: projectionOf(["general"]),
+          text: phase === "catalogue" ? "model:anthropic/example explain" : "explain",
+          providers: ["anthropic"],
+          ...(phase === "catalogue"
+            ? {
+                providerModels: {
+                  read: async () => {
+                    clock = 61_000;
+                    controller.abort();
+                    return new Promise<string>(() => {});
+                  },
+                },
+              }
+            : {}),
+        }),
+        async () => {
+          calls++;
+          if (calls === 3 && phase === "late") clock = 61_000;
+          throw new MultiToolCallError([
+            { tool: OPERATOR_READ_TOOLS.threadState, input: {} },
+            {
+              tool: OPERATOR_ASK_TOOL,
+              input: {
+                text: "Confirm?",
+                proposal: "agent:general explain",
+                proposalSettings: phase === "catalogue" ? { model: "anthropic/example" } : {},
+                reason: "fork",
+              },
+            },
+          ]);
+        },
+        {
+          now: () => clock,
+          startedAt: 1_000,
+          timeoutMs: 60_000,
+          signal: controller.signal,
+          ...(phase === "context"
+            ? {
+                readContext: async () => {
+                  clock = 61_000;
+                  controller.abort();
+                  return input();
+                },
+              }
+            : {}),
+        },
+      );
+      expect(operatorEventOf("on", answer)).toMatchObject({
+        outcome: "non_decision",
+        reason: "operator_timeout",
+        telemetry: { timeout: { phase: phase === "late" ? "model" : phase } },
+      });
+    },
+  );
   it("bind_preset carries no request argument — the admitted message rides by reference, so the call's size never grows with the ask", () => {
     const bind = operatorTools(input()).find((t) => t.name === OPERATOR_BIND_TOOL)!;
     const schema = bind.inputSchema as { required: string[]; properties: Record<string, unknown> };
@@ -6121,7 +6337,9 @@ describe("typed action limits and saved choices", () => {
       return wrong;
     });
     expect(answer.decision).toMatchObject({ kind: "non_decision" });
-    expect(answer.attempts?.map((attempt) => attempt.outcome)).toEqual(["violation", "violation", "violation"]);
+    expect(answer.attempts?.map((attempt) => attempt.outcome)).toEqual(
+      multi ? ["violation", "violation", "violation", "violation"] : ["violation", "violation", "violation"],
+    );
   });
   it("an authorized Review batch preserves its formal budget without granting Ship", async () => {
     const urls = [url, "https://github.com/acme/web/pull/8"];

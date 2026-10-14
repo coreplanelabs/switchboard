@@ -4,6 +4,9 @@ import type { CompletionRequest, Provider } from "../provider.js";
 import { operatorCompletion } from "./operatorCompletion.js";
 import { operatorMaxOutputTokens } from "./operator.js";
 import { REASONING_OUTPUT_TOKEN_ALLOWANCE } from "./route.js";
+import { runOperator, operatorEventOf, operatorProjection, operatorPresets } from "./operator.js";
+import { usageOfEvents } from "../runUsage.js";
+import { runCostOf } from "../modelPricing.js";
 
 // Feature: docs/reference/specs/load-harness.md item 17 and
 // docs/reference/specs/routing-and-config.md item 29.
@@ -43,6 +46,58 @@ async function request(yaml: string) {
 }
 
 describe("operatorCompletion", () => {
+  it("prices measured routing tokens without replacing a shared model's recorded agent charge", async () => {
+    const config = parseAppConfigText(`${providers}
+defaults:
+  agent: general
+  models: { general: acme/door }
+costs:
+  prices:
+    acme/door: { input: 2, output: 10, cacheRead: 0, cacheWrite: 0 }
+`);
+    const completion = operatorCompletion(config, {
+      get: () => ({
+        name: "acme",
+        complete: async () => ({
+          content: [{ type: "tool_use", id: "t1", name: "bind_preset", input: { preset: "general", reason: "read" } }],
+          stopReason: "tool_use",
+          usage: { inputTokens: 100, outputTokens: 20 },
+        }),
+      }),
+    })!;
+    const answer = await runOperator(
+      {
+        text: "explain",
+        tail: [],
+        projection: operatorProjection({
+          presets: operatorPresets(),
+          commands: [],
+          allowedPresets: ["general"],
+        }),
+      },
+      completion.model,
+    );
+    const usage = usageOfEvents([
+      { type: "operator", ...operatorEventOf("on", answer) },
+      {
+        type: "span_end",
+        name: "model.turn",
+        spanId: "agent",
+        startedAt: 0,
+        durationMs: 1,
+        status: "ok",
+        attrs: { model: "acme/door", inputTokens: 1000, outputTokens: 100, usd: 0.5, priceSource: "provider" },
+      },
+    ]);
+    expect(usage.byModel["acme/door"]).toMatchObject({
+      turns: 2,
+      inputTokens: 1100,
+      outputTokens: 120,
+      usd: 0.5004,
+      priceSources: ["operator", "provider"],
+    });
+    expect(runCostOf(usage).usd).toBe(0.5004);
+  });
   it("uses the independent light profile, mapped effort and reasoning cap in the actual completion", async () => {
     const result = await request(`${providers}
 extends: builtin

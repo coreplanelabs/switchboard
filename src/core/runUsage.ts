@@ -1,5 +1,6 @@
 import type { RunEvent } from "./runEvents.js";
 import { unitOfIdempotencyKey } from "./coordinator/contract.js";
+import { routingPhaseSpans } from "./routingTelemetry.js";
 
 // What a run cost in tokens, and who it belongs to — the data behind the cost
 // dimensions of the costs page (docs/reference/specs/costs.md items 10–10a) and
@@ -83,8 +84,17 @@ export function usageOfEvents(events: readonly RunEvent[]): RunUsage {
       sources: Set<string>;
     }
   >();
-  for (const e of events) {
-    if (e.type !== "span_end" || e.name !== MODEL_TURN) continue;
+  const present = new Set(events.flatMap((e) => (e.type === "span_end" || e.type === "span_start" ? [e.spanId] : [])));
+  const routing = events
+    .flatMap((e) => (e.type === "operator" && !e.telemetry?.usage ? routingPhaseSpans(e.telemetry) : []))
+    .filter((e) => !present.has(e.spanId));
+  const aggregatedRoutingIds = new Set(
+    events.flatMap((e) =>
+      e.type === "operator" && e.telemetry?.usage ? routingPhaseSpans(e.telemetry).map((span) => span.spanId) : [],
+    ),
+  );
+  for (const e of [...events, ...routing]) {
+    if (e.type !== "span_end" || e.name !== MODEL_TURN || aggregatedRoutingIds.has(e.spanId)) continue;
     const attrs = (e.attrs ?? {}) as Record<string, unknown>;
     const model = typeof attrs.model === "string" && attrs.model ? attrs.model : UNKNOWN_MODEL;
     const m = usage.byModel[model] ?? {
@@ -132,7 +142,10 @@ export function usageOfEvents(events: readonly RunEvent[]): RunUsage {
     if (p.feeTurns > 0) m.feeUsd = p.feeUsd;
     if (p.sources.size > 0) m.priceSources = [...p.sources].sort();
   }
-  return usage;
+  return events.reduce(
+    (total, e) => (e.type === "operator" && e.telemetry?.usage ? addUsage(total, e.telemetry.usage) : total),
+    usage,
+  );
 }
 
 /** The two sides' `usd` folded: a sum when both carry one, null when either

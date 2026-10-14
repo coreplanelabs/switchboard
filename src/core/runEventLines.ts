@@ -194,7 +194,10 @@ function isRunEvent(v: unknown): v is RunEvent {
       // The operator's shadow decision (record 0057; run-history item 60).
       return (
         (o.mode === "shadow" || o.mode === "on") &&
-        (o.outcome === "binds" || o.outcome === "question" || o.outcome === "refusal") &&
+        (o.outcome === "binds" ||
+          o.outcome === "question" ||
+          o.outcome === "refusal" ||
+          o.outcome === "non_decision") &&
         typeof o.reason === "string"
       );
     case "refusal":

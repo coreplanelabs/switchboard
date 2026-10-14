@@ -35,6 +35,42 @@ import { contextDependenciesHash } from "./references/contextDependencies.js";
 import { pendingQuestionOf, bindFromAnswer } from "./dispatch/operator.js";
 import type { ChildHandoff } from "./dispatch/handoff.js";
 
+it("retains routing phases and estimate provenance through record and JSONL reconstruction", () => {
+  const event: RunEvent = {
+    type: "operator",
+    mode: "on",
+    outcome: "non_decision",
+    reason: "operator_timeout",
+    outputTokens: 634,
+    outputTokensSource: "estimate",
+    telemetry: {
+      schema: 1,
+      startedAt: 1_000,
+      deadlineAt: 61_000,
+      finishedAt: 61_000,
+      timeout: { phase: "model", step: 1, at: 61_000 },
+      steps: [
+        {
+          index: 1,
+          phase: "model",
+          startedAt: 1_000,
+          finishedAt: 61_000,
+          durationMs: 60_000,
+          remainingMs: 0,
+          outcome: "timeout",
+          provider: "example",
+          model: "example/router",
+          requestId: "req_saved",
+        },
+      ],
+    },
+  };
+  const kept = JSON.parse(JSON.stringify(record({ events: [event], operator: operatorOfEvents([event]) })));
+  expect(isRunRecord(kept)).toBe(true);
+  expect(kept.operator).toMatchObject({ outputTokensSource: "estimate", telemetry: event.telemetry });
+  expect(operatorOfEvents(kept.events)?.telemetry).toEqual(event.telemetry);
+});
+
 it("stored operator failures retain provider diagnostics after serialization", () => {
   const event: RunEvent = {
     type: "operator",

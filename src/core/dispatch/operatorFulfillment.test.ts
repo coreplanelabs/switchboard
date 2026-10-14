@@ -58,6 +58,37 @@ const work: RouteToolCall = {
 };
 
 describe("last-read command correction", () => {
+  it.each(["late", "abort", "failure"] as const)(
+    "recovered commands retain fulfillment evidence and refuse unavailable verdicts: %s",
+    async (kind) => {
+      let clock = 1_000;
+      const controller = new AbortController();
+      const answer = await runOperator(
+        { ...fix, text: "List connected repositories." },
+        async (prompt, options) => {
+          if (prompt.tool.name !== VERIFY_TOOL_NAME)
+            throw new MultiToolCallError([{ tool: OPERATOR_READ_TOOLS.threadState, input: {} }, listing]);
+          options.observe?.({ model: "example/router", usage: { inputTokens: 100, outputTokens: 20 } });
+          if (kind === "failure") throw new Error("provider unavailable");
+          clock = 61_000;
+          if (kind === "abort") {
+            controller.abort();
+            throw new DOMException("aborted", "AbortError");
+          }
+          return verdict(true);
+        },
+        { now: () => clock, startedAt: 1_000, timeoutMs: 60_000, signal: controller.signal },
+      );
+      expect(answer.decision).toMatchObject({ kind: "non_decision" });
+      expect(answer.telemetry?.steps.at(-1)).toMatchObject({
+        phase: "command_fulfillment",
+        outcome: kind === "failure" ? "error" : "timeout",
+        model: "example/router",
+        usage: { inputTokens: 100, outputTokens: 20 },
+      });
+      if (kind !== "failure") expect(answer.telemetry?.timeout).toMatchObject({ phase: "command_fulfillment" });
+    },
+  );
   const helper = { tool: OPERATOR_READ_TOOLS.repositoryBrief, input: { repo: "acme/api" } };
 
   it.each([

@@ -5,7 +5,8 @@
 // `CompletionResult` — while pi's adapters speak each provider's wire shape.
 // The table is built from config provider blocks; the operator, intake and
 // memory model settings resolve through it. These background calls
-// do not publish a run's `model.turn` span or usage record.
+// do not publish harness `model.turn` spans. The operator records its phase
+// receipts and provider usage separately for timing and cost reconstruction.
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
@@ -197,6 +198,14 @@ export class PiAiProvider implements Provider {
         try {
           const response = await (this.fetchImpl ?? globalThis.fetch)(input, init);
           failureContext.headers = Object.fromEntries(response.headers);
+          const requestId = response.headers.get("x-request-id") ?? response.headers.get("request-id");
+          if (requestId) {
+            try {
+              req.observer?.onResponse?.(requestId);
+            } catch {
+              /* Diagnostics cannot fail a completion. */
+            }
+          }
           upstreamFailure = response.ok
             ? undefined
             : classifyProviderFailure({

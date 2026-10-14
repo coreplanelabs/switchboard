@@ -1180,14 +1180,14 @@ export type RunEvent =
     }
   /** The operator's decision ([record 0057](../../docs/decisions/0057-the-operator-is-the-one-door-a-model-binds-every-chat-input-and-deterministic-code-authorizes-fences-and-executes.md);
    *  run-history item 60): one per admitted chat event under
-   *  `routing.operator: shadow` or `on`. A no-call turn is repaired once and a
-   *  second becomes a typed general bind with reason `no_decision`; another
-   *  exhausted violation may remain `non_decision` and resolves on the
-   *  configured default with no second model. `attempts` lists what each
+   *  `routing.operator: shadow` or `on`. A no-call turn is repaired once;
+   *  exhaustion ends at the door as `non_decision`. `attempts` lists what each
    *  answer violated or that it was accepted. A bind's `line` is redacted and cut like the
    *  receipt (`ROUTE_RECEIPT_CAP`), never the message text; `intake` carries
    *  the intake gate's verdict when the gate is present; `latencyMs` and
-   *  `outputTokens` feed the replay's median rows. Under `shadow` nothing
+   *  `outputTokens` feed the replay's median rows (the latter is an estimate).
+   *  `telemetry` keeps bounded phase receipts and measured provider counters.
+   *  Under `shadow` nothing
    *  runs from it. Additive: unknown → ignored. */
   | {
       type: "operator";
@@ -1268,6 +1268,8 @@ export type RunEvent =
       providerFailure?: ProviderFailureCause;
       providerFailureDetails?: ProviderFailureDetails;
       attempts?: ReadonlyArray<{ outcome: "accepted" | "violation"; violation?: string }>;
+      telemetry?: import("./routingTelemetry.js").RoutingTelemetry;
+      outputTokensSource?: "estimate";
       /** Snapshot of the factual repository context the operator received. */
       repoContext?: {
         organization: string;

@@ -69,6 +69,8 @@ export interface CompletionRequest {
 }
 
 export interface CompletionObserver {
+  /** The provider's correlation ID, observed at headers even if the stream later aborts. */
+  onResponse?(requestId: string): void;
   onFirstToken?(): void;
   /** A content block began / ended, by kind (`text`, `thinking`, `redacted_thinking`,
    *  `tool_use`, …) and stream index: the span layer sums a turn's thinking and
@@ -87,6 +89,7 @@ export interface TokenUsage {
 }
 
 export interface CompletionResult {
+  requestId?: string;
   // assistant content parts in order (text and tool_use)
   content: ContentPart[];
   stopReason: "end_turn" | "tool_use" | "max_tokens" | "refusal" | "other";
