@@ -31,15 +31,15 @@ const input = (text: string): OperatorInput => ({
 });
 
 const bindModel =
-  (preset: string): RouteModel =>
+  (preset: string, settings: Record<string, unknown> = {}): RouteModel =>
   async () => ({
     tool: OPERATOR_BIND_TOOL,
-    input: { preset, reason: "fixture route", ...(preset === "ship" ? { shipEntry: "work" } : {}) },
+    input: { preset, reason: "fixture route", ...settings, ...(preset === "ship" ? { shipEntry: "work" } : {}) },
   });
 
 const boundPreset = (decision: OperatorDecision): string | undefined => {
   if (decision.kind !== "binds") return undefined;
-  return /^agent:([^\s]+)/.exec(decision.binds[0]?.line ?? "")?.[1];
+  return decision.binds[0]?.preset;
 };
 
 describe("the door row owns every checked-in routed fixture", () => {
@@ -70,10 +70,23 @@ describe("the door row owns every checked-in routed fixture", () => {
   ];
 
   it("grounded preset fixtures bind, while an unevidenced review cannot use the readers' router", async () => {
+    const formalSettings: Record<string, Record<string, unknown>> = {
+      "directive:dm1": { model: "openai/gpt-5" },
+      "directive:de1": { effort: "low", settingsEvidence: { effort: { quote: "effort:low", intent: "requested" } } },
+      "directive:db1": { budget: 30, settingsEvidence: { budget: { quote: "budget:30", intent: "requested" } } },
+      "directive:ds1": {
+        severity: "minor",
+        settingsEvidence: { severity: { quote: "severity:minor", intent: "requested" } },
+      },
+      "directive:dv1": {
+        verbosity: "quiet",
+        settingsEvidence: { verbosity: { quote: "verbosity:quiet", intent: "requested" } },
+      },
+    };
     expect(cases.length).toBeGreaterThan(0);
     expect(new Set(cases.map((fixture) => fixture.id)).size).toBe(cases.length);
     for (const fixture of cases) {
-      const answer = await runOperator(input(fixture.text), bindModel(fixture.preset));
+      const answer = await runOperator(input(fixture.text), bindModel(fixture.preset, formalSettings[fixture.id]));
       if (fixture.preset === "review") {
         expect(answer.decision.kind, fixture.id).toBe("non_decision");
         expect(answer.attempts, fixture.id).toEqual(

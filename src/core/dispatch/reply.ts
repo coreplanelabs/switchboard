@@ -713,6 +713,7 @@ export interface DeliveryContext {
    *  from them (agent-review.md item 5b). Absent on every other run. */
   verdict?: ReviewVerdict | undefined;
   reviewPost?: ReviewPost | undefined;
+  reviewIncomplete?: string;
   /** A stop before review work began is already the complete reply; verdict
    *  rendering and the live-run suffix would add claims beyond that stop. */
   reviewStoppedBeforeStart?: boolean;
@@ -871,6 +872,7 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
           ? buildReviewChannelReply({
               answer: privateAnswer,
               verdict: ctx.verdict,
+              failure: ctx.reviewIncomplete,
               posted: ctx.reviewPost?.posted ? ctx.reviewPost.target : undefined,
               liveUrl,
               ...(ctx.verbosity !== undefined ? { verbosity: ctx.verbosity } : {}),

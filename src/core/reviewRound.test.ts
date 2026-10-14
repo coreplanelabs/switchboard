@@ -524,7 +524,7 @@ describe("makeSystemComposer (head-pinned composition with an explicit AgentDef)
 
 describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
   const answer = "Looks solid.";
-  const verdict = { verdict: "approve" as const, summary: "solid change", head: HEAD };
+  const verdict = { verdict: "approve" as const, summary: "solid change", head: HEAD, findings: [] };
 
   function harness() {
     const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
@@ -1519,6 +1519,24 @@ describe("runReviewPostStep durable original publication", () => {
     };
     return { input, posts, events, replies, receipts, publicationJournal, read: () => saved };
   }
+  it("an incomplete latest submission gives neither the publication journal nor the result approval credit", async () => {
+    const h = setup();
+    const out = await runReviewPostStep({
+      ...h.input,
+      verdict: { ...verdict, findings: [] },
+      reviewIncomplete: "The latest report is incomplete.",
+    });
+    expect(out).toMatchObject({ posted: true });
+    expect(out).not.toHaveProperty("verdict");
+    expect(h.read()).not.toHaveProperty("verdict");
+    expect(h.posts[0].body.split("\n")[0]).toBe("Review incomplete — findings not validated.");
+    expect(JSON.parse(h.posts[0].body.match(/<!-- switchboard:verdict (.*) -->/)![1])).toEqual({
+      verdict: "none",
+      head: HEAD,
+    });
+    expect(h.events.find((event) => event.type === "review_posted")).not.toHaveProperty("verdict");
+  });
+
   it("awaits exact original pending admission before a native review POST", async () => {
     const h = setup();
     let release!: () => void;

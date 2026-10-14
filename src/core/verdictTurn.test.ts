@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { submitVerdictTool } from "../tools/submit.js";
 import { MINUTE_MS, POST_STEP_MINUTES } from "./budgets.js";
 import { AGENTS } from "../agents/registry.js";
 import type { Executor } from "../execution/executor.js";
@@ -35,7 +36,7 @@ describe("verdictFollowUp — the user turn the model is given", () => {
   it("names the pull request, what a missing verdict posts as, the submit tool with every field, and the two prohibitions", () => {
     const text = verdictFollowUp(PR);
     expect(text).toContain("acme/api#700");
-    expect(text).toContain("No verdict submitted — not approving");
+    expect(text).toContain("Review incomplete — findings not validated");
     expect(text).toContain("submit_verdict");
     expect(text).toContain("exactly once");
     for (const field of [
@@ -74,6 +75,32 @@ describe("runVerdictTurn — one clipped prompt on the run's own pi session (har
     };
     return { turn, events, progress, forwarded };
   }
+
+  it("a later rejected submission clears an earlier approval captured in the verdict turn", async () => {
+    const stages: string[] = [];
+    const h = turnSpec();
+    h.turn.toolContext.onReviewSubmission = async (submission) => {
+      stages.push(submission.status);
+    };
+    h.turn.followUp = async ({ toolContext }) => {
+      expect(
+        await submitVerdictTool.run(
+          { verdict: "approve", summary: "No findings", head: HEAD, findings: [] },
+          toolContext,
+        ),
+      ).toContain("verdict recorded: approve");
+      expect(
+        await submitVerdictTool.run(
+          { verdict: "request_changes", summary: "An issue remains", head: HEAD, findings: [] },
+          toolContext,
+        ),
+      ).toContain("changes requested requires validated findings");
+      return "The report is incomplete.";
+    };
+    const out = await runVerdictTurn({ target: PR, turn: h.turn, logKey: "t" });
+    expect(out.verdict).toBeUndefined();
+    expect(stages).toEqual(["pending", "accepted", "pending", "rejected"]);
+  });
 
   it("the turn's minutes are carved from the lease's remainder: twenty minutes left give the review post-step's three, one minute left gives one", async () => {
     for (const [remainingMs, minutes] of [

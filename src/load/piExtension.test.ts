@@ -49,7 +49,7 @@ describe("piExtension", () => {
     const verdict = f.tools.get("submit_verdict")!;
     // The head is what the reviewed-head guard's fallback reads; a schema that
     // does not require it is a verdict the model is free to submit without one.
-    expect(verdict.parameters.required).toEqual(["verdict", "summary", "head"]);
+    expect(verdict.parameters.required).toEqual(["verdict", "summary", "head", "findings"]);
     const native = submitVerdictTool.inputSchema as { properties: Record<string, unknown> };
     expect(verdict.parameters.properties.head).toEqual(native.properties.head);
     expect(verdict.parameters).toEqual(submitVerdictTool.inputSchema);

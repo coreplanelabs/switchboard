@@ -187,7 +187,7 @@ const SUBMIT_PR_DESCRIPTION: PiToolDeclaration = {
  *  it, a model follows the schema it is given and submits verdicts naming none. */
 const SUBMIT_VERDICT: PiToolDeclaration = {
   description:
-    "Record your review verdict. REQUIRED before your final message when reviewing a PR: `approve` when no finding at or above the severity to address remains (the level in force for this run, `minor` by default: a major or minor finding means `request_changes`; nits alone never block), `request_changes` otherwise. Switchboard writes the verdict as the first line of the GitHub comment itself (`LGTM:` only for approve); a review with no submitted verdict is posted as NOT approving. Call it once, after your analysis; a later call replaces the earlier one. `head` is the commit you reviewed — run `git rev-parse HEAD` in the checkout you read and tested and pass its output; Switchboard posts to the PR only if that commit IS the PR's head, so a review of the wrong branch can never land on a PR. Enumerate EVERY issue you report in `findings` with STABLE ids assigned in order (F1, F2, …) — a fix round references findings by these ids, so never renumber them. Severity is exactly one of blocking|major|minor|nit; the entry carries the file (plus line when it points at one) and a title of one concise sentence, at most 180 characters, stating the failure and impact in plain language, while the full explanation stays in your review text keyed by the same ids. Every new finding declares kind: single or pattern. A single finding omits invariant and cases entirely. For a pattern, declare kind: pattern, name its invariant and enumerate independently checkable {scenario, expected} cases, including all selection and execution paths in the diff; for a push, check source, destination, endpoint and command composition, not just the first counterexample. A missing or malformed matrix is refused before recording the verdict; you must judge whether its cases cover the invariant. An `approve` carrying a finding at or above the severity to address is downgraded to `request_changes` and the ack names the finding and the level — approve only when every finding sits below it. Set `humanGated: true` on a finding ONLY when its remedy is a receipt no run can produce — a replay needing a credential no sandbox holds, a procedure a person runs live — so the ship loop can hold the unit for a person instead of opening a fix round that can change nothing. Before a PR verdict, read github_pull_get with includeReviewHistory: true and every returned historyPage in order. Verify every outstanding finding and all its cases at this head. Re-raise it in findings with its exact scoped ID; the tool preserves its original metadata and case text. Supply cases only to append new cases, never to copy prior rows. For every prior case, submit caseAssessments with findingId, caseId, outcome (open|fixed|declined) and current-head evidence in note. Alternatively record a resolution: fixed after verifying the change, declined after verifying why the finding does not apply. A closure has no open cases; fixed requires a fixed case, declined requires every case to be declined. Each resolution requires an evidence note naming the checked paths or cases. Author assertions and absence from this round are not proof. New findings use fresh F1, F2, … IDs.",
+    "Record your review verdict. REQUIRED before your final message when reviewing a PR: `approve` when no finding at or above the severity to address remains (the level in force for this run, `minor` by default: a major or minor finding means `request_changes`; nits alone never block), `request_changes` otherwise. Switchboard writes the verdict as the first line of the GitHub comment itself (`LGTM:` only for approve); a review with no submitted verdict is posted as NOT approving. Call it once, after your analysis; a later call replaces the earlier one. `head` is the commit you reviewed — run `git rev-parse HEAD` in the checkout you read and tested and pass its output; Switchboard posts to the PR only if that commit IS the PR's head, so a review of the wrong branch can never land on a PR. Enumerate EVERY issue you report in `findings` with STABLE ids assigned in order (F1, F2, …) — a fix round references findings by these ids, so never renumber them. Severity is exactly one of blocking|major|minor|nit; the entry carries the file (plus line when it points at one) and a title of one concise sentence, at most 180 characters, stating the failure and impact in plain language, while the full explanation stays in your review text keyed by the same ids. Every new finding declares kind: single or pattern. A single finding omits invariant and cases entirely. For a pattern, declare kind: pattern, name its invariant and enumerate independently checkable {scenario, expected} cases, including all selection and execution paths in the diff; for a push, check source, destination, endpoint and command composition, not just the first counterexample. A missing or malformed matrix is refused before recording the verdict; you must judge whether its cases cover the invariant. An `approve` carrying a finding at or above the severity to address is downgraded to `request_changes` and the ack names the finding and the level — approve only when every finding sits below it. Set `humanGated: true` on a finding ONLY when its remedy is a receipt no run can produce — a replay needing a credential no sandbox holds, a procedure a person runs live — so the ship loop can hold the unit for a person instead of opening a fix round that can change nothing. Before a PR verdict, read github_pull_get with includeReviewHistory: true and every returned historyPage in order. Verify every outstanding finding and all its cases at this head. Re-raise it in priorFindings with its exact scoped findingId; the tool preserves its original metadata and case text. Supply cases only to append new cases, never to copy prior rows. For every prior case, submit caseAssessments with findingId, caseId, outcome (open|fixed|declined) and current-head evidence in note. Alternatively record a resolution: fixed after verifying the change, declined after verifying why the finding does not apply. A closure has no open cases; fixed requires a fixed case, declined requires every case to be declined. Each resolution requires an evidence note naming the checked paths or cases. Author assertions and absence from this round are not proof. New findings use fresh F1, F2, … IDs.",
   parameters: {
     type: "object",
     properties: {
@@ -214,7 +214,8 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
               properties: {
                 id: {
                   type: "string",
-                  description: 'Stable id assigned in order: "F1", "F2", … — dispositions reference it',
+                  pattern: "^F[1-9][0-9]*$",
+                  description: "A fresh finding ID in this report: F1, F2, …; never a run or prior-review ID",
                 },
                 severity: {
                   type: "string",
@@ -252,7 +253,8 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
               properties: {
                 id: {
                   type: "string",
-                  description: 'Stable id assigned in order: "F1", "F2", … — dispositions reference it',
+                  pattern: "^F[1-9][0-9]*$",
+                  description: "A fresh finding ID in this report: F1, F2, …; never a run or prior-review ID",
                 },
                 severity: {
                   type: "string",
@@ -323,8 +325,8 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
               properties: {
                 id: {
                   type: "string",
-                  pattern: "^review:",
-                  description: "Exact scoped ID from outstandingFindings",
+                  pattern: "^F[1-9][0-9]*$",
+                  description: "A fresh finding ID in this report: F1, F2, …; never a run or prior-review ID",
                 },
                 cases: {
                   type: "array",
@@ -354,6 +356,38 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
               additionalProperties: false,
             },
           ],
+        },
+      },
+      priorFindings: {
+        type: "array",
+        description: "Re-raise controller-issued prior findings by exact identity; fresh findings belong in findings.",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["findingId"],
+          properties: {
+            findingId: {
+              type: "string",
+              description: "One exact issued finding ID from complete current-head review history",
+            },
+            cases: {
+              type: "array",
+              description: "Optional new invariant cases; omit controller-issued case IDs",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["scenario", "expected"],
+                properties: {
+                  scenario: {
+                    type: "string",
+                  },
+                  expected: {
+                    type: "string",
+                  },
+                },
+              },
+            },
+          },
         },
       },
       caseAssessments: {
@@ -395,7 +429,7 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
       resolutions: {
         type: "array",
         description:
-          "Explicit reviewer-verified closures of outstanding findings from github_pull_get; re-raised findings remain in findings instead",
+          "Explicit reviewer-verified closures of outstanding findings from github_pull_get; re-raised findings belong in priorFindings instead",
         items: {
           type: "object",
           properties: {
@@ -417,7 +451,7 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
         },
       },
     },
-    required: ["verdict", "summary", "head"],
+    required: ["verdict", "summary", "head", "findings"],
   },
 };
 

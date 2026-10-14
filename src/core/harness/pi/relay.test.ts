@@ -217,7 +217,7 @@ describe("relayedToolDefinitions", () => {
     });
     expect(served.description).toContain("run `git rev-parse HEAD` in the checkout you read");
     const schema = served.inputSchema as { properties: Record<string, unknown>; required: string[] };
-    expect(schema.required).toEqual(["verdict", "summary", "head"]);
+    expect(schema.required).toEqual(["verdict", "summary", "head", "findings"]);
     expect(schema.properties.head).toEqual({
       type: "string",
       description: "Output of `git rev-parse HEAD` in the checkout you reviewed (the commit the review is about)",
@@ -686,13 +686,13 @@ describe("runRelayedTool — the verdict path", () => {
     const { harness } = live({ identity: "read" });
     harness.tools = [submitVerdict];
     harness.toolContext = { executor, onVerdict: (v) => void relayed.push(v) };
-    const headless = { verdict: "approve", summary: "looks correct" };
+    const headless = { verdict: "approve", summary: "looks correct", findings: [] };
     const answer = await runRelayedTool(harness, { toolCallId: "c5", tool: "submit_verdict", input: headless });
     const nativeText = await submitVerdict.run(headless, { executor, onVerdict: (v) => void native.push(v) });
     expect(answer).toEqual({ content: [{ type: "text", text: nativeText }], isError: false });
-    expect(nativeText).toBe("verdict recorded: approve");
+    expect(nativeText).toBe("verdict recorded: approve (0 findings)");
     expect(relayed).toEqual(native);
-    expect(relayed).toEqual([{ verdict: "approve", summary: "looks correct" }]);
+    expect(relayed).toEqual([{ verdict: "approve", summary: "looks correct", findings: [] }]);
     expect(relayed[0].head).toBeUndefined();
     // The guard's two sources: the model's head is the fallback for a
     // workspace whose HEAD could not be read — a head the relay wrote from the

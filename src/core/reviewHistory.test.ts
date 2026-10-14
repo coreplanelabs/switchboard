@@ -84,10 +84,15 @@ describe("review finding history", () => {
     const resolutions = [
       { findingId: repeated.id, disposition: "fixed" as const, note: "Verified unique write IDs at the reviewed head" },
     ];
-    expect(outstandingReviewFindings([review(1), review(2, { findings: [], resolutions }, "other[bot]")])).toHaveLength(
-      1,
-    );
-    expect(outstandingReviewFindings([review(1), review(2, { findings: [], resolutions })])).toEqual([]);
+    expect(
+      outstandingReviewFindings([
+        review(1),
+        review(2, { verdict: "approve", findings: [], resolutions }, "other[bot]"),
+      ]),
+    ).toHaveLength(1);
+    expect(
+      outstandingReviewFindings([review(1), review(2, { verdict: "approve", findings: [], resolutions })]),
+    ).toEqual([]);
   });
 
   it("uses the last complete marker and refuses malformed or head-mismatched marked reviews", () => {

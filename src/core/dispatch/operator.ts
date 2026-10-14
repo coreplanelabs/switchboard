@@ -16,7 +16,7 @@ import type { OperatorTailContext } from "./operatorTail.js";
 // The operator (docs/decisions/0057-the-operator-is-the-one-door-a-model-binds-every-chat-input-and-deterministic-code-authorizes-fences-and-executes.md;
 // the one-door plan's operator unit; docs/reference/specs/routing-and-config.md item
 // 29): one typed decision binds an admitted chat event into registry calls; a
-// single explicit PR directive can bind without a model turn. Under `routing.operator: shadow` the dispatcher calls it once per
+// accepted preset identity reaches execution without display-text decoding. Under `routing.operator: shadow` the dispatcher calls it once per
 // admitted chat event ahead of stage A and outside the deterministic
 // live-thread and directive short-circuits, and its decision is written
 // beside the routed request in the run store — the bound line redacted and
@@ -36,7 +36,7 @@ import type { OperatorTailContext } from "./operatorTail.js";
 // re-asked once with the violation named; a second no-call turn ends at the
 // door with `non_decision`. The model authors no
 // refusal — its "cannot" is an `ask` or a repaired no-call turn; refusal exists only
-// where the policy table made one (`decideExecution`'s `policy_refusal` row).
+// where the policy table made one or execution recorded a refusal.
 // The prompt is ordered rules, projection, briefs,
 // tail oldest-first, request (the plan's prompt-order rule), so consecutive events in a thread hit the
 // prompt cache for everything but the new turns; the tail is capped at
@@ -85,21 +85,16 @@ import {
   type RepositoryBriefApi,
   type RepositoryBriefContext,
 } from "./repositoryBriefs.js";
-import {
-  prUrlIdentity,
-  inspectPrTargetEvidence,
-  verifyPrTargetEvidence,
-  type PrTargetEvidence,
-} from "./targetEvidence.js";
+import { inspectPrTargetEvidence, type PrTargetEvidence } from "./targetEvidence.js";
 import { requesterTargetText, requesterUrlText, requesterUrlWords } from "./requesterText.js";
-import { barePrNumberOf, explicitPrOf, explicitRepoOf, type ResidentSlugs } from "../repoContext.js";
+import { barePrNumberOf, explicitRepoOf, type ResidentSlugs } from "../repoContext.js";
 import { parseSlug } from "../residentAdmin.js";
 import { prBatchBindingOf, type PrBatchBinding } from "../prBatchBinding.js";
 import { residentSlugsLister } from "../../execution/factory.js";
 import type { ProviderModelsReader } from "./providerModels.js";
 import type { McpCatalogEntry, McpToolSource } from "../../mcp/source.js";
 import { boundBlastRadius, type CommandDef, type CommandInput } from "../commandRegistry.js";
-import { chatInvocation, cliWords, namedToInput, tokenize } from "../commandSurface.js";
+import { chatInvocation, cliWords, namedToInput } from "../commandSurface.js";
 import { GRANT_RENEWALS_MAX, MINUTE_MS, STRUCTURED_RETRIES_MAX } from "../budgets.js";
 import { parseChatCommand, type ChatCommands, type ParsedChatCommand } from "../commandChat.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
@@ -263,6 +258,8 @@ export type OperatorDecision =
       text: string;
       proposal?: string;
       proposalSettings?: OperatorRequestSettings;
+      proposalPreset?: string;
+      proposalRequest?: string;
       /** Set only after checking the proposed line against the command registry. */
       confirmablePreset?: true;
       questionKind?: "target_repository";
@@ -286,6 +283,10 @@ export type OperatorDecision =
 export interface OperatorBind {
   line: string;
   reason: string;
+  /** Accepted action identity; display text never selects a current preset. */
+  preset?: string;
+  /** Accepted task for a confirmed saved choice; never rediscovered from display text. */
+  request?: string;
   /** Execution-only registry input. Never copied to a receipt or run event. */
   invocation?: Extract<ParsedChatCommand, { kind: "invoke" }>;
   /** The model ref the run uses (the plain-words model unit): the request
@@ -562,15 +563,39 @@ export interface OperatorInput {
   owner?: OperatorThreadOwner;
 }
 
-/** A leading preset directive selects work, not a terminal registry reply.
- * Helper reads still ground that work. Ownership takes precedence so this
- * restriction cannot redirect a follow-up away from its original writer. */
+/** Decode only explicit leading syntax, never prose intent. Capability
+ * membership remains separate from the person's choice. */
+function requestedPreset(text: string, presets: readonly RoutablePreset[]): string | undefined {
+  const token = text.trimStart().split(/\s+/, 1)[0] ?? "";
+  const name = token.startsWith("agent:") || token.startsWith("agent=") ? token.slice(6) : undefined;
+  return presets.some((preset) => preset.name === name) ? name : undefined;
+}
+
 function actionProjection(input: OperatorInput): OperatorProjection {
   if (input.owner) return ownedProjection(input.projection, input.owner);
-  const preset = parseDirectives(input.text).agent;
-  return preset !== undefined && input.projection.presets.some((offered) => offered.name === preset)
-    ? { ...input.projection, commands: [] }
-    : input.projection;
+  const choice = requestedPreset(input.text, input.projection.presets);
+  if (choice === undefined) return input.projection;
+  return {
+    ...input.projection,
+    commands: [],
+    presets: input.projection.presets.filter(
+      (preset) => preset.name === choice || ((choice === "review" || choice === "ship") && preset.name === "conductor"),
+    ),
+  };
+}
+
+/** Only the contiguous formal control prefix constrains values. A quoted
+ * token or later task mention stays with the model's classified evidence. */
+function formalSettings(text: string): OperatorRequestSettings {
+  const settings: OperatorRequestSettings = {};
+  for (const [index, token] of text.trimStart().split(/\s+/).entries()) {
+    if (index === 0 && (token.startsWith("agent:") || token.startsWith("agent="))) continue;
+    const parsed = parseDirectives(token);
+    const { text: rest, agent: _agent, interpreter: _interpreter, ...control } = parsed;
+    if (rest || Object.keys(control).length !== 1) break;
+    Object.assign(settings, control);
+  }
+  return settings;
 }
 
 /**
@@ -581,10 +606,9 @@ function actionProjection(input: OperatorInput): OperatorProjection {
  * The request and every tail turn are quoted as untrusted data behind the
  * router's own tags.
  */
-export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
+export function buildOperatorPrompt(input: OperatorInput, projection = actionProjection(input)): RoutePrompt {
   // An owned thread's event is shown only what a follow-up may bind (issue
   // 2027); a decision outside that table is one the executor folds.
-  const projection = actionProjection(input);
   const commandList = projection.commands
     .map((c) => `- \`${c.tool.name}\`: ${oneLine(c.tool.description ?? c.id)}`)
     .join("\n");
@@ -725,7 +749,7 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
     quoteRequest(input.text),
     "</request>",
   ].join("\n");
-  const tools = operatorTools(input);
+  const tools = operatorTools(input, projection);
   return { system, user, tool: tools[0], tools: tools.slice(1), open: true };
 }
 
@@ -735,12 +759,53 @@ export function buildOperatorPrompt(input: OperatorInput): RoutePrompt {
  *  preset or command outside the author's projection has no tool here, so a
  *  bind the author may not run is unrepresentable, and a line to mangle never
  *  exists: the schema carries the arguments typed. */
-export function operatorTools(input: OperatorInput): ToolDef[] {
-  const projection = actionProjection(input);
-  const presets = projection.presets.map((p) => p.name);
+export function operatorTools(input: OperatorInput, projection = actionProjection(input)): ToolDef[] {
+  const choice = !input.owner ? requestedPreset(input.text, input.projection.presets) : undefined;
+  const presets = projection.presets.filter((p) => choice === undefined || p.name === choice).map((p) => p.name);
   const repositoryWriters = projection.presets
     .filter((preset) => preset.identity === "write" && machineNeedsRepo(preset.machine))
     .map((preset) => preset.name);
+  const settingProperties = {
+    model: {
+      type: "string",
+      description:
+        "the model ref the run uses, ONLY when the request names a model in plain words: a `<provider>/<model>` ref `provider_models` lists, resolved from the person's word — omit when no model is named, and ask instead of guessing when the word matches several refs or none",
+    },
+    modelWord: {
+      type: "string",
+      description:
+        "one exact model-name word in a plain-words request that `model` resolves, such as astra, o3, or gpt-6; omit when the full model ref appears in the request",
+    },
+    effort: {
+      type: "string",
+      enum: [...EFFORT_LEVELS],
+      description:
+        "effort explicitly requested for this run, with requested-intent evidence; never infer low from a simple task or short answer; omit defaults",
+    },
+    budget: {
+      type: "integer",
+      minimum: MIN_BOUNDARY_MINUTES,
+      description: "whole-minute boundary the person requested for this run; omit when unrequested",
+    },
+    severity: {
+      type: "string",
+      enum: [...ADDRESS_SEVERITIES],
+      description:
+        "severity the person asked to address in review or Ship; explaining a severity term is task content, not a requested control",
+    },
+    renewals: {
+      type: "integer",
+      minimum: 0,
+      maximum: GRANT_RENEWALS_MAX,
+      description: "Ship renewals the person requested; omit when unrequested",
+    },
+    verbosity: {
+      type: "string",
+      enum: [...VERBOSITY_LEVELS],
+      description: "reply detail the person requested for this run; omit when unrequested",
+    },
+    settingsEvidence: OPERATOR_SETTINGS_EVIDENCE_SCHEMA,
+  };
   const bind: ToolDef[] =
     presets.length > 0
       ? [
@@ -754,45 +819,7 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
               required: ["preset", "reason"],
               properties: {
                 preset: { type: "string", enum: presets, description: "the least capable preset that covers the ask" },
-                model: {
-                  type: "string",
-                  description:
-                    "the model ref the run uses, ONLY when the request names a model in plain words: a `<provider>/<model>` ref `provider_models` lists, resolved from the person's word — omit when no model is named, and ask instead of guessing when the word matches several refs or none",
-                },
-                modelWord: {
-                  type: "string",
-                  description:
-                    "one exact model-name word in a plain-words request that `model` resolves, such as astra, o3, or gpt-6; omit when the full model ref appears in the request",
-                },
-                effort: {
-                  type: "string",
-                  enum: [...EFFORT_LEVELS],
-                  description:
-                    "effort explicitly requested for this run, with requested-intent evidence; never infer low from a simple task or short answer; omit defaults",
-                },
-                budget: {
-                  type: "integer",
-                  minimum: MIN_BOUNDARY_MINUTES,
-                  description: "whole-minute boundary the person requested for this run; omit when unrequested",
-                },
-                severity: {
-                  type: "string",
-                  enum: [...ADDRESS_SEVERITIES],
-                  description:
-                    "severity the person asked to address in review or Ship; explaining a severity term is task content, not a requested control",
-                },
-                renewals: {
-                  type: "integer",
-                  minimum: 0,
-                  maximum: GRANT_RENEWALS_MAX,
-                  description: "Ship renewals the person requested; omit when unrequested",
-                },
-                verbosity: {
-                  type: "string",
-                  enum: [...VERBOSITY_LEVELS],
-                  description: "reply detail the person requested for this run; omit when unrequested",
-                },
-                settingsEvidence: OPERATOR_SETTINGS_EVIDENCE_SCHEMA,
+                ...settingProperties,
                 repo: {
                   type: "string",
                   pattern: "^[\\w.-]+/[\\w.-]+$",
@@ -828,7 +855,7 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
           },
         ]
       : [];
-  const batch: ToolDef[] = presets.includes("conductor")
+  const batch: ToolDef[] = projection.presets.some((preset) => preset.name === "conductor")
     ? [
         {
           name: OPERATOR_BATCH_TOOL,
@@ -839,7 +866,8 @@ export function operatorTools(input: OperatorInput): ToolDef[] {
             additionalProperties: false,
             required: ["kind", "targets", "actionQuote", "targetQuotes", "reason"],
             properties: {
-              kind: { type: "string", enum: ["review", "ship"] },
+              ...settingProperties,
+              kind: { type: "string", enum: choice === "review" || choice === "ship" ? [choice] : ["review", "ship"] },
               targets: { type: "array", minItems: 2, maxItems: 32, items: { type: "string" } },
               actionQuote: { type: "string", description: "one exact action span in this request" },
               targetQuotes: {
@@ -1140,6 +1168,8 @@ export type OperatorTurn =
  *  parse can never disagree. */
 export interface OperatorTurnContext {
   requestText: string;
+  /** An authored formal choice, distinct from available capabilities. */
+  requestedPreset?: string;
   requesterId?: string;
   tail?: readonly OperatorTailTurn[];
   presets: readonly string[];
@@ -1348,16 +1378,18 @@ function requestSettingsOf(
     return { violation: `bind_preset renewals must be a Ship count from 0 to ${GRANT_RENEWALS_MAX}` };
   if (verbosity !== undefined && !isVerbosity(verbosity))
     return { violation: "bind_preset verbosity must be quiet, verbose or debug" };
-  return {
-    settings: {
-      ...(ref !== undefined ? { model: ref } : {}),
-      ...(effort !== undefined ? { effort: effort as Effort } : {}),
-      ...(budget !== undefined ? { budget: budget as number } : {}),
-      ...(severity !== undefined ? { severity: severity as AddressSeverity } : {}),
-      ...(renewals !== undefined ? { renewals: renewals as number } : {}),
-      ...(verbosity !== undefined ? { verbosity: verbosity as Verbosity } : {}),
-    },
+  const accepted = {
+    ...(ref !== undefined ? { model: ref } : {}),
+    ...(effort !== undefined ? { effort: effort as Effort } : {}),
+    ...(budget !== undefined ? { budget: budget as number } : {}),
+    ...(severity !== undefined ? { severity: severity as AddressSeverity } : {}),
+    ...(renewals !== undefined ? { renewals: renewals as number } : {}),
+    ...(verbosity !== undefined ? { verbosity: verbosity as Verbosity } : {}),
   };
+  for (const [key, value] of Object.entries(formalSettings(requestText)))
+    if (accepted[key as keyof OperatorRequestSettings] !== value)
+      return { violation: `the accepted ${key} must preserve the authored formal value` };
+  return { settings: accepted };
 }
 
 /** Validate one model turn. Presets run on the author's own text; commands
@@ -1382,15 +1414,23 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
       ...(typeof input.filter === "string" && input.filter.trim().length > 0 ? { filter: input.filter } : {}),
     };
   if (answer.tool === OPERATOR_BATCH_TOOL) {
+    if (ctx.requestedPreset !== undefined && ctx.requestedPreset !== "conductor" && input.kind !== ctx.requestedPreset)
+      return { kind: "violation", violation: "the PR batch must preserve the requested action" };
     if (!ctx.presets.includes("conductor"))
       return { kind: "violation", violation: "a PR batch needs the conductor preset" };
     const parsed = prBatchBindingOf(input, ctx.requestText);
     if ("error" in parsed) return { kind: "violation", violation: parsed.error };
+    const requestSettings = requestSettingsOf(input, "conductor", ctx.requestText, ctx.providers);
+    if ("violation" in requestSettings) return { kind: "violation", violation: requestSettings.violation };
     const reason = tidy(input.reason);
     const line = operatorLine(redactSecrets(`agent:conductor ${stripDirectiveHead(ctx.requestText, "conductor")}`));
     return {
       kind: "decision",
-      decision: { kind: "binds", binds: [{ line, reason, prBatch: parsed.binding }], reason },
+      decision: {
+        kind: "binds",
+        binds: [{ line, reason, preset: "conductor", ...requestSettings.settings, prBatch: parsed.binding }],
+        reason,
+      },
     };
   }
   if (answer.tool === OPERATOR_BIND_TOOL) {
@@ -1400,6 +1440,8 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         kind: "violation",
         violation: `bind_preset named "${String(preset)}", not a preset the projection offers`,
       };
+    if (ctx.requestedPreset !== undefined && preset !== ctx.requestedPreset)
+      return { kind: "violation", violation: "the preset must preserve the requested action" };
     const selectedPreset = preset;
     if (
       selectedPreset === "ship" &&
@@ -1483,6 +1525,7 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         binds: [
           {
             line,
+            preset: selectedPreset,
             reason: tidy(reason),
             ...requestSettings.settings,
             ...(repository !== undefined ? { repo: repository } : {}),
@@ -1552,6 +1595,11 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
       };
     const proposedPreset =
       typeof proposal === "string" ? confirmablePresetOf(proposal, ctx.presets, ctx.commands) : undefined;
+    if (proposedPreset !== undefined && ctx.requestedPreset !== undefined && proposedPreset !== ctx.requestedPreset)
+      return {
+        kind: "violation",
+        violation: "a saved proposal must preserve the requested action; a batch needs its typed action and targets",
+      };
     if (proposedPreset !== undefined && proposalSettings === undefined)
       return {
         kind: "violation",
@@ -1581,6 +1629,11 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
       checkedProposalSettings.settings.model === undefined
     )
       return { kind: "violation", violation: "a proposed model needs evidence in this request" };
+    const proposalRequest = typeof proposal === "string" ? presetRequestOf(proposal) : undefined;
+    const safeConfirmation =
+      proposedPreset !== undefined &&
+      proposalRequest !== undefined &&
+      redactAndCap(proposalRequest, OPERATOR_REQUEST_CAP) === proposalRequest;
     return {
       kind: "decision",
       decision: {
@@ -1588,7 +1641,12 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
         text: redactAndCap(text, ROUTE_RECEIPT_CAP),
         ...(typeof proposal === "string" && proposal.trim().length > 0 ? { proposal: operatorLine(proposal) } : {}),
         ...(checkedProposalSettings !== undefined && "settings" in checkedProposalSettings
-          ? { proposalSettings: checkedProposalSettings.settings, confirmablePreset: true as const }
+          ? {
+              proposalSettings: checkedProposalSettings.settings,
+              ...(safeConfirmation
+                ? { proposalPreset: proposedPreset, proposalRequest, confirmablePreset: true as const }
+                : {}),
+            }
           : {}),
         reason: tidy(reason),
       },
@@ -1690,7 +1748,13 @@ function boundCommandOf(
   // from its public (possibly capped or redacted) display line.
   if (bind.confirmed) return null;
   const typed = operatorInvocations.get(event);
-  return typed !== undefined ? typed : commands ? parseChatCommand(bind.line, commands) : null;
+  return typed !== undefined
+    ? typed
+    : bind.preset !== undefined
+      ? null
+      : commands
+        ? parseChatCommand(bind.line, commands)
+        : null;
 }
 
 /** The same ownership predicate is used before semantic checking and effects.
@@ -1723,7 +1787,7 @@ function ownedDecisionRuns(
       bind !== undefined &&
       !bind.confirmed &&
       (commands === undefined || boundCommandOf(event, bind, commands) === null) &&
-      presetBindOf(bind.line, ["review"]) === "review"
+      (bind.preset ?? presetBindOf(bind.line, ["review"])) === "review"
     );
   }
   return (event.binds ?? []).every((bind) => {
@@ -1757,6 +1821,8 @@ export function pendingQuestionOf(
           outcome: string;
           proposal?: string;
           proposalSettings?: OperatorRequestSettings;
+          proposalPreset?: string;
+          proposalRequest?: string;
           confirmablePreset?: true;
           question?: string;
           questionKind?: "target_repository";
@@ -1770,6 +1836,8 @@ export function pendingQuestionOf(
   | {
       proposal?: string;
       proposalSettings?: OperatorRequestSettings;
+      proposalPreset?: string;
+      proposalRequest?: string;
       confirmablePreset?: true;
       question?: string;
       questionKind?: "target_repository";
@@ -1785,6 +1853,8 @@ export function pendingQuestionOf(
   return {
     ...(operator.proposal !== undefined ? { proposal: operator.proposal } : {}),
     ...(operator.proposalSettings !== undefined ? { proposalSettings: operator.proposalSettings } : {}),
+    ...(operator.proposalPreset !== undefined ? { proposalPreset: operator.proposalPreset } : {}),
+    ...(operator.proposalRequest !== undefined ? { proposalRequest: operator.proposalRequest } : {}),
     ...(operator.confirmablePreset === true ? { confirmablePreset: true as const } : {}),
     ...(operator.question !== undefined ? { question: operator.question } : {}),
     ...(operator.questionKind !== undefined ? { questionKind: operator.questionKind } : {}),
@@ -1864,23 +1934,34 @@ export function answeredRepositoryTarget(
  *  (`joinedAnswerRequest`) and decided fresh. */
 export function bindFromAnswer(
   text: string,
-  pending: { proposal: string; proposalSettings?: OperatorRequestSettings; confirmablePreset?: true },
+  pending: {
+    proposal: string;
+    proposalSettings?: OperatorRequestSettings;
+    proposalPreset?: string;
+    proposalRequest?: string;
+    confirmablePreset?: true;
+  },
   commands: readonly RoutableCommand[] = [],
 ): OperatorBind | undefined {
   if (!isYesAnswer(text) || pending.confirmablePreset !== true || pending.proposalSettings === undefined)
     return undefined;
-  const preset = confirmablePresetOf(
-    pending.proposal,
-    operatorPresets().map((p) => p.name),
-    commands,
-  );
+  const preset =
+    pending.proposalPreset ??
+    confirmablePresetOf(
+      pending.proposal,
+      operatorPresets().map((p) => p.name),
+      commands,
+    );
   // Only a preset proposal can safely bind from its display line. Registry
   // commands need the complete typed input, which a public proposal never
   // retains; even a short line may have lost whitespace or secrets.
-  if (preset === undefined) return undefined;
+  if (preset === undefined || (pending.proposalPreset !== undefined && pending.proposalRequest === undefined))
+    return undefined;
   // Marked confirmed: the preset proposal's line carries the task, not "yes".
   return {
     line: operatorLine(pending.proposal),
+    preset,
+    request: pending.proposalRequest ?? presetRequestOf(pending.proposal),
     reason: "yes to the pending question's proposal",
     ...pending.proposalSettings,
     confirmed: true,
@@ -2151,10 +2232,6 @@ export function requesterThreadEvidence(
 }
 
 /**
- * The deterministic exception: a single explicit, current requester PR directive
- * can be parsed and checked against the same typed evidence boundary before
- * the model decides. Unclear intent or target still takes the model's door.
- *
  * The operator's loop (record 0069, as amended): the prompt with the typed
  * tools, under ONE timeout covering the whole loop. A read tool call is
  * answered from the turn's own state (`answerOperatorRead`) and the model is
@@ -2174,261 +2251,20 @@ export function requesterThreadEvidence(
  * becomes a typed refusal with the cause's one safe sentence. It never falls
  * through to the configured default.
  */
-function descriptiveReviewFollowUp(lines: string): boolean {
-  // The shortcut can only discard retrospective context, never decide whether
-  // an unknown follow-up is a second task. Leave uncertain prose to the model.
-  return lines.split(/\r?\n/).every((line) => {
-    let text = line.trim();
-    if (!text) return true;
-    text = text.replace(/^App notification from App:\s*/i, "").replace(/^(?:Why|Context|Note):\s*/i, "");
-    if (/\b(?:please|also|actually|instead|should|must|need|want|will|can|could|would|and|but)\b/i.test(text))
-      return false;
-    if (/^[a-z]+ed[.!]?$/i.test(text)) return true; // e.g. an App's "updated"
-    // Admit one complete status clause. A trailing request is left to the model.
-    const subject =
-      "(?:(?:the|a|an|this|that)\\s+(?:(?!(?:was|were|had|has|have|been)\\b)[a-z]+\\s+){1,3}|(?:it|we|i|they)\\s+)";
-    const nounWord = "(?!(?:so|then|now|to|and|but|please)\\b)[a-z]+";
-    const object = `(?:the|a|an|this|that)\\s+${nounWord}(?:\\s+${nounWord})?`;
-    return new RegExp(
-      `^${subject}(?:(?:was|were)\\s+[a-z]+ed|(?:has|have|had)\\s+been\\s+[a-z]+ed|(?:has|have|had)\\s+[a-z]+ed\\s+${object}|[a-z]+ed\\s+${object})[.!]?$`,
-      "i",
-    ).test(text);
-  });
-}
-
-function explicitPrDirective(input: OperatorInput): OperatorDecision | undefined {
-  const directives = parseDirectives(input.text);
-  const openingLine = input.text.split(/\r?\n/, 1)[0]?.trim() ?? "";
-  const lineBreak = input.text.indexOf("\n");
-  const laterLines = lineBreak < 0 ? "" : input.text.slice(lineBreak + 1);
-  // A stand-alone opening PR request is current requester authority. Later
-  // lines from an attached App notification are task data, not route authority.
-  const naturalReview =
-    directives.agent === undefined &&
-    /^review\s+\S/i.test(openingLine) &&
-    /^App notification from App\b/.test(laterLines.trimStart());
-  const naturalShip =
-    directives.agent === undefined &&
-    /^ship\s+\S/i.test(openingLine) &&
-    (laterLines.trim() === "" || /^App notification from App\b/.test(laterLines.trimStart()));
-  const repeatReview = directives.agent === undefined && /^re-review\s+\S/i.test(openingLine) && !laterLines.trim();
-  const naturalPr = naturalReview || naturalShip || repeatReview;
-  const preset = naturalReview || repeatReview ? "review" : naturalShip ? "ship" : directives.agent;
-  if (preset !== "review" && preset !== "ship") return undefined;
-  if (!input.projection.presets.some((offered) => offered.name === preset)) return undefined;
-  if (input.owner && input.owner.kind !== "pipeline") return undefined;
-  if (input.owner?.kind === "pipeline" && preset === "review" && !input.owner.allowReview) return undefined;
-  // A setting needs the operator's typed evidence and cannot be silently
-  // projected away by this narrow PR-only path.
-  if (!repeatReview && Object.keys(directives).some((key) => key !== "agent" && key !== "text")) return undefined;
-  // Keep newlines and indentation: parseDirectives normalizes whitespace,
-  // which would erase the requesterTargetText quote/code boundary.
-  const words = naturalPr ? openingLine : stripDirectiveHead(input.text, preset);
-  const addressable = requesterTargetText(words);
-  const urlWords = requesterUrlWords(addressable)
-    .map(requesterUrlText)
-    .filter((url): url is string => url !== undefined);
-  if (urlWords.length !== 1) return undefined;
-  const quote = urlWords[0]!;
-  const index = words.indexOf(quote);
-  if (index < 0) return undefined;
-  let before = words.slice(0, index).trim();
-  let after = words.slice(index + quote.length).trim();
-  // An authored Slack label is task text too, not an ignorable URL decoration.
-  if (after.startsWith("|")) {
-    if (!before.endsWith("<")) return undefined;
-    const labelled = /^\|([^>]+)>/.exec(after);
-    if (!labelled) return undefined;
-    let labelUrl: URL;
-    try {
-      labelUrl = new URL(quote);
-    } catch {
-      return undefined;
-    }
-    const labelPath = `${labelUrl.hostname}${labelUrl.pathname}`;
-    if (labelled[1] !== labelPath && labelled[1] !== `${labelPath}${labelUrl.search}${labelUrl.hash}`) return undefined;
-    before = before.slice(0, -1).trim();
-    after = after.slice(labelled[0].length).trim();
-  }
-  if (before.endsWith("<") && after.startsWith(">")) {
-    before = before.slice(0, -1).trim();
-    after = after.slice(1).trim();
-  }
-  let settings: OperatorRequestSettings = {};
-  let settingsEvidence: Record<string, { quote: string; intent: "requested" }> = {};
-  if (repeatReview) {
-    // Only this literal control segment is authority. A pushed-head receipt is
-    // context carried by the original request, never prose to classify here.
-    const header = /^(?:(?:model|effort|budget|severity|renewals|verbosity)[:=]\S+(?:\s+|$))+/.exec(after)?.[0];
-    if (!header) return undefined;
-    const { agent: _agent, text, ...parsed } = parseDirectives(`agent:review ${header}`);
-    if (text || Object.keys(parsed).length === 0) return undefined;
-    settings = parsed;
-    settingsEvidence = Object.fromEntries(
-      header
-        .trim()
-        .split(/\s+/)
-        .map((quote) => [quote.split(/[:=]/, 1)[0]!, { quote, intent: "requested" as const }]),
-    );
-    // A later control must not be dropped or supersede the literal segment.
-    for (const key of ["model", ...OPERATOR_SETTING_NAMES] as const)
-      if (directives[key] !== settings[key]) return undefined;
-    const receipt = after.slice(header.length).trim();
-    if (receipt && !/^— pushed [0-9a-f]{7,40}:\s+\S/.test(receipt)) return undefined;
-    after = "";
-  }
-  const front = tokenize(before);
-  const tail = tokenize(after);
-  if (!front.ok || !tail.ok) return undefined;
-  const intent = front.tokens.map((token) => token.toLowerCase());
-  if (intent[0] === "please") intent.shift();
-  const action = intent.shift();
-  // These are the typed preset/Ship-entry verbs and PR target noun, not
-  // alternative phrasings of a task. Every other word stays with the model.
-  if (intent.length !== 0 && !(intent.length === 2 && intent[0] === "pull" && intent[1] === "request"))
-    return undefined;
-  if (
-    action !== undefined &&
-    action !== "review" &&
-    !(repeatReview && action === "re-review") &&
-    action !== preset &&
-    !(preset === "ship" && action === "continue")
-  )
-    return undefined;
-  // Only retrospective context may ride an automatic repeat review; a
-  // competing or ambiguous follow-up belongs to the ordinary operator path.
-  if (naturalPr && !descriptiveReviewFollowUp(laterLines)) return undefined;
-  if (preset === "ship" && action === "continue" && input.owner?.kind !== "pipeline") return undefined;
-  // On an ended unit a Ship bind folds into continuation, even when it says
-  // review. Let the operator choose an independent Review bind instead.
-  if (preset === "ship" && action === "review" && input.owner?.kind === "pipeline") return undefined;
-  // The sole supported qualifier is an exact head pin. Any other suffix,
-  // including a second task, belongs to the model's intent choice.
-  if (tail.tokens.length > 0) {
-    if (preset !== "review") return undefined;
-    const [preposition, ...qualifier] = tail.tokens.map((token) => token.toLowerCase());
-    if (preposition !== "with" && preposition !== "at") return undefined;
-    if (qualifier[0] === "the") qualifier.shift();
-    if (qualifier[0] === "exact") qualifier.shift();
-    if (qualifier.shift() !== "head" || qualifier.length !== 1) return undefined;
-    let sha = qualifier[0]!;
-    if (sha.endsWith(".") || sha.endsWith("!")) sha = sha.slice(0, -1);
-    if (sha.length < 7 || sha.length > 40 || [...sha].some((char) => !"0123456789abcdef".includes(char)))
-      return undefined;
-  }
-  let url: URL;
-  try {
-    url = new URL(quote);
-  } catch {
-    return undefined;
-  }
-  if (url.protocol !== "https:" || url.hostname !== "github.com" || url.username || url.password || url.port)
-    return undefined;
-  const identity = prUrlIdentity(quote);
-  if (!identity) return undefined;
-  if (naturalPr) {
-    for (const word of requesterUrlWords(requesterTargetText(laterLines))) {
-      const raw = requesterUrlText(word);
-      if (!raw) continue;
-      const other = prUrlIdentity(raw);
-      if (other && (other.repo !== identity.repo || other.number !== identity.number)) return undefined;
-    }
-    for (const match of laterLines.matchAll(/\bPR\s*#([1-9]\d*)\b/gi))
-      if (Number(match[1]) !== identity.number) return undefined;
-  }
-  const direct = explicitPrOf(input.text);
-  const repo = explicitRepoOf(input.text);
-  if (!direct || !repo || repo !== direct.repo) return undefined;
-  const prTarget = verifyPrTargetEvidence(
-    { number: direct.number, source: "request", quote },
-    { requestText: input.text, repo },
-  );
-  if (!prTarget) return undefined;
-  const shipEntry = preset === "ship" ? (input.owner?.kind === "pipeline" ? "continue" : "review") : undefined;
-  const reason = "explicit requester PR target";
-  const turn = parseOperatorTurn(
-    {
-      tool: OPERATOR_BIND_TOOL,
-      input: {
-        preset,
-        repo,
-        ...settings,
-        settingsEvidence,
-        ...(shipEntry ? { shipEntry } : {}),
-        ...(shipEntry !== "continue" ? { prTarget } : {}),
-        reason,
-      },
-    },
-    {
-      requestText: input.text,
-      requesterId: input.requesterId,
-      tail: input.tail,
-      presets: input.projection.presets.map((offered) => offered.name),
-      commands: input.projection.commands,
-      providers: input.providers,
-    },
-  );
-  if (turn.kind !== "decision" || turn.decision.kind !== "binds") return undefined;
-  const bind = turn.decision.binds[0];
-  return Object.entries(settings).every(([key, value]) => bind?.[key as keyof OperatorRequestSettings] === value)
-    ? turn.decision
-    : undefined;
-}
-
-export async function runOperator(
-  input: OperatorInput,
-  model: RouteModel,
-  opts: {
-    timeoutMs?: number;
-    now?: () => number;
-    maxOutputTokens?: number;
-    includeAllowance?: boolean;
-    smokeDiagnosticScope?: "candidate-smoke-v1";
-  } = {},
-): Promise<OperatorAnswer> {
-  const now = opts.now ?? Date.now;
-  const started = now();
-  const smokeDiagnostic = candidateSmokeDiagnostic(opts.smokeDiagnosticScope);
-  const timeoutMs = opts.timeoutMs ?? OPERATOR_TIMEOUT_MS;
-  const signal = AbortSignal.timeout(timeoutMs);
-  const expired = () => signal.aborted || now() - started >= timeoutMs;
-  // An unambiguous, current requester directive is already a typed target.
-  // Do not make the model reconstruct its repo and PR before the review door.
-  const direct = explicitPrDirective(input);
-  if (direct) {
-    let onTimeout = () => {};
-    const deadline = new Promise<string>((resolve) => {
-      onTimeout = () => resolve("operator_timeout");
-      signal.addEventListener("abort", onTimeout, { once: true });
-    });
-    try {
-      const violation = await Promise.race([decisionModelRefViolation(direct, input.providerModels), deadline]);
-      if (expired() || violation === undefined)
-        return {
-          decision: expired() ? { kind: "non_decision", reason: "operator_timeout" } : direct,
-          latencyMs: now() - started,
-          outputTokens: 0,
-          ...(smokeDiagnostic ? { smokeDiagnostic: smokeDiagnostic.snapshot() } : {}),
-        };
-    } finally {
-      signal.removeEventListener("abort", onTimeout);
-    }
-  }
-  let prompt = buildOperatorPrompt(input);
-  // The turn parse reads the author's FULL projection even on an owned thread
-  // (issue 2027): a call naming a tool the owned turn was not offered is a
-  // decision the executor folds into the owner, never a violation the loop
-  // re-asks.
+function operatorTurnContext(input: OperatorInput, offered = actionProjection(input)): OperatorTurnContext {
   const requesterTarget =
     input.requesterId && !input.targetStoreUnavailable
       ? requesterRepoContext(input.tail, input.requesterId, input.requesterTarget)
       : {};
-  const ctx: OperatorTurnContext = {
+  return {
     requestText: input.text,
     ...(input.requesterId !== undefined ? { requesterId: input.requesterId } : {}),
     tail: input.tail,
-    presets: input.projection.presets.map((p) => p.name),
-    commands: input.owner ? input.projection.commands : actionProjection(input).commands,
+    presets: (input.owner ? input.projection : offered).presets.map((p) => p.name),
+    commands: (input.owner ? input.projection : offered).commands,
+    ...(!input.owner && requestedPreset(input.text, input.projection.presets)
+      ? { requestedPreset: requestedPreset(input.text, input.projection.presets) }
+      : {}),
     ...(input.newestFinishedRun?.repo ? { threadRepo: input.newestFinishedRun.repo } : {}),
     ...requesterTarget,
     ...(input.requesterTarget?.issue && !requesterTarget.requesterRepoConflict
@@ -2448,6 +2284,94 @@ export async function runOperator(
     ],
     ...(input.providers !== undefined ? { providers: input.providers } : {}),
     ...(input.catalogueProviders !== undefined ? { catalogueProviders: input.catalogueProviders } : {}),
+  };
+}
+
+async function withinOperatorDeadline<T>(value: Promise<T>, signal: AbortSignal): Promise<T> {
+  let onAbort = () => {};
+  try {
+    return await Promise.race([
+      value,
+      new Promise<T>((_resolve, reject) => {
+        onAbort = () => reject(new Error("operator_timeout"));
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+export async function runOperator(
+  input: OperatorInput,
+  model: RouteModel,
+  opts: {
+    timeoutMs?: number;
+    now?: () => number;
+    startedAt?: number;
+    signal?: AbortSignal;
+    maxOutputTokens?: number;
+    includeAllowance?: boolean;
+    smokeDiagnosticScope?: "candidate-smoke-v1";
+    /** Read saved context only when the same proposal or a helper needs it. */
+    readContext?: () => Promise<OperatorInput>;
+  } = {},
+): Promise<OperatorAnswer> {
+  const now = opts.now ?? Date.now;
+  const started = opts.startedAt ?? now();
+  const smokeDiagnostic = candidateSmokeDiagnostic(opts.smokeDiagnosticScope);
+  const timeoutMs = opts.timeoutMs ?? OPERATOR_TIMEOUT_MS;
+  const signal = opts.signal ?? AbortSignal.timeout(timeoutMs);
+  const expired = () => signal.aborted || now() - started >= timeoutMs;
+  const withinDeadline = <T>(value: Promise<T>) => withinOperatorDeadline(value, signal);
+  let offered = actionProjection(input);
+  let prompt = buildOperatorPrompt(input, offered);
+  // The turn parse reads the author's FULL projection even on an owned thread
+  // (issue 2027): a call naming a tool the owned turn was not offered is a
+  // decision the executor folds into the owner, never a violation the loop
+  // re-asks.
+  const ctx = operatorTurnContext(input, offered);
+  const withdrawnTools = new Set<string>();
+  let contextLoaded = opts.readContext === undefined;
+  const parseTurn = async (answer: RouteToolCall | string): Promise<OperatorTurn> => {
+    if (typeof answer !== "string" && withdrawnTools.has(answer.tool))
+      return { kind: "violation", violation: "this action tool was withdrawn; choose another offered action or ask" };
+    let turn = parseOperatorTurn(answer, ctx);
+    const bind = turn.kind === "decision" && turn.decision.kind === "binds" ? turn.decision.binds[0] : undefined;
+    const independent =
+      (bind?.preset === "review" && bind.prTarget?.source === "request") ||
+      (bind?.preset === "conductor" && bind.prBatch?.kind === "review");
+    const raw =
+      typeof answer !== "string" && typeof answer.input === "object" && answer.input !== null
+        ? (answer.input as Record<string, unknown>)
+        : {};
+    const target =
+      typeof raw.prTarget === "object" && raw.prTarget !== null ? (raw.prTarget as Record<string, unknown>) : {};
+    const contextRead =
+      turn.kind === "read" &&
+      (
+        [
+          OPERATOR_READ_TOOLS.threadState,
+          OPERATOR_READ_TOOLS.repoFacts,
+          OPERATOR_READ_TOOLS.repositoryBrief,
+        ] as string[]
+      ).includes(turn.tool);
+    const needsContext =
+      contextRead ||
+      (turn.kind === "violation" && target.source === "thread") ||
+      (turn.kind === "decision" && !independent);
+    if (!contextLoaded && needsContext) {
+      contextLoaded = true;
+      input = await withinDeadline(opts.readContext!());
+      offered = actionProjection(input);
+      Object.assign(ctx, operatorTurnContext(input, offered));
+      ctx.commands = ctx.commands.filter((command) => !withdrawnTools.has(command.tool.name));
+      prompt = buildOperatorPrompt(input, offered);
+      for (const name of withdrawnTools) prompt = promptWithoutTool(prompt, name) ?? prompt;
+      turn = parseOperatorTurn(answer, ctx);
+    }
+    return turn;
   };
   const initialCommands = ctx.commands;
   // The answers' size, summed over the attempts: the replay's token rows read
@@ -2497,15 +2421,6 @@ export async function runOperator(
     turns.push({ answer, violation: reAskTurn(noun, "offered", feedback) });
     return true;
   };
-  const sourceTurns = input.requesterId
-    ? input.tail
-        .filter((turn) => turn.actor === input.requesterId && turn.text.startsWith("user: "))
-        .map((turn) => turn.text.slice(6))
-    : [];
-  if (input.requesterId && !input.targetStoreUnavailable && input.requesterTarget && !input.requesterTarget.conflict) {
-    sourceTurns.push(`Requester target checkpoint (context only): ${JSON.stringify(input.requesterTarget)}`);
-  }
-  sourceTurns.push(input.text);
   type CommandViolation = { kind: "rejected" | "unconfirmed"; violation: string };
   const commandCheck = async (decision: OperatorDecision): Promise<CommandViolation | undefined> => {
     if (decision.kind !== "binds") return undefined;
@@ -2537,6 +2452,20 @@ export async function runOperator(
     if (reads >= OPERATOR_READS_MAX) return violation("command fulfillment read allowance is spent");
     reads++;
     if (!command) return violation("command fulfillment definition is unavailable");
+    const sourceTurns = input.requesterId
+      ? input.tail
+          .filter((turn) => turn.actor === input.requesterId && turn.text.startsWith("user: "))
+          .map((turn) => turn.text.slice(6))
+      : [];
+    if (
+      input.requesterId &&
+      !input.targetStoreUnavailable &&
+      input.requesterTarget &&
+      !input.requesterTarget.conflict
+    ) {
+      sourceTurns.push(`Requester target checkpoint (context only): ${JSON.stringify(input.requesterTarget)}`);
+    }
+    sourceTurns.push(input.text);
     let answer: RouteToolCall | string;
     try {
       answer = await model(
@@ -2573,6 +2502,7 @@ export async function runOperator(
         const narrowed = promptWithoutTool(prompt, command.tool.name);
         if (narrowed) {
           prompt = narrowed;
+          withdrawnTools.add(command.tool.name);
           ctx.commands = ctx.commands.filter((entry) => entry.tool.name !== command.tool.name);
         }
       }
@@ -2637,6 +2567,8 @@ export async function runOperator(
             const violation = `provider rejected tool "${rejected.tool}" schema keyword "${rejected.keyword}"; re-asked without that tool`;
             attempts.push({ outcome: "violation", violation });
             schemaReasks++;
+            withdrawnTools.add(rejected.tool);
+            ctx.commands = ctx.commands.filter((command) => command.tool.name !== rejected.tool);
             prompt = retry;
             continue;
           }
@@ -2658,9 +2590,11 @@ export async function runOperator(
         attempts.push({ outcome: "violation", violation });
         if (violations >= STRUCTURED_RETRIES_MAX) {
           const actions = err.calls.filter((c) => !isOperatorReadTool(c.tool));
-          const taken = actions.length === 1 ? parseOperatorTurn(actions[0]!, ctx) : undefined;
+          const taken = actions.length === 1 ? await parseTurn(actions[0]!) : undefined;
           if (taken?.kind === "decision") {
-            const catalogueViolation = await decisionModelRefViolation(taken.decision, input.providerModels);
+            const catalogueViolation = await withinDeadline(
+              decisionModelRefViolation(taken.decision, input.providerModels),
+            );
             if (catalogueViolation !== undefined) {
               attempts.push({ outcome: "violation", violation: catalogueViolation });
               return answered({ kind: "non_decision", reason: tidy(catalogueViolation) });
@@ -2681,7 +2615,7 @@ export async function runOperator(
       const answerText =
         typeof answer === "string" ? answer : JSON.stringify({ tool: answer.tool, input: answer.input });
       chars += (typeof answer === "string" ? answer : JSON.stringify(answer.input)).length;
-      const turn = parseOperatorTurn(answer, ctx);
+      const turn = await parseTurn(answer);
       if (turn.kind === "decision" && turn.decision.kind === "non_decision") {
         const violation = turn.decision.reason;
         if (noCallTurns > 0) {
@@ -2752,7 +2686,9 @@ export async function runOperator(
       // on a guessed model. A catalogue that cannot be read costs the check,
       // never the bind: the parse already held the ref's provider.
       const catalogueViolation =
-        turn.kind === "decision" ? await decisionModelRefViolation(turn.decision, input.providerModels) : undefined;
+        turn.kind === "decision"
+          ? await withinDeadline(decisionModelRefViolation(turn.decision, input.providerModels))
+          : undefined;
       if (turn.kind === "read" || turn.kind === "violation" || catalogueViolation !== undefined) {
         // A read past the budget is a violation too: the turn must act.
         const violation =
@@ -2794,6 +2730,7 @@ export async function runOperator(
     // Parse, catalogue and fulfillment-check failures end at the door.
     // The routing call returns its typed provider refusal above; an unavailable
     // fulfillment call cannot authorize a terminal command here.
+    if (expired()) return answered({ kind: "non_decision", reason: "operator_timeout" });
     const why = tidy(err instanceof Error ? err.message : String(err));
     const carried = attemptsOfThrow(err);
     if (carried) attempts.push(...carried);
@@ -2824,6 +2761,8 @@ export function operatorEventOf(
   binds?: {
     line: string;
     reason: string;
+    preset?: string;
+    request?: string;
     model?: string;
     effort?: Effort;
     budget?: number;
@@ -2844,6 +2783,8 @@ export function operatorEventOf(
   questionWriter?: string;
   proposal?: string;
   proposalSettings?: OperatorRequestSettings;
+  proposalPreset?: string;
+  proposalRequest?: string;
   confirmablePreset?: true;
   refusalCause?: string;
   refusalText?: string;
@@ -2864,6 +2805,8 @@ export function operatorEventOf(
           binds: d.binds.map((b) => ({
             line: b.line,
             reason: b.reason,
+            ...(b.preset !== undefined ? { preset: b.preset } : {}),
+            ...(b.request !== undefined ? { request: b.request } : {}),
             ...(b.model !== undefined ? { model: b.model } : {}),
             ...(b.effort !== undefined ? { effort: b.effort } : {}),
             ...(b.budget !== undefined ? { budget: b.budget } : {}),
@@ -2886,6 +2829,8 @@ export function operatorEventOf(
     ...(d.kind === "question" && d.questionWriter !== undefined ? { questionWriter: d.questionWriter } : {}),
     ...(d.kind === "question" && d.proposal !== undefined ? { proposal: d.proposal } : {}),
     ...(d.kind === "question" && d.proposalSettings !== undefined ? { proposalSettings: d.proposalSettings } : {}),
+    ...(d.kind === "question" && d.proposalPreset !== undefined ? { proposalPreset: d.proposalPreset } : {}),
+    ...(d.kind === "question" && d.proposalRequest !== undefined ? { proposalRequest: d.proposalRequest } : {}),
     ...(d.kind === "question" && d.confirmablePreset === true ? { confirmablePreset: true as const } : {}),
     ...(d.kind === "refusal" ? { refusalCause: d.cause, refusalText: d.text } : {}),
     ...(d.kind === "refusal" && d.cause === "provider"
@@ -2906,6 +2851,7 @@ export function operatorEventOf(
 /** What the operator stage reads off the dispatcher's dependencies. */
 export interface OperatorStageDeps {
   config: ConfigStore;
+  clock?: () => number;
   github?: RepositoryBriefApi;
   completions?: ProviderTable;
   commands?: ChatCommands;
@@ -3036,6 +2982,20 @@ export async function operatorStage(
   },
 ): Promise<OperatorEventFields | undefined> {
   const { msg, mode } = ctx;
+  const now = deps.clock ?? Date.now;
+  const startedAt = now();
+  const signal = AbortSignal.timeout(OPERATOR_TIMEOUT_MS);
+  const expired = () => signal.aborted || now() - startedAt >= OPERATOR_TIMEOUT_MS;
+  const timeout = () =>
+    operatorEventOf(
+      mode,
+      {
+        decision: { kind: "non_decision", reason: "operator_timeout" },
+        latencyMs: now() - startedAt,
+        outputTokens: 0,
+      },
+      ctx.intake,
+    );
   const cfg = deps.config.config;
   let model = deps.operatorModel;
   let maxOutputTokens: number | undefined;
@@ -3071,213 +3031,275 @@ export async function operatorStage(
     commands: deps.commands ? routableCommands(deps.commands) : [],
     allowedPresets: presets.map((p) => p.name).filter((name) => deps.config.canRunAgent(actor, name)),
   });
-  // This route consumes only the current request. Do not load a previous
-  // review's source results or notes and then refuse an independent re-review
-  // when one of those optional sources can no longer be revalidated.
-  if (!msg.documents?.length && !msg.images?.length && !msg.staged?.length) {
+  const prepare = async () => {
+    const newestFinishedRun = ctx.thread ? newestFinishedRunOf(ctx.thread) : undefined;
+    const channelRepo = deps.config.scopes(msg.channelId, msg.userId).channel.repo;
+    const preferredRepos = [newestFinishedRun?.repo, channelRepo].filter(
+      (repo): repo is string => repo !== undefined && deps.config.canUseRepo(actor, repo),
+    );
+    const contextP = loadOperatorContext({
+      organization: cfg.organization,
+      requester: msg.userId,
+      channelId: msg.channelId,
+      text: msg.text,
+      readNotes: ctx.readNotes,
+      readMemory: ctx.readMemory,
+    });
+    const briefsP = deps.github
+      ? loadRepositoryBriefs({
+          github: deps.github,
+          canRead: (repo) => deps.config.canUseRepo(actor, repo),
+          preferredRepos,
+          query: msg.text,
+        })
+      : Promise.resolve(undefined);
+    let attachmentCharsLeft = 24_000;
+    const safeMediaType = (type: string) => redactAndCap(oneLine(stripAnsi(type)), 100);
+    const attachments: NonNullable<OperatorInput["attachments"]>[number][] = [
+      ...(msg.documents ?? []).map((doc) => {
+        const text =
+          doc.mediaType === "application/pdf"
+            ? undefined
+            : redactSecrets(stripAnsi(doc.data)).slice(0, attachmentCharsLeft);
+        attachmentCharsLeft -= text?.length ?? 0;
+        return {
+          name: redactAndCap(oneLine(doc.name ?? "attachment"), 100),
+          mediaType: safeMediaType(doc.mediaType),
+          ...(text ? { text } : {}),
+        };
+      }),
+      ...(msg.images ?? []).map((file) => ({
+        name: redactAndCap(oneLine(file.name ?? "image"), 100),
+        mediaType: safeMediaType(file.mediaType),
+      })),
+      ...(msg.staged ?? []).map((file) => ({
+        name: redactAndCap(oneLine(file.name), 100),
+        mediaType: safeMediaType(file.type),
+      })),
+    ];
+    // An attachment can identify a repository by its product name. A bare PR
+    // number can need a repository question. Neither case makes a roster entry
+    // proof that the repository owns the PR.
+    const list = deps.residentSlugs ?? residentSlugsLister(cfg.execution?.resident);
+    const requestNamesRepo = /(^|[^\w.-])[\w.-]+\/[\w.-]+(?=$|[^\w.-])/i.test(msg.text);
+    const barePrCandidates =
+      barePrNumberOf(msg.text) !== undefined &&
+      !requestNamesRepo &&
+      newestFinishedRun?.repo === undefined &&
+      channelRepo === undefined;
+    const requestCandidates = attachments.length > 0 || barePrCandidates;
+    const candidateRead = requestCandidates ? list?.().catch(() => undefined) : undefined;
+    const [savedTail, candidates, context, repositoryBriefs] = await Promise.all([
+      ctx.readTail?.() ?? Promise.resolve({ turns: [], unavailable: [] } as OperatorTailContext),
+      candidateRead ?? Promise.resolve(undefined),
+      contextP,
+      briefsP,
+    ]);
+    const tailAdmitted =
+      !savedTail.turns.length || (isContextDependencies(savedTail.context) && savedTail.context.status === "known");
+    if (!tailAdmitted) throw new Error("Saved conversation dependencies are unproved.");
+    const tail = [...savedTail.turns];
+    context.unavailable = [...context.unavailable, ...savedTail.unavailable];
+    context.context = mergeContextDependencies(
+      freshContext(),
+      context.context,
+      ...(savedTail.context ? [savedTail.context] : []),
+      ...(repositoryBriefs ? [githubRepositoryDependencies(repositoryBriefs.catalog.map((brief) => brief.repo))] : []),
+    );
+    ctx.onContext?.(context.context);
+    if (repositoryBriefs) {
+      const read = repositoryBriefs.read;
+      repositoryBriefs.read = async (repo) => {
+        const brief = await read(repo);
+        if (brief) {
+          context.context = mergeContextDependencies(context.context, githubRepositoryDependencies([brief.repo]));
+          ctx.onContext?.(context.context);
+        }
+        return brief;
+      };
+    }
+    let requesterTarget: RequesterTarget | undefined;
+    const targetStore = deps.runLedger;
+    const typedTargetStoreUnavailable = !targetStore?.readRequesterTarget || !targetStore.checkpointRequesterTarget;
+    let targetStoreUnavailable = false;
+    if (targetStore?.readRequesterTarget && targetStore.checkpointRequesterTarget) {
+      const key = threadSessionKey(msg.threadKey);
+      try {
+        requesterTarget = (await targetStore.readRequesterTarget(key, msg.userId)) ?? undefined;
+        // Migrate actor-stamped turns still visible in older logs, then checkpoint
+        // this admitted request before the model decides. No bot/foreign turn writes.
+        for (const turn of tail) {
+          if (turn.actor !== msg.userId || !turn.text.startsWith("user: ")) continue;
+          for (const target of requesterTargetsOf(turn.text.slice(6)))
+            requesterTarget = await targetStore.checkpointRequesterTarget(key, msg.userId, target);
+        }
+        for (const target of requesterTargetsOf(msg.text))
+          requesterTarget = await targetStore.checkpointRequesterTarget(key, msg.userId, target);
+      } catch {
+        targetStoreUnavailable = true;
+        requesterTarget = undefined;
+      }
+    }
+    const authorizedRepos = candidates
+      ?.filter((repo) => /^[\w.-]+\/[\w.-]+$/.test(repo) && deps.config.canUseRepo(actor, repo))
+      .sort();
+    const residentRepos = barePrCandidates ? authorizedRepos?.slice(0, 20) : undefined;
+    const repoCandidates = attachments.length > 0 ? authorizedRepos?.slice(0, 50) : undefined;
+    const candidateStatus: NonNullable<OperatorEventFields["repoContext"]>["candidateStatus"] = !requestCandidates
+      ? "skipped"
+      : candidates === undefined
+        ? "unavailable"
+        : authorizedRepos?.length
+          ? authorizedRepos.length > (barePrCandidates ? 20 : 50)
+            ? "truncated"
+            : "available"
+          : "empty";
+    let sources: OperatorSource[] | undefined;
+    let sourceCatalogUnavailable: string | undefined;
+    if (deps.mcp !== undefined) {
+      try {
+        const catalog = await deps.mcp.catalogFor({ userId: msg.userId, channelId: msg.channelId });
+        sources = operatorSources(catalog, projection.presets);
+      } catch (err) {
+        sourceCatalogUnavailable = redactAndCap(oneLine(err instanceof Error ? err.message : String(err)), 160);
+        console.log(`[operator] ${msg.threadKey} MCP catalog unavailable: ${sourceCatalogUnavailable}`);
+      }
+    }
+    // The pending question (routing-and-config item 29): when the thread's
+    // newest run is an `on` question with a proposed line, this event may be its
+    // answer — "yes" binds a preset with saved settings or refuses a registry
+    // proposal without typed input; anything else binds fresh.
+    const pending = ctx.pending;
+    const proposalCommands = deps.commands ? routableCommands(deps.commands) : [];
+    const proposedPreset =
+      pending?.proposal !== undefined && pending.confirmablePreset === true
+        ? (pending.proposalPreset ??
+          confirmablePresetOf(
+            pending.proposal,
+            operatorPresets().map((p) => p.name),
+            proposalCommands,
+          ))
+        : undefined;
+    const legacyPresetProposal =
+      pending?.proposal !== undefined &&
+      pending.confirmablePreset === true &&
+      pending.proposalSettings === undefined &&
+      isYesAnswer(msg.text) &&
+      proposedPreset !== undefined;
+    const unconfirmableCommandProposal =
+      pending?.proposal !== undefined && isYesAnswer(msg.text) && proposedPreset === undefined;
+    const yes =
+      pending?.proposal !== undefined
+        ? bindFromAnswer(
+            msg.text,
+            pending as {
+              proposal: string;
+              proposalSettings?: OperatorRequestSettings;
+              proposalPreset?: string;
+              proposalRequest?: string;
+              confirmablePreset?: true;
+            },
+            proposalCommands,
+          )
+        : undefined;
+    const durableContext = requesterRepoContext(tail, msg.userId, requesterTarget);
+    const provisionalTarget =
+      !targetStoreUnavailable &&
+      !typedTargetStoreUnavailable &&
+      ctx.answeredTarget?.actor === msg.userId &&
+      !durableContext.requesterRepoConflict &&
+      durableContext.requesterRepo === undefined
+        ? ctx.answeredTarget.target
+        : undefined;
     const input: OperatorInput = {
       text: msg.text,
       projection,
-      tail: [],
+      registryCommands: proposalCommands,
+      tail,
+      context,
+      ...(repositoryBriefs ? { repositoryBriefs, briefs: renderRepositoryBriefs(repositoryBriefs) } : {}),
       requesterId: msg.userId,
+      ...((provisionalTarget ?? requesterTarget) ? { requesterTarget: provisionalTarget ?? requesterTarget } : {}),
+      ...(targetStoreUnavailable ? { targetStoreUnavailable: true } : {}),
+      ...(typedTargetStoreUnavailable ? { typedTargetStoreUnavailable: true } : {}),
+      ...(attachments.length > 0 ? { attachments } : {}),
+      ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates: repoCandidates.slice(0, 50) } : {}),
+      organization: cfg.organization,
+      ...(residentRepos && residentRepos.length > 0 ? { residentRepos } : {}),
+      ...(candidateStatus === "truncated" && barePrCandidates ? { residentReposTruncated: true } : {}),
+      ...(newestFinishedRun !== undefined ? { newestFinishedRun } : {}),
+      ...(channelRepo !== undefined ? { channelRepo } : {}),
+      // The deployment's declared providers (issue 2088): what a write
+      // proposal may name, and what the parse holds a write's ref against.
+      // The catalogue-bearing blocks (a `baseUrl` of their own — the
+      // aggregators) lead the fallback proposal's choice.
+      providers: Object.keys(cfg.providers ?? {}),
+      catalogueProviders: Object.entries(cfg.providers ?? {})
+        .filter(([, block]) => typeof block.baseUrl === "string" && block.baseUrl.length > 0)
+        .map(([name]) => name),
+      ...(deps.providerModels !== undefined ? { providerModels: deps.providerModels } : {}),
+      ...(sources !== undefined ? { sources } : {}),
+      ...(sourceCatalogUnavailable !== undefined ? { sourceCatalogUnavailable } : {}),
+      ...(pending
+        ? {
+            pendingQuestion:
+              pending.proposal !== undefined
+                ? {
+                    proposal: pending.proposal,
+                    ...(pending.confirmablePreset ? { confirmablePreset: true as const } : {}),
+                  }
+                : {},
+          }
+        : {}),
       ...(ctx.owner ? { owner: ctx.owner } : {}),
     };
-    if (explicitPrDirective(input)) {
-      const answer = await runOperator(
-        { ...input, providers: Object.keys(cfg.providers ?? {}), providerModels: deps.providerModels },
-        model,
-        maxOutputTokens !== undefined ? { maxOutputTokens } : {},
-      );
-      ctx.onContext?.(freshContext());
-      const event: OperatorEventFields = operatorEventOf(mode, answer, ctx.intake);
-      event.repoContext = {
-        organization: cfg.organization,
-        candidateStatus: "skipped",
-        candidateCount: 0,
-      };
-      return event.outcome === "question"
-        ? { ...event, request: redactAndCap(oneLine(msg.text), OPERATOR_REQUEST_CAP) }
-        : event;
-    }
-  }
-  const newestFinishedRun = ctx.thread ? newestFinishedRunOf(ctx.thread) : undefined;
-  const channelRepo = deps.config.scopes(msg.channelId, msg.userId).channel.repo;
-  const preferredRepos = [newestFinishedRun?.repo, channelRepo].filter(
-    (repo): repo is string => repo !== undefined && deps.config.canUseRepo(actor, repo),
-  );
-  const contextP = loadOperatorContext({
-    organization: cfg.organization,
-    requester: msg.userId,
-    channelId: msg.channelId,
-    text: msg.text,
-    readNotes: ctx.readNotes,
-    readMemory: ctx.readMemory,
-  });
-  const briefsP = deps.github
-    ? loadRepositoryBriefs({
-        github: deps.github,
-        canRead: (repo) => deps.config.canUseRepo(actor, repo),
-        preferredRepos,
-        query: msg.text,
-      })
-    : Promise.resolve(undefined);
-  let attachmentCharsLeft = 24_000;
-  const safeMediaType = (type: string) => redactAndCap(oneLine(stripAnsi(type)), 100);
-  const attachments: NonNullable<OperatorInput["attachments"]>[number][] = [
-    ...(msg.documents ?? []).map((doc) => {
-      const text =
-        doc.mediaType === "application/pdf"
-          ? undefined
-          : redactSecrets(stripAnsi(doc.data)).slice(0, attachmentCharsLeft);
-      attachmentCharsLeft -= text?.length ?? 0;
-      return {
-        name: redactAndCap(oneLine(doc.name ?? "attachment"), 100),
-        mediaType: safeMediaType(doc.mediaType),
-        ...(text ? { text } : {}),
-      };
-    }),
-    ...(msg.images ?? []).map((file) => ({
-      name: redactAndCap(oneLine(file.name ?? "image"), 100),
-      mediaType: safeMediaType(file.mediaType),
-    })),
-    ...(msg.staged ?? []).map((file) => ({
-      name: redactAndCap(oneLine(file.name), 100),
-      mediaType: safeMediaType(file.type),
-    })),
-  ];
-  // An attachment can identify a repository by its product name. A bare PR
-  // number can need a repository question. Neither case makes a roster entry
-  // proof that the repository owns the PR.
-  const list = deps.residentSlugs ?? residentSlugsLister(cfg.execution?.resident);
-  const requestNamesRepo = /(^|[^\w.-])[\w.-]+\/[\w.-]+(?=$|[^\w.-])/i.test(msg.text);
-  const barePrCandidates =
-    barePrNumberOf(msg.text) !== undefined &&
-    !requestNamesRepo &&
-    newestFinishedRun?.repo === undefined &&
-    channelRepo === undefined;
-  const requestCandidates = attachments.length > 0 || barePrCandidates;
-  const candidateRead = requestCandidates ? list?.().catch(() => undefined) : undefined;
-  const [savedTail, candidates, context, repositoryBriefs] = await Promise.all([
-    ctx
-      .readTail?.()
-      .catch(() => ({ turns: [], unavailable: ["Saved conversation could not be read."] }) as OperatorTailContext) ??
-      Promise.resolve({ turns: [], unavailable: [] } as OperatorTailContext),
-    candidateRead ?? Promise.resolve(undefined),
-    contextP,
-    briefsP,
-  ]);
-  const tailAdmitted =
-    !savedTail.turns.length || (isContextDependencies(savedTail.context) && savedTail.context.status === "known");
-  const tail = tailAdmitted ? [...savedTail.turns] : [];
-  context.unavailable = [
-    ...context.unavailable,
-    ...savedTail.unavailable,
-    ...(!tailAdmitted ? ["Saved conversation dependencies are unproved."] : []),
-  ];
-  context.context = mergeContextDependencies(
-    freshContext(),
-    context.context,
-    ...(tailAdmitted && savedTail.context ? [savedTail.context] : []),
-    ...(repositoryBriefs ? [githubRepositoryDependencies(repositoryBriefs.catalog.map((brief) => brief.repo))] : []),
-  );
-  ctx.onContext?.(context.context);
-  if (repositoryBriefs) {
-    const read = repositoryBriefs.read;
-    repositoryBriefs.read = async (repo) => {
-      const brief = await read(repo);
-      if (brief) {
-        context.context = mergeContextDependencies(context.context, githubRepositoryDependencies([brief.repo]));
-        ctx.onContext?.(context.context);
-      }
-      return brief;
+    return {
+      input,
+      legacyPresetProposal,
+      unconfirmableCommandProposal,
+      yes,
+      provisionalTarget,
+      requesterTarget,
+      targetStore,
+      targetStoreUnavailable,
+      tail,
+      newestFinishedRun,
+      channelRepo,
+      candidateStatus,
+      residentRepos,
+      repoCandidates,
     };
+  };
+  let prepared: Awaited<ReturnType<typeof prepare>> | undefined;
+  const readContext = async () => (prepared ??= await withinOperatorDeadline(prepare(), signal)).input;
+  const needsSavedContext =
+    ctx.pending !== undefined ||
+    (ctx.owner !== undefined && !(ctx.owner.kind === "pipeline" && ctx.owner.allowReview)) ||
+    ctx.answeredTarget !== undefined ||
+    !!(msg.documents?.length || msg.images?.length || msg.staged?.length);
+  let initialInput: OperatorInput;
+  try {
+    initialInput = needsSavedContext
+      ? await readContext()
+      : {
+          text: msg.text,
+          projection,
+          tail: [],
+          requesterId: msg.userId,
+          ...(ctx.owner ? { owner: ctx.owner } : {}),
+          typedTargetStoreUnavailable:
+            !deps.runLedger?.readRequesterTarget || !deps.runLedger.checkpointRequesterTarget,
+          providers: Object.keys(cfg.providers ?? {}),
+          ...(deps.providerModels ? { providerModels: deps.providerModels } : {}),
+        };
+  } catch {
+    return expired() ? timeout() : unavailable();
   }
-  let requesterTarget: RequesterTarget | undefined;
-  const targetStore = deps.runLedger;
-  const typedTargetStoreUnavailable = !targetStore?.readRequesterTarget || !targetStore.checkpointRequesterTarget;
-  let targetStoreUnavailable = false;
-  if (targetStore?.readRequesterTarget && targetStore.checkpointRequesterTarget) {
-    const key = threadSessionKey(msg.threadKey);
-    try {
-      requesterTarget = (await targetStore.readRequesterTarget(key, msg.userId)) ?? undefined;
-      // Migrate actor-stamped turns still visible in older logs, then checkpoint
-      // this admitted request before the model decides. No bot/foreign turn writes.
-      for (const turn of tail) {
-        if (turn.actor !== msg.userId || !turn.text.startsWith("user: ")) continue;
-        for (const target of requesterTargetsOf(turn.text.slice(6)))
-          requesterTarget = await targetStore.checkpointRequesterTarget(key, msg.userId, target);
-      }
-      for (const target of requesterTargetsOf(msg.text))
-        requesterTarget = await targetStore.checkpointRequesterTarget(key, msg.userId, target);
-    } catch {
-      targetStoreUnavailable = true;
-      requesterTarget = undefined;
-    }
-  }
-  const authorizedRepos = candidates
-    ?.filter((repo) => /^[\w.-]+\/[\w.-]+$/.test(repo) && deps.config.canUseRepo(actor, repo))
-    .sort();
-  const residentRepos = barePrCandidates ? authorizedRepos?.slice(0, 20) : undefined;
-  const repoCandidates = attachments.length > 0 ? authorizedRepos?.slice(0, 50) : undefined;
-  const candidateStatus = !requestCandidates
-    ? "skipped"
-    : candidates === undefined
-      ? "unavailable"
-      : authorizedRepos?.length
-        ? authorizedRepos.length > (barePrCandidates ? 20 : 50)
-          ? "truncated"
-          : "available"
-        : "empty";
-  let sources: OperatorSource[] | undefined;
-  let sourceCatalogUnavailable: string | undefined;
-  if (deps.mcp !== undefined) {
-    try {
-      const catalog = await deps.mcp.catalogFor({ userId: msg.userId, channelId: msg.channelId });
-      sources = operatorSources(catalog, projection.presets);
-    } catch (err) {
-      sourceCatalogUnavailable = redactAndCap(oneLine(err instanceof Error ? err.message : String(err)), 160);
-      console.log(`[operator] ${msg.threadKey} MCP catalog unavailable: ${sourceCatalogUnavailable}`);
-    }
-  }
-  // The pending question (routing-and-config item 29): when the thread's
-  // newest run is an `on` question with a proposed line, this event may be its
-  // answer — "yes" binds a preset with saved settings or refuses a registry
-  // proposal without typed input; anything else binds fresh.
-  const pending = ctx.pending;
-  const proposalCommands = deps.commands ? routableCommands(deps.commands) : [];
-  const proposedPreset =
-    pending?.proposal !== undefined && pending.confirmablePreset === true
-      ? confirmablePresetOf(
-          pending.proposal,
-          operatorPresets().map((p) => p.name),
-          proposalCommands,
-        )
-      : undefined;
-  const legacyPresetProposal =
-    pending?.proposal !== undefined &&
-    pending.confirmablePreset === true &&
-    pending.proposalSettings === undefined &&
-    isYesAnswer(msg.text) &&
-    proposedPreset !== undefined;
-  const unconfirmableCommandProposal =
-    pending?.proposal !== undefined && isYesAnswer(msg.text) && proposedPreset === undefined;
-  const yes =
-    pending?.proposal !== undefined
-      ? bindFromAnswer(
-          msg.text,
-          pending as { proposal: string; proposalSettings?: OperatorRequestSettings; confirmablePreset?: true },
-          proposalCommands,
-        )
-      : undefined;
-  const durableContext = requesterRepoContext(tail, msg.userId, requesterTarget);
-  const provisionalTarget =
-    !targetStoreUnavailable &&
-    !typedTargetStoreUnavailable &&
-    ctx.answeredTarget?.actor === msg.userId &&
-    !durableContext.requesterRepoConflict &&
-    durableContext.requesterRepo === undefined
-      ? ctx.answeredTarget.target
-      : undefined;
+  if (expired()) return timeout();
+  ctx.onContext?.(initialInput.context?.context ?? freshContext());
+  const legacyPresetProposal = prepared?.legacyPresetProposal ?? false;
+  const unconfirmableCommandProposal = prepared?.unconfirmableCommandProposal ?? false;
+  const yes = prepared?.yes;
   let answer: OperatorAnswer =
     legacyPresetProposal || unconfirmableCommandProposal
       ? {
@@ -3298,60 +3320,32 @@ export async function operatorStage(
         }
       : yes
         ? { decision: { kind: "binds", binds: [yes], reason: yes.reason }, latencyMs: 0, outputTokens: 0 }
-        : await runOperator(
-            {
-              text: msg.text,
-              projection,
-              registryCommands: proposalCommands,
-              tail,
-              context,
-              ...(repositoryBriefs ? { repositoryBriefs, briefs: renderRepositoryBriefs(repositoryBriefs) } : {}),
-              requesterId: msg.userId,
-              ...((provisionalTarget ?? requesterTarget)
-                ? { requesterTarget: provisionalTarget ?? requesterTarget }
-                : {}),
-              ...(targetStoreUnavailable ? { targetStoreUnavailable: true } : {}),
-              ...(typedTargetStoreUnavailable ? { typedTargetStoreUnavailable: true } : {}),
-              ...(attachments.length > 0 ? { attachments } : {}),
-              ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates: repoCandidates.slice(0, 50) } : {}),
-              organization: cfg.organization,
-              ...(residentRepos && residentRepos.length > 0 ? { residentRepos } : {}),
-              ...(candidateStatus === "truncated" && barePrCandidates ? { residentReposTruncated: true } : {}),
-              ...(newestFinishedRun !== undefined ? { newestFinishedRun } : {}),
-              ...(channelRepo !== undefined ? { channelRepo } : {}),
-              // The deployment's declared providers (issue 2088): what a write
-              // proposal may name, and what the parse holds a write's ref against.
-              // The catalogue-bearing blocks (a `baseUrl` of their own — the
-              // aggregators) lead the fallback proposal's choice.
-              providers: Object.keys(cfg.providers ?? {}),
-              catalogueProviders: Object.entries(cfg.providers ?? {})
-                .filter(([, block]) => typeof block.baseUrl === "string" && block.baseUrl.length > 0)
-                .map(([name]) => name),
-              ...(deps.providerModels !== undefined ? { providerModels: deps.providerModels } : {}),
-              ...(sources !== undefined ? { sources } : {}),
-              ...(sourceCatalogUnavailable !== undefined ? { sourceCatalogUnavailable } : {}),
-              ...(pending
-                ? {
-                    pendingQuestion:
-                      pending.proposal !== undefined
-                        ? {
-                            proposal: pending.proposal,
-                            ...(pending.confirmablePreset ? { confirmablePreset: true as const } : {}),
-                          }
-                        : {},
-                  }
-                : {}),
-              ...(ctx.owner ? { owner: ctx.owner } : {}),
-            },
-            model,
-            maxOutputTokens !== undefined ? { maxOutputTokens } : {},
-          );
+        : await runOperator(initialInput, model, {
+            now,
+            startedAt,
+            signal,
+            ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+            ...(!needsSavedContext ? { readContext } : {}),
+          });
+  const {
+    provisionalTarget,
+    targetStore,
+    targetStoreUnavailable,
+    tail,
+    newestFinishedRun,
+    channelRepo,
+    candidateStatus,
+    residentRepos,
+    repoCandidates,
+  } = prepared ?? { tail: [], candidateStatus: "skipped" as const };
+  let requesterTarget = prepared?.requesterTarget;
   const bind = answer.decision.kind === "binds" ? answer.decision.binds[0] : undefined;
   const preset = bind
-    ? presetBindOf(
+    ? (bind.preset ??
+      presetBindOf(
         bind.line,
         projection.presets.map((p) => p.name),
-      )
+      ))
     : undefined;
   if (
     provisionalTarget &&
@@ -3528,8 +3522,7 @@ export type OperatorExecution =
 
 /**
  * Under `on` the decision is what runs, and every outcome executes through
- * `decideExecution`'s cell (record 0069, as amended) — no caller renders an
- * outcome the table did not name. An `ask` is the `question` cell: record
+ * this boundary and the dispatcher's gates (record 0069, as amended). An `ask` is the `question` cell: record
  * 0054's marker renders only for a confirmable preset; a registry proposal
  * is display-only and a subsequent yes is refused. The
  * question parks as the thread's pending question on a door record. A
@@ -3624,10 +3617,11 @@ export async function executeOperatorDecision(
     const receiptBind = event.binds?.[0];
     const routedPreset =
       receiptBind !== undefined &&
-      presetBindOf(
-        receiptBind.line,
-        operatorPresets().map((preset) => preset.name),
-      ) !== undefined;
+      (receiptBind.preset ??
+        presetBindOf(
+          receiptBind.line,
+          operatorPresets().map((preset) => preset.name),
+        )) !== undefined;
     const verbosity = deps.config.verbosityFor(
       msg.channelId,
       msg.userId,
@@ -3691,14 +3685,15 @@ export async function executeOperatorDecision(
       // otherwise — never the literal "yes" (review F2 of the owned-thread fold).
       const confirmed = (event.binds ?? []).find((b) => b.confirmed);
       const request =
-        confirmed !== undefined
+        confirmed?.request ??
+        (confirmed !== undefined
           ? presetBindOf(
               confirmed.line,
               operatorPresets().map((p) => p.name),
             ) !== undefined
             ? (presetRequestOf(confirmed.line) ?? confirmed.line)
             : confirmed.line
-          : undefined;
+          : undefined);
       return { kind: "fold", ...(request !== undefined ? { request } : {}) };
     }
     if (event.outcome === "refusal") {
@@ -3727,8 +3722,8 @@ export async function executeOperatorDecision(
         parsed?.kind === "invoke" && def
           ? { def: def as CommandDef<unknown>, radius: boundBlastRadius(def as CommandDef<unknown>, parsed.input) }
           : undefined;
-      const preset = bound ? undefined : presetBindOf(bind.line, presetNames);
-      if (preset !== undefined) {
+      const preset = bound ? undefined : (bind.preset ?? presetBindOf(bind.line, presetNames));
+      if (preset !== undefined && presetNames.includes(preset)) {
         // The `bind_preset` row: resolution runs the preset on the person's own
         // request — a confirmed proposal's tail is the one
         // exception, the person's message being the word "yes".
@@ -3739,7 +3734,7 @@ export async function executeOperatorDecision(
         // preset word — is the receipt, exactly as a routed run's card is.
         if (verbose) await reply(renderOperatorReceipt(bind.line, radius, bind.reason));
         const request = bind.confirmed
-          ? presetRequestOf(bind.line)
+          ? (bind.request ?? presetRequestOf(bind.line))
           : requestWords !== undefined && requestWords !== msg.text
             ? requestWords
             : undefined;

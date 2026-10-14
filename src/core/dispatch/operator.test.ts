@@ -76,7 +76,6 @@ import { RunRegistry } from "../runRegistry.js";
 import type { CommandDef } from "../commandRegistry.js";
 import { mcpToolName } from "../commandSurface.js";
 import { verifyPrTargetEvidence } from "./targetEvidence.js";
-import type { RequesterTarget } from "../runLedger/ledger.js";
 
 const tool = (name: string): ToolDef => ({ name, description: name, inputSchema: { type: "object", properties: {} } });
 const command = (id: string): RoutableCommand => ({
@@ -99,6 +98,18 @@ const input = (over: Partial<OperatorInput> = {}): OperatorInput => ({
   tail: [],
   ...over,
 });
+
+/** Fixtures explicitly ask the existing helper before choosing from saved context. */
+const groundedModel = (model: RouteModel): RouteModel => {
+  let first = true;
+  return async (prompt, opts) => {
+    if (first) {
+      first = false;
+      return { tool: OPERATOR_READ_TOOLS.threadState, input: {} };
+    }
+    return model(prompt, opts);
+  };
+};
 
 const ctxOf = (over: Partial<OperatorTurnContext> = {}): OperatorTurnContext => ({
   requestText: "list the runs",
@@ -169,6 +180,19 @@ describe("publication of an operator decision", () => {
     };
     return { deps, ctx, registry, appendReply, reply, offer, requestFailed, invoke, put };
   }
+
+  it("executes the accepted typed preset when display text names another preset", async () => {
+    const { deps, ctx } = fixture();
+    const answer = await runOperator(input({ text: "What changed?" }), async () => ({
+      tool: OPERATOR_BIND_TOOL,
+      input: { preset: "general", reason: "answer the question" },
+    }));
+    const event = operatorEventOf("on", answer);
+    event.binds![0]!.line = "agent:ship This is display text only.";
+    const result = await executeOperatorDecision(deps, { ...ctx, event });
+    expect(result).toMatchObject({ kind: "route", preset: "general" });
+    expect(event.binds![0]).toMatchObject({ preset: "general" });
+  });
 
   it.each([
     { name: "question", event: eventOf(), owner: undefined },
@@ -432,45 +456,6 @@ describe("publication of an operator decision", () => {
 });
 
 describe("explicit PR directives at the operator stage", () => {
-  it("binds a self-contained repeat review without reading earlier source context", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "swb-repeat-review-"));
-    const path = join(dir, "config.yaml");
-    writeFileSync(
-      path,
-      `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
-    );
-    const model = vi.fn<RouteModel>(async () => ({
-      tool: OPERATOR_ASK_TOOL,
-      input: { text: "Which PR?", reason: "older source unavailable" },
-    }));
-    const readTail = vi.fn(async () => {
-      throw new Error("earlier source access was revoked");
-    });
-    const url = "https://github.com/acme/api/pull/7";
-    const text =
-      `review <${url}|github.com/acme/api/pull/7>\n` +
-      "App notification from App: The author updated the tests.\n" +
-      "Why: The earlier review requested a regression guard.";
-    const result = await operatorStage(
-      {
-        config: new ConfigStore(path, join(dir, "overrides.json")),
-        operatorModel: model,
-      },
-      {
-        msg: { channelId: "slack:CPUBLIC", userId: "slack:UREQUESTER", threadKey: "slack:CPUBLIC:1", text },
-        mode: "on",
-        readTail,
-        thread: [{ finished: true, agent: "review", repo: "acme/api" }],
-      },
-    );
-    expect(readTail).not.toHaveBeenCalled();
-    expect(model).not.toHaveBeenCalled();
-    expect(result).toMatchObject({
-      outcome: "binds",
-      binds: [{ repo: "acme/api", repoSource: "request", prTarget: { number: 7, quote: url } }],
-    });
-  });
-
   it("asks the operator about a competing later-line fix instead of taking the early review bind", async () => {
     const dir = mkdtempSync(join(tmpdir(), "swb-ambiguous-review-"));
     const path = join(dir, "config.yaml");
@@ -497,77 +482,6 @@ describe("explicit PR directives at the operator stage", () => {
     expect(model).toHaveBeenCalled();
     expect(result).toMatchObject({ outcome: "question", question: "Review or fix the check?" });
   });
-
-  it.each([
-    { surface: "fresh MCP review", channelId: "mcp:session", preset: "review", owner: undefined },
-    {
-      surface: "long private Ship continuation",
-      channelId: "slack:D1",
-      preset: "ship",
-      owner: { kind: "pipeline" as const, unit: "u1" },
-    },
-  ])(
-    "binds the original PR from a $surface despite a malformed model question",
-    async ({ channelId, preset, owner }) => {
-      const dir = mkdtempSync(join(tmpdir(), "swb-explicit-pr-"));
-      const path = join(dir, "config.yaml");
-      writeFileSync(
-        path,
-        `organization: acme\nproviders:\n  anthropic:\n    type: anthropic\ndefaults:\n  agent: general\n  models:\n    general: anthropic/general-model\n`,
-      );
-      const model = vi.fn<RouteModel>(async () => ({
-        tool: OPERATOR_ASK_TOOL,
-        input: { text: "Which repository?", proposalSettings: {}, reason: "missing" },
-      }));
-      const url = "https://github.com/acme/api/pull/7";
-      const result = await operatorStage(
-        {
-          config: new ConfigStore(path, join(dir, "overrides.json")),
-          operatorModel: model,
-          runLedger: {
-            readSessionTail: async () => ({
-              transcript: {
-                complete: true,
-                turns: 2,
-                messages: [
-                  {
-                    role: "user",
-                    content: [{ type: "text", text: "Investigate https://github.com/acme/api/issues/3" }],
-                  },
-                  { role: "assistant", content: [{ type: "text", text: "Earlier answer ".repeat(8_000) }] },
-                ],
-                compactions: [],
-                actors: ["slack:UREQUESTER", undefined],
-              },
-            }),
-            readRequesterTarget: async () => ({
-              repo: "acme/api",
-              issue: "acme/api#3",
-              provenance: "Investigate https://github.com/acme/api/issues/3",
-            }),
-            checkpointRequesterTarget: async (_key: string, _actor: string, target: RequesterTarget) => target,
-          } as never,
-        },
-        {
-          msg: { channelId, userId: "slack:UREQUESTER", threadKey: `${channelId}:1`, text: `agent:${preset} ${url}` },
-          mode: "on",
-          ...(owner ? { owner } : {}),
-          thread: [{ finished: true, agent: "general", repo: "acme/api" }],
-        },
-      );
-      expect(model).not.toHaveBeenCalled();
-      expect(result).toMatchObject({
-        outcome: "binds",
-        binds: [
-          {
-            repo: "acme/api",
-            repoSource: "request",
-            ...(preset === "ship" ? { shipEntry: "continue" } : { prTarget: { number: 7, quote: url } }),
-          },
-        ],
-      });
-    },
-  );
 });
 
 describe("the operator is one loop with typed tools", () => {
@@ -594,86 +508,6 @@ describe("the operator is one loop with typed tools", () => {
     });
   });
 
-  it.each(["review", "ship"])("binds an explicit %s PR tab link before calling the model", async (preset) => {
-    const quote = "https://github.com/acme/api/pull/124/files?diff=split#diff-abc";
-    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "Which PR?" } }));
-    const result = await runOperator(
-      input({
-        text: `agent:${preset} <${quote}|${quote.slice("https://".length)}>`,
-        projection: projectionOf([preset]),
-      }),
-      model,
-    );
-    expect(model).not.toHaveBeenCalled();
-    expect(result.decision).toMatchObject({
-      kind: "binds",
-      binds: [{ repo: "acme/api", prTarget: { number: 124, quote } }],
-    });
-  });
-
-  it.each(["review", "ship"])(
-    "binds an explicit %s PR URL before an invalid question can exhaust the door",
-    async (preset) => {
-      const url = "https://github.com/acme/api/pull/7";
-      const model = vi.fn<RouteModel>(async () => ({
-        tool: OPERATOR_ASK_TOOL,
-        input: { text: "Which repository?", proposalSettings: {}, reason: "missing repository" },
-      }));
-      const answer = await runOperator(
-        input({
-          text: `agent:${preset} ${url}`,
-          projection: projectionOf(["review", "ship"]),
-          requesterId: "slack:UREQUESTER",
-          tail: [{ actor: "slack:UREQUESTER", text: "user: investigate https://github.com/acme/api/issues/3" }],
-        }),
-        model,
-      );
-      expect(model).not.toHaveBeenCalled();
-      expect(answer.decision).toMatchObject({
-        kind: "binds",
-        binds: [
-          {
-            repo: "acme/api",
-            repoSource: "request",
-            ...(preset === "ship" ? { shipEntry: "review" } : {}),
-            prTarget: { source: "request", number: 7, quote: url },
-          },
-        ],
-      });
-    },
-  );
-
-  it.each([
-    "ship https://github.com/acme/api/pull/7",
-    "ship https://github.com/acme/api/pull/7\nApp notification from App: The author updated the tests.",
-  ])("binds one opening-line Ship PR request before asking the model: %s", async (text) => {
-    const url = "https://github.com/acme/api/pull/7";
-    const model = vi.fn<RouteModel>(async () => ({
-      tool: OPERATOR_ASK_TOOL,
-      input: { text: "Which task?", proposalSettings: {}, reason: "missed PR route" },
-    }));
-    const answer = await runOperator(
-      input({
-        text,
-        projection: projectionOf(["review", "ship", "orchestrator"]),
-        requesterId: "slack:UREQUESTER",
-      }),
-      model,
-    );
-    expect(model).not.toHaveBeenCalled();
-    expect(answer.decision).toMatchObject({
-      kind: "binds",
-      binds: [
-        {
-          repo: "acme/api",
-          repoSource: "request",
-          shipEntry: "review",
-          prTarget: { source: "request", number: 7, quote: url },
-        },
-      ],
-    });
-  });
-
   it("leaves a competing Ship follow-up with the operator", async () => {
     const model = vi.fn<RouteModel>(async () => ({
       tool: OPERATOR_ASK_TOOL,
@@ -691,101 +525,6 @@ describe("the operator is one loop with typed tools", () => {
     );
     expect(model).toHaveBeenCalled();
     expect(answer.decision).toMatchObject({ kind: "question" });
-  });
-
-  it.each([
-    { preset: "review", words: "Please review pull request", entry: undefined },
-    { preset: "ship", words: "review pull request", entry: "review" },
-  ])(
-    "binds a tokenized $preset PR request with a target noun before an invalid model question",
-    async ({ preset, words, entry }) => {
-      const url = "https://github.com/acme/api/pull/7";
-      const model = vi.fn<RouteModel>(async () => ({
-        tool: OPERATOR_ASK_TOOL,
-        input: { text: "Which repository?", proposalSettings: {}, reason: "missing repository" },
-      }));
-      const answer = await runOperator(
-        input({ text: `agent:${preset} ${words} ${url}`, projection: projectionOf([preset]) }),
-        model,
-      );
-      expect(model).not.toHaveBeenCalled();
-      expect(answer.decision).toMatchObject({
-        kind: "binds",
-        binds: [
-          {
-            repo: "acme/api",
-            repoSource: "request",
-            ...(entry ? { shipEntry: entry } : {}),
-            prTarget: { number: 7, source: "request", quote: url },
-          },
-        ],
-      });
-    },
-  );
-
-  it("binds an explicit review with a head constraint without changing the authored request", async () => {
-    const url = "https://github.com/acme/api/pull/7";
-    const text = `agent:review ${url} with exact head ${"a".repeat(40)}`;
-    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: {} }));
-    const answer = await runOperator(input({ text, projection: projectionOf(["review"]) }), model);
-    expect(model).not.toHaveBeenCalled();
-    expect(answer.decision).toMatchObject({
-      kind: "binds",
-      binds: [{ line: text, repo: "acme/api", prTarget: { number: 7, quote: url } }],
-    });
-  });
-
-  it("binds an unlabeled Slack-formatted explicit review to its destination", async () => {
-    const url = "https://github.com/acme/api/pull/7";
-    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: {} }));
-    const answer = await runOperator(
-      input({ text: `agent:review <${url}>`, projection: projectionOf(["review"]) }),
-      model,
-    );
-    expect(model).not.toHaveBeenCalled();
-    expect(answer.decision).toMatchObject({
-      kind: "binds",
-      binds: [{ repo: "acme/api", prTarget: { number: 7, quote: url } }],
-    });
-  });
-
-  it("binds a typed continue verb on the original Ship PR without asking the model", async () => {
-    const url = "https://github.com/acme/api/pull/7";
-    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "Which repository?" } }));
-    const answer = await runOperator(
-      input({
-        text: `agent:ship continue ${url}`,
-        projection: projectionOf(["ship"]),
-        owner: { kind: "pipeline", unit: "u1" },
-      }),
-      model,
-    );
-    expect(model).not.toHaveBeenCalled();
-    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ repo: "acme/api", shipEntry: "continue" }] });
-    if (answer.decision.kind !== "binds") throw new Error("expected a Ship continuation bind");
-    expect(answer.decision.binds[0]).not.toHaveProperty("prTarget");
-  });
-
-  it("binds a Ship PR URL as continuation in its ended pipeline thread, not as a second writer", async () => {
-    const url = "https://github.com/acme/api/pull/7";
-    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: {} }));
-    const answer = await runOperator(
-      input({
-        text: `agent:ship ${url}`,
-        projection: projectionOf(["ship"]),
-        owner: { kind: "pipeline", unit: "u1" },
-        requesterId: "slack:UREQUESTER",
-        tail: [{ actor: "slack:UREQUESTER", text: "user: https://github.com/acme/api/issues/3" }],
-      }),
-      model,
-    );
-    expect(model).not.toHaveBeenCalled();
-    expect(answer.decision).toMatchObject({
-      kind: "binds",
-      binds: [{ repo: "acme/api", repoSource: "request", shipEntry: "continue" }],
-    });
-    if (answer.decision.kind !== "binds") throw new Error("expected a Ship continuation bind");
-    expect(answer.decision.binds[0]).not.toHaveProperty("prTarget");
   });
 
   it.each([
@@ -845,23 +584,6 @@ describe("the operator is one loop with typed tools", () => {
     const answer = await runOperator(input({ text, projection: projectionOf(["review"]) }), model);
     expect(model).toHaveBeenCalled();
     expect(answer.decision).toEqual({ kind: "question", text: "Which task?", reason: "no reason given" });
-  });
-
-  it("binds a repeat review with descriptive follow-up context rather than treating a past fix as a task", async () => {
-    const model = vi.fn<RouteModel>(async () => ({ tool: OPERATOR_ASK_TOOL, input: { text: "Which task?" } }));
-    for (const text of [
-      ...[
-        "The fix was pushed",
-        "The PR has been updated",
-        "The author has updated the tests",
-        "They have updated the tests",
-      ].map((followUp) => `review https://github.com/acme/api/pull/7\nApp notification from App: updated\n${followUp}`),
-      "review https://github.com/acme/api/pull/7\nApp notification from App: The PR has been updated",
-    ]) {
-      const answer = await runOperator(input({ text, projection: projectionOf(["review"]) }), model);
-      expect(model).not.toHaveBeenCalled();
-      expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ prTarget: { number: 7 } }] });
-    }
   });
 
   it("leaves an ended owner's Ship review wording to the operator instead of folding it as continuation", async () => {
@@ -1128,7 +850,9 @@ channels:
       ctxOf({ requestText: "what changed this week?" }),
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
-    expect(turn.decision.binds).toEqual([{ line: "agent:general what changed this week?", reason: "read ask" }]);
+    expect(turn.decision.binds).toEqual([
+      { preset: "general", line: "agent:general what changed this week?", reason: "read ask" },
+    ]);
   });
 
   it("bind_preset carries typed request settings beside the unchanged authored text", () => {
@@ -1154,6 +878,7 @@ channels:
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
     expect(turn.decision.binds).toEqual([
       {
+        preset: "general",
         line: `agent:general ${requestText}`,
         reason: "requested controls",
         effort: "high",
@@ -1215,6 +940,7 @@ channels:
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
     expect(turn.decision.binds[0]).toEqual({
+      preset: "general",
       line: "agent:general What happened in this thread?",
       reason: "answer the question",
     });
@@ -1266,6 +992,7 @@ channels:
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("read did not bind");
     expect(turn.decision.binds[0]).toEqual({
+      preset: "general",
       line: "agent:general What happened with the export?",
       reason: "answer the question",
     });
@@ -1289,7 +1016,7 @@ channels:
       kind: "decision",
       decision: {
         kind: "binds",
-        binds: [{ line: `agent:general ${requestText}`, reason: "explain the term" }],
+        binds: [{ preset: "general", line: `agent:general ${requestText}`, reason: "explain the term" }],
         reason: "explain the term",
       },
     });
@@ -1303,7 +1030,11 @@ channels:
         ctxOf({ requestText }),
       );
       if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("read did not bind");
-      expect(turn.decision.binds[0]).toEqual({ line: `agent:general ${requestText}`, reason: "answer" });
+      expect(turn.decision.binds[0]).toEqual({
+        preset: "general",
+        line: `agent:general ${requestText}`,
+        reason: "answer",
+      });
     }
   });
 
@@ -1355,7 +1086,12 @@ channels:
       expect(answer.decision).toEqual({
         kind: "binds",
         binds: [
-          { line: `agent:general ${text}`, reason: "answer", ...(intent === "requested" ? { effort: "high" } : {}) },
+          {
+            preset: "general",
+            line: `agent:general ${text}`,
+            reason: "answer",
+            ...(intent === "requested" ? { effort: "high" } : {}),
+          },
         ],
         reason: "answer",
       });
@@ -1377,6 +1113,7 @@ channels:
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("work did not bind");
     expect(turn.decision.binds[0]).toEqual({
+      preset: "ship",
       line: `agent:ship ${requestText}`,
       shipEntry: "work",
       ...settings,
@@ -1462,6 +1199,7 @@ channels:
       );
       if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("read did not bind");
       expect(turn.decision.binds[0]).toEqual({
+        preset: "general",
         line: "agent:general What is 2 + 2? Answer in one sentence.",
         reason: "answer the question",
         repo: "x/y",
@@ -1953,7 +1691,13 @@ channels:
     );
     if (turn.kind !== "decision" || turn.decision.kind !== "binds") throw new Error("not a bind");
     expect(turn.decision.binds).toEqual([
-      { line: "agent:research review again", reason: "the thread target", repo: "acme/api", repoSource: "thread" },
+      {
+        preset: "research",
+        line: "agent:research review again",
+        reason: "the thread target",
+        repo: "acme/api",
+        repoSource: "thread",
+      },
     ]);
     expect(
       parseOperatorTurn(
@@ -2771,10 +2515,10 @@ defaults:
     const result = await operatorStage(
       {
         config,
-        operatorModel: async (prompt) => {
+        operatorModel: groundedModel(async (prompt) => {
           prompts.push(prompt);
           return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "configured data source" } };
-        },
+        }),
         mcp: {
           catalogFor: async (caller) => {
             expect(caller).toEqual({ userId: "slack:UX", channelId: "slack:CX" });
@@ -2832,10 +2576,10 @@ defaults:
     const result = await operatorStage(
       {
         config,
-        operatorModel: async (prompt) => {
+        operatorModel: groundedModel(async (prompt) => {
           prompts.push(prompt);
           return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "service investigation" } };
-        },
+        }),
         mcp: {
           catalogFor: async () => {
             throw new Error("registry HTTP 503");
@@ -2883,10 +2627,10 @@ restrict:
       {
         config,
         residentSlugs,
-        operatorModel: async (prompt) => {
+        operatorModel: groundedModel(async (prompt) => {
           prompts.push(prompt);
           return { tool: OPERATOR_ASK_TOOL, input: { text: "Which repository contains PR #7?", reason: "bare PR" } };
-        },
+        }),
       },
       {
         msg: { channelId: "slack:CX", userId: "slack:UX", text: "review PR #7", threadKey: "slack:CX:1.0" },
@@ -2927,10 +2671,10 @@ restrict:
     const result = await operatorStage(
       {
         config,
-        operatorModel: async (prompt) => {
+        operatorModel: groundedModel(async (prompt) => {
           prompts.push(prompt);
           return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "fallback read" } };
-        },
+        }),
         mcp: {
           catalogFor: async (caller) => {
             expect(caller).toEqual({ userId: "slack:UX", channelId: "slack:CX" });
@@ -4598,15 +4342,15 @@ describe("the operator's repository briefs", () => {
       {
         config: new ConfigStore(path, join(path, "../overrides.json")),
         github,
-        operatorModel: async (prompt) => {
+        operatorModel: groundedModel(async (prompt) => {
           modelCalls++;
-          expect(onContext).toHaveBeenCalledTimes(modelCalls);
-          expect(onContext.mock.calls[0][0].githubRepos).toEqual(["acme/payments"]);
-          expect(onContext.mock.calls[0][0].origins.map((entry: { runId: string }) => entry.runId).sort()).toEqual([
-            "memory-producer",
-            "notes-producer",
-            "tail-producer",
-          ]);
+          expect(onContext.mock.calls.at(-1)![0].githubRepos).toEqual(["acme/payments"]);
+          expect(
+            onContext.mock.calls
+              .at(-1)![0]
+              .origins.map((entry: { runId: string }) => entry.runId)
+              .sort(),
+          ).toEqual(["memory-producer", "notes-producer", "tail-producer"]);
           captured = prompt;
           if (modelCalls === 1) return { tool: OPERATOR_READ_TOOLS.repositoryBrief, input: { repo: "acme/payments" } };
           return {
@@ -4618,7 +4362,7 @@ describe("the operator's repository briefs", () => {
               reason: "The connected README identifies Billing Desk",
             },
           };
-        },
+        }),
       },
       {
         mode: "on",
@@ -4638,7 +4382,6 @@ describe("the operator's repository briefs", () => {
       binds: [{ repo: "acme/payments", repoSource: "context", line: `agent:ship ${text}` }],
     });
     expect(modelCalls).toBe(2);
-    expect(onContext).toHaveBeenCalledTimes(2);
     expect(readNotes).toHaveBeenCalledOnce();
     expect(readMemory).toHaveBeenCalledOnce();
     expect(readFile).toHaveBeenCalledWith("acme/payments", "README.md", "main", expect.any(Object));
@@ -4943,7 +4686,7 @@ describe("requester-authored repository inheritance for a plain fix", () => {
       },
     }));
     const result = await operatorStage(
-      { config, runLedger: { readSessionTail } as never, operatorModel: async () => bind },
+      { config, runLedger: { readSessionTail } as never, operatorModel: groundedModel(async () => bind) },
       {
         msg: { channelId: "slack:C1", threadKey: "slack:C1:1.0", userId: requester, text: "Fix it." },
         mode: "on",
@@ -5033,10 +4776,10 @@ describe("requester-authored repository inheritance for a plain fix", () => {
         {
           config,
           runLedger: ledger as never,
-          operatorModel: async () => ({
+          operatorModel: groundedModel(async () => ({
             tool: OPERATOR_BIND_TOOL,
             input: { preset: "general", reason: "investigate" },
-          }),
+          })),
         },
         {
           msg: { channelId, threadKey, userId: requester, text: `Investigate ${targetIssue}` },
@@ -5050,7 +4793,7 @@ describe("requester-authored repository inheritance for a plain fix", () => {
         {
           config,
           runLedger: ledger as never,
-          operatorModel: async (p) => {
+          operatorModel: groundedModel(async (p) => {
             prompt = p.user;
             return {
               tool: OPERATOR_BIND_TOOL,
@@ -5061,7 +4804,7 @@ describe("requester-authored repository inheritance for a plain fix", () => {
                 reason: "follow up",
               },
             };
-          },
+          }),
         },
         {
           msg: { channelId, threadKey, userId: requester, text: followUpText },
@@ -5131,7 +4874,7 @@ describe("requester-authored repository inheritance for a plain fix", () => {
           readRequesterTarget: async () => null,
           checkpointRequesterTarget: writes,
         } as never,
-        operatorModel: async () => bind,
+        operatorModel: groundedModel(async () => bind),
       },
       {
         msg: { channelId: "slack:C1", threadKey: "slack:C1:1.0", userId: requester, text: "Fix it." },
@@ -5233,7 +4976,7 @@ describe("requester-authored repository inheritance for a plain fix", () => {
             throw new Error("store offline");
           },
         } as never,
-        operatorModel: async () => bind,
+        operatorModel: groundedModel(async () => bind),
       },
       {
         msg: { channelId: "slack:C1", threadKey: "slack:C1:1.0", userId: requester, text: "Fix it." },
@@ -5855,13 +5598,15 @@ describe("a plain-words model rides bind_preset (the plain-words model unit)", (
     const event = operatorEventOf("on", {
       decision: {
         kind: "binds",
-        binds: [{ line: "agent:general list the runs", reason: "r", model: ASTRA }],
+        binds: [{ preset: "general", line: "agent:general list the runs", reason: "r", model: ASTRA }],
         reason: "r",
       },
       latencyMs: 1,
       outputTokens: 1,
     });
-    expect(event.binds).toEqual([{ line: "agent:general list the runs", reason: "r", model: ASTRA }]);
+    expect(event.binds).toEqual([
+      { preset: "general", line: "agent:general list the runs", reason: "r", model: ASTRA },
+    ]);
   });
 
   it("the prompt says a plain-words model resolves through provider_models and rides bind_preset's model, and the tool's schema carries the argument", () => {
@@ -6185,4 +5930,281 @@ ${effort === undefined ? "" : `  efforts:\n    general: ${effort}`}
       expect(requests[0]!.maxTokens).toBeGreaterThanOrEqual(reasoningTokensBeforeBind + 200);
     },
   );
+});
+
+describe("typed action acceptance", () => {
+  const url = "https://github.com/acme/api/pull/7";
+  const target = { number: 7, source: "request", quote: url };
+  const projection = operatorProjection({
+    presets: operatorPresets(),
+    commands: [],
+    allowedPresets: ["review", "ship", "conductor", "general"],
+  });
+  it("a simple explicit Review uses the model proposal instead of a prose shortcut", async () => {
+    const answer = await runOperator(input({ text: `agent:review review ${url}`, projection }), async () => ({
+      tool: OPERATOR_ASK_TOOL,
+      input: { text: "Which review scope?", reason: "unresolved scope" },
+    }));
+    expect(answer.decision).toMatchObject({ kind: "question", text: "Which review scope?" });
+  });
+  it.each([undefined, 16])("repairs a missing or mismatched formal budget: %s", async (budget) => {
+    const text = `agent:review budget:15 Review ${url}. Publish; do not change files.`;
+    const bind = (value: number | undefined) => ({
+      tool: OPERATOR_BIND_TOOL,
+      input: {
+        preset: "review",
+        repo: "acme/api",
+        prTarget: target,
+        budget: value,
+        settingsEvidence: { budget: { quote: "budget:15", intent: "requested" } },
+        reason: "review this PR",
+      },
+    });
+    const model = vi.fn<RouteModel>().mockResolvedValueOnce(bind(budget)).mockResolvedValueOnce(bind(15));
+    const answer = await runOperator(input({ text, projection }), model);
+    expect(answer.attempts).toMatchObject([{ outcome: "violation" }, { outcome: "accepted" }]);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ preset: "review", budget: 15, prTarget: target }],
+    });
+  });
+  it("an explicit Review batch accepts Conductor for Review and repairs Ship", async () => {
+    const urls = [url, "https://github.com/acme/web/pull/8"];
+    const text = `agent:review Review ${urls.join(" and ")}; do not ship these.`;
+    const call = (kind: string) => ({
+      tool: OPERATOR_BATCH_TOOL,
+      input: {
+        kind,
+        targets: urls,
+        targetQuotes: urls,
+        actionQuote: kind === "ship" ? "ship" : "Review",
+        reason: "review both PRs",
+      },
+    });
+    const model = vi.fn<RouteModel>().mockResolvedValueOnce(call("ship")).mockResolvedValueOnce(call("review"));
+    const answer = await runOperator(input({ text, projection }), model);
+    expect(answer.attempts).toMatchObject([{ outcome: "violation" }, { outcome: "accepted" }]);
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [
+        {
+          preset: "conductor",
+          prBatch: {
+            kind: "review",
+            targets: [
+              { repo: "acme/api", number: 7 },
+              { repo: "acme/web", number: 8 },
+            ],
+          },
+        },
+      ],
+    });
+  });
+});
+
+describe("model-selected PR requests keep their authored constraints", () => {
+  it.each([
+    ["review", "agent:review review https://github.com/acme/api/pull/7"],
+    [
+      "review",
+      "agent:review please review pull request <https://github.com/acme/api/pull/7|github.com/acme/api/pull/7>",
+    ],
+    [
+      "review",
+      "agent:review review https://github.com/acme/api/pull/7 at exact head 1111111111111111111111111111111111111111",
+    ],
+    [
+      "review",
+      "review https://github.com/acme/api/pull/7\nApp notification from App: The author has updated the tests",
+    ],
+    ["ship", "ship https://github.com/acme/api/pull/7"],
+    ["ship", "agent:ship review https://github.com/acme/api/pull/7"],
+  ])("routes the typed %s choice on the unchanged request: %s", async (preset, text) => {
+    const answer = await runOperator(input({ text, projection: projectionOf(["review", "ship"]) }), async () => ({
+      tool: OPERATOR_BIND_TOOL,
+      input: {
+        preset,
+        repo: "acme/api",
+        prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+        ...(preset === "ship" ? { shipEntry: "review" } : {}),
+        reason: "review the current target",
+      },
+    }));
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [
+        {
+          preset,
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+          line: `agent:${preset} ${text.replace(`agent:${preset} `, "").split("\n")[0]}`,
+        },
+      ],
+    });
+  });
+  it.each(["agent:ship continue", "agent:ship"])("keeps an owned Ship continuation typed: %s", async (prefix) => {
+    const answer = await runOperator(
+      input({
+        text: `${prefix} https://github.com/acme/api/pull/7`,
+        projection: projectionOf(["ship"]),
+        owner: { kind: "pipeline", unit: "u1" },
+      }),
+      async () => ({
+        tool: OPERATOR_BIND_TOOL,
+        input: { preset: "ship", repo: "acme/api", shipEntry: "continue", reason: "resume the owned unit" },
+      }),
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ preset: "ship", repo: "acme/api", shipEntry: "continue" }],
+    });
+  });
+});
+
+describe("typed action limits and saved choices", () => {
+  const url = "https://github.com/acme/api/pull/7";
+  const projection = operatorProjection({
+    presets: operatorPresets(),
+    commands: [],
+    allowedPresets: ["review", "ship", "conductor", "general"],
+  });
+  it.each([false, true])("an exhausted wrong Ship stays a non-decision: multi-call %s", async (multi) => {
+    const wrong = {
+      tool: OPERATOR_BIND_TOOL,
+      input: {
+        preset: "ship",
+        shipEntry: "review",
+        repo: "acme/api",
+        prTarget: { number: 7, source: "request", quote: url },
+        reason: "wrong action",
+      },
+    };
+    const answer = await runOperator(input({ text: `agent:review budget:15 Review ${url}`, projection }), async () => {
+      if (multi) throw new MultiToolCallError([{ tool: OPERATOR_READ_TOOLS.threadState, input: {} }, wrong]);
+      return wrong;
+    });
+    expect(answer.decision).toMatchObject({ kind: "non_decision" });
+    expect(answer.attempts?.map((attempt) => attempt.outcome)).toEqual(["violation", "violation", "violation"]);
+  });
+  it("an authorized Review batch preserves its formal budget without granting Ship", async () => {
+    const urls = [url, "https://github.com/acme/web/pull/8"];
+    const answer = await runOperator(
+      input({ text: `agent:review budget:15 Review ${urls.join(" and ")}`, projection }),
+      async () => ({
+        tool: OPERATOR_BATCH_TOOL,
+        input: {
+          kind: "review",
+          targets: urls,
+          targetQuotes: urls,
+          actionQuote: "Review",
+          budget: 15,
+          settingsEvidence: { budget: { quote: "budget:15", intent: "requested" } },
+          reason: "review both",
+        },
+      }),
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [
+        {
+          preset: "conductor",
+          budget: 15,
+          prBatch: {
+            kind: "review",
+            targets: [
+              { repo: "acme/api", number: 7 },
+              { repo: "acme/web", number: 8 },
+            ],
+          },
+        },
+      ],
+    });
+  });
+  it("a saved typed question keeps its action, task and settings when the display line changes", async () => {
+    const answer = await runOperator(input({ text: "budget:15 Explain the retry policy." }), async () => ({
+      tool: OPERATOR_ASK_TOOL,
+      input: {
+        text: "Use this scope?",
+        proposal: "agent:general Explain the retry policy.",
+        proposalSettings: { budget: 15, settingsEvidence: { budget: { quote: "budget:15", intent: "requested" } } },
+        reason: "confirm the scope",
+      },
+    }));
+    const event = operatorEventOf("on", answer);
+    const saved = JSON.parse(JSON.stringify(event));
+    saved.proposal = "agent:ship Display text only.";
+    const pending = pendingQuestionOf([{ userId: "slack:UREQUESTER", operator: saved }])!;
+    const accepted = bindFromAnswer("yes", pending as Parameters<typeof bindFromAnswer>[1]);
+    expect(accepted).toMatchObject({
+      preset: "general",
+      request: "Explain the retry policy.",
+      budget: 15,
+      confirmed: true,
+    });
+  });
+  it("quoted controls and mid-prose agent words supply no formal constraints", async () => {
+    const answer = await runOperator(
+      input({ text: "Explain `agent:review budget:15` and the agent:ship word.", projection }),
+      async () => ({ tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "explain the syntax" } }),
+    );
+    expect(answer.decision).toMatchObject({ kind: "binds", binds: [{ preset: "general" }] });
+  });
+  it("a custom offered preset preserves its exact leading choice", async () => {
+    const custom = { ...projectionOf(["general"]).presets[0]!, name: "custom" };
+    const answer = await runOperator(
+      input({ text: "agent:custom Explain this.", projection: { presets: [custom], commands: [] } }),
+      async () => ({ tool: OPERATOR_BIND_TOOL, input: { preset: "custom", reason: "use the offered custom preset" } }),
+    );
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ preset: "custom", line: "agent:custom Explain this." }],
+    });
+  });
+});
+
+describe("questions retain required context admission", () => {
+  it("refuses a question when its required saved context cannot be admitted", async () => {
+    const model = vi.fn<RouteModel>(async () => ({
+      tool: "ask",
+      input: { text: "Which service?", reason: "request preference" },
+    }));
+    const result = await runOperator(input({ text: "Prepare a service report" }), model, {
+      readContext: async () => {
+        throw new Error("Required saved context unavailable");
+      },
+    });
+    expect(result.decision).toEqual({
+      kind: "non_decision",
+      reason: "the operator failed: Required saved context unavailable",
+    });
+    expect(model).toHaveBeenCalledOnce();
+  });
+});
+
+describe("loaded context remains command fulfillment evidence", () => {
+  it.each(["helper", "direct"])("uses requester history loaded through the same loop: %s", async (path) => {
+    const prompts: RoutePrompt[] = [];
+    const model: RouteModel = async (prompt) => {
+      prompts.push(prompt);
+      if (prompt.tool.name === "verify")
+        return { tool: "verify", input: { agrees: true, reason: "same requester asked for the listing" } };
+      if (path === "helper" && prompts.length === 1) return { tool: OPERATOR_READ_TOOLS.threadState, input: {} };
+      return { tool: "runs_list", input: { reason: "repeat the requester's listing", intent: "read" } };
+    };
+    const current = input({ text: "Again", requesterId: "slack:UREQUESTER" });
+    const result = await runOperator(current, model, {
+      readContext: async () => ({
+        ...current,
+        tail: [
+          { actor: "slack:UREQUESTER", text: "user: List the failed runs for acme/api" },
+          { actor: "slack:UOTHER", text: "user: Unrelated private request" },
+        ],
+      }),
+    });
+    const check = prompts.find((prompt) => prompt.tool.name === "verify")!;
+    expect(check.user).toContain("List the failed runs for acme/api");
+    expect(check.user).toContain("Again");
+    expect(check.user).not.toContain("Unrelated private request");
+    expect(result.decision).toMatchObject({ kind: "binds", binds: [{ line: "runs list" }] });
+  });
 });

@@ -32,6 +32,7 @@ import type { Predicate } from "./authz/types.js";
 import { RESTART_CLAIM_GRACE_MS } from "./budgets.js";
 import { planContextCheckpoint } from "./references/contextCheckpoint.js";
 import { contextDependenciesHash } from "./references/contextDependencies.js";
+import { pendingQuestionOf, bindFromAnswer } from "./dispatch/operator.js";
 import type { ChildHandoff } from "./dispatch/handoff.js";
 
 it("stored operator failures retain provider diagnostics after serialization", () => {
@@ -1722,4 +1723,36 @@ describe("strict terminal review publication", () => {
     const { events: _events, ...summary } = record({ repo: "acme/api", reviewPublication: receipt });
     expect(isRunListItem(summary)).toBe(false);
   });
+});
+
+it("saved operator choices keep their typed identity and task through run-record reconstruction", () => {
+  const event: RunEvent = {
+    type: "operator",
+    mode: "on",
+    outcome: "question",
+    reason: "confirm the scope",
+    question: "Use this scope?",
+    proposal: "agent:general Explain retries.",
+    proposalPreset: "general",
+    proposalRequest: "Explain retries.",
+    proposalSettings: { budget: 15 },
+    confirmablePreset: true,
+  };
+  const stored = JSON.parse(JSON.stringify(record({ events: [event], operator: operatorOfEvents([event]) })));
+  stored.operator.proposal = "agent:ship Display text only.";
+  const choice = bindFromAnswer(
+    "yes",
+    pendingQuestionOf([{ operator: stored.operator }]) as Parameters<typeof bindFromAnswer>[1],
+  );
+  expect(choice).toMatchObject({ preset: "general", request: "Explain retries.", budget: 15, confirmed: true });
+  const bind: RunEvent = {
+    type: "operator",
+    mode: "on",
+    outcome: "binds",
+    reason: "accepted",
+    binds: [{ line: "display only", reason: "accepted", preset: "review", request: "Review this exact target." }],
+  };
+  expect(JSON.parse(JSON.stringify(operatorOfEvents([bind]))).binds).toEqual([
+    { line: "display only", reason: "accepted", preset: "review", request: "Review this exact target." },
+  ]);
 });

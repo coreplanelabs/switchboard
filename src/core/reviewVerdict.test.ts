@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "./chatMessage.js";
+import { submitVerdictTool } from "../tools/submit.js";
+import type { ToolContext } from "../tools/runnableTool.js";
+import type { ReviewVerdict } from "./reviewVerdict.js";
 import {
   ADDRESS_SEVERITIES,
   buildReviewChannelReply,
@@ -21,6 +24,7 @@ import {
   redactReviewPost,
   redactVerdict,
   recordedVerdictFromTranscript,
+  reviewSubmissionFailure,
   severityAtOrAbove,
   verdictLine,
 } from "./reviewVerdict.js";
@@ -79,7 +83,14 @@ describe("review finding resolutions", () => {
 describe("recordedVerdictFromTranscript", () => {
   const call: ChatMessage = {
     role: "assistant",
-    content: [{ type: "tool_use", id: "v1", name: "submit_verdict", input: { verdict: "approve", summary: "clear" } }],
+    content: [
+      {
+        type: "tool_use",
+        id: "v1",
+        name: "submit_verdict",
+        input: { verdict: "approve", summary: "clear", findings: [] },
+      },
+    ],
   };
 
   it("restores only an accepted tool result, never a bare or failed verdict call", () => {
@@ -103,11 +114,33 @@ describe("recordedVerdictFromTranscript", () => {
     ).toBeUndefined();
   });
 
-  it("returns the last accepted verdict and ignores a later failed call", () => {
+  it("a later rejected verdict leaves recovery incomplete", () => {
     const accepted = (id: string, verdict: string): ChatMessage[] => [
       {
         role: "assistant",
-        content: [{ type: "tool_use", id, name: "submit_verdict", input: { verdict, summary: verdict } }],
+        content: [
+          {
+            type: "tool_use",
+            id,
+            name: "submit_verdict",
+            input: {
+              verdict,
+              summary: verdict,
+              findings:
+                verdict === "request_changes"
+                  ? [
+                      {
+                        id: "F1",
+                        kind: "single",
+                        severity: "major",
+                        file: "src/x.ts",
+                        title: "Rejected values are accepted",
+                      },
+                    ]
+                  : [],
+            },
+          },
+        ],
       },
       { role: "user", content: [{ type: "tool_result", toolUseId: id, content: `verdict recorded: ${verdict}` }] },
     ];
@@ -121,7 +154,7 @@ describe("recordedVerdictFromTranscript", () => {
         },
         { role: "user", content: [{ type: "tool_result", toolUseId: "failed", content: "error", isError: true }] },
       ]),
-    ).toMatchObject({ verdict: "request_changes" });
+    ).toBeUndefined();
   });
 });
 
@@ -451,7 +484,7 @@ describe("review verdict → post body", () => {
     expect(empty).toContain("LGTM: no issues found\n");
     expect(empty).not.toContain("| Severity |");
     const none = buildReviewPostBody("Fine.", parseVerdictInput({ verdict: "approve", summary: "ok" })!, TARGET);
-    expect(none).toContain("LGTM: issues not itemized\n");
+    expect(none).toContain("Review incomplete — findings not validated.\n");
     expect(none).not.toContain("| Severity |");
   });
 
@@ -515,13 +548,21 @@ describe("review verdict → post body", () => {
   });
 
   it("summary is collapsed to one line so the token line cannot be split", () => {
-    expect(verdictLine({ verdict: "approve", summary: "  ok\n\nreally\n" })).toBe("LGTM: ok really");
-    expect(verdictLine({ verdict: "approve", summary: "" })).toBe("LGTM:");
+    expect(verdictLine({ verdict: "approve", summary: "  ok\n\nreally\n", findings: [] })).toBe("LGTM: ok really");
+    expect(verdictLine({ verdict: "approve", summary: "", findings: [] })).toBe("LGTM:");
   });
 
   it("parseVerdictInput accepts only the two verdict values", () => {
-    expect(parseVerdictInput({ verdict: "approve", summary: "fine" })).toEqual({ verdict: "approve", summary: "fine" });
-    expect(parseVerdictInput({ verdict: "request_changes" })).toEqual({ verdict: "request_changes", summary: "" });
+    expect(parseVerdictInput({ verdict: "approve", summary: "fine", findings: [] })).toEqual({
+      verdict: "approve",
+      summary: "fine",
+      findings: [],
+    });
+    expect(parseVerdictInput({ verdict: "request_changes" })).toEqual({
+      verdict: "request_changes",
+      summary: "",
+      droppedFindings: ["findings: a complete review requires a findings array"],
+    });
     expect(parseVerdictInput({ verdict: "LGTM" })).toBeNull();
     expect(parseVerdictInput({ verdict: "approved" })).toBeNull();
     expect(parseVerdictInput({})).toBeNull();
@@ -850,27 +891,32 @@ describe("review verdict → post body", () => {
   // (`git rev-parse HEAD`); the dispatcher checks it against the PR head.
   it("parseVerdictInput carries a well-formed reported head (7–40 hex, lowercased) and drops anything else", () => {
     const sha = "E8E43F480a09b76989b85ebe6a2a254d99a4d2a3";
-    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: sha })).toEqual({
+    expect(parseVerdictInput({ verdict: "approve", summary: "ok", findings: [], head: sha })).toEqual({
       verdict: "approve",
       summary: "ok",
+      findings: [],
       head: sha.toLowerCase(),
     });
-    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: " e8e43f4 " })).toEqual({
+    expect(parseVerdictInput({ verdict: "approve", summary: "ok", findings: [], head: " e8e43f4 " })).toEqual({
       verdict: "approve",
       summary: "ok",
+      findings: [],
       head: "e8e43f4",
     });
-    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: "HEAD" })).toEqual({
+    expect(parseVerdictInput({ verdict: "approve", summary: "ok", findings: [], head: "HEAD" })).toEqual({
       verdict: "approve",
       summary: "ok",
+      findings: [],
     });
-    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: "e8e43f" })).toEqual({
+    expect(parseVerdictInput({ verdict: "approve", summary: "ok", findings: [], head: "e8e43f" })).toEqual({
       verdict: "approve",
       summary: "ok",
+      findings: [],
     });
-    expect(parseVerdictInput({ verdict: "approve", summary: "ok", head: 42 })).toEqual({
+    expect(parseVerdictInput({ verdict: "approve", summary: "ok", findings: [], head: 42 })).toEqual({
       verdict: "approve",
       summary: "ok",
+      findings: [],
     });
   });
 });
@@ -979,7 +1025,7 @@ describe("review verdict → channel reply (item 5b: Slack gets the verdict and 
   it("posted but findings not itemized → the prose rides along: a list that says nothing is no substitute", () => {
     const bare = parseVerdictInput({ verdict: "approve", summary: "fine" })!;
     expect(buildReviewChannelReply({ answer, verdict: bare, posted, liveUrl })).toBe(
-      `${LGTM_TOKEN} fine\n\n${answer}\n\nPosted to acme/site#359 · [Live run](${liveUrl})`,
+      `Review incomplete — findings not validated.\n\n${answer}\n\nPosted to acme/site#359 · [Live run](${liveUrl})`,
     );
   });
 
@@ -1023,11 +1069,11 @@ describe("verdictCountsLine + the quiet channel reply — one line in the user's
     })!;
     expect(verdictCountsLine(one)).toBe("Changes requested: 1 nit");
     const none = parseVerdictInput({ verdict: "request_changes", summary: "s", findings: [] })!;
-    expect(verdictCountsLine(none)).toBe("Changes requested");
+    expect(verdictCountsLine(none)).toBe("Review incomplete — findings not validated.");
   });
 
   it("an approve is the one word LGTM", () => {
-    expect(verdictCountsLine(parseVerdictInput({ verdict: "approve", summary: "fine" })!)).toBe("LGTM");
+    expect(verdictCountsLine(parseVerdictInput({ verdict: "approve", summary: "fine", findings: [] })!)).toBe("LGTM");
   });
 
   it("at quiet, a posted itemized verdict is ONE line — the counts and the pull request link; an approve reads LGTM", () => {
@@ -1060,5 +1106,332 @@ describe("verdictCountsLine + the quiet channel reply — one line in the user's
     expect(
       buildReviewChannelReply({ answer: "prose", verdict: bare, posted, liveUrl: undefined, verbosity: "quiet" }),
     ).toBe(buildReviewChannelReply({ answer: "prose", verdict: bare, posted, liveUrl: undefined }));
+  });
+});
+
+describe("incomplete review output", () => {
+  it("an empty changes-requested report stays incomplete across render and recovery", () => {
+    const verdict = parseVerdictInput({
+      verdict: "request_changes",
+      head: "a".repeat(40),
+      findings: [],
+      summary: "Finding serialization is unavailable.",
+    })!;
+    const body = buildReviewPostBody("The raw report retains two Major issues.", verdict);
+    expect(body).toContain("Review incomplete — findings not validated.");
+    expect(verdictLine(verdict)).toBe("Review incomplete — findings not validated.");
+    expect(verdictCountsLine(verdict)).toBe("Review incomplete — findings not validated.");
+    const messages: ChatMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "v", name: "submit_verdict", input: verdict }] },
+      {
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: "v", content: "verdict recorded: request_changes (0 findings)" }],
+      },
+    ];
+    expect({
+      recovered: recordedVerdictFromTranscript(messages) ?? "incomplete",
+      report: body.includes("two Major issues"),
+    }).toEqual({ recovered: "incomplete", report: true });
+  });
+});
+
+describe("review validation preserves incomplete evidence", () => {
+  it("a rejected finding cannot become an authoritative empty report after redaction and rendering", () => {
+    const incomplete = parseVerdictInput({
+      verdict: "approve",
+      summary: "The report names a Major defect.",
+      findings: [{ id: "F1", kind: "single", severity: "major", file: "src/x.ts" }],
+    })!;
+    const saved = JSON.parse(JSON.stringify(redactVerdict(incomplete)));
+    const body = buildReviewPostBody("F1: the original report is retained.", saved);
+    expect({
+      headline: body.split("\n")[0],
+      retained: body.includes("F1: the original report is retained."),
+      marker: JSON.parse(body.match(/<!-- switchboard:verdict (.*) -->/)![1]),
+    }).toEqual({
+      headline: "Review incomplete — findings not validated.",
+      retained: true,
+      marker: { verdict: "none" },
+    });
+    expect(
+      buildReviewChannelReply({
+        answer: "F1: the original report is retained.",
+        verdict: saved,
+        posted: { repo: "acme/api", number: 7 },
+        verbosity: "quiet",
+        liveUrl: undefined,
+      }),
+    ).toContain("F1: the original report is retained.");
+  });
+  it("a valid complete correction replaces the rejected proposal through accepted transcript recovery", () => {
+    const bad = {
+      verdict: "request_changes",
+      summary: "cannot serialize findings",
+      head: "a".repeat(40),
+      findings: [],
+    };
+    const good = {
+      ...bad,
+      summary: "A Major defect remains",
+      findings: [
+        { id: "F1", kind: "single", severity: "major", file: "src/x.ts", title: "Rejected findings disappear" },
+      ],
+    };
+    const messages: ChatMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "bad", name: "submit_verdict", input: bad }] },
+      {
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: "bad", content: "error: invalid findings; no verdict recorded" }],
+      },
+      { role: "assistant", content: [{ type: "tool_use", id: "good", name: "submit_verdict", input: good }] },
+      {
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: "good", content: "verdict recorded: request_changes (1 finding)" }],
+      },
+    ];
+    const verdict = recordedVerdictFromTranscript(messages)!;
+    expect(verdict).toMatchObject({
+      verdict: "request_changes",
+      findings: [{ id: "F1", severity: "major", title: "Rejected findings disappear" }],
+    });
+    expect(buildReviewPostBody("F1 is still open.", verdict)).toContain("Changes requested: 1 issue\n");
+  });
+});
+
+describe("review submission rejection and correction", () => {
+  it.each(["review:1:F1", "review:current-run:F2"])(
+    "an unknown reference %s and an empty retry preserve the last complete verdict until correction",
+    async (unknownId) => {
+      const head = "a".repeat(40);
+      const first = {
+        verdict: "request_changes",
+        summary: "One Major remains",
+        head,
+        findings: [
+          { id: "F1", kind: "single", severity: "major", file: "src/x.ts", title: "Rejected findings disappear" },
+        ],
+      };
+      let latest: ReviewVerdict | undefined;
+      const ctx = {
+        executor: {},
+        onVerdict: (verdict: ReviewVerdict) => {
+          latest = verdict;
+        },
+        reviewHistory: { target: { repo: "acme/api", number: 7 }, snapshot: { head, findings: [] } },
+      } as unknown as ToolContext;
+      expect(await submitVerdictTool.run(first, ctx)).toContain("verdict recorded: request_changes (1 finding)");
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const reply = await submitVerdictTool.run(
+          { ...first, findings: [{ ...first.findings[0], id: unknownId }] },
+          ctx,
+        );
+        expect(reply).toBe(
+          `error: unknown prior finding ${unknownId}; read complete review history first; no verdict recorded`,
+        );
+      }
+      expect(
+        await submitVerdictTool.run({ ...first, summary: "Finding serialization is unavailable", findings: [] }, ctx),
+      ).toBe("error: invalid findings; findings: changes requested requires validated findings; no verdict recorded");
+      expect(latest).toMatchObject({
+        summary: "One Major remains",
+        findings: [{ id: "F1", severity: "major", title: "Rejected findings disappear" }],
+      });
+      const correction = {
+        ...first,
+        summary: "The complete corrected report",
+        findings: [{ ...first.findings[0], title: "Invalid reports erase complete findings" }],
+      };
+      expect(await submitVerdictTool.run(correction, ctx)).toContain("verdict recorded: request_changes (1 finding)");
+      expect(latest).toMatchObject({
+        summary: "The complete corrected report",
+        findings: [{ id: "F1", title: "Invalid reports erase complete findings" }],
+      });
+    },
+  );
+});
+
+describe("missing review output remains incomplete", () => {
+  it.each(["approve", "request_changes"])(
+    "a %s proposal without findings cannot replace a complete result",
+    async (verdict) => {
+      let latest: ReviewVerdict = { verdict: "approve", summary: "Last complete result", findings: [] };
+      const ctx = {
+        executor: {},
+        onVerdict: (accepted: ReviewVerdict) => {
+          latest = accepted;
+        },
+      } as unknown as ToolContext;
+      const result = await submitVerdictTool.run(
+        { verdict, summary: "Unitemized proposal", head: "a".repeat(40) },
+        ctx,
+      );
+      expect(result).toBe(
+        "error: invalid findings; findings: a complete review requires a findings array; no verdict recorded",
+      );
+      expect(latest).toEqual({ verdict: "approve", summary: "Last complete result", findings: [] });
+      expect(
+        buildReviewPostBody("Preserved report", parseVerdictInput({ verdict, summary: "Unitemized proposal" })!),
+      ).toContain("Review incomplete — findings not validated.");
+    },
+  );
+});
+
+describe("review restart cannot promote a rejected latest submission", () => {
+  it("retains last valid facts but does not recover them as the completed current review", () => {
+    const messages: ChatMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "valid",
+            name: "submit_verdict",
+            input: { verdict: "approve", summary: "Last valid facts", head: "a".repeat(40), findings: [] },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [{ type: "tool_result", toolUseId: "valid", content: "verdict recorded: approve (0 findings)" }],
+      },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "invalid",
+            name: "submit_verdict",
+            input: {
+              verdict: "request_changes",
+              summary: "An unresolved reported defect",
+              head: "a".repeat(40),
+              findings: [
+                {
+                  id: "review:1:F1",
+                  kind: "single",
+                  severity: "major",
+                  file: "src/x.ts",
+                  title: "The reported defect remains",
+                },
+              ],
+            },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "invalid",
+            content: "error: unknown prior finding review:1:F1; no verdict recorded",
+          },
+        ],
+      },
+    ];
+    expect({
+      historical: recordedVerdictFromTranscript(messages.slice(0, 2))?.summary,
+      current: recordedVerdictFromTranscript(messages)?.verdict ?? "incomplete",
+    }).toEqual({ historical: "Last valid facts", current: "incomplete" });
+  });
+});
+
+describe("three reported Minor findings remain incomplete after serialization refusal", () => {
+  it("does not turn rejected current-run references or an empty retry into a formal negative verdict", async () => {
+    const report =
+      "F1 Minor: follow-up recovery bypasses the guard. F2 Minor: decoded structured text exposes private bytes. F3 Minor: machine history is not fenced.";
+    const submissions: unknown[] = [];
+    let accepted: ReviewVerdict | undefined;
+    const ctx = {
+      executor: {},
+      onVerdict: (v: ReviewVerdict) => {
+        accepted = v;
+      },
+      onReviewSubmission: async (s: unknown) => {
+        submissions.push(s);
+      },
+    } as unknown as ToolContext;
+    const proposal = {
+      verdict: "request_changes",
+      summary: report,
+      head: "a".repeat(40),
+      findings: [1, 2, 3].map((number) => ({
+        id: `review:current-run:F${number}`,
+        kind: "single",
+        severity: "minor",
+        file: "src/x.ts",
+        title: `Reported boundary ${number} remains`,
+      })),
+    };
+    expect(await submitVerdictTool.run(proposal, ctx)).toContain("unknown prior finding");
+    expect(await submitVerdictTool.run({ ...proposal, findings: [] }, ctx)).toContain(
+      "changes requested requires validated findings",
+    );
+    const partial = parseVerdictInput({ ...proposal, findings: [] })!;
+    const body = buildReviewPostBody(report, partial);
+    expect({
+      headline: body.split("\n")[0],
+      report: body.includes(report),
+      verdict: accepted ?? "incomplete",
+      marker: JSON.parse(body.match(/<!-- switchboard:verdict (.*) -->/)![1]),
+    }).toEqual({
+      headline: "Review incomplete — findings not validated.",
+      report: true,
+      verdict: "incomplete",
+      marker: { verdict: "none" },
+    });
+    expect(submissions).toMatchObject([
+      { status: "pending", proposal },
+      { status: "rejected", stage: "reference", proposal },
+      { status: "pending", proposal: { findings: [] } },
+      { status: "rejected", stage: "input" },
+    ]);
+  });
+});
+
+describe("private review rejection projects a safe incomplete report", () => {
+  it("keeps the report and failure stage without publishing raw proposal diagnostics", () => {
+    const failure = reviewSubmissionFailure({
+      status: "rejected",
+      stage: "reference",
+      proposal: { summary: "private proposal bytes" },
+      reason: "private validator bytes",
+    });
+    const body = buildReviewPostBody("Authorized review report", undefined, undefined, failure);
+    expect(body.split("\n")[0]).toBe("Review incomplete — findings not validated.");
+    expect(body).toContain(
+      "**Validation:** The review contains finding references that were not issued by the current history.",
+    );
+    expect(body).toContain("Authorized review report");
+    expect(body).not.toContain("private");
+    expect(JSON.parse(body.match(/<!-- switchboard:verdict (.*) -->/)![1])).toEqual({ verdict: "none" });
+  });
+});
+
+describe("incomplete submission cannot publish stale approval credit", () => {
+  it("removes an older approval from the marker and every channel verbosity", () => {
+    const verdict: ReviewVerdict = {
+      verdict: "approve",
+      summary: "Earlier acceptance",
+      head: "a".repeat(40),
+      findings: [],
+    };
+    const failure = "The latest report is incomplete.";
+    const body = buildReviewPostBody("The current report remains.", verdict, undefined, failure);
+    expect(body.split("\n")[0]).toBe("Review incomplete — findings not validated.");
+    expect(JSON.parse(body.match(/<!-- switchboard:verdict (.*) -->/)![1])).toEqual({ verdict: "none" });
+    for (const verbosity of ["quiet", "verbose"] as const) {
+      const reply = buildReviewChannelReply({
+        answer: "The current report remains.",
+        verdict,
+        failure,
+        posted: { repo: "acme/api", number: 7 },
+        liveUrl: undefined,
+        verbosity,
+      });
+      expect(reply).toContain("Review incomplete — findings not validated.");
+      expect(reply).toContain("The current report remains.");
+      expect(reply).not.toContain("LGTM");
+    }
   });
 });

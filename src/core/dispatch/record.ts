@@ -259,6 +259,7 @@ export function reclaimedRunRecord(input: {
   };
   return assembleRunRecord({
     verdict,
+    ...(typeof saved.reviewIncomplete === "string" ? { reviewIncomplete: saved.reviewIncomplete } : {}),
     dispositions,
     handoff,
     researchBrief,
@@ -456,6 +457,7 @@ export function assembleRunRecord(input: {
    *  dispositions a fix round submitted (run-history item 2) — redacted HERE
    *  like the handoff. Each omitted when the run has none. */
   verdict?: ReviewVerdict;
+  reviewIncomplete?: string;
   reviewHead?: string;
   dispositions?: FindingDisposition[];
   /** How the review run's post-step ended (agent-review.md item 18) — the
@@ -583,6 +585,7 @@ export function assembleRunRecord(input: {
     ...(input.handoff !== undefined ? { handoff: redactHandoff(input.handoff) } : {}),
     ...(input.researchBrief !== undefined ? { researchBrief: input.researchBrief } : {}),
     ...(input.verdict !== undefined ? { verdict: redactVerdict(input.verdict) } : {}),
+    ...(input.reviewIncomplete !== undefined ? { reviewIncomplete: redactAndCap(input.reviewIncomplete, 600) } : {}),
     ...(input.reviewHead !== undefined ? { reviewHead: input.reviewHead } : {}),
     ...(input.dispositions !== undefined ? { dispositions: redactDispositions(input.dispositions) } : {}),
     ...(input.reviewPublication !== undefined ? { reviewPublication: structuredClone(input.reviewPublication) } : {}),
@@ -836,6 +839,7 @@ export interface FinishRecordContext {
   researchBrief?: ResearchBrief;
   /** The verdict a review run submitted and the head it reviewed; the dispositions a fix round submitted. */
   verdict?: ReviewVerdict;
+  reviewIncomplete?: string;
   reviewHead?: string;
   dispositions?: FindingDisposition[];
   /** How the review run's post-step ended (agent-review.md item 18), when it ran one. */
@@ -886,6 +890,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     handoff,
     researchBrief,
     verdict,
+    reviewIncomplete,
     reviewHead,
     dispositions,
     reviewPost,
@@ -927,6 +932,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           ...(handoff !== undefined ? { handoff } : {}),
           ...(researchBrief !== undefined ? { researchBrief } : {}),
           ...(verdict !== undefined ? { verdict } : {}),
+          ...(reviewIncomplete !== undefined ? { reviewIncomplete } : {}),
           ...(reviewHead !== undefined ? { reviewHead } : {}),
           ...(dispositions !== undefined ? { dispositions } : {}),
           ...(reviewPublication !== undefined ? { reviewPublication } : {}),
