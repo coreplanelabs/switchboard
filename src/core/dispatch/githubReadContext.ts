@@ -90,7 +90,7 @@ export function githubReadWithContext(
         if (!admissionHash) {
           publishHistory(ctx.agentName !== "orchestrator");
           return ctx.agentName === "orchestrator"
-            ? "GitHub result unavailable: current repository access could not be verified."
+            ? "error: GitHub result unavailable: current repository access could not be verified."
             : result;
         }
       }
@@ -119,7 +119,7 @@ export function githubReadWithContext(
         : githubRepositoryDependencies(repos);
       if (!isSourceResultReceipt(receipt) || context.status !== "known" || !(await input.commit(receipt, context))) {
         publishHistory(false);
-        return "GitHub result unavailable: its source context could not be durably recorded.";
+        return "error: GitHub result unavailable: its source context could not be durably recorded.";
       }
       publishHistory(true);
       return result;
