@@ -122,7 +122,7 @@ describe("current native execution read authority", () => {
             { repo: "acme/private", path: "private.ts" },
             { executor: {} as never, agentName: "review", github: { api, canWrite: () => false } },
           ),
-        ).toBe("github_file: GitHub timed out.");
+        ).toBe("error: github_file: GitHub timed out.");
       expect(JSON.stringify(result)).not.toMatch(/private|body|token/);
     },
   );

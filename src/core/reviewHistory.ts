@@ -1,5 +1,12 @@
 import type { PullReviewFeedback } from "../execution/githubApi.js";
-import { isFindingShape, parseVerdictInput, redactVerdict, type Finding, type ReviewVerdict } from "./reviewVerdict.js";
+import {
+  completeReviewVerdict,
+  isFindingShape,
+  parseVerdictInput,
+  redactVerdict,
+  type Finding,
+  type ReviewVerdict,
+} from "./reviewVerdict.js";
 import { normalizeHead } from "./reviewedHead.js";
 import { redactSecrets } from "./redact.js";
 import { mapStringLeaves } from "./prDescription.js";
@@ -29,6 +36,42 @@ export interface ReviewHistoryContext {
 }
 
 const VERDICT_MARKER = /^<!-- switchboard:verdict (\{[^\r\n]*\}) -->\r?$/gm;
+
+function markedReview(body: string): { marker: RegExpMatchArray; input: Record<string, unknown> } | undefined {
+  const marker = [...body.matchAll(VERDICT_MARKER)].at(-1);
+  const last = [...body.matchAll(/^<!-- switchboard:verdict/gm)].at(-1);
+  if (!marker || last?.index !== marker.index) {
+    if (body.includes("<!-- switchboard:verdict")) throw new Error("Invalid review history marker");
+    return undefined;
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(marker[1]!);
+  } catch {
+    throw new Error("Invalid review history marker JSON");
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid review history marker");
+  return { marker, input: raw as Record<string, unknown> };
+}
+
+/** Old incomplete reports remain context, but malformed typed evidence still refuses the read. */
+function historyVerdict(input: Record<string, unknown>): ReviewVerdict | undefined {
+  if (input.verdict === "none") return undefined;
+  const verdict = parseVerdictInput(input, { history: true });
+  if (
+    !verdict ||
+    verdict.droppedFindings?.length ||
+    (input.findings !== undefined && (!Array.isArray(input.findings) || !input.findings.every(isFindingShape)))
+  )
+    throw new Error("Invalid typed review history");
+  for (const [index, finding] of (verdict.findings ?? []).entries()) {
+    const original = (input.findings as Finding[])[index]!;
+    const caseIds = finding.cases?.flatMap((row) => (row.id ? [row.id] : [])) ?? [];
+    if (finding.id !== original.id || new Set(caseIds).size !== caseIds.length)
+      throw new Error("Invalid typed review history");
+  }
+  return verdict;
+}
 
 /** Legacy matrices get IDs in their recorded order. Appends never renumber existing cases. */
 export function withFindingCaseIds(finding: Finding): Finding {
@@ -90,10 +133,11 @@ export function materializeReviewFollowup(
  * or the serialized history document; only its text leaves are source text. */
 export function redactReviewHistoryBody(review: PullReviewFeedback): string {
   if (review.authorType !== "Bot" || review.state === "PENDING") return redactSecrets(review.body);
-  const marker = [...review.body.matchAll(VERDICT_MARKER)].at(-1);
-  if (!marker) return redactSecrets(review.body);
-  const raw = JSON.parse(marker[1]!);
-  const payload = raw.verdict === "none" ? mapStringLeaves(raw, redactSecrets) : redactVerdict(parseVerdictInput(raw)!);
+  const marked = markedReview(review.body);
+  if (!marked) return redactSecrets(review.body);
+  const { marker, input } = marked;
+  const verdict = historyVerdict(input);
+  const payload = verdict ? redactVerdict(verdict) : mapStringLeaves(input, redactSecrets);
   const envelope = `<!-- switchboard:verdict ${JSON.stringify(payload).replace(/[<>]/g, (c) => (c === "<" ? "\\u003c" : "\\u003e"))} -->`;
   return (
     redactSecrets(review.body.slice(0, marker.index)) +
@@ -112,29 +156,13 @@ export function outstandingReviewFindings(reviews: readonly PullReviewFeedback[]
     if (ids.has(review.id)) throw new Error("Duplicate review identity in history");
     ids.add(review.id);
     if (review.authorType !== "Bot" || review.state === "PENDING") continue;
-    const marker = [...review.body.matchAll(VERDICT_MARKER)].at(-1);
-    if (!marker) {
-      if (review.body.includes("<!-- switchboard:verdict")) throw new Error("Invalid review history marker");
-      continue;
-    }
-    let raw: Record<string, unknown>;
-    try {
-      raw = JSON.parse(marker[1]!);
-    } catch {
-      throw new Error("Invalid review history marker JSON");
-    }
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid review history marker");
-    // A no-verdict post has no typed finding or closure authority.
-    if (raw.verdict === "none") continue;
-    const verdict = parseVerdictInput(raw);
-    if (
-      !verdict ||
-      verdict.droppedFindings?.length ||
-      (raw.findings !== undefined && (!Array.isArray(raw.findings) || !raw.findings.every(isFindingShape)))
-    )
-      throw new Error("Invalid typed review history");
+    const marked = markedReview(review.body);
+    if (!marked) continue;
+    const verdict = historyVerdict(marked.input);
+    if (!verdict) continue;
     if (!verdict.head || verdict.head !== normalizeHead(review.head))
       throw new Error("Review history marker head disagrees with its native review head");
+    if (!completeReviewVerdict(verdict)) continue;
     const repeated = new Set<string>();
     for (const finding of verdict.findings ?? []) {
       const key = known.get(finding.id) === review.author ? finding.id : `review:${review.id}:${finding.id}`;

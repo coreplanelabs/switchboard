@@ -11,6 +11,9 @@ import type { RunnableTool } from "../../tools/runnableTool.js";
 import { UncertainStoreError } from "../storeFailure.js";
 import { PiBridge } from "./pi/bridge.js";
 import { OpenCodeBridge } from "./opencode/bridge.js";
+import { GITHUB_READ_TOOLS, GITHUB_ISSUE_WRITE_TOOLS, githubFileTool } from "../../tools/github.js";
+import { InMemoryGithubApi, RestGithubApi } from "../../execution/githubApi.js";
+import { githubReadWithContext } from "../dispatch/githubReadContext.js";
 
 function fixture(tools: RunnableTool[] = [submitVerdictTool], previous?: unknown) {
   const saved: unknown[] = [];
@@ -58,6 +61,84 @@ const badVerdict = {
 };
 
 describe("run-owned tool recovery", () => {
+  it.each(["source checkpoint", "current access"] as const)(
+    "reports a refused GitHub %s as failure while keeping successful source text readable",
+    async (failure) => {
+      const api = new InMemoryGithubApi({ "acme/api": { files: { "a.ts": "error: source text, not a failed read" } } });
+      const f = fixture([githubFileTool]);
+      let reads = 0;
+      f.harness.toolContext.github = {
+        api,
+        canWrite: () => false,
+        readableRepos: async () => (failure === "current access" && ++reads % 2 === 0 ? [] : api.listRepos()),
+      };
+      const input = { repo: "acme/api", path: "a.ts" };
+      expect(await f.call("success", "github_file", input)).toEqual({
+        isError: false,
+        content: [
+          {
+            type: "text",
+            text: "https://github.com/acme/api/blob/main/a.ts (37 bytes):\n\nerror: source text, not a failed read",
+          },
+        ],
+      });
+      f.harness.toolContext.agentName = "orchestrator";
+      f.harness.tools = [
+        githubReadWithContext(githubFileTool, { runId: "r", commit: async () => failure !== "source checkpoint" }),
+      ];
+      const expected =
+        failure === "source checkpoint"
+          ? "error: GitHub result unavailable: its source context could not be durably recorded."
+          : "error: GitHub result unavailable: current repository access could not be verified.";
+      for (const id of ["first", "second"])
+        expect(await f.call(id, "github_file", input)).toEqual({
+          isError: true,
+          content: [{ type: "text", text: expected }],
+        });
+      expect(f.bearers.consumeTurn("r")).toEqual({
+        ok: false,
+        reason: "tool_recovery",
+        stop: { tool: "github_file", attempts: 2, reason: "repeated_failure" },
+      });
+    },
+  );
+
+  it.each([...GITHUB_READ_TOOLS, ...GITHUB_ISSUE_WRITE_TOOLS].map((tool) => [tool.name, tool] as const))(
+    "reports %s API failures and blocks a repeated attempt before another model call",
+    async (name, tool) => {
+      const f = fixture([tool]);
+      f.harness.toolContext.github = {
+        api: new RestGithubApi({
+          token: async () => "test-token",
+          fetch: async () => new Response('{"message":"Forbidden"}', { status: 403 }),
+        }),
+        canWrite: () => true,
+      };
+      const input = {
+        repo: "acme/api",
+        number: 1,
+        path: "a.ts",
+        query: "lost",
+        title: "fix",
+        body: "evidence",
+        state: "closed",
+        run: "1",
+        job: "1",
+      };
+      const result = await f.call("first", name, input);
+      expect(result).toMatchObject({
+        isError: true,
+        content: [{ type: "text", text: expect.stringContaining("error:") }],
+      });
+      await f.call("second", name, input);
+      expect(f.bearers.consumeTurn("r")).toEqual({
+        ok: false,
+        reason: "tool_recovery",
+        stop: { tool: name, attempts: 2, reason: "repeated_failure" },
+      });
+    },
+  );
+
   it("keeps definitive command-budget refusals out of task failure recovery", async () => {
     const f = fixture([runCheckTool]);
     const bridge = new PiBridge({ clock: () => 1000, emit: () => {}, recovery: f.recovery });

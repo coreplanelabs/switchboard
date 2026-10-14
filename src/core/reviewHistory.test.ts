@@ -30,6 +30,70 @@ const review = (id: number, verdict: Partial<ReviewVerdict> = {}, author = "revi
 });
 
 describe("review finding history", () => {
+  it.each([{ verdict: "request_changes", findings: [] }, { verdict: "request_changes" }, { verdict: "approve" }])(
+    "reads legacy incomplete markers as context without closing valid findings (%j)",
+    (legacy) => {
+      const row = {
+        ...review(2),
+        body: `Legacy report\n<!-- switchboard:verdict ${JSON.stringify({
+          ...legacy,
+          head,
+          resolutions: [{ findingId: "review:1:F1", disposition: "fixed", note: "claimed fixed" }],
+        })} -->`,
+      };
+      const later = review(3, { findings: [{ ...finding, title: "Another unresolved write" }] });
+      for (const body of [row.body, redactReviewHistoryBody(row)]) {
+        expect(outstandingReviewFindings([review(1), { ...row, body }, later])).toMatchObject([
+          { finding: { id: "review:1:F1", title: "Rollback loses a concurrent link" } },
+          { finding: { id: "review:3:F1", title: "Another unresolved write" } },
+        ]);
+      }
+      expect(() => outstandingReviewFindings([{ ...row, head: "b".repeat(40) }, later])).toThrow(/head/);
+    },
+  );
+
+  it.each([null, "missing", [{ id: "F1" }]])(
+    "refuses malformed historical findings rather than skipping them (%j)",
+    (findings) => {
+      const row = {
+        ...review(1),
+        body: `<!-- switchboard:verdict ${JSON.stringify({ verdict: "request_changes", head, findings })} -->`,
+      };
+      expect(() => outstandingReviewFindings([row, review(2)])).toThrow("Invalid typed review history");
+      expect(() => redactReviewHistoryBody(row)).toThrow("Invalid typed review history");
+    },
+  );
+
+  it("refuses a malformed final marker instead of accepting an earlier valid marker", () => {
+    const row = review(1);
+    for (const suffix of ["<!-- switchboard:verdict {", "<!-- switchboard:verdict {broken} -->"]) {
+      const broken = { ...row, body: `${row.body}\n${suffix}` };
+      expect(() => outstandingReviewFindings([broken])).toThrow(/Invalid review history marker/);
+      expect(() => redactReviewHistoryBody(broken)).toThrow(/Invalid review history marker/);
+    }
+    expect(outstandingReviewFindings([row])).toMatchObject([{ finding: { id: "review:1:F1" } }]);
+  });
+
+  it("refuses changed finding identities and duplicate case identities before redaction can normalize them", () => {
+    for (const invalid of [
+      { ...finding, id: " F1 " },
+      {
+        ...finding,
+        cases: [
+          { id: "C1", scenario: "First write", expected: "Keep it" },
+          { id: "C1", scenario: "Other write", expected: "Keep both" },
+        ],
+      },
+    ]) {
+      const row = review(1, { findings: [invalid] });
+      expect(() => outstandingReviewFindings([row])).toThrow("Invalid typed review history");
+      expect(() => redactReviewHistoryBody(row)).toThrow("Invalid typed review history");
+    }
+    expect(outstandingReviewFindings([review(1)])[0]?.finding.cases).toEqual([
+      { id: "C1", scenario: "Two writes have the same timestamp", expected: "Keep the newer write" },
+    ]);
+  });
+
   it.each(["-->", "--!>", "<script>escaped</script>"])(
     "escapes JSON angle brackets in both published and redacted verdict markers (%s)",
     (text) => {

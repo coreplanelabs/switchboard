@@ -149,7 +149,7 @@
     "src/core/references/unitStatusReference.ts": "a7d07aa188ec78fcfd8763a3d6f1ae3a814e5aa50f3c8d55edc085a3b9203084",
     "src/core/research/brief.ts": "aad30e37d5be5980b597cd2889979f1a5a4dade2b56ca5c707bbf158ba5136fb",
     "src/core/reviewPublication.ts": "1673180bf13218417dd9a6ef19dbca7c6e716ad005cfda7aefabb20485f8c92d",
-    "src/core/reviewVerdict.ts": "1de997067075fba54756b024cdbdc0932debc07408224a09f5fe18ae38c87ce2",
+    "src/core/reviewVerdict.ts": "68bdb79e0cc26f7acd539ba26deba746affb08211f3cb787e1adab3055b03f21",
     "src/core/reviewedHead.ts": "943f8078a2e0eff3ec98ca7330c29d7da72c2af702b003589f0c53d6c610652c",
     "src/core/runEvents.ts": "919ce394d27fbba8187971bcb41b8917d2dfb0782b9f899c98343a97b06b43f8",
     "src/core/runFriction.ts": "2d002c82861ae52f0b727ff281a4b26dcebcafc9e0b5894a9f85a50848d0d9b0",

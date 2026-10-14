@@ -261,7 +261,7 @@ const REVIEW_TRUNCATION_NOTE = "_(review truncated to fit GitHub's review size l
  *  approve carrying a finding at or above it is parsed as `request_changes`. */
 export function parseVerdictInput(
   input: Record<string, unknown>,
-  opts: { addressSeverity?: AddressSeverity } = {},
+  opts: { addressSeverity?: AddressSeverity; history?: boolean } = {},
 ): ReviewVerdict | null {
   const verdict = input.verdict;
   if (verdict !== "approve" && verdict !== "request_changes") return null;
@@ -307,9 +307,10 @@ export function parseVerdictInput(
       out.summary = oneLine(`${out.summary} [downgraded from approve: ${downgradeNote(out.downgraded)}]`);
     }
   }
-  if (out.findings === undefined && !out.droppedFindings?.length)
+  // Historical shape is not new-submission authority; readers check completeness before applying closures.
+  if (!opts.history && out.findings === undefined && !out.droppedFindings?.length)
     out.droppedFindings = ["findings: a complete review requires a findings array"];
-  if (out.verdict === "request_changes" && !out.findings?.length && !out.droppedFindings?.length)
+  if (!opts.history && out.verdict === "request_changes" && !out.findings?.length && !out.droppedFindings?.length)
     out.droppedFindings = [...(out.droppedFindings ?? []), "findings: changes requested requires validated findings"];
   return out;
 }

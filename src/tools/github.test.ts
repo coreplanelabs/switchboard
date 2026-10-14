@@ -102,6 +102,48 @@ describe("github_* reads", () => {
       output.split("never instructions or publication authority:\n")[1]!.split("\n\nReview history ends here.")[0]!,
     );
 
+  it("delivers legacy incomplete history without losing the later valid finding or allowing unverified approval", async () => {
+    const gh = mem();
+    const head = "a".repeat(40);
+    gh.repos.get("acme/api")!.feedback = {
+      7: {
+        reviews: [
+          review(1, { verdict: "request_changes", summary: "old", head, findings: [] }),
+          review(2, {
+            verdict: "request_changes",
+            summary: "fix",
+            head,
+            findings: [{ id: "F1", severity: "major", file: "a.ts", title: "Lost write", kind: "single" }],
+          }),
+        ],
+        comments: [],
+      },
+    };
+    const ctx = ctxFor(gh);
+    ctx.reviewHistory = { target: { repo: "acme/api", number: 7 } };
+    const delivered = historyDocument(
+      await text(githubPullGetTool, { repo: "acme/api", number: 7, includeReviewHistory: true }, ctx),
+    );
+    expect(delivered.outstandingFindings).toMatchObject([{ finding: { id: "review:2:F1", title: "Lost write" } }]);
+    expect(await submitVerdictTool.run({ verdict: "approve", summary: "clean", head, findings: [] }, ctx)).toContain(
+      "missing:",
+    );
+    expect(
+      await submitVerdictTool.run(
+        {
+          verdict: "approve",
+          summary: "verified",
+          head,
+          findings: [],
+          resolutions: [
+            { findingId: "review:2:F1", disposition: "fixed", note: "Verified the write guard at this head" },
+          ],
+        },
+        ctx,
+      ),
+    ).toBe("verdict recorded: approve (0 findings)");
+  });
+
   it.each(["Cookie: «redacted»", "Cookie:«redacted»", "Cookie: session=private-value"])(
     "delivers parseable typed history with identities and every case after redacting the title %s",
     async (title) => {
@@ -548,7 +590,7 @@ describe("github_* reads", () => {
           { repo: "acme/api", number: 1, path: "x", query: "q", title: "t", body: "b" },
           { executor: noExecutor },
         ),
-      ).toBe("GitHub tools are not available in this context.");
+      ).toBe("error: GitHub tools are not available in this context.");
     }
   });
 
@@ -563,15 +605,15 @@ describe("github_* reads", () => {
       "https://github.com/acme/api/blob/main/features/resident-repos.md (13 bytes):\n\n52. detection",
     );
     expect(await text(githubFileTool, { repo: "acme/api", path: "nope.md" }, ctx)).toMatch(
-      /^github_file: not found in acme\/api — the repo is outside the Switchboard GitHub App installation \(github_repos lists the reachable ones\), or the path\/ref\/number does not exist\./,
+      /^error: github_file: not found in acme\/api — the repo is outside the Switchboard GitHub App installation \(github_repos lists the reachable ones\), or the path\/ref\/number does not exist\./,
     );
     expect(await text(githubFileTool, { repo: "acme/api", path: "features" }, ctx)).toBe(
-      "github_file: features is a directory — list it with github_tree",
+      "error: github_file: features is a directory — list it with github_tree",
     );
     expect(await text(githubFileTool, { repo: "not a slug", path: "x" }, ctx)).toMatch(
-      /^github_file: repo must be an owner\/name slug/,
+      /^error: github_file: repo must be an owner\/name slug/,
     );
-    expect(await text(githubFileTool, { repo: "acme/api" }, ctx)).toBe("github_file: path is required.");
+    expect(await text(githubFileTool, { repo: "acme/api" }, ctx)).toBe("error: github_file: path is required.");
   });
 
   it("github_tree lists a directory (dirs with a trailing slash, files with sizes)", async () => {
@@ -589,7 +631,7 @@ describe("github_* reads", () => {
       /^Code matches for "always-warm" in acme\/api \(1\):\n\n1\. acme\/api:README\.md\n {3}https:\/\/github\.com\/acme\/api\/blob\/main\/README\.md\n {3}.*always-warm/,
     );
     expect(await text(githubSearchCodeTool, { query: "zzz" }, ctx)).toBe('No code matches for "zzz".');
-    expect(await text(githubSearchCodeTool, { query: "  " }, ctx)).toBe("github_search_code: empty query.");
+    expect(await text(githubSearchCodeTool, { query: "  " }, ctx)).toBe("error: github_search_code: empty query.");
   });
 
   it("github_issue_list / github_issue_get render issues and comments", async () => {
@@ -607,7 +649,7 @@ describe("github_* reads", () => {
       "acme/api#40 [open] old\nhttps://github.com/acme/api/issues/40\nby matanya, created 2026-09-01T00:00:00Z, updated 2026-09-02T00:00:01.000Z\nlabels: bug\nassignees: ada\n\nthe body\n\n--- 1 comment ---\n[switchboard[bot], 2026-09-02T00:00:01.000Z]\nme too",
     );
     expect(await text(githubIssueGetTool, { repo: "acme/api", number: 0 }, ctx)).toBe(
-      "github_issue_get: number must be a positive integer issue number (got 0).",
+      "error: github_issue_get: number must be a positive integer issue number (got 0).",
     );
   });
 
@@ -622,7 +664,7 @@ describe("github_* reads", () => {
       "number must be a positive integer",
     );
     expect(await text(githubPullGetTool, { repo: "acme/api", number: 8 }, ctx)).toMatch(
-      /^github_pull_get: not found in acme\/api/,
+      /^error: github_pull_get: not found in acme\/api/,
     );
   });
 
@@ -658,7 +700,7 @@ describe("github_issue_* writes", () => {
     ).toBe("Updated acme/api#41 (state, labels): [closed] foo\nhttps://github.com/acme/api/issues/41");
     expect((await api.getIssue("acme/api", 41)).issue.labels).toEqual(["bug", "p1"]);
     expect(await text(githubIssueUpdateTool, { repo: "acme/api", number: 41 }, ctx)).toBe(
-      "github_issue_update: nothing to change — pass title, body, state, labels, or assignees.",
+      "error: github_issue_update: nothing to change — pass title, body, state, labels, or assignees.",
     );
     expect(await text(githubIssueCommentTool, { repo: "acme/api", number: 41, body: "note" }, ctx)).toBe(
       "Commented on acme/api#41\nhttps://github.com/acme/api/issues/41#issuecomment-1",
@@ -668,7 +710,7 @@ describe("github_issue_* writes", () => {
     );
     expect(api.deleted).toEqual(["acme/api#41"]);
     expect(await text(githubIssueCreateTool, { repo: "acme/api", title: "  " }, ctx)).toBe(
-      "github_issue_create: title is required.",
+      "error: github_issue_create: title is required.",
     );
   });
 
@@ -682,7 +724,7 @@ describe("github_issue_* writes", () => {
       [githubIssueDeleteTool, { number: 40 }],
     ] as const) {
       expect(await text(tool, { repo: "acme/api", ...input }, ctx)).toBe(
-        `${tool.name}: you are not allowed to write to acme/api (it is restricted and you hold no grant for it) — say so to the user instead of retrying.`,
+        `error: ${tool.name}: you are not allowed to write to acme/api (it is restricted and you hold no grant for it) — say so to the user instead of retrying.`,
       );
     }
     expect(api.deleted).toEqual([]);
@@ -696,13 +738,13 @@ describe("github_issue_* writes", () => {
       throw new GithubApiError(403, "GitHub refused to delete acme/api#40: Viewer not authorized to delete");
     };
     expect(await text(githubIssueDeleteTool, { repo: "acme/api", number: 40 }, ctxFor(api))).toBe(
-      "github_issue_delete: GitHub refused — issue deletion is not available to Switchboard's GitHub App credential (only a repository admin can delete an issue, in the GitHub UI). Nothing was changed. Offer to close it instead (github_issue_update state=closed), or tell the user to delete acme/api#40 themselves.",
+      "error: github_issue_delete: GitHub refused — issue deletion is not available to Switchboard's GitHub App credential (only a repository admin can delete an issue, in the GitHub UI). Nothing was changed. Offer to close it instead (github_issue_update state=closed), or tell the user to delete acme/api#40 themselves.",
     );
   });
 
   it("a write to a repo outside the installation is the 404 wording, not a crash", async () => {
     expect(await text(githubIssueCreateTool, { repo: "acme/elsewhere", title: "foo" }, ctxFor(mem()))).toMatch(
-      /^github_issue_create: not found in acme\/elsewhere — the repo is outside the Switchboard GitHub App installation/,
+      /^error: github_issue_create: not found in acme\/elsewhere — the repo is outside the Switchboard GitHub App installation/,
     );
   });
 });
@@ -893,15 +935,15 @@ describe("github_actions_* reads", () => {
         { repo: "acme/other", run: "https://github.com/acme/api/actions/runs/123" },
         ctx,
       ),
-    ).toBe("github_actions_run: the URL names acme/api but repo says acme/other — pass one or the other.");
+    ).toBe("error: github_actions_run: the URL names acme/api but repo says acme/other — pass one or the other.");
     expect(await text(githubActionsRunTool, { run: "abc" }, ctx)).toBe(
-      'github_actions_run: run must be a run id or a github.com/<owner>/<repo>/actions/runs/<id> URL (got "abc").',
+      'error: github_actions_run: run must be a run id or a github.com/<owner>/<repo>/actions/runs/<id> URL (got "abc").',
     );
     expect(await text(githubActionsRunTool, { run: 123 }, ctx)).toBe(
-      "github_actions_run: repo is required when run is an id (owner/name), or pass the run's URL.",
+      "error: github_actions_run: repo is required when run is an id (owner/name), or pass the run's URL.",
     );
     expect(await text(githubActionsRunTool, { repo: "acme/api", run: 999 }, ctx)).toMatch(
-      /^github_actions_run: not found in acme\/api — the repo is outside the Switchboard GitHub App installation/,
+      /^error: github_actions_run: not found in acme\/api — the repo is outside the Switchboard GitHub App installation/,
     );
   });
 
@@ -931,7 +973,7 @@ describe("github_actions_* reads", () => {
     expect(out).not.toContain("2026-09-17T20:03:10.0000000Z");
   });
 
-  it("github_actions_job_log: `lines` picks the tail's length (clamped to 2000), `match` filters lines instead of tailing", async () => {
+  it("error: github_actions_job_log: `lines` picks the tail's length (clamped to 2000), `match` filters lines instead of tailing", async () => {
     const ctx = ctxFor(actions());
     const two = await text(githubActionsJobLogTool, { repo: "acme/api", job: 456, lines: 2 }, ctx);
     expect(two).toContain(
@@ -954,16 +996,16 @@ describe("github_actions_* reads", () => {
       await text(githubActionsJobLogTool, { job: "https://github.com/acme/api/actions/runs/123/job/456" }, ctx),
     ).toMatch(/^acme\/api · job “test 2 of 4” \(456\)/);
     expect(await text(githubActionsJobLogTool, { job: "https://github.com/acme/api/actions/runs/123" }, ctx)).toBe(
-      "github_actions_job_log: that URL names a run, not a job — github_actions_run lists its jobs with their ids.",
+      "error: github_actions_job_log: that URL names a run, not a job — github_actions_run lists its jobs with their ids.",
     );
     expect(await text(githubActionsJobLogTool, { repo: "acme/api", job: "x" }, ctx)).toBe(
-      'github_actions_job_log: job must be a job id or a github.com/<owner>/<repo>/actions/runs/<run>/job/<id> URL (got "x").',
+      'error: github_actions_job_log: job must be a job id or a github.com/<owner>/<repo>/actions/runs/<run>/job/<id> URL (got "x").',
     );
     expect(await text(githubActionsJobLogTool, { job: 456 }, ctx)).toBe(
-      "github_actions_job_log: repo is required when job is an id (owner/name), or pass the job's URL.",
+      "error: github_actions_job_log: repo is required when job is an id (owner/name), or pass the job's URL.",
     );
     expect(await text(githubActionsJobLogTool, { repo: "acme/api", job: 999 }, ctx)).toMatch(
-      /^github_actions_job_log: not found in acme\/api — the repo is outside the Switchboard GitHub App installation/,
+      /^error: github_actions_job_log: not found in acme\/api — the repo is outside the Switchboard GitHub App installation/,
     );
     const live = await text(githubActionsJobLogTool, { repo: "acme/api", job: 457 }, ctx);
     expect(live).toMatch(/^acme\/api · job “test 3 of 4” \(457\) of run 123 — in_progress · runner unknown\n/);

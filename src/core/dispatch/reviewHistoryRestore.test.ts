@@ -88,6 +88,47 @@ function fixture() {
 }
 
 describe("review history restoration from canonical results", () => {
+  it("restores legacy incomplete history while retaining the later finding and requiring its closure", async () => {
+    const f = fixture();
+    const row = {
+      author: "review[bot]",
+      authorType: "Bot",
+      head: A,
+      state: "COMMENTED",
+      submittedAt: "2026-01-01T00:00:00Z",
+    } as const;
+    f.repo.feedback![7]!.reviews.push(
+      { ...row, id: 1, body: `<!-- switchboard:verdict {"verdict":"request_changes","head":"${A}","findings":[]} -->` },
+      {
+        ...row,
+        id: 2,
+        body: buildReviewPostBody("Lost write", {
+          verdict: "request_changes",
+          summary: "fix",
+          head: A,
+          findings: [{ id: "F1", severity: "major", file: "a.ts", title: "Lost write", kind: "single" }],
+        }),
+      },
+    );
+    await f.read();
+    const next = f.resumed();
+    await f.restore(next);
+    expect(next.reviewHistory!.snapshot).toMatchObject({
+      head: A,
+      findings: [{ finding: { id: "review:2:F1", title: "Lost write" } }],
+    });
+    expect(await submitVerdictTool.run(verdict, next)).toContain("missing:");
+    expect(
+      await submitVerdictTool.run(
+        {
+          ...verdict,
+          resolutions: [{ findingId: "review:2:F1", disposition: "fixed", note: "Verified write guard at this head" }],
+        },
+        next,
+      ),
+    ).toBe("verdict recorded: approve (0 findings)");
+  });
+
   it("accepts a resumed verdict after reconstructing complete unchanged recorded history without external reads", async () => {
     const f = fixture();
     await f.read();
