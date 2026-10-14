@@ -1467,7 +1467,11 @@ export async function dispatch(
           }),
         );
         if (execution.kind === "answered")
-          return operatorEvent?.outcome === "non_decision" ? { status: "failed" } : ended;
+          return operatorEvent?.outcome === "non_decision" ||
+            operatorEvent?.refusalCause === "timeout" ||
+            operatorEvent?.refusalCause === "provider"
+            ? { status: "failed" }
+            : ended;
         // A command bind that ran before the preset already carries the
         // decision's event on its record: the agent run does not repeat it.
         if (execution.kind !== "fold" && execution.carried) operatorEvent = undefined;

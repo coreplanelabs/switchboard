@@ -150,7 +150,8 @@ describe("closed candidate smoke loop diagnostic", () => {
     const off = await execute(false),
       on = await execute(true);
     const { smokeDiagnostic, ...ordinary } = on.result;
-    expect(ordinary).toEqual(off.result);
+    expect(ordinary).toEqual({ ...off.result, telemetry: { ...off.result.telemetry, id: expect.any(String) } });
+    expect(ordinary.telemetry?.id).not.toBe(off.result.telemetry?.id);
     expect(on.prompts).toEqual(off.prompts);
     expect(on.calls).toBe(off.calls);
     expect(smokeDiagnostic?.lastCommand).toEqual({ category: "read" });
@@ -283,7 +284,8 @@ describe("closed candidate smoke loop diagnostic", () => {
       const off = await execute(false),
         on = await execute(true);
       const { smokeDiagnostic, ...ordinary } = on.answer;
-      expect(ordinary).toEqual(off.answer);
+      expect(ordinary).toEqual({ ...off.answer, telemetry: { ...off.answer.telemetry, id: expect.any(String) } });
+      expect(ordinary.telemetry?.id).not.toBe(off.answer.telemetry?.id);
       expect(on.prompts).toEqual(off.prompts);
       expect(on.calls).toBe(off.calls);
       expect(off.answer).not.toHaveProperty("smokeDiagnostic");

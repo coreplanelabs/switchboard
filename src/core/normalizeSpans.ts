@@ -1,3 +1,4 @@
+import { routingPhaseSpans } from "./routingTelemetry.js";
 import { isSpanRecord, type RunEvent, type SpanEndEvent, type SpanStartEvent } from "./runEvents.js";
 import type { LossInterval } from "./trace/partition.js";
 import type { SpanRecord } from "./trace/types.js";
@@ -73,11 +74,24 @@ export function normalizeSpans(events: readonly RunEvent[]): RunEvent[] {
   }
 
   const out: RunEvent[] = [];
+  const existingSpanIds = new Set(events.filter(isSpanRecord).map((event) => event.spanId));
   // A call's synthesized start, keyed by callId, until its result closes it.
   const openCalls = new Map<string, { spanId: string; startedAt: number }>();
 
   events.forEach((e, index) => {
     switch (e.type) {
+      case "operator": {
+        // Routing finishes before an agent run exists. Its bounded phase
+        // receipts are sufficient to recover real intervals, without guessing
+        // model time from a wall-clock gap or counting the same interval twice.
+        for (const span of routingPhaseSpans(e.telemetry)) {
+          if (existingSpanIds.has(span.spanId)) continue;
+          out.push(span);
+          existingSpanIds.add(span.spanId);
+        }
+        out.push(e);
+        return;
+      }
       case "tool_call": {
         const callId = e.callId;
         if (callId === undefined || e.at === undefined || toolSpanCallIds.has(callId)) {
@@ -249,6 +263,10 @@ export function createLossTracker(): LossTracker {
   > = [];
   return {
     push(e) {
+      if (e.type === "operator" && e.telemetry?.lostInterval) {
+        const { from, to } = e.telemetry.lostInterval;
+        if (Number.isFinite(from) && Number.isFinite(to) && to >= from) entries.push({ kind: "note", from, to });
+      }
       if (!first) {
         first = { seq: e.seq ?? 1, at: e.at };
       } else if (prev && e.seq !== undefined && prev.seq !== undefined && e.seq > prev.seq + 1) {

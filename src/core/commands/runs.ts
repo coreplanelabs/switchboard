@@ -156,10 +156,31 @@ function wrapProviderFailure<T extends ProviderFailureDetails>(details: T): T {
   };
 }
 
-function wrapOperator<T extends { providerFailureDetails?: ProviderFailureDetails }>(operator: T): T {
-  return operator.providerFailureDetails
-    ? { ...operator, providerFailureDetails: wrapProviderFailure(operator.providerFailureDetails) }
-    : operator;
+function wrapOperator<
+  T extends {
+    providerFailureDetails?: ProviderFailureDetails;
+    telemetry?: import("../routingTelemetry.js").RoutingTelemetry;
+  },
+>(operator: T): T {
+  return {
+    ...operator,
+    ...(operator.providerFailureDetails
+      ? { providerFailureDetails: wrapProviderFailure(operator.providerFailureDetails) }
+      : {}),
+    ...(operator.telemetry
+      ? {
+          telemetry: {
+            ...operator.telemetry,
+            steps: operator.telemetry.steps.map((step) => ({
+              ...step,
+              ...(step.question === undefined ? {} : { question: wrapUntrusted(step.question) }),
+              ...(step.proposal === undefined ? {} : { proposal: wrapUntrusted(step.proposal) }),
+              ...(step.validation === undefined ? {} : { validation: wrapUntrusted(step.validation) }),
+            })),
+          },
+        }
+      : {}),
+  };
 }
 
 function wrapStorageException(

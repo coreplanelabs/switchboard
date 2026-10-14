@@ -22,8 +22,8 @@ import type { SpanRecord } from "./trace/types.js";
 //
 // Every duration comes from ONE span set: the stream normalized through
 // `normalizeSpans` (a tool pair whose twin span the record budget dropped gets
-// it back) and paired by `spansFromEvents`. Model time is the sum of the
-// `model.turn` spans, tool time the sum of the `tool.*` spans, and each timed
+// it back) and paired by `spansFromEvents`. Model time is the union of the
+// `model.turn` intervals, tool time the sum of the `tool.*` spans, and each timed
 // finding carries the duration of the span it is about — so a tool-denominated
 // finding is a summand of tool time and a slow turn of model time, and no
 // share can exceed 100 %. A stream with no spans (a hand-written capture, a
@@ -120,9 +120,8 @@ export interface FrictionFinding {
 export interface CategoryTotals {
   count: number;
   /** The category's attributed time: the sum of its findings' `durationMs` for
-   *  the tool-denominated categories and `slow_model_turn` (whose turns are
-   *  disjoint), the union of its findings' intervals for the other
-   *  run-denominated ones; 0 without timings. */
+   *  the tool-denominated categories, the union of its findings' intervals
+   *  for every run-denominated category; 0 without timings. */
   durationMs: number;
 }
 
@@ -350,10 +349,11 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   // before that event's own findings (a turn is over before its tool starts).
   const turnFindingsAt = new Map<number, FrictionFinding[]>();
   let modelTimeMs: number | undefined;
+  const modelIntervals: Array<{ start: number; end: number }> = [];
   for (const s of turnSpans) {
     const durationMs = durationOfSpan(s);
     if (durationMs === undefined) continue;
-    modelTimeMs = (modelTimeMs ?? 0) + durationMs;
+    modelIntervals.push({ start: s.startedAt, end: s.startedAt + durationMs });
     if (durationMs < slowModelTurnMs) continue;
     const anchor = anchorOf.get(s.spanId) ?? events.length - 1;
     const produced = events[producedOf.get(s.spanId) ?? anchor];
@@ -379,6 +379,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     };
     turnFindingsAt.set(anchor, [...(turnFindingsAt.get(anchor) ?? []), finding]);
   }
+  if (modelIntervals.length > 0) modelTimeMs = unionMs(modelIntervals);
   const flushTurns = (index: number) => {
     const list = turnFindingsAt.get(index);
     if (list) {
@@ -418,6 +419,23 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
     // the runner's routes, not the model) and the router's route are published
     // by the dispatcher/pipeline outside the model loop entirely. Counting any
     // of them would distort the story.
+    if (ev.type === "operator") {
+      const timeout =
+        ev.reason === "operator_timeout" ||
+        ev.refusalCause === "timeout" ||
+        (ev.outcome === "non_decision" && ev.telemetry?.timeout !== undefined);
+      if (timeout || ev.outcome === "non_decision" || ev.refusalCause === "provider") {
+        const phase = ev.telemetry?.timeout;
+        findings.push({
+          category: timeout ? "budget_hit" : "infra_failure",
+          severity: "high",
+          summary: timeout
+            ? `routing deadline expired${phase ? ` during ${phase.phase} (step ${phase.step})` : ""}`
+            : `routing failed: ${ev.reason}`,
+          eventIndex: index,
+        });
+      }
+    }
     if (
       ev.type === "skill_use" ||
       ev.type === "artifact" ||
@@ -676,9 +694,10 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
   for (const f of findings) byCategory[f.category].count++;
   for (const c of FRICTION_CATEGORIES) {
     const own = findings.filter((f) => f.category === c);
-    // Turns are disjoint (one loop runs at a time), so their sum is their union.
+    // Follow-up routing can overlap its owner's agent turn. Run-denominated
+    // friction claims each observed wall-clock instant only once.
     byCategory[c].durationMs =
-      DENOMINATOR_OF[c] === "run" && c !== "slow_model_turn"
+      DENOMINATOR_OF[c] === "run"
         ? unionMs(own.flatMap((f) => (f.interval ? [f.interval] : [])))
         : own.reduce((sum, f) => sum + (f.durationMs ?? 0), 0);
   }

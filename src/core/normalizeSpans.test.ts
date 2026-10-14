@@ -24,6 +24,46 @@ const spans = (events: RunEvent[]) => events.filter((e) => e.type === "span_star
 const withSeq = (events: RunEvent[]): RunEvent[] => events.map((e, i) => ({ ...e, seq: i + 1 }));
 
 describe("normalizeSpans — the twin rule", () => {
+  it("reconstructs routing phase intervals once across repeated normalization", () => {
+    const event: RunEvent = {
+      type: "operator",
+      mode: "on",
+      outcome: "non_decision",
+      reason: "operator_timeout",
+      telemetry: {
+        schema: 1,
+        startedAt: 1_000,
+        deadlineAt: 61_000,
+        finishedAt: 61_000,
+        steps: [
+          {
+            index: 1,
+            phase: "context",
+            startedAt: 1_000,
+            finishedAt: 11_000,
+            durationMs: 10_000,
+            remainingMs: 50_000,
+            outcome: "completed",
+          },
+          {
+            index: 2,
+            phase: "model",
+            startedAt: 11_000,
+            finishedAt: 61_000,
+            durationMs: 50_000,
+            remainingMs: 0,
+            outcome: "timeout",
+          },
+        ],
+      },
+    };
+    const normalized = normalizeSpans([event]);
+    expect(spansFromEvents(normalized, "run").map((span) => [span.name, span.durationMs])).toEqual([
+      ["dispatch.route", 10_000],
+      ["model.turn", 50_000],
+    ]);
+    expect(normalizeSpans(normalized)).toEqual(normalized);
+  });
   it("a tool_call/tool_result pair becomes a tool.<name> span keyed by callId, placed around the pair; an unpaired call stays open (a start with no end)", () => {
     const out = normalizeSpans([call("c1", 1_000), result("c1", 3_500, false), call("c2", 4_000)]);
     expect(out.map((e) => e.type)).toEqual([

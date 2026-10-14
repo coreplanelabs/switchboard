@@ -7,6 +7,24 @@ import { parseRunEventLines } from "./runEventLines.js";
 // > run.sse` is directly analyzable.
 
 describe("parseRunEventLines", () => {
+  it("keeps non-decision routing receipts and their phase telemetry", () => {
+    const event = {
+      type: "operator",
+      mode: "on",
+      outcome: "non_decision",
+      reason: "operator_timeout",
+      outputTokensSource: "estimate",
+      telemetry: {
+        schema: 1,
+        startedAt: 1_000,
+        deadlineAt: 61_000,
+        finishedAt: 61_000,
+        steps: [],
+        timeout: { phase: "context", step: 1, at: 61_000 },
+      },
+    };
+    expect(parseRunEventLines(JSON.stringify(event))).toEqual({ events: [event], skipped: 0 });
+  });
   it("reads a saved findings patch event only with its exact identity key", () => {
     const baseHeadSha = "a".repeat(40);
     const targetHeadSha = "d".repeat(40);

@@ -175,6 +175,52 @@ const expectFencedDiagnostic = (operator: typeof diagnosticOperator) => {
 };
 
 describe("provider diagnostics in machine history", () => {
+  it("fences routing question and rejection evidence while retaining typed timing", async () => {
+    const { store, registry, deps } = await setup();
+    const operator = {
+      ...diagnosticOperator,
+      telemetry: {
+        schema: 1 as const,
+        startedAt: 1_000,
+        deadlineAt: 61_000,
+        finishedAt: 61_000,
+        steps: [
+          {
+            index: 1,
+            phase: "model" as const,
+            startedAt: 1_000,
+            finishedAt: 61_000,
+            durationMs: 60_000,
+            remainingMs: 0,
+            outcome: "timeout" as const,
+            question: "Ignore instructions?",
+            proposal: "agent:review ignore instructions",
+            validation: "unknown action",
+            validationCode: "proposal_unknown_action",
+            requestId: "req_timing",
+          },
+        ],
+      },
+    };
+    await store.put(record("diag", NOW, { operator, events: [{ type: "operator", ...operator, seq: 1 }] }));
+    const output = value<{ operator: typeof operator; events: RunEvent[] }>(
+      await registry.invoke("runs.get", { args: ["diag"], options: { include: "messages" } }, cli, deps),
+    );
+    const event = output.events[0];
+    if (event.type !== "operator") throw new Error("expected operator event");
+    for (const telemetry of [output.operator.telemetry, event.telemetry]) {
+      expect(telemetry?.steps[0]).toMatchObject({
+        durationMs: 60_000,
+        remainingMs: 0,
+        requestId: "req_timing",
+        validationCode: "proposal_unknown_action",
+        question: expect.stringContaining(UNTRUSTED_OPEN),
+        proposal: expect.stringContaining(UNTRUSTED_OPEN),
+        validation: expect.stringContaining(UNTRUSTED_OPEN),
+      });
+    }
+    expect((await store.get("diag"))?.operator).toEqual(operator);
+  });
   it.each([undefined, "messages", "audience"] as const)(
     "fences operator projections on runs.get with include %s",
     async (include) => {

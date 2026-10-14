@@ -643,6 +643,8 @@ export interface RunOperatorDecision {
   /** The structured seam's attempts (record 0067): what each answer violated,
    *  or that it was accepted. */
   attempts?: { outcome: "accepted" | "violation"; violation?: string }[];
+  telemetry?: import("./routingTelemetry.js").RoutingTelemetry;
+  outputTokensSource?: "estimate";
   repoContext?: {
     organization: string;
     threadRepo?: string;
@@ -722,6 +724,8 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
           })),
         }
       : {}),
+    ...(e.telemetry ? { telemetry: structuredClone(e.telemetry) } : {}),
+    ...(e.outputTokensSource ? { outputTokensSource: e.outputTokensSource } : {}),
     ...(e.repoContext ? { repoContext: { ...e.repoContext } } : {}),
     ...(e.intake ? { intake: { verdict: e.intake.verdict, reason: e.intake.reason } } : {}),
     ...(e.latencyMs !== undefined ? { latencyMs: e.latencyMs } : {}),

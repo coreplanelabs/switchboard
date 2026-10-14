@@ -118,6 +118,26 @@ function fakeFetch(stream: string, status = 200, headers: Record<string, string>
 }
 
 describe("PiAiProviders — the provider table config.yaml names, built on pi's model library", () => {
+  it("observes the provider request ID at response headers without changing the completion", async () => {
+    const { fetchImpl } = fakeFetch(anthropicToolCallStream(), 200, { "request-id": "req_routing" });
+    const table = new PiAiProviders(CONFIGS, { secrets: SECRETS, clock: CLOCK, fetch: fetchImpl });
+    const ids: string[] = [];
+    const completed = await table.get("anthropic").complete({
+      ...routeRequest(),
+      observer: {
+        onResponse: (id) => {
+          ids.push(id);
+          throw new Error("diagnostic sink failed");
+        },
+      },
+    });
+    expect(ids).toEqual(["req_routing"]);
+    expect(completed).toMatchObject({
+      stopReason: "tool_use",
+      usage: { inputTokens: 12, outputTokens: 9 },
+      content: [{ type: "tool_use", name: "route", input: { preset: "review", reason: "a PR" } }],
+    });
+  });
   it("redacts the configured key from direct HTTP 200 Responses stream errors", async () => {
     const { fetchImpl } = fakeFetch(
       'event: error\ndata: {"type":"error","code":"invalid_value","message":"Rejected custom-sensitive-provider-key https://provider.test/custom-sensitive-provider-key"}\n\n',
