@@ -260,7 +260,7 @@ describe("runs.* registrations", () => {
       expect(byId[id].action).toBe("runs:read");
       expect(byId[id].effect).toBe("read");
     }
-    expect(byId["runs.stop"]).toMatchObject({ action: "runs:write", effect: "write" });
+    expect(byId["runs.stop"]).toMatchObject({ action: "stop:write", effect: "write" });
     // The findings ledger reads finished records: it needs run history and says so; every other read is always on.
     expect(byId["runs.findings"].enabledWhen).toBeDefined();
     for (const id of Object.keys(byId).filter((id) => id !== "runs.findings"))

@@ -70,11 +70,15 @@ export function selfIdsOf(actor: Actor): readonly string[] {
   return principal.self && principal.self.length > 0 ? principal.self : [principal.id];
 }
 
-/** Whether a self set names a chat identity — the `acts-as-person` condition:
- *  every chat actor, a dashboard session linked to its person; never an
- *  unlinked browser session or a credential. */
-export function actsAsPerson(selfIds: readonly string[]): boolean {
-  return selfIds.some((id) => id.startsWith("slack:"));
+/** By default, only a resolved chat identity satisfies `acts-as-person`.
+ *  Cancellation opts into server-resolved Access accounts as well. These
+ *  ids come from actor resolution, never caller-supplied command arguments. */
+export function actsAsPerson(selfIds: readonly string[], includeAccess = false): boolean {
+  return selfIds.some(
+    (id) =>
+      id.startsWith("slack:") ||
+      (includeAccess && id.startsWith("access:") && id.length > "access:".length && !id.startsWith("access:svc:")),
+  );
 }
 
 // ── decision ─────────────────────────────────────────────────────────────────
@@ -138,7 +142,7 @@ export function evaluateCondition(
     case "is-self":
       return attributes.userId !== undefined && selfIds.includes(attributes.userId);
     case "acts-as-person":
-      return actsAsPerson(selfIds);
+      return actsAsPerson(selfIds, condition.includeAccess);
     case "owner-of":
       return attributes.repo !== undefined && holdsRepo(grants.repos, attributes.repo);
     case "repo-access":

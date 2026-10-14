@@ -116,7 +116,7 @@ function compileCondition(
     case "is-self":
       return selfPredicate(selfIds);
     case "acts-as-person":
-      return actsAsPerson(selfIds) ? ALL : NONE;
+      return actsAsPerson(selfIds, condition.includeAccess) ? ALL : NONE;
     case "owner-of":
       if (grants.repos === "all") return ALL;
       return grants.repos.size === 0

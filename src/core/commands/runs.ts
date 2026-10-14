@@ -42,7 +42,7 @@ import { unwrapUntrusted } from "../untrusted.js";
 // Everything a surface can learn about a run comes through here. Two rules the
 // service does not enforce because they are about the CALLER, not the run:
 //   - what the caller may SEE is the authorization policy (authorization.md
-//     items 5–7): a point read authorizes `runs:read` (or `runs:write`
+//     items 5–7): a point read authorizes `runs:read` (or `stop:write`
 //     for `stop`) against the run's own attributes — channel, user, stamped
 //     visibility — and a deny is `not_found`, byte-identical to a missing run
 //     (the reason goes to the audit line only); a list hands the store
@@ -428,15 +428,15 @@ export const runsStop = defineCommand({
       .enum(["soft", "hard"])
       .describe("soft = finish the current step; hard = abort now (and the escape that seals a pipeline)"),
   }),
-  action: "runs:write",
+  action: "stop:write",
   effect: "write",
   // Ends someone's live run; nothing restarts it.
   annotations: { destructive: true, risk: () => "stops a live run; hard aborts it now" },
   describe:
-    "Request a live run to stop (`--mode soft` = finish the current step; `hard` = abort now). A pipeline refuses soft — `--mode hard` seals it failed and releases its thread. Records the caller as the requester.",
+    "Stop your own live run, or another run with operator permission (`--mode soft` = finish the current step; `hard` = abort now). A pipeline refuses soft — `--mode hard` seals it failed and releases its thread. Records the caller as the requester.",
   handler: async ({ args, options, caller, deps }) => {
     const runs = await deps.runs();
-    await getVisibleRun(runs, args.id, caller, "runs:write", deps, "runs.stop");
+    await getVisibleRun(runs, args.id, caller, "stop:write", deps, "runs.stop");
     return asJson(unwrap(await runs.stopRun(args.id, options.mode, { kind: caller.kind, id: caller.id })));
   },
 });

@@ -142,10 +142,15 @@ export type Condition =
   | { readonly kind: "member-of" }
   /** resource.userId is one of the principal's `self` ids (its own id, or the person it is linked to). */
   | { readonly kind: "is-self" }
-  /** The principal's `self` names a chat identity (`slack:U…`): every chat
+  /** By default, the principal's `self` names a chat identity (`slack:U…`): every chat
    *  actor, and a dashboard session linked to its person (record 0042) — never
    *  an unlinked browser session or a credential. */
-  | { readonly kind: "acts-as-person" }
+  | {
+      readonly kind: "acts-as-person";
+      /** Also accept a server-resolved Access account, never an Access service token.
+       * Only cancellation opts in; existing chat-identity policies stay unchanged. */
+      readonly includeAccess?: true;
+    }
   /** actor.grants.repos contains the resource's repo (or is "all"). */
   | { readonly kind: "owner-of" }
   /** Compiled code access covers the resource repo; never grants memory ownership. */

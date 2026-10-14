@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/runs.js";
+import { createRunsService } from "../core/runsService.js";
+import { InMemoryRunStore } from "../core/runStore.js";
 import { withCommandConfirmation } from "../core/commandConfirmations.js";
 import { resolveChatActor } from "../core/authz/actor.js";
 import type { Caller } from "../core/commandRegistry.js";
@@ -45,7 +48,10 @@ describe("MCP approval parity", () => {
     let now = 10_000;
     let personGrants = person;
     let connectionGrants: Grants = ALL_GRANTS;
-    const registry = new CommandRegistry<MergeCommandDeps>({ audit: () => {}, confirmationClass: () => "destructive" });
+    const registry = new CommandRegistry<MergeCommandDeps & RunsCommandDeps>({
+      audit: () => {},
+      confirmationClass: () => "destructive",
+    });
     registry.register({
       id: "repo.offboard",
       action: "repo:write",
@@ -63,7 +69,13 @@ describe("MCP approval parity", () => {
       handler: async () => ({ saved: "configuration" }),
     });
     if (merge) registerMergeCommands(registry);
-    const commands = bindCommands(registry, merge ? { merge: { service: async () => merge } } : {});
+    const stopRuns = new RunRegistry();
+    registerRunsCommands(registry);
+    const runs = createRunsService({ registry: stopRuns, store: new InMemoryRunStore() });
+    const commands = bindCommands(registry, {
+      runs: async () => runs,
+      ...(merge ? { merge: { service: async () => merge } } : {}),
+    });
     const grantsFor = (id: string) =>
       id === "mcp:device" || id === "mcp:other-device" || id === "mcp:personal:device"
         ? connectionGrants
@@ -170,6 +182,10 @@ describe("MCP approval parity", () => {
     };
     return {
       dir,
+      stopRuns,
+      setConnectionGrants: (grants: Grants) => {
+        connectionGrants = grants;
+      },
       commandRegistry: registry,
       deps,
       options,
@@ -191,6 +207,131 @@ describe("MCP approval parity", () => {
       },
     };
   }
+  it("a verified requester stops only their own review through MCP form consent without runs:write", async () => {
+    const f = fixture(NO_GRANTS);
+    f.setConnectionGrants({ ...NO_GRANTS, actions: new Set(["dispatch"]) });
+    const own = f.stopRuns.create("review", {
+      userId: "slack:UALICE",
+      channelId: "slack:D1",
+      threadKey: "slack:D1:1",
+      channelVisibility: "dm",
+    });
+    const foreign = f.stopRuns.create("review", {
+      userId: "slack:UBOB",
+      channelId: "slack:D2",
+      threadKey: "slack:D2:2",
+      channelVisibility: "dm",
+    });
+    const args = { id: own.id, mode: "hard" };
+    const requestState = await f.offeredId("runs_stop", args);
+    expect(own.control.hardSignal.aborted).toBe(false);
+    const consent = {
+      _meta: FORM_META,
+      requestState,
+      inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+    };
+    expect((await f.call("runs_stop", { ...args, id: foreign.id }, "tok", consent)).body).toMatchObject({
+      error: { code: -32001 },
+    });
+    expect((await f.call("runs_stop", args, "other", consent)).body).toMatchObject({ error: { code: -32001 } });
+    const result = await f.call("runs_stop", args, "tok", consent);
+    expect(result.body).toMatchObject({ result: { content: [{ text: expect.stringContaining("state: stopping") }] } });
+    expect(own.control.requested).toBe("hard");
+    expect(own.control.hardSignal.aborted).toBe(true);
+    expect(f.stopRuns.getById(own.id)).toMatchObject({ finished: false });
+    expect(foreign.control.hardSignal.aborted).toBe(false);
+    expect((await f.call("runs_stop", args, "tok", consent)).body).toMatchObject({ error: { code: -32001 } });
+    const deniedState = await f.offeredId("runs_stop", { ...args, id: foreign.id });
+    expect(
+      (await f.call("runs_stop", { ...args, id: foreign.id }, "tok", { ...consent, requestState: deniedState })).body,
+    ).toMatchObject({ result: { content: [{ text: "⚠️ `runs stop`: no run found" }] } });
+    expect(foreign.control.hardSignal.aborted).toBe(false);
+  });
+
+  it("MCP self cancellation refuses unlinked, read-only and spoofed callers and rechecks consent authority", async () => {
+    const f = fixture(NO_GRANTS);
+    const target = f.stopRuns.create("review", {
+      userId: "slack:UALICE",
+      channelId: "slack:D1",
+      threadKey: "slack:D1:1",
+      channelVisibility: "dm",
+    });
+    const args = { id: target.id, mode: "hard" };
+    f.setConnectionGrants({ ...NO_GRANTS, actions: new Set(["runs:read"]) });
+    expect((await f.call("runs_stop", args, "tok", { _meta: FORM_META })).body).toMatchObject({
+      error: { code: -32001 },
+    });
+    f.setConnectionGrants({ ...NO_GRANTS, actions: new Set(["dispatch"]) });
+    const linkedLookup = f.options.personByEmail;
+    f.options.personByEmail = async () => undefined;
+    expect(
+      (await f.call("runs_stop", { ...args, userId: "slack:UALICE" }, "tok", { _meta: FORM_META })).body,
+    ).toMatchObject({ error: { code: -32001 } });
+    f.options.personByEmail = linkedLookup;
+    const requestState = await f.offeredId("runs_stop", args);
+    f.readOnly();
+    expect(
+      (
+        await f.call("runs_stop", args, "tok", {
+          _meta: FORM_META,
+          requestState,
+          inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+        })
+      ).body,
+    ).toMatchObject({ result: { content: [{ text: "🚫 `runs stop` is restricted. Ask an admin." }] } });
+    expect(target.control.hardSignal.aborted).toBe(false);
+  });
+
+  it("MCP owner stop preserves confirmation, monotonic repeats and terminal conflict", async () => {
+    const f = fixture(NO_GRANTS);
+    f.setConnectionGrants({ ...NO_GRANTS, actions: new Set(["dispatch"]) });
+    const target = f.stopRuns.create("review", {
+      userId: "slack:UALICE",
+      channelId: "slack:D1",
+      threadKey: "slack:D1:1",
+      channelVisibility: "dm",
+    });
+    const args = { id: target.id, mode: "hard" };
+    expect((await f.call("runs_stop", args)).body).toMatchObject({ error: { code: -32004 } });
+    expect(target.control.hardSignal.aborted).toBe(false);
+    const declined = await f.offeredId("runs_stop", args);
+    expect(
+      (
+        await f.call("runs_stop", args, "tok", {
+          _meta: FORM_META,
+          requestState: declined,
+          inputResponses: { approval: { action: "decline" } },
+        })
+      ).body,
+    ).toMatchObject({ result: { content: [{ text: "Cancelled; nothing ran" }] } });
+    expect(target.control.hardSignal.aborted).toBe(false);
+    for (const mode of ["hard", "soft"]) {
+      const input = { ...args, mode };
+      const requestState = await f.offeredId("runs_stop", input);
+      const result = await f.call("runs_stop", input, "tok", {
+        _meta: FORM_META,
+        requestState,
+        inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+      });
+      expect(result.body).toMatchObject({
+        result: { content: [{ text: expect.stringContaining("state: stopping") }] },
+      });
+      expect(target.control.requested).toBe("hard");
+    }
+    f.stopRuns.finish(target.id, "stopped_hard");
+    const requestState = await f.offeredId("runs_stop", args);
+    expect(
+      (
+        await f.call("runs_stop", args, "tok", {
+          _meta: FORM_META,
+          requestState,
+          inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+        })
+      ).body,
+    ).toMatchObject({ result: { content: [{ text: "⚠️ `runs stop`: the run already finished" }] } });
+    expect(f.stopRuns.getById(target.id)).toMatchObject({ finished: true, status: "stopped_hard" });
+  });
+
   it.each(["merge", "enqueue"] as const)(
     "a browser-approved MCP %s uses the linked person's GitHub binding",
     async (action) => {
@@ -928,6 +1069,62 @@ describe("MCP approval parity", () => {
     await f.call("approval_resume", { id: second });
     expect(f.removed()).toBe(1);
   });
+  it("a verified Access-only personal MCP account cancels its own run without accepting forged account prefixes", async () => {
+    const f = fixture(NO_GRANTS);
+    f.setConnectionGrants({ ...NO_GRANTS, actions: new Set(["dispatch"]) });
+    const token = "c".repeat(64);
+    const store = new InMemoryPersonalTokenStore();
+    await store.put({
+      digest: digestBearer(token),
+      subject: "personal:device",
+      userId: "access:device",
+      email: "account@example.com",
+      createdAt: 1,
+    });
+    f.options.auth = { tokens: { forged: { subject: "access:device" } } };
+    f.options.personalTokens = store;
+    f.options.personByEmail = undefined;
+    const originalLookup = f.options.grantsFor!;
+    f.options.grantsFor = (id) =>
+      id === "mcp:access:device" ? { ...NO_GRANTS, actions: new Set(["dispatch"]) } : originalLookup(id);
+    const own = f.stopRuns.create("review", {
+      userId: "access:device",
+      channelId: "mcp:default",
+      threadKey: "mcp:default:own",
+      channelVisibility: "machine",
+    });
+    const foreign = f.stopRuns.create("review", {
+      userId: "access:other",
+      channelId: "mcp:default",
+      threadKey: "mcp:default:other",
+      channelVisibility: "machine",
+    });
+    const args = { id: own.id, mode: "hard" };
+    expect(
+      (await f.call("runs_stop", { ...args, userId: "access:device" }, "forged", { _meta: FORM_META })).body,
+    ).toMatchObject({ error: { code: -32001 } });
+    const first = await f.call("runs_stop", args, token, { _meta: FORM_META });
+    expect(first.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "form" } } } } });
+    expect(own.control.hardSignal.aborted).toBe(false);
+    const requestState = (first.body as { result: { requestState: string } }).result.requestState;
+    const approve = {
+      _meta: FORM_META,
+      requestState,
+      inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+    };
+    expect((await f.call("runs_stop", args, token, approve)).body).toMatchObject({
+      result: { content: [{ text: expect.stringContaining("state: stopping") }] },
+    });
+    expect(own.control.hardSignal.aborted).toBe(true);
+    const input = { id: foreign.id, mode: "hard" };
+    const foreignOffer = await f.call("runs_stop", input, token, { _meta: FORM_META });
+    const foreignState = (foreignOffer.body as { result: { requestState: string } }).result.requestState;
+    expect((await f.call("runs_stop", input, token, { ...approve, requestState: foreignState })).body).toMatchObject({
+      result: { content: [{ text: "⚠️ `runs stop`: no run found" }] },
+    });
+    expect(foreign.control.hardSignal.aborted).toBe(false);
+  });
+
   it("a legacy personal connection without Slack still reads as its verified Access user", async () => {
     const f = fixture();
     const token = "b".repeat(64);
