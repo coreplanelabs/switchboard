@@ -51,6 +51,8 @@ export interface ToolContext {
   command?: ConversationCommand;
   /** Exact PR whose prior findings a review must verify before submitting. */
   reviewHistory?: ReviewHistoryContext;
+  /** Current controller-bound review identity; tool arguments never choose the repository or revision. */
+  reviewReadTarget?: () => import("./reviewRead.js").ReviewReadTarget | undefined;
   /** Durable read actions bound by dispatch, never authority supplied by tool arguments. */
   sourceReads?: SourceReads;
   executor: Executor;

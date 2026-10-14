@@ -14554,6 +14554,42 @@ describe("the relaunch ceiling — the mid-run re-attach spike (the record's fir
 
 // Feature: coding-checks.md — model selection precedes typed execution.
 describe("runLoop checkout-bound tools", () => {
+  it("binds source reads to the resolved review head and acknowledged checkout", async () => {
+    const observed = watched(piHarness);
+    observed.harness.open = async (_deps, request) => {
+      const source = request.tools.find((tool) => tool.name === "review_read")!;
+      expect(request.toolContext.reviewReadTarget?.()).toEqual({
+        repo: "acme/api",
+        pr: 7,
+        head: "a".repeat(40),
+        baseRef: "main",
+      });
+      expect(request.toolContext.checkout?.()).toBe("/workspace/checkout");
+      expect(await source.run({ kind: "diff" }, request.toolContext)).toBe(
+        "error: review_read: source read did not complete; no page was accepted",
+      );
+      return {
+        answer: "source binding checked",
+        followUp: async () => "",
+        remainingMs: () => 60_000,
+        end: async () => {},
+      };
+    };
+    const s = setup("unused", {
+      agent: "review",
+      repoCtx: { repo: "acme/api", pr: 7, baseRef: "main", headSha: "b".repeat(40) },
+      review: { head: "a".repeat(40), post: async () => {} },
+      cold: { ref: "work", sha: "a".repeat(40), workspace: "/workspace/checkout" },
+      executor: { execResult: async () => ({ stdout: "", stderr: "transport failed", exitCode: 1, truncated: false }) },
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example",
+        loopbackUrl: "http://127.0.0.1:8080",
+      },
+    });
+    expect(answered(await runLoop(s.deps, s.ctx)).answer).toContain("source binding checked");
+  });
   it("computes a digest in the acknowledged cold checkout", async () => {
     const observed = watched(piHarness);
     observed.harness.open = async (_deps, request) => {

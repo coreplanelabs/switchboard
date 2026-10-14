@@ -379,6 +379,9 @@ export function harnessPromptNote(
   if (commandPolicy === "hosted-review")
     return (
       "HARNESS NOTE: this review uses `read`, `grep`, `find` and `ls` for workspace reads. Native `bash` is unavailable." +
+      (relayTools.includes("review_read")
+        ? " Use `review_read` for the pinned full diff and oversized tracked files; follow nextOffset and sourceHash until eof."
+        : "") +
       (relayTools.includes("run_check")
         ? " Use `run_check` for recorded commands."
         : " Recorded commands are unavailable for this run.") +

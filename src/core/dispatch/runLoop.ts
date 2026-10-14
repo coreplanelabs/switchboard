@@ -2426,6 +2426,17 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     onVerdict,
     onReviewSubmission: persistReviewSubmission,
     ...(reviewHistory ? { reviewHistory } : {}),
+    reviewReadTarget: () => {
+      const head = reviewHistory?.requiredHead ?? reviewHead ?? repoCtx.headSha;
+      return !privateAudienceLatch.revoked &&
+        isPrReview &&
+        repoCtx.repo &&
+        repoCtx.pr !== undefined &&
+        repoCtx.baseRef &&
+        head
+        ? { repo: repoCtx.repo, pr: repoCtx.pr, head, baseRef: repoCtx.baseRef }
+        : undefined;
+    },
     addressSeverity: ctx.addressSeverity.level,
     onDigest,
     onPrDescription,

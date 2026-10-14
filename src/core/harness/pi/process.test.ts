@@ -592,7 +592,7 @@ describe("hosted Review launch policy", () => {
     const hosted = {
       ...reviewSpec,
       commandPolicy: "hosted-review",
-      relayTools: ["run_check", "submit_verdict"].map((name) => ({
+      relayTools: ["run_check", "review_read", "submit_verdict"].map((name) => ({
         name,
         description: name,
         inputSchema: { type: "object" },
@@ -608,7 +608,14 @@ describe("hosted Review launch policy", () => {
         hosted.commandPolicy,
       ),
     ).toContain("Use `run_check`");
-    expect(tools).toEqual(["read", "grep", "find", "ls", "run_check", "submit_verdict"]);
+    expect(tools).toEqual(["read", "grep", "find", "ls", "run_check", "review_read", "submit_verdict"]);
+    expect(
+      harnessPromptNote(
+        hosted.relayTools.map((tool) => tool.name),
+        hosted.identity,
+        hosted.commandPolicy,
+      ),
+    ).toContain("Use `review_read` for the pinned full diff");
     expect(piLaunchArgs(spec)[piLaunchArgs(spec).indexOf("--tools") + 1].split(",")).toContain("bash");
     expect(piLaunchArgs(reviewSpec)[piLaunchArgs(reviewSpec).indexOf("--tools") + 1].split(",")).toContain("bash");
   });
