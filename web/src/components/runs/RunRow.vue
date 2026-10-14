@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive } from "vue";
+import { computed, ref } from "vue";
 import StatusDot from "../StatusDot.vue";
 import SourceMark from "./SourceMark.vue";
 import { browser } from "../../lib/browser";
@@ -74,7 +74,9 @@ const sourceUrl = computed(() => safeSourceUrl(props.run));
 const threadLink = computed(() => (props.run.threadKey ? threadHref(props.run.threadKey) : null));
 const expires = computed(() => expiresAt(props.run, props.retentionMs));
 const leaving = computed(() => expires.value !== undefined && expires.value - props.now <= LEAVING_WINDOW_MS);
-const stoppable = computed(() => !props.run.finished && !props.run.stop);
+const stopRequested = ref(false);
+const stoppable = computed(() => !props.run.finished && !props.run.stop && !stopRequested.value);
+const killable = computed(() => !props.run.finished);
 // A finished row's stopwatch is painted by the duration heat scale (item 24) on
 // the run scale, so a 40-minute run stands out of a page of 3-minute ones; a
 // live row stays green — its clock is still moving.
@@ -112,7 +114,7 @@ const inherited = computed(() =>
 const pace = computed(() => bound.value ?? inherited.value?.text ?? rowPace(props.run, props.now));
 const stalled = computed(() => rowStalled(props.run, props.now));
 
-const disabled = reactive({ soft: false, hard: false });
+const pending = ref(false);
 
 /** The row's actions menu, the one control at every width (a pair of Stop and
  *  Kill buttons per row cost 7.6em of every line for two rarely used actions):
@@ -135,14 +137,18 @@ const actionItems = computed(() => [
         {
           label: "Stop (soft)",
           icon: "i-lucide-octagon-pause",
-          disabled: disabled.soft,
+          disabled: pending.value,
           onSelect: () => requestStop("soft"),
         },
+      ]
+    : []),
+  ...(killable.value
+    ? [
         {
           label: "Kill (hard)",
           icon: "i-lucide-octagon-x",
           color: "error" as const,
-          disabled: disabled.hard,
+          disabled: pending.value,
           onSelect: () => requestStop("hard"),
         },
       ]
@@ -150,15 +156,18 @@ const actionItems = computed(() => [
 ]);
 
 function requestStop(mode: "soft" | "hard"): void {
+  if (pending.value) return;
   if (mode === "hard" && !browser.confirm("Hard stop: abort this run now with no summary and free its sandbox?"))
     return;
-  disabled[mode] = true;
+  pending.value = true;
   fetch(stopHref(props.run, mode), { method: "POST", credentials: "same-origin" })
     .then((r) => {
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      stopRequested.value = true;
     })
-    .catch(() => {
-      disabled[mode] = false;
+    .catch(() => {})
+    .finally(() => {
+      pending.value = false;
     });
 }
 
