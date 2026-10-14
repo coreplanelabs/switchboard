@@ -1,5 +1,5 @@
 import type { CheckOperation } from "../execution/checkOperation.js";
-import type { ExecInfraReason } from "../execution/executor.js";
+import type { ExecInfraReason } from "../execution/execResult.js";
 import type { ExecResult } from "../execution/execResult.js";
 import type { TypedExecutionDiagnostic } from "../execution/typedExecutionDiagnostic.js";
 

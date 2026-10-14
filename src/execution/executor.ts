@@ -1,8 +1,9 @@
 import type { CheckOperation } from "./checkOperation.js";
 import { advanceWorkspace } from "./workspaceAdvance.js";
 import type { CredentialInspection, CredentialInspectionInput } from "./credentialInspection.js";
-import type { ExecResult } from "./execResult.js";
-export type { ExecResult } from "./execResult.js";
+import type { ExecInfraReason, ExecResult } from "./execResult.js";
+export { EXEC_INFRA_REASONS } from "./execResult.js";
+export type { ExecInfraReason, ExecResult } from "./execResult.js";
 import { execFile } from "node:child_process";
 import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -224,16 +225,6 @@ export class ExecInfraError extends Error {
  *  5xx — judged at once by the type, whatever its words. `aborted`: the run's
  *  own stop aborted the request; nothing is wrong with the Worker and nothing
  *  waits. */
-export const EXEC_INFRA_REASONS = [
-  "transport-lost",
-  "deadline-passed",
-  "empty-failure",
-  "worker-unavailable",
-  "answered",
-  "refused",
-  "aborted",
-] as const;
-export type ExecInfraReason = (typeof EXEC_INFRA_REASONS)[number];
 
 /** The reasons a wait can clear: the failure reached no Worker, or reached one that could not serve yet. */
 export const EXEC_INFRA_WAITABLE: ReadonlySet<ExecInfraReason> = new Set<ExecInfraReason>([
