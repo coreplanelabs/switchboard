@@ -1,7 +1,7 @@
 import { cancellationRecordMatches } from "../../src/core/runLedger/cancellation.ts";
 import { isRunRecord } from "../../src/core/runRecord.ts";
 import { reclaimedRunRecord } from "../../src/core/dispatch/record.ts";
-import { sourceHash } from "../../src/core/references/receipts.ts";
+import { sourceHash, mergeSessionSources } from "../../src/core/references/receipts.ts";
 import {
   pullOwnerQualificationSnapshot,
   qualifyPullOwnerSnapshot,
@@ -70,6 +70,11 @@ import {
   type StorageFailureNotice,
 } from "../../src/core/storageFailureDiagnostic.ts";
 import { storeRequestWitness } from "../../src/core/storeResponse.ts";
+import { githubReadWithContext } from "../../src/core/dispatch/githubReadContext.ts";
+import { githubFileTool } from "../../src/tools/github.ts";
+import type { ToolContext } from "../../src/tools/runnableTool.ts";
+import { InMemoryGithubApi } from "../../src/execution/githubApi.ts";
+import { mergeContextDependencies } from "../../src/core/references/contextDependencies.ts";
 
 // The check producer imports the unused LocalExecutor environment helper.
 // Workerd has no host secret manifest; no local execution uses this stub.
@@ -12530,6 +12535,296 @@ describe("durable review artifact appends", () => {
     await expect(wire.append(id, "g1", [oversized])).rejects.toMatchObject({ name: "PermanentStoreError" });
     expect(await client(key).readEvents(id)).toEqual([saved]);
   });
+});
+
+describe("concurrent source persistence", () => {
+  const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+  async function fixture() {
+    const key = storeKey();
+    const wire = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (url, init) => fetchMemoryTest(String(url), init),
+    });
+    const warnings: string[] = [];
+    const writer = createLedgerWriteThrough({
+      ledger: wire,
+      gen: "g1",
+      now: () => 1000,
+      warn: (message) => warnings.push(message),
+      fallback: { put: async () => {}, abandoned: () => {} },
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+      schedule: () => ({ cancel() {} }),
+    });
+    const opened = await writer.open({
+      ...claimBody(key, id, `mcp:fixture:source-race:${key}`).run,
+      seed: {
+        messages: [{ role: "user", content: [{ type: "text", text: "read both sources" }] }],
+        budgetMs: 600_000,
+        context: { version: 2, status: "known", revision: 0, origins: [], slack: [], mcp: [] },
+      },
+    });
+    if (opened.kind !== "tracked" || !opened.run.session) throw new Error("fixture did not open");
+    const run = opened.run;
+    const session = run.session!.key;
+    const sources = (await wire.readSessionTail(session, 1)).sources!;
+    return { key, wire, writer, run, session, sources, warnings };
+  }
+
+  it("acknowledges both concurrent source callers and retains their exact dependency union", async () => {
+    const f = await fixture();
+    const refs = [
+      { runId: id, callId: "read-a", resultHash: "a".repeat(64), admissionHash: "c".repeat(64) },
+      { runId: id, callId: "read-b", resultHash: "b".repeat(64), admissionHash: "c".repeat(64) },
+    ];
+    const snapshots = refs.map((ref) => ({
+      ...f.sources,
+      context: { ...f.sources.context!, version: 2 as const, executionGithub: [ref] },
+    }));
+    try {
+      expect(await Promise.all(snapshots.map((snapshot) => f.run.writeSources(snapshot)))).toEqual([true, true]);
+      expect((await f.wire.readSessionTail(f.session, 1)).sources).toMatchObject({
+        status: "known",
+        context: { status: "known", executionGithub: refs },
+      });
+      expect(await f.wire.peekInbox(id, "g1", 0)).toMatchObject({
+        ok: true,
+        boundary: { state: { contextDependencies: { status: "known", executionGithub: refs } } },
+      });
+      expect(f.warnings).toEqual([]);
+    } finally {
+      await f.run.close();
+    }
+  });
+
+  it.each(["revoked", "context-revoked", "binding", "owner"] as const)(
+    "does not acknowledge fresh source evidence after %s refusal",
+    async (kind) => {
+      const f = await fixture();
+      const next = {
+        ...f.sources,
+        context: { ...f.sources.context!, githubRepos: ["acme/api"] },
+      };
+      try {
+        if (kind === "revoked") expect(await f.run.writeSources({ ...f.sources, status: "revoked" })).toBe(true);
+        if (kind === "context-revoked")
+          expect(
+            await f.run.writeSources({ ...f.sources, context: { ...f.sources.context!, status: "revoked" } }),
+          ).toBe(true);
+        if (kind === "binding" && next.status === "known") next.binding = { ...next.binding, requester: "slack:OTHER" };
+        if (kind === "owner") {
+          const owner = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName(f.session));
+          await owner.setOwner(id, "foreign");
+        }
+        const before = (await f.wire.readSessionTail(f.session, 1)).sources;
+        expect(await f.run.writeSources(next)).toBe(false);
+        const saved = (await f.wire.readSessionTail(f.session, 1)).sources;
+        expect(saved).toEqual(before);
+        expect(saved?.context?.githubRepos).toBeUndefined();
+        if (kind === "binding")
+          expect(f.warnings.at(-1)).toContain("stage=merge-sources failure=unavailable reason=binding-mismatch");
+        if (kind.includes("revoked"))
+          expect(f.warnings.at(-1)).toContain("stage=merge-sources failure=unavailable reason=revoked");
+        expect(await f.wire.peekInbox(id, "g1", 0)).toMatchObject({
+          ok: true,
+          boundary: { state: kind.includes("revoked") ? { contextDependencies: { status: "revoked" } } : {} },
+        });
+      } finally {
+        await f.run.close();
+      }
+    },
+  );
+
+  it("delivers concurrent GitHub results only with their durable receipts and withholds a revoked source", async () => {
+    const f = await fixture();
+    const api = new InMemoryGithubApi({
+      "acme/a": { private: false, files: { "README.md": "source A" } },
+      "acme/b": { private: false, files: { "README.md": "source B" } },
+    });
+    const context: ToolContext = {
+      executor: {} as ToolContext["executor"],
+      agentName: "review",
+      github: { api, canWrite: () => false, readableRepos: async () => api.listRepos() },
+    };
+    const tool = githubReadWithContext(githubFileTool, {
+      runId: id,
+      commit: async (receipt, dependencies) =>
+        (await f.run.writeSources({
+          ...f.sources,
+          context: mergeContextDependencies(f.sources.context, dependencies),
+        })) && (await f.run.recordSourceResult(receipt)),
+    });
+    try {
+      const delivered = await Promise.all([
+        tool.run({ repo: "acme/a", path: "README.md" }, { ...context, callId: "read-a" }),
+        tool.run({ repo: "acme/b", path: "README.md" }, { ...context, callId: "read-b" }),
+      ]);
+      expect(delivered, JSON.stringify(f.warnings)).toEqual([
+        "https://github.com/acme/a/blob/main/README.md (8 bytes):\n\nsource A",
+        "https://github.com/acme/b/blob/main/README.md (8 bytes):\n\nsource B",
+      ]);
+      const state = await f.wire.peekInbox(id, "g1", 0);
+      expect(state).toMatchObject({
+        ok: true,
+        boundary: {
+          state: {
+            contextDependencies: { githubRepos: ["acme/a", "acme/b"] },
+            sourceResults: [
+              {
+                runId: id,
+                callId: "read-a",
+                tool: "github_file",
+                repos: ["acme/a"],
+                resultHash: "f2595489b041389f106677f9e6af444f424062d6b0c0857204b3a000a2bbb5d0",
+              },
+              {
+                runId: id,
+                callId: "read-b",
+                tool: "github_file",
+                repos: ["acme/b"],
+                resultHash: "1260c519fc5016616e25a4fa5b7b57168a89063416e99bded88620ae429d0a9f",
+              },
+            ],
+          },
+        },
+      });
+      const saved = (await f.wire.readSessionTail(f.session, 1)).sources!;
+      expect(await f.run.writeSources({ ...saved, status: "revoked" })).toBe(true);
+      expect(await tool.run({ repo: "acme/a", path: "README.md" }, { ...context, callId: "revoked-read" })).toBe(
+        "error: GitHub result unavailable: its source context could not be durably recorded.",
+      );
+      if (!state.ok) throw new Error("owner disappeared");
+      expect(await f.wire.peekInbox(id, "g1", 0)).toMatchObject({
+        ok: true,
+        boundary: { state: { sourceResults: state.boundary.state.sourceResults } },
+      });
+    } finally {
+      await f.run.close();
+    }
+  });
+
+  it.each(["envelope", "context"] as const)(
+    "keeps unknown bookkeeping unknown and acknowledges an explicit %s revocation",
+    async (revocation) => {
+      const f = await fixture();
+      try {
+        const initial = mergeSessionSources(
+          f.sources,
+          {
+            ...f.sources,
+            status: "unknown",
+            context: { ...f.sources.context!, status: "unknown" },
+          },
+          false,
+        );
+        expect(await f.wire.writeSessionSources(f.session, id, "g1", initial)).toEqual({ ok: true });
+        expect(await f.run.writeSources(initial)).toBe(true);
+        expect(await f.run.writeSources(f.sources)).toBe(true);
+        const saved = (await f.wire.readSessionTail(f.session, 1)).sources!;
+        expect(saved).toMatchObject({ status: "unknown", context: { status: "unknown" } });
+        expect(
+          await f.run.writeSources(
+            revocation === "envelope"
+              ? { ...saved, status: "revoked" }
+              : { ...saved, context: { ...saved.context!, status: "revoked" } },
+          ),
+        ).toBe(true);
+        expect((await f.wire.readSessionTail(f.session, 1)).sources).toMatchObject({
+          status: revocation === "envelope" ? "revoked" : "unknown",
+          context: { status: "revoked" },
+        });
+        expect(await f.wire.peekInbox(id, "g1", 0)).toMatchObject({
+          ok: true,
+          boundary: { state: { contextDependencies: { status: "revoked" } } },
+        });
+      } finally {
+        await f.run.close();
+      }
+    },
+  );
+
+  const sourceStates = [
+    ["known", "known"],
+    ["unknown", "unknown"],
+    ["known", "unknown"],
+    ["unknown", "known"],
+  ] as const;
+  it.each(
+    sourceStates.flatMap(([envelope, context]) =>
+      (["envelope", "context"] as const).flatMap((revocation) =>
+        (["source-write", "state-ack"] as const).map((stage) => ({ envelope, context, revocation, stage })),
+      ),
+    ),
+  )(
+    "withholds $envelope/$context source acknowledgement after $revocation revocation during $stage",
+    async ({ envelope, context, revocation, stage }) => {
+      const f = await fixture();
+      const initial = mergeSessionSources(
+        f.sources,
+        {
+          ...f.sources,
+          status: envelope,
+          context: { ...f.sources.context!, status: context },
+        },
+        false,
+      );
+      expect(await f.wire.writeSessionSources(f.session, id, "g1", initial)).toEqual({ ok: true });
+      const write = f.wire.writeSessionSources.bind(f.wire);
+      const state = f.wire.setState.bind(f.wire);
+      let revokedAck: unknown;
+      const revoke = async () => {
+        const saved = (await f.wire.readSessionTail(f.session, 1)).sources!;
+        revokedAck = await write(
+          f.session,
+          id,
+          "g1",
+          mergeSessionSources(
+            saved,
+            revocation === "envelope"
+              ? { ...saved, status: "revoked" }
+              : { ...saved, context: { ...saved.context!, status: "revoked" } },
+            false,
+          ),
+        );
+      };
+      const spy =
+        stage === "source-write"
+          ? vi.spyOn(f.wire, "writeSessionSources").mockImplementation(async (...args) => {
+              const result = await write(...args);
+              if (result.ok) await revoke();
+              return result;
+            })
+          : vi.spyOn(f.wire, "setState").mockImplementation(async (...args) => {
+              const result = await state(...args);
+              if (result.ok) await revoke();
+              return result;
+            });
+      try {
+        expect(
+          await f.run.writeSources({ ...f.sources, context: { ...f.sources.context!, githubRepos: ["acme/api"] } }),
+        ).toBe(false);
+        expect(revokedAck, JSON.stringify(f.warnings)).toEqual({ ok: true });
+        expect((await f.wire.readSessionTail(f.session, 1)).sources).toMatchObject({
+          status: revocation === "envelope" ? "revoked" : envelope,
+          context: { status: "revoked" },
+        });
+        const saved = await f.wire.peekInbox(id, "g1", 0);
+        expect(saved).toMatchObject({ ok: true });
+        if (!saved.ok) throw new Error("owner disappeared");
+        expect(saved.boundary.state.sourceResults).toBeUndefined();
+        expect(f.warnings.at(-1)).toContain(
+          stage === "source-write"
+            ? "stage=read-after failure=unavailable"
+            : "stage=read-committed failure=unavailable",
+        );
+      } finally {
+        spy.mockRestore();
+        await f.run.close();
+      }
+    },
+  );
 });
 
 describe("append rejection diagnostics", () => {
