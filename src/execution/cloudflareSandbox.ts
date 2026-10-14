@@ -29,6 +29,7 @@ import {
   RUNTIME_BUSY_REASON,
   RUNTIME_BUSY_WAIT_MAX_MS,
   SANDBOX_START_BACKOFF_MS,
+  SANDBOX_STARTING_REASON,
   SANDBOX_START_WAIT_MAX_MS,
   fleetBusyExhaustedMessage,
   isWaitReason,
@@ -321,7 +322,7 @@ export class CloudflareSandboxExecutor implements Executor {
     for (;;) {
       const answer = await this.send(route, sent, headers, budgetMs, signal, span, singleSend);
       if (answer.kind === "ok") return answer.data;
-      if (singleSend && !(logObservation && answer.knownRuntimeBusy === true))
+      if (singleSend && !(logObservation && answer.knownLogWait === true))
         throw new ExecCapacityError(
           "The typed command was refused before execution.",
           undefined,
@@ -384,7 +385,7 @@ export class CloudflareSandboxExecutor implements Executor {
         containerId?: string;
         executionDiagnostic?: TypedExecutionDiagnostic;
         /** Fresh native refusal qualification, never a replayed diagnostic. */
-        knownRuntimeBusy?: true;
+        knownLogWait?: true;
       }
   > {
     // Sandbox cold starts can 5xx on a thread's first command — retry briefly.
@@ -466,7 +467,9 @@ export class CloudflareSandboxExecutor implements Executor {
         return {
           kind: "busy",
           reason,
-          ...(qualified && reason === RUNTIME_BUSY_REASON ? { knownRuntimeBusy: true as const } : {}),
+          ...(qualified && (reason === RUNTIME_BUSY_REASON || reason === SANDBOX_STARTING_REASON)
+            ? { knownLogWait: true as const }
+            : {}),
           ...(qualified
             ? {
                 executionDiagnostic: {
