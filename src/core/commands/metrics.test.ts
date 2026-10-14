@@ -73,7 +73,10 @@ const REPORT: MetricsReport = {
 };
 delete (REPORT.range as unknown as Record<string, unknown>).agent;
 
-const service = (report: () => Promise<MetricsReport>): MetricsService => ({ report });
+const service = (report: () => Promise<MetricsReport>): MetricsService => ({
+  report,
+  feedback: () => new NullMetricsService().feedback(),
+});
 
 const invoke = (svc: MetricsService, options: Record<string, unknown> = {}) =>
   metricsTrend.handler({ args: [], options, caller, deps: { metrics: { service: async () => svc } } } as never);
@@ -94,6 +97,7 @@ describe("metrics.trend", () => {
     const asked: unknown[] = [];
     const svc = service(async () => REPORT);
     const spied: MetricsService = {
+      feedback: svc.feedback,
       report: (opts) => {
         asked.push(opts);
         return svc.report();

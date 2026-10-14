@@ -50,6 +50,7 @@ import { InMemoryCostsSnapshotStore } from "../costsSnapshotStore.js";
 import { createCostsService } from "../costsService.js";
 import { InMemoryMetricsSource, parseMetricsConfig } from "../metrics.js";
 import { createMetricsService } from "../metricsService.js";
+import { InMemoryReviewFeedbackStore } from "../reviewFeedback.js";
 import { createReviewsService } from "../reviewsService.js";
 import { pointOf } from "../runMetrics.js";
 import { createDeliveryService, InMemoryDeliverySource, type PullRequestFacts } from "../delivery.js";
@@ -642,14 +643,31 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
   );
   // `metrics trend`: the real service over the in-memory source, holding the
   // two finished fixture runs' own points — the report is arithmetic over them.
+  const feedback = new InMemoryReviewFeedbackStore(() => NOW);
+  feedback.retain({
+    runId: FIXTURE.persistedRun,
+    repo: FIXTURE.repo,
+    pr: 42,
+    head: "a".repeat(40),
+    bodyHash: "b".repeat(64),
+    format: 1,
+    findings: 1,
+    publishedAt: NOW - 1000,
+    review: {
+      id: "123",
+      nodeId: "PRR_fixture",
+      url: `https://github.com/${FIXTURE.repo}/pull/42#pullrequestreview-123`,
+      publishedAt: NOW - 1000,
+    },
+  });
   const metrics = createMetricsService(
-    parseMetricsConfig({ dataset: "fixture_runs" })!,
+    parseMetricsConfig({ dataset: "fixture_runs", feedback: { enabled: true } })!,
     new InMemoryMetricsSource(
       [pointOf(record(FIXTURE.persistedRun, NOW - 1000)), pointOf(record("fin-2", NOW - 2000))].filter(
         (p) => p !== undefined,
       ),
     ),
-    { now: () => NOW },
+    { now: () => NOW, feedback },
   );
   // `delivery report`: one merged pull request of the fixture repo, reviewed
   // twice by a bot the fixture names, merged in the week of the pinned clock —

@@ -231,6 +231,14 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
   f("c39h", "happy", "show the run trend for the last 7 days", "metrics.trend", { args: [], options: { days: 7 } }),
   f("c39p", "paraphrase", "how are the agents' runs trending lately — failures and wall times?", "metrics.trend"),
   f("c45h", "happy", "show the review dashboard report for this week", "metrics.reviews"),
+  f("feedback-happy", "happy", "list reviews with negative human feedback", "metrics.feedback", {
+    args: [],
+    options: { rating: "negative" },
+  }),
+  f("feedback-paraphrase", "paraphrase", "show the exact ratings captured for review run run-8f2", "metrics.feedback", {
+    args: [],
+    options: { run: "run-8f2" },
+  }),
   f(
     "c45p",
     "paraphrase",
@@ -342,6 +350,7 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c35d", "is the review agent worth what it costs us?", "costs.by"),
   d("c39d", "the metrics point for run run-8f2 looks wrong — what does it carry?", "metrics.trend"),
   d("c45d", "why did the review of acme/api#42 ask for changes?", "metrics.reviews", ["runs.findings"]),
+  d("feedback-decoy", "was the reviewer right about the fix in acme/api#42?", "metrics.feedback", ["runs.findings"]),
   d("c37d", "which openrouter model should the coding preset run on?", "providers.check"),
   // Asks why the pull request conflicts, not for it to be rebased.
   d("c40d", "why is acme/api#42 conflicting with main?", "pulls.rebase", ["runs.findings"]),

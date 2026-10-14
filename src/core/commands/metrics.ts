@@ -12,7 +12,8 @@ import { METRICS_OFF_MESSAGE, type MetricsService } from "../metricsService.js";
 import { DAY_MS, MINUTE_MS } from "../budgets.js";
 import type { ReviewsService } from "../reviewsService.js";
 import { systemClock } from "../trace/clock.js";
-import type { ReviewFeedbackReport } from "../reviewFeedbackReport.js";
+import { FeedbackQueryInputError, type ReviewFeedbackReport } from "../reviewFeedbackReport.js";
+import { isPublicationRepo } from "../branchPublication.js";
 
 // `metrics.trend` (docs/reference/specs/run-metrics.md item 9): the run trend
 // over the Analytics Engine dataset every finished run's point lands in — the
@@ -236,9 +237,89 @@ export const metricsReviews = defineCommand({
   },
 });
 
+const feedbackOptions = z
+  .object({
+    days: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(METRICS_MAX_DAYS)
+      .optional()
+      .describe("publication range in whole UTC days, 1..90; cannot be combined with an exact run lookup"),
+    repo: z.string().refine(isPublicationRepo, "repo must be owner/name").optional().describe("only this repository"),
+    pr: z.coerce.number().int().positive().safe().optional().describe("only this pull request; requires repo"),
+    rating: z
+      .enum(["positive", "negative", "mixed", "unrated"])
+      .optional()
+      .describe(
+        "effective human votes; positive/negative include mixed and last-known ratings; state complete selects current data",
+      ),
+    state: z
+      .enum(["complete", "missing_identity", "pending", "stale", "unavailable", "content_changed"])
+      .optional()
+      .describe("only this read state"),
+    limit: z.coerce.number().int().min(1).max(100).optional().describe("reviews per page, 1..100 (default 20)"),
+    after: z.string().min(1).max(512).optional().describe("nextCursor from the previous page of the same query"),
+    run: z
+      .string()
+      .min(1)
+      .max(512)
+      .optional()
+      .describe(
+        "exact review run ID; returns the retained publication and reaction snapshot across the full 90-day retention",
+      ),
+  })
+  .superRefine((value, ctx) => {
+    if (value.pr !== undefined && !value.repo)
+      ctx.addIssue({ code: "custom", path: ["pr"], message: "pr requires repo" });
+    if (value.run && Object.keys(value).some((k) => k !== "run"))
+      ctx.addIssue({
+        code: "custom",
+        path: ["run"],
+        message: "An exact run lookup cannot be combined with list filters",
+      });
+  });
+
+export const metricsFeedback = defineCommand({
+  id: "metrics.feedback",
+  options: feedbackOptions,
+  action: "metrics:read",
+  effect: "read",
+  enabledWhen: (caps) => caps.metrics,
+  describe:
+    "Find human feedback on native PR reviews or retrieve an exact retained reaction snapshot by run ID. Returns PR/review links, reviewed head, snapshot status and stable reaction/actor IDs for investigation. Stored reads only; no review, model run or GitHub write is started.",
+  render: (output) => {
+    const result = output as JsonObject;
+    const rows = (result.reviews ?? []) as JsonObject[];
+    return [
+      `Review feedback: ${num(result.matching)} matching reviews`,
+      ...rows.map(
+        (r) =>
+          `• ${String(r.repo)}#${num(r.pr)} · ${String(r.state)} · 👍 ${num(r.positiveVotes)} / 👎 ${num(r.negativeVotes)} · run ${String(r.runId)}${r.url ? ` · ${String(r.url)}` : ""}`,
+      ),
+      ...(result.nextCursor ? [`Next page: repeat this query with after=${String(result.nextCursor)}`] : []),
+      String(result.evidenceLimit),
+    ].join("\n");
+  },
+  handler: async ({ options, deps }) => {
+    const parsed = feedbackOptions.safeParse(options);
+    if (!parsed.success) throw new CommandError("invalid_input", parsed.error.issues.map((i) => i.message).join("; "));
+    try {
+      return (await (await deps.metrics.service()).feedback(parsed.data)) as unknown as JsonValue;
+    } catch (error) {
+      if (error instanceof FeedbackQueryInputError) throw new CommandError("invalid_input", error.message);
+      throw new CommandError(
+        "unavailable",
+        "Human review feedback is unavailable; collection must be enabled and its retained data accessible.",
+      );
+    }
+  },
+});
+
 export const metricsCommands: readonly CommandDef<MetricsCommandDeps>[] = [
   metricsTrend,
   metricsReviews,
+  metricsFeedback,
 ] as unknown as CommandDef<MetricsCommandDeps>[];
 
 export function registerMetricsCommands<D extends MetricsCommandDeps>(registry: CommandRegistry<D>): void {

@@ -141,6 +141,8 @@ import {
   surfacesFor,
   type Fixture,
   CALLER_IDS,
+  mcp,
+  mcpToolNames,
 } from "./testing/conformanceFixture.js";
 // ---- 7. the regression fences -------------------------------------------------------------------------
 
@@ -156,6 +158,32 @@ function foldCallers<T>(cmd: { id: string }, value: T, callerId: string): T {
 }
 
 describe("command conformance — catalogue fences", () => {
+  it("MCP exposes exact review feedback by run ID only after the metrics read grant", async () => {
+    const f = await fixture();
+    const cmd = f.commands.list().find((c) => c.id === "metrics.feedback")!;
+    expect(await mcpToolNames(f)).toContain("metrics_feedback");
+    const result = await mcp.run(f, cmd, { run: "fin-1" }, "power");
+    expect(result).toMatchObject({
+      ok: true,
+      json: {
+        matching: 1,
+        detail: {
+          publication: {
+            runId: "fin-1",
+            repo: "acme/api",
+            pr: 42,
+            review: {
+              id: "123",
+              nodeId: "PRR_fixture",
+              url: "https://github.com/acme/api/pull/42#pullrequestreview-123",
+            },
+          },
+        },
+      },
+    });
+    const refused = await mcp.run(f, cmd, { run: "fin-1" }, "nobody");
+    expect(refused).toMatchObject({ ok: false, code: "unauthorized" });
+  });
   it("every chat-exposed command is exposed to CLI, HTTP and MCP", () => {
     const gaps = CATALOGUE.filter((cmd) => CommandRegistry.exposedTo(cmd, "chat")).flatMap((cmd) =>
       (["cli", "access", "mcp"] as const)
