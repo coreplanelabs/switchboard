@@ -10,12 +10,15 @@ import {
   cancellationFailure,
   cancellationRefusal,
   cancellationOf,
+  cancellationRefusalOf,
+  cancellationObservationOf,
   sameCancellation,
   type RunCancellation,
   type CancellationObservation,
   type CancellationRefusal,
   type RetirementBlock,
 } from "../../src/core/runLedger/cancellation.js";
+import { RUN_ID_PATTERN } from "../../src/core/runIdentity.js";
 // Resident Worker: always-warm per-repo environments on Cloudflare Sandbox 1.0
 // (@cloudflare/sandbox@next, exact-pinned; the Dockerfile FROM tag must match).
 // One ResidentDO — a Sandbox subclass, i.e. a container — per onboarded
@@ -11471,7 +11474,123 @@ export class ResidentDO extends Sandbox<Env> {
   /** Debug: enumerate thread bindings (read scope). No secrets live in a
    *  binding; worktreePath is omitted like getResidentInfo does — internal
    *  disk layout is not part of the lower-trust read surface. */
-  async debugThreads(): Promise<{ threads: Array<Omit<ThreadBinding, "worktreePath">> }> {
+  async debugThreads(selection?: { threadKey: string; runId: string }) {
+    if (selection) {
+      const { threadKey, runId } = selection;
+      const cancellationKey = `cancelled:${threadKey}:${runId}`;
+      const rows = await this.ctx.storage.get<unknown>([
+        RESOURCE_KEY,
+        cancellationKey,
+        threadBindingKey(threadKey),
+        runRegKey(threadKey),
+        runFenceKey(threadKey),
+      ]);
+      const object = (value: unknown): Record<string, unknown> | undefined =>
+        value !== null && typeof value === "object" && !Array.isArray(value)
+          ? (value as Record<string, unknown>)
+          : undefined;
+      const text = (value: unknown, limit: number): value is string =>
+        typeof value === "string" && value.length > 0 && value.length <= limit;
+      const saved = object(rows.get(cancellationKey));
+      const parsed = cancellationOf(saved?.cancellation);
+      const ticket =
+        parsed?.runId === runId && parsed.threadKey === threadKey && rows.get(RESOURCE_KEY) === `repo:${parsed.repo}`
+          ? parsed
+          : undefined;
+      const rawTarget = object(saved?.target);
+      const target =
+        ticket &&
+        rawTarget &&
+        text(rawTarget.ref, 512) &&
+        text(rawTarget.user, 128) &&
+        isResidentPoolUser(rawTarget.user) &&
+        text(rawTarget.container, 128) &&
+        text(rawTarget.workspace, 4096) &&
+        rawTarget.workspace.startsWith("/workspace/threads/") &&
+        isWorkspaceOwner({ runId, ownerGen: rawTarget.ownerGen, ownerFence: rawTarget.ownerFence }) &&
+        rawTarget.ownerGen === ticket.ownerGen
+          ? {
+              ref: rawTarget.ref,
+              user: rawTarget.user,
+              container: rawTarget.container,
+              ownerGen: rawTarget.ownerGen as string,
+              ownerFence: rawTarget.ownerFence as number,
+            }
+          : null;
+      const rawBinding = object(rows.get(threadBindingKey(threadKey)));
+      const binding =
+        rawBinding &&
+        rawBinding.threadKey === threadKey &&
+        text(rawBinding.ref, 512) &&
+        text(rawBinding.user, 128) &&
+        isResidentPoolUser(rawBinding.user) &&
+        text(rawBinding.container, 128)
+          ? { ref: rawBinding.ref, user: rawBinding.user, container: rawBinding.container }
+          : null;
+      const owner = (value: unknown) =>
+        isWorkspaceOwner(value) ? { runId: value.runId, ownerGen: value.ownerGen, ownerFence: value.ownerFence } : null;
+      const registration = owner(rows.get(runRegKey(threadKey)));
+      const fence = owner(rows.get(runFenceKey(threadKey)));
+      const matchesOwner = (current: typeof registration) =>
+        !target || !current
+          ? null
+          : current.runId === runId && current.ownerGen === target.ownerGen && current.ownerFence === target.ownerFence;
+      const matches = {
+        binding:
+          !target || !binding
+            ? null
+            : rawBinding?.evicted !== true &&
+              binding.ref === target.ref &&
+              binding.user === target.user &&
+              binding.container === target.container &&
+              rawBinding?.worktreePath === rawTarget?.workspace,
+        registration: matchesOwner(registration),
+        fence: matchesOwner(fence),
+      };
+      const disposition =
+        saved?.disposition === "processes-stopped" || saved?.disposition === "runtime-retired"
+          ? saved.disposition
+          : null;
+      const receipt = ticket
+        ? {
+            stopped: saved?.stopped === true ? true : saved?.stopped === false ? false : null,
+            disposition,
+            refusal: cancellationRefusalOf(saved?.failure) ?? null,
+            observation: cancellationObservationOf(saved?.observation) ?? null,
+          }
+        : null;
+      // This is stored custody, not a current kernel or process observation.
+      // No report read repairs a missing row or acknowledges a shutdown.
+      const state =
+        rows.get(cancellationKey) === undefined
+          ? ("absent" as const)
+          : ticket &&
+              target &&
+              Object.values(matches).every((value) => value === true) &&
+              (saved?.failure === undefined || receipt?.refusal !== null) &&
+              (saved?.observation === undefined || receipt?.observation !== null) &&
+              (saved?.disposition === undefined || disposition !== null) &&
+              (saved?.stopped === undefined ||
+                saved.stopped === false ||
+                (saved.stopped === true && disposition !== null))
+            ? ("recorded" as const)
+            : ("unverified" as const);
+      return {
+        cancellation: {
+          runId,
+          threadKey,
+          evidence: "stored-only" as const,
+          state,
+          ticket: ticket ? { id: ticket.id, ownerGen: ticket.ownerGen, startedAt: ticket.startedAt } : null,
+          target,
+          binding,
+          registration,
+          fence,
+          matches,
+          receipt,
+        },
+      };
+    }
     const all = await this.ctx.storage.list<ThreadBinding>({ prefix: THREAD_KEY_PREFIX });
     return { threads: [...all.values()].map(({ worktreePath: _internal, ...rest }) => rest) };
   }
@@ -14082,6 +14201,20 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
 
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);
+  let threadSelection: { threadKey: string; runId: string } | undefined;
+  if (op === "threads" && (body.threadKey !== undefined || body.runId !== undefined)) {
+    const thread = parseThreadKey(body.threadKey);
+    if ("error" in thread || typeof body.runId !== "string" || !RUN_ID_PATTERN.test(body.runId))
+      return json({ error: "threads inspection requires a valid threadKey and runId" }, 400);
+    threadSelection = { threadKey: thread.threadKey, runId: body.runId };
+  }
+  if (threadSelection) {
+    try {
+      return json(await residentStub(env, resource.resource).debugThreads(threadSelection));
+    } catch {
+      return json({ error: "The saved shutdown report is unavailable." }, 503);
+    }
+  }
   const stub = residentStub(env, resource.resource);
   switch (op) {
     case "info":

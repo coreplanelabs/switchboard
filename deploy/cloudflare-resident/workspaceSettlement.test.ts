@@ -32,13 +32,20 @@ import { KeyedAsyncLock } from "./keyedAsyncLock";
 import { isRuntimeBusySignal, SandboxRuntimeBusyError } from "../../src/execution/sandboxErrors";
 import { planForceDetach } from "../../src/execution/residentDetach";
 import { legacyStageReuseScrubCommand } from "./legacyCredentials";
-import { cancellationFailure, sameCancellation } from "../../src/core/runLedger/cancellation";
+import {
+  cancellationFailure,
+  cancellationOf,
+  cancellationRefusalOf,
+  cancellationObservationOf,
+  sameCancellation,
+} from "../../src/core/runLedger/cancellation";
 
 const source = ts.createSourceFile("worker.ts", readSource("worker.ts"), ts.ScriptTarget.Latest, true);
 const resident = source.statements.find(
   (s): s is ts.ClassDeclaration => ts.isClassDeclaration(s) && s.name?.text === "ResidentDO",
 )!;
 const names = [
+  "debugThreads",
   "discardAbsentBinding",
   "debugBackdateThread",
   "workspaceDiscarded",
@@ -228,7 +235,10 @@ function harness(
     });
   });
   const storage: any = {
-    get: async (key: string) => structuredClone(rows.get(key)),
+    get: async (key: string | string[]) =>
+      Array.isArray(key)
+        ? new Map(key.filter((k) => rows.has(k)).map((k) => [k, structuredClone(rows.get(k))]))
+        : structuredClone(rows.get(key)),
     put: async (key: string, value: unknown) => {
       rows.set(key, structuredClone(value));
       events.push("put:" + key);
@@ -303,6 +313,9 @@ function harness(
     legacyStageReuseScrubCommand,
     cancellationRefusal: () => false,
     cancellationFailure,
+    cancellationOf,
+    cancellationRefusalOf,
+    cancellationObservationOf,
     sameCancellation,
     TextDecoder,
     FORCE_DETACH_KILL_TIMEOUT_MS: 1000,
@@ -391,6 +404,146 @@ function harness(
   });
   return { instance, rows, events, warnings, fetch, ackedRevision: () => acknowledged };
 }
+
+describe("resident cancellation inspection", () => {
+  const ticket = {
+    version: 1,
+    id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+    runId: owner.runId,
+    threadKey,
+    repo: "owner/name",
+    ownerGen: owner.ownerGen,
+    startedAt: 1,
+    actor: { kind: "chat", id: "slack:operator" },
+  };
+  const observation = {
+    step: "initial-kill",
+    phase: "exit",
+    cause: "exit-unconfirmed",
+    exitCode: 2,
+    retirement: "native-outcome-unknown",
+  };
+  it("reports the saved original retirement refusal without changing state or exposing private bytes", async () => {
+    const h = harness();
+    h.rows.set(`cancelled:${threadKey}:${owner.runId}`, {
+      cancellation: ticket,
+      target: shutdownTarget,
+      failure: { phase: "resident", cause: "kill-unconfirmed" },
+      observation,
+      private: "fixture-private-token",
+    });
+    h.rows.get("thread:" + threadKey).private = "fixture-private-worktree-bytes";
+    const before = structuredClone([...h.rows]);
+    expect(await h.instance.debugThreads({ threadKey, runId: owner.runId })).toEqual({
+      cancellation: {
+        runId: "run-old",
+        threadKey: "slack:C1:123",
+        evidence: "stored-only",
+        state: "recorded",
+        ticket: { id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb", ownerGen: "gen-old", startedAt: 1 },
+        target: { ref: "main", user: "worker2", container: "vm-a", ownerGen: "gen-old", ownerFence: 7 },
+        binding: { ref: "main", user: "worker2", container: "vm-a" },
+        registration: { runId: "run-old", ownerGen: "gen-old", ownerFence: 7 },
+        fence: { runId: "run-old", ownerGen: "gen-old", ownerFence: 7 },
+        matches: { binding: true, registration: true, fence: true },
+        receipt: {
+          stopped: null,
+          disposition: null,
+          refusal: { phase: "resident", cause: "kill-unconfirmed" },
+          observation: {
+            step: "initial-kill",
+            phase: "exit",
+            cause: "exit-unconfirmed",
+            exitCode: 2,
+            retirement: "native-outcome-unknown",
+          },
+        },
+      },
+    });
+    expect([...h.rows]).toEqual(before);
+    expect(h.events).toEqual([]);
+    expect(h.instance.ctx.container.exec).not.toHaveBeenCalled();
+    expect(h.instance.run).not.toHaveBeenCalled();
+  });
+  it("keeps absent and corrupt cancellation evidence unverified without repairing rows", async () => {
+    const h = harness();
+    const key = `cancelled:${threadKey}:${owner.runId}`;
+    expect((await h.instance.debugThreads({ threadKey, runId: owner.runId })).cancellation).toMatchObject({
+      state: "absent",
+      evidence: "stored-only",
+      ticket: null,
+      target: null,
+      receipt: null,
+      matches: { binding: null, registration: null, fence: null },
+    });
+    for (const row of [
+      { cancellation: { ...ticket, ownerGen: undefined }, target: shutdownTarget },
+      { cancellation: { ...ticket, repo: "foreign/repo" }, target: shutdownTarget },
+      { cancellation: ticket, target: { ...shutdownTarget, ownerFence: undefined } },
+      { cancellation: ticket, target: shutdownTarget, observation: { ...observation, secret: "private-value" } },
+    ]) {
+      h.rows.set(key, row);
+      const before = structuredClone([...h.rows]);
+      const result = await h.instance.debugThreads({ threadKey, runId: owner.runId });
+      expect(result.cancellation).toMatchObject({ state: "unverified", evidence: "stored-only" });
+      expect(JSON.stringify(result)).not.toContain("private-value");
+      expect([...h.rows]).toEqual(before);
+    }
+    expect(h.events).toEqual([]);
+    expect(h.instance.ctx.container.exec).not.toHaveBeenCalled();
+  });
+  it("reports successor mismatches and labels completed receipts as stored evidence", async () => {
+    const h = harness();
+    h.rows.set(`cancelled:${threadKey}:${owner.runId}`, {
+      cancellation: ticket,
+      target: shutdownTarget,
+      stopped: true,
+      disposition: "runtime-retired",
+    });
+    expect((await h.instance.debugThreads({ threadKey, runId: owner.runId })).cancellation).toMatchObject({
+      state: "recorded",
+      evidence: "stored-only",
+      receipt: { stopped: true, disposition: "runtime-retired", refusal: null, observation: null },
+      matches: { binding: true, registration: true, fence: true },
+    });
+    h.rows.set("runReg:" + threadKey, { ...owner, runId: "run-successor", ownerFence: 8 });
+    h.rows.set("runFence:" + threadKey, { ...owner, runId: "run-successor", ownerFence: 8 });
+    h.rows.get("thread:" + threadKey).worktreePath = "/workspace/threads/successor/private";
+    const before = structuredClone([...h.rows]);
+    expect((await h.instance.debugThreads({ threadKey, runId: owner.runId })).cancellation).toMatchObject({
+      state: "unverified",
+      evidence: "stored-only",
+      registration: { runId: "run-successor", ownerGen: "gen-old", ownerFence: 8 },
+      fence: { runId: "run-successor", ownerGen: "gen-old", ownerFence: 8 },
+      matches: { binding: false, registration: false, fence: false },
+      receipt: { stopped: true, disposition: "runtime-retired" },
+    });
+    expect([...h.rows]).toEqual(before);
+    expect(h.events).toEqual([]);
+  });
+  it("preserves the default thread listing and does not turn read failure into absence", async () => {
+    const h = harness();
+    expect(await h.instance.debugThreads()).toEqual({
+      threads: [
+        {
+          threadKey: "slack:C1:123",
+          ref: "main",
+          user: "worker2",
+          container: "vm-a",
+          lastAttachAt: "today",
+          sha: "a".repeat(40),
+          ownBranches: [],
+        },
+      ],
+    });
+    h.instance.ctx.storage.get = async () => {
+      throw new Error("stored witness unavailable");
+    };
+    await expect(h.instance.debugThreads({ threadKey, runId: owner.runId })).rejects.toThrow(
+      "stored witness unavailable",
+    );
+  });
+});
 
 describe("resident cancellation admission", () => {
   const ticket = {
