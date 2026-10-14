@@ -535,6 +535,7 @@ export interface RunsServiceDeps {
   /** Trusted runtime stop, bound to the store-fenced original target. */
   stopRuntime?: ((row: LiveRunRow, cancellation: RunCancellation) => Promise<RuntimeStopResult>) & {
     supports?: (row: LiveRunRow) => boolean;
+    unavailable?: (row: LiveRunRow) => CancellationRefusal | undefined;
   };
   /** This process's existing writer; its actual run handle owns canonical closure. */
   writer?: Pick<LedgerWriteThrough, "gen" | "sessionPersistence" | "liveRuns">;
@@ -1481,8 +1482,9 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     },
 
     async stopRun(id, mode, actor) {
+      const here = registry.getById(id);
       let cancellationCandidate: LiveRunRow | undefined;
-      if (mode === "hard" && ledger?.prepareCancellation && ledger.finishCancellation && deps.stopRuntime) {
+      if (mode === "hard" && ledger && (!here || deps.stopRuntime)) {
         try {
           cancellationCandidate = (await ledger.listLive()).find((row) => row.runId === id);
         } catch {
@@ -1531,7 +1533,13 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
               return { ok: true, value: { id, mode, state: "stopped" } };
             }
             if (prepared.reason !== "unsupported") return { ok: false, error: "unavailable" };
-          }
+            if (!here)
+              return {
+                ok: false,
+                error: "unavailable",
+                refusal: { phase: "prepare", cause: "custody-unverified" },
+              };
+          } else return { ok: false, error: "unavailable" };
         } catch (err) {
           warn(`[runs] hard stop cancellation unconfirmed for ${id}: ${describe(err)}`);
           return { ok: false, error: "unavailable" };
@@ -1542,11 +1550,37 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       // 16): no run loop observes its control, so a soft stop would end nothing
       // — refused, pointing at the hard escape — and a hard stop is the
       // maintainer's escape for an orphaned pipeline: seal it, not signal it.
-      const here = registry.getById(id);
       if (here?.finished) return conflict;
       if (here && !here.finished && here.hosted) {
         if (mode === "soft") return hostedRefused;
         return sealHosted(here.id, actor);
+      }
+      // A durable intent cannot signal a process this generation does not
+      // host. Retain that intent, but do not report shutdown in progress when
+      // no trusted runtime target could perform it.
+      if (mode === "hard" && !here && cancellationCandidate && !cancellationCandidate.meta.hosted) {
+        try {
+          const requested = await ledger!.requestStop(id, "hard");
+          if (!requested.ok) return { ok: false, error: "unavailable" };
+          if (
+            deps.generation !== undefined &&
+            (await sealPausedHardStop(ledger!, id, deps.generation, clock)) === "sealed"
+          )
+            return { ok: true, value: { id, mode, state: "stopped" } };
+          // The store's fresh lease witness preserves delivery to an owner
+          // whose real control lives in another process, including the CLI.
+          if (requested.ownerLive === true) return { ok: true, value: { id, mode, state: "stopping" } };
+        } catch {
+          return { ok: false, error: "unavailable" };
+        }
+        return {
+          ok: false,
+          error: "unavailable",
+          refusal: deps.stopRuntime?.unavailable?.(cancellationCandidate) ?? {
+            phase: "prepare",
+            cause: deps.stopRuntime ? "custody-unverified" : "state-unconfigured",
+          },
+        };
       }
       if (here) {
         // A retry pause can hand off while this stop is being written.
