@@ -2039,6 +2039,122 @@ describe("RunsService.stopRun", () => {
     });
   });
 
+  it.each([false, true])(
+    "hard stop preserves deferred review checkpoint outcomes without posting: committed=%s",
+    async (committed) => {
+      const { reg, store } = setup();
+      const ledger = new InMemoryRunLedger(() => NOW);
+      const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+      const threadKey = "slack:C9:deferred";
+      const binding = {
+        backend: "resident",
+        workspace: "/workspace/original",
+        ref: "main",
+        user: "worker2",
+        container: "original-boot",
+        ownerGen: "g-original",
+        ownerFence: 7,
+      };
+      const proposal = {
+        verdict: "request_changes",
+        summary: "Original review",
+        head: "a".repeat(40),
+        findings: [{ id: "F1", kind: "single", severity: "major", file: "src/example.ts", title: "Original defect" }],
+      };
+      const pending = { status: "pending", proposal, callId: "original-call" };
+      const accepted = { status: "accepted", proposal, verdict: proposal, callId: "original-call" };
+      await ledger.claim({
+        runId: id,
+        threadKey,
+        gen: "g-original",
+        leaseMs: 30_000,
+        startedAt: NOW,
+        meta: { agent: "review", channelId: "slack:C9", userId: "slack:operator", threadKey, repo: "fixture/repo" },
+        card: null,
+        system: "",
+        tools: [],
+        state: { binding, reviewSubmission: pending },
+      });
+      // The caller lost the state-write reply. Test both actual durable outcomes,
+      // never an inferred acceptance or another review execution.
+      const submit = async () => {
+        if (committed)
+          await ledger.setState(id, "g-original", { binding, reviewSubmission: accepted, verdict: proposal });
+        throw new Error("state write response lost");
+      };
+      await expect(submit()).rejects.toThrow("state write response lost");
+      await ledger.append(id, "g-original", [
+        {
+          seq: 1,
+          at: NOW,
+          type: "run_note",
+          kind: "checkpoint_deferred",
+          summary: "review submission checkpoint unconfirmed",
+        },
+      ]);
+      let runtimeAcknowledged = false;
+      const tickets: unknown[] = [];
+      const service = createRunsService({
+        registry: reg,
+        store,
+        ledger,
+        clock: () => NOW,
+        stopRuntime: async (_row, cancellation) => {
+          tickets.push(cancellation);
+          return runtimeAcknowledged
+            ? { stopped: true, disposition: "processes-stopped" }
+            : { stopped: false, refusal: { phase: "resident", cause: "native-outcome-unknown" } };
+        },
+      });
+      expect(await service.stopRun(id, "hard", actor)).toEqual({
+        ok: false,
+        error: "unavailable",
+        refusal: { phase: "resident", cause: "native-outcome-unknown" },
+      });
+      expect(ledger.live.get(id)).toMatchObject({
+        ownerGen: "g-original",
+        stop: "hard",
+        state: {
+          binding,
+          reviewSubmission: committed ? accepted : pending,
+          ...(committed ? { verdict: proposal } : {}),
+        },
+      });
+      runtimeAcknowledged = true;
+      expect(await service.stopRun(id, "hard", actor)).toEqual({
+        ok: true,
+        value: { id, mode: "hard", state: "stopped" },
+      });
+      expect(tickets).toEqual([tickets[0], tickets[0]]);
+      expect(tickets[0]).toMatchObject({ runId: id, ownerGen: "g-original", threadKey });
+      const stopped = ledger.finished.get(id)!;
+      expect(stopped).toMatchObject({
+        id,
+        status: "stopped_hard",
+        cancellation: { cancellation: tickets[0], disposition: "processes-stopped" },
+      });
+      expect(
+        stopped.events.map((event) => ({ type: event.type, kind: "kind" in event ? event.kind : null })),
+      ).toContainEqual({ type: "run_note", kind: "checkpoint_deferred" });
+      expect({
+        posted: stopped.events.some((event) => event.type === "review_posted"),
+        reviewPost: stopped.reviewPost ?? null,
+        verdict: stopped.verdict ?? null,
+      }).toEqual({ posted: false, reviewPost: null, verdict: committed ? proposal : null });
+      expect(
+        await ledger.setState(id, "g-original", { binding, reviewSubmission: accepted, verdict: proposal }),
+      ).toEqual({
+        ok: false,
+        reason: "unknown-run",
+      });
+      expect(
+        await ledger.append(id, "g-original", [
+          { seq: 2, at: NOW, type: "run_note", kind: "checkpoint_deferred", summary: "late original write" },
+        ]),
+      ).toEqual({ ok: false, reason: "unknown-run" });
+    },
+  );
+
   it("strips disallowed characters from actor.id and caps it at 128", async () => {
     const { reg, svc } = setup();
     const { id, token } = reg.create();
