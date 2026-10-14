@@ -525,6 +525,14 @@ export const COMMAND_FIXTURES: Readonly<
     },
     why: "`--from` and `--to` are UTC days, `--from` on or before `--to`; a generic string sample is neither",
   },
+  "metrics.feedback": {
+    hints: { pr: 42, run: FIXTURE.persistedRun, after: FIXTURE.persistedRun },
+    baseline: { repo: FIXTURE.repo },
+    variants: {
+      "all-options-set": { omit: ["run", "after"] },
+    },
+    why: "PR filters require a repository; exact run lookup is separate from list filters, and cursors name retained publications",
+  },
   "repo.onboard": {
     variants: { "all-options-set": { omit: ["evictColdest"] } },
     why: "metadata-only registration and resident eviction are mutually exclusive; individual true/false variants still cover both flags",

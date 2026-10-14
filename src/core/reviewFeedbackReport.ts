@@ -11,6 +11,29 @@ import {
   type ReviewFeedbackWindow,
 } from "./reviewFeedback.js";
 
+export interface FeedbackQuery {
+  days?: number;
+  repo?: string;
+  pr?: number;
+  rating?: "positive" | "negative" | "mixed" | "unrated";
+  state?: FeedbackState;
+  limit?: number;
+  after?: string;
+  run?: string;
+}
+export interface FeedbackQueryResult {
+  asOf: number;
+  range: { sinceMs: number; untilMs: number };
+  collectionStartedAt?: number;
+  total: FeedbackCounts;
+  matching: number;
+  reviews: FeedbackReview[];
+  nextCursor?: string;
+  detail?: (ReviewFeedbackEntry & { excludedActorIds: string[] }) | null;
+  evidenceLimit: string;
+}
+export class FeedbackQueryInputError extends Error {}
+
 export type FeedbackBucket = "positiveOnly" | "negativeOnly" | "mixed" | "ambiguousOnly" | "unknownOnly" | "unrated";
 export type FeedbackState = "complete" | "missing_identity" | "pending" | "stale" | "unavailable" | "content_changed";
 export interface FeedbackReview {
@@ -216,13 +239,12 @@ function week(ms: number): string {
   return new Date(start).toISOString().slice(0, 10);
 }
 
-/** Current votes of a publication cohort; sampled run telemetry never enters these denominators. */
-export function buildReviewFeedbackReport(
+function feedbackRows(
   window: ReviewFeedbackWindow,
   range: { sinceMs: number; untilMs: number },
   now: number,
   opts: { excludedActorIds?: string[]; excludedPullRequests?: string[] } = {},
-): AvailableReviewFeedbackReport {
+): ClassifiedReview[] {
   if (!validFeedbackRange(range.sinceMs, range.untilMs) || !window.entries.every(isReviewFeedbackEntry))
     throw new Error("Invalid review feedback report input");
   const excludedPrs = new Set(opts.excludedPullRequests?.map((p) => p.toLowerCase())),
@@ -238,7 +260,17 @@ export function buildReviewFeedbackReport(
     if (seen.has(key)) throw new Error("Duplicate review feedback publication");
     seen.add(key);
   }
-  const rows = entries.map((entry) => classify(entry, now, new Set(opts.excludedActorIds)));
+  return entries.map((entry) => classify(entry, now, new Set(opts.excludedActorIds)));
+}
+
+/** Current votes of a publication cohort; sampled run telemetry never enters these denominators. */
+export function buildReviewFeedbackReport(
+  window: ReviewFeedbackWindow,
+  range: { sinceMs: number; untilMs: number },
+  now: number,
+  opts: { excludedActorIds?: string[]; excludedPullRequests?: string[] } = {},
+): AvailableReviewFeedbackReport {
+  const rows = feedbackRows(window, range, now, opts);
   const byKind = ["findings", "clean"].flatMap((key) => {
     const values = rows.filter((r) => (key === "findings" ? r.findings > 0 : r.findings === 0));
     return values.length ? [{ key, counts: summarize(values) }] : [];
@@ -261,5 +293,59 @@ export function buildReviewFeedbackReport(
       .sort((a, b) => b.publishedAt - a.publishedAt || a.runId.localeCompare(b.runId))
       .slice(0, REVIEW_DETAILS_LIMIT)
       .map(({ raters: _raters, ...row }) => row),
+  };
+}
+
+export function queryReviewFeedback(
+  window: ReviewFeedbackWindow,
+  range: { sinceMs: number; untilMs: number },
+  now: number,
+  query: FeedbackQuery,
+  exclusions: { excludedActorIds?: string[]; excludedPullRequests?: string[] },
+): FeedbackQueryResult {
+  const scoped = {
+    ...window,
+    entries: window.entries.filter(
+      ({ publication: p }) =>
+        (!query.repo || p.repo.toLowerCase() === query.repo.toLowerCase()) &&
+        (query.pr === undefined || p.pr === query.pr) &&
+        (!query.run || p.runId === query.run),
+    ),
+  };
+  const rows = feedbackRows(scoped, range, now, exclusions);
+  const matches = rows
+    .filter(
+      (r) =>
+        (!query.state || r.state === query.state) &&
+        (!query.rating ||
+          (query.rating === "positive"
+            ? r.positiveVotes > 0
+            : query.rating === "negative"
+              ? r.negativeVotes > 0
+              : query.rating === "mixed"
+                ? r.positiveVotes > 0 && r.negativeVotes > 0
+                : r.bucket === "unrated")),
+    )
+    .sort((a, b) => b.publishedAt - a.publishedAt || a.runId.localeCompare(b.runId));
+  const afterIndex = query.after ? matches.findIndex((r) => r.runId === query.after) : -1;
+  if (query.after && afterIndex < 0)
+    throw new FeedbackQueryInputError("Feedback cursor no longer matches this query; start from the first page.");
+  const limit = query.limit ?? 20;
+  const page = matches.slice(afterIndex + 1, afterIndex + 1 + limit);
+  const detail =
+    query.run && matches.length ? scoped.entries.find((e) => e.publication.runId === query.run) : undefined;
+  return {
+    asOf: now,
+    range,
+    ...(window.collectionStartedAt ? { collectionStartedAt: window.collectionStartedAt } : {}),
+    total: summarize(rows),
+    matching: matches.length,
+    reviews: page.map(({ raters: _raters, ...review }) => review),
+    ...(afterIndex + 1 + page.length < matches.length ? { nextCursor: page.at(-1)!.runId } : {}),
+    ...(query.run
+      ? { detail: detail ? { ...structuredClone(detail), excludedActorIds: exclusions.excludedActorIds ?? [] } : null }
+      : {}),
+    evidenceLimit:
+      "Feedback records thumbs-up/down reactions, not the person's explanation. Failed or old reads retain last-known votes. Use the native review URL, reviewed head and run ID to investigate; original run records may have expired.",
   };
 }

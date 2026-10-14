@@ -67,7 +67,7 @@ A command under two capabilities is on when either gives it a backend.
 | `runLedger` | — |
 | `mcp` | `mcp add`, `mcp connect`, `mcp show`, `mcp remove`, `mcp promote` |
 | `costs` | `costs by`, `costs snapshot` |
-| `metrics` | `metrics trend`, `metrics reviews` |
+| `metrics` | `metrics trend`, `metrics reviews`, `metrics feedback` |
 | `schedules` | `schedule list` |
 | `github` | `delivery report`, `pulls rebase`, `pulls merge`, `pulls enqueue` |
 | `ingress` | — |

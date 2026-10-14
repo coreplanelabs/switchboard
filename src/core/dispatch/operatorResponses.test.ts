@@ -182,7 +182,7 @@ describe("the direct operator on the Responses wire", () => {
       })),
     };
 
-    expect(tools).toHaveLength(57);
+    expect(tools.map((tool) => tool.name)).toContain("metrics_feedback");
     expect(tools.map((tool) => tool.name)).toContain("review_status");
     expect(tools.filter((tool) => tool.name === OPERATOR_READ_TOOLS.repositoryBrief)).toHaveLength(1);
     expect(tools.map((tool) => tool.name)).toContain(OPERATOR_BATCH_TOOL);

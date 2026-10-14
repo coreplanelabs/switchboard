@@ -1194,6 +1194,75 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     "action": "metrics:read",
     "args": [],
     "effect": "read",
+    "id": "metrics.feedback",
+    "options": [
+      {
+        "name": "days",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "repo",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "pr",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "rating",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "positive",
+          "negative",
+          "mixed",
+          "unrated",
+        ],
+      },
+      {
+        "name": "state",
+        "required": false,
+        "type": "enum",
+        "values": [
+          "complete",
+          "missing_identity",
+          "pending",
+          "stale",
+          "unavailable",
+          "content_changed",
+        ],
+      },
+      {
+        "name": "limit",
+        "required": false,
+        "type": "integer",
+      },
+      {
+        "name": "after",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "run",
+        "required": false,
+        "type": "string",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "metrics:read",
+    "args": [],
+    "effect": "read",
     "id": "metrics.reviews",
     "options": [
       {

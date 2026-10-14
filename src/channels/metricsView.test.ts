@@ -56,7 +56,7 @@ function seedOf(html: string): MetricsSeed {
 }
 
 function fakeService(impl: MetricsService["report"]): MetricsService & { report: ReturnType<typeof vi.fn> } {
-  return { report: vi.fn(impl) } as MetricsService & { report: ReturnType<typeof vi.fn> };
+  return { report: vi.fn(impl), feedback: () => new NullMetricsService().feedback() };
 }
 
 function fakeReqRes(method: string, url: string) {

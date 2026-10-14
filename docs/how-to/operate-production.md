@@ -257,6 +257,16 @@ remaining fixes into an authorized follow-up pull request from the current base.
 An open pull request still requires every findings result and an independently
 verified exact head before review resumes.
 
+## Investigate human feedback on a review
+
+Use the read-only MCP tool `metrics_feedback` with `{"rating":"negative","state":"complete","days":30}` to find reviews with current human thumbs-down reactions. Repeat the same query with `after` set to the returned `nextCursor` to read another page. Omit `state` to include last-known negative ratings after a stale or failed read; each result names its read state.
+
+Call `metrics_feedback` with only `{"run":"<returned runId>"}` for the exact retained publication and reaction snapshot. This lookup searches the full 90-day retention and returns the native review URL, PR, reviewed head, body hash, reaction IDs, actor IDs and the exclusions used in the counts. An absent or expired record returns `detail: null`. The data contains reaction signs, not a person's explanation or a saved copy of the comment body.
+
+For an investigation, give an agent the returned native review URL, PR, reviewed head and run ID through the existing `dispatch` tool. Ask it to read the original comment and code at that head, decide whether the finding describes a reachable user problem, and report its evidence without changing code or posting comments. Run-history reads and the investigation use their existing permissions. A rating never starts an agent automatically.
+
+This requires a deployed build containing `metrics_feedback`, the `metrics:read` grant, enabled metrics and `metrics.feedback.enabled: true` with its retained store available. The tool reads stored data and does not refresh GitHub reactions on demand.
+
 ## Next
 
 - [Deploy](deploy.md)
