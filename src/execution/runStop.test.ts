@@ -47,6 +47,30 @@ function row(): LiveRunRow {
 }
 
 describe("run runtime stop", () => {
+  it("asks the recorded Resident backend to resolve an incomplete original target without attaching", async () => {
+    const target = row();
+    target.phase = "attaching";
+    target.meta.selection = "resident";
+    delete target.state.binding;
+    const ticket = { ...cancellation, repo: "fixture/repo" };
+    target.state.cancellation = ticket;
+    const fetch = vi.fn(async (_url: URL | RequestInfo, init?: RequestInit) => {
+      expect(JSON.parse(init!.body as string)).toEqual({
+        cancellation: ticket,
+        binding: null,
+        resource: "repo:fixture/repo",
+      });
+      return Response.json({ cancellationId: ticket.id, stopped: true, disposition: "processes-stopped" });
+    });
+    const stop = createRunStop(
+      { type: "cloudflare", resident: { baseUrl: "https://resident.example" } },
+      secretsFrom({ RESIDENT_OPERATOR_TOKEN: "operator" }),
+      fetch,
+    );
+    expect(await stop!(target, ticket)).toEqual({ stopped: true, disposition: "processes-stopped" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(String(fetch.mock.calls[0]![0])).toBe("https://resident.example/cancel-run");
+  });
   it.each([
     { step: "other-target", phase: "exit", cause: "exit-unconfirmed", exitCode: 2 },
     { step: "initial-kill", phase: "exit", cause: "exit-unconfirmed", exitCode: "2" },

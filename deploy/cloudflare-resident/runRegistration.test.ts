@@ -1048,6 +1048,7 @@ describe("the preflight-facing counts see registered runs the op counters miss",
 // reconciliation, attachment, and detachment decisions are not reimplemented.
 const parsedWorker = ts.createSourceFile("worker.ts", source, ts.ScriptTarget.Latest, true);
 const ownerMethods = [
+  "cancellationPending",
   "reconcileRetainedOwner",
   "attachThreadTraced",
   "withOwnedNativeOperation",
@@ -1247,6 +1248,7 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
     env: {},
     threadAttaches: { run: async (_key: string, action: () => Promise<unknown>) => action() },
     threadOpsInFlight: new Map(),
+    runNativeScopes: new Map(),
     threadOperationScope: new AsyncLocalStorage(),
     opUsersInUse: new Map(),
     poolUsersInspecting: new Set(),
@@ -1636,6 +1638,7 @@ function workloadResident(
     },
     opUsersInUse: new Map<string, string>(),
     threadOpsInFlight: new Map<string, number>(),
+    runNativeScopes: new Map(),
     ctx: {
       storage: {
         get: async (key: string) => structuredClone(rows.get(key)),

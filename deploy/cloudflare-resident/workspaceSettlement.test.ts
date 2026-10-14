@@ -46,6 +46,7 @@ const resident = source.statements.find(
 )!;
 const names = [
   "debugThreads",
+  "cancellationPending",
   "discardAbsentBinding",
   "debugBackdateThread",
   "workspaceDiscarded",
@@ -378,6 +379,8 @@ function harness(
     execThreadImpl: async () => ({ stdout: "ran", stderr: "", exitCode: 0, truncated: false }),
     env: { STATE_WORKER_URL: "https://state.example", MEMORY_TOKEN: "test" },
     threadAttaches: { run: async (_key: string, fn: () => Promise<unknown>) => fn() },
+    runCancellations: new KeyedAsyncLock(),
+    runNativeScopes: new Map(),
     putThreadBinding: async (next: any) => storage.put("thread:" + next.threadKey, next),
     watchdogCheckLifecycle: async () => {
       events.push("lifecycle");
@@ -416,6 +419,58 @@ describe("resident cancellation inspection", () => {
     startedAt: 1,
     actor: { kind: "chat", id: "slack:operator" },
   };
+  it("stops a later same-thread run without discarding a full page of retired original history", async () => {
+    const h = harness();
+    for (let i = 0; i < 30; i++) h.rows.set(`native-operation:${threadKey}:${owner.runId}:${i}`, { ...owner });
+    const history = structuredClone([...h.rows].filter(([key]) => key.startsWith("native-operation:")));
+    const commands: string[][] = [];
+    h.instance.ctx.container.exec = async (argv: string[]) => {
+      commands.push(argv);
+      const exitCode = argv[6].startsWith("boot=") && argv[8] === "new-kernel" ? 12 : 0;
+      return {
+        exitCode: Promise.resolve(exitCode),
+        output: async () => ({
+          exitCode,
+          stdout: new TextEncoder().encode("new-kernel\n").buffer,
+          stderr: new ArrayBuffer(0),
+        }),
+      };
+    };
+    // Previously verified retirement is durable history; this stop must not
+    // reclassify it or discard it when a later run owns the thread.
+    h.rows.set(`native-retirement:${threadKey}:${owner.runId}`, {
+      version: 1,
+      cancellationId: ticket.id,
+      owner,
+      threadKey,
+      originalBoot: "vm-a",
+      currentBoot: "new-kernel",
+      originalOperationOutcome: "unknown",
+      records: await new NativeOperationJournal(h.instance.ctx.storage).fingerprints(
+        `native-operation:${threadKey}:${owner.runId}:`,
+      ),
+    });
+    h.rows.set(`cancelled:${threadKey}:${owner.runId}`, {
+      cancellation: ticket,
+      target: shutdownTarget,
+      stopped: true,
+      disposition: "runtime-retired",
+      retiredBoot: "new-kernel",
+    });
+    const next = { runId: "run-next", ownerGen: "gen-next", ownerFence: 8 };
+    const current = { ...physical, ...next, container: "new-kernel" };
+    h.rows.get("thread:" + threadKey).container = current.container;
+    h.rows.set("runReg:" + threadKey, { threadKey, ...next, workspace: current });
+    h.rows.set("runFence:" + threadKey, next);
+    const stop = { ...ticket, id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", runId: next.runId, ownerGen: next.ownerGen };
+    expect(await h.instance.cancelRun(stop, current)).toEqual({
+      stopped: true,
+      cancellationId: stop.id,
+      disposition: "processes-stopped",
+    });
+    for (const [key, value] of history) expect(h.rows.get(key)).toEqual(value);
+    expect(commands.filter((argv) => argv[6].includes("kill -9")).every((argv) => argv[8] === "new-kernel")).toBe(true);
+  });
   const observation = {
     step: "initial-kill",
     phase: "exit",
@@ -555,6 +610,281 @@ describe("resident cancellation admission", () => {
     startedAt: 1,
     actor: { kind: "chat", id: "slack:operator" },
   };
+  it.each(["process", "opaque"])(
+    "does not turn an unbound submitted %s into retirement after its scope ends",
+    async (kind) => {
+      const h = harness();
+      const key = `native-operation:${threadKey}:${owner.runId}:unbound`;
+      const journal = new NativeOperationJournal(h.instance.ctx.storage);
+      await journal.open(key, owner, threadKey);
+      await journal.begin(key, kind as "process" | "opaque");
+      await journal.close(key);
+      const original = structuredClone(h.rows.get(key));
+      h.instance.ctx.container.exec = async (argv: string[]) => ({
+        exitCode: Promise.resolve(argv[6].includes("kill -9") ? 2 : 0),
+        output: async () => ({
+          exitCode: 0,
+          stdout: new TextEncoder().encode("new-kernel\n").buffer,
+          stderr: new ArrayBuffer(0),
+        }),
+      });
+      expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: false, cancellationId: ticket.id });
+      expect(h.rows.get(key)).toEqual(original);
+      expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)?.stopped).toBeUndefined();
+    },
+  );
+  it("recovers a missing mutable thread binding from the exact registered original runtime", async () => {
+    const h = harness();
+    h.rows.delete("thread:" + threadKey);
+    expect(await h.instance.cancelRun(ticket, null)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "processes-stopped",
+    });
+    expect(h.rows.get("runReg:" + threadKey)).toMatchObject({ ...owner, workspace: physical });
+    expect(h.rows.has("thread:" + threadKey)).toBe(false);
+  });
+  it("stops a positively registered new runtime of the same original without replacing the old target", async () => {
+    const h = harness();
+    h.rows.set(`cancelled:${threadKey}:${owner.runId}`, { cancellation: ticket, target: shutdownTarget });
+    const current = { ...physical, container: "new-kernel" };
+    h.rows.get("thread:" + threadKey).container = current.container;
+    h.rows.set("runReg:" + threadKey, { threadKey, ...owner, workspace: current });
+    const commands: string[][] = [];
+    h.instance.ctx.container.exec = async (argv: string[]) => {
+      commands.push(argv);
+      return {
+        exitCode: Promise.resolve(0),
+        output: async () => ({
+          exitCode: 0,
+          stdout: new TextEncoder().encode("new-kernel\n").buffer,
+          stderr: new ArrayBuffer(0),
+        }),
+      };
+    };
+    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: true, cancellationId: ticket.id });
+    expect(commands.some((argv) => argv[6].includes("kill -9") && argv[8] === "new-kernel")).toBe(true);
+    expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`).target).toEqual(shutdownTarget);
+    expect(h.rows.get("runReg:" + threadKey)).toMatchObject({ ...owner, workspace: current });
+  });
+  it("keeps a changed original binding unconfirmed during the final physical observation", async () => {
+    const h = harness();
+    let probes = 0;
+    h.instance.ctx.container.exec = async () => ({
+      output: async () => {
+        if (++probes === 3) h.rows.get("thread:" + threadKey).container = "new-kernel";
+        return { exitCode: 0, stdout: new TextEncoder().encode("new-kernel\n").buffer, stderr: new ArrayBuffer(0) };
+      },
+    });
+    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({
+      stopped: false,
+      refusal: { cause: "target-changed" },
+    });
+    expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)?.stopped).toBeUndefined();
+    expect(h.rows.get("thread:" + threadKey).container).toBe("new-kernel");
+  });
+  it("does not commit a competing cancellation when the thread already holds another ticket", async () => {
+    const h = harness();
+    const held = { runId: "run-other", cancellationId: "cancel-other" };
+    h.rows.set(`cancel-control:${threadKey}`, held);
+    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({
+      stopped: false,
+      refusal: { cause: "ticket-conflict" },
+    });
+    expect(h.rows.has(`cancelled:${threadKey}:${owner.runId}`)).toBe(false);
+    expect(h.rows.get(`cancel-control:${threadKey}`)).toEqual(held);
+  });
+  it("does not retire a successor's old epoch while the original still holds a native launch scope", async () => {
+    const h = harness();
+    let release!: () => void;
+    const active = h.instance.withOwnedNativeOperation(
+      threadKey,
+      owner,
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    const next = { runId: "run-successor", ownerGen: "gen-next", ownerFence: 8 };
+    h.rows.set("runReg:" + threadKey, { threadKey, ...next });
+    h.rows.set("runFence:" + threadKey, next);
+    h.rows.get("thread:" + threadKey).container = "new-kernel";
+    h.rows.set(`cancelled:${threadKey}:${owner.runId}`, { cancellation: ticket, target: shutdownTarget });
+    h.instance.ctx.container.exec = async () => ({
+      output: async () => ({
+        exitCode: 0,
+        stdout: new TextEncoder().encode("new-kernel\n").buffer,
+        stderr: new ArrayBuffer(0),
+      }),
+    });
+    try {
+      expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({
+        stopped: false,
+        refusal: { cause: "operations-busy" },
+      });
+      expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)?.stopped).toBeUndefined();
+    } finally {
+      release();
+      await active;
+    }
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "runtime-retired",
+    });
+    expect(h.rows.get("runReg:" + threadKey)).toEqual({ threadKey, ...next });
+  });
+  it("holds a replaced original epoch with unbound opaque native history", async () => {
+    const h = harness();
+    const journalKey = `native-operation:${threadKey}:${owner.runId}:lost`;
+    const journal = new NativeOperationJournal(h.instance.ctx.storage);
+    await journal.open(journalKey, owner, threadKey);
+    await journal.begin(journalKey, "opaque");
+    await journal.close(journalKey);
+    const before = structuredClone(h.rows.get(journalKey));
+    h.instance.hydration = null;
+    h.instance.getStatus = async () => ({ state: "warm" });
+    h.instance.recreateAdmission = { blocked: async () => false };
+    h.instance.ctx.container.exec = vi.fn(async (argv: string[]) => ({
+      exitCode: Promise.resolve(argv[6].startsWith("boot=") ? 0 : 2),
+      output: async () => ({
+        exitCode: 0,
+        stdout: new TextEncoder().encode("new-kernel\n").buffer,
+        stderr: new ArrayBuffer(0),
+      }),
+    }));
+    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({
+      stopped: false,
+      cancellationId: ticket.id,
+    });
+    expect(h.rows.get(journalKey)).toEqual(before);
+    expect(h.rows.has(`native-retirement:${threadKey}:${owner.runId}`)).toBe(false);
+    expect(h.instance.ctx.container.exec.mock.calls.every(([argv]: [string[]]) => argv[8] === "vm-a")).toBe(true);
+  });
+  it("resolves only a positively owned original target when its upstream binding is missing", async () => {
+    const h = harness();
+    expect(await h.instance.cancelRun(ticket, null)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "processes-stopped",
+    });
+    const missing = harness();
+    missing.rows.delete("runReg:" + threadKey);
+    expect(await missing.instance.cancelRun(ticket, null)).toEqual({
+      stopped: false,
+      cancellationId: ticket.id,
+      refusal: { phase: "resident", cause: "custody-unverified" },
+    });
+    expect(missing.instance.ctx.container.exec).not.toHaveBeenCalled();
+    const foreign = harness();
+    foreign.rows.set("runReg:" + threadKey, { ...owner, runId: "other-run" });
+    expect(await foreign.instance.cancelRun(ticket, null)).toMatchObject({
+      stopped: false,
+      refusal: { cause: "custody-unverified" },
+    });
+    expect(foreign.instance.ctx.container.exec).not.toHaveBeenCalled();
+  });
+  it("retires the saved original epoch without signalling a successor that reused its UID", async () => {
+    const h = harness();
+    h.rows.set(`cancelled:${threadKey}:${owner.runId}`, { cancellation: ticket, target: shutdownTarget });
+    const next = { runId: "run-successor", ownerGen: "gen-next", ownerFence: 8 };
+    h.rows.set("runReg:" + threadKey, { threadKey, ...next });
+    h.rows.set("runFence:" + threadKey, next);
+    h.rows.set("thread:" + threadKey, {
+      ...h.rows.get("thread:" + threadKey),
+      container: "new-kernel",
+      lastRunOwner: next,
+    });
+    const successor = structuredClone(h.rows.get("thread:" + threadKey));
+    h.instance.threadOpsInFlight.set(threadKey, 1);
+    h.instance.opUsersInUse.set("worker2", "op:successor");
+    h.instance.poolUserOwnerMatches = async () => false;
+    h.instance.ctx.container.exec = vi.fn(async (argv: string[]) => ({
+      exitCode: Promise.resolve(argv[6].includes("kill -9") ? 2 : 0),
+      output: async () => ({
+        exitCode: 0,
+        stdout: new TextEncoder().encode("new-kernel\n").buffer,
+        stderr: new ArrayBuffer(0),
+      }),
+    }));
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "runtime-retired",
+    });
+    expect(h.rows.get("thread:" + threadKey)).toEqual(successor);
+    expect(h.rows.get("runReg:" + threadKey)).toEqual({ threadKey, ...next });
+    expect(h.rows.get("runFence:" + threadKey)).toEqual(next);
+    expect(h.instance.ctx.container.exec.mock.calls.every(([argv]: [string[]]) => !argv[6].includes("kill -9"))).toBe(
+      true,
+    );
+  });
+  it("persists the cancellation fence before waiting behind a held attachment", async () => {
+    const h = harness();
+    const lock = new KeyedAsyncLock();
+    h.instance.threadAttaches = lock;
+    let release!: () => void;
+    const held = lock.run(
+      threadKey,
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    await Promise.resolve();
+    const stop = h.instance.cancelRun(ticket, physical);
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toMatchObject({
+        cancellation: ticket,
+        target: shutdownTarget,
+      });
+    } finally {
+      release();
+      await held;
+      await stop;
+    }
+  });
+  it("does not retire an epoch while an original launch capability is still pending", async () => {
+    const h = harness();
+    h.instance.threadOpsInFlight.set(threadKey, 1);
+    h.instance.waitForThreadDrain = async () => 1;
+    h.instance.hydration = null;
+    h.instance.getStatus = async () => ({ state: "warm" });
+    h.instance.recreateAdmission = { blocked: async () => false };
+    h.instance.ctx.container.exec = async () => ({
+      exitCode: Promise.resolve(2),
+      output: async () => ({
+        exitCode: 0,
+        stdout: new TextEncoder().encode("new-kernel\n").buffer,
+        stderr: new ArrayBuffer(0),
+      }),
+    });
+    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: false, cancellationId: ticket.id });
+    expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)?.stopped).toBeUndefined();
+    expect(h.rows.get("runReg:" + threadKey)).toMatchObject(owner);
+  });
+  it("does not call the whole run stopped when the same original owns work on a new epoch", async () => {
+    const h = harness();
+    h.rows.set(`cancelled:${threadKey}:${owner.runId}`, { cancellation: ticket, target: shutdownTarget });
+    h.rows.get("thread:" + threadKey).container = "new-kernel";
+    h.instance.ctx.container.exec = vi.fn(async () => ({
+      exitCode: Promise.resolve(0),
+      output: async () => ({
+        exitCode: 0,
+        stdout: new TextEncoder().encode("new-kernel\n").buffer,
+        stderr: new ArrayBuffer(0),
+      }),
+    }));
+    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({
+      stopped: false,
+      refusal: { cause: "target-changed" },
+    });
+    expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)?.stopped).toBeUndefined();
+    expect(h.rows.get("runReg:" + threadKey)).toMatchObject(owner);
+    expect(h.instance.ctx.container.exec).not.toHaveBeenCalled();
+  });
   it("acknowledges a replaced original runtime without discarding retained ownership", async () => {
     const h = harness();
     h.instance.opUsersInUse = new Map();
@@ -635,7 +965,7 @@ describe("resident cancellation admission", () => {
     "onboarding",
     "restoring",
     "down",
-  ])("retains the original cancellation when retirement is unconfirmed: %s", async (outcome) => {
+  ])("judges physical retirement independently of historical debt and lifecycle labels: %s", async (outcome) => {
     const h = harness();
     h.instance.hydration = null;
     h.instance.getStatus = async () => ({
@@ -672,7 +1002,9 @@ describe("resident cancellation admission", () => {
         }),
       };
     };
-    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: false });
+    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({
+      stopped: ["hydration", "recreate held", "onboarding", "restoring", "down"].includes(outcome),
+    });
     expect(h.rows.get("thread:" + threadKey)).toMatchObject({ user: "worker2", container: "vm-a" });
     expect(h.rows.get("runReg:" + threadKey)).toMatchObject(owner);
     if (outcome === "unknown native operation") expect(h.rows.get(marker)).toEqual(owner);
@@ -1065,7 +1397,7 @@ describe("resident cancellation admission", () => {
       cancellationId: ticket.id,
       refusal: { phase: "resident", cause: "native-observation-unconfirmed" },
     });
-    expect(nativeCommands).toHaveLength(3);
+    expect(nativeCommands.filter((argv) => argv[6].includes("kill -9"))).toHaveLength(2);
     expect(nativeCommands.at(-1)?.slice(-2)).toEqual(["vm-a", "worker2"]);
     h.instance.ctx.container.exec = async () => ({ exitCode: Promise.resolve(0) });
     expect(await h.instance.cancelRun(ticket, physical)).toEqual({
@@ -1191,7 +1523,7 @@ describe("resident run cancellation", () => {
       actor: { kind: "chat" as const, id: "slack:operator" },
     };
     h.instance.hydration = null;
-    h.instance.getStatus = async () => {
+    h.instance.waitForThreadDrain = async () => {
       throw new Error("Bearer fixture-private-token");
     };
     expect(await h.instance.cancelRun(ticket, physical)).toEqual({
@@ -1218,7 +1550,7 @@ describe("resident run cancellation", () => {
       actor: { kind: "chat" as const, id: "slack:operator" },
     };
     h.instance.hydration = null;
-    h.instance.getStatus = async () => {
+    h.instance.waitForThreadDrain = async () => {
       h.instance.ctx.storage.transaction = async () => {
         throw new Error("Bearer fixture-storage-token");
       };
@@ -1249,7 +1581,7 @@ describe("resident run cancellation", () => {
     };
     const receipt = { cancellation: ticket, target: shutdownTarget, stopped: true, disposition: "runtime-retired" };
     h.instance.hydration = null;
-    h.instance.getStatus = async () => {
+    h.instance.waitForThreadDrain = async () => {
       h.rows.set(`cancelled:${threadKey}:${owner.runId}`, receipt);
       throw new Error("runtime reply lost after shutdown committed");
     };
@@ -1326,9 +1658,9 @@ describe("resident run cancellation", () => {
               phase: "exit",
               cause: "exit-unconfirmed",
               exitCode: 2,
-              retirement: "hydration-unconfirmed",
+              retirement: "native-exec-failed",
             }
-          : { step: "initial-kill", phase: "launch", cause: "native-exec-failed", retirement: "hydration-unconfirmed" };
+          : { step: "initial-kill", phase: "launch", cause: "native-exec-failed", retirement: "native-exec-failed" };
       const result = await h.instance.cancelRun(ticket, physical);
       expect(result).toEqual({
         stopped: false,
@@ -1556,7 +1888,16 @@ describe("resident run cancellation", () => {
       workspaceExclusiveOpsInFlight: new Set(),
       waitForThreadDrain: async () => 0,
     });
-    h.instance.ctx.container.exec = async () => ({ exitCode: Promise.reject(new Error("native result lost")) });
+    h.instance.ctx.container.exec = async () => {
+      const exitCode = Promise.reject(new Error("native result lost"));
+      return {
+        exitCode,
+        output: async () => {
+          await exitCode;
+          return { exitCode: 0, stdout: new ArrayBuffer(0), stderr: new ArrayBuffer(0) };
+        },
+      };
+    };
     expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: false });
     expect(h.rows.get("runReg:" + threadKey)).toMatchObject(owner);
     expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toMatchObject({

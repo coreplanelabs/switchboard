@@ -1392,7 +1392,7 @@ describe("run control: POST /runs/:id/stop", () => {
     expect(reg.getById(id)!.finished).toBe(false);
   });
 
-  it("the tokenless route: 409 hosted for soft; hard seals the parent failed (the operator's escape)", async () => {
+  it.each([true, false])("the tokenless hosted hard stop requires a confirmed pipeline stop: %s", async (confirmed) => {
     const reg = fixedRegistry();
     const { id } = reg.create("ship · acme/api", {
       agent: "ship",
@@ -1401,7 +1401,24 @@ describe("run control: POST /runs/:id/stop", () => {
       threadKey: "web:s:c9",
       hosted: true,
     });
-    const handler = liveOnlyHandler(reg);
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+    if (confirmed)
+      await instances.put({
+        id: "plan-stop",
+        kind: "ship",
+        userId: "access:u1",
+        channelId: "web:s",
+        threadKey: "web:s:c9",
+        repo: "acme/api",
+        branch: "plan/stop",
+        createdAt: 1,
+        plan: { id: "stop", path: "docs/plans/stop.md" },
+        runId: id,
+      });
+    reg.publish(id, { type: "run_meta", agent: "ship", instanceId: "plan-stop", at: 1 });
+    const handler = liveOnlyHandler(reg, {
+      service: createRunsService({ registry: reg, store: null, units: instances }),
+    });
     const soft = fakeReqRes("POST", `/runs/${id}/stop?mode=soft`);
     handler(soft.req, soft.res);
     await soft.finished;
@@ -1411,9 +1428,15 @@ describe("run control: POST /runs/:id/stop", () => {
     const hard = fakeReqRes("POST", `/runs/${id}/stop?mode=hard`);
     handler(hard.req, hard.res);
     await hard.finished;
-    expect(hard.status).toBe(200);
-    expect(JSON.parse(hard.body())).toEqual({ id, mode: "hard", state: "stopping" });
-    expect(reg.getById(id)!).toMatchObject({ finished: true, status: "failed" });
+    expect(hard.status).toBe(confirmed ? 200 : 503);
+    if (confirmed) {
+      expect(JSON.parse(hard.body())).toEqual({ id, mode: "hard", state: "stopping" });
+      expect(reg.getById(id)!).toMatchObject({ finished: true, status: "failed" });
+      expect((await instances.get("plan-stop"))?.stop).toMatchObject({ at: expect.any(Number) });
+    } else {
+      expect(reg.getById(id)!).toMatchObject({ finished: false });
+      expect(await instances.get("plan-stop")).toBeNull();
+    }
   });
 
   it("the live page seed of a hosted run carries no stopUrl — the page draws no stop control; a normal run's seed is unchanged", () => {

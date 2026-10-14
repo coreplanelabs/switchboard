@@ -305,7 +305,14 @@ export async function readCancellationPreparation(
 /** A cancellation fence is irreversible by ordinary execution; select only a scoped runtime. */
 export function cancellationRuntimeSupported(row: LiveRunRow): boolean {
   const b = row.state.binding;
-  if (b === undefined) return row.meta.profile?.machine === "none";
+  if (b === undefined)
+    return (
+      row.meta.profile?.machine === "none" ||
+      (!row.meta.hosted &&
+        row.meta.selection === "resident" &&
+        typeof row.meta.repo === "string" &&
+        row.meta.repo.length > 0)
+    );
   if (!b || typeof b !== "object" || Array.isArray(b)) return false;
   const binding = b as Record<string, unknown>;
   if (binding.backend === "sandbox")
@@ -323,6 +330,19 @@ export function cancellationRuntimeSupported(row: LiveRunRow): boolean {
     Number.isSafeInteger(binding.ownerFence) &&
     binding.ownerFence > 0
   );
+}
+
+/** Null explicitly requests discovery; absence never bypasses a stored target. */
+export function cancellationTargetMatches(row: LiveRunRow, requested: unknown): boolean {
+  if (requested === null)
+    return (
+      row.state.binding === undefined &&
+      !row.meta.hosted &&
+      row.meta.selection === "resident" &&
+      typeof row.meta.repo === "string" &&
+      row.meta.repo.length > 0
+    );
+  return cancellationBindingMatches(row.state.binding, requested);
 }
 
 export function prepareCancellation(row: LiveRunRow, actor: CancellationActor, id: string): CancellationPreparation {

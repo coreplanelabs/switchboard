@@ -6220,6 +6220,10 @@ export class ResidentDO extends Sandbox<Env> {
         )
           throw new Error("workspace discarded");
       }
+      if (scope && (await txn.get(`cancelled:${next.threadKey}:${scope.owner.runId}`)))
+        throw new RunCancelledError("run cancelled");
+      if (await txn.get(`cancel-control:${next.threadKey}`))
+        throw new RunCancelledError("workspace cancellation is in progress");
       const loss =
         newWorkspaceAfterDiscard && retired
           ? await txn.get<{ completed?: boolean; binding?: ThreadBinding }>(
@@ -6406,6 +6410,19 @@ export class ResidentDO extends Sandbox<Env> {
   /** The prior binding read, allocation and possible rollback are one
    *  same-thread operation, even while an attach awaits disk or Git. */
   private readonly threadAttaches = new KeyedAsyncLock();
+  private readonly runCancellations = new KeyedAsyncLock();
+  private readonly runNativeScopes = new Map<string, number>();
+  private async cancellationPending(threadKey: string): Promise<boolean> {
+    const held = await this.ctx.storage.get<{ runId?: unknown; cancellationId?: unknown }>(
+      `cancel-control:${threadKey}`,
+    );
+    if (held === undefined) return false;
+    if (typeof held?.runId !== "string" || typeof held.cancellationId !== "string") return true;
+    const receipt = await this.ctx.storage.get<{ stopped?: unknown; cancellation?: { id?: unknown } }>(
+      `cancelled:${threadKey}:${held.runId}`,
+    );
+    return receipt?.stopped !== true || receipt.cancellation?.id !== held.cancellationId;
+  }
   private readonly workloadAdmissions = new KeyedAsyncLock();
   private readonly workloadReservations = new Set<string>();
 
@@ -6416,7 +6433,9 @@ export class ResidentDO extends Sandbox<Env> {
     const [bindings, registrations, native] = await Promise.all([
       this.liveBindings(),
       this.ctx.storage.list<RunRegistration>({ prefix: RUN_REG_KEY_PREFIX }),
-      this.ctx.storage.list<Partial<WorkspaceOwner> & { opOwner?: string }>({ prefix: "native-operation:" }),
+      new NativeOperationJournal(this.ctx.storage).unresolved() as Promise<
+        Map<string, Partial<WorkspaceOwner> & { opOwner?: string }>
+      >,
     ]);
     // Validate the generation once. Each current owner then uses an indexed
     // read, independent of the number of historical identities.
@@ -6739,6 +6758,13 @@ export class ResidentDO extends Sandbox<Env> {
           // attach cannot slip between this check and a fallback-eligible refusal.
           if (!validRunOwner(runId, ownerGen, ownerFence))
             return { error: "run-registration-incomplete: attach requires a verifiable owner", status: 400 };
+          if (await this.cancellationPending(threadKey))
+            return {
+              error: "workspace is busy stopping its original run",
+              status: 503,
+              reason: "busy",
+              cause: "system",
+            } satisfies ThreadErr;
           if (await this.workspaceDiscarded(threadKey, runId))
             return { error: "workspace discarded", status: 409 } satisfies ThreadErr;
           if (await this.ctx.storage.get(`cancelled:${threadKey}:${runId}`))
@@ -8542,6 +8568,12 @@ export class ResidentDO extends Sandbox<Env> {
       await journal.settle(scope.key, id!);
       ended();
     }
+    try {
+      await this.assertThreadOperationAllowed();
+    } catch (error) {
+      if (scope && id) await journal.settle(scope.key, id);
+      throw error;
+    }
     let settled = false;
     return {
       launched: async (process: { status(): Promise<unknown> }) => {
@@ -8620,7 +8652,15 @@ export class ResidentDO extends Sandbox<Env> {
   ): Promise<T> {
     const key = `native-operation:${threadKey}:${owner.runId}:${crypto.randomUUID()}`;
     const scope = { key, threadKey, owner, attachment, active: true };
-    return this.withNativeOperationScope(key, owner, scope, () => this.threadOperationScope.run(scope, fn));
+    const identity = workspaceOwnerKey(owner);
+    this.runNativeScopes.set(identity, (this.runNativeScopes.get(identity) ?? 0) + 1);
+    try {
+      return await this.withNativeOperationScope(key, owner, scope, () => this.threadOperationScope.run(scope, fn));
+    } finally {
+      const remaining = this.runNativeScopes.get(identity)! - 1;
+      if (remaining) this.runNativeScopes.set(identity, remaining);
+      else this.runNativeScopes.delete(identity);
+    }
   }
 
   /** Both request kinds retain the same native-outcome obligation. */
@@ -8643,7 +8683,11 @@ export class ResidentDO extends Sandbox<Env> {
   private async assertThreadOperationAllowed(): Promise<void> {
     const scope = this.threadOperationScope?.getStore();
     if (!scope) return;
-    if (!scope.active || (await this.workspaceDiscarded(scope.threadKey, scope.owner.runId)))
+    if (
+      !scope.active ||
+      (await this.cancellationPending(scope.threadKey)) ||
+      (await this.workspaceDiscarded(scope.threadKey, scope.owner.runId))
+    )
       throw new RunCancelledError("run cancelled");
     const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(scope.threadKey));
     if (
@@ -8683,7 +8727,7 @@ export class ResidentDO extends Sandbox<Env> {
           (last?.runId && (await this.ctx.storage.get(`cancelled:${threadKey}:${requestOwner?.runId ?? last.runId}`)))
         )
           return { error: "run cancelled", status: 409, reason: "busy", cause: "system" } satisfies ThreadErr;
-        if (this.workspaceExclusiveOpsInFlight.has(threadKey))
+        if (this.workspaceExclusiveOpsInFlight.has(threadKey) || (await this.cancellationPending(threadKey)))
           return { error: "workspace is busy", status: 409, reason: "busy", cause: "system" } satisfies ThreadErr;
         return requestOwner !== undefined && isWorkspaceOwner(last)
           ? this.withOwnedNativeOperation(threadKey, requestOwner ?? last, fn)
@@ -10462,253 +10506,449 @@ export class ResidentDO extends Sandbox<Env> {
       ownerFence?: number;
       container?: string;
       workspace?: string;
-    },
+    } | null,
   ) {
     const threadKey = cancellation.threadKey;
-    return this.withDeployAdmission(() =>
-      this.threadAttaches.run(threadKey, async () => {
-        const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
-        const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
-        const key = `cancelled:${threadKey}:${cancellation.runId}`;
-        const target = {
-          ref: expected.ref,
-          user: expected.user,
-          container: expected.container,
-          workspace: expected.workspace,
-          ownerGen: expected.ownerGen,
-          ownerFence: expected.ownerFence,
+    type Target = NonNullable<typeof expected>;
+    const retainedRuntime = (registration: RunRegistration | undefined): ThreadBinding | undefined => {
+      if (!isWorkspaceOwner(registration)) return;
+      const physical = workspaceBindingOf(registration.workspace, registration);
+      if (!physical || !isResidentPoolUser(physical.user)) return;
+      return {
+        threadKey,
+        ref: physical.ref,
+        user: physical.user,
+        container: physical.container,
+        worktreePath: physical.workspace,
+      } as ThreadBinding;
+    };
+    if (expected === null) {
+      const prior = await this.ctx.storage.get<{ cancellation: RunCancellation; target?: Target }>(
+        `cancelled:${threadKey}:${cancellation.runId}`,
+      );
+      if (
+        prior &&
+        sameCancellation(prior.cancellation, cancellation) &&
+        prior.target &&
+        typeof prior.target === "object" &&
+        !Array.isArray(prior.target)
+      )
+        expected = prior.target;
+    }
+    if (expected === null) {
+      const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+      const binding =
+        (await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey))) ?? retainedRuntime(registration);
+      const fence = await this.ctx.storage.get<unknown>(runFenceKey(threadKey));
+      if (
+        !binding ||
+        binding.evicted ||
+        !binding.container ||
+        !binding.worktreePath ||
+        !isWorkspaceOwner(registration) ||
+        !isWorkspaceOwner(fence) ||
+        registration.runId !== cancellation.runId ||
+        registration.ownerGen !== cancellation.ownerGen ||
+        workspaceOwnerKey(registration) !== workspaceOwnerKey(fence) ||
+        !(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`))
+      )
+        return cancellationFailure(cancellation, "resident", "custody-unverified");
+      expected = {
+        ref: binding.ref,
+        user: binding.user,
+        container: binding.container,
+        workspace: binding.worktreePath,
+        ownerGen: registration.ownerGen,
+        ownerFence: registration.ownerFence,
+      };
+    }
+    const resolvedExpected = expected;
+    return this.runCancellations.run(cancellation.runId, async () => {
+      const binding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+      const registration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+      const runtimeBinding = binding ?? retainedRuntime(registration);
+      const key = `cancelled:${threadKey}:${cancellation.runId}`;
+      const target = {
+        ref: resolvedExpected.ref,
+        user: resolvedExpected.user,
+        container: resolvedExpected.container,
+        workspace: resolvedExpected.workspace,
+        ownerGen: resolvedExpected.ownerGen,
+        ownerFence: resolvedExpected.ownerFence,
+      };
+      const matchesTarget = (value: unknown): boolean => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+        const saved = value as typeof target;
+        return (
+          typeof saved.ref === "string" &&
+          saved.ref.length > 0 &&
+          typeof saved.user === "string" &&
+          isResidentPoolUser(saved.user) &&
+          typeof saved.container === "string" &&
+          saved.container.length > 0 &&
+          typeof saved.workspace === "string" &&
+          saved.workspace.length > 0 &&
+          validRunOwner(cancellation.runId, saved.ownerGen, saved.ownerFence) &&
+          saved.ownerGen === cancellation.ownerGen &&
+          Object.keys(target).every(
+            (field) => saved[field as keyof typeof target] === target[field as keyof typeof target],
+          )
+        );
+      };
+      const prior = await this.ctx.storage.get<{
+        cancellation: RunCancellation;
+        target?: typeof target;
+        stopped?: true;
+        disposition?: "processes-stopped" | "runtime-retired";
+        failure?: CancellationRefusal;
+        observation?: CancellationObservation;
+      }>(key);
+      if (prior && !sameCancellation(prior.cancellation, cancellation))
+        return cancellationFailure(cancellation, "resident", "ticket-conflict");
+      if (prior?.target !== undefined && !matchesTarget(prior.target))
+        return cancellationFailure(cancellation, "resident", "target-changed");
+      if (!matchesTarget(target)) return cancellationFailure(cancellation, "resident", "custody-unverified");
+      if (prior?.stopped === true) {
+        if (!matchesTarget(prior.target)) return cancellationFailure(cancellation, "resident", "custody-unverified");
+        return {
+          stopped: true,
+          cancellationId: cancellation.id,
+          disposition: prior.disposition ?? "processes-stopped",
         };
-        const matchesTarget = (value: unknown): boolean => {
-          if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-          const saved = value as typeof target;
-          return (
-            typeof saved.ref === "string" &&
-            saved.ref.length > 0 &&
-            typeof saved.user === "string" &&
-            isResidentPoolUser(saved.user) &&
-            typeof saved.container === "string" &&
-            saved.container.length > 0 &&
-            typeof saved.workspace === "string" &&
-            saved.workspace.length > 0 &&
-            validRunOwner(cancellation.runId, saved.ownerGen, saved.ownerFence) &&
-            saved.ownerGen === cancellation.ownerGen &&
-            Object.keys(target).every(
-              (field) => saved[field as keyof typeof target] === target[field as keyof typeof target],
-            )
-          );
+      }
+      const refuse = async (
+        cause: CancellationRefusal["cause"],
+        observation?: CancellationObservation,
+        transaction?: DurableObjectTransaction,
+      ) => {
+        const save = async (txn: DurableObjectTransaction) => {
+          const current = await txn.get<typeof prior>(key);
+          if (!current || !sameCancellation(current.cancellation, cancellation))
+            return cancellationFailure(cancellation, "resident", "ticket-conflict");
+          if (!matchesTarget(current.target))
+            return cancellationFailure(cancellation, "resident", "custody-unverified");
+          if (current.stopped === true)
+            return {
+              stopped: true as const,
+              cancellationId: cancellation.id,
+              disposition: current.disposition ?? ("processes-stopped" as const),
+            };
+          const failure = { phase: "resident" as const, cause };
+          await txn.put(key, { ...current, failure, ...(observation ? { observation } : {}) });
+          return { ...cancellationFailure(cancellation, "resident", cause), ...(observation ? { observation } : {}) };
         };
-        const prior = await this.ctx.storage.get<{
-          cancellation: RunCancellation;
-          target?: typeof target;
-          stopped?: true;
-          disposition?: "processes-stopped" | "runtime-retired";
-          failure?: CancellationRefusal;
-          observation?: CancellationObservation;
-        }>(key);
-        if (prior && !sameCancellation(prior.cancellation, cancellation))
-          return cancellationFailure(cancellation, "resident", "ticket-conflict");
-        if (prior?.target !== undefined && !matchesTarget(prior.target))
-          return cancellationFailure(cancellation, "resident", "target-changed");
-        if (prior?.stopped === true) {
-          if (!matchesTarget(prior.target)) return cancellationFailure(cancellation, "resident", "custody-unverified");
-          return {
-            stopped: true,
-            cancellationId: cancellation.id,
-            disposition: prior.disposition ?? "processes-stopped",
-          };
-        }
-        const refuse = async (
-          cause: CancellationRefusal["cause"],
-          observation?: CancellationObservation,
-          transaction?: DurableObjectTransaction,
-        ) => {
-          const save = async (txn: DurableObjectTransaction) => {
-            const current = await txn.get<typeof prior>(key);
-            if (!current || !sameCancellation(current.cancellation, cancellation))
+        return transaction ? save(transaction) : this.ctx.storage.transaction(save);
+      };
+      const fence = await this.ctx.storage.get<unknown>(runFenceKey(threadKey));
+      const savedOriginal = prior !== undefined && matchesTarget(prior.target);
+      const registeredRuntime = retainedRuntime(registration);
+      const originalEpochMoved =
+        savedOriginal &&
+        !!binding &&
+        !!registeredRuntime &&
+        !binding.evicted &&
+        binding.container !== target.container &&
+        ["ref", "user", "worktreePath"].every(
+          (field) => binding[field as keyof ThreadBinding] === originalBindingField(field),
+        ) &&
+        ["ref", "user", "container", "worktreePath"].every(
+          (field) => binding[field as keyof ThreadBinding] === registeredRuntime[field as keyof ThreadBinding],
+        ) &&
+        registeredRunOwnsRelease(registration, cancellation.runId, target.ownerGen, target.ownerFence) &&
+        isWorkspaceOwner(fence) &&
+        isWorkspaceOwner(registration) &&
+        workspaceOwnerKey(fence) === workspaceOwnerKey(registration) &&
+        (await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`));
+      function originalBindingField(field: string) {
+        return field === "worktreePath" ? target.workspace : target[field as "ref" | "user"];
+      }
+      const currentOriginal =
+        originalEpochMoved ||
+        (!!runtimeBinding &&
+          !runtimeBinding.evicted &&
+          runtimeBinding.ref === resolvedExpected.ref &&
+          runtimeBinding.user === resolvedExpected.user &&
+          runtimeBinding.container === resolvedExpected.container &&
+          runtimeBinding.worktreePath === resolvedExpected.workspace &&
+          registeredRunOwnsRelease(
+            registration,
+            cancellation.runId,
+            resolvedExpected.ownerGen,
+            resolvedExpected.ownerFence,
+          ) &&
+          isWorkspaceOwner(fence) &&
+          isWorkspaceOwner(registration) &&
+          workspaceOwnerKey(fence) === workspaceOwnerKey(registration) &&
+          (await this.poolUserOwnerMatches(runtimeBinding.user, `thread:${threadKey}`)));
+      const successor =
+        isWorkspaceOwner(registration) &&
+        isWorkspaceOwner(fence) &&
+        registration.runId !== cancellation.runId &&
+        registration.ownerFence > (target.ownerFence ?? 0) &&
+        workspaceOwnerKey(registration) === workspaceOwnerKey(fence);
+      if (!currentOriginal && registration?.runId === cancellation.runId)
+        return cancellationFailure(cancellation, "resident", "target-changed");
+      if (!savedOriginal && !currentOriginal) return cancellationFailure(cancellation, "resident", "target-mismatch");
+      const originalBinding = {
+        threadKey,
+        lastRunOwner: { runId: cancellation.runId, ownerGen: target.ownerGen!, ownerFence: target.ownerFence! },
+        ref: target.ref!,
+        user: target.user!,
+        container: target.container!,
+        worktreePath: target.workspace!,
+      } as ThreadBinding;
+      const stopBinding = originalEpochMoved ? registeredRuntime! : originalBinding;
+      if (!savedOriginal && (this.destroying || this.ctx.container?.running !== true))
+        return cancellationFailure(cancellation, "resident", "target-mismatch");
+      this.workspaceExclusiveOpsInFlight.add(threadKey);
+      try {
+        const admitted = await this.ctx.storage.transaction(async (txn) => {
+          const current = await txn.get<typeof prior>(key);
+          if (current && !sameCancellation(current.cancellation, cancellation))
+            return cancellationFailure(cancellation, "resident", "ticket-conflict");
+          if (current?.target !== undefined && !matchesTarget(current.target))
+            return cancellationFailure(cancellation, "resident", "target-changed");
+          if (current?.stopped === true && !matchesTarget(current.target))
+            return cancellationFailure(cancellation, "resident", "custody-unverified");
+          if (current?.stopped === true)
+            return {
+              stopped: true as const,
+              cancellationId: cancellation.id,
+              disposition: current.disposition ?? ("processes-stopped" as const),
+            };
+          const currentBinding = await txn.get<ThreadBinding>(threadBindingKey(threadKey));
+          const currentOwner = await txn.get<RunRegistration>(runRegKey(threadKey));
+          const currentFence = await txn.get<unknown>(runFenceKey(threadKey));
+          if (
+            JSON.stringify(currentBinding) !== JSON.stringify(binding) ||
+            JSON.stringify(currentOwner) !== JSON.stringify(registration) ||
+            JSON.stringify(currentFence) !== JSON.stringify(fence)
+          )
+            return cancellationFailure(cancellation, "resident", "target-changed");
+          if (currentOriginal) {
+            const held = await txn.get<{ runId?: unknown; cancellationId?: unknown }>(`cancel-control:${threadKey}`);
+            if (held && (held.runId !== cancellation.runId || held.cancellationId !== cancellation.id))
               return cancellationFailure(cancellation, "resident", "ticket-conflict");
-            if (!matchesTarget(current.target))
-              return cancellationFailure(cancellation, "resident", "custody-unverified");
-            if (current.stopped === true)
-              return {
-                stopped: true as const,
-                cancellationId: cancellation.id,
-                disposition: current.disposition ?? ("processes-stopped" as const),
-              };
-            const failure = { phase: "resident" as const, cause };
-            await txn.put(key, { ...current, failure, ...(observation ? { observation } : {}) });
-            return { ...cancellationFailure(cancellation, "resident", cause), ...(observation ? { observation } : {}) };
-          };
-          return transaction ? save(transaction) : this.ctx.storage.transaction(save);
-        };
-        const fence = await this.ctx.storage.get<unknown>(runFenceKey(threadKey));
-        if (
-          !binding ||
-          binding.evicted ||
-          this.destroying ||
-          this.ctx.container?.running !== true ||
-          binding.ref !== expected.ref ||
-          binding.user !== expected.user ||
-          binding.container !== expected.container ||
-          binding.worktreePath !== expected.workspace ||
-          !isResidentPoolUser(binding.user) ||
-          !registeredRunOwnsRelease(registration, cancellation.runId, expected.ownerGen, expected.ownerFence) ||
-          !isWorkspaceOwner(fence) ||
-          !isWorkspaceOwner(registration) ||
-          workspaceOwnerKey(fence) !== workspaceOwnerKey(registration) ||
-          expected.ownerGen !== cancellation.ownerGen ||
-          !(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`))
-        )
-          return cancellationFailure(cancellation, "resident", "target-mismatch");
-        this.workspaceExclusiveOpsInFlight.add(threadKey);
-        try {
-          const admitted = await this.ctx.storage.transaction(async (txn) => {
-            const current = await txn.get<typeof prior>(key);
-            if (current && !sameCancellation(current.cancellation, cancellation))
-              return cancellationFailure(cancellation, "resident", "ticket-conflict");
-            if (current?.target !== undefined && !matchesTarget(current.target))
-              return cancellationFailure(cancellation, "resident", "target-changed");
-            if (current?.stopped === true && !matchesTarget(current.target))
-              return cancellationFailure(cancellation, "resident", "custody-unverified");
-            if (current?.stopped === true)
-              return {
-                stopped: true as const,
-                cancellationId: cancellation.id,
-                disposition: current.disposition ?? ("processes-stopped" as const),
-              };
-            const currentBinding = await txn.get<ThreadBinding>(threadBindingKey(threadKey));
-            const currentOwner = await txn.get<RunRegistration>(runRegKey(threadKey));
-            const currentFence = await txn.get<unknown>(runFenceKey(threadKey));
-            if (
-              !currentBinding ||
-              currentBinding.evicted ||
-              ["ref", "user", "container", "worktreePath"].some(
-                (field) => currentBinding[field as keyof ThreadBinding] !== binding[field as keyof ThreadBinding],
-              ) ||
-              !registeredRunOwnsRelease(currentOwner, cancellation.runId, expected.ownerGen, expected.ownerFence) ||
-              !isWorkspaceOwner(currentFence) ||
-              workspaceOwnerKey(currentFence) !== workspaceOwnerKey(registration!)
-            )
-              return cancellationFailure(cancellation, "resident", "target-changed");
-            await txn.put(key, { ...current, cancellation, target });
-            await txn.put(`cancelled-thread:${threadKey}`, true);
-            return null;
-          });
-          if (admitted) return admitted;
-          // Prove an obsolete runtime before using an SDK path that could wake
-          // a replacement. This observation is native-only and preserves bytes.
-          let retirement: RetirementBlock | undefined;
-          const retiredBoot = await this.observeRetiredThreadRuntime(binding, (cause) => {
-            retirement = cause;
-          });
-          if (!retiredBoot) {
-            const initialKill = await this.killThreadUserProcesses(binding.user, threadKey, binding.container);
-            if (!initialKill.stopped) {
-              const { stopped: _stopped, ...observation } = initialKill;
-              return await refuse("kill-unconfirmed", {
-                step: "initial-kill",
-                ...observation,
-                ...(retirement ? { retirement } : {}),
-              });
-            }
-            if (await this.waitForThreadDrain(threadKey)) return await refuse("operations-busy");
-            // Unknown native work remains held across an isolate or VM replacement.
-            const unresolved = await this.ctx.storage.list({ prefix: `native-operation:${threadKey}:`, limit: 1 });
-            if (unresolved.size) return await refuse("native-outcome-unknown");
-            // An admitted launch may have resumed after the first kill. All its
-            // waits have now settled; kill detached children too, then ask the
-            // native container for its physical identity and this UID's absence.
-            const finalKill = await this.killThreadUserProcesses(binding.user, threadKey, binding.container);
-            if (!finalKill.stopped) {
-              const { stopped: _stopped, ...observation } = finalKill;
-              return await refuse("kill-unconfirmed", { step: "final-kill", ...observation });
-            }
-            if (this.ctx.container?.running !== true) return await refuse("runtime-unavailable");
-            const probe = await this.ctx.container.exec([
-              "/usr/bin/timeout",
-              "-s",
-              "KILL",
-              String(FORCE_DETACH_KILL_TIMEOUT_MS / SECOND_MS),
-              "/bin/sh",
-              "-c",
-              'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; /usr/bin/pgrep -u "$2" >/dev/null 2>&1; test "$?" = 1',
-              "--",
-              binding.container!,
-              binding.user,
-            ]);
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            const exit = await Promise.race([
-              probe.exitCode,
-              new Promise<null>((resolve) => {
-                timer = setTimeout(() => resolve(null), FORCE_DETACH_KILL_TIMEOUT_MS);
-              }),
-            ]).finally(() => {
-              if (timer !== undefined) clearTimeout(timer);
+            await txn.put(`cancel-control:${threadKey}`, {
+              runId: cancellation.runId,
+              cancellationId: cancellation.id,
             });
-            if (exit !== 0 || this.ctx.container?.running !== true)
+            await txn.put(`cancelled-thread:${threadKey}`, true);
+          }
+          await txn.put(key, { ...current, cancellation, target });
+          return null;
+        });
+        if (admitted) return admitted;
+        if (
+          successor &&
+          (this.runNativeScopes.get(
+            workspaceOwnerKey({
+              runId: cancellation.runId,
+              ownerGen: target.ownerGen!,
+              ownerFence: target.ownerFence!,
+            }),
+          ) ?? 0) > 0
+        )
+          return await refuse("operations-busy");
+        // Prove an obsolete runtime before using an SDK path that could wake
+        // a replacement. This observation is native-only and preserves bytes.
+        let retirement: RetirementBlock | undefined;
+        let retiredBoot = originalEpochMoved
+          ? undefined
+          : await this.observeRetiredThreadRuntime(
+              originalBinding,
+              (cause) => {
+                retirement = cause;
+              },
+              successor,
+            );
+        if (!retiredBoot) {
+          if (!currentOriginal) return await refuse("target-changed");
+          const active = await new NativeOperationJournal(this.ctx.storage).unresolved(
+            `native-operation:${threadKey}:`,
+          );
+          if (
+            [...active.values()].some(
+              (value) =>
+                isWorkspaceOwner(value) &&
+                (value.runId !== cancellation.runId ||
+                  value.ownerGen !== target.ownerGen ||
+                  value.ownerFence !== target.ownerFence),
+            )
+          )
+            return await refuse("target-changed");
+          const initialKill = await this.killThreadUserProcesses(stopBinding.user, threadKey, stopBinding.container);
+          if (!initialKill.stopped) {
+            const { stopped: _stopped, ...observation } = initialKill;
+            return await refuse("kill-unconfirmed", {
+              step: "initial-kill",
+              ...observation,
+              ...(retirement ? { retirement } : {}),
+            });
+          }
+          if (await this.waitForThreadDrain(threadKey)) return await refuse("operations-busy");
+          // Unknown native work remains held across an isolate or VM replacement.
+          const unresolved = await new NativeOperationJournal(this.ctx.storage).unresolved(
+            `native-operation:${threadKey}:`,
+          );
+          if (unresolved.size) return await refuse("native-outcome-unknown");
+          // An admitted launch may have resumed after the first kill. All its
+          // waits have now settled; kill detached children too, then ask the
+          // native container for its physical identity and this UID's absence.
+          const finalKill = await this.killThreadUserProcesses(stopBinding.user, threadKey, stopBinding.container);
+          if (!finalKill.stopped) {
+            const { stopped: _stopped, ...observation } = finalKill;
+            return await refuse("kill-unconfirmed", { step: "final-kill", ...observation });
+          }
+          if (this.ctx.container?.running !== true) return await refuse("runtime-unavailable");
+          const probe = await this.ctx.container.exec([
+            "/usr/bin/timeout",
+            "-s",
+            "KILL",
+            String(FORCE_DETACH_KILL_TIMEOUT_MS / SECOND_MS),
+            "/bin/sh",
+            "-c",
+            'test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$1" || exit 2; /usr/bin/pgrep -u "$2" >/dev/null 2>&1; test "$?" = 1',
+            "--",
+            stopBinding.container!,
+            stopBinding.user,
+          ]);
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const exit = await Promise.race([
+            probe.exitCode,
+            new Promise<null>((resolve) => {
+              timer = setTimeout(() => resolve(null), FORCE_DETACH_KILL_TIMEOUT_MS);
+            }),
+          ]).finally(() => {
+            if (timer !== undefined) clearTimeout(timer);
+          });
+          if (exit !== 0 || this.ctx.container?.running !== true) return await refuse("native-observation-unconfirmed");
+          if (originalEpochMoved) {
+            retiredBoot = await this.observeRetiredThreadRuntime(originalBinding);
+            if (!retiredBoot || retiredBoot !== stopBinding.container)
               return await refuse("native-observation-unconfirmed");
           }
-          const currentBinding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
-          const currentRegistration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
-          if (
-            !currentBinding ||
-            currentBinding.evicted ||
+        }
+        const currentBinding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
+        const currentRegistration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
+        const currentRuntime = currentBinding ?? retainedRuntime(currentRegistration);
+        if (
+          !retiredBoot &&
+          (!currentRuntime ||
+            currentRuntime.evicted ||
             ["threadKey", "ref", "worktreePath", "user", "container"].some(
-              (field) => currentBinding[field as keyof ThreadBinding] !== binding[field as keyof ThreadBinding],
+              (field) => currentRuntime[field as keyof ThreadBinding] !== originalBinding[field as keyof ThreadBinding],
             ) ||
             !registeredRunOwnsRelease(
               currentRegistration,
               cancellation.runId,
-              expected.ownerGen,
-              expected.ownerFence,
+              resolvedExpected.ownerGen,
+              resolvedExpected.ownerFence,
             ) ||
-            !(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`))
+            !(await this.poolUserOwnerMatches(currentRuntime.user, `thread:${threadKey}`)))
+        )
+          return await refuse("target-changed");
+        if (
+          retiredBoot &&
+          (await this.observeRetiredThreadRuntime(originalBinding, undefined, successor)) !== retiredBoot
+        )
+          return await refuse("native-observation-unconfirmed");
+        const disposition = retiredBoot ? "runtime-retired" : "processes-stopped";
+        const journal = new NativeOperationJournal(this.ctx.storage);
+        const records = retiredBoot
+          ? await journal.fingerprints(`native-operation:${threadKey}:${cancellation.runId}:`)
+          : {};
+        if (
+          retiredBoot &&
+          (await this.observeRetiredThreadRuntime(originalBinding, undefined, successor)) !== retiredBoot
+        )
+          return await refuse("native-observation-unconfirmed");
+        return await this.ctx.storage.transaction(async (txn) => {
+          const finalBinding = await txn.get<ThreadBinding>(threadBindingKey(threadKey));
+          const finalOwner = await txn.get<RunRegistration>(runRegKey(threadKey));
+          const finalFence = await txn.get<unknown>(runFenceKey(threadKey));
+          if (
+            retiredBoot &&
+            (this.runNativeScopes.get(
+              workspaceOwnerKey({
+                runId: cancellation.runId,
+                ownerGen: target.ownerGen!,
+                ownerFence: target.ownerFence!,
+              }),
+            ) ?? 0) > 0
           )
-            return await refuse("target-changed");
-          if (retiredBoot && (await this.observeRetiredThreadRuntime(currentBinding)) !== retiredBoot)
-            return await refuse("native-observation-unconfirmed");
-          const disposition = retiredBoot ? "runtime-retired" : "processes-stopped";
-          return await this.ctx.storage.transaction(async (txn) => {
-            const finalBinding = await txn.get<ThreadBinding>(threadBindingKey(threadKey));
-            const finalOwner = await txn.get<RunRegistration>(runRegKey(threadKey));
-            const finalFence = await txn.get<unknown>(runFenceKey(threadKey));
-            if (
-              JSON.stringify(finalBinding) !== JSON.stringify(currentBinding) ||
+            return refuse("operations-busy", undefined, txn);
+          // The old kernel may be gone while this run acquires a new one.
+          // Credit retirement only against the ownership snapshot we observed.
+          if (
+            retiredBoot &&
+            (JSON.stringify(finalBinding) !== JSON.stringify(binding) ||
+              JSON.stringify(finalOwner) !== JSON.stringify(registration) ||
+              JSON.stringify(finalFence) !== JSON.stringify(fence))
+          )
+            return refuse("target-changed", undefined, txn);
+          if (
+            !retiredBoot &&
+            (JSON.stringify(finalBinding) !== JSON.stringify(currentBinding) ||
               JSON.stringify(finalOwner) !== JSON.stringify(currentRegistration) ||
               !isWorkspaceOwner(finalOwner) ||
               !isWorkspaceOwner(finalFence) ||
               workspaceOwnerKey(finalFence) !== workspaceOwnerKey(finalOwner) ||
               (this.threadOpsInFlight.get(threadKey) ?? 0) > 0 ||
-              (await txn.list({ prefix: `native-operation:${threadKey}:`, limit: 1 })).size
-            )
-              return refuse("target-changed", undefined, txn);
-            const current = await txn.get<typeof prior>(key);
-            if (!current || !sameCancellation(current.cancellation, cancellation))
-              return cancellationFailure(cancellation, "resident", "ticket-conflict");
-            if (!matchesTarget(current.target))
-              return cancellationFailure(cancellation, "resident", "custody-unverified");
+              (await journal.unresolved(`native-operation:${threadKey}:`, txn)).size)
+          )
+            return refuse("target-changed", undefined, txn);
+          const current = await txn.get<typeof prior>(key);
+          if (!current || !sameCancellation(current.cancellation, cancellation))
+            return cancellationFailure(cancellation, "resident", "ticket-conflict");
+          if (!matchesTarget(current.target))
+            return cancellationFailure(cancellation, "resident", "custody-unverified");
+          if (
+            retiredBoot &&
+            JSON.stringify(await journal.fingerprints(`native-operation:${threadKey}:${cancellation.runId}:`, txn)) !==
+              JSON.stringify(records)
+          )
+            return refuse("native-outcome-unknown", undefined, txn);
+          if (!retiredBoot && currentBinding && currentRegistration)
             await txn.put(threadBindingKey(threadKey), { ...currentBinding, lastRunOwner: currentRegistration });
-            await txn.put(key, {
-              ...current,
-              cancellation,
-              stopped: true,
-              disposition,
-              ...(retiredBoot ? { retiredBoot } : {}),
+          if (retiredBoot)
+            await txn.put(`native-retirement:${threadKey}:${cancellation.runId}`, {
+              version: 1,
+              cancellationId: cancellation.id,
+              owner: { runId: cancellation.runId, ownerGen: target.ownerGen, ownerFence: target.ownerFence },
+              threadKey,
+              originalBoot: target.container,
+              currentBoot: retiredBoot,
+              originalOperationOutcome: "unknown",
+              records,
             });
-            return { stopped: true, cancellationId: cancellation.id, disposition };
+          await txn.put(key, {
+            ...current,
+            cancellation,
+            stopped: true,
+            disposition,
+            ...(retiredBoot ? { retiredBoot } : {}),
+            ...(originalEpochMoved
+              ? { endedRuntime: { container: stopBinding.container, user: stopBinding.user } }
+              : {}),
           });
+          const held = await txn.get<{ runId?: unknown; cancellationId?: unknown }>(`cancel-control:${threadKey}`);
+          if (held?.runId === cancellation.runId && held.cancellationId === cancellation.id)
+            await txn.delete(`cancel-control:${threadKey}`);
+          return { stopped: true, cancellationId: cancellation.id, disposition };
+        });
+      } catch {
+        try {
+          return await refuse("runtime-unconfirmed");
         } catch {
-          try {
-            return await refuse("runtime-unconfirmed");
-          } catch {
-            // Storage failure leaves the original intent unresolved. Do not
-            // expose a provider error or claim a durable shutdown receipt.
-            return cancellationFailure(cancellation, "resident", "runtime-unconfirmed");
-          }
-        } finally {
-          this.workspaceExclusiveOpsInFlight.delete(threadKey);
+          // Storage failure leaves the original intent unresolved. Do not
+          // expose a provider error or claim a durable shutdown receipt.
+          return cancellationFailure(cancellation, "resident", "runtime-unconfirmed");
         }
-      }),
-    );
+      } finally {
+        this.workspaceExclusiveOpsInFlight.delete(threadKey);
+      }
+    });
   }
 
   /** A different kernel boot proves the original runtime is gone, not that
@@ -10716,22 +10956,29 @@ export class ResidentDO extends Sandbox<Env> {
   private async observeRetiredThreadRuntime(
     binding: ThreadBinding,
     onBlocked?: (cause: RetirementBlock) => void,
+    successor = false,
   ): Promise<string | undefined> {
     const blocked = (cause: RetirementBlock): undefined => {
       onBlocked?.(cause);
       return;
     };
     if (this.destroying) return blocked("destroying");
-    if (this.hydration !== null) return blocked("hydration-unconfirmed");
     if (this.ctx.container?.running !== true) return blocked("runtime-unavailable");
-    if (!["warm", "refreshing"].includes((await this.getStatus()).state)) return blocked("lifecycle-transition");
-    if (await this.recreateAdmission.blocked()) return blocked("recreate-held");
-    if ((this.threadOpsInFlight.get(binding.threadKey) ?? 0) > 0) return blocked("operations-busy");
-    if (this.opUsersInUse.has(binding.user)) return blocked("operation-uid-active");
-    if (!(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`)))
-      return blocked("uid-owner-unverified");
-    if ((await this.ctx.storage.list({ prefix: `native-operation:${binding.threadKey}:`, limit: 1 })).size)
+    // Owner/hash and a dead kernel cannot bind an unknown SDK submission to
+    // that kernel. Keep its authority held until native confinement is proven.
+    if (!isWorkspaceOwner(binding.lastRunOwner)) return blocked("uid-owner-unverified");
+    if (
+      (
+        await new NativeOperationJournal(this.ctx.storage).unresolved(
+          `native-operation:${binding.threadKey}:${binding.lastRunOwner.runId}:`,
+        )
+      ).size
+    )
       return blocked("native-outcome-unknown");
+    if (!successor && (this.threadOpsInFlight.get(binding.threadKey) ?? 0) > 0) return blocked("operations-busy");
+    if (!successor && this.opUsersInUse.has(binding.user)) return blocked("operation-uid-active");
+    if (!successor && !(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`)))
+      return blocked("uid-owner-unverified");
     if (this.ctx.container?.running !== true) return blocked("runtime-unavailable");
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -10743,7 +10990,9 @@ export class ResidentDO extends Sandbox<Env> {
           String(FORCE_DETACH_KILL_TIMEOUT_MS / SECOND_MS),
           "/bin/sh",
           "-c",
-          'boot=$(/bin/cat /proc/sys/kernel/random/boot_id) || exit 10; test -n "$boot" || exit 10; test "$boot" != "$1" || exit 12; /usr/bin/pgrep -u "$2" >/dev/null 2>&1; test "$?" = 1 || exit 3; test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$boot" || exit 2; printf "%s\\n" "$boot"',
+          successor
+            ? 'boot=$(/bin/cat /proc/sys/kernel/random/boot_id) || exit 10; test -n "$boot" || exit 10; test "$boot" != "$1" || exit 12; test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$boot" || exit 2; printf "%s\\n" "$boot"'
+            : 'boot=$(/bin/cat /proc/sys/kernel/random/boot_id) || exit 10; test -n "$boot" || exit 10; test "$boot" != "$1" || exit 12; /usr/bin/pgrep -u "$2" >/dev/null 2>&1; test "$?" = 1 || exit 3; test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$boot" || exit 2; printf "%s\\n" "$boot"',
           "--",
           binding.container!,
           binding.user,
@@ -11075,6 +11324,8 @@ export class ResidentDO extends Sandbox<Env> {
     await this.ctx.storage.transaction(async (txn) => {
       if ((await txn.get(`discarding:${threadKey}`)) || (await txn.get(`discarded:${threadKey}:${runId}`)))
         throw new Error("workspace discarded");
+      if ((await txn.get(`cancelled:${threadKey}:${runId}`)) || (await txn.get(`cancel-control:${threadKey}`)))
+        throw new RunCancelledError("run cancelled");
       await txn.put(runFenceKey(threadKey), { runId, ownerGen, ownerFence });
       await txn.put(runRegKey(threadKey), {
         threadKey,
@@ -11136,7 +11387,10 @@ export class ResidentDO extends Sandbox<Env> {
     // An operator awaiting a UID has not begun its command yet.
     // Only its exact, acknowledged pre-allocation marker may be excluded;
     // reading two entries still detects a foreign marker after that one.
-    const native = await this.ctx.storage.list<{ opOwner?: string }>({ prefix: "native-operation:", limit: 2 });
+    const native = (await new NativeOperationJournal(this.ctx.storage).unresolved()) as Map<
+      string,
+      { opOwner?: string }
+    >;
     const op = this.opOperationScope?.getStore();
     let n = [...native].some(
       ([key, value]) =>
@@ -11216,7 +11470,8 @@ export class ResidentDO extends Sandbox<Env> {
       else if (state === "unknown") unknownRuns++;
     }
     const nativeOperationReadback = await this.getNativeOperations();
-    if (this.runsInFlightCount() === 0 && nativeOperationReadback.operations.length > 0) unknownRuns++;
+    if (this.runsInFlightCount() === 0 && (await new NativeOperationJournal(this.ctx.storage).unresolved()).size > 0)
+      unknownRuns++;
     return {
       ...(await this.getResidentInfo()),
       executingRuns: executingRuns + this.runsInFlightCount(),
@@ -13092,8 +13347,7 @@ export default {
               !cancellation ||
               "error" in resource ||
               body.resource !== `repo:${cancellation.repo}` ||
-              !body.binding ||
-              typeof body.binding !== "object"
+              (body.binding !== null && (!body.binding || typeof body.binding !== "object"))
             ) {
               cancellationRefusal(cancellation, "resident", "invalid-request");
               return json({ error: "invalid cancellation" }, 400);

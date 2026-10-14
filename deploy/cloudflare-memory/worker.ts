@@ -3,7 +3,7 @@ import { STORAGE_FAILURE_DIAGNOSTIC_HEADER, storageFailureNotice } from "../../s
 import { hasConfirmationConsent, type ConfirmationConsentSource } from "../../src/core/confirmationConsent.ts";
 import {
   prepareCancellation,
-  cancellationBindingMatches,
+  cancellationTargetMatches,
   cancellationOf,
   cancellationMatches,
   cancellationRecordMatches,
@@ -7620,7 +7620,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     return (
       !!row &&
       cancellationMatches(row, cancellation) &&
-      (binding === undefined || cancellationBindingMatches(row.state.binding, binding))
+      (binding === undefined || cancellationTargetMatches(row, binding))
     );
   }
   async finishCancellation(cancellation: RunCancellation, record: RunRecord, point?: RunMetricsPoint) {
