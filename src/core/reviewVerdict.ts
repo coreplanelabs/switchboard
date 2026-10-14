@@ -679,7 +679,8 @@ export function buildReviewPostBody(
     );
   }
   const head = target?.head ?? verdict?.head;
-  if (head) fixedParts.push(`_Reviewed at \`${head.slice(0, 7)}\`._`);
+  if (head)
+    fixedParts.push(`_${completeReviewVerdict(verdict) ? "Reviewed at" : "Review target:"} \`${head.slice(0, 7)}\`._`);
   const agentParts: string[] = [];
   if (failure) agentParts.push(`**Validation:** ${redactAndCap(failure, 600)}`);
   if (verdict?.summary) agentParts.push(`**Rationale:** ${oneLine(verdict.summary)}`);

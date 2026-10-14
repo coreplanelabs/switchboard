@@ -155,7 +155,7 @@
     "src/core/research/brief.ts": "aad30e37d5be5980b597cd2889979f1a5a4dade2b56ca5c707bbf158ba5136fb",
     "src/core/reviewPost.ts": "6ac0a2d4e2e53f840ce19d752187c9920df6e90d6a932c68cb8aa1193028462c",
     "src/core/reviewPublication.ts": "1673180bf13218417dd9a6ef19dbca7c6e716ad005cfda7aefabb20485f8c92d",
-    "src/core/reviewVerdict.ts": "68bdb79e0cc26f7acd539ba26deba746affb08211f3cb787e1adab3055b03f21",
+    "src/core/reviewVerdict.ts": "f23c18e43351b66da3f8d983a3180a1b60da3b199a0d4c9fb9d5403da020eb39",
     "src/core/reviewedHead.ts": "943f8078a2e0eff3ec98ca7330c29d7da72c2af702b003589f0c53d6c610652c",
     "src/core/runDuration.ts": "dca2a672930febee9fae33e917c5129d6271fd1f9781a7dbcb4cb2217dbe2dae",
     "src/core/runEvents.ts": "919ce394d27fbba8187971bcb41b8917d2dfb0782b9f899c98343a97b06b43f8",

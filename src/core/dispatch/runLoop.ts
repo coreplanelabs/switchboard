@@ -3749,10 +3749,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       postedBefore === undefined &&
       verdict === undefined &&
       !(reviewSubmission?.status === "pending" && reviewSubmission.proposal !== undefined) &&
-      // A new history head cannot be reviewed by a verdict-only prompt in this checkout.
+      // Head compatibility, not whether the model attempted submission, decides
+      // if a verdict-only prompt can complete this review in the current checkout.
       !(
-        reviewSubmission?.status === "rejected" &&
-        reviewSubmission.stage === "head" &&
         observedHead !== undefined &&
         toolContext.reviewHistory?.snapshot !== undefined &&
         toolContext.reviewHistory.snapshot.head !== observedHead
