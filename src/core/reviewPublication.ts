@@ -1,6 +1,13 @@
 import { isPublicationRepo } from "./branchPublication.js";
 import type { ReviewPost, ReviewVerdictKind } from "./reviewVerdict.js";
 
+export interface NativeReviewReceipt {
+  id: string;
+  nodeId: string;
+  url: string;
+  publishedAt: number;
+}
+
 /** Small original-run receipt; public facts contain no review prose. */
 export interface ReviewPublicationReceipt {
   version: 1;
@@ -9,6 +16,8 @@ export interface ReviewPublicationReceipt {
   bodyHash: string;
   verdict?: ReviewVerdictKind;
   state: "pending" | "accepted" | "refused" | "uncertain";
+  nativeReview?: NativeReviewReceipt;
+  feedback?: { format: 1; findings: number; at: number };
 }
 export interface ReviewPublicationJournal {
   runId: string;
@@ -27,7 +36,10 @@ export function reviewPublicationOf(value: unknown): ReviewPublicationReceipt | 
   if (!object(value) || !object(value.target)) return undefined;
   const target = value.target;
   if (
-    Object.keys(value).some((key) => !["version", "runId", "target", "bodyHash", "verdict", "state"].includes(key)) ||
+    Object.keys(value).some(
+      (key) =>
+        !["version", "runId", "target", "bodyHash", "verdict", "state", "nativeReview", "feedback"].includes(key),
+    ) ||
     Object.keys(target).some((key) => !["repo", "number", "commitId"].includes(key)) ||
     value.version !== 1 ||
     typeof value.runId !== "string" ||
@@ -44,7 +56,50 @@ export function reviewPublicationOf(value: unknown): ReviewPublicationReceipt | 
     !["pending", "accepted", "refused", "uncertain"].includes(value.state as string)
   )
     return undefined;
+  if (
+    value.nativeReview !== undefined &&
+    (value.state !== "accepted" ||
+      !nativeReviewReceiptOf(value.nativeReview, target.repo as string, target.number as number))
+  )
+    return undefined;
+  if (
+    value.feedback !== undefined &&
+    (!object(value.feedback) ||
+      Object.keys(value.feedback).some((k) => !["format", "findings", "at"].includes(k)) ||
+      value.feedback.format !== 1 ||
+      !Number.isSafeInteger(value.feedback.findings) ||
+      Number(value.feedback.findings) < 0 ||
+      !Number.isSafeInteger(value.feedback.at) ||
+      Number(value.feedback.at) <= 0)
+  )
+    return undefined;
   return structuredClone(value) as unknown as ReviewPublicationReceipt;
+}
+
+export function nativeReviewReceiptOf(value: unknown, repo: string, pr: number): NativeReviewReceipt | undefined {
+  if (!object(value)) return undefined;
+  const url =
+    typeof value.url === "string"
+      ? /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/([1-9]\d*)#pullrequestreview-([1-9]\d*)$/.exec(value.url)
+      : null;
+  if (
+    Object.keys(value).some((k) => !["id", "nodeId", "url", "publishedAt"].includes(k)) ||
+    typeof value.id !== "string" ||
+    !/^[1-9]\d{0,19}$/.test(value.id) ||
+    typeof value.nodeId !== "string" ||
+    value.nodeId.length < 1 ||
+    value.nodeId.length > 256 ||
+    /\s/.test(value.nodeId) ||
+    [...value.nodeId].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127) ||
+    !url ||
+    url[1]!.toLowerCase() !== repo.toLowerCase() ||
+    url[2] !== String(pr) ||
+    url[3] !== value.id ||
+    !Number.isSafeInteger(value.publishedAt) ||
+    Number(value.publishedAt) <= 0
+  )
+    return undefined;
+  return value as unknown as NativeReviewReceipt;
 }
 export function sameReviewPublication(a: ReviewPublicationReceipt, b: ReviewPublicationReceipt): boolean {
   return (

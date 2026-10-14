@@ -45,7 +45,13 @@ import {
   type PrCommitList,
 } from "./headMoved.js";
 import { decideReviewPost, reviewPostIntended, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
-import { buildReviewPostBody, completeReviewVerdict, type ReviewPost, type ReviewVerdict } from "./reviewVerdict.js";
+import {
+  buildReviewPostBody,
+  completeReviewVerdict,
+  REVIEW_FEEDBACK_INVITATION,
+  type ReviewPost,
+  type ReviewVerdict,
+} from "./reviewVerdict.js";
 import { checkReviewedHead, normalizeHead, sameCommit } from "./reviewedHead.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
 import { checkDigestCoverage, type PrSize } from "./digestCoverage.js";
@@ -54,7 +60,8 @@ import type { RepoContext } from "./repoContext.js";
 import type { RunEvent } from "./runEvents.js";
 import type { RunControl } from "./runRegistry/runControl.js";
 import { systemClock } from "./trace/clock.js";
-import type { PullRequestFacts, GithubWriteResult } from "../execution/githubPulls.js";
+import type { PullRequestFacts } from "../execution/githubPulls.js";
+import type { GithubReviewWriteResult } from "../execution/githubComments.js";
 import { sourceHash } from "./references/receipts.js";
 import {
   acceptedReviewPublication,
@@ -929,7 +936,7 @@ export async function runReviewPostStep(
     carried: { reviewed: string; current: string; commits: number } | undefined;
     hardStopped: boolean;
     /** The GitHub post; the dispatcher passes `deps.postReviewComment ?? postReviewComment`. */
-    post: (target: ReviewCommentTarget, body: string) => Promise<GithubWriteResult | void>;
+    post: (target: ReviewCommentTarget, body: string) => Promise<GithubReviewWriteResult | void>;
     /** The original run's fenced, trim-independent publication receipt. */
     publicationJournal?: ReviewPublicationJournal;
     fetchPrHead: FetchPrHead;
@@ -1158,6 +1165,9 @@ export async function runReviewPostStep(
       bodyHash: await sourceHash(body),
       ...(completeReviewVerdict(verdict) ? { verdict: verdict!.verdict } : {}),
       state: "pending",
+      ...(body.includes(REVIEW_FEEDBACK_INVITATION) && verdict?.humanFindings !== undefined
+        ? { feedback: { format: 1, findings: verdict.findings?.length ?? 0, at: systemClock() } }
+        : {}),
     });
     if (!pending) return record({ posted: false, reason: "the complete review publication target was not confirmed" });
     try {
@@ -1180,7 +1190,7 @@ export async function runReviewPostStep(
       if (!(await journal.canPublish())) {
         return (await journal.commit({ ...pending, state: "refused" })) === "committed" ? refused() : uncertain();
       }
-      let result: GithubWriteResult | void;
+      let result: GithubReviewWriteResult | void;
       try {
         result = await input.post(target, body);
       } catch {
@@ -1189,7 +1199,16 @@ export async function runReviewPostStep(
       const state: ReviewPublicationReceipt["state"] =
         result?.state === "accepted" ? "accepted" : result?.state === "refused" ? "refused" : "uncertain";
       // Completion records the issued call even if a stop arrived meanwhile.
-      if ((await journal.commit({ ...pending, state })) !== "committed") return uncertain();
+      if (
+        (await journal.commit({
+          ...pending,
+          state,
+          ...(state === "accepted" && result?.state === "accepted" && result.nativeReview
+            ? { nativeReview: result.nativeReview }
+            : {}),
+        })) !== "committed"
+      )
+        return uncertain();
       if (state === "refused") return refused();
       if (state !== "accepted") return uncertain();
     } catch {

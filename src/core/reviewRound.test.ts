@@ -1573,6 +1573,28 @@ describe("runReviewPostStep durable original publication", () => {
     };
     return { input, posts, events, replies, receipts, publicationJournal, read: () => saved };
   }
+  it("retains invitation metadata and native identity on acceptance, then replays without a second publication", async () => {
+    const h = setup();
+    const nativeReview = {
+      id: "71",
+      nodeId: "PRR_native",
+      url: "https://github.com/acme/api/pull/42#pullrequestreview-71",
+      publishedAt: 1767225600000,
+    };
+    const input = {
+      ...h.input,
+      verdict: { ...verdict, findings: [], humanFindings: [] },
+      post: async (target: ReviewCommentTarget, body: string) => {
+        h.posts.push({ target, body });
+        return { state: "accepted" as const, nativeReview };
+      },
+    };
+    expect(await runReviewPostStep(input)).toMatchObject({ posted: true, verdict: "approve", head: HEAD });
+    expect(h.read()).toMatchObject({ state: "accepted", nativeReview, feedback: { format: 1, findings: 0 } });
+    expect(h.posts[0].body.split("<details>")[0]).toContain("React 👍 for yes or 👎 for no.");
+    expect(await runReviewPostStep(input)).toMatchObject({ posted: true, verdict: "approve", head: HEAD });
+    expect(h.posts).toHaveLength(1);
+  });
   it("an incomplete latest submission gives neither the publication journal nor the result approval credit", async () => {
     const h = setup();
     const out = await runReviewPostStep({

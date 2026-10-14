@@ -2,11 +2,29 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildReviewPostBody, MAX_REVIEW_POST_CODE_POINTS, parseVerdictInput } from "../core/reviewVerdict.js";
 import { branchPublicationOf } from "../core/branchPublication.js";
 import { postReviewComment } from "./githubComments.js";
+import { nativeReviewReceiptOf } from "../core/reviewPublication.js";
 
 // Feature: docs/reference/specs/agent-review.md — the bot-process post is a COMMENT-event
 // pull-request review (what the auto-approve workflow listens to), pinned to
 // the reviewed commit, and never an APPROVE/REQUEST_CHANGES event.
 describe("postReviewComment", () => {
+  it("matches repository casing while preserving the exact review URL host, number and fragment", () => {
+    const receipt = {
+      id: "71",
+      nodeId: "PRR_native",
+      publishedAt: 1767225600000,
+      url: "https://github.com/Acme/API/pull/42#pullrequestreview-71",
+    };
+    expect(nativeReviewReceiptOf(receipt, "acme/api", 42)).toEqual(receipt);
+    for (const url of [
+      "https://github.com.evil.test/Acme/API/pull/42#pullrequestreview-71",
+      "https://github.com/Acme/API/pull/43#pullrequestreview-71",
+      "https://github.com/Acme/API/pull/42#PULLREQUESTREVIEW-71",
+      "https://github.com/Acme/API/pull/42#pullrequestreview-72",
+    ]) {
+      expect(nativeReviewReceiptOf({ ...receipt, url }, "acme/api", 42)).toBeUndefined();
+    }
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
@@ -89,6 +107,45 @@ describe("postReviewComment", () => {
     expect(
       await postReviewComment({ repo: "acme/api", number: 42, commitId: "b".repeat(40) }, "original review"),
     ).toEqual(status === 422 ? { state: "refused", status } : { state: "uncertain" });
+  });
+
+  it("retains validated native feedback identity without changing legacy write acceptance", async () => {
+    vi.stubEnv("GH_TOKEN", "ghtok");
+    vi.stubEnv("GITHUB_APP_ID", "");
+    const head = "b".repeat(40),
+      body = "original review";
+    for (const valid of [true, false]) {
+      vi.stubGlobal("fetch", async () =>
+        Response.json(
+          {
+            id: 71,
+            state: "COMMENTED",
+            body,
+            commit_id: head,
+            pull_request_url: "https://api.github.com/repos/acme/api/pulls/42",
+            node_id: "PRR_native",
+            html_url: valid
+              ? "https://github.com/Acme/API/pull/42#pullrequestreview-71"
+              : "https://example.test/forged",
+            submitted_at: "2026-01-01T00:00:00Z",
+          },
+          { status: 201 },
+        ),
+      );
+      expect(await postReviewComment({ repo: "acme/api", number: 42, commitId: head }, body)).toEqual({
+        state: "accepted",
+        ...(valid
+          ? {
+              nativeReview: {
+                id: "71",
+                nodeId: "PRR_native",
+                url: "https://github.com/Acme/API/pull/42#pullrequestreview-71",
+                publishedAt: 1767225600000,
+              },
+            }
+          : {}),
+      });
+    }
   });
 
   it("posts a COMMENT-event review to /pulls/{n}/reviews with commit_id when given", async () => {

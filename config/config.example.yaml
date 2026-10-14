@@ -681,6 +681,10 @@ workspaceDir: ./workspaces
 # metrics:
 #   dataset: switchboard_runs
 #   days: 30                                  # optional: the default report range in whole UTC days, 1..90
+#   feedback:                                 # optional: exact native review-body ratings, retained for 90 days
+#     enabled: true                           # needs runHistory.worker and the GitHub App read credential
+#     excludedActorIds: []                    # GitHub node IDs of automation accounts using User identities
+#     excludedPullRequests: []                # owner/repository#number for disposable acceptance tests
 
 # Delivery indicators: GET /delivery and `delivery report` (docs/reference/specs/delivery.md).
 # Optional. Needs a GitHub credential (the App triple or GH_TOKEN); read-only on GitHub.

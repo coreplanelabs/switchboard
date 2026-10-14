@@ -46,6 +46,21 @@ const RANGE: MetricsRange = { sinceMs: SINCE, untilMs: UNTIL };
 const day = (i: number): string => new Date(SINCE + i * DAY_MS).toISOString().slice(0, 10);
 
 describe("parseMetricsConfig", () => {
+  it("validates optional feedback collection and explicit automation/test exclusions", () => {
+    expect(parseMetricsConfig({ dataset: "runs", feedback: { enabled: true } })).toEqual({
+      dataset: "runs",
+      days: 30,
+      feedback: { enabled: true, excludedActorIds: [], excludedPullRequests: [] },
+    });
+    for (const feedback of [
+      true,
+      { enabled: "yes" },
+      { enabled: true, excludedActorIds: [null] },
+      { enabled: true, excludedPullRequests: ["https://example.test"] },
+    ]) {
+      expect(() => parseMetricsConfig({ dataset: "runs", feedback })).toThrow(/metrics.feedback/);
+    }
+  });
   it("absent → undefined; a dataset alone gets the 30-day default; days is kept when in 1..90", () => {
     expect(parseMetricsConfig(undefined)).toBeUndefined();
     expect(parseMetricsConfig(null)).toBeUndefined();

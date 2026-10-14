@@ -88,6 +88,14 @@ import { intakePointOf } from "../../src/core/intakeMetrics.js";
 import { branchPublicationOf, doorPublicationOf } from "../../src/core/branchPublication.js";
 import { reviewPublicationOf } from "../../src/core/reviewPublication.js";
 import {
+  retainedFeedbackReceipt,
+  isReviewFeedbackSnapshot,
+  validFeedbackRange,
+  type ReviewFeedbackSnapshot,
+} from "../../src/core/reviewFeedback.js";
+import { ReviewFeedbackStorage } from "./reviewFeedbackStorage.js";
+import { REVIEW_FEEDBACK_DAILY_MS } from "../../src/core/budgets.js";
+import {
   isMaintenanceAdmissionInput,
   prepareMaintenanceAdmission,
   planMaintenanceAdmission,
@@ -2172,6 +2180,7 @@ const TERMINAL_PULL_OWNER_COLUMNS = `SELECT run_id,
 
 export class RunHistoryDO extends DurableObject<Env> {
   private readonly sql: SqlStorage;
+  private readonly reviewFeedback: ReviewFeedbackStorage;
   /** Where a turned-final run's point goes (run-metrics.md): the Analytics
    *  Engine dataset when the deploy bound one, the NullSink otherwise —
    *  selected once at construction, the `SHIP_COORDINATOR?` shape. */
@@ -2180,6 +2189,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
+    this.reviewFeedback = new ReviewFeedbackStorage(ctx.storage);
     this.metrics = env.RUN_METRICS !== undefined ? new AnalyticsEngineSink(env.RUN_METRICS) : new NullSink();
     // Idempotent schema. `runs` carries the listing columns plus the record
     // minus its events as JSON (`summary_json`, what `list` returns); events
@@ -7101,11 +7111,32 @@ export class RunHistoryDO extends DurableObject<Env> {
           this.pinContext(runId, undefined, preserved.contextDependencies);
         if (receipt) this.pinReference(runId, runId, receipt.seed.key);
         this.sql.exec(`UPDATE live_runs SET state_json = ? WHERE run_id = ?`, JSON.stringify(preserved), runId);
+        const feedbackReceipt = retainedFeedbackReceipt(row.state.reviewPublication, preserved.reviewPublication, {
+          runId,
+          repo: row.meta.repo,
+          pr: row.meta.pr,
+        });
+        if (feedbackReceipt) this.reviewFeedback.retain(feedbackReceipt);
       });
       if (promotionRefused) return pending();
       if (stateMoved) return { ok: false, reason: "fenced" };
       return { ok: true };
     });
+  }
+
+  /** Feedback reads and leases are independent of run ownership and publication. */
+  async listReviewFeedback(sinceMs: number, untilMs: number, after?: string) {
+    return this.reviewFeedback.list(sinceMs, untilMs, systemClock(), after);
+  }
+  async claimReviewFeedback(limit: number) {
+    return this.reviewFeedback.claim(systemClock(), limit);
+  }
+  async completeReviewFeedback(runId: string, lease: number, update: ReviewFeedbackSnapshot) {
+    return this.reviewFeedback.complete(runId, lease, update, systemClock());
+  }
+  async cooldownReviewFeedback(untilMs: number) {
+    this.reviewFeedback.cooldown(Math.min(untilMs, systemClock() + REVIEW_FEEDBACK_DAILY_MS));
+    return { ok: true };
   }
 
   /** Any generation: a steer arrives on whichever container is up. */
@@ -8885,6 +8916,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         let candidates: { key: string; threadKey: string }[] = [];
         this.ctx.storage.transactionSync(() => {
           deleted = this.trim(policy, now, undefined).deleted;
+          this.reviewFeedback.prune(now);
           // Orphan sweep: events whose run is gone. The table holds both live
           // ledger events and finished history, so both owners must be absent.
           this.sql.exec(`DELETE FROM run_events
@@ -13041,6 +13073,38 @@ async function handleLedger(
 async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Response> {
   const stub = (key: string) => env.RUNS.get(env.RUNS.idFromName(key));
   if (LEDGER_ROUTES.has(pathname)) return handleLedger(pathname, body, env);
+  if (pathname.startsWith("/runs/review-feedback/")) {
+    if (!body || typeof body !== "object" || Array.isArray(body))
+      return json({ error: "invalid review feedback request" }, 400);
+    const b = body as Record<string, unknown>,
+      key = parseStoreKey(b);
+    if (!key.ok) return json({ error: key.error }, 400);
+    const target = stub(key.value);
+    if (pathname.endsWith("/list")) {
+      if (
+        !validFeedbackRange(b.sinceMs as number, b.untilMs as number) ||
+        (b.after !== undefined && (typeof b.after !== "string" || !b.after || b.after.length > 512))
+      )
+        return json({ error: "invalid review feedback range or cursor" }, 400);
+      return json(
+        await target.listReviewFeedback(b.sinceMs as number, b.untilMs as number, b.after as string | undefined),
+      );
+    }
+    if (pathname.endsWith("/claim")) {
+      if (!Number.isSafeInteger(b.limit) || Number(b.limit) < 1 || Number(b.limit) > 20)
+        return json({ error: "invalid review feedback limit" }, 400);
+      return json({ claims: await target.claimReviewFeedback(Number(b.limit)) });
+    }
+    if (pathname.endsWith("/complete")) {
+      const runId = parseRunId(b.runId);
+      if (!runId.ok || !Number.isSafeInteger(b.lease) || Number(b.lease) < 1 || !isReviewFeedbackSnapshot(b.update))
+        return json({ error: "invalid review feedback completion" }, 400);
+      return json({ ok: await target.completeReviewFeedback(runId.value, Number(b.lease), b.update) });
+    }
+    if (!Number.isSafeInteger(b.untilMs) || Number(b.untilMs) < 0)
+      return json({ error: "invalid review feedback cooldown" }, 400);
+    return json(await target.cooldownReviewFeedback(Number(b.untilMs)));
+  }
   if (pathname === "/runs/put") {
     const parsed = parseRunPut(body);
     if (!parsed.ok) return json({ error: parsed.error }, 400);
@@ -13133,6 +13197,10 @@ const ROUTES = new Set([
   "/runs/usage",
   "/runs/delete",
   "/runs/metrics-health",
+  "/runs/review-feedback/list",
+  "/runs/review-feedback/claim",
+  "/runs/review-feedback/complete",
+  "/runs/review-feedback/cooldown",
   ...LEDGER_ROUTES,
   ...PLANE_ROUTES,
 ]);

@@ -27,6 +27,35 @@ export interface MetricsConfig {
   dataset: string;
   /** The default `?days` / `--days` range; 1..90, 30 unless configured. */
   days: number;
+  feedback?: ReviewFeedbackConfig;
+}
+
+export interface ReviewFeedbackConfig {
+  enabled: boolean;
+  excludedActorIds: string[];
+  /** Exact owner/repository#number identities for disposable acceptance PRs. */
+  excludedPullRequests: string[];
+}
+
+function parseFeedback(raw: unknown): ReviewFeedbackConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("metrics.feedback must be a mapping");
+  const r = raw as Record<string, unknown>;
+  if (r.enabled !== undefined && typeof r.enabled !== "boolean")
+    throw new Error("metrics.feedback.enabled must be boolean");
+  const list = (name: string, valid: (s: string) => boolean): string[] => {
+    const value = r[name] ?? [];
+    if (!Array.isArray(value) || value.length > 200 || !value.every((s) => typeof s === "string" && valid(s)))
+      throw new Error(`metrics.feedback.${name} must be a list of valid identities`);
+    return [...new Set(value as string[])];
+  };
+  return {
+    enabled: r.enabled === true,
+    excludedActorIds: list("excludedActorIds", (s) => s.length > 0 && s.length <= 256 && !/\s/.test(s)),
+    excludedPullRequests: list("excludedPullRequests", (s) =>
+      /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[1-9]\d*$/.test(s),
+    ).map((s) => s.toLowerCase()),
+  };
 }
 
 /** Analytics Engine's own dataset-name rule (the profile's `metrics.dataset` holds the same). */
@@ -58,7 +87,8 @@ export function parseMetricsConfig(raw: unknown): MetricsConfig | undefined {
   const days = r.days === undefined ? METRICS_DEFAULT_DAYS : r.days;
   if (typeof days !== "number" || !Number.isInteger(days) || days < 1 || days > METRICS_MAX_DAYS)
     throw new Error(`metrics.days must be a whole number of days between 1 and ${METRICS_MAX_DAYS}`);
-  return { dataset: r.dataset, days };
+  const feedback = parseFeedback(r.feedback);
+  return { dataset: r.dataset, days, ...(feedback ? { feedback } : {}) };
 }
 
 /** One result row as the SQL API's `data` carries it: the query's aliases as keys. */

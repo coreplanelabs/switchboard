@@ -112,10 +112,12 @@ export const call = (name: string, input: Record<string, unknown>, id = name): C
  * constructs new stores and restores only data; clocks and methods stay new. */
 function persisted<T extends object>(path: string, fresh: T): T {
   if (existsSync(path)) Object.assign(fresh, deserialize(readFileSync(path)));
-  // The canonical run owner is an injected seam; each process pairs it with its restored ledger.
+  // The run owner and feedback store are injected seams; each gets its own restored owner.
   const save = () => {
     const data = Object.fromEntries(
-      Object.entries(fresh).filter(([key, v]) => typeof v !== "function" && key !== "runOwner"),
+      Object.entries(fresh).filter(
+        ([key, v]) => typeof v !== "function" && key !== "runOwner" && key !== "reviewFeedback",
+      ),
     );
     writeFileSync(`${path}.next`, serialize(data));
     renameSync(`${path}.next`, path);
@@ -247,6 +249,9 @@ workspaceDir: ${join(world.dir, "workspaces")}
   );
   const config = new ConfigStore(cfgPath, join(world.dir, "overrides.json"));
   const ledger = persisted(join(world.dir, "ledger.bin"), new InMemoryRunLedger());
+  Object.defineProperty(ledger, "reviewFeedback", {
+    value: persisted(join(world.dir, "feedback.bin"), ledger.reviewFeedback),
+  });
   const instances = persisted(join(world.dir, "instances.bin"), new InMemoryCoordinatorInstanceStore(ledger));
   const privateWorkerLog = persisted(join(world.dir, "private.bin"), new InMemoryPrivateWorkerLog());
   const runStore = new FileRunStore(join(world.dir, "runs"));

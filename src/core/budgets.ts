@@ -722,3 +722,15 @@ export const MODEL_CAPACITY_BENCHMARK = {
 export const RUN_VIEW_POLL_MS = 3 * SECOND_MS;
 /** One correction of a repeated failure; varied failures share the same run bound. */
 export const TOOL_RECOVERY = { sameFailure: 2, totalFailures: 6, receipts: 256 } as const;
+// Human review feedback reads are independent of review execution.
+export const REVIEW_FEEDBACK_TICK_MS = 60_000;
+export const REVIEW_FEEDBACK_RECENT_MS = 7 * 86_400_000;
+export const REVIEW_FEEDBACK_RETAIN_MS = 90 * 86_400_000;
+export const REVIEW_FEEDBACK_HOURLY_MS = 3_600_000;
+export const REVIEW_FEEDBACK_DAILY_MS = 86_400_000;
+export const REVIEW_FEEDBACK_RECENT_FRESH_MS = 2 * 3_600_000;
+export const REVIEW_FEEDBACK_OLDER_FRESH_MS = 26 * 3_600_000;
+export const REVIEW_FEEDBACK_LEASE_MS = 5 * 60_000;
+export const REVIEW_FEEDBACK_REQUEST_MS = 15_000;
+export const REVIEW_FEEDBACK_READ_MS = 30_000;
+export const REVIEW_FEEDBACK_PASS_MS = 45_000;
