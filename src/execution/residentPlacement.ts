@@ -1,3 +1,4 @@
+import { residentRouteOf } from "./residentRoute.js";
 export interface ResidentPlacement {
   schema: 1;
   resource: string;
@@ -12,26 +13,33 @@ interface PlacementTransaction {
   put(key: string, value: ResidentPlacement): Promise<unknown>;
 }
 
-function placementOf(value: unknown, proposed: ResidentPlacement): ResidentPlacement | null {
+function placementOf(
+  value: unknown,
+  proposed: Pick<ResidentPlacement, "resource" | "threadKey">,
+): ResidentPlacement | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
-  if (
-    row.schema !== 1 ||
-    row.resource !== proposed.resource ||
-    row.threadKey !== proposed.threadKey ||
-    typeof row.residentId !== "string" ||
-    !/^[a-zA-Z0-9][a-zA-Z0-9_:/.-]{0,62}$/.test(row.residentId) ||
-    typeof row.placementId !== "string" ||
-    !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(row.placementId)
-  )
+  const route = residentRouteOf(row);
+  if (row.schema !== 1 || row.resource !== proposed.resource || row.threadKey !== proposed.threadKey || !route)
     return null;
   return {
     schema: 1,
     resource: proposed.resource,
     threadKey: proposed.threadKey,
-    residentId: row.residentId,
-    placementId: row.placementId,
+    ...route,
   };
+}
+
+const placementKey = (resource: string, threadKey: string) => `placement:${JSON.stringify([resource, threadKey])}`;
+
+/** Read-only routing and cancellation never allocate a replacement address. */
+export async function readResidentPlacement(
+  transaction: Pick<PlacementTransaction, "get">,
+  resource: string,
+  threadKey: string,
+): Promise<ResidentPlacement | null | undefined> {
+  const saved = await transaction.get(placementKey(resource, threadKey));
+  return saved === undefined ? undefined : placementOf(saved, { resource, threadKey });
 }
 
 /** Placement precedes attach. A failed write must not yield a destination;
@@ -42,7 +50,7 @@ export async function recordResidentPlacement(
   proposed: ResidentPlacement,
 ): Promise<{ ok: true; placement: ResidentPlacement } | { ok: false; reason: "placement-unverified" }> {
   // Tuple encoding is unambiguous and stays outside repository enumeration.
-  const key = `placement:${JSON.stringify([proposed.resource, proposed.threadKey])}`;
+  const key = placementKey(proposed.resource, proposed.threadKey);
   const saved = await transaction.get(key);
   const placement = placementOf(saved === undefined ? proposed : saved, proposed);
   if (!placement) return { ok: false, reason: "placement-unverified" };

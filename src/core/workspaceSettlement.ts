@@ -1,3 +1,4 @@
+import { residentRouteOf } from "../execution/residentRoute.js";
 import { branchPublicationOf, type BranchPublication } from "./branchPublication.js";
 import { publicationSettlementForRun, type PublicationSettlement } from "./publicationSettlement.js";
 import { RUN_ID_PATTERN, type RunRecord } from "./runRecord.js";
@@ -25,6 +26,8 @@ export interface WorkspaceSettlement {
   owner: WorkspaceOwner;
   binding: {
     backend: "resident";
+    residentId?: string;
+    placementId?: string;
     ref: string;
     workspace: string;
     user: string;
@@ -103,6 +106,7 @@ export function workspaceBindingOf(
   if (
     !object(value) ||
     value.backend !== "resident" ||
+    residentRouteOf(value) === null ||
     ![value.ref, value.workspace, value.user, value.container].every(text) ||
     value.ownerFence !== owner.ownerFence ||
     value.ownerGen !== owner.ownerGen ||
@@ -157,12 +161,14 @@ export function terminalWorkspaceSettlement(row: LiveRunRow, record: RunRecord):
   const proof = publicationSettlementForRun(row.state.publicationSettlement, record);
   const repo = record.repo === undefined ? undefined : text(record.repo) ? record.repo : null;
   const publication = branchPublicationOf(row.state.branchPublication, record.repo);
+  const route = residentRouteOf(b);
   const candidate = {
     version: 1,
     revision: 1,
     owner,
     binding: {
       backend: b.backend,
+      ...(route === null ? { residentId: "", placementId: "" } : (route ?? {})),
       ref: b.ref,
       workspace: b.workspace,
       user: b.user,

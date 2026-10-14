@@ -19896,6 +19896,100 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(readStartState).not.toHaveBeenCalled();
   });
 
+  it.each(["malformed", "changed", "missing"])(
+    "an ordinary resume with a %s resident address fails setup without restarting on the primary",
+    async (fault) => {
+      vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+      vi.stubEnv("SANDBOX_TOKEN", "tok");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const placementId = "cf5c0a88-820b-45f2-b689-4432d93fbdce";
+      const { calls } = residentFetchStub({
+        attach: () =>
+          Response.json({
+            ref: "main",
+            sha: "abc",
+            workspace: "/workspace/threads/t/main",
+            user: "worker2",
+            ...(fault === "changed" ? { residentId: "replica-b", placementId } : {}),
+          }),
+      });
+      const ledger = new InMemoryRunLedger(() => 10_000);
+      const request = msg("agent:coding fix it", "slack:UADMIN");
+      const transcript: ChatMessage[] = [{ role: "user", content: [{ type: "text", text: "fix it" }] }];
+      await ledger.claim({
+        runId: "run-old",
+        threadKey: request.threadKey,
+        gen: "gen-OLD",
+        leaseMs: 30_000,
+        startedAt: 5_000,
+        meta: {
+          channelId: request.channelId,
+          userId: request.userId,
+          threadKey: request.threadKey,
+          agent: "coding",
+          model: "anthropic/coding-model",
+          repo: "acme/api",
+          request: durableInboxMessage(request, request.text, 4_000),
+        },
+        system: "sys",
+        tools: [],
+        state: {
+          binding: {
+            backend: "resident",
+            workspace: "/workspace/threads/t/main",
+            user: "worker2",
+            residentId: "replica-a",
+            ...(fault === "malformed" ? {} : { placementId }),
+          },
+          preserveOnReattachRefusal: false,
+        },
+      });
+      await ledger.seed("run-old", "gen-OLD", [{ idx: 0, message: transcript[0] }]);
+      await ledger.step(
+        "run-old",
+        "gen-OLD",
+        {
+          step: 0,
+          seq: 0,
+          turnIndex: 1,
+          inFlight: [],
+          inboxConsumedSeq: 0,
+          remainingMs: 300_000,
+          turn: 0,
+          iteration: 0,
+        },
+        [],
+      );
+      ledger.live.get("run-old")!.leaseUntil = 0;
+      const [reclaimed] = await ledger.reclaim("gen-T", 10_000, 30_000);
+      const provider = capturingProvider("must not restart");
+      const { deps, writer } = wired(provider, { ledger, yaml: RESIDENT_YAML_FIXTURE });
+      deps.clock = () => 10_000;
+      const plan = planResume({
+        transcript: { complete: true, compactions: [], turns: 1, messages: transcript },
+        lastStep: reclaimed.lastStep!,
+        tools: knownToolsFor(getAgent("coding")),
+      });
+      if (plan.kind !== "resume") throw new Error(plan.kind);
+      const outcome = await dispatch(deps, resumeMessage(reclaimed.row, "fix it"), ioWithCard().io, {
+        resume: {
+          row: reclaimed.row,
+          lastStep: reclaimed.lastStep!,
+          plan,
+          events: [],
+          lastSeq: 0,
+          repoCtx: { repo: "acme/api", ref: "main" },
+          inbox: [],
+        },
+      });
+      await writer.settled();
+      expect(outcome).toEqual({ status: "failed", refusal: "setup_failed", cause: "system" });
+      expect(ledger.finished.get("run-old")?.status).toBe("interrupted");
+      expect(calls.map((call) => call.path)).toEqual(fault === "malformed" ? [] : ["/status", "/attach"]);
+      expect(provider.requests).toEqual([]);
+    },
+  );
+
   it("a resume whose recorded resident refuses to reuse the worktree provisions no sandbox: the resumed row closes interrupted with the note that says why, and the request runs again under the SAME run id once the thread is free (item 54) — one row on the index, the record ending completed with the replacement said as one resumed note", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");

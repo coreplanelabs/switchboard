@@ -1,8 +1,9 @@
+import { residentRouteOf, sameResidentRoute } from "../../src/execution/residentRoute";
 import { describe, expect, it } from "vitest";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
 import { registerRepository, residentRecords } from "../../src/execution/repoRegistration";
-import { recordResidentPlacement } from "../../src/execution/residentPlacement";
+import { readResidentPlacement, recordResidentPlacement } from "../../src/execution/residentPlacement";
 import { effectiveLimits } from "./gc";
 import { methodOf, readSource } from "./testing/sourceScan";
 
@@ -107,12 +108,16 @@ describe("primary resident placement", () => {
   const placementId = "cf5c0a88-820b-45f2-b689-4432d93fbdce";
 
   function registry(rows = new Map<string, unknown>([[`resident:${resource}`, record]])) {
-    const compiled = ts.transpileModule(`class Registry { ${methodOf(source, "resolveThreadPlacement")} }`, {
-      compilerOptions: { target: ts.ScriptTarget.ES2022 },
-    }).outputText;
+    const compiled = ts.transpileModule(
+      `class Registry { ${methodOf(source, "resolveThreadPlacement")} ${methodOf(source, "readThreadPlacement")} }`,
+      {
+        compilerOptions: { target: ts.ScriptTarget.ES2022 },
+      },
+    ).outputText;
     const Registry = runInNewContext(`${compiled}\nRegistry`, {
       registryKey: (value: string) => `resident:${value}`,
       recordResidentPlacement,
+      readResidentPlacement,
       crypto: { randomUUID: () => placementId },
     });
     const instance = new Registry();
@@ -125,6 +130,7 @@ describe("primary resident placement", () => {
     };
     instance.ctx = {
       storage: {
+        ...port,
         transaction: (body: (txn: typeof port) => Promise<unknown>) => {
           const result = tail.then(() => body(port));
           tail = result.then(
@@ -136,6 +142,29 @@ describe("primary resident placement", () => {
       },
     };
     return { instance, rows };
+  }
+
+  function threadRoute(instance: any) {
+    const routeSource = ts.transpileModule(`${handler("residentRouteFor")}\n${handler("resolveThreadRoute")}`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    // Exercise the existing route with both the old lookup and new placement
+    // RPC available: the baseline can route but fails the durable-row check.
+    return runInNewContext(`${routeSource}\nresolveThreadRoute`, {
+      Response,
+      residentRouteOf,
+      sameResidentRoute,
+      parseResource: (value: string) => ({ resource: value }),
+      parseThreadKey: (value: string) => ({ threadKey: value }),
+      registryStub: () => ({
+        ...instance,
+        getRecord: async () => record,
+        resolveThreadPlacement: instance.resolveThreadPlacement.bind(instance),
+        readThreadPlacement: instance.readThreadPlacement.bind(instance),
+      }),
+      residentStub: (_env: unknown, id: string) => ({ destination: id }),
+      json: (body: unknown, status = 200) => Response.json(body, { status }),
+    });
   }
 
   it("concurrent requests and a new registry instance recover one primary placement", async () => {
@@ -190,32 +219,41 @@ describe("primary resident placement", () => {
 
   it("routes attach only after primary placement commits and stops on a lost storage reply", async () => {
     const { instance, rows } = registry();
-    const routeSource = ts.transpileModule(handler("resolveThreadRoute"), {
-      compilerOptions: { target: ts.ScriptTarget.ES2022 },
-    }).outputText;
-    // Exercise the existing route with both the old lookup and new placement
-    // RPC available: the baseline can route but fails the durable-row check.
-    const route = runInNewContext(`${routeSource}\nresolveThreadRoute`, {
-      parseResource: (value: string) => ({ resource: value }),
-      parseThreadKey: (value: string) => ({ threadKey: value }),
-      registryStub: () => ({
-        ...instance,
-        getRecord: async () => record,
-        resolveThreadPlacement: instance.resolveThreadPlacement.bind(instance),
-      }),
-      residentStub: (_env: unknown, id: string) => ({ destination: id }),
-      json: (body: unknown, status: number) => ({ body, status }),
-    });
+    const route = threadRoute(instance);
     expect(await route({}, { resource, threadKey }, true)).toEqual({
       stub: { destination: resource },
       resource,
       threadKey,
       record,
+      placement: { schema: 1, resource, threadKey, residentId: resource, placementId },
     });
     expect([...rows.values()]).toEqual([record, { schema: 1, resource, threadKey, residentId: resource, placementId }]);
     instance.ctx.storage.transaction = async () => {
       throw new Error("storage reply lost");
     };
     await expect(route({}, { resource, threadKey }, true)).rejects.toThrow("storage reply lost");
+  });
+
+  it("a data route honors only the exact saved replica and leaves legacy traffic on the primary", async () => {
+    const { instance, rows } = registry();
+    await instance.resolveThreadPlacement(resource, threadKey);
+    const key = [...rows.keys()].find((value) => value.startsWith("placement:"))!;
+    const saved = { schema: 1, resource, threadKey, residentId: "replica-b", placementId };
+    rows.set(key, saved);
+    const route = threadRoute(instance);
+    expect(await route({}, { resource, threadKey, residentId: "replica-b", placementId })).toEqual({
+      stub: { destination: "replica-b" },
+      resource,
+      threadKey,
+    });
+    expect(await route({}, { resource, threadKey })).toEqual({
+      stub: { destination: resource },
+      resource,
+      threadKey,
+    });
+    const denied = await route({}, { resource, threadKey, residentId: "replica-c", placementId });
+    expect(denied.status).toBe(409);
+    expect(await denied.json()).toEqual({ error: "resident address does not match the saved placement" });
+    expect(await instance.readThreadPlacement(resource, threadKey)).toEqual(saved);
   });
 });
