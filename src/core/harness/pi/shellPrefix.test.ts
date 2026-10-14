@@ -44,7 +44,7 @@ async function run(command: string, timeout: number): Promise<{ ok: boolean; tex
       undefined as never,
     );
     const first = (result.content as Array<{ type: string; text?: string }>)[0];
-    return { ok: true, text: first?.text ?? "", elapsedMs: Date.now() - started };
+    return { ok: result.isError !== true, text: first?.text ?? "", elapsedMs: Date.now() - started };
   } catch (error) {
     return { ok: false, text: error instanceof Error ? error.message : String(error), elapsedMs: Date.now() - started };
   }

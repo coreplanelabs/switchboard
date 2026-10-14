@@ -49,7 +49,22 @@ function loadFiles(): Map<string, RegistryFile | undefined> {
   }
   for (const name of names) {
     try {
-      cache.set(name, JSON.parse(readFileSync(join(dir, `${name}.json`), "utf8")) as RegistryFile);
+      const file = JSON.parse(readFileSync(join(dir, `${name}.json`), "utf8")) as RegistryFile;
+      // Registry storage keys include modality in pi 1.x; the provider's
+      // public model ID is still card.id. Keep non-chat models out of runs.
+      cache.set(
+        name,
+        Object.fromEntries(
+          Object.entries(file).map(([wire, cards]) => [
+            wire,
+            Object.fromEntries(
+              Object.entries(cards)
+                .filter(([, card]) => card.type === undefined || card.type === "chat")
+                .map(([key, card]) => [card.id ?? key, card]),
+            ),
+          ]),
+        ),
+      );
     } catch {
       cache.set(name, undefined);
     }

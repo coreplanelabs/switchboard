@@ -225,9 +225,10 @@ RUN apt-get update \
 # the BUILD fails, not a run: the pi on PATH answers the pin, and its own help
 # names the RPC mode the harness drives. Dark until a deployment sets
 # `harness: { coding: pi }`: nothing here starts pi on its own.
-RUN npm install -g @earendil-works/pi-coding-agent@0.87.1 \
+RUN npm install -g @earendil-works/pi-coding-agent@1.0.4 \
+  @earendil-works/pi-ai@1.0.4 @earendil-works/chord@1.0.4 @earendil-works/pi-agent-core@1.0.4 @earendil-works/pi-codemode@1.0.4 @earendil-works/pi-mcp@1.0.4 @earendil-works/pi-tui@1.0.4 @earendil-works/pi-telemetry@1.0.4 \
   && npm cache clean --force \
-  && pi --version | grep -qx '0.87.1' \
+  && pi --version | grep -qx '1.0.4' \
   && pi --help | grep -q -- '--mode <mode>'
 
 # OpenCode, the second harness (docs/reference/specs/harness.md): `@opencode/cli`
@@ -280,7 +281,7 @@ RUN su -s /bin/bash worker1 -c "playwright screenshot --viewport-size=640,480 'd
 # the same `su`, so the BUILD proves an unprivileged user finds the pin on PATH
 # and pi answers without a writable home (its config directory is the run's
 # own, named by PI_CODING_AGENT_DIR at start).
-RUN su -s /bin/bash worker1 -c "pi --version | grep -qx '0.87.1'"
+RUN su -s /bin/bash worker1 -c "pi --version | grep -qx '1.0.4'"
 
 # OpenCode once more, as worker1: a run's server is started as the thread's
 # user through the same `su`, so the BUILD proves an unprivileged user finds

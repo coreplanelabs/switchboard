@@ -24,13 +24,25 @@ describe("the pi registry as a catalog", () => {
 
   it("reads a card by the block's wire first, and under any wire when that wire has none", () => {
     const byChatWire = installedModelRegistry.card("openrouter", "openai-chat", "deepseek/deepseek-v4-pro");
-    expect(byChatWire).toBeDefined();
-    expect(byChatWire?.thinkingLevelMap).toBeDefined();
+    expect(byChatWire).toMatchObject({ id: "deepseek/deepseek-v4-pro", contextWindow: 1024000 });
     // `anthropic/claude-fable-5` lives under openrouter.json's anthropic-messages
     // wire; an openai-chat block still finds it (levels, window and price).
     const anyWire = installedModelRegistry.card("openrouter", "openai-chat", "anthropic/claude-fable-5");
-    expect(anyWire).toBeDefined();
-    expect(anyWire?.contextWindow).toBeGreaterThan(0);
+    expect(anyWire).toMatchObject({ id: "anthropic/claude-fable-5", contextWindow: 1000000 });
+  });
+
+  it("exposes public chat IDs without registry modality prefixes", () => {
+    const file = installedModelRegistry.file("openrouter")!;
+    expect(file["openai-completions"]["deepseek/deepseek-v4-pro"]).toMatchObject({
+      id: "deepseek/deepseek-v4-pro",
+      type: "chat",
+    });
+    expect(file["openai-completions"]["chat:deepseek/deepseek-v4-pro"]).toBeUndefined();
+    expect(
+      Object.values(file)
+        .flatMap((cards) => Object.values(cards))
+        .every((card) => card.type === "chat"),
+    ).toBe(true);
   });
 
   it("reads no card for a catalog that does not exist or a model the catalog does not list", () => {
