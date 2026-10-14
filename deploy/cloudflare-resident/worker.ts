@@ -110,6 +110,7 @@ import {
   registerRepository,
   residentRecords,
 } from "../../src/execution/repoRegistration.js";
+import { recordResidentPlacement, type ResidentPlacement } from "../../src/execution/residentPlacement.js";
 import { inspectResidentCredentials } from "./credentialInspection.js";
 import {
   emptyCredentialInspection,
@@ -1821,6 +1822,36 @@ export class ResidentRegistryDO extends DurableObject<Env> {
   async getRecord(resource: string): Promise<ResidentRecord | null> {
     const record = await this.getRepository(resource);
     return record?.noResident === true ? null : record;
+  }
+
+  /** Record primary placement before attach. This migration does not yet
+   * admit secondary replicas or move any thread's existing workspace. */
+  async resolveThreadPlacement(
+    resource: string,
+    threadKey: string,
+  ): Promise<
+    { ok: true; record: ResidentRecord; placement: ResidentPlacement } | { ok: false; status: number; error: string }
+  > {
+    const placementId = crypto.randomUUID();
+    return this.ctx.storage.transaction(async (txn) => {
+      const record = await txn.get<ResidentRecord>(registryKey(resource));
+      if (!record || record.noResident === true)
+        return { ok: false, status: 404, error: `${resource} is not onboarded` };
+      const result = await recordResidentPlacement(txn, {
+        schema: 1,
+        resource,
+        threadKey,
+        residentId: resource,
+        placementId,
+      });
+      if (!result.ok || result.placement.residentId !== resource) {
+        console.log(
+          `[placement] refused ${resource} for ${threadKey}: ${result.ok ? "unsupported-address" : result.reason}`,
+        );
+        return { ok: false, status: 503, error: "resident placement could not be verified" };
+      }
+      return { ok: true, record, placement: result.placement };
+    });
   }
 
   async getRepository(resource: string): Promise<ResidentRecord | null> {
@@ -14521,13 +14552,13 @@ async function resolveThreadRoute(
   if (!requireOnboarded) {
     return { stub: residentStub(env, resource.resource), resource: resource.resource, threadKey: threadKey.threadKey };
   }
-  const record = await registryStub(env).getRecord(resource.resource);
-  if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
+  const resolved = await registryStub(env).resolveThreadPlacement(resource.resource, threadKey.threadKey);
+  if (!resolved.ok) return json({ error: resolved.error }, resolved.status);
   return {
-    stub: residentStub(env, resource.resource),
+    stub: residentStub(env, resolved.placement.residentId),
     resource: resource.resource,
     threadKey: threadKey.threadKey,
-    record,
+    record: resolved.record,
   };
 }
 
