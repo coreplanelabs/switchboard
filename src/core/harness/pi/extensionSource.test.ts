@@ -165,6 +165,27 @@ describe("the harness extension", () => {
     await expect(read.execute("r", { path: outside }, undefined, undefined, { cwd: checkout })).rejects.toThrow();
   });
 
+  it("directs an oversized review source to the available byte reader instead of bash", async () => {
+    const checkout = join(dir, "checkout");
+    mkdirSync(checkout);
+    writeFileSync(join(checkout, "catalog.txt"), "x".repeat(900_000));
+    process.env.SWITCHBOARD_PI_OUTPUT_ROOT = join(dir, "output");
+    const tool = { name: "review_read", description: "bounded source", inputSchema: { type: "object" } };
+    fakeBot({ "/harness/tools": { tools: [tool] } });
+    const pi = fakePi();
+    await (
+      await load([tool])
+    )(pi.api);
+    const read = pi.tools.find((t) => t.name === "read")!;
+    const result = await read.execute("large", { path: "catalog.txt" }, undefined, undefined, { cwd: checkout });
+    expect(result.content).toEqual([
+      {
+        type: "text",
+        text: 'This line exceeds the read tool limit. Read the tracked file at the pinned review head with review_read {"kind":"file","path":"catalog.txt","offset":0}; continue with each returned nextOffset and sourceHash until eof. Uncommitted files are not included.',
+      },
+    ]);
+  });
+
   it("retains a blocking gate when extension initialization fails", async () => {
     fakeBot({});
     const pi = fakePi();

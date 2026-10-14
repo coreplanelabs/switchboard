@@ -317,7 +317,15 @@ async function outputReadTool() {
       const path = await resolveReadPathAsync(args.path, checkout);
       if (inside(checkout, path)) {
         if (!inside(canonicalCheckout, await realpath(path))) throw new Error("read refused: path resolves outside the checkout");
-        return normal.execute(id, { ...args, path }, signal, update, ctx);
+        const result = await normal.execute(id, { ...args, path }, signal, update, ctx);
+        if (result.details && result.details.truncation && result.details.truncation.firstLineExceedsLimit &&
+            TOOL_DEFINITIONS.some((tool) => tool.name === "review_read")) {
+          return { ...result, content: [{ type: "text", text:
+            "This line exceeds the read tool limit. Read the tracked file at the pinned review head with review_read " +
+            JSON.stringify({ kind: "file", path: relative(checkout, path), offset: 0 }) +
+            "; continue with each returned nextOffset and sourceHash until eof. Uncommitted files are not included." }] };
+        }
+        return result;
       }
       return output.execute(id, { ...args, path }, signal, update, ctx);
     },

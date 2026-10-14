@@ -15,6 +15,7 @@
 
 import { DEPOT_CI_TOOLS } from "./depotCi.js";
 import { submitResearchTool } from "./research.js";
+import { reviewReadTool } from "./reviewRead.js";
 import { runCheckTool } from "./check.js";
 import { attachFileTool } from "./attach.js";
 import { planeShowTool } from "./plane.js";
@@ -73,6 +74,7 @@ export const TOOLSETS: Record<string, RunnableTool[]> = {
     ...SESSION_TOOLS,
   ],
   readonly: [
+    reviewReadTool,
     updateStatusTool,
     submitVerdictTool,
     webFetchTool,
