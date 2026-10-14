@@ -71,6 +71,24 @@ afterEach(() => {
 });
 
 describe("resolveGithubToken", () => {
+  it("cancels an opted-in mint request and can mint again after cancellation", async () => {
+    configureApp();
+    const mod = await freshModule();
+    const controller = new AbortController();
+    vi.stubGlobal(
+      "fetch",
+      (_url: unknown, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal!.addEventListener("abort", () => reject(new Error("mint cancelled")), { once: true });
+        }),
+    );
+    const minted = mod.resolveGithubToken("read", undefined, controller.signal);
+    const refused = expect(minted).rejects.toThrow("mint cancelled");
+    controller.abort();
+    await refused;
+    vi.stubGlobal("fetch", mockMint("later-token", 60 * 60_000));
+    expect(await mod.resolveGithubToken("read")).toBe("later-token");
+  });
   it("mints door write tokens for one repository with only Git push permissions and keeps scope caches separate", async () => {
     configureApp();
     const fetchMock = mockMint("ghs_door", 60 * 60_000);

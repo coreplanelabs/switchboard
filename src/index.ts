@@ -45,6 +45,9 @@ import { costsFromConfig, NullCostsService } from "./core/costsService.js";
 import { AnalyticsEngineSqlSource, parseMetricsConfig } from "./core/metrics.js";
 import { createMetricsService, NullMetricsService } from "./core/metricsService.js";
 import { createReviewsService, NullReviewsService } from "./core/reviewsService.js";
+import { buildReviewFeedbackStore } from "./core/reviewFeedbackWorker.js";
+import { startReviewFeedbackRefresh } from "./core/reviewFeedback.js";
+import { GithubReviewFeedbackSource } from "./execution/githubReviewFeedback.js";
 import { NullResidentAdminClient, residentAdminFromConfig } from "./core/residentAdmin.js";
 import { NO_FLEET, residentFleetWatcherFor, type ResidentFleetFacts } from "./core/residentFleet.js";
 import { httpJwksFetcher, JwksCache, parseAccessConfig, type VerifyDeps } from "./channels/accessAuth.js";
@@ -809,6 +812,15 @@ export async function runBot(): Promise<void> {
   // the dataset over the Analytics Engine SQL API with the SAME analytics token the
   // costs sources hold — revealed into the source's constructor and held nowhere else.
   const metricsCfg = parseMetricsConfig(config.config.metrics);
+  const reviewFeedbackStore = metricsCfg?.feedback?.enabled
+    ? buildReviewFeedbackStore(config.config, processSecrets)
+    : undefined;
+  if (metricsCfg?.feedback?.enabled) {
+    const warn = (message: string) => console.warn(`[review feedback] ${message}`);
+    if (reviewFeedbackStore && capabilities.github)
+      startReviewFeedbackRefresh(reviewFeedbackStore, new GithubReviewFeedbackSource(), { warn });
+    else warn("Collection needs the durable run-history Worker and a GitHub credential.");
+  }
   const metricsToken = costsCfg && processSecrets.named(costsCfg.cloudflareTokenEnv);
   const metricsService =
     capabilities.metrics && metricsCfg && costsCfg && metricsToken

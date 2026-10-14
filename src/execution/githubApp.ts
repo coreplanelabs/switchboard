@@ -108,8 +108,13 @@ export function githubAppConfigured(): boolean {
  * "read" where the caller needs only reads. The static GH_TOKEN fallback is
  * opaque and must never be handed to a model command or the Git door.
  */
-export async function resolveGithubToken(scope: GithubTokenScope = "write", span?: Span): Promise<string | null> {
-  if (githubAppConfigured()) return mintInstallationToken(scope, span);
+export async function resolveGithubToken(
+  scope: GithubTokenScope = "write",
+  span?: Span,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  signal?.throwIfAborted();
+  if (githubAppConfigured()) return mintInstallationToken(scope, span, signal);
   // Revealed here for trusted callers only, never the model workspace.
   return processSecrets.get("GH_TOKEN")?.reveal() ?? null;
 }
@@ -235,12 +240,12 @@ async function githubJson(url: string, bearer: string): Promise<unknown> {
 /** The mint as the caller's `github.token_mint` child when it has a span
  *  (docs/reference/specs/tracing.md item 23): `scope`, whether the cache answered, and how
  *  long the token lives. Without a span the same work, unmeasured. */
-async function mintInstallationToken(scope: GithubTokenScope, span?: Span): Promise<string> {
-  if (!span) return mintCore(scope);
-  return span.span("github.token_mint", (s) => mintCore(scope, s), { attrs: { scope } });
+async function mintInstallationToken(scope: GithubTokenScope, span?: Span, signal?: AbortSignal): Promise<string> {
+  if (!span) return mintCore(scope, undefined, signal);
+  return span.span("github.token_mint", (s) => mintCore(scope, s, signal), { attrs: { scope } });
 }
 
-async function mintCore(scope: GithubTokenScope, span?: Span): Promise<string> {
+async function mintCore(scope: GithubTokenScope, span?: Span, signal?: AbortSignal): Promise<string> {
   // Reuse only while the token outlives the longest possible command; the
   // executors call this per command, so no run is ever pinned to one token.
   const cached = cache.get(scope);
@@ -266,7 +271,7 @@ async function mintCore(scope: GithubTokenScope, span?: Span): Promise<string> {
   const res = await tracedFetch(
     span,
     `https://api.github.com/app/installations/${credentials.installationId.reveal()}/access_tokens`,
-    { method: "POST", headers, ...(body ? { body } : {}) },
+    { method: "POST", headers, ...(body ? { body } : {}), ...(signal ? { signal } : {}) },
     { route: "app_installation_token", name: "github.rest" },
   );
   if (!res.ok) {

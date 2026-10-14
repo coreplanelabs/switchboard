@@ -35,6 +35,7 @@ export default defineConfig({
       "worker.test.ts",
       "schedules.test.ts",
       "runs.test.ts",
+      "reviewFeedback.test.ts",
       "config.test.ts",
       "runLedger.test.ts",
       "harnessLaunch.test.ts",

@@ -45,6 +45,8 @@ import {
 } from "./reviewHumanFindings.js";
 
 export type ReviewVerdictKind = "approve" | "request_changes";
+export const REVIEW_FEEDBACK_INVITATION =
+  "Did this review help you decide what to change? React 👍 for yes or 👎 for no.";
 
 /** The severity ladder, most to least severe. One list serves the findings a
  *  reviewer submits and the level the loop addresses: a finding's severity is
@@ -699,6 +701,8 @@ export function buildReviewPostBody(
   const head = target?.head ?? verdict?.head;
   if (head)
     fixedParts.push(`_${completeReviewVerdict(verdict) ? "Reviewed at" : "Review target:"} \`${head.slice(0, 7)}\`._`);
+  if (verdict?.humanFindings !== undefined && completeReviewVerdict(verdict))
+    fixedParts.push(REVIEW_FEEDBACK_INVITATION);
   const agentParts: string[] = [];
   if (failure) agentParts.push(`**Validation:** ${redactAndCap(failure, 600)}`);
   if (verdict?.summary) agentParts.push(`**Rationale:** ${oneLine(verdict.summary)}`);

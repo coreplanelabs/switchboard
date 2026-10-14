@@ -2,6 +2,10 @@ import { resolveGithubToken } from "./githubApp.js";
 import type { GithubWriteResult } from "./githubPulls.js";
 import { isPublicationRepo } from "../core/branchPublication.js";
 import { MAX_REVIEW_POST_CODE_POINTS } from "../core/reviewVerdict.js";
+import { nativeReviewReceiptOf, type NativeReviewReceipt } from "../core/reviewPublication.js";
+
+export type GithubReviewWriteResult =
+  { state: "accepted"; nativeReview?: NativeReviewReceipt } | Exclude<GithubWriteResult, { state: "accepted" }>;
 
 // Posting a review back to a PR. The bot process posts the comment
 // itself over the GitHub REST API with the App installation token — never a
@@ -38,7 +42,7 @@ export interface ReviewCommentTarget {
  * Post only a pinned review. A positive exact native receipt credits acceptance;
  * ambiguous transport or response bytes retain an uncertain original write.
  */
-export async function postReviewComment(target: ReviewCommentTarget, body: string): Promise<GithubWriteResult> {
+export async function postReviewComment(target: ReviewCommentTarget, body: string): Promise<GithubReviewWriteResult> {
   if (
     !isPublicationRepo(target.repo) ||
     !Number.isSafeInteger(target.number) ||
@@ -80,7 +84,19 @@ export async function postReviewComment(target: ReviewCommentTarget, body: strin
       typeof r.pull_request_url === "string" &&
       r.pull_request_url.toLowerCase() ===
         `https://api.github.com/repos/${target.repo.toLowerCase()}/pulls/${target.number}`
-      ? { state: "accepted" }
+      ? (() => {
+          const nativeReview = nativeReviewReceiptOf(
+            {
+              id: String(r.id),
+              nodeId: r.node_id,
+              url: r.html_url,
+              publishedAt: typeof r.submitted_at === "string" ? Date.parse(r.submitted_at) : undefined,
+            },
+            target.repo,
+            target.number,
+          );
+          return { state: "accepted" as const, ...(nativeReview ? { nativeReview } : {}) };
+        })()
       : { state: "uncertain" };
   } catch {
     return { state: "uncertain" };

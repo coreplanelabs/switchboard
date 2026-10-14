@@ -113,6 +113,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0103 | [Context is a bounded view of source-bound work](../decisions/0103-context-is-a-bounded-view-of-source-bound-work.md) | Durable source records with scoped working projections and acknowledged phase artifacts | proposed | 2026-10-11 |
 | 0105 | [Rebuild modes and exact operation termination share existing recovery](../decisions/0105-rebuild-modes-and-exact-operation-termination-share-existing-recovery.md) | Explicit destructive mode and original-runtime process capability | proposed | 2026-10-11 |
 | 0106 | [Terminal execution and replay fencing commit together](../decisions/0106-terminal-execution-and-replay-fencing-commit-together.md) | Durable journal and atomic completion barrier | proposed | 2026-10-12 |
+| 0107 | [Retain exact review feedback with the publication owner](../decisions/0107-retain-exact-review-feedback-with-the-publication-owner.md) | Transactional receipt and replaceable snapshot | accepted | 2026-10-14 |
 
 <!-- /generated:decision-records -->
 

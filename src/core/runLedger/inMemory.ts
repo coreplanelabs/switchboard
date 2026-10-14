@@ -101,6 +101,11 @@ import {
 // also documents the storage shape in the plainest form.
 
 import { reviewPublicationOf } from "../reviewPublication.js";
+import {
+  InMemoryReviewFeedbackStore,
+  retainedFeedbackReceipt,
+  reviewFeedbackPublicationOf,
+} from "../reviewFeedback.js";
 import { allocationAckFromCanonical } from "./allocationAck.js";
 import {
   promotionBodyOf,
@@ -261,6 +266,7 @@ export interface SessionLog {
 const TRIM_MARKER_BYTES_ESTIMATE = 260;
 
 export class InMemoryRunLedger implements RunLedger {
+  readonly reviewFeedback = new InMemoryReviewFeedbackStore(() => this.now());
   originalPromotionBody(request: ClaimRequest): string {
     return JSON.stringify({ storeKey: RUN_STORE_KEY, run: request });
   }
@@ -1823,6 +1829,13 @@ export class InMemoryRunLedger implements RunLedger {
       log.rangePins ??= {};
       log.rangePins[runId] = [...(log.rangePins[runId] ?? []), { from: receipt.seed.from, to: receipt.seed.through }];
     }
+    const feedbackReceipt = retainedFeedbackReceipt(row.state.reviewPublication, preserved.reviewPublication, {
+      runId,
+      repo: row.meta.repo,
+      pr: row.meta.pr,
+    });
+    const feedbackPublication = feedbackReceipt && reviewFeedbackPublicationOf(feedbackReceipt);
+    if (feedbackPublication) this.reviewFeedback.retain(feedbackPublication);
     row.state = preserved;
     return { ok: true };
   }
