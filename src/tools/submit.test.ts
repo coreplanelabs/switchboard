@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { validateToolArguments, type Tool, type ToolCall } from "@earendil-works/pi-ai";
+import { convertResponsesTools } from "@earendil-works/pi-ai/api/openai-responses-shared";
 import { TITLE_GATE_REPOSITORY, visibleLength, type PrDescription } from "../core/prDescription.js";
 import type { RunEvent } from "../core/runEvents.js";
 import type { Handoff } from "../core/ship/handoff.js";
@@ -301,11 +302,14 @@ describe("submit_verdict tool", () => {
   });
 
   it("rejects contradictory finding variants in the provider-visible schema", () => {
-    const tool: Tool = {
+    const declared: Tool = {
       name: submitVerdictTool.name,
       description: submitVerdictTool.description,
       parameters: submitVerdictTool.inputSchema as Tool["parameters"],
     };
+    const wire = convertResponsesTools([declared])[0];
+    if (wire.type !== "function") throw new Error("Expected a function tool");
+    const tool = { ...declared, parameters: JSON.parse(JSON.stringify(wire.parameters)) as Tool["parameters"] };
     const base = { id: "F1", severity: "major", file: "a.ts", title: "unsafe" };
     const matrix = { invariant: "checked trees", cases: [{ scenario: "write", expected: "refuse" }] };
     const check = (finding: ToolCall["arguments"][string]) =>
@@ -315,18 +319,37 @@ describe("submit_verdict tool", () => {
         name: tool.name,
         arguments: { verdict: "request_changes", summary: "unsafe", head: "a".repeat(40), findings: [finding] },
       });
-    for (const finding of [
+    const invalid: ToolCall["arguments"][string][] = [
+      { id: "F1", cases: [] },
+      { id: "F1" },
       { ...base, kind: "single", ...matrix },
       { ...base, kind: "pattern" },
       { ...base, kind: "pattern", ...matrix, cases: [] },
       { ...base, kind: "pattern", ...matrix, cases: [{ scenario: " ", expected: "refuse" }] },
-    ])
-      expect(() => check(finding)).toThrow();
-    for (const finding of [
-      { ...base, kind: "single" },
-      { ...base, kind: "pattern", ...matrix },
-    ])
-      expect(() => check(finding)).not.toThrow();
+    ];
+    for (const finding of invalid) expect(() => check(finding)).toThrow();
+    expect(check({ ...base, kind: "single" })).toEqual({
+      verdict: "request_changes",
+      summary: "unsafe",
+      head: "a".repeat(40),
+      findings: [{ id: "F1", severity: "major", file: "a.ts", title: "unsafe", kind: "single" }],
+    });
+    expect(check({ ...base, kind: "pattern", ...matrix })).toEqual({
+      verdict: "request_changes",
+      summary: "unsafe",
+      head: "a".repeat(40),
+      findings: [
+        {
+          id: "F1",
+          severity: "major",
+          file: "a.ts",
+          title: "unsafe",
+          kind: "pattern",
+          invariant: "checked trees",
+          cases: [{ scenario: "write", expected: "refuse" }],
+        },
+      ],
+    });
   });
 
   it("refuses malformed findings atomically even without bound PR history", async () => {
@@ -447,7 +470,17 @@ describe("submit_verdict tool", () => {
       ],
       priorFindings: [{ findingId: "review:1:F1" }],
     };
-    expect(await submitVerdictTool.run(input, ctx)).toContain("verdict recorded: request_changes (2 findings)");
+    const accepted = validateToolArguments(
+      {
+        name: submitVerdictTool.name,
+        description: submitVerdictTool.description,
+        parameters: submitVerdictTool.inputSchema as Tool["parameters"],
+      },
+      { type: "toolCall", id: "fresh-and-prior", name: submitVerdictTool.name, arguments: input },
+    );
+    const receipt = await submitVerdictTool.run(accepted, ctx);
+    if (typeof receipt !== "string") throw new Error("Expected a text verdict receipt");
+    expect(receipt.split("\n")[0]).toBe("verdict recorded: request_changes (2 findings)");
     expect(recorded[0].findings).toMatchObject([
       { id: "F2", title: "The new path drops its guard" },
       { id: "review:1:F1", title: "Retry drops new work" },

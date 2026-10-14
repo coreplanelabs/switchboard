@@ -1,5 +1,6 @@
 import { createCheckExecution } from "../checkExecution.js";
 import { describe, expect, it } from "vitest";
+import { validateToolArguments, type Tool } from "@earendil-works/pi-ai";
 import { ToolRecovery, ToolRecoveryStoppedError } from "./toolRecovery.js";
 import { authorizeToolCall, runRelayedTool, type LiveHarness } from "./pi/relay.js";
 import { RunBearerStore } from "../modelProxy/runBearers.js";
@@ -236,6 +237,100 @@ describe("run-owned tool recovery", () => {
     });
     expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
   });
+
+  it.each(["corrected", "repeated"])(
+    "an id-only verdict gets one correction through relay and native receipts: %s",
+    async (mode) => {
+      const f = fixture();
+      const bridge = new PiBridge({ clock: () => 1000, emit: () => {}, recovery: f.recovery });
+      bridge.gateSaw("earlier-grep");
+      bridge.observe({
+        type: "tool_execution_start",
+        toolCallId: "earlier-grep",
+        toolName: "grep",
+        args: { path: "/work/missing" },
+      });
+      bridge.observe({
+        type: "tool_execution_end",
+        toolCallId: "earlier-grep",
+        toolName: "grep",
+        isError: true,
+        result: { content: [{ type: "text", text: "Path not found" }] },
+      });
+      await f.recovery.settled(false);
+      const request = { verdict: "request_changes", summary: "A guard is missing", head: "a".repeat(40) };
+      const malformed = { ...request, findings: [{ id: "F1", cases: [] }] };
+      const call = async (id: string, input: Record<string, unknown>) => {
+        bridge.gateSaw(id);
+        bridge.observe({ type: "tool_execution_start", toolCallId: id, toolName: "submit_verdict", args: input });
+        const answer = await f.call(id, "submit_verdict", input);
+        bridge.observe({
+          type: "tool_execution_end",
+          toolCallId: id,
+          toolName: "submit_verdict",
+          isError: answer.isError,
+          result: { content: answer.content },
+        });
+        await f.recovery.settled(false);
+        return answer;
+      };
+      expect(await call("first", malformed)).toEqual({
+        content: [{ type: "text", text: "error: findings[0]: declare kind single or pattern; no verdict recorded" }],
+        isError: true,
+      });
+      expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+      if (mode === "repeated") {
+        expect(await call("second", malformed)).toEqual({
+          content: [{ type: "text", text: "error: findings[0]: declare kind single or pattern; no verdict recorded" }],
+          isError: true,
+        });
+        expect(f.bearers.consumeTurn("r")).toEqual({
+          ok: false,
+          reason: "tool_recovery",
+          stop: { tool: "submit_verdict", attempts: 3, reason: "repeated_failure" },
+        });
+        return;
+      }
+      const corrected = validateToolArguments(
+        {
+          name: submitVerdictTool.name,
+          description: submitVerdictTool.description,
+          parameters: submitVerdictTool.inputSchema as Tool["parameters"],
+        },
+        {
+          type: "toolCall",
+          id: "second",
+          name: submitVerdictTool.name,
+          arguments: {
+            ...request,
+            findings: [
+              { id: "F1", kind: "single", severity: "minor", file: "src/guard.ts", title: "A guard is missing" },
+            ],
+          },
+        },
+      );
+      const submissions: unknown[] = [];
+      f.harness.toolContext.onReviewSubmission = async (submission) => {
+        submissions.push(submission);
+      };
+      expect(await call("second", corrected)).toEqual({
+        content: [{ type: "text", text: "verdict recorded: request_changes (1 finding)" }],
+        isError: false,
+      });
+      expect(submissions.at(-1)).toMatchObject({
+        status: "accepted",
+        callId: "second",
+        verdict: {
+          verdict: "request_changes",
+          head: "a".repeat(40),
+          findings: [
+            { id: "F1", kind: "single", severity: "minor", file: "src/guard.ts", title: "A guard is missing" },
+          ],
+        },
+      });
+      expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 2 });
+    },
+  );
 
   it("retains the allowance and settled call identities across reconstruction", async () => {
     const first = fixture();

@@ -6,8 +6,8 @@
 // never a throw (`failsInText`); each mutates run state, so none is
 // side-effect-free. Relayed to pi like every bot tool
 // (docs/reference/specs/harness-pi.md item 7); the load harness's extension
-// (src/load/piExtension.ts) transcribes two of these definitions and a test
-// holds them equal. The toolset wiring stays in src/tools/workspace.ts.
+// (src/load/piExtension.ts) shares the finding schema and mirrors the remaining
+// declarations; a test holds them equal. The toolset wiring stays in src/tools/workspace.ts.
 
 import { z } from "zod";
 import { MAX_TOOL_RESULT_CHARS } from "../core/chatMessage.js";
@@ -26,21 +26,6 @@ import { downgradeNote, parseDispositionsInput, parseVerdictInput } from "../cor
 import { parseHandoff } from "../core/ship/handoff.js";
 import { materializeReviewFollowup, validateReviewFollowup, withFindingCaseIds } from "../core/reviewHistory.js";
 import type { RunnableTool } from "./runnableTool.js";
-
-const freshFindingSchema = {
-  ...reviewFindingInputSchema,
-  anyOf: reviewFindingInputSchema.anyOf.map((variant) => ({
-    ...variant,
-    properties: {
-      ...variant.properties,
-      id: {
-        type: "string",
-        pattern: "^F[1-9][0-9]*$",
-        description: "A fresh finding ID in this report: F1, F2, …; never a run or prior-review ID",
-      },
-    },
-  })),
-};
 
 export const submitVerdictTool: RunnableTool = {
   name: "submit_verdict",
@@ -81,7 +66,7 @@ export const submitVerdictTool: RunnableTool = {
       findings: {
         type: "array",
         description: "Every issue you report, one entry each, in the order reported — rendered under the verdict line",
-        items: freshFindingSchema,
+        items: reviewFindingInputSchema,
       },
       priorFindings: {
         type: "array",
