@@ -1,3 +1,5 @@
+import { ExecCapacityError, ExecInfraError } from "../../../execution/executor.js";
+import { ToolRecovery } from "../toolRecovery.js";
 import { parentContextOf } from "../../dispatch/handoff.js";
 import { createCheckExecution } from "../../checkExecution.js";
 import type { CheckExecutionState } from "../../checkExecutionTypes.js";
@@ -1416,7 +1418,7 @@ describe.each(["pi", "opencode"])("hosted %s check lifecycle", (name) => {
       signal: hard.signal,
       clock: () => 100,
     });
-    const { harness } = live({ identity: "read" });
+    const { harness, events } = live({ identity: "read" });
     harness.runId = name;
     harness.commandPolicy = "hosted-review";
     harness.tools = [runCheckTool];
@@ -1428,8 +1430,116 @@ describe.each(["pi", "opencode"])("hosted %s check lifecycle", (name) => {
         tool: "run_check",
         input: { command, purpose: "verification", timeoutMs: 10_000 },
       });
-    return { hard, original, saved, execResult, save, harness, ask };
+    return { hard, original, saved, execResult, save, harness, events, ask };
   }
+  it("retains the original check failure before recovery stops native result delivery", async () => {
+    const w = setupCheck();
+    let beforeStop: RunEvent[] = [];
+    w.harness.toolContext.recovery = new ToolRecovery(undefined, async (state) => {
+      if (state.stopped) beforeStop = structuredClone(w.events);
+      return true;
+    });
+    const initial = w.execResult.getMockImplementation()!;
+    w.execResult.mockImplementation(async (command, opts) => {
+      if (!command.startsWith("set -eu")) throw new ExecInfraError("PRIVATE failure /private/path", "transport-lost");
+      return initial(command, opts);
+    });
+    const answer = await w.ask();
+    expect(answer.isError).toBe(true);
+    const failure = beforeStop.find((e) => e.type === "run_note" && e.kind === "harness_error");
+    expect(failure).toMatchObject({
+      type: "run_note",
+      summary: expect.stringContaining('"callId":"check"'),
+    });
+    expect(failure).toMatchObject({ summary: expect.stringContaining('"infrastructureReason":"transport-lost"') });
+    expect(failure).toMatchObject({ summary: expect.stringContaining('"kind":"unknown","reason":"transport"') });
+    expect(w.saved.at(-1)?.receipts[0]?.outcome).toEqual({
+      kind: "unknown",
+      reason: "transport",
+      infrastructureReason: "transport-lost",
+    });
+    expect(JSON.stringify(beforeStop)).not.toContain("PRIVATE");
+    expect(await w.ask("another")).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: expect.stringContaining("original operation remains held") }],
+    });
+    expect(w.execResult).toHaveBeenCalledTimes(2);
+  });
+  it.each(["command", "stdout", "stderr"] as const)(
+    "retains structural failure evidence when %s contains a cookie header",
+    async (field) => {
+      const w = setupCheck();
+      let beforeStop: RunEvent[] = [];
+      w.harness.toolContext.recovery = new ToolRecovery(undefined, async (state) => {
+        if (state.stopped) beforeStop = structuredClone(w.events);
+        return true;
+      });
+      const initial = w.execResult.getMockImplementation()!;
+      w.execResult.mockImplementation(async (command, opts) => {
+        if (command.startsWith("set -eu")) return initial(command, opts);
+        if (field === "command") throw new ExecInfraError("PRIVATE failure", "transport-lost");
+        return { exitCode: 124, stdout: "", stderr: "", truncated: false, [field]: "Cookie: fixture-cookie-value" };
+      });
+      const command =
+        field === "command"
+          ? "git status --short; curl -H 'Cookie: fixture-cookie-value' https://example.test"
+          : "git status --short";
+      const answer = await w.ask("cookie-check", command);
+      expect(answer.isError).toBe(true);
+      const note = beforeStop.find((event) => event.type === "run_note" && event.kind === "harness_error");
+      if (note?.type !== "run_note") throw new Error("Missing retained failure note");
+      const encoded = note.summary.split("<untrusted-check-evidence>\n")[1]?.split("\n</untrusted-check-evidence>")[0];
+      const receipt = JSON.parse(encoded!);
+      expect(receipt).toMatchObject({
+        callId: "cookie-check",
+        outcome:
+          field === "command"
+            ? { kind: "unknown", reason: "transport", infrastructureReason: "transport-lost" }
+            : { kind: "unknown", reason: "interrupted", result: { exitCode: 124 } },
+      });
+      expect(field === "command" ? receipt.command : receipt.outcome.result[field]).toContain("«redacted»");
+      expect(JSON.stringify([beforeStop, w.saved, answer])).not.toContain("fixture-cookie-value");
+      expect(await w.ask("repeat")).toMatchObject({
+        isError: true,
+        content: [{ type: "text", text: expect.stringContaining("original operation remains held") }],
+      });
+      expect(w.execResult).toHaveBeenCalledTimes(2);
+    },
+  );
+  it("retains a closed metadata refusal before recovery without inventing a command receipt", async () => {
+    const w = setupCheck();
+    let beforeStop: RunEvent[] = [];
+    w.harness.toolContext.recovery = new ToolRecovery(undefined, async (state) => {
+      if (state.stopped) beforeStop = structuredClone(w.events);
+      return true;
+    });
+    w.execResult.mockRejectedValue(
+      new ExecCapacityError("PRIVATE platform bytes", undefined, {
+        version: 1,
+        phase: "pre_execution_busy",
+        route: "exec",
+        reason: "runtime-busy",
+        responseClass: "success",
+        caller: "executor",
+        operation: "unclassified",
+      }),
+    );
+    expect(await w.ask()).toMatchObject({ isError: true });
+    expect(beforeStop).toEqual([
+      {
+        type: "run_note",
+        kind: "harness_error",
+        summary: expect.stringContaining(
+          'Execution diagnostic: {"version":1,"phase":"pre_execution_busy","route":"exec","reason":"runtime-busy","responseClass":"success","caller":"check","operation":"metadata"}',
+        ),
+      },
+    ]);
+    expect(beforeStop[0]).toMatchObject({ summary: expect.stringContaining("run_check check:") });
+    expect(JSON.stringify(beforeStop)).not.toContain("PRIVATE");
+    expect(JSON.stringify(beforeStop)).not.toContain("untrusted-check-evidence");
+    expect(w.saved).toEqual([]);
+    expect(w.execResult).toHaveBeenCalledTimes(1);
+  });
   it("does not dispatch when the originating loop-end cut precedes the pending ACK", async () => {
     const w = setupCheck();
     const pending = deferred();

@@ -33,7 +33,12 @@ export interface CheckExecutionReceipt {
     | { kind: "pending" }
     | { kind: "not_started"; reason: "command_refused" | "budget_exhausted" | "stopped" }
     | ({ kind: "completed" } & ExecResult)
-    | { kind: "unknown"; reason: "interrupted" | "transport" | "invalid_result"; result?: ExecResult };
+    | {
+        kind: "unknown";
+        reason: "interrupted" | "transport" | "invalid_result";
+        infrastructureReason?: ExecInfraReason;
+        result?: ExecResult;
+      };
 }
 
 export interface CheckExecutionState {

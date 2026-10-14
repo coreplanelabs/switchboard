@@ -2,7 +2,7 @@ import { z } from "zod";
 import { BASH_TIMEOUT_MAX_MS, BASH_TIMEOUT_MIN_MS } from "../execution/bashTimeout.js";
 import { NOTEPAD_MAX_BYTES } from "../core/runLedger/sessionLog.js";
 import { utf8ByteLength } from "../core/runRecord.js";
-import { redactSecrets } from "../core/runEvents.js";
+import { redactAndCap, redactSecrets } from "../core/runEvents.js";
 import type { CheckExecutionReceipt } from "../core/checkExecutionTypes.js";
 import type { RunnableTool } from "./runnableTool.js";
 import { typedExecutionDiagnosticFrom, type TypedExecutionDiagnostic } from "../execution/typedExecutionDiagnostic.js";
@@ -142,6 +142,20 @@ export const runCheckTool: RunnableTool = {
       /* Optional observation cannot change the original tool result. */
     }
     const diagnosticText = diagnostic ? `\nExecution diagnostic: ${JSON.stringify(diagnostic)}` : "";
+    // Recovery can stop the harness before its native log receives this result.
+    // Preserve the original bounded evidence on the run stream first.
+    const retainFailure = (text: string): string => {
+      try {
+        ctx.publish?.({
+          type: "run_note",
+          kind: "harness_error",
+          summary: `run_check ${redactAndCap(ctx.callId ?? "", 200)}: ${text}`.slice(0, 16_000),
+        });
+      } catch {
+        // Observation cannot change the original receipt or recovery hold.
+      }
+      return text;
+    };
     if (response.kind === "unavailable") {
       const invalid = ["invalid_input", "command_refused"].includes(response.reason);
       const missing = ["recording_unavailable", "unsupported_executor", "workspace_unavailable"].includes(
@@ -158,13 +172,13 @@ export const runCheckTool: RunnableTool = {
               : "outcome_unknown",
         recovery: lifecycle || invalid || missing ? "correct" : "stop",
       });
-    }
-    if (response.kind === "unavailable" && response.reason === "recording_unavailable")
-      return "error: recording capability unavailable; command did not start";
-    if (response.kind === "unavailable")
-      return `error: recorded check unavailable (${response.reason}); no completion receipt was returned${diagnosticText}${
+      if (response.reason === "recording_unavailable")
+        return "error: recording capability unavailable; command did not start";
+      const text = `error: recorded check unavailable (${response.reason}); no completion receipt was returned${diagnosticText}${
         response.metadataFailure ? `\nMetadata diagnostic: ${JSON.stringify(response.metadataFailure)}` : ""
       }`;
+      return lifecycle || invalid || missing ? text : retainFailure(text);
+    }
     const receipt = response.receipt;
     if (receipt.outcome.kind !== "completed")
       ctx.reportToolFailure?.({
@@ -205,8 +219,11 @@ export const runCheckTool: RunnableTool = {
         }
       }
     }
-    // Output and command text remain evidence, even when they contain fake tags.
-    const encoded = JSON.stringify(receipt)
+    // Redact text leaves before serialization: header patterns must not consume
+    // the structural fields that follow them on the JSON line.
+    const encoded = JSON.stringify(receipt, (_key, value: unknown) =>
+      typeof value === "string" ? redactAndCap(value, 16_000) : value,
+    )
       .replaceAll("<", "\\u003c")
       .replaceAll(">", "\\u003e")
       .replaceAll("&", "\\u0026");
@@ -216,6 +233,7 @@ export const runCheckTool: RunnableTool = {
         : receipt.outcome.kind === "not_started"
           ? `Command did not start (${receipt.outcome.reason}). No execution result exists.`
           : "Command outcome is unknown; do not blindly rerun it. Existing workspace recovery must reconcile the operation.";
-    return `${receipt.outcome.kind === "completed" ? "" : "error: "}${summary}${diagnosticText}${checkpointResult ? `\n${checkpointResult}` : ""}\n<untrusted-check-evidence>\n${encoded}\n</untrusted-check-evidence>`;
+    const text = `${receipt.outcome.kind === "completed" ? "" : "error: "}${summary}${diagnosticText}${checkpointResult ? `\n${checkpointResult}` : ""}\n<untrusted-check-evidence>\n${encoded}\n</untrusted-check-evidence>`;
+    return ["pending", "unknown"].includes(receipt.outcome.kind) ? retainFailure(text) : text;
   },
 };

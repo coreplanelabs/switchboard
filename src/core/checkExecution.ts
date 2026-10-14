@@ -71,6 +71,7 @@ const receiptSchema = z
         .object({
           kind: z.literal("unknown"),
           reason: z.enum(["interrupted", "transport", "invalid_result"]),
+          infrastructureReason: z.enum(EXEC_INFRA_REASONS).optional(),
           result: storedResultSchema.optional(),
         })
         .strict(),
@@ -100,7 +101,7 @@ export interface CheckExecutionBinding {
 
 /** Only the actual typed cause supplies an allowlisted infrastructure reason.
  * Diagnostic prose and class names are not classifiers. */
-function metadataInfrastructureReason(error: unknown): CheckMetadataFailure["infrastructureReason"] {
+function infrastructureReasonOf(error: unknown): CheckMetadataFailure["infrastructureReason"] {
   const seen = new Set<unknown>();
   let current = error;
   while (current instanceof Error && !seen.has(current)) {
@@ -257,7 +258,7 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
     } catch (error) {
       annotateExecutionDiagnostic(error, { caller: "check", operation: "metadata" });
       const executionDiagnostic = typedExecutionDiagnosticOf(error);
-      const infrastructureReason = metadataInfrastructureReason(error);
+      const infrastructureReason = infrastructureReasonOf(error);
       let abortSource: CheckMetadataFailure["abortSource"];
       if (infrastructureReason === "aborted") {
         abortSource = "unknown";
@@ -368,7 +369,12 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
       } catch (error) {
         annotateExecutionDiagnostic(error, { caller: "check", operation: "command" });
         executionDiagnostic = typedExecutionDiagnosticOf(error);
-        receipt.outcome = { kind: "unknown", reason: commandSignal.aborted ? "interrupted" : "transport" };
+        const infrastructureReason = infrastructureReasonOf(error);
+        receipt.outcome = {
+          kind: "unknown",
+          reason: commandSignal.aborted ? "interrupted" : "transport",
+          ...(infrastructureReason ? { infrastructureReason } : {}),
+        };
       }
     }
     receipt.completedAt = binding.clock();
