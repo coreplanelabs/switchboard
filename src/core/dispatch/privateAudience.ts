@@ -12,6 +12,7 @@ import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
 import type { FollowUpInput } from "../threadAdmission.js";
 import type { SessionSeed } from "./seed.js";
 import type { SlackSourceReceipt } from "../references/receipts.js";
+import { githubAccessDiagnosticOf, type GithubAccessDiagnostic } from "../references/githubAccessDiagnostic.js";
 
 /** A live run's private-source revocation follows it through answer delivery. */
 export interface PrivateAudienceLatch extends AudienceTrace {
@@ -19,6 +20,7 @@ export interface PrivateAudienceLatch extends AudienceTrace {
   /** Recovery cannot reconstruct every consumed follow-up's source. */
   code?: AudienceRefusalCode;
   check?: ContextRefusalCheck;
+  githubAccess?: GithubAccessDiagnostic;
   /** A saved Slack read must still match a fresh authorized source at publication. */
   revalidateSources?: () => Promise<AudienceCheck>;
 }
@@ -114,6 +116,7 @@ export async function savedSlackSourcesStillValid(latch: PrivateAudienceLatch): 
     if (!checked.ok && latch.code === undefined) {
       latch.code = checked.code;
       latch.check = checked.check;
+      latch.githubAccess = githubAccessDiagnosticOf(checked.githubAccess);
     }
   } catch {
     // Failed source checks never restore an earlier result's authority.
@@ -184,6 +187,9 @@ export async function privateRunAudienceDecision(
     ok: false,
     code: latch.refusal?.code ?? latch.code ?? "followup-unverified",
     ...((latch.refusal?.check ?? latch.check) ? { check: latch.refusal?.check ?? latch.check } : {}),
+    ...((latch.refusal?.githubAccess ?? latch.githubAccess)
+      ? { githubAccess: latch.refusal?.githubAccess ?? latch.githubAccess }
+      : {}),
   });
   if (latch.revoked) return revoked();
   if (privateAudienceRequired(msg)) {

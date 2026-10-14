@@ -102,6 +102,45 @@ function record(over: Partial<RunRecord> = {}): RunRecord {
   };
 }
 
+it("stored audience diagnostics retain safe GitHub failure facts after normalization", () => {
+  const audienceRefusal = {
+    version: 1,
+    code: "saved-context-unproved",
+    check: "execution_github_access_unproved",
+    causeAt: "answer-event",
+    withheldAt: "answer-event",
+    githubAccess: {
+      tool: "github_pull_get",
+      stage: "tool-read",
+      operation: "getPullRequestFeedback",
+      reason: "http",
+      httpStatus: 403,
+      requestId: "A1:B2",
+      sourceCallHash: "a".repeat(64),
+    },
+  } as const;
+  const stored = JSON.parse(JSON.stringify(record({ audienceRefusal })));
+  expect(isRunRecord(stored)).toBe(true);
+  expect(normalizeStored(stored).audienceRefusal).toEqual({
+    version: 1,
+    code: "saved-context-unproved",
+    check: "execution_github_access_unproved",
+    causeAt: "answer-event",
+    withheldAt: "answer-event",
+    githubAccess: {
+      tool: "github_pull_get",
+      stage: "tool-read",
+      operation: "getPullRequestFeedback",
+      reason: "http",
+      httpStatus: 403,
+      requestId: "A1:B2",
+      sourceCallHash: "a".repeat(64),
+    },
+  });
+  stored.audienceRefusal.githubAccess.body = "private source";
+  expect(isRunRecord(stored)).toBe(false);
+});
+
 function childHandoff(sourceRunId: string): ChildHandoff {
   return {
     version: 1,

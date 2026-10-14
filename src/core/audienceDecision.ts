@@ -1,3 +1,6 @@
+import { githubAccessDiagnosticOf, type GithubAccessDiagnostic } from "./references/githubAccessDiagnostic.js";
+import type { SpanAttrs } from "./trace/attrs.js";
+
 /** Structural diagnostics only. These values never grant source or reply access. */
 export const AUDIENCE_REFUSAL_CODES = [
   "direct-address-unproved",
@@ -76,7 +79,9 @@ export const CONTEXT_REFUSAL_CHECKS = [
   "mcp_audience_unproved",
 ] as const;
 export type ContextRefusalCheck = (typeof CONTEXT_REFUSAL_CHECKS)[number];
-export type AudienceCheck = { ok: true } | { ok: false; code: AudienceRefusalCode; check?: ContextRefusalCheck };
+export type AudienceCheck =
+  | { ok: true }
+  | { ok: false; code: AudienceRefusalCode; check?: ContextRefusalCheck; githubAccess?: GithubAccessDiagnostic };
 export type AudienceStage = "prompt" | "followup" | "recovery" | "answer-event" | "reply";
 export interface AudienceRefusalReceipt {
   version: 1;
@@ -84,6 +89,7 @@ export interface AudienceRefusalReceipt {
   withheldAt?: "prompt" | "answer-event" | "reply";
   code: AudienceRefusalCode;
   check?: ContextRefusalCheck;
+  githubAccess?: GithubAccessDiagnostic;
 }
 export interface AudienceTrace {
   refusal?: AudienceRefusalReceipt;
@@ -93,12 +99,16 @@ export interface AudienceTrace {
 export function audienceRefusalOf(value: unknown): AudienceRefusalReceipt | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const v = value as Record<string, unknown>;
+  const githubAccess = githubAccessDiagnosticOf(v.githubAccess);
   if (
-    Object.keys(v).some((key) => !["version", "causeAt", "withheldAt", "code", "check"].includes(key)) ||
+    Object.keys(v).some(
+      (key) => !["version", "causeAt", "withheldAt", "code", "check", "githubAccess"].includes(key),
+    ) ||
     v.version !== 1 ||
     !["prompt", "followup", "recovery", "answer-event", "reply"].includes(v.causeAt as string) ||
     !(AUDIENCE_REFUSAL_CODES as readonly unknown[]).includes(v.code) ||
     (v.check !== undefined && !(CONTEXT_REFUSAL_CHECKS as readonly unknown[]).includes(v.check)) ||
+    (v.githubAccess !== undefined && (!githubAccess || v.check !== "execution_github_access_unproved")) ||
     (v.withheldAt !== undefined && !["prompt", "answer-event", "reply"].includes(v.withheldAt as string))
   )
     return undefined;
@@ -107,6 +117,7 @@ export function audienceRefusalOf(value: unknown): AudienceRefusalReceipt | unde
     causeAt: v.causeAt as AudienceStage,
     code: v.code as AudienceRefusalCode,
     ...(v.check !== undefined ? { check: v.check as ContextRefusalCheck } : {}),
+    ...(githubAccess ? { githubAccess } : {}),
     ...(v.withheldAt !== undefined ? { withheldAt: v.withheldAt as AudienceRefusalReceipt["withheldAt"] } : {}),
   };
 }
@@ -118,11 +129,42 @@ export function noteAudienceRefusal(
   causeAt: AudienceStage,
   withheldAt?: AudienceRefusalReceipt["withheldAt"],
   check?: ContextRefusalCheck,
+  githubAccess?: GithubAccessDiagnostic,
 ): AudienceRefusalReceipt {
-  trace.refusal ??= { version: 1, causeAt, code, ...(check !== undefined ? { check } : {}) };
+  const diagnostic = check === "execution_github_access_unproved" ? githubAccessDiagnosticOf(githubAccess) : undefined;
+  trace.refusal ??= {
+    version: 1,
+    causeAt,
+    code,
+    ...(check !== undefined ? { check } : {}),
+    ...(diagnostic ? { githubAccess: diagnostic } : {}),
+  };
   if (withheldAt !== undefined && trace.refusal.withheldAt === undefined)
     trace.refusal = { ...trace.refusal, withheldAt };
   return trace.refusal;
+}
+
+/** Trace and terminal receipts project the same closed facts. */
+export function audienceCheckAttrs(check: AudienceCheck): SpanAttrs {
+  const diagnostic =
+    !check.ok && check.check === "execution_github_access_unproved"
+      ? githubAccessDiagnosticOf(check.githubAccess)
+      : undefined;
+  return {
+    outcome: check.ok ? "allowed" : (check.check ?? check.code),
+    ...(diagnostic
+      ? {
+          githubStage: diagnostic.stage,
+          githubReason: diagnostic.reason,
+          githubTool: diagnostic.tool,
+          githubOperation: diagnostic.operation,
+          sourceCallHash: diagnostic.sourceCallHash,
+          ...(diagnostic.httpStatus !== undefined ? { httpStatus: diagnostic.httpStatus } : {}),
+          ...(diagnostic.requestId ? { githubRequestId: diagnostic.requestId } : {}),
+          ...(diagnostic.route ? { route: diagnostic.route } : {}),
+        }
+      : {}),
+  };
 }
 
 /** Copy is a projection of the typed decision, never its authority. */
