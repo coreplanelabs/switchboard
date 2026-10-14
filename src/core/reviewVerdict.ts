@@ -36,6 +36,13 @@ import { normalizeHead } from "./reviewedHead.js";
 import { toolResultText, type ChatMessage } from "./chatMessage.js";
 import { redactAndCap, redactSecrets } from "./redact.js";
 import { shows, type Verbosity } from "./verbosity.js";
+import {
+  humanExplanation,
+  humanFindingsProblem,
+  humanText,
+  redactHumanFindings,
+  type HumanFinding,
+} from "./reviewHumanFindings.js";
 
 export type ReviewVerdictKind = "approve" | "request_changes";
 
@@ -150,6 +157,8 @@ export interface Finding {
 }
 
 export interface ReviewVerdict {
+  /** Current-head human explanation; historical finding metadata stays immutable. */
+  humanFindings?: HumanFinding[];
   verdict: ReviewVerdictKind;
   /** One line: why. Newlines are collapsed so the token line stays one line. */
   summary: string;
@@ -312,6 +321,10 @@ export function parseVerdictInput(
     out.droppedFindings = ["findings: a complete review requires a findings array"];
   if (!opts.history && out.verdict === "request_changes" && !out.findings?.length && !out.droppedFindings?.length)
     out.droppedFindings = [...(out.droppedFindings ?? []), "findings: changes requested requires validated findings"];
+  if (input.humanFindings !== undefined) {
+    if (humanFindingsProblem(input.humanFindings, out.findings?.map((f) => f.id) ?? [])) return null;
+    out.humanFindings = structuredClone(input.humanFindings) as HumanFinding[];
+  }
   return out;
 }
 
@@ -611,7 +624,10 @@ function whereCell(f: Finding, target: ReviewBodyTarget | undefined): string {
   const location = f.line !== undefined ? `${f.file}:${f.line}` : f.file;
   const label = `\`${escapeMarkdownTableCell(location)}\``;
   if (!target || !isRepoPath(f.file)) return label;
-  const path = encodeURI(f.file).replace(/#/g, "%23").replace(/\?/g, "%3F");
+  const path = f.file
+    .split("/")
+    .map((part) => encodeURIComponent(part).replace(/\(/g, "%28").replace(/\)/g, "%29"))
+    .join("/");
   const url = `https://github.com/${target.repo}/blob/${target.head}/${path}${f.line !== undefined ? `#L${f.line}` : ""}`;
   return `[${label}](${url})`;
 }
@@ -671,10 +687,12 @@ export function buildReviewPostBody(
     const ranked = FINDING_SEVERITIES.flatMap((severity) => findings.filter((f) => f.severity === severity));
     fixedParts.push(
       ranked
-        .map(
-          (f) =>
-            `- ${SEVERITY_LABEL[f.severity]} · ${whereCell(f, target)}${f.humanGated ? " · Needs human verification" : ""}  \n  ${findingSentence(f.title)}`,
-        )
+        .map((f) => {
+          const human = verdict?.humanFindings?.find((row) => row.findingId === f.id);
+          const title = human ? humanText(human.problem) : findingSentence(f.title);
+          const location = human ? { ...f, file: human.location.file, line: human.location.line } : f;
+          return `- ${SEVERITY_LABEL[f.severity]} · ${whereCell(location, target)}${f.humanGated ? " · Needs human verification" : ""}  \n  ${title}${human ? ` ${humanExplanation(human)}` : ""}`;
+        })
         .join("\n\n"),
     );
   }
@@ -943,6 +961,11 @@ export function isReviewVerdictShape(v: unknown): v is ReviewVerdict {
   if (v.findings !== undefined && !(Array.isArray(v.findings) && v.findings.every(isFindingShape))) return false;
   if (v.resolutions !== undefined && !isFindingDispositionsShape(v.resolutions)) return false;
   if (v.caseAssessments !== undefined && !isCaseAssessmentsShape(v.caseAssessments)) return false;
+  if (
+    v.humanFindings !== undefined &&
+    humanFindingsProblem(v.humanFindings, (v.findings as Finding[] | undefined)?.map((f) => f.id) ?? [], false)
+  )
+    return false;
   return true;
 }
 
@@ -1008,6 +1031,7 @@ export function isFindingDispositionsShape(v: unknown): v is FindingDisposition[
  *  ride a record. */
 export function redactVerdict(v: ReviewVerdict, redact: (s: string) => string = redactSecrets): ReviewVerdict {
   return {
+    ...(v.humanFindings !== undefined ? { humanFindings: redactHumanFindings(v.humanFindings, redact) } : {}),
     verdict: v.verdict,
     summary: redact(v.summary),
     ...(v.droppedFindings?.length ? { droppedFindings: v.droppedFindings.map(redact) } : {}),

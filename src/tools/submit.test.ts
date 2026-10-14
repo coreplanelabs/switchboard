@@ -14,6 +14,7 @@ import {
   type ReviewVerdict,
 } from "../core/reviewVerdict.js";
 import { outstandingReviewFindings } from "../core/reviewHistory.js";
+import { humanReview } from "../core/testing/humanReview.js";
 
 // The recorders: `submit_verdict`, `submit_dispositions`, `submit_handoff` and
 // `submit_pr_description` set dispatcher state through the tool context and
@@ -88,6 +89,7 @@ describe("submit_verdict tool", () => {
       const f = caseReview(kind);
       const input = {
         verdict: "approve",
+        humanFindings: humanReview("review:1:F1"),
         summary: "Checked",
         head: f.head,
         findings: [{ id: "review:1:F1" }],
@@ -137,6 +139,7 @@ describe("submit_verdict tool", () => {
     const input = {
       verdict: "request_changes",
       summary: "Checked",
+      humanFindings: humanReview("review:1:F1"),
       head: f.head,
       findings: [{ id: "review:1:F1" }],
       caseAssessments: f.assessments.map((row) => ({ ...row, outcome: "fixed" })),
@@ -177,6 +180,7 @@ describe("submit_verdict tool", () => {
     const input = {
       verdict: "request_changes",
       summary: "Retry remains unsafe",
+      humanFindings: humanReview("review:1:F1"),
       head: f.head,
       findings: [],
       priorFindings: [
@@ -317,7 +321,13 @@ describe("submit_verdict tool", () => {
         type: "toolCall",
         id: "probe",
         name: tool.name,
-        arguments: { verdict: "request_changes", summary: "unsafe", head: "a".repeat(40), findings: [finding] },
+        arguments: {
+          verdict: "request_changes",
+          summary: "unsafe",
+          head: "a".repeat(40),
+          findings: [finding],
+          humanFindings: humanReview("F1"),
+        },
       });
     const invalid: ToolCall["arguments"][string][] = [
       { id: "F1", cases: [] },
@@ -332,12 +342,14 @@ describe("submit_verdict tool", () => {
       verdict: "request_changes",
       summary: "unsafe",
       head: "a".repeat(40),
+      humanFindings: humanReview("F1"),
       findings: [{ id: "F1", severity: "major", file: "a.ts", title: "unsafe", kind: "single" }],
     });
     expect(check({ ...base, kind: "pattern", ...matrix })).toEqual({
       verdict: "request_changes",
       summary: "unsafe",
       head: "a".repeat(40),
+      humanFindings: humanReview("F1"),
       findings: [
         {
           id: "F1",
@@ -356,7 +368,10 @@ describe("submit_verdict tool", () => {
     const got: unknown[] = [];
     const ctx = ctxWith((v) => got.push(v));
     const valid = { id: "F1", severity: "major", file: "a.ts", title: "unsafe", kind: "single" };
-    await submitVerdictTool.run({ verdict: "request_changes", findings: [valid] }, ctx);
+    await submitVerdictTool.run(
+      { verdict: "request_changes", findings: [valid], humanFindings: humanReview("F1") },
+      ctx,
+    );
     for (const findings of [
       [valid, { ...valid, id: "F2", severity: "typo" }],
       [valid, { ...valid, id: "" }],
@@ -412,7 +427,7 @@ describe("submit_verdict tool", () => {
       ),
     ).toMatch(/^verdict recorded: approve/);
     expect(got).toMatchObject([{ resolutions: [{ findingId: "review:1:F1", disposition: "fixed" }] }]);
-    const repeated = { ...input, findings: [{ id: "review:1:F1" }] };
+    const repeated = { ...input, findings: [{ id: "review:1:F1" }], humanFindings: humanReview("review:1:F1") };
     const receipt = await submitVerdictTool.run(repeated, ctx);
     expect(String(receipt).split("\n")[0]).toMatch(/^verdict recorded: request_changes/);
     expect(
@@ -464,6 +479,7 @@ describe("submit_verdict tool", () => {
     const input = {
       verdict: "request_changes",
       summary: "Both boundaries remain",
+      humanFindings: humanReview("F2", "review:1:F1"),
       head,
       findings: [
         { id: "F2", kind: "single", severity: "minor", file: "src/new.ts", title: "The new path drops its guard" },
@@ -538,6 +554,7 @@ describe("submit_verdict tool", () => {
         {
           verdict: "request_changes",
           summary: "bug",
+          humanFindings: humanReview("F1"),
           findings: [
             { id: "F1", kind: "single", severity: "major", file: "src/x.ts", title: "The result drops findings" },
           ],
@@ -565,7 +582,7 @@ describe("submit_verdict tool", () => {
     it("without a level on the context the parser's default (minor) holds: an approve over a major is recorded as request_changes and the ack says so", async () => {
       const got: Array<{ verdict: string; summary: string }> = [];
       const out = await submitVerdictTool.run(
-        { verdict: "approve", summary: "ship it", findings: [major] },
+        { verdict: "approve", summary: "ship it", findings: [major], humanFindings: humanReview("F3") },
         ctxWith((v) => got.push(v)),
       );
       expect(got[0].verdict).toBe("request_changes");
@@ -579,7 +596,7 @@ describe("submit_verdict tool", () => {
     it("the context's level is the one the parser holds to: at `blocking` the same approve stands and the ack carries no downgrade", async () => {
       const got: Array<{ verdict: string }> = [];
       const out = await submitVerdictTool.run(
-        { verdict: "approve", summary: "ship it", findings: [major] },
+        { verdict: "approve", summary: "ship it", findings: [major], humanFindings: humanReview("F3") },
         ctxAt("blocking", (v) => got.push(v as { verdict: string })),
       );
       expect(got[0].verdict).toBe("approve");
@@ -589,7 +606,12 @@ describe("submit_verdict tool", () => {
     it("at `nit` even a nit downgrades; the sink receives the downgraded verdict, never the model's approve", async () => {
       const got: Array<{ verdict: string }> = [];
       await submitVerdictTool.run(
-        { verdict: "approve", summary: "s", findings: [{ ...major, id: "F1", severity: "nit" }] },
+        {
+          verdict: "approve",
+          summary: "s",
+          findings: [{ ...major, id: "F1", severity: "nit" }],
+          humanFindings: humanReview("F1"),
+        },
         ctxAt("nit", (v) => got.push(v as { verdict: string })),
       );
       expect(got).toHaveLength(1);
@@ -632,6 +654,7 @@ describe("submit_verdict tool", () => {
       const result = await submitVerdictTool.run(
         {
           verdict: "request_changes",
+          humanFindings: humanReview("F1"),
           findings: [
             {
               id: "F1",
@@ -677,6 +700,7 @@ describe("submit_verdict tool", () => {
       const accepted = await submitVerdictTool.run(
         {
           verdict: "request_changes",
+          humanFindings: humanReview("F1"),
           findings: [
             {
               ...base,
@@ -728,6 +752,7 @@ describe("submit_verdict tool", () => {
         {
           verdict: "request_changes",
           summary: "one bug",
+          humanFindings: humanReview("F1"),
           findings: [{ id: "F1", severity: "major", file: "src/a.ts", line: 3, title: "off by one", kind: "single" }],
         },
         ctxWith((v) => got.push(v)),
@@ -736,6 +761,7 @@ describe("submit_verdict tool", () => {
         {
           verdict: "request_changes",
           summary: "one bug",
+          humanFindings: humanReview("F1"),
           findings: [{ id: "F1", severity: "major", file: "src/a.ts", line: 3, title: "off by one", kind: "single" }],
         },
       ]);
@@ -1329,7 +1355,11 @@ describe("review submission acceptance state", () => {
       { status: "pending", proposal },
       { status: "rejected", proposal, reason: expect.stringContaining("unknown prior finding") },
     ]);
-    const correction = { ...proposal, findings: [{ ...proposal.findings[0], id: "F1" }] };
+    const correction = {
+      ...proposal,
+      findings: [{ ...proposal.findings[0], id: "F1" }],
+      humanFindings: humanReview("F1"),
+    };
     expect(await submitVerdictTool.run(correction, ctx)).toContain("verdict recorded: request_changes (1 finding)");
     expect(seen.slice(2)).toMatchObject([
       { status: "pending", proposal: correction },

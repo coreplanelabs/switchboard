@@ -3,6 +3,7 @@ import type { ChatMessage } from "./chatMessage.js";
 import { submitVerdictTool } from "../tools/submit.js";
 import type { ToolContext } from "../tools/runnableTool.js";
 import type { ReviewVerdict } from "./reviewVerdict.js";
+import { humanReview } from "./testing/humanReview.js";
 import {
   ADDRESS_SEVERITIES,
   buildReviewChannelReply,
@@ -1205,6 +1206,7 @@ describe("review submission rejection and correction", () => {
       const first = {
         verdict: "request_changes",
         summary: "One Major remains",
+        humanFindings: humanReview("F1"),
         head,
         findings: [
           { id: "F1", kind: "single", severity: "major", file: "src/x.ts", title: "Rejected findings disappear" },

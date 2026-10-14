@@ -1,4 +1,5 @@
 import { createSpanLog } from "../trace/spanLog.js";
+import { humanReview } from "../testing/humanReview.js";
 import type { CheckExecutionReceipt } from "../checkExecutionTypes.js";
 import { preparedHarnessLaunch } from "../harness/sessionPolicy.js";
 import { ToolRecovery, ToolRecoveryStoppedError } from "../harness/toolRecovery.js";
@@ -8291,6 +8292,7 @@ describe("the pi harness — the review preset", () => {
   const VERDICT = {
     verdict: "approve",
     summary: "looks correct",
+    humanFindings: humanReview("F1"),
     head: HEAD,
     findings: [{ id: "F1", kind: "single", severity: "nit", file: "src/x.ts", line: 3, title: "a name" }],
   };
@@ -8975,6 +8977,7 @@ describe("the pi harness — the review preset", () => {
             : {
                 verdict: "request_changes",
                 summary: "the new test is wrong",
+                humanFindings: humanReview("F1"),
                 head: NEW,
                 findings: [
                   {

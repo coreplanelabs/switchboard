@@ -1,4 +1,5 @@
 import { createCheckExecution } from "../checkExecution.js";
+import { humanReview } from "../testing/humanReview.js";
 import { describe, expect, it } from "vitest";
 import { validateToolArguments, type Tool } from "@earendil-works/pi-ai";
 import { ToolRecovery, ToolRecoveryStoppedError } from "./toolRecovery.js";
@@ -306,7 +307,11 @@ describe("run-owned tool recovery", () => {
   it("accepts a corrected finding and clears only the completed deliverable's failures", async () => {
     const f = fixture();
     await f.call("bad", "submit_verdict", badVerdict);
-    const corrected = { ...badVerdict, findings: [{ ...badVerdict.findings[0], id: "F1" }] };
+    const corrected = {
+      ...badVerdict,
+      findings: [{ ...badVerdict.findings[0], id: "F1" }],
+      humanFindings: humanReview("F1"),
+    };
     expect(await f.call("fixed", "submit_verdict", corrected)).toEqual({
       content: [
         {
@@ -339,7 +344,12 @@ describe("run-owned tool recovery", () => {
         result: { content: [{ type: "text", text: "Path not found" }] },
       });
       await f.recovery.settled(false);
-      const request = { verdict: "request_changes", summary: "A guard is missing", head: "a".repeat(40) };
+      const request = {
+        verdict: "request_changes",
+        summary: "A guard is missing",
+        head: "a".repeat(40),
+        humanFindings: humanReview("F1"),
+      };
       const malformed = { ...request, findings: [{ id: "F1", cases: [] }] };
       const call = async (id: string, input: Record<string, unknown>) => {
         bridge.gateSaw(id);

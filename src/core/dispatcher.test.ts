@@ -1,4 +1,5 @@
 import { startRequestRoot } from "./requestTrace.js";
+import { humanReview } from "./testing/humanReview.js";
 import { preapprovedCaller } from "./testing/callers.js";
 import { runShipBranch } from "./dispatch/ship.js";
 import { TerminalCommitmentUnknownError, terminalCommitmentUnknown } from "./runLedger/writeThrough.js";
@@ -5595,6 +5596,7 @@ describe("review post-step", () => {
                 input: {
                   verdict: "request_changes",
                   summary: "one real issue",
+                  humanFindings: humanReview("F1"),
                   head: PR_HEAD,
                   findings: [
                     {
@@ -5781,6 +5783,7 @@ describe("review post-step", () => {
                   input: {
                     verdict: "request_changes",
                     summary: "one nit",
+                    humanFindings: humanReview("F1"),
                     head: PR_HEAD,
                     findings: [
                       { id: "F1", kind: "single", severity: "nit", file: "src/a.ts", line: 3, title: "off by one" },
@@ -5808,6 +5811,7 @@ describe("review post-step", () => {
       expect(rec.verdict).toEqual({
         verdict: "request_changes",
         summary: "one nit",
+        humanFindings: humanReview("F1"),
         head: PR_HEAD,
         findings: [{ id: "F1", kind: "single", severity: "nit", file: "src/a.ts", line: 3, title: "off by one" }],
       });
@@ -6012,6 +6016,7 @@ describe("review post-step", () => {
                           ],
                     ...t.verdict,
                     summary: "ok",
+                    ...(t.verdict.verdict === "approve" ? {} : { humanFindings: humanReview("F1") }),
                   },
                 },
               ],
@@ -6374,6 +6379,11 @@ describe("review post-step", () => {
                 input: {
                   verdict,
                   summary,
+                  ...(findings?.length
+                    ? { humanFindings: humanReview(...findings.map((f) => (f as { id: string }).id)) }
+                    : verdict === "approve"
+                      ? {}
+                      : { humanFindings: humanReview("F1") }),
                   ...(head ? { head } : {}),
                   findings:
                     findings ??
@@ -22003,6 +22013,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
                   ],
                   verdict: "request_changes",
                   summary: "two findings",
+                  humanFindings: humanReview("F1"),
                 },
               },
             ],

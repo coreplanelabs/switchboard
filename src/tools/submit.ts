@@ -10,6 +10,7 @@
 // declarations; a test holds them equal. The toolset wiring stays in src/tools/workspace.ts.
 
 import { z } from "zod";
+import { humanFindingsInputSchema, humanFindingsProblem } from "../core/reviewHumanFindings.js";
 import { MAX_TOOL_RESULT_CHARS } from "../core/chatMessage.js";
 import { caseAssessmentInputSchema, reviewFindingInputSchema } from "../core/reviewFindingSchema.js";
 import {
@@ -94,6 +95,7 @@ export const submitVerdictTool: RunnableTool = {
         },
       },
       caseAssessments: caseAssessmentInputSchema,
+      humanFindings: humanFindingsInputSchema,
       resolutions: {
         type: "array",
         description:
@@ -116,7 +118,7 @@ export const submitVerdictTool: RunnableTool = {
         },
       },
     },
-    required: ["verdict", "summary", "head", "findings"],
+    required: ["verdict", "summary", "head", "findings", "humanFindings"],
   },
   async run(input, ctx) {
     const proposal = structuredClone(input);
@@ -187,9 +189,12 @@ async function validateVerdictSubmission(
   input = materialized.input;
   // The level in force rides the context (the dispatcher resolved it for
   // the run); absent — a CLI, a unit test — the parser holds the default.
-  const verdict = parseVerdictInput(input, {
-    ...(ctx.addressSeverity !== undefined ? { addressSeverity: ctx.addressSeverity } : {}),
-  });
+  const verdict = parseVerdictInput(
+    { ...input, humanFindings: undefined },
+    {
+      ...(ctx.addressSeverity !== undefined ? { addressSeverity: ctx.addressSeverity } : {}),
+    },
+  );
   if (!verdict)
     return rejectedVerdict(
       "reference",
@@ -269,6 +274,15 @@ async function validateVerdictSubmission(
     if (invalid) return rejectedVerdict("history", `error: ${invalid}; no verdict recorded`);
   } else if (verdict.resolutions?.length || verdict.caseAssessments?.length)
     return rejectedVerdict("history", "error: prior finding history is unavailable; no verdict recorded");
+  const humanProblem = humanFindingsProblem(
+    input.humanFindings ?? (!verdict.findings?.length ? [] : undefined),
+    verdict.findings?.map((f) => f.id) ?? [],
+  );
+  if (humanProblem) return rejectedVerdict("input", `error: ${humanProblem}; no verdict recorded`);
+  if (input.humanFindings !== undefined)
+    verdict.humanFindings = structuredClone(
+      input.humanFindings,
+    ) as import("../core/reviewHumanFindings.js").HumanFinding[];
   const notes: string[] = [];
   if (verdict.downgraded) notes.push(`downgraded from approve: ${downgradeNote(verdict.downgraded)}`);
   if (verdict.findings) notes.push(`${verdict.findings.length} finding${verdict.findings.length === 1 ? "" : "s"}`);

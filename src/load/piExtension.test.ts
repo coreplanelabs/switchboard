@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { humanReview } from "../core/testing/humanReview.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -67,7 +68,12 @@ describe("piExtension", () => {
       const wire = convertResponsesTools([declared])[0];
       if (wire.type !== "function") throw new Error("Expected a function tool");
       const served = { ...declared, parameters: JSON.parse(JSON.stringify(wire.parameters)) as Tool["parameters"] };
-      const request = { verdict: "request_changes", summary: "A guard is missing", head: "a".repeat(40) };
+      const request = {
+        verdict: "request_changes",
+        summary: "A guard is missing",
+        head: "a".repeat(40),
+        humanFindings: humanReview("F1"),
+      };
       const validate = (findings: ToolCall["arguments"][string]) =>
         validateToolArguments(served, {
           type: "toolCall",
@@ -96,6 +102,7 @@ describe("piExtension", () => {
           verdict: "request_changes",
           summary: "A guard is missing",
           head: "a".repeat(40),
+          humanFindings: humanReview("F1"),
           findings: [
             { id: "F1", severity: "minor", file: "src/guard.ts", title: "A guard is missing", kind: "single" },
           ],
@@ -112,7 +119,7 @@ describe("piExtension", () => {
     const verdict = f.tools.get("submit_verdict")!;
     // The head is what the reviewed-head guard's fallback reads; a schema that
     // does not require it is a verdict the model is free to submit without one.
-    expect(verdict.parameters.required).toEqual(["verdict", "summary", "head", "findings"]);
+    expect(verdict.parameters.required).toEqual(["verdict", "summary", "head", "findings", "humanFindings"]);
     const native = submitVerdictTool.inputSchema as { properties: Record<string, unknown> };
     expect(verdict.parameters.properties.head).toEqual(native.properties.head);
     expect(verdict.parameters).toEqual(submitVerdictTool.inputSchema);

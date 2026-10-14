@@ -1,3 +1,4 @@
+import { humanFindingsInputSchema } from "../core/reviewHumanFindings.js";
 import { reviewFindingInputSchema } from "../core/reviewFindingSchema.js";
 
 // The extension pi loads for `load:pi` (docs/reference/specs/load-harness.md,
@@ -211,6 +212,7 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
         description: "Every issue you report, one entry each, in the order reported — rendered under the verdict line",
         items: reviewFindingInputSchema,
       },
+      humanFindings: humanFindingsInputSchema,
       priorFindings: {
         type: "array",
         description: "Re-raise controller-issued prior findings by exact identity; fresh findings belong in findings.",
@@ -304,7 +306,7 @@ const SUBMIT_VERDICT: PiToolDeclaration = {
         },
       },
     },
-    required: ["verdict", "summary", "head", "findings"],
+    required: ["verdict", "summary", "head", "findings", "humanFindings"],
   },
 };
 
