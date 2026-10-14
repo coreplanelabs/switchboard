@@ -62,6 +62,19 @@ export interface ThreadDirectives {
   verbosity?: Verbosity;
 }
 
+/** An explicit commit pin only in the request's control prefix. Keep the token
+ * in the authored text so the original run's restart retains the same pin.
+ * Invalid or repeated pins reach the preflight instead of becoming unpinned. */
+export function reviewHeadOf(text: string): string | undefined {
+  const heads: string[] = [];
+  for (const token of text.trimStart().split(/\s+/)) {
+    const control = /^(agent|model|effort|budget|severity|renewals|verbosity|review-head)[:=](.*)$/.exec(token);
+    if (!control) break;
+    if (control[1] === "review-head") heads.push(control[2]);
+  }
+  return heads.length === 0 ? undefined : heads.join(",");
+}
+
 /** Every directive key but `agent`, anywhere in the text. */
 const DIRECTIVE_RE = /(?:^|\s)(model|effort|budget|severity|renewals|verbosity)[:=](\S+)/g;
 /** `agent:` binds only at the head: the first token of the text. */

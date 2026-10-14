@@ -84,6 +84,9 @@ describe("attrs", () => {
     expect(invalidAttrKeys({ command: "repo list --all; rm -rf" })).toEqual(["command"]);
     expect(invalidAttrKeys({ host: "https://x.example/?t=SECRET" })).toEqual(["host"]);
     expect(invalidAttrKeys({ execMs: Number.NaN })).toEqual(["execMs"]);
+    expect(invalidAttrKeys({ reviewPinnedHead: "a".repeat(40) })).toEqual([]);
+    expect(invalidAttrKeys({ reviewPinnedHead: "short" })).toEqual(["reviewPinnedHead"]);
+    expect(invalidAttrKeys({ reviewPinnedHead: "secret bytes in prose" })).toEqual(["reviewPinnedHead"]);
     expect(ATTR_KEYS).toContain("queuedBehindMs");
     expect(invalidAttrKeys({ files: 0, resolvedFiles: 1 })).toEqual([]);
     expect(invalidAttrKeys({ resolvedFiles: "1" } as never)).toEqual(["resolvedFiles"]);

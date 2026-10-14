@@ -117,7 +117,7 @@ import { authorize } from "./authz/authorize.js";
 import { chatActorOf, resolveChatActor } from "./authz/actor.js";
 import { operatorModeOf, referencesOn } from "../config.js";
 import { parseChatCommand } from "./commandChat.js";
-import { parseDirectives } from "../directives.js";
+import { parseDirectives, reviewHeadOf } from "../directives.js";
 import {
   readRequest,
   resolveProfile,
@@ -1935,6 +1935,13 @@ export async function dispatch(
     // (docs/reference/specs/agent-ship.md item 8) — so the profile below, the
     // card's budget line and the pipeline's wall clock read one number.
     const agent = configuredAgent(deps.config.config, resolved.agentName);
+    // A confirmed or joined request is the admitted work, not the transport
+    // answer. Keep its pin and review intent in setup custody and restarts.
+    if (agent.name === "review" && operatorRequest !== undefined && reviewHeadOf(directives.text) !== undefined)
+      msg = {
+        ...msg,
+        text: /^\s*agent[:=]review(?:\s|$)/.test(operatorRequest) ? operatorRequest : `agent:review ${operatorRequest}`,
+      };
     if (resolved.agentName === "ship") agent.maxMinutes = shipPresetFor(deps.config.config.ship).maxMinutes;
     // The run's effective profile (dispatch/resolve.ts; record 0026): preset ∩
     // the request's `budget:` directive ∩ the boundaries on the path — a

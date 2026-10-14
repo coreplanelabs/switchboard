@@ -503,6 +503,32 @@ describe("authorizePrHead — the PR head preflight", () => {
   const review = getAgent("review");
   const text = "review https://github.com/acme/api/pull/41";
 
+  it("an explicit review head rejects malformed, duplicate, missing and changed targets, but allows its exact head", async () => {
+    for (const [prefix, headSha] of [
+      [`review-head:${SHA_A}`, SHA_B],
+      [`review-head:${SHA_A}`, undefined],
+      ["review-head:short", SHA_A],
+      ["review-head:", SHA_A],
+      [`review-head:${SHA_A} review-head:${SHA_B}`, SHA_A],
+      [`review-head:${SHA_A}`, SHA_A],
+    ] as const) {
+      const h = setup({ text: `${prefix} ${text}` });
+      const out = await authorizePrHead({
+        ...h.gate,
+        ...h.cardCtx,
+        agent: review,
+        directives: { text: `${prefix} ${text}` },
+        repoCtx: { repo: "acme/api", pr: 41, headSha },
+      });
+      expect(out).toEqual(
+        prefix === `review-head:${SHA_A}` && headSha === SHA_A
+          ? { kind: "allowed" }
+          : { kind: "refused", reason: "workspace_head_mismatch" },
+      );
+      if (out.kind === "refused") expect(h.replies.join("\n")).toContain("No review started or was posted to GitHub");
+    }
+  });
+
   it("a review of a PR whose head could not be resolved is not started: card closed, one named reply", async () => {
     const { gate, cardCtx, replies, refusals, closes } = setup({ text });
     const out = await authorizePrHead({
@@ -647,6 +673,21 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
       root: s.root,
     };
   }
+
+  it("a pinned review refuses attachment adoption but verifies its unchanged checkout", async () => {
+    for (const observed of [SHA_B, SHA_A]) {
+      const s = setup({ text: `agent:review review-head:${SHA_A} acme/api#41` });
+      const { selection: sel, releases } = selection({ sha: observed, observed: `${observed}\n` });
+      const out = await authorizeAttachedHead({ ...s.deps, fetchPrHead: async () => observed }, ctx(s, sel));
+      expect(out).toEqual(
+        observed === SHA_A
+          ? { kind: "allowed", repoCtx, verifiedAtAttach: true, headAdopted: false }
+          : { kind: "refused", reason: "workspace_head_mismatch" },
+      );
+      expect(releases).toEqual(observed === SHA_A ? [] : ["always"]);
+      if (observed === SHA_B) expect(s.replies).toEqual(["The attached review head changed from its saved commit."]);
+    }
+  });
 
   it("the worktree attached at the PR head: verified, the repo context unchanged", async () => {
     const s = setup();
