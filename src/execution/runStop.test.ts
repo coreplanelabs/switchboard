@@ -196,7 +196,7 @@ describe("run runtime stop", () => {
       refusal: { phase: "prepare", cause: "state-not-prepared" },
     });
   });
-  it("requires affirmative no-workspace evidence and leaves unsupported backends on ordinary stop", async () => {
+  it("requires affirmative no-workspace evidence and names an unverified shutdown target", async () => {
     const stop = createRunStop(
       { type: "cloudflare", url: "https://sandbox.example" },
       secretsFrom({ SANDBOX_TOKEN: "fixture" }),
@@ -205,13 +205,22 @@ describe("run runtime stop", () => {
     const legacy = row();
     delete legacy.state.binding;
     delete legacy.meta.selection;
-    expect(await stop!(legacy, cancellation)).toEqual({ stopped: false });
+    expect(await stop!(legacy, cancellation)).toEqual({
+      stopped: false,
+      refusal: { phase: "prepare", cause: "custody-unverified" },
+    });
     legacy.meta.selection = "none";
-    expect(await stop!(legacy, cancellation)).toEqual({ stopped: false });
+    expect(await stop!(legacy, cancellation)).toEqual({
+      stopped: false,
+      refusal: { phase: "prepare", cause: "custody-unverified" },
+    });
     legacy.meta.profile = { machine: "none", identity: "read", minutes: 25 };
     expect(await stop!(legacy, cancellation)).toEqual({ stopped: true, disposition: "no-workspace" });
     legacy.state.binding = { backend: "unknown", workspace: "/private" };
-    expect(await stop!(legacy, cancellation)).toEqual({ stopped: false });
+    expect(await stop!(legacy, cancellation)).toEqual({
+      stopped: false,
+      refusal: { phase: "prepare", cause: "custody-unverified" },
+    });
   });
   it("does not reserve cancellation for an unavailable resident target or an empty physical binding", () => {
     const stop = createRunStop(

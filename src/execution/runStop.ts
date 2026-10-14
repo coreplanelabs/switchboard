@@ -6,6 +6,7 @@ import {
   cancellationRuntimeSupported,
   cancellationRefusalOf,
   cancellationObservationOf,
+  type CancellationRefusal,
   type RunCancellation,
   type RuntimeStopResult,
 } from "../core/runLedger/cancellation.js";
@@ -29,16 +30,25 @@ export function createRunStop(
       ),
     };
   };
-  const stop = async (row: LiveRunRow, cancellation: RunCancellation): Promise<RuntimeStopResult> => {
+  const unavailable = (row: LiveRunRow): CancellationRefusal | undefined => {
     const binding = workspaceBindingOf(row.state.binding);
-    if (!binding)
-      return row.state.binding === undefined && cancellationRuntimeSupported(row)
-        ? { stopped: true, disposition: "no-workspace" }
-        : { stopped: false };
-    const resident = binding.backend === "resident";
-    if (!resident && binding.backend !== "sandbox") return { stopped: false };
+    if (!cancellationRuntimeSupported(row) || (binding?.backend === "resident" && !row.meta.repo))
+      return { phase: "prepare", cause: "custody-unverified" };
+    if (row.state.binding === undefined) return;
+    if (!binding || (binding.backend !== "resident" && binding.backend !== "sandbox"))
+      return { phase: "prepare", cause: "custody-unverified" };
     const { url, token } = target(binding);
-    if (!url || !token) return { stopped: false };
+    if (!url || !token)
+      return { phase: binding.backend === "resident" ? "resident" : "sandbox", cause: "runtime-unavailable" };
+  };
+  const stop = async (row: LiveRunRow, cancellation: RunCancellation): Promise<RuntimeStopResult> => {
+    const refusal = unavailable(row);
+    if (refusal) return { stopped: false, refusal };
+    const binding = workspaceBindingOf(row.state.binding);
+    if (!binding) return { stopped: true, disposition: "no-workspace" };
+    const resident = binding.backend === "resident";
+    const { url, token } = target(binding);
+    if (!url || !token) return { stopped: false, refusal: { phase: "prepare", cause: "state-unconfigured" } };
     const phase = resident ? "resident" : "sandbox";
     const unconfirmed = (): RuntimeStopResult => ({
       stopped: false as const,
@@ -78,13 +88,7 @@ export function createRunStop(
     }
   };
   return Object.assign(stop, {
-    supports: (row: LiveRunRow) => {
-      if (!cancellationRuntimeSupported(row)) return false;
-      if (row.state.binding === undefined) return true;
-      const binding = workspaceBindingOf(row.state.binding);
-      if (!binding || (binding.backend === "resident" && !row.meta.repo)) return false;
-      const { url, token } = target(binding);
-      return Boolean(url && token);
-    },
+    supports: (row: LiveRunRow) => unavailable(row) === undefined,
+    unavailable,
   });
 }

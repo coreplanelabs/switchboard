@@ -141,6 +141,8 @@ describe("original promotion hold diagnosis", () => {
         secretsFrom({}),
       ),
     });
+    // This service has no local control, but the original owner's lease is
+    // current, so the existing heartbeat can still deliver the stop.
     expect(await service.stopRun(runId, "hard", { kind: "chat", id: "slack:operator" })).toEqual({
       ok: true,
       value: { id: runId, mode: "hard", state: "stopping" },
@@ -150,6 +152,7 @@ describe("original promotion hold diagnosis", () => {
     expect(owned.state).not.toHaveProperty("cancellation");
     const record = reclaimedRunRecord({ row: owned, events: [], status: "stopped_hard", finishedAt: 20_000 });
     expect(await store.finish(runId, "g1", record)).toEqual({ ok: true, stored: true });
+    expect(store.finished.get(runId)).toMatchObject({ id: runId, status: "stopped_hard" });
   });
   it("hard stop cancels an unconfirmed original without confirming its source or retaining an active run", async () => {
     const w = await world();

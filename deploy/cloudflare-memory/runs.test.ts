@@ -267,7 +267,7 @@ describe("unit context retention work", () => {
 // agent, names the parents outside the batch, and fills in a record written
 // before the field from its stored model.turn events as it answers.
 describe("run usage", () => {
-  const T = Date.UTC(2026, 8, 15, 5, 0, 0);
+  const T = Date.now() - 7 * DAY;
   const modelTurn = (seq: number, model: string, inputTokens: number, outputTokens: number) =>
     ({
       type: "span_end",
@@ -296,10 +296,11 @@ describe("run usage", () => {
       },
     });
     // Alice's run, with usage as every record written since carries it — finished a week before the range.
-    await post("/runs/put", {
+    const parentPut = await post("/runs/put", {
       storeKey: key,
       record: record("alice-1", T - DAY, { usage: usage(100, 10), userName: "alice" }),
     });
+    expect(parentPut.data).toMatchObject({ ok: true, stored: true });
     // A child the coordinator started for alice, in the unit's thread on the coding agent: its own
     // user_id is the coordinator's, and its parent is outside the range asked below.
     await post("/runs/put", {

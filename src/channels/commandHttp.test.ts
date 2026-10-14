@@ -9,7 +9,11 @@ import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunRecord } from "../core/runRecord.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import { InMemoryRunStore } from "../core/runStore.js";
-import { createRunsService } from "../core/runsService.js";
+import { createRunsService, type RunsServiceDeps } from "../core/runsService.js";
+import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
+import type { LiveRunRow } from "../core/runLedger/types.js";
+import { createRunStop } from "../execution/runStop.js";
+import { secretsFrom } from "../secrets.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import { ALL_GRANTS, grantsFor, parseGrantsConfig, type GrantsConfig } from "../core/authz/grants.js";
 import { NO_GRANTS } from "../core/authz/types.js";
@@ -72,7 +76,7 @@ function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): 
   };
 }
 
-async function fixture(over: Partial<CommandHttpOptions> = {}) {
+async function fixture(over: Partial<CommandHttpOptions> = {}, serviceDeps: Partial<RunsServiceDeps> = {}) {
   let n = 0;
   const reg = new RunRegistry({ genId: () => `live-${++n}`, genToken: () => `tok-${n}`, now: () => NOW });
   const live = reg.create("coding · acme/live", {
@@ -94,7 +98,7 @@ async function fixture(over: Partial<CommandHttpOptions> = {}) {
       channelVisibility: "private",
     }),
   );
-  const runs = createRunsService({ registry: reg, store });
+  const runs = createRunsService({ registry: reg, store, ...serviceDeps });
   const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
   registerRunsCommands(registry);
   const bound = bindCommands(registry, { runs: async () => runs });
@@ -402,6 +406,165 @@ describe("createCommandHttpHandler — write safety", () => {
     expect(t.status).toBe(200);
     const note = stopNotes(reg, live.id)[0] as { actor?: unknown };
     expect(note.actor).toEqual({ kind: "access", id: "access:op-1" });
+  });
+});
+
+describe("createCommandHttpHandler — hard stop after restart", () => {
+  const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+  const threadKey = "slack:C1:original";
+  const cancellation = {
+    version: 1 as const,
+    runId: id,
+    ownerGen: "g-original",
+    startedAt: NOW - 60_000,
+    threadKey,
+    repo: "fixture/repo",
+    actor: { kind: "chat" as const, id: "slack:original-operator" },
+  };
+
+  async function stoppedLedger(state: LiveRunRow["state"] = {}) {
+    let now = NOW - 60_000;
+    const ledger = new InMemoryRunLedger(() => now);
+    await ledger.claim({
+      runId: id,
+      threadKey,
+      gen: "g-original",
+      leaseMs: 30_000,
+      startedAt: NOW - 60_000,
+      meta: {
+        agent: "review",
+        channelId: "slack:C1",
+        userId: "slack:UA",
+        channelVisibility: "public",
+        threadKey,
+        repo: "fixture/repo",
+        profile: { machine: "repo-resident", identity: "read", minutes: 25 },
+      },
+      card: null,
+      system: "",
+      tools: [],
+      state,
+    });
+    await ledger.requestStop(id, "hard");
+    now = NOW;
+    return ledger;
+  }
+
+  it("reports an unavailable shutdown rather than stopping an old run with no target or local control", async () => {
+    const ledger = await stoppedLedger();
+    // No local control exists in the restarted process. The legacy row has no
+    // trusted physical target; that does not prove no workspace or no effects.
+    const { handler } = await fixture(
+      {},
+      {
+        registry: new RunRegistry({ now: () => NOW }),
+        ledger,
+        generation: "g-restarted",
+        clock: () => NOW,
+        stopRuntime: createRunStop(
+          { type: "cloudflare", resident: { baseUrl: "https://resident.example" } },
+          secretsFrom({ RESIDENT_OPERATOR_TOKEN: "fixture" }),
+        ),
+      },
+    );
+    const request = stopPost(id, {}, JSON.stringify({ id, mode: "hard" }));
+    await handler(request.req, request.res, operator);
+
+    expect({ status: request.status, body: request.json() }).toEqual({
+      status: 503,
+      body: { code: "unavailable", error: "The run's workspace could not be verified." },
+    });
+    expect(ledger.live.get(id)).toMatchObject({ runId: id, ownerGen: "g-original", stop: "hard", state: {} });
+    const read = fakeReqRes({ method: "GET", url: `/api/runs.get?id=${id}` });
+    await handler(read.req, read.res, operator);
+    expect(read.json()).toMatchObject({ id, finished: false, stop: { mode: "hard", state: "stopping" } });
+  });
+
+  it("seals the original ticket only after a matching runtime acknowledgment survives restart", async () => {
+    const ledger = await stoppedLedger({
+      binding: {
+        backend: "resident",
+        workspace: "/workspace/original",
+        ref: "main",
+        user: "worker2",
+        container: "original-boot",
+        ownerGen: "g-original",
+        ownerFence: 7,
+      },
+    });
+    const prepared = await ledger.prepareCancellation(id, cancellation.actor);
+    expect(prepared).toMatchObject({ ok: true, cancellation });
+    if (!prepared.ok) throw new Error("fixture cancellation was not prepared");
+    const originalTicket = structuredClone(prepared.cancellation);
+    const { handler } = await fixture(
+      {},
+      {
+        registry: new RunRegistry({ now: () => NOW }),
+        ledger,
+        generation: "g-restarted",
+        clock: () => NOW,
+        // Scripted external transport: this proves the public API/store contract,
+        // not an actual native kill or production runtime acceptance.
+        stopRuntime: createRunStop(
+          { type: "cloudflare", resident: { baseUrl: "https://resident.example" } },
+          secretsFrom({ RESIDENT_OPERATOR_TOKEN: "fixture" }),
+          async () =>
+            Response.json({ stopped: true, cancellationId: originalTicket.id, disposition: "processes-stopped" }),
+        ),
+      },
+    );
+    const request = stopPost(id, {}, JSON.stringify({ id, mode: "hard" }));
+    await handler(request.req, request.res, operator);
+
+    expect(request.status).toBe(200);
+    expect(request.json()).toEqual({ id, mode: "hard", state: "stopped" });
+    expect(ledger.finished.get(id)).toMatchObject({
+      id,
+      status: "stopped_hard",
+      cancellation: {
+        version: 1,
+        actor: cancellation.actor,
+        cancellation: originalTicket,
+        disposition: "processes-stopped",
+      },
+    });
+  });
+
+  it("still delivers hard-stop intent to a live remote owner without a local control", async () => {
+    const ledger = await stoppedLedger();
+    expect(await ledger.heartbeat(id, "g-original", 30_000)).toMatchObject({ ok: true, stop: "hard" });
+    const { handler } = await fixture(
+      {},
+      {
+        registry: new RunRegistry({ now: () => NOW }),
+        ledger,
+        generation: "g-restarted",
+        clock: () => NOW,
+        stopRuntime: createRunStop(
+          { type: "cloudflare", resident: { baseUrl: "https://resident.example" } },
+          secretsFrom({ RESIDENT_OPERATOR_TOKEN: "fixture" }),
+        ),
+      },
+    );
+    const request = stopPost(id, {}, JSON.stringify({ id, mode: "hard" }));
+    await handler(request.req, request.res, operator);
+
+    expect({ status: request.status, body: request.json() }).toEqual({
+      status: 200,
+      body: { id, mode: "hard", state: "stopping" },
+    });
+    expect(ledger.live.get(id)).toMatchObject({ runId: id, ownerGen: "g-original", stop: "hard" });
+  });
+
+  it("still aborts a genuine local run control through the public hard-stop command", async () => {
+    const { handler, live } = await fixture();
+    const request = stopPost(live.id, {}, JSON.stringify({ id: live.id, mode: "hard" }));
+    await handler(request.req, request.res, operator);
+
+    expect(request.status).toBe(200);
+    expect(request.json()).toEqual({ id: live.id, mode: "hard", state: "stopping" });
+    expect(live.control.requested).toBe("hard");
+    expect(live.control.hardSignal.aborted).toBe(true);
   });
 });
 

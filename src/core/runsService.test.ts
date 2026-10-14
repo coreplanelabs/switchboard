@@ -1482,7 +1482,7 @@ describe("RunsService with the run ledger — one registry across generations (r
     await ledger.append(id, "g-SAME", [{ type: "input", messageId: "m1", text: "work", at: NOW - 5_000, seq: 1 }]);
     expect(await ledger.handoff("g-SAME", [id], { pausedForRetry: true })).toEqual({ marked: [id] });
 
-    expect(await svc.stopRun(id, "hard", actor)).toEqual({ ok: true, value: { id, mode: "hard", state: "stopping" } });
+    expect(await svc.stopRun(id, "hard", actor)).toEqual({ ok: true, value: { id, mode: "hard", state: "stopped" } });
     expect(ledger.live.has(id)).toBe(false);
     expect(ledger.finished.get(id)).toMatchObject({ id, status: "stopped_hard", threadKey });
     expect(ledger.sessions.get(session.key)?.owner).toBeUndefined();
