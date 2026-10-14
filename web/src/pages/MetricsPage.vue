@@ -3,6 +3,7 @@ import { computed } from "vue";
 import AppShell from "../components/AppShell.vue";
 import CostChart from "../components/costs/CostChart.vue";
 import TrendLineChart from "../components/metrics/TrendLineChart.vue";
+import ReviewFeedback from "../components/metrics/ReviewFeedback.vue";
 import { useSeed } from "../lib/seed";
 import { monthDayOf, SERIES_SWATCH, usd } from "../lib/costs";
 import {
@@ -112,6 +113,8 @@ const dayOf = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
         <span class="text-xs text-muted">{{ t.sub }}</span>
       </div>
     </section>
+
+    <ReviewFeedback v-if="report.feedback" :report="report.feedback" />
 
     <section class="mb-5 grid gap-3 rounded-lg border border-default bg-elevated px-5 py-4">
       <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">

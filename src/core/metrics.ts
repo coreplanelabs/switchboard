@@ -1,4 +1,5 @@
 import { DAY_MS } from "./budgets.js";
+import type { ReviewFeedbackReport } from "./reviewFeedbackReport.js";
 import {
   blobColumn,
   blobOf,
@@ -352,6 +353,7 @@ export interface MetricsReportRange {
 }
 
 export interface MetricsReport {
+  feedback?: ReviewFeedbackReport;
   dataset: string;
   tiles: MetricsTiles;
   /** One row per UTC day in range, zero-filled: an empty day is a zero row, never a gap. */

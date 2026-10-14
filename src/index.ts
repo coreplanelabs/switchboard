@@ -827,6 +827,7 @@ export async function runBot(): Promise<void> {
       ? createMetricsService(
           metricsCfg,
           new AnalyticsEngineSqlSource({ accountId: costsCfg.cloudflareAccountId, token: metricsToken.reveal() }),
+          { feedback: reviewFeedbackStore, warn: (message) => console.warn(`[metrics] ${message}`) },
         )
       : new NullMetricsService();
   // The review dashboard's report (record 0097): the same dataset and token.

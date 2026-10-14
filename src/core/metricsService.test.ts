@@ -24,6 +24,40 @@ function recordingSource(): { source: MetricsSource; queries: string[] } {
 
 describe("createMetricsService", () => {
   const cfg = parseMetricsConfig({ dataset: "runs_v1", days: 7 })!;
+  it("serves exact stored feedback on the shared report and isolates its failures from operational metrics", async () => {
+    const { source } = recordingSource();
+    const enabled = { ...cfg, feedback: { enabled: true, excludedActorIds: [], excludedPullRequests: [] } };
+    const feedback = {
+      list: async () => ({ entries: [], collectionStartedAt: NOW }),
+      claim: async () => [],
+      complete: async () => false,
+      cooldown: async () => {},
+    };
+    const warnings: string[] = [];
+    const service = createMetricsService(enabled, source, {
+      now: () => NOW,
+      feedback,
+      warn: (message) => warnings.push(message),
+    });
+    const report = await service.report();
+    expect(report.feedback).toMatchObject({
+      status: "available",
+      asOf: NOW,
+      collectionStartedAt: NOW,
+      total: { eligible: 0, ratedReviews: 0, helpfulClearShare: null, ratingCoverage: null },
+    });
+    feedback.list = async () => {
+      throw new Error("Review feedback store unavailable (HTTP 503)");
+    };
+    const failed = await service.report();
+    expect(failed.feedback).toEqual({ status: "unavailable", asOf: NOW });
+    expect(failed.tiles.runs).toBe(0);
+    expect(JSON.stringify(failed)).not.toContain("HTTP 503");
+    expect(warnings).toEqual([
+      "Human review feedback unavailable: Error: Review feedback store unavailable (HTTP 503)",
+    ]);
+    expect((await service.report({ agent: "coding" })).feedback).toEqual({ status: "not_applicable", asOf: NOW });
+  });
 
   it("reports over whole UTC days ending today (today included), the default range from config", async () => {
     const { source, queries } = recordingSource();
