@@ -110,7 +110,12 @@ import {
   registerRepository,
   residentRecords,
 } from "../../src/execution/repoRegistration.js";
-import { recordResidentPlacement, type ResidentPlacement } from "../../src/execution/residentPlacement.js";
+import {
+  readResidentPlacement,
+  recordResidentPlacement,
+  type ResidentPlacement,
+} from "../../src/execution/residentPlacement.js";
+import { residentRouteOf, sameResidentRoute, type ResidentRoute } from "../../src/execution/residentRoute.js";
 import { inspectResidentCredentials } from "./credentialInspection.js";
 import {
   emptyCredentialInspection,
@@ -1852,6 +1857,10 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       }
       return { ok: true, record, placement: result.placement };
     });
+  }
+
+  async readThreadPlacement(resource: string, threadKey: string): Promise<ResidentPlacement | null | undefined> {
+    return readResidentPlacement(this.ctx.storage, resource, threadKey);
   }
 
   async getRepository(resource: string): Promise<ResidentRecord | null> {
@@ -13714,7 +13723,11 @@ export default {
               env.MEMORY_TOKEN,
             );
             if (!("prepared" in preparation)) return json(preparation, 409);
-            return json(await residentStub(env, resource.resource).cancelRun(cancellation, body.binding));
+            const route = await residentRouteFor(env, resource.resource, cancellation.threadKey, body.binding);
+            if (route instanceof Response) return route;
+            return json(
+              await residentStub(env, route?.residentId ?? resource.resource).cancelRun(cancellation, body.binding),
+            );
           }
           case "/detach":
             return await handleDetach(env, body);
@@ -14445,7 +14458,15 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
   // and `inFlight` can be a hair apart (and differ slightly from a /residents
   // sample taken alongside). All are best-effort current-state reads; the
   // deploy gate reads /residents. Registration is checked before any DO read.
-  const stub = residentStub(env, resource.resource);
+  const selector = Object.fromEntries(url.searchParams);
+  const route = await residentRouteFor(
+    env,
+    resource.resource,
+    typeof selector.threadKey === "string" ? selector.threadKey : undefined,
+    selector,
+  );
+  if (route instanceof Response) return route;
+  const stub = residentStub(env, route?.residentId ?? resource.resource);
   const [status, inFlight, refresh, snapshot, memory, levels] = await Promise.all([
     stub.getStatus(),
     stub.getInFlightCount(),
@@ -14538,19 +14559,50 @@ async function handleRecordedCheck(env: Env, body: unknown, settle: boolean): Pr
  *  routes fail closed anyway (no binding → `not-attached`/`no-binding`; a
  *  never-onboarded resource's DO has no state → 503 `not-serviceable`), and a
  *  binding can only exist because an attach passed the real check. */
+/** A selector is checked against durable placement before a native target is
+ * resolved. Missing selectors retain the legacy primary address in this release. */
+async function residentRouteFor(
+  env: Env,
+  resource: string,
+  threadKey: string | undefined,
+  selector: unknown,
+): Promise<ResidentRoute | undefined | Response> {
+  const route = residentRouteOf(selector);
+  if (route === null) return json({ error: "invalid resident address" }, 400);
+  if (!route) return undefined;
+  if (!threadKey) return json({ error: "resident address requires its thread" }, 400);
+  const saved = await registryStub(env).readThreadPlacement(resource, threadKey);
+  if (!saved || !sameResidentRoute(saved, route))
+    return json({ error: "resident address does not match the saved placement" }, 409);
+  return route;
+}
+
 async function resolveThreadRoute(
   env: Env,
   body: Record<string, unknown>,
   requireOnboarded = false,
 ): Promise<
-  { stub: ReturnType<typeof residentStub>; resource: string; threadKey: string; record?: ResidentRecord } | Response
+  | {
+      stub: ReturnType<typeof residentStub>;
+      resource: string;
+      threadKey: string;
+      record?: ResidentRecord;
+      placement?: ResidentPlacement;
+    }
+  | Response
 > {
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);
   const threadKey = parseThreadKey(body.threadKey);
   if ("error" in threadKey) return json({ error: threadKey.error }, 400);
+  const route = await residentRouteFor(env, resource.resource, threadKey.threadKey, body);
+  if (route instanceof Response) return route;
   if (!requireOnboarded) {
-    return { stub: residentStub(env, resource.resource), resource: resource.resource, threadKey: threadKey.threadKey };
+    return {
+      stub: residentStub(env, route?.residentId ?? resource.resource),
+      resource: resource.resource,
+      threadKey: threadKey.threadKey,
+    };
   }
   const resolved = await registryStub(env).resolveThreadPlacement(resource.resource, threadKey.threadKey);
   if (!resolved.ok) return json({ error: resolved.error }, resolved.status);
@@ -14559,6 +14611,7 @@ async function resolveThreadRoute(
     resource: resource.resource,
     threadKey: threadKey.threadKey,
     record: resolved.record,
+    placement: resolved.placement,
   };
 }
 
@@ -14664,7 +14717,11 @@ async function handleAttach(env: Env, body: Record<string, unknown>, traceparent
         ownerFence,
       ),
     ),
-    ({ result, levels }) => ({ ...(result as object), ...(levels ? { levels } : {}) }),
+    ({ result, levels }) => ({
+      ...(result as object),
+      ...(ctx.placement ? { residentId: ctx.placement.residentId, placementId: ctx.placement.placementId } : {}),
+      ...(levels ? { levels } : {}),
+    }),
     (err) => catchAllErr(err),
   );
 }
@@ -14703,8 +14760,15 @@ async function handleAwaitRestore(env: Env, body: Record<string, unknown>): Prom
   if ("error" in resource) return json({ error: resource.error }, 400);
   const record = await registryStub(env).getRecord(resource.resource);
   if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
+  const route = await residentRouteFor(
+    env,
+    resource.resource,
+    typeof body.threadKey === "string" ? body.threadKey : undefined,
+    body,
+  );
+  if (route instanceof Response) return route;
   return streamHeartbeatJson(
-    residentStub(env, resource.resource).awaitRestore(),
+    residentStub(env, route?.residentId ?? resource.resource).awaitRestore(),
     (result) => result,
     (err) => catchAllErr(err),
   );

@@ -1,3 +1,4 @@
+import { residentRouteOf, type ResidentRoute } from "./residentRoute.js";
 import { resolve } from "node:path";
 import { FIRST_ATTACH_WAIT_MS, minutesToMs } from "../core/budgets.js";
 import { BASH_TIMEOUT_MS, RUN_DEADLINE_RESERVE_MS, attachBoundWithinRun } from "./bashTimeout.js";
@@ -202,7 +203,7 @@ export interface ExecutorContext {
  *  recorded on the run's ledger row at the claim (`state.binding`) and read
  *  back by the generation that resumes the run, so it re-attaches where the
  *  run ran instead of provisioning as for a new one. */
-export interface WorkspaceBinding {
+export interface WorkspaceBinding extends Partial<ResidentRoute> {
   /** The backend the run's commands execute on: the one a resume consults, and the only one. */
   backend: Backend;
   /** The actual attached branch, including a resolved default branch. */
@@ -273,8 +274,10 @@ export function workspaceBindingOf(value: unknown): WorkspaceBinding | undefined
             : {}),
         }
       : undefined;
+  const route = v.backend === "resident" ? residentRouteOf(v) : undefined;
   return {
     backend: v.backend as Backend,
+    ...(route === null ? { residentId: "", placementId: "" } : (route ?? {})),
     ...(typeof v.ref === "string" && v.ref.length > 0 && v.ref.length <= 255 ? { ref: v.ref } : {}),
     ...(typeof v.workspace === "string" && v.workspace ? { workspace: v.workspace } : {}),
     ...(typeof v.user === "string" && v.user ? { user: v.user } : {}),
@@ -405,6 +408,7 @@ export function workspaceBindingFor(
 ): WorkspaceBinding | undefined {
   if (machine === "none" || selection.backend === undefined) return undefined;
   const b = selection.executor instanceof ResidentExecutor ? selection.executor.binding : selection.binding;
+  const route = selection.backend === "resident" ? residentRouteOf(b) : undefined;
   const checkout = b?.workspace ?? selection.seeded?.workspace ?? selection.cold?.workspace;
   const publicationBaseSha =
     recorded === undefined
@@ -414,6 +418,7 @@ export function workspaceBindingFor(
         : undefined;
   return {
     backend: selection.backend,
+    ...(route === null ? { residentId: "", placementId: "" } : (route ?? {})),
     ...(b?.ref !== undefined || selection.cold?.ref !== undefined ? { ref: b?.ref ?? selection.cold?.ref } : {}),
     ...(checkout !== undefined ? { workspace: checkout } : {}),
     ...(b?.user !== undefined ? { user: b.user } : {}),
@@ -447,7 +452,8 @@ export function workspaceBindingFor(
  *  keep the tree, could not be reached or cannot serve, or its answer named
  *  another tree than the run's. Nothing else was provisioned (the run's work
  *  is on that backend or nowhere, so no other backend is tried), and the
- *  dispatcher restarts the run from its request, saying why. */
+ *  dispatcher may restart a legacy binding from its request, saying why. An
+ *  explicit resident address remains refused rather than losing its identity. */
 /** A claimed seed refused to fall to a fresh start: the trusted run context
  *  did not match the resolved seed, or the claimed `/seed` failed. A claimed
  *  owner never silently moves to a new checkout, so the run gets no
@@ -1557,6 +1563,9 @@ async function reattachWorkspace(
   const token = processSecrets.named(tokenEnv);
   if (!token) throw new Error(`execution.resident is configured but ${tokenEnv} is not set`);
   const resource = repoResourceId(ctx.repo);
+  const route = residentRouteOf(recorded);
+  if (route === null) throw refuse("the saved resident address is malformed");
+  const selector = route ? { ...route, threadKey: ctx.threadKey } : undefined;
   // The selection probe waited through a blip the Worker typed transient, as a
   // fresh run's is (execution.md item 9): drawn from the first attach's budget
   // clipped to the run's lease, the run's stop riding in, named on the note. A
@@ -1570,6 +1579,7 @@ async function reattachWorkspace(
     span,
     ctx.stopSignal,
     budgetMs,
+    selector,
   );
   const spentProbing = leaseSpent();
   if (spentProbing) throw spentProbing;
@@ -1592,6 +1602,7 @@ async function reattachWorkspace(
       restoreHoldBudget(ctx.remainingMs?.()),
       span,
       ctx.stopSignal,
+      selector,
     );
     // The stop's typed shape, never a refusal that would restart the stopped
     // run from its request; the lease spent under the hold is the run's end on
@@ -1619,6 +1630,7 @@ async function reattachWorkspace(
     baseUrl: resident.baseUrl,
     token: token.reveal(),
     resource,
+    ...(route ?? {}),
     threadKey: ctx.threadKey,
     ...(ctx.runId !== undefined ? { runId: ctx.runId } : {}),
     ...(ctx.ownerGen !== undefined ? { ownerGen: ctx.ownerGen } : {}),
@@ -1890,6 +1902,7 @@ async function probeResident(
    *  the wait too. */
   stop?: AbortSignal,
   remainingMs?: number,
+  route?: ResidentRoute & { threadKey: string },
 ): Promise<ResidentStatusProbe> {
   if (probeOutage && systemClock() < probeOutage.until) {
     return { kind: "unreachable", error: `${probeOutage.error}; probe skipped during outage window`, transport: true };
@@ -1901,6 +1914,7 @@ async function probeResident(
     Math.max(1, Math.min(cfg.probeTimeoutMs ?? PROBE_TIMEOUT_MS, remainingMs ?? Infinity)),
     span,
     stop,
+    route,
   );
   // The run's own stop aborted the request: the stop's signal decides before
   // the error's name, as at every send — the caller's stop, never the network,
@@ -1947,12 +1961,13 @@ async function probeThroughBlip(
   stopSignal?: AbortSignal,
   /** How long the wait may probe: the first attach's budget, or what a resumed run's lease leaves of it (`leaseClippedBudget`). */
   budgetMs: number = FIRST_ATTACH_WAIT_MS,
+  route?: ResidentRoute & { threadKey: string },
 ): Promise<{ probe: ResidentStatusProbe; waitedMs: number }> {
   const since = systemClock();
   const left = () => Math.max(0, budgetMs - (systemClock() - since));
   const probeWithinAllowance = (signal?: AbortSignal) => {
     const remaining = left();
-    return probeResident(cfg, token, resource, span, signal, remaining);
+    return probeResident(cfg, token, resource, span, signal, remaining, route);
   };
   const first = await probeWithinAllowance(stopSignal);
   // The stop aborted the probe: the stop's own typed error, as the loop throws

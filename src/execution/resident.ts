@@ -1,3 +1,4 @@
+import { residentRouteOf, sameResidentRoute, type ResidentRoute } from "./residentRoute.js";
 import {
   CheckCapacityError,
   checkOperationSchema,
@@ -564,7 +565,7 @@ export async function waitOnStatus<T>(input: {
   }
 }
 
-export interface ResidentExecutorOptions {
+export interface ResidentExecutorOptions extends Partial<ResidentRoute> {
   /** The run that owns this registration; an older lease update cannot renew a later run. */
   runId?: string;
   /** Bot generation that owns this run's current attachment. */
@@ -644,7 +645,7 @@ export interface ResidentExecutorOptions {
 }
 
 /** What a successful /attach reports about the thread's worktree. */
-export interface ResidentBinding {
+export interface ResidentBinding extends Partial<ResidentRoute> {
   ref: string;
   sha: string;
   /** Fence acknowledged by this successful attach, not a later ledger claim. */
@@ -1034,7 +1035,14 @@ export class ResidentExecutor implements Executor {
    *  on, and the resident would refuse that as `stale-tip`. */
   private shaPending: boolean;
 
+  private route(): ResidentRoute | undefined {
+    const route = residentRouteOf(this.lastBinding ?? this.opts);
+    if (route === null) this.refuseAttachment("resident address is malformed");
+    return route;
+  }
+
   constructor(private opts: ResidentExecutorOptions) {
+    this.route();
     this.shaPending = opts.sha !== undefined;
   }
 
@@ -1059,8 +1067,10 @@ export class ResidentExecutor implements Executor {
     /** The run's stop, where the caller has one (the wake wait's probes): it
      *  drops the request at once, as it does every other send. */
     signal?: AbortSignal,
+    route?: ResidentRoute & { threadKey: string },
   ): Promise<ResidentStatusProbe> {
-    const url = `${baseUrl.replace(/\/$/, "")}/status?resource=${encodeURIComponent(resource)}`;
+    const query = new URLSearchParams({ resource, ...(route ?? {}) });
+    const url = `${baseUrl.replace(/\/$/, "")}/status?${query}`;
     let res: Response;
     try {
       res = await tracedFetch(
@@ -1132,6 +1142,7 @@ export class ResidentExecutor implements Executor {
     timeoutMs: number,
     span?: Span,
     signal?: AbortSignal,
+    route?: ResidentRoute & { threadKey: string },
   ): Promise<ResidentRestoreWait> {
     try {
       const res = await tracedFetch(
@@ -1140,7 +1151,7 @@ export class ResidentExecutor implements Executor {
         {
           method: "POST",
           headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-          body: JSON.stringify({ resource }),
+          body: JSON.stringify({ resource, ...(route ?? {}) }),
           signal: execDeadline(timeoutMs, signal),
         },
         { route: "/await-restore" },
@@ -1192,6 +1203,7 @@ export class ResidentExecutor implements Executor {
             ownerGen: this.opts.ownerGen,
             ownerFence: this.opts.ownerFence,
             ...body,
+            ...(this.route() ?? {}),
           }),
           // Bound every route so a hung resident can't stall the dispatch; /exec
           // streams and can legitimately run minutes, so it passes its command
@@ -1457,6 +1469,10 @@ export class ResidentExecutor implements Executor {
         !this.opts.ownerGen)
     )
       this.refuseAttachment("attachment fence mismatch");
+    const expectedRoute = this.route();
+    const route = residentRouteOf(data);
+    if (route === null || (expectedRoute && (!route || !sameResidentRoute(expectedRoute, route))))
+      this.refuseAttachment("resident address mismatch");
     const returned = returnedOf(data.returned);
     // A named ref is the spawn's branch, not a hint an older sticky binding may
     // override. Fail closed against a Worker predating that invariant rather
@@ -1478,6 +1494,7 @@ export class ResidentExecutor implements Executor {
     const rebound = reboundOf(data.rebound);
     const rebindRefused = rebindRefusedOf(data.rebindRefused);
     this.lastBinding = {
+      ...(route ?? {}),
       ref: data.ref,
       sha: data.sha,
       ...(data.ownerFence !== undefined ? { ownerFence: data.ownerFence as number, ownerGen: this.opts.ownerGen } : {}),
@@ -1955,15 +1972,18 @@ export class ResidentExecutor implements Executor {
           }
         : wakeDecision(view);
     /** The one probe, for the first view and every re-probe: the wake's own deadline, the run's stop riding in. */
-    const probe = (signal: AbortSignal | undefined): Promise<ResidentStatusProbe> =>
-      ResidentExecutor.probeStatus(
+    const probe = (signal: AbortSignal | undefined): Promise<ResidentStatusProbe> => {
+      const route = this.route();
+      return ResidentExecutor.probeStatus(
         this.opts.baseUrl,
         this.opts.token,
         this.opts.resource,
         WAKE_PROBE_TIMEOUT_MS,
         opts.span,
         signal,
+        route ? { ...route, threadKey: this.opts.threadKey } : undefined,
       );
+    };
     let first: ResidentStatusProbe;
     try {
       first = await probe(opts.signal);

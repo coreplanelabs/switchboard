@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { RecordedCheckOperation, type CheckOperationStorage, type CheckOperationContext } from "./checkOperation.js";
 import { checkCommandHash } from "../../src/execution/checkOperation.js";
+import { residentRouteOf, sameResidentRoute } from "../../src/execution/residentRoute.js";
 import {
   checkSelectorSchema,
   checkSourceReadOf,
@@ -789,6 +790,7 @@ function inspectionHttpFixture(reads: unknown[], data = fixture()) {
     "parseThreadKey",
     "readRecordedCheckSource",
     "handleRecordedCheck",
+    "residentRouteFor",
     "resolveThreadRoute",
     "json",
   ].map((name) => {
@@ -844,6 +846,8 @@ function inspectionHttpFixture(reads: unknown[], data = fixture()) {
     checkSelectorSchema,
     checkSourceReadOf,
     checkSourceIdentityHash,
+    residentRouteOf,
+    sameResidentRoute,
     RecordedCheckOperation,
     RUN_STORE_KEY,
     RUN_STORE_TIMEOUT_MS,

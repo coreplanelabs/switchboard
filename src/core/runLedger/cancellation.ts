@@ -1,3 +1,4 @@
+import { residentRouteOf } from "../../execution/residentRoute.js";
 import { RUN_STORE_TIMEOUT_MS } from "../runStoreConstants.js";
 import type { LiveRunRow } from "./types.js";
 import type { RunRecord } from "../runRecord.js";
@@ -241,9 +242,18 @@ export function cancellationBindingMatches(actual: unknown, requested: unknown):
   if (!actual || !requested || typeof actual !== "object" || typeof requested !== "object") return false;
   const a = actual as Record<string, unknown>,
     b = requested as Record<string, unknown>;
-  return ["backend", "ref", "workspace", "container", "user", "ownerGen", "ownerFence", "sandboxKey"].every((key) =>
-    Object.is(a[key] ?? null, b[key] ?? null),
-  );
+  return [
+    "backend",
+    "ref",
+    "workspace",
+    "container",
+    "user",
+    "ownerGen",
+    "ownerFence",
+    "sandboxKey",
+    "residentId",
+    "placementId",
+  ].every((key) => Object.is(a[key] ?? null, b[key] ?? null));
 }
 
 /** Only closed causes and validated identity enter this operator diagnostic. */
@@ -319,6 +329,7 @@ export function cancellationRuntimeSupported(row: LiveRunRow): boolean {
     return typeof binding.sandboxKey === "string" && binding.sandboxKey.endsWith(`:${row.runId}`);
   return (
     binding.backend === "resident" &&
+    residentRouteOf(binding) !== null &&
     typeof binding.user === "string" &&
     binding.user.length > 0 &&
     typeof binding.container === "string" &&

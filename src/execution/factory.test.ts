@@ -2499,6 +2499,25 @@ describe("makeExecutor resident selection", () => {
       });
     });
 
+    it("a resumed resident probes and reattaches only its saved replica address", async () => {
+      stubEnvs();
+      const route = { residentId: "resident-secondary", placementId: "cf5c0a88-820b-45f2-b689-4432d93fbdce" };
+      const { fn, bodies } = stubFetch({ body: { state: "warm", reason: "" } }, attachOk(route));
+      const selection = await makeExecutor(residentOpts(), { ...repoCtx(), reattach: { ...recorded, ...route } });
+      expect(Object.fromEntries(new URL(String(fn.mock.calls[0][0])).searchParams)).toEqual({
+        resource: "repo:jshttp/vary",
+        threadKey: repoCtx().threadKey,
+        ...route,
+      });
+      expect(bodies[1]).toMatchObject({ reuse: true, ...route });
+      expect(workspaceBindingFor(selection)).toEqual({
+        ...recorded,
+        ...route,
+        ref: "master",
+        publicationBaseSha: "1220b9c487f9538a6dd509ef11b6a5042d85bd05",
+      });
+    });
+
     it("a fresh run (no reattach) never sends reuse: the body is the one every fresh attach always sent", async () => {
       stubEnvs();
       const { bodies } = stubFetch({ body: { state: "warm", reason: "" } }, attachOk());

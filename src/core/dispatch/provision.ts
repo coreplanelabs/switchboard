@@ -1,5 +1,6 @@
 import { TerminalCommitmentUnknownError } from "../runLedger/writeThrough.js";
 import { originalColdAllocation, sameWorkspaceAllocation } from "../runLedger/workspaceDurability.js";
+import { residentRouteOf } from "../../execution/residentRoute.js";
 import { resourceLifetimeSchema } from "../../agents/resourceLifetime.js";
 import { allocationAckOf } from "../runLedger/allocationAck.js";
 import { UnknownAllocationClaimError } from "../runLedger/allocationAck.js";
@@ -1287,10 +1288,18 @@ export async function reattachWorkspace(
       return { kind: "lease_spent", leftMs: err.leftMs, note: err.note };
     // The run's workspace is where its row says or nowhere (item 54): the
     // factory tried that backend alone and refused by name.
-    if (err instanceof WorkspaceReattachRefusedError)
-      return ctx.preserveOnReattachRefusal === true
-        ? { kind: "reattach_unready", reason: "backend_unavailable", reattach: ctx.reattach, message: err.message }
-        : { kind: "reattach_refused", why: err.why };
+    if (err instanceof WorkspaceReattachRefusedError) {
+      if (ctx.preserveOnReattachRefusal === true)
+        return {
+          kind: "reattach_unready",
+          reason: "backend_unavailable",
+          reattach: ctx.reattach,
+          message: err.message,
+        };
+      if (err.recorded.backend === "resident" && residentRouteOf(err.recorded) !== undefined)
+        throw new RefusalError(refusalOf("setup_failed", err.message));
+      return { kind: "reattach_refused", why: err.why };
+    }
     // The run's own stop ended the re-attach's wait — the executor's typed
     // `aborted` error, read by its shape as `attachWorkspace` reads it: the
     // caller ends the run stopped, and nothing restarts from its request.
@@ -1415,6 +1424,9 @@ export async function attachWorkspace(
     if (err instanceof WorkspaceReattachRefusedError) {
       if (reattach !== undefined && ctx.preserveOnReattachRefusal === true)
         return { kind: "reattach_unready", reason: "backend_unavailable", reattach, message: err.message };
+      // Restarting without an explicit address could move retained work to the primary.
+      if (err.recorded.backend === "resident" && residentRouteOf(err.recorded) !== undefined)
+        throw new RefusalError(refusalOf("setup_failed", err.message));
       return { kind: "reattach_refused", why: err.why };
     }
     // The run's own stop ended the attach — its signal rode into the attach's
