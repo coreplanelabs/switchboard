@@ -859,6 +859,28 @@ describe("runs.get / runs.events / runs.friction", () => {
 });
 
 describe("runs.stop", () => {
+  it("reports the original machine identity refusal from a validated shutdown observation", async () => {
+    const { reg, registry, deps } = await setup();
+    const { id } = reg.create("live", {
+      agent: "review",
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:t",
+    });
+    const runs = await deps.runs();
+    vi.spyOn(runs, "stopRun").mockResolvedValue({
+      ok: false,
+      error: "unavailable",
+      refusal: { phase: "resident", cause: "kill-unconfirmed" },
+      observation: { step: "initial-kill", phase: "exit", cause: "exit-unconfirmed", exitCode: 2 },
+    });
+    expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "hard" } }, reader, deps)).toMatchObject({
+      ok: false,
+      error: "unavailable",
+      status: 503,
+      message: "The original machine's identity could not be confirmed.",
+    });
+  });
   it("finished run → conflict; unknown → not_found", async () => {
     const { registry, deps } = await setup();
     expect(await registry.invoke("runs.stop", { args: ["fin-x"], options: { mode: "soft" } }, cli, deps)).toMatchObject(

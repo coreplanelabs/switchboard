@@ -5,6 +5,7 @@ import type { LiveRunRow } from "../core/runLedger/types.js";
 import {
   cancellationRuntimeSupported,
   cancellationRefusalOf,
+  cancellationObservationOf,
   type RunCancellation,
   type RuntimeStopResult,
 } from "../core/runLedger/cancellation.js";
@@ -57,7 +58,13 @@ export function createRunStop(
       const result = (await response.json().catch(() => null)) as Record<string, unknown> | null;
       if (result?.cancellationId === cancellation.id && result.stopped === false) {
         const refusal = cancellationRefusalOf(result.refusal);
-        if (refusal && (refusal.phase === "prepare" || refusal.phase === phase)) return { stopped: false, refusal };
+        if (refusal && (refusal.phase === "prepare" || refusal.phase === phase)) {
+          const observation =
+            phase === "resident" && refusal.cause === "kill-unconfirmed"
+              ? cancellationObservationOf(result.observation)
+              : undefined;
+          return { stopped: false, refusal, ...(observation ? { observation } : {}) };
+        }
       }
       if (!response.ok) return { stopped: false, refusal: { phase, cause: "runtime-http-refusal" } };
       if (!result || result.cancellationId !== cancellation.id || result.stopped !== true) return unconfirmed();

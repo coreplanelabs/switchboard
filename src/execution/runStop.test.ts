@@ -47,6 +47,67 @@ function row(): LiveRunRow {
 }
 
 describe("run runtime stop", () => {
+  it.each([
+    { step: "other-target", phase: "exit", cause: "exit-unconfirmed", exitCode: 2 },
+    { step: "initial-kill", phase: "exit", cause: "exit-unconfirmed", exitCode: "2" },
+    { step: "initial-kill", phase: "exit", cause: "exit-unconfirmed", exitCode: 2, stdout: "private-native-output" },
+    { step: "initial-kill", phase: "exit", cause: "exit-unconfirmed", exitCode: 2, retirement: "private error text" },
+  ])("drops an invalid observation while retaining the exact shutdown refusal: %j", async (observation) => {
+    const target = row();
+    target.state.binding = {
+      backend: "resident",
+      workspace: "/workspace/thread",
+      ref: "main",
+      user: "worker2",
+      container: "original-container",
+      ownerGen: "g1",
+      ownerFence: 7,
+    };
+    const stop = createRunStop(
+      { type: "cloudflare", resident: { baseUrl: "https://resident.example" } },
+      secretsFrom({ RESIDENT_OPERATOR_TOKEN: "fixture" }),
+      async () =>
+        Response.json({
+          stopped: false,
+          cancellationId: cancellation.id,
+          refusal: { phase: "resident", cause: "kill-unconfirmed" },
+          observation,
+        }),
+    );
+    expect(await stop!(target, cancellation)).toEqual({
+      stopped: false,
+      refusal: { phase: "resident", cause: "kill-unconfirmed" },
+    });
+  });
+  it("keeps a validated native failure observation for the exact cancellation", async () => {
+    const target = row();
+    target.state.binding = {
+      backend: "resident",
+      workspace: "/workspace/thread",
+      ref: "main",
+      user: "worker2",
+      container: "original-container",
+      ownerGen: "g1",
+      ownerFence: 7,
+    };
+    const stop = createRunStop(
+      { type: "cloudflare", resident: { baseUrl: "https://resident.example" } },
+      secretsFrom({ RESIDENT_OPERATOR_TOKEN: "fixture" }),
+      async () =>
+        Response.json({
+          stopped: false,
+          cancellationId: cancellation.id,
+          refusal: { phase: "resident", cause: "kill-unconfirmed" },
+          observation: { step: "initial-kill", phase: "exit", cause: "exit-unconfirmed", exitCode: 2 },
+          privateBody: "must not leave this boundary",
+        }),
+    );
+    expect(await stop!(target, cancellation)).toEqual({
+      stopped: false,
+      refusal: { phase: "resident", cause: "kill-unconfirmed" },
+      observation: { step: "initial-kill", phase: "exit", cause: "exit-unconfirmed", exitCode: 2 },
+    });
+  });
   it("preserves an exact closed refusal without exposing the Worker's private payload", async () => {
     const target = row();
     target.state.binding = {

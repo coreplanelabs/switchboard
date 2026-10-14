@@ -12,6 +12,9 @@ import {
   cancellationOf,
   sameCancellation,
   type RunCancellation,
+  type CancellationObservation,
+  type CancellationRefusal,
+  type RetirementBlock,
 } from "../../src/core/runLedger/cancellation.js";
 // Resident Worker: always-warm per-repo environments on Cloudflare Sandbox 1.0
 // (@cloudflare/sandbox@next, exact-pinned; the Dockerfile FROM tag must match).
@@ -10001,7 +10004,7 @@ export class ResidentDO extends Sandbox<Env> {
         });
         if (plan.action === "refuse") return { released: false, reason: plan.reason, user: binding.user };
         if (plan.action === "kill") {
-          if (!(await this.killThreadUserProcesses(plan.user, threadKey, binding.container)))
+          if (!(await this.killThreadUserProcesses(plan.user, threadKey, binding.container)).stopped)
             return { error: "runtime-stop-unconfirmed: force detach kept the workspace", status: 503 };
           console.log(
             `detach: force — killed ${plan.user}'s processes for ${threadKey} (${plan.inFlight} op(s) were in flight)`,
@@ -10317,13 +10320,38 @@ export class ResidentDO extends Sandbox<Env> {
           cancellation: RunCancellation;
           stopped?: true;
           disposition?: "processes-stopped" | "runtime-retired";
+          failure?: CancellationRefusal;
+          observation?: CancellationObservation;
         }>(key);
-        if (sameCancellation(prior?.cancellation, cancellation) && prior?.stopped)
+        if (sameCancellation(prior?.cancellation, cancellation) && prior?.stopped === true)
           return {
             stopped: true,
             cancellationId: cancellation.id,
             disposition: prior.disposition ?? "processes-stopped",
           };
+        if (prior && !sameCancellation(prior.cancellation, cancellation))
+          return cancellationFailure(cancellation, "resident", "ticket-conflict");
+        const refuse = async (
+          cause: CancellationRefusal["cause"],
+          observation?: CancellationObservation,
+          transaction?: DurableObjectTransaction,
+        ) => {
+          const save = async (txn: DurableObjectTransaction) => {
+            const current = await txn.get<typeof prior>(key);
+            if (!current || !sameCancellation(current.cancellation, cancellation))
+              return cancellationFailure(cancellation, "resident", "ticket-conflict");
+            if (current.stopped === true)
+              return {
+                stopped: true as const,
+                cancellationId: cancellation.id,
+                disposition: current.disposition ?? ("processes-stopped" as const),
+              };
+            const failure = { phase: "resident" as const, cause };
+            await txn.put(key, { ...current, failure, ...(observation ? { observation } : {}) });
+            return { ...cancellationFailure(cancellation, "resident", cause), ...(observation ? { observation } : {}) };
+          };
+          return transaction ? save(transaction) : this.ctx.storage.transaction(save);
+        };
         const fence = await this.ctx.storage.get<unknown>(runFenceKey(threadKey));
         if (
           !binding ||
@@ -10344,26 +10372,50 @@ export class ResidentDO extends Sandbox<Env> {
           return cancellationFailure(cancellation, "resident", "target-mismatch");
         this.workspaceExclusiveOpsInFlight.add(threadKey);
         try {
-          await this.ctx.storage.put(key, { cancellation });
-          await this.ctx.storage.put(`cancelled-thread:${threadKey}`, true);
+          const admitted = await this.ctx.storage.transaction(async (txn) => {
+            const current = await txn.get<typeof prior>(key);
+            if (current && !sameCancellation(current.cancellation, cancellation))
+              return cancellationFailure(cancellation, "resident", "ticket-conflict");
+            if (current?.stopped === true)
+              return {
+                stopped: true as const,
+                cancellationId: cancellation.id,
+                disposition: current.disposition ?? ("processes-stopped" as const),
+              };
+            await txn.put(key, { ...current, cancellation });
+            await txn.put(`cancelled-thread:${threadKey}`, true);
+            return null;
+          });
+          if (admitted) return admitted;
           // Prove an obsolete runtime before using an SDK path that could wake
           // a replacement. This observation is native-only and preserves bytes.
-          const retiredBoot = await this.observeRetiredThreadRuntime(binding);
+          let retirement: RetirementBlock | undefined;
+          const retiredBoot = await this.observeRetiredThreadRuntime(binding, (cause) => {
+            retirement = cause;
+          });
           if (!retiredBoot) {
-            if (!(await this.killThreadUserProcesses(binding.user, threadKey, binding.container)))
-              return cancellationFailure(cancellation, "resident", "kill-unconfirmed");
-            if (await this.waitForThreadDrain(threadKey))
-              return cancellationFailure(cancellation, "resident", "operations-busy");
+            const initialKill = await this.killThreadUserProcesses(binding.user, threadKey, binding.container);
+            if (!initialKill.stopped) {
+              const { stopped: _stopped, ...observation } = initialKill;
+              return await refuse("kill-unconfirmed", {
+                step: "initial-kill",
+                ...observation,
+                ...(retirement ? { retirement } : {}),
+              });
+            }
+            if (await this.waitForThreadDrain(threadKey)) return await refuse("operations-busy");
             // Unknown native work remains held across an isolate or VM replacement.
             const unresolved = await this.ctx.storage.list({ prefix: `native-operation:${threadKey}:`, limit: 1 });
-            if (unresolved.size) return cancellationFailure(cancellation, "resident", "native-outcome-unknown");
+            if (unresolved.size) return await refuse("native-outcome-unknown");
             // An admitted launch may have resumed after the first kill. All its
             // waits have now settled; kill detached children too, then ask the
             // native container for its physical identity and this UID's absence.
-            if (!(await this.killThreadUserProcesses(binding.user, threadKey, binding.container)))
-              return cancellationFailure(cancellation, "resident", "kill-unconfirmed");
-            if (this.ctx.container?.running !== true)
-              return cancellationFailure(cancellation, "resident", "runtime-unavailable");
+            const finalKill = await this.killThreadUserProcesses(binding.user, threadKey, binding.container);
+            if (!finalKill.stopped) {
+              const { stopped: _stopped, ...observation } = finalKill;
+              return await refuse("kill-unconfirmed", { step: "final-kill", ...observation });
+            }
+            if (this.ctx.container?.running !== true) return await refuse("runtime-unavailable");
             const probe = await this.ctx.container.exec([
               "/usr/bin/timeout",
               "-s",
@@ -10386,7 +10438,7 @@ export class ResidentDO extends Sandbox<Env> {
               if (timer !== undefined) clearTimeout(timer);
             });
             if (exit !== 0 || this.ctx.container?.running !== true)
-              return cancellationFailure(cancellation, "resident", "native-observation-unconfirmed");
+              return await refuse("native-observation-unconfirmed");
           }
           const currentBinding = await this.ctx.storage.get<ThreadBinding>(threadBindingKey(threadKey));
           const currentRegistration = await this.ctx.storage.get<RunRegistration>(runRegKey(threadKey));
@@ -10404,9 +10456,9 @@ export class ResidentDO extends Sandbox<Env> {
             ) ||
             !(await this.poolUserOwnerMatches(binding.user, `thread:${threadKey}`))
           )
-            return cancellationFailure(cancellation, "resident", "target-changed");
+            return await refuse("target-changed");
           if (retiredBoot && (await this.observeRetiredThreadRuntime(currentBinding)) !== retiredBoot)
-            return cancellationFailure(cancellation, "resident", "native-observation-unconfirmed");
+            return await refuse("native-observation-unconfirmed");
           const disposition = retiredBoot ? "runtime-retired" : "processes-stopped";
           return await this.ctx.storage.transaction(async (txn) => {
             const finalBinding = await txn.get<ThreadBinding>(threadBindingKey(threadKey));
@@ -10421,14 +10473,28 @@ export class ResidentDO extends Sandbox<Env> {
               (this.threadOpsInFlight.get(threadKey) ?? 0) > 0 ||
               (await txn.list({ prefix: `native-operation:${threadKey}:`, limit: 1 })).size
             )
-              return cancellationFailure(cancellation, "resident", "target-changed");
+              return refuse("target-changed", undefined, txn);
+            const current = await txn.get<typeof prior>(key);
+            if (!current || !sameCancellation(current.cancellation, cancellation))
+              return cancellationFailure(cancellation, "resident", "ticket-conflict");
             await txn.put(threadBindingKey(threadKey), { ...currentBinding, lastRunOwner: currentRegistration });
-            await txn.put(key, { cancellation, stopped: true, disposition, ...(retiredBoot ? { retiredBoot } : {}) });
+            await txn.put(key, {
+              ...current,
+              cancellation,
+              stopped: true,
+              disposition,
+              ...(retiredBoot ? { retiredBoot } : {}),
+            });
             return { stopped: true, cancellationId: cancellation.id, disposition };
           });
-        } catch (error) {
-          cancellationRefusal(cancellation, "resident", "runtime-unconfirmed");
-          throw error;
+        } catch {
+          try {
+            return await refuse("runtime-unconfirmed");
+          } catch {
+            // Storage failure leaves the original intent unresolved. Do not
+            // expose a provider error or claim a durable shutdown receipt.
+            return cancellationFailure(cancellation, "resident", "runtime-unconfirmed");
+          }
         } finally {
           this.workspaceExclusiveOpsInFlight.delete(threadKey);
         }
@@ -10438,20 +10504,26 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** A different kernel boot proves the original runtime is gone, not that
    * its workspace may be discarded. Native exec cannot wake a stopped VM. */
-  private async observeRetiredThreadRuntime(binding: ThreadBinding): Promise<string | undefined> {
-    if (
-      this.destroying ||
-      this.hydration !== null ||
-      this.ctx.container?.running !== true ||
-      (await this.getStatus()).state !== "warm" ||
-      (await this.recreateAdmission.blocked()) ||
-      (this.threadOpsInFlight.get(binding.threadKey) ?? 0) > 0 ||
-      this.opUsersInUse.has(binding.user) ||
-      !(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`)) ||
-      (await this.ctx.storage.list({ prefix: `native-operation:${binding.threadKey}:`, limit: 1 })).size
-    )
+  private async observeRetiredThreadRuntime(
+    binding: ThreadBinding,
+    onBlocked?: (cause: RetirementBlock) => void,
+  ): Promise<string | undefined> {
+    const blocked = (cause: RetirementBlock): undefined => {
+      onBlocked?.(cause);
       return;
-    if (this.ctx.container?.running !== true) return;
+    };
+    if (this.destroying) return blocked("destroying");
+    if (this.hydration !== null) return blocked("hydration-unconfirmed");
+    if (this.ctx.container?.running !== true) return blocked("runtime-unavailable");
+    if (!["warm", "refreshing"].includes((await this.getStatus()).state)) return blocked("lifecycle-transition");
+    if (await this.recreateAdmission.blocked()) return blocked("recreate-held");
+    if ((this.threadOpsInFlight.get(binding.threadKey) ?? 0) > 0) return blocked("operations-busy");
+    if (this.opUsersInUse.has(binding.user)) return blocked("operation-uid-active");
+    if (!(await this.poolUserOwnerMatches(binding.user, `thread:${binding.threadKey}`)))
+      return blocked("uid-owner-unverified");
+    if ((await this.ctx.storage.list({ prefix: `native-operation:${binding.threadKey}:`, limit: 1 })).size)
+      return blocked("native-outcome-unknown");
+    if (this.ctx.container?.running !== true) return blocked("runtime-unavailable");
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const observation = (async () => {
@@ -10462,7 +10534,7 @@ export class ResidentDO extends Sandbox<Env> {
           String(FORCE_DETACH_KILL_TIMEOUT_MS / SECOND_MS),
           "/bin/sh",
           "-c",
-          'boot=$(/bin/cat /proc/sys/kernel/random/boot_id) || exit 2; test -n "$boot" && test "$boot" != "$1" || exit 2; /usr/bin/pgrep -u "$2" >/dev/null 2>&1; test "$?" = 1 || exit 3; test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$boot" || exit 2; printf "%s\\n" "$boot"',
+          'boot=$(/bin/cat /proc/sys/kernel/random/boot_id) || exit 10; test -n "$boot" || exit 10; test "$boot" != "$1" || exit 12; /usr/bin/pgrep -u "$2" >/dev/null 2>&1; test "$?" = 1 || exit 3; test "$(/bin/cat /proc/sys/kernel/random/boot_id)" = "$boot" || exit 2; printf "%s\\n" "$boot"',
           "--",
           binding.container!,
           binding.user,
@@ -10475,18 +10547,22 @@ export class ResidentDO extends Sandbox<Env> {
           timer = setTimeout(() => resolve(undefined), FORCE_DETACH_KILL_TIMEOUT_MS);
         }),
       ]);
+      if (!result) return blocked("timeout");
+      if (result.exitCode === 10) return blocked("boot-read-unconfirmed");
+      if (result.exitCode === 12) return blocked("original-runtime-present");
+      if (result.exitCode === 2) return blocked("boot-unconfirmed");
+      if (result.exitCode === 3) return blocked("uid-presence-unconfirmed");
       if (
-        !result ||
         result.exitCode !== 0 ||
         result.stderr.byteLength !== 0 ||
         result.stdout.byteLength > 65 ||
         this.ctx.container?.running !== true
       )
-        return;
+        return blocked("native-observation-unconfirmed");
       const boot = new TextDecoder().decode(result.stdout).trim();
-      return /^[A-Za-z0-9-]{1,64}$/.test(boot) && boot !== binding.container ? boot : undefined;
+      return /^[A-Za-z0-9-]{1,64}$/.test(boot) && boot !== binding.container ? boot : blocked("boot-unconfirmed");
     } catch {
-      return;
+      return blocked("native-exec-failed");
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
@@ -10502,12 +10578,16 @@ export class ResidentDO extends Sandbox<Env> {
    *  masquerade as that result. Lost, timed-out or foreign-boot results do
    *  not acknowledge a kill. Callers still drain and apply their own ending
    *  or workspace-preservation policy after this physical operation. */
-  private async killThreadUserProcesses(user: string, threadKey: string, container?: string): Promise<boolean> {
+  private async killThreadUserProcesses(
+    user: string,
+    threadKey: string,
+    container?: string,
+  ): Promise<{ stopped: true } | ({ stopped: false } & Omit<CancellationObservation, "step">)> {
     let phase: "guard" | "launch" | "exit" = "guard";
     const unconfirmed = (
       cause: "target-unverified" | "runtime-unavailable" | "timeout" | "exit-unconfirmed" | "native-exec-failed",
       exitCode?: number,
-    ): false => {
+    ): { stopped: false } & Omit<CancellationObservation, "step"> => {
       // Native failures can carry commands or credentials. Record only the
       // control phase and closed cause, never exception text or output.
       console.warn(
@@ -10520,7 +10600,7 @@ export class ResidentDO extends Sandbox<Env> {
           ...(exitCode !== undefined ? { exitCode } : {}),
         }),
       );
-      return false;
+      return { stopped: false, phase, cause, ...(exitCode !== undefined ? { exitCode } : {}) };
     };
     if (!container || !isResidentPoolUser(user) || !(await this.poolUserOwnerMatches(user, `thread:${threadKey}`)))
       return unconfirmed("target-unverified");
@@ -10556,7 +10636,7 @@ export class ResidentDO extends Sandbox<Env> {
           typeof exit === "number" && Number.isSafeInteger(exit) ? exit : undefined,
         );
       if (this.ctx.container?.running !== true) return unconfirmed("runtime-unavailable", exit);
-      return true;
+      return { stopped: true };
     } catch {
       return unconfirmed("native-exec-failed");
     } finally {
