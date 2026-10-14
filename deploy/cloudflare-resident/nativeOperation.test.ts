@@ -56,6 +56,146 @@ async function lostProcess(h: ReturnType<typeof fixture>, close = true) {
 }
 
 describe("native launch storage acknowledgements", () => {
+  it.each(["terminal", "running", "kill-ack", "kill-error"])(
+    "preserves retirement when an already admitted recovery returns %s",
+    async (phase) => {
+      const h = fixture();
+      const owner = { runId: "run-old", ownerGen: "gen-old", ownerFence: 7 };
+      const threadKey = "slack:C1:123";
+      const ownedKey = `native-operation:${threadKey}:run-old:pending`;
+      await h.journal.open(ownedKey, owner, threadKey);
+      const attempt = await h.journal.begin(ownedKey, "process");
+      await h.journal.launched(ownedKey, attempt, identity);
+      await h.journal.close(ownedKey);
+      const original = structuredClone(h.rows.get(ownedKey));
+      const saved = (await h.journal.list()).operations[0]!;
+      let controls: unknown;
+      const retire = async () => {
+        controls = structuredClone(h.rows.get(`native-operation-control:${ownedKey}:${identity.id}`));
+        h.rows.set(`native-retirement:${threadKey}:run-old`, {
+          version: 1,
+          cancellationId: "cancel-old",
+          owner,
+          threadKey,
+          originalBoot: "old-kernel",
+          currentBoot: "new-kernel",
+          originalOperationOutcome: "unknown",
+          records: await h.journal.fingerprints(`native-operation:${threadKey}:run-old:`),
+        });
+        h.rows.set(`cancelled:${threadKey}:run-old`, {
+          stopped: true,
+          disposition: "runtime-retired",
+          retiredBoot: "new-kernel",
+          cancellation: { id: "cancel-old", runId: "run-old", ownerGen: "gen-old", threadKey },
+          target: { container: "old-kernel", ownerGen: "gen-old", ownerFence: 7 },
+        });
+      };
+      let kills = 0;
+      const result = await h.journal.recover(
+        ownedKey,
+        saved.recordHash,
+        async () => {
+          if (phase === "terminal" || phase === "running") await retire();
+          return phase === "terminal" ? terminal : { ...identity, state: "running" };
+        },
+        matches,
+        phase === "terminal"
+          ? undefined
+          : async () => {
+              kills++;
+              await retire();
+              if (phase === "kill-error") throw new Error("late acknowledgement lost");
+            },
+      );
+      expect(result).toEqual({
+        error: "native-operation-recovery-refused: original-runtime-retired; historical effects unknown",
+        status: 409,
+      });
+      expect(h.rows.get(ownedKey)).toEqual(original);
+      expect(h.rows.get(`native-operation-control:${ownedKey}:${identity.id}`)).toEqual(controls);
+      expect(kills).toBe(phase === "kill-ack" || phase === "kill-error" ? 1 : 0);
+    },
+  );
+  it("preserves retired journal bytes across late callbacks and refuses renewed launch or recovery", async () => {
+    const h = fixture();
+    const owner = { runId: "run-old", ownerGen: "gen-old", ownerFence: 7 };
+    const threadKey = "slack:C1:123";
+    const ownedKey = `native-operation:${threadKey}:run-old:pending`;
+    await h.journal.open(ownedKey, owner, threadKey);
+    const attempt = await h.journal.begin(ownedKey, "process");
+    await h.journal.launched(ownedKey, attempt, identity);
+    const savedNative = (h.rows.get(ownedKey) as { native: unknown }).native;
+    h.rows.set(ownedKey, { native: savedNative, ownerFence: 7, ownerGen: "gen-old", runId: "run-old" });
+    const original = structuredClone(h.rows.get(ownedKey));
+    h.rows.set(`native-retirement:${threadKey}:run-old`, {
+      version: 1,
+      cancellationId: "cancel-old",
+      owner,
+      threadKey,
+      originalBoot: "old-kernel",
+      currentBoot: "new-kernel",
+      originalOperationOutcome: "unknown",
+      records: await h.journal.fingerprints(`native-operation:${threadKey}:run-old:`),
+    });
+    h.rows.set(`cancelled:${threadKey}:run-old`, {
+      stopped: true,
+      disposition: "runtime-retired",
+      retiredBoot: "new-kernel",
+      cancellation: { id: "cancel-old", runId: "run-old", ownerGen: "gen-old", threadKey },
+      target: { container: "old-kernel", ownerGen: "gen-old", ownerFence: 7 },
+    });
+    await h.journal.settle(ownedKey, attempt);
+    await h.journal.close(ownedKey);
+    await expect(h.journal.begin(ownedKey, "process")).rejects.toThrow("original native runtime retired");
+    await expect(h.journal.launched(ownedKey, attempt, identity)).rejects.toThrow("original native runtime retired");
+    await expect(h.journal.open(`${ownedKey}-late`, owner, threadKey)).rejects.toThrow("run cancelled");
+    const saved = (await h.journal.list()).operations[0]!;
+    expect(saved).toMatchObject({ recoverable: false, recoveryReason: "original-runtime-retired" });
+    expect(await h.journal.recover(ownedKey, saved.recordHash, async () => terminal, matches)).toEqual({
+      error: "native-operation-recovery-refused: original-runtime-retired; historical effects unknown",
+      status: 409,
+    });
+    expect(h.rows.get(ownedKey)).toEqual(original);
+    expect([...(await h.journal.unresolved())]).toEqual([]);
+  });
+  it("keeps original retired history and finds foreign active work beyond a full retired page", async () => {
+    const h = fixture();
+    const owner = { runId: "run-old", ownerGen: "gen-old", ownerFence: 7 };
+    const threadKey = "slack:C1:123";
+    for (let i = 0; i < 30; i++)
+      h.rows.set(`native-operation:${threadKey}:run-old:${String(i).padStart(2, "0")}`, { ...owner });
+    const original = structuredClone([...h.rows]);
+    const records = await h.journal.fingerprints(`native-operation:${threadKey}:run-old:`);
+    h.rows.set(`native-retirement:${threadKey}:run-old`, {
+      version: 1,
+      cancellationId: "cancel-old",
+      owner,
+      threadKey,
+      originalBoot: "old-kernel",
+      currentBoot: "new-kernel",
+      originalOperationOutcome: "unknown",
+      records,
+    });
+    h.rows.set(`cancelled:${threadKey}:run-old`, {
+      stopped: true,
+      disposition: "runtime-retired",
+      retiredBoot: "new-kernel",
+      cancellation: { id: "cancel-old", runId: "run-old", ownerGen: "gen-old", threadKey },
+      target: { container: "old-kernel", ownerGen: "gen-old", ownerFence: 7 },
+    });
+    const foreignKey = "native-operation:zz:run-live:one";
+    const foreign = { runId: "run-live", ownerGen: "gen-live", ownerFence: 8 };
+    h.rows.set(foreignKey, foreign);
+    expect([...(await h.journal.unresolved())]).toEqual([[foreignKey, foreign]]);
+    for (const [key, value] of original) expect(h.rows.get(key)).toEqual(value);
+    const changedKey = `native-operation:${threadKey}:run-old:00`;
+    h.rows.set(changedKey, { ...owner, altered: true });
+    expect([...(await h.journal.unresolved()).keys()]).toEqual([changedKey, foreignKey]);
+    h.rows.set(changedKey, { ...owner, ownerFence: 9 });
+    expect([...(await h.journal.unresolved()).keys()]).toEqual([changedKey, foreignKey]);
+    h.rows.set(changedKey, { ...owner, ownerGen: "other-generation" });
+    expect([...(await h.journal.unresolved()).keys()]).toEqual([changedKey, foreignKey]);
+  });
   function lostAck(h: ReturnType<typeof fixture>, commit: boolean, readable = true) {
     return new NativeOperationJournal({
       ...h.storage,

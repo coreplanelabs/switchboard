@@ -19,8 +19,8 @@ export function createRunStop(
   fetchImpl = fetch,
 ) {
   if (execution?.type !== "cloudflare" && !execution?.resident) return undefined;
-  const target = (binding: ReturnType<typeof workspaceBindingOf>) => {
-    const resident = binding?.backend === "resident";
+  const target = (binding: ReturnType<typeof workspaceBindingOf>, row: LiveRunRow) => {
+    const resident = binding?.backend === "resident" || (binding === undefined && row.meta.selection === "resident");
     return {
       url: resident ? execution?.resident?.baseUrl : execution?.url,
       token: secrets.named(
@@ -31,23 +31,30 @@ export function createRunStop(
     };
   };
   const unavailable = (row: LiveRunRow): CancellationRefusal | undefined => {
+    if (row.meta.hosted) return { phase: "prepare", cause: "custody-unverified" };
     const binding = workspaceBindingOf(row.state.binding);
     if (!cancellationRuntimeSupported(row) || (binding?.backend === "resident" && !row.meta.repo))
       return { phase: "prepare", cause: "custody-unverified" };
-    if (row.state.binding === undefined) return;
-    if (!binding || (binding.backend !== "resident" && binding.backend !== "sandbox"))
+    if (row.state.binding === undefined && row.meta.profile?.machine === "none") return;
+    if (
+      (!binding && row.meta.selection !== "resident") ||
+      (binding && binding.backend !== "resident" && binding.backend !== "sandbox")
+    )
       return { phase: "prepare", cause: "custody-unverified" };
-    const { url, token } = target(binding);
+    const { url, token } = target(binding, row);
     if (!url || !token)
-      return { phase: binding.backend === "resident" ? "resident" : "sandbox", cause: "runtime-unavailable" };
+      return {
+        phase: binding?.backend === "resident" || row.meta.selection === "resident" ? "resident" : "sandbox",
+        cause: "runtime-unavailable",
+      };
   };
   const stop = async (row: LiveRunRow, cancellation: RunCancellation): Promise<RuntimeStopResult> => {
     const refusal = unavailable(row);
     if (refusal) return { stopped: false, refusal };
     const binding = workspaceBindingOf(row.state.binding);
-    if (!binding) return { stopped: true, disposition: "no-workspace" };
-    const resident = binding.backend === "resident";
-    const { url, token } = target(binding);
+    if (!binding && row.meta.profile?.machine === "none") return { stopped: true, disposition: "no-workspace" };
+    const resident = binding?.backend === "resident" || (!binding && row.meta.selection === "resident");
+    const { url, token } = target(binding, row);
     if (!url || !token) return { stopped: false, refusal: { phase: "prepare", cause: "state-unconfigured" } };
     const phase = resident ? "resident" : "sandbox";
     const unconfirmed = (): RuntimeStopResult => ({
@@ -60,9 +67,13 @@ export function createRunStop(
         headers: {
           authorization: `Bearer ${token.reveal()}`,
           "content-type": "application/json",
-          ...(!resident && binding.sandboxKey ? { "x-thread-key": binding.sandboxKey } : {}),
+          ...(!resident && binding?.sandboxKey ? { "x-thread-key": binding.sandboxKey } : {}),
         },
-        body: JSON.stringify({ cancellation, binding, ...(resident ? { resource: `repo:${row.meta.repo}` } : {}) }),
+        body: JSON.stringify({
+          cancellation,
+          binding: binding ?? null,
+          ...(resident ? { resource: `repo:${row.meta.repo}` } : {}),
+        }),
         signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
       });
       const result = (await response.json().catch(() => null)) as Record<string, unknown> | null;

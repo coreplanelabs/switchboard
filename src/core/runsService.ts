@@ -1002,8 +1002,8 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
    *  becomes the answer (the instance is the LAST `run_meta` carrying one), the
    *  run finishes `failed` and seals, and the record replaces the ledger's live
    *  row in one transaction — releasing the host key, so a later ship request
-   *  on the thread claims it. A ledger failure is a warning: the registry row
-   *  is sealed either way, and the reclaim's deadline closes the row later. */
+   *  on the thread claims it. Pipeline admission must be stopped first, and
+   *  the original writer must land the terminal record before sealing. */
   const sealHosted = async (id: string, actor: RunActor): Promise<Result<StopRunView>> => {
     const at = clock();
     registry.publish(id, {
@@ -1018,11 +1018,17 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       (found, e) => (e.type === "run_meta" && e.instanceId !== undefined ? e.instanceId : found),
       undefined,
     );
+    if (ledger) {
+      try {
+        if (!(await ledger.requestStop(id, "hard")).ok) return { ok: false, error: "unavailable" };
+      } catch {
+        return { ok: false, error: "unavailable" };
+      }
+    }
     let unitRows: CoordinatorUnit[] = [];
     // The runner's stop (record 0060; issue 1924): the mark on the instance row,
     // written before the answer is composed so the answer says what happened.
-    // Best effort like the ledger below: a mark that could not be written seals
-    // the parent anyway, and the answer says the runner may still be walking.
+    // A lost reply requires positive readback before sealing the parent.
     let runnerStopped = false;
     if (units && instanceId !== undefined) {
       try {
@@ -1032,17 +1038,28 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       } catch (err) {
         warn(`[runs] the runner's stop mark failed for ${id}: ${describe(err)}`);
       }
+      if (!runnerStopped) {
+        try {
+          const current = await units.get(instanceId);
+          runnerStopped =
+            current?.id === instanceId &&
+            current.stop !== undefined &&
+            (current.runId === undefined || current.runId === id);
+        } catch {
+          // A lost stop reply is not permission to seal a still-running plan.
+        }
+      }
       try {
         unitRows = await units.listUnits(instanceId);
       } catch (err) {
         warn(`[runs] unit rows unavailable for the hard stop of ${id}: ${describe(err)}`);
       }
     }
+    if (!runnerStopped) return { ok: false, error: "unavailable" };
     let tracked: TrackedLedgerRun | undefined;
     let canonicalRow: LiveRunRow | undefined;
     if (ledger) {
       try {
-        if (!(await ledger.requestStop(id, "hard")).ok) return { ok: false, error: "unavailable" };
         const writer = deps.writer;
         const rows = (await ledger.listLive()).filter((row) => row.runId === id);
         if (!writer || writer.sessionPersistence !== true || deps.generation !== writer.gen || rows.length !== 1)

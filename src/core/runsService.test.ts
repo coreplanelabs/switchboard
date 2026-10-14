@@ -3036,7 +3036,7 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
     ...over,
   });
 
-  async function hostedWorld(regOver: Parameters<typeof testRegistry>[0] = {}) {
+  async function hostedWorld(regOver: Parameters<typeof testRegistry>[0] = {}, waitingForInput = false) {
     const { reg } = testRegistry(regOver);
     const ledger = new InMemoryRunLedger(() => NOW);
     const units = new InMemoryCoordinatorInstanceStore(ledger);
@@ -3050,13 +3050,23 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
       branch: "plan/p/u16",
       createdAt: NOW - 60_000,
     } satisfies CoordinatorInstance);
-    await units.putUnits([
-      unitRow("U16", {
-        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
-        ending: { kind: "merged", report: "done", at: NOW },
-      }),
-      unitRow("U17", { threadKey: "web:s:u2" }),
-    ]);
+    await units.putUnits(
+      waitingForInput
+        ? [
+            unitRow("unit-awaiting", {
+              threadKey: hostedMeta.threadKey,
+              rounds: [{ index: 0, agent: "research", outcome: "completed", at: NOW - 60_000 }],
+              idle: { why: "held", at: NOW - 60_000, renewalsLeft: 0, wakes: 0, spendUsd: 0 },
+            }),
+          ]
+        : [
+            unitRow("U16", {
+              pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+              ending: { kind: "merged", report: "done", at: NOW },
+            }),
+            unitRow("U17", { threadKey: "web:s:u2" }),
+          ],
+    );
     const writer = createLedgerWriteThrough({
       ledger,
       gen: GEN,
@@ -3132,6 +3142,45 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
       } finally {
         await opened.run.close();
       }
+    },
+  );
+  it.each(["committed", "foreign"])(
+    "reads back a lost pipeline stop reply without crediting %s ownership",
+    async (mode) => {
+      const w = await hostedWorld({}, true);
+      const mark = w.units.markStopped.bind(w.units);
+      const get = w.units.get.bind(w.units);
+      w.units.markStopped = async (...args) => {
+        await mark(...args);
+        throw new Error("stop reply lost");
+      };
+      if (mode === "foreign") w.units.get = async (id) => ({ ...(await get(id))!, runId: "foreign-run" });
+      try {
+        const result = await w.svc.stopRun(w.id, "hard", actor);
+        expect(result).toMatchObject(mode === "committed" ? { ok: true } : { ok: false, error: "unavailable" });
+        expect(w.reg.getById(w.id)?.finished).toBe(mode === "committed");
+        expect(w.ledger.live.has(w.id)).toBe(mode !== "committed");
+        expect((await get("plan-p-1"))?.stop).toEqual({ at: NOW });
+      } finally {
+        await w.tracked.close();
+      }
+    },
+  );
+  it.each(["refused", "unknown"])(
+    "does not seal an input-waiting parent when its pipeline stop is %s",
+    async (failure) => {
+      const w = await hostedWorld({}, true);
+      w.units.markStopped = async () => {
+        if (failure === "unknown") throw new Error("transport timed out");
+        return { ok: false, reason: "unknown_instance" };
+      };
+      expect(await w.svc.stopRun(w.id, "hard", actor)).toEqual({ ok: false, error: "unavailable" });
+      expect(w.reg.getById(w.id)?.finished).toBe(false);
+      expect(w.ledger.live.has(w.id)).toBe(true);
+      expect(await w.units.listUnits("plan-p-1")).toMatchObject([
+        { unit: "unit-awaiting", idle: { why: "held", wakes: 0 } },
+      ]);
+      expect((await w.units.get("plan-p-1"))?.stop).toBeUndefined();
     },
   );
   it.each(["missing", "ambiguous", "foreign", "handoff", "unstarted", "off", "fallback"])(
@@ -3296,7 +3345,7 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
     expect(answer && "text" in answer && answer.text).toContain("the remaining units end `stopped`");
   });
 
-  it("a hard stop whose instance record is missing still seals, and the answer says the runner may still be walking instead of claiming a stop", async () => {
+  it("a missing instance cannot acknowledge a pipeline stop or seal its parent", async () => {
     const { reg } = testRegistry();
     const ledger = new InMemoryRunLedger(() => NOW);
     // No instance record: the mark has nowhere to land (unknown_instance).
@@ -3311,12 +3360,8 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
     });
     const { id } = reg.create("ship · acme/api", hostedMeta);
     reg.publish(id, { type: "run_meta", agent: "ship", instanceId: "plan-p-1", at: NOW });
-    expect(await svc.stopRun(id, "hard", actor)).toMatchObject({ ok: true });
-    expect(reg.getById(id)!.status).toBe("failed");
-    const events = reg.snapshotById(id)!.events;
-    const answer = [...events].reverse().find((e) => e.type === "answer");
-    expect(answer && "text" in answer && answer.text).toContain("could not be marked stopped");
-    expect(answer && "text" in answer && answer.text).not.toContain("The plan runner was stopped");
+    expect(await svc.stopRun(id, "hard", actor)).toEqual({ ok: false, error: "unavailable" });
+    expect(reg.getById(id)!.finished).toBe(false);
     expect(warned.some((m) => m.includes("unknown_instance"))).toBe(true);
   });
 

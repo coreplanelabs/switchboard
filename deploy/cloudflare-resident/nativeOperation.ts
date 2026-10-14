@@ -3,6 +3,7 @@ import { isWorkspaceOwner, type WorkspaceOwner } from "../../src/core/workspaceS
 
 export const NATIVE_OPERATION_PREFIX = "native-operation:";
 const RECEIPT_PREFIX = "native-operation-receipt:";
+const RETIREMENT_PREFIX = "native-retirement:";
 const CONTROL_PREFIX = "native-operation-control:";
 const PAGE_SIZE = 25;
 const ATTEMPT_LIMIT = 64;
@@ -46,6 +47,16 @@ const terminalSchema = processIdentity.extend({
   }),
 });
 export type NativeOperationRecord = z.infer<typeof recordSchema>;
+export interface NativeRuntimeRetirement {
+  version: 1;
+  cancellationId: string;
+  owner: WorkspaceOwner;
+  threadKey: string;
+  originalBoot: string;
+  currentBoot: string;
+  originalOperationOutcome: "unknown";
+  records: Record<string, string>;
+}
 export type NativeProcessIdentity = z.infer<typeof processIdentity>;
 type NativeTerminal = z.infer<typeof terminalSchema>;
 export interface NativeOperationRows {
@@ -127,6 +138,98 @@ export function unstartedNativeOperator(value: unknown, owner: string): boolean 
 export class NativeOperationJournal {
   constructor(private readonly storage: NativeOperationStorage) {}
 
+  /** A cancelled epoch releases physical activity, not historical effect certainty. */
+  private async retirement(key: string, value: unknown, rows: Pick<NativeOperationRows, "get"> = this.storage) {
+    const owner = ownerOf(value);
+    if (!owner || !isWorkspaceOwner(owner)) return;
+    const split = key.lastIndexOf(`:${owner.runId}:`);
+    if (split <= NATIVE_OPERATION_PREFIX.length) return;
+    const threadKey = key.slice(NATIVE_OPERATION_PREFIX.length, split);
+    const receipt = await rows.get<NativeRuntimeRetirement>(`${RETIREMENT_PREFIX}${threadKey}:${owner.runId}`);
+    if (
+      !receipt ||
+      receipt.version !== 1 ||
+      receipt.threadKey !== threadKey ||
+      receipt.originalOperationOutcome !== "unknown" ||
+      !isWorkspaceOwner(receipt.owner) ||
+      receipt.owner.runId !== owner.runId ||
+      receipt.owner.ownerGen !== owner.ownerGen ||
+      receipt.owner.ownerFence !== owner.ownerFence ||
+      typeof receipt.originalBoot !== "string" ||
+      typeof receipt.currentBoot !== "string" ||
+      !/^[A-Za-z0-9-]{1,64}$/.test(receipt.currentBoot) ||
+      receipt.originalBoot === receipt.currentBoot
+    )
+      return;
+    if (!receipt.records || receipt.records[key] !== (await recordHash(value))) return;
+    const stopped = await rows.get<{
+      stopped?: unknown;
+      disposition?: unknown;
+      retiredBoot?: unknown;
+      cancellation?: { id?: unknown; runId?: unknown; ownerGen?: unknown; threadKey?: unknown };
+      target?: { container?: unknown; ownerGen?: unknown; ownerFence?: unknown };
+    }>(`cancelled:${threadKey}:${owner.runId}`);
+    if (
+      stopped?.stopped !== true ||
+      stopped.disposition !== "runtime-retired" ||
+      stopped.retiredBoot !== receipt.currentBoot ||
+      stopped.cancellation?.id !== receipt.cancellationId ||
+      stopped.cancellation.runId !== owner.runId ||
+      stopped.cancellation.ownerGen !== owner.ownerGen ||
+      stopped.cancellation.threadKey !== threadKey ||
+      stopped.target?.container !== receipt.originalBoot ||
+      stopped.target.ownerGen !== owner.ownerGen ||
+      stopped.target.ownerFence !== owner.ownerFence
+    )
+      return;
+    return receipt;
+  }
+
+  async fingerprints(
+    prefix: string,
+    rows: Pick<NativeOperationStorage, "list"> = this.storage,
+  ): Promise<Record<string, string>> {
+    const hashes: Record<string, string> = {};
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await rows.list<unknown>({
+        prefix,
+        limit: PAGE_SIZE,
+        ...(cursor ? { startAfter: cursor } : {}),
+      });
+      if (!page.size) break;
+      const next = [...page.keys()].at(-1)!;
+      if (cursor !== undefined && next <= cursor) throw new Error("native operation inventory is incomplete");
+      for (const [key, value] of page) hashes[key] = await recordHash(value);
+      if (page.size < PAGE_SIZE) break;
+      cursor = next;
+    }
+    return hashes;
+  }
+
+  /** Complete paging is required: retired entries cannot hide a later foreign operation. */
+  async unresolved(
+    prefix = NATIVE_OPERATION_PREFIX,
+    rows: Pick<NativeOperationStorage, "get" | "list"> = this.storage,
+  ): Promise<Map<string, unknown>> {
+    const active = new Map<string, unknown>();
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await rows.list<unknown>({
+        prefix,
+        limit: PAGE_SIZE,
+        ...(cursor ? { startAfter: cursor } : {}),
+      });
+      if (!page.size) break;
+      const next = [...page.keys()].at(-1)!;
+      if (cursor !== undefined && next <= cursor) throw new Error("native operation inventory is incomplete");
+      for (const [key, value] of page) if (!(await this.retirement(key, value, rows))) active.set(key, value);
+      if (page.size < PAGE_SIZE) break;
+      cursor = next;
+    }
+    return active;
+  }
+
   private async controls(key: string) {
     const rows = await this.storage.list<unknown>({ prefix: `${CONTROL_PREFIX}${key}:`, limit: ATTEMPT_LIMIT });
     return [...rows.values()]
@@ -144,6 +247,8 @@ export class NativeOperationJournal {
     await this.storage.transaction(async (rows) => {
       if ((await rows.get(key)) !== undefined || (await rows.get(RECEIPT_PREFIX + key)) !== undefined)
         throw new Error("native operation identity already used");
+      if (threadKey && isWorkspaceOwner(owner) && (await rows.get(`cancelled:${threadKey}:${owner.runId}`)))
+        throw new Error("run cancelled");
       await rows.put(key, record);
     });
   }
@@ -152,7 +257,9 @@ export class NativeOperationJournal {
     const id = crypto.randomUUID();
     try {
       await this.storage.transaction(async (rows) => {
-        const record = recordSchema.parse(await rows.get(key));
+        const value = await rows.get(key);
+        if (await this.retirement(key, value, rows)) throw new Error("original native runtime retired");
+        const record = recordSchema.parse(value);
         if (record.native.closed) throw new Error("native operation already closed");
         if (Object.keys(record.native.pending).length >= ATTEMPT_LIMIT)
           throw new Error("too many pending native attempts");
@@ -162,7 +269,9 @@ export class NativeOperationJournal {
     } catch (error) {
       // An uncertain write is not a new admission. Read only this locally
       // retained ID; the caller still checks scope closure before submission.
-      const saved = recordSchema.safeParse(await this.storage.get(key));
+      const value = await this.storage.get(key);
+      if (await this.retirement(key, value)) throw error;
+      const saved = recordSchema.safeParse(value);
       const attempt = saved.success ? saved.data.native.pending[id] : undefined;
       if (!attempt || attempt.kind !== kind || attempt.process) throw error;
     }
@@ -173,7 +282,9 @@ export class NativeOperationJournal {
     const process = processIdentity.parse(status);
     try {
       await this.storage.transaction(async (rows) => {
-        const record = recordSchema.parse(await rows.get(key));
+        const value = await rows.get(key);
+        if (await this.retirement(key, value, rows)) throw new Error("original native runtime retired");
+        const record = recordSchema.parse(value);
         const attempt = record.native.pending[id];
         if (!attempt || attempt.kind !== "process" || attempt.process)
           throw new Error("native launch identity changed");
@@ -183,7 +294,9 @@ export class NativeOperationJournal {
     } catch (error) {
       // Qualify a committed original tuple without repeating native work or
       // overwriting identity. Missing or unreadable evidence remains unknown.
-      const saved = recordSchema.safeParse(await this.storage.get(key));
+      const value = await this.storage.get(key);
+      if (await this.retirement(key, value)) throw error;
+      const saved = recordSchema.safeParse(value);
       const attempt = saved.success ? saved.data.native.pending[id] : undefined;
       const original = attempt?.kind === "process" ? attempt.process : undefined;
       if (
@@ -201,6 +314,7 @@ export class NativeOperationJournal {
       const value = await rows.get(key);
       // Recovery may already have archived the same observed terminal process.
       if (value === undefined && (await rows.get(RECEIPT_PREFIX + key)) !== undefined) return;
+      if (await this.retirement(key, value, rows)) return;
       const record = recordSchema.parse(value);
       delete record.native.pending[id];
       if (record.native.closed && Object.keys(record.native.pending).length === 0) await rows.delete(key);
@@ -212,6 +326,7 @@ export class NativeOperationJournal {
     await this.storage.transaction(async (rows) => {
       const value = await rows.get(key);
       if (value === undefined) return;
+      if (await this.retirement(key, value, rows)) return;
       const record = recordSchema.parse(value);
       record.native.closed = true;
       if (Object.keys(record.native.pending).length === 0) await rows.delete(key);
@@ -230,18 +345,22 @@ export class NativeOperationJournal {
       page.map(async ([key, value]) => {
         const parsed = recordSchema.safeParse(value);
         const hash = await recordHash(value);
+        const retirement = await this.retirement(key, value);
         return {
           key,
           recordHash: hash,
           owner: ownerOf(value),
-          recoverable: parsed.success && recoverable(parsed.data),
-          recoveryReason: !parsed.success
-            ? "legacy-or-invalid-record"
-            : !recoverable(parsed.data)
-              ? "original-native-evidence-unavailable"
-              : "original-process-result-required",
+          recoverable: !retirement && parsed.success && recoverable(parsed.data),
+          recoveryReason: retirement
+            ? "original-runtime-retired"
+            : !parsed.success
+              ? "legacy-or-invalid-record"
+              : !recoverable(parsed.data)
+                ? "original-native-evidence-unavailable"
+                : "original-process-result-required",
           controls: await this.controls(key),
           journal: parsed.success ? parsed.data.native : null,
+          ...(retirement ? { retirement } : {}),
         };
       }),
     );
@@ -263,6 +382,7 @@ export class NativeOperationJournal {
       return { ...refuse("record-missing-or-changed"), ...(controls.length ? { controls } : {}) };
     }
     if ((await recordHash(value)) !== expectedHash) return refuse("record-changed");
+    if (await this.retirement(key, value)) return refuse("original-runtime-retired; historical effects unknown");
     const parsed = recordSchema.safeParse(value);
     if (!parsed.success || !recoverable(parsed.data)) return refuse("original-native-evidence-unavailable");
     const processes: NativeTerminal[] = [];
@@ -282,6 +402,8 @@ export class NativeOperationJournal {
           const controlKey = `${CONTROL_PREFIX}${key}:${identity.id}`;
           const admitted = await this.storage.transaction(async (rows) => {
             const current = await rows.get(key);
+            if (await this.retirement(key, current, rows))
+              return refuse("original-runtime-retired; historical effects unknown");
             if (
               current === undefined ||
               (await recordHash(current)) !== expectedHash ||
@@ -294,21 +416,37 @@ export class NativeOperationJournal {
             return null;
           });
           if (admitted) return admitted;
+          const saveControl = async (control: z.infer<typeof controlSchema>) =>
+            this.storage.transaction(async (rows) => {
+              const current = await rows.get(key);
+              if (await this.retirement(key, current, rows))
+                return refuse("original-runtime-retired; historical effects unknown");
+              if (
+                current === undefined ||
+                (await recordHash(current)) !== expectedHash ||
+                !(await ownerMatches(rows, parsed.data))
+              )
+                return refuse("record-or-owner-changed");
+              await rows.put(controlKey, control);
+              return null;
+            });
           try {
             await terminate(identity);
-            await this.storage.put(controlKey, {
+            const held = await saveControl({
               process: identity,
               recordHash: expectedHash,
               outcome: "kill-acknowledged",
             });
+            if (held) return held;
           } catch (error) {
             const details = errorDetails(error);
-            await this.storage.put(controlKey, {
+            const held = await saveControl({
               process: identity,
               recordHash: expectedHash,
               outcome: "kill-unverified",
               failure: details,
             });
+            if (held) return held;
             return { error: "native-operation-recovery-refused: termination-outcome-unverified", status: 503, details };
           }
           observed = await lookup(identity);
@@ -333,6 +471,8 @@ export class NativeOperationJournal {
     }
     return this.storage.transaction(async (rows) => {
       const current = await rows.get<unknown>(key);
+      if (await this.retirement(key, current, rows))
+        return refuse("original-runtime-retired; historical effects unknown");
       if (
         current === undefined ||
         (await recordHash(current)) !== expectedHash ||

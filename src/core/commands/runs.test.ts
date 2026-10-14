@@ -1160,35 +1160,62 @@ describe("runs.stop", () => {
 
   // Feature: docs/reference/specs/live-view.md items 10 and 16 (record 0060) — a
   // hosted parent takes no soft stop; `--mode hard` is the maintainer's escape.
-  it("a hosted parent refuses the soft stop as a 409 naming the hard escape; --mode hard seals it failed", async () => {
-    const { reg, registry, deps } = await setup();
-    const { id } = reg.create("ship · acme/api", {
-      agent: "ship",
-      channelId: "slack:C1",
-      userId: "slack:UALICE",
-      threadKey: "slack:C1:t",
-      hosted: true,
-    });
-    const soft = await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, reader, deps);
-    expect(soft).toMatchObject({
-      ok: false,
-      error: "conflict",
-      status: 409,
-      message: expect.stringContaining("--mode hard"),
-    });
-    // Record 0066: the refusal speaks the pipeline noun — no "hosted" —
-    // with the `--mode hard` escape wording intact.
-    expect(soft.ok ? undefined : soft.message).toBe(HOSTED_STOP_REFUSAL);
-    expect(HOSTED_STOP_REFUSAL).toContain("this run is a pipeline");
-    expect(HOSTED_STOP_REFUSAL).toContain(
-      "`--mode hard` is the escape: it seals the run failed and releases the thread",
-    );
-    expect(HOSTED_STOP_REFUSAL).not.toMatch(/hosted/i);
-    expect(reg.getById(id)!.finished).toBe(false);
-    const hard = await registry.invoke("runs.stop", { args: [id], options: { mode: "hard" } }, reader, deps);
-    expect(hard).toEqual({ ok: true, value: { id, mode: "hard", state: "stopping" } });
-    expect(reg.getById(id)!).toMatchObject({ finished: true, status: "failed" });
-  });
+  it.each([true, false])(
+    "a hosted parent refuses the soft stop and hard closure requires a confirmed pipeline stop: %s",
+    async (confirmed) => {
+      const { reg, store, registry, deps } = await setup();
+      const { id } = reg.create("ship · acme/api", {
+        agent: "ship",
+        channelId: "slack:C1",
+        userId: "slack:UALICE",
+        threadKey: "slack:C1:t",
+        hosted: true,
+      });
+      const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+      if (confirmed)
+        await instances.put({
+          id: "plan-stop",
+          kind: "ship",
+          userId: "slack:UALICE",
+          channelId: "slack:C1",
+          threadKey: "slack:C1:t",
+          repo: "acme/api",
+          branch: "plan/stop",
+          createdAt: NOW,
+          plan: { id: "stop", path: "docs/plans/stop.md" },
+          runId: id,
+        });
+      reg.publish(id, { type: "run_meta", agent: "ship", instanceId: "plan-stop", at: NOW });
+      const runs = createRunsService({ registry: reg, store, units: instances, clock: () => NOW });
+      deps.runs = async () => runs;
+      const soft = await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, reader, deps);
+      expect(soft).toMatchObject({
+        ok: false,
+        error: "conflict",
+        status: 409,
+        message: expect.stringContaining("--mode hard"),
+      });
+      // Record 0066: the refusal speaks the pipeline noun — no "hosted" —
+      // with the `--mode hard` escape wording intact.
+      expect(soft.ok ? undefined : soft.message).toBe(HOSTED_STOP_REFUSAL);
+      expect(HOSTED_STOP_REFUSAL).toContain("this run is a pipeline");
+      expect(HOSTED_STOP_REFUSAL).toContain(
+        "`--mode hard` is the escape: it seals the run failed and releases the thread",
+      );
+      expect(HOSTED_STOP_REFUSAL).not.toMatch(/hosted/i);
+      expect(reg.getById(id)!.finished).toBe(false);
+      const hard = await registry.invoke("runs.stop", { args: [id], options: { mode: "hard" } }, reader, deps);
+      if (confirmed) {
+        expect(hard).toEqual({ ok: true, value: { id, mode: "hard", state: "stopping" } });
+        expect(reg.getById(id)!).toMatchObject({ finished: true, status: "failed" });
+        expect((await instances.get("plan-stop"))?.stop).toEqual({ at: NOW });
+      } else {
+        expect(hard).toMatchObject({ ok: false, error: "unavailable", status: 503 });
+        expect(reg.getById(id)!.finished).toBe(false);
+        expect(await instances.get("plan-stop")).toBeNull();
+      }
+    },
+  );
 
   it("stopping needs runs:write AND visibility: a reader without the write grant is refused by the registry, a writer outside the channel gets not_found", async () => {
     const { reg, registry, deps } = await setup();

@@ -611,6 +611,51 @@ describe("original workspace durability in real SQLite", () => {
       });
     },
   );
+  it("prepares only recorded Resident discovery and never treats an unknown target as absent", async () => {
+    const sk = storeKey();
+    const req = request(sk, null);
+    req.run.meta.selection = "resident";
+    expect((await post("/runs/claim", req)).status).toBe(200);
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: sk,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect(await client.requestStop(id, "hard")).toMatchObject({ ok: true });
+    const prepared = await client.prepareCancellation(id, { kind: "chat", id: "slack:operator" });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) throw new Error("original cancellation unavailable");
+    expect(prepared.row.state.binding).toBeUndefined();
+    const actual = await post("/runs/cancellation/read", {
+      storeKey: sk,
+      cancellation: prepared.cancellation,
+      binding: null,
+    });
+    expect(actual.status).toBe(200);
+    expect(actual.data).toEqual({ prepared: true, cancellationId: prepared.cancellation.id });
+    const foreign = await post("/runs/cancellation/read", {
+      storeKey: sk,
+      cancellation: { ...prepared.cancellation, ownerGen: "foreign" },
+      binding: null,
+    });
+    expect(foreign.data).toEqual({ prepared: false, cancellationId: prepared.cancellation.id });
+    const other = storeKey();
+    const unknown = request(other, null);
+    expect((await post("/runs/claim", unknown)).status).toBe(200);
+    const unknownClient = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: other,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect(await unknownClient.requestStop(id, "hard")).toMatchObject({ ok: true });
+    expect(await unknownClient.prepareCancellation(id, { kind: "chat", id: "slack:operator" })).toEqual({
+      ok: false,
+      reason: "unsupported",
+    });
+  });
+
   async function originalSourceFixture(noWorkspace = false) {
     const sk = storeKey(),
       req = request(sk, null),
