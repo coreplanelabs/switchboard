@@ -1,6 +1,7 @@
 import { ExecCapacityError, ExecInfraError } from "../../../execution/executor.js";
 import { ToolRecovery } from "../toolRecovery.js";
 import { parentContextOf } from "../../dispatch/handoff.js";
+import { humanReview } from "../../testing/humanReview.js";
 import { createCheckExecution } from "../../checkExecution.js";
 import type { CheckExecutionState } from "../../checkExecutionTypes.js";
 import { RUN_DEADLINE_RESERVE_MS } from "../../../execution/bashTimeout.js";
@@ -219,7 +220,7 @@ describe("relayedToolDefinitions", () => {
     });
     expect(served.description).toContain("run `git rev-parse HEAD` in the checkout you read");
     const schema = served.inputSchema as { properties: Record<string, unknown>; required: string[] };
-    expect(schema.required).toEqual(["verdict", "summary", "head", "findings"]);
+    expect(schema.required).toEqual(["verdict", "summary", "head", "findings", "humanFindings"]);
     expect(schema.properties.head).toEqual({
       type: "string",
       description: "Output of `git rev-parse HEAD` in the checkout you reviewed (the commit the review is about)",
@@ -586,6 +587,7 @@ describe("runRelayedTool — the verdict path", () => {
   const input = {
     verdict: "approve",
     summary: "looks correct",
+    humanFindings: humanReview("F1"),
     head: HEAD,
     findings: [{ id: "F1", kind: "single", severity: "nit", file: "src/x.ts", line: 3, title: "a name" }],
   };
