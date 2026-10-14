@@ -28,6 +28,7 @@ const REDACT: Array<{ re: RegExp; replace: string }> = [
   // Cookies (whole header value)
   { re: /\b((?:Set-)?Cookie\s*:\s*)[^\r\n]+/gi, replace: "$1«redacted»" },
   // Provider / cloud token formats
+  { re: /\bsbr_[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9_-]+/g, replace: "«redacted-run-bearer»" },
   { re: /xox[baprs]-[A-Za-z0-9-]{8,}/g, replace: "«redacted-slack-token»" },
   { re: /gh[pousr]_[A-Za-z0-9]{20,}/g, replace: "«redacted-github-token»" },
   { re: /github_pat_[A-Za-z0-9_]{20,}/g, replace: "«redacted-github-pat»" },

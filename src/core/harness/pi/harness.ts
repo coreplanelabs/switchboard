@@ -570,6 +570,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   const bridge = new PiBridge({
     recovery: run.toolContext.recovery,
     runId: run.runId,
+    secretValues: [deps.bearer],
     emit,
     onProgress: run.onProgress,
     agentSpan,

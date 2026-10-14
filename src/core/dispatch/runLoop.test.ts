@@ -3928,6 +3928,28 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     );
   });
 
+  it("saves redacted unverified Pi error fields on the original failed run", async () => {
+    const s = setup(
+      new Error(
+        '400 {"error":{"type":"invalid_request_error","code":"bad_schema","message":"Invalid tool schema sk-proj-12345678901234567890"},"input":"private prompt"}',
+      ),
+    );
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const record = (await s.store.get("run-l"))!;
+    expect(record.status).toBe("failed");
+    const notes = record.events.filter((event) => event.type === "run_note" && event.kind === "harness_error");
+    expect(notes).toEqual([
+      expect.objectContaining({
+        summary:
+          'the model call ended without a classified result; no provider failure was established — pi stop: "error"; provider stop: "missing"; terminal evidence: {"source":"unverified","errorMessage":"present","contentParts":0,"error":{"type":"invalid_request_error","code":"bad_schema","message":"Invalid tool schema «redacted-api-key»"}}',
+      }),
+    ]);
+    expect(JSON.stringify(notes)).not.toContain("private prompt");
+    expect(JSON.stringify(notes)).not.toContain("sk-proj-");
+  });
+
   it("a failed run leaves its reason on the record: the loop's throw is published as a `run_failed` run_note before the finish, so the run page says why", async () => {
     const s = setup(new Error("harness container: read failed — runtime-replaced"));
     await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(UNKNOWN_MODEL_TERMINAL_MESSAGE);

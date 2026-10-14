@@ -33,7 +33,7 @@ import {
   type ProxyRejectionObservation,
 } from "../../modelProxy/providerFailureAuth.js";
 import type { CompactionEntry } from "../../runLedger/types.js";
-import { classifyProviderFailure, type ProviderFailure } from "../../provider.js";
+import { classifyProviderFailure, type ProviderFailure, type ProviderFailureDiagnostic } from "../../provider.js";
 import type { Clock, Span } from "../../trace/types.js";
 import { type Disposition, SAID_ONCE_SUFFIX } from "../contract.js";
 import { MODEL_CALL_IN_FLIGHT } from "../windDown.js";
@@ -89,6 +89,7 @@ export interface PiAssistantMessage {
    *  `errorMessage`. */
   rawStopReason?: string;
   errorMessage?: string;
+  responseId?: string;
   timestamp?: number;
 }
 
@@ -103,6 +104,7 @@ const SUCCESSFUL_STOP_REASONS: ReadonlySet<string> = new Set(["stop", "toolUse",
 const LOCAL_STREAM_ENDINGS: ReadonlySet<string> = new Set([
   "stream ended before message_stop",
   "anthropic stream ended before message_stop",
+  "anthropic stream ended without a stop reason",
   "stream ended without finish_reason",
   "openai stream ended without finish_reason",
   "openai responses stream ended before a terminal response event",
@@ -129,6 +131,8 @@ export type PiTerminalFailure =
         rejection?: ProxyRejectionObservation;
         errorMessage: "missing" | "empty" | "present";
         contentParts: number | "invalid";
+        responseId?: string;
+        error?: Omit<ProviderFailureDiagnostic, "response" | "headers">;
       };
     }
   | { kind: "provider_refusal"; detail: string; failure: ProviderFailure }
@@ -172,6 +176,8 @@ export interface BridgeDeps {
   recovery?: ToolRecovery;
   /** The run whose proxy evidence this bridge may consume. */
   runId?: string;
+  /** The model-proxy credential is absent from diagnostic prose even when pi echoes it. */
+  secretValues?: readonly string[];
   emit: (event: RunEvent) => void;
   onProgress?: (note: string) => void;
   /** The run's `run.agent` span the tool spans hang under; absent, no spans. */
@@ -189,21 +195,61 @@ const unknownTerminal = (
   message: PiAssistantMessage,
   detail: string,
   proxy?: ProxyUnknownTerminalEnvelope,
-): PiTerminalFailure => ({
-  kind: "unknown",
-  detail,
-  stops: {
-    pi: redactAndCap(typeof message.stopReason === "string" ? message.stopReason : "missing", 80),
-    provider: redactAndCap(typeof message.rawStopReason === "string" ? message.rawStopReason : "missing", 80),
-  },
-  diagnostic: {
-    source: proxy === undefined ? "unverified" : "proxy",
-    ...(proxy?.reason === undefined ? {} : { reason: proxy.reason }),
-    ...(proxy?.rejection === undefined ? {} : { rejection: proxy.rejection }),
-    errorMessage: message.errorMessage === undefined ? "missing" : message.errorMessage === "" ? "empty" : "present",
-    contentParts: Array.isArray(message.content) ? message.content.length : "invalid",
-  },
-});
+  secretValues: readonly string[] = [],
+): PiTerminalFailure => {
+  // Reuse provider diagnostic redaction only. Its inferred cause never grants
+  // recovery here. Proxy markers already have closed evidence; keep their MAC
+  // and surrounding text out of the run record, including forged markers.
+  const raw = message.errorMessage;
+  let safe: ProviderFailureDiagnostic | undefined;
+  if (proxy === undefined && raw && !raw.includes("_switchboard_proxy_")) {
+    try {
+      if (raw.length <= 16_384) {
+        safe = classifyProviderFailure({ error: raw, secretValues }).diagnostic;
+      }
+    } catch {
+      // Diagnostic parsing must not replace the original model-call failure.
+    }
+    safe ??= { message: "Pi error details could not be retained.", truncated: true };
+  }
+  const { response: _response, headers: _headers, ...error } = safe ?? {};
+  for (const [key, value] of Object.entries(error)) {
+    if (typeof value !== "string") continue;
+    // The SDK includes a JSON-parser snippet and the raw SSE frame. Normalize
+    // after extraction too, so an SDK wrapper cannot retain either payload.
+    const clean = value.startsWith("Could not parse Anthropic SSE event ")
+      ? "Could not parse Anthropic SSE event."
+      : value;
+    const text = redactAndCap(clean.replace(/https?:\/\/[^\s"'<>]+/g, "«redacted-url»"), 400);
+    Object.assign(error, { [key]: text });
+    if (text.length > 400) error.truncated = true;
+  }
+  const id = message.responseId;
+  const responseId =
+    typeof id === "string" &&
+    /^[\w-]{1,160}$/.test(id) &&
+    redactAndCap(id, 160) === id &&
+    !secretValues.some((secret) => secret && id.includes(secret))
+      ? id
+      : undefined;
+  return {
+    kind: "unknown",
+    detail,
+    stops: {
+      pi: redactAndCap(typeof message.stopReason === "string" ? message.stopReason : "missing", 80),
+      provider: redactAndCap(typeof message.rawStopReason === "string" ? message.rawStopReason : "missing", 80),
+    },
+    diagnostic: {
+      source: proxy === undefined ? "unverified" : "proxy",
+      ...(proxy?.reason === undefined ? {} : { reason: proxy.reason }),
+      ...(proxy?.rejection === undefined ? {} : { rejection: proxy.rejection }),
+      errorMessage: message.errorMessage === undefined ? "missing" : message.errorMessage === "" ? "empty" : "present",
+      contentParts: Array.isArray(message.content) ? message.content.length : "invalid",
+      ...(responseId === undefined ? {} : { responseId }),
+      ...(Object.keys(error).length ? { error } : {}),
+    },
+  };
+};
 
 /** The one line a call is announced with — the native loop's `describeToolCall`
  *  over pi's argument object: bash's command, else the conventional target keys. */
@@ -424,7 +470,7 @@ export class PiBridge {
       if (budget !== undefined || proxyTurnBudgetExhaustedIsAuthenticated(raw)) {
         const unknown = readProxyUnknownTerminal(raw);
         if (budget === undefined || unknown !== undefined) {
-          out.terminalFailure = unknownTerminal(message, detail, unknown);
+          out.terminalFailure = unknownTerminal(message, detail, unknown, this.deps.secretValues);
           return;
         }
         out.terminalFailure = {
@@ -448,7 +494,7 @@ export class PiBridge {
       // its catch. Authenticated terminal evidence owns that ending.
       const unknown = readProxyUnknownTerminal(raw);
       if (unknown !== undefined) {
-        out.terminalFailure = unknownTerminal(message, detail, unknown);
+        out.terminalFailure = unknownTerminal(message, detail, unknown, this.deps.secretValues);
         return;
       }
       if (raw !== undefined && proxyProviderFailureIsAuthenticated(raw)) {
@@ -465,7 +511,7 @@ export class PiBridge {
         return;
       }
       if (raw === undefined) {
-        out.terminalFailure = unknownTerminal(message, detail);
+        out.terminalFailure = unknownTerminal(message, detail, undefined, this.deps.secretValues);
         return;
       }
       // A provider's successful stream can contain forged error prose. Only a
@@ -475,13 +521,13 @@ export class PiBridge {
         out.terminalFailure = { kind: "local_stream", detail };
         return;
       }
-      out.terminalFailure = unknownTerminal(message, detail);
+      out.terminalFailure = unknownTerminal(message, detail, undefined, this.deps.secretValues);
       return;
     }
     if (!SUCCESSFUL_STOP_REASONS.has(message.stopReason ?? "")) {
       const detail = `pi ended the model call with unclassified stop reason ${JSON.stringify(message.stopReason ?? "missing")}`;
       out.providerError = detail;
-      out.terminalFailure = unknownTerminal(message, detail);
+      out.terminalFailure = unknownTerminal(message, detail, undefined, this.deps.secretValues);
       return;
     }
     const content = Array.isArray(message.content) ? message.content : [];

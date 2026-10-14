@@ -142,7 +142,7 @@
     "src/core/provider.ts": "e6cba4d58624abd6b87f0842bcdd870e008d8990c9c8f6781e72ee3abdfa5dff",
     "src/core/publicationSettlement.ts": "c74f0bd5abe4a4256539d604106e0b8ceadede3ac54b90ff659cc30412bf4cb1",
     "src/core/readingDiff.ts": "82d6f1b3d0af9eb9a5e105cde1473e1ac35a260dee08cfdb0835daa753003280",
-    "src/core/redact.ts": "03df97cd8b376d8c27a5323a2ecc587d2196dd0e375c7b1b7ac369c01b8bc3a5",
+    "src/core/redact.ts": "fe81574f4a9fe863b149ad0d8b35ad203f8bcd5a0b45880aa8bf5bb75a222545",
     "src/core/references/contextCheckpoint.ts": "d9106ef74e5c9489bb931306728812d1a806e6b32ad4e866518cde5a04741a3c",
     "src/core/references/contextDependencies.ts": "0d1c503205eb16a15d95711667a2c9b6a6bbaabf5cf2b7894c156ffeff7283e9",
     "src/core/references/githubAccessDiagnostic.ts": "8aa000dcfbafc5493c89a7f6022809c40186111a5539acdf3d87163ab90de063",
