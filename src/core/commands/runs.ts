@@ -1,7 +1,8 @@
 import { cancellationFailureMessage } from "../runLedger/cancellation.js";
 import { z } from "zod";
 import { authorize } from "../authz/authorize.js";
-import { allOf, ownedBy, predicateFor } from "../authz/predicate.js";
+import { allOf, matchesPredicate, ownedBy, predicateFor } from "../authz/predicate.js";
+import { visibilityOf } from "../authz/channelDirectory.js";
 import type { Action, Actor } from "../authz/types.js";
 import {
   CommandError,
@@ -261,6 +262,16 @@ export const runsList = defineCommand({
     mine: flag
       .optional()
       .describe("only the runs you requested — for a dashboard session, the Slack user its email names (record 0042)"),
+    readUser: z
+      .string()
+      .regex(/^http:[A-Za-z0-9_-]+$/)
+      .optional()
+      .describe("HTTP requester for a read-scope preview; requires channel and readRepo"),
+    readRepo: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/)
+      .optional()
+      .describe("repository for a read-scope preview; requires HTTP channel and readUser"),
   }),
   action: "runs:read",
   effect: "read",
@@ -270,9 +281,24 @@ export const runsList = defineCommand({
     // `channel` option is a plain filter the caller asked for on top of it, and
     // `--mine` narrows it to the caller's own runs (`ownedBy`: every id the
     // caller means by "me") — a narrowing only, never a widening.
-    const { thread, parent, mine, ...rest } = options;
+    const { thread, parent, mine, readUser, readRepo, ...rest } = options;
     const readable = predicateFor(caller.actor, "runs:read", "run");
     const visibleTo = mine ? allOf([readable, ownedBy(caller.actor)]) : readable;
+    if (
+      (readUser === undefined) !== (readRepo === undefined) ||
+      (readUser !== undefined && (!rest.channel || !/^http:[A-Za-z0-9_-]+$/.test(rest.channel)))
+    )
+      throw new CommandError("invalid_input", "readUser and readRepo require each other and an HTTP channel filter");
+    let scopeProof;
+    if (readUser !== undefined && readRepo !== undefined && rest.channel !== undefined) {
+      const readScope = { channelId: rest.channel, userId: readUser, repo: readRepo };
+      const channelVisibility = visibilityOf(rest.channel);
+      if (channelVisibility !== "machine")
+        throw new CommandError("unavailable", "HTTP read scope could not be verified");
+      // A permission preview over requested attributes, never a stored run or
+      // ending fact. Reuse the exact predicate that filters this caller's page.
+      scopeProof = { ...readScope, allowed: matchesPredicate(visibleTo, { ...readScope, channelVisibility }) };
+    }
     const page = await (
       await deps.runs()
     ).listRuns({
@@ -281,7 +307,7 @@ export const runsList = defineCommand({
       ...(parent !== undefined ? { parentRunId: parent } : {}),
       visibleTo,
     });
-    return asJson({ ...page, runs: page.runs.map(wrapRunView) });
+    return asJson({ ...page, runs: page.runs.map(wrapRunView), ...(scopeProof ? { readScope: scopeProof } : {}) });
   },
 });
 

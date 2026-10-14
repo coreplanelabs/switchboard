@@ -1077,6 +1077,8 @@ describe("the production deploy is one reusable workflow", () => {
       "RESIDENT_DRAIN_TOKEN",
       "RESIDENT_READ_TOKEN",
       "SANDBOX_TOKEN",
+      "SMOKE_ACCESS_CLIENT_ID",
+      "SMOKE_ACCESS_CLIENT_SECRET",
       "SMOKE_INGRESS_TOKEN",
     ]);
     for (const [name, s] of Object.entries(secrets)) expect(s.required, `${name} must be optional`).toBe(false);
@@ -1448,6 +1450,8 @@ describe("the production deploy is one reusable workflow", () => {
       'npm run --silent smoke:ingress -- "$RUNNER_TEMP/smoke-fleet.json" "$RUNNER_TEMP/smoke-receipt.json"',
     );
     expect(job.env?.SMOKE_INGRESS_TOKEN).toBe("${{ secrets.SMOKE_INGRESS_TOKEN }}");
+    expect(job.env?.SMOKE_ACCESS_CLIENT_ID).toBe("${{ secrets.SMOKE_ACCESS_CLIENT_ID }}");
+    expect(job.env?.SMOKE_ACCESS_CLIENT_SECRET).toBe("${{ secrets.SMOKE_ACCESS_CLIENT_SECRET }}");
     expect(job.env?.SMOKE_INGRESS_ORIGIN).toBe("${{ vars.SMOKE_INGRESS_ORIGIN }}");
     expect(steps.indexOf(smoke)).toBeGreaterThan(steps.findIndex((s) => s.name === "what is live"));
     const setup = steps.find((s) => s.name === "validate disposable smoke setup")!;

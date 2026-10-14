@@ -1814,6 +1814,16 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "required": false,
         "type": "boolean",
       },
+      {
+        "name": "readUser",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "readRepo",
+        "required": false,
+        "type": "string",
+      },
     ],
     "resource": "command",
     "surfaces": [

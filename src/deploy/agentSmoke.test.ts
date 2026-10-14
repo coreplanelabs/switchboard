@@ -4,6 +4,40 @@ import { MCP_PROTOCOL_VERSION } from "../mcp/client.js";
 
 import { commit, config, fixture, head } from "./testing/agentSmoke.js";
 
+/** Existing intake fixtures also serve the bounded read-only reader handshake. */
+function withReaderProbe(fetch: typeof globalThis.fetch): typeof globalThis.fetch {
+  return async (url, init) => {
+    if (String(url) === "https://bot.example.test/mcp") {
+      const request = JSON.parse(String(init?.body));
+      if (request.method === "initialize")
+        return Response.json({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: MCP_PROTOCOL_VERSION } });
+      if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (request.method === "tools/call" && request.params.name === "runs_list") {
+        const args = request.params.arguments;
+        if (args.channel !== "http:smoke" || args.limit !== 1 || args.status !== "all")
+          return Response.json({
+            jsonrpc: "2.0",
+            id: request.id,
+            error: { code: -32001, message: "fixture scope refused" },
+          });
+        return Response.json({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: 'runs.list: ok\n{"runs":[],"readScope":{"channelId":"http:smoke","userId":"http:smoke","repo":"acme/smoke","allowed":true}}',
+              },
+            ],
+          },
+        });
+      }
+    }
+    return fetch(url, init);
+  };
+}
+
 describe("bounded agent smoke", () => {
   it("sanitizes prefixed and encoded JSON fragments before retaining runless replies", async () => {
     for (const reply of [
@@ -24,7 +58,7 @@ describe("bounded agent smoke", () => {
           healthUrl: "https://bot.example.test/healthz",
           token: "fixture-only",
           config,
-          fetch,
+          fetch: withReaderProbe(fetch),
         }),
       });
       expect(receipt.scenarios[0]).toMatchObject({ outcome: "failed", reason: "no_agent_run" });
@@ -57,7 +91,7 @@ describe("bounded agent smoke", () => {
         healthUrl: "https://bot.example.test/healthz",
         token: "fixture-only",
         config,
-        fetch,
+        fetch: withReaderProbe(fetch),
       }),
     });
     expect(receipt.scenarios[0]).toMatchObject({ outcome: "failed", reason: "no_agent_run" });
@@ -101,7 +135,7 @@ describe("bounded agent smoke", () => {
           healthUrl: "https://bot.example.test/healthz",
           token: "fixture-only",
           config,
-          fetch,
+          fetch: withReaderProbe(fetch),
         }),
       });
       expect(receipt.scenarios[0]).toMatchObject({
@@ -152,7 +186,7 @@ describe("bounded agent smoke", () => {
           healthUrl: "https://bot.example.test/healthz",
           token: "fixture-only",
           config,
-          fetch,
+          fetch: withReaderProbe(fetch),
         }),
       });
       expect(receipt.scenarios[0]).toMatchObject({ outcome: "failed", reason: "no_agent_run" });
@@ -179,7 +213,7 @@ describe("bounded agent smoke", () => {
         healthUrl: "https://bot.example.test/healthz",
         token: "fixture-only",
         config,
-        fetch,
+        fetch: withReaderProbe(fetch),
       }),
       onReceipt: async (value) => {
         saved.push(value);
@@ -245,7 +279,7 @@ describe("bounded agent smoke", () => {
           healthUrl: "https://bot.example.test/healthz",
           token: "fixture-only",
           config,
-          fetch,
+          fetch: withReaderProbe(fetch),
         }),
       });
       expect(receipt.capabilityOutcome).toBe("incomplete");
@@ -280,7 +314,7 @@ describe("bounded agent smoke", () => {
         healthUrl: "https://bot.example.test/healthz",
         token: "fixture-only",
         config,
-        fetch,
+        fetch: withReaderProbe(fetch),
       }),
     });
     expect(receipt.capabilityOutcome).toBe("failed");
@@ -318,7 +352,7 @@ describe("bounded agent smoke", () => {
         healthUrl: "https://bot.example.test/healthz",
         token: "fixture-only",
         config,
-        fetch,
+        fetch: withReaderProbe(fetch),
       }),
     });
     expect(receipt.scenarios[0]).toMatchObject({
@@ -580,7 +614,7 @@ describe("bounded agent smoke", () => {
         healthUrl: "https://bot.example.test/healthz",
         token: "transport-opaque-value",
         config,
-        fetch,
+        fetch: withReaderProbe(fetch),
       });
       const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
       if (foreign) {
@@ -992,7 +1026,7 @@ describe("bounded agent smoke", () => {
         healthUrl: "https://bot.example.test/healthz",
         token: "fixture-only",
         config,
-        fetch,
+        fetch: withReaderProbe(fetch),
       });
       const pending = runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
       await vi.runAllTimersAsync();
@@ -1032,7 +1066,7 @@ describe("bounded agent smoke", () => {
         healthUrl: "https://bot.example.test/healthz",
         token: "fixture-only",
         config,
-        fetch,
+        fetch: withReaderProbe(fetch),
       });
       const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
       expect(receipt.scenarios[0]).toMatchObject({
@@ -1072,7 +1106,7 @@ describe("bounded agent smoke", () => {
         healthUrl: "https://bot.example.test/healthz",
         token: "fixture-only",
         config,
-        fetch,
+        fetch: withReaderProbe(fetch),
       });
       const pending = runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
       await vi.runAllTimersAsync();
@@ -1115,7 +1149,7 @@ describe("bounded agent smoke", () => {
       healthUrl: "https://bot.example.test/healthz",
       token: "fixture-only",
       config,
-      fetch,
+      fetch: withReaderProbe(fetch),
     });
     expect(await transport.health()).toEqual({ commit });
     expect(
@@ -1130,7 +1164,461 @@ describe("bounded agent smoke", () => {
       expect(init?.redirect).toBe("error");
       expect(init?.signal).toBeInstanceOf(AbortSignal);
     }
-    const body = JSON.parse(String(fetch.mock.calls[1]?.[1]?.body));
+    const body = JSON.parse(String(fetch.mock.calls.find(([url]) => String(url).endsWith("/ingress"))?.[1]?.body));
     expect(body).toEqual({ text: "question", channel: "smoke", thread: "smoke-1", async: true });
+  });
+});
+
+describe("machine MCP reader authentication", () => {
+  it.each([
+    ["missing", undefined, "mcp_protocol_mismatch"],
+    [
+      "denied",
+      { channelId: "http:smoke", userId: "http:smoke", repo: "acme/smoke", allowed: false },
+      "mcp_read_scope_denied",
+    ],
+    [
+      "foreign channel",
+      { channelId: "mcp:smoke", userId: "http:smoke", repo: "acme/smoke", allowed: true },
+      "mcp_protocol_mismatch",
+    ],
+    [
+      "foreign user",
+      { channelId: "http:smoke", userId: "http:foreign", repo: "acme/smoke", allowed: true },
+      "mcp_protocol_mismatch",
+    ],
+    [
+      "foreign repo",
+      { channelId: "http:smoke", userId: "http:smoke", repo: "acme/foreign", allowed: true },
+      "mcp_protocol_mismatch",
+    ],
+    [
+      "malformed",
+      { channelId: "http:smoke", userId: "http:smoke", repo: "acme/smoke", allowed: "yes" },
+      "mcp_protocol_mismatch",
+    ],
+  ])("refuses %s scope proof even when history is empty", async (_name, readScope, code) => {
+    const paths: string[] = [];
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      paths.push(new URL(String(url)).pathname);
+      if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: { commit } });
+      const request = JSON.parse(String(init?.body));
+      if (String(url).endsWith("/ingress")) return Response.json({ runId: "unexpected-run" }, { status: 202 });
+      if (request.method === "initialize")
+        return Response.json({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: MCP_PROTOCOL_VERSION } });
+      if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+      return Response.json({
+        jsonrpc: "2.0",
+        id: request.id,
+        result: {
+          content: [
+            {
+              type: "text",
+              text: `runs.list: ok\n${JSON.stringify({ runs: [], readScope, detail: "private-reader-detail" })}`,
+            },
+          ],
+        },
+      });
+    });
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "release-1",
+      transport: agentSmokeTransport({
+        origin: "https://bot.example.test",
+        healthUrl: "https://bot.example.test/healthz",
+        token: "fixture-only",
+        config,
+        fetch,
+      }),
+    });
+    expect(receipt).toMatchObject({
+      capabilityOutcome: "incomplete",
+      scenarios: [
+        { reason: "reader_unproven", observationError: { code, http: { status: 200, authChallenge: false } } },
+        { outcome: "skipped" },
+        { outcome: "skipped" },
+      ],
+    });
+    expect(paths).toEqual(["/healthz", "/mcp", "/mcp", "/mcp"]);
+    expect(JSON.stringify(receipt)).not.toContain("private-reader-detail");
+  });
+  it.each(["storeUnavailable", "ledgerUnavailable"])(
+    "refuses degraded reader flag %s before starting work",
+    async (flag) => {
+      const paths: string[] = [];
+      const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        paths.push(new URL(String(url)).pathname);
+        if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: { commit } });
+        const request = JSON.parse(String(init?.body));
+        if (String(url).endsWith("/ingress")) return Response.json({ runId: "unexpected-run" }, { status: 202 });
+        if (request.method === "initialize")
+          return Response.json({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: MCP_PROTOCOL_VERSION } });
+        if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+        return Response.json({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: `runs.list: ok\n${JSON.stringify({ runs: [], [flag]: true, detail: "private-reader-detail" })}`,
+              },
+            ],
+          },
+        });
+      });
+      const receipt = await runAgentSmoke({
+        config,
+        expectedCommit: commit,
+        thread: "release-1",
+        transport: agentSmokeTransport({
+          origin: "https://bot.example.test",
+          healthUrl: "https://bot.example.test/healthz",
+          token: "fixture-only",
+          config,
+          fetch,
+        }),
+      });
+      expect(receipt).toMatchObject({
+        capabilityOutcome: "incomplete",
+        scenarios: [
+          {
+            reason: "reader_unproven",
+            observationError: { code: "mcp_reader_unavailable", http: { status: 200, authChallenge: false } },
+          },
+          { outcome: "skipped" },
+          { outcome: "skipped" },
+        ],
+      });
+      expect(paths).toEqual(["/healthz", "/mcp", "/mcp", "/mcp"]);
+      expect(JSON.stringify(receipt)).not.toContain("private-reader-detail");
+    },
+  );
+  it("rejects either partial Access credential pair before a request", () => {
+    for (const [access, missing] of [
+      [{ clientId: "access-client" }, "SMOKE_ACCESS_CLIENT_SECRET"],
+      [{ clientSecret: "access-private" }, "SMOKE_ACCESS_CLIENT_ID"],
+    ] as const) {
+      expect(() =>
+        agentSmokeTransport({
+          origin: "https://bot.example.test",
+          healthUrl: "https://bot.example.test/healthz",
+          token: "fixture-only",
+          config,
+          access,
+        }),
+      ).toThrow(`${missing} is not set`);
+    }
+  });
+  it("completes the original runs with paired Access auth confined to canonical MCP", async () => {
+    const original = fixture();
+    const requests: Array<{ path: string; auth: string | null; accessId: string | null; accessSecret: string | null }> =
+      [];
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(url)).pathname;
+      const headers = new Headers(init?.headers);
+      requests.push({
+        path,
+        auth: headers.get("authorization"),
+        accessId: headers.get("cf-access-client-id"),
+        accessSecret: headers.get("cf-access-client-secret"),
+      });
+      if (path === "/healthz") return Response.json({ ok: true, build: { commit, version: "1.0.0" } });
+      const request = JSON.parse(String(init?.body));
+      if (path === "/ingress") {
+        const scenario = request.text.includes("agent:review")
+          ? "review"
+          : request.text.includes("agent:explore")
+            ? "workspace"
+            : "answer";
+        const admission = (await original.transport.request(
+          {
+            id: scenario,
+            agent: scenario === "workspace" ? "explore" : scenario === "review" ? "review" : "general",
+            text: request.text,
+            minutes: Number(request.text.match(/budget:(\d+)/)?.[1]),
+          },
+          request.thread,
+        )) as { run: { id: string }; build: unknown };
+        return Response.json(
+          { runId: admission.run.id, threadKey: `http:smoke:${request.thread}`, build: admission.build },
+          { status: 202 },
+        );
+      }
+      if (
+        headers.get("cf-access-client-id") !== "access-client" ||
+        headers.get("cf-access-client-secret") !== "access-private"
+      )
+        return Response.json(
+          { error: "invalid_token" },
+          { status: 401, headers: { "www-authenticate": "Bearer realm=OAuth" } },
+        );
+      if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (request.method === "initialize")
+        return Response.json({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: MCP_PROTOCOL_VERSION } });
+      if (
+        request.params.name === "runs_list" &&
+        (request.params.arguments.channel !== "http:smoke" ||
+          request.params.arguments.limit !== 1 ||
+          request.params.arguments.status !== "all")
+      )
+        return Response.json({
+          jsonrpc: "2.0",
+          id: request.id,
+          error: { code: -32001, message: "fixture scope refused" },
+        });
+      const text =
+        request.params.name === "runs_list"
+          ? 'runs.list: ok\n{"runs":[],"readScope":{"channelId":"http:smoke","userId":"http:smoke","repo":"acme/smoke","allowed":true}}'
+          : `runs.get: ok\n${JSON.stringify(original.records.get(request.params.arguments.id))}`;
+      return Response.json({ jsonrpc: "2.0", id: request.id, result: { content: [{ type: "text", text }] } });
+    });
+    const options = {
+      origin: "https://bot.example.test",
+      healthUrl: "https://bot.example.test/healthz",
+      token: "fixture-only",
+      config,
+      fetch,
+      access: { clientId: "access-client", clientSecret: "access-private" },
+    };
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "release-1",
+      transport: agentSmokeTransport(options),
+    });
+    expect(
+      receipt.capabilityOutcome,
+      JSON.stringify(receipt.scenarios.map(({ reason, observationError }) => ({ reason, observationError }))),
+    ).toBe("passed");
+    expect(receipt.scenarios.map((row) => [row.runId, row.outcome])).toEqual([
+      ["run-answer", "passed"],
+      ["run-workspace", "passed"],
+      ["run-review", "passed"],
+    ]);
+    expect(
+      requests.filter((row) => row.path === "/mcp").map((row) => [row.auth, row.accessId, row.accessSecret]),
+    ).toEqual(expect.arrayContaining([["Bearer fixture-only", "access-client", "access-private"]]));
+    expect(
+      requests.filter((row) => row.path !== "/mcp").map((row) => [row.path, row.accessId, row.accessSecret]),
+    ).toEqual([
+      ["/healthz", null, null],
+      ["/ingress", null, null],
+      ["/healthz", null, null],
+      ["/healthz", null, null],
+      ["/ingress", null, null],
+      ["/healthz", null, null],
+      ["/healthz", null, null],
+      ["/ingress", null, null],
+      ["/healthz", null, null],
+    ]);
+  });
+
+  it("refuses a reader auth challenge before admission and retains only safe HTTP facts", async () => {
+    const paths: string[] = [];
+    const fetch = vi.fn(async (url: string | URL | Request) => {
+      const path = new URL(String(url)).pathname;
+      paths.push(path);
+      if (path === "/healthz") return Response.json({ ok: true, build: { commit } });
+      if (path === "/mcp")
+        return new Response("access-private fixture-only", {
+          status: 401,
+          headers: { "www-authenticate": "Bearer access-private" },
+        });
+      return Response.json(
+        { runId: "admitted-run", threadKey: "http:smoke:release-1-answer", build: { commit } },
+        { status: 202 },
+      );
+    });
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "release-1",
+      transport: agentSmokeTransport({
+        origin: "https://bot.example.test",
+        healthUrl: "https://bot.example.test/healthz",
+        token: "fixture-only",
+        config,
+        fetch,
+      }),
+    });
+    expect(receipt).toMatchObject({
+      capabilityOutcome: "incomplete",
+      observedUsd: 0,
+      scenarios: [
+        {
+          outcome: "incomplete",
+          reason: "reader_unproven",
+          observationError: { code: "mcp_auth_required", http: { status: 401, authChallenge: true } },
+        },
+        { outcome: "skipped" },
+        { outcome: "skipped" },
+      ],
+    });
+    expect(paths).toEqual(["/healthz", "/mcp"]);
+    expect(JSON.stringify(receipt)).not.toContain("access-private");
+    expect(JSON.stringify(receipt)).not.toContain("fixture-only");
+  });
+
+  it("distinguishes a denied reader grant from other RPC refusals without retaining remote prose", async () => {
+    for (const [code, expected] of [
+      [-32001, "mcp_read_unauthorized"],
+      [-32602, "mcp_rpc_failed"],
+    ] as const) {
+      const paths: string[] = [];
+      const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const path = new URL(String(url)).pathname;
+        paths.push(path);
+        if (path === "/healthz") return Response.json({ ok: true, build: { commit } });
+        const request = JSON.parse(String(init?.body));
+        if (request.method === "initialize")
+          return Response.json({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: MCP_PROTOCOL_VERSION } });
+        if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+        return Response.json({
+          jsonrpc: "2.0",
+          id: request.id,
+          error: { code, message: "access-private remote prose" },
+        });
+      });
+      const receipt = await runAgentSmoke({
+        config,
+        expectedCommit: commit,
+        thread: "release-1",
+        transport: agentSmokeTransport({
+          origin: "https://bot.example.test",
+          healthUrl: "https://bot.example.test/healthz",
+          token: "fixture-only",
+          config,
+          fetch,
+        }),
+      });
+      expect(receipt).toMatchObject({
+        capabilityOutcome: "incomplete",
+        scenarios: [
+          {
+            reason: "reader_unproven",
+            observationError: { code: expected, http: { status: 200, authChallenge: false } },
+          },
+          { outcome: "skipped" },
+          { outcome: "skipped" },
+        ],
+      });
+      expect(paths).toEqual(["/healthz", "/mcp", "/mcp", "/mcp"]);
+      expect(JSON.stringify(receipt)).not.toContain("access-private");
+    }
+  });
+
+  it("retains an original admission when its MCP read is denied after readiness", async () => {
+    let admissions = 0;
+    const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: { commit } });
+      const request = JSON.parse(String(init?.body));
+      if (String(url).endsWith("/ingress")) {
+        admissions++;
+        return Response.json(
+          { runId: "original-run", threadKey: "http:smoke:release-1-answer", build: { commit } },
+          { status: 202 },
+        );
+      }
+      if (request.method === "initialize")
+        return Response.json({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: MCP_PROTOCOL_VERSION } });
+      if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (request.params.name === "runs_list")
+        return Response.json({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: 'runs.list: ok\n{"runs":[],"readScope":{"channelId":"http:smoke","userId":"http:smoke","repo":"acme/smoke","allowed":true}}',
+              },
+            ],
+          },
+        });
+      return new Response("access-private", { status: 403 });
+    });
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "release-1",
+      transport: agentSmokeTransport({
+        origin: "https://bot.example.test",
+        healthUrl: "https://bot.example.test/healthz",
+        token: "fixture-only",
+        config,
+        fetch,
+        access: { clientId: "access-client", clientSecret: "access-private" },
+      }),
+    });
+    expect(receipt).toMatchObject({
+      capabilityOutcome: "incomplete",
+      scenarios: [
+        {
+          runId: "original-run",
+          reason: "run_record_unproven",
+          observationError: { code: "mcp_access_denied", http: { status: 403, authChallenge: false } },
+        },
+        { outcome: "skipped" },
+        { outcome: "skipped" },
+      ],
+    });
+    expect(admissions).toBe(1);
+    expect(JSON.stringify(receipt)).not.toContain("access-private");
+  });
+
+  it("refuses foreign reader metadata before starting a run", async () => {
+    for (const identity of [
+      { userId: "http:foreign", channelId: "http:smoke" },
+      { userId: "http:smoke", channelId: "http:foreign" },
+    ]) {
+      const paths: string[] = [];
+      const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        paths.push(new URL(String(url)).pathname);
+        if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: { commit } });
+        const request = JSON.parse(String(init?.body));
+        if (request.method === "initialize")
+          return Response.json({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: MCP_PROTOCOL_VERSION } });
+        if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
+        return Response.json({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: `runs.list: ok\n${JSON.stringify({ runs: [{ ...identity, private: "foreign-private-content" }], readScope: { channelId: "http:smoke", userId: "http:smoke", repo: "acme/smoke", allowed: true } })}`,
+              },
+            ],
+          },
+        });
+      });
+      const receipt = await runAgentSmoke({
+        config,
+        expectedCommit: commit,
+        thread: "release-1",
+        transport: agentSmokeTransport({
+          origin: "https://bot.example.test",
+          healthUrl: "https://bot.example.test/healthz",
+          token: "fixture-only",
+          config,
+          fetch,
+        }),
+      });
+      expect(receipt).toMatchObject({
+        capabilityOutcome: "incomplete",
+        scenarios: [
+          {
+            reason: "reader_unproven",
+            observationError: { code: "mcp_protocol_mismatch", http: { status: 200, authChallenge: false } },
+          },
+          { outcome: "skipped" },
+          { outcome: "skipped" },
+        ],
+      });
+      expect(paths).toEqual(["/healthz", "/mcp", "/mcp", "/mcp"]);
+      expect(JSON.stringify(receipt)).not.toContain("foreign-private-content");
+    }
   });
 });
