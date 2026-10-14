@@ -98,6 +98,21 @@ describe("the three images carry one pi", () => {
 });
 
 describe("the installed pi packages", () => {
+  it("keeps internal pi dependencies on the image release in the lockfile and global installs", () => {
+    const lock = JSON.parse(read("package-lock.json")) as { packages: Record<string, { version?: string }> };
+    const peers = Object.entries(lock.packages).filter(([path]) => /node_modules\/@earendil-works\/[^/]+$/.test(path));
+    expect(peers.length).toBeGreaterThan(2);
+    for (const [path, pkg] of peers) {
+      expect(pkg.version, path).toBe(PI_VERSION);
+      const name = path.slice(path.lastIndexOf("node_modules/") + "node_modules/".length);
+      for (const image of ALL_IMAGES)
+        expect(
+          imagePins(read(image)).find((pin) => pin.tool === name),
+          `${image}: ${name}`,
+        ).toMatchObject({ spec: PI_VERSION, floating: false });
+    }
+  });
+
   it.each(["pi-ai", "pi-coding-agent"])("%s resolves to the exact image pin", (name) => {
     const pkg = JSON.parse(read(`node_modules/@earendil-works/${name}/package.json`)) as { version: string };
     expect(pkg.version).toBe(PI_VERSION);
