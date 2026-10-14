@@ -5,6 +5,71 @@ import { MCP_PROTOCOL_VERSION } from "../mcp/client.js";
 import { commit, config, fixture, head } from "./testing/agentSmoke.js";
 
 describe("bounded agent smoke", () => {
+  it("sanitizes prefixed and encoded JSON fragments before retaining runless replies", async () => {
+    for (const reply of [
+      'response={"api_token":"opaque-private-value"} after',
+      `response=${JSON.stringify(JSON.stringify({ api_token: "opaque-private-value" }))} after`,
+      'response={"api_token":"opaque-private-value',
+      `${"x".repeat(15930)} response=${JSON.stringify({ api_token: "opaque-private-value", detail: "z".repeat(2000) })} after`,
+    ]) {
+      const fetch = vi.fn(async (url: string | URL | Request) =>
+        String(url).endsWith("/healthz") ? Response.json({ ok: true, build: { commit } }) : Response.json({ reply }),
+      );
+      const receipt = await runAgentSmoke({
+        config,
+        expectedCommit: commit,
+        thread: "release-1",
+        transport: agentSmokeTransport({
+          origin: "https://bot.example.test",
+          healthUrl: "https://bot.example.test/healthz",
+          token: "fixture-only",
+          config,
+          fetch,
+        }),
+      });
+      expect(receipt.scenarios[0]).toMatchObject({ outcome: "failed", reason: "no_agent_run" });
+      const response = receipt.scenarios[0]?.intake?.response;
+      const observed = response?.truncated ? response.preview! : (response?.body as { reply: string }).reply;
+      expect(observed).toContain("response=");
+      expect(observed).toContain("redacted");
+      expect(JSON.stringify(receipt)).not.toContain("opaque-private-value");
+      if (reply.length > 16000) {
+        expect(response?.truncated).toBe(true);
+        expect(observed).toHaveLength(16000);
+      } else if (reply.endsWith(" after")) expect(observed).toContain(" after");
+      else expect(observed).toBe("response=«redacted-json-fragment»");
+    }
+  });
+
+  it("excludes transport and canonical credentials used as raw or encoded JSON member names", async () => {
+    const detail = { "fixture-only": "diagnostic", ghp_abcdefghijklmnopqrstuvwxy: "diagnostic" };
+    const fetch = vi.fn(async (url: string | URL | Request) =>
+      String(url).endsWith("/healthz")
+        ? Response.json({ ok: true, build: { commit } })
+        : Response.json({ detail, reply: JSON.stringify({ detail }) }),
+    );
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "release-1",
+      transport: agentSmokeTransport({
+        origin: "https://bot.example.test",
+        healthUrl: "https://bot.example.test/healthz",
+        token: "fixture-only",
+        config,
+        fetch,
+      }),
+    });
+    expect(receipt.scenarios[0]).toMatchObject({ outcome: "failed", reason: "no_agent_run" });
+    const body = receipt.scenarios[0]?.intake?.response?.body as { detail: unknown; reply: string };
+    expect(body.detail).toEqual({ "«redacted»": "diagnostic", "«redacted-github-token»": "diagnostic" });
+    expect(JSON.parse(body.reply)).toEqual({
+      detail: { "«redacted»": "diagnostic", "«redacted-github-token»": "diagnostic" },
+    });
+    for (const secret of ["fixture-only", "ghp_abcdefghijklmnopqrstuvwxy"])
+      expect(JSON.stringify(receipt)).not.toContain(secret);
+  });
+
   it("redacts credentials in nested JSON-encoded replies before retaining or truncating intake evidence", async () => {
     for (const detail of ["diagnostic", "x".repeat(20000)]) {
       const fetch = vi.fn(async (url: string | URL | Request) =>
