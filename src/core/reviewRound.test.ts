@@ -974,6 +974,12 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       const out = await runReviewPostStep({
         ...base(h, events),
         carried: { reviewed: HEAD, current: OTHER, commits: 2 },
+        digest: {
+          complete: true,
+          base: "main",
+          range: { base: "e".repeat(40), canonicalBase: "e".repeat(40), head: HEAD, baseRef: "main" },
+          totals: { files: 1, additions: 1, deletions: 0 },
+        },
         fetchPrHead: async () => OTHER,
       });
       expect(out).toMatchObject({ posted: true, head: OTHER });

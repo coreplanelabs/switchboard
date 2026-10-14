@@ -57,3 +57,32 @@ describe("checkDigestCoverage", () => {
     expect(coverageTolerance({ changedFiles: 1, additions: 1, deletions: 0 })).toEqual({ files: 1, lines: 50 });
   });
 });
+
+// Feature: agent-review.md item 15.
+describe("canonical digest range guard", () => {
+  it.each(["incremental", "stale head", "different base"])(
+    "refuses %s coverage even when its totals are large",
+    (kind) => {
+      const range = { base: "a".repeat(40), canonicalBase: "a".repeat(40), head: "b".repeat(40), baseRef: "main" };
+      const digest = {
+        complete: true as const,
+        base: "main",
+        range,
+        totals: { files: 49, additions: 1772, deletions: 126 },
+      };
+      const target = {
+        pr: { changedFiles: 49, additions: 1772, deletions: 126 },
+        head: "b".repeat(40),
+        baseRef: "main",
+      };
+      expect(checkDigestCoverage({ ...target, digest })).toEqual({ ok: true, compared: true });
+      if (kind === "incremental") range.base = "c".repeat(40);
+      if (kind === "stale head") range.head = "c".repeat(40);
+      if (kind === "different base") range.baseRef = "release";
+      expect(checkDigestCoverage({ ...target, digest })).toEqual({
+        ok: false,
+        reason: "the diff digest does not cover the current canonical PR range",
+      });
+    },
+  );
+});

@@ -51,6 +51,8 @@ export function coverageTolerance(pr: PrSize): { files: number; lines: number } 
 export function checkDigestCoverage(input: {
   digest: DigestReport | undefined;
   pr: PrSize | undefined;
+  head?: string;
+  baseRef?: string;
 }): CoverageCheck {
   const { digest, pr } = input;
   if (!digest) return { ok: true, compared: false };
@@ -60,6 +62,13 @@ export function checkDigestCoverage(input: {
       reason: `the diff digest could not state its totals (${digest.reason}) — the review may not have read the whole change`,
     };
   }
+  if (
+    digest.range &&
+    (digest.range.base !== digest.range.canonicalBase ||
+      (input.head !== undefined && digest.range.head !== input.head.toLowerCase()) ||
+      (input.baseRef !== undefined && digest.range.baseRef !== input.baseRef))
+  )
+    return { ok: false, reason: "the diff digest does not cover the current canonical PR range" };
   if (!pr) return { ok: true, compared: false };
   const tol = coverageTolerance(pr);
   const filesShort = pr.changedFiles - digest.totals.files > tol.files;

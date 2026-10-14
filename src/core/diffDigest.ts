@@ -34,11 +34,33 @@ export interface DigestTotals {
   deletions: number;
 }
 
-/** What the diff_digest tool reports to the run that owns it, once per call
- *  (the last call wins): the range it digested and either its totals or the
- *  reason it could not state them. */
-export type DigestReport =
-  { complete: true; base: string; totals: DigestTotals } | { complete: false; base: string; reason: string };
+/** Immutable merge-base range observed in the bound review checkout. */
+export interface DigestRange {
+  base: string;
+  head: string;
+  canonicalBase: string;
+  baseRef: string;
+}
+
+export type DigestReport = (
+  { complete: true; base: string; totals: DigestTotals } | { complete: false; base: string; reason: string }
+) & { range?: DigestRange };
+
+/** Incremental inspection cannot replace full coverage of the same PR range. */
+export function retainDigest(previous: DigestReport | undefined, next: DigestReport): DigestReport {
+  const old = previous?.range;
+  const current = next.range;
+  return previous &&
+    old &&
+    current &&
+    old.base === old.canonicalBase &&
+    current.base !== current.canonicalBase &&
+    old.canonicalBase === current.canonicalBase &&
+    old.head === current.head &&
+    old.baseRef === current.baseRef
+    ? previous
+    : next;
+}
 
 export interface Digest {
   text: string;
@@ -248,6 +270,23 @@ export function parseDigestReport(value: unknown): DigestReport | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const v = value as Record<string, unknown>;
   if (typeof v.base !== "string") return undefined;
+  let range: DigestRange | undefined;
+  if (v.range !== undefined) {
+    if (!v.range || typeof v.range !== "object") return undefined;
+    const r = v.range as Record<string, unknown>;
+    if (
+      ![r.base, r.head, r.canonicalBase].every((x) => typeof x === "string" && /^[0-9a-f]{40}$/.test(x)) ||
+      typeof r.baseRef !== "string" ||
+      !r.baseRef
+    )
+      return undefined;
+    range = {
+      base: r.base as string,
+      head: r.head as string,
+      canonicalBase: r.canonicalBase as string,
+      baseRef: r.baseRef,
+    };
+  }
   if (v.complete === true) {
     const t = v.totals as Record<string, unknown> | undefined;
     const n = (x: unknown) => typeof x === "number" && Number.isInteger(x) && x >= 0;
@@ -255,9 +294,11 @@ export function parseDigestReport(value: unknown): DigestReport | undefined {
     return {
       complete: true,
       base: v.base,
+      ...(range ? { range } : {}),
       totals: { files: t.files as number, additions: t.additions as number, deletions: t.deletions as number },
     };
   }
-  if (v.complete === false && typeof v.reason === "string") return { complete: false, base: v.base, reason: v.reason };
+  if (v.complete === false && typeof v.reason === "string")
+    return { complete: false, base: v.base, reason: v.reason, ...(range ? { range } : {}) };
   return undefined;
 }
