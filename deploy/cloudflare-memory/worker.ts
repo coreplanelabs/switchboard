@@ -1,3 +1,4 @@
+import { parseStoredJson } from "../../src/core/storedJson.ts";
 import { STORAGE_FAILURE_DIAGNOSTIC_HEADER, storageFailureNotice } from "../../src/core/storageFailureDiagnostic.ts";
 import { hasConfirmationConsent, type ConfirmationConsentSource } from "../../src/core/confirmationConsent.ts";
 import {
@@ -981,7 +982,7 @@ function toRecord(row: Row): MemoryRecord {
     scopeKey: row.scope_key,
     kind: row.kind as MemoryRecord["kind"],
     text: row.text,
-    keywords: JSON.parse(row.keywords) as string[],
+    keywords: parseStoredJson(row.keywords) as string[],
     sourceThreadKey: row.source_thread_key,
     createdAt: row.created_at,
     useCount: row.use_count,
@@ -990,7 +991,7 @@ function toRecord(row: Row): MemoryRecord {
   if (row.source_run_id !== null) r.sourceRunId = row.source_run_id;
   if (row.provenance_json) {
     try {
-      const provenance: unknown = JSON.parse(row.provenance_json);
+      const provenance: unknown = parseStoredJson(row.provenance_json);
       if (isMemoryProvenance(provenance) && provenance.scopeKey === row.scope_key) r.provenance = provenance;
     } catch {
       /* Malformed legacy metadata remains unknown to source readers. */
@@ -1075,7 +1076,7 @@ export class ScheduleDO extends DurableObject<Env> {
     const out: ScheduleFiring[] = [];
     for (const row of rows) {
       try {
-        const parsed: unknown = JSON.parse(row.record);
+        const parsed: unknown = parseStoredJson(row.record);
         if (isScheduleFiring(parsed)) out.push(parsed);
       } catch {
         // a corrupt row is skipped, never fatal
@@ -1446,7 +1447,7 @@ export class ConfigDO extends DurableObject<Env> {
       .toArray()[0];
     if (!row) return { document: null, version: 0 };
     try {
-      return { document: JSON.parse(row.body) as unknown, version: row.version };
+      return { document: parseStoredJson(row.body) as unknown, version: row.version };
     } catch {
       return { document: null, version: row.version };
     }
@@ -1514,7 +1515,7 @@ export class ConfigDO extends DurableObject<Env> {
 
 function parseStored<T>(text: string, guard: (v: unknown) => v is T): T | null {
   try {
-    const parsed: unknown = JSON.parse(text);
+    const parsed: unknown = parseStoredJson(text);
     return guard(parsed) ? parsed : null;
   } catch {
     return null;
@@ -1622,8 +1623,8 @@ export class DeliveryDO extends DurableObject<Env> {
     const prs = this.sql
       .exec<{ facts: string }>(`SELECT facts FROM pull_requests WHERE repo = ? ORDER BY number`, repo)
       .toArray()
-      .map((r) => JSON.parse(r.facts) as DeliverySnapshot["prs"][number]);
-    return { ...(JSON.parse(row.meta) as Omit<DeliverySnapshot, "prs">), prs };
+      .map((r) => parseStoredJson(r.facts) as DeliverySnapshot["prs"][number]);
+    return { ...(parseStoredJson(row.meta) as Omit<DeliverySnapshot, "prs">), prs };
   }
 }
 
@@ -1756,12 +1757,12 @@ export class CostsSnapshotDO extends DurableObject<Env> {
     if (meta === undefined) return null;
     const read = (part: string): unknown => {
       const body = parts.get(part);
-      return body === undefined ? undefined : (JSON.parse(body) as unknown);
+      return body === undefined ? undefined : (parseStoredJson(body) as unknown);
     };
     const usage = Object.fromEntries(USAGE_PARTS.map((name) => [name, read(`usage.${name}`)]));
     const invoices = read("invoices");
     const snapshot = {
-      ...(JSON.parse(meta) as Record<string, unknown>),
+      ...(parseStoredJson(meta) as Record<string, unknown>),
       usage,
       llm: read("llm"),
       ...(invoices !== undefined ? { invoices } : {}),
@@ -2102,7 +2103,7 @@ type LiveRow = {
 type StateWriteGuard = { ok: true; before: string } | { ok: false; reason: "fenced" | "unknown-run" };
 
 function rowToLive(r: LiveRow): LiveRunRow {
-  const state = JSON.parse(r.state_json) as RunState;
+  const state = parseStoredJson(r.state_json) as RunState;
   const liveState = state.liveState as LiveRunRow["liveState"];
   const liveStateSeq = state.liveStateSeq;
   return {
@@ -2113,10 +2114,10 @@ function rowToLive(r: LiveRow): LiveRunRow {
     startedAt: r.started_at,
     phase: r.phase as LivePhase,
     stop: (r.stop as StopMode | null) ?? null,
-    meta: JSON.parse(r.meta_json) as LiveRunRow["meta"],
-    card: r.card_json ? (JSON.parse(r.card_json) as LiveRunRow["card"]) : null,
+    meta: parseStoredJson(r.meta_json) as LiveRunRow["meta"],
+    card: r.card_json ? (parseStoredJson(r.card_json) as LiveRunRow["card"]) : null,
     system: r.system_text,
-    tools: JSON.parse(r.tools_json) as LiveRunRow["tools"],
+    tools: parseStoredJson(r.tools_json) as LiveRunRow["tools"],
     state,
     ...(liveState !== undefined ? { liveState } : {}),
     ...(typeof liveStateSeq === "number" ? { liveStateSeq } : {}),
@@ -2602,8 +2603,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         requester: r.requester,
         threadKey: r.thread_key,
         stage: r.stage as PlaneStage,
-        request: JSON.parse(r.request_json) as Record<string, unknown>,
-        conditions: JSON.parse(r.conditions_json) as PlaneQueueRow["conditions"],
+        request: parseStoredJson(r.request_json) as Record<string, unknown>,
+        conditions: parseStoredJson(r.conditions_json) as PlaneQueueRow["conditions"],
         position: r.position_at,
         queuedAt: r.queued_at,
         state: r.state as PlaneQueueRow["state"],
@@ -2617,7 +2618,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const liveThreads = liveRows.map((r) => r.thread_key);
     const liveRuns = Object.fromEntries(
       liveRows.flatMap((r) => {
-        const meta = JSON.parse(r.meta_json) as Record<string, unknown>;
+        const meta = parseStoredJson(r.meta_json) as Record<string, unknown>;
         return typeof meta.channelId === "string"
           ? [[r.run_id, { channelId: meta.channelId, threadKey: r.thread_key }] as const]
           : [];
@@ -2747,7 +2748,7 @@ export class RunHistoryDO extends DurableObject<Env> {
               {
                 watch: w.finding.watch,
                 subject: w.finding.subject,
-                timeline: JSON.parse(prior.timeline_json) as PlaneFinding["timeline"],
+                timeline: parseStoredJson(prior.timeline_json) as PlaneFinding["timeline"],
                 firstAt: Number(prior.filed_at),
                 lastAt: w.finding.lastAt,
               },
@@ -3025,7 +3026,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       .toArray()) {
       dues.push(r.lease_until > now ? r.lease_until : reoffer);
       try {
-        const hosting = (JSON.parse(r.state_json) as Record<string, unknown>).hosting as { until?: unknown };
+        const hosting = (parseStoredJson(r.state_json) as Record<string, unknown>).hosting as { until?: unknown };
         if (typeof hosting?.until === "number") dues.push(hosting.until > now ? hosting.until : reoffer);
       } catch {
         // A malformed state contributes no deadline.
@@ -3238,7 +3239,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         PLANE_EFFECTS_PER_ANSWER,
       )
       .toArray()
-      .map((r) => JSON.parse(r.body_json) as PlaneEffect);
+      .map((r) => parseStoredJson(r.body_json) as PlaneEffect);
   }
 
   /** Shadow (orchestration-plane item 8): the bot's own outcome for one dispatch, judged beside the
@@ -3282,7 +3283,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const row = this.sql
       .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'plane_disagreements'`)
       .toArray()[0];
-    const counts = row ? (JSON.parse(row.value) as Record<string, number>) : {};
+    const counts = row ? (parseStoredJson(row.value) as Record<string, number>) : {};
     counts[condition] = (counts[condition] ?? 0) + 1;
     this.sql.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('plane_disagreements', ?)`, JSON.stringify(counts));
   }
@@ -3304,7 +3305,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         .exec<{ body_json: string }>(`SELECT body_json FROM plane_effects WHERE id = ? AND acked_at IS NULL`, id)
         .toArray()[0];
       if (!offered) return;
-      const effect = JSON.parse(offered.body_json) as PlaneEffect;
+      const effect = parseStoredJson(offered.body_json) as PlaneEffect;
       if (effect.kind !== "steer" || effect.runId !== runId) return;
       const live = this.liveRow(runId);
       if (!live || live.ownerGen !== gen || live.phase !== "live") return;
@@ -3326,7 +3327,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       .exec<{ body_json: string }>(`SELECT body_json FROM plane_effects WHERE id = ? AND acked_at IS NULL`, id)
       .toArray()[0];
     if (!offered) return { ok: true };
-    const effect = JSON.parse(offered.body_json) as PlaneEffect;
+    const effect = parseStoredJson(offered.body_json) as PlaneEffect;
     // A terminal execution's offer is not closed by a transport word. Its
     // canonical report obligations are independently checked below.
     if (effect.kind === "coordinator_reconcile") return { ok: true };
@@ -3355,8 +3356,8 @@ export class RunHistoryDO extends DurableObject<Env> {
       .toArray()[0];
     if (!savedInstance || !savedUnit) return;
     try {
-      const instance = JSON.parse(savedInstance.json),
-        row = JSON.parse(savedUnit.json);
+      const instance = parseStoredJson(savedInstance.json),
+        row = parseStoredJson(savedUnit.json);
       if (!isCoordinatorInstance(instance) || !isCoordinatorUnit(row) || row.instanceId !== instance.id) return;
       const actionId = row.recovery?.actionId ?? (row.recoveryReceipt ? row.history?.receiptId : undefined);
       let action: RecoveryAction | undefined;
@@ -3371,7 +3372,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           )
           .toArray()[0];
         if (!record) return;
-        const parsed = JSON.parse(record.json);
+        const parsed = parseStoredJson(record.json);
         if (
           !isRecoveryAction(parsed) ||
           parsed.instanceId !== instance.id ||
@@ -3505,7 +3506,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     let after: [string, string] = ["", ""];
     try {
       if (cursor) {
-        const value = JSON.parse(cursor.value);
+        const value = parseStoredJson(cursor.value);
         if (Array.isArray(value) && value.length === 2 && value.every((v) => typeof v === "string"))
           after = value as [string, string];
       }
@@ -3554,7 +3555,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         PLANE_EFFECTS_PER_ANSWER,
       )
       .toArray()
-      .map((row) => JSON.parse(row.body_json) as CoordinatorReconcileEffect);
+      .map((row) => parseStoredJson(row.body_json) as CoordinatorReconcileEffect);
     this.sql.exec(
       `INSERT OR REPLACE INTO meta (key, value) VALUES ('coordinator_reconcile_delivery_cursor', ?)`,
       pending.length === PLANE_EFFECTS_PER_ANSWER ? pending.at(-1)!.id : "",
@@ -3592,7 +3593,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       .exec<{ body_json: string }>(`SELECT body_json FROM plane_effects WHERE id = ? AND acked_at IS NULL`, id)
       .toArray()[0];
     if (!offered) return { ok: true };
-    const effect: unknown = JSON.parse(offered.body_json);
+    const effect: unknown = parseStoredJson(offered.body_json);
     if (!isCoordinatorReconcileEffect(effect) || !isCoordinatorReconcileReceipt(receipt)) return { ok: false };
     const before = this.coordinatorSnapshot(effect.instanceId, effect.unit);
     if (
@@ -3652,7 +3653,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         )
         .toArray()[0];
       if (!reply) return { ok: false };
-      const event = JSON.parse(reply.json);
+      const event = parseStoredJson(reply.json);
       if (event.kind !== "reply" || event.text !== frozen.text) return { ok: false };
     } else {
       if (receipt.privateReplyId !== undefined || receipt.publicDelivery === undefined) return { ok: false };
@@ -3827,7 +3828,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           )
           .toArray()[0];
         if (prior) {
-          const row = JSON.parse(prior.json) as PrivateWorkerEvent;
+          const row = parseStoredJson(prior.json) as PrivateWorkerEvent;
           const same =
             row.kind === event.kind &&
             (event.kind === "input"
@@ -3870,7 +3871,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         threadKey,
       )
       .toArray()
-      .map((row) => JSON.parse(row.json) as PrivateWorkerEvent);
+      .map((row) => parseStoredJson(row.json) as PrivateWorkerEvent);
   }
 
   async listPrivateWorkerEventsAfter(
@@ -3887,7 +3888,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       )
       .toArray();
     return {
-      events: rows.slice(0, limit).map((row) => JSON.parse(row.json) as PrivateWorkerEvent),
+      events: rows.slice(0, limit).map((row) => parseStoredJson(row.json) as PrivateWorkerEvent),
       more: rows.length > limit,
     };
   }
@@ -4104,7 +4105,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const row = this.sql
       .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, id)
       .toArray()[0];
-    return row ? (JSON.parse(row.json) as CoordinatorInstance) : null;
+    return row ? (parseStoredJson(row.json) as CoordinatorInstance) : null;
   }
 
   /** The hard stop's mark on the instance row (record 0060; issue 1924).
@@ -4143,7 +4144,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         out = { ok: false, reason: "unknown_instance" };
         return;
       }
-      const instance = JSON.parse(row.json) as CoordinatorInstance;
+      const instance = parseStoredJson(row.json) as CoordinatorInstance;
       if (binding !== undefined) {
         const unitText = this.sql
           .exec<{ json: string }>(
@@ -4152,7 +4153,7 @@ export class RunHistoryDO extends DurableObject<Env> {
             binding.unit,
           )
           .toArray()[0]?.json;
-        const unit = unitText ? (JSON.parse(unitText) as CoordinatorUnit) : undefined;
+        const unit = unitText ? (parseStoredJson(unitText) as CoordinatorUnit) : undefined;
         if (binding.instanceId !== id || !this.currentMainTaskBindingMatches(binding, instance, unit)) {
           out = { ok: false, reason: "stale" };
           return;
@@ -4204,18 +4205,18 @@ export class RunHistoryDO extends DurableObject<Env> {
              FROM coordinator_units u JOIN coordinator_instances i ON i.instance_id = u.instance_id`,
         )
         .toArray()) {
-        const instance = JSON.parse(row.instance_json) as CoordinatorInstance;
-        const unit = JSON.parse(row.unit_json) as CoordinatorUnit;
+        const instance = parseStoredJson(row.instance_json) as CoordinatorInstance;
+        const unit = parseStoredJson(row.unit_json) as CoordinatorUnit;
         if (instance.repo === repo && unit.record !== undefined) used.add(unit.record);
       }
       for (const row of this.sql
         .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE repo = ?`, repo)
         .toArray()) {
-        const record = JSON.parse(row.summary_json) as { record?: unknown };
+        const record = parseStoredJson(row.summary_json) as { record?: unknown };
         if (typeof record.record === "string" && /^\d{4}$/.test(record.record)) used.add(record.record);
       }
       for (const row of this.sql.exec<{ meta_json: string }>(`SELECT meta_json FROM live_runs`).toArray()) {
-        const meta = JSON.parse(row.meta_json) as { repo?: unknown; record?: unknown };
+        const meta = parseStoredJson(row.meta_json) as { repo?: unknown; record?: unknown };
         if (meta.repo === repo && typeof meta.record === "string" && /^\d{4}$/.test(meta.record)) used.add(meta.record);
       }
 
@@ -4267,7 +4268,7 @@ export class RunHistoryDO extends DurableObject<Env> {
               .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, next.instanceId)
               .toArray()[0]
           : undefined;
-      const instance = owner ?? (saved ? JSON.parse(saved.json) : null);
+      const instance = owner ?? (saved ? parseStoredJson(saved.json) : null);
       if (!isCoordinatorInstance(instance)) return report("incomplete", "instance_shape");
       if (!force && !pullBindingChanges(instance, current, next)) return;
       stage = "ownership_scan";
@@ -4280,7 +4281,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         const saved = this.sql
           .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, unit.instanceId)
           .toArray()[0];
-        rows.units.push({ unit, instance: saved ? JSON.parse(saved.json) : null });
+        rows.units.push({ unit, instance: saved ? parseStoredJson(saved.json) : null });
       }
       stage = "binding_validation";
       const reason = unitPullBindingRefusal(rows, instance, current, next, diagnostics);
@@ -4321,7 +4322,7 @@ export class RunHistoryDO extends DurableObject<Env> {
                 unit.unit,
               )
               .toArray()[0];
-            const current = row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined;
+            const current = row ? (parseStoredJson(row.json) as CoordinatorUnit) : undefined;
             const prior = pending.get(key);
             pending.set(key, { current, next: prepareUnfencedUnitWrite(prior?.next ?? current, unit) });
           }
@@ -4364,7 +4365,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       const instanceRow = this.sql
         .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, expected.instanceId)
         .toArray()[0];
-      const instance = instanceRow && JSON.parse(instanceRow.json);
+      const instance = instanceRow && parseStoredJson(instanceRow.json);
       if (!isCoordinatorInstance(instance)) return;
       const key = `${instance.id}:${expected.unit}/`;
       const thread = expected.threadKey ?? instance.threadKey;
@@ -4466,7 +4467,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           return;
         }
         const instances = records.map((row) => {
-          const instance = JSON.parse(row.json);
+          const instance = parseStoredJson(row.json);
           if (!isCoordinatorInstance(instance) || instance.id !== row.instance_id)
             throw new Error("unreadable maintenance owner");
           return instance;
@@ -4519,8 +4520,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         .toArray()[0];
       let current: unknown, instance: unknown;
       try {
-        current = saved ? JSON.parse(saved.json) : undefined;
-        instance = savedInstance ? JSON.parse(savedInstance.json) : null;
+        current = saved ? parseStoredJson(saved.json) : undefined;
+        instance = savedInstance ? parseStoredJson(savedInstance.json) : null;
       } catch {
         result = { ok: false, reason: "incomplete" };
         return;
@@ -4545,8 +4546,8 @@ export class RunHistoryDO extends DurableObject<Env> {
           const finished = this.sql
             .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, runId)
             .toArray()[0];
-          const liveMeta = live ? JSON.parse(live.meta_json) : undefined;
-          const record = finished ? JSON.parse(finished.summary_json) : undefined;
+          const liveMeta = live ? parseStoredJson(live.meta_json) : undefined;
+          const record = finished ? parseStoredJson(finished.summary_json) : undefined;
           if (live && live.thread_key !== liveMeta?.threadKey) throw new Error("unreadable child claim");
           if (finished && (!isRunRecord({ ...record, events: [] }) || record.id !== runId))
             throw new Error("unreadable child receipt");
@@ -4566,7 +4567,7 @@ export class RunHistoryDO extends DurableObject<Env> {
                       runId,
                     )
                     .toArray()[0];
-                  return original ? JSON.parse(original.json) : undefined;
+                  return original ? parseStoredJson(original.json) : undefined;
                 })(),
               startedAt: live?.started_at ?? meta.startedAt,
               tags: this.sql
@@ -4575,7 +4576,7 @@ export class RunHistoryDO extends DurableObject<Env> {
                   runId,
                 )
                 .toArray()
-                .map((row) => JSON.parse(row.json)),
+                .map((row) => parseStoredJson(row.json)),
             };
         } catch {
           result = { ok: false, reason: "incomplete" };
@@ -4658,13 +4659,15 @@ export class RunHistoryDO extends DurableObject<Env> {
         : undefined;
       const planned = planRecoveryTransition(
         prepared,
-        instance ? JSON.parse(instance.json) : null,
-        saved ? JSON.parse(saved.json) : undefined,
+        instance ? parseStoredJson(instance.json) : null,
+        saved ? parseStoredJson(saved.json) : undefined,
         {
-          actions: records.filter((row) => row.kind === "action").map((row) => JSON.parse(row.json) as RecoveryAction),
+          actions: records
+            .filter((row) => row.kind === "action")
+            .map((row) => parseStoredJson(row.json) as RecoveryAction),
           receipts: records
             .filter((row) => row.kind === "receipt")
-            .map((row) => JSON.parse(row.json) as RecoveryReceipt),
+            .map((row) => parseStoredJson(row.json) as RecoveryReceipt),
           mainTask,
         },
       );
@@ -4679,7 +4682,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           return;
         }
       }
-      this.pinUnitContext(planned.unit, saved ? (JSON.parse(saved.json) as CoordinatorUnit) : undefined, now);
+      this.pinUnitContext(planned.unit, saved ? (parseStoredJson(saved.json) as CoordinatorUnit) : undefined, now);
       if (planned.receipt)
         this.sql.exec(
           `INSERT INTO coordinator_recovery_journal (instance_id, unit, kind, id, json) VALUES (?, ?, 'receipt', ?, ?)`,
@@ -4722,7 +4725,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       )
       .toArray()[0];
     if (!row) return null;
-    const action = JSON.parse(row.json) as RecoveryAction;
+    const action = parseStoredJson(row.json) as RecoveryAction;
     return isRecoveryAction(action) &&
       action.id === id &&
       action.instanceId === key.instanceId &&
@@ -4740,7 +4743,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       )
       .toArray();
     return recoveryHistoryPage(
-      rows.map((row) => JSON.parse(row.json) as RecoveryReceipt),
+      rows.map((row) => parseStoredJson(row.json) as RecoveryReceipt),
       after,
     );
   }
@@ -4749,7 +4752,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     return this.sql
       .exec<{ json: string }>(`SELECT json FROM coordinator_units WHERE instance_id = ? ORDER BY rowid`, instanceId)
       .toArray()
-      .map((r) => JSON.parse(r.json) as CoordinatorUnit);
+      .map((r) => parseStoredJson(r.json) as CoordinatorUnit);
   }
 
   /** Reads are also consumed by admission inside this existing owner transaction. */
@@ -4792,7 +4795,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     for (const row of rows) {
       bytes += 3 * row.authority_json.length;
       if (bytes > MAX_RECORD_BYTES || row.seq !== events.length + 1) return;
-      const value = JSON.parse(row.authority_json);
+      const value = parseStoredJson(row.authority_json);
       const event: unknown = { ...value, seq: row.seq };
       if (!isHistoricalOwnerEvent(event)) return;
       events.push(historicalOwnerEvent(event));
@@ -4813,7 +4816,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     };
     const parse = (raw: string, check: PullOwnershipCheck) => {
       try {
-        return JSON.parse(raw);
+        return parseStoredJson(raw);
       } catch {
         return fail(check, "json");
       }
@@ -4862,7 +4865,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     };
     const parse = (raw: string, check: PullOwnershipCheck) => {
       try {
-        return JSON.parse(raw);
+        return parseStoredJson(raw);
       } catch (error) {
         unreadable(check);
         if (diagnostics) diagnostics.cause = "json";
@@ -5184,7 +5187,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       )
       .toArray()
       .map((r) => {
-        const unit: unknown = JSON.parse(r.json);
+        const unit: unknown = parseStoredJson(r.json);
         if (!isCoordinatorUnit(unit) || unit.recovery === undefined)
           throw new Error("active recovery index contains a malformed coordinator unit");
         return unit;
@@ -5202,7 +5205,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       )
       .toArray()[0];
     if (row === undefined) return undefined;
-    const parsed = JSON.parse(row.json) as CoordinatorUnit;
+    const parsed = parseStoredJson(row.json) as CoordinatorUnit;
     return parsed.recovery?.workflowId;
   }
 
@@ -5234,8 +5237,8 @@ export class RunHistoryDO extends DurableObject<Env> {
             unit,
           )
           .toArray()[0]?.json;
-        const instance = instanceText ? (JSON.parse(instanceText) as CoordinatorInstance) : undefined;
-        const row = unitText ? (JSON.parse(unitText) as CoordinatorUnit) : undefined;
+        const instance = instanceText ? (parseStoredJson(instanceText) as CoordinatorInstance) : undefined;
+        const row = unitText ? (parseStoredJson(unitText) as CoordinatorUnit) : undefined;
         if (
           binding !== undefined &&
           (binding.instanceId !== instanceId ||
@@ -5275,10 +5278,10 @@ export class RunHistoryDO extends DurableObject<Env> {
             unit,
           )
           .toArray()
-          .find((row) => (JSON.parse(row.json) as ThreadEvent).id === event.id);
+          .find((row) => (parseStoredJson(row.json) as ThreadEvent).id === event.id);
         if (existing !== undefined) {
           seq = existing.seq;
-          storedEvent = JSON.parse(existing.json) as ThreadEvent;
+          storedEvent = parseStoredJson(existing.json) as ThreadEvent;
           return;
         }
       }
@@ -5317,7 +5320,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       )
       .toArray()
       .map((r) => {
-        const e = JSON.parse(r.json) as ThreadEvent;
+        const e = parseStoredJson(r.json) as ThreadEvent;
         return r.consumed_by !== null ? { ...e, consumedBy: r.consumed_by } : e;
       });
   }
@@ -5357,7 +5360,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           unit.unit,
         )
         .toArray()[0];
-      const current = row ? (JSON.parse(row.json) as CoordinatorUnit) : undefined;
+      const current = row ? (parseStoredJson(row.json) as CoordinatorUnit) : undefined;
       const prepared = prepareUnfencedUnitWrite(current, updated);
       const reason = this.bindingRefusal(current, prepared);
       if (reason) return reason;
@@ -5546,7 +5549,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           row.runId,
         )
         .toArray()[0]?.json;
-      const last = lastJson ? (JSON.parse(lastJson) as StepRecord) : undefined;
+      const last = lastJson ? (parseStoredJson(lastJson) as StepRecord) : undefined;
       if (
         !session ||
         session.key !== request.key ||
@@ -5800,7 +5803,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           .toArray()[0];
     let raw: unknown = live?.state.contextCheckpointReceipt;
     try {
-      if (!raw && archived?.context_checkpoint_json) raw = JSON.parse(archived.context_checkpoint_json);
+      if (!raw && archived?.context_checkpoint_json) raw = parseStoredJson(archived.context_checkpoint_json);
     } catch {
       return undefined;
     }
@@ -5871,9 +5874,9 @@ export class RunHistoryDO extends DurableObject<Env> {
         .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, holder.id)
         .toArray()[0];
       const existing = unit
-        ? (JSON.parse(unit.json) as CoordinatorUnit).context?.handoff
+        ? (parseStoredJson(unit.json) as CoordinatorUnit).context?.handoff
         : (this.liveRow(holder.id)?.meta.childHandoff ??
-          (archived ? (JSON.parse(archived.summary_json) as RunRecord).childHandoff : undefined));
+          (archived ? (parseStoredJson(archived.summary_json) as RunRecord).childHandoff : undefined));
       return JSON.stringify(existing) !== JSON.stringify(holder.handoff);
     });
     if (!holders.some((holder) => handoffRangePins(holder.handoff).size)) return commit();
@@ -5948,7 +5951,7 @@ export class RunHistoryDO extends DurableObject<Env> {
             "SELECT allocation_json FROM workspace_settlements WHERE allocation_json IS NOT NULL",
           )
           .toArray()) {
-          const archive = workspaceDurabilityArchiveOf(JSON.parse(entry.allocation_json));
+          const archive = workspaceDurabilityArchiveOf(parseStoredJson(entry.allocation_json));
           if (!archive) throw new Error("workspace allocation authority is unreadable");
           const allocation = archive.allocation;
           if (allocation?.kind !== "exclusive-scratch") continue;
@@ -5972,7 +5975,7 @@ export class RunHistoryDO extends DurableObject<Env> {
             )
             .toArray()[0];
           if (!saved || !this.isKept(saved, policy, now)) continue;
-          const record = JSON.parse(saved.summary_json) as RunRecord;
+          const record = parseStoredJson(saved.summary_json) as RunRecord;
           if (
             record.startedAt !== archive.startedAt ||
             record.provisional ||
@@ -6052,7 +6055,7 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   private unitContextJsonIsRetained(json: string): boolean {
     try {
-      const unit: unknown = JSON.parse(json);
+      const unit: unknown = parseStoredJson(json);
       return isCoordinatorUnit(unit) && unit.context !== undefined;
     } catch {
       return false;
@@ -6099,7 +6102,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         )
         .toArray()[0];
       if (!live && (!archived || !this.isKept(archived, policy, now))) return false;
-      const facts = live?.meta ?? (JSON.parse(archived!.summary_json) as RunListItem);
+      const facts = live?.meta ?? (parseStoredJson(archived!.summary_json) as RunListItem);
       if (ref.sessionKey !== undefined && facts.session?.key !== ref.sessionKey) return false;
       if (
         origins.some(
@@ -6147,10 +6150,12 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (!summary) return true;
     try {
       const evidence =
-        row.work_evidence_json === null ? undefined : parseWorkEvidence(JSON.parse(row.work_evidence_json), summary);
+        row.work_evidence_json === null
+          ? undefined
+          : parseWorkEvidence(parseStoredJson(row.work_evidence_json), summary);
       if (row.work_evidence_json !== null && evidence === undefined) return true;
       return (
-        terminalPublicationRetentionRequired(JSON.parse(row.summary_json)) ||
+        terminalPublicationRetentionRequired(parseStoredJson(row.summary_json)) ||
         evidence?.branchPublication !== undefined ||
         evidence?.doorPublicationPending !== undefined ||
         evidence?.reviewPublication !== undefined ||
@@ -6278,12 +6283,12 @@ export class RunHistoryDO extends DurableObject<Env> {
       )
       .toArray()[0];
     if (!archived) return incoming;
-    const record: unknown = JSON.parse(archived.summary_json);
+    const record: unknown = parseStoredJson(archived.summary_json);
     if (!isRunWorkOwner(record) || record.id !== runId) return undefined;
     const evidence =
       archived.work_evidence_json === null
         ? undefined
-        : parseWorkEvidence(JSON.parse(archived.work_evidence_json), record);
+        : parseWorkEvidence(parseStoredJson(archived.work_evidence_json), record);
     if (archived.work_evidence_json !== null && !evidence) return undefined;
     const summary = record as RunWorkOwner & { branchIdentityBaseline?: unknown };
     const baseline =
@@ -6478,7 +6483,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     let steps: StepRecord[];
     try {
       steps = snapshot.entries.map((entry) => {
-        const record = JSON.parse(entry.json) as StepRecord;
+        const record = parseStoredJson(entry.json) as StepRecord;
         if (record.step + (workspaceDurabilityArchiveOf(snapshot.archive)?.promotionStepBase ?? 0) !== entry.step)
           throw new Error("unreadable canonical seed key");
         return record;
@@ -6671,7 +6676,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, req.runId)
           .toArray()[0];
         const original =
-          this.liveRow(req.runId)?.meta ?? (retained ? (JSON.parse(retained.summary_json) as unknown) : undefined);
+          this.liveRow(req.runId)?.meta ?? (retained ? (parseStoredJson(retained.summary_json) as unknown) : undefined);
         if (!validMaintenanceTransport(req.meta) || (original && !sameMaintenanceTransport(original, req.meta)))
           throw new Error("maintenance transport identity conflicts with retained state");
         const restored = this.preserveArchivedBaseline(req.runId, req.state ?? {}, { id: req.runId, ...req.meta });
@@ -6853,7 +6858,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       if (
         !maintenanceEventsMatch(
           this.liveRow(runId)!.meta,
-          events.map((event) => JSON.parse(event.json)),
+          events.map((event) => parseStoredJson(event.json)),
         )
       ) {
         out = { ok: false, reason: "fenced" };
@@ -6866,8 +6871,9 @@ export class RunHistoryDO extends DurableObject<Env> {
           const saved = this.sql
             .exec<{ json: string }>(`SELECT json FROM run_events WHERE run_id = ? AND seq = ?`, runId, event.seq)
             .toArray()[0];
-          const previous = previousBySeq.get(event.seq) ?? (saved ? (JSON.parse(saved.json) as unknown) : undefined);
-          const next: unknown = JSON.parse(event.json);
+          const previous =
+            previousBySeq.get(event.seq) ?? (saved ? (parseStoredJson(saved.json) as unknown) : undefined);
+          const next: unknown = parseStoredJson(event.json);
           if (!preserveMaintenanceEvent(originalMeta, previous, next)) {
             out = { ok: false, reason: "fenced" };
             return;
@@ -7057,7 +7063,7 @@ export class RunHistoryDO extends DurableObject<Env> {
             runId,
           )
           .toArray()[0]?.json;
-        const last = lastJson ? (JSON.parse(lastJson) as StepRecord) : undefined;
+        const last = lastJson ? (parseStoredJson(lastJson) as StepRecord) : undefined;
         if (
           receipt.ownerGen !== gen ||
           checkpoint?.key !== receipt.seed.key ||
@@ -7136,7 +7142,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         Math.max(afterSeq, floor),
       )
       .toArray()
-      .map((r) => ({ seq: r.seq, message: JSON.parse(r.json) as Record<string, unknown> }));
+      .map((r) => ({ seq: r.seq, message: parseStoredJson(r.json) as Record<string, unknown> }));
   }
 
   async peekInbox(
@@ -7175,13 +7181,13 @@ export class RunHistoryDO extends DurableObject<Env> {
     });
     try {
       const state = structuredClone(initial.row.state);
-      const lastStep: unknown = initial.step ? JSON.parse(initial.step) : null;
+      const lastStep: unknown = initial.step ? parseStoredJson(initial.step) : null;
       const floor = inboxSegmentFloor(initial.archive, initial.row);
       if (floor === undefined) return { ok: false, reason: "incomplete" };
       const rows = initial.inbox.filter((item) => item.seq > Math.max(afterSeq, floor));
       const items = await Promise.all(
         rows.map(async (item) => {
-          const message: unknown = JSON.parse(item.json);
+          const message: unknown = parseStoredJson(item.json);
           if (!message || typeof message !== "object" || Array.isArray(message))
             throw new Error("unreadable inbox row");
           return {
@@ -7489,7 +7495,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const highWater =
       this.sql.exec<{ m: number | null }>("SELECT MAX(seq) AS m FROM run_inbox WHERE run_id=?", runId).one().m ?? 0;
     return encodeInboxSegment(
-      closeInboxSegment(previous, row, last ? (JSON.parse(last.json) as StepRecord) : null, highWater),
+      closeInboxSegment(previous, row, last ? (parseStoredJson(last.json) as StepRecord) : null, highWater),
       MAX_RECORD_BYTES,
     );
   }
@@ -7508,7 +7514,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       .exec<{ json: string }>("SELECT json FROM run_steps WHERE run_id=? AND step=?", runId, INBOX_SEGMENT_ARCHIVE_STEP)
       .one().json;
     try {
-      return JSON.parse(raw);
+      return parseStoredJson(raw);
     } catch {
       return null;
     }
@@ -7559,7 +7565,7 @@ export class RunHistoryDO extends DurableObject<Env> {
             row.runId,
           )
           .toArray()[0];
-        const lastStep = stepRow ? (JSON.parse(stepRow.json) as StepRecord) : null;
+        const lastStep = stepRow ? (parseStoredJson(stepRow.json) as StepRecord) : null;
         // Past the cursor, plus the deferred rows at or below it: the lowest
         // deferred seq bounds the read, and the record's predicate filters.
         const unread = unreadInbox(lastStep);
@@ -7575,12 +7581,12 @@ export class RunHistoryDO extends DurableObject<Env> {
             from,
           )
           .toArray()
-          .map((r) => ({ seq: r.seq, message: JSON.parse(r.json) as Record<string, unknown> }))
+          .map((r) => ({ seq: r.seq, message: parseStoredJson(r.json) as Record<string, unknown> }))
           .filter((item) => floor !== undefined && item.seq > floor && unread(item));
         const jobs = this.sql
           .exec<{ kind: string; json: string }>(`SELECT kind, json FROM run_jobs WHERE run_id = ?`, row.runId)
           .toArray()
-          .map((r) => ({ kind: r.kind, payload: JSON.parse(r.json) as unknown }));
+          .map((r) => ({ kind: r.kind, payload: parseStoredJson(r.json) as unknown }));
         out.push({
           row: { ...row, ownerGen: gen, leaseUntil: now + leaseMs, phase, state },
           reclaimedFrom: row.phase,
@@ -7702,7 +7708,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (!rows.length) return;
     if (rows.length !== 1 || rows[0].revision !== 1) throw new PromotionPendingError(runId, "corrupt");
     try {
-      return workspaceDurabilityArchiveOf(JSON.parse(rows[0].allocation_json));
+      return workspaceDurabilityArchiveOf(parseStoredJson(rows[0].allocation_json));
     } catch {
       throw new PromotionPendingError(runId, "corrupt");
     }
@@ -7729,7 +7735,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (rows.length === 0) return undefined;
     if (rows.length !== 1 || rows[0].revision !== 1) return { unreadableRevision: rows };
     try {
-      return JSON.parse(rows[0].allocation_json);
+      return parseStoredJson(rows[0].allocation_json);
     } catch {
       return null;
     }
@@ -7750,7 +7756,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       .toArray()[0];
     if (!row) return false;
     try {
-      return JSON.parse(row.summary_json).provisional !== true;
+      return parseStoredJson(row.summary_json).provisional !== true;
     } catch {
       return true;
     }
@@ -7763,8 +7769,8 @@ export class RunHistoryDO extends DurableObject<Env> {
     const events = this.sql
       .exec<{ seq: number; json: string }>(`SELECT seq, json FROM run_events WHERE run_id = ? ORDER BY seq`, row.runId)
       .toArray()
-      .map((e) => ({ ...JSON.parse(e.json), seq: e.seq }) as RunEvent);
-    const step = stepRow && (JSON.parse(stepRow.json) as StepRecord);
+      .map((e) => ({ ...parseStoredJson(e.json), seq: e.seq }) as RunEvent);
+    const step = stepRow && (parseStoredJson(stepRow.json) as StepRecord);
     const jobs =
       this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM run_jobs WHERE run_id = ?`, row.runId).toArray()[0]?.n ??
       0;
@@ -7964,8 +7970,8 @@ export class RunHistoryDO extends DurableObject<Env> {
       let binding: unknown;
       let workspaceThreadKey: string | undefined;
       try {
-        workspaceThreadKey = terminalThreadKey({ threadKey: live.thread_key, meta: JSON.parse(live.meta_json) });
-        binding = (JSON.parse(live.state_json) as RunState).binding;
+        workspaceThreadKey = terminalThreadKey({ threadKey: live.thread_key, meta: parseStoredJson(live.meta_json) });
+        binding = (parseStoredJson(live.state_json) as RunState).binding;
       } catch {
         return { kind: "unknown" };
       }
@@ -8026,7 +8032,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       .toArray()[0];
     if (!row || row.json === null) return;
     try {
-      const value = workspaceSettlementOf(JSON.parse(row.json));
+      const value = workspaceSettlementOf(parseStoredJson(row.json));
       return value && workspaceOwnerKey(value.owner) === workspaceOwnerKey(owner) && value.revision === row.revision
         ? value
         : null;
@@ -8095,7 +8101,7 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   private intakeRow(key: string): IntakeReceipt | undefined {
     const r = this.sql.exec<{ json: string }>(`SELECT json FROM intake_receipts WHERE key = ?`, key).toArray()[0];
-    return r ? (JSON.parse(r.json) as IntakeReceipt) : undefined;
+    return r ? (parseStoredJson(r.json) as IntakeReceipt) : undefined;
   }
 
   /** Insert-if-absent inside one transaction: the first writer's row stands
@@ -8198,7 +8204,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     return this.sql
       .exec<{ json: string }>(`SELECT json FROM intake_receipts${where} ORDER BY decided_at ASC`, ...params)
       .toArray()
-      .map((r) => JSON.parse(r.json) as IntakeReceipt);
+      .map((r) => parseStoredJson(r.json) as IntakeReceipt);
   }
 
   // ---- policy ---------------------------------------------------------------
@@ -8208,7 +8214,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     const row = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = ?`, POLICY_KEY).toArray()[0];
     if (!row) return { policy: clampRetentionPolicy({}), policyUpdatedAt: 0 };
     try {
-      const parsed = JSON.parse(row.value) as Partial<RetentionPolicy> & { policyUpdatedAt?: number };
+      const parsed = parseStoredJson(row.value) as Partial<RetentionPolicy> & { policyUpdatedAt?: number };
       const at =
         typeof parsed.policyUpdatedAt === "number" && Number.isFinite(parsed.policyUpdatedAt)
           ? parsed.policyUpdatedAt
@@ -8454,7 +8460,7 @@ export class RunHistoryDO extends DurableObject<Env> {
               stored.id,
             )
             .toArray()[0];
-          return previous?.context_checkpoint_json ? JSON.parse(previous.context_checkpoint_json) : undefined;
+          return previous?.context_checkpoint_json ? parseStoredJson(previous.context_checkpoint_json) : undefined;
         })();
       if (
         stored.contextCheckpointReceipt !== undefined &&
@@ -8469,7 +8475,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         .toArray()[0];
       const priorEvidence =
         priorRecord?.work_evidence_json != null
-          ? parseWorkEvidence(JSON.parse(priorRecord.work_evidence_json), stored)
+          ? parseWorkEvidence(parseStoredJson(priorRecord.work_evidence_json), stored)
           : undefined;
       if (priorRecord?.work_evidence_json != null && priorEvidence === undefined)
         throw new Error("work evidence is unreadable");
@@ -8479,17 +8485,23 @@ export class RunHistoryDO extends DurableObject<Env> {
         liveWork ?? {
           ...priorEvidence,
           ...(priorRecord &&
-          (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPublication !== undefined
-            ? { branchPublication: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPublication }
-            : {}),
-          ...(priorRecord &&
-          (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).reviewPublication !== undefined
-            ? { reviewPublication: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).reviewPublication }
-            : {}),
-          ...(priorRecord &&
-          (JSON.parse(priorRecord.summary_json) as Record<string, unknown>).branchPushReceipts !== undefined
+          (parseStoredJson(priorRecord.summary_json) as Record<string, unknown>).branchPublication !== undefined
             ? {
-                branchPushReceipts: (JSON.parse(priorRecord.summary_json) as Record<string, unknown>)
+                branchPublication: (parseStoredJson(priorRecord.summary_json) as Record<string, unknown>)
+                  .branchPublication,
+              }
+            : {}),
+          ...(priorRecord &&
+          (parseStoredJson(priorRecord.summary_json) as Record<string, unknown>).reviewPublication !== undefined
+            ? {
+                reviewPublication: (parseStoredJson(priorRecord.summary_json) as Record<string, unknown>)
+                  .reviewPublication,
+              }
+            : {}),
+          ...(priorRecord &&
+          (parseStoredJson(priorRecord.summary_json) as Record<string, unknown>).branchPushReceipts !== undefined
+            ? {
+                branchPushReceipts: (parseStoredJson(priorRecord.summary_json) as Record<string, unknown>)
                   .branchPushReceipts,
               }
             : {}),
@@ -8504,7 +8516,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         : priorRecord
           ? priorEvidence && Object.hasOwn(priorEvidence, "doorPublicationPending")
             ? priorEvidence.doorPublicationPending
-            : JSON.parse(priorRecord.summary_json).doorPublicationPending
+            : parseStoredJson(priorRecord.summary_json).doorPublicationPending
           : stored.doorPublicationPending;
       delete stored.doorPublicationPending;
       const doorPublicationPending = doorPublicationOf(canonicalDoor);
@@ -8770,7 +8782,7 @@ export class RunHistoryDO extends DurableObject<Env> {
           runId,
         );
         closed = true;
-        const kept = row.restart_point_json === null ? undefined : (JSON.parse(row.restart_point_json) as unknown);
+        const kept = row.restart_point_json === null ? undefined : (parseStoredJson(row.restart_point_json) as unknown);
         point = isRunMetricsPoint(kept) ? unclaimedRestartPoint(kept) : undefined;
       });
       if (closed) console.log(`[runs/sweep] ${runId}: restart unclaimed past its deadline — closed interrupted`);
@@ -9066,18 +9078,18 @@ export class RunHistoryDO extends DurableObject<Env> {
     let contextCheckpointReceipt: unknown;
     let directAudience: unknown;
     try {
-      branchPublication = (JSON.parse(row.summary_json) as Record<string, unknown>).branchPublication;
+      branchPublication = (parseStoredJson(row.summary_json) as Record<string, unknown>).branchPublication;
       if (branchPublication !== undefined && !branchPublicationOf(branchPublication, summary.repo)) return null;
-      reviewPublication = (JSON.parse(row.summary_json) as Record<string, unknown>).reviewPublication;
+      reviewPublication = (parseStoredJson(row.summary_json) as Record<string, unknown>).reviewPublication;
       if (reviewPublication !== undefined) {
         const receipt = reviewPublicationOf(reviewPublication);
         if (!receipt || receipt.runId !== id || receipt.target.repo !== summary.repo) return null;
       }
-      branchPushReceipts = (JSON.parse(row.summary_json) as Record<string, unknown>).branchPushReceipts;
+      branchPushReceipts = (parseStoredJson(row.summary_json) as Record<string, unknown>).branchPushReceipts;
       if (branchPushReceipts !== undefined && !branchPushReceiptsOf(branchPushReceipts)) return null;
-      sourceReads = row.source_reads_json == null ? undefined : JSON.parse(row.source_reads_json);
+      sourceReads = row.source_reads_json == null ? undefined : parseStoredJson(row.source_reads_json);
       if (row.work_evidence_json != null) {
-        const evidence = parseWorkEvidence(JSON.parse(row.work_evidence_json), summary);
+        const evidence = parseWorkEvidence(parseStoredJson(row.work_evidence_json), summary);
         if (evidence === undefined) return null;
         if (privatePublication && Object.hasOwn(evidence, "branchPublication"))
           branchPublication = evidence.branchPublication;
@@ -9089,8 +9101,8 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
 
       contextCheckpointReceipt =
-        row.context_checkpoint_json == null ? undefined : JSON.parse(row.context_checkpoint_json);
-      directAudience = row.direct_audience_json == null ? undefined : JSON.parse(row.direct_audience_json);
+        row.context_checkpoint_json == null ? undefined : parseStoredJson(row.context_checkpoint_json);
+      directAudience = row.direct_audience_json == null ? undefined : parseStoredJson(row.direct_audience_json);
     } catch {
       return null;
     }
@@ -9241,7 +9253,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       .exec<{ json: string }>(`SELECT json FROM run_events WHERE run_id = ? AND json LIKE '%"model.turn"%'`, runId)
       .toArray()) {
       try {
-        const e = JSON.parse(r.json) as RunEvent;
+        const e = parseStoredJson(r.json) as RunEvent;
         if (e && e.type === "span_end") out.push(e);
       } catch {
         // an unparsable event row prices nothing
@@ -9471,7 +9483,7 @@ function parseEventRows(rows: readonly EventRow[]): StoredRunEvent[] {
   const out: StoredRunEvent[] = [];
   for (const r of rows) {
     try {
-      const parsed: unknown = JSON.parse(r.json);
+      const parsed: unknown = parseStoredJson(r.json);
       if (typeof parsed === "object" && parsed !== null && typeof (parsed as { type?: unknown }).type === "string") {
         out.push({ ...(parsed as RunEvent), seq: r.seq });
       }
@@ -9503,7 +9515,7 @@ type UsageRow = {
 function parseUsageJson(raw: string | null): RunUsage | undefined {
   if (raw === null) return undefined;
   try {
-    const parsed: unknown = JSON.parse(raw);
+    const parsed: unknown = parseStoredJson(raw);
     return isRunUsage(parsed) ? parsed : undefined;
   } catch {
     return undefined;
@@ -9519,7 +9531,7 @@ function identityOfSummary(raw: string): {
   costCapUsd?: number;
 } {
   try {
-    const s = JSON.parse(raw) as Record<string, unknown>;
+    const s = parseStoredJson(raw) as Record<string, unknown>;
     return {
       ...(typeof s.userName === "string" && s.userName ? { userName: s.userName } : {}),
       ...(typeof s.parentRunId === "string" && s.parentRunId ? { parentRunId: s.parentRunId } : {}),
@@ -9559,7 +9571,7 @@ function parseWorkEvidence(value: unknown, owner: RunWorkOwner): Record<string, 
 
 function parseSummary(row: Pick<RunRow, "summary_json">): RunListItem | null {
   try {
-    const parsed: unknown = JSON.parse(row.summary_json);
+    const parsed: unknown = parseStoredJson(row.summary_json);
     if (typeof parsed !== "object" || parsed === null) return null;
     const {
       branchPublication: _branchPublication,
@@ -9595,7 +9607,7 @@ function unclaimedRestartPoint(point: RunMetricsPoint): RunMetricsPoint {
  *  alone; an unreadable summary reads as a terminal close, as it always did. */
 function summaryCloseOf(summaryJson: string): { provisional?: true; restarting?: true } {
   try {
-    const s = JSON.parse(summaryJson) as { provisional?: unknown; restarting?: unknown };
+    const s = parseStoredJson(summaryJson) as { provisional?: unknown; restarting?: unknown };
     return {
       ...(s.provisional === true ? { provisional: true as const } : {}),
       ...(s.restarting === true ? { restarting: true as const } : {}),
@@ -10178,7 +10190,7 @@ export class SessionLogDO extends DurableObject<Env> {
       .toArray()) {
       let record: SourceSeedOriginalRecord | undefined;
       try {
-        record = sourceSeedOriginalOf(JSON.parse(row.value));
+        record = sourceSeedOriginalOf(parseStoredJson(row.value));
       } catch {
         /* Preserve unreadable metadata. */
       }
@@ -10195,8 +10207,8 @@ export class SessionLogDO extends DurableObject<Env> {
     if (legacy !== undefined) {
       let receipt: SourceSeedReceipt | undefined, release: SourceSeedReleaseReceipt | undefined;
       try {
-        receipt = sourceSeedReceiptOf(JSON.parse(legacy));
-        release = rawRelease === undefined ? undefined : sourceSeedReleaseOf(JSON.parse(rawRelease));
+        receipt = sourceSeedReceiptOf(parseStoredJson(legacy));
+        release = rawRelease === undefined ? undefined : sourceSeedReleaseOf(parseStoredJson(rawRelease));
       } catch {
         /* Preserve unreadable legacy evidence. */
       }
@@ -10223,7 +10235,7 @@ export class SessionLogDO extends DurableObject<Env> {
     if (raw !== undefined) {
       let record: SourceSeedOriginalRecord | undefined;
       try {
-        record = sourceSeedOriginalOf(JSON.parse(raw));
+        record = sourceSeedOriginalOf(parseStoredJson(raw));
       } catch {
         /* Preserve unreadable metadata. */
       }
@@ -10240,8 +10252,8 @@ export class SessionLogDO extends DurableObject<Env> {
     if (legacy === undefined) return;
     let receipt: SourceSeedReceipt | undefined, release: SourceSeedReleaseReceipt | undefined;
     try {
-      receipt = sourceSeedReceiptOf(JSON.parse(legacy));
-      release = rawRelease === undefined ? undefined : sourceSeedReleaseOf(JSON.parse(rawRelease));
+      receipt = sourceSeedReceiptOf(parseStoredJson(legacy));
+      release = rawRelease === undefined ? undefined : sourceSeedReleaseOf(parseStoredJson(rawRelease));
     } catch {
       /* Preserve unreadable metadata. */
     }
@@ -10259,7 +10271,7 @@ export class SessionLogDO extends DurableObject<Env> {
     if (raw !== undefined) {
       let ref: SourceSeedReference | undefined;
       try {
-        ref = sourceSeedReferenceOf(JSON.parse(raw));
+        ref = sourceSeedReferenceOf(parseStoredJson(raw));
       } catch {
         /* A pointer alone proves nothing. */
       }
@@ -10275,7 +10287,7 @@ export class SessionLogDO extends DurableObject<Env> {
     if (legacy === undefined) return;
     let receipt: SourceSeedReceipt | undefined;
     try {
-      receipt = sourceSeedReceiptOf(JSON.parse(legacy));
+      receipt = sourceSeedReceiptOf(parseStoredJson(legacy));
     } catch {
       /* Preserve unreadable metadata. */
     }
@@ -10306,7 +10318,7 @@ export class SessionLogDO extends DurableObject<Env> {
     if (
       record.release &&
       this.sourceMeta("expected_seed_release") === undefined &&
-      sourceSeedOriginalKey(sourceSeedReceiptOf(JSON.parse(this.sourceMeta("expected_seed_pending")!))!) ===
+      sourceSeedOriginalKey(sourceSeedReceiptOf(parseStoredJson(this.sourceMeta("expected_seed_pending")!))!) ===
         sourceSeedOriginalKey(record.receipt)
     )
       this.setSourceMeta("expected_seed_release", JSON.stringify(record.release));
@@ -10639,7 +10651,7 @@ export class SessionLogDO extends DurableObject<Env> {
 
   private rangePins(): SessionRangePins {
     const stored = this.sourceMeta("range_pins");
-    return stored ? (JSON.parse(stored) as SessionRangePins) : {};
+    return stored ? (parseStoredJson(stored) as SessionRangePins) : {};
   }
 
   /** A separate RPC capability: an older receiver cannot silently execute a
@@ -11210,7 +11222,7 @@ export class SessionLogDO extends DurableObject<Env> {
     const value = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'sources'`).toArray()[0]?.value;
     if (value === undefined) return undefined;
     try {
-      const parsed: unknown = JSON.parse(value);
+      const parsed: unknown = parseStoredJson(value);
       return isSessionSources(parsed) ? parsed : { version: 1, status: "unknown" };
     } catch {
       return { version: 1, status: "unknown" };

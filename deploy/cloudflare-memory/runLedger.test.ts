@@ -11900,6 +11900,75 @@ describe("state-write holds across Durable Object RPC", () => {
       },
     });
   }
+  it("keeps corrupt retained inbox bytes out of HTTP diagnostics and preserves the original SQLite row", async () => {
+    const key = "runs:decoder-private-inbox";
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    expect((await stub.claim(claim(), 1)).ok).toBe(true);
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec("INSERT INTO run_inbox(run_id,seq,json) VALUES(?,?,?)", id, 1, "PRIVATE_STORED_PAYLOAD");
+    });
+    const notices: unknown[] = [],
+      headers: string[] = [],
+      logs: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+    const warn = vi.spyOn(console, "warn").mockImplementation((line) => logs.push(String(line)));
+    try {
+      const wire = new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "test-token",
+        storeKey: key,
+        onFailure: (notice) => notices.push(notice),
+        fetch: async (url, init) => {
+          const payload = String(init?.body),
+            sized = new Headers(init?.headers);
+          sized.set("content-length", String(new TextEncoder().encode(payload).byteLength));
+          const response = await memoryWorker.fetch(new Request(String(url), { ...init, headers: sized }), env);
+          headers.push(response.headers.get(STORAGE_FAILURE_DIAGNOSTIC_HEADER) ?? "missing");
+          return response;
+        },
+      });
+      expect(await wire.readInbox(id, 0).catch(() => "failed")).toBe("failed");
+      expect(notices).toMatchObject([
+        {
+          runIds: [id],
+          diagnostic: {
+            httpStatus: 500,
+            server: { stage: "request", exception: { name: "SyntaxError", message: "Stored JSON is unreadable" } },
+          },
+        },
+      ]);
+      expect(JSON.stringify({ notices, headers, logs })).not.toContain("PRIVATE");
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
+    }
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(
+        state.storage.sql.exec<{ json: string }>("SELECT json FROM run_inbox WHERE run_id=? AND seq=1", id).one().json,
+      ).toBe("PRIVATE_STORED_PAYLOAD");
+    });
+  });
+
+  it("does not disclose corrupt retained session metadata through real RPC", async () => {
+    const stub = env.SESSION_LOGS.get(env.SESSION_LOGS.idFromName("mcp:fixture:decoder:review"));
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec("INSERT INTO meta(key,value) VALUES(?,?)", "range_pins", "PRIVATE_SESSION_PAYLOAD");
+    });
+    const failure = await stub.custodyPinRevision().catch((error) => error);
+    expect({ name: failure.name, message: failure.message }).toEqual({
+      name: "SyntaxError",
+      message: "Stored JSON is unreadable",
+    });
+    expect(JSON.stringify({ message: failure.message, stack: failure.stack, cause: failure.cause })).not.toContain(
+      "PRIVATE",
+    );
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(
+        state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key=?", "range_pins").one().value,
+      ).toBe("PRIVATE_SESSION_PAYLOAD");
+    });
+  });
+
   it.each(["readInbox", "append"] as const)(
     "captures non-state RPC exceptions from %s without replay or private bodies",
     async (method) => {

@@ -11,6 +11,9 @@ import {
   stateWriteDiagnosticHeader,
 } from "../runStateWriteDiagnostic.js";
 import { storeRequestWitness } from "../storeResponse.js";
+import { storageFailureNote } from "../storageFailureDiagnostic.js";
+import { testRegistry } from "../runRegistry/testing.js";
+import type { RunEvent } from "../runEvents.js";
 
 const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const gen = "diagnostic-owner";
@@ -40,6 +43,55 @@ function response(mode: string): Response {
 }
 
 describe("original uncertain write diagnostics", () => {
+  it("keeps private diagnostic appends non-recursive after registry projection without exposing exception prose", async () => {
+    const { reg } = testRegistry();
+    const run = reg.create("private", {
+      agent: "orchestrator",
+      channelId: "slack:D1",
+      userId: "slack:UA",
+      threadKey: "slack:D1:1",
+      directAudience: { kind: "slack-unshared-im", channelId: "slack:D1", userId: "slack:UA", threadKey: "slack:D1:1" },
+    });
+    let emitted = 0;
+    let posts = 0;
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://state.invalid",
+      token: "fixture",
+      storeKey: "fixture",
+      onFailure: ({ runIds, diagnostic }) => {
+        emitted++;
+        for (const target of runIds) reg.publish(target, storageFailureNote(diagnostic));
+      },
+      fetch: async (url, init) => {
+        posts++;
+        const witness = await storeRequestWitness(new URL(String(url)).pathname, String(init?.body));
+        return new Response("private body", {
+          status: 500,
+          headers: {
+            [STATE_WRITE_DIAGNOSTIC_HEADER]: stateWriteDiagnosticHeader({
+              version: 1,
+              requestDigest: witness.digest,
+              failure: stateWriteException("state-rpc", new Error("private fixture words")),
+            }),
+          },
+        });
+      },
+    });
+    expect(await wire.setState(run.id, gen, {}).catch(() => "held")).toBe("held");
+    const events = reg.snapshot(run.id, run.token)!.events;
+    expect(events).toMatchObject([
+      {
+        kind: "storage_failure",
+        summary: "Private storage request failed.",
+        storageFailure: { operation: "/runs/state", phase: "http", httpStatus: 500 },
+      },
+    ]);
+    expect(JSON.stringify(events)).not.toContain("private fixture words");
+    expect(await wire.append(run.id, gen, events as Array<RunEvent & { seq: number }>).catch(() => "held")).toBe(
+      "held",
+    );
+    expect({ emitted, posts }).toEqual({ emitted: 1, posts: 2 });
+  });
   it("keeps the source-save owner visible when the session write fails", async () => {
     const notices: unknown[] = [];
     const wire = new WorkerRunLedger({

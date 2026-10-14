@@ -1,4 +1,5 @@
 import type { RunEvent } from "./runEvents.js";
+import { storageFailureDiagnosticOf } from "./storageFailureDiagnostic.js";
 
 /** A verified private main DM's source data stays in its requester-scoped model session.
  * Its run page and live stream are shared diagnostic surfaces, so they carry
@@ -69,6 +70,24 @@ export function privateMainEvent(event: RunEvent): RunEvent {
     case "lease":
       return event;
     case "run_note":
+      if (event.kind === "storage_failure") {
+        const diagnostic = storageFailureDiagnosticOf(event.storageFailure);
+        let structural;
+        if (diagnostic) {
+          const { exception: _local, server, ...facts } = diagnostic;
+          const remote = server ? { ...server } : undefined;
+          if (remote && "exception" in remote) delete remote.exception;
+          structural = { ...facts, ...(remote ? { server: remote } : {}) };
+        }
+        return {
+          type: "run_note",
+          kind: "storage_failure",
+          summary: "Private storage request failed.",
+          ...(structural ? { storageFailure: structural } : {}),
+          at,
+          seq,
+        };
+      }
       if (event.kind === "work_context_refused" && event.contextReason)
         return {
           type: "run_note",

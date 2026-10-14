@@ -25,11 +25,18 @@ export function breakFenceMarkers(text: string): string {
 /** The body of a fence `wrapUntrusted` built, for a surface that renders text
  *  as text — the dashboard, whose bindings can carry no instruction. A string
  *  that is not a whole fence is returned as it came, so a snippet from a route
- *  that never wrapped it reads the same. The markers a body carried stay
- *  broken: what came out of the fence is what went in, minus its own fences. */
-export function unwrapUntrusted(text: string): string {
+ *  that never wrapped it reads the same. By default, markers a body carried
+ *  stay broken: what came out is what went in, minus its own fences. */
+export function unwrapUntrusted(text: string, options: { restoreMarkers?: boolean } = {}): string {
   const head = `${UNTRUSTED_PREAMBLE}\n${UNTRUSTED_OPEN}\n`;
   const tail = `\n${UNTRUSTED_CLOSE}`;
   if (!text.startsWith(head) || !text.endsWith(tail) || text.length < head.length + tail.length) return text;
-  return text.slice(head.length, text.length - tail.length);
+  const body = text.slice(head.length, text.length - tail.length);
+  // A validator that immediately re-wraps the result can check the original
+  // text budget without counting the escape spaces.
+  return options.restoreMarkers
+    ? body
+        .replaceAll(breakFenceMarkers(UNTRUSTED_CLOSE), UNTRUSTED_CLOSE)
+        .replaceAll(breakFenceMarkers(UNTRUSTED_OPEN), UNTRUSTED_OPEN)
+    : body;
 }
