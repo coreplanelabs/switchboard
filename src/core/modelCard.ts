@@ -394,8 +394,7 @@ export function decideControls(card: ModelCard, asked: AskedControls): ControlDe
   // (record 0052's amendment: the harness write names the biller's own
   // provider). The Anthropic wire's own packages place per-block breakpoints;
   // on the chat wire a biller the table names caches the aggregator's own way
-  // — the pinned OpenCode binary exempts the openrouter route from per-block
-  // placement, so the write carries OpenRouter's top-level
+  // — OpenCode places per-block markers and the write also carries the top-level
   // `cache_control: { type: "ephemeral" }` via `settings.extraBody` (measured
   // in `opencode/testing/realDriver.test.ts`), and pi's compat sends the
   // per-block markers. A biller served generically degrades, never a silent

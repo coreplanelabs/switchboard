@@ -1250,6 +1250,9 @@ export class OpenCodeBridge {
         }
         if (earlier) break;
         this.stepOpen = false;
+        // Newer servers continue after a rejected sibling. Their successful
+        // execution has already handled the refusal; do not repeat the work.
+        if (event.type === "session.execution.succeeded") this.cascadeRePrompt = undefined;
         // An `interrupted` end that is not the cut's drops any steer that was
         // enqueued but not yet delivered: the drainer's `InboxFate` is told.
         if (event.type === "session.execution.interrupted") out.inboxDropped = true;

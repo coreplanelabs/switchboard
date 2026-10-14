@@ -597,11 +597,9 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
   // itself (`packages/core/src/permission.ts:203-220` at v2.0.3 — the reject
   // cascade, a `permission.replied` `reject` published for it), so the bot's
   // `once` for it answers 404 (`:198-201`); the sibling fails `aborted` (`The
-  // user declined this tool call`), the step fails `aborted` (`Step
-  // interrupted`) and the execution ends `interrupted`. The loop then
-  // re-prompts the model with the refusal (harness.md item 2): a new
-  // execution starts, the model continues, and its text is the run's answer.
-  it("a step with two shell calls, one refused and one allowed: the reply to the sibling meets 404 and is read as the ask withdrawn — one ask_withdrawn note, no reply-failed error, no bypass on the server's own reject echo — and the loop re-prompts the model with the refusal (a decline_cascade note), so the next step runs and its text is the run's answer", async () => {
+  // user declined this tool call`). The current server continues the model
+  // with both refusals; the harness must not start a second execution.
+  it("a step with two shell calls, one refused and one allowed: the reply to the sibling meets 404 and is read as the ask withdrawn — one ask_withdrawn note, no reply-failed error, no bypass on the server's own reject echo — and the server continues with the refusal and answers without a second prompt", async () => {
     const twoCalls: ModelScript = (results, chunks) =>
       results === 0
         ? chunks.toolCall("call_status", "update_status", { checklist: "○ first step" })
@@ -657,21 +655,17 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
       [],
     );
     // The binary's own word on the sibling: declined with the step, never run —
-    // its `permission.replied` `reject` the server's, its failure `aborted`.
+    // its `permission.replied` `reject` the server's, its failure `permission.rejected`.
     expect(siblingRequestID).toBeDefined();
     expect(permissionEvents).toContain(`permission.replied id=${siblingRequestID} call= reply=reject`);
-    expect(siblingEvents.some((e) => /^session\.tool\.failed .*"aborted"/.test(e))).toBe(true);
+    expect(siblingEvents.some((e) => /^session\.tool\.failed .*"permission\.rejected"/.test(e))).toBe(true);
     expect(siblingEvents.some((e) => e.startsWith("session.tool.success"))).toBe(false);
     expect(sibling).toMatchObject({ ok: false });
-    // The step with the declined call ended its execution `interrupted` — the
-    // server's own end after the cascade — and the loop re-prompted the model
-    // with the refusal: a new execution started and succeeded, its text the
-    // run's answer, the re-prompt on the record as a `decline_cascade` note.
-    const interruptedAt = stepEvents.indexOf("session.execution.interrupted");
-    expect(interruptedAt).toBeGreaterThan(-1);
-    expect(stepEvents.slice(interruptedAt + 1)).toContain("session.execution.started");
+    // The binary continues after the refusal. A successful execution must
+    // settle once; prompting again would repeat completed work.
+    expect(stepEvents.filter((e) => e === "session.execution.started")).toHaveLength(1);
     expect(stepEvents.at(-1)).toBe("session.execution.succeeded");
-    expect(notes.some((n) => n.kind === "decline_cascade")).toBe(true);
+    expect(notes.filter((n) => n.kind === "decline_cascade")).toEqual([]);
     expect(session.answer).toBe("all done after the two-call step");
 
     await session.end();
@@ -685,17 +679,9 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode against the real @opencode
 // asks for the final chunk's usage (`usage: { include: true }`, the cost the
 // meter reads) and spells reasoning its own way (`reasoning: { effort }`), and
 // the proxy's meter row shows the cache read the upstream reports from the
-// second turn on. The cache markers ride the aggregator's own way: the pinned
-// binary places NO per-block `cache_control` breakpoints on the openrouter
-// route — it exempts that route from its automatic placement and no
-// configuration key reaches the request's own `cache` option — so the write
-// carries OpenRouter's other documented spelling, one top-level
-// `cache_control: { type: "ephemeral" }` (its "automatic caching", honoured on
-// its Anthropic-family routes), as the provider's `settings.extraBody`, which
-// the binary merges into every request body (a model-level `options` entry
-// does NOT reach the body — measured). The same script on
-// the generic package (the plain run) carries neither the usage ask nor the
-// reasoning object — asserted against the direct fake's captured bodies.
+// second turn on. The current binary places per-block cache markers in
+// addition to the top-level cache_control supplied by settings.extraBody.
+// The generic provider's contrasting payload is checked below.
 describe.skipIf(!openCodeBinaryAvailable())("OpenCode speaks the aggregator's own protocol through the proxy", () => {
   /** The aggregator card the dispatcher would resolve for the block (record
    *  0052): markers from the vendor, the levels named through high. */
@@ -739,7 +725,7 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode speaks the aggregator's ow
     };
   };
 
-  it("an aggregator run's captured payload asks for usage, spells reasoning the aggregator's way and carries the top-level cache_control on every turn — per-block markers stay absent, the binary's measured behaviour — and the meter row shows the cache read the upstream reports on the second turn", async () => {
+  it("an aggregator run's captured payload asks for usage, spells reasoning the aggregator's way and carries the top-level cache_control on every turn — per-block markers are present — and the meter row shows the cache read the upstream reports on the second turn", async () => {
     const script: ModelScript = (results, chunks) =>
       results === 0
         ? chunks.toolCall("call_status", "update_status", { checklist: "○ first step" })
@@ -794,14 +780,10 @@ describe.skipIf(!openCodeBinaryAvailable())("OpenCode speaks the aggregator's ow
       expect(body.usage, `turn ${i}`).toEqual({ include: true });
       expect(body.reasoning, `turn ${i}`).toEqual({ effort: "high" });
       expect(body).not.toHaveProperty("reasoning_effort");
-      // The markers, the aggregator's own way: the provider's
-      // `settings.extraBody` rides every request body as OpenRouter's
-      // top-level `cache_control: { type: "ephemeral" }` ("automatic
-      // caching"). The measured negative stays measured: the pinned binary
-      // exempts the openrouter route from per-block placement, so the last
-      // tool, the system part and the tail carry none.
+      // Both the configured top-level hint and the binary's per-block
+      // markers reach the upstream unchanged.
       expect(body.cache_control, `turn ${i}`).toEqual({ type: "ephemeral" });
-      expect(spots[i], `turn ${i}`).toMatchObject({ lastTool: false, system: false, tail: false });
+      expect(spots[i], `turn ${i}`).toMatchObject({ lastTool: true, system: true, tail: true });
     }
 
     // The meter's word (model-proxy item 3): the upstream reported cached
