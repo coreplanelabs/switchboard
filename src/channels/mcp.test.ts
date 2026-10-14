@@ -899,6 +899,8 @@ describe("handleMcpRequest — registry commands as tools", () => {
       "runs_get",
       "runs_events",
       "runs_friction",
+      "runs_check",
+      "runs_settlecheck",
       "runs_stop",
       "runs_unit",
       "runs_children",

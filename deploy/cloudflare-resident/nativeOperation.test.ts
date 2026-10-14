@@ -55,6 +55,51 @@ async function lostProcess(h: ReturnType<typeof fixture>, close = true) {
   return (await h.journal.list()).operations[0]!;
 }
 
+describe("stored original native endings", () => {
+  it.each(["key", "hash", "process", "original", "retirement"])(
+    "refuses %s evidence that cannot prove the stored original ending",
+    async (fault) => {
+      const h = fixture();
+      const operation = await lostProcess(h);
+      const receipt = await h.journal.recover(key, operation.recordHash, async () => terminal, matches);
+      expect(receipt).toMatchObject({ outcome: "native-ended", key });
+      const archived = structuredClone(h.rows.get(`native-operation-receipt:${key}`)) as {
+        original: Record<string, unknown>;
+        receipt: { key: string; recordHash: string; processes: (typeof terminal)[] };
+      };
+      if (fault === "key") archived.receipt.key += "-foreign";
+      if (fault === "hash") archived.receipt.recordHash = "f".repeat(64);
+      if (fault === "process") archived.receipt.processes[0].pid = 99;
+      if (fault === "original") archived.original.opOwner = "op:foreign";
+      h.rows.set(
+        `native-operation-receipt:${key}`,
+        fault === "retirement"
+          ? { originalOperationOutcome: "unknown", records: { [key]: operation.recordHash } }
+          : archived,
+      );
+      const before = structuredClone([...h.rows]);
+      expect(await h.journal.readEnding(key)).toEqual({ kind: "unavailable" });
+      expect([...h.rows]).toEqual(before);
+    },
+  );
+
+  it("reads only the exact archived original ending without changing storage", async () => {
+    const h = fixture();
+    const operation = await lostProcess(h);
+    expect(await h.journal.readEnding(key)).toEqual({ kind: "missing" });
+    const receipt = await h.journal.recover(key, operation.recordHash, async () => terminal, matches);
+    expect(receipt).toEqual({ key, recordHash: operation.recordHash, outcome: "native-ended", processes: [terminal] });
+    const before = structuredClone([...h.rows]);
+    expect(await h.journal.readEnding(key)).toEqual({
+      kind: "ended",
+      original: (before.find(([k]) => k === `native-operation-receipt:${key}`)![1] as { original: unknown }).original,
+      receipt,
+    });
+    expect([...h.rows]).toEqual(before);
+    expect(await h.journal.readEnding("native-operation:op:foreign")).toEqual({ kind: "missing" });
+  });
+});
+
 describe("native launch storage acknowledgements", () => {
   it.each(["terminal", "running", "kill-ack", "kill-error"])(
     "preserves retirement when an already admitted recovery returns %s",

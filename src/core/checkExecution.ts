@@ -1,6 +1,15 @@
-import { CheckCapacityError, checkOperationSchema, type CheckOperation } from "../execution/checkOperation.js";
+import { CheckCapacityError, type CheckOperation } from "../execution/checkOperation.js";
 import { createHash } from "node:crypto";
-import { z } from "zod";
+import {
+  STREAM_CAP,
+  COMMAND_CAP,
+  RECEIPT_CAP,
+  sha,
+  resultSchema,
+  checkExecutionStateOf,
+  checkOperationSeed,
+  checkMetadataOperationSeed,
+} from "./checkExecutionSchema.js";
 import {
   execDeadline,
   ExecInfraError,
@@ -25,83 +34,8 @@ import type {
   CheckExecutionState,
 } from "./checkExecutionTypes.js";
 
-const STREAM_CAP = 4_000;
-const COMMAND_CAP = 2_000;
-const RECEIPT_CAP = 32;
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
-const sha = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/);
-const resultSchema = z.object({
-  stdout: z.string(),
-  stderr: z.string(),
-  exitCode: z.number().int().min(0).max(255),
-  truncated: z.boolean(),
-});
-const storedResultSchema = resultSchema.extend({
-  stdout: z.string().max(STREAM_CAP),
-  stderr: z.string().max(STREAM_CAP),
-});
-const ownerSchema = z
-  .object({
-    runId: z.string().min(1),
-    requester: z.string().min(1),
-    threadKey: z.string().min(1),
-    unit: z.string().min(1).optional(),
-    repo: z.string().min(1),
-  })
-  .strict()
-  .refine((owner) => !Object.hasOwn(owner, "unit") || owner.unit !== undefined);
-const receiptSchema = z
-  .object({
-    callId: z.string().min(1).max(200),
-    checkOperation: checkOperationSchema.optional(),
-    inputHash: z.string().regex(/^[a-f0-9]{64}$/),
-    commandHash: z.string().regex(/^[a-f0-9]{64}$/),
-    command: z.string().max(COMMAND_CAP),
-    purpose: z.enum(["baseline", "verification"]),
-    owner: ownerSchema,
-    workspace: z.object({ cwd: z.string().min(1).max(4096), head: sha, fingerprint: sha }).strict(),
-    timeoutMs: z.number().int().positive(),
-    startedAt: z.number().finite(),
-    completedAt: z.number().finite().optional(),
-    outcome: z.discriminatedUnion("kind", [
-      z.object({ kind: z.literal("pending") }).strict(),
-      z
-        .object({
-          kind: z.literal("not_started"),
-          reason: z.enum(["command_refused", "budget_exhausted", "stopped", "capacity"]),
-        })
-        .strict(),
-      storedResultSchema.extend({ kind: z.literal("completed") }).strict(),
-      z
-        .object({
-          kind: z.literal("unknown"),
-          reason: z.enum(["interrupted", "transport", "invalid_result"]),
-          infrastructureReason: z.enum(EXEC_INFRA_REASONS).optional(),
-          result: storedResultSchema.optional(),
-        })
-        .strict(),
-    ]),
-  })
-  .strict();
-export { receiptSchema as checkExecutionReceiptSchema };
-
-const stateSchema = z
-  .object({
-    version: z.literal(1),
-    receipts: z.array(receiptSchema).max(RECEIPT_CAP),
-    metadata: z
-      .object({
-        callId: z.string().min(1).max(200),
-        inputHash: z.string().regex(/^[a-f0-9]{64}$/),
-        owner: ownerSchema,
-        workspace: z.string().min(1).max(4096),
-        checkOperation: checkOperationSchema,
-        result: storedResultSchema.optional(),
-      })
-      .strict()
-      .optional(),
-  })
-  .strict();
+export { checkExecutionReceiptSchema } from "./checkExecutionSchema.js";
 
 export interface CheckExecutionBinding {
   executor: () => Pick<Executor, "execResult" | "inspectCheckResult">;
@@ -168,25 +102,10 @@ function boundedResult(value: unknown): ExecResult | undefined {
 /** A thin ledger/executor adapter. This records selected commands; it does not
  * certify their relevance, test collection, side effects or ordering before edits. */
 export function createCheckExecution(binding: CheckExecutionBinding): CheckExecutionCapability {
-  const parsed = stateSchema.safeParse(binding.previous ?? { version: 1, receipts: [] });
-  const parsedOwner = ownerSchema.safeParse(binding.owner);
   const owner = { ...binding.owner };
-  const sameOwner = (candidate: CheckExecutionOwner) =>
-    (["runId", "requester", "threadKey", "repo", "unit"] as const).every((key) => candidate[key] === owner[key]) &&
-    Object.hasOwn(candidate, "unit") === Object.hasOwn(owner, "unit");
-  const valid =
-    parsedOwner.success &&
-    parsed.success &&
-    (!parsed.data.metadata || sameOwner(parsed.data.metadata.owner)) &&
-    parsed.data.receipts.every(
-      (receipt) =>
-        sameOwner(receipt.owner) &&
-        (receipt.outcome.kind === "pending" || Number.isFinite(receipt.completedAt)) &&
-        (receipt.outcome.kind !== "completed" || ![124, 137, 143].includes(receipt.outcome.exitCode)),
-    ) &&
-    new Set(parsed.data.receipts.map((receipt) => receipt.callId)).size === parsed.data.receipts.length;
-  const state: CheckExecutionState =
-    valid && parsed.success ? structuredClone(parsed.data) : { version: 1, receipts: [] };
+  const parsed = checkExecutionStateOf(binding.previous ?? { version: 1, receipts: [] }, owner);
+  const valid = parsed !== undefined;
+  const state: CheckExecutionState = parsed ? structuredClone(parsed) : { version: 1, receipts: [] };
   let persistenceFailed = false;
   let queue: Promise<unknown> = Promise.resolve();
   const unavailable = (
@@ -210,18 +129,7 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
     }
   };
 
-  const operationKey = (callId: string, inputHash: string) =>
-    hash(
-      JSON.stringify([
-        owner.runId,
-        owner.requester,
-        owner.threadKey,
-        owner.repo,
-        owner.unit ?? null,
-        callId,
-        inputHash,
-      ]),
-    );
+  const operationKey = (callId: string, inputHash: string) => hash(checkOperationSeed(owner, callId, inputHash));
 
   async function inspectResult(
     operation: CheckOperation,
@@ -334,7 +242,7 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
     if (
       retainedMetadata &&
       (retainedMetadata.workspace !== workspace ||
-        retainedMetadata.checkOperation.key !== hash(JSON.stringify([operationKey(callId, inputHash), "metadata"])) ||
+        retainedMetadata.checkOperation.key !== hash(checkMetadataOperationSeed(operationKey(callId, inputHash))) ||
         retainedMetadata.checkOperation.commandHash !== hash(command))
     )
       return unavailable("invalid_state");
@@ -345,7 +253,7 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
         owner: { ...owner },
         workspace,
         checkOperation: {
-          key: hash(JSON.stringify([operationKey(callId, inputHash), "metadata"])),
+          key: hash(checkMetadataOperationSeed(operationKey(callId, inputHash))),
           commandHash: hash(command),
         },
       };

@@ -1,4 +1,11 @@
 import type { CancellationRefusal, CancellationObservation } from "./runLedger/cancellation.js";
+import {
+  checkSourceReadOf,
+  checkSourceIdentityHash,
+  type CheckSourceRead,
+  type CheckSelector,
+  type CheckInspection,
+} from "./checkInspection.js";
 import type { RunCancellation, RuntimeStopResult } from "./runLedger/cancellation.js";
 import { reclaimedRunRecord } from "./dispatch/record.js";
 import type { LedgerRun as TrackedLedgerRun, LedgerWriteThrough } from "./runLedger/writeThrough.js";
@@ -447,6 +454,10 @@ export interface LiveRunAccess {
 }
 
 export interface RunsService {
+  /** Match private canonical evidence to the ordinary run before the command authorizes it. */
+  getCheckSource(selector: CheckSelector): Promise<Result<{ run: RunRecordView; source: CheckSourceRead }>>;
+  inspectCheck(source: CheckSourceRead): Promise<CheckInspection>;
+  settleCheck(source: CheckSourceRead): Promise<CheckInspection>;
   listRuns(opts: ListRunsOptions): Promise<ListRunsResult>;
   /** The ledger's live rows this process does not hold, under the viewer's
    *  predicate (run-history item 41) — what the default index adds to the
@@ -532,6 +543,8 @@ const ordinaryRun = (view: { threadKey?: string }, access?: typeof PRIVATE_WORKE
   access === PRIVATE_WORKER_INTERNAL_READ || !privateWorkerRun(view);
 
 export interface RunsServiceDeps {
+  /** Selector-only access to the existing original-operation journal. Never dispatches a run. */
+  checkRuntime?: (selector: CheckSelector, settle: boolean, expectedSourceHash: string) => Promise<CheckInspection>;
   /** Trusted runtime stop, bound to the store-fenced original target. */
   stopRuntime?: ((row: LiveRunRow, cancellation: RunCancellation) => Promise<RuntimeStopResult>) & {
     supports?: (row: LiveRunRow) => boolean;
@@ -556,7 +569,7 @@ export interface RunsServiceDeps {
    *  Null or absent when the ledger is off. */
   ledger?:
     | (Pick<RunLedger, "listLive" | "readEvents" | "requestStop" | "finish" | "planeWithdraw" | "planeQueued"> &
-        Partial<Pick<RunLedger, "prepareCancellation" | "finishCancellation">>)
+        Partial<Pick<RunLedger, "prepareCancellation" | "finishCancellation" | "readCheckSource">>)
     | null;
   /** Only the bot that owns this generation may close its paused rows.
    *  A CLI or another reader has no generation and only signals a stop. */
@@ -815,6 +828,15 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
   const clock = deps.clock ?? systemClock;
   const warn = deps.warn ?? ((m: string) => console.warn(m));
   const describe = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+
+  const inspectCheck = async (read: CheckSourceRead, settle: boolean): Promise<CheckInspection> => {
+    if (read.kind !== "source") return { kind: "unavailable", reason: "source" };
+    const source = read.source;
+    if (settle && source.state !== "terminal") return { kind: "unavailable", reason: "live" };
+    if (!settle && source.result) return { kind: "known", source: "canonical", result: source.result };
+    if (!deps.checkRuntime) return { kind: "unavailable", reason: "backend" };
+    return deps.checkRuntime(source.selector, settle, await checkSourceIdentityHash(source));
+  };
 
   /** The ledger's live rows, one listing per `LEDGER_LIST_TTL_MS` (item 41):
    *  a page view's three reads share it, and a history read of a finished run
@@ -1429,6 +1451,38 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       if (record.researchBrief !== undefined) view.researchBrief = record.researchBrief;
       return { ok: true, value: await diagnostic(view) };
     },
+
+    async getCheckSource(selector) {
+      const read = await service.getRun(selector.runId);
+      if (!read.ok) return read;
+      let source: CheckSourceRead;
+      try {
+        source = (await ledger?.readCheckSource?.(selector)) ?? { kind: "unavailable" };
+      } catch {
+        source = { kind: "unavailable" };
+      }
+      if (source.kind === "source") {
+        const frozen = source.source.resource;
+        const run = read.value;
+        // A public record update cannot widen access to the frozen private evidence.
+        // Missing legacy attributes do not acquire the frozen source's values.
+        if (
+          frozen.type !== "run" ||
+          frozen.id !== run.id ||
+          frozen.userId !== run.userId ||
+          frozen.channelId !== run.channelId ||
+          frozen.channelVisibility !== run.channelVisibility ||
+          frozen.repo !== run.repo ||
+          source.source.threadKey !== run.threadKey
+        )
+          return { ok: false, error: "not_found" };
+        source = checkSourceReadOf(source, selector);
+      }
+      return { ok: true, value: { run: read.value, source } };
+    },
+
+    inspectCheck: (source) => inspectCheck(source, false),
+    settleCheck: (source) => inspectCheck(source, true),
 
     async getRunEvents(id, opts) {
       if (!(await service.getRun(id, { privateWorkerAccess: opts.privateWorkerAccess })).ok) return notFound;

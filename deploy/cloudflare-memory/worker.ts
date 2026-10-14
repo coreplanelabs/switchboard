@@ -1,3 +1,14 @@
+import {
+  captureCheckArchive,
+  hasRecordedCheckEvidence,
+  checkArchiveOf,
+  restoreArchivedChecks,
+  selectCheckSource,
+  checkSelectorSchema,
+  type CheckArchive,
+  type CheckSelector,
+  type CheckSourceRead,
+} from "../../src/core/checkInspection.js";
 import { parseStoredJson } from "../../src/core/storedJson.ts";
 import { STORAGE_FAILURE_DIAGNOSTIC_HEADER, storageFailureNotice } from "../../src/core/storageFailureDiagnostic.ts";
 import { hasConfirmationConsent, type ConfirmationConsentSource } from "../../src/core/confirmationConsent.ts";
@@ -6288,6 +6299,36 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /** Restore only the original baseline; other segment state keeps its existing lifetime. */
+  async readCheckSource(selector: CheckSelector): Promise<CheckSourceRead> {
+    const live = this.liveRow(selector.runId);
+    if (live) {
+      try {
+        return await selectCheckSource(captureCheckArchive(live), selector, "live");
+      } catch {
+        return { kind: "unavailable" };
+      }
+    }
+    const row = this.sql
+      .exec<{ summary_json: string; work_evidence_json: string | null }>(
+        "SELECT summary_json,work_evidence_json FROM runs WHERE run_id = ?",
+        selector.runId,
+      )
+      .toArray()[0];
+    if (!row || row.work_evidence_json === null) return { kind: "unavailable" };
+    const retained = this.sql
+      .exec<RetentionRow>("SELECT run_id,finished_at,bytes FROM runs WHERE run_id = ?", selector.runId)
+      .toArray()[0];
+    if (!retained || !this.isKept(retained, this.policyState().policy, systemClock())) return { kind: "unavailable" };
+    try {
+      const record = parseStoredJson(row.summary_json);
+      if (!record || record.provisional || record.restarting) return { kind: "unavailable" };
+      const evidence = parseWorkEvidence(parseStoredJson(row.work_evidence_json), record);
+      return selectCheckSource(evidence?.checkArchive, selector, "terminal");
+    } catch {
+      return { kind: "unavailable" };
+    }
+  }
+
   private preserveArchivedBaseline(runId: string, incoming: RunState, owner: RunWorkOwner): RunState | undefined {
     const archived = this.sql
       .exec<{ summary_json: string; work_evidence_json: string | null }>(
@@ -6295,7 +6336,12 @@ export class RunHistoryDO extends DurableObject<Env> {
         runId,
       )
       .toArray()[0];
-    if (!archived) return incoming;
+    if (!archived) {
+      const current = this.liveRow(runId)?.state.checkExecutions;
+      return incoming.checkExecutions === undefined && current !== undefined
+        ? { ...incoming, checkExecutions: current }
+        : incoming;
+    }
     const record: unknown = parseStoredJson(archived.summary_json);
     if (!isRunWorkOwner(record) || record.id !== runId) return undefined;
     const evidence =
@@ -6304,6 +6350,15 @@ export class RunHistoryDO extends DurableObject<Env> {
         : parseWorkEvidence(parseStoredJson(archived.work_evidence_json), record);
     if (archived.work_evidence_json !== null && !evidence) return undefined;
     const summary = record as RunWorkOwner & { branchIdentityBaseline?: unknown };
+    const liveChecks = this.liveRow(runId);
+    const currentChecks = liveChecks?.state.checkExecutions;
+    const restoredChecks = restoreArchivedChecks(
+      evidence?.checkArchive,
+      incoming.checkExecutions ?? currentChecks,
+      owner,
+    );
+    if (!restoredChecks) return undefined;
+    if (restoredChecks.checks !== undefined) incoming = { ...incoming, checkExecutions: restoredChecks.checks };
     const baseline =
       evidence && Object.hasOwn(evidence, "branchIdentityBaseline")
         ? evidence.branchIdentityBaseline
@@ -6629,6 +6684,13 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (Object.hasOwn(req.meta, "workspaceDisposition")) throw new Error("workspace disposition is store-derived");
     if ((req.state && Object.hasOwn(req.state, "cancellation")) || workspaceAuthorityFieldsPresent(req.state))
       throw new Error("workspace allocation cannot be written as mutable state");
+    const checkCustody = this.liveRow(req.runId);
+    if (
+      checkCustody &&
+      hasRecordedCheckEvidence(checkCustody.state.checkExecutions) &&
+      !restoreArchivedChecks(captureCheckArchive(checkCustody), undefined, { ...req.meta, id: req.runId })
+    )
+      throw new Error("recorded check authorization is immutable");
     req = structuredClone(req);
     return this.withRangePins([{ id: req.runId, handoff: req.meta.childHandoff }], async () => {
       let out: ClaimResult = { ok: true };
@@ -6655,6 +6717,13 @@ export class RunHistoryDO extends DurableObject<Env> {
             return;
           }
         }
+        const checkCustody = this.liveRow(req.runId);
+        if (
+          checkCustody &&
+          hasRecordedCheckEvidence(checkCustody.state.checkExecutions) &&
+          !restoreArchivedChecks(captureCheckArchive(checkCustody), undefined, { ...req.meta, id: req.runId })
+        )
+          throw new Error("recorded check authorization is immutable");
         const existing = this.liveByThread(req.threadKey);
         if (
           existing?.runId === req.runId &&
@@ -7386,7 +7455,12 @@ export class RunHistoryDO extends DurableObject<Env> {
         out = { ok: false, reason: "fenced" };
         return;
       }
-      const put = this.upsertInTransaction(record, proposal, point);
+      const put = this.upsertInTransaction(
+        record,
+        proposal,
+        point,
+        captureCheckArchive(row, !record.provisional && !record.restarting),
+      );
       if (allocation?.allocation && row && confirmed)
         this.retainAllocation({
           ...allocation,
@@ -7444,6 +7518,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   /** The live rows go with no record (item 42): a reserved run that never
    *  started. Fenced. */
   async abandon(runId: string, gen: string): Promise<FenceResult> {
+    if (hasRecordedCheckEvidence(this.liveRow(runId)?.state.checkExecutions)) return { ok: false, reason: "fenced" };
     if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion)
       await this.requirePromotionRelease(runId, gen);
     const admitted = checkFence(this.liveRow(runId), gen);
@@ -7464,6 +7539,10 @@ export class RunHistoryDO extends DurableObject<Env> {
         const row = this.liveRow(runId);
         out = checkFence(row, gen);
         if (!out.ok) return;
+        if (hasRecordedCheckEvidence(row?.state.checkExecutions)) {
+          out = { ok: false, reason: "fenced" };
+          return;
+        }
         const allocation = workspaceDurabilityArchiveOf(this.allocationArchive(runId));
         if (allocation?.allocation && row)
           this.retainAllocation({
@@ -7681,7 +7760,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       const current = this.liveRow(cancellation.runId);
       if (!current || !cancellationMatches(current, cancellation)) return;
       this.checkWorkspaceFinishCapacity(current, record);
-      const put = this.upsertInTransaction(record, undefined, point);
+      const put = this.upsertInTransaction(record, undefined, point, captureCheckArchive(current, true));
       if (!put.stored) return;
       const obligation = terminalWorkspaceSettlement(current, record);
       if (obligation) {
@@ -8461,6 +8540,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     proposal?: RunPolicyProposal,
     /** The record's point: kept beside a `restarting` row for the sweep (record 0097). */
     point?: RunMetricsPoint,
+    checkSnapshot?: CheckArchive,
   ): {
     ok: true;
     retained: number;
@@ -8470,6 +8550,8 @@ export class RunHistoryDO extends DurableObject<Env> {
     /** The committed record's review row when this write emits (record 0097). */
     reviewPoint?: RunMetricsPoint;
   } {
+    if (Object.hasOwn(record, "checkArchive") || Object.hasOwn(record, "checkExecutions"))
+      throw new Error("check archive cannot be submitted through a run record");
     if (workspaceAuthorityFieldsPresent(record))
       throw new Error("workspace allocation authority cannot be written through a run record");
     {
@@ -8513,6 +8595,15 @@ export class RunHistoryDO extends DurableObject<Env> {
           : undefined;
       if (priorRecord?.work_evidence_json != null && priorEvidence === undefined)
         throw new Error("work evidence is unreadable");
+      const priorCheck = checkArchiveOf(priorEvidence?.checkArchive);
+      if (priorEvidence?.checkArchive !== undefined && !priorCheck) throw new Error("check archive is unreadable");
+      if (
+        priorCheck?.sealed &&
+        checkSnapshot !== undefined &&
+        JSON.stringify(priorCheck) !== JSON.stringify(checkSnapshot)
+      )
+        throw new Error("sealed check archive is immutable");
+      const checkArchive = priorCheck?.sealed ? priorCheck : (checkSnapshot ?? priorCheck);
       const liveWork = this.liveRow(stored.id)?.state;
       const canonicalWork = this.preserveArchivedBaseline(
         stored.id,
@@ -8612,17 +8703,48 @@ export class RunHistoryDO extends DurableObject<Env> {
         doorPublicationPending === undefined && canonicalDoor !== undefined && canonicalDoor !== null
           ? { doorPublicationPending: canonicalDoor }
           : {};
-      const bytes = utf8ByteLength(
-        JSON.stringify({
-          ...unreadableDoor,
-          ...unreadableReview,
-          ...unreadablePush,
-          ...stored,
-          ...(branchPublication === undefined && canonicalWork.branchPublication !== undefined
-            ? { branchPublication: canonicalWork.branchPublication }
-            : {}),
-        }),
-      );
+      const workEvidenceJson =
+        workReads === undefined &&
+        unitSeedReceipt === undefined &&
+        branchIdentityBaseline === undefined &&
+        !(branchPublication === undefined && canonicalWork.branchPublication !== undefined) &&
+        Object.keys(unreadablePush).length === 0 &&
+        Object.keys(unreadableReview).length === 0 &&
+        Object.keys(unreadableDoor).length === 0 &&
+        checkArchive === undefined
+          ? null
+          : JSON.stringify({
+              version: 1,
+              ...(checkArchive === undefined ? {} : { checkArchive }),
+              ...unreadableDoor,
+              ...unreadableReview,
+              ...unreadablePush,
+              workReads,
+              unitSeedReceipt,
+              branchIdentityBaseline,
+              ...(branchPublication === undefined && canonicalWork.branchPublication !== undefined
+                ? { branchPublication: canonicalWork.branchPublication }
+                : {}),
+            });
+      const bytes =
+        checkArchive !== undefined
+          ? utf8ByteLength(
+              JSON.stringify({ ...summary, events, sourceReads, contextCheckpointReceipt, directAudience }),
+            ) + utf8ByteLength(workEvidenceJson ?? "")
+          : utf8ByteLength(
+              JSON.stringify({
+                ...unreadableDoor,
+                ...unreadableReview,
+                ...unreadablePush,
+                ...(checkArchive === undefined ? {} : { checkArchive }),
+                ...stored,
+                ...(branchPublication === undefined && canonicalWork.branchPublication !== undefined
+                  ? { branchPublication: canonicalWork.branchPublication }
+                  : {}),
+              }),
+            );
+      if (checkArchive !== undefined && bytes > MAX_RECORD_BYTES)
+        throw new Error("check evidence exceeds record byte limit");
       const existing = this.sql
         .exec<{
           event_count: number;
@@ -8707,26 +8829,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         sourceReads === undefined ? null : JSON.stringify(sourceReads),
         contextCheckpointReceipt === undefined ? null : JSON.stringify(contextCheckpointReceipt),
         directAudience === undefined ? null : JSON.stringify(directAudience),
-        workReads === undefined &&
-          unitSeedReceipt === undefined &&
-          branchIdentityBaseline === undefined &&
-          !(branchPublication === undefined && canonicalWork.branchPublication !== undefined) &&
-          Object.keys(unreadablePush).length === 0 &&
-          Object.keys(unreadableReview).length === 0 &&
-          Object.keys(unreadableDoor).length === 0
-          ? null
-          : JSON.stringify({
-              version: 1,
-              ...unreadableDoor,
-              ...unreadableReview,
-              ...unreadablePush,
-              workReads,
-              unitSeedReceipt,
-              branchIdentityBaseline,
-              ...(branchPublication === undefined && canonicalWork.branchPublication !== undefined
-                ? { branchPublication: canonicalWork.branchPublication }
-                : {}),
-            }),
+        workEvidenceJson,
         latched || emits ? 1 : 0,
         stored.restarting === true && point !== undefined ? JSON.stringify(point) : null,
       );
@@ -8759,6 +8862,8 @@ export class RunHistoryDO extends DurableObject<Env> {
       // The just-written row is either kept or was deleted by the trim (it is
       // always `first`), so kept membership IS whether it is still stored.
       const { kept } = this.trim(policy, now, RUN_TRIM_FENCE, record.id);
+      if (checkSnapshot !== undefined && !kept.has(record.id))
+        throw new Error("check evidence exceeds retention policy");
       return {
         ok: true as const,
         retained: kept.size,
@@ -8796,8 +8901,13 @@ export class RunHistoryDO extends DurableObject<Env> {
       let closed = false;
       this.ctx.storage.transactionSync(() => {
         const row = this.sql
-          .exec<{ restart_point_json: string | null }>(
-            `SELECT restart_point_json FROM runs
+          .exec<{
+            restart_point_json: string | null;
+            work_evidence_json: string | null;
+            summary_json: string;
+            bytes: number;
+          }>(
+            `SELECT restart_point_json,work_evidence_json,summary_json,bytes FROM runs
              WHERE run_id = ? AND metrics_emitted = 0 AND json_valid(summary_json)
                AND json_extract(summary_json, '$.restarting') = 1
                AND json_extract(summary_json, '$.restartUntil') = ?
@@ -8807,6 +8917,26 @@ export class RunHistoryDO extends DurableObject<Env> {
           )
           .toArray()[0];
         if (row === undefined) return;
+        if (row.work_evidence_json !== null) {
+          let evidence: Record<string, unknown>;
+          try {
+            const record = parseStoredJson(row.summary_json);
+            if (!isRunWorkOwner(record)) return;
+            const parsed = parseWorkEvidence(parseStoredJson(row.work_evidence_json), record);
+            if (!parsed) return;
+            evidence = parsed;
+          } catch {
+            return;
+          }
+          if (evidence.checkArchive !== undefined) {
+            const archive = checkArchiveOf(evidence.checkArchive);
+            if (!archive) return;
+            const json = JSON.stringify({ ...evidence, checkArchive: { ...archive, sealed: true } });
+            const bytes = row.bytes - utf8ByteLength(row.work_evidence_json) + utf8ByteLength(json);
+            if (bytes > MAX_RECORD_BYTES) return;
+            this.sql.exec("UPDATE runs SET work_evidence_json = ?, bytes = ? WHERE run_id = ?", json, bytes, runId);
+          }
+        }
         this.sql.exec(
           `UPDATE runs SET
              summary_json = json_set(json_remove(summary_json, '$.restarting', '$.restartUntil'),
@@ -9596,7 +9726,8 @@ function parseWorkEvidence(value: unknown, owner: RunWorkOwner): Record<string, 
         field !== "branchPublication" &&
         field !== "reviewPublication" &&
         field !== "branchPushReceipts" &&
-        field !== "doorPublicationPending",
+        field !== "doorPublicationPending" &&
+        field !== "checkArchive",
     ) ||
     !workEvidenceBelongsToRun(evidence, owner)
   )
@@ -11506,6 +11637,7 @@ export class SessionLogDO extends DurableObject<Env> {
 }
 
 const LEDGER_ROUTES = new Set([
+  "/runs/check-source",
   "/runs/context-checkpoint",
   "/runs/session/checkpoint",
   "/runs/private-worker/append",
@@ -12295,6 +12427,14 @@ async function handleLedger(
       if (pending) return json(pending, 423);
       throw error;
     }
+  }
+
+  if (pathname === "/runs/check-source") {
+    const selector = checkSelectorSchema.safeParse(b.selector);
+    if (!selector.success) return json({ kind: "unavailable" }, 400);
+    const key = parseStoreKey(b);
+    if (!key.ok) return json({ kind: "unavailable" }, 400);
+    return json(await env.RUNS.get(env.RUNS.idFromName(key.value)).readCheckSource(selector.data));
   }
 
   if (pathname.startsWith("/runs/transcript/")) {

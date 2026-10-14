@@ -1,6 +1,7 @@
 import { commandConfirmationMessage } from "./commandConfirmations.js";
 import { effectiveConfirm } from "../config/profile.js";
 import { createRunStop } from "../execution/runStop.js";
+import { createRunCheck } from "../execution/runCheck.js";
 import type { CredentialsCommandDeps } from "./commands/credentials.js";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -294,6 +295,7 @@ export function buildCoreCommands(
       store: await runStore(),
       ledger: workerLedger,
       stopRuntime: createRunStop(config.execution, wiring.secrets),
+      checkRuntime: createRunCheck(config.execution, wiring.secrets),
       sessions: workerLedger,
       units: buildCoordinatorInstanceStore(history, wiring.secrets),
       // A finished run's tokens are priced through `costs.prices` (costs.md item 4c), the list alone without one.

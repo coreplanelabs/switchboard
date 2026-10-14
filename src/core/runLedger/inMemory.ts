@@ -1,4 +1,13 @@
 import {
+  captureCheckArchive,
+  hasRecordedCheckEvidence,
+  checkArchiveOf,
+  restoreArchivedChecks,
+  selectCheckSource,
+  type CheckSelector,
+  type CheckSourceRead,
+} from "../checkInspection.js";
+import {
   prepareCancellation,
   cancellationMatches,
   cancellationRecordMatches,
@@ -972,6 +981,21 @@ export class InMemoryRunLedger implements RunLedger {
   readonly finished = new Map<string, RunRecord>();
   /** Mirrors private terminal producer evidence that cannot enter a typed record. */
   readonly finishedWorkEvidence = new Map<string, RunState>();
+
+  async readCheckSource(selector: CheckSelector): Promise<CheckSourceRead> {
+    const live = this.live.get(selector.runId);
+    if (live) {
+      try {
+        return await selectCheckSource(captureCheckArchive(live), selector, "live");
+      } catch {
+        return { kind: "unavailable" };
+      }
+    }
+    const record = this.finished.get(selector.runId);
+    if (!record || record.provisional || record.restarting) return { kind: "unavailable" };
+    return selectCheckSource(this.finishedWorkEvidence.get(selector.runId)?.checkArchive, selector, "terminal");
+  }
+
   readonly intake = new Map<string, IntakeReceipt>();
   readonly intakeDeliveries = new Map<string, { poster: string; claimUntil: number; delivered: boolean }>();
   /** The failure toggle (run-history item 59): tests flip a flag to make the
@@ -1110,6 +1134,15 @@ export class InMemoryRunLedger implements RunLedger {
   ): RunState | undefined {
     const record = this.finished.get(runId);
     const evidence = this.finishedWorkEvidence.get(runId);
+    const liveChecks = this.live.get(runId);
+    const currentChecks = liveChecks?.state.checkExecutions;
+    const restoredChecks = restoreArchivedChecks(
+      evidence?.checkArchive,
+      incoming.checkExecutions ?? currentChecks,
+      owner,
+    );
+    if (!restoredChecks) return undefined;
+    if (restoredChecks.checks !== undefined) incoming = { ...incoming, checkExecutions: restoredChecks.checks };
     const baseline =
       evidence && Object.hasOwn(evidence, "branchIdentityBaseline")
         ? evidence.branchIdentityBaseline
@@ -1168,6 +1201,13 @@ export class InMemoryRunLedger implements RunLedger {
     if (Object.hasOwn(req.meta, "workspaceDisposition")) throw new Error("workspace disposition is store-derived");
     if ((req.state && Object.hasOwn(req.state, "cancellation")) || workspaceAuthorityFieldsPresent(req.state))
       throw new Error("workspace allocation cannot be written as mutable state");
+    const checkCustody = this.live.get(req.runId);
+    if (
+      checkCustody &&
+      hasRecordedCheckEvidence(checkCustody.state.checkExecutions) &&
+      !restoreArchivedChecks(captureCheckArchive(checkCustody), undefined, { ...req.meta, id: req.runId })
+    )
+      throw new Error("recorded check authorization is immutable");
     const existing = this.byThread(req.threadKey);
     if (
       existing?.runId === req.runId &&
@@ -1933,6 +1973,25 @@ export class InMemoryRunLedger implements RunLedger {
         : { ok: false as const, reason: "unknown-run" as const };
     if (!cancellationMatches(row, cancellation) || !cancellationRecordMatches(record, cancellation))
       return { ok: false as const, reason: "fenced" as const };
+    if (Object.hasOwn(record, "checkArchive") || Object.hasOwn(record, "checkExecutions"))
+      return { ok: false as const, reason: "fenced" as const };
+    const checkArchive = captureCheckArchive(row, true);
+    const priorCheckValue = this.finishedWorkEvidence.get(row.runId)?.checkArchive;
+    const priorCheck = checkArchiveOf(priorCheckValue);
+    if (
+      (priorCheckValue !== undefined && !priorCheck) ||
+      (priorCheck?.sealed && checkArchive !== undefined && JSON.stringify(priorCheck) !== JSON.stringify(checkArchive))
+    )
+      return { ok: false as const, reason: "fenced" as const };
+    const checkEvidence = {
+      ...this.finishedWorkEvidence.get(row.runId),
+      ...(checkArchive === undefined ? {} : { checkArchive }),
+    };
+    if (
+      checkArchive !== undefined &&
+      utf8ByteLength(JSON.stringify({ ...record, ...checkEvidence, version: 1 })) > MAX_RECORD_BYTES
+    )
+      throw new Error("check evidence exceeds record byte limit");
     const obligation = terminalWorkspaceSettlement(row, record);
     if (obligation) {
       const ownerKey = workspaceOwnerKey(obligation.owner),
@@ -1953,6 +2012,7 @@ export class InMemoryRunLedger implements RunLedger {
       }
       if (log?.owner?.runId === row.runId && log.owner.gen === row.ownerGen) delete log.owner;
     }
+    if (checkArchive !== undefined) this.finishedWorkEvidence.set(row.runId, checkEvidence);
     this.finished.set(row.runId, structuredClone(record));
     this.live.delete(row.runId);
     this.planeEndings.set(row.runId, {
@@ -2000,7 +2060,12 @@ export class InMemoryRunLedger implements RunLedger {
     record: RunRecord,
     opts?: { requireStoppedPause: true },
   ): Promise<FinishResult> {
-    if (workspaceAuthorityFieldsPresent(record)) return { ok: false, reason: "fenced" };
+    if (
+      workspaceAuthorityFieldsPresent(record) ||
+      Object.hasOwn(record, "checkArchive") ||
+      Object.hasOwn(record, "checkExecutions")
+    )
+      return { ok: false, reason: "fenced" };
     if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
@@ -2083,18 +2148,15 @@ export class InMemoryRunLedger implements RunLedger {
       JSON.stringify(record.contextCheckpointReceipt) !== JSON.stringify(priorReceipt)
     )
       return { ok: false, reason: "fenced" };
-    const obligation = terminalWorkspaceSettlement(row, record);
-    if (obligation) {
-      const key = workspaceOwnerKey(obligation.owner);
-      const prior = this.workspaceObligations.get(key);
-      if ((prior?.pending.size ?? 0) >= WORKSPACE_SETTLEMENTS_MAX)
-        throw new Error("workspace obligation capacity exhausted");
-      obligation.revision = nextWorkspaceRevision(prior?.revision);
-      const pending = prior?.pending ?? new Map<number, WorkspaceSettlement>();
-      pending.set(obligation.revision, obligation);
-      this.workspaceObligations.set(key, { revision: obligation.revision, pending });
+    let checkArchive = captureCheckArchive(row, !record.provisional && !record.restarting);
+    const priorCheck = checkArchiveOf(this.finishedWorkEvidence.get(runId)?.checkArchive);
+    if (priorCheck?.sealed) {
+      if (checkArchive !== undefined && JSON.stringify(priorCheck) !== JSON.stringify(checkArchive))
+        return { ok: false, reason: "fenced" };
+      checkArchive = priorCheck;
     }
     const unreadable = {
+      ...(checkArchive === undefined ? {} : { checkArchive }),
       ...(canonicalWork.branchPushReceipts !== undefined && branchPushReceipts === undefined
         ? { branchPushReceipts: structuredClone(canonicalWork.branchPushReceipts) }
         : {}),
@@ -2110,6 +2172,22 @@ export class InMemoryRunLedger implements RunLedger {
         ? { doorPublicationPending: structuredClone(canonicalWork.doorPublicationPending) }
         : {}),
     };
+    if (
+      checkArchive !== undefined &&
+      utf8ByteLength(JSON.stringify({ ...record, ...unreadable, version: 1 })) > MAX_RECORD_BYTES
+    )
+      throw new Error("check evidence exceeds record byte limit");
+    const obligation = terminalWorkspaceSettlement(row, record);
+    if (obligation) {
+      const key = workspaceOwnerKey(obligation.owner);
+      const prior = this.workspaceObligations.get(key);
+      if ((prior?.pending.size ?? 0) >= WORKSPACE_SETTLEMENTS_MAX)
+        throw new Error("workspace obligation capacity exhausted");
+      obligation.revision = nextWorkspaceRevision(prior?.revision);
+      const pending = prior?.pending ?? new Map<number, WorkspaceSettlement>();
+      pending.set(obligation.revision, obligation);
+      this.workspaceObligations.set(key, { revision: obligation.revision, pending });
+    }
     if (Object.keys(unreadable).length) this.finishedWorkEvidence.set(runId, unreadable);
     else this.finishedWorkEvidence.delete(runId);
     this.finished.set(runId, record);
@@ -2393,6 +2471,7 @@ export class InMemoryRunLedger implements RunLedger {
     const fence = this.fence(runId, gen);
     if (!fence.ok) return fence;
     if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
+    if (hasRecordedCheckEvidence(this.live.get(runId)?.state.checkExecutions)) return { ok: false, reason: "fenced" };
     const retainedSteps = this.prepareInboxSegment(runId);
     this.steps.set(runId, retainedSteps);
     const allocation = workspaceDurabilityArchiveOf(this.allocationArchive(runId));

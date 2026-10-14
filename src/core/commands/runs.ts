@@ -1,4 +1,5 @@
 import { cancellationFailureMessage } from "../runLedger/cancellation.js";
+import { checkSelectorSchema, type CheckSelector } from "../checkInspection.js";
 import { z } from "zod";
 import { authorize } from "../authz/authorize.js";
 import { allOf, matchesPredicate, ownedBy, predicateFor } from "../authz/predicate.js";
@@ -50,7 +51,8 @@ import { unwrapUntrusted } from "../untrusted.js";
 //     filtered afterwards. No channel id is compared by hand here.
 //   - stored free text (message bodies, tool summaries) leaves wrapped as
 //     untrusted content. `runs.list` carries none of it by construction.
-// None of these commands starts a run; `runs.stop` only ends one.
+// None of these commands starts a run; `runs.stop` only ends one, and
+// `runs.settlecheck` retires an original check only from recorded ending proof.
 // Surface forms (derived): `runs get <id> [--include messages]`,
 // `runs events <id> [--after-seq n] [--limit n]`, `runs friction <id>`,
 // `runs stop <id> --mode soft|hard`, `runs list [--status …] [--agent …] …`,
@@ -441,6 +443,79 @@ export const runsFriction = defineCommand({
   },
 });
 
+const checkArgs = [
+  idArg,
+  { name: "call", schema: checkSelectorSchema.shape.callId, describe: "original recorded check call id" },
+] as const;
+const checkOptions = z
+  .object({ phase: checkSelectorSchema.shape.phase.describe("original metadata or command phase") })
+  .strict();
+
+async function inspectRecordedCheck(
+  selector: CheckSelector,
+  caller: Caller,
+  deps: RunsCommandDeps,
+  settle: boolean,
+): Promise<JsonValue> {
+  const runs = await deps.runs();
+  let selected: Awaited<ReturnType<RunsService["getCheckSource"]>>;
+  try {
+    selected = await runs.getCheckSource(selector);
+  } catch (error) {
+    if (error instanceof TransientStoreError)
+      throw new CommandError("unavailable", "History is temporarily unavailable");
+    throw error;
+  }
+  const { run, source } = unwrap(selected);
+  const action = settle ? "runs:write" : "runs:read";
+  const commandId = settle ? "runs.settlecheck" : "runs.check";
+  const resource = source.kind === "source" ? source.source.resource : runResource(run);
+  const decision = authorize(caller.actor, action, resource);
+  if (!decision.allow) {
+    (deps.denied ?? logDenied)({ commandId, actorId: caller.actor.id, action, reason: decision.reason });
+    throw new CommandError("not_found", "no run found");
+  }
+  const inspected = await (settle ? runs.settleCheck(source) : runs.inspectCheck(source));
+  return asJson(
+    inspected.kind === "known"
+      ? {
+          ...inspected,
+          result: {
+            ...inspected.result,
+            stdout: wrapUntrusted(inspected.result.stdout),
+            stderr: wrapUntrusted(inspected.result.stderr),
+          },
+        }
+      : inspected,
+  );
+}
+
+export const runsCheck = defineCommand({
+  id: "runs.check",
+  args: checkArgs,
+  options: checkOptions,
+  action: "runs:read",
+  effect: "read",
+  surfaces: { chat: false },
+  describe:
+    "Inspect an original recorded check without running it again; saved output is wrapped as untrusted content.",
+  handler: ({ args, options, caller, deps }) =>
+    inspectRecordedCheck({ runId: args.id, callId: args.call, phase: options.phase }, caller, deps, false),
+});
+
+export const runsSettleCheck = defineCommand({
+  id: "runs.settlecheck",
+  args: checkArgs,
+  options: checkOptions,
+  action: "runs:write",
+  effect: "write",
+  surfaces: { chat: false },
+  describe:
+    "Retire one original check after its run finishes, only when saved proof verifies that the original process ended.",
+  handler: ({ args, options, caller, deps }) =>
+    inspectRecordedCheck({ runId: args.id, callId: args.call, phase: options.phase }, caller, deps, true),
+});
+
 export const runsStop = defineCommand({
   id: "runs.stop",
   args: [idArg],
@@ -666,6 +741,8 @@ export const runsCommands: readonly CommandDef<RunsCommandDeps>[] = [
   runsGet,
   runsEvents,
   runsFriction,
+  runsCheck,
+  runsSettleCheck,
   runsStop,
   runsUnit,
   runsChildren,

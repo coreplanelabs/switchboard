@@ -1,3 +1,4 @@
+import { checkSelectorSchema, checkSourceReadOf, type CheckSelector, type CheckSourceRead } from "./checkInspection.js";
 import {
   cancellationRecordMatches,
   cancellationOf,
@@ -423,6 +424,16 @@ export class WorkerRunLedger implements RunLedger {
     if (!Number.isSafeInteger(r.data.fence) || (r.data.fence as number) <= 0)
       throw new PermanentStoreError("run ledger resident claim: invalid fence");
     return { ok: true, fence: r.data.fence as number };
+  }
+
+  async readCheckSource(selector: CheckSelector): Promise<CheckSourceRead> {
+    if (!checkSelectorSchema.safeParse(selector).success) return { kind: "unavailable" };
+    try {
+      const response = await this.read("/runs/check-source", { storeKey: this.opts.storeKey, selector });
+      return response.status === 200 ? checkSourceReadOf(response.data, selector) : { kind: "unavailable" };
+    } catch {
+      return { kind: "unavailable" };
+    }
   }
 
   async workspaceDisposition(expected: WorkspaceAllocation): Promise<WorkspaceDispositionRead> {

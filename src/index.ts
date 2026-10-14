@@ -1,5 +1,6 @@
 import { storageFailureNote } from "./core/storageFailureDiagnostic.js";
 import { createRunStop } from "./execution/runStop.js";
+import { createRunCheck } from "./execution/runCheck.js";
 import { readImageConfigConsumerIdentity, type ConfigConsumerIdentity } from "./configConsumer.js";
 import "./loadEnv.js";
 import { createServer } from "node:http";
@@ -735,6 +736,7 @@ export async function runBot(): Promise<void> {
   // One RunsService for every surface: the command registry (HTTP/MCP/chat), the
   // /runs pages, and the run tools a spawning run holds (the dispatcher's `runs`).
   const runsService = createRunsService({
+    checkRuntime: createRunCheck(config.config.execution),
     stopRuntime: createRunStop(config.config.execution),
     registry: defaultRunRegistry,
     store: runStore,
