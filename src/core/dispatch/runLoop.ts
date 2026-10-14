@@ -171,7 +171,7 @@ import {
   type FindingDisposition,
   type ReviewVerdict,
 } from "../reviewVerdict.js";
-import { parseDigestReport, type DigestReport } from "../diffDigest.js";
+import { parseDigestReport, retainDigest, type DigestReport } from "../diffDigest.js";
 import { runReviewPostStep, settleReviewedHead, type ReviewPostOutcome, type RoundWorkspace } from "../reviewRound.js";
 import { postReviewComment } from "../../execution/githubComments.js";
 import {
@@ -1326,14 +1326,47 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
       reviewSubmission = { status: "accepted", verdict: v };
     ledgerRun?.setState({ verdict: v, reviewSubmission });
   };
-  // The review's diff digest, set only through the diff_digest tool (the last
-  // call wins); the post-step holds its totals against the PR's size and
-  // refuses a verdict whose digest covered less. Restored like the verdict, so
-  // a resumed run keeps what its earlier generation digested.
+  // Keep canonical coverage when a reviewer also inspects an incremental range.
+  // The immutable range survives restart and is checked again at publication.
   let digest: DigestReport | undefined = parseDigestReport(restored.digest);
+  if (isPrReview && restored.digest !== undefined && !digest?.range) {
+    console.log(
+      JSON.stringify({
+        event: "review_digest_refused",
+        repo: repoCtx.repo,
+        pr: repoCtx.pr,
+        head: reviewHead,
+        baseRef: repoCtx.baseRef,
+        reason: "saved_range_unavailable",
+      }),
+    );
+    digest = {
+      complete: false,
+      base: repoCtx.baseRef ?? "unknown",
+      reason: "saved digest does not identify the current review range",
+    };
+  }
   const onDigest = (d: DigestReport) => {
-    digest = d;
-    ledgerRun?.setState({ digest: d });
+    const kept = retainDigest(digest, d);
+    if (kept !== d) {
+      try {
+        console.log(
+          JSON.stringify({
+            event: "review_digest_retained",
+            repo: repoCtx.repo,
+            pr: repoCtx.pr,
+            keptHead: kept.range?.head,
+            keptBase: kept.range?.base,
+            seenHead: d.range?.head,
+            seenBase: d.range?.base,
+          }),
+        );
+      } catch {
+        // Optional observation cannot replace canonical coverage.
+      }
+    }
+    digest = kept;
+    ledgerRun?.setState({ digest });
   };
   // Coding PR description, set only through the structured
   // submit_pr_description tool (the last valid call wins — a resubmit after
@@ -2439,6 +2472,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     },
     addressSeverity: ctx.addressSeverity.level,
     onDigest,
+    ...(isPrReview
+      ? {
+          digestTarget: () => {
+            // Settlement commits the shared target before prompting a new-head turn.
+            const head = reviewHistory?.requiredHead ?? reviewHead;
+            return repoCtx.baseRef && head ? { baseRef: repoCtx.baseRef, head } : undefined;
+          },
+        }
+      : {}),
     onPrDescription,
     onHandoff,
     onResearchBrief,

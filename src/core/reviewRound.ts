@@ -1085,7 +1085,12 @@ export async function runReviewPostStep(
     // (no digest, no PR size) passes: the guard catches a digest that lied,
     // it does not require one.
     const where = `${postTarget.repo}#${postTarget.number}`;
-    const coverage = checkDigestCoverage({ digest: input.digest, pr: repoCtx.prSize });
+    const coverage = checkDigestCoverage({
+      digest: input.digest,
+      pr: repoCtx.prSize,
+      head: reviewHead,
+      baseRef: repoCtx.baseRef,
+    });
     if (!coverage.ok) {
       console.log(`[review-post] ${logKey} skipped: ${coverage.reason} (${where})`);
       await input

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { LocalExecutor, type Executor } from "../execution/executor.js";
 import { execSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -40,6 +40,33 @@ function scripted(answers: Array<(cmd: string) => string>) {
 }
 
 describe("diff_digest tool", () => {
+  it("records a bounded refusal without logging the caller's base expression", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const ctx = ctxWith(
+      async () => `@@diff_digest:range@@\n${"a".repeat(40)}\n${"b".repeat(40)}\n${"a".repeat(40)}\n${ONE_FILE}`,
+    );
+    ctx.repo = "acme/api";
+    ctx.reviewHistory = { target: { repo: "acme/api", number: 42 } };
+    ctx.digestTarget = () => ({ baseRef: "main", head: "c".repeat(40) });
+    try {
+      expect(await diffDigestTool.run({ base: "caller-private-expression" }, ctx)).toBe(
+        "diff_digest: the digest did not confirm the pinned review head and base.",
+      );
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)))).toEqual([
+        {
+          event: "review_digest_refused",
+          repo: "acme/api",
+          pr: 42,
+          head: "c".repeat(40),
+          baseRef: "main",
+          reason: "range_unconfirmed",
+        },
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it("distills the file listing the executor returns and reports its totals through onDigest", async () => {
     const reports: DigestReport[] = [];
     const ctx = ctxWith(async () => ONE_FILE);
@@ -235,6 +262,36 @@ describe("diff_digest tool on a real multi-commit branch (LocalExecutor)", () =>
     for (const f of ["a-huge.txt", "src/late.ts", "zz-last.md", "README.md"]) expect(out).toContain(f);
     expect(reports).toEqual([
       { complete: true, base: "origin/HEAD", totals: { files: 4, additions: 4204, deletions: 0 } },
+    ]);
+  });
+
+  it("binds full and incremental digests to their immutable review ranges", async () => {
+    const reports: DigestReport[] = [];
+    const head = sh(wt, "git rev-parse HEAD").trim();
+    const base = sh(wt, "git rev-parse main").trim();
+    const delta = sh(wt, "git rev-parse HEAD~1").trim();
+    const ctx: ToolContext = {
+      executor: new LocalExecutor(wt),
+      onDigest: (report) => reports.push(report),
+      ...{ digestTarget: () => ({ baseRef: "main", head }) },
+    };
+    const full = await diffDigestTool.run({ base: "main" }, ctx);
+    const incremental = await diffDigestTool.run({ base: "HEAD~1" }, ctx);
+    expect(full).toContain("4 files changed, +4204 -0");
+    expect(incremental).toContain("2 files changed, +2 -0");
+    expect(reports).toEqual([
+      {
+        complete: true,
+        base: "main",
+        range: { base, head, canonicalBase: base, baseRef: "main" },
+        totals: { files: 4, additions: 4204, deletions: 0 },
+      },
+      {
+        complete: true,
+        base: "HEAD~1",
+        range: { base: delta, head, canonicalBase: base, baseRef: "main" },
+        totals: { files: 2, additions: 2, deletions: 0 },
+      },
     ]);
   });
 

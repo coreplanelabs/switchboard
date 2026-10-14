@@ -34,6 +34,7 @@ import { declaredProfile } from "../../config/profile.js";
 import { InMemoryGithubApi } from "../../execution/githubApi.js";
 import { githubPullGetTool } from "../../tools/github.js";
 import { submitVerdictTool } from "../../tools/submit.js";
+import { diffDigestTool } from "../../tools/diffDigest.js";
 import type { ToolContext } from "../../tools/runnableTool.js";
 import { githubRepositoryDependencies, mergeContextDependencies } from "../references/contextDependencies.js";
 import { githubReadWithContext } from "./githubReadContext.js";
@@ -8923,9 +8924,15 @@ describe("the pi harness — the review preset", () => {
       const registry = new HarnessRegistry();
       let worktreeHead = adoption ? NEW : HEAD;
       const moves: string[] = [];
+      const digestAnswers: string[] = [];
       const executor = {
         moveRequiresIdleProducer: requiresIdle,
-        exec: async (command: string) => (command.includes("rev-parse") ? `${worktreeHead}\n` : ""),
+        exec: async (command: string) =>
+          command.includes("@@diff_digest:range@@")
+            ? `@@diff_digest:range@@\n${(command.includes("prior^{commit}") ? "c" : "e").repeat(40)}\n${worktreeHead}\n${"e".repeat(40)}\n1\t0\tsrc/x.ts\n@@diff_digest:name-status@@\nM\tsrc/x.ts\n`
+            : command.includes("rev-parse")
+              ? `${worktreeHead}\n`
+              : "",
         execResult: async () => ({ exitCode: 0, stdout: worktreeHead + "\n", stderr: "", truncated: false }),
         moveTo: async (sha: string) => {
           if (requiresIdle && (await container.alive(container.pid)))
@@ -8999,6 +9006,8 @@ describe("the pi harness — the review preset", () => {
         };
         if (n === 1) {
           expect(worktreeHead).toBe(NEW);
+          digestAnswers.push(String(await diffDigestTool.run({ base: "main" }, live.toolContext)));
+          digestAnswers.push(String(await diffDigestTool.run({ base: "prior" }, live.toolContext)));
           await reject("HEAD", "error: a valid reviewed commit head");
           await reject(HEAD, "error: reviewed head differs from the required review head");
           expect(live.toolContext.reviewHistory?.snapshot).toBeUndefined();
@@ -9113,6 +9122,10 @@ describe("the pi harness — the review preset", () => {
         true,
       );
       const out = answered(await runLoop(s.deps, ctx));
+      expect(digestAnswers).toEqual([
+        expect.stringContaining("1 file changed, +1 -0"),
+        expect.stringContaining("1 file changed, +1 -0"),
+      ]);
       expect(bearers.marksOf("run-l")).not.toHaveProperty("turn");
       expect(toolChoices).toEqual(["auto"]);
       // One pi survives the re-review and, if needed, the verdict-only prompt.
@@ -14590,6 +14603,68 @@ describe("runLoop checkout-bound tools", () => {
     });
     expect(answered(await runLoop(s.deps, s.ctx)).answer).toContain("source binding checked");
   });
+  it("retains full-range coverage after an incremental digest", async () => {
+    const observed = watched(piHarness);
+    observed.harness.open = async (_deps, request) => {
+      request.toolContext.onDigest?.({
+        complete: true,
+        base: "origin/main",
+        totals: { files: 49, additions: 1772, deletions: 126 },
+        ...{ range: { base: "a".repeat(40), canonicalBase: "a".repeat(40), head: "b".repeat(40), baseRef: "main" } },
+      });
+      request.toolContext.onDigest?.({
+        complete: true,
+        base: "prior-head",
+        totals: { files: 10, additions: 94, deletions: 9 },
+        ...{ range: { base: "c".repeat(40), canonicalBase: "a".repeat(40), head: "b".repeat(40), baseRef: "main" } },
+      });
+      return {
+        answer: "Inspected both ranges.",
+        followUp: async () => "",
+        remainingMs: () => 60_000,
+        end: async () => {},
+      };
+    };
+    const s = setup("unused", {
+      agent: "review",
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example",
+        loopbackUrl: "http://127.0.0.1:8080",
+      },
+    });
+    const ctx = await trackedReviewContext(s);
+    const writes = vi.spyOn(ctx.ledgerRun!, "setState");
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(answered(await runLoop(s.deps, ctx)).answer).toBe("Inspected both ranges.");
+      const saved = writes.mock.calls.map(([state]) => state.digest).filter((value) => value !== undefined);
+      expect(saved.at(-1)).toMatchObject({
+        complete: true,
+        base: "origin/main",
+        totals: { files: 49, additions: 1772, deletions: 126 },
+      });
+      expect(
+        log.mock.calls
+          .map(([line]) => String(line))
+          .filter((line) => line.startsWith('{"event":"review_digest_retained"'))
+          .map((line) => JSON.parse(line)),
+      ).toEqual([
+        {
+          event: "review_digest_retained",
+          keptHead: "b".repeat(40),
+          keptBase: "a".repeat(40),
+          seenHead: "b".repeat(40),
+          seenBase: "c".repeat(40),
+        },
+      ]);
+    } finally {
+      log.mockRestore();
+      await ctx.ledgerRun!.close();
+    }
+  });
+
   it("computes a digest in the acknowledged cold checkout", async () => {
     const observed = watched(piHarness);
     observed.harness.open = async (_deps, request) => {

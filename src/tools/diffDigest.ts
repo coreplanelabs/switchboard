@@ -15,7 +15,7 @@
 // 41 files; the review approved on it). A stat listing that is itself cut is
 // reported as incomplete rather than rendered as a smaller change.
 
-import { distillDiffStats } from "../core/diffDigest.js";
+import { distillDiffStats, type DigestRange, type DigestReport } from "../core/diffDigest.js";
 import { shellQuote } from "../execution/shellQuote.js";
 import { gitInCheckout } from "../execution/workspaceAdvance.js";
 import type { RunnableTool } from "./runnableTool.js";
@@ -49,7 +49,33 @@ export const diffDigestTool: RunnableTool = {
   },
   async run(input, ctx) {
     const base = String(input.base ?? "").trim();
-    const baseName = base || "origin/HEAD";
+    const target = ctx.digestTarget?.();
+    const baseName = base || (target ? `origin/${target.baseRef}` : "origin/HEAD");
+    let observedRange: DigestRange | undefined;
+    const report = (
+      value: DigestReport,
+      reason?: "review_target_unavailable" | "listing_truncated" | "range_unconfirmed",
+    ) => {
+      if (reason && ctx.digestTarget)
+        console.log(
+          JSON.stringify({
+            event: "review_digest_refused",
+            repo: ctx.repo,
+            pr: ctx.reviewHistory?.target.number,
+            head: target && /^[0-9a-f]{40}$/i.test(target.head) ? target.head : undefined,
+            baseRef: target?.baseRef,
+            reason,
+          }),
+        );
+      ctx.onDigest?.({ ...value, ...(observedRange ? { range: observedRange } : {}) });
+    };
+    if (ctx.digestTarget && (!target || !/^[0-9a-f]{40}$/i.test(target.head))) {
+      report(
+        { complete: false, base: baseName, reason: "the canonical review range is unavailable" },
+        "review_target_unavailable",
+      );
+      return "diff_digest: the canonical review range is unavailable.";
+    }
     // git OPTION injection (distinct from shell injection): a base like
     // `--output=/path` or `-O/etc/passwd` is parsed by GIT itself as an option
     // — arbitrary file write/read — even though the shell token is inert. Reject
@@ -65,9 +91,26 @@ export const diffDigestTool: RunnableTool = {
     const baseExpr = base
       ? shellQuote(base)
       : `"$(${git} rev-parse --abbrev-ref origin/HEAD 2>/dev/null || echo origin/main)"`;
-    const range = `--end-of-options ${baseExpr}...HEAD`;
-    const listing = `${git} diff --numstat ${range} && echo ${NAME_STATUS_MARK} && ${git} diff --name-status ${range}`;
+    const selectedBase = base || (target ? `origin/${target.baseRef}` : undefined);
+    const range = target ? '"$digest_base..$digest_head"' : `--end-of-options ${baseExpr}...HEAD`;
+    const pin = target
+      ? `digest_head=$(${git} rev-parse --verify HEAD) && ` +
+        `digest_base=$(${git} rev-parse --verify --end-of-options ${shellQuote(`${selectedBase}^{commit}`)}) && ` +
+        `digest_target=$(${git} rev-parse --verify --end-of-options ${shellQuote(`origin/${target.baseRef}^{commit}`)}) && ` +
+        `digest_base=$(${git} merge-base "$digest_base" "$digest_head") && ` +
+        `digest_target=$(${git} merge-base "$digest_target" "$digest_head") && ` +
+        `printf '%s\\n' '@@diff_digest:range@@' "$digest_base" "$digest_head" "$digest_target" && `
+      : "";
+    const listing = `${pin}${git} diff --numstat ${range} && echo ${NAME_STATUS_MARK} && ${git} diff --name-status ${range}`;
     let raw = await ctx.executor.exec(listing);
+    const readRange = () => {
+      const match = /^@@diff_digest:range@@\n([0-9a-f]{40})\n([0-9a-f]{40})\n([0-9a-f]{40})\n/.exec(raw);
+      observedRange =
+        target && match && match[2] === target.head.toLowerCase()
+          ? { base: match[1], head: match[2], canonicalBase: match[3], baseRef: target.baseRef }
+          : undefined;
+    };
+    readRange();
     // The Executor's output cap, checked FIRST: a listing this long (one line
     // per file) means thousands of files, and the cut can land before the
     // marker — which would otherwise read as a failed command. Totals from a
@@ -75,7 +118,7 @@ export const diffDigestTool: RunnableTool = {
     // failure this tool exists to prevent.
     const incomplete = (): string => {
       const reason = "the file listing exceeded the executor's output cap";
-      ctx.onDigest?.({ complete: false, base: baseName, reason });
+      report({ complete: false, base: baseName, reason }, "listing_truncated");
       return `diff_digest: ${reason} — the digest cannot state totals for this change (base \`${baseName}\`). Read the diff file by file (\`git diff --name-only ${baseName}...HEAD\`).`;
     };
     if (OUTPUT_CUT_RE.test(raw)) return incomplete();
@@ -90,6 +133,7 @@ export const diffDigestTool: RunnableTool = {
       if (shallow) {
         await ctx.executor.exec(`${git} fetch --unshallow --quiet origin "+refs/heads/*:refs/remotes/origin/*"`);
         raw = await ctx.executor.exec(listing);
+        readRange();
         if (OUTPUT_CUT_RE.test(raw)) return incomplete();
         marker = NAME_STATUS_MARK_LINE.exec(raw);
       }
@@ -100,8 +144,13 @@ export const diffDigestTool: RunnableTool = {
     if (!marker) {
       return `diff_digest: could not compute the diff (base \`${baseName}\`).\n${raw.trim()}`;
     }
+    if (target && !observedRange) {
+      const reason = "the digest did not confirm the pinned review head and base";
+      report({ complete: false, base: baseName, reason }, "range_unconfirmed");
+      return `diff_digest: ${reason}.`;
+    }
     const digest = distillDiffStats(raw.slice(0, marker.index), raw.slice(marker.index + marker[0].length));
-    ctx.onDigest?.({ complete: true, base: baseName, totals: digest.totals });
+    report({ complete: true, base: baseName, totals: digest.totals });
     return digest.text;
   },
 };
