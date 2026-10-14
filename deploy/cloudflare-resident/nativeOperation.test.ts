@@ -6,6 +6,7 @@ import { validNativeOperationKey } from "./nativeOperation.js";
 import { describe, expect, it } from "vitest";
 import { NativeOperationJournal, type NativeOperationStorage, type NativeOperationRows } from "./nativeOperation.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
+import { RUN_ID_PATTERN } from "../../src/core/runIdentity.js";
 
 function fixture() {
   const rows = new Map<string, unknown>();
@@ -480,7 +481,7 @@ describe("native operation journal", () => {
   });
 });
 
-function httpFixture(h: ReturnType<typeof fixture>, running = false) {
+function httpFixture(h: ReturnType<typeof fixture>, running = false, reportError?: Error, failStub = false) {
   const source = ts.createSourceFile("worker.ts", readSource("worker.ts"), ts.ScriptTarget.Latest, true);
   const functions = [
     "bearerToken",
@@ -488,12 +489,20 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false) {
     "tokenScope",
     "hasScope",
     "parseResource",
+    "parseThreadKey",
     "handleDebug",
     "json",
   ].map((name) =>
     source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name)!.getText(source),
   );
-  const variables = ["ROUTES", "READ_DEBUG_OPS", "RESOURCE_RE", "REPO_ID_RE", "SUPPORTED_RESOURCE_TYPES"].map((name) =>
+  const variables = [
+    "ROUTES",
+    "READ_DEBUG_OPS",
+    "RESOURCE_RE",
+    "REPO_ID_RE",
+    "SUPPORTED_RESOURCE_TYPES",
+    "THREAD_KEY_RE",
+  ].map((name) =>
     source.statements
       .find(
         (node) =>
@@ -514,6 +523,8 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false) {
   let nativeReads = 0;
   let nativeControls = 0;
   let terminated = false;
+  const reports: unknown[] = [];
+  const residentResources: string[] = [];
   const worker = runInNewContext(compiled + "\nworker", {
     Request,
     Response,
@@ -521,6 +532,7 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false) {
     TextEncoder,
     sanitizeResidentBody,
     validNativeOperationKey,
+    RUN_ID_PATTERN,
     STREAMED_ROUTES: new Set(),
     startAdoptedRoot: () => undefined,
     tracer: {},
@@ -529,25 +541,43 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false) {
     withFleetAdmission: () => {
       throw new Error("recovery must not reopen fleet admission");
     },
-    residentStub: () => ({
-      getNativeOperations: (cursor?: string) => h.journal.list(cursor),
-      recoverNativeOperation: (key: string, hash: string, terminate = false) =>
-        h.journal.recover(
-          key,
-          hash,
-          async () => {
-            nativeReads++;
-            return running && !terminated ? { ...identity, state: "running" } : terminal;
-          },
-          matches,
-          terminate
-            ? async () => {
-                nativeControls++;
-                terminated = true;
+    residentStub: (_env: unknown, resource: string) => {
+      if (reportError && failStub) throw reportError;
+      residentResources.push(resource);
+      return {
+        debugThreads: async (selection?: { threadKey: string; runId: string }) => {
+          reports.push({ resource, selection });
+          if (reportError) throw reportError;
+          return selection
+            ? {
+                cancellation: {
+                  runId: selection.runId,
+                  threadKey: selection.threadKey,
+                  evidence: "stored-only",
+                  state: "absent",
+                },
               }
-            : undefined,
-        ),
-    }),
+            : { threads: [] };
+        },
+        getNativeOperations: (cursor?: string) => h.journal.list(cursor),
+        recoverNativeOperation: (key: string, hash: string, terminate = false) =>
+          h.journal.recover(
+            key,
+            hash,
+            async () => {
+              nativeReads++;
+              return running && !terminated ? { ...identity, state: "running" } : terminal;
+            },
+            matches,
+            terminate
+              ? async () => {
+                  nativeControls++;
+                  terminated = true;
+                }
+              : undefined,
+          ),
+      };
+    },
   });
   const env = {
     RESIDENT_ADMIN_TOKEN: "admin",
@@ -567,8 +597,72 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false) {
       ) as Promise<Response>,
     nativeReads: () => nativeReads,
     nativeControls: () => nativeControls,
+    reports,
+    residentResources,
   };
 }
+
+describe("resident cancellation inspection HTTP", () => {
+  const selection = { op: "threads", resource: "repo:acme/app", threadKey: "slack:C1:123", runId: "run-old" };
+  it.each(["report", "stub"])("returns a closed unavailable response when the selected %s fails", async (boundary) => {
+    const api = httpFixture(
+      fixture(),
+      false,
+      new Error("fixture-private-token /workspace/private-file"),
+      boundary === "stub",
+    );
+    const response = await api.request("/debug", "reader", selection);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "The saved shutdown report is unavailable." });
+    expect(api.reports).toEqual(
+      boundary === "stub"
+        ? []
+        : [{ resource: "repo:acme/app", selection: { threadKey: "slack:C1:123", runId: "run-old" } }],
+    );
+    expect(api.nativeControls()).toBe(0);
+  });
+  it("keeps the existing Read scope and resource while returning selected stored evidence", async () => {
+    const api = httpFixture(fixture());
+    for (const token of ["reader", "admin"]) {
+      const response = await api.request("/debug", token, selection);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        cancellation: {
+          runId: "run-old",
+          threadKey: "slack:C1:123",
+          evidence: "stored-only",
+          state: "absent",
+        },
+      });
+    }
+    expect(api.reports).toEqual([
+      { resource: "repo:acme/app", selection: { threadKey: "slack:C1:123", runId: "run-old" } },
+      { resource: "repo:acme/app", selection: { threadKey: "slack:C1:123", runId: "run-old" } },
+    ]);
+    for (const token of ["operator", "drain", null])
+      expect((await api.request("/debug", token, selection)).status).toBe(401);
+    expect(api.reports).toHaveLength(2);
+    expect(api.nativeReads()).toBe(0);
+    expect(api.nativeControls()).toBe(0);
+  });
+  it("refuses invalid or incomplete selectors before creating a Resident stub", async () => {
+    const api = httpFixture(fixture());
+    for (const body of [
+      { ...selection, runId: undefined },
+      { ...selection, threadKey: undefined },
+      { ...selection, runId: "run:foreign" },
+      { ...selection, threadKey: "not-namespaced" },
+      { ...selection, runId: "x".repeat(65) },
+      { ...selection, resource: "not-a-repository" },
+    ])
+      expect((await api.request("/debug", "reader", body)).status).toBe(400);
+    expect(api.reports).toEqual([]);
+    expect(api.residentResources).toEqual([]);
+    const response = await api.request("/debug", "reader", { op: "threads", resource: "repo:acme/app" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ threads: [] });
+  });
+});
 
 describe("native operation HTTP permissions", () => {
   it("admin termination must be explicit and strictly typed, while readers cannot signal a process", async () => {
