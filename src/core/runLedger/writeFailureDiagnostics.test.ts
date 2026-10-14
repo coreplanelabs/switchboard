@@ -11,9 +11,12 @@ import {
   stateWriteDiagnosticHeader,
 } from "../runStateWriteDiagnostic.js";
 import { storeRequestWitness } from "../storeResponse.js";
-import { storageFailureNote } from "../storageFailureDiagnostic.js";
+import { STORAGE_FAILURE_DIAGNOSTIC_HEADER, storageFailureNote } from "../storageFailureDiagnostic.js";
 import { testRegistry } from "../runRegistry/testing.js";
 import type { RunEvent } from "../runEvents.js";
+import { assembleRunRecord } from "../dispatch/record.js";
+import { analyzeRunFriction } from "../runFriction.js";
+import { parseRunEventLines } from "../runEventLines.js";
 
 const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
 const gen = "diagnostic-owner";
@@ -43,6 +46,74 @@ function response(mode: string): Response {
 }
 
 describe("original uncertain write diagnostics", () => {
+  it("retains a closed append rejection through private backlog trimming and final record assembly", async () => {
+    const { reg } = testRegistry({ genId: () => id, backlogLimit: 4 });
+    const run = reg.create("private", {
+      agent: "orchestrator",
+      channelId: "slack:D1",
+      userId: "slack:UA",
+      threadKey: "slack:D1:1",
+      directAudience: { kind: "slack-unshared-im", channelId: "slack:D1", userId: "slack:UA", threadKey: "slack:D1:1" },
+    });
+    reg.publish(id, { type: "tool_call", tool: "read", summary: "private" });
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://state.invalid",
+      token: "fixture",
+      storeKey: "fixture",
+      onFailure: ({ diagnostic }) => reg.publish(id, storageFailureNote(diagnostic)),
+      fetch: async (url, init) => {
+        const witness = await storeRequestWitness(new URL(String(url)).pathname, String(init?.body));
+        return Response.json(
+          { error: "PRIVATE_BODY" },
+          {
+            status: 400,
+            headers: {
+              [STORAGE_FAILURE_DIAGNOSTIC_HEADER]: JSON.stringify({
+                version: 1,
+                requestDigest: witness.digest,
+                failure: { stage: "request", errorKind: "rejection", reason: "append_event_too_large" },
+              }),
+            },
+          },
+        );
+      },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(
+        await wire.append(id, gen, [{ seq: 1, type: "assistant", text: "PRIVATE_REQUEST" }]).catch(() => "rejected"),
+      ).toBe("rejected");
+    } finally {
+      warn.mockRestore();
+    }
+    for (let i = 0; i < 10; i++)
+      reg.publish(id, { type: "tool_result", tool: "read", ok: true, summary: "PRIVATE_REPLY" });
+    const snap = reg.snapshot(id, run.token)!;
+    expect(snap.events.length).toBe(4);
+    const saved = assembleRunRecord({
+      run,
+      snap,
+      msg: { channelId: "slack:D1", userId: "slack:UA", threadKey: "slack:D1:1" },
+      channelVisibility: "private",
+      finishedAt: 10,
+      status: "interrupted",
+      diagnosis: analyzeRunFriction(snap.events),
+    });
+    const captured = parseRunEventLines(saved.events.map((event) => JSON.stringify(event)).join("\n"));
+    expect(captured.events.find((event) => event.type === "run_note")).toMatchObject({
+      kind: "storage_failure",
+      summary: "Private storage request failed.",
+      storageFailure: {
+        operation: "/runs/append",
+        httpStatus: 400,
+        server: { stage: "request", errorKind: "rejection", reason: "append_event_too_large" },
+      },
+    });
+    expect(saved.truncated).toBe(true);
+    expect(saved.diagnosis.byCategory.infra_failure.count).toBe(1);
+    expect(JSON.stringify(captured)).not.toContain("PRIVATE_");
+  });
+
   it("keeps private diagnostic appends non-recursive after registry projection without exposing exception prose", async () => {
     const { reg } = testRegistry();
     const run = reg.create("private", {

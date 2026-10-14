@@ -292,7 +292,7 @@ export class WorkerRunLedger implements RunLedger {
       }
       phase = "http";
       server =
-        res.status >= 500
+        res.status >= 400
           ? stateWriteDiagnosticFromHeader(
               res.headers.get(STORAGE_FAILURE_DIAGNOSTIC_HEADER) ??
                 (path === "/runs/state" ? res.headers.get(STATE_WRITE_DIAGNOSTIC_HEADER) : null),

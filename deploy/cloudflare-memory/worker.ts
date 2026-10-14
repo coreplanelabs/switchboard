@@ -13,12 +13,14 @@ import {
 import { qualifyPullOwnerSnapshot } from "../../src/core/coordinator/pullOwnerQualification.ts";
 import { originalPromotionArchiveKey } from "../../src/core/runLedger/workspaceDurability.ts";
 import { storeRequestWitness } from "../../src/core/storeResponse.ts";
+import type { StoreRequestWitness } from "../../src/core/storeFailure.ts";
 import {
   STATE_WRITE_DIAGNOSTIC_HEADER,
   StateWriteBoundaryError,
   stateWriteException,
   stateWriteReplyShape,
   stateWriteDiagnosticHeader,
+  type StateWriteFailure,
 } from "../../src/core/runStateWriteDiagnostic.ts";
 import { isConfigPublicationSnapshotKey, type ConfigSourcePrecondition } from "../../src/configPublicationProtocol.js";
 import { DO_MAX_BOUND_PARAMETERS, RUN_EVENT_INSERT_BATCH } from "../../src/memorySqlLimits.js";
@@ -10015,6 +10017,72 @@ function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 }
 
+type StorageTelemetryStage = "request-witness" | "diagnostic-header" | "operator-log";
+
+/** A failed capture exposes its stage, never the failed input or exception prose. */
+function logStorageTelemetryFailure(
+  operation: string,
+  stage: StorageTelemetryStage,
+  error: unknown,
+  reason?: import("../../src/core/runStateWriteDiagnostic.ts").AppendRejectionReason,
+  requestDigest?: string,
+): void {
+  try {
+    const errorKind =
+      error instanceof Error
+        ? error.name === "SyntaxError"
+          ? "syntax"
+          : error.name === "TypeError"
+            ? "type"
+            : "error"
+        : "non-error";
+    console.warn(
+      JSON.stringify({
+        event: "storage.request.failure_telemetry_failed",
+        side: "worker",
+        operation,
+        stage,
+        errorKind,
+        ...(reason ? { reason } : {}),
+        ...(requestDigest ? { requestDigest } : {}),
+        build: BUILD,
+      }),
+    );
+  } catch {
+    /* A failed fallback sink cannot change the original outcome or recurse. */
+  }
+}
+
+/** Returned rejections and thrown exceptions share the same operator evidence. */
+function logStorageRequestFailure(
+  request: StoreRequestWitness,
+  failure: StateWriteFailure,
+  httpStatus: number,
+  error?: unknown,
+): void {
+  try {
+    // POST alone cannot classify the client-owned read/write operation kind.
+    const notice = storageFailureNotice(request, undefined, "http", error, undefined, failure);
+    console.log(
+      JSON.stringify({
+        event: "storage.request.failure",
+        side: "worker",
+        ...notice,
+        diagnostic: { ...notice.diagnostic, httpStatus },
+        build: BUILD,
+      }),
+    );
+  } catch (error) {
+    logStorageTelemetryFailure(
+      request.operation,
+      "operator-log",
+      error,
+      "reason" in failure ? failure.reason : undefined,
+      request.digest,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Live-run transcripts (run-history item 32)
 // ---------------------------------------------------------------------------
@@ -12813,15 +12881,39 @@ async function handleLedger(
     return r.ok ? json(r) : json(r, 409);
   }
   if (pathname === "/runs/append") {
-    if (!Array.isArray(b.events)) return json({ error: "events must be an array" }, 400);
+    const reject = async (
+      reason: import("../../src/core/runStateWriteDiagnostic.ts").AppendRejectionReason,
+      error: string,
+    ) => {
+      const response = json({ error }, 400);
+      // Only frozen public ingress bytes establish request correlation.
+      if (originalBody === undefined) return response;
+      let stage: StorageTelemetryStage = "request-witness";
+      let digest: string | undefined;
+      try {
+        const request = await storeRequestWitness(pathname, originalBody);
+        digest = request.digest;
+        stage = "diagnostic-header";
+        const failure = { stage: "request" as const, errorKind: "rejection" as const, reason };
+        response.headers.set(
+          STORAGE_FAILURE_DIAGNOSTIC_HEADER,
+          stateWriteDiagnosticHeader({ version: 1, requestDigest: request.digest, failure }),
+        );
+        logStorageRequestFailure(request, failure, response.status);
+      } catch (error) {
+        logStorageTelemetryFailure(pathname, stage, error, reason, digest);
+      }
+      return response;
+    };
+    if (!Array.isArray(b.events)) return reject("append_events_not_array", "events must be an array");
     const events: Array<{ seq: number; json: string }> = [];
     for (const e of b.events) {
       const ev = e as Record<string, unknown>;
       if (typeof ev?.seq !== "number" || !Number.isInteger(ev.seq) || ev.seq < 1)
-        return json({ error: "every event needs an integer seq ≥ 1" }, 400);
+        return reject("append_seq_invalid", "every event needs an integer seq ≥ 1");
       const text = JSON.stringify(e);
       if (utf8ByteLength(text) > MAX_EVENT_BYTES)
-        return json({ error: `event ${ev.seq} exceeds ${MAX_EVENT_BYTES} bytes` }, 400);
+        return reject("append_event_too_large", `event ${ev.seq} exceeds ${MAX_EVENT_BYTES} bytes`);
       events.push({ seq: ev.seq, json: text });
     }
     const r = await stub.appendEvents(runId.value, g.value, events);
@@ -13114,7 +13206,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
       return json({ error: "body must be valid JSON" }, 400);
     }
     try {
-      return await (needsSeed || url.pathname === "/runs/state"
+      return await (needsSeed || url.pathname === "/runs/state" || url.pathname === "/runs/append"
         ? handleLedger(url.pathname, body, env, originalBody, expectedSeed)
         : handleRuns(url.pathname, body, env));
     } catch (error) {
@@ -13124,22 +13216,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
         error instanceof StateWriteBoundaryError
           ? error.diagnostic
           : { version: 1 as const, requestDigest: request.digest, failure: stateWriteException("request", error) };
-      // POST alone does not tell the Worker whether the client asked to read
-      // or write. Keep that client-owned classification absent here.
-      const notice = storageFailureNotice(request, undefined, "http", error, undefined, diagnostic.failure);
-      try {
-        console.log(
-          JSON.stringify({
-            event: "storage.request.failure",
-            side: "worker",
-            ...notice,
-            diagnostic: { ...notice.diagnostic, httpStatus: 500 },
-            build: BUILD,
-          }),
-        );
-      } catch {
-        /* Logging cannot replace the original storage exception. */
-      }
+      logStorageRequestFailure(request, diagnostic.failure, 500, error);
       throw error instanceof StateWriteBoundaryError ? error : new StateWriteBoundaryError(diagnostic, error);
     }
   }

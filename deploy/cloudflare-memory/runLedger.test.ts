@@ -64,7 +64,11 @@ import {
   STATE_WRITE_DIAGNOSTIC_HEADER,
   stateWriteDiagnosticFromHeader,
 } from "../../src/core/runStateWriteDiagnostic.ts";
-import { STORAGE_FAILURE_DIAGNOSTIC_HEADER } from "../../src/core/storageFailureDiagnostic.ts";
+import {
+  STORAGE_FAILURE_DIAGNOSTIC_HEADER,
+  storageFailureNote,
+  type StorageFailureNotice,
+} from "../../src/core/storageFailureDiagnostic.ts";
 import { storeRequestWitness } from "../../src/core/storeResponse.ts";
 
 // The check producer imports the unused LocalExecutor environment helper.
@@ -12002,34 +12006,60 @@ describe("state-write holds across Durable Object RPC", () => {
           return memoryWorker.fetch(new Request(String(url), { ...init, headers }), routed);
         },
       });
-      const outcome =
-        method === "readInbox"
-          ? await wire.readInbox(id, 0).catch(() => "failed")
-          : await wire
-              .append(id, gen, [{ seq: 1, type: "assistant", text: "private request bytes" }])
-              .catch(() => "held");
-      expect(outcome).toBe(method === "readInbox" ? "failed" : "held");
-      expect(notices).toMatchObject([
-        {
-          runIds: [id],
-          diagnostic: {
-            operation: method === "readInbox" ? "/runs/inbox/read" : "/runs/append",
-            phase: "http",
-            httpStatus: 500,
-            server: {
-              stage: "request",
-              exception: {
-                message: "Durable Object unavailable token=«redacted»",
-                remote: true,
-                retryable: true,
-                code: "E_STORAGE",
+      const logs: string[] = [];
+      const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+      try {
+        const outcome =
+          method === "readInbox"
+            ? await wire.readInbox(id, 0).catch(() => "failed")
+            : await wire
+                .append(id, gen, [{ seq: 1, type: "assistant", text: "private request bytes" }])
+                .catch(() => "held");
+        expect(outcome).toBe(method === "readInbox" ? "failed" : "held");
+        expect(notices).toMatchObject([
+          {
+            runIds: [id],
+            diagnostic: {
+              operation: method === "readInbox" ? "/runs/inbox/read" : "/runs/append",
+              phase: "http",
+              httpStatus: 500,
+              server: {
+                stage: "request",
+                exception: {
+                  message: "Durable Object unavailable token=«redacted»",
+                  remote: true,
+                  retryable: true,
+                  code: "E_STORAGE",
+                },
               },
             },
           },
-        },
-      ]);
-      expect(calls).toBe(1);
-      expect(JSON.stringify(notices)).not.toMatch(/fixture-credential|private request/);
+        ]);
+        expect(calls).toBe(1);
+        expect(logs.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))).toContainEqual(
+          expect.objectContaining({
+            event: "storage.request.failure",
+            side: "worker",
+            runIds: [id],
+            build: { commit: "unknown" },
+            diagnostic: expect.objectContaining({
+              operation: method === "readInbox" ? "/runs/inbox/read" : "/runs/append",
+              phase: "http",
+              httpStatus: 500,
+              server: expect.objectContaining({
+                stage: "request",
+                exception: expect.objectContaining({
+                  message: "Durable Object unavailable token=«redacted»",
+                  code: "E_STORAGE",
+                }),
+              }),
+            }),
+          }),
+        );
+        expect(JSON.stringify({ notices, logs })).not.toMatch(/fixture-credential|private request/);
+      } finally {
+        log.mockRestore();
+      }
     },
   );
 
@@ -12364,5 +12394,201 @@ describe("state-write holds across Durable Object RPC", () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({ ok: false, reason: "fenced" });
     expect((await stub.listLive())[0]).toMatchObject({ ownerGen: gen, state: {} });
+  });
+});
+
+describe("append rejection diagnostics", () => {
+  const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+  it.each([
+    ["append_events_not_array", { length: 1 }, "7e4594a5507fecfdd2ce9349ccbef0ccf0b05407b19597fd7d9f7e01a6224d08"],
+    [
+      "append_seq_invalid",
+      [{ seq: 0, type: "assistant", text: "PRIVATE_REQUEST" }],
+      "b25761f8125f34806282da5b0faaeda4be6b5f9e1aa2d1215004d80c29c36263",
+    ],
+    [
+      "append_event_too_large",
+      [{ seq: 1, type: "assistant", text: "PRIVATE_REQUEST".repeat(6000) }],
+      "edf6bd1a1a641254c8e04e974574c1d4af6dc5361ac0a223d5ed8c34d3f6fa25",
+    ],
+  ])(
+    "retains %s from an authenticated rejected append without replay or payload bytes",
+    async (reason, events, digest) => {
+      const key = "runs:append-rejection:" + reason;
+      const notices: StorageFailureNotice[] = [];
+      const logs: string[] = [];
+      const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+      const warn = vi.spyOn(console, "warn").mockImplementation((line) => logs.push(String(line)));
+      let calls = 0;
+      const wire = new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "test-token",
+        storeKey: key,
+        onFailure: (notice) => notices.push(notice),
+        fetch: async (url, init) => {
+          calls++;
+          const payload = String(init?.body);
+          const headers = new Headers(init?.headers);
+          headers.set("content-length", String(new TextEncoder().encode(payload).length));
+          return memoryWorker.fetch(new Request(String(url), { ...init, headers }), env);
+        },
+      });
+      try {
+        expect(await wire.append(id, "owner-1", events as AppendableEvent[]).catch(() => "rejected")).toBe("rejected");
+        expect(notices).toMatchObject([
+          {
+            runIds: [id],
+            diagnostic: {
+              operation: "/runs/append",
+              phase: "http",
+              httpStatus: 400,
+              requestDigest: digest,
+              server: { stage: "request", errorKind: "rejection", reason },
+            },
+          },
+        ]);
+        expect(calls).toBe(1);
+        const workerLogs = logs.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
+        expect(workerLogs).toContainEqual(
+          expect.objectContaining({
+            event: "storage.request.failure",
+            side: "worker",
+            build: { commit: "unknown" },
+            diagnostic: expect.objectContaining({
+              requestDigest: digest,
+              httpStatus: 400,
+              server: { stage: "request", errorKind: "rejection", reason },
+            }),
+          }),
+        );
+        const note = { ...storageFailureNote(notices[0].diagnostic), seq: 1 };
+        expect(
+          (
+            await post("/runs/put", {
+              storeKey: key,
+              record: {
+                ...record(id, "mcp:fixture:append-rejection"),
+                events: [note],
+                eventCount: 1,
+                storedEventCount: 1,
+              },
+            })
+          ).status,
+        ).toBe(200);
+        const retained = await post("/runs/events", { storeKey: key, id, afterSeq: 0, limit: 10 });
+        expect(retained.status).toBe(200);
+        expect(retained.data.events).toMatchObject([
+          {
+            kind: "storage_failure",
+            summary: `Storage request failed: /runs/append (http, HTTP 400): ${reason}`,
+            storageFailure: { requestDigest: digest, server: { stage: "request", errorKind: "rejection", reason } },
+          },
+        ]);
+        expect(JSON.stringify({ notices, logs, retained })).not.toContain("PRIVATE_REQUEST");
+      } finally {
+        log.mockRestore();
+        warn.mockRestore();
+      }
+    },
+  );
+
+  it.each(["request-witness", "diagnostic-header", "operator-log"] as const)(
+    "reports a safe fallback when %s capture fails without changing the rejection",
+    async (stage) => {
+      const payload = JSON.stringify({
+        storeKey: "runs:telemetry-fallback",
+        runId: id,
+        gen: "owner-1",
+        events: [{ seq: 0, text: "PRIVATE_PAYLOAD" }],
+      });
+      const request = new Request("https://memory.test/runs/append", {
+        method: "POST",
+        body: payload,
+        headers: { ...AUTH, "content-length": String(payload.length) },
+      });
+      const failure = new TypeError("PRIVATE_PAYLOAD token=fixture-credential");
+      const warnings: string[] = [];
+      const warn = vi.spyOn(console, "warn").mockImplementation((line) => warnings.push(String(line)));
+      const faults = [];
+      if (stage === "request-witness") faults.push(vi.spyOn(crypto.subtle, "digest").mockRejectedValue(failure));
+      if (stage === "diagnostic-header") {
+        const set = Headers.prototype.set;
+        faults.push(
+          vi.spyOn(Headers.prototype, "set").mockImplementation(function (this: Headers, name, value) {
+            if (name === STORAGE_FAILURE_DIAGNOSTIC_HEADER) throw failure;
+            return set.call(this, name, value);
+          }),
+        );
+      }
+      if (stage === "operator-log")
+        faults.push(
+          vi.spyOn(console, "log").mockImplementation((line) => {
+            if (String(line).includes('"event":"storage.request.failure"')) throw failure;
+          }),
+        );
+      try {
+        const response = await memoryWorker.fetch(request, env);
+        expect(response.status).toBe(400);
+        expect(await response.json()).toEqual({ error: "every event needs an integer seq ≥ 1" });
+        expect(warnings.map((line) => JSON.parse(line))).toMatchObject([
+          {
+            event: "storage.request.failure_telemetry_failed",
+            side: "worker",
+            operation: "/runs/append",
+            stage,
+            reason: "append_seq_invalid",
+            errorKind: "type",
+            build: { commit: "unknown" },
+          },
+        ]);
+        expect(JSON.stringify(warnings)).not.toMatch(/PRIVATE_PAYLOAD|fixture-credential/);
+      } finally {
+        warn.mockRestore();
+        for (const fault of faults) fault.mockRestore();
+      }
+    },
+  );
+
+  it("preserves the original rejection when the fallback log sink also fails", async () => {
+    const payload = JSON.stringify({
+      storeKey: "runs:telemetry-no-sink",
+      runId: id,
+      gen: "owner-1",
+      events: [{ seq: 0 }],
+    });
+    const digest = vi.spyOn(crypto.subtle, "digest").mockRejectedValue(new Error("unavailable"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {
+      throw new Error("log unavailable");
+    });
+    try {
+      const response = await memoryWorker.fetch(
+        new Request("https://memory.test/runs/append", {
+          method: "POST",
+          body: payload,
+          headers: { ...AUTH, "content-length": String(payload.length) },
+        }),
+        env,
+      );
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "every event needs an integer seq ≥ 1" });
+    } finally {
+      digest.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("keeps unauthenticated append rejections outside the diagnostic contract", async () => {
+    const payload = JSON.stringify({ storeKey: "runs:unauthorized", runId: id, gen: "owner-1", events: {} });
+    const response = await memoryWorker.fetch(
+      new Request("https://memory.test/runs/append", {
+        method: "POST",
+        body: payload,
+        headers: { "content-length": String(payload.length), authorization: "Bearer wrong" },
+      }),
+      env,
+    );
+    expect(response.status).toBe(401);
+    expect(response.headers.get(STORAGE_FAILURE_DIAGNOSTIC_HEADER)).toBeNull();
+    expect(await response.json()).toEqual({ error: "unauthorized" });
   });
 });
