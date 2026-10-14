@@ -10,7 +10,12 @@ import {
   type CheckSourceRead,
 } from "../../src/core/checkInspection.js";
 import { parseStoredJson } from "../../src/core/storedJson.ts";
-import { STORAGE_FAILURE_DIAGNOSTIC_HEADER, storageFailureNotice } from "../../src/core/storageFailureDiagnostic.ts";
+import {
+  STORAGE_FAILURE_DIAGNOSTIC_HEADER,
+  STORAGE_REQUEST_ID_HEADER,
+  storageFailureNotice,
+  storageRequestIdOf,
+} from "../../src/core/storageFailureDiagnostic.ts";
 import { hasConfirmationConsent, type ConfirmationConsentSource } from "../../src/core/confirmationConsent.ts";
 import {
   prepareCancellation,
@@ -12181,6 +12186,7 @@ async function handleLedger(
   env: Env,
   originalBody?: string,
   expectedSeed?: ExpectedSeedManifest,
+  requestId?: string,
 ): Promise<Response> {
   if (typeof body !== "object" || body === null) return json({ error: "body must be a JSON object" }, 400);
   const b = body as Record<string, unknown>;
@@ -12494,13 +12500,64 @@ async function handleLedger(
     pathname === "/runs/state" && originalBody !== undefined
       ? await storeRequestWitness(pathname, originalBody)
       : undefined;
+  let rpcWitness = stateWitness;
+  const observeRpc = async <T>(
+    stage: "promotion-preflight" | "state-read" | "state-rpc" | "heartbeat-rpc" | "append-rpc",
+    attempt: number,
+    call: () => Promise<T>,
+  ): Promise<T> => {
+    if (originalBody === undefined || !["/runs/state", "/runs/heartbeat", "/runs/append"].includes(pathname))
+      return call();
+    try {
+      rpcWitness ??= await storeRequestWitness(pathname, originalBody);
+    } catch (error) {
+      logStorageTelemetryFailure(pathname, "request-witness", error);
+      return call();
+    }
+    const witness = rpcWitness;
+    const startedAt = systemClock();
+    const progress = (outcome: "started" | "completed" | "failed") => {
+      try {
+        const id = parseRunId(b.runId),
+          owner = gen(b.gen);
+        if (!id.ok || !owner.ok) return;
+        console.log(
+          JSON.stringify({
+            event: "storage.rpc.progress",
+            operation: pathname,
+            requestDigest: witness.digest,
+            ...(requestId ? { requestId } : {}),
+            runId: id.value,
+            ownerGen: owner.value,
+            stage,
+            outcome,
+            attempt,
+            elapsedMs: outcome === "started" ? 0 : Math.max(0, systemClock() - startedAt),
+            build: BUILD,
+          }),
+        );
+      } catch (error) {
+        logStorageTelemetryFailure(pathname, "operator-log", error, undefined, rpcWitness?.digest);
+      }
+    };
+    // Emit before awaiting RPC so an unfinished call remains visible after a client timeout.
+    progress("started");
+    try {
+      const result = await call();
+      progress("completed");
+      return result;
+    } catch (error) {
+      progress("failed");
+      throw error;
+    }
+  };
   const stateRpc = async <T>(
     stage: "promotion-preflight" | "state-read" | "state-rpc",
     call: () => Promise<T>,
   ): Promise<T> => {
     for (let attempt = 1; ; attempt++) {
       try {
-        const result = await call();
+        const result = await observeRpc(stage, attempt, call);
         if (stateWitness && attempt > 1)
           console.log(
             JSON.stringify({
@@ -13050,7 +13107,9 @@ async function handleLedger(
       typeof (b.facts as Record<string, unknown>).startedAt === "number"
         ? (b.facts as unknown as HeartbeatFacts)
         : undefined;
-    const r = (await stub.heartbeat(runId.value, g.value, lease.value, now, facts)) as unknown as HeartbeatAnswer;
+    const r = (await observeRpc("heartbeat-rpc", 1, () =>
+      stub.heartbeat(runId.value, g.value, lease.value, now, facts),
+    )) as unknown as HeartbeatAnswer;
     return r.ok ? json(r) : json(r, 409);
   }
   if (pathname === "/runs/append") {
@@ -13093,7 +13152,7 @@ async function handleLedger(
         return reject("append_event_too_large", `event ${ev.seq} exceeds ${maxBytes} bytes`);
       events.push({ seq: ev.seq, json: text });
     }
-    const r = await stub.appendEvents(runId.value, g.value, events);
+    const r = await observeRpc<FenceResult>("append-rpc", 1, () => stub.appendEvents(runId.value, g.value, events));
     console.log(`[runs/append] ${key.value} ${runId.value} <- ${events.length} event(s), ok=${r.ok}`);
     return fenced(r);
   }
@@ -13419,8 +13478,15 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
       return json({ error: "body must be valid JSON" }, 400);
     }
     try {
-      return await (needsSeed || url.pathname === "/runs/state" || url.pathname === "/runs/append"
-        ? handleLedger(url.pathname, body, env, originalBody, expectedSeed)
+      return await (needsSeed || ["/runs/state", "/runs/append", "/runs/heartbeat"].includes(url.pathname)
+        ? handleLedger(
+            url.pathname,
+            body,
+            env,
+            originalBody,
+            expectedSeed,
+            storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER)),
+          )
         : handleRuns(url.pathname, body, env));
     } catch (error) {
       if (error instanceof PromotionPendingError) throw error;

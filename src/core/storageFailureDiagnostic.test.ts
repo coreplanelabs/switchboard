@@ -77,6 +77,13 @@ describe("storage diagnostic captures", () => {
         },
       },
       { ...valid.storageFailure, requestDigest: "bad" },
+      { ...valid.storageFailure, requestId: "private request bytes" },
+      { ...valid.storageFailure, timing: { elapsedMs: -1, timeoutMs: 10000, deadlineExceeded: true } },
+      { ...valid.storageFailure, timing: { elapsedMs: 10000, timeoutMs: 10000 } },
+      {
+        ...valid.storageFailure,
+        timing: { elapsedMs: 10000, timeoutMs: 10000, deadlineExceeded: true, body: "private" },
+      },
     ];
     const parsed = parseRunEventLines(
       [

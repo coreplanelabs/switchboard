@@ -12152,6 +12152,117 @@ describe("state-write holds across Durable Object RPC", () => {
       ).toBe(1);
     },
   );
+  it.each(["state", "heartbeat", "append"] as const)(
+    "exposes the pending %s RPC and its completion under the original request digest",
+    async (operation) => {
+      const key = "runs:rpc-progress:" + operation;
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      expect((await stub.claim(claim(), 1)).ok).toBe(true);
+      let entered!: () => void;
+      let release!: () => void;
+      const pending = new Promise<void>((resolve) => (entered = resolve));
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const method = operation === "state" ? "setState" : operation === "append" ? "appendEvents" : "heartbeat";
+      const stage = operation === "state" ? "state-rpc" : operation === "append" ? "append-rpc" : "heartbeat-rpc";
+      const routed = routedEnv(stub, (name) =>
+        name === method
+          ? async (...args: unknown[]) => {
+              entered();
+              await gate;
+              return Reflect.apply(stub[method], stub, args);
+            }
+          : undefined,
+      );
+      const body = JSON.stringify({
+        storeKey: key,
+        runId: id,
+        gen,
+        ...(operation === "state"
+          ? { state }
+          : operation === "heartbeat"
+            ? { leaseMs: 30000 }
+            : { events: [{ seq: 1, type: "assistant", text: "PRIVATE_REQUEST" }] }),
+      });
+      const path = "/runs/" + operation;
+      const requestId = "11111111-1111-4111-a111-111111111111";
+      const digest = (await storeRequestWitness(path, body)).digest;
+      const logs: string[] = [];
+      const log = vi.spyOn(console, "log").mockImplementation((line) => logs.push(String(line)));
+      const progress = () =>
+        logs
+          .filter((line) => line.startsWith("{"))
+          .map((line) => JSON.parse(line))
+          .filter((line) => line.event === "storage.rpc.progress" && line.stage === stage);
+      const response = memoryWorker.fetch(
+        new Request("https://memory.test" + path, {
+          method: "POST",
+          body,
+          headers: {
+            ...AUTH,
+            "content-length": String(new TextEncoder().encode(body).length),
+            "x-switchboard-storage-request-id": requestId,
+          },
+        }),
+        routed,
+      );
+      try {
+        await pending;
+        expect(progress()).toEqual([
+          {
+            event: "storage.rpc.progress",
+            operation: path,
+            requestDigest: digest,
+            requestId,
+            runId: id,
+            ownerGen: gen,
+            stage,
+            outcome: "started",
+            attempt: 1,
+            elapsedMs: 0,
+            build: { commit: "unknown" },
+          },
+        ]);
+      } finally {
+        release();
+        await response;
+        log.mockRestore();
+      }
+      expect((await response).status).toBe(200);
+      expect(await (await response).json()).toMatchObject({ ok: true });
+      expect(progress()).toEqual([
+        expect.objectContaining({ stage, outcome: "started", requestDigest: digest }),
+        expect.objectContaining({ stage, outcome: "completed", requestDigest: digest, elapsedMs: expect.any(Number) }),
+      ]);
+      expect(logs.join("\n")).not.toContain("PRIVATE_REQUEST");
+    },
+  );
+  it("preserves the state write when RPC progress logging fails", async () => {
+    const key = "runs:rpc-progress-log-failure";
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    expect((await stub.claim(claim(), 1)).ok).toBe(true);
+    const warnings: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation((line) => warnings.push(String(line)));
+    const log = vi.spyOn(console, "log").mockImplementation((line) => {
+      if (String(line).includes('"event":"storage.rpc.progress"')) throw new Error("PRIVATE_TELEMETRY_FAILURE");
+    });
+    try {
+      const response = await memoryWorker.fetch(request(key), env);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true });
+      expect((await stub.listLive())[0].state).toEqual(state);
+      expect(warnings.map((line) => JSON.parse(line))).toContainEqual(
+        expect.objectContaining({
+          event: "storage.request.failure_telemetry_failed",
+          operation: "/runs/state",
+          stage: "operator-log",
+        }),
+      );
+      expect(warnings.join("\n")).not.toContain("PRIVATE_TELEMETRY_FAILURE");
+    } finally {
+      warn.mockRestore();
+      log.mockRestore();
+    }
+  });
   it("refuses a retry after another state write instead of restoring the old snapshot", async () => {
     const key = "runs:rpc-state-retry-moved";
     const stub = env.RUNS.get(env.RUNS.idFromName(key));

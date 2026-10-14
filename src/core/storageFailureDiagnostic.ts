@@ -12,6 +12,13 @@ import type { StoreOperationKind } from "./storeResponse.js";
 import { RUN_ID_PATTERN } from "./runIdentity.js";
 
 export const STORAGE_FAILURE_DIAGNOSTIC_HEADER = "x-switchboard-storage-failure";
+export const STORAGE_REQUEST_ID_HEADER = "x-switchboard-storage-request-id";
+
+export function storageRequestIdOf(value: unknown): string | undefined {
+  return typeof value === "string" && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value)
+    ? value
+    : undefined;
+}
 const phases = [
   "transport",
   "http",
@@ -27,6 +34,7 @@ export interface StorageFailureDiagnostic {
   version: 1;
   operation: string;
   requestDigest: string;
+  requestId?: string;
   kind?: StoreOperationKind;
   phase: (typeof phases)[number];
   ownerGen?: string;
@@ -34,6 +42,7 @@ export interface StorageFailureDiagnostic {
   rayId?: string;
   exception?: StateWriteException;
   server?: StateWriteFailure;
+  timing?: { elapsedMs: number; timeoutMs: number; deadlineExceeded: boolean };
 }
 export interface StorageFailureNotice {
   runIds: readonly string[];
@@ -48,6 +57,7 @@ export function storageFailureNotice(
   error: unknown,
   response?: Response,
   server?: StateWriteFailure,
+  observation?: Pick<StorageFailureDiagnostic, "timing" | "requestId">,
 ): StorageFailureNotice {
   let body: Record<string, unknown> = {};
   try {
@@ -77,6 +87,7 @@ export function storageFailureNotice(
   const diagnosis = error instanceof UncertainStoreError ? error.diagnosis : undefined;
   const observedPhase = diagnosis?.kind ?? phase;
   const ray = response?.headers.get("cf-ray");
+  const requestId = storageRequestIdOf(observation?.requestId);
   return {
     runIds,
     diagnostic: {
@@ -85,6 +96,8 @@ export function storageFailureNotice(
       requestDigest: request.digest,
       ...(kind ? { kind } : {}),
       phase: observedPhase,
+      ...(observation?.timing ? { timing: observation.timing } : {}),
+      ...(requestId ? { requestId } : {}),
       ...(typeof ownerGen === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(ownerGen) ? { ownerGen } : {}),
       ...(response
         ? { httpStatus: response.status }
@@ -164,6 +177,7 @@ export function storageFailureDiagnosticOf(value: unknown): StorageFailureDiagno
           "version",
           "operation",
           "requestDigest",
+          "requestId",
           "kind",
           "phase",
           "ownerGen",
@@ -171,6 +185,7 @@ export function storageFailureDiagnosticOf(value: unknown): StorageFailureDiagno
           "rayId",
           "exception",
           "server",
+          "timing",
         ].includes(key),
     ) ||
     v.version !== 1 ||
@@ -191,7 +206,21 @@ export function storageFailureDiagnosticOf(value: unknown): StorageFailureDiagno
   )
     return;
   if (v.rayId !== undefined && (typeof v.rayId !== "string" || !/^[a-f0-9]{16}(?:-[A-Z]{3})?$/.test(v.rayId))) return;
+  if (v.requestId !== undefined && !storageRequestIdOf(v.requestId)) return;
   const server = v.server === undefined ? undefined : stateWriteFailureOf(v.server);
+  if (v.timing !== undefined) {
+    if (!v.timing || typeof v.timing !== "object" || Array.isArray(v.timing)) return;
+    const timing = v.timing as Record<string, unknown>;
+    if (
+      Object.keys(timing).some((key) => !["elapsedMs", "timeoutMs", "deadlineExceeded"].includes(key)) ||
+      !Number.isSafeInteger(timing.elapsedMs) ||
+      Number(timing.elapsedMs) < 0 ||
+      !Number.isSafeInteger(timing.timeoutMs) ||
+      Number(timing.timeoutMs) < 1 ||
+      typeof timing.deadlineExceeded !== "boolean"
+    )
+      return;
+  }
   const captured = v.exception === undefined ? undefined : exceptionOf(v.exception);
   if ((v.server !== undefined && !server) || (v.exception !== undefined && !captured)) return;
   return {

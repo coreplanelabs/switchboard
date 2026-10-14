@@ -176,10 +176,12 @@ import {
   type InboxItem,
 } from "./runLedger/types.js";
 import type { Secrets } from "../secrets.js";
+import { systemClock } from "./trace/clock.js";
 import { UncertainStoreError, type StoreRequestWitness } from "./storeFailure.js";
 import { readStoreResponse, storeRequestWitness, type StoreOperationKind } from "./storeResponse.js";
 import {
   STORAGE_FAILURE_DIAGNOSTIC_HEADER,
+  STORAGE_REQUEST_ID_HEADER,
   storageFailureNotice,
   isStorageDiagnosticAppend,
   type StorageFailureDiagnostic,
@@ -240,6 +242,12 @@ export function buildRunLedger(
 export class WorkerRunLedger implements RunLedger {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
+  // Route-specific ACK validation runs after HTTP decoding. Weak keys keep its
+  // evidence on the original request without retaining completed payloads.
+  private readonly requestObservations = new WeakMap<
+    StoreRequestWitness,
+    { requestId: string; startedAt: number; signal: AbortSignal }
+  >();
 
   constructor(private readonly opts: WorkerRunLedgerOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
@@ -268,7 +276,12 @@ export class WorkerRunLedger implements RunLedger {
   ): Promise<{ status: number; data: Record<string, unknown>; request: StoreRequestWitness }> {
     const payload = encodedBody ?? JSON.stringify(body);
     const request = await storeRequestWitness(path, payload);
-    const ordinaryHeaders = { "content-type": "application/json", authorization: `Bearer ${this.opts.token}` };
+    const requestId = crypto.randomUUID();
+    const ordinaryHeaders = {
+      "content-type": "application/json",
+      authorization: `Bearer ${this.opts.token}`,
+      [STORAGE_REQUEST_ID_HEADER]: requestId,
+    };
     const headers = new Headers(ordinaryHeaders);
     if (expectedSeedHeader !== undefined) {
       headers.set(EXPECTED_SEED_HEADER, expectedSeedHeader);
@@ -282,13 +295,16 @@ export class WorkerRunLedger implements RunLedger {
     let res: Response | undefined;
     let phase: StorageFailureDiagnostic["phase"] = "transport";
     let server: StateWriteFailure | undefined;
+    const signal = AbortSignal.timeout(RUN_STORE_TIMEOUT_MS);
+    const startedAt = systemClock();
+    this.requestObservations.set(request, { requestId, startedAt, signal });
     try {
       try {
         res = await this.fetchImpl(`${this.baseUrl}${path}`, {
           method: "POST",
           headers: expectedSeedHeader === undefined ? ordinaryHeaders : headers,
           body: payload,
-          signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+          signal,
         });
       } catch (err) {
         if (kind === "write")
@@ -370,7 +386,18 @@ export class WorkerRunLedger implements RunLedger {
     server?: StateWriteFailure,
   ): void {
     try {
-      const notice = storageFailureNotice(request, kind, phase, error, response, server);
+      const transport = this.requestObservations.get(request);
+      const observation = transport
+        ? {
+            requestId: transport.requestId,
+            timing: {
+              elapsedMs: Math.max(0, systemClock() - transport.startedAt),
+              timeoutMs: RUN_STORE_TIMEOUT_MS,
+              deadlineExceeded: transport.signal.aborted,
+            },
+          }
+        : undefined;
+      const notice = storageFailureNotice(request, kind, phase, error, response, server, observation);
       try {
         console.warn(JSON.stringify({ event: "storage.request.failure", side: "client", ...notice }));
       } catch {
