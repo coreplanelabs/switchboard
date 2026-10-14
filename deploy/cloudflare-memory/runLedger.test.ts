@@ -12397,6 +12397,96 @@ describe("state-write holds across Durable Object RPC", () => {
   });
 });
 
+describe("durable review artifact appends", () => {
+  const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+  const thread = "mcp:fixture:review-artifact";
+  function client(key: string) {
+    return new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: key,
+      fetch: (url, init) => fetchMemoryTest(String(url), init),
+    });
+  }
+  const artifact = (seq: number): AppendableEvent => ({
+    type: "review_artifact",
+    artifact: "reading_diff",
+    poweredBy: "git",
+    baseRef: "origin/main",
+    diff: '"\\界😀\n'.repeat(19_000),
+    truncated: false,
+    seq,
+  });
+
+  it("retains the exact artifact and neighboring events through the live writer and a fresh history reader", async () => {
+    const key = storeKey();
+    const wire = client(key);
+    const warnings: string[] = [];
+    const writer = createLedgerWriteThrough({
+      ledger: wire,
+      gen: "g1",
+      now: () => 1000,
+      warn: (message) => warnings.push(message),
+      fallback: { put: async () => {}, abandoned: () => {} },
+      setInterval: () => ({ unref() {} }),
+      clearInterval: () => {},
+      schedule: () => ({ cancel() {} }),
+    });
+    const reserved = await writer.reserve(claimBody(key, id, thread).run);
+    if (reserved.kind !== "tracked") throw new Error("fixture reservation refused");
+    const events: AppendableEvent[] = [
+      { type: "assistant", text: "before", seq: 1 },
+      artifact(2),
+      { type: "assistant", text: "after", seq: 3 },
+    ];
+    for (const event of events) reserved.run.event(event, event.seq);
+    await reserved.run.close();
+    const stored = await client(key).readEvents(id);
+    expect(stored.map((event) => event.type)).toEqual(["assistant", "review_artifact", "assistant"]);
+    expect(stored).toEqual(events);
+    expect(warnings).toEqual([]);
+
+    const receipt = {
+      version: 1 as const,
+      runId: id,
+      callId: "source-1",
+      tool: "github_file",
+      repos: ["acme/api"],
+      resultHash: "b".repeat(64),
+    };
+    expect(await reserved.run.recordSourceResult(receipt)).toBe(true);
+    expect(await client(key).peekInbox(id, "g1", 0)).toMatchObject({
+      ok: true,
+      boundary: { state: { sourceResults: [receipt] } },
+    });
+    expect(await wire.append(id, "foreign", [{ type: "assistant", text: "changed", seq: 2 }])).toEqual({
+      ok: false,
+      reason: "fenced",
+    });
+    expect(await client(key).readEvents(id)).toEqual(events);
+  });
+
+  it("keeps an artifact burst below the request ceiling without losing or reordering events", async () => {
+    const key = storeKey();
+    const wire = client(key);
+    expect(await wire.claim(claimBody(key, id, thread).run)).toMatchObject({ ok: true });
+    const events = Array.from({ length: 12 }, (_, index) => artifact(index + 1));
+    expect(await wire.append(id, "g1", events).catch(() => "rejected")).toEqual({ ok: true });
+    expect(await client(key).readEvents(id)).toEqual(events);
+  });
+
+  it("rejects an over-budget artifact without changing any neighboring event", async () => {
+    const key = storeKey();
+    const wire = client(key);
+    expect(await wire.claim(claimBody(key, id, thread).run)).toMatchObject({ ok: true });
+    const saved: AppendableEvent = { type: "assistant", text: "original", seq: 1 };
+    expect(await wire.append(id, "g1", [saved])).toEqual({ ok: true });
+    const oversized = { ...artifact(2), diff: "x".repeat(1_600_000) };
+    await expect(wire.append(id, "g1", [oversized])).rejects.toMatchObject({ name: "PermanentStoreError" });
+    expect(await client(key).readEvents(id)).toEqual([saved]);
+  });
+});
+
 describe("append rejection diagnostics", () => {
   const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
   it.each([

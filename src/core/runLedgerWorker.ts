@@ -117,7 +117,14 @@ import { type SessionSources, isSessionSources, sourceHash } from "./references/
 //   POST /runs/intake/delivery/finish {storeKey, key, poster, delivered}  → {ok:true}
 //   POST /runs/intake/list      {storeKey, threadKey?, since?}           → {receipts: IntakeReceipt[]}
 
-import { isRunRecord, RUN_ID_PATTERN, SESSION_KEY_PATTERN, type RunRecord } from "./runRecord.js";
+import {
+  isRunRecord,
+  MAX_RECORD_BYTES,
+  utf8ByteLength,
+  RUN_ID_PATTERN,
+  SESSION_KEY_PATTERN,
+  type RunRecord,
+} from "./runRecord.js";
 import { RUN_LIVE_STATE_NAMES } from "./runLiveState.js";
 import { pointOf } from "./runMetrics.js";
 import type { ModelPriceTable } from "./modelPricing.js";
@@ -1096,7 +1103,59 @@ export class WorkerRunLedger implements RunLedger {
   async append(runId: string, gen: string, events: AppendableEvent[]): Promise<FenceResult> {
     this.checkIds(runId, gen);
     if (events.length === 0) return { ok: true };
-    return this.fenceResult(await this.post("/runs/append", { storeKey: this.opts.storeKey, runId, gen, events }));
+    if (!Array.isArray(events) || events.length === 1)
+      return this.fenceResult(await this.post("/runs/append", { storeKey: this.opts.storeKey, runId, gen, events }));
+    // Freeze every event before the first await. A record-sized target leaves
+    // room beneath the Worker's 2 MiB request ceiling, including one artifact
+    // that uses the whole record budget plus its request envelope.
+    const frozen = JSON.parse(JSON.stringify(events)) as AppendableEvent[];
+    const envelope = { storeKey: this.opts.storeKey, runId, gen };
+    const overhead = utf8ByteLength(JSON.stringify({ ...envelope, events: [] }));
+    const batches: AppendableEvent[][] = [];
+    let batch: AppendableEvent[] = [];
+    let bytes = overhead;
+    for (const event of frozen) {
+      const size = utf8ByteLength(JSON.stringify(event)) + 1;
+      if (batch.length > 0 && bytes + size > MAX_RECORD_BYTES) {
+        batches.push(batch);
+        batch = [];
+        bytes = overhead;
+      }
+      batch.push(event);
+      bytes += size;
+    }
+    batches.push(batch);
+    let acknowledgedEvents = 0;
+    const reportPartial = () => {
+      if (acknowledgedEvents === 0) return;
+      try {
+        console.warn(
+          JSON.stringify({
+            event: "storage.append.partial",
+            runId,
+            ownerGen: gen,
+            acknowledgedEvents,
+            unconfirmedEvents: frozen.length - acknowledgedEvents,
+          }),
+        );
+      } catch {
+        // Observability cannot change a refusal or unknown acknowledgement.
+      }
+    };
+    try {
+      for (const events of batches) {
+        const result = this.fenceResult(await this.post("/runs/append", { ...envelope, events }));
+        if (!result.ok) {
+          reportPartial();
+          return result;
+        }
+        acknowledgedEvents += events.length;
+      }
+    } catch (error) {
+      reportPartial();
+      throw error;
+    }
+    return { ok: true };
   }
 
   async assignLiveState(

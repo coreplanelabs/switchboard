@@ -1372,7 +1372,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         if (!result.ok && !this.finished) this.detach(`append refused (${result.reason})`, result.reason === "fenced");
       },
       onError: (err, batch) => {
-        if (!this.finished) warn(`[ledger] ${this.threadKey} ${batch.length} event(s) not appended: ${err.message}`);
+        if (!this.finished)
+          warn(`[ledger] ${this.threadKey} append not fully acknowledged (${batch.length} events): ${err.message}`);
       },
       ...(opts.schedule ? { schedule: opts.schedule } : {}),
     });

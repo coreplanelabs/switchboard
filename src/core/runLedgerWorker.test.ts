@@ -3,7 +3,7 @@ import { contextDependenciesHash } from "./references/contextDependencies.js";
 import { storeRequestWitness } from "./storeResponse.js";
 import { UNKNOWN_CONTEXT_DEPENDENCIES } from "./references/contextDependencies.js";
 import { testSessionSources } from "./testing/slackSources.js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { secretsFrom } from "../secrets.js";
 import { planResume } from "./runLedger/resume.js";
 import { assembleTranscript, turnRows } from "./runLedger/transcript.js";
@@ -126,6 +126,62 @@ describe("durable ledger acknowledgement continuity", () => {
 });
 
 describe("WorkerRunLedger", () => {
+  it("stops partitioned appends at the first refused or unknown acknowledgement", async () => {
+    const logs: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation((line) => logs.push(String(line)));
+    try {
+      for (const [failure, loggerFails] of [
+        ["fenced", false],
+        ["unknown", false],
+        ["fenced", true],
+        ["unknown", true],
+      ] as const) {
+        warn.mockImplementation((line) => {
+          if (loggerFails) throw new Error("PRIVATE_LOG_SINK");
+          logs.push(String(line));
+        });
+        let calls = 0;
+        const accepted: number[] = [];
+        const w = stubWorker((_path, body) => {
+          calls++;
+          if (calls === 2)
+            return failure === "fenced"
+              ? { status: 409, data: { ok: false, reason: "fenced" } }
+              : { status: 200, data: {} };
+          accepted.push(...(body.events as Array<{ seq: number }>).map((event) => event.seq));
+          return { status: 200, data: { ok: true } };
+        });
+        const events = Array.from({ length: 4 }, (_, i) => ({
+          type: "review_artifact" as const,
+          artifact: "reading_diff" as const,
+          poweredBy: "git" as const,
+          baseRef: "origin/main",
+          diff: "PRIVATE_ARTIFACT".repeat(60_000),
+          truncated: false,
+          seq: i + 1,
+        }));
+        expect(await w.ledger.append("r1", "g1", events).catch(() => "unknown")).toEqual(
+          failure === "fenced" ? { ok: false, reason: "fenced" } : "unknown",
+        );
+        expect(accepted).toEqual([1]);
+        expect(w.calls.map((call) => (call.body.events as Array<{ seq: number }>).map((event) => event.seq))).toEqual([
+          [1],
+          [2],
+        ]);
+      }
+      const partial = logs
+        .filter((line) => line.includes('"event":"storage.append.partial"'))
+        .map((line) => JSON.parse(line));
+      expect(partial).toEqual([
+        { event: "storage.append.partial", runId: "r1", ownerGen: "g1", acknowledgedEvents: 1, unconfirmedEvents: 3 },
+        { event: "storage.append.partial", runId: "r1", ownerGen: "g1", acknowledgedEvents: 1, unconfirmedEvents: 3 },
+      ]);
+      expect(logs.join("\n")).not.toContain("PRIVATE_ARTIFACT");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("reads and acknowledges only an exact retained workspace version and rejects ambiguous responses", async () => {
     const owner = { runId: "r1", ownerGen: "g1", ownerFence: 7 };
     const settlement = {

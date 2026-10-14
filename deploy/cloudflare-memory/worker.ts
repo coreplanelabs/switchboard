@@ -2042,8 +2042,9 @@ function parseScheduleFiring(body: unknown): Validated<ScheduleFiring> {
 // 2 MB per string/BLOB/row; 100 columns per table; 10 GB storage per object
 // (Workers Paid). Consequences here: event inserts carry 3 parameters per row,
 // so a batch is 33 rows (99 parameters); deletions by id list are batched at
-// 100 ids; an event is capped to 64 KiB upstream (MAX_EVENT_BYTES) so no row
-// nears 2 MB; and `maxBytes` is clamped to 8 GiB (RETENTION_BOUNDS), under the
+// 100 ids; ordinary appended events are capped to 64 KiB (MAX_EVENT_BYTES),
+// while review artifacts can use the 1.5 MiB record budget, still below the
+// row ceiling; and `maxBytes` is clamped to 8 GiB (RETENTION_BOUNDS), under the
 // 10 GB per-object ceiling.
 /** Ids per `DELETE ... WHERE run_id IN (...)` statement. */
 const RUN_DELETE_BATCH = DO_MAX_BOUND_PARAMETERS;
@@ -12912,8 +12913,12 @@ async function handleLedger(
       if (typeof ev?.seq !== "number" || !Number.isInteger(ev.seq) || ev.seq < 1)
         return reject("append_seq_invalid", "every event needs an integer seq ≥ 1");
       const text = JSON.stringify(e);
-      if (utf8ByteLength(text) > MAX_EVENT_BYTES)
-        return reject("append_event_too_large", `event ${ev.seq} exceeds ${MAX_EVENT_BYTES} bytes`);
+      // Reading diffs and PR descriptions are already bounded artifacts, not
+      // the short text/summary fields capped by capEvent. Preserve their bytes
+      // under the same ceiling as the final record instead of losing the batch.
+      const maxBytes = ev.type === "review_artifact" ? MAX_RECORD_BYTES : MAX_EVENT_BYTES;
+      if (utf8ByteLength(text) > maxBytes)
+        return reject("append_event_too_large", `event ${ev.seq} exceeds ${maxBytes} bytes`);
       events.push({ seq: ev.seq, json: text });
     }
     const r = await stub.appendEvents(runId.value, g.value, events);
