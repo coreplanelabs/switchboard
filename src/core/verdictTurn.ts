@@ -7,8 +7,8 @@
 // keys on the `LGTM:` token the tool produces) sat out a review that approved
 // in words. So when a review run's model loop ends on a pull request with no
 // verdict submitted, the run loop gives the same run ONE more bounded model
-// turn asking for the call — after the head settle (whose re-review turn asks
-// for a fresh verdict itself, so a moved head is never nudged twice) and
+// turn asking for the call — after the head settle, only when the observed
+// checkout and complete history do not disagree, and
 // before the post step reads the verdict. Mirrors the coding run's description turn
 // (descriptionTurn.ts): one more `prompt` on the run's own pi session
 // (docs/reference/specs/harness-pi.md item 14), through the seam the run stage

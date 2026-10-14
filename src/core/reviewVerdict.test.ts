@@ -17,7 +17,6 @@ import {
   verdictCountsLine,
   LGTM_TOKEN,
   MAX_REVIEW_POST_CODE_POINTS,
-  NO_VERDICT_LINE,
   parseDispositionsInput,
   parseVerdictInput,
   redactDispositions,
@@ -433,7 +432,7 @@ describe("review verdict → post body", () => {
 
   it("no verdict → fail-closed: the non-approving line, no issues, the prose preserved", () => {
     const body = buildReviewPostBody("LGTM: ship it", undefined, TARGET);
-    expect(body.startsWith(`${NO_VERDICT_LINE}\n\n_Reviewed at \`ca726ad\`._`)).toBe(true);
+    expect(body.startsWith("No verdict submitted — not approving.\n\n_Review target: `ca726ad`._")).toBe(true);
     expect(body.startsWith("LGTM")).toBe(false);
     expect(body).not.toContain("| Severity |");
     expect(body).toContain("LGTM: ship it"); // the prose is kept, just not first

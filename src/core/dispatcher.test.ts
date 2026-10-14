@@ -5579,7 +5579,9 @@ describe("review post-step", () => {
     expect(replies).toContainEqual(expect.stringContaining("answer")); // Slack still gets the review
     // No submit_verdict call → fail-closed: the body leads with the explicit
     // non-approving line, never "LGTM".
-    expect(spy.calls[0].body.startsWith(`${INCOMPLETE_REVIEW_LINE}\n\n_Reviewed at \`e8e43f4\`._`)).toBe(true);
+    expect(
+      spy.calls[0].body.startsWith("Review incomplete — findings not validated.\n\n_Review target: `e8e43f4`._"),
+    ).toBe(true);
     expect(spy.calls).toEqual([
       {
         target: { repo: "acme/api", number: 42, commitId: PR_HEAD },
