@@ -407,7 +407,9 @@ export class RestGithubApi implements GithubApi {
         undefined,
         "application/vnd.github.raw+json",
       );
-      content = await readTextCapped(raw, maxChars + 1);
+      content = await readTextCapped(raw, maxChars + 1).catch((error: unknown) => {
+        throw githubBodyError(error, raw, "contents_raw");
+      });
     } else content = String(body.content ?? "");
     if (content.includes("\u0000")) content = `(binary file, ${size} bytes — not shown)`;
     const truncated = content.length > maxChars;
@@ -643,7 +645,9 @@ export class RestGithubApi implements GithubApi {
       "application/vnd.github.diff",
     );
     // One char past the cap tells "cut here" from "exactly this long".
-    const text = await readTextCapped(res, maxChars + 1);
+    const text = await readTextCapped(res, maxChars + 1).catch((error: unknown) => {
+      throw githubBodyError(error, res, "compare");
+    });
     return text.length > maxChars ? { diff: text.slice(0, maxChars), complete: false } : { diff: text, complete: true };
   }
 
@@ -774,7 +778,9 @@ export class RestGithubApi implements GithubApi {
         );
       }
     }
-    return readTailCapped(res, maxChars);
+    return readTailCapped(res, maxChars).catch((error: unknown) => {
+      throw githubBodyError(error, res, res === first ? "actions_job_logs" : "actions_job_logs_blob");
+    });
   }
 
   /** One call. Non-2xx throws `GithubApiError` with the status and the start
@@ -869,9 +875,32 @@ export class GithubResponseDecodeError extends SyntaxError {
 
 /** Preserve observed headers when JSON syntax fails; no body text is retained. */
 async function githubJson(response: Response, route: GithubRoute): Promise<unknown> {
-  return response.json().catch(() => {
-    throw new GithubResponseDecodeError(response.status, githubRequestId(response), route);
+  return response.json().catch((error: unknown) => {
+    if (error instanceof SyntaxError)
+      throw new GithubResponseDecodeError(response.status, githubRequestId(response), route);
+    throw githubBodyError(error, response, route);
   });
+}
+
+interface GithubResponseFailure {
+  httpStatus: number;
+  requestId?: string;
+  route: GithubRoute;
+}
+const RESPONSE_FAILURES = new WeakMap<object, GithubResponseFailure>();
+
+/** Diagnostic context on the original native error, copied before terminal storage. */
+export function githubResponseFailureOf(error: unknown): GithubResponseFailure | undefined {
+  const facts = error !== null && typeof error === "object" ? RESPONSE_FAILURES.get(error) : undefined;
+  return facts ? { ...facts } : undefined;
+}
+
+function githubBodyError<E>(error: E, response: Response, route: GithubRoute): E {
+  if (error !== null && typeof error === "object") {
+    const requestId = route === "actions_job_logs_blob" ? undefined : githubRequestId(response);
+    RESPONSE_FAILURES.set(error, { httpStatus: response.status, route, ...(requestId ? { requestId } : {}) });
+  }
+  return githubTransportError(error, route);
 }
 
 /** Keep failure facts on the same error, including calls without a parent span. */

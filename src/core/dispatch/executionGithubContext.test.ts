@@ -8,8 +8,124 @@ import {
 } from "../../execution/githubApi.js";
 import { classifyError } from "../trace/classify.js";
 import { currentGithubReadCapability } from "./executionGithubContext.js";
+import { githubFileTool } from "../../tools/github.js";
 
 describe("current native execution read authority", () => {
+  it.each(["AbortError", "TypeError"] as const)(
+    "retains signed log body %s facts without changing the error",
+    async (name) => {
+      const error =
+        name === "TypeError" ? new TypeError("private blob transfer") : new DOMException("private blob timeout", name);
+      const api = new RestGithubApi({
+        token: async () => "private token",
+        fetch: async (url) => {
+          const path = String(url);
+          if (path.includes("/installation/repositories"))
+            return Response.json({ repositories: [{ full_name: "acme/private", private: true }] });
+          if (path.endsWith("/actions/jobs/7"))
+            return Response.json({ id: 7, status: "completed", conclusion: "success" });
+          if (path.endsWith("/actions/jobs/7/logs"))
+            return new Response(null, {
+              status: 302,
+              headers: { location: "https://logs.example.test/blob?signature=private" },
+            });
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.error(error);
+              },
+            }),
+            { status: 200 },
+          );
+        },
+      });
+      const result = await currentGithubReadCapability(
+        {
+          version: 2,
+          runId: "run",
+          callId: "call",
+          tool: "github_actions_job_log",
+          repos: ["acme/private"],
+          resultHash: "a".repeat(64),
+          inputHash: "b".repeat(64),
+          admissionHash: "c".repeat(64),
+        },
+        { repo: "acme/private", job: "7" },
+        { api, canWrite: () => false },
+        "review",
+      );
+      expect(result).toEqual({
+        ok: false,
+        githubAccess: {
+          tool: "github_actions_job_log",
+          stage: "tool-read",
+          operation: "getActionsJobLog",
+          route: "actions_job_logs_blob",
+          reason: name === "TypeError" ? "transport" : "timeout",
+          httpStatus: 200,
+          sourceCallHash: "9fd6fd2ffd299ff3691b5e216c4778afe73ff2b7e23fb14e138b032cfc0994e0",
+        },
+      });
+      expect(await api.getActionsJobLog("acme/private", 7).catch((caught) => caught)).toBe(error);
+      expect(JSON.stringify(result)).not.toMatch(/private|signature|https|body/);
+    },
+  );
+  it.each(["AbortError", "TimeoutError", "TypeError"] as const)(
+    "preserves %s after response headers with safe body-read facts",
+    async (name) => {
+      const error =
+        name === "TypeError" ? new TypeError("private body transfer") : new DOMException("private body timeout", name);
+      const api = new RestGithubApi({
+        token: async () => "private token",
+        fetch: async (url) => {
+          if (String(url).includes("/installation/repositories"))
+            return Response.json({ repositories: [{ full_name: "acme/private", private: true }] });
+          const response = new Response(null, { status: 200, headers: { "x-github-request-id": "A1:B2" } });
+          response.json = async () => {
+            throw error;
+          };
+          return response;
+        },
+      });
+      const result = await currentGithubReadCapability(
+        {
+          version: 2,
+          runId: "run",
+          callId: "call",
+          tool: "github_file",
+          repos: ["acme/private"],
+          resultHash: "a".repeat(64),
+          inputHash: "b".repeat(64),
+          admissionHash: "c".repeat(64),
+        },
+        { repo: "acme/private", path: "private.ts" },
+        { api, canWrite: () => false },
+        "review",
+      );
+      expect(result).toEqual({
+        ok: false,
+        githubAccess: {
+          tool: "github_file",
+          stage: "tool-read",
+          operation: "readFile",
+          route: "contents",
+          reason: name === "TypeError" ? "transport" : "timeout",
+          httpStatus: 200,
+          requestId: "A1:B2",
+          sourceCallHash: "9fd6fd2ffd299ff3691b5e216c4778afe73ff2b7e23fb14e138b032cfc0994e0",
+        },
+      });
+      expect(await api.readFile("acme/private", "private.ts").catch((caught) => caught)).toBe(error);
+      if (name !== "TypeError")
+        expect(
+          await githubFileTool.run(
+            { repo: "acme/private", path: "private.ts" },
+            { executor: {} as never, agentName: "review", github: { api, canWrite: () => false } },
+          ),
+        ).toBe("github_file: GitHub timed out.");
+      expect(JSON.stringify(result)).not.toMatch(/private|body|token/);
+    },
+  );
   it.each(["installation_repos", "contents", "pull_reviews"] as const)(
     "retains observed response facts for %s JSON decode failure",
     async (route) => {

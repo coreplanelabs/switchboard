@@ -3,7 +3,12 @@ import type { LiveRunMeta } from "../runLedger/types.js";
 import { sourceHash } from "../references/receipts.js";
 import { GITHUB_READ_TOOLS, type GithubCapability } from "../../tools/github.js";
 import type { ChatMessage } from "../chatMessage.js";
-import { GithubApiError, GithubCredentialUnavailable, GithubResponseDecodeError } from "../../execution/githubApi.js";
+import {
+  GithubApiError,
+  GithubCredentialUnavailable,
+  GithubResponseDecodeError,
+  githubResponseFailureOf,
+} from "../../execution/githubApi.js";
 import { classificationOf } from "../trace/classify.js";
 import {
   GITHUB_ACCESS_OPERATIONS,
@@ -117,19 +122,23 @@ export async function currentGithubReadCapability(
   const failedRead = (error: unknown, failedOperation = operation) => {
     if (error instanceof GithubCredentialUnavailable)
       return denied(error.reason === "missing" ? "credential-missing" : "credential-failed", {}, failedOperation);
+    const response = githubResponseFailureOf(error);
     const status =
-      error instanceof GithubApiError
+      response?.httpStatus ??
+      (error instanceof GithubApiError
         ? error.status
         : error instanceof GithubResponseDecodeError
           ? error.httpStatus
-          : undefined;
+          : undefined);
     const requestId =
-      error instanceof GithubApiError || error instanceof GithubResponseDecodeError ? error.requestId : undefined;
+      response?.requestId ??
+      (error instanceof GithubApiError || error instanceof GithubResponseDecodeError ? error.requestId : undefined);
     const classification = classificationOf(error);
     const originalRoute =
-      error instanceof GithubApiError || error instanceof GithubResponseDecodeError
+      response?.route ??
+      (error instanceof GithubApiError || error instanceof GithubResponseDecodeError
         ? error.route
-        : classification?.code;
+        : classification?.code);
     const route = (GITHUB_ACCESS_ROUTES as readonly unknown[]).includes(originalRoute)
       ? (originalRoute as GithubAccessDiagnostic["route"])
       : undefined;
