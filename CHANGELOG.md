@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.297.2](https://github.com/coreplanelabs/switchboard/compare/v1.297.1...v1.297.2) (2026-10-14)
+
+
+### Bug fixes
+
+* **core:** preserve accepted actions and incomplete review reports ([#3066](https://github.com/coreplanelabs/switchboard/issues/3066)) ([30ac021](https://github.com/coreplanelabs/switchboard/commit/30ac0214360b1ddcaa828a390f1af1564dc46515))
+* **deploy:** check smoke reader access before starting runs ([#3063](https://github.com/coreplanelabs/switchboard/issues/3063)) ([9e337c9](https://github.com/coreplanelabs/switchboard/commit/9e337c97be822e4e782c29e459b3e28478205917))
+* **deploy:** redact encoded smoke intake credentials ([#3060](https://github.com/coreplanelabs/switchboard/issues/3060)) ([dd2b377](https://github.com/coreplanelabs/switchboard/commit/dd2b377afb6f2072ef58963b3a48a683b033b8c4))
+* **harness:** wait for log reads while Sandbox starts ([#3069](https://github.com/coreplanelabs/switchboard/issues/3069)) ([f36ba42](https://github.com/coreplanelabs/switchboard/commit/f36ba42e47b6ac257dec7f4089008cc02ac7cd74))
+* **resident:** read PR heads through scoped GitHub metadata ([#3064](https://github.com/coreplanelabs/switchboard/issues/3064)) ([2046962](https://github.com/coreplanelabs/switchboard/commit/204696226a54a34e1adca165f70c96eeb77bb853))
+* **runs:** bind stop receipts to their original target ([#3068](https://github.com/coreplanelabs/switchboard/issues/3068)) ([d0e892e](https://github.com/coreplanelabs/switchboard/commit/d0e892e4010393e3e71ffa172291787d514b7e35))
+* **runs:** keep storage diagnostics private and non-recursive ([#3065](https://github.com/coreplanelabs/switchboard/issues/3065)) ([600cb79](https://github.com/coreplanelabs/switchboard/commit/600cb7933af5e428614eb6725739ce01af2788bc))
+* **runs:** retain hard-stop failures and unblock runtime retirement ([#3067](https://github.com/coreplanelabs/switchboard/issues/3067)) ([f057e9f](https://github.com/coreplanelabs/switchboard/commit/f057e9f24658cc2583777b6b9834cae2d32b7acc))
+* **runs:** retain storage exceptions across run requests ([#3061](https://github.com/coreplanelabs/switchboard/issues/3061)) ([d37395a](https://github.com/coreplanelabs/switchboard/commit/d37395a93f06eb30259aac4756b003380faae2ee))
+* **runs:** stop repeated tool failures before more model spend ([#3059](https://github.com/coreplanelabs/switchboard/issues/3059)) ([8b3e59c](https://github.com/coreplanelabs/switchboard/commit/8b3e59c61dd11682d4f1ad274963ac89640c67d6))
+* **web:** keep Kill available until a run ends ([#3070](https://github.com/coreplanelabs/switchboard/issues/3070)) ([9b35a8f](https://github.com/coreplanelabs/switchboard/commit/9b35a8f08396255f14d6910cc912eba74f60a167))
+
 ## [1.297.1](https://github.com/coreplanelabs/switchboard/compare/v1.297.0...v1.297.1) (2026-10-13)
 
 
