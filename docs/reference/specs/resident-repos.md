@@ -749,3 +749,10 @@ The [operator sequence](../../how-to/staging.md#install-the-maintenance-support-
 | `POST /staging-seal-window` | `drain` | `attempt`; the normal retained runner calls it after exact readiness. A new Worker version after the fence and zero blocking obligations are required. |
 | `POST /staging-release-maintenance` | `admin` | `expectedStartedAt`, `expectedRecordSha256`, `attempt`, `releaseDecisionSha256`. The new decision digest must differ from the original risk decision. |
 | `GET /staging-maintenance` | `read` | Returns `maintenance` with hold identity/state, fixture/risk digests, selected deployment data and window metadata; released state adds release time and decision digest. It does not return a full account/resource inventory. |
+
+
+## Selected bootstrap producer
+
+| Criterion | Proof |
+| --- | --- |
+| A selected force bootstrap compares the qualified old Cloudflare Worker version UUID to the authenticated fence’s swapVersion UUID; newer producer diagnostics, when present, must agree. The source commit and timestamped build remain separate. The selected fixture needs complete idle member and fence data; only one independently qualified old global admission can remain. A changed or unverified producer refuses even under force; an HTTP denial or malformed response cannot become a bootstrap fallback. Calls without the bootstrap version guard retain normal preflight behavior. | `[unit]` `deploy/cloudflare-resident/preflight.test.mjs::selected staging maintenance preflight::refuses a changed bootstrap Worker version through the public preflight even under force`; `::accepts the known-old fence Worker UUID without newer diagnostics`; `::never lets a selected bootstrap force an HTTP refusal or malformed response`; `deploy/cloudflare-resident/preflight.test.mjs::*` |

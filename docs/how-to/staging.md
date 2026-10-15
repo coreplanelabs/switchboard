@@ -172,3 +172,26 @@ Creation writes a mode-600 `INITIALIZE_MEMORY_RECEIPT.json` under the staging se
 `npm run staging:deploy -- --resume-memory <receipt>` continues only a provisional Memory checkpoint. It verifies the account/script/hostname, original upload, exact current 100% deployment ID, code/binding/namespace hash and the same active account-token writer. The native custom-domain ID must still belong to that script in the selected zone and its production environment. The source build must match the receipt; both config slots must still be empty and Bot/Resident/Sandbox must be absent. It reuses Memory without replaying creation or provisioning, then follows normal first-install acceptance. Before config publication and final Memory binding completion it verifies the checkpoint again. Other partial phases and unreadable evidence refuse.
 
 A prior operator may transfer an older captured upload/secret-provisioning receipt only after matching its positive upload version and native same-writer successor; observing a remote target alone does not authorize adoption. Wait for the recorded domain to resolve and verify its exact build over valid HTTPS. Never use an insecure TLS override or force to finish it.
+
+
+### Use the manual held bootstrap in CI
+
+Use `deploy-staging-bootstrap.yml` only after the operator qualifies the old producer, fixture and remaining old capabilities. This is one Resident update under retained maintenance. It cannot supply full-stack or Review E2E acceptance. The normal workflow continues to use force zero.
+
+Select an open same-repository PR at its exact current head. The workflow source and dispatched branch must point to that same commit. Select an immutable profile and nested configuration through the existing staging configuration reader. Match the Environment profile pin and the policy's source, hashes, hold, generation, operation ID, controller label and fixed deadline. The deadline includes queue and installation time, lasts no more than 90 minutes from the original run, and needs the existing 20-minute reserve before upload. Keep the original actor and sole controller.
+
+After those external qualification steps, the operator can dispatch the selected operation:
+
+```sh
+gh workflow run deploy-staging-bootstrap.yml --ref "$BOOTSTRAP_BRANCH" \
+  -f commit="$BOOTSTRAP_COMMIT" -f pr="$BOOTSTRAP_PR" \
+  -f profile_ref="$BOOTSTRAP_PROFILE_REF" -f attempt_id="$BOOTSTRAP_ATTEMPT_ID" \
+  -f previous_commit="$BOOTSTRAP_PREVIOUS_COMMIT" \
+  -f previous_worker_version="$BOOTSTRAP_PREVIOUS_WORKER_VERSION"
+```
+
+The job uses the existing staging Environment and `deploy-staging` lock. It checks positive original GitHub run metadata and complete preserved workflow history. A rerun or another run for the same selected operation refuses. Missing or changed old source/version and unreadable preflight data refuse before upload. An existing maintenance record also refuses a new bootstrap. The job does not reset the fixture.
+
+The expected result is the distinct `staging / bootstrap held` job and its `staging-held-bootstrap-<run>-1` artifact. A successful artifact reports image readiness, the exact maintenance hold and a null risk window. The job reconciles the original members against the exact native application, version and image, including when that image is unchanged. Missing members or pending activation refuse. It grants no normal staging, release, production or FE acceptance. It records no original request or native ending.
+
+If upload, readiness or receipt delivery is uncertain, retain the original run and result. Do not rerun it or reuse its operation ID. The operator must reconcile the original outcome before selecting any new operation. Read-only adoption of a proved original result is separate from another upload. After a verified held bootstrap, the operator makes the one finite risk decision. Only the later first normal retained CI run can claim its window, seal completion, wait for explicit release and run its own E2E.

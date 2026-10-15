@@ -19,7 +19,7 @@ import {
 import { spawn, execFileSync } from "node:child_process";
 import { maintenanceProfileMaterial } from "./profile.js";
 import { sameResidentImageTarget, type ResidentImageTarget } from "./residentMaintenance.js";
-import { MINUTE_MS } from "../core/budgets.js";
+import { DRAIN, MINUTE_MS, minutesToMs } from "../core/budgets.js";
 import {
   DRAINED_GAVE_UP_SUFFIX,
   drainBeganLine,
@@ -2107,9 +2107,12 @@ async function deployStepTraced(
             version: residentAfter.value.version,
             image: residentAfter.value.image,
           };
-        let reconcileRequired = application.kind === "changed" || residentPrintedTarget !== null;
+        let reconcileRequired =
+          application.kind === "changed" ||
+          residentPrintedTarget !== null ||
+          step.setEnv.RESIDENT_BOOTSTRAP_PREVIOUS_VERSION !== undefined;
         if (application.kind === "unknown") result = residentNotReady(result, application.reason);
-        else if (application.kind === "unchanged" && residentPrintedTarget === null) {
+        else if (application.kind === "unchanged" && residentPrintedTarget === null && !reconcileRequired) {
           const base = step.drain?.url ?? step.setEnv.RESIDENT_BASE_URL;
           const bearer = RESIDENT_BEARER_ENVS.map((name) => deps.env[name]).find((value) => value?.trim());
           const registry =
@@ -2459,6 +2462,12 @@ async function deployStepLoop(
         return { ok: false, live: "not deployed", reason: `resident upload refused: ${before.reason}` };
       if (deps.signal?.aborted) return { ok: false, live: "not deployed", reason: "deployment cancelled" };
     }
+    if (
+      step.setEnv.RESIDENT_BOOTSTRAP_PREVIOUS_VERSION !== undefined &&
+      step.maintenance &&
+      step.maintenance.attempt.deadline - deps.now() < minutesToMs(DRAIN.deployFenceMinRemainingMinutes)
+    )
+      return { ok: false, live: "not deployed", reason: "selected staging bootstrap upload reserve is exhausted" };
     uploadState(true);
     const r = await exec(step, io, deps.signal);
     if (r.cancelled || deps.signal?.aborted)

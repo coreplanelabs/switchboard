@@ -252,12 +252,12 @@
       "when": "Model capacity receipts."
     },
     "smoke:ingress": {
-      "does": "Checks three deployment capability families and writes an acceptance receipt; --check validates setup without network.",
-      "when": "Explicitly configured disposable smoke scope; release acceptance."
+      "does": "Checks three deployment capability families; --check makes no network request.",
+      "when": "Configured disposable scope; release acceptance."
     },
     "staging:deploy": {
-      "when": "Manual staging candidates; requires separate staging and production account pins.",
-      "does": "Validates staging isolation, freezes deployment inputs, and deploys the selected candidate Workers. --check validates without upload."
+      "does": "Checks isolation and deploys a frozen staging candidate; --check makes no upload.",
+      "when": "Manual staging; separate account pins required."
     },
     "staging:validate": {
       "does": "Checks PR eligibility before staging.",
@@ -266,6 +266,10 @@
     "check:native-scope": {
       "does": "Tests the native gate and kill.",
       "when": "Docker; see the containment plan."
+    },
+    "staging:bootstrap-held": {
+      "does": "Installs Resident support and keeps maintenance held.",
+      "when": "Manual staging CI; separate readiness artifact."
     }
   }
 }
