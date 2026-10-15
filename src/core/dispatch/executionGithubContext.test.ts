@@ -9,8 +9,33 @@ import {
 import { classifyError } from "../trace/classify.js";
 import { currentGithubReadCapability } from "./executionGithubContext.js";
 import { githubFileTool } from "../../tools/github.js";
+import { sourceHash } from "../references/receipts.js";
 
 describe("current native execution read authority", () => {
+  it("denies retained private bytes when a now-public source returns different content", async () => {
+    const api = new InMemoryGithubApi({ "upstream/provider": { private: false, files: { "x.ts": "public code" } } });
+    api.listRepos = async () => [];
+    const result = await currentGithubReadCapability(
+      {
+        version: 2,
+        runId: "run",
+        callId: "call",
+        tool: "github_file",
+        repos: ["upstream/provider"],
+        resultHash: await sourceHash("https://github.com/upstream/provider/blob/main/x.ts (12 bytes):\n\nprivate code"),
+        inputHash: "b".repeat(64),
+        admissionHash: "c".repeat(64),
+      },
+      { repo: "upstream/provider", path: "x.ts" },
+      { api, canWrite: () => false },
+      "review",
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      githubAccess: { stage: "tool-read", reason: "public-result-changed" },
+    });
+  });
+
   it.each([200, 403])(
     "rechecks an uninstalled public source through its original read family (HTTP %s)",
     async (status) => {
@@ -36,7 +61,7 @@ describe("current native execution read authority", () => {
           callId: "call",
           tool: "github_file",
           repos: ["upstream/provider"],
-          resultHash: "a".repeat(64),
+          resultHash: await sourceHash("upstream/provider:schema.go (4 bytes):\n\ncode"),
           inputHash: "b".repeat(64),
           admissionHash: "c".repeat(64),
         },
