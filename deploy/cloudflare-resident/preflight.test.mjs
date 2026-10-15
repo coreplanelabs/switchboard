@@ -46,6 +46,152 @@ describe("selected staging maintenance preflight", () => {
     },
   });
 
+  // The installed legacy Worker returns no count, maintenance or producer diagnostic.
+  const bootstrapFence = (workerVersion) => ({
+    activeAdmissions: 1,
+    fenceReady: false,
+    draining: {
+      since: "2026-01-01T00:00:00Z",
+      until: "2026-01-01T00:30:00Z",
+      swapFence: false,
+      swapVersion: workerVersion,
+    },
+    residents: [
+      {
+        resource: "repo:acme/api",
+        live: { state: "warm", inFlight: 0, runsInFlight: 0, executingRuns: 0, retainedRuns: 0, unknownRuns: 0 },
+      },
+    ],
+  });
+
+  it("refuses a changed bootstrap Worker version through the public preflight even under force", async () => {
+    const expected = "00000000-0000-4000-8000-000000000001";
+    const body = bootstrapFence("00000000-0000-4000-8000-000000000002");
+    const wire = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(body));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const output = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(
+        await main(["--force"], {
+          RESIDENT_BASE_URL: "https://resident.example.test",
+          RESIDENT_DRAIN_TOKEN: "fixture",
+          RESIDENT_DEPLOY_ATTEMPT: JSON.stringify(attempt),
+          RESIDENT_BOOTSTRAP_PREVIOUS_VERSION: expected,
+          RESIDENT_BOOTSTRAP_UPLOAD_RESERVE_MS: "1200000",
+          RESIDENT_BOOTSTRAP_RESOURCES: JSON.stringify(["repo:acme/api"]),
+        }),
+      ).toBe(1);
+      expect(wire).toHaveBeenCalledTimes(1);
+    } finally {
+      wire.mockRestore();
+      log.mockRestore();
+      output.mockRestore();
+    }
+  });
+
+  it("accepts the known-old fence Worker UUID without newer diagnostics", async () => {
+    const expected = "00000000-0000-4000-8000-000000000001";
+    const body = bootstrapFence(expected);
+    const wire = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(body));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const output = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(
+        await main(["--force"], {
+          RESIDENT_BASE_URL: "https://resident.example.test",
+          RESIDENT_DRAIN_TOKEN: "fixture",
+          RESIDENT_DEPLOY_ATTEMPT: JSON.stringify(attempt),
+          RESIDENT_BOOTSTRAP_PREVIOUS_VERSION: expected,
+          RESIDENT_BOOTSTRAP_UPLOAD_RESERVE_MS: "1200000",
+          RESIDENT_BOOTSTRAP_RESOURCES: JSON.stringify(["repo:acme/api"]),
+        }),
+      ).toBe(0);
+      expect(wire).toHaveBeenCalledTimes(1);
+    } finally {
+      wire.mockRestore();
+      log.mockRestore();
+      output.mockRestore();
+    }
+  });
+
+  it("rechecks the selected readiness reserve at the final bootstrap preflight", async () => {
+    const expected = "00000000-0000-4000-8000-000000000001";
+    const wire = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json(bootstrapFence(expected)));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const output = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const env = {
+        RESIDENT_BASE_URL: "https://resident.example.test",
+        RESIDENT_DRAIN_TOKEN: "fixture",
+        RESIDENT_DEPLOY_ATTEMPT: JSON.stringify(attempt),
+        RESIDENT_BOOTSTRAP_PREVIOUS_VERSION: expected,
+        RESIDENT_BOOTSTRAP_RESOURCES: JSON.stringify(["repo:acme/api"]),
+        RESIDENT_BOOTSTRAP_UPLOAD_RESERVE_MS: "1200000",
+      };
+      expect(await main(["--force"], env, { clock: () => attempt.deadline - 21 * 60_000 })).toBe(0);
+      expect(await main(["--force"], env, { clock: () => attempt.deadline - 19 * 60_000 })).toBe(1);
+    } finally {
+      wire.mockRestore();
+      log.mockRestore();
+      output.mockRestore();
+    }
+  });
+
+  it("never lets a selected bootstrap force an HTTP refusal or malformed response", async () => {
+    for (const response of [
+      ...[403, 404, 409, 500].map((status) => Response.json({ error: "refused" }, { status })),
+      new Response("not JSON", { status: 200 }),
+    ]) {
+      const wire = vi.spyOn(globalThis, "fetch").mockResolvedValue(response);
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        expect(
+          await main(["--force"], {
+            RESIDENT_BASE_URL: "https://resident.example.test",
+            RESIDENT_DRAIN_TOKEN: "fixture",
+            RESIDENT_DEPLOY_ATTEMPT: JSON.stringify(attempt),
+            RESIDENT_BOOTSTRAP_PREVIOUS_VERSION: "00000000-0000-4000-8000-000000000001",
+          }),
+        ).toBe(1);
+        expect(wire).toHaveBeenCalledTimes(1);
+      } finally {
+        wire.mockRestore();
+        log.mockRestore();
+      }
+    }
+  });
+
+  it("refuses matching Worker identity without complete bootstrap member evidence", async () => {
+    const wire = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        deployDiagnostic: {
+          schema: 1,
+          producer: {
+            build: `${"b".repeat(40)}@2026-01-01T00:00:00Z`,
+            workerVersion: "00000000-0000-4000-8000-000000000001",
+          },
+          fenceDisposition: "retained",
+          admissionReadback: "reported",
+        },
+      }),
+    );
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(
+        await main(["--force"], {
+          RESIDENT_BASE_URL: "https://resident.example.test",
+          RESIDENT_DRAIN_TOKEN: "fixture",
+          RESIDENT_DEPLOY_ATTEMPT: JSON.stringify(attempt),
+          RESIDENT_BOOTSTRAP_PREVIOUS_VERSION: "00000000-0000-4000-8000-000000000001",
+          RESIDENT_BOOTSTRAP_RESOURCES: JSON.stringify(["repo:acme/api"]),
+        }),
+      ).toBe(1);
+    } finally {
+      wire.mockRestore();
+      log.mockRestore();
+    }
+  });
+
   it("refuses a selected-attempt HTTP denial even when force is requested", async () => {
     const wire = vi
       .spyOn(globalThis, "fetch")

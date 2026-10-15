@@ -16,6 +16,7 @@
 // (preflight.test.mjs); `main()` only does I/O around it.
 
 import { pathToFileURL } from "node:url";
+import { deploymentClock } from "../bin/deploy-clock.mjs";
 
 /** The env var naming this Worker's origin. `deploy all` sets it from the deployment profile; the
  *  preflight has no address of its own (deploy/profile.json is the only place the fleet's hostnames live). */
@@ -530,7 +531,10 @@ function qualifiedMaintenance(receipt, attempt, active) {
   );
 }
 
-export function decide(fetched, { force = false, attempt } = {}) {
+export function decide(
+  fetched,
+  { force = false, attempt, bootstrapPreviousWorkerVersion, bootstrapResources, bootstrapReserveMs, now } = {},
+) {
   if (attempt && fetched?.ok !== true) force = false;
   if (fetched?.payload?.stagingMaintenance && !matchingMaintenance(fetched.payload.stagingMaintenance, attempt))
     force = false;
@@ -539,6 +543,29 @@ export function decide(fetched, { force = false, attempt } = {}) {
   const interrupting = [];
   const unknown = [];
   const problems = [];
+  if (bootstrapPreviousWorkerVersion !== undefined) {
+    const producer = deployProducerDiagnostic(fetched?.payload).producer;
+    if (
+      !force ||
+      !validAttempt(attempt) ||
+      !uuid(fetched?.payload?.draining?.swapVersion) ||
+      fetched.payload.draining.swapVersion !== bootstrapPreviousWorkerVersion ||
+      (fetched.payload.deployDiagnostic !== undefined &&
+        (producer.state !== "reported" || producer.workerVersion !== bootstrapPreviousWorkerVersion))
+    ) {
+      force = false;
+      problems.push("selected staging bootstrap Worker version changed or is unverified");
+    }
+    if (
+      !Number.isSafeInteger(now) ||
+      !Number.isSafeInteger(bootstrapReserveMs) ||
+      bootstrapReserveMs <= 0 ||
+      attempt?.deadline - now < bootstrapReserveMs
+    ) {
+      force = false;
+      problems.push("selected staging bootstrap upload reserve is exhausted or unverified");
+    }
+  }
   let retained = 0;
 
   if (!fetched || fetched.ok !== true) {
@@ -658,6 +685,45 @@ export function decide(fetched, { force = false, attempt } = {}) {
     }
   }
 
+  if (bootstrapPreviousWorkerVersion !== undefined) {
+    const body = fetched?.payload;
+    const drain = body?.draining;
+    const residents = body?.residents;
+    if (
+      !Array.isArray(bootstrapResources) ||
+      bootstrapResources.length === 0 ||
+      new Set(bootstrapResources).size !== bootstrapResources.length ||
+      bootstrapResources.some(
+        (resource) => typeof resource !== "string" || !/^repo:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(resource),
+      ) ||
+      !Array.isArray(residents) ||
+      new Set(residents.map((row) => row?.residentId ?? row?.resource)).size !== residents.length ||
+      residents.some(
+        (row) =>
+          !bootstrapResources.includes(row?.resource) || row?.live?.inFlight !== 0 || row?.live?.runsInFlight !== 0,
+      ) ||
+      bootstrapResources.some((resource) => !residents.some((row) => row?.resource === resource)) ||
+      !Number.isSafeInteger(body?.activeAdmissions) ||
+      body.activeAdmissions < 0 ||
+      body.activeAdmissions > 1 ||
+      body.stagingMaintenance != null ||
+      typeof body?.fenceReady !== "boolean" ||
+      typeof drain?.swapFence !== "boolean" ||
+      typeof drain?.since !== "string" ||
+      typeof drain?.until !== "string" ||
+      !Number.isFinite(Date.parse(drain?.since)) ||
+      !Number.isFinite(Date.parse(drain?.until)) ||
+      Date.parse(drain.until) <= Date.parse(drain.since) ||
+      busy.length ||
+      provisioning.length ||
+      interrupting.length ||
+      unknown.length
+    ) {
+      force = false;
+      problems.push("selected staging bootstrap fixture or fence evidence is incomplete");
+    }
+  }
+
   // Interruptible cycles never refuse; they are named so the log says what the
   // swap interrupts and why that is fine.
   const warningText = interrupting.length
@@ -701,7 +767,7 @@ export function decide(fetched, { force = false, attempt } = {}) {
   };
 }
 
-export async function main(argv = process.argv.slice(2), env = process.env) {
+export async function main(argv = process.argv.slice(2), env = process.env, { clock = deploymentClock } = {}) {
   const force = argv.includes("--force") || env.RESIDENT_DEPLOY_FORCE === "1";
   const baseUrl = env[BASE_URL_ENV];
   if (!baseUrl) {
@@ -721,7 +787,20 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     }
   }
   const fetched = await fetchResidents(baseUrl, readToken(env), { attempt });
-  const d = decide(fetched, { force, attempt });
+  const d = decide(fetched, {
+    force,
+    attempt,
+    bootstrapPreviousWorkerVersion: env.RESIDENT_BOOTSTRAP_PREVIOUS_VERSION,
+    bootstrapReserveMs: Number(env.RESIDENT_BOOTSTRAP_UPLOAD_RESERVE_MS),
+    now: env.RESIDENT_BOOTSTRAP_PREVIOUS_VERSION === undefined ? undefined : clock(),
+    bootstrapResources: (() => {
+      try {
+        return JSON.parse(env.RESIDENT_BOOTSTRAP_RESOURCES ?? "null");
+      } catch {
+        return null;
+      }
+    })(),
+  });
   if (qualifiedMaintenance(fetched.payload?.stagingMaintenance, attempt, fetched.payload?.activeAdmissions)) {
     const receipt = fetched.payload.stagingMaintenance;
     console.log(

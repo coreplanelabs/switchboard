@@ -185,6 +185,96 @@ describe("retained staging deployment", () => {
     ]);
   });
 
+  it("reconciles a selected force bootstrap even when the native image is unchanged", async () => {
+    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn", RESIDENT_READ_TOKEN: "read" }, [drained, reconciled]);
+    h.deps.readAppState = async () => app;
+    h.deps.readHealth = async (url) => ({
+      status: 200,
+      body: url.endsWith("/residents")
+        ? {
+            ...registry,
+            stagingMaintenance: { ...registry.stagingMaintenance, window: null },
+            residents: [
+              {
+                resource: "repo:acme/api",
+                live: {
+                  imageReport: "current",
+                  imageTarget: {
+                    application: "switchboard-resident-residentdo",
+                    version: 17,
+                    image: "registry.example.test/resident:stable",
+                  },
+                },
+              },
+            ],
+          }
+        : { ok: true, build: { commit: HEAD } },
+    });
+    const result = await deployStep(
+      {
+        ...step,
+        forcedBy: "RESIDENT_DEPLOY_FORCE",
+        setEnv: {
+          ...step.setEnv,
+          RESIDENT_BOOTSTRAP_PREVIOUS_VERSION: "00000000-0000-4000-8000-000000000001",
+        },
+      },
+      plan,
+      HEAD,
+      h.io,
+      h.deps,
+      exec(h, 0),
+    );
+    expect(result).toMatchObject({ ok: true, live: "uploaded, image-ready, maintenance held" });
+    expect(
+      h.calls.filter((call) => call.dep === "postJson").map((call) => ({ url: call.args[0], body: call.args[2] })),
+    ).toMatchObject([
+      { url: "https://switchboard-resident.example.test/drain" },
+      {
+        url: "https://switchboard-resident.example.test/reconcile",
+        body: {
+          imageTarget: {
+            application: "switchboard-resident-residentdo",
+            version: 17,
+            image: "registry.example.test/resident:stable",
+          },
+        },
+      },
+    ]);
+    expect(h.calls.filter((call) => call.dep === "postJson")).toHaveLength(2);
+  });
+
+  it("refuses bootstrap upload when native preparation consumes its readiness reserve", async () => {
+    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn", RESIDENT_READ_TOKEN: "read" }, [drained]);
+    let now = 2_340_000;
+    h.deps.now = () => now;
+    h.deps.readAppState = async () => {
+      now = 2_460_000;
+      return app;
+    };
+    const result = await deployStep(
+      {
+        ...step,
+        forcedBy: "RESIDENT_DEPLOY_FORCE",
+        setEnv: {
+          ...step.setEnv,
+          RESIDENT_BOOTSTRAP_PREVIOUS_VERSION: "00000000-0000-4000-8000-000000000001",
+        },
+      },
+      plan,
+      HEAD,
+      h.io,
+      h.deps,
+      exec(h, 0),
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      live: "not deployed",
+      reason: "selected staging bootstrap upload reserve is exhausted",
+    });
+    expect(h.calls.filter((call) => call.dep === "exec")).toHaveLength(0);
+  });
+
   it("refuses a different source before upload and retains maintenance on cancellation", async () => {
     const h = harness({ RESIDENT_DRAIN_TOKEN: "drn", RESIDENT_READ_TOKEN: "read" });
     const wrong = await deployStep(step, plan, "b".repeat(40), h.io, h.deps, exec(h, 0));

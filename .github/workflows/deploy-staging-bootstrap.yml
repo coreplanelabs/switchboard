@@ -1,0 +1,162 @@
+name: bootstrap staging held
+run-name: staging held bootstrap ${{ inputs.attempt_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Exact qualified source commit
+        required: true
+        type: string
+      pr:
+        description: Open same-repository pull request at that commit
+        required: true
+        type: string
+      profile_ref:
+        description: Exact immutable staging profile reference already selected by the operator
+        required: true
+        type: string
+      attempt_id:
+        description: Attempt UUID from that immutable policy
+        required: true
+        type: string
+      previous_commit:
+        description: Previously qualified serving Resident source commit
+        required: true
+        type: string
+      previous_worker_version:
+        description: Previously qualified Resident Worker version UUID
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+  actions: read
+
+jobs:
+  validate:
+    name: bootstrap source validation
+    if: github.event_name == 'workflow_dispatch' && github.run_attempt == 1
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 40
+    outputs:
+      eligible: ${{ steps.validate.outputs.eligible }}
+    steps:
+      - name: bind the manual controller and candidate
+        env:
+          COMMIT: ${{ inputs.commit }}
+          PR: ${{ inputs.pr }}
+          ATTEMPT: ${{ inputs.attempt_id }}
+          CONTROLLER_COMMIT: ${{ github.workflow_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] && [[ "$PR" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [[ "$ATTEMPT" =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || exit 1
+          [ "$GITHUB_SHA" = "$COMMIT" ] && [ "$CONTROLLER_COMMIT" = "$COMMIT" ] || { echo '::error::Controller source changed'; exit 1; }
+          pull=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR")
+          jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$COMMIT" --arg branch "$GITHUB_REF_NAME" '.state == "open" and .head.repo.full_name == $repo and .head.sha == $sha and .head.ref == $branch' <<< "$pull" > /dev/null
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - id: validate
+        run: npm run staging:validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_COMMIT: ${{ inputs.commit }}
+          STAGING_PR_NUMBER: ${{ inputs.pr }}
+          STAGING_AUTOMATIC: "false"
+          STAGING_ACTOR: ${{ github.actor }}
+
+  bootstrap:
+    name: staging / bootstrap held
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && github.run_attempt == 1 && needs.validate.outputs.eligible == 'true'
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 60
+    environment: staging
+    concurrency:
+      group: deploy-staging
+      queue: max
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - run: npm ci
+      - id: recheck
+        run: npm run staging:validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_COMMIT: ${{ inputs.commit }}
+          STAGING_PR_NUMBER: ${{ inputs.pr }}
+          STAGING_AUTOMATIC: "false"
+          STAGING_ACTOR: ${{ github.actor }}
+          STAGING_VALIDATE_MODE: recheck
+      - name: require the current qualified candidate
+        env:
+          ELIGIBLE: ${{ steps.recheck.outputs.eligible }}
+        run: '[ "$ELIGIBLE" = "true" ]'
+      - name: require the selected immutable profile pin
+        if: steps.recheck.outputs.eligible == 'true'
+        env:
+          EXPECTED_PROFILE: ${{ inputs.profile_ref }}
+          PROFILE: ${{ vars.SWITCHBOARD_STAGING_PROFILE }}
+        run: '[ -n "$PROFILE" ] && [ "$PROFILE" = "$EXPECTED_PROFILE" ]'
+      - id: config-token
+        if: steps.recheck.outputs.eligible == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.STAGING_CONFIG_REPO_APP_CLIENT_ID }}
+          private-key: ${{ secrets.STAGING_CONFIG_REPO_APP_PRIVATE_KEY }}
+          owner: ${{ vars.CONFIG_REPO_OWNER }}
+          repositories: ${{ vars.CONFIG_REPO_NAME }}
+          permission-contents: read
+      - name: install the held Resident support once
+        if: steps.recheck.outputs.eligible == 'true'
+        run: npm run --silent staging:bootstrap-held -- --receipt "$RUNNER_TEMP/staging-held-bootstrap.json"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_COMMIT: ${{ inputs.commit }}
+          STAGING_PR_NUMBER: ${{ inputs.pr }}
+          STAGING_CONTROLLER_COMMIT: ${{ github.workflow_sha }}
+          STAGING_BOOTSTRAP_ATTEMPT: ${{ inputs.attempt_id }}
+          STAGING_BOOTSTRAP_PREVIOUS_COMMIT: ${{ inputs.previous_commit }}
+          STAGING_BOOTSTRAP_PREVIOUS_VERSION: ${{ inputs.previous_worker_version }}
+          SWITCHBOARD_DEPLOY_PROFILE: ${{ vars.SWITCHBOARD_STAGING_PROFILE }}
+          SWITCHBOARD_STAGING_ACCOUNT: ${{ vars.SWITCHBOARD_STAGING_ACCOUNT }}
+          SWITCHBOARD_PRODUCTION_ACCOUNT: ${{ vars.SWITCHBOARD_PRODUCTION_ACCOUNT }}
+          CONFIG_REPO_OWNER: ${{ vars.CONFIG_REPO_OWNER }}
+          CONFIG_REPO_NAME: ${{ vars.CONFIG_REPO_NAME }}
+          CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_CLOUDFLARE_DEPLOY_TOKEN }}
+          RESIDENT_READ_TOKEN: ${{ secrets.STAGING_RESIDENT_READ_TOKEN }}
+          RESIDENT_DRAIN_TOKEN: ${{ secrets.STAGING_RESIDENT_DRAIN_TOKEN }}
+          CI: "1"
+          WRANGLER_SEND_METRICS: "false"
+      - name: retain the bootstrap outcome
+        if: always()
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          if [ ! -f "$RUNNER_TEMP/staging-held-bootstrap.json" ]; then
+            jq -n --arg source "$COMMIT" --arg run "$GITHUB_RUN_ID" '{schema:1,kind:"staging-held-bootstrap",outcome:"unverified",source:$source,run:$run}' > "$RUNNER_TEMP/staging-held-bootstrap.json"
+          fi
+          echo 'Held bootstrap only. Normal staging and Review E2E acceptance remain separate.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: staging-held-bootstrap-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/staging-held-bootstrap.json
+          if-no-files-found: error
