@@ -1,6 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -34,13 +36,49 @@ const container = docker([
   image,
   "120",
 ]).trim();
+const temporary = mkdtempSync(join(tmpdir(), "native-harness-"));
 try {
+  // Render writes through the real harness consumer, then execute them in
+  // the installed image. The local capture alone is not the behavior proof.
+  const commands = execFileSync(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      `
+    import { ExecHarnessContainer } from "./src/core/harness/container.ts";
+    import { piRunPaths } from "./src/core/harness/pi/process.ts";
+    import { openCodeRunPaths } from "./src/core/harness/opencode/process.ts";
+    const fixtures = [];
+    for (const [id, paths] of [["a", piRunPaths("a")], ["b", openCodeRunPaths("b")]]) {
+      const commands = [];
+      const container = new ExecHarnessContainer({ execResult: async (command) => { commands.push(command); return { stdout: "", stderr: "", exitCode: 0 }; } });
+      await container.writeFile(paths.dir + "/driver", "harness-state");
+      fixtures.push({ id, root: paths.dir, commands });
+    }
+    console.log(JSON.stringify(fixtures));
+  `,
+    ],
+    { cwd: root, encoding: "utf8" },
+  );
+  const commandFile = join(temporary, "commands.json");
+  writeFileSync(commandFile, commands, { mode: 0o600 });
+  docker(["cp", commandFile, `${container}:/tmp/harness-root-commands.json`]);
   docker(["cp", fixture, `${container}:/tmp/native-scope-test.py`]);
   docker(["start", container]);
   const helperSha256 = createHash("sha256").update(readFileSync(helper)).digest("hex");
   const installed = docker(["exec", container, "/usr/bin/sha256sum", "/opt/switchboard/native-scope.py"]).split(" ")[0];
   if (installed !== helperSha256) throw new Error("image does not contain the current native helper");
-  const result = docker(["exec", container, "/usr/bin/python3", "-I", "/tmp/native-scope-test.py"]);
+  const result = docker([
+    "exec",
+    container,
+    "/usr/bin/python3",
+    "-I",
+    "/tmp/native-scope-test.py",
+    "/tmp/harness-root-commands.json",
+  ]);
   const receipt = JSON.parse(result.trim());
   if (receipt.productionHelper !== "passed") throw new Error("native scope assertions failed");
   console.log(
@@ -53,4 +91,5 @@ try {
   );
 } finally {
   docker(["rm", "-f", container]);
+  rmSync(temporary, { recursive: true, force: true });
 }
