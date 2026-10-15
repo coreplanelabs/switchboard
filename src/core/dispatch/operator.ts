@@ -1665,53 +1665,64 @@ export function parseOperatorTurn(answer: RouteToolCall | string, ctx: OperatorT
     // their absence (an older call, a scripted test) — the schema requires
     // them, so the harness re-asks a call without them in production.
     const { reason: why, intent, ...named } = input;
-    // Issue 2088's write-intent cell: a write-class intent never executes as
-    // a read command — the declared `write` on a read-class command is a
-    // violation the seam re-asks with it named (record 0067's shape), so the
-    // model gets its retries to call the write tool that does the work (or
-    // ask with a runnable proposal); the read never runs.
-    if (intent === "write" && command.effect === "read")
-      return {
-        kind: "violation",
-        violation: `a write intent on the read command \`${cliWords(command.def.id).join(" ")}\` — a read never covers a write; call the command that does the work, or ask with a runnable proposal`,
-      };
-    // The same cell's other half: a write the deployment cannot run as typed
-    // — a required argument missing, or a model ref naming a provider it does
-    // not have — is the question with the best guess from what exists, never
-    // a broken line the ladder would mint or run.
-    if (command.effect !== "read") {
-      const required = ((command.tool.inputSchema as { required?: string[] }).required ?? []).filter(
-        (k) => k !== "intent" && k !== "reason",
-      );
-      const missing = required.filter((k) => !(k in named));
-      const refs = ctx.providers === undefined ? [] : unresolvableModelRefs(named, ctx.providers);
-      if (missing.length > 0 || refs.length > 0)
-        return { kind: "decision", decision: writeIntentQuestion(command, ctx, { missing, refs, named }) };
-    }
-    try {
-      const bound = namedToInput(command.def, named, "camel");
-      if ("error" in bound && typeof bound.error === "string")
-        return { kind: "violation", violation: tidy(`the ${answer.tool} call did not validate: ${bound.error}`) };
-      const line = operatorLine(chatInvocation(command.def, bound as CommandInput));
-      const reason = tidy(why ?? "a registry command bound as typed");
-      return {
-        kind: "decision",
-        decision: {
-          kind: "binds",
-          binds: [{ line, reason, invocation: { kind: "invoke", id: command.def.id, input: bound as CommandInput } }],
-          reason,
-        },
-      };
-    } catch (err) {
-      return {
-        kind: "violation",
-        violation: tidy(
-          `the ${answer.tool} call did not validate: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      };
-    }
+    return bindRegistryCommand(command, named, ctx, { intent, reason: why });
   }
   return { kind: "violation", violation: `the operator called tool "${answer.tool}", which this turn does not offer` };
+}
+
+/** Bind registry parameters without mixing command fields with routing metadata. */
+export function bindRegistryCommand(
+  command: RoutableCommand,
+  named: Record<string, unknown>,
+  ctx: OperatorTurnContext,
+  metadata: { intent?: unknown; reason?: unknown } = {},
+): OperatorTurn {
+  const { intent, reason: why } = metadata;
+  // Issue 2088's write-intent cell: a write-class intent never executes as
+  // a read command — the declared `write` on a read-class command is a
+  // violation the seam re-asks with it named (record 0067's shape), so the
+  // model gets its retries to call the write tool that does the work (or
+  // ask with a runnable proposal); the read never runs.
+  if (intent === "write" && command.effect === "read")
+    return {
+      kind: "violation",
+      violation: `a write intent on the read command \`${cliWords(command.def.id).join(" ")}\` — a read never covers a write; call the command that does the work, or ask with a runnable proposal`,
+    };
+  // The same cell's other half: a write the deployment cannot run as typed
+  // — a required argument missing, or a model ref naming a provider it does
+  // not have — is the question with the best guess from what exists, never
+  // a broken line the ladder would mint or run.
+  if (command.effect !== "read") {
+    const required = ((command.tool.inputSchema as { required?: string[] }).required ?? []).filter(
+      (k) => k !== "intent" && k !== "reason",
+    );
+    const missing = required.filter((k) => !(k in named));
+    const refs = ctx.providers === undefined ? [] : unresolvableModelRefs(named, ctx.providers);
+    if (missing.length > 0 || refs.length > 0)
+      return { kind: "decision", decision: writeIntentQuestion(command, ctx, { missing, refs, named }) };
+  }
+  try {
+    const bound = namedToInput(command.def, named, "camel");
+    if ("error" in bound && typeof bound.error === "string")
+      return { kind: "violation", violation: tidy(`the ${command.tool.name} call did not validate: ${bound.error}`) };
+    const line = operatorLine(chatInvocation(command.def, bound as CommandInput));
+    const reason = tidy(why ?? "a registry command bound as typed");
+    return {
+      kind: "decision",
+      decision: {
+        kind: "binds",
+        binds: [{ line, reason, invocation: { kind: "invoke", id: command.def.id, input: bound as CommandInput } }],
+        reason,
+      },
+    };
+  } catch (err) {
+    return {
+      kind: "violation",
+      violation: tidy(
+        `the ${command.tool.name} call did not validate: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    };
+  }
 }
 
 /** A question may render only a runnable suggestion: a registry command
@@ -2259,7 +2270,7 @@ export function requesterThreadEvidence(
  * becomes a typed refusal with the cause's one safe sentence. It never falls
  * through to the configured default.
  */
-function operatorTurnContext(input: OperatorInput, offered = actionProjection(input)): OperatorTurnContext {
+export function operatorTurnContext(input: OperatorInput, offered = actionProjection(input)): OperatorTurnContext {
   const requesterTarget =
     input.requesterId && !input.targetStoreUnavailable
       ? requesterRepoContext(input.tail, input.requesterId, input.requesterTarget)
