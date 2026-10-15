@@ -1,7 +1,12 @@
 import { DRAIN, minutesToMs } from "../core/budgets.js";
 import { servedCommit } from "./liveGate.js";
 import type { HealthRead } from "./sandboxLiveGate.js";
-import { stagingAttemptMatches, type StagingMaintenancePolicy } from "./residentMaintenance.js";
+import {
+  stagingAttemptMatches,
+  sameResidentImageTarget,
+  type ResidentImageTarget,
+  type StagingMaintenancePolicy,
+} from "./residentMaintenance.js";
 
 /** The registry's cycle backstop releases admissions, not proof of readiness. */
 export const RESIDENT_READY_WAIT_MS = minutesToMs(DRAIN.cycleBoundMinutes);
@@ -76,6 +81,7 @@ export function residentMaintenanceProblem(
 export function residentImageReportsProblem(
   read: { status: number; body: unknown } | { error: string },
   expectedResources: readonly string[] = [],
+  imageTarget?: ResidentImageTarget,
 ): string | undefined {
   if ("error" in read) return `registry unreadable: ${read.error}`;
   if (read.status !== 200) return `registry unreadable: HTTP ${read.status}`;
@@ -106,6 +112,8 @@ export function residentImageReportsProblem(
     }
     seen.add(identity);
     const live = object(row.live);
+    if (imageTarget && !sameResidentImageTarget(live?.imageTarget, imageTarget))
+      problems.push(`${identity}: selected image target is unverified`);
     if (live?.imageReport !== "current" || live.error !== undefined)
       problems.push(
         `${identity}: image report ${String(live?.imageReport ?? "missing")}${live?.error ? " (live view failed)" : ""}`,

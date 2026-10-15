@@ -18,6 +18,7 @@ import {
 } from "./pagingDiagnostic.js";
 import { spawn, execFileSync } from "node:child_process";
 import { maintenanceProfileMaterial } from "./profile.js";
+import { sameResidentImageTarget, type ResidentImageTarget } from "./residentMaintenance.js";
 import { MINUTE_MS } from "../core/budgets.js";
 import {
   DRAINED_GAVE_UP_SUFFIX,
@@ -139,6 +140,7 @@ import {
   PROBE_TIMEOUT_MS,
   probeThreadKey,
   rolloutAdvanced,
+  residentNoChangeFromDeployOutput,
   rolloutTargetFromDeployOutput,
   shortImage,
   type AppState,
@@ -1988,6 +1990,8 @@ async function deployStepTraced(
   let result: StepOutcome;
   let readyDeadline = 0;
   let resources: string[] = [];
+  let imageTarget: ResidentImageTarget | undefined;
+  let residentNoChange = false;
   let retryImageReconcile = true;
   // Once the resident command starts, its upload may have landed even if the
   // command or health read fails. Only a proved pre-upload refusal or an
@@ -2019,7 +2023,13 @@ async function deployStepTraced(
         return residentBefore;
       },
       (output) => {
-        residentPrintedTarget = rolloutTargetFromDeployOutput(output);
+        residentPrintedTarget = rolloutTargetFromDeployOutput(
+          output,
+          step.name === "resident" ? step.residentContainerApp : undefined,
+        );
+        residentNoChange = step.residentContainerApp
+          ? residentNoChangeFromDeployOutput(output, step.residentContainerApp)
+          : false;
       },
     );
     // An informational wake cannot undo a completed non-Resident step.
@@ -2039,12 +2049,64 @@ async function deployStepTraced(
       if (deps.signal?.aborted) return { ok: false, live: "upload outcome uncertain", reason: "deployment cancelled" };
       if (healthProblem) result = residentNotReady(result, healthProblem);
       else {
-        const residentAfter = step.residentContainerApp
-          ? await deps.readAppState(step.dir, step.residentContainerApp)
+        if (!step.residentImage && !residentPrintedTarget && !residentNoChange)
+          return residentNotReady(result, "Resident deployment image intent is unverified");
+        if (step.residentImage && residentPrintedTarget?.image && step.residentImage !== residentPrintedTarget.image)
+          return residentNotReady(result, "printed Resident image disagrees with the selected plan image");
+        const intendedImage = step.residentImage ?? residentPrintedTarget?.image;
+        let residentAfter = step.residentContainerApp
+          ? await deps.readAppState(step.dir, step.residentContainerApp, undefined, deps.signal)
           : undefined;
+        let lastTargetWaitLog = -Infinity;
+        while (
+          step.residentContainerApp &&
+          residentBefore &&
+          "value" in residentBefore &&
+          residentAfter &&
+          "value" in residentAfter &&
+          residentApplicationChange(residentBefore, residentAfter, step.residentContainerApp).kind !== "unknown" &&
+          ((residentPrintedTarget && residentAfter.value.version <= residentBefore.value.version) ||
+            (intendedImage && residentAfter.value.image !== intendedImage)) &&
+          deps.now() < readyDeadline
+        ) {
+          if (deps.now() - lastTargetWaitLog >= MINUTE_MS) {
+            io.log("[deploy:all] resident: waiting for the selected container application target to register");
+            lastTargetWaitLog = deps.now();
+          }
+          await deps.sleep(Math.min(LIVE_GATE_POLL_MS, readyDeadline - deps.now()), deps.signal);
+          if (deps.signal?.aborted)
+            return { ok: false, live: "upload outcome uncertain", reason: "deployment cancelled" };
+          if (deps.now() >= readyDeadline)
+            return residentNotReady(
+              result,
+              "selected container application target did not register within the readiness deadline",
+            );
+          residentAfter = await deps.readAppState(step.dir, step.residentContainerApp, undefined, deps.signal);
+        }
         if (deps.signal?.aborted)
           return { ok: false, live: "upload outcome uncertain", reason: "deployment cancelled" };
-        const application = residentApplicationChange(residentBefore, residentAfter, step.residentContainerApp);
+        if (deps.now() >= readyDeadline)
+          return residentNotReady(result, "native container target arrived after the readiness deadline");
+        const application = residentApplicationChange(
+          residentBefore,
+          residentAfter,
+          step.residentContainerApp,
+          residentPrintedTarget,
+        );
+        if (residentNoChange && !step.residentImage && application.kind !== "unchanged")
+          return residentNotReady(result, "native Resident target disagrees with the no-change announcement");
+        if (
+          application.kind !== "unknown" &&
+          residentAfter &&
+          "value" in residentAfter &&
+          step.residentContainerApp &&
+          residentAfter.value.image
+        )
+          imageTarget = {
+            application: step.residentContainerApp,
+            version: residentAfter.value.version,
+            image: residentAfter.value.image,
+          };
         let reconcileRequired = application.kind === "changed" || residentPrintedTarget !== null;
         if (application.kind === "unknown") result = residentNotReady(result, application.reason);
         else if (application.kind === "unchanged" && residentPrintedTarget === null) {
@@ -2088,7 +2150,7 @@ async function deployStepTraced(
           // New pool members also need reconciliation when the image is unchanged.
           // Without this deploy's reconcile, an absent pending marker reads as
           // current even on an old image. Missing reconcile capability fails closed.
-          const answer = await reconcileFleet(step, io, deps);
+          const answer = await reconcileFleet(step, io, deps, imageTarget);
           if (deps.signal?.aborted)
             return { ok: false, live: "upload outcome uncertain", reason: "deployment cancelled" };
           const reconciled = answer && reconciledResources(answer);
@@ -2121,6 +2183,7 @@ async function deployStepTraced(
       deps,
       resources,
       retryImageReconcile,
+      retryImageReconcile ? imageTarget : undefined,
     );
     if (problem) return residentNotReady(result, problem);
     if (step.maintenance) {
@@ -2155,6 +2218,7 @@ function residentApplicationChange(
   before: Read<AppState> | undefined,
   after: Read<AppState> | undefined,
   name: string | undefined,
+  printedTarget: RolloutTarget | null = null,
 ): ResidentApplicationChange {
   if (!name || !before || !after) return { kind: "unknown", reason: "named resident container application missing" };
   if ("error" in before)
@@ -2174,6 +2238,14 @@ function residentApplicationChange(
     !current.image.trim()
   )
     return { kind: "unknown", reason: `container application ${name} target is incomplete or regressed` };
+  if (
+    printedTarget &&
+    (current.version <= prior.version || (printedTarget.image !== null && current.image !== printedTarget.image))
+  )
+    return {
+      kind: "unknown",
+      reason: `container application ${name} has not registered the printed deployment target`,
+    };
   return prior.version === current.version && prior.image === current.image
     ? { kind: "unchanged", version: current.version, image: current.image }
     : { kind: "changed" };
@@ -2208,6 +2280,7 @@ async function waitForResident(
   deps: SandboxGateDeps,
   resources?: readonly string[],
   retryImageReconcile = true,
+  imageTarget?: ResidentImageTarget,
 ): Promise<string | undefined> {
   const base = step.drain?.url ?? step.setEnv.RESIDENT_BASE_URL;
   if (!base) return "resident base URL missing";
@@ -2232,6 +2305,19 @@ async function waitForResident(
           ? residentMaintenanceProblem(registry, step.maintenance, resources, step.forcedBy !== undefined)
           : residentRegistryProblem(registry, resources)),
     ].filter(Boolean);
+    if (registry && imageTarget) {
+      const targetProblem = residentImageReportsProblem(registry, resources, imageTarget);
+      if (targetProblem) problems.push(targetProblem);
+    }
+    if (problems.length === 0 && imageTarget) {
+      const actual = await deps.readAppState(step.dir, imageTarget.application, undefined, deps.signal);
+      if (deps.signal?.aborted) return "deployment cancelled";
+      if (
+        "error" in actual ||
+        !sameResidentImageTarget({ application: imageTarget.application, ...actual.value }, imageTarget)
+      )
+        return "Resident application target changed or could not be verified before image readiness";
+    }
     if (problems.length === 0 && deps.now() <= deadline) return undefined;
     problem = problems.join("; ") || "readback arrived after the readiness deadline";
     if (problem !== lastLoggedProblem || deps.now() - lastLoggedAt >= MINUTE_MS) {
@@ -2249,7 +2335,7 @@ async function waitForResident(
       deadline - deps.now() > 2 * LIVE_GATE_POLL_MS &&
       !residentWorkerProblem(health, expectedCommit)
     ) {
-      const retry = await reconcileFleet(step, io, deps, false);
+      const retry = await reconcileFleet(step, io, deps, imageTarget, false);
       if (deps.signal?.aborted) return "deployment cancelled";
       if (retry && !reconciledResources(retry)) io.log(reconcileLine(step.name, retry));
       nextReconcileAt = deps.now() + MINUTE_MS;
@@ -2301,15 +2387,15 @@ async function reconcileFleet(
   step: DeployStep,
   io: DeployRunnerIO,
   deps: SandboxGateDeps,
+  imageTarget?: ResidentImageTarget,
   log = true,
 ): Promise<PostAnswer | undefined> {
   if (deps.signal?.aborted) return;
   const bearer = step.drain ? deps.env[step.drain.tokenEnv] : undefined;
-  if (!step.drain || !bearer || !deps.postJson) return;
-  const answer = await deps.postJson(
-    reconcileUrl(step.drain.url),
-    bearer,
-    step.maintenance
+  if (!step.drain || !bearer || !deps.postJson || !imageTarget) return;
+  const answer = await deps.postJson(reconcileUrl(step.drain.url), bearer, {
+    imageTarget,
+    ...(step.maintenance
       ? {
           attempt: {
             ...step.maintenance.attempt,
@@ -2317,8 +2403,10 @@ async function reconcileFleet(
             generation: step.maintenance.generation,
           },
         }
-      : {},
-  );
+      : {}),
+  });
+  if (!("error" in answer) && answer.status === 200 && !sameResidentImageTarget(answer.body?.imageTarget, imageTarget))
+    return { error: "Resident did not acknowledge the selected application image target" };
   if (log) io.log(reconcileLine(step.name, answer));
   return answer;
 }

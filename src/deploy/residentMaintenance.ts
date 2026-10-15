@@ -50,6 +50,26 @@ export const stagingAttemptSchema = stagingMaintenanceSchema.shape.attempt
   .strict();
 export type SelectedStagingAttempt = z.infer<typeof stagingAttemptSchema>;
 
+/** The authenticated deploy controller's observed native application target. */
+export const residentImageTargetSchema = z
+  .object({
+    application: word,
+    version: z.number().int().nonnegative(),
+    image: z.string().min(1).max(2048).regex(/^\S+$/),
+  })
+  .strict();
+export type ResidentImageTarget = z.infer<typeof residentImageTargetSchema>;
+
+export function sameResidentImageTarget(stored: unknown, target: ResidentImageTarget): boolean {
+  const parsed = residentImageTargetSchema.safeParse(stored);
+  return (
+    parsed.success &&
+    parsed.data.application === target.application &&
+    parsed.data.version === target.version &&
+    parsed.data.image === target.image
+  );
+}
+
 const timestamp = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 export const maintenanceRecordSchema = z
   .object({

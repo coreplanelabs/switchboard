@@ -1,23 +1,29 @@
+import { sameResidentImageTarget, type ResidentImageTarget } from "../../src/deploy/residentMaintenance.js";
+
 /** One deploy's durable progress for a resident container. A repeated
  *  reconcile may retry a deferred stop or collect an inactive container's
  *  report, but must not stop a replacement that is still hydrating. */
 export interface DeployImageReconcileState {
   build: string;
+  target: ResidentImageTarget;
   cycleIssued: boolean;
   cycleStoppedAt?: string;
   containerBeforeCycle?: string;
 }
 
-export type DeployImageReconcileAction = "start" | "retry-cycle" | "await-report" | "verified";
+export type DeployImageReconcileAction = "start" | "retry-cycle" | "await-report" | "await-target" | "verified";
 
 export function nextDeployImageReconcile(
   build: string,
   stored: unknown,
   reportPending: boolean,
+  target: ResidentImageTarget,
 ): DeployImageReconcileAction {
-  if (!stored || typeof stored !== "object") return "start";
+  if (!stored || typeof stored !== "object") return reportPending ? "await-target" : "start";
   const state = stored as Record<string, unknown>;
-  if (state.build !== build || typeof state.cycleIssued !== "boolean") return "start";
+  if (!sameResidentImageTarget(state.target, target) && reportPending) return "await-target";
+  if (state.build !== build || !sameResidentImageTarget(state.target, target) || typeof state.cycleIssued !== "boolean")
+    return "start";
   if (!reportPending) return "verified";
   return state.cycleIssued ? "await-report" : "retry-cycle";
 }

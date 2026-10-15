@@ -44,6 +44,7 @@ const residentStep: DeployStep = {
   name: "resident",
   script: "switchboard-resident",
   residentContainerApp: "switchboard-resident-residentdo",
+  residentImage: "registry.example.test/resident:new",
   dir: "deploy/cloudflare-resident",
   command: ["npm", "run", "deploy"],
   unsetEnv: [],
@@ -56,11 +57,24 @@ const residentStep: DeployStep = {
   why: "per-repo DOs",
 };
 const app = { value: { version: 17, image: "registry.example.test/resident:stable" } };
+const workerOnlyStep = { ...residentStep, residentImage: "registry.example.test/resident:stable" };
 const currentRegistry = {
   ok: true,
   draining: null,
   count: 1,
-  residents: [{ resource: "repo:acme/api", live: { imageReport: "current" } }],
+  residents: [
+    {
+      resource: "repo:acme/api",
+      live: {
+        imageReport: "current",
+        imageTarget: {
+          application: "switchboard-resident-residentdo",
+          version: 18,
+          image: "registry.example.test/resident:new",
+        },
+      },
+    },
+  ],
 };
 const pendingRegistry = {
   ...currentRegistry,
@@ -95,7 +109,10 @@ function harness(env: Record<string, string>, posts: PostAnswer[] = [drained, li
     probeExec: async () => ({ body: { stdout: "", stderr: "", exitCode: 1 } }),
     postJson: async (...args) => {
       calls.push({ dep: "postJson", args });
-      return posts.shift() ?? { error: "unscripted POST" };
+      const result = posts.shift() ?? { error: "unscripted POST" };
+      return args[0].endsWith("/reconcile") && "body" in result && result.status === 200
+        ? { ...result, body: { imageTarget: args[2].imageTarget, ...result.body } }
+        : result;
     },
   };
   const io = { log: (l: string) => lines.push(l), warn: (l: string) => lines.push(`WARN ${l}`), stream: () => {} };
@@ -127,7 +144,7 @@ describe("retained staging deployment", () => {
     ...TEST_MAINTENANCE,
     attempt: { ...TEST_MAINTENANCE.attempt, sourceCommit: HEAD, deadline: 3_600_000 },
   };
-  const step = { ...residentStep, maintenance, retryOnPreflightRefusal: false };
+  const step = { ...workerOnlyStep, maintenance, retryOnPreflightRefusal: false };
   const registry = {
     ...currentRegistry,
     draining: drained.body.draining,
@@ -368,7 +385,17 @@ describe("deployStep (resident) drains the fleet", () => {
       { minutes: 90, reason: "deploy 62e4e9a", by: "deploy all" },
     ]);
     // The reconcile runs while the fleet is still drained; the lift follows it.
-    expect(h.calls[4].args).toEqual(["https://switchboard-resident.example.test/reconcile", "drn", {}]);
+    expect(h.calls[4].args).toEqual([
+      "https://switchboard-resident.example.test/reconcile",
+      "drn",
+      {
+        imageTarget: {
+          application: "switchboard-resident-residentdo",
+          version: 18,
+          image: "registry.example.test/resident:new",
+        },
+      },
+    ]);
     expect(h.calls[5].args).toEqual(["https://switchboard-resident.example.test/undrain", "drn", {}]);
     const lines = h.plain();
     expect(lines[0]).toBe(drainBeganLine("resident", drained));
@@ -663,6 +690,73 @@ describe("resident deployment readiness", () => {
 });
 
 describe("resident application target", () => {
+  it("uses structured registry intent when the deploy output omits its container announcement", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
+    let reads = 0;
+    h.deps.readAppState = async () => ({
+      value: reads++ < 2 ? app.value : { version: 18, image: "registry.example.test/resident:new" },
+    });
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result).toMatchObject({ ok: true, live: "live" });
+    expect(h.plain()).toContain(
+      "[deploy:all] resident: waiting for the selected container application target to register",
+    );
+    expect(h.calls.find((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")?.args[2]).toEqual({
+      imageTarget: {
+        application: "switchboard-resident-residentdo",
+        version: 18,
+        image: "registry.example.test/resident:new",
+      },
+    });
+  });
+
+  it("refuses missing, unrecognized or foreign build intent instead of approving an old target", async () => {
+    for (const output of [
+      DEPLOYED,
+      `${DEPLOYED}\nContainer application changes\nunrecognized`,
+      `${DEPLOYED}\nContainer application changes\nno changes foreign-residentdo`,
+      `${DEPLOYED}\nContainer application changes\nEDIT foreign-residentdo\n+ "image": "registry.example.test/resident:new"`,
+      `${DEPLOYED}\nContainer application changes\nEDIT switchboard-resident-residentdo\n+ "instance_type": "standard"\nNEW foreign-residentdo\n+ "image": "registry.example.test/resident:new"`,
+      `${DEPLOYED}\nContainer application changes\nno changes switchboard-resident-residentdo\nNEW foreign-residentdo\n+ "image": "registry.example.test/resident:new"`,
+    ]) {
+      const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained]);
+      h.deps.readAppState = async () => app;
+      const result = await deployStep(
+        { ...residentStep, residentImage: undefined },
+        plan,
+        HEAD,
+        h.io,
+        h.deps,
+        async () => ({ code: 0, output }),
+      );
+      expect(result.ok).toBe(false);
+      expect(result.reason).toContain("image intent is unverified");
+      expect(h.calls.filter((c) => c.dep === "postJson").map((c) => c.args[0])).toEqual([
+        "https://switchboard-resident.example.test/drain",
+      ]);
+    }
+  });
+
+  it("accepts a known build no-change hint only with identical structured native reads", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, lifted]);
+    h.deps.readAppState = async () => app;
+    const result = await deployStep(
+      { ...workerOnlyStep, residentImage: undefined },
+      plan,
+      HEAD,
+      h.io,
+      h.deps,
+      async () => ({
+        code: 0,
+        output: `${DEPLOYED}\nContainer application changes\n│ no changes switchboard-resident-residentdo\nNo changes to be made`,
+      }),
+    );
+    expect(result).toMatchObject({ ok: true, live: "live" });
+    expect(h.calls.filter((c) => c.dep === "postJson").map((c) => c.args[0])).toEqual([
+      "https://switchboard-resident.example.test/drain",
+      "https://switchboard-resident.example.test/undrain",
+    ]);
+  });
   it.each([
     { status: 500, body: { ...currentRegistry, pendingReplicas: 1 } },
     {
@@ -689,7 +783,7 @@ describe("resident application target", () => {
     const read = h.deps.readHealth;
     h.deps.readHealth = async (url, bearer, timeoutMs) =>
       url.endsWith("/residents") ? registry : read(url, bearer, timeoutMs);
-    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    const result = await deployStep(workerOnlyStep, plan, HEAD, h.io, h.deps, exec(h, 0));
     expect(result).toMatchObject({ ok: false });
     expect(h.calls.map((c) => c.args[0])).toEqual(["https://switchboard-resident.example.test/drain", undefined]);
   });
@@ -722,11 +816,21 @@ describe("resident application target", () => {
                     ...currentRegistry,
                     count: 2,
                     pendingReplicas: 0,
-                    residents: [...currentRegistry.residents, member],
+                    residents: [...currentRegistry.residents, member].map((row) => ({
+                      ...row,
+                      live: {
+                        ...row.live,
+                        imageTarget: {
+                          application: "switchboard-resident-residentdo",
+                          version: 17,
+                          image: "registry.example.test/resident:stable",
+                        },
+                      },
+                    })),
                   },
           }
         : read(url, bearer, timeoutMs);
-    expect(await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0))).toMatchObject({
+    expect(await deployStep(workerOnlyStep, plan, HEAD, h.io, h.deps, exec(h, 0))).toMatchObject({
       ok: true,
       live: "live",
     });
@@ -759,7 +863,7 @@ describe("resident application target", () => {
           }
         : original(url, bearer, timeoutMs);
 
-    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    const result = await deployStep(workerOnlyStep, plan, HEAD, h.io, h.deps, exec(h, 0));
     expect(result).toMatchObject({ ok: true, live: "live" });
     expect(reads).toEqual([residentStep.residentContainerApp, residentStep.residentContainerApp]);
     expect(h.calls.map((c) => c.args[0])).toEqual([
@@ -779,6 +883,83 @@ describe("resident application target", () => {
     const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
     expect(result).toMatchObject({ ok: true, live: "live" });
     expect(h.calls.some((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")).toBe(true);
+  });
+
+  it("refuses a missing or different image target acknowledgement without lifting the drain", async () => {
+    for (const imageTarget of [
+      undefined,
+      { application: "foreign-residentdo", version: 18, image: "registry.example.test/resident:new" },
+    ]) {
+      const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [
+        drained,
+        { ...reconciled, body: { ...reconciled.body, imageTarget } },
+      ]);
+      const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+      expect(result).toMatchObject({ ok: false });
+      expect(result.reason).toContain("reconcile did not confirm the affected fleet");
+      expect(h.calls.filter((c) => c.dep === "postJson").map((c) => c.args[0])).toEqual([
+        "https://switchboard-resident.example.test/drain",
+        "https://switchboard-resident.example.test/reconcile",
+      ]);
+    }
+  });
+
+  it("refuses current reports for another image target on any physical member", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
+    const original = h.deps.readHealth;
+    h.deps.readHealth = async (url, ...args) =>
+      url.endsWith("/residents")
+        ? {
+            status: 200,
+            body: {
+              ...currentRegistry,
+              count: 2,
+              residents: [
+                currentRegistry.residents[0],
+                {
+                  resource: "repo:acme/api",
+                  residentId: "resident-2",
+                  live: {
+                    imageReport: "current",
+                    imageTarget: {
+                      application: "switchboard-resident-residentdo",
+                      version: 17,
+                      image: "registry.example.test/resident:stable",
+                    },
+                  },
+                },
+              ],
+            },
+          }
+        : original(url, ...args);
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("resident-2: selected image target is unverified");
+  });
+
+  it("refuses image readiness if the native application target changes after reconciliation", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
+    let reads = 0;
+    h.deps.readAppState = async () => ({
+      value:
+        reads++ === 0
+          ? app.value
+          : reads === 2
+            ? { version: 18, image: "registry.example.test/resident:new" }
+            : { version: 19, image: "registry.example.test/resident:other" },
+    });
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain(
+      "Resident application target changed or could not be verified before image readiness",
+    );
+    expect(h.calls.find((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")?.args[2]).toEqual({
+      imageTarget: {
+        application: "switchboard-resident-residentdo",
+        version: 18,
+        image: "registry.example.test/resident:new",
+      },
+    });
   });
 
   it("a changed image with protected registrations stays pending behind the reconcile guard", async () => {
@@ -806,16 +987,77 @@ describe("resident application target", () => {
     expect(protectedThreads.every((thread) => thread.evicted === false)).toBe(true);
   });
 
-  it("a printed container change cannot be treated as Worker-only while the application read still looks unchanged", async () => {
+  it("a printed container change refuses an unchanged native target without reconciling or lifting", async () => {
     const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
     h.deps.readAppState = async () => app;
+    h.deps.readHealth = async (url) => ({
+      status: 200,
+      body: url.endsWith("/residents")
+        ? {
+            ...currentRegistry,
+            residents: [
+              {
+                resource: "repo:acme/api",
+                live: {
+                  imageReport: "current",
+                  imageTarget: {
+                    application: "switchboard-resident-residentdo",
+                    version: 17,
+                    image: "registry.example.test/resident:stable",
+                  },
+                },
+              },
+            ],
+          }
+        : { ok: true, build: { commit: HEAD } },
+    });
     const upload: StepExec = async () => ({
       code: 0,
       output: `${DEPLOYED}\nContainer application changes\nEDIT switchboard-resident-residentdo\n+ "image": "registry.example.test/resident:new"`,
     });
     const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, upload);
+    expect(result.ok).toBe(false);
+    expect(h.calls.filter((c) => c.dep === "postJson").map((c) => c.args[0])).toEqual([
+      "https://switchboard-resident.example.test/drain",
+    ]);
+  });
+
+  it("waits for the printed image to register before selecting its native target", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
+    let reads = 0;
+    h.deps.readAppState = async () => ({
+      value: reads++ < 2 ? app.value : { version: 18, image: "registry.example.test/resident:new" },
+    });
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, async () => ({
+      code: 0,
+      output: `${DEPLOYED}\nContainer application changes\nEDIT switchboard-resident-residentdo\n+ "image": "registry.example.test/resident:new"`,
+    }));
     expect(result).toMatchObject({ ok: true, live: "live" });
-    expect(h.calls.some((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")).toBe(true);
+    expect(h.plain()).toContain(
+      "[deploy:all] resident: waiting for the selected container application target to register",
+    );
+    expect(h.calls.find((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")?.args[2]).toEqual({
+      imageTarget: {
+        application: "switchboard-resident-residentdo",
+        version: 18,
+        image: "registry.example.test/resident:new",
+      },
+    });
+  });
+
+  it("retains the drain when native target evidence arrives after the readiness deadline", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, lifted]);
+    let reads = 0;
+    h.deps.readAppState = async () => {
+      if (reads++ === 0) return app;
+      await h.deps.sleep(10 * 60_000 + 1);
+      return { value: { version: 18, image: "registry.example.test/resident:new" } };
+    };
+    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result.ok).toBe(false);
+    expect(h.calls.filter((c) => c.dep === "postJson").map((c) => c.args[0])).toEqual([
+      "https://switchboard-resident.example.test/drain",
+    ]);
   });
 
   it("unreadable application cannot lift the drain", async () => {
@@ -876,7 +1118,7 @@ describe("resident application target", () => {
           }
         : original(url, bearer, timeoutMs);
 
-    const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+    const result = await deployStep(workerOnlyStep, plan, HEAD, h.io, h.deps, exec(h, 0));
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("image report pending");
     expect(h.calls.some((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")).toBe(false);

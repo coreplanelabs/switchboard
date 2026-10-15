@@ -503,6 +503,8 @@ import {
   stagingAttemptMatches,
   stagingMaintenanceSchema,
   stagingAttemptSchema,
+  residentImageTargetSchema,
+  type ResidentImageTarget,
   type MaintenanceRecord,
 } from "./admissionRisk.js";
 import { createRefreshInstance, createRefreshInstanceNow, type RefreshInstanceParams } from "./refresh";
@@ -1837,7 +1839,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       policy.stagingAccount === policy.productionAccount ||
       policy.residentScript !== this.env.RESIDENT_SCRIPT_NAME ||
       !policy.residentScript.includes("staging") ||
-      policy.attempt.sourceCommit !== BUILD_ID
+      policy.attempt.sourceCommit !== BUILD.commit
     )
       throw new Error("staging-maintenance-scope-mismatch");
     await this.ctx.storage.transaction(async (txn) => {
@@ -2536,7 +2538,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       const held = await this.getStagingMaintenance(txn);
       if (
         held?.state === "held" &&
-        (!selectedStagingAttempt(held, attempt, systemClock()) || held.policy.attempt.sourceCommit !== BUILD_ID)
+        (!selectedStagingAttempt(held, attempt, systemClock()) || held.policy.attempt.sourceCommit !== BUILD.commit)
       )
         return null;
       const record = liveDrain(await txn.get(DRAIN_KEY), systemClock());
@@ -6975,26 +6977,44 @@ export class ResidentDO extends Sandbox<Env> {
    *  before the hold is a no-op — the marker would be consumed and the hold
    *  added afterwards would wait for a report nothing sends (until the drain's
    *  `until`). Held first, every report finds its hold. */
-  async reconcileForDeploy(resource: string): Promise<{ result: ImageReconcileResult; verified: boolean }> {
+  async reconcileForDeploy(
+    resource: string,
+    input: unknown,
+  ): Promise<{ result: ImageReconcileResult; verified: boolean }> {
+    const target = residentImageTargetSchema.safeParse(input);
+    if (!target.success || target.data.application !== `${this.env.RESIDENT_SCRIPT_NAME}-residentdo`) {
+      console.log(
+        JSON.stringify({
+          event: "resident-image-target-refused",
+          resource,
+          expected: `${this.env.RESIDENT_SCRIPT_NAME ?? "missing"}-residentdo`,
+          received: target.success ? target.data.application : null,
+        }),
+      );
+      return { result: "deferred", verified: false };
+    }
     // The deploy's image report and an idle pool recycle both reason about the
     // same VM. Admit reconciliation as disk work before its first await, so a
     // recycle sees it as busy; a recycle already holding admission defers this
     // pass for the deploy's bounded readiness retry.
-    const admitted = await this.withRecreateSafeAdmin(() => this.reconcileForDeployAdmitted(resource));
+    const admitted = await this.withRecreateSafeAdmin(() => this.reconcileForDeployAdmitted(resource, target.data));
     return "error" in admitted ? { result: "deferred", verified: false } : admitted;
   }
 
   private async reconcileForDeployAdmitted(
     _resource: string,
+    target: ResidentImageTarget,
   ): Promise<{ result: ImageReconcileResult; verified: boolean }> {
     const progress = await this.ctx.storage.get<DeployImageReconcileState>(IMAGE_RECONCILE_KEY);
     const pending = await this.ctx.storage.get<{ resource: string }>(IMAGE_REPORT_PENDING_KEY);
-    const action = nextDeployImageReconcile(BUILD.commit, progress, pending !== undefined);
+    const action = nextDeployImageReconcile(BUILD_ID, progress, pending !== undefined, target);
+    if (action === "await-target")
+      throw new Error("desired image target changed while an earlier image report remains pending");
     if (action === "verified") return { result: "current", verified: true };
     if (action === "start") {
       await registryStub(this.env).holdDrainFor([await this.residentIdentity()]);
       await this.ctx.storage.put(IMAGE_REPORT_PENDING_KEY, { resource: await this.residentIdentity() });
-      await this.ctx.storage.put(IMAGE_RECONCILE_KEY, { build: BUILD.commit, cycleIssued: false });
+      await this.ctx.storage.put(IMAGE_RECONCILE_KEY, { build: BUILD_ID, target, cycleIssued: false });
     }
     if (action === "await-report") {
       const active = await this.isRuntimeActive().catch(() => null);
@@ -7031,7 +7051,8 @@ export class ResidentDO extends Sandbox<Env> {
     const result = await this.reconcileImage("deploy", true);
     if (result === "restarted")
       await this.ctx.storage.put(IMAGE_RECONCILE_KEY, {
-        build: BUILD.commit,
+        build: BUILD_ID,
+        target,
         cycleIssued: true,
         cycleStoppedAt: new Date(systemClock()).toISOString(),
         containerBeforeCycle,
@@ -14176,6 +14197,7 @@ export class ResidentDO extends Sandbox<Env> {
       INFRA_STREAK_KEY,
       MEMORY_KEY,
       IMAGE_REPORT_PENDING_KEY,
+      IMAGE_RECONCILE_KEY,
       DESTROY_UNCONFIRMED_KEY,
       CLEANUP_PENDING_KEY,
       RECREATE_ADMISSION_KEY,
@@ -14278,6 +14300,10 @@ export class ResidentDO extends Sandbox<Env> {
       // the deploy's readers never print a bare "warm" for a repository whose
       // running container the last deploy could not verify.
       imageReport: map.get(IMAGE_REPORT_PENDING_KEY) !== undefined ? "pending" : "current",
+      imageTarget:
+        (map.get(IMAGE_RECONCILE_KEY) as DeployImageReconcileState | undefined)?.build === BUILD_ID
+          ? ((map.get(IMAGE_RECONCILE_KEY) as DeployImageReconcileState).target ?? null)
+          : null,
       recreateAdmissionHeld: this.recreateAdmission.pending || map.get(RECREATE_ADMISSION_KEY) === true,
       poolUsersSpent: uidReport?.issued ?? null,
       poolUsersTotal: null,
@@ -15194,7 +15220,7 @@ export default {
           case "/undrain":
             return await handleUndrain(env);
           case "/reconcile":
-            return await handleReconcile(env, body.attempt);
+            return await handleReconcile(env, body.attempt, body.imageTarget);
           case "/residents":
             return await handleResidents(env);
           case "/debug-replica":
@@ -16133,7 +16159,14 @@ async function handleRecoverNativeOperation(env: Env, body: Record<string, unkno
  *  fresh container was VERIFIED on the deploy's image (issue 1931); one not
  *  verified — deferred, a failed fresh probe, an error — leaves a hold on the
  *  drain, so the fleet reopens only on that container's later report. */
-async function handleReconcile(env: Env, attempt?: unknown): Promise<Response> {
+async function handleReconcile(env: Env, attempt?: unknown, input?: unknown): Promise<Response> {
+  const target = residentImageTargetSchema.safeParse(input);
+  if (!target.success || target.data.application !== `${env.RESIDENT_SCRIPT_NAME}-residentdo`) {
+    console.log(
+      `[reconcile] refused image target: Resident script ${env.RESIDENT_SCRIPT_NAME ?? "missing"}, application ${target.success ? target.data.application : "invalid target"}`,
+    );
+    return json({ error: "an exact Resident application version and image target are required" }, 400);
+  }
   const registry = registryStub(env);
   const admission = await beginTrackedDeployAdmission(
     registry,
@@ -16181,7 +16214,7 @@ async function handleReconcile(env: Env, attempt?: unknown): Promise<Response> {
         const stub = residentStub(env, residentAddress(record));
         if (record.residentId)
           await stub.ensureResidentMember(record.resource, residentAddress(record), record.provisioningTimeoutMs);
-        return stub.reconcileForDeploy(record.resource);
+        return stub.reconcileForDeploy(record.resource, target.data);
       }),
     );
     const reconciled = residents.map((record, i) => {
@@ -16208,7 +16241,7 @@ async function handleReconcile(env: Env, attempt?: unknown): Promise<Response> {
     const unverified = reconciled.filter((r) => !r.verified).map((r) => residentAddress(r));
     if (unverified.length > 0) await registryStub(env).holdDrainFor(unverified);
     console.log(`[reconcile] deploy image reconcile: ${JSON.stringify(reconciled)}`);
-    return json({ reconciled });
+    return json({ reconciled, imageTarget: target.data });
   } finally {
     await endTrackedDeployAdmission(registry, admission);
   }

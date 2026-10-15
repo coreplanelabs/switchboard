@@ -20,9 +20,15 @@ import { placementHistoryThreads, replicaMaintenanceFence } from "./replicaMigra
 import { ResidentRecreateAdmission } from "../../src/execution/residentRecreateAdmission";
 import { effectiveLimits } from "./gc";
 import { methodOf, readSource } from "./testing/sourceScan";
+import { residentImageTargetSchema } from "../../src/deploy/residentMaintenance";
 
 const source = readSource("worker.ts");
 const resource = "repo:acme/api";
+const imageTarget = {
+  application: "test-resident-residentdo",
+  version: 1,
+  image: "registry.example.test/resident:one",
+};
 const fence = {
   since: "2026-01-01T00:00:00.000Z",
   until: "2026-01-01T01:00:00.000Z",
@@ -519,6 +525,7 @@ describe("resident fleet lifecycle", () => {
     };
     const run = runInNewContext(`${handler("handleReconcile")}\nhandleReconcile`, {
       console,
+      residentImageTargetSchema,
       residentPoolOf,
       residentAddress,
       BUILD_ID: "test",
@@ -536,7 +543,9 @@ describe("resident fleet lifecycle", () => {
       json: (body: unknown, status = 200) => Response.json(body, { status }),
       errMsg: String,
     });
-    await expect(run({})).rejects.toThrow("chunk reply lost");
+    await expect(run({ RESIDENT_SCRIPT_NAME: "test-resident" }, undefined, imageTarget)).rejects.toThrow(
+      "chunk reply lost",
+    );
     expect([...rows.keys()].filter((key) => key.startsWith("placement:")).length).toBe(256);
     activeRegistry = registry(rows).instance;
     const progress = await activeRegistry.importPrimaryPlacements(resource, pool.revision, "reconcile", fence);
@@ -546,7 +555,8 @@ describe("resident fleet lifecycle", () => {
       active: (rows.get(`resident:${resource}`) as any).pool.active,
     }).toEqual({ after: undefined, done: false, active: 1 });
     const saved = await activeRegistry.readThreadPlacement(resource, "mcp:evicted");
-    expect(await (await run({})).json()).toEqual({
+    expect(await (await run({ RESIDENT_SCRIPT_NAME: "test-resident" }, undefined, imageTarget)).json()).toEqual({
+      imageTarget,
       reconciled: pool.members.map((residentId: string) => ({
         resource,
         residentId,
@@ -694,6 +704,7 @@ describe("resident fleet lifecycle", () => {
     };
     const run = runInNewContext(`${handler("handleReconcile")}\nhandleReconcile`, {
       console,
+      residentImageTargetSchema,
       residentPoolOf,
       residentAddress,
       BUILD_ID: "test",
@@ -715,7 +726,8 @@ describe("resident fleet lifecycle", () => {
       json: (body: unknown, status = 200) => Response.json(body, { status }),
       errMsg: String,
     });
-    expect(await (await run({})).json()).toEqual({
+    expect(await (await run({ RESIDENT_SCRIPT_NAME: "test-resident" }, undefined, imageTarget)).json()).toEqual({
+      imageTarget,
       reconciled: [
         { resource, residentId: resource, result: "current", verified: true },
         { resource, residentId: "resident-b", result: "deferred", verified: false },

@@ -326,7 +326,7 @@ const SECTION_GUTTER = /^[\s│├╭╰|]+/;
  * A change means Cloudflare creates a new application version and rolls it
  * out; `null` — no section, or no change in it — means no rollout is coming.
  */
-export function rolloutTargetFromDeployOutput(output: string): RolloutTarget | null {
+export function rolloutTargetFromDeployOutput(output: string, application?: string): RolloutTarget | null {
   const text = output.replace(ANSI_SEQUENCE, "");
   const at = text.indexOf("Container application changes");
   if (at < 0) return null;
@@ -334,6 +334,14 @@ export function rolloutTargetFromDeployOutput(output: string): RolloutTarget | n
     .slice(at)
     .split("\n")
     .map((l) => l.replace(SECTION_GUTTER, "").trimEnd());
+  if (application) {
+    const announcements = lines.filter((line) => /^(?:EDIT|NEW|no changes)\s/.test(line));
+    if (
+      announcements.length !== 1 ||
+      (announcements[0] !== `EDIT ${application}` && announcements[0] !== `NEW ${application}`)
+    )
+      return null;
+  }
   const imageOn = (candidates: string[]) => {
     for (const l of candidates) {
       const m = /^\+?\s*"image":\s*"([^"]+)"/.exec(l);
@@ -344,6 +352,19 @@ export function rolloutTargetFromDeployOutput(output: string): RolloutTarget | n
   if (lines.some((l) => /^NEW\s/.test(l))) return { image: imageOn(lines) };
   const added = lines.filter((l) => /^\+\s/.test(l));
   return added.length === 0 ? null : { image: imageOn(added) };
+}
+
+/** A known no-change announcement is only a hint; native before/after reads must also agree. */
+export function residentNoChangeFromDeployOutput(output: string, application: string): boolean {
+  const text = output.replace(ANSI_SEQUENCE, "");
+  const at = text.indexOf("Container application changes");
+  if (at < 0) return false;
+  const announcements = text
+    .slice(at)
+    .split("\n")
+    .map((line) => line.replace(SECTION_GUTTER, "").trim())
+    .filter((line) => /^(?:EDIT|NEW|no changes)\s/.test(line));
+  return announcements.length === 1 && announcements[0] === `no changes ${application}`;
 }
 
 /** One explicitly paginated `wrangler containers instances` result. A bare
