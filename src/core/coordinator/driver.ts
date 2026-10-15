@@ -41,6 +41,7 @@ import { isPublicationSettlement } from "../publicationSettlement.js";
 // plan's re-issue. A task string's ship branch waits for a person. Node-free:
 // the shim Worker imports this by relative path.
 
+import { pullOwnerReadDiagnosticFrom, type PullOwnerReadDiagnostic } from "./pullOwnership.js";
 import {
   DAY_MS,
   DEFAULT_GRANT,
@@ -226,10 +227,13 @@ export function transientRefusal(answer: BotAnswer): string | undefined {
 }
 
 class UnreadableAnswer extends Error {
+  readonly diagnostic?: PullOwnerReadDiagnostic;
   constructor(route: CoordinatorStepRoute, answer: BotAnswer, what: string) {
     super(
       `the bot's ${route} answer could not be read (${what}): HTTP ${answer.status} ${JSON.stringify(answer.body).slice(0, REASON_MAX)}`,
     );
+    if (route === "unit-start" && answer.body.error === "unit_write_refused" && answer.body.reason === "incomplete")
+      this.diagnostic = pullOwnerReadDiagnosticFrom(answer.body.diagnostic);
   }
 }
 
@@ -1067,7 +1071,8 @@ async function tellStepThrew(
   recoveryUnitKey?: string,
   recoveryWorkflowId?: string,
 ): Promise<void> {
-  const line = oneLineOf(err);
+  const diagnostic = err instanceof UnreadableAnswer ? err.diagnostic : undefined;
+  const line = `${oneLineOf(err)}${diagnostic ? `\n\nOwnership diagnostic: ${JSON.stringify(diagnostic)}` : ""}`;
   const where =
     at.round === undefined
       ? `at \`${at.step}\``

@@ -17,6 +17,7 @@
 
 import { refusalOf, type Refusal, type RefusalCode } from "../refusal.js";
 import { redactSecrets } from "../redact.js";
+import { pullOwnerReadDiagnosticFrom, type PullOwnerReadDiagnostic } from "./pullOwnership.js";
 import { isUnitContext, type UnitContext } from "../dispatch/unitContext.js";
 import { DEFAULT_GRANT, IDLE_DAYS_DEFAULT, type Grant, type GrantSource } from "../budgets.js";
 import { DEFAULT_VERBOSITY, type Verbosity } from "../verbosity.js";
@@ -170,6 +171,7 @@ export interface HandOffAdmissionDiagnostic {
   reason: "owned" | "stale" | "incomplete" | "unavailable";
   instanceId: string;
   unitCount: number;
+  diagnostic?: PullOwnerReadDiagnostic;
 }
 
 /** The ship outcome's shape, as the ship branch closes its card and replies from it. */
@@ -1292,13 +1294,15 @@ async function start(
     );
   }
   const rows = mainClaim !== undefined ? { ok: true as const } : await deps.instances.putUnits(units);
-  if (!rows.ok)
+  if (!rows.ok) {
+    const diagnostic = rows.reason === "incomplete" ? pullOwnerReadDiagnosticFrom(rows.diagnostic) : undefined;
     return {
       admissionDiagnostic: {
         operation: "units_put",
         reason: rows.reason,
         instanceId: instance.id,
         unitCount: units.length,
+        ...(diagnostic ? { diagnostic } : {}),
       },
       ...refused(
         rows.reason === "owned" || rows.reason === "stale" ? "plan_runner_conflict" : "plan_history_unavailable",
@@ -1307,6 +1311,7 @@ async function start(
           : "The plan runner could not verify durable ownership: no runner started.",
       ),
     };
+  }
   // A generated task's accepted inline media enters the same durable event
   // list as a later thread reply. The unit row exists first, and the Workflow
   // starts only after the append, so its first coding spawn can fold the bytes.

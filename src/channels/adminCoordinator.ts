@@ -45,7 +45,7 @@
 
 import { findRunnerPullOwner } from "../core/runnerOwnership.js";
 import { createSweepEffectJournal } from "../core/coordinator/sweepEffectJournal.js";
-import { isPullOwnersResult } from "../core/coordinator/pullOwnership.js";
+import { isPullOwnersResult, pullOwnerReadDiagnosticFrom } from "../core/coordinator/pullOwnership.js";
 import { branchPublicationOf } from "../core/branchPublication.js";
 import { sourceHash } from "../core/references/receipts.js";
 import { performRecoverPublication } from "../core/coordinator/recoverPublicationEffect.js";
@@ -6994,13 +6994,16 @@ async function unitStart(body: Record<string, unknown>, deps: AdminCoordinatorDe
   }
   row = { ...row, startedAt: row.startedAt ?? at };
   const written = await deps.instances.putUnits([row]);
-  if (!written.ok)
+  if (!written.ok) {
+    const diagnostic = written.reason === "incomplete" ? pullOwnerReadDiagnosticFrom(written.diagnostic) : undefined;
     return json(written.reason === "unavailable" ? 503 : 409, {
       ok: false,
       error: "unit_write_refused",
       reason: written.reason,
+      ...(diagnostic ? { diagnostic } : {}),
       at,
     });
+  }
   if (host.kind === "host")
     await hostPublish(
       deps,

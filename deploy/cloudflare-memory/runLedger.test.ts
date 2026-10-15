@@ -72,6 +72,7 @@ import {
   type StorageFailureNotice,
 } from "../../src/core/storageFailureDiagnostic.ts";
 import { storeRequestWitness } from "../../src/core/storeResponse.ts";
+import { WorkerCoordinatorInstanceStore } from "../../src/core/coordinator/instanceStore.ts";
 import { githubReadWithContext } from "../../src/core/dispatch/githubReadContext.ts";
 import { githubFileTool } from "../../src/tools/github.ts";
 import type { ToolContext } from "../../src/tools/runnableTool.ts";
@@ -10652,6 +10653,25 @@ describe("coordinator admission diagnostics", () => {
       expect(await post("/runs/coordinator/units/put", { storeKey: key, units: [row] })).toMatchObject({
         status: 409,
         data: { ok: false, reason: "incomplete" },
+      });
+      const client = new WorkerCoordinatorInstanceStore({
+        baseUrl: BASE,
+        token: "test-token",
+        storeKey: key,
+        fetch: fetchMemoryTest,
+      });
+      expect(await client.putUnits([row])).toEqual({
+        ok: false,
+        reason: "incomplete",
+        diagnostic: {
+          version: 1,
+          stage: "unit_shape",
+          cause: "validation",
+          source: "units",
+          rowIndex: 0,
+          rowsRead: 1,
+          sourceBytes: expect.any(Number),
+        },
       });
       const lines = log.mock.calls.map(([line]) => String(line));
       const diagnostic = lines

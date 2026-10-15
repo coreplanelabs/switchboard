@@ -2084,13 +2084,23 @@ describe("Ship admission refusal diagnostics", () => {
     "retains the exact %s unit refusal without starting a runner",
     async (reason) => {
       const h = harness();
-      h.deps.instances.putUnits = async () => ({ ok: false, reason });
+      const diagnostic = {
+        version: 1 as const,
+        stage: "inventory_byte_limit" as const,
+        cause: "byte-limit" as const,
+        source: "runs" as const,
+        rowIndex: 10,
+        rowsRead: 12,
+        sourceBytes: 16_777_218,
+      };
+      h.deps.instances.putUnits = async () => ({ ok: false, reason, diagnostic });
       const out = await handOffToCoordinator(h.deps, input());
       expect(out.admissionDiagnostic).toEqual({
         operation: "units_put",
         reason,
         instanceId: "plan-fixture",
         unitCount: 3,
+        ...(reason === "incomplete" ? { diagnostic } : {}),
       });
       expect(out.status).toBe("aborted");
       expect(h.created).toEqual([]);

@@ -61,6 +61,7 @@ import {
   PULL_OWNER_SCAN_MAX_BYTES,
   isPullOwnersResult,
   pullOwnerReadDiagnosticFrom,
+  type PullOwnerReadDiagnostic,
   type PullTarget,
   type PullOwnersResult,
 } from "./pullOwnership.js";
@@ -129,7 +130,8 @@ import {
  *  idempotent); `unavailable`: no durable store in this process. */
 export type PutInstanceResult = { ok: true } | { ok: false; reason: "exists" | "unavailable" };
 export type ConfirmCreatedResult = { ok: true } | { ok: false; reason: "stale" | "unavailable" };
-export type PutUnitsResult = { ok: true } | { ok: false; reason: PullBindingRefusal };
+export type PutUnitsResult =
+  { ok: true } | { ok: false; reason: PullBindingRefusal; diagnostic?: PullOwnerReadDiagnostic };
 export type CompareAndReplaceUnitResult =
   { ok: true } | { ok: false; reason: "stale" | "unavailable" | "owned" | "incomplete" };
 export type AppendEventResult =
@@ -1369,9 +1371,12 @@ export class WorkerCoordinatorInstanceStore implements CoordinatorInstanceStore 
 
   async putUnits(units: readonly CoordinatorUnit[]): Promise<PutUnitsResult> {
     const r = await this.post("/runs/coordinator/units/put", { units });
-    const d = r.data as { ok?: unknown; reason?: unknown };
+    const d = r.data as { ok?: unknown; reason?: unknown; diagnostic?: unknown };
     if (r.status === 409 && d.reason === "settled") throw new CoordinatorUnitWriteConflict();
-    if (r.status === 409 && isPullBindingRefusal(d.reason)) return { ok: false, reason: d.reason };
+    if (r.status === 409 && isPullBindingRefusal(d.reason)) {
+      const diagnostic = d.reason === "incomplete" ? pullOwnerReadDiagnosticFrom(d.diagnostic) : undefined;
+      return { ok: false, reason: d.reason, ...(diagnostic ? { diagnostic } : {}) };
+    }
     if (d.ok === true) return { ok: true };
     throw new Error(`coordinator store /runs/coordinator/units/put: unexpected answer (HTTP ${r.status})`);
   }
