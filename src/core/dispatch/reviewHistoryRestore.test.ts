@@ -88,6 +88,41 @@ function fixture() {
 }
 
 describe("review history restoration from canonical results", () => {
+  it("retains recorded inline evidence but refuses fresh credit after a reply changes at the same head", async () => {
+    const f = fixture();
+    const reply = {
+      id: 102,
+      reviewId: 9,
+      inReplyToId: 101,
+      author: "author",
+      authorId: 12,
+      authorType: "User",
+      body: "Fixed the owner guard",
+      createdAt: "2026-01-02T00:00:00Z",
+      updatedAt: "2026-01-02T00:00:00Z",
+      url: "https://github.com/acme/api/pull/7#discussion_r102",
+      path: "src/queue.ts",
+      head: A,
+      originalHead: A,
+      diffHunk: "@@ -1 +1 @@\n+guard",
+      line: null,
+    };
+    f.repo.feedback![7]!.reviewComments = [reply];
+    expect(await f.read()).toContain('"inReplyToId":101');
+    const recorded = await f.reconstruct();
+    expect(recorded?.snapshot).toEqual({ head: A, findings: [] });
+    reply.body = "The guard still loses a concurrent update";
+    reply.updatedAt = "2026-01-02T00:00:01Z";
+    const next = f.resumed();
+    expect(await f.restore(next)).toEqual(recorded);
+    expect(next.reviewHistory!.snapshot).toBeUndefined();
+    expect(await submitVerdictTool.run(verdict, next)).toContain("read complete PR history");
+    expect(await f.read()).toContain("The guard still loses a concurrent update");
+    const refreshed = f.resumed();
+    await f.restore(refreshed);
+    expect(refreshed.reviewHistory!.snapshot).toEqual({ head: A, findings: [] });
+  });
+
   it("restores legacy incomplete history while retaining the later finding and requiring its closure", async () => {
     const f = fixture();
     const row = {

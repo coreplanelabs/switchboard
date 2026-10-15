@@ -107,9 +107,32 @@ export interface PullReviewFeedback {
   submittedAt: string;
   body: string;
 }
+/** Inline and file comments are source evidence, including replies and outdated locations. */
+export interface PullReviewComment extends Omit<IssueComment, "author"> {
+  id: number;
+  reviewId: number | null;
+  author: string | null;
+  authorId: number | null;
+  authorType: string | null;
+  updatedAt: string;
+  url: string;
+  path: string;
+  head: string;
+  originalHead: string;
+  diffHunk: string;
+  inReplyToId?: number;
+  line?: number | null;
+  originalLine?: number | null;
+  startLine?: number | null;
+  originalStartLine?: number | null;
+  side?: "LEFT" | "RIGHT" | null;
+  startSide?: "LEFT" | "RIGHT" | null;
+  subjectType?: "line" | "file";
+}
 export interface PullFeedback {
   reviews: PullReviewFeedback[];
   comments: Array<IssueComment & { id: number }>;
+  reviewComments: PullReviewComment[];
 }
 
 /** PR metadata for a relayed read. This is context, not publication authority. */
@@ -299,6 +322,7 @@ export type GithubRoute =
   | "issue_comments"
   | "pull"
   | "pull_reviews"
+  | "pull_review_comments"
   | "head_ref"
   | "issue_create"
   | "issue_update"
@@ -609,21 +633,22 @@ export class RestGithubApi implements GithubApi {
     };
     const reviews = await pages(`/repos/${repo}/pulls/${number}/reviews`, "pull_reviews");
     const comments = await pages(`/repos/${repo}/issues/${number}/comments`, "issue_comments");
+    const reviewComments = await pages(`/repos/${repo}/pulls/${number}/comments`, "pull_review_comments");
     const source = (row: Record<string, unknown>) => {
-      const user = row.user as Record<string, unknown> | null;
-      if (
-        !Number.isSafeInteger(row.id) ||
-        Number(row.id) <= 0 ||
-        typeof user?.login !== "string" ||
-        !user.login ||
-        (row.body !== null && typeof row.body !== "string")
-      )
+      if (!Number.isSafeInteger(row.id) || Number(row.id) <= 0 || (row.body !== null && typeof row.body !== "string"))
         throw new GithubApiError(502, "Invalid pull request feedback identity or body");
-      return { id: Number(row.id), author: user.login, body: String(row.body ?? "") };
+      return { id: Number(row.id), body: String(row.body ?? "") };
+    };
+    const author = (row: Record<string, unknown>): string => {
+      const user = row.user as Record<string, unknown> | null;
+      if (typeof user?.login !== "string" || !user.login)
+        throw new GithubApiError(502, "Invalid pull request feedback identity or body");
+      return user.login;
     };
     return {
       reviews: reviews.map((row) => {
         const native = source(row);
+        const name = author(row);
         const authorType = (row.user as Record<string, unknown>).type;
         if (authorType !== "Bot" && authorType !== "User")
           throw new GithubApiError(502, "Invalid pull request review author type");
@@ -634,7 +659,9 @@ export class RestGithubApi implements GithubApi {
         )
           throw new GithubApiError(502, "Invalid pull request review metadata");
         return {
-          ...native,
+          id: native.id,
+          author: name,
+          body: native.body,
           authorType,
           state: row.state,
           head: row.commit_id,
@@ -643,8 +670,60 @@ export class RestGithubApi implements GithubApi {
       }),
       comments: comments.map((row) => {
         const native = source(row);
+        const name = author(row);
         if (typeof row.created_at !== "string") throw new GithubApiError(502, "Invalid pull request comment timestamp");
-        return { ...native, createdAt: row.created_at };
+        return { id: native.id, author: name, body: native.body, createdAt: row.created_at };
+      }),
+      reviewComments: reviewComments.map((row): PullReviewComment => {
+        const native = source(row);
+        const user = row.user as Record<string, unknown> | null;
+        const positive = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
+        const line = (value: unknown): number | null | undefined => {
+          if (value === undefined || value === null || positive(value)) return value;
+          throw new GithubApiError(502, "Invalid pull request review comment location");
+        };
+        const side = (value: unknown): "LEFT" | "RIGHT" | null | undefined => {
+          if (value === undefined || value === null || value === "LEFT" || value === "RIGHT") return value;
+          throw new GithubApiError(502, "Invalid pull request review comment side");
+        };
+        if (
+          (user !== null && (!user || !positive(user.id) || typeof user.type !== "string" || !user.type)) ||
+          (row.pull_request_review_id !== null && !positive(row.pull_request_review_id)) ||
+          (row.in_reply_to_id !== undefined && !positive(row.in_reply_to_id)) ||
+          ![row.created_at, row.updated_at, row.html_url, row.path].every(
+            (v) => typeof v === "string" && v.length > 0,
+          ) ||
+          typeof row.diff_hunk !== "string" ||
+          typeof row.commit_id !== "string" ||
+          !/^[a-f0-9]{40}$/.test(row.commit_id) ||
+          typeof row.original_commit_id !== "string" ||
+          !/^[a-f0-9]{40}$/.test(row.original_commit_id) ||
+          (row.subject_type !== undefined && row.subject_type !== "line" && row.subject_type !== "file")
+        )
+          throw new GithubApiError(502, "Invalid pull request review comment metadata");
+        return {
+          id: native.id,
+          author: user === null ? null : author(row),
+          body: native.body,
+          reviewId: row.pull_request_review_id === null ? null : Number(row.pull_request_review_id),
+          authorId: user === null ? null : Number(user.id),
+          authorType: user === null ? null : String(user.type),
+          createdAt: String(row.created_at),
+          updatedAt: String(row.updated_at),
+          url: String(row.html_url),
+          path: String(row.path),
+          head: row.commit_id,
+          originalHead: row.original_commit_id,
+          diffHunk: row.diff_hunk,
+          ...(row.in_reply_to_id !== undefined ? { inReplyToId: Number(row.in_reply_to_id) } : {}),
+          line: line(row.line),
+          originalLine: line(row.original_line),
+          startLine: line(row.start_line),
+          originalStartLine: line(row.original_start_line),
+          side: side(row.side),
+          startSide: side(row.start_side),
+          ...(row.subject_type !== undefined ? { subjectType: row.subject_type } : {}),
+        };
       }),
     };
   }
@@ -1088,7 +1167,7 @@ export interface InMemoryRepo {
   files?: Record<string, string>;
   issues?: IssueSummary[];
   pulls?: PullSummary[];
-  feedback?: Record<number, PullFeedback>;
+  feedback?: Record<number, Omit<PullFeedback, "reviewComments"> & { reviewComments?: PullReviewComment[] }>;
   defaultBranch?: string;
   private?: boolean;
   description?: string | null;
@@ -1248,7 +1327,12 @@ export class InMemoryGithubApi implements GithubApi {
 
   async getPullRequestFeedback(repo: string, number: number): Promise<PullFeedback> {
     await this.getPullRequest(repo, number);
-    return this.repo(repo).feedback?.[number] ?? { reviews: [], comments: [] };
+    const feedback = this.repo(repo).feedback?.[number];
+    return {
+      reviews: feedback?.reviews ?? [],
+      comments: feedback?.comments ?? [],
+      reviewComments: feedback?.reviewComments ?? [],
+    };
   }
 
   async createIssue(repo: string, input: NewIssueInput): Promise<IssueSummary> {

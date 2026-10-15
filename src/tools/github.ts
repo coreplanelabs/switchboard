@@ -367,7 +367,7 @@ export const githubPullGetTool: RunnableTool = {
       includeReviewHistory: {
         type: "boolean",
         description:
-          "Read complete reviews and conversation comments for follow-up verification; required before a bound PR review verdict",
+          "Read reviews, conversation comments, inline/file review comments and replies for follow-up verification; required before a bound PR review verdict",
       },
       historyPage: {
         type: "integer",
@@ -416,6 +416,12 @@ PR metadata is context; publication authority is supplied separately.`;
         const redacted = {
           reviews: feedback.reviews.map((r) => ({ ...r, body: redactReviewHistoryBody(r) })),
           comments: feedback.comments.map((c) => ({ ...c, body: redactSecrets(c.body) })),
+          reviewComments: feedback.reviewComments.map((c) => ({
+            ...c,
+            body: redactSecrets(c.body),
+            diffHunk: redactSecrets(c.diffHunk),
+            path: redactSecrets(c.path),
+          })),
         };
         const findings = outstandingReviewFindings(redacted.reviews);
         const document = JSON.stringify({ outstandingFindings: findings, ...redacted });
