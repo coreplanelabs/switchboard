@@ -10,7 +10,7 @@ import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { turnRows } from "../runLedger/transcript.js";
 import { sessionCapabilityFor } from "../../tools/session.js";
 import { RunRegistry } from "../runRegistry.js";
-import type { RunsService } from "../runsService.js";
+import { createRunsService, type RunsService } from "../runsService.js";
 import type { ChannelIO, IncomingMessage, OpenedThread } from "../types.js";
 import type { CoreDeps, DispatchOptions, DispatchOutcome } from "../dispatcher.js";
 import {
@@ -20,6 +20,7 @@ import {
   MAX_SPAWN_DEPTH,
   maxChildrenOf,
   nullSpawnCapability,
+  runToolCapabilities,
   spawnCapabilityFor,
   spawnChild,
   spawnTierRefusal,
@@ -988,6 +989,180 @@ describe("tiers at spawn — the parent's model and effort in the child's reques
     });
     expect(out.kind).toBe("spawned");
     expect(calls[0].msg.text).toBe("agent:explore model:anthropic/fast-model effort:low time the suite");
+  });
+});
+
+describe("child launch after asynchronous waits", () => {
+  it("subtracts context and thread waits from the read child's inherited budget", async () => {
+    let now = NOW;
+    const ch = channel();
+    const open = ch.io.openThread!;
+    ch.io.openThread = async (lead) => {
+      now += 60_000;
+      return open(lead);
+    };
+    const { dispatch, calls } = fakeDispatch(registers("run-child"));
+    const d = { ...deps(dispatch), clock: () => now };
+    const out = await spawnChild(
+      d,
+      parent(ch.io, {
+        remainingMs: 10 * 60_000,
+        context: async () => {
+          now += 2 * 60_000;
+          return parentContextOf([]);
+        },
+      }),
+      { preset: "research", prompt: "q" },
+    );
+    expect(out).toMatchObject({ kind: "spawned", runId: "run-child" });
+    expect(calls[0].opts?.parent).toEqual({ runId: "run-p", depth: 1, remainingMs: 7 * 60_000 });
+  });
+
+  it.each(["context", "thread"])("refuses an exhausted budget after the %s wait", async (stage) => {
+    let now = NOW;
+    const ch = channel();
+    const open = ch.io.openThread!;
+    ch.io.openThread = async (lead) => {
+      if (stage === "thread") now += 3 * 60_000;
+      return open(lead);
+    };
+    const { dispatch } = fakeDispatch(registers("run-child"));
+    const out = await spawnChild(
+      { ...deps(dispatch), clock: () => now },
+      parent(ch.io, {
+        remainingMs: 5 * 60_000,
+        context: async () => {
+          if (stage === "context") now += 3 * 60_000;
+          return parentContextOf([]);
+        },
+      }),
+      { preset: "research", prompt: "q" },
+    );
+    expect(out).toMatchObject({ kind: "refused", reason: "spawn_budget" });
+    expect(ch.leads).toHaveLength(stage === "thread" ? 1 : 0);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("counts time in the serial launch queue against each call's original budget", async () => {
+    let now = NOW;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const ch = channel();
+    const { dispatch, calls } = fakeDispatch(registers("run-child"));
+    const { remainingMs: _, ...run } = parent(ch.io);
+    const cap = spawnCapabilityFor({ ...deps(dispatch), clock: () => now }, run);
+    const first = cap.spawn(
+      { preset: "research", prompt: "first" },
+      {
+        remainingMs: 10 * 60_000,
+        context: async () => {
+          await held;
+          return parentContextOf([]);
+        },
+      },
+    );
+    const second = cap.spawn({ preset: "research", prompt: "second" }, { remainingMs: 5 * 60_000 });
+    now += 2 * 60_000;
+    release();
+    expect(await first).toMatchObject({ kind: "spawned", runId: "run-child" });
+    expect(await second).toMatchObject({ kind: "refused", reason: "spawn_budget" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].opts?.parent?.remainingMs).toBe(8 * 60_000);
+  });
+
+  it.each([
+    ["context", "stop"],
+    ["thread", "stop"],
+    ["context", "finish"],
+    ["thread", "discard"],
+    ["context", "replace"],
+  ] as const)("refuses when the parent changes to %s/%s before child dispatch", async (stage, end) => {
+    const ch = channel();
+    const { dispatch } = fakeDispatch(registers("run-child"));
+    const d = deps(dispatch);
+    const handle = d.registry.create("parent", undefined, { id: "run-p" });
+    d.core.runs = createRunsService({ registry: d.registry, store: null });
+    const endParent = () => {
+      if (end === "stop") d.registry.requestStop(handle.id, handle.token, "soft");
+      else if (end === "finish") d.registry.finish(handle.id, "completed");
+      else if (end === "discard") d.registry.discard(handle.id);
+      else {
+        d.registry.finish(handle.id, "interrupted");
+        d.registry.discard(handle.id);
+        d.registry.create("resumed parent", undefined, { id: handle.id, token: handle.token });
+      }
+    };
+    const open = ch.io.openThread!;
+    ch.io.openThread = async (lead) => {
+      if (stage === "thread") endParent();
+      return open(lead);
+    };
+    const { remainingMs: _, ...run } = parent(ch.io);
+    const cap = runToolCapabilities(d, { ...run, control: handle.control, inbox: { arrived: 0 } }).spawn;
+    const out = await cap.spawn(
+      { preset: "research", prompt: "q" },
+      {
+        remainingMs: 10 * 60_000,
+        context: async () => {
+          if (stage === "context") endParent();
+          return parentContextOf([]);
+        },
+      },
+    );
+    expect(out).toEqual({
+      kind: "refused",
+      reason: "spawn_parent_ended",
+      message: "this run has stopped or ended; no new child can start",
+    });
+    expect(ch.leads).toHaveLength(stage === "thread" ? 1 : 0);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("does not launch a queued child after its parent stops, while retaining the child already started", async () => {
+    const ch = channel();
+    const registry = new RunRegistry();
+    const handle = registry.create("parent", undefined, { id: "run-p" });
+    const { dispatch, calls } = fakeDispatch(async (_msg, io) => {
+      io.runStarted?.({ id: "first-child" });
+      registry.requestStop(handle.id, handle.token, "hard");
+      return { status: "completed" };
+    });
+    const d = deps(dispatch, { registry });
+    d.core.runs = createRunsService({ registry, store: null });
+    const { remainingMs: _, ...run } = parent(ch.io);
+    const cap = runToolCapabilities(d, { ...run, control: handle.control, inbox: { arrived: 0 } }).spawn;
+    const first = cap.spawn({ preset: "research", prompt: "first" }, { remainingMs: 10 * 60_000 });
+    const second = cap.spawn({ preset: "research", prompt: "second" }, { remainingMs: 10 * 60_000 });
+    expect(await first).toMatchObject({ kind: "spawned", runId: "first-child" });
+    expect(await second).toMatchObject({ kind: "refused", reason: "spawn_parent_ended" });
+    expect(calls).toHaveLength(1);
+    expect(ch.leads).toHaveLength(1);
+  });
+
+  it("counts Ship history reads against the launch budget without clipping an admitted unit's lease", async () => {
+    let now = NOW;
+    const ch = channel();
+    const { dispatch, calls } = fakeDispatch(registers("ship-child"));
+    const target = "https://github.com/acme/api/pull/7";
+    const { remainingMs: _, ...run } = parent(ch.io, {
+      prBatch: { kind: "ship", targets: [{ repo: "acme/api", number: 7, url: target }] },
+    });
+    const d = { ...deps(dispatch), clock: () => now };
+    const history = {
+      listRuns: async () => {
+        now += 2 * 60_000;
+        return { runs: [] };
+      },
+      getRun: async () => ({ ok: false as const, error: "not_found" as const }),
+    };
+    const request = { preset: "ship", prompt: target };
+    const started = await spawnCapabilityFor(d, run, history).spawn(request, { remainingMs: 8 * 60_000 });
+    expect(started).toMatchObject({ kind: "spawned", runId: "ship-child" });
+    expect(calls[0].opts?.parent).toEqual({ runId: "run-p", depth: 1 });
+    const ended = await spawnCapabilityFor(d, run, history).spawn(request, { remainingMs: 5 * 60_000 });
+    expect(ended).toMatchObject({ kind: "refused", reason: "spawn_budget" });
+    expect(calls).toHaveLength(1);
+    expect(ch.leads).toHaveLength(1);
   });
 });
 

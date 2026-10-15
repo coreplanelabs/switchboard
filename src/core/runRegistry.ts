@@ -648,6 +648,13 @@ export class RunRegistry {
     return run ? summaryOf(run, this.now()) : null;
   }
 
+  /** The original in-process runner still owns an active row. A resumed row
+   *  can retain its id and token, but it has a different stop control. */
+  isActive(id: string, control: Pick<RunControl, "requested">): boolean {
+    const run = this.runs.get(id);
+    return run !== undefined && run.control === control && !run.finished && control.requested === undefined;
+  }
+
   /** Token-free `snapshot` for `RunsService`: the same copied
    *  backlog + finished/startedAt/eventCount, null when unknown/evicted. */
   snapshotById(id: string): RunSnapshot | null {
