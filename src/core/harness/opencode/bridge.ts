@@ -2244,6 +2244,7 @@ export async function driveOpenCode(
   );
   const lease = loopClock(startedAt, remainingMs, run.agent.name, kind);
   const { deadline, loopEnd, warnAt } = lease;
+  run.toolContext.remainingMs = () => deadline - now();
   /** The loop has left: a request that fails on its transport now was cut by
    *  the caller's end of the process — that end's own effect, not the record's.
    *  An answer the server gives is its word whenever it comes, noted to the

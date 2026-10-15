@@ -78,6 +78,9 @@ export interface SpawnRequest {
   effort?: Effort;
 }
 
+export type SpawnBinding =
+  { kind: "bound"; request: SpawnRequest; target?: OperationTarget } | { kind: "refused"; message: string };
+
 /** Which tier a model ref is at spawn. The fast classifier model retired
  *  with the readers' router, so every run model is on the strong tier. */
 export function tierOfModel(_modelRef: string, _cfg: unknown): ModelTier {
@@ -137,6 +140,10 @@ export interface SpawnParent extends ParentRun {
   context?: () => Promise<ParentContext>;
   /** Read the live parent state before opening a thread or dispatching a child. */
   isActive?: () => boolean;
+  /** The selecting requester message still owns this call. */
+  sourceCurrent?: () => boolean;
+  /** Target produced by the existing typed action binder. */
+  operationTarget?: OperationTarget;
 }
 
 /** How a spawn ended: the child registered — its run id, its thread and a
@@ -342,6 +349,8 @@ export async function spawnChild<D extends SpawnCoreDeps>(
   const admissionProblem = (): SpawnOutcome | undefined => {
     if (parent.isActive?.() === false)
       return refused("spawn_parent_ended", "this run has stopped or ended; no new child can start");
+    if (parent.sourceCurrent?.() === false)
+      return refused("spawn_source_changed", "the requester source changed; no child was dispatched");
     remainingMs = Math.min(remainingMs, parent.remainingMs - Math.max(0, deps.clock() - startedAt));
     const carved = carveChildOfParent(remainingMs, childPreset);
     if (carved.kind === "refused")
@@ -425,11 +434,13 @@ export async function spawnChild<D extends SpawnCoreDeps>(
   });
   const settled = deps
     .dispatch(deps.core, child, io, {
-      ...(selectedTarget !== undefined
-        ? { operationTarget: { repo: selectedTarget.repo } }
-        : request.repo !== undefined
-          ? { operationTarget: { repo: request.repo, ...(request.ref !== undefined ? { ref: request.ref } : {}) } }
-          : {}),
+      ...(parent.operationTarget !== undefined
+        ? { operationTarget: parent.operationTarget }
+        : selectedTarget !== undefined
+          ? { operationTarget: { repo: selectedTarget.repo } }
+          : request.repo !== undefined
+            ? { operationTarget: { repo: request.repo, ...(request.ref !== undefined ? { ref: request.ref } : {}) } }
+            : {}),
       parent: {
         runId: parent.runId,
         depth: parent.depth + 1,
@@ -479,6 +490,9 @@ export async function spawnChild<D extends SpawnCoreDeps>(
  *  the transcript elsewhere): the child then starts from its own thread. */
 export interface SpawnMoment {
   remainingMs: number;
+  /** Trusted call-specific source check, separate from parent liveness. */
+  sourceCurrent?: () => boolean;
+  operationTarget?: OperationTarget;
   conversation?: readonly ChatMessage[];
   parentContext?: ParentContext;
   context?: () => Promise<ParentContext>;

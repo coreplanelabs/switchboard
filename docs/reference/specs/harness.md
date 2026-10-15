@@ -211,3 +211,8 @@ A canonical child uses the absolute bound committed at its original admission. S
 | A same-run typed unconfirmed opening retains its original checkpoint cause rather than gaining another custody wrapper; dispatch's existing single unwrap sees that cause. A foreign-run error cannot replace current identity. Unknown ACK still holds the original producer with no model or ending effects, and opening/ending fields retain their meanings. | `[unit]` `src/core/harness/contract.test.ts::original session policy canonical first-fact ACK::holds the newly started …`, `::a foreign … custody error cannot replace the current run's identity`, `::holds the actual started …` |
 
 | A successful OpenCode execution after a refusal settles without a second prompt; interrupted decline cascades retain their recovery prompt. | `[unit]` `src/core/harness/opencode/testing/realDriver.test.ts::OpenCode against the real @opencode/cli binary::a step with two shell calls…` |
+
+
+| Criterion | Proof |
+| --- | --- |
+| Pi and OpenCode expose the active lease to relayed read-delegation tools. A valid requester spawn receives a finite positive remainder and returns its child result; an unknown budget stays held in the orchestrator. | `[unit]` `src/core/harness/opencode/bridge.test.ts::relayed read delegation budget::*`; `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::delegation keeps its saved source through the spawn path: %s` |

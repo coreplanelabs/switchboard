@@ -1,3 +1,4 @@
+import { bindConversationRead } from "./conversationRead.js";
 import { createSpanLog } from "../trace/spanLog.js";
 import { humanReview } from "../testing/humanReview.js";
 import type { CheckExecutionReceipt } from "../checkExecutionTypes.js";
@@ -115,7 +116,13 @@ import {
   type RelayedToolAnswer,
   type ToolCallAsk,
 } from "../harness/pi/relay.js";
-import { spawnCapabilityFor, type SpawnCapability, type SpawnDeps } from "./spawn.js";
+import {
+  nullSpawnCapability,
+  spawnCapabilityFor,
+  type SpawnCapability,
+  type SpawnDeps,
+  type SpawnRequest,
+} from "./spawn.js";
 import type { SessionCapability } from "../../tools/session.js";
 import {
   ModelPolicyRefusedError,
@@ -497,6 +504,8 @@ function setup(
   const published: string[] = [];
   const ending = createRunEnding({ registry });
   const ctx = {
+    bindReadTask: (message: IncomingMessage, request: SpawnRequest, prTarget?: unknown) =>
+      bindConversationRead(deps, message, request, prTarget),
     recordWorkDecision: async () => true,
     msg: message,
     io,
@@ -2010,6 +2019,148 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(after).toMatchObject({ kind: "refused" });
     expect(started).toHaveBeenCalledTimes(1);
   });
+
+  it("offers read delegation only to a fresh root with one requester source", async () => {
+    const offered: boolean[] = [];
+    for (const variant of ["fresh", "recovered", "delegated", "merged"] as const) {
+      const base = watched(piHarness);
+      const s = setup("Done.", {
+        agent: "orchestrator",
+        userId: "slack:UADMIN",
+        spawn: nullSpawnCapability,
+        harness: {
+          harnesses: roster({
+            ...base.harness,
+            open: async (deps, run) => {
+              offered.push(run.tools.some((tool) => tool.name === "spawn_run"));
+              return base.harness.open(deps, run);
+            },
+          }),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          loopbackUrl: "http://127.0.0.1:8080",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+      });
+      await runLoop(s.deps, {
+        ...s.ctx,
+        recovered: variant === "recovered",
+        ...(variant === "delegated" ? { parentRunId: "parent" } : {}),
+        msg: { ...s.ctx.msg, ...(variant === "merged" ? { mergedFollowUps: true as const } : {}) },
+        recordWorkDecision: async () => true,
+        captureParentContext: async () => parentContextOf([]),
+      });
+      s.ending.drain(undefined);
+      await s.writer.settled();
+    }
+    expect(offered).toEqual([true, false, false, false]);
+  });
+
+  it.each(["saved", "storage failure", "source changed", "unknown budget"] as const)(
+    "delegation keeps its saved source through the spawn path: %s",
+    async (mode) => {
+      const results: string[] = [];
+      const records: unknown[] = [];
+      const dispatched: unknown[] = [];
+      let opened = 0;
+      const base = watched(piHarness);
+      const s = setup("Done.", {
+        agent: "orchestrator",
+        userId: "slack:UADMIN",
+        harness: {
+          harnesses: roster({
+            ...base.harness,
+            open: async (deps, run) => {
+              const tool = run.tools.find((candidate) => candidate.name === "spawn_run")!;
+              const input = { preset: "research", prompt: "Inspect storage.", sourceMessage: "initial request" };
+              const ctx = {
+                ...run.toolContext,
+                callId: "delegate",
+                remainingMs: () => (mode === "unknown budget" ? Infinity : 600_000),
+              };
+              results.push(String(await tool.run(input, ctx)));
+              results.push(String(await tool.run(input, ctx)));
+              if (mode === "saved") results.push(String(await tool.run({ ...input, prompt: "Different work." }, ctx)));
+              return base.harness.open(deps, run);
+            },
+          }),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          loopbackUrl: "http://127.0.0.1:8080",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+      });
+      let now = s.ctx.clock();
+      s.ctx.clock = () => now;
+      s.ctx.spawn = spawnCapabilityFor(
+        {
+          core: s.deps,
+          registry: s.registry,
+          clock: () => now,
+          dispatch: async (_deps, message, io, options) => {
+            dispatched.push({ message, options });
+            io.runStarted?.({ id: "child" });
+            return { status: "completed" };
+          },
+        },
+        {
+          runId: s.run.id,
+          depth: 0,
+          agentName: "orchestrator",
+          msg: s.ctx.msg,
+          io: {
+            ...s.ctx.io,
+            openThread: async () => {
+              expect(records).toHaveLength(1);
+              opened++;
+              return { thread: { threadKey: "slack:CX:child" }, io: s.ctx.io };
+            },
+          },
+        },
+      );
+      await runLoop(s.deps, {
+        ...s.ctx,
+        msg: { ...s.ctx.msg, text: "initial request", messageId: "request-one" },
+        captureParentContext: async () => parentContextOf([]),
+        recordWorkDecision: async (message, callId, action) => {
+          now += 120_000;
+          records.push({ messageId: message.messageId, callId, action });
+          if (mode === "source changed")
+            s.ctx.admitted.inbox.push({
+              userId: "slack:UOTHER",
+              messageId: "foreign",
+              text: "new request",
+              at: 2,
+              msg: { ...s.ctx.msg, userId: "slack:UOTHER", text: "new request" },
+            });
+          return mode !== "storage failure";
+        },
+      });
+      s.ending.drain(undefined);
+      await s.writer.settled();
+      if (mode === "unknown budget") {
+        expect(results[0]).toContain("spawn_budget");
+        expect(records).toHaveLength(0);
+        expect(dispatched).toHaveLength(0);
+        expect(opened).toBe(0);
+        return;
+      }
+      expect(records).toEqual([
+        { messageId: "request-one", callId: "delegate", action: { tool: "spawn_run", target: { preset: "research" } } },
+      ]);
+      if (mode === "saved") {
+        expect(results.slice(0, 2).every((text) => text.includes("spawned a research run: child"))).toBe(true);
+        expect(results[2]).toContain("spawn_call_conflict");
+        expect(dispatched).toHaveLength(1);
+        expect(dispatched[0]).toMatchObject({ options: { parent: { remainingMs: 480_000 } } });
+        expect(opened).toBe(1);
+      } else {
+        expect(results[0]).toContain("spawn_context");
+        expect(dispatched).toHaveLength(0);
+        expect(opened).toBe(0);
+      }
+    },
+  );
 
   it("holds shared commands on recovered root conversations and permits a fresh requester", async () => {
     const offered: boolean[] = [];

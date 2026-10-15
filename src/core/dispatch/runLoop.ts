@@ -203,9 +203,17 @@ import { assignRunLiveState } from "../runLiveState.js";
 import { causeOfClose } from "../plane/decide.js";
 import { RefusalError, refusalOf } from "../refusal.js";
 import { shellQuote } from "../../execution/shellQuote.js";
-import type { RunsReadCapability, SteerCapability } from "../../tools/runs.js";
+import {
+  requesterSpawnTool,
+  awaitRunsTool,
+  listRunsTool,
+  getRunStatusTool,
+  type RequesterSpawn,
+  type RunsReadCapability,
+  type SteerCapability,
+} from "../../tools/runs.js";
 import type { WaitCapability } from "./awaitChildren.js";
-import type { SpawnCapability } from "./spawn.js";
+import type { SpawnBinding, SpawnCapability, SpawnRequest } from "./spawn.js";
 import type { SessionCapability } from "../../tools/session.js";
 import { inFlightCallAfter, quietSuffix, type InFlightTool } from "../statusCardLabel.js";
 import { eventsInWindow, paceText, PACE_WINDOW_MS } from "../runPace.js";
@@ -318,12 +326,13 @@ class ContextCheckpointDeferred extends Error {}
 
 /** What `runLoop` reads off the dispatch. */
 export interface RunLoopContext {
+  bindReadTask?: (message: IncomingMessage, request: SpawnRequest, prTarget?: unknown) => Promise<SpawnBinding>;
   recordWorkDecision?: (
     message: IncomingMessage,
     callId: string,
     action: import("./orchestratorDecisions.js").OrchestratorWorkAction,
     input: unknown,
-    context?: import("./unitContext.js").UnitContext,
+    context?: UnitContext | ParentContext,
   ) => Promise<boolean>;
   orchestratorDecisions?: () => import("./orchestratorDecisions.js").OrchestratorDecision[];
   executeCommand?: (
@@ -2088,7 +2097,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     msg.messageId === undefined ? { ...msg, messageId: messageIdOf(msg, run.id) } : msg,
     (source) => chatActorOf(deps.config, source),
   );
-  const publicCommands =
+  const publicActions =
     agent.name === "orchestrator" &&
     channelVisibility !== "dm" &&
     !privateAudienceRequired(msg) &&
@@ -2097,8 +2106,8 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     ctx.coordinator === undefined &&
     !ctx.recovered &&
     !msg.mergedFollowUps;
-  const commandEffectGate = publicCommands ? createMainWorkEffectGate() : mainWorkEffectGate;
-  if (publicCommands) {
+  const commandEffectGate = publicActions ? createMainWorkEffectGate() : mainWorkEffectGate;
+  if (publicActions) {
     admitted.inbox.onAccepted((input) => {
       mainSources.observe(input);
       if (!mainSources.current()) void commandEffectGate.revoke();
@@ -2125,7 +2134,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     return current;
   };
   const command: ConversationCommand | undefined =
-    (publicCommands ||
+    (publicActions ||
       (mainWorkAudienceAllowed({
         agentName: agent.name,
         actor: chatActorOf(deps.config, msg),
@@ -2140,7 +2149,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           if (source.kind === "refused")
             return { ok: false, text: "This call does not match the latest requester turn." };
           const trusted = (currentSource: boolean) =>
-            (publicCommands
+            (publicActions
               ? operatorModeOf(deps.config.config) === "on" && mainSources.current() !== undefined
               : mainWorkTrusted) &&
             !privateAudienceLatch.revoked &&
@@ -2148,7 +2157,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             (!currentSource || mainSources.get(quote) === source.source);
           const authority = async (currentSource = true) =>
             trusted(currentSource) &&
-            (publicCommands || (await verifyDirectAudience!(source.source.msg.directAudience!)).ok) &&
+            (publicActions || (await verifyDirectAudience!(source.source.msg.directAudience!)).ok) &&
             trusted(currentSource);
           return (
             (await commandEffectGate.run(async () => {
@@ -2156,6 +2165,78 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
               return ctx.executeCommand!(source.source.msg, id, input, authority, callId);
             })) ?? { ok: false, text: "Requester authority was withdrawn; nothing ran." }
           );
+        }
+      : undefined;
+  const delegationCalls = new Map<string, { identity: string; result: Promise<import("./spawn.js").SpawnOutcome> }>();
+  const bindReadTask = ctx.bindReadTask;
+  const delegate: RequesterSpawn | undefined =
+    publicActions && spawn && bindReadTask && ctx.recordWorkDecision && ctx.captureParentContext
+      ? async (quote, request, at, callId, prTarget) => {
+          const started = clock();
+          const refused = (reason: string, message: string) => ({ kind: "refused" as const, reason, message });
+          if (!Number.isFinite(at.remainingMs))
+            return refused("spawn_budget", "The parent's remaining launch budget could not be proved.");
+          const selected = mainSources.select(quote);
+          if (selected.kind === "refused")
+            return refused("spawn_source_changed", "This call does not match the latest requester turn.");
+          const source = selected.source;
+          const current = () =>
+            operatorModeOf(deps.config.config) === "on" &&
+            !privateAudienceLatch.revoked &&
+            registry.isActive(run.id, run.control) &&
+            mainSources.get(quote) === source;
+          const identity = JSON.stringify([source.msg.messageId, quote, request, prTarget]);
+          const previous = delegationCalls.get(callId);
+          if (previous)
+            return previous.identity === identity
+              ? previous.result
+              : refused("spawn_call_conflict", "This call already selected different work.");
+          const result = commandEffectGate
+            .run(async () => {
+              if (!current()) return refused("spawn_source_changed", "Requester authority is unavailable.");
+              const binding = await bindReadTask(source.msg, request, prTarget);
+              if (binding.kind === "refused") return refused("spawn_binding", binding.message);
+              if (!current()) return refused("spawn_source_changed", "Requester authority was withdrawn.");
+              return spawn.spawn(binding.request, {
+                ...at,
+                remainingMs: at.remainingMs - Math.max(0, clock() - started),
+                ...(binding.target ? { operationTarget: binding.target } : {}),
+                sourceCurrent: current,
+                context: async () => {
+                  if (!current()) throw new Error("The requester source changed before context capture.");
+                  const context = at.parentContext ?? (await (at.context ?? ctx.captureParentContext!)());
+                  if (
+                    !current() ||
+                    !(await ctx.recordWorkDecision!(
+                      source.msg,
+                      callId,
+                      {
+                        tool: "spawn_run",
+                        target: {
+                          preset: binding.request.preset,
+                          ...(binding.target
+                            ? {
+                                repo: binding.target.repo,
+                                ...(binding.target.prTarget ? { prNumber: binding.target.prTarget.number } : {}),
+                              }
+                            : {}),
+                        },
+                      },
+                      binding.request,
+                      context,
+                    )) ||
+                    !current()
+                  )
+                    throw new Error("The delegation decision could not be saved with current requester authority.");
+                  return context;
+                },
+                // Capture and record the immutable context through the guarded callback.
+                parentContext: undefined,
+              });
+            })
+            .then((outcome) => outcome ?? refused("spawn_source_changed", "Requester authority was withdrawn."));
+          delegationCalls.set(callId, { identity, result });
+          return result;
         }
       : undefined;
   const stageFollowUps = async (inputs: readonly FollowUpInput[]): Promise<string> => {
@@ -3481,6 +3562,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                       mainStart !== undefined && verifiedAtOpen && mainWorkTrusted && !privateAudienceLatch.revoked,
                     ),
                     ...(command ? conversationCommandTools(deps.commands) : []),
+                    ...(delegate ? [requesterSpawnTool(delegate), awaitRunsTool, listRunsTool, getRunStatusTool] : []),
                     ...(reviewCheckReady && commandPolicy === "hosted-review" && checkExecution ? [runCheckTool] : []),
                   ].filter((tool) => slackContext !== undefined || tool.name !== "slack_context"),
                   mcpForRun?.tools,

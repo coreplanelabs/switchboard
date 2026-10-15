@@ -1,3 +1,4 @@
+import { bindConversationRead } from "./dispatch/conversationRead.js";
 import { wrapUntrusted } from "./untrusted.js";
 import { isResearchBrief, renderResearchBrief } from "./research/brief.js";
 import { researchFromRun, researchInputAnswers } from "./research/source.js";
@@ -4656,6 +4657,7 @@ export async function dispatch(
         ledgerRun?.tracked() === true && (await ledgerRun.setStateAndFlush({ orchestratorDecisions: entries })),
     });
     const ran = await runLoop(deps, {
+      bindReadTask: (message, request, prTarget) => bindConversationRead(deps, message, request, prTarget),
       orchestratorDecisions: orchestratorDecisions.snapshot,
       recordWorkDecision: async (message, callId, action, input, context) => {
         if (!message.messageId || !(await revalidateAdmitted()).ok) return false;
