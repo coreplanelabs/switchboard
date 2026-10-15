@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   planStagingRecreation,
   recreateStaging,
+  StagingDependencyFieldsError,
   stagingRestorationSecrets,
   STAGING_RESTORATION_KEYS,
 } from "./stagingRecreate.js";
@@ -55,6 +56,83 @@ function fixture() {
 }
 
 describe("staging installation recreation", () => {
+  it("retains bounded dependency field shapes without provider values when an unknown field refuses", () => {
+    const h = fixture();
+    h.inventory.dependencies["switchboard-staging"].references = {
+      unfamiliar: { target: "must-not-appear", credential: "secret-value" },
+    };
+    let refused: unknown;
+    try {
+      planStagingRecreation(h.profile, h.production, h.inventory, source);
+    } catch (error) {
+      refused = error;
+    }
+    expect((refused as Error).message).toBe(
+      "staging dependency kind is unverified for switchboard-staging: unfamiliar",
+    );
+    expect(refused).toBeInstanceOf(StagingDependencyFieldsError);
+    expect((refused as StagingDependencyFieldsError).diagnostic).toEqual({
+      worker: "switchboard-staging",
+      fieldCount: 1,
+      fields: [{ name: "unfamiliar", type: "object", keyCount: 2, keys: ["credential", "target"] }],
+    });
+    expect(JSON.stringify((refused as StagingDependencyFieldsError).diagnostic)).not.toContain("secret-value");
+    expect(JSON.stringify((refused as StagingDependencyFieldsError).diagnostic)).not.toContain("must-not-appear");
+    h.inventory.dependencies["switchboard-staging"].references = Object.fromEntries(
+      Array.from({ length: 20 }, (_, i) => [`field_${i}`, "not-printed"]),
+    );
+    try {
+      planStagingRecreation(h.profile, h.production, h.inventory, source);
+    } catch (error) {
+      refused = error;
+    }
+    expect((refused as StagingDependencyFieldsError).diagnostic.fieldCount).toBe(20);
+    expect((refused as StagingDependencyFieldsError).diagnostic.fields).toHaveLength(8);
+    h.inventory.dependencies["switchboard-staging"].references = {
+      "invalid field\nprivate-fragment": ["not-retained"],
+    };
+    try {
+      planStagingRecreation(h.profile, h.production, h.inventory, source);
+    } catch (error) {
+      refused = error;
+    }
+    expect((refused as StagingDependencyFieldsError).diagnostic.fields).toEqual([
+      { name: "unrecognized-field", type: "array", length: 1 },
+    ]);
+    expect((refused as Error).message).toBe(
+      "staging dependency kind is unverified for switchboard-staging: unrecognized-field",
+    );
+  });
+  it("accepts the published Wrangler dependency shape and preserves selected incoming Worker dependencies", () => {
+    const h = fixture();
+    h.inventory.dependencies["switchboard-staging"].references = {
+      services: {
+        incoming: [{ name: "BOT", service: "switchboard-staging-memory", environment: "production" }],
+        outgoing: [],
+        pages_function: false,
+      },
+      durable_objects: [
+        {
+          name: "Coordinator",
+          service: "switchboard-staging-memory",
+          environment: "production",
+          durable_object_namespace_id: "2".repeat(32),
+          durable_object_namespace_name: "Coordinator",
+        },
+      ],
+      dispatch_outbounds: [],
+    };
+    expect(
+      planStagingRecreation(h.profile, h.production, h.inventory, source)
+        .deletions.filter((e) => e.kind === "worker")
+        .map((e) => e.name),
+    ).toEqual([
+      "switchboard-staging-memory",
+      "switchboard-staging",
+      "switchboard-staging-resident",
+      "switchboard-staging-sandbox",
+    ]);
+  });
   it("requires only the exact restoration roster and matching original CI bearers", () => {
     const values = Object.fromEntries(STAGING_RESTORATION_KEYS.map((name) => [name, `${name}-fixture-value`]));
     const restored = stagingRestorationSecrets(JSON.stringify(values), values, {});
