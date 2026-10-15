@@ -2629,6 +2629,93 @@ describe("durable coordinator Workflow reconciliation", () => {
       expect(owner.openPlaneEffects()).toHaveLength(1);
     });
   });
+  it.each(["empty", "earlier"] as const)(
+    "saves the next wake before native discovery with no live runs and an %s alarm slot",
+    async (slot) => {
+      const key = storeKey();
+      await seed(key);
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+        const now = Date.now();
+        const due = now + 60_000;
+        const expected = slot === "earlier" ? now + 30_000 : due;
+        await state.storage.deleteAlarm();
+        state.storage.sql.exec(`DELETE FROM meta WHERE key = 'plane_alarm_at'`);
+        state.storage.sql.exec(
+          `INSERT OR REPLACE INTO meta(key, value) VALUES ('coordinator_reconcile_due', ?)`,
+          String(due),
+        );
+        if (slot === "earlier") await state.storage.setAlarm(expected);
+        const observations: Array<{ alarm: number | null; live: number }> = [];
+        const holder = owner as unknown as { env: Record<string, unknown> };
+        const original = holder.env;
+        holder.env = {
+          ...original,
+          RUN_HISTORY_MAINTENANCE: "paused",
+          SHIP_COORDINATOR: {
+            get: async () => ({
+              status: async () => {
+                observations.push({ alarm: await state.storage.getAlarm(), live: (await owner.listLive()).length });
+                return { status: "running" };
+              },
+            }),
+          },
+        };
+        try {
+          await owner.alarm();
+          expect(observations).toEqual([{ alarm: expected, live: 0 }]);
+          if (slot === "earlier") expect(await state.storage.getAlarm()).toBe(expected);
+          expect(await owner.listUnits(instance.id)).toEqual([unit]);
+        } finally {
+          holder.env = original;
+          await state.storage.deleteAlarm();
+        }
+      });
+    },
+  );
+
+  it("blocks native discovery until the next wake is acknowledged and resumes on a later alarm", async () => {
+    const key = storeKey();
+    await seed(key);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      await state.storage.deleteAlarm();
+      const setAlarm = state.storage.setAlarm;
+      let fail = true;
+      state.storage.setAlarm = async (...args) => {
+        if (fail) {
+          fail = false;
+          throw new Error("wake storage unavailable");
+        }
+        return setAlarm.call(state.storage, ...args);
+      };
+      let nativeReads = 0;
+      const holder = owner as unknown as { env: Record<string, unknown> };
+      const original = holder.env;
+      holder.env = {
+        ...original,
+        RUN_HISTORY_MAINTENANCE: "paused",
+        SHIP_COORDINATOR: {
+          get: async () => {
+            nativeReads++;
+            return { status: async () => ({ status: "running" }) };
+          },
+        },
+      };
+      try {
+        await expect(owner.alarm()).rejects.toThrow("wake storage unavailable");
+        expect(nativeReads).toBe(0);
+        state.storage.setAlarm = setAlarm;
+        await owner.alarm();
+        expect(nativeReads).toBe(1);
+        expect(await owner.listUnits(instance.id)).toEqual([unit]);
+        expect(await state.storage.getAlarm()).not.toBeNull();
+      } finally {
+        holder.env = original;
+        state.storage.setAlarm = setAlarm;
+        await state.storage.deleteAlarm();
+      }
+    });
+  });
+
   it("bounds discovery with a persisted cursor and re-arms after an alarm failure while maintenance is paused", async () => {
     const key = storeKey();
     await seed(key);

@@ -9102,6 +9102,13 @@ export class RunHistoryDO extends DurableObject<Env> {
     return result;
   }
 
+  private async ensureNextAlarm(now: number): Promise<void> {
+    const set = await this.ctx.storage.getAlarm();
+    if (set === null || set > now + RUN_SWEEP_INTERVAL_MS) await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
+    await this.armCoordinatorReconciliation(now);
+    await this.ensurePlaneAlarm(now);
+  }
+
   /** The shared alarm always serves live plane work. Scheduled physical
    *  cleanup runs only when explicitly enabled. */
   async alarm(): Promise<void> {
@@ -9110,6 +9117,9 @@ export class RunHistoryDO extends DurableObject<Env> {
     const root = startAdoptedRoot(tracer, "state.alarm", { sinks: traceSinks });
     try {
       const now = systemClock();
+      // The process can stop during external work, before finally can re-arm.
+      // Save the next shared deadline before starting that work.
+      await this.ensureNextAlarm(now);
       await this.discoverCoordinatorWorkflows(now);
       let deleted = 0;
       if (this.env.RUN_HISTORY_MAINTENANCE === "enabled") {
@@ -9189,12 +9199,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     } finally {
       // Platform alarm retries are bounded. Persist the next due and arm it
       // even when discovery or physical maintenance failed in this pass.
-      const now = systemClock();
-      const set = await this.ctx.storage.getAlarm();
-      if (set === null || set > now + RUN_SWEEP_INTERVAL_MS)
-        await this.ctx.storage.setAlarm(now + RUN_SWEEP_INTERVAL_MS);
-      await this.armCoordinatorReconciliation(now);
-      await this.ensurePlaneAlarm(now);
+      await this.ensureNextAlarm(systemClock());
     }
   }
 
