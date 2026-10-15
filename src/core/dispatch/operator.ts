@@ -2958,6 +2958,304 @@ export async function operatorThreadTail(
   return operatorTail(turns);
 }
 
+/** Context preparation cannot invoke a completion provider. */
+export type ActionContextDeps = Pick<
+  OperatorStageDeps,
+  "config" | "github" | "commands" | "providerModels" | "mcp" | "runLedger" | "residentSlugs"
+>;
+
+/** Inputs shared by front-door context preparation and its action loop. */
+export interface ActionContextRequest {
+  msg: IncomingMessage;
+  /** Saved-context capability with current source and audience checks. */
+  readNotes?: () => Promise<OperatorSavedContext>;
+  readMemory?: () => Promise<{ memory?: string; unavailable: readonly string[]; context?: ContextDependencies }>;
+  readTail?: () => Promise<OperatorTailContext>;
+  onContext?: (context: ContextDependencies) => void;
+  /** Canonical saved decision already admitted by the current context reader. */
+  pending?: ReturnType<typeof pendingQuestionOf>;
+  /** The thread's runs, newest first: the agents for the tail's session keys
+   *  and each record's operator decision for a pending question. */
+  thread?: readonly {
+    finished: boolean;
+    agent?: string;
+    repo?: string;
+    pr?: { number: number; url: string; head?: string };
+    userId?: string;
+    operator?: {
+      mode: string;
+      outcome: string;
+      proposal?: string;
+      questionKind?: "target_repository";
+      questionWriter?: string;
+    };
+  }[];
+  intake?: { verdict: IntakeVerdict; reason: string };
+  /** A validated answer to the original requester's typed write-target question.
+   * It is provisional until this turn binds a repository writer. */
+  answeredTarget?: { actor: string; writer: string; target: RequesterTarget };
+  /** The thread's owner, when a live run, an idle unit or an ended pipeline
+   *  holds it (issue 2027; thread-admission item 9): the turn's projection and prompt read it. */
+  owner?: OperatorThreadOwner;
+}
+
+/** Prepare authorized actions and saved context without a model call.
+ * The caller keeps its own execution deadline and performs final policy checks. */
+export async function prepareActionContext(
+  deps: ActionContextDeps,
+  ctx: ActionContextRequest,
+  projection?: OperatorProjection,
+) {
+  const { msg } = ctx;
+  const cfg = deps.config.config;
+  const actor = chatActorOf(deps.config, msg);
+  if (projection === undefined) {
+    const presets = operatorPresets(cfg);
+    projection = operatorProjection({
+      presets,
+      commands: deps.commands ? routableCommands(deps.commands) : [],
+      allowedPresets: presets.map((preset) => preset.name).filter((name) => deps.config.canRunAgent(actor, name)),
+    });
+  }
+  const newestFinishedRun = ctx.thread ? newestFinishedRunOf(ctx.thread) : undefined;
+  const channelRepo = deps.config.scopes(msg.channelId, msg.userId).channel.repo;
+  const preferredRepos = [newestFinishedRun?.repo, channelRepo].filter(
+    (repo): repo is string => repo !== undefined && deps.config.canUseRepo(actor, repo),
+  );
+  const contextP = loadOperatorContext({
+    organization: cfg.organization,
+    requester: msg.userId,
+    channelId: msg.channelId,
+    text: msg.text,
+    readNotes: ctx.readNotes,
+    readMemory: ctx.readMemory,
+  });
+  const briefsP = deps.github
+    ? loadRepositoryBriefs({
+        github: deps.github,
+        canRead: (repo) => deps.config.canUseRepo(actor, repo),
+        preferredRepos,
+        query: msg.text,
+      })
+    : Promise.resolve(undefined);
+  let attachmentCharsLeft = 24_000;
+  const safeMediaType = (type: string) => redactAndCap(oneLine(stripAnsi(type)), 100);
+  const attachments: NonNullable<OperatorInput["attachments"]>[number][] = [
+    ...(msg.documents ?? []).map((doc) => {
+      const text =
+        doc.mediaType === "application/pdf"
+          ? undefined
+          : redactSecrets(stripAnsi(doc.data)).slice(0, attachmentCharsLeft);
+      attachmentCharsLeft -= text?.length ?? 0;
+      return {
+        name: redactAndCap(oneLine(doc.name ?? "attachment"), 100),
+        mediaType: safeMediaType(doc.mediaType),
+        ...(text ? { text } : {}),
+      };
+    }),
+    ...(msg.images ?? []).map((file) => ({
+      name: redactAndCap(oneLine(file.name ?? "image"), 100),
+      mediaType: safeMediaType(file.mediaType),
+    })),
+    ...(msg.staged ?? []).map((file) => ({
+      name: redactAndCap(oneLine(file.name), 100),
+      mediaType: safeMediaType(file.type),
+    })),
+  ];
+  // An attachment can identify a repository by its product name. A bare PR
+  // number can need a repository question. Neither case makes a roster entry
+  // proof that the repository owns the PR.
+  const list = deps.residentSlugs ?? residentSlugsLister(cfg.execution?.resident);
+  const requestNamesRepo = /(^|[^\w.-])[\w.-]+\/[\w.-]+(?=$|[^\w.-])/i.test(msg.text);
+  const barePrCandidates =
+    barePrNumberOf(msg.text) !== undefined &&
+    !requestNamesRepo &&
+    newestFinishedRun?.repo === undefined &&
+    channelRepo === undefined;
+  const requestCandidates = attachments.length > 0 || barePrCandidates;
+  const candidateRead = requestCandidates ? list?.().catch(() => undefined) : undefined;
+  const [savedTail, candidates, context, repositoryBriefs] = await Promise.all([
+    ctx.readTail?.() ?? Promise.resolve({ turns: [], unavailable: [] } as OperatorTailContext),
+    candidateRead ?? Promise.resolve(undefined),
+    contextP,
+    briefsP,
+  ]);
+  const tailAdmitted =
+    !savedTail.turns.length || (isContextDependencies(savedTail.context) && savedTail.context.status === "known");
+  if (!tailAdmitted) throw new Error("Saved conversation dependencies are unproved.");
+  const tail = [...savedTail.turns];
+  context.unavailable = [...context.unavailable, ...savedTail.unavailable];
+  context.context = mergeContextDependencies(
+    freshContext(),
+    context.context,
+    ...(savedTail.context ? [savedTail.context] : []),
+    ...(repositoryBriefs ? [githubRepositoryDependencies(repositoryBriefs.catalog.map((brief) => brief.repo))] : []),
+  );
+  ctx.onContext?.(context.context);
+  if (repositoryBriefs) {
+    const read = repositoryBriefs.read;
+    repositoryBriefs.read = async (repo) => {
+      const brief = await read(repo);
+      if (brief) {
+        context.context = mergeContextDependencies(context.context, githubRepositoryDependencies([brief.repo]));
+        ctx.onContext?.(context.context);
+      }
+      return brief;
+    };
+  }
+  let requesterTarget: RequesterTarget | undefined;
+  const targetStore = deps.runLedger;
+  const typedTargetStoreUnavailable = !targetStore?.readRequesterTarget || !targetStore.checkpointRequesterTarget;
+  let targetStoreUnavailable = false;
+  if (targetStore?.readRequesterTarget && targetStore.checkpointRequesterTarget) {
+    const key = threadSessionKey(msg.threadKey);
+    try {
+      requesterTarget = (await targetStore.readRequesterTarget(key, msg.userId)) ?? undefined;
+      // Migrate actor-stamped turns still visible in older logs, then checkpoint
+      // this admitted request before the model decides. No bot/foreign turn writes.
+      for (const turn of tail) {
+        if (turn.actor !== msg.userId || !turn.text.startsWith("user: ")) continue;
+        for (const target of requesterTargetsOf(turn.text.slice(6)))
+          requesterTarget = await targetStore.checkpointRequesterTarget(key, msg.userId, target);
+      }
+      for (const target of requesterTargetsOf(msg.text))
+        requesterTarget = await targetStore.checkpointRequesterTarget(key, msg.userId, target);
+    } catch {
+      targetStoreUnavailable = true;
+      requesterTarget = undefined;
+    }
+  }
+  const authorizedRepos = candidates
+    ?.filter((repo) => /^[\w.-]+\/[\w.-]+$/.test(repo) && deps.config.canUseRepo(actor, repo))
+    .sort();
+  const residentRepos = barePrCandidates ? authorizedRepos?.slice(0, 20) : undefined;
+  const repoCandidates = attachments.length > 0 ? authorizedRepos?.slice(0, 50) : undefined;
+  const candidateStatus: NonNullable<OperatorEventFields["repoContext"]>["candidateStatus"] = !requestCandidates
+    ? "skipped"
+    : candidates === undefined
+      ? "unavailable"
+      : authorizedRepos?.length
+        ? authorizedRepos.length > (barePrCandidates ? 20 : 50)
+          ? "truncated"
+          : "available"
+        : "empty";
+  let sources: OperatorSource[] | undefined;
+  let sourceCatalogUnavailable: string | undefined;
+  if (deps.mcp !== undefined) {
+    try {
+      const catalog = await deps.mcp.catalogFor({ userId: msg.userId, channelId: msg.channelId });
+      sources = operatorSources(catalog, projection.presets);
+    } catch (err) {
+      sourceCatalogUnavailable = redactAndCap(oneLine(err instanceof Error ? err.message : String(err)), 160);
+      console.log(`[operator] ${msg.threadKey} MCP catalog unavailable: ${sourceCatalogUnavailable}`);
+    }
+  }
+  // The pending question (routing-and-config item 29): when the thread's
+  // newest run is an `on` question with a proposed line, this event may be its
+  // answer — "yes" binds a preset with saved settings or refuses a registry
+  // proposal without typed input; anything else binds fresh.
+  const pending = ctx.pending;
+  const proposalCommands = deps.commands ? routableCommands(deps.commands) : [];
+  const proposedPreset =
+    pending?.proposal !== undefined && pending.confirmablePreset === true
+      ? (pending.proposalPreset ??
+        confirmablePresetOf(
+          pending.proposal,
+          operatorPresets().map((p) => p.name),
+          proposalCommands,
+        ))
+      : undefined;
+  const legacyPresetProposal =
+    pending?.proposal !== undefined &&
+    pending.confirmablePreset === true &&
+    pending.proposalSettings === undefined &&
+    isYesAnswer(msg.text) &&
+    proposedPreset !== undefined;
+  const unconfirmableCommandProposal =
+    pending?.proposal !== undefined && isYesAnswer(msg.text) && proposedPreset === undefined;
+  const yes =
+    pending?.proposal !== undefined
+      ? bindFromAnswer(
+          msg.text,
+          pending as {
+            proposal: string;
+            proposalSettings?: OperatorRequestSettings;
+            proposalPreset?: string;
+            proposalRequest?: string;
+            confirmablePreset?: true;
+          },
+          proposalCommands,
+        )
+      : undefined;
+  const durableContext = requesterRepoContext(tail, msg.userId, requesterTarget);
+  const provisionalTarget =
+    !targetStoreUnavailable &&
+    !typedTargetStoreUnavailable &&
+    ctx.answeredTarget?.actor === msg.userId &&
+    !durableContext.requesterRepoConflict &&
+    durableContext.requesterRepo === undefined
+      ? ctx.answeredTarget.target
+      : undefined;
+  const input: OperatorInput = {
+    text: msg.text,
+    projection,
+    registryCommands: proposalCommands,
+    tail,
+    context,
+    ...(repositoryBriefs ? { repositoryBriefs, briefs: renderRepositoryBriefs(repositoryBriefs) } : {}),
+    requesterId: msg.userId,
+    ...((provisionalTarget ?? requesterTarget) ? { requesterTarget: provisionalTarget ?? requesterTarget } : {}),
+    ...(targetStoreUnavailable ? { targetStoreUnavailable: true } : {}),
+    ...(typedTargetStoreUnavailable ? { typedTargetStoreUnavailable: true } : {}),
+    ...(attachments.length > 0 ? { attachments } : {}),
+    ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates: repoCandidates.slice(0, 50) } : {}),
+    organization: cfg.organization,
+    ...(residentRepos && residentRepos.length > 0 ? { residentRepos } : {}),
+    ...(candidateStatus === "truncated" && barePrCandidates ? { residentReposTruncated: true } : {}),
+    ...(newestFinishedRun !== undefined ? { newestFinishedRun } : {}),
+    ...(channelRepo !== undefined ? { channelRepo } : {}),
+    // The deployment's declared providers (issue 2088): what a write
+    // proposal may name, and what the parse holds a write's ref against.
+    // The catalogue-bearing blocks (a `baseUrl` of their own — the
+    // aggregators) lead the fallback proposal's choice.
+    providers: Object.keys(cfg.providers ?? {}),
+    catalogueProviders: Object.entries(cfg.providers ?? {})
+      .filter(([, block]) => typeof block.baseUrl === "string" && block.baseUrl.length > 0)
+      .map(([name]) => name),
+    ...(deps.providerModels !== undefined ? { providerModels: deps.providerModels } : {}),
+    ...(sources !== undefined ? { sources } : {}),
+    ...(sourceCatalogUnavailable !== undefined ? { sourceCatalogUnavailable } : {}),
+    ...(pending
+      ? {
+          pendingQuestion:
+            pending.proposal !== undefined
+              ? {
+                  proposal: pending.proposal,
+                  ...(pending.confirmablePreset ? { confirmablePreset: true as const } : {}),
+                }
+              : {},
+        }
+      : {}),
+    ...(ctx.owner ? { owner: ctx.owner } : {}),
+  };
+  return {
+    input,
+    legacyPresetProposal,
+    unconfirmableCommandProposal,
+    yes,
+    provisionalTarget,
+    requesterTarget,
+    targetStore,
+    targetStoreUnavailable,
+    tail,
+    newestFinishedRun,
+    channelRepo,
+    candidateStatus,
+    residentRepos,
+    repoCandidates,
+  };
+}
+
 /**
  * The stage (routing-and-config item 29): under `shadow` or `on`, one
  * operator turn per admitted chat event, ahead of stage A and outside the
@@ -2970,40 +3268,7 @@ export async function operatorThreadTail(
  */
 export async function operatorStage(
   deps: OperatorStageDeps,
-  ctx: {
-    msg: IncomingMessage;
-    mode: "shadow" | "on";
-    /** Saved-context capability with current source and audience checks. */
-    readNotes?: () => Promise<OperatorSavedContext>;
-    readMemory?: () => Promise<{ memory?: string; unavailable: readonly string[]; context?: ContextDependencies }>;
-    readTail?: () => Promise<OperatorTailContext>;
-    onContext?: (context: ContextDependencies) => void;
-    /** Canonical saved decision already admitted by the current context reader. */
-    pending?: ReturnType<typeof pendingQuestionOf>;
-    /** The thread's runs, newest first: the agents for the tail's session keys
-     *  and each record's operator decision for a pending question. */
-    thread?: readonly {
-      finished: boolean;
-      agent?: string;
-      repo?: string;
-      pr?: { number: number; url: string; head?: string };
-      userId?: string;
-      operator?: {
-        mode: string;
-        outcome: string;
-        proposal?: string;
-        questionKind?: "target_repository";
-        questionWriter?: string;
-      };
-    }[];
-    intake?: { verdict: IntakeVerdict; reason: string };
-    /** A validated answer to the original requester's typed write-target question.
-     * It is provisional until this turn binds a repository writer. */
-    answeredTarget?: { actor: string; writer: string; target: RequesterTarget };
-    /** The thread's owner, when a live run, an idle unit or an ended pipeline
-     *  holds it (issue 2027; thread-admission item 9): the turn's projection and prompt read it. */
-    owner?: OperatorThreadOwner;
-  },
+  ctx: ActionContextRequest & { mode: "shadow" | "on" },
 ): Promise<OperatorEventFields | undefined> {
   const { msg, mode } = ctx;
   const now = deps.clock ?? Date.now;
@@ -3074,245 +3339,7 @@ export async function operatorStage(
     commands: deps.commands ? routableCommands(deps.commands) : [],
     allowedPresets: presets.map((p) => p.name).filter((name) => deps.config.canRunAgent(actor, name)),
   });
-  const prepare = async () => {
-    const newestFinishedRun = ctx.thread ? newestFinishedRunOf(ctx.thread) : undefined;
-    const channelRepo = deps.config.scopes(msg.channelId, msg.userId).channel.repo;
-    const preferredRepos = [newestFinishedRun?.repo, channelRepo].filter(
-      (repo): repo is string => repo !== undefined && deps.config.canUseRepo(actor, repo),
-    );
-    const contextP = loadOperatorContext({
-      organization: cfg.organization,
-      requester: msg.userId,
-      channelId: msg.channelId,
-      text: msg.text,
-      readNotes: ctx.readNotes,
-      readMemory: ctx.readMemory,
-    });
-    const briefsP = deps.github
-      ? loadRepositoryBriefs({
-          github: deps.github,
-          canRead: (repo) => deps.config.canUseRepo(actor, repo),
-          preferredRepos,
-          query: msg.text,
-        })
-      : Promise.resolve(undefined);
-    let attachmentCharsLeft = 24_000;
-    const safeMediaType = (type: string) => redactAndCap(oneLine(stripAnsi(type)), 100);
-    const attachments: NonNullable<OperatorInput["attachments"]>[number][] = [
-      ...(msg.documents ?? []).map((doc) => {
-        const text =
-          doc.mediaType === "application/pdf"
-            ? undefined
-            : redactSecrets(stripAnsi(doc.data)).slice(0, attachmentCharsLeft);
-        attachmentCharsLeft -= text?.length ?? 0;
-        return {
-          name: redactAndCap(oneLine(doc.name ?? "attachment"), 100),
-          mediaType: safeMediaType(doc.mediaType),
-          ...(text ? { text } : {}),
-        };
-      }),
-      ...(msg.images ?? []).map((file) => ({
-        name: redactAndCap(oneLine(file.name ?? "image"), 100),
-        mediaType: safeMediaType(file.mediaType),
-      })),
-      ...(msg.staged ?? []).map((file) => ({
-        name: redactAndCap(oneLine(file.name), 100),
-        mediaType: safeMediaType(file.type),
-      })),
-    ];
-    // An attachment can identify a repository by its product name. A bare PR
-    // number can need a repository question. Neither case makes a roster entry
-    // proof that the repository owns the PR.
-    const list = deps.residentSlugs ?? residentSlugsLister(cfg.execution?.resident);
-    const requestNamesRepo = /(^|[^\w.-])[\w.-]+\/[\w.-]+(?=$|[^\w.-])/i.test(msg.text);
-    const barePrCandidates =
-      barePrNumberOf(msg.text) !== undefined &&
-      !requestNamesRepo &&
-      newestFinishedRun?.repo === undefined &&
-      channelRepo === undefined;
-    const requestCandidates = attachments.length > 0 || barePrCandidates;
-    const candidateRead = requestCandidates ? list?.().catch(() => undefined) : undefined;
-    const [savedTail, candidates, context, repositoryBriefs] = await Promise.all([
-      ctx.readTail?.() ?? Promise.resolve({ turns: [], unavailable: [] } as OperatorTailContext),
-      candidateRead ?? Promise.resolve(undefined),
-      contextP,
-      briefsP,
-    ]);
-    const tailAdmitted =
-      !savedTail.turns.length || (isContextDependencies(savedTail.context) && savedTail.context.status === "known");
-    if (!tailAdmitted) throw new Error("Saved conversation dependencies are unproved.");
-    const tail = [...savedTail.turns];
-    context.unavailable = [...context.unavailable, ...savedTail.unavailable];
-    context.context = mergeContextDependencies(
-      freshContext(),
-      context.context,
-      ...(savedTail.context ? [savedTail.context] : []),
-      ...(repositoryBriefs ? [githubRepositoryDependencies(repositoryBriefs.catalog.map((brief) => brief.repo))] : []),
-    );
-    ctx.onContext?.(context.context);
-    if (repositoryBriefs) {
-      const read = repositoryBriefs.read;
-      repositoryBriefs.read = async (repo) => {
-        const brief = await read(repo);
-        if (brief) {
-          context.context = mergeContextDependencies(context.context, githubRepositoryDependencies([brief.repo]));
-          ctx.onContext?.(context.context);
-        }
-        return brief;
-      };
-    }
-    let requesterTarget: RequesterTarget | undefined;
-    const targetStore = deps.runLedger;
-    const typedTargetStoreUnavailable = !targetStore?.readRequesterTarget || !targetStore.checkpointRequesterTarget;
-    let targetStoreUnavailable = false;
-    if (targetStore?.readRequesterTarget && targetStore.checkpointRequesterTarget) {
-      const key = threadSessionKey(msg.threadKey);
-      try {
-        requesterTarget = (await targetStore.readRequesterTarget(key, msg.userId)) ?? undefined;
-        // Migrate actor-stamped turns still visible in older logs, then checkpoint
-        // this admitted request before the model decides. No bot/foreign turn writes.
-        for (const turn of tail) {
-          if (turn.actor !== msg.userId || !turn.text.startsWith("user: ")) continue;
-          for (const target of requesterTargetsOf(turn.text.slice(6)))
-            requesterTarget = await targetStore.checkpointRequesterTarget(key, msg.userId, target);
-        }
-        for (const target of requesterTargetsOf(msg.text))
-          requesterTarget = await targetStore.checkpointRequesterTarget(key, msg.userId, target);
-      } catch {
-        targetStoreUnavailable = true;
-        requesterTarget = undefined;
-      }
-    }
-    const authorizedRepos = candidates
-      ?.filter((repo) => /^[\w.-]+\/[\w.-]+$/.test(repo) && deps.config.canUseRepo(actor, repo))
-      .sort();
-    const residentRepos = barePrCandidates ? authorizedRepos?.slice(0, 20) : undefined;
-    const repoCandidates = attachments.length > 0 ? authorizedRepos?.slice(0, 50) : undefined;
-    const candidateStatus: NonNullable<OperatorEventFields["repoContext"]>["candidateStatus"] = !requestCandidates
-      ? "skipped"
-      : candidates === undefined
-        ? "unavailable"
-        : authorizedRepos?.length
-          ? authorizedRepos.length > (barePrCandidates ? 20 : 50)
-            ? "truncated"
-            : "available"
-          : "empty";
-    let sources: OperatorSource[] | undefined;
-    let sourceCatalogUnavailable: string | undefined;
-    if (deps.mcp !== undefined) {
-      try {
-        const catalog = await deps.mcp.catalogFor({ userId: msg.userId, channelId: msg.channelId });
-        sources = operatorSources(catalog, projection.presets);
-      } catch (err) {
-        sourceCatalogUnavailable = redactAndCap(oneLine(err instanceof Error ? err.message : String(err)), 160);
-        console.log(`[operator] ${msg.threadKey} MCP catalog unavailable: ${sourceCatalogUnavailable}`);
-      }
-    }
-    // The pending question (routing-and-config item 29): when the thread's
-    // newest run is an `on` question with a proposed line, this event may be its
-    // answer — "yes" binds a preset with saved settings or refuses a registry
-    // proposal without typed input; anything else binds fresh.
-    const pending = ctx.pending;
-    const proposalCommands = deps.commands ? routableCommands(deps.commands) : [];
-    const proposedPreset =
-      pending?.proposal !== undefined && pending.confirmablePreset === true
-        ? (pending.proposalPreset ??
-          confirmablePresetOf(
-            pending.proposal,
-            operatorPresets().map((p) => p.name),
-            proposalCommands,
-          ))
-        : undefined;
-    const legacyPresetProposal =
-      pending?.proposal !== undefined &&
-      pending.confirmablePreset === true &&
-      pending.proposalSettings === undefined &&
-      isYesAnswer(msg.text) &&
-      proposedPreset !== undefined;
-    const unconfirmableCommandProposal =
-      pending?.proposal !== undefined && isYesAnswer(msg.text) && proposedPreset === undefined;
-    const yes =
-      pending?.proposal !== undefined
-        ? bindFromAnswer(
-            msg.text,
-            pending as {
-              proposal: string;
-              proposalSettings?: OperatorRequestSettings;
-              proposalPreset?: string;
-              proposalRequest?: string;
-              confirmablePreset?: true;
-            },
-            proposalCommands,
-          )
-        : undefined;
-    const durableContext = requesterRepoContext(tail, msg.userId, requesterTarget);
-    const provisionalTarget =
-      !targetStoreUnavailable &&
-      !typedTargetStoreUnavailable &&
-      ctx.answeredTarget?.actor === msg.userId &&
-      !durableContext.requesterRepoConflict &&
-      durableContext.requesterRepo === undefined
-        ? ctx.answeredTarget.target
-        : undefined;
-    const input: OperatorInput = {
-      text: msg.text,
-      projection,
-      registryCommands: proposalCommands,
-      tail,
-      context,
-      ...(repositoryBriefs ? { repositoryBriefs, briefs: renderRepositoryBriefs(repositoryBriefs) } : {}),
-      requesterId: msg.userId,
-      ...((provisionalTarget ?? requesterTarget) ? { requesterTarget: provisionalTarget ?? requesterTarget } : {}),
-      ...(targetStoreUnavailable ? { targetStoreUnavailable: true } : {}),
-      ...(typedTargetStoreUnavailable ? { typedTargetStoreUnavailable: true } : {}),
-      ...(attachments.length > 0 ? { attachments } : {}),
-      ...(repoCandidates && repoCandidates.length > 0 ? { repoCandidates: repoCandidates.slice(0, 50) } : {}),
-      organization: cfg.organization,
-      ...(residentRepos && residentRepos.length > 0 ? { residentRepos } : {}),
-      ...(candidateStatus === "truncated" && barePrCandidates ? { residentReposTruncated: true } : {}),
-      ...(newestFinishedRun !== undefined ? { newestFinishedRun } : {}),
-      ...(channelRepo !== undefined ? { channelRepo } : {}),
-      // The deployment's declared providers (issue 2088): what a write
-      // proposal may name, and what the parse holds a write's ref against.
-      // The catalogue-bearing blocks (a `baseUrl` of their own — the
-      // aggregators) lead the fallback proposal's choice.
-      providers: Object.keys(cfg.providers ?? {}),
-      catalogueProviders: Object.entries(cfg.providers ?? {})
-        .filter(([, block]) => typeof block.baseUrl === "string" && block.baseUrl.length > 0)
-        .map(([name]) => name),
-      ...(deps.providerModels !== undefined ? { providerModels: deps.providerModels } : {}),
-      ...(sources !== undefined ? { sources } : {}),
-      ...(sourceCatalogUnavailable !== undefined ? { sourceCatalogUnavailable } : {}),
-      ...(pending
-        ? {
-            pendingQuestion:
-              pending.proposal !== undefined
-                ? {
-                    proposal: pending.proposal,
-                    ...(pending.confirmablePreset ? { confirmablePreset: true as const } : {}),
-                  }
-                : {},
-          }
-        : {}),
-      ...(ctx.owner ? { owner: ctx.owner } : {}),
-    };
-    return {
-      input,
-      legacyPresetProposal,
-      unconfirmableCommandProposal,
-      yes,
-      provisionalTarget,
-      requesterTarget,
-      targetStore,
-      targetStoreUnavailable,
-      tail,
-      newestFinishedRun,
-      channelRepo,
-      candidateStatus,
-      residentRepos,
-      repoCandidates,
-    };
-  };
+  const prepare = () => prepareActionContext(deps, ctx, projection);
   let prepared: Awaited<ReturnType<typeof prepare>> | undefined;
   const readContext = async () => (prepared ??= await withinOperatorDeadline(prepare(), signal)).input;
   const needsSavedContext =
