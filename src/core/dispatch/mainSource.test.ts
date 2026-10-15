@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { ALL_GRANTS } from "../authz/grants.js";
 import type { Actor } from "../authz/types.js";
 import type { IncomingMessage, SlackDirectAudience } from "../types.js";
+import { followUpFromInbox } from "./admission.js";
+import { durableInboxMessage } from "../runLedger/inboxMessage.js";
 import { MainSourceTracker } from "./mainSource.js";
 
 const directAudience: SlackDirectAudience = {
@@ -25,7 +27,87 @@ const actor = (msg: IncomingMessage): Actor => ({
   grants: ALL_GRANTS,
 });
 
-describe("private main work source — admitted conversation messages", () => {
+describe("main action source", () => {
+  it("preserves the delivered MCP approval binding through durable follow-up selection", () => {
+    const source = {
+      channelId: "mcp:default",
+      threadKey: "mcp:default:one",
+      userId: "slack:U101",
+      authenticatedAs: "mcp:credential-one",
+      messageId: "1",
+      text: "show config",
+    };
+    const approvalConnection = {
+      id: "connection-one",
+      credentialId: "mcp:credential-one",
+      requestHash: "b".repeat(64),
+      mode: "form" as const,
+    };
+    const followUp = { ...source, messageId: "2", text: "reset this channel", approvalConnection };
+    const input = followUpFromInbox(
+      { seq: 7, message: durableInboxMessage(followUp, followUp.text, 2) },
+      {
+        reply: async () => {},
+        status: async () => ({ update: () => {}, done: async () => {} }),
+        history: async () => [],
+      },
+      0,
+    )!;
+    const sources = new MainSourceTracker(source, actor);
+    sources.accept([input]);
+    expect(sources.get("reset this channel")?.msg).toEqual({ ...followUp, receivedAt: 2 });
+  });
+
+  it("does not restore command authority from merged context or a later ordinary follow-up", () => {
+    const merged = { ...initial, directAudience: undefined, mergedFollowUps: true as const };
+    const sources = new MainSourceTracker(merged, actor);
+    sources.accept([{ userId: initial.userId, text: "set my effort high", messageId: "2", at: 2 }]);
+    expect(sources.select("set my effort high")).toEqual({ kind: "refused", reason: "source_compromised" });
+    const fresh = new MainSourceTracker({ ...merged, mergedFollowUps: undefined }, actor);
+    expect(fresh.select(initial.text)).toMatchObject({ kind: "selected", source: { msg: { messageId: "1" } } });
+    fresh.accept([
+      { userId: initial.userId, text: "set my effort high", messageId: "2", at: 2, mergedFollowUps: true },
+    ]);
+    expect(fresh.select("set my effort high")).toEqual({ kind: "refused", reason: "source_compromised" });
+  });
+
+  it("binds a public requester follow-up without inventing a private audience", () => {
+    const publicMessage: IncomingMessage = {
+      channelId: "mcp:default",
+      threadKey: "mcp:default:one",
+      userId: "slack:U101",
+      authenticatedAs: "mcp:credential-one",
+      messageId: "1",
+      text: "show my configuration",
+    };
+    const sources = new MainSourceTracker(publicMessage, actor);
+    const next = {
+      userId: publicMessage.userId,
+      authenticatedAs: publicMessage.authenticatedAs,
+      messageId: "2",
+      text: "set my effort high",
+      at: 2,
+    };
+    sources.observe(next);
+    expect(sources.get("show my configuration")?.msg.messageId).toBe("1");
+    sources.accept([next]);
+    expect(sources.get("set my effort high")?.msg).toEqual({
+      channelId: "mcp:default",
+      threadKey: "mcp:default:one",
+      userId: "slack:U101",
+      authenticatedAs: "mcp:credential-one",
+      messageId: "2",
+      receivedAt: 2,
+      text: "set my effort high",
+    });
+    sources.accept([{ ...next, messageId: undefined, ledgerSeq: 7 }]);
+    expect(sources.get("set my effort high")?.msg.messageId).toBe("inbox-7");
+    sources.observe({ ...next, authenticatedAs: "mcp:credential-two", messageId: "3" });
+    expect(sources.select("set my effort high")).toEqual({ kind: "refused", reason: "source_compromised" });
+    sources.accept([{ ...next, messageId: "4" }]);
+    expect(sources.select("set my effort high")).toEqual({ kind: "refused", reason: "source_compromised" });
+  });
+
   it("reports a compromised source separately from a quote that is not in the latest turn", () => {
     const sources = new MainSourceTracker(initial, actor);
     expect(sources.select("fix it")).toEqual({

@@ -58,7 +58,7 @@ import { createCheckExecution } from "../checkExecution.js";
 import { typedExecutionDiagnosticOf } from "../../execution/typedExecutionDiagnostic.js";
 import { ensureFirstTest, firstTestContext, FirstTestHeld, type FirstTestReceipt } from "../firstTest.js";
 import { MINUTE_MS, GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
-import type { ResolvedRequest } from "../../config.js";
+import { operatorModeOf, type ResolvedRequest } from "../../config.js";
 import type { AgentDef } from "../../agents/registry.js";
 import { chatActorOf } from "../authz/actor.js";
 import { PLANE_ACTOR_ID } from "../authz/grants.js";
@@ -216,7 +216,7 @@ import type { ChannelVisibility } from "../authz/types.js";
 import type { Clock, Span } from "../trace/types.js";
 import { classifyError } from "../trace/classify.js";
 import { publicEnv } from "../../secrets.js";
-import type { ChannelIO, IncomingMessage, StatusActivity, StatusHandle } from "../types.js";
+import { messageIdOf, type ChannelIO, type IncomingMessage, type StatusActivity, type StatusHandle } from "../types.js";
 import type { DispatchFollowUp, ResumeContext } from "./admission.js";
 import type { RegisteredRun } from "./provision.js";
 import { registerFinishRecord } from "./record.js";
@@ -355,6 +355,8 @@ export interface RunLoopContext {
   preserveOnReattachRefusal?: boolean;
   readyRequirementOverride?: ReadyEnvironmentRequirement;
   resume: ResumeContext | undefined;
+  /** All dispatcher recovery paths, including request-only restarts. */
+  recovered: boolean;
   repoCtx: RepoContext;
   /** Original acknowledged evidence carried through a same-ID request restart. */
   restartBranchIdentityBaseline?: unknown;
@@ -2080,9 +2082,32 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           () => false,
         )
       : false;
-  // A private work source comes only from a delivered requester message, never
+  // An action source comes only from a delivered requester message, never
   // the operator's combined prompt. Follow-ups bind after confirmed delivery.
-  const mainSources = new MainSourceTracker(msg, (source) => chatActorOf(deps.config, source));
+  const mainSources = new MainSourceTracker(
+    msg.messageId === undefined ? { ...msg, messageId: messageIdOf(msg, run.id) } : msg,
+    (source) => chatActorOf(deps.config, source),
+  );
+  const publicCommands =
+    agent.name === "orchestrator" &&
+    channelVisibility !== "dm" &&
+    !privateAudienceRequired(msg) &&
+    operatorModeOf(deps.config.config) === "on" &&
+    ctx.parentRunId === undefined &&
+    ctx.coordinator === undefined &&
+    !ctx.recovered &&
+    !msg.mergedFollowUps;
+  const commandEffectGate = publicCommands ? createMainWorkEffectGate() : mainWorkEffectGate;
+  if (publicCommands) {
+    admitted.inbox.onAccepted((input) => {
+      mainSources.observe(input);
+      if (!mainSources.current()) void commandEffectGate.revoke();
+    });
+    admitted.inbox.onUntrustedFollowUp(() => {
+      mainSources.revoke();
+      void commandEffectGate.revoke();
+    });
+  }
   const recordWorkDecision = async (
     message: IncomingMessage,
     callId: string | undefined,
@@ -2100,30 +2125,33 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     return current;
   };
   const command: ConversationCommand | undefined =
-    mainWorkAudienceAllowed({
-      agentName: agent.name,
-      actor: chatActorOf(deps.config, msg),
-      message: msg,
-      channelVisibility,
-    }) &&
-    verifiedAtOpen &&
-    mainWorkTrusted &&
+    (publicCommands ||
+      (mainWorkAudienceAllowed({
+        agentName: agent.name,
+        actor: chatActorOf(deps.config, msg),
+        message: msg,
+        channelVisibility,
+      }) &&
+        verifiedAtOpen &&
+        mainWorkTrusted)) &&
     ctx.executeCommand
       ? async (quote, id, input, callId) => {
           const source = mainSources.select(quote);
           if (source.kind === "refused")
             return { ok: false, text: "This call does not match the latest requester turn." };
           const trusted = (currentSource: boolean) =>
-            mainWorkTrusted &&
+            (publicCommands
+              ? operatorModeOf(deps.config.config) === "on" && mainSources.current() !== undefined
+              : mainWorkTrusted) &&
             !privateAudienceLatch.revoked &&
             run.control.requested === undefined &&
             (!currentSource || mainSources.get(quote) === source.source);
           const authority = async (currentSource = true) =>
             trusted(currentSource) &&
-            (await verifyDirectAudience!(source.source.msg.directAudience!)).ok &&
+            (publicCommands || (await verifyDirectAudience!(source.source.msg.directAudience!)).ok) &&
             trusted(currentSource);
           return (
-            (await mainWorkEffectGate.run(async () => {
+            (await commandEffectGate.run(async () => {
               if (!(await authority())) return { ok: false, text: "Requester authority is unavailable; nothing ran." };
               return ctx.executeCommand!(source.source.msg, id, input, authority, callId);
             })) ?? { ok: false, text: "Requester authority was withdrawn; nothing ran." }

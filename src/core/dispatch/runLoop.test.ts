@@ -529,6 +529,7 @@ function setup(
     ledgerRun: undefined,
     validateExecutionContext: undefined as RunLoopContext["validateExecutionContext"],
     resume: undefined,
+    recovered: false,
     repoCtx: opts.repoCtx ?? {},
     ...(opts.bearer === null
       ? {}
@@ -2008,6 +2009,144 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(before).toEqual({ kind: "refused", reply: "fixture" });
     expect(after).toMatchObject({ kind: "refused" });
     expect(started).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds shared commands on recovered root conversations and permits a fresh requester", async () => {
+    const offered: boolean[] = [];
+    for (const recovered of [false, true]) {
+      const base = watched(piHarness);
+      const s = setup("Done.", {
+        agent: "orchestrator",
+        userId: "slack:UADMIN",
+        harness: {
+          harnesses: roster({
+            ...base.harness,
+            open: async (deps, run) => {
+              offered.push(run.toolContext.command !== undefined);
+              return base.harness.open(deps, run);
+            },
+          }),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          loopbackUrl: "http://127.0.0.1:8080",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+      });
+      await runLoop(s.deps, { ...s.ctx, recovered, executeCommand: async () => ({ ok: true, text: "ran" }) });
+      s.ending.drain(undefined);
+      await s.writer.settled();
+    }
+    expect(offered).toEqual([true, false]);
+  });
+
+  it("shared command authority belongs to a root conversation rather than a delegated reader", async () => {
+    const offered: boolean[] = [];
+    for (const parentRunId of [undefined, "parent-run"]) {
+      const base = watched(piHarness);
+      const s = setup("Done.", {
+        agent: "orchestrator",
+        userId: "slack:UADMIN",
+        harness: {
+          harnesses: roster({
+            ...base.harness,
+            open: async (deps, run) => {
+              offered.push(run.toolContext.command !== undefined);
+              return base.harness.open(deps, run);
+            },
+          }),
+          registry: new HarnessRegistry(),
+          harnessUrl: "https://bot.example.com",
+          loopbackUrl: "http://127.0.0.1:8080",
+          containerFor: () => new FakeHarnessContainer(),
+        },
+      });
+      await runLoop(s.deps, { ...s.ctx, parentRunId, executeCommand: async () => ({ ok: true, text: "ran" }) });
+      s.ending.drain(undefined);
+      await s.writer.settled();
+    }
+    expect(offered).toEqual([true, false]);
+  });
+
+  it("shared commands use confirmed requester turns and stop on an untrusted queued source", async () => {
+    const selected: Array<{ messageId?: string; authenticatedAs?: string }> = [];
+    let openRun: HarnessRun;
+    const watchedPi = watched(piHarness);
+    const s = setup("Done.", {
+      agent: "orchestrator",
+      userId: "slack:UADMIN",
+      harness: {
+        harnesses: roster({
+          ...watchedPi.harness,
+          open: async (deps, run) => {
+            openRun = run;
+            const command = run.toolContext.command!;
+            expect(await command("initial request", "config.show", {}, "first")).toEqual({
+              ok: true,
+              text: "selected 1",
+            });
+            const input = {
+              userId: "slack:UADMIN",
+              authenticatedAs: "mcp:credential",
+              messageId: "2",
+              text: "latest request",
+              at: 2,
+            };
+            if (!run.inbox) throw new Error("expected the run inbox");
+            run.inbox.push(input);
+            await run.stageFollowUps?.([input]);
+            expect(await command("latest request", "config.show", {}, "undelivered")).toEqual({
+              ok: false,
+              text: "This call does not match the latest requester turn.",
+            });
+            run.confirmedFollowUps?.([input]);
+            expect(await command("latest request", "config.show", {}, "latest")).toEqual({
+              ok: true,
+              text: "selected 2",
+            });
+            expect(await command("latest request", "config.show", {}, "late")).toEqual({
+              ok: false,
+              text: "source unavailable",
+            });
+            expect(await command("latest request", "config.show", {}, "foreign")).toEqual({
+              ok: false,
+              text: "This call does not match the latest requester turn.",
+            });
+            return watchedPi.harness.open(deps, run);
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    await runLoop(s.deps, {
+      ...s.ctx,
+      msg: { ...s.ctx.msg, messageId: "1", authenticatedAs: "mcp:credential", text: "initial request" },
+      channelVisibility: "machine",
+      executeCommand: async (msg, _id, _input, authority, callId) => {
+        if (callId === "late") {
+          await Promise.resolve();
+          if (!openRun.inbox) throw new Error("expected the run inbox");
+          openRun.inbox.push({
+            userId: "slack:UADMIN",
+            authenticatedAs: "mcp:other",
+            messageId: "3",
+            text: "foreign request",
+            at: 3,
+          });
+        }
+        if (!(await authority())) return { ok: false, text: "source unavailable" };
+        selected.push({ messageId: msg.messageId, authenticatedAs: msg.authenticatedAs });
+        return { ok: true, text: `selected ${msg.messageId}` };
+      },
+    });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect(selected).toEqual([
+      { messageId: "1", authenticatedAs: "mcp:credential" },
+      { messageId: "2", authenticatedAs: "mcp:credential" },
+    ]);
   });
 
   it("holds a worker start when a newer requester turn arrives during the decision save", async () => {

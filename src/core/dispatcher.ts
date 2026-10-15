@@ -4722,6 +4722,7 @@ export async function dispatch(
         ? { readyRequirementOverride: readyRequirement }
         : {}),
       resume,
+      recovered,
       repoCtx,
       restartBranchIdentityBaseline: restartEvidence?.branchIdentityBaseline,
       restartPushedBranch: restartEvidence?.pushedBranch,

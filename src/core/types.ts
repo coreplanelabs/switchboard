@@ -63,6 +63,8 @@ export interface SlackDirectAudience {
 }
 
 export interface IncomingMessage {
+  /** Trusted settlement metadata: combined context has no single command source. */
+  mergedFollowUps?: true;
   /** Server-verified connection and normalized request bound to a saved approval. */
   approvalConnection?: { id: string; credentialId: string; requestHash: string; mode?: "form" };
   /**

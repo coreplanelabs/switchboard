@@ -102,6 +102,8 @@ function followUpOf(
   const directAudience = opts.from === undefined ? directAudienceStampOf(msg) : undefined;
   return {
     text,
+    ...(msg.approvalConnection !== undefined ? { approvalConnection: msg.approvalConnection } : {}),
+    ...(msg.mergedFollowUps ? { mergedFollowUps: true as const } : {}),
     userId: msg.userId,
     ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
     // The credential behind a bound person and the app that relayed for them

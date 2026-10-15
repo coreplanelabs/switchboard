@@ -1,7 +1,7 @@
 import type { Actor } from "../authz/types.js";
 import { PLANE_ACTOR_ID } from "../authz/grants.js";
 import { isReissueSteerText } from "../plane/decide.js";
-import type { FollowUpInput } from "../threadAdmission.js";
+import { followUpMessageId, type FollowUpInput } from "../threadAdmission.js";
 import type { IncomingMessage } from "../types.js";
 
 export type MainSourceFailureCode =
@@ -22,8 +22,8 @@ export type MainSourceSelection = { kind: "selected"; source: MainSource } | Mai
 export type MainSourceResolution =
   { kind: "ready"; actor: Actor; msg: IncomingMessage; authorizedRepo: string } | MainSourceRefusal;
 
-/** The model interprets a request. This tracker only binds its tool proposal
- * to the latest delivered, verified person turn in the private pilot DM. */
+/** Bind a proposal to the latest delivered requester turn. Private tools
+ * separately require fresh proof of their one-person audience. */
 export class MainSourceTracker {
   private latest: MainSource | undefined;
   private compromised = false;
@@ -32,39 +32,62 @@ export class MainSourceTracker {
     initial: IncomingMessage,
     private readonly actorOf: (msg: IncomingMessage) => Actor,
   ) {
-    this.latest = { actor: actorOf(initial), msg: initial, selectableText: initial.text };
+    if (initial.mergedFollowUps) this.revoke();
+    else this.latest = { actor: actorOf(initial), msg: initial, selectableText: initial.text };
+  }
+
+  revoke(): void {
+    this.compromised = true;
+    this.latest = undefined;
+  }
+
+  /** Queued input can withdraw authority before delivery. It cannot select
+   * a new request until the runtime confirms that delivery. */
+  observe(input: FollowUpInput): boolean {
+    if (input.userId === PLANE_ACTOR_ID && isReissueSteerText(input.text)) return false;
+    const previous = this.latest;
+    const audience = input.directAudience;
+    const expected = previous?.msg.directAudience;
+    if (
+      this.compromised ||
+      !previous ||
+      input.from ||
+      input.mergedFollowUps ||
+      (input.messageId === undefined &&
+        (expected !== undefined || !Number.isSafeInteger(input.ledgerSeq) || Number(input.ledgerSeq) <= 0)) ||
+      input.userId !== previous.msg.userId ||
+      input.postedBy !== previous.msg.postedBy ||
+      input.authenticatedAs !== previous.msg.authenticatedAs ||
+      input.relayedBy !== previous.msg.relayedBy ||
+      (expected
+        ? audience?.kind !== expected.kind ||
+          audience.channelId !== expected.channelId ||
+          audience.userId !== expected.userId ||
+          audience.threadKey !== expected.threadKey
+        : audience !== undefined)
+    ) {
+      this.revoke();
+      return false;
+    }
+    return true;
   }
 
   accept(inputs: readonly FollowUpInput[]): void {
     for (const input of inputs) {
-      if (input.userId === PLANE_ACTOR_ID && isReissueSteerText(input.text)) continue;
-      const audience = input.directAudience;
-      const previous = this.latest;
-      if (
-        !previous ||
-        input.from ||
-        input.postedBy ||
-        input.authenticatedAs ||
-        input.messageId === undefined ||
-        input.userId !== previous.msg.userId ||
-        audience?.kind !== "slack-unshared-im" ||
-        audience.channelId !== previous.msg.channelId ||
-        audience.userId !== input.userId ||
-        audience.threadKey !== previous.msg.threadKey
-      ) {
-        this.compromised = true;
-        this.latest = undefined;
-        return;
-      }
-      if (this.compromised) return;
+      if (!this.observe(input)) continue;
+      const previous = this.latest!;
       const msg: IncomingMessage = {
         channelId: previous.msg.channelId,
         threadKey: previous.msg.threadKey,
         userId: input.userId,
-        directAudience: audience,
+        ...(input.approvalConnection !== undefined ? { approvalConnection: input.approvalConnection } : {}),
         text: input.text,
-        messageId: input.messageId,
+        messageId: followUpMessageId(input),
         receivedAt: input.at,
+        ...(input.directAudience !== undefined ? { directAudience: input.directAudience } : {}),
+        ...(input.postedBy !== undefined ? { postedBy: input.postedBy } : {}),
+        ...(input.authenticatedAs !== undefined ? { authenticatedAs: input.authenticatedAs } : {}),
+        ...(input.relayedBy !== undefined ? { relayedBy: input.relayedBy } : {}),
         ...(input.userName !== undefined ? { userName: input.userName } : {}),
         ...(input.sourceUrl !== undefined ? { sourceUrl: input.sourceUrl } : {}),
       };
