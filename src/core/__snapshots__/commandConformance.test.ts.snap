@@ -1669,7 +1669,13 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
     "effect": "read",
     "id": "repo.workload",
-    "options": [],
+    "options": [
+      {
+        "name": "resident",
+        "required": false,
+        "type": "integer",
+      },
+    ],
     "resource": "command",
     "surfaces": [
       "chat",

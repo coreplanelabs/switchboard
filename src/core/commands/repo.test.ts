@@ -382,9 +382,61 @@ describe("repo.workload", () => {
     );
   });
 
+  it("selects an active second resident and rejects a report for its sibling", async () => {
+    const residents = vi.fn(async () =>
+      ok({
+        count: 2,
+        residents: [
+          { resource: "repo:acme/api", residentId: "repo:acme/api", replicaOrdinal: 0 },
+          { resource: "repo:acme/api", residentId: "resident-b", replicaOrdinal: 1 },
+        ],
+      }),
+    );
+    const workload = vi.fn(async (_resource: string, _resident?: number) =>
+      ok({ ...report, residentId: "resident-b" }),
+    );
+    const commands = bind({ admin: { ...mockClient(), residents, workload } });
+    expect((await say(commands, "repo workload acme/api --resident 2", mcp("repo:read"))).res).toEqual({
+      ok: true,
+      value: { ...report, residentId: "resident-b" },
+    });
+    expect(residents).toHaveBeenCalledOnce();
+    expect(workload.mock.calls).toEqual([["repo:acme/api", 2]]);
+
+    workload.mockResolvedValueOnce(ok(report));
+    expect((await say(commands, "repo workload acme/api --resident 2", mcp("repo:read"))).res).toMatchObject({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+
+  it("refuses a pending or unknown resident before requesting its workload", async () => {
+    const workload = vi.fn(async (_resource: string, _resident?: number) => ok(report));
+    const residents = vi.fn(async () =>
+      ok({
+        count: 1,
+        residents: [
+          {
+            resource: "repo:acme/api",
+            residentId: "repo:acme/api",
+            replicaOrdinal: 0,
+            pool: { members: ["repo:acme/api", "resident-b"], active: 1, desired: 2 },
+          },
+        ],
+      }),
+    );
+    const commands = bind({ admin: { ...mockClient(), residents, workload } });
+    expect((await say(commands, "repo workload acme/api --resident 2", mcp("repo:read"))).res).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+    expect(workload).not.toHaveBeenCalled();
+  });
+
   it("refuses callers without read access or repository access before reading owner evidence", async () => {
     const workload = vi.fn(async () => ok(report));
-    const commands = bind({ admin: { ...mockClient(), workload }, canUseRepo: () => false });
+    const residents = vi.fn(async () => ok(TWO_RESIDENTS));
+    const commands = bind({ admin: { ...mockClient(), workload, residents }, canUseRepo: () => false });
     expect(await commands.invoke("repo.workload", { args: ["acme/api"] }, mcp("dispatch"))).toMatchObject({
       ok: false,
       error: "unauthorized",
@@ -393,7 +445,12 @@ describe("repo.workload", () => {
       ok: false,
       error: "unauthorized",
     });
+    expect((await say(commands, "repo workload acme/api --resident 2", mcp("repo:read"))).res).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
     expect(workload.mock.calls).toEqual([]);
+    expect(residents).not.toHaveBeenCalled();
     const allowed = bind({ admin: { ...mockClient(), workload } });
     expect(await allowed.invoke("repo.workload", { args: ["acme/api"] }, mcp("repo:read"))).toEqual({
       ok: true,

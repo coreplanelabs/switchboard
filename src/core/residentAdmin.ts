@@ -28,8 +28,8 @@ export interface ResidentAdminClient {
   reconfigure(body: Record<string, unknown>): Promise<ResidentAdminResponse>;
   rebuild(resource: string, dryRun: boolean, full?: boolean, resident?: number): Promise<ResidentAdminResponse>;
   residents(): Promise<ResidentAdminResponse>;
-  /** Read the primary resident's workload count and the records behind it. */
-  workload(resource: string): Promise<ResidentAdminResponse>;
+  /** Read the selected resident's workload count and the records behind it. */
+  workload(resource: string, resident?: number): Promise<ResidentAdminResponse>;
   /** One resident's `{ state, reason, inFlight }` (`GET /status`; 404 when not
    *  onboarded) — what the onboard/rebuild follow-up polls. */
   status(resource: string, resident?: number): Promise<ResidentAdminResponse>;
@@ -69,7 +69,7 @@ export class NullResidentAdminClient implements ResidentAdminClient {
   residents(): Promise<ResidentAdminResponse> {
     return this.answer();
   }
-  workload(_resource: string): Promise<ResidentAdminResponse> {
+  workload(_resource: string, _resident?: number): Promise<ResidentAdminResponse> {
     return this.answer();
   }
   status(_resource: string): Promise<ResidentAdminResponse> {
@@ -94,7 +94,8 @@ type AdminRoute =
   | "/reset"
   | "/residents"
   | "/status"
-  | "/debug";
+  | "/debug"
+  | "/debug-replica";
 
 export function makeResidentAdminClient(baseUrl: string, token: string): ResidentAdminClient {
   // One closure per parent: the unbound client, and the view `withSpan` makes
@@ -147,7 +148,12 @@ export function makeResidentAdminClient(baseUrl: string, token: string): Residen
           { resource, ...(dryRun ? { dryRun: true } : {}), ...(resident === undefined ? {} : { resident }) },
         ),
       residents: () => call("/residents", "GET"),
-      workload: (resource) => call("/debug", "POST", { op: "workload-audit", resource }),
+      workload: (resource, resident) =>
+        call(resident === undefined ? "/debug" : "/debug-replica", "POST", {
+          op: "workload-audit",
+          resource,
+          ...(resident === undefined ? {} : { resident }),
+        }),
       status: (resource, resident) => {
         const route = resident === undefined ? "/status" : "/replica-status";
         return call(

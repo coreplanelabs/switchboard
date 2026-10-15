@@ -2016,6 +2016,14 @@ describe("resident workload admission", () => {
       { resource: "repo:acme/app", residentId: "repo:acme/app", used: 1 },
       { resource: "repo:acme/app", residentId: "resident-secondary", used: 16 },
     ]);
+    expect(
+      [primary, secondary].map((member) =>
+        member.native.logs.map((line) => JSON.parse(line.slice(11))).find((event) => event.event === "workload-audit"),
+      ),
+    ).toMatchObject([
+      { resource: "repo:acme/app", residentId: "repo:acme/app", used: 1 },
+      { resource: "repo:acme/app", residentId: "resident-secondary", used: 16 },
+    ]);
     expect(await secondary.instance.reserveWorkloadSlot("op:new")).toMatchObject({ reason: "workload-full" });
     const refusal = secondary.native.logs
       .map((line) => JSON.parse(line.slice(11)))
@@ -2290,6 +2298,37 @@ describe("resident workload admission", () => {
     expect(h.rows.get("resident:runtimeUnreachable")).toEqual(counter);
   });
 
+  it("logs one bounded successful audit summary and a failed log leaves its report and original obligations unchanged", async () => {
+    const h = workloadResident({ live: 1 });
+    const held = { opOwner: "op:held" };
+    const counter = { count: 2, firstAt: "1970-01-01T00:00:00.000Z", lastAt: "1970-01-01T00:00:01.000Z" };
+    h.rows.set("native-operation:op:held", held);
+    h.rows.set("resident:runtimeUnreachable", counter);
+    const report = await h.instance.getWorkloadAudit("repo:acme/app");
+    expect(report).toMatchObject({
+      used: 2,
+      complete: true,
+      owners: [{ key: "op:held" }, { key: "thread:mcp:owner-0" }],
+    });
+    expect(h.native.logs.map((line) => JSON.parse(line.slice(11)))).toEqual([
+      {
+        event: "workload-audit",
+        resource: "repo:acme/app",
+        residentId: "repo:acme/app",
+        asOf: "1970-01-01T02:46:40.000Z",
+        finishedAt: "1970-01-01T02:46:40.000Z",
+        used: 2,
+        complete: true,
+        ownersOmitted: 0,
+        issues: [],
+      },
+    ]);
+    h.native.failLog = true;
+    expect(await h.instance.getWorkloadAudit("repo:acme/app")).toEqual(report);
+    expect(h.rows.get("native-operation:op:held")).toEqual({ opOwner: "op:held" });
+    expect(h.rows.get("resident:runtimeUnreachable")).toEqual(counter);
+  });
+
   it("bounds audit output and records the original full-capacity contributors without admitting work", async () => {
     const h = workloadResident({ live: 16 });
     expect(await h.instance.reserveWorkloadSlot("op:new")).toMatchObject({ reason: "workload-full", status: 503 });
@@ -2345,7 +2384,9 @@ describe("resident workload admission", () => {
       ),
     ).toBe(true);
     expect(await h.instance.reserveWorkloadSlot("op:new")).toMatchObject({ reason: "workload-full", status: 503 });
-    const line = h.native.logs.find((entry) => entry.startsWith("[workload] "))!;
+    const line = h.native.logs.find(
+      (entry) => entry.startsWith("[workload] ") && JSON.parse(entry.slice(11)).event === "admission-refused",
+    )!;
     expect(new TextEncoder().encode(line).byteLength).toBeLessThanOrEqual(64 * 1024);
     const refusal = JSON.parse(line.slice(11));
     expect(refusal).toMatchObject({ event: "admission-refused", used: 16, complete: false, ownersOmitted: 0 });

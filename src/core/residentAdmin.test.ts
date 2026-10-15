@@ -170,6 +170,21 @@ describe("makeResidentAdminClient (real fetch client)", () => {
     expect(JSON.parse(String(calls[1].init.body))).toEqual({ resource: "repo:acme/api" }); // no dryRun key when false
   });
 
+  it("reads a selected member through the replica debug route without replaying a refused request", async () => {
+    const { calls } = stubFetch(
+      { body: { residentId: "repo:acme/api" } },
+      { status: 404, body: { error: "unknown route" } },
+    );
+    const client = makeResidentAdminClient("https://resident.example", "admin-tok");
+    expect((await client.workload("repo:acme/api")).status).toBe(200);
+    expect((await client.workload("repo:acme/api", 2)).status).toBe(404);
+    expect(calls.map((call) => route(call))).toEqual(["/debug", "/debug-replica"]);
+    expect(calls.map((call) => JSON.parse(String(call.init.body)))).toEqual([
+      { op: "workload-audit", resource: "repo:acme/api" },
+      { op: "workload-audit", resource: "repo:acme/api", resident: 2 },
+    ]);
+  });
+
   it("status(resource) is GET /status?resource=<encoded> with the bearer (item 52: what the provisioning follow-up polls)", async () => {
     const { calls } = stubFetch({ body: { state: "onboarding", reason: "", inFlight: 0 } });
     const client = makeResidentAdminClient("https://resident.example", "admin-tok");
