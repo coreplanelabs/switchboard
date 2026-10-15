@@ -542,7 +542,7 @@ describe("derived naming across surfaces", () => {
     expect(byId["schedule.list"]).toBe("schedule list");
     expect(byId["friction.analyze"]).toBe("friction analyze [source] [--slow-ms <number>] [--in-progress]");
     expect(byId["deploy.plan"]).toBe(
-      "deploy plan [--only <string>] [--skip <string>] [--affected] [--base <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>]",
+      "deploy plan [--only <string>] [--skip <string>] [--affected] [--base <string>] [--force] [--allow-branch] [--retain-maintenance] [--wait-max <integer>] [--poll <integer>]",
     );
     // `deploy all` takes the plan's selection options plus its own --dry-run (the copies it would make).
     expect(byId["deploy.all"]).toBe(`${byId["deploy.plan"].replace("deploy plan", "deploy all")} [--dry-run]`);

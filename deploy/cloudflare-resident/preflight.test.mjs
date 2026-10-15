@@ -1,6 +1,124 @@
 import { describe, expect, it, vi } from "vitest";
 import { BASE_URL_ENV, decide, main, readToken } from "./preflight.mjs";
 
+describe("selected staging maintenance preflight", () => {
+  const attempt = {
+    holdId: "11111111-1111-4111-8111-111111111111",
+    generation: 1,
+    id: "22222222-2222-4222-8222-222222222222",
+    controllerId: "selected-controller",
+    sourceCommit: "a".repeat(40),
+    profileSha256: "3".repeat(64),
+    configSha256: "4".repeat(64),
+    deadline: 1_800_000_060_000,
+  };
+  const received = () => ({
+    ...payload([]),
+    payload: {
+      ...payload([]).payload,
+      stagingMaintenance: {
+        schema: 1,
+        holdId: attempt.holdId,
+        generation: 1,
+        state: "held",
+        attempt: {
+          id: attempt.id,
+          controllerId: "selected-controller",
+          sourceCommit: "a".repeat(40),
+          profileSha256: "3".repeat(64),
+          configSha256: "4".repeat(64),
+          deadline: 1_800_000_060_000,
+        },
+        window: {
+          state: "fenced",
+          disposition: "operator-abandoned",
+          requestEnd: "unobserved",
+          nativeOutcome: "unverified",
+          recordId: "33333333-3333-4333-8333-333333333333",
+          originalRecordSha256: "5".repeat(64),
+          decisionSha256: "6".repeat(64),
+          observedAt: 1_800_000_000_000,
+          stored: 1,
+          excluded: 1,
+          blocking: 0,
+        },
+      },
+    },
+  });
+
+  it("refuses a selected-attempt HTTP denial even when force is requested", async () => {
+    const wire = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(Response.json({ error: "selected attempt refused" }, { status: 409 }));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(
+        await main(["--force"], {
+          RESIDENT_BASE_URL: "https://resident.example.test",
+          RESIDENT_DRAIN_TOKEN: "synthetic-token",
+          RESIDENT_DEPLOY_ATTEMPT: JSON.stringify(attempt),
+        }),
+      ).toBe(1);
+    } finally {
+      wire.mockRestore();
+      log.mockRestore();
+    }
+  });
+
+  it("accepts the selected exact attempt and refuses a borrowed or unverified exception", () => {
+    expect(decide(received(), { attempt }).allow).toBe(true);
+    expect(decide(received(), { attempt: { ...attempt, controllerId: "other-controller" } }).allow).toBe(false);
+    expect(decide(received(), { force: true, attempt: { ...attempt, controllerId: "other-controller" } }).allow).toBe(
+      false,
+    );
+    expect(decide(received()).allow).toBe(false);
+    const changed = received();
+    changed.payload.stagingMaintenance.window.originalRecordSha256 = null;
+    expect(decide(changed, { attempt }).allow).toBe(false);
+    expect(decide(payload([]), { attempt }).allow).toBe(false);
+  });
+
+  it("sends the selected attempt once and reports the preserved unknown request outcome", async () => {
+    const requests = [];
+    const lines = [];
+    const wire = vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      requests.push({ url, body: init.body });
+      return Response.json(received().payload);
+    });
+    const log = vi.spyOn(console, "log").mockImplementation((line) => lines.push(line));
+    const error = vi.spyOn(console, "error").mockImplementation((line) => lines.push(line));
+    try {
+      expect(
+        await main([], {
+          RESIDENT_BASE_URL: "https://resident.example.test",
+          RESIDENT_DRAIN_TOKEN: "synthetic-token",
+          RESIDENT_DEPLOY_ATTEMPT: JSON.stringify(attempt),
+        }),
+      ).toBe(0);
+      expect(requests).toEqual([
+        {
+          url: "https://resident.example.test/deploy-fence",
+          body: JSON.stringify({ attempt }),
+        },
+      ]);
+      const line = lines.find((value) => value.startsWith("[resident-staging-maintenance] "));
+      expect(line && JSON.parse(line.slice("[resident-staging-maintenance] ".length))).toMatchObject({
+        disposition: "operator-abandoned",
+        requestEnd: "unobserved",
+        nativeOutcome: "unverified",
+        stored: 1,
+        excluded: 1,
+        blocking: 0,
+      });
+      expect(lines.join("\n")).not.toContain("synthetic-token");
+    } finally {
+      wire.mockRestore();
+      log.mockRestore();
+      error.mockRestore();
+    }
+  });
+});
+
 describe("resident deploy preflight — main()", () => {
   const operation = (suffix = "first") => ({
     key: `native-operation:http:fixture:run-original:${suffix}`,

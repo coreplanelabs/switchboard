@@ -310,7 +310,9 @@ describe("deploy registration activity", () => {
     const route = source.slice(source.indexOf("async function handleDeployFence"));
     expect(start).toContain("swapFence: true");
     expect(start).toContain("deployFenceReady(fenced, now)");
-    expect(route.indexOf("registry.setDeployFence(versionId)")).toBeLessThan(route.indexOf("getResidentDeployInfo()"));
+    expect(route.indexOf("registry.setDeployFence(versionId, attempt)")).toBeLessThan(
+      route.indexOf("getResidentDeployInfo()"),
+    );
     expect(route.indexOf("getResidentDeployInfo()")).toBeLessThan(route.indexOf("registry.verifyDeployFence("));
     expect(methodOf(registry, "verifyDeployFence")).toContain("deployFenceReady(current, now)");
     expect(attach).toContain("drain.swapFence || !registered");
@@ -332,7 +334,7 @@ describe("deploy registration activity", () => {
     expect(begin).toContain("swapFence");
     expect(begin).toContain("DEPLOY_ADMISSION_KEY_PREFIX");
     expect(end).toContain("DEPLOY_ADMISSION_KEY_PREFIX");
-    expect(verify).toContain("DEPLOY_ADMISSION_KEY_PREFIX");
+    expect(verify).toContain("getDeployObligations(txn)");
     expect(route).toContain("registry.verifyDeployFence(fence.since, fence.until, versionId)");
     for (const name of ["attachThreadTraced", "detachThread", "runOpTraced", "withThreadBusy"]) {
       expect(method(name), `${name} must participate in the admission barrier`).toContain("withDeployAdmission");
@@ -343,7 +345,7 @@ describe("deploy registration activity", () => {
     expect(source).toContain('case "/rebuild":\n            return await withFleetAdmission');
     expect(methodOf(registry, "setDrain")).toContain("swapFence");
     expect(methodOf(registry, "clearDrain")).toContain("postUploadVersion(record, versionId, versionTimestamp)");
-    expect(methodOf(registry, "clearDrain")).toContain("DEPLOY_ADMISSION_KEY_PREFIX");
+    expect(methodOf(registry, "clearDrain")).toContain("getDeployObligations(txn)");
     expect(source.slice(source.indexOf("async function handleReconcile"))).toContain("beginTrackedDeployAdmission");
   });
 

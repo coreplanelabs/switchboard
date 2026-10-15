@@ -137,7 +137,7 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 
 | Command | What it does | Who can run it |
 |---|---|---|
-| `deploy plan [--only <string>] [--skip <string>] [--affected] [--base <string>] [--force] [--allow-branch] [--wait-max <integer>] [--poll <integer>]` | The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why. | admins |
+| `deploy plan [--only <string>] [--skip <string>] [--affected] [--base <string>] [--force] [--allow-branch] [--retain-maintenance] [--wait-max <integer>] [--poll <integer>]` | The production deploy plan: checks, Worker order, preflight handling — computed, nothing executed. With --affected, also which Workers this tree actually needs deployed and why. | admins |
 
 ### `delivery`
 

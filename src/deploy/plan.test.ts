@@ -22,7 +22,13 @@ import {
   type ImagesInput,
 } from "./plan.js";
 import { EXAMPLE_ACCOUNT, profileUrls, type LoadedProfile } from "./profile.js";
-import { TEST_PROFILE, TEST_PUBLISHED_IMAGES, TEST_REGISTRY_PROFILE } from "./testing/profile.js";
+import {
+  TEST_PROFILE,
+  TEST_PUBLISHED_IMAGES,
+  TEST_REGISTRY_PROFILE,
+  TEST_MAINTENANCE,
+  TEST_MAINTENANCE_PROFILE,
+} from "./testing/profile.js";
 
 // The one production deploy order, as a pure plan (README "Deploying on
 // Cloudflare Containers", AGENTS.md "Deploy order"). The runner
@@ -58,6 +64,42 @@ const plan = (
   loaded: LoadedProfile = LOADED,
   images: ImagesInput = IMAGES,
 ) => planDeploy({ ...DEFAULTS, ...opts }, host, loaded, images);
+
+describe("selected staging maintenance deployment", () => {
+  const loaded = { ...LOADED, profile: TEST_MAINTENANCE_PROFILE };
+
+  it("keeps the exact selected attempt in a force-zero Resident plan", () => {
+    const actual = plan({ only: ["resident"], retainMaintenance: true }, installed, loaded);
+    expect(actual.steps).toMatchObject([
+      {
+        name: "resident",
+        retryOnPreflightRefusal: false,
+        maintenance: TEST_MAINTENANCE,
+        setEnv: {
+          RESIDENT_DEPLOY_FORCE: "0",
+          RESIDENT_DEPLOY_ATTEMPT: JSON.stringify({
+            holdId: "11111111-1111-4111-8111-111111111111",
+            generation: 1,
+            ...TEST_MAINTENANCE.attempt,
+          }),
+        },
+      },
+    ]);
+    expect(actual.force).toBe(false);
+  });
+
+  it("refuses retained deployment without the selected policy or Resident step", () => {
+    expect(() => plan({ retainMaintenance: true })).toThrowError(
+      "retained maintenance requires a selected staging Resident policy",
+    );
+    expect(() => plan({ retainMaintenance: true, only: ["bot"] }, installed, loaded)).toThrowError(
+      "retained maintenance requires the Resident step",
+    );
+    expect(() => plan({ only: ["resident"] }, installed, loaded)).toThrowError(
+      "selected staging maintenance requires --retain-maintenance",
+    );
+  });
+});
 
 describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
   it("is state Worker → bot → resident → sandbox, each once, each with its dir and command", () => {

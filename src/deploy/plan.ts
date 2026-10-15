@@ -42,6 +42,7 @@ import {
 } from "./images.js";
 import { WORK_AREA_DIR, type RootMode } from "./operatorRoot.js";
 import { profileUrls, type DeploymentProfile, type LoadedProfile, type WorkerKind } from "./profile.js";
+import { maintenanceProfileProblems, type StagingMaintenancePolicy } from "./residentMaintenance.js";
 import { BOT_CONTAINER_CLASS, BOT_WORKER_DIR, containerApplicationName } from "./configConsumerTarget.js";
 export {
   BOT_CONTAINER_CLASS,
@@ -343,6 +344,7 @@ export interface DeployOptions {
   dryRun: boolean;
   force: boolean;
   allowBranch: boolean;
+  retainMaintenance?: boolean;
   waitMaxMinutes: number;
   pollSeconds: number;
 }
@@ -378,6 +380,8 @@ export interface DeployStep {
   liveGate?: LiveGate;
   /** The named resident Containers application, needed for a Worker-only upload receipt. */
   residentContainerApp?: string;
+  /** Selected staging policy; upload readiness does not release its durable hold. */
+  maintenance?: StagingMaintenancePolicy;
   /** Registry bot image selected by this plan, never parsed from deploy output. */
   botImage?: string;
   /** Account for the raw application list Wrangler deploy uses. */
@@ -495,6 +499,20 @@ export function planDeploy(
   const chosen = workersFor(profile).filter(
     (w) => (selected ? selected.includes(w.name) : true) && !(opts.skip ?? []).includes(w.name),
   );
+  const maintenance = profile.residentMaintenance;
+  if (maintenance && !opts.retainMaintenance)
+    throw new Error("selected staging maintenance requires --retain-maintenance");
+  if (opts.retainMaintenance) {
+    if (!maintenance) throw new Error("retained maintenance requires a selected staging Resident policy");
+    const problems = maintenanceProfileProblems(maintenance, {
+      account: profile.account,
+      images: profile.images,
+      resident: profile.workers.resident,
+    });
+    if (problems.length) throw new Error(problems.join("; "));
+    if (!chosen.some((worker) => worker.name === "resident"))
+      throw new Error("retained maintenance requires the Resident step");
+  }
   const steps = chosen.map<DeployStep>((w) => ({
     name: w.name,
     script: w.script,
@@ -506,6 +524,16 @@ export function planDeploy(
           [w.preflight.baseUrlEnv]: w.baseUrl,
           ...(w.liveGate?.kind === "bot" ? { SWITCHBOARD_BOT_CONTAINER_APP: w.liveGate.containerApp } : {}),
           ...(opts.force ? { [w.preflight.forceEnv]: "1" } : {}),
+          ...(w.name === "resident" && maintenance
+            ? {
+                RESIDENT_DEPLOY_FORCE: opts.force ? "1" : "0",
+                RESIDENT_DEPLOY_ATTEMPT: JSON.stringify({
+                  holdId: maintenance.holdId,
+                  generation: maintenance.generation,
+                  ...maintenance.attempt,
+                }),
+              }
+            : {}),
         }
       : {},
     ...(opts.force && w.preflight ? { forcedBy: w.preflight.forceEnv } : {}),
@@ -515,7 +543,7 @@ export function planDeploy(
     // needs R2 on the credential, checked up front like every capability; an
     // installation without artifacts asks nothing extra of its token.
     capabilities: [...(w.capabilities ?? []), ...(w.name === "bot" && profile.artifacts ? [R2_CAPABILITY] : [])],
-    retryOnPreflightRefusal: !!w.preflight && !opts.force,
+    retryOnPreflightRefusal: !!w.preflight && !opts.force && !(w.name === "resident" && maintenance),
     ...(w.waitMaxMs !== undefined ? { waitMaxMs: w.waitMaxMs } : {}),
     ...(w.preflight?.healthUrl ? { healthUrl: w.preflight.healthUrl } : {}),
     ...(w.drain ? { drain: { url: w.baseUrl, tokenEnv: w.drain.tokenEnv } } : {}),
@@ -531,6 +559,7 @@ export function planDeploy(
         }
       : {}),
     ...(w.residentContainerApp ? { residentContainerApp: w.residentContainerApp } : {}),
+    ...(w.name === "resident" && maintenance ? { maintenance } : {}),
     ...(!w.liveGate && !w.healthBearerEnv ? { wakeUrl: w.healthUrl } : {}),
     // The plan says where a run's points will land (run-metrics.md item 6): the state Worker's
     // template binds the dataset the profile names, and the platform creates it on first write —

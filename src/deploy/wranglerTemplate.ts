@@ -44,6 +44,8 @@ export const GENERATED_HEADER: readonly string[] = [
  *  `{{#if metrics}}` block `{{metrics.dataset}}` (the run-metrics dataset is optional), and inside
  *  an `{{#if resident}}` block `{{resident.script}}` (the resident is optional too). */
 export interface TemplateView {
+  /** Policy JSON escaped for a quoted template value; absent for other Workers. */
+  residentMaintenancePolicy?: string;
   account: string;
   zone: string;
   /** This Worker's script name — wrangler's `name`. */
@@ -111,6 +113,9 @@ export function templateView(
     metrics: profile.metrics,
     bot: { script: profile.workers.bot.script },
     resident: profile.workers.resident ? { script: profile.workers.resident.script } : undefined,
+    ...(kind === "resident" && profile.residentMaintenance
+      ? { residentMaintenancePolicy: JSON.stringify(JSON.stringify(profile.residentMaintenance)).slice(1, -1) }
+      : {}),
   };
 }
 

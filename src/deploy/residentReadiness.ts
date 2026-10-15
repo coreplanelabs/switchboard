@@ -1,6 +1,7 @@
 import { DRAIN, minutesToMs } from "../core/budgets.js";
 import { servedCommit } from "./liveGate.js";
 import type { HealthRead } from "./sandboxLiveGate.js";
+import { stagingAttemptMatches, type StagingMaintenancePolicy } from "./residentMaintenance.js";
 
 /** The registry's cycle backstop releases admissions, not proof of readiness. */
 export const RESIDENT_READY_WAIT_MS = minutesToMs(DRAIN.cycleBoundMinutes);
@@ -33,6 +34,41 @@ export function residentRegistryProblem(
     problems.unshift(`registry not undrained${Array.isArray(held) ? `; held: ${held.join(", ")}` : ""}`);
   }
   return problems.length ? problems.join("; ") : undefined;
+}
+
+/** Retained staging proves image readiness and the exact hold, while the
+ * ordinary readiness predicate continues to require an open fleet. */
+export function residentMaintenanceProblem(
+  read: { status: number; body: unknown } | { error: string },
+  policy: StagingMaintenancePolicy,
+  expectedResources: readonly string[] = [],
+  bootstrap = false,
+): string | undefined {
+  const images = residentImageReportsProblem(read, expectedResources);
+  if (images) return images;
+  if ("error" in read) return "staging maintenance read is unavailable";
+  const held = object(object(read.body)?.stagingMaintenance);
+  const attempt = object(held?.attempt);
+  if (
+    held?.schema !== 1 ||
+    held.state !== "held" ||
+    held.fixtureSha256 !== policy.fixtureSha256 ||
+    held.decisionSha256 !== policy.decisionSha256 ||
+    !stagingAttemptMatches({ policy }, { ...attempt, holdId: held.holdId, generation: held.generation })
+  )
+    return "selected staging maintenance is not held";
+  const window = object(held.window);
+  if (
+    !bootstrap &&
+    (window?.state !== "fenced" ||
+      window.blocking !== 0 ||
+      window.excluded !== 1 ||
+      window.stored !== 1 ||
+      window.requestEnd !== "unobserved" ||
+      window.nativeOutcome !== "unverified")
+  )
+    return "selected staging upload window is unverified";
+  return undefined;
 }
 
 /** Registry image proof without judging the deploy's own drain, which is still in force. */

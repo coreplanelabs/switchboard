@@ -4,7 +4,12 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { baseConfigDocument, ConfigDocumentClient, sameConfigPublicationSnapshot } from "../configDocument.js";
+import {
+  baseConfigDocument,
+  ConfigDocumentClient,
+  sameConfigPublicationSnapshot,
+  sha256Hex,
+} from "../configDocument.js";
 import { planDeploy, type WorkerName } from "./plan.js";
 import {
   defaultRestartRunnerDeps,
@@ -20,7 +25,9 @@ import {
   runDeployPlan,
   type SandboxGateDeps,
 } from "./run.js";
-import { TEST_PROFILE } from "./testing/profile.js";
+import { TEST_PROFILE, TEST_MAINTENANCE } from "./testing/profile.js";
+import { maintenanceProfileMaterial, type DeploymentProfile } from "./profile.js";
+import * as configSources from "./configSource.js";
 import { OPERATOR_ROOT } from "./host.js";
 
 // Exercise the real runner's ordering. Only external process and rendering I/O
@@ -185,24 +192,49 @@ afterEach(() => {
   processes.onInstall = () => {};
 });
 
-function runner(store: ReturnType<typeof stateStore>, only: WorkerName[] = ["memory", "bot"], stateWorker = true) {
+function runner(
+  store: ReturnType<typeof stateStore>,
+  only: WorkerName[] = ["memory", "bot"],
+  stateWorker = true,
+  retained = false,
+) {
   const dir = mkdtempSync(join(tmpdir(), "config-publication-"));
   dirs.push(dir);
   processes.workArea = dir;
   const source = join(dir, "candidate.yaml");
   writeFileSync(source, candidateText);
-  const profile = {
+  const profile: DeploymentProfile = {
     ...TEST_PROFILE,
     configSource: source,
     workers: stateWorker ? TEST_PROFILE.workers : { bot: TEST_PROFILE.workers.bot },
   };
+  if (retained) {
+    profile.workers.resident = { script: "switchboard-staging-resident", hostname: "resident-staging.example.test" };
+    profile.residentMaintenance = {
+      ...TEST_MAINTENANCE,
+      attempt: {
+        ...TEST_MAINTENANCE.attempt,
+        profileSha256: sha256Hex(maintenanceProfileMaterial(profile)),
+        configSha256: sha256Hex(candidateText),
+      },
+    };
+  }
   const profilePath = join(dir, "profile.json");
   writeFileSync(profilePath, JSON.stringify(profile));
   vi.stubEnv("SWITCHBOARD_DEPLOY_PROFILE", profilePath);
   vi.stubEnv("MEMORY_TOKEN", "test");
   vi.stubGlobal("fetch", store.fetchImpl);
   const plan = planDeploy(
-    { dryRun: false, force: false, allowBranch: true, only, skip: undefined, waitMaxMinutes: 1, pollSeconds: 1 },
+    {
+      dryRun: false,
+      force: false,
+      allowBranch: true,
+      only,
+      skip: undefined,
+      waitMaxMinutes: 1,
+      pollSeconds: 1,
+      ...(retained ? { retainMaintenance: true } : {}),
+    },
     { root: { mode: "checkout", path: dir }, hasNodeModules: () => true },
     { profile, origin: "profile", path: profilePath },
     { mode: "build" },
@@ -347,6 +379,34 @@ describe("config publication inputs", () => {
 });
 
 describe("runDeployPlan config publication", () => {
+  it("publishes the checked retained configuration even when its source changes after the read", async () => {
+    const store = stateStore();
+    const h = runner(store, ["memory", "bot", "resident"], true, true);
+    vi.stubEnv("RESIDENT_DRAIN_TOKEN", "synthetic-drain");
+    vi.stubEnv("RESIDENT_READ_TOKEN", "synthetic-read");
+    const original = configSources.readConfigSource;
+    let reads = 0;
+    const reader = vi.spyOn(configSources, "readConfigSource").mockImplementation(async (...args) => {
+      const value = await original(...args);
+      reads++;
+      if (reads === 1) writeFileSync(h.source, candidateText.replace("organization: example", "organization: changed"));
+      return value;
+    });
+    try {
+      const outcome = await runDeployPlan(h.plan, h.io, h.deps);
+      if (outcome.kind !== "ran") throw new Error(JSON.stringify(outcome));
+      expect(outcome).toMatchObject({ kind: "ran" });
+      expect(
+        [...store.snapshots.values()].map(
+          (saved) => (saved.document as { candidate: { yaml: string } }).candidate.yaml,
+        ),
+      ).toEqual([candidateText]);
+      expect(reads).toBe(1);
+    } finally {
+      reader.mockRestore();
+    }
+  });
+
   it("waits for lagging native singleton inventory before confirming the published config", async () => {
     const store = stateStore();
     const h = runner(store);

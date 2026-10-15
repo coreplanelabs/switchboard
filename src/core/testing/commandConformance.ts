@@ -507,11 +507,25 @@ export const COMMAND_FIXTURES: Readonly<
       hints?: SampleHints;
       baseline?: Named;
       folds?: "every-caller";
-      variants?: Record<string, { set?: Named; omit?: readonly string[] }>;
+      variants?: Record<string, { set?: Named; omit?: readonly string[]; expect?: Variant["expect"] }>;
       why: string;
     }
   >
 > = {
+  "deploy.plan": {
+    variants: {
+      "all-options-set": { omit: ["retainMaintenance"] },
+      "retainMaintenance=true": { expect: { ok: false, error: "invalid_input", field: "retainMaintenance" } },
+    },
+    why: "retained maintenance requires an explicitly selected staging profile; its valid and refused paths have dedicated deploy command tests",
+  },
+  "deploy.all": {
+    variants: {
+      "all-options-set": { omit: ["retainMaintenance"] },
+      "retainMaintenance=true": { expect: { ok: false, error: "invalid_input", field: "retainMaintenance" } },
+    },
+    why: "as deploy.plan; the generic production fixture cannot enable a staging risk policy",
+  },
   "runs.list": {
     hints: { channel: "http:smoke", readUser: "http:smoke", readRepo: "acme/smoke" },
     baseline: { channel: "http:smoke", readUser: "http:smoke", readRepo: "acme/smoke" },
@@ -679,7 +693,7 @@ export function variantsOf(cmd: Pick<CommandDef<unknown>, "id" | "args" | "optio
     if (!patch) return v;
     const named = { ...v.named, ...patch.set };
     for (const field of patch.omit ?? []) delete named[field];
-    return { ...v, named };
+    return { ...v, named, expect: patch.expect ?? v.expect };
   });
   return { variants: patched.filter((v) => SURFACE_METAS.some((s) => exposedOn(cmd, s, v))), missingSamples };
 }

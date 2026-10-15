@@ -2,12 +2,41 @@ import { describe, expect, it } from "vitest";
 import { methodOf, readSource } from "./testing/sourceScan";
 import { hasUnexpectedOwnedThreadDir } from "./orphanThreadUsers.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
+import ts from "typescript";
+import { runInNewContext } from "node:vm";
 
 const source = readSource("worker.ts");
 const resident = source.slice(source.indexOf("export class ResidentDO"));
 const method = (name: string) => methodOf(resident, name) ?? "";
 
 describe("resident model credential boundary", () => {
+  it("refuses token access outside a held staging fixture before returning cached credentials", async () => {
+    const body = source.slice(
+      source.indexOf("export async function mintRepoScopedToken"),
+      source.indexOf("/** Short-lived RS256 JWT"),
+    );
+    const compiled = ts.transpileModule(body.replace("export async function", "async function"), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const cached = { token: "synthetic-fixture-token", expiresAtMs: 100_000_000 };
+    const mint = runInNewContext(compiled + "\nmintRepoScopedToken", {
+      registryStub: () => ({
+        getStagingMaintenance: async () => ({ state: "held", policy: { resources: ["repo:acme/api"] } }),
+      }),
+      githubAppConfigured: () => true,
+      githubTokenCache: new Map([
+        ["acme/api", cached],
+        ["elsewhere/private", cached],
+      ]),
+      systemClock: () => 1000,
+      CREDENTIAL_EXPIRY_MARGIN_MS: 60_000,
+    });
+    await expect(mint({}, "elsewhere/private")).rejects.toThrowError(
+      "staging maintenance refuses token access outside the selected fixture",
+    );
+    expect(await mint({}, "acme/api")).toEqual({ token: "synthetic-fixture-token", expiresAtMs: 100_000_000 });
+  });
+
   it("refuses an old thread directory owned by a candidate UID", () => {
     const root = "/workspace/threads";
     const current = `${root}/current-12345678`;

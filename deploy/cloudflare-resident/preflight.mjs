@@ -59,13 +59,14 @@ export function readToken(env) {
 }
 
 /** POST /deploy-fence closes registered reattach and reads activity. Never throws. */
-export async function fetchResidents(baseUrl, token, { timeoutMs = 15_000 } = {}) {
+export async function fetchResidents(baseUrl, token, { timeoutMs = 15_000, attempt } = {}) {
   if (!token) return { ok: false, error: "no bearer in the environment" };
   const url = new URL("/deploy-fence", baseUrl).toString();
   try {
     const res = await fetch(url, {
       method: "POST",
       headers: { authorization: `Bearer ${token}` },
+      ...(attempt ? { body: JSON.stringify({ attempt }) } : {}),
       signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await res.text();
@@ -467,7 +468,72 @@ function deployAdmissionDiagnostic(fetched) {
  * The decision, pure. `fetched` is the result of `fetchResidents`.
  * @returns {{ allow: boolean, forced: boolean, busy: {resource:string,inFlight:number}[], provisioning: {resource:string,state:string}[], interrupting: {resource:string,state:string}[], unknown: {resource:string,error:string}[], message: string }}
  */
-export function decide(fetched, { force = false } = {}) {
+const ATTEMPT_FIELDS = ["id", "controllerId", "sourceCommit", "profileSha256", "configSha256", "deadline"];
+const uuid = (value) => typeof value === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
+const sha256 = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+
+function validAttempt(value) {
+  return (
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    uuid(value.holdId) &&
+    Number.isSafeInteger(value.generation) &&
+    value.generation > 0 &&
+    uuid(value.id) &&
+    typeof value.controllerId === "string" &&
+    /^[A-Za-z0-9_.:-]{1,128}$/.test(value.controllerId) &&
+    typeof value.sourceCommit === "string" &&
+    /^[0-9a-f]{40}$/.test(value.sourceCommit) &&
+    sha256(value.profileSha256) &&
+    sha256(value.configSha256) &&
+    Number.isSafeInteger(value.deadline) &&
+    value.deadline > 0
+  );
+}
+
+/** Consume the authenticated producer's decision without inferring request ending. */
+function matchingMaintenance(receipt, attempt) {
+  if (
+    !validAttempt(attempt) ||
+    !receipt ||
+    receipt.schema !== 1 ||
+    receipt.state !== "held" ||
+    receipt.holdId !== attempt.holdId ||
+    receipt.generation !== attempt.generation ||
+    ATTEMPT_FIELDS.some((field) => receipt.attempt?.[field] !== attempt[field])
+  )
+    return false;
+  return true;
+}
+
+function qualifiedMaintenance(receipt, attempt, active) {
+  if (!matchingMaintenance(receipt, attempt)) return false;
+  const window = receipt.window;
+  return (
+    window?.state === "fenced" &&
+    window.disposition === "operator-abandoned" &&
+    window.requestEnd === "unobserved" &&
+    window.nativeOutcome === "unverified" &&
+    uuid(window.recordId) &&
+    sha256(window.originalRecordSha256) &&
+    sha256(window.decisionSha256) &&
+    Number.isSafeInteger(window.observedAt) &&
+    window.observedAt >= 0 &&
+    window.observedAt < attempt.deadline &&
+    Number.isSafeInteger(window.stored) &&
+    Number.isSafeInteger(window.blocking) &&
+    window.blocking >= 0 &&
+    window.excluded === 1 &&
+    window.stored === window.blocking + 1 &&
+    active === window.blocking
+  );
+}
+
+export function decide(fetched, { force = false, attempt } = {}) {
+  if (attempt && fetched?.ok !== true) force = false;
+  if (fetched?.payload?.stagingMaintenance && !matchingMaintenance(fetched.payload.stagingMaintenance, attempt))
+    force = false;
   const busy = [];
   const provisioning = [];
   const interrupting = [];
@@ -478,6 +544,11 @@ export function decide(fetched, { force = false } = {}) {
   if (!fetched || fetched.ok !== true) {
     problems.push(`resident Worker not consulted: ${fetched?.error ?? "unknown error"}`);
   } else {
+    const maintenance = fetched.payload?.stagingMaintenance;
+    if (attempt || maintenance) {
+      if (!qualifiedMaintenance(maintenance, attempt, fetched.payload?.activeAdmissions))
+        problems.push("selected staging maintenance or deployment attempt is unverified");
+    }
     const drain = fetched.payload?.draining;
     if (
       drain?.swapFence !== true ||
@@ -639,8 +710,31 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     );
     return 2;
   }
-  const fetched = await fetchResidents(baseUrl, readToken(env));
-  const d = decide(fetched, { force });
+  let attempt;
+  if (env.RESIDENT_DEPLOY_ATTEMPT !== undefined) {
+    try {
+      attempt = JSON.parse(env.RESIDENT_DEPLOY_ATTEMPT);
+      if (!validAttempt(attempt)) throw new Error("invalid attempt");
+    } catch {
+      console.error("[resident-preflight] selected staging deployment attempt is invalid");
+      return 2;
+    }
+  }
+  const fetched = await fetchResidents(baseUrl, readToken(env), { attempt });
+  const d = decide(fetched, { force, attempt });
+  if (qualifiedMaintenance(fetched.payload?.stagingMaintenance, attempt, fetched.payload?.activeAdmissions)) {
+    const receipt = fetched.payload.stagingMaintenance;
+    console.log(
+      "[resident-staging-maintenance] " +
+        JSON.stringify({
+          holdId: receipt.holdId,
+          generation: receipt.generation,
+          attemptId: receipt.attempt.id,
+          sourceCommit: receipt.attempt.sourceCommit,
+          ...receipt.window,
+        }),
+    );
+  }
   if (!d.allow) {
     try {
       const diagnostic = deployAdmissionDiagnostic(fetched);

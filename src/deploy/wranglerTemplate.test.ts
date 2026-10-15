@@ -4,7 +4,13 @@ import { stripJsonc } from "../agentEnv/bootstrap.js";
 import { DOCKERFILES, registryName } from "./images.js";
 import { publishedImagesOnHost } from "./run.js";
 import { parseProfile, PROFILE_ENV, PROFILE_EXAMPLE_PATH, PROFILE_PATH, type DeploymentProfile } from "./profile.js";
-import { TEST_PROFILE, TEST_PUBLISHED_IMAGES, TEST_REGISTRY_PROFILE } from "./testing/profile.js";
+import {
+  TEST_PROFILE,
+  TEST_PUBLISHED_IMAGES,
+  TEST_REGISTRY_PROFILE,
+  TEST_MAINTENANCE,
+  TEST_MAINTENANCE_PROFILE,
+} from "./testing/profile.js";
 import {
   GENERATED_HEADER,
   RENDERED_FILE,
@@ -27,6 +33,20 @@ import {
 // hand edit.
 
 describe("templateView", () => {
+  it("renders the selected maintenance policy only for its staging Resident", () => {
+    const view = templateView(TEST_MAINTENANCE_PROFILE, "resident", TEST_PUBLISHED_IMAGES)!;
+    const actual = renderTemplate('{"vars":{"RESIDENT_MAINTENANCE_POLICY":"{{residentMaintenancePolicy}}"}}', view);
+    expect(actual).toMatchObject({ ok: true });
+    if (!actual.ok) throw new Error(actual.problems.join("; "));
+    expect(JSON.parse(JSON.parse(stripJsonc(actual.text)).vars.RESIDENT_MAINTENANCE_POLICY)).toEqual(TEST_MAINTENANCE);
+    expect(templateView(TEST_MAINTENANCE_PROFILE, "bot", TEST_PUBLISHED_IMAGES)).not.toHaveProperty(
+      "residentMaintenancePolicy",
+    );
+    expect(templateView(TEST_PROFILE, "resident", TEST_PUBLISHED_IMAGES)).not.toHaveProperty(
+      "residentMaintenancePolicy",
+    );
+  });
+
   it("binds a Worker's script and hostname, the account and zone, and the URLs the other Workers are reached at", () => {
     const view = templateView(TEST_PROFILE, "resident", TEST_PUBLISHED_IMAGES);
     expect(view).toEqual({

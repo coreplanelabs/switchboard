@@ -714,3 +714,11 @@ A managed PR child uses its parent's admitted publication binding to form the ty
 | Criterion | Proof |
 |---|---|
 | Parent targets survive competing child citations and history; separate repositories can carry the same PR number in one conversation. The persisted target retains parent provenance. | `[unit]` `src/core/repoContext.test.ts::resolveRepoContext: accepted operation authority::resolves each parent work target despite another PR in the same conversation`; `src/core/dispatcher.test.ts::*::a managed review inherits its parent target before reading misleading child text` |
+
+## Explicit staging risk
+
+| Criterion | Proof |
+| --- | --- |
+| One selected staging record stays stored with an immutable abandonment audit and unobserved ending. The common global gate excludes only its exact matching record; a neighbor still blocks. | `[unit]` `deploy/cloudflare-resident/drain.test.ts::global deploy admission evidence::excludes only the exact staging record while retaining its original data and unknown result`; `::commits one exact staging abandonment audit without deleting the request` |
+| Maintenance survives ordinary drain removal, alarm expiry and last-image callbacks. Only an authenticated fresh manual release can reopen the selected fixture after the upload window expires; the original record remains and the window is not renewed. | `[unit]` `deploy/cloudflare-resident/drain.test.ts::global deploy admission evidence::installs a durable hold that refuses new work after ordinary drain removal`; `::keeps maintenance through ordinary alarm and last-image callbacks`; `::uses the authenticated HTTP risk path and releases only through a fresh decision after expiry` |
+| Retained deployment reports image readiness under its exact hold, makes no undrain request and rejects another source. Cancellation retains maintenance. The staging controller waits for an explicit matching release within its deadline. | `[unit]` `src/deploy/residentDrainRun.test.ts::retained staging deployment::*`; `src/deploy/staging.test.ts::isolated staging deployment::waits only for the selected explicit release and stops at its deadline` |

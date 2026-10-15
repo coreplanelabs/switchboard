@@ -17,6 +17,8 @@
 // the file is the runner's job (src/deploy/run.ts).
 
 import { z } from "zod";
+import { maintenanceProfileProblems, stagingMaintenanceSchema } from "./residentMaintenance.js";
+import { canonicalSeedJson } from "../core/runLedger/seedManifest.js";
 
 /** The Workers an installation may run, in deploy order. The project's docs
  *  site (deploy/cloudflare-docs/) is not one of them: it is the project's
@@ -94,6 +96,8 @@ export const profileSchema = z.object({
   /** How the bot, resident and sandbox images reach wrangler (`IMAGE_MODES`).
    *  Absent means `build` — the checkout deploys what it builds. */
   images: z.enum(IMAGE_MODES).default("build"),
+  /** Absent disables staging risk decisions and retained-maintenance deployment. */
+  residentMaintenance: stagingMaintenanceSchema.optional(),
   /** The Cloudflare Access application in front of the bot's dashboards, when
    *  there is one: the team domain the JWT is issued by and the app's AUD. */
   access: z.object({ teamDomain: hostname, aud: z.string().regex(/^[0-9a-f]{64}$/) }).optional(),
@@ -128,6 +132,13 @@ export const profileSchema = z.object({
 
 export type DeploymentProfile = z.infer<typeof profileSchema>;
 
+/** Bind target and credential-source metadata. Configuration bytes have
+ * their own digest because the runner freezes them at a temporary path. */
+export function maintenanceProfileMaterial(profile: DeploymentProfile): string {
+  const { residentMaintenance: _policy, configSource: _source, ...scope } = profile;
+  return canonicalSeedJson(scope);
+}
+
 /** Pure: a parsed, validated profile, or the problems that make it unusable —
  *  each naming the field, never the value. A hostname outside the zone is a
  *  problem: the custom-domain route would be for a zone the account does not own. */
@@ -150,6 +161,14 @@ export function parseProfile(
     .filter((e): e is z.infer<typeof endpoint> => !!e)
     .map((e) => e.script);
   if (new Set(scripts).size !== scripts.length) problems.push("workers: two Workers share a script name");
+  if (p.residentMaintenance)
+    problems.push(
+      ...maintenanceProfileProblems(p.residentMaintenance, {
+        account: p.account,
+        images: p.images,
+        resident: p.workers.resident,
+      }),
+    );
   return problems.length > 0 ? { ok: false, problems } : { ok: true, profile: p };
 }
 
