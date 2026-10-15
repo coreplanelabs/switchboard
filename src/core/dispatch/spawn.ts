@@ -8,10 +8,10 @@
 // `DispatchOptions.parent` naming the parent and depth. Read children inherit
 // the parent's remaining clock and structured context with durable source references. An exact-PR
 // Ship child gets its own lease and no parent seed. What this
-// stage decides for itself it refuses by name before anything is opened: a
+// stage checks these limits before opening a thread: a
 // child cannot spawn (`spawn_depth`), a writer outside a typed Ship batch
 // is refused (`spawn_identity`), a parent with
-// under two minutes left has no budget to hand on (`spawn_budget`), a parent
+// under the child preset floor has no budget to hand on (`spawn_budget`), a parent
 // at `spawn.maxChildren` live read children waits (`spawn_fanout`), a channel with
 // no thread to open has no child (`spawn_unsupported`). Everything else — the
 // agent gate, the profile gate, admission, the repository gates — is the
@@ -124,7 +124,7 @@ export interface ParentRun {
  *  keeps none in this process (a unit context, a harness that holds the
  *  transcript elsewhere): the child then starts from its own thread. */
 export interface SpawnParent extends ParentRun {
-  /** The wall clock the parent has left: a spawned child is always bounded by it. */
+  /** The parent budget at the call. Read children inherit its unspent remainder. */
   remainingMs: number;
   agentName: string;
   /** A typed operator batch survives on the conductor's run event. */
@@ -135,12 +135,14 @@ export interface SpawnParent extends ParentRun {
   parentContext?: ParentContext;
   /** Read the durable context snapshot at the spawn, after the parent call lands. */
   context?: () => Promise<ParentContext>;
+  /** Read the live parent state before opening a thread or dispatching a child. */
+  isActive?: () => boolean;
 }
 
 /** How a spawn ended: the child registered — its run id, its thread and a
  *  link to it — or a refusal by name with the text the child's thread (or the
  *  stage itself) said. `reason` is `spawn_depth`, `spawn_identity`,
- *  `spawn_budget`, `spawn_fanout`, `spawn_unsupported`, `spawn_failed`, or a
+ *  `spawn_budget`, `spawn_parent_ended`, `spawn_fanout`, `spawn_unsupported`, `spawn_failed`, or a
  *  gate's own `dispatch.refuse` name (`agent_allowlist`, `profile_bounded`, …)
  *  relayed. */
 export type SpawnOutcome =
@@ -261,8 +263,8 @@ const describe = (err: unknown): string => (err instanceof Error ? err.message :
 
 /**
  * Start a child run as the requesting user (docs/reference/specs/routing-and-config.md
- * item 20). Refuses depth, budget and fan-out before anything is opened, then
- * asks the parent's channel for a thread, builds the child's message — the
+ * item 20). Checks depth, budget and fan-out before opening a thread. Rechecks
+ * parent liveness and budget after asynchronous preparation, then builds the child's message — the
  * parent's user and channel, the opened thread, the preset directive plus the
  * prompt, `receivedAt` from the clock — and hands it to `dispatch()` with
  * `parent` set. Resolves the moment the child is REGISTERED (its row exists
@@ -276,6 +278,8 @@ export async function spawnChild<D extends SpawnCoreDeps>(
   parent: SpawnParent,
   request: SpawnRequest,
 ): Promise<SpawnOutcome> {
+  const startedAt = deps.clock();
+  let remainingMs = parent.remainingMs;
   const refused = (reason: string, message: string): SpawnOutcome => ({ kind: "refused", reason, message });
   if (parent.depth >= MAX_SPAWN_DEPTH) {
     return refused(
@@ -335,13 +339,20 @@ export async function spawnChild<D extends SpawnCoreDeps>(
       "spawn_budget",
       `a \`${request.preset}\` child needs at least ${PRESET_FLOORS[childPreset]} minutes for its loop and write-up`,
     );
-  const carved = carveChildOfParent(parent.remainingMs, childPreset);
-  if (carved.kind === "refused") {
-    return refused(
-      "spawn_budget",
-      `this run has ${carved.minutes} minute${carved.minutes === 1 ? "" : "s"} left — under the ${carved.floor}-minute floor a \`${request.preset}\` child needs to do useful work; wrap up instead`,
-    );
-  }
+  const admissionProblem = (): SpawnOutcome | undefined => {
+    if (parent.isActive?.() === false)
+      return refused("spawn_parent_ended", "this run has stopped or ended; no new child can start");
+    remainingMs = Math.min(remainingMs, parent.remainingMs - Math.max(0, deps.clock() - startedAt));
+    const carved = carveChildOfParent(remainingMs, childPreset);
+    if (carved.kind === "refused")
+      return refused(
+        "spawn_budget",
+        `this run has ${carved.minutes} minute${carved.minutes === 1 ? "" : "s"} left — under the ${carved.floor}-minute floor a \`${request.preset}\` child needs to do useful work; wrap up instead`,
+      );
+    return undefined;
+  };
+  const initialProblem = admissionProblem();
+  if (initialProblem) return initialProblem;
   if (shipTarget === undefined) {
     const live = deps.registry
       .listActive()
@@ -372,6 +383,8 @@ export async function spawnChild<D extends SpawnCoreDeps>(
   } catch (err) {
     return refused("spawn_context", `the parent's context could not be handed over: ${describe(err)}`);
   }
+  const contextProblem = admissionProblem();
+  if (contextProblem) return contextProblem;
   // A channel that could not open the thread (a Slack answer without a `ts`,
   // a transport failure) is a spawn that failed, by name — never a throw into
   // the parent's tool call.
@@ -381,6 +394,8 @@ export async function spawnChild<D extends SpawnCoreDeps>(
   } catch (err) {
     return refused("spawn_failed", `the channel could not open the child's thread: ${describe(err)}`);
   }
+  const threadProblem = admissionProblem();
+  if (threadProblem) return threadProblem;
   const child: IncomingMessage = {
     channelId: parent.msg.channelId,
     userId: parent.msg.userId,
@@ -418,7 +433,7 @@ export async function spawnChild<D extends SpawnCoreDeps>(
       parent: {
         runId: parent.runId,
         depth: parent.depth + 1,
-        ...(shipTarget === undefined ? { remainingMs: parent.remainingMs } : {}),
+        ...(shipTarget === undefined ? { remainingMs } : {}),
       },
       ...(parentContext ? { parentContext } : {}),
     })
@@ -509,6 +524,7 @@ export function spawnCapabilityFor<D extends SpawnCoreDeps>(
   let previous: Promise<unknown> = Promise.resolve();
   return {
     spawn: (request, at) => {
+      const queuedAt = deps.clock();
       const turn = previous.then(async () => {
         const target = request.preset === "ship" ? request.prompt.trim() : undefined;
         if (target !== undefined && spawnedShipTargets.has(target))
@@ -561,7 +577,11 @@ export function spawnCapabilityFor<D extends SpawnCoreDeps>(
             };
           }
         }
-        const outcome = await spawnChild(withHook, { ...parent, ...at }, request);
+        const outcome = await spawnChild(
+          withHook,
+          { ...parent, ...at, remainingMs: at.remainingMs - Math.max(0, deps.clock() - queuedAt) },
+          request,
+        );
         if (target !== undefined && outcome.kind === "spawned") {
           spawnedShipTargets.add(target);
           spawnedShipRuns.add(outcome.runId);
@@ -600,7 +620,14 @@ export function runToolCapabilities<D extends SpawnCoreDeps>(
   const { core } = deps;
   const service = core.runs ?? createRunsService({ registry: deps.registry, store: core.runStore });
   return {
-    spawn: spawnCapabilityFor(deps, run, service),
+    spawn: spawnCapabilityFor(
+      deps,
+      {
+        ...run,
+        isActive: () => deps.registry.isActive(run.runId, run.control),
+      },
+      service,
+    ),
     runs: {
       service,
       actor: resolveChatActor(run.msg, (id) => core.config.grantsFor(id)),

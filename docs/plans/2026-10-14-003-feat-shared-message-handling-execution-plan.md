@@ -232,3 +232,7 @@ Measure input latency, state-write latency before acknowledgment, candidate rate
 Steps 1–3 establish the shared contract. Step 4 uses it. Step 5 integrates head continuation. Step 6 depends on the schema work; Step 7 verifies the complete enabled path. Test design begins with each step rather than waiting until the end.
 
 Optional deployment/security/linked-issue sources, another broker, cross-partition routing, and the separate GitHub CLI compatibility repair are outside this first implementation. Any later source must use the same front door and prove its own read scope and coverage.
+
+## Progress: shared child launch checks
+
+The existing spawn path is a prerequisite for source-bound delegation in Step 1. It must retain the original parent's launch budget through queued work, context reads and thread creation. It must also check the parent's stop control and local run state before opening a thread and dispatching a child. This cut adds those checks to the existing capability. It preserves the independent lease for an admitted exact-PR Ship unit. It does not expose spawn tools to the orchestrator or complete external intake.
