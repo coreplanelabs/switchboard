@@ -38,3 +38,15 @@ Every Worker's `wrangler.jsonc` is rendered from the deployment profile, never w
 ## Pattern
 
 Derived, not declared. Each deploy step is measured as a span; the live gate is a readiness check on the new instance rather than on the upload.
+
+## Amended 2026-10-14
+
+This re-evaluation preserves the original configuration and state dependencies.
+
+The original order prevented a Bot from writing before Memory migrations existed. It also put the execution Workers after the Bot because their bearers came from its configuration. These requirements still apply. Native execution adds a producer dependency: a new Bot must not send versioned routes to a Resident that does not implement them.
+
+The runner now uses Memory, Resident, Bot, Sandbox. It validates and freezes configuration before upload, then publishes the same prepared bytes before the first selected Resident/Bot consumer. Publication still checks the original source version, hash and Bot application. It checks that application again before Bot upload. Resident-only bootstrap does not publish an unrelated Bot configuration. Secret rotation remains a separate provisioning and restart operation; this order does not establish deployed secret equality.
+
+The Resident step retains its drain, owner protection, image reconciliation and exact Worker readiness checks. Bot retains its SIGTERM handoff and exact application/process/config acceptance. A Bot-only or forced deploy checks Resident protocol support and the complete ready image registry before upload. A missing or old dependency refuses before Bot changes. No native request is downgraded to a legacy route.
+
+A failed Resident step leaves the old Bot in place and keeps the prepared configuration record. Unknown upload or process outcomes remain unknown under the existing partial-deployment rules. The protocol flag proves receiver support; it does not prove kernel capability or physical closure. Those require the separate image and product acceptance tests.

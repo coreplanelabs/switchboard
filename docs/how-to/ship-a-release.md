@@ -41,7 +41,7 @@ Merging tags the version, publishes the release, and deploys the marked Workers 
 
 ```mermaid
 flowchart LR
-    W1[["memory<br/>the state Worker"]] --> W2[["bot"]] --> W3[["resident"]] --> W4[["sandbox"]]
+    W1[["memory<br/>the state Worker"]] --> W2[["resident"]] --> W3[["bot"]] --> W4[["sandbox"]]
 ```
 
 <!-- /generated:deploy-order -->

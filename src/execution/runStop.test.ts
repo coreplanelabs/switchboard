@@ -69,7 +69,7 @@ describe("run runtime stop", () => {
     );
     expect(await stop!(target, ticket)).toEqual({ stopped: true, disposition: "processes-stopped" });
     expect(fetch).toHaveBeenCalledTimes(1);
-    expect(String(fetch.mock.calls[0]![0])).toBe("https://resident.example/cancel-run");
+    expect(String(fetch.mock.calls[0]![0])).toBe("https://resident.example/native/cancel-run");
   });
   it.each([
     { step: "other-target", phase: "exit", cause: "exit-unconfirmed", exitCode: 2 },

@@ -1,5 +1,12 @@
 import { z } from "zod";
 import { isWorkspaceOwner, type WorkspaceOwner } from "../../src/core/workspaceSettlement.js";
+import {
+  nativeScopeRefSchema,
+  nativeScopeClosed,
+  nativeScopeKey,
+  nativeScopeRetirementKey,
+  type NativeScopeRef,
+} from "./nativeScope.js";
 
 export const NATIVE_OPERATION_PREFIX = "native-operation:";
 const RECEIPT_PREFIX = "native-operation-receipt:";
@@ -23,6 +30,7 @@ const nativeSchema = z
     version: z.literal(1),
     closed: z.boolean(),
     threadKey: z.string().min(1).max(256).optional(),
+    scope: nativeScopeRefSchema.optional(),
     pending: z.record(z.string(), attemptSchema).refine((attempts) => Object.keys(attempts).length <= ATTEMPT_LIMIT),
   })
   .strict();
@@ -139,6 +147,20 @@ export function unstartedNativeOperator(value: unknown, owner: string): boolean 
     : Object.keys(value).length === 1;
 }
 
+/** A valid empty admission has issued no native work and can close without a runtime. */
+export function unstartedNativeThread(value: unknown, owner: WorkspaceOwner, threadKey: string): boolean {
+  const parsed = recordSchema.safeParse(value);
+  return (
+    parsed.success &&
+    isWorkspaceOwner(parsed.data) &&
+    parsed.data.runId === owner.runId &&
+    parsed.data.ownerGen === owner.ownerGen &&
+    parsed.data.ownerFence === owner.ownerFence &&
+    parsed.data.native.threadKey === threadKey &&
+    Object.keys(parsed.data.native.pending).length === 0
+  );
+}
+
 /** The existing DO journal owns admission and settlement; native status supplies evidence only. */
 export class NativeOperationJournal {
   constructor(private readonly storage: NativeOperationStorage) {}
@@ -150,6 +172,37 @@ export class NativeOperationJournal {
     const split = key.lastIndexOf(`:${owner.runId}:`);
     if (split <= NATIVE_OPERATION_PREFIX.length) return;
     const threadKey = key.slice(NATIVE_OPERATION_PREFIX.length, split);
+    const scoped = await rows.get<{
+      scope: NativeScopeRef;
+      cancellationId: string;
+      records: Record<string, string>;
+      originalOperationOutcome?: unknown;
+      controllerOwnerGen?: unknown;
+    }>(nativeScopeRetirementKey(threadKey, owner));
+    if (scoped && scoped.records?.[key] === (await recordHash(value))) {
+      const parsed = recordSchema.safeParse(value);
+      const scope = nativeScopeRefSchema.safeParse(scoped.scope);
+      const cancelled = await rows.get<{
+        stopped?: unknown;
+        cancellation?: { id?: unknown; runId?: unknown; ownerGen?: unknown; threadKey?: unknown };
+      }>(`cancelled:${threadKey}:${owner.runId}`);
+      if (
+        scoped.originalOperationOutcome === "unknown" &&
+        parsed.success &&
+        scope.success &&
+        nativeScopeClosed(await rows.get(nativeScopeKey(threadKey, owner)), scope.data) &&
+        JSON.stringify(parsed.data.native.scope) === JSON.stringify(scope.data) &&
+        scope.data.threadKey === threadKey &&
+        JSON.stringify(scope.data.owner) === JSON.stringify(owner) &&
+        cancelled?.stopped === true &&
+        cancelled.cancellation?.id === scoped.cancellationId &&
+        cancelled.cancellation.runId === owner.runId &&
+        cancelled.cancellation.ownerGen === scoped.controllerOwnerGen &&
+        typeof scoped.controllerOwnerGen === "string" &&
+        cancelled.cancellation.threadKey === threadKey
+      )
+        return scoped;
+    }
     const receipt = await rows.get<NativeRuntimeRetirement>(`${RETIREMENT_PREFIX}${threadKey}:${owner.runId}`);
     if (
       !receipt ||
@@ -254,6 +307,27 @@ export class NativeOperationJournal {
         throw new Error("native operation identity already used");
       if (threadKey && isWorkspaceOwner(owner) && (await rows.get(`cancelled:${threadKey}:${owner.runId}`)))
         throw new Error("run cancelled");
+      await rows.put(key, record);
+    });
+  }
+
+  async bindScope(key: string, scope: NativeScopeRef): Promise<void> {
+    await this.storage.transaction(async (rows) => {
+      const record = recordSchema.parse(await rows.get(key));
+      if (
+        !isWorkspaceOwner(record) ||
+        record.runId !== scope.owner.runId ||
+        record.ownerGen !== scope.owner.ownerGen ||
+        record.ownerFence !== scope.owner.ownerFence ||
+        record.native.threadKey !== scope.threadKey ||
+        record.native.closed
+      )
+        throw new Error("native scope owner mismatch");
+      if (record.native.scope && JSON.stringify(record.native.scope) !== JSON.stringify(scope))
+        throw new Error("native scope identity changed");
+      if (!record.native.scope && Object.keys(record.native.pending).length)
+        throw new Error("legacy native submission cannot be adopted");
+      record.native.scope = scope;
       await rows.put(key, record);
     });
   }

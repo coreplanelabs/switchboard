@@ -3,16 +3,12 @@
 // `planDeploy` returns, so the order, the filters, and the force gating are
 // unit-tested here and cannot be bypassed by hand-ordering four `npm run deploy`s.
 //
-// Why this order (README "Deploying on Cloudflare Containers"):
-//   1. memory   — the state Worker: Durable Object migrations must exist before
-//                 the bot writes to them (friction ledger, memory, schedule firings).
-//   2. bot      — the container shim; its own preflight refuses over a rollout in
-//                 progress and only warns about runs in flight, which are handed
-//                 to the next generation on SIGTERM
-//                 (docs/decisions/0019-durable-run-ledger-resume-after-kill.md).
-//   3. resident — per-repo DOs; its preflight refuses while a resident has work
-//                 in flight; needs the admin bearer in the env.
-//   4. sandbox  — the per-thread exec proxy; stateless per run, no preflight.
+// Memory migrations land first. The runner then publishes the already-frozen
+// configuration against the original Bot application, before either consumer.
+// Resident drains, uploads and proves image readiness before Bot starts using
+// native execution routes. Bot retains its normal SIGTERM handoff and live gate.
+// Sandbox retains its separate final image/probe gate. Secret rotation is a
+// separate operation; changing this order does not provision or rotate bearers.
 // Every step strips the ambient CLOUDFLARE_ACCOUNT_ID: it would override the
 // account every wrangler.jsonc pins (a wrong-account deploy happened once).
 // CLOUDFLARE_API_TOKEN is KEPT — it is how CI authenticates — and the runner
@@ -206,7 +202,7 @@ export const WORKER_DIRS: Readonly<Record<WorkerKind, string>> = {
   sandbox: "deploy/cloudflare-sandbox",
 };
 
-/** Canonical order. Never reorder without updating README + AGENTS.md. */
+/** State, prepared configuration, execution producer, then its Bot consumer. */
 export const WORKER_SPECS: readonly WorkerSpec[] = [
   {
     name: "memory",
@@ -217,6 +213,24 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
       lockfile: [{ workspace: "deploy/cloudflare-memory", includeDev: false }],
     },
     why: "state Worker — DO migrations land before the bot writes to them",
+  },
+  {
+    name: "resident",
+    dir: WORKER_DIRS.resident,
+    entry: "deploy/cloudflare-resident/worker.ts",
+    inputs: {
+      paths: ["deploy/cloudflare-resident/"],
+      lockfile: [{ workspace: "deploy/cloudflare-resident", includeDev: false }],
+    },
+    preflight: { forceEnv: "RESIDENT_DEPLOY_FORCE", baseUrlEnv: "RESIDENT_BASE_URL" },
+    requiredEnv: [{ anyOf: RESIDENT_BEARER_ENVS }, { anyOf: [RESIDENT_DRAIN_TOKEN_ENV] }],
+    // A container image like the bot's — checked here too, since an --affected
+    // release can select the resident without the bot — plus the BACKUP_BUCKET
+    // R2 binding wrangler validates on deploy.
+    capabilities: [CONTAINERS_CAPABILITY, R2_CAPABILITY],
+    waitMaxMs: RESIDENT_WAIT_MAX_MS,
+    drain: { tokenEnv: RESIDENT_DRAIN_TOKEN_ENV },
+    why: "per-repo DOs — the runner drains new admissions, then preflight fences registered reattach and refuses executing or unknown owners while retained terminal workspaces stay protected; provisioning refuses and interruptible refresh or restore only warns",
   },
   {
     name: "bot",
@@ -253,24 +267,6 @@ export const WORKER_SPECS: readonly WorkerSpec[] = [
     // The preflight reads the container application and the deploy pushes the image: both need Containers.
     capabilities: [CONTAINERS_CAPABILITY],
     why: "container shim — preflight refuses only over a rollout in progress (runs in flight hand off); done only when the selected application image, running singleton version and exact health commit agree. A rotated bot secret needs no build: `wrangler secret put` alone leaves the running container on its old env — `deploy restart` restarts it on the current application target",
-  },
-  {
-    name: "resident",
-    dir: WORKER_DIRS.resident,
-    entry: "deploy/cloudflare-resident/worker.ts",
-    inputs: {
-      paths: ["deploy/cloudflare-resident/"],
-      lockfile: [{ workspace: "deploy/cloudflare-resident", includeDev: false }],
-    },
-    preflight: { forceEnv: "RESIDENT_DEPLOY_FORCE", baseUrlEnv: "RESIDENT_BASE_URL" },
-    requiredEnv: [{ anyOf: RESIDENT_BEARER_ENVS }, { anyOf: [RESIDENT_DRAIN_TOKEN_ENV] }],
-    // A container image like the bot's — checked here too, since an --affected
-    // release can select the resident without the bot — plus the BACKUP_BUCKET
-    // R2 binding wrangler validates on deploy.
-    capabilities: [CONTAINERS_CAPABILITY, R2_CAPABILITY],
-    waitMaxMs: RESIDENT_WAIT_MAX_MS,
-    drain: { tokenEnv: RESIDENT_DRAIN_TOKEN_ENV },
-    why: "per-repo DOs — the runner drains new admissions, then preflight fences registered reattach and refuses executing or unknown owners while retained terminal workspaces stay protected; provisioning refuses and interruptible refresh or restore only warns",
   },
   {
     name: "sandbox",
@@ -386,6 +382,8 @@ export interface DeployStep {
   botImage?: string;
   /** Account for the raw application list Wrangler deploy uses. */
   botAccount?: string;
+  /** Native execution must be available before this Bot can consume it. */
+  residentExecutionGate?: { baseUrl: string; maintenance?: StagingMaintenancePolicy };
   why: string;
 }
 
@@ -410,7 +408,7 @@ export interface DeployPlan {
   /** The deployment profile the plan was computed from. `deploy all` refuses a plan from the example. */
   profile: { origin: LoadedProfile["origin"]; path: string; selection: DeploymentProfile };
   /** The bot's runtime config: where it comes from, and the state Worker document the runner pushes it to
-   *  before the bot step — no `stateWorkerUrl` when the profile has no state Worker (nothing is pushed). */
+   *  before the first selected Resident/Bot consumer — no `stateWorkerUrl` when the profile has no state Worker (nothing is pushed). */
   config: { source: string; document: string; stateWorkerUrl?: string; originalSource?: ConfigSourceObservation };
   /** Where the planned steps' container images come from (the profile's `images` mode). */
   images: PlanImages;
@@ -496,7 +494,9 @@ export function planDeploy(
   const selected = opts.affected
     ? opts.affected.selected.filter((n) => !opts.only || opts.only.includes(n))
     : opts.only;
-  const chosen = workersFor(profile).filter(
+  const workers = workersFor(profile);
+  const resident = workers.find((worker) => worker.name === "resident");
+  const chosen = workers.filter(
     (w) => (selected ? selected.includes(w.name) : true) && !(opts.skip ?? []).includes(w.name),
   );
   const maintenance = profile.residentMaintenance;
@@ -549,6 +549,9 @@ export function planDeploy(
     ...(w.drain ? { drain: { url: w.baseUrl, tokenEnv: w.drain.tokenEnv } } : {}),
     ...(w.liveGate ? { liveGate: w.liveGate } : {}),
     ...(w.name === "bot" ? { botAccount: profile.account } : {}),
+    ...(w.name === "bot" && resident
+      ? { residentExecutionGate: { baseUrl: resident.baseUrl, ...(maintenance ? { maintenance } : {}) } }
+      : {}),
     ...(w.name === "bot" && images.mode === "registry"
       ? {
           botImage: accountRegistryImage(

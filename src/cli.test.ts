@@ -752,7 +752,7 @@ describe("the CLI without config/config.yaml (a worktree, a fresh clone, CI)", (
     const json = await runCommand(commands, command(["deploy", "plan", "--json"], commands), CLI_CALLER);
     expect(JSON.parse(json.stdout)).toMatchObject({
       dryRun: true,
-      steps: [{ name: "memory" }, { name: "bot" }, { name: "resident" }, { name: "sandbox" }],
+      steps: [{ name: "memory" }, { name: "resident" }, { name: "bot" }, { name: "sandbox" }],
     });
     expect((await runCommand(commands, command(["help", "show"], commands), CLI_CALLER)).exitCode).toBe(0);
     expect((await runCli(commands, { kind: "catalogue" }, CLI_CALLER)).exitCode).toBe(0);

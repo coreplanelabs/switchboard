@@ -80,12 +80,13 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
         const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
         calls.push({ path, body });
         if (path === "/status") return new Response(JSON.stringify({ state: "warm", reason: "" }), { status: 200 });
-        if (path === "/attach") {
+        if (path === "/attach" || path === "/native/attach") {
           return new Response(JSON.stringify({ ...attached, workspace: "/workspace/threads/t/x", user: "worker1" }), {
             status: 200,
           });
         }
-        if (path === "/detach") return new Response(JSON.stringify({ released: true }), { status: 200 });
+        if (path === "/detach" || path === "/native/detach")
+          return new Response(JSON.stringify({ released: true }), { status: 200 });
         throw new Error(`unexpected fetch: ${String(url)}`);
       }),
     );
@@ -124,13 +125,13 @@ describe("attachRoundWorkspace (explicit AgentDef → attach + paired release)",
       logKey: "t-owned",
     });
     expect(claims).toBe(3);
-    expect(calls.find((c) => c.path === "/attach")?.body).toMatchObject({
+    expect(calls.find((c) => c.path === "/native/attach")?.body).toMatchObject({
       runId: "run-1",
       ownerGen: "gen-2",
       ownerFence: 18,
     });
     await round.release({ hardStopped: false });
-    expect(calls.find((c) => c.path === "/detach")?.body).toMatchObject({
+    expect(calls.find((c) => c.path === "/native/detach")?.body).toMatchObject({
       runId: "run-1",
       ownerGen: "gen-2",
       ownerFence: 18,

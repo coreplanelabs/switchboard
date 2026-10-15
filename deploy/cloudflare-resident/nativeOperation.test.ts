@@ -6,6 +6,7 @@ import { sanitizeResidentBody } from "../../src/execution/residentText.js";
 import { validNativeOperationKey } from "./nativeOperation.js";
 import { describe, expect, it } from "vitest";
 import { NativeOperationJournal, type NativeOperationStorage, type NativeOperationRows } from "./nativeOperation.js";
+import { NativeRunScopes } from "./nativeScope.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
 import { RUN_ID_PATTERN } from "../../src/core/runIdentity.js";
 
@@ -979,4 +980,76 @@ describe("native operation HTTP permissions", () => {
     expect(await invalid.json()).toEqual({ error: "exact native operation key and recordHash are required" });
     expect(api.nativeReads()).toBe(1);
   });
+});
+
+describe("native scope execution retirement", () => {
+  async function retained() {
+    const h = fixture();
+    const owner = { runId: "run-a", ownerGen: "gen-a", ownerFence: 3 };
+    const thread = "thread-a";
+    const key = `native-operation:${thread}:run-a:unknown`;
+    const scopes = new NativeRunScopes(h.storage, {
+      request: async (value) => ({
+        stdout: JSON.stringify(
+          value.mode === "inspect"
+            ? { version: 1, boot: "11111111-1111-4111-8111-111111111111" }
+            : {
+                ref: value.ref,
+                closed: value.mode === "close",
+                ...(value.mode === "close" ? { populated: false } : {}),
+              },
+        ),
+        stderr: "",
+        exitCode: 0,
+        timedOut: false,
+      }),
+    });
+    await scopes.birth(thread, owner, true, async () => {});
+    const scope = await scopes.ensure(thread, owner, async () => {});
+    await h.journal.open(key, owner, thread);
+    await h.journal.bindScope(key, scope);
+    const attempt = await h.journal.begin(key, "opaque");
+    await h.journal.close(key);
+    const original = structuredClone(h.rows.get(key));
+    await scopes.close(thread, owner);
+    h.rows.set(`cancelled:${thread}:run-a`, {
+      stopped: true,
+      cancellation: { id: "stop-a", runId: "run-a", ownerGen: "gen-a", threadKey: thread },
+    });
+    h.rows.set(`native-scope-retirement:${thread}:run-a:gen-a:3`, {
+      scope,
+      cancellationId: "stop-a",
+      controllerOwnerGen: "gen-a",
+      originalOperationOutcome: "unknown",
+      records: await h.journal.fingerprints("native-operation:"),
+    });
+    return { ...h, key, attempt, original, owner, scope };
+  }
+  it("releases only execution debt and retains the original unknown journal bytes", async () => {
+    const h = await retained();
+    expect((await h.journal.unresolved()).size).toBe(0);
+    await h.journal.settle(h.key, h.attempt);
+    await h.journal.close(h.key);
+    expect(h.rows.get(h.key)).toEqual(h.original);
+    expect(await h.journal.readEnding(h.key)).toEqual({ kind: "missing" });
+    expect((await h.journal.list()).operations[0]).toMatchObject({
+      retirement: { originalOperationOutcome: "unknown" },
+    });
+  });
+  it.each(["gate", "hash", "ticket", "owner"])(
+    "retains execution debt when %s closure evidence changes",
+    async (fault) => {
+      const h = await retained();
+      if (fault === "gate") h.rows.delete("native-scope:thread-a:run-a:gen-a:3");
+      if (fault === "ticket")
+        h.rows.set("cancelled:thread-a:run-a", { stopped: true, cancellation: { id: "foreign" } });
+      if (fault === "hash") h.rows.set(h.key, { ...(h.original as object), ownerFence: 4 });
+      if (fault === "owner")
+        h.rows.set("native-scope-retirement:thread-a:run-a:gen-a:3", {
+          scope: { ...h.scope, owner: { ...h.owner, runId: "foreign" } },
+        });
+      expect((await h.journal.unresolved()).has(h.key)).toBe(true);
+      expect(await h.journal.readEnding(h.key)).toEqual({ kind: "missing" });
+    },
+  );
 });

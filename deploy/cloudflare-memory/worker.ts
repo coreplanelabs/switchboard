@@ -1,3 +1,4 @@
+import { EXECUTION_PROTOCOL_HEADER } from "../../src/core/runLedger/types.js";
 import {
   captureCheckArchive,
   hasRecordedCheckEvidence,
@@ -2864,7 +2865,7 @@ export class RunHistoryDO extends DurableObject<Env> {
             w.effect.threadKey,
             w.at,
             w.at,
-            JSON.stringify({ request: w.effect.request }),
+            JSON.stringify({ request: w.effect.request, executionUnclaimed: true }),
           );
         }
       }
@@ -5009,7 +5010,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         meta &&
         typeof meta === "object" &&
         !Array.isArray(meta) &&
-        Object.keys(meta).length === 1 &&
+        Object.keys(meta).every((key) => key === "request" || key === "executionUnclaimed") &&
+        (meta.executionUnclaimed === undefined || meta.executionUnclaimed === true) &&
         meta.request &&
         typeof meta.request === "object" &&
         !Array.isArray(meta.request) &&
@@ -6684,8 +6686,15 @@ export class RunHistoryDO extends DurableObject<Env> {
     }
     return { kind: "prepared", preparation: structuredClone(prepared) };
   }
-  async claim(req: ClaimRequest, now: number, originalBodyJson?: string): Promise<ClaimResult> {
+  nativeExecutionRequired(runId: string): boolean {
+    return workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.residentExecution === "native-v1";
+  }
+
+  async claim(req: ClaimRequest, now: number, originalBodyJson?: string, nativeClient = false): Promise<ClaimResult> {
     if (this.liveRow(req.runId)?.state.cancellation !== undefined) throw new PromotionPendingError(req.runId);
+    const originalExecution = workspaceDurabilityArchiveOf(this.allocationArchive(req.runId))?.residentExecution;
+    if (!nativeClient && (originalExecution === "native-v1" || req.meta.residentExecution === "native-v1"))
+      throw new Error("versioned execution client is required");
     const restartArchiveBefore = canonicalSeedJson(this.allocationArchive(req.runId));
     const restartHeld =
       req.phase === "attaching" && req.meta.restartOf === req.runId
@@ -7668,7 +7677,7 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** A booting generation takes every expired or handed-off run (item 31),
    *  atomically, with what a resume needs. */
-  async reclaim(gen: string, now: number, leaseMs: number): Promise<ReclaimedRun[]> {
+  async reclaim(gen: string, now: number, leaseMs: number, nativeClient = false): Promise<ReclaimedRun[]> {
     const candidates = selectReclaim(
       this.sql.exec<LiveRow>("SELECT * FROM live_runs").toArray().map(rowToLive),
       now,
@@ -7694,6 +7703,27 @@ export class RunHistoryDO extends DurableObject<Env> {
               item.raw === canonicalSeedJson(this.allocationArchive(row.runId)),
           ),
       )) {
+        const prior = workspaceDurabilityArchiveOf(this.allocationArchive(row.runId));
+        if (prior?.residentExecution === "native-v1" && !nativeClient) continue;
+        if (row.meta.executionUnclaimed === true && this.allocationArchive(row.runId) === undefined) {
+          if (
+            row.phase !== "attaching" ||
+            Object.keys(row.state).length !== 0 ||
+            row.system !== "" ||
+            row.tools.length !== 0
+          )
+            continue;
+          this.retainAllocation({
+            version: 1,
+            runId: row.runId,
+            startedAt: row.startedAt,
+            allocation: null,
+            ...(nativeClient ? { residentExecution: "native-v1" as const } : {}),
+          });
+          const { executionUnclaimed: _unclaimed, ...meta } = row.meta;
+          row.meta = { ...meta, ...(nativeClient ? { residentExecution: "native-v1" as const } : {}) };
+          this.sql.exec("UPDATE live_runs SET meta_json=? WHERE run_id=?", JSON.stringify(row.meta), row.runId);
+        }
         const phase = reclaimPhase(row.phase);
         const state = { ...row.state };
         delete state.pausedForRetry;
@@ -8107,12 +8137,16 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   async preservationOwner(runId: string, owner?: WorkspaceOwner): Promise<unknown> {
     const live = this.sql
-      .exec<Pick<LiveRow, "run_id" | "thread_key" | "owner_gen" | "phase" | "state_json" | "meta_json">>(
-        `SELECT run_id, thread_key, owner_gen, phase, state_json, meta_json FROM live_runs WHERE run_id = ?`,
+      .exec<Pick<LiveRow, "run_id" | "thread_key" | "owner_gen" | "phase" | "state_json" | "meta_json" | "started_at">>(
+        `SELECT run_id, thread_key, owner_gen, phase, state_json, meta_json, started_at FROM live_runs WHERE run_id = ?`,
         runId,
       )
       .toArray()[0];
     if (live) {
+      const rawBirth = this.allocationArchive(runId);
+      const birth = workspaceDurabilityArchiveOf(rawBirth);
+      if (rawBirth !== undefined && (!birth || birth.runId !== live.run_id || birth.startedAt !== live.started_at))
+        return { kind: "unknown" };
       let binding: unknown;
       let workspaceThreadKey: string | undefined;
       try {
@@ -8125,6 +8159,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         kind: "live",
         row: {
           runId: live.run_id,
+          ...(birth?.residentExecution === "native-v1" ? { residentExecution: "native-v1" } : {}),
           threadKey: live.thread_key,
           ownerGen: live.owner_gen,
           phase: live.phase,
@@ -12215,6 +12250,7 @@ async function handleLedger(
   originalBody?: string,
   expectedSeed?: ExpectedSeedManifest,
   requestId?: string,
+  nativeClient = false,
 ): Promise<Response> {
   if (typeof body !== "object" || body === null) return json({ error: "body must be a JSON object" }, 400);
   const b = body as Record<string, unknown>;
@@ -12693,12 +12729,17 @@ async function handleLedger(
     }
     const req = parseClaim(b);
     if (!req.ok) return json({ error: req.error }, 400);
+    if (
+      !nativeClient &&
+      (req.value.meta.residentExecution === "native-v1" || (await stub.nativeExecutionRequired(req.value.runId)))
+    )
+      return json({ error: "versioned execution client is required" }, 409);
     const pending = await stub.promotionHold(req.value.runId, req.value.gen);
     if (pending) {
       const saved = await stub.readPromotion({ runId: req.value.runId, gen: req.value.gen });
       if (saved.kind === "held" || saved.preparation.bodyJson !== originalBody) return json(pending, 423);
     }
-    const r = await stub.claim(req.value, now, originalBody);
+    const r = await stub.claim(req.value, now, originalBody, nativeClient);
     console.log(
       `[runs/claim] ${key.value} ${req.value.runId} on ${req.value.threadKey} → ${r.ok ? "claimed" : r.reason}`,
     );
@@ -12742,7 +12783,7 @@ async function handleLedger(
     // The RPC type mapping reads the row's open-ended JSON fields as
     // unserializable; the values are plain JSON, so the cast only restores the
     // declared shape.
-    const runs = (await stub.reclaim(g.value, at, lease.value)) as unknown as ReclaimedRun[];
+    const runs = (await stub.reclaim(g.value, at, lease.value, nativeClient)) as unknown as ReclaimedRun[];
     console.log(`[runs/reclaim] ${key.value} ${g.value} took ${runs.length} run(s)`);
     // The reclaim sweep's answer carries the plane's open effects like every
     // heartbeat answer does (record 0064; orchestration-plane item 7) — empty until a unit writes them.
@@ -13302,9 +13343,10 @@ async function handleLedger(
 
 /** The `/runs/*` routes. Observability lines carry ids + counts only —
  *  never event text. A bad `id` is 400 before any DO call. */
-async function handleRuns(pathname: string, body: unknown, env: Env): Promise<Response> {
+async function handleRuns(pathname: string, body: unknown, env: Env, nativeClient = false): Promise<Response> {
   const stub = (key: string) => env.RUNS.get(env.RUNS.idFromName(key));
-  if (LEDGER_ROUTES.has(pathname)) return handleLedger(pathname, body, env);
+  if (LEDGER_ROUTES.has(pathname))
+    return handleLedger(pathname, body, env, undefined, undefined, undefined, nativeClient);
   if (pathname.startsWith("/runs/review-feedback/")) {
     if (!body || typeof body !== "object" || Array.isArray(body))
       return json({ error: "invalid review feedback request" }, 400);
@@ -13514,8 +13556,9 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
             originalBody,
             expectedSeed,
             storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER)),
+            request.headers.get(EXECUTION_PROTOCOL_HEADER) === "native-v1",
           )
-        : handleRuns(url.pathname, body, env));
+        : handleRuns(url.pathname, body, env, request.headers.get(EXECUTION_PROTOCOL_HEADER) === "native-v1"));
     } catch (error) {
       if (error instanceof PromotionPendingError) throw error;
       const request = await storeRequestWitness(url.pathname, originalBody);

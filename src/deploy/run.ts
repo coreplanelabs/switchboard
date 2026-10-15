@@ -1941,6 +1941,36 @@ async function deployStepTraced(
 ): Promise<StepOutcome> {
   if (step.maintenance && step.maintenance.attempt.sourceCommit !== expectedCommit)
     return { ok: false, live: "not deployed", reason: "selected staging source does not match the upload" };
+  if (step.residentExecutionGate) {
+    const bearer = RESIDENT_BEARER_ENVS.map((name) => deps.env[name]).find(Boolean);
+    if (!bearer) return { ok: false, live: "not deployed", reason: "native Resident readiness bearer is missing" };
+    const base = step.residentExecutionGate.baseUrl;
+    const [health, registry] = await Promise.all([
+      deps.readHealth(new URL("/healthz", base).toString(), undefined, LIVE_GATE_POLL_MS, deps.signal),
+      deps.readHealth(new URL("/residents", base).toString(), bearer, LIVE_GATE_POLL_MS, deps.signal),
+    ]);
+    const features = "body" in health ? health.body?.features : undefined;
+    if (
+      !("body" in health) ||
+      health.status !== 200 ||
+      health.body?.ok !== true ||
+      typeof features !== "object" ||
+      features === null ||
+      Array.isArray(features) ||
+      !("nativeRunScopes" in features) ||
+      features.nativeRunScopes !== "native-v1"
+    )
+      return { ok: false, live: "not deployed", reason: "Resident cannot serve native execution; Bot upload refused" };
+    const maintenance = step.residentExecutionGate.maintenance;
+    const problem = maintenance
+      ? maintenance.attempt.sourceCommit !== expectedCommit || maintenance.attempt.deadline <= deps.now()
+        ? "selected staging authority is not current for the Bot upload"
+        : residentMaintenanceProblem(registry, maintenance, [], false, "completed")
+      : residentRegistryProblem(registry);
+    if (problem)
+      return { ok: false, live: "not deployed", reason: `native Resident dependency is not ready: ${problem}` };
+    if (deps.signal?.aborted) return { ok: false, live: "not deployed", reason: "deployment cancelled" };
+  }
   const started = deps.now();
   // A step may carry its own budget (the resident's, sized for runs and a
   // provisioning rather than a rollout — plan.ts RESIDENT_WAIT_MAX_MS). A
@@ -2723,14 +2753,17 @@ async function runSelectedDeployPlan(
   if (planeDeploy) await postPlaneDeploy(planeDeploy, "pending", expectedCommit);
   const results: DeployStepResult[] = [];
   let windowSettled = true;
+  let configPublished = false;
+  const configConsumerStep = plan.steps.find((step) => step.name === "bot");
   try {
     for (const step of plan.steps) {
       if (deps.signal?.aborted) break;
-      if (step.name === "bot" && configPublication) {
-        // After the memory step (the document lives there), before the bot rolls (it reads it on start).
+      if ((step.name === "resident" || step.name === "bot") && configPublication) {
+        // Publish the same prepared bytes after Memory and before either consumer.
+        // The original Bot application remains the source authority.
         const currentApp =
-          step.liveGate?.kind === "bot"
-            ? await deps.readAppState(step.dir, step.liveGate.containerApp)
+          configConsumerStep?.liveGate?.kind === "bot"
+            ? await deps.readAppState(configConsumerStep.dir, configConsumerStep.liveGate.containerApp)
             : { error: "bot application unavailable" };
         if (cancelled()) break;
         if (!configSource || !unchangedConfigSourceApplication(configSource, currentApp)) {
@@ -2742,20 +2775,23 @@ async function runSelectedDeployPlan(
           });
           break;
         }
-        const pushed = await publishConfigPublication(configPublication, { env: process.env });
-        if (cancelled()) break;
-        if (!pushed.ok) {
-          results.push({
-            name: step.name,
-            script: step.script,
-            live: "not deployed",
-            status: `FAILED: config push — ${pushed.problem}`,
-          });
-          break;
+        if (!configPublished) {
+          const pushed = await publishConfigPublication(configPublication, { env: process.env });
+          if (cancelled()) break;
+          if (!pushed.ok) {
+            results.push({
+              name: step.name,
+              script: step.script,
+              live: "not deployed",
+              status: `FAILED: config push — ${pushed.problem}`,
+            });
+            break;
+          }
+          configPublished = true;
+          io.log(
+            `[deploy:all] config: ${pushed.how} → document "${configPublication.key}" v${pushed.version} on ${stateWorkerUrl} (sha256 ${pushed.sha256.slice(0, 12)}, ${pushed.bytes} bytes)`,
+          );
         }
-        io.log(
-          `[deploy:all] config: ${pushed.how} → document "${configPublication.key}" v${pushed.version} on ${stateWorkerUrl} (sha256 ${pushed.sha256.slice(0, 12)}, ${pushed.bytes} bytes)`,
-        );
       }
       if (deps.signal?.aborted) break;
       if (!(await ensureNodeModules(step, io, deps.signal))) {

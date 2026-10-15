@@ -4,6 +4,7 @@ import {
   credentialInspectionInputSchema,
   emptyCredentialInspection,
 } from "../../src/execution/credentialInspection.js";
+import { NativeRunScopes } from "./nativeScope.js";
 import { NativeOperationJournal } from "./nativeOperation.js";
 import { ErrorCode, OperationInterruptedError, RPCTransportError } from "@cloudflare/sandbox/errors";
 import { runInNewContext } from "node:vm";
@@ -51,6 +52,7 @@ describe("resident credential diagnostic", () => {
     };
     const Constructor = runInNewContext(`${compiled}\nResident`, {
       NativeOperationJournal,
+      NativeRunScopes,
       credentialInspectionInputSchema,
       emptyCredentialInspection,
       inspectResidentCredentials,
@@ -88,10 +90,12 @@ describe("resident credential diagnostic", () => {
     });
     const instance = new Constructor(),
       scope = { key, active: true },
-      threadScope = new AsyncLocalStorage();
+      threadScope = new AsyncLocalStorage(),
+      opScope = new AsyncLocalStorage();
     Object.assign(instance, {
       ctx: { storage },
       threadOperationScope: threadScope,
+      opOperationScope: opScope,
       workspaceExclusiveOpsInFlight: new Set(),
       memoryGate: async () => null,
       isRuntimeActive: async () => true,
@@ -106,9 +110,9 @@ describe("resident credential diagnostic", () => {
     });
     instance.withThreadBusy = async (_thread: string, fn: () => Promise<unknown>) => {
       const journal = new NativeOperationJournal(storage);
-      await journal.open(key, { runId: "run-one", ownerGen: "generation", ownerFence: 1 }, "mcp:credential");
+      await journal.open(key, { opOwner: "op:legacy-credential" });
       try {
-        return await threadScope.run(scope, fn);
+        return await opScope.run(scope, fn);
       } finally {
         scope.active = false;
         await journal.close(key);
@@ -213,22 +217,5 @@ describe("resident credential diagnostic", () => {
         emptyCredentialInspection(),
       );
     expect(execute).not.toHaveBeenCalled();
-  });
-  it("wires only the typed operator route and a single nonrecovering process transport", () => {
-    const source = readSource("worker.ts");
-    const method = methodOf(source.slice(source.indexOf("export class ResidentDO")), "inspectThreadCredentials") ?? "";
-    expect(source).toContain('"/inspect-credentials": { scope: "operator", method: "POST" }');
-    expect(method).toContain("inspectResidentCredentials");
-    expect(method).toContain("createExtensionProcessSandbox(this).exec");
-    expect(method).not.toMatch(
-      /threadRunCapped|threadPreflight|ensureHydrated|this\.run\(|console\.|withLevels|recoverCapturedOutput/,
-    );
-    const route = source.slice(
-      source.indexOf("async function handleInspectCredentials"),
-      source.indexOf("async function handlePublish"),
-    );
-    expect(route).toContain("parseCredentialInspection");
-    expect(route).toContain("emptyCredentialInspection");
-    expect(route).not.toMatch(/catchAllErr|streamThreadExec|withLevels/);
   });
 });

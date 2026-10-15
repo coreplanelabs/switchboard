@@ -700,13 +700,13 @@ describe("makeExecutor resident selection", () => {
         calls.push(path);
         bodies.push(init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined);
         if (path === "/status") return new Response(JSON.stringify({ state: "warm", reason: "" }));
-        if (path === "/attach") {
+        if (path === "/native/attach") {
           ownsRun = false;
           return new Response(
             JSON.stringify({ workspace: "/workspace/threads/x/master", ref: "master", sha: "abc", user: "worker2" }),
           );
         }
-        if (path === "/detach") return new Response(JSON.stringify({ released: true }));
+        if (path === "/native/detach") return new Response(JSON.stringify({ released: true }));
         throw new Error(`unexpected fetch: ${path}`);
       }),
     );
@@ -719,7 +719,7 @@ describe("makeExecutor resident selection", () => {
       makeExecutor(residentOpts(), { ...repoCtx(), runId: "run-1", ownerGen: "gen-1", residentClaim: claim }),
     ).rejects.toThrow("resident claim refused: fenced");
     expect(claim).toHaveBeenCalledTimes(3);
-    expect(calls).toEqual(["/status", "/attach", "/detach"]);
+    expect(calls).toEqual(["/status", "/native/attach", "/native/detach"]);
     expect(bodies[1]).toMatchObject({ ownerFence: 8 });
     expect(bodies[2]).toMatchObject({ ownerFence: 8 });
   });
@@ -753,7 +753,7 @@ describe("makeExecutor resident selection", () => {
       residentClaim: async () => 7,
     }).catch((err: unknown) => err);
     expect(refused).toBeInstanceOf(ResidentRegistrationMismatchError);
-    expect(calls).toEqual(["/status", "/attach"]);
+    expect(calls).toEqual(["/status", "/native/attach"]);
   });
 
   it("needs-ref WITH the resident's defaultRef → re-attach once on that ref; the note says it was the repo default", async () => {

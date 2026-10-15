@@ -4247,7 +4247,7 @@ function residentFetchStub(
     if (path === "/status") {
       return handlers.status?.() ?? new Response(JSON.stringify({ state: "warm", reason: "" }), { status: 200 });
     }
-    if (path === "/attach") {
+    if (path === "/native/attach" || path === "/attach") {
       const response =
         handlers.attach?.(body ?? {}) ??
         new Response(
@@ -4263,7 +4263,7 @@ function residentFetchStub(
       return response;
     }
     if (path === "/run-deadline") return new Response(JSON.stringify({ deadlineAt: 0 }), { status: 200 });
-    if (path === "/exec") {
+    if (path === "/native/exec" || path === "/exec") {
       if (
         handlers.exec === undefined &&
         ![
@@ -4602,7 +4602,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     ];
     const { io, replies } = fakeIO(history);
     await dispatch(deps, msg("branch:main", "slack:UADMIN"), io);
-    const attach = calls.find((c) => c.path === "/attach");
+    const attach = calls.find((c) => c.path === "/native/attach");
     expect(attach?.body).toMatchObject({ resource: "repo:acme/api", refHint: "main" });
     expect(provider.requests).toHaveLength(1); // sticky agent:coding thread ran
     expect(provider.requests[0].model).toBe("coding-model");
@@ -4682,7 +4682,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     const { io, replies, statuses } = fakeIO(history);
     await dispatch(deps, msg("add the tests' names to the PR description", "slack:UADMIN"), io);
     expect(replies).toContainEqual(expect.stringContaining("answer"));
-    const attach = calls.find((c) => c.path === "/attach");
+    const attach = calls.find((c) => c.path === "/native/attach");
     expect(attach?.body).toMatchObject({
       resource: "repo:acme/api",
       threadKey: "slack:CX:1.0",
@@ -4896,11 +4896,11 @@ describe("repo/ref resolution + resident prompt selection", () => {
           );
           expect(replies.join("\n")).toContain("No review started or was posted to GitHub");
           expect(provider.requests).toEqual([]);
-          expect(calls.filter((c) => c.path === "/attach")).toEqual([]);
+          expect(calls.filter((c) => c.path === "/native/attach")).toEqual([]);
           expect(deps.postReviewComment).not.toHaveBeenCalled();
         } else {
           expect(provider.requests[0].system).toContain(`Head commit: ${current}`);
-          expect(calls.filter((c) => c.path === "/attach").map((c) => c.body?.sha)).toEqual([current]);
+          expect(calls.filter((c) => c.path === "/native/attach").map((c) => c.body?.sha)).toEqual([current]);
         }
       }
   });
@@ -5080,7 +5080,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
 
     expect(provider.requests).toHaveLength(2); // the review and its no-verdict follow-up both ran
     expect(replies.some((r) => /No review started|review did not start/i.test(r))).toBe(false);
-    expect(calls.filter((c) => c.path === "/attach").map((c) => c.body?.sha)).toEqual([head, head]);
+    expect(calls.filter((c) => c.path === "/native/attach").map((c) => c.body?.sha)).toEqual([head, head]);
   });
 
   it("a unit reviewing an adopted pull request binds its attach to the pull request branch instead of its own", async () => {
@@ -5136,12 +5136,12 @@ describe("repo/ref resolution + resident prompt selection", () => {
 
     expect(provider.requests).toHaveLength(2);
     expect(replies.some((r) => /No review started|review did not start/i.test(r))).toBe(false);
-    expect(calls.find((c) => c.path === "/attach")?.body).toMatchObject({
+    expect(calls.find((c) => c.path === "/native/attach")?.body).toMatchObject({
       refHint: "patch-1",
       sha: head,
       readonly: true,
     });
-    expect(calls.find((c) => c.path === "/attach")?.body).not.toHaveProperty("ownPr");
+    expect(calls.find((c) => c.path === "/native/attach")?.body).not.toHaveProperty("ownPr");
   });
 
   it("a failed reprovision refuses with the two heads and no cause the guard did not establish", async () => {
@@ -5161,7 +5161,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
         const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
         calls.push({ path, body });
         if (path === "/status") return new Response(JSON.stringify({ state: "warm", reason: "" }), { status: 200 });
-        if (path === "/attach") {
+        if (path === "/native/attach") {
           attaches++;
           checkedOutHead = attaches === 1 ? firstHead : reprovisionedHead;
           return new Response(
@@ -5174,13 +5174,13 @@ describe("repo/ref resolution + resident prompt selection", () => {
             { status: 200 },
           );
         }
-        if (path === "/exec") {
+        if (path === "/native/exec") {
           return new Response(
             JSON.stringify({ stdout: `${checkedOutHead}\n`, stderr: "", exitCode: 0, truncated: false }),
             { status: 200 },
           );
         }
-        if (path === "/detach") return new Response(JSON.stringify({ released: true }), { status: 200 });
+        if (path === "/native/detach") return new Response(JSON.stringify({ released: true }), { status: 200 });
         throw new Error(`unexpected fetch: ${String(url)}`);
       }),
     );
@@ -5206,8 +5206,11 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(reply).toContain(expectedHead.slice(0, 7));
     expect(reply).not.toMatch(/branch moved|push|force-push|bug/i);
     expect(statuses.at(-1)?.title).toMatch(/not started.*workspace head mismatch/i);
-    expect(calls.filter((c) => c.path === "/attach").map((c) => c.body?.sha)).toEqual([expectedHead, expectedHead]);
-    expect(calls.at(-1)).toMatchObject({ path: "/detach", body: { force: true } });
+    expect(calls.filter((c) => c.path === "/native/attach").map((c) => c.body?.sha)).toEqual([
+      expectedHead,
+      expectedHead,
+    ]);
+    expect(calls.at(-1)).toMatchObject({ path: "/native/detach", body: { force: true } });
   });
 
   // agent-review.md item 12: the resident's attach fetches the mirror to the
@@ -5298,7 +5301,7 @@ describe("repo/ref resolution + resident prompt selection", () => {
     await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), io);
     expect(provider.requests).toHaveLength(0);
     expect(post).not.toHaveBeenCalled();
-    expect(calls.filter((c) => c.path === "/attach")).toHaveLength(0);
+    expect(calls.filter((c) => c.path === "/native/attach")).toHaveLength(0);
     const reply = replies.find((r) => /No review started|review did not start/i.test(r)) ?? "";
     expect(reply).toContain("acme/api#42");
     expect(reply).toMatch(/current version/i);
@@ -19360,8 +19363,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     await writer.settled();
     expect(replies.at(-1)).toContain("resumed and done");
     expect(replies.at(-1)).toContain("No push was confirmed");
-    const attaches = calls.filter((c) => c.path === "/status" || c.path === "/attach");
-    expect(attaches.map((c) => c.path)).toEqual(["/status", "/attach"]);
+    const attaches = calls.filter((c) => c.path === "/status" || c.path === "/native/attach");
+    expect(attaches.map((c) => c.path)).toEqual(["/status", "/native/attach"]);
     expect(attaches[1].body).toMatchObject({
       reuse: true,
       refHint: "main",
@@ -19554,7 +19557,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       });
       expect(ledger.finished.has("run-held")).toBe(false);
       expect((await ledger.readEvents("run-held")).filter((event) => event.type === "child_resumed")).toEqual([]);
-      expect(calls.filter((call) => call.path === "/detach")).toEqual([]);
+      expect(calls.filter((call) => call.path === "/native/detach")).toEqual([]);
     },
   );
 
@@ -19699,7 +19702,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(ledger.live.get("run-held")).toMatchObject({ ownerGen: "gen-NEXT", phase: "live", state: { binding } });
     expect(ledger.finished.has("run-held")).toBe(false);
     expect((await ledger.readEvents("run-held")).filter((event) => event.type === "child_resumed")).toEqual([]);
-    expect(calls.filter((call) => call.path === "/detach")).toEqual([]);
+    expect(calls.filter((call) => call.path === "/native/detach")).toEqual([]);
   };
 
   it("a fenced resumed pilot binding commit leaves the reply and row to the new owner", async () => {
@@ -19827,12 +19830,12 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     });
     await writer.settled();
     expect(provider.requests).toEqual([]);
-    expect(calls.filter((c) => c.path === "/attach")).toHaveLength(1);
+    expect(calls.filter((c) => c.path === "/native/attach")).toHaveLength(1);
     expect(replies.at(-1)).toMatch(/paused.*workspace/i);
     expect(ledger.finished.has("run-old")).toBe(false);
     expect(ledger.live.get("run-old")).toMatchObject({ phase: "handoff", state: { binding } });
     await dispatch(deps, msg("agent:coding also keep this note", "slack:UADMIN"), io);
-    expect(calls.filter((c) => c.path === "/attach")).toHaveLength(1);
+    expect(calls.filter((c) => c.path === "/native/attach")).toHaveLength(1);
     expect(await ledger.readInbox("run-old", 0)).toHaveLength(1);
     const next = await ledger.reclaim("gen-NEXT", 10_000, 30_000);
     expect(next.map((r) => r.row.runId)).toEqual(["run-old"]);
@@ -19861,10 +19864,10 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     await continued.writer.settled();
     expect(nextReplies.at(-1)).toContain("continued after repair");
     expect(nextReplies.at(-1)).toContain("No push was confirmed");
-    expect(calls.filter((c) => c.path === "/attach")).toHaveLength(2);
-    expect(calls.filter((c) => c.path === "/attach").every((c) => c.body?.reuse === true)).toBe(true);
+    expect(calls.filter((c) => c.path === "/native/attach")).toHaveLength(2);
+    expect(calls.filter((c) => c.path === "/native/attach").every((c) => c.body?.reuse === true)).toBe(true);
     expect(
-      calls.filter((c) => c.path === "/exec" && String(c.body?.command).includes("MISSING_DEPENDENCIES")),
+      calls.filter((c) => c.path === "/native/exec" && String(c.body?.command).includes("MISSING_DEPENDENCIES")),
     ).toHaveLength(1);
     expect(ledger.finished.get("run-old")?.status).toBe("completed");
   });
@@ -20240,7 +20243,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     });
     await writer.settled();
     expect(outcome.refusal).toBe("workspace_lost");
-    expect(calls.filter((call) => call.path === "/attach")).toHaveLength(2);
+    expect(calls.filter((call) => call.path === "/native/attach")).toHaveLength(2);
     expect(provider.requests).toHaveLength(1);
     expect(ledger.finished.get("run-old")?.status).toBe("completed");
     expect(ledger.finished.get("run-old")?.branchIdentityBaseline).toBeUndefined();
@@ -20336,7 +20339,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       await writer.settled();
       expect(outcome).toEqual({ status: "failed", refusal: "setup_failed", cause: "system" });
       expect(ledger.finished.get("run-old")?.status).toBe("interrupted");
-      expect(calls.map((call) => call.path)).toEqual(fault === "malformed" ? [] : ["/status", "/attach"]);
+      expect(calls.map((call) => call.path)).toEqual(fault === "malformed" ? [] : ["/status", "/native/attach"]);
       expect(provider.requests).toEqual([]);
     },
   );
@@ -20471,8 +20474,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     );
     // Never a sandbox for the resumed run: the resident alone was asked, in reuse-only mode; then the
     // restarted run attached as a fresh run does (no reuse), under the same id, and answered the thread.
-    const attaches = calls.filter((c) => c.path === "/status" || c.path === "/attach");
-    expect(attaches.map((c) => c.path)).toEqual(["/status", "/attach", "/status", "/attach"]);
+    const attaches = calls.filter((c) => c.path === "/status" || c.path === "/native/attach");
+    expect(attaches.map((c) => c.path)).toEqual(["/status", "/native/attach", "/status", "/native/attach"]);
     expect(attaches[1].body).toMatchObject({ reuse: true });
     expect(attaches[3].body).not.toHaveProperty("reuse");
     expect(calls.every((c) => c.host === "resident.example")).toBe(true);
@@ -20806,7 +20809,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       phase: "handoff",
       state: { preserveOnReattachRefusal: true, binding: { backend: "resident", workspace: "/workspace/dirty" } },
     });
-    expect(calls.filter((c) => c.path === "/attach").map((c) => c.body?.reuse === true)).toEqual([false, true]);
+    expect(calls.filter((c) => c.path === "/native/attach").map((c) => c.body?.reuse === true)).toEqual([false, true]);
     expect(provider.requests).toEqual([]);
     expect(containers).toHaveLength(1);
     expect(registry.getById("run-1")).toBeNull();
@@ -20844,7 +20847,11 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(resumed).toMatchObject({ status: "refused", refusal: "setup_failed" });
     expect(ledger.finished.has("run-1")).toBe(false);
     expect(ledger.live.get("run-1")?.phase).toBe("handoff");
-    expect(calls.filter((c) => c.path === "/attach").map((c) => c.body?.reuse === true)).toEqual([false, true, true]);
+    expect(calls.filter((c) => c.path === "/native/attach").map((c) => c.body?.reuse === true)).toEqual([
+      false,
+      true,
+      true,
+    ]);
   });
 
   it("refuses an opted-in pilot writer before workspace attach when its run is not durably tracked", async () => {
@@ -20908,8 +20915,8 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     expect(containers[0]!.removed).toEqual([]);
     expect(containers[1]!.starts).toHaveLength(1);
     // The resident was asked, once, to keep the run's own tree (run-history item 54); the fresh attach never was.
-    const attaches = calls.filter((c) => c.path === "/status" || c.path === "/attach");
-    expect(attaches.map((c) => c.path)).toEqual(["/status", "/attach", "/status", "/attach"]);
+    const attaches = calls.filter((c) => c.path === "/status" || c.path === "/native/attach");
+    expect(attaches.map((c) => c.path)).toEqual(["/status", "/native/attach", "/status", "/native/attach"]);
     expect(attaches[1]!.body).not.toHaveProperty("reuse");
     expect(attaches[3]!.body).toMatchObject({ reuse: true });
     // The bearer was rotated on the run's own meter: one secret buys its calls, the relaunched pi's turn counted on it, revoked at the finish.

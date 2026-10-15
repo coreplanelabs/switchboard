@@ -369,8 +369,8 @@ describe("the installed CLI", () => {
     expect(plan.stdout).toContain("Profile: deploy/profile.json;");
     expect(plan.stdout).toContain("materialised under .switchboard/ — no git");
     expect(plan.stdout).toContain("1. memory (switchboard-memory)");
-    expect(plan.stdout).toContain("2. bot (switchboard)");
-    expect(plan.stdout).toContain("3. resident (switchboard-resident)");
+    expect(plan.stdout).toContain("3. bot (switchboard)");
+    expect(plan.stdout).toContain("2. resident (switchboard-resident)");
     expect(plan.stdout).toContain("4. sandbox (switchboard-sandbox)");
     // The package's profile deploys the published images; without a token the registry is not read, and the plan says so.
     expect(plan.stdout).toContain("Images: registry (version ");

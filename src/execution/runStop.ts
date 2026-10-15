@@ -62,7 +62,7 @@ export function createRunStop(
       refusal: { phase, cause: "runtime-unconfirmed" as const },
     });
     try {
-      const response = await fetchImpl(new URL("/cancel-run", url), {
+      const response = await fetchImpl(new URL(resident ? "/native/cancel-run" : "/cancel-run", url), {
         method: "POST",
         headers: {
           authorization: `Bearer ${token.reveal()}`,

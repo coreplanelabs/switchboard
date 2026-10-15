@@ -281,6 +281,8 @@ export function workspaceReportRowsMatch(rows: readonly TranscriptRow[] | undefi
 }
 
 export interface WorkspaceDurabilityArchive {
+  /** Original execution contract, never inferred from a later empty workspace. */
+  residentExecution?: "native-v1";
   version: 1;
   runId: string;
   /** Identity reference to the first claim, not a new budget or expiry. */
@@ -457,14 +459,29 @@ export function prepareWorkspaceAllocation(
     if (prior.disposition?.kind === "scratch-custody-closed") throw new Error("workspace allocation is terminal");
     return prior;
   }
-  if (!incoming) return { version: 1, runId, startedAt, allocation: null };
+  if (!incoming)
+    return {
+      version: 1,
+      runId,
+      startedAt,
+      allocation: null,
+      ...(!previouslyAdmitted && meta.residentExecution === "native-v1"
+        ? { residentExecution: "native-v1" as const }
+        : {}),
+    };
   if (
     previouslyAdmitted ||
     !allocationMatchesRun(incoming, runId, meta) ||
     (incoming.kind === "exclusive-scratch" && (meta.readonly !== true || meta.profile?.identity !== "read"))
   )
     throw new Error("workspace allocation does not match original admission");
-  return { version: 1, runId, startedAt, allocation: incoming };
+  return {
+    version: 1,
+    runId,
+    startedAt,
+    allocation: incoming,
+    ...(meta.residentExecution === "native-v1" ? { residentExecution: "native-v1" as const } : {}),
+  };
 }
 
 export function workspaceAuthorityFieldsPresent(v: unknown): boolean {
@@ -551,6 +568,7 @@ export function workspaceDurabilityArchiveOf(v: unknown): WorkspaceDurabilityArc
   if (
     !object(v) ||
     v.version !== 1 ||
+    (v.residentExecution !== undefined && v.residentExecution !== "native-v1") ||
     !text(v.runId) ||
     typeof v.startedAt !== "number" ||
     !Number.isFinite(v.startedAt) ||
@@ -558,6 +576,7 @@ export function workspaceDurabilityArchiveOf(v: unknown): WorkspaceDurabilityArc
       (k) =>
         ![
           "version",
+          "residentExecution",
           "runId",
           "startedAt",
           "allocation",
@@ -602,6 +621,7 @@ export function workspaceDurabilityArchiveOf(v: unknown): WorkspaceDurabilityArc
     return;
   return {
     version: 1,
+    ...(v.residentExecution === "native-v1" ? { residentExecution: "native-v1" as const } : {}),
     runId: v.runId,
     startedAt: v.startedAt,
     allocation,

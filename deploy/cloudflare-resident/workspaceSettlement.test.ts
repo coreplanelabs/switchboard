@@ -1,6 +1,12 @@
+import { inspectResidentCredentials } from "./credentialInspection.js";
+import {
+  credentialInspectionInputSchema,
+  emptyCredentialInspection,
+} from "../../src/execution/credentialInspection.js";
 import { RecordedCheckOperation } from "./checkOperation.js";
 import { checkCommandHash, reportCheckResultFailure } from "../../src/execution/checkOperation.js";
-import { NativeOperationJournal, unstartedNativeOperator } from "./nativeOperation.js";
+import { NativeOperationJournal, unstartedNativeThread, unstartedNativeOperator } from "./nativeOperation.js";
+import { NativeRunScopes, nativeScopeRetirementKey } from "./nativeScope.js";
 import { isResidentPoolUser } from "../../src/execution/residentPoolSpends.js";
 import { releasePoolBinding, claimPoolBinding } from "../../src/execution/residentPoolSpends";
 import { registeredRunOwnsRelease, registeredRunAllowsClaim } from "./runRegistration";
@@ -53,12 +59,17 @@ const names = [
   "debugBackdateThread",
   "workspaceDiscarded",
   "cancelRun",
+  "cancelNativeRunScope",
+  "nativeScopeTransport",
   "detachThread",
   "killThreadUserProcesses",
   "observeRetiredThreadRuntime",
   "withThreadBusy",
   "withOwnedNativeOperation",
   "withNativeOperationScope",
+  "withSharedNativeOperation",
+  "withOpNativeOperation",
+  "inspectThreadCredentials",
   "assertThreadOperationAllowed",
   "beginThreadNativeOperation",
   "execThread",
@@ -139,6 +150,7 @@ const ending = {
 
 function harness(
   options: {
+    native?: boolean;
     lostAck?: boolean;
     refusedAck?: boolean;
     live?: boolean;
@@ -264,6 +276,12 @@ function harness(
     AsyncLocalStorage,
     crypto: webcrypto,
     NativeOperationJournal,
+    unstartedNativeThread,
+    NativeRunScopes,
+    inspectResidentCredentials,
+    credentialInspectionInputSchema,
+    emptyCredentialInspection,
+    nativeScopeRetirementKey,
     RecordedCheckOperation,
     reportCheckResultFailure,
     unstartedNativeOperator,
@@ -362,13 +380,49 @@ function harness(
     console: { warn: (message: string) => warnings.push(message), log: () => {} },
   });
   const instance = new C();
+  const kernelScopes = new Map<string, boolean>();
   Object.assign(instance, {
+    nativeScopeTransport: () => ({
+      request: async (request: any) => {
+        if (request.mode === "launch") {
+          if (request.role === "write") {
+            await instance.writeFile(request.path, request.content);
+            return { stdout: "{}", stderr: "", exitCode: 0, timedOut: false };
+          }
+          const process = await instance.processSandbox.exec(request.argv, { env: request.env });
+          return process.output();
+        }
+        if (request.mode === "inspect")
+          return {
+            stdout: JSON.stringify({ version: 1, boot: "4b15c6de-2eb6-4ef1-9b6c-e36ebf389807" }),
+            stderr: "",
+            exitCode: 0,
+            timedOut: false,
+          };
+        if (request.mode === "bootstrap") kernelScopes.set(request.ref.id, false);
+        if (request.mode === "close") kernelScopes.set(request.ref.id, true);
+        const closed = kernelScopes.get(request.ref.id) === true;
+        return {
+          stdout: JSON.stringify({
+            ref: request.ref,
+            closed,
+            ...(request.mode === "bootstrap"
+              ? {}
+              : { populated: false, ...(request.mode === "view" ? { present: true } : {}) }),
+          }),
+          stderr: "",
+          exitCode: 0,
+          timedOut: false,
+        };
+      },
+    }),
     ctx: {
       storage,
       id: { toString: () => "fixture-container" },
       container: { running: true, exec: vi.fn(async () => ({ exitCode: Promise.resolve(0) })) },
     },
     threadOperationScope: new AsyncLocalStorage(),
+    opOperationScope: new AsyncLocalStorage(),
     clearRuntimeUnreachable: async () => {},
     noteRuntimeUnreachable: async () => ({ count: 1 }),
     threadWrites: new KeyedAsyncLock(),
@@ -412,6 +466,16 @@ function harness(
       throw new Error("metadata reconciliation must not wake a VM");
     }),
   });
+  const beginNative = instance.beginThreadNativeOperation.bind(instance);
+  instance.beginThreadNativeOperation = async (kind: string) => {
+    const scope = instance.threadOperationScope.getStore();
+    if (options.native !== false && scope && !rows.has(`cancelled:${scope.threadKey}:${scope.owner.runId}`)) {
+      const key = `native-scope-mode:${encodeURIComponent(scope.threadKey)}:${scope.owner.runId}`;
+      if (!rows.has(key))
+        rows.set(key, { threadKey: scope.threadKey, runId: scope.owner.runId, protocol: "native-v1" });
+    }
+    return beginNative(kind);
+  };
   return { instance, rows, events, warnings, fetch, ackedRevision: () => acknowledged };
 }
 
@@ -1064,7 +1128,7 @@ describe("resident cancellation admission", () => {
       truncated: false,
     });
   });
-  it("a known never-started refusal clears admission so a later hard stop can finish", async () => {
+  it("a native submission failure can be stopped through its reserved scope", async () => {
     const h = harness();
     h.instance.run = Object.getPrototypeOf(h.instance).run;
     h.instance.processSandbox = {
@@ -1073,10 +1137,10 @@ describe("resident cancellation admission", () => {
       },
     };
     h.instance.execThreadImpl = async () => h.instance.run(["su", "-s", "/bin/bash", "worker2", "-c", "echo work"]);
-    await expect(
-      h.instance.execThread(threadKey, "echo work", 1000, undefined, undefined, owner),
-    ).rejects.toMatchObject({ name: "SandboxRuntimeBusyError" });
-    expect([...h.rows.keys()].filter((k) => k.startsWith("native-operation:"))).toEqual([]);
+    await expect(h.instance.execThread(threadKey, "echo work", 1000, undefined, undefined, owner)).rejects.toThrow(
+      "taking too long to accept the connection",
+    );
+    expect([...h.rows.keys()].filter((k) => k.startsWith("native-operation:"))).toHaveLength(1);
     h.instance.processSandbox = {
       exec: async () => ({
         output: async () => ({ stdout: "done", stderr: "", exitCode: 0, timedOut: false, truncated: false }),
@@ -1092,7 +1156,7 @@ describe("resident cancellation admission", () => {
       disposition: "processes-stopped",
     });
   });
-  it("keeps a durable hold when an actual native output is lost, even after isolate restart", async () => {
+  it("closes execution after a lost output while retaining the original unknown journal", async () => {
     const h = harness();
     const nativeRun = Object.getPrototypeOf(h.instance).run;
     h.instance.run = nativeRun;
@@ -1111,7 +1175,13 @@ describe("resident cancellation admission", () => {
     h.instance.threadOperationScope = new AsyncLocalStorage();
     h.instance.threadOpsInFlight = new Map();
     h.instance.run = async () => ({ exitCode: 137, timedOut: false, truncated: false });
-    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: false });
+    const original = structuredClone([...h.rows].filter(([key]) => key.startsWith("native-operation:")));
+    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({
+      stopped: true,
+      disposition: "processes-stopped",
+    });
+    for (const [key, value] of original) expect(h.rows.get(key)).toEqual(value);
+    expect((await new NativeOperationJournal(h.instance.ctx.storage).unresolved()).size).toBe(0);
   });
   it("settles a completed native write but retains an unknown write outcome", async () => {
     const write = async (lost: boolean) => {
@@ -1133,9 +1203,9 @@ describe("resident cancellation admission", () => {
     expect(await write(true)).toEqual({
       result: { error: "write-failed: Error: native write reply lost", status: 400 },
       stopped: {
-        stopped: false,
+        stopped: true,
         cancellationId: ticket.id,
-        refusal: { phase: "resident", cause: "native-outcome-unknown" },
+        disposition: "processes-stopped",
       },
     });
   });
@@ -1185,7 +1255,7 @@ describe("resident cancellation admission", () => {
     });
   });
   it.each(["cancelled", "busy", "unreachable"])(
-    "a publication proven never started clears its hold: %s",
+    "closes a refused publication scope without replaying it: %s",
     async (refusal) => {
       const h = harness();
       h.instance.run = Object.getPrototypeOf(h.instance).run;
@@ -1220,7 +1290,9 @@ describe("resident cancellation admission", () => {
       );
       if (refusal === "cancelled") expect(await publication).toMatchObject({ status: 409, error: "run cancelled" });
       else await expect(publication).rejects.toThrow();
-      expect([...h.rows.keys()].filter((k) => k.startsWith("native-operation:"))).toEqual([]);
+      expect([...h.rows.keys()].filter((k) => k.startsWith("native-operation:"))).toHaveLength(
+        refusal === "cancelled" ? 0 : 1,
+      );
       h.instance.run = async () => ({ exitCode: 0, timedOut: false, truncated: false });
       expect(await h.instance.cancelRun(ticket, physical)).toEqual({
         stopped: true,
@@ -1229,42 +1301,47 @@ describe("resident cancellation admission", () => {
       });
     },
   );
-  it.each(["failed", "timeout", "lost"])("an actual unresolved publication retains its hold: %s", async (outcome) => {
-    const h = harness();
-    h.instance.run = Object.getPrototypeOf(h.instance).run;
-    h.instance.processSandbox = {
-      exec: async (argv: string[]) => ({
-        output: async () => {
-          const push = argv.some((v) => v.startsWith("https://door.example/"));
-          if (push && outcome === "lost") throw new Error("publication result lost");
-          return {
-            stdout: "",
-            stderr: "",
-            exitCode: push ? 1 : 0,
-            timedOut: push && outcome === "timeout",
-            truncated: false,
-          };
+  it.each(["failed", "timeout", "lost"])(
+    "closes publication execution and retains its uncertain effect: %s",
+    async (outcome) => {
+      const h = harness();
+      h.instance.run = Object.getPrototypeOf(h.instance).run;
+      h.instance.processSandbox = {
+        exec: async (argv: string[]) => ({
+          output: async () => {
+            const push = argv.some((v) => v.startsWith("https://door.example/"));
+            if (push && outcome === "lost") throw new Error("publication result lost");
+            return {
+              stdout: "",
+              stderr: "",
+              exitCode: push ? 1 : 0,
+              timedOut: push && outcome === "timeout",
+              truncated: false,
+            };
+          },
+        }),
+      };
+      const publication = h.instance.publishThread(
+        threadKey,
+        {
+          repo: "owner/name",
+          doorOrigin: "https://door.example",
+          branch: "fix/owned",
+          next: "a".repeat(40),
+          bearer: "effect-test-token",
         },
-      }),
-    };
-    const publication = h.instance.publishThread(
-      threadKey,
-      {
-        repo: "owner/name",
-        doorOrigin: "https://door.example",
-        branch: "fix/owned",
-        next: "a".repeat(40),
-        bearer: "effect-test-token",
-      },
-      owner,
-    );
-    if (outcome === "lost") await expect(publication).rejects.toThrow("publication result lost");
-    else expect(await publication).toMatchObject({ exitCode: outcome === "timeout" ? 124 : 1 });
-    h.instance.run = async () => ({ exitCode: 0, timedOut: false, truncated: false });
-    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: false });
-  });
+        owner,
+      );
+      if (outcome === "lost") await expect(publication).rejects.toThrow("publication result lost");
+      else expect(await publication).toMatchObject({ exitCode: outcome === "timeout" ? 124 : 1 });
+      h.instance.run = async () => ({ exitCode: 0, timedOut: false, truncated: false });
+      const original = structuredClone([...h.rows].filter(([key]) => key.startsWith("native-operation:")));
+      expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: true });
+      for (const [key, value] of original) expect(h.rows.get(key)).toEqual(value);
+    },
+  );
   it.each([undefined, "b".repeat(40)])(
-    "awaits already-begun privileged publication before shutdown: lease=%s",
+    "closes already-begun privileged publication without awaiting its output: lease=%s",
     async (old) => {
       const h = harness();
       let entered!: () => void;
@@ -1316,9 +1393,10 @@ describe("resident cancellation admission", () => {
       await begun;
       expect([...h.rows.keys()].filter((k) => k.startsWith("native-operation:"))).toHaveLength(1);
       const stopped = await h.instance.cancelRun(ticket, physical);
+      complete();
       expect(await published).toEqual({ stdout: "", stderr: "", exitCode: 0, truncated: false });
       expect(stopped).toEqual({ stopped: true, cancellationId: ticket.id, disposition: "processes-stopped" });
-      expect([...h.rows.keys()].filter((k) => k.startsWith("native-operation:"))).toEqual([]);
+      expect([...h.rows.keys()].filter((k) => k.startsWith("native-operation:"))).toHaveLength(1);
       const git = commands.find((argv) => argv.some((v) => v.startsWith("https://door.example/")))!;
       expect(git.at(-1)).toBe("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:refs/heads/fix/owned");
       if (old)
@@ -2677,4 +2755,476 @@ describe("Resident recorded check result lookup", () => {
     h.rows.set(`cancelled:${threadKey}:${owner.runId}`, true);
     expect(await h.instance.inspectCheckResult(threadKey, operation, owner)).toEqual({ kind: "unknown" });
   });
+});
+
+describe("shared maintenance ownership", () => {
+  it("keeps shared native work outside its cancelled consumer's gate and retains its own unknown result", async () => {
+    const h = harness();
+    h.instance.run = Object.getPrototypeOf(h.instance).run;
+    let release!: () => void;
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = false;
+    h.instance.processSandbox = {
+      exec: async () => ({
+        status: async () => ({ id: "shared-original", pid: 42, startedAt: "2026-10-14T00:00:00.000Z" }),
+        output: async () => {
+          entered = true;
+          await wait;
+          throw new Error("shared output lost");
+        },
+      }),
+    };
+    const shared = h.instance.withOwnedNativeOperation(threadKey, owner, () =>
+      h.instance.withSharedNativeOperation(() => h.instance.run(["echo", "shared"])),
+    );
+    const rejected = expect(shared).rejects.toThrow("shared output lost");
+    for (let n = 0; n < 80 && !entered; n++) await Promise.resolve();
+    expect(entered).toBe(true);
+    const active = await new NativeOperationJournal(h.instance.ctx.storage).unresolved();
+    expect([...active.values()]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ ...owner }),
+        expect.objectContaining({ opOwner: expect.stringMatching(/^op:/) }),
+      ]),
+    );
+    h.rows.set(`cancelled:${threadKey}:${owner.runId}`, { cancellation: { runId: owner.runId } });
+    release();
+    await rejected;
+    const remaining = await new NativeOperationJournal(h.instance.ctx.storage).unresolved();
+    expect([...remaining.values()]).toMatchObject([
+      { opOwner: expect.stringMatching(/^op:/), native: { closed: true } },
+    ]);
+  });
+});
+
+describe("owned credential native scope", () => {
+  it("returns only validated counts from the confined original inspection", async () => {
+    const h = harness();
+    h.instance.run = Object.getPrototypeOf(h.instance).run;
+    h.instance.isRuntimeActive = async () => true;
+    const counts = {
+      ...emptyCredentialInspection(),
+      completed: true,
+      bindingMatched: true,
+      filesChecked: 4,
+      commandEnvironments: 1,
+      harnessEnvironments: 1,
+      helperEntries: 2,
+      unknownCount: 0,
+    };
+    h.rows.get("thread:" + threadKey).githubDoorHost = "door.example";
+    const status = vi.fn(() => {
+      throw new Error("SDK identity lookup must not run");
+    });
+    h.instance.processSandbox = {
+      exec: async () => ({
+        status,
+        output: async () => ({
+          stdout: JSON.stringify(counts),
+          stderr: "",
+          exitCode: 0,
+          timedOut: false,
+          truncated: false,
+        }),
+      }),
+    };
+    const actual = await h.instance.inspectThreadCredentials(
+      threadKey,
+      {
+        runId: owner.runId,
+        pid: 42,
+        processBirth: "11111111-1111-4111-8111-111111111111:123",
+        repo: "owner/name",
+        ref: physical.ref,
+        head: "a".repeat(40),
+      },
+      { GH_ENTERPRISE_TOKEN: "sbr_run-old.abcdefghijklmnopqrstuv", GH_HOST: "door.example" },
+      owner,
+    );
+    expect(actual).toEqual(counts);
+    expect(status).not.toHaveBeenCalled();
+    expect((await new NativeOperationJournal(h.instance.ctx.storage).unresolved()).size).toBe(0);
+    expect([...h.rows.keys()].some((key) => key.startsWith("native-scope:"))).toBe(true);
+  });
+});
+
+describe("native startup cancellation", () => {
+  it("closes the reserved run while VM start is hung and refuses the released continuation", async () => {
+    const h = harness();
+    h.instance.run = Object.getPrototypeOf(h.instance).run;
+    h.instance.ctx.container.running = false;
+    h.instance.execThreadImpl = () => h.instance.run(["/bin/bash", "-c", "echo late"], { nativeUser: "worker2" });
+    let started = false,
+      release!: () => void;
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.instance.start = async () => {
+      started = true;
+      await wait;
+      h.instance.ctx.container.running = true;
+    };
+    h.instance.processSandbox = {
+      exec: vi.fn(() => {
+        throw new Error("late payload must not run");
+      }),
+    };
+    const command = h.instance.execThread(threadKey, "echo late", 1000, undefined, undefined, owner);
+    for (let n = 0; n < 150 && !started; n++) await Promise.resolve();
+    expect(started).toBe(true);
+    const ticket = {
+      version: 1,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      ...owner,
+      threadKey,
+      startedAt: 1,
+      actor: { kind: "chat", id: "slack:operator" },
+    };
+    const stopped = await h.instance.cancelRun(ticket, physical);
+    expect(stopped).toEqual({ stopped: true, cancellationId: ticket.id, disposition: "processes-stopped" });
+    expect(h.instance.ctx.container.exec).not.toHaveBeenCalled();
+    release();
+    expect(await command).toMatchObject({ error: "run cancelled", status: 409 });
+    expect(h.instance.processSandbox.exec).not.toHaveBeenCalled();
+  });
+  it("keeps an old run on its legacy stop path after its settled journal disappeared", async () => {
+    const h = harness();
+    h.rows.set(`native-scope-mode:${encodeURIComponent(threadKey)}:${owner.runId}`, {
+      threadKey,
+      runId: owner.runId,
+      protocol: "legacy",
+    });
+    expect(
+      await h.instance.cancelNativeRunScope({
+        version: 1,
+        id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+        ...owner,
+        threadKey,
+        startedAt: 1,
+        actor: { kind: "chat", id: "slack:operator" },
+      }),
+    ).toBeNull();
+    expect(h.instance.ctx.container.exec).not.toHaveBeenCalled();
+    expect([...h.rows.keys()].filter((key) => key.startsWith("native-scope:"))).toEqual([]);
+  });
+});
+
+describe("native run generations", () => {
+  it("closes every original generation of the selected run while preserving a different run", async () => {
+    const h = harness();
+    const scopes = new NativeRunScopes(h.instance.ctx.storage, h.instance.nativeScopeTransport());
+    const old = { ...owner, ownerGen: "gen-before-reset", ownerFence: 6 };
+    await scopes.birth(threadKey, old, true, async () => {});
+    const oldRef = await scopes.ensure(threadKey, old, async () => {});
+    const currentRef = await scopes.ensure(threadKey, owner, async () => {});
+    const neighbour = { runId: "run-neighbour", ownerGen: "gen-neighbour", ownerFence: 8 };
+    await scopes.birth("thread-neighbour", neighbour, true, async () => {});
+    const neighbourRef = await scopes.ensure("thread-neighbour", neighbour, async () => {});
+    const journal = new NativeOperationJournal(h.instance.ctx.storage);
+    const oldKey = `native-operation:${threadKey}:${owner.runId}:old-unknown`;
+    await journal.open(oldKey, old, threadKey);
+    await journal.bindScope(oldKey, oldRef);
+    await journal.begin(oldKey, "process");
+    await journal.close(oldKey);
+    const original = structuredClone(h.rows.get(oldKey));
+    const ticket = {
+      version: 1,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      runId: owner.runId,
+      ownerGen: owner.ownerGen,
+      threadKey,
+      startedAt: 1,
+      actor: { kind: "chat", id: "slack:operator" },
+    };
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "processes-stopped",
+    });
+    expect(await scopes.close(threadKey, old)).toEqual(oldRef);
+    expect(await scopes.close(threadKey, owner)).toEqual(currentRef);
+    expect(await scopes.ensure("thread-neighbour", neighbour, async () => {})).toEqual(neighbourRef);
+    expect((await journal.unresolved()).size).toBe(0);
+    expect(h.rows.get(oldKey)).toEqual(original);
+    expect(await journal.readEnding(oldKey)).toEqual({ kind: "missing" });
+  });
+});
+
+describe("native cancellation inventory", () => {
+  it("persists stop intent before inventory can admit a new generation", async () => {
+    const h = harness();
+    const scopes = new NativeRunScopes(h.instance.ctx.storage, h.instance.nativeScopeTransport());
+    await scopes.birth(threadKey, owner, true, async () => {});
+    const originalRef = await scopes.ensure(threadKey, owner, async () => {});
+    const list = h.instance.ctx.storage.list.bind(h.instance.ctx.storage);
+    let checked = false,
+      barred = false;
+    h.instance.ctx.storage.list = async (options: any) => {
+      const page = await list(options);
+      if (options.prefix.startsWith("native-scope:") && !checked) {
+        checked = true;
+        try {
+          await scopes.birth(threadKey, { ...owner, ownerGen: "gen-late", ownerFence: 8 }, true, async () => {});
+        } catch (error) {
+          barred = error instanceof Error && error.message === "run cancelled";
+        }
+      }
+      return page;
+    };
+    const ticket = {
+      version: 1,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      runId: owner.runId,
+      ownerGen: owner.ownerGen,
+      threadKey,
+      startedAt: 1,
+      actor: { kind: "chat", id: "slack:operator" },
+    };
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "processes-stopped",
+    });
+    expect({ checked, barred }).toEqual({ checked: true, barred: true });
+    expect(await scopes.close(threadKey, owner)).toEqual(originalRef);
+    expect((await scopes.matching(threadKey, owner.runId)).length).toBe(1);
+  });
+});
+
+const legacyHarness = (options: Parameters<typeof harness>[0] = {}) => harness({ ...options, native: false });
+
+describe("legacy cancellation admission", () => {
+  const ticket = {
+    version: 1,
+    id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+    runId: owner.runId,
+    threadKey,
+    ownerGen: owner.ownerGen,
+    startedAt: 1,
+    actor: { kind: "chat", id: "slack:operator" },
+  };
+  const harness = legacyHarness;
+  it("a known never-started refusal clears admission so a later hard stop can finish", async () => {
+    const h = harness();
+    h.instance.run = Object.getPrototypeOf(h.instance).run;
+    h.instance.processSandbox = {
+      exec: async () => {
+        throw new Error("taking too long to accept the connection");
+      },
+    };
+    h.instance.execThreadImpl = async () => h.instance.run(["su", "-s", "/bin/bash", "worker2", "-c", "echo work"]);
+    await expect(
+      h.instance.execThread(threadKey, "echo work", 1000, undefined, undefined, owner),
+    ).rejects.toMatchObject({ name: "SandboxRuntimeBusyError" });
+    expect([...h.rows.keys()].filter((k) => k.startsWith("native-operation:"))).toEqual([]);
+    h.instance.processSandbox = {
+      exec: async () => ({
+        output: async () => ({ stdout: "done", stderr: "", exitCode: 0, timedOut: false, truncated: false }),
+      }),
+    };
+    expect(await h.instance.execThread(threadKey, "echo work", 1000, undefined, undefined, owner)).toMatchObject({
+      stdout: "done",
+      exitCode: 0,
+    });
+    expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "processes-stopped",
+    });
+  });
+
+  it("keeps a durable hold when an actual native output is lost, even after isolate restart", async () => {
+    const h = harness();
+    const nativeRun = Object.getPrototypeOf(h.instance).run;
+    h.instance.run = nativeRun;
+    h.instance.processSandbox = {
+      exec: async () => ({
+        output: async () => {
+          throw new Error("lost native output");
+        },
+      }),
+    };
+    h.instance.execThreadImpl = async () => h.instance.run(["su", "-s", "/bin/bash", "worker2", "-c", "echo work"]);
+    await expect(h.instance.execThread(threadKey, "echo work", 1000, undefined, undefined, owner)).rejects.toThrow(
+      "lost native output",
+    );
+    expect([...h.rows.keys()].filter((k) => k.startsWith("native-operation:"))).toHaveLength(1);
+    h.instance.threadOperationScope = new AsyncLocalStorage();
+    h.instance.threadOpsInFlight = new Map();
+    h.instance.run = async () => ({ exitCode: 137, timedOut: false, truncated: false });
+    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: false });
+  });
+
+  it("settles a completed native write but retains an unknown write outcome", async () => {
+    const write = async (lost: boolean) => {
+      const h = harness();
+      h.instance.runOk = async () => {};
+      h.instance.threadRunOk = async () => {};
+      h.instance.writeFile = async () => {
+        if (lost) throw new Error("native write reply lost");
+        return { success: true };
+      };
+      const result = await h.instance.writeThreadFile(threadKey, "owned.txt", "owned", owner);
+      h.instance.run = async () => ({ exitCode: 137, timedOut: false, truncated: false });
+      return { result, stopped: await h.instance.cancelRun(ticket, physical) };
+    };
+    expect(await write(false)).toEqual({
+      result: { ok: true, bytes: 5 },
+      stopped: { stopped: true, cancellationId: ticket.id, disposition: "processes-stopped" },
+    });
+    expect(await write(true)).toEqual({
+      result: { error: "write-failed: Error: native write reply lost", status: 400 },
+      stopped: {
+        stopped: false,
+        cancellationId: ticket.id,
+        refusal: { phase: "resident", cause: "native-outcome-unknown" },
+      },
+    });
+  });
+
+  it.each(["cancelled", "busy", "unreachable"])(
+    "a publication proven never started clears its hold: %s",
+    async (refusal) => {
+      const h = harness();
+      h.instance.run = Object.getPrototypeOf(h.instance).run;
+      h.instance.processSandbox = {
+        exec: async (argv: string[]) => {
+          const push = argv.some((v) => v.startsWith("https://door.example/"));
+          if (push && refusal === "busy") throw new Error("taking too long to accept the connection");
+          if (push && refusal === "unreachable") {
+            const error = new Error("connect refused before dispatch");
+            error.name = "FixtureRuntimeUnreachable";
+            throw error;
+          }
+          return {
+            output: async () => {
+              if (refusal === "cancelled" && argv[0] === "test")
+                h.rows.set(`cancelled:${threadKey}:${owner.runId}`, { cancellation: ticket });
+              return { stdout: "", stderr: "", exitCode: 0, timedOut: false, truncated: false };
+            },
+          };
+        },
+      };
+      const publication = h.instance.publishThread(
+        threadKey,
+        {
+          repo: "owner/name",
+          doorOrigin: "https://door.example",
+          branch: "fix/owned",
+          next: "a".repeat(40),
+          bearer: "effect-test-token",
+        },
+        owner,
+      );
+      if (refusal === "cancelled") expect(await publication).toMatchObject({ status: 409, error: "run cancelled" });
+      else await expect(publication).rejects.toThrow();
+      expect([...h.rows.keys()].filter((k) => k.startsWith("native-operation:"))).toEqual([]);
+      h.instance.run = async () => ({ exitCode: 0, timedOut: false, truncated: false });
+      expect(await h.instance.cancelRun(ticket, physical)).toEqual({
+        stopped: true,
+        cancellationId: ticket.id,
+        disposition: "processes-stopped",
+      });
+    },
+  );
+
+  it.each(["failed", "timeout", "lost"])("an actual unresolved publication retains its hold: %s", async (outcome) => {
+    const h = harness();
+    h.instance.run = Object.getPrototypeOf(h.instance).run;
+    h.instance.processSandbox = {
+      exec: async (argv: string[]) => ({
+        output: async () => {
+          const push = argv.some((v) => v.startsWith("https://door.example/"));
+          if (push && outcome === "lost") throw new Error("publication result lost");
+          return {
+            stdout: "",
+            stderr: "",
+            exitCode: push ? 1 : 0,
+            timedOut: push && outcome === "timeout",
+            truncated: false,
+          };
+        },
+      }),
+    };
+    const publication = h.instance.publishThread(
+      threadKey,
+      {
+        repo: "owner/name",
+        doorOrigin: "https://door.example",
+        branch: "fix/owned",
+        next: "a".repeat(40),
+        bearer: "effect-test-token",
+      },
+      owner,
+    );
+    if (outcome === "lost") await expect(publication).rejects.toThrow("publication result lost");
+    else expect(await publication).toMatchObject({ exitCode: outcome === "timeout" ? 124 : 1 });
+    h.instance.run = async () => ({ exitCode: 0, timedOut: false, truncated: false });
+    expect(await h.instance.cancelRun(ticket, physical)).toMatchObject({ stopped: false });
+  });
+
+  it.each([undefined, "b".repeat(40)])(
+    "awaits already-begun privileged publication before shutdown: lease=%s",
+    async (old) => {
+      const h = harness();
+      let entered!: () => void;
+      let complete!: () => void;
+      const begun = new Promise<void>((r) => {
+        entered = r;
+      });
+      const settled = new Promise<void>((r) => {
+        complete = r;
+      });
+      const commands: string[][] = [];
+      h.instance.run = Object.getPrototypeOf(h.instance).run;
+      h.instance.waitForThreadDrain = Object.getPrototypeOf(h.instance).waitForThreadDrain;
+      h.instance.ctx.container.exec = async (argv: string[]) => {
+        if (argv.some((v) => v.includes("kill -9 -1"))) complete();
+        return { exitCode: Promise.resolve(0) };
+      };
+      h.instance.processSandbox = {
+        exec: async (argv: string[]) => {
+          commands.push(argv);
+          const publishing = argv.some((v) => v.startsWith("https://door.example/"));
+          if (publishing) entered();
+          return {
+            output: async () => {
+              if (publishing) await settled;
+              return {
+                stdout: "",
+                stderr: "",
+                exitCode: argv.some((v) => v.includes("kill -9 -1")) ? 137 : 0,
+                timedOut: false,
+                truncated: false,
+              };
+            },
+          };
+        },
+      };
+      const published = h.instance.publishThread(
+        threadKey,
+        {
+          repo: "owner/name",
+          doorOrigin: "https://door.example",
+          branch: "fix/owned",
+          next: "a".repeat(40),
+          ...(old ? { old } : {}),
+          bearer: "effect-test-token",
+        },
+        owner,
+      );
+      await begun;
+      expect([...h.rows.keys()].filter((k) => k.startsWith("native-operation:"))).toHaveLength(1);
+      const stopped = await h.instance.cancelRun(ticket, physical);
+      expect(await published).toEqual({ stdout: "", stderr: "", exitCode: 0, truncated: false });
+      expect(stopped).toEqual({ stopped: true, cancellationId: ticket.id, disposition: "processes-stopped" });
+      expect([...h.rows.keys()].filter((k) => k.startsWith("native-operation:"))).toEqual([]);
+      const git = commands.find((argv) => argv.some((v) => v.startsWith("https://door.example/")))!;
+      expect(git.at(-1)).toBe("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:refs/heads/fix/owned");
+      if (old)
+        expect(git).toContain("--force-with-lease=refs/heads/fix/owned:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    },
+  );
 });

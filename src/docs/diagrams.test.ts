@@ -74,7 +74,7 @@ describe("renderDeployOrder", () => {
     expect(out).toContain("flowchart LR");
     const nodes = [...out.matchAll(/W(\d)\[\["([^"]*)"\]\]/g)].map((m) => m[2].split("<br/>")[0]);
     expect(nodes).toEqual([...DEPLOY_ORDER]);
-    expect(out).toContain('W1[["memory<br/>the state Worker"]] --> W2[["bot"]]');
+    expect(out).toContain('W1[["memory<br/>the state Worker"]] --> W2[["resident"]]');
     expect(diagramProblems(mermaidFences(out)[0].source)).toEqual([]);
   });
 });

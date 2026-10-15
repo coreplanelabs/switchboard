@@ -1189,7 +1189,7 @@ export class ResidentExecutor implements Executor {
       // the trace context rides only because the resident is one of our hosts.
       res = await tracedFetch(
         span,
-        `${this.opts.baseUrl.replace(/\/$/, "")}${route}`,
+        `${this.opts.baseUrl.replace(/\/$/, "")}${this.opts.runId ? "/native" : ""}${route}`,
         {
           method: "POST",
           headers: {

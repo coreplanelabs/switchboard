@@ -1,3 +1,4 @@
+import { NativeRunScopes } from "./nativeScope.js";
 import { RecordedCheckOperation } from "./checkOperation.js";
 import { NativeOperationJournal, unstartedNativeOperator } from "./nativeOperation.js";
 import { ErrorCode, OperationInterruptedError, RPCTransportError } from "@cloudflare/sandbox/errors";
@@ -1148,6 +1149,7 @@ async function ownerFlow(pathForm: "canonical" | "collision-safe replacement" | 
       provisionUidCommand,
       crypto: webcrypto,
       NativeOperationJournal,
+      NativeRunScopes,
       RecordedCheckOperation,
       unstartedNativeOperator,
       TextEncoder,
@@ -1485,6 +1487,7 @@ function workloadResident(
     provisionUidCommand,
     crypto: webcrypto,
     NativeOperationJournal,
+    NativeRunScopes,
     RecordedCheckOperation,
     unstartedNativeOperator,
     registeredRunOwnsRelease,
