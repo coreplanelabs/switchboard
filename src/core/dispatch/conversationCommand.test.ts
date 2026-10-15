@@ -1,7 +1,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { ConfigStore } from "../../config.js";
 import { processSecrets } from "../../secrets.js";
@@ -20,6 +20,8 @@ import { RunRegistry } from "../runRegistry.js";
 import type { ChannelIO, ConfirmationOffer, IncomingMessage } from "../types.js";
 import { consumeAndRun } from "./confirm.js";
 import { executeConversationCommand } from "./conversationCommand.js";
+import { createOrchestratorDecisions, type OrchestratorCommandDecision } from "./orchestratorDecisions.js";
+import { LEASE_MS } from "../runLedger/types.js";
 
 // Feature: docs/reference/specs/main-agent-actions.md — native command receipts.
 const YAML = `
@@ -57,7 +59,15 @@ function fixture(persistent = true) {
       operations: () => ({ run: async (_op, input) => ({ kind: "result", ok: true, summary: `Passed ${input.ref}` }) }),
     }),
     ...(persistent
-      ? { runLedger: { sessionPersistence: true, appendSession: ledger.appendSession.bind(ledger) } }
+      ? {
+          runLedger: {
+            sessionPersistence: true,
+            appendSession: ledger.appendSession.bind(ledger),
+            readSessionTail: ledger.readSessionTail.bind(ledger),
+            readRequesterTarget: ledger.readRequesterTarget.bind(ledger),
+            checkpointRequesterTarget: ledger.checkpointRequesterTarget.bind(ledger),
+          },
+        }
       : {}),
   };
   const message: IncomingMessage = {
@@ -77,6 +87,30 @@ function fixture(persistent = true) {
   const trace = startRequestRoot({}, { channel: "slack", receivedAt: 0 });
   trace.bindRun(parent.id, (event) => registry.publish(parent.id, event));
   const ending = createRunEnding({ registry });
+  const ready = ledger.claim({
+    runId: parent.id,
+    threadKey: message.threadKey,
+    gen: "command-generation",
+    leaseMs: LEASE_MS,
+    startedAt: 0,
+    meta: { agent: "orchestrator", channelId: message.channelId, userId: message.userId, threadKey: message.threadKey },
+    system: "",
+    tools: [],
+  });
+  const decisions = createOrchestratorDecisions({
+    owner: {
+      runId: parent.id,
+      requesterId: message.userId,
+      channelId: message.channelId,
+      threadKey: message.threadKey,
+    },
+    save: async (entries) =>
+      (await ledger.setState(parent.id, "command-generation", { orchestratorDecisions: entries })).ok,
+  });
+  const admission = {
+    record: (decision: OrchestratorCommandDecision) => decisions.record(decision),
+    check: async () => ({ ok: true as boolean }),
+  };
   const replies: string[] = [];
   const offers: ConfirmationOffer[] = [];
   const io: ChannelIO = {
@@ -85,8 +119,9 @@ function fixture(persistent = true) {
     status: async () => ({ update: () => {}, done: async () => {} }),
     offer: async (offer) => void offers.push(offer),
   };
-  const invoke = (id: string, input: CommandInput, callId: string, msg = message) =>
-    executeConversationCommand(
+  const invoke = async (id: string, input: CommandInput, callId: string, msg = message) => {
+    await ready;
+    return executeConversationCommand(
       deps,
       {
         msg,
@@ -95,11 +130,14 @@ function fixture(persistent = true) {
         ending,
         invocationId: JSON.stringify([parent.id, callId]),
         context: { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] },
-        check: async () => ({ ok: true }),
+        check: async () =>
+          (await admission.check()).ok ? { ok: true } : { ok: false, code: "direct-audience-denied" },
+        recordDecision: (decision: OrchestratorCommandDecision) => admission.record(decision),
       },
       id,
       input,
     );
+  };
   const session = () => ledger.sessions.get(contextThreadSessionKey(message.threadKey));
   const saved = () => (session()?.rows ?? []).map((row) => JSON.parse(row.json).part.text as string);
   const toolContext: ToolContext = {
@@ -122,10 +160,113 @@ function fixture(persistent = true) {
     session,
     saved,
     toolContext,
+    admission,
   };
 }
 
 describe("conversation command receipts", () => {
+  it("saves the orchestrator and source decision before applying a command", async () => {
+    const f = fixture();
+    let before: unknown;
+    const apply = f.config.setUserOverride.bind(f.config);
+    vi.spyOn(f.config, "setUserOverride").mockImplementation(async (...args) => {
+      before = structuredClone(f.ledger.live.get(f.parent.id)?.state.orchestratorDecisions);
+      return apply(...args);
+    });
+    const result = await f.invoke("config.set", { args: ["me"], options: { effort: "high" } }, "set-first");
+    expect(JSON.parse(result.text).outcome).toBe("ran");
+    expect(f.config.scopes(f.message.channelId, f.message.userId).user).toEqual({ effort: "high" });
+    expect(before).toMatchObject([
+      {
+        version: 1,
+        id: '["run-1","set-first"]',
+        owner: { runId: "run-1", requesterId: "slack:UADMIN", channelId: "slack:DTEST", threadKey: "slack:DTEST:1.0" },
+        source: { kind: "request", messageId: "1" },
+        command: "config.set",
+        line: "config set me --effort high",
+      },
+    ]);
+  });
+
+  it("holds a command when its decision cannot be saved", async () => {
+    const f = fixture();
+    f.admission.record = async () => false;
+    const refused = await f.invoke("config.set", { args: ["me"], options: { effort: "high" } }, "held");
+    expect(refused).toEqual({ ok: false, text: "The command decision could not be saved; no command ran." });
+    expect(f.config.scopes(f.message.channelId, f.message.userId).user).toEqual({});
+    f.admission.record = async (decision) => {
+      return (await f.ledger.setState(f.parent.id, "command-generation", { orchestratorDecisions: [decision] })).ok;
+    };
+    const accepted = await f.invoke("config.set", { args: ["me"], options: { effort: "high" } }, "accepted");
+    expect(JSON.parse(accepted.text).outcome).toBe("ran");
+    expect(f.config.scopes(f.message.channelId, f.message.userId).user).toEqual({ effort: "high" });
+  });
+
+  it("rechecks source access after the decision acknowledgement", async () => {
+    const f = fixture();
+    f.admission.check = async () => ({ ok: f.ledger.live.get(f.parent.id)?.state.orchestratorDecisions === undefined });
+    const result = await f.invoke("config.set", { args: ["me"], options: { effort: "high" } }, "lost-source");
+    expect(result).toEqual({ ok: false, text: "Requester source access is unavailable; no command ran." });
+    expect(f.config.scopes(f.message.channelId, f.message.userId).user).toEqual({});
+    f.admission.check = async () => ({ ok: true });
+    const accepted = await f.invoke("config.set", { args: ["me"], options: { effort: "high" } }, "fresh-source");
+    expect(JSON.parse(accepted.text).outcome).toBe("ran");
+  });
+
+  it("preserves command arguments named reason and intent", async () => {
+    const f = fixture();
+    const commands = new CommandRegistry({ audit: () => {} });
+    commands.register({
+      id: "backend.explain",
+      action: "config:read",
+      effect: "read",
+      describe: "Read an explanation",
+      args: [{ name: "reason", schema: z.string(), describe: "Reason" }],
+      options: z.object({ intent: z.string() }),
+      handler: async ({ args, options }) => `${args.reason}: ${options.intent}`,
+    });
+    f.deps.commands = bindCommands(commands, {});
+    const result = await f.invoke(
+      "backend.explain",
+      { args: ["requested reason"], options: { intent: "requested intent" } },
+      "explain",
+    );
+    expect(JSON.parse(result.text).outcome).toBe("ran");
+    expect(f.replies).toEqual(["requested reason: requested intent"]);
+  });
+
+  it("preserves raw parameters for the registry's schema transformations", async () => {
+    const f = fixture();
+    const commands = new CommandRegistry({ audit: () => {} });
+    commands.register({
+      id: "backend.size",
+      action: "config:read",
+      effect: "read",
+      describe: "Read a string size",
+      args: [{ name: "text", schema: z.string().transform((value) => value.length), describe: "Text" }],
+      handler: async ({ args }) => `size ${args.text}`,
+    });
+    f.deps.commands = bindCommands(commands, {});
+    const result = await f.invoke("backend.size", { args: ["hello"] }, "size");
+    expect(JSON.parse(result.text).outcome).toBe("ran");
+    expect(f.replies).toEqual(["size 5"]);
+  });
+
+  it("refuses an unknown option before it can be hidden by a positional argument", async () => {
+    const f = fixture();
+    const refused = await f.invoke(
+      "config.set",
+      { args: ["me"], options: { scope: "channel", effort: "high" } },
+      "invalid",
+    );
+    expect(refused.ok).toBe(false);
+    expect(refused.text).toContain("scope");
+    expect(f.config.scopes(f.message.channelId, f.message.userId).user).toEqual({});
+    const accepted = await f.invoke("config.set", { args: ["me"], options: { effort: "high" } }, "valid");
+    expect(JSON.parse(accepted.text).outcome).toBe("ran");
+    expect(f.config.scopes(f.message.channelId, f.message.userId).user).toEqual({ effort: "high" });
+  });
+
   it.each(["pi", "opencode"])(
     "the shared harness relay keeps distinct calls and replays one call once (%s)",
     async (mode) => {

@@ -1191,6 +1191,8 @@ export type RunEvent =
    *  runs from it. Additive: unknown → ignored. */
   | {
       type: "operator";
+      /** Internal command selection saved under its original orchestrator before execution. */
+      orchestratorDecision?: import("./dispatch/orchestratorDecisions.js").OrchestratorCommandDecision;
       mode: "shadow" | "on";
       outcome: "binds" | "question" | "refusal" | "non_decision";
       reason: string;

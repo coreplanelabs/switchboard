@@ -71,6 +71,57 @@ it("retains routing phases and estimate provenance through record and JSONL reco
   expect(operatorOfEvents(kept.events)?.telemetry).toEqual(event.telemetry);
 });
 
+it("retains the command's orchestrator and source link after record serialization", () => {
+  const selection = {
+    version: 1 as const,
+    id: '["parent-run","command-call"]',
+    owner: {
+      runId: "parent-run",
+      requesterId: "slack:UREADER",
+      channelId: "slack:DTEST",
+      threadKey: "slack:DTEST:1.0",
+    },
+    source: { kind: "request" as const, messageId: "1", textHash: "a".repeat(64) },
+    command: "config.show",
+    line: "config show",
+    inputHash: "b".repeat(64),
+    contextHash: "c".repeat(64),
+  };
+  const event: RunEvent = {
+    type: "operator",
+    mode: "on",
+    outcome: "binds",
+    reason: "Selected by the orchestrator",
+    orchestratorDecision: selection,
+  };
+  const kept = JSON.parse(
+    JSON.stringify(
+      record({
+        parentRunId: "parent-run",
+        userId: "slack:UREADER",
+        channelId: "slack:DTEST",
+        threadKey: "slack:DTEST:1.0",
+        events: [event],
+        operator: operatorOfEvents([event]),
+      }),
+    ),
+  );
+  expect(isRunRecord(kept)).toBe(true);
+  expect(kept.operator.orchestratorDecision.owner).toEqual({
+    runId: "parent-run",
+    requesterId: "slack:UREADER",
+    channelId: "slack:DTEST",
+    threadKey: "slack:DTEST:1.0",
+  });
+  expect(operatorOfEvents(kept.events)?.orchestratorDecision?.source).toEqual({
+    kind: "request",
+    messageId: "1",
+    textHash: "a".repeat(64),
+  });
+  kept.operator.orchestratorDecision.owner.runId = "another-run";
+  expect(isRunRecord(kept)).toBe(false);
+});
+
 it("stored operator failures retain provider diagnostics after serialization", () => {
   const event: RunEvent = {
     type: "operator",

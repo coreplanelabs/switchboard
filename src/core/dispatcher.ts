@@ -104,6 +104,7 @@ import {
   recordRoutedDecision,
 } from "./dispatch/commandRun.js";
 import { COMMAND_RUN_AGENT } from "./runOwner.js";
+import { createOrchestratorDecisions } from "./dispatch/orchestratorDecisions.js";
 import { redactedInput } from "./dispatch/route.js";
 import type { Actor, ChannelVisibility } from "./authz/types.js";
 import {
@@ -4603,6 +4604,12 @@ export async function dispatch(
     // The agent loop (dispatch/runLoop.ts): the model turn, the follow-up inbox,
     // the settle and the post-steps, the finish. A throw propagates to the
     // outer catch after the workspace is released.
+    const commandDecisions = createOrchestratorDecisions({
+      owner: { runId: run.id, requesterId: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey },
+      previous: (resume?.row.state ?? restart?.row.state ?? ledgerRun?.harnessLaunchState)?.orchestratorDecisions,
+      save: async (entries) =>
+        ledgerRun?.tracked() === true && (await ledgerRun.setStateAndFlush({ orchestratorDecisions: entries })),
+    });
     const ran = await runLoop(deps, {
       executeCommand: async (message, id, input, authority, callId) =>
         executeConversationCommand(
@@ -4614,6 +4621,7 @@ export async function dispatch(
             ending,
             invocationId: JSON.stringify([run.id, callId]),
             context: structuredClone(admittedContext),
+            recordDecision: (decision) => commandDecisions.record(decision),
             check: async (currentSource = true) => {
               if (!(await authority(currentSource))) return { ok: false, code: "direct-audience-denied" };
               const checked = await revalidateAdmitted();
