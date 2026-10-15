@@ -378,6 +378,8 @@ export interface DeployStep {
   residentContainerApp?: string;
   /** Selected staging policy; upload readiness does not release its durable hold. */
   maintenance?: StagingMaintenancePolicy;
+  /** Registry Resident image selected by the plan, independent of deploy output. */
+  residentImage?: string;
   /** Registry bot image selected by this plan, never parsed from deploy output. */
   botImage?: string;
   /** Account for the raw application list Wrangler deploy uses. */
@@ -562,6 +564,15 @@ export function planDeploy(
         }
       : {}),
     ...(w.residentContainerApp ? { residentContainerApp: w.residentContainerApp } : {}),
+    ...(w.name === "resident" && images.mode === "registry"
+      ? {
+          residentImage: accountRegistryImage(
+            profile.account,
+            registryName(images.published.names.resident),
+            accountImageTag("resident", images.published),
+          ),
+        }
+      : {}),
     ...(w.name === "resident" && maintenance ? { maintenance } : {}),
     ...(!w.liveGate && !w.healthBearerEnv ? { wakeUrl: w.healthUrl } : {}),
     // The plan says where a run's points will land (run-metrics.md item 6): the state Worker's

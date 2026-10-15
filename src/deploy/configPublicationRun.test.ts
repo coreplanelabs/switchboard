@@ -44,6 +44,7 @@ const processes = vi.hoisted(() => ({
   botCode: 1,
   residentCode: 1,
   botOutput: undefined as string | undefined,
+  residentOutput: undefined as string | undefined,
   wrangler: undefined as
     ((args: string[], env: Record<string, string>) => { output: string; code: number }) | undefined,
 }));
@@ -95,6 +96,7 @@ vi.mock("node:child_process", () => ({
         }
         output = code === 0 ? "Current Version ID: worker-version" : "upload failed";
         if (name !== "memory" && processes.botOutput !== undefined) output = processes.botOutput;
+        if (name === "resident" && processes.residentOutput !== undefined) output = processes.residentOutput;
       }
       child.stdout.emit("data", Buffer.from(output));
       child.emit("close", code);
@@ -195,6 +197,7 @@ afterEach(() => {
   processes.botCode = 1;
   processes.residentCode = 1;
   processes.botOutput = undefined;
+  processes.residentOutput = undefined;
   processes.wrangler = undefined;
   processes.onBot = () => {};
   processes.onResident = () => {};
@@ -451,6 +454,8 @@ describe("runDeployPlan config publication", () => {
       throw new Error("unexpected control request");
     };
     processes.residentCode = 0;
+    processes.residentOutput =
+      "Current Version ID: worker-version\nContainer application changes\nno changes switchboard-staging-resident-residentdo\nNo changes to be made";
     processes.onResident = () => {
       expect(store.slotState.document?.yaml).toBe(candidateText);
       events.push("resident upload");

@@ -813,6 +813,9 @@ describe("the plan's images", () => {
       { name: "switchboard-resident", tags: ["1.2.2"] },
     ];
     const p = plan({}, installed, REGISTRY, { mode: "registry", published: TEST_PUBLISHED_IMAGES, registry: listing });
+    expect(p.steps.find((step) => step.name === "resident")!.residentImage).toBe(
+      `registry.cloudflare.com/${account}/switchboard-resident:1.2.3`,
+    );
     expect(p.steps.find((step) => step.name === "bot")!.botImage).toBe(
       `registry.cloudflare.com/${account}/switchboard:1.2.3`,
     );

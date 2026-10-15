@@ -22,6 +22,8 @@ import {
 import { DRAIN } from "../../src/core/budgets";
 import { methodOf, readSource } from "./testing/sourceScan";
 import { TEST_MAINTENANCE } from "../../src/deploy/testing/profile.js";
+import { buildId, resolveBuildStamp, type BuildStamp } from "../../src/deploy/buildStamp.js";
+import { buildStamp } from "../bin/build-stamp.mjs";
 import {
   deployObligations,
   liveMaintenanceWindow,
@@ -32,10 +34,14 @@ import {
   selectedStagingAttempt,
   stagingAttemptMatches,
   abandonmentAuditSchema,
+  type StagingMaintenancePolicy,
+  residentImageTargetSchema,
 } from "./admissionRisk.js";
 
 describe("global deploy admission evidence", () => {
-  function fixture() {
+  function fixture(
+    options: { stamp?: BuildStamp; policy?: StagingMaintenancePolicy; rows?: Map<string, unknown> } = {},
+  ) {
     const source = readSource("worker.ts");
     const registry = source.slice(
       source.indexOf("export class ResidentRegistryDO"),
@@ -60,6 +66,8 @@ describe("global deploy admission evidence", () => {
             "handleStagingAbandonment",
             "handleStagingMaintenanceRelease",
             "handleDeployAdmissions",
+            "handleDrain",
+            "handleReconcile",
             "bearerToken",
             "timingSafeEqual",
             "tokenScope",
@@ -85,6 +93,7 @@ describe("global deploy admission evidence", () => {
       (node) => ts.isMethodDeclaration(node) && node.name.getText(ast) === "fetch",
     )!;
     const methods = [
+      "constructor",
       "initializeStagingMaintenance",
       "abandonStagingAdmission",
       "readStagingAbandonmentReceipt",
@@ -93,6 +102,7 @@ describe("global deploy admission evidence", () => {
       "getStagingMaintenanceReadback",
       "releaseStagingMaintenance",
       "readStagingReleaseReceipt",
+      "sealStagingWindow",
       "setDrain",
       "clearDrain",
       "reportContainerImageCurrent",
@@ -115,17 +125,30 @@ describe("global deploy admission evidence", () => {
     ]
       .map((name) => methodOf(registry, name) ?? "")
       .join("\n");
+    const buildDeclarations = ast.statements
+      .filter(
+        (node) =>
+          ts.isVariableStatement(node) &&
+          node.declarationList.declarations.some((declaration) =>
+            ["BUILD", "BUILD_ID"].includes(declaration.name.getText(ast)),
+          ),
+      )
+      .map((node) => node.getText(ast));
     const compiled = ts.transpileModule(
-      helpers.join("\n") +
+      buildDeclarations.join("\n") +
+        "\n" +
+        helpers.join("\n") +
         "\n" +
         routeDeclaration.getText(ast) +
         `\nconst Worker = { ${fetchMethod.getText(ast)} };` +
-        `\nclass Registry { ${methods} } class Resident { ${methodOf(source.slice(source.indexOf("export class ResidentDO")), "withDeployAdmission")} }`,
+        `\nclass Registry extends DurableObject { ${methods} } class Resident { ${methodOf(source.slice(source.indexOf("export class ResidentDO")), "withDeployAdmission")} }`,
       {
         compilerOptions: { target: ts.ScriptTarget.ES2022 },
       },
     ).outputText;
-    const rows = new Map<string, unknown>();
+    const rows = options.rows ?? new Map<string, unknown>();
+    const stamp = options.stamp ?? resolveBuildStamp("a".repeat(40), undefined);
+    let initialization = Promise.resolve();
     const events: Array<Record<string, unknown>> = [];
     let now = 1000,
       failDelete = false,
@@ -191,9 +214,24 @@ describe("global deploy admission evidence", () => {
         URL,
         sanitizeResidentBody,
         residentAddress,
-        registryStub: () => api,
+        DurableObject: class {
+          constructor(
+            public ctx: unknown,
+            public env: unknown,
+          ) {}
+        },
+        injectedBuildStamp: () => stamp,
+        buildId,
+        registryStub: () =>
+          new Proxy(api, {
+            get: (target, key) =>
+              typeof target[key] === "function"
+                ? (...args: unknown[]) => initialization.then(() => target[key](...args))
+                : target[key],
+          }),
         residentStub: () => ({
           getResidentDeployInfo: async () => recoveryView,
+          reconcileForDeploy: async () => ({ result: "current", verified: true }),
           getResidentRecoveryProbe: async () => {
             onRecoveryProbe();
             return { activeProcesses: 0 };
@@ -205,6 +243,8 @@ describe("global deploy admission evidence", () => {
         liveDrain,
         postUploadVersion,
         deployFenceReady,
+        parseDrainRequest,
+        residentPoolOf: () => null,
         recoveryEvidenceUrl,
         recoveryViewsAreIdle,
         admissionRecordHash,
@@ -214,6 +254,7 @@ describe("global deploy admission evidence", () => {
         releaseWindowSchema,
         stagingMaintenanceSchema,
         stagingAttemptSchema,
+        residentImageTargetSchema,
         selectedStagingAttempt,
         stagingAttemptMatches,
         liftDrain,
@@ -228,7 +269,6 @@ describe("global deploy admission evidence", () => {
         catchAllErr: () => ({ error: "request failed" }),
         DRAIN_KEY: "drain",
         DEPLOY_ADMISSION_KEY_PREFIX: "deploy:admission:",
-        BUILD_ID: "a".repeat(40),
         RESOURCE_KEY: "resource",
         DEPLOY_RELEASE_RECEIPTS_KEY: "deploy:release-receipts",
         DEPLOY_RECOVERY_KEY_PREFIX: "deploy:recovered:",
@@ -243,14 +283,26 @@ describe("global deploy admission evidence", () => {
         },
       },
     );
-    const api = new Registry();
-    api.pushDrainPost = async () => {};
-    api.env = {
+    const env = {
       CLOUDFLARE_ACCOUNT_ID: TEST_MAINTENANCE.stagingAccount,
       RESIDENT_SCRIPT_NAME: TEST_MAINTENANCE.residentScript,
+      ...(options.policy ? { RESIDENT_MAINTENANCE_POLICY: JSON.stringify(options.policy) } : {}),
     };
-    api.ctx = { storage };
+    const api = new Registry(
+      {
+        storage,
+        blockConcurrencyWhile: (work: () => Promise<void>) => {
+          initialization = work();
+          void initialization.catch(() => {});
+          return initialization;
+        },
+      },
+      env,
+    );
+    api.pushDrainPost = async () => {};
+    api.getDrainOutbox = async () => null;
     api.list = async () => [{ resource: "repo:acme/api" }];
+    api.listRepositories = api.list;
     let recoveryMutations = 0;
     const recoverOriginal = api.recoverQuotedDeployAdmission.bind(api);
     api.recoverQuotedDeployAdmission = (...args: unknown[]) => {
@@ -259,6 +311,42 @@ describe("global deploy admission evidence", () => {
     };
     return {
       api,
+      boot: () => initialization,
+      http: (
+        method: string,
+        path: string,
+        body?: Record<string, unknown>,
+        version = "00000000-0000-4000-8000-000000000002",
+      ) =>
+        Worker.fetch(
+          new Request(`https://example.com${path}`, {
+            method,
+            headers: { authorization: "Bearer admin-fixture", "content-type": "application/json" },
+            ...(body
+              ? {
+                  body: JSON.stringify({
+                    ...(path === "/reconcile"
+                      ? {
+                          imageTarget: {
+                            application: `${env.RESIDENT_SCRIPT_NAME}-residentdo`,
+                            version: 1,
+                            image: "registry.example.test/resident:one",
+                          },
+                        }
+                      : {}),
+                    ...body,
+                  }),
+                }
+              : {}),
+          }),
+          {
+            ...env,
+            CF_VERSION_METADATA: { id: version, timestamp: "1970-01-01T00:00:02.000Z" },
+            RESIDENT_ADMIN_TOKEN: "admin-fixture",
+            RESIDENT_READ_TOKEN: "read-fixture",
+            RESIDENT_DRAIN_TOKEN: "drain-fixture",
+          },
+        ),
       inventory: (id?: string) =>
         inventoryHandler({}, new URL(`https://example.com/deploy-admissions${id ? `?id=${id}` : ""}`)),
       recoveryMutations: () => recoveryMutations,
@@ -383,6 +471,164 @@ describe("global deploy admission evidence", () => {
     expectedStartedAt: 1000,
     expectedRecordSha256: "a81747d391ba39d7ed7e15e4b633483a6104f8c6f9318d5548a2589a3f22ab6a",
   };
+
+  it("starts a stamped Registry and completes selected claim, reconciliation and release without changing source authority", async () => {
+    const policy = { ...TEST_MAINTENANCE, attempt: { ...TEST_MAINTENANCE.attempt, deadline: 3_600_000 } };
+    const h = fixture({
+      stamp: buildStamp({ commit: "a".repeat(40), dirty: false, now: new Date("2026-10-15T00:00:00.000Z") }),
+      policy,
+    });
+    const held = await h.http("GET", "/staging-maintenance");
+    expect(held.status).toBe(200);
+    expect(await held.json()).toMatchObject({ maintenance: { state: "held", generation: 1, window: null } });
+    h.rows.set(`deploy:admission:${recoveryRequest.id}`, { startedAt: 1000, kind: "watchdog" });
+    const quote = await h.http("GET", `/deploy-admissions?id=${recoveryRequest.id}`);
+    expect(await quote.json()).toEqual({
+      admission: { id: recoveryRequest.id, startedAt: 1000, recordSha256: recoveryRequest.expectedRecordSha256 },
+    });
+    const attempt = { ...policy.attempt, holdId: policy.holdId, generation: 1 };
+    expect((await h.http("POST", "/drain", { minutes: 90, attempt })).status).toBe(200);
+    expect(
+      (
+        await h.http("POST", "/staging-abandon-admission", {
+          id: recoveryRequest.id,
+          expectedStartedAt: 1000,
+          expectedRecordSha256: recoveryRequest.expectedRecordSha256,
+          expectedFixtureSha256: policy.fixtureSha256,
+          expectedDecisionSha256: policy.decisionSha256,
+          attempt,
+        })
+      ).status,
+    ).toBe(200);
+    expect((await h.http("POST", "/drain", { minutes: 90, attempt })).status).toBe(200);
+    const fence = await h.http("POST", "/deploy-fence", { attempt });
+    expect(fence.status).toBe(200);
+    expect(await fence.json()).toMatchObject({
+      fenceReady: true,
+      deployDiagnostic: { producer: { build: `${"a".repeat(40)}@2026-10-15T00:00:00.000Z` } },
+    });
+    const later = fixture({
+      stamp: resolveBuildStamp("a".repeat(40), "2026-10-15T00:01:00.000Z"),
+      policy,
+      rows: h.rows,
+    });
+    later.advance();
+    const uploadedVersion = "00000000-0000-4000-8000-000000000003";
+    const reconciled = await later.http("POST", "/reconcile", { attempt }, uploadedVersion);
+    expect(reconciled.status).toBe(200);
+    expect(await reconciled.json()).toMatchObject({
+      reconciled: [{ resource: "repo:acme/api", result: "current", verified: true }],
+    });
+    expect((await later.http("POST", "/staging-seal-window", { attempt }, uploadedVersion)).status).toBe(200);
+    expect(
+      (
+        await later.http(
+          "POST",
+          "/staging-release-maintenance",
+          {
+            expectedStartedAt: 1000,
+            expectedRecordSha256: recoveryRequest.expectedRecordSha256,
+            attempt,
+            releaseDecisionSha256: "7".repeat(64),
+          },
+          uploadedVersion,
+        )
+      ).status,
+    ).toBe(200);
+    expect((await (await later.http("GET", "/staging-maintenance")).json()).maintenance).toMatchObject({
+      state: "released",
+      generation: 1,
+      releaseDecisionSha256: "7".repeat(64),
+    });
+    const restarted = fixture({
+      stamp: resolveBuildStamp("a".repeat(40), "2026-10-15T00:02:00.000Z"),
+      policy,
+      rows: h.rows,
+    });
+    expect((await (await restarted.http("GET", "/staging-maintenance")).json()).maintenance.state).toBe("released");
+    expect(h.rows.get(`deploy:admission:${recoveryRequest.id}`)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    expect(h.rows.get(`deploy:abandoned:${recoveryRequest.id}`)).toMatchObject({
+      requestEnd: "unobserved",
+      nativeOutcome: "unverified",
+    });
+  });
+
+  it("admits the selected post-upload reconcile from a stamped source and refuses wrong source or generation", async () => {
+    const policy = { ...TEST_MAINTENANCE, attempt: { ...TEST_MAINTENANCE.attempt, deadline: 3_600_000 } };
+    const attempt = { ...policy.attempt, holdId: policy.holdId, generation: 1 };
+    const run = async (commit: string, generation: number) => {
+      const h = fixture({ stamp: resolveBuildStamp(commit, "2026-10-15T00:00:00.000Z") });
+      h.rows.set("deploy:staging-maintenance", { schema: 1, state: "held", installedAt: 1000, policy });
+      h.rows.set("drain", {
+        since: "1970-01-01T00:00:00.000Z",
+        until: "1970-01-01T01:00:00.000Z",
+        by: "deploy",
+        reason: "release",
+        swapFence: true,
+        swapVersion: "00000000-0000-4000-8000-000000000001",
+        swapAt: "1970-01-01T00:00:01.000Z",
+      });
+      const response = await h.http("POST", "/reconcile", { attempt: { ...attempt, generation } });
+      const body = await response.json();
+      return {
+        status: response.status,
+        body: response.status === 200 ? { reconciled: body.reconciled } : body,
+        rows: await h.api.listDeployAdmissions(),
+      };
+    };
+    expect(await run("a".repeat(40), 1)).toEqual({
+      status: 200,
+      body: { reconciled: [{ resource: "repo:acme/api", result: "current", verified: true }] },
+      rows: [],
+    });
+    for (const [source, generation] of [
+      ["b".repeat(40), 1],
+      ["a".repeat(40), 2],
+    ] as const)
+      expect(await run(source, generation)).toEqual({
+        status: 409,
+        body: { error: "deploy-fence: reconcile waits for the uploaded Worker" },
+        rows: [],
+      });
+  });
+
+  it("refuses missing, malformed and foreign image targets before reconcile admission", async () => {
+    const h = fixture();
+    await h.boot();
+    const before = [...h.rows];
+    for (const imageTarget of [
+      undefined,
+      { application: "foreign-residentdo", version: 1, image: "registry.example.test/resident:one" },
+      { application: "test-resident-residentdo", version: 1, image: null },
+    ]) {
+      const response = await h.http("POST", "/reconcile", { imageTarget });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error: "an exact Resident application version and image target are required",
+      });
+      expect([...h.rows]).toEqual(before);
+    }
+  });
+
+  it("refuses wrong, unknown and dirty stamped source or a changed held generation at Registry startup", async () => {
+    const policy = { ...TEST_MAINTENANCE, attempt: { ...TEST_MAINTENANCE.attempt, deadline: 3_600_000 } };
+    for (const commit of ["b".repeat(40), "unknown", "a".repeat(7), `${"a".repeat(40)}-dirty`]) {
+      const h = fixture({ stamp: resolveBuildStamp(commit, "2026-10-15T00:00:00.000Z"), policy });
+      await expect(h.boot()).rejects.toThrow("staging-maintenance-scope-mismatch");
+      expect((await h.http("GET", "/staging-maintenance")).status).toBe(500);
+      expect([...h.rows]).toEqual([]);
+    }
+    const original = { schema: 1, state: "held", installedAt: 1000, policy };
+    const rows = new Map<string, unknown>([["deploy:staging-maintenance", original]]);
+    const h = fixture({
+      stamp: resolveBuildStamp("a".repeat(40), "2026-10-15T00:00:00.000Z"),
+      policy: { ...policy, generation: 2 },
+      rows,
+    });
+    await expect(h.boot()).rejects.toThrow("staging-maintenance-generation-mismatch");
+    expect((await h.http("GET", "/staging-maintenance")).status).toBe(500);
+    expect([...rows]).toEqual([["deploy:staging-maintenance", original]]);
+  });
 
   it("excludes only the exact staging record while retaining its original data and unknown result", async () => {
     const h = fixture();
@@ -1792,13 +2038,15 @@ describe("the Worker's wiring (by scan)", () => {
 
   it("the reconcile route is a drain-scope POST dispatched to its handler, which asks every resident's Durable Object to cycle its container onto the current image and VERIFY the fresh start (issue 1931: 'reconciled' is not 'swapped') — an unverified resident holds the drain until its own report", () => {
     expect(source).toMatch(/"\/reconcile": \{ scope: "drain", method: "POST" \}/);
-    expect(source).toMatch(/case "\/reconcile":\s*\n\s*return await handleReconcile\(env, body\.attempt\);/);
+    expect(source).toMatch(
+      /case "\/reconcile":\s*\n\s*return await handleReconcile\(env, body\.attempt, body\.imageTarget\);/,
+    );
     // The DO method never trusts the pool-user probe on the deploy path (the
     // pre-deploy image passes it when the pool did not change): the active
     // container is cycled (force), and only the replacement's completed
     // hydration to `warm` provides the report.
     expect(source).toMatch(
-      /async reconcileForDeploy\(resource: string\): Promise<\{ result: ImageReconcileResult; verified: boolean \}>/,
+      /async reconcileForDeploy\(\s*resource: string,\s*input: unknown,?\s*\): Promise<\{ result: ImageReconcileResult; verified: boolean \}>/,
     );
     const forDeploy = source.slice(source.indexOf("async reconcileForDeploy("), source.indexOf("// -- watchdog"));
     expect(forDeploy).toMatch(/this\.reconcileImage\("deploy", true\)/);
