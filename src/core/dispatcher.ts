@@ -487,18 +487,32 @@ async function answerUnitOwnedThread(
         );
         return "acked";
       }
-      const settled = await store.putUnits([
-        {
+      // The status belongs to the snapshot read before the nudge. It cannot
+      // close work that advanced while that status request was in flight.
+      const settled = await store
+        .compareAndReplaceUnit(owner.unit, {
           ...owner.unit,
           ending: {
             kind: "terminated",
             report: `the plan runner instance is gone (${why}) — the thread is unowned from here`,
             at,
           },
-        },
-      ]);
-      if (!settled.ok) {
-        await io.reply(`Unit ${unitKey}'s ending could not be recorded; this message started no replacement work.`);
+        })
+        .catch((err: unknown) => {
+          console.warn(
+            `[dispatch] ${msg.threadKey}: unit ${unitKey} settlement write failed (${err instanceof Error ? err.message : String(err)})`,
+          );
+          return undefined;
+        });
+      if (settled?.ok !== true) {
+        console.warn(
+          `[dispatch] ${msg.threadKey}: unit ${unitKey} ending not confirmed (${settled?.reason ?? "unknown"})`,
+        );
+        await io.reply(
+          settled?.reason === "stale"
+            ? "The task changed while its status was checked. Your message remains with the original task. No replacement work started."
+            : "I could not confirm the task's ending. Your message remains saved with the original task. No replacement work started.",
+        );
         return "acked";
       }
       console.log(`[dispatch] ${msg.threadKey}: unit ${unitKey} ended terminated (${why}) — routing fresh`);

@@ -95,6 +95,12 @@ This is a saved selection, not a completed action or a job queue. The existing r
 
 The main conversation's private audience and latest-delivered-source checks remain in force. This cut adds no specialist delegation, external evidence delivery, source listener or second model loop. Unit-thread, live-run and explicit external steer paths still need the recorded ownership boundary. Step 1 remains in progress.
 
+### Gone Workflow settlement, 2026-10-15
+
+A unit can advance while the dispatcher checks a failed nudge against the Workflow status. The ordinary gone-Workflow path now uses the store's existing compare-and-replace operation, as the recovery path already does. Only an acknowledged replacement of the exact checked unit snapshot permits the existing requester routing fallback. A changed unit, refusal or unknown write result keeps the saved reply with the original task and starts no replacement. A regression reproduces loss of a newer round log before this change.
+
+This fixes the stale unit write without adding a store operation, retry or listener. It complements the append-failure boundary in [PR #3141](https://github.com/coreplanelabs/switchboard/pull/3141). Shared fold decisions and the broader routing migration remain pending.
+
 ### Private worker controls, 2026-10-15
 
 The command binding cut is merged in [PR #3134](https://github.com/coreplanelabs/switchboard/pull/3134). The next cut extends its existing decision writer to the orchestrator's private `work_start`, `work_steer` and `work_stop` tools. Commands and worker controls share one owned history and its count and byte limits. Before a worker can start or receive a change, the writer must acknowledge the conversation, requester, latest delivered source message and selected tool. It retains hashes of the target, input and context. Private target names and request bodies do not enter this metadata.

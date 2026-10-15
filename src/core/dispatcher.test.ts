@@ -28766,6 +28766,86 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.provider.requests[0]!.model).toBe("general-model");
   });
 
+  it("a gone Workflow cannot replace a unit that advanced during its status lookup", async () => {
+    const s = await unitOwnedSetup({ startedAt: 1_000 });
+    expect(
+      await s.instances.put({
+        id: INSTANCE,
+        kind: "ship",
+        userId: "slack:UADMIN",
+        channelId: "slack:CX",
+        threadKey: THREAD,
+        repo: "acme/api",
+        base: "main",
+        branch: unitRow().branch,
+        plan: { id: "fix-the-login-6435ec" },
+        createdAt: 1_000,
+        runId: "ship-parent",
+        merge: "person",
+      }),
+    ).toEqual({ ok: true });
+    const newer = unitRow({ startedAt: 1_000, rounds: [{ index: 1, agent: "coding", outcome: "started", at: 2_000 }] });
+    s.deps.workflow = {
+      get: async () => ({
+        sendEvent: async () => {
+          throw new Error("nudge refused");
+        },
+      }),
+    };
+    s.deps.fetchCoordinatorInstanceStatus = async () => {
+      seedCoordinatorUnit(s.instances, newer);
+      return { kind: "absent" as const };
+    };
+    const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
+
+    await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+
+    expect(await s.instances.listUnits(INSTANCE)).toEqual([newer]);
+    expect(await s.instances.listEvents(s.key, true)).toEqual([
+      expect.objectContaining({ seq: 1, sender: "slack:UADMIN", text: "what about the tests", mode: "steer" }),
+    ]);
+    expect(replies).toEqual([
+      "The task changed while its status was checked. Your message remains with the original task. No replacement work started.",
+    ]);
+    expect(s.provider.requests).toHaveLength(0);
+  });
+
+  it.each(["unavailable", "lost-ack"] as const)(
+    "an unconfirmed gone-Workflow settlement (%s) keeps the saved reply without replacement work",
+    async (failure) => {
+      const s = await unitOwnedSetup();
+      s.deps.workflow = {
+        get: async () => ({
+          sendEvent: async () => {
+            throw new Error("nudge refused");
+          },
+        }),
+      };
+      s.deps.fetchCoordinatorInstanceStatus = async () => ({ kind: "absent" as const });
+      const replace = s.instances.compareAndReplaceUnit.bind(s.instances);
+      s.instances.compareAndReplaceUnit = async (...args) => {
+        if (failure === "unavailable") return { ok: false, reason: "unavailable" };
+        const result = await replace(...args);
+        expect(result).toEqual({ ok: true });
+        throw new Error("settlement acknowledgment lost");
+      };
+      const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
+
+      await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+
+      const [row] = await s.instances.listUnits(INSTANCE);
+      if (failure === "unavailable") expect(row).toEqual(unitRow());
+      else expect(row!.ending).toMatchObject({ kind: "terminated" });
+      expect(await s.instances.listEvents(s.key, true)).toEqual([
+        expect.objectContaining({ seq: 1, sender: "slack:UADMIN", text: "what about the tests", mode: "steer" }),
+      ]);
+      expect(replies).toEqual([
+        "I could not confirm the task's ending. Your message remains saved with the original task. No replacement work started.",
+      ]);
+      expect(s.provider.requests).toHaveLength(0);
+    },
+  );
+
   it("the relay's no-instance ends the row terminated and routes fresh with the line saying so", async () => {
     const s = await unitOwnedSetup();
     s.deps.workflow = {
