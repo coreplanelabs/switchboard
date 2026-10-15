@@ -27,6 +27,27 @@ npm run staging:deploy -- --only bot
 
 `--check` reads and validates inputs without upload. The runner requires the explicit staging account, full topology, build-mode images, matching state/execution endpoints and separate storage names. It freezes the profile and config outside the checkout before invoking the existing `deploy plan` and `deploy all`. The existing runner checks credentials, clean tree, preservation and live readiness. `--force` is refused, and inherited shell or checkout-file force overrides are disabled. The bot preflight uses the selected profile’s native application name. Account and endpoint checks cannot prove Slack/GitHub credential scope: prove those separately during provisioning.
 
+## Selected recovery under maintenance
+
+Resident stores unfinished requests to block unsafe deployment. A separately qualified staging operator can accept a finite fixture risk while preserving the original request record and its unknown result. This uses the [selected maintenance contract](../reference/specs/release-and-deploy.md#selected-staging-maintenance) and [staging risk decision](../decisions/0086-deploy-fence-separates-execution-from-workspace-retention.md). A normal deployment does not infer that the request ended.
+
+Use `--retain-maintenance` only with a matching `residentMaintenance` policy in the private staging profile and a selection that includes Resident. The operator must first install the qualified contract producer, verify the exact durable hold and accept one quoted risk window. This is separate from first-install creation. The selected source, controller, profile, configuration and deadline must match that window.
+
+```bash
+npm run staging:deploy -- --check --retain-maintenance
+npm run staging:deploy -- --retain-maintenance
+```
+
+For the same path in GitHub, manually dispatch the exact candidate branch and current PR head:
+
+```bash
+gh workflow run deploy-staging.yml --ref <candidate-branch> -f pr=<pr-number> -f commit=<40-character-current-head> -f retain_maintenance=true -f review_e2e=true
+```
+
+The branch must contain the retained-mode workflow. Existing writer, same-repository, current-head and validation checks still apply. `retain_maintenance` defaults to false and automatic requests do not select it. The workflow passes the explicit option to both acceptance plans and the deployment wrapper. It keeps the shared staging lock while the wrapper deploys with force zero, proves image readiness, seals the selected upload window and waits for an explicit Admin release. The operator uses `POST /staging-release-maintenance` with the unchanged full request quote, selected deployment data and a fresh release decision. Release refuses unknown or busy member views and other unfinished requests. The wrapper only reads that release receipt; it cannot release or renew maintenance itself.
+
+E2E runs after the exact release is verified. Failed state reads, HTTP refusals, changed inputs or deadline expiry stop the selected deployment. Do not retry it through force or remove its policy. The separately qualified first producer upload remains outside this workflow. Do not consume the selected window in a manual deployment before asking CI to use it. After release the original request remains stored; this decision does not authorize a later deployment.
+
 ## GitHub
 
 For the role of each source, routing, staging and production check, see [the testing model](ship-a-release.md#what-the-checks-prove).

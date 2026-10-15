@@ -24,6 +24,10 @@ on: # zizmor: ignore[dangerous-triggers]
         description: Run bounded live Review acceptance after full-stack deployment
         type: boolean
         default: false
+      retain_maintenance:
+        description: Keep selected staging maintenance held until explicit Admin release
+        type: boolean
+        default: false
       model:
         description: Optional per-request full model ref for acceptance (provider/model)
         type: string
@@ -35,6 +39,7 @@ on: # zizmor: ignore[dangerous-triggers]
 env:
   STAGING_ACCEPTANCE_MODEL: ${{ inputs.model }}
   STAGING_REQUIRE_VOUCHED_CONTROLS: ${{ inputs.require_vouched_controls }}
+  STAGING_RETAIN_MAINTENANCE: ${{ inputs.retain_maintenance }}
 
 permissions:
   contents: read
@@ -227,7 +232,9 @@ jobs:
           SMOKE_SLACK_CONFIG: ${{ vars.STAGING_SLACK_SMOKE_CONFIG }}
           SMOKE_SLACK_USER_TOKEN: ${{ secrets.STAGING_SLACK_TEST_USER_TOKEN }}
         run: |
-          npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/staging-fleet.json"
+          plan_args=()
+          if [ "$STAGING_RETAIN_MAINTENANCE" = true ]; then plan_args=(--retain-maintenance); fi
+          npm run --silent cli -- deploy plan --allow-branch --json "${plan_args[@]}" > "$RUNNER_TEMP/staging-fleet.json"
           smoke_args=()
           if [ -n "$SMOKE_MODEL" ]; then smoke_args=(--model "$SMOKE_MODEL"); fi
           if [ "$STAGING_REQUIRE_VOUCHED_CONTROLS" = true ]; then smoke_args+=(--require-vouched-controls); fi
@@ -256,6 +263,7 @@ jobs:
               [[ "$TARGETS" =~ ^(memory|bot|resident|sandbox)(,(memory|bot|resident|sandbox))*$ ]] || { echo '::error::Invalid targets'; exit 1; }
               args=(--only "$TARGETS") ;;
           esac
+          if [ "$STAGING_RETAIN_MAINTENANCE" = true ]; then args+=(--retain-maintenance); fi
           set -o pipefail
           npm run --silent staging:deploy -- "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/staging-deploy.log"
       - name: run live Review acceptance on the deployed stack
@@ -274,7 +282,9 @@ jobs:
           SMOKE_SLACK_CONFIG: ${{ vars.STAGING_SLACK_SMOKE_CONFIG }}
           SMOKE_SLACK_USER_TOKEN: ${{ secrets.STAGING_SLACK_TEST_USER_TOKEN }}
         run: |
-          npm run --silent cli -- deploy plan --allow-branch --json > "$RUNNER_TEMP/staging-fleet.json"
+          plan_args=()
+          if [ "$STAGING_RETAIN_MAINTENANCE" = true ]; then plan_args=(--retain-maintenance); fi
+          npm run --silent cli -- deploy plan --allow-branch --json "${plan_args[@]}" > "$RUNNER_TEMP/staging-fleet.json"
           smoke_args=()
           if [ -n "$SMOKE_MODEL" ]; then smoke_args=(--model "$SMOKE_MODEL"); fi
           if [ "$STAGING_REQUIRE_VOUCHED_CONTROLS" = true ]; then smoke_args+=(--require-vouched-controls); fi
