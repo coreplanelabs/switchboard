@@ -209,6 +209,12 @@ export const INTAKE_RECOVERY_WINDOW_MS = 10 * MINUTE_MS;
  * process that died after the atomic claim and before it could finish it. */
 export const INTAKE_DELIVERY_CLAIM_MS = 5 * MINUTE_MS;
 
+/** Inactive source reception limits; qualify throughput before enabling a producer. */
+export const SOURCE_EVENT_MAX_BYTES = 400 * 1024;
+export const SOURCE_EVENT_STORE_MAX_BYTES = 32 * 1024 * 1024;
+export const SOURCE_EVENT_STORE_MAX_COUNT = 1024;
+export const SOURCE_EVENT_WAKE_MS = 30 * SECOND_MS;
+
 /** The presets that run the tool loop, and the one pipeline preset. */
 export const LOOP_PRESETS = [
   "general",

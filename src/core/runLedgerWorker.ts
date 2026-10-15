@@ -1,5 +1,13 @@
 import { EXECUTION_PROTOCOL_HEADER } from "./runLedger/types.js";
 import type { InboxPushResult } from "./runLedger/inboxMessage.js";
+import {
+  isSourceEventKey,
+  prepareSourceEvent,
+  sourceEventRecordOf,
+  sourceEventReceiveResultOf,
+  type SourceEventRecord,
+  type SourceEventReceiveResult,
+} from "./runLedger/sourceEvents.js";
 import { checkSelectorSchema, checkSourceReadOf, type CheckSelector, type CheckSourceRead } from "./checkInspection.js";
 import {
   cancellationRecordMatches,
@@ -1507,6 +1515,39 @@ export class WorkerRunLedger implements RunLedger {
       inserted: r.data.inserted === true,
       stored: isIntakeReceipt(r.data.stored) ? r.data.stored : receipt,
     };
+  }
+
+  async receiveSourceEvent(event: unknown): Promise<SourceEventReceiveResult> {
+    const prepared = await prepareSourceEvent(event);
+    if (!prepared) return { kind: "refused", reason: "invalid-event" };
+    const response = await this.post("/runs/source-events/receive", {
+      storeKey: this.opts.storeKey,
+      event: prepared.event,
+    });
+    const result = sourceEventReceiveResultOf(response.data);
+    if (
+      response.status === 200 &&
+      result &&
+      (result.kind === "refused" ||
+        (result.receipt.key === prepared.key && result.receipt.bodyHash === prepared.bodyHash))
+    )
+      return result;
+    throw this.unknownAcknowledgement(
+      "run ledger: source reception acknowledgement is unreadable",
+      response.request,
+      response.status,
+    );
+  }
+
+  async readSourceEvent(key: string): Promise<SourceEventRecord | undefined> {
+    if (!isSourceEventKey(key)) throw new PermanentStoreError("run ledger: invalid source event key");
+    const response = await this.read("/runs/source-events/read", { storeKey: this.opts.storeKey, key });
+    if (response.status === 200 && Object.keys(response.data).length === 1) {
+      if (response.data.record === null) return;
+      const record = await sourceEventRecordOf(response.data.record);
+      if (record?.receipt.key === key) return record;
+    }
+    throw new PermanentStoreError("run ledger: source event read is unreadable");
   }
 
   async readIntake(key: string): Promise<IntakeReceipt | undefined> {

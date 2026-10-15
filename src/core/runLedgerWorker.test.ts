@@ -1184,3 +1184,84 @@ describe("checkpoint acknowledgment original binding", () => {
     },
   );
 });
+
+describe("saved source-event client", () => {
+  const event = {
+    version: 1,
+    sourceId: "fixture:host:installation:1",
+    deliveryId: "delivery-a",
+    objectId: "comment:7",
+    changeId: "revision:1",
+    kind: "source-evidence",
+    authorId: "fixture:user:2",
+    payload: { text: "The changed branch has a missing check." },
+  };
+  const receipt = {
+    version: 1,
+    key: "source:a836bcb63b79f3b097ac8707143e140eb2b6b2455cb03f69b12615018e78245f",
+    sequence: 1,
+    receivedAt: 1_000,
+    bodyHash: "27e0beeb8bdc1bb74142a3a6ef00ddc125387ffe4d27a66a36ba300d4460d6f5",
+  };
+  const record = {
+    event,
+    receipt,
+    job: {
+      version: 1,
+      eventKey: receipt.key,
+      stage: "received",
+      attempts: 0,
+      nextAttemptAt: 1_000,
+    },
+  };
+
+  it("requires a receipt tied to this exact source and body before acknowledging reception", async () => {
+    const { ledger, calls } = stubWorker((path) => ({
+      status: 200,
+      data: path.endsWith("/receive") ? { kind: "received", receipt } : { record },
+    }));
+    expect(await ledger.receiveSourceEvent(event)).toEqual({ kind: "received", receipt });
+    expect(await ledger.readSourceEvent(receipt.key)).toEqual(record);
+    expect(calls.map((call) => ({ path: call.path, body: call.body }))).toEqual([
+      { path: "/runs/source-events/receive", body: { storeKey: "runs:default", event } },
+      { path: "/runs/source-events/read", body: { storeKey: "runs:default", key: receipt.key } },
+    ]);
+  });
+
+  it.each([
+    {},
+    { ok: true },
+    { kind: "received", receipt: { ...receipt, bodyHash: "a".repeat(64) } },
+    { kind: "refused", reason: "capacity", receipt },
+    { kind: "received", receipt: { ...receipt, sequence: 0 } },
+  ])("holds an unreadable or contradictory write acknowledgment (%j)", async (ack) => {
+    const { ledger } = stubWorker(() => ({ status: 200, data: ack }));
+    await expect(ledger.receiveSourceEvent(event)).rejects.toMatchObject({
+      name: "UncertainStoreError",
+      request: { operation: "/runs/source-events/receive" },
+    });
+  });
+
+  it("accepts an explicit refusal but does not turn absent read data into source absence", async () => {
+    const { ledger } = stubWorker((path) => ({
+      status: 200,
+      data: path.endsWith("/receive") ? { kind: "refused", reason: "capacity" } : {},
+    }));
+    expect(await ledger.receiveSourceEvent(event)).toEqual({ kind: "refused", reason: "capacity" });
+    await expect(ledger.readSourceEvent(receipt.key)).rejects.toThrow("source event read is unreadable");
+    const absent = stubWorker(() => ({ status: 200, data: { record: null } }));
+    expect(await absent.ledger.readSourceEvent(receipt.key)).toBeUndefined();
+  });
+
+  it("refuses changed source bytes and an unknown job schema on read", async () => {
+    for (const bad of [
+      { ...record, event: { ...event, payload: { text: "changed" } } },
+      { ...record, job: { version: 2, stage: "completed" } },
+    ]) {
+      const { ledger } = stubWorker(() => ({ status: 200, data: { record: bad } }));
+      await expect(ledger.readSourceEvent(receipt.key)).rejects.toThrow("source event read is unreadable");
+    }
+    const good = stubWorker(() => ({ status: 200, data: { record } }));
+    expect(await good.ledger.readSourceEvent(receipt.key)).toEqual(record);
+  });
+});

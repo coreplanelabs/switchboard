@@ -2349,3 +2349,168 @@ describe("local original checkpoint boundary before effects", () => {
     },
   );
 });
+
+describe("saved source-event reception", () => {
+  const event = {
+    version: 1,
+    sourceId: "fixture:host:installation:1",
+    deliveryId: "delivery-a",
+    objectId: "comment:7",
+    changeId: "revision:1",
+    kind: "source-evidence",
+    authorId: "fixture:user:2",
+    payload: { text: "The changed branch has a missing check." },
+  };
+
+  it("saves one event and pending job before returning its receipt", async () => {
+    const ledger = new InMemoryRunLedger(() => 1_000);
+    const received = await ledger.receiveSourceEvent(event);
+    expect(received.kind).toBe("received");
+    if (received.kind === "refused") throw new Error("expected reception");
+    expect(await ledger.readSourceEvent(received.receipt.key)).toEqual({
+      event,
+      receipt: { ...received.receipt, sequence: 1, receivedAt: 1_000 },
+      job: { version: 1, eventKey: received.receipt.key, stage: "received", attempts: 0, nextAttemptAt: 1_000 },
+    });
+    expect(ledger.sourceEventWakeAt).toBe(31_000);
+  });
+
+  it("returns the original receipt on repeated delivery and refuses changed bytes under that identity", async () => {
+    let now = 1_000;
+    const ledger = new InMemoryRunLedger(() => now);
+    const first = await ledger.receiveSourceEvent(event);
+    if (first.kind === "refused") throw new Error("expected reception");
+    now = 2_000;
+    expect(await ledger.receiveSourceEvent(event)).toEqual({ kind: "duplicate", receipt: first.receipt });
+    expect(await ledger.receiveSourceEvent({ ...event, payload: { text: "different" } })).toEqual({
+      kind: "refused",
+      reason: "delivery-conflict",
+    });
+    expect((await ledger.readSourceEvent(first.receipt.key))?.event).toEqual(event);
+  });
+
+  it("keeps A to B to A as three observations with increasing local sequences", async () => {
+    const ledger = new InMemoryRunLedger(() => 1_000);
+    const results = [];
+    for (const [index, text] of ["A", "B", "A"].entries())
+      results.push(
+        await ledger.receiveSourceEvent({ ...event, deliveryId: `observation-${index}`, payload: { text } }),
+      );
+    const records = await Promise.all(
+      results.map((result) => {
+        if (result.kind === "refused") throw new Error("expected reception");
+        return ledger.readSourceEvent(result.receipt.key);
+      }),
+    );
+    expect(records.map((record) => record?.event.payload)).toEqual([{ text: "A" }, { text: "B" }, { text: "A" }]);
+    expect(records.map((record) => record?.receipt.sequence)).toEqual([1, 2, 3]);
+  });
+  it("refuses untrusted destination fields and non-JSON payloads without consuming a sequence", async () => {
+    const ledger = new InMemoryRunLedger(() => 1_000);
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const sparse = Object.assign(new Array(2), { 1: "present", extra: true });
+    for (const invalid of [
+      { ...event, targetRunId: "worker" },
+      { ...event, requesterId: "administrator" },
+      { ...event, sourceId: "unscoped" },
+      { ...event, payload: undefined },
+      { ...event, payload: { ignored: undefined } },
+      { ...event, payload: NaN },
+      { ...event, payload: new Date(0) },
+      { ...event, payload: cyclic },
+      { ...event, payload: sparse },
+      { ...event, payload: "x".repeat(400 * 1024) },
+    ])
+      expect(await ledger.receiveSourceEvent(invalid)).toEqual({ kind: "refused", reason: "invalid-event" });
+    const accepted = await ledger.receiveSourceEvent(event);
+    if (accepted.kind === "refused") throw new Error("expected reception");
+    expect(accepted.receipt.sequence).toBe(1);
+    expect((await ledger.readSourceEvent(accepted.receipt.key))?.event).toEqual(event);
+  });
+
+  it("scopes native delivery IDs to their source and returns detached snapshots", async () => {
+    const ledger = new InMemoryRunLedger(() => 1_000);
+    const first = await ledger.receiveSourceEvent(event);
+    const second = await ledger.receiveSourceEvent({ ...event, sourceId: "fixture:other-installation:2" });
+    if (first.kind === "refused" || second.kind === "refused") throw new Error("expected reception");
+    expect(second.receipt.sequence).toBe(2);
+    const read = await ledger.readSourceEvent(first.receipt.key);
+    if (!read) throw new Error("expected retained event");
+    read.event.payload = { text: "mutated reader" };
+    first.receipt.receivedAt = 9_999;
+    expect((await ledger.readSourceEvent(second.receipt.key))?.event.sourceId).toBe("fixture:other-installation:2");
+    expect((await ledger.readSourceEvent(read.receipt.key))?.event).toEqual(event);
+    expect(await ledger.receiveSourceEvent(event)).toEqual({ kind: "duplicate", receipt: read.receipt });
+  });
+
+  it("holds an unreadable retained job while returning its original reception receipt", async () => {
+    const ledger = new InMemoryRunLedger(() => 1_000);
+    const accepted = await ledger.receiveSourceEvent(event);
+    if (accepted.kind === "refused") throw new Error("expected reception");
+    ledger.sourceEvents.get(accepted.receipt.key)!.job = { version: 2, stage: "completed" };
+    expect(await ledger.receiveSourceEvent(event)).toEqual({ kind: "duplicate", receipt: accepted.receipt });
+    await expect(ledger.readSourceEvent(accepted.receipt.key)).rejects.toThrow("Stored source event is unreadable");
+  });
+
+  it("retains exactly one event under simultaneous duplicate deliveries", async () => {
+    const ledger = new InMemoryRunLedger(() => 1_000);
+    const received = await Promise.all(Array.from({ length: 10 }, () => ledger.receiveSourceEvent(event)));
+    expect(received.map((r) => r.kind).sort()).toEqual([...Array.from({ length: 9 }, () => "duplicate"), "received"]);
+    if (received[0]!.kind === "refused") throw new Error("expected reception");
+    const record = await ledger.readSourceEvent(received[0]!.receipt.key);
+    expect(record?.event).toEqual(event);
+    expect(record?.receipt.sequence).toBe(1);
+  });
+
+  it("returns old receipts at the count limit and refuses a new event", async () => {
+    const ledger = new InMemoryRunLedger(() => 1_000);
+    const first = await ledger.receiveSourceEvent(event);
+    if (first.kind === "refused") throw new Error("expected reception");
+    for (let i = 1; i < 1024; i++) {
+      expect((await ledger.receiveSourceEvent({ ...event, deliveryId: `delivery-${i}` })).kind).toBe("received");
+    }
+    expect(await ledger.receiveSourceEvent(event)).toEqual({ kind: "duplicate", receipt: first.receipt });
+    expect(await ledger.receiveSourceEvent({ ...event, deliveryId: "over-cap" })).toEqual({
+      kind: "refused",
+      reason: "capacity",
+    });
+    expect((await ledger.readSourceEvent(first.receipt.key))?.event).toEqual(event);
+  });
+
+  it("bounds retained event bytes independently of row count", async () => {
+    const ledger = new InMemoryRunLedger(() => 1_000);
+    const large = { ...event, payload: { text: "x".repeat(400_000) } };
+    const first = await ledger.receiveSourceEvent(large);
+    if (first.kind === "refused") throw new Error("expected reception");
+    for (let i = 1; i < 83; i++)
+      expect((await ledger.receiveSourceEvent({ ...large, deliveryId: `large-${i}` })).kind).toBe("received");
+    expect(await ledger.receiveSourceEvent({ ...large, deliveryId: "byte-cap" })).toEqual({
+      kind: "refused",
+      reason: "capacity",
+    });
+    expect(await ledger.receiveSourceEvent(large)).toEqual({ kind: "duplicate", receipt: first.receipt });
+    expect((await ledger.readSourceEvent(first.receipt.key))?.event).toEqual(large);
+  });
+  it("retains null, primitive and nested array payloads through JSON storage", async () => {
+    const ledger = new InMemoryRunLedger(() => 1_000);
+    const saved = [];
+    for (const [index, payload] of [null, true, 42, "note", ["note", null, { nativeId: 7 }]].entries()) {
+      const received = await ledger.receiveSourceEvent({ ...event, deliveryId: `json-${index}`, payload });
+      if (received.kind === "refused") throw new Error("expected reception");
+      saved.push((await ledger.readSourceEvent(received.receipt.key))?.event.payload);
+    }
+    expect(saved).toEqual([null, true, 42, "note", ["note", null, { nativeId: 7 }]]);
+  });
+  it("keeps the original wake when a distinct source event arrives later", async () => {
+    let now = 1_000;
+    const ledger = new InMemoryRunLedger(() => now);
+    const first = await ledger.receiveSourceEvent(event);
+    if (first.kind === "refused") throw new Error("expected reception");
+    now = 11_000;
+    const later = await ledger.receiveSourceEvent({ ...event, deliveryId: "later-event" });
+    expect(later).toMatchObject({ kind: "received", receipt: { sequence: 2, receivedAt: 11_000 } });
+    expect(ledger.sourceEventWakeAt).toBe(31_000);
+    expect((await ledger.readSourceEvent(first.receipt.key))?.event).toEqual(event);
+  });
+});

@@ -1,5 +1,14 @@
 import { EXECUTION_PROTOCOL_HEADER } from "../../src/core/runLedger/types.js";
 import {
+  isSourceEventKey,
+  prepareSourceEvent,
+  sourceEventReceiptOf,
+  sourceEventRecordOf,
+  receivedSourceEventJob,
+  type SourceEventReceiveResult,
+  type SourceEventRecord,
+} from "../../src/core/runLedger/sourceEvents.js";
+import {
   captureCheckArchive,
   hasRecordedCheckEvidence,
   checkArchiveOf,
@@ -350,6 +359,9 @@ import {
 } from "../../src/core/runLedger/inboxSegment.ts";
 import {
   INTAKE_DELIVERY_CLAIM_MS,
+  SOURCE_EVENT_STORE_MAX_BYTES,
+  SOURCE_EVENT_STORE_MAX_COUNT,
+  SOURCE_EVENT_WAKE_MS,
   intakeReceiptRetentionMs,
   minutesToMs,
   PLANE,
@@ -2395,6 +2407,17 @@ export class RunHistoryDO extends DurableObject<Env> {
         json TEXT NOT NULL,
         PRIMARY KEY (run_id, kind)
       );
+      CREATE TABLE IF NOT EXISTS source_events (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT NOT NULL UNIQUE,
+        event_json TEXT NOT NULL,
+        body_hash TEXT NOT NULL,
+        received_at INTEGER NOT NULL,
+        job_json TEXT NOT NULL,
+        due_at INTEGER NOT NULL,
+        bytes INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS source_events_due ON source_events(due_at);
     `);
     const allocationColumns = new Set(
       this.sql
@@ -3051,6 +3074,11 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  contributes nothing to end a run — the alarm only offers. */
   private planeEarliestDue(now: number): number | undefined {
     const dues: number[] = [];
+    const sourceDue = this.sql
+      .exec<{ due: number | null }>(`SELECT MIN(due_at) AS due FROM source_events`)
+      .toArray()[0]?.due;
+    if (sourceDue !== undefined && sourceDue !== null)
+      dues.push(sourceDue > now ? sourceDue : now + SOURCE_EVENT_WAKE_MS);
     const reoffer = now + this.planeReaskMs();
     for (const r of this.sql
       .exec<{ lease_until: number; state_json: string }>(`SELECT lease_until, state_json FROM live_runs`)
@@ -3091,9 +3119,13 @@ export class RunHistoryDO extends DurableObject<Env> {
     }
     const due = Math.min(raw, now + RUN_SWEEP_INTERVAL_MS);
     const set = await this.ctx.storage.getAlarm();
+    const sourceOverdue =
+      this.sql.exec(`SELECT key FROM source_events WHERE due_at <= ? LIMIT 1`, now).toArray().length > 0;
     // Re-arm when the slot is empty, later than the due, or holds an alarm
-    // this plane armed itself; an earlier foreign alarm fires first.
-    if (set !== due && (set === null || set > due || set === priorAt)) await this.ctx.storage.setAlarm(due);
+    // this plane armed itself. Due source work keeps its earlier armed wake
+    // until it fires; traffic must not restart that recovery delay.
+    if (set !== due && (set === null || set > due || (set === priorAt && !sourceOverdue)))
+      await this.ctx.storage.setAlarm(due);
     if (due !== priorAt)
       this.sql.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('plane_alarm_at', ?)`, String(due));
   }
@@ -8330,6 +8362,106 @@ export class RunHistoryDO extends DurableObject<Env> {
     return this.intakeRow(key) ?? null;
   }
 
+  private sourceEventRow(key: string) {
+    return this.sql
+      .exec<{
+        seq: number;
+        key: string;
+        event_json: string;
+        body_hash: string;
+        received_at: number;
+        job_json: string;
+      }>(`SELECT seq, key, event_json, body_hash, received_at, job_json FROM source_events WHERE key = ?`, key)
+      .toArray()[0];
+  }
+
+  async receiveSourceEvent(value: unknown, now = systemClock()): Promise<SourceEventReceiveResult> {
+    const prepared = await prepareSourceEvent(value);
+    if (!prepared) return { kind: "refused", reason: "invalid-event" };
+    if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid source reception time");
+    let refusalContext: Record<string, string | number> = {};
+    const result = await this.ctx.storage.transaction<SourceEventReceiveResult>(async () => {
+      const prior = this.sourceEventRow(prepared.key);
+      if (prior) {
+        const receipt = sourceEventReceiptOf({
+          version: 1,
+          key: prior.key,
+          sequence: prior.seq,
+          receivedAt: prior.received_at,
+          bodyHash: prior.body_hash,
+        });
+        if (!receipt) throw new Error("Stored source receipt is unreadable");
+        if (prior.event_json === prepared.json && receipt.bodyHash === prepared.bodyHash)
+          return { kind: "duplicate", receipt };
+        refusalContext = { storedBodyHash: receipt.bodyHash };
+        return { kind: "refused", reason: "delivery-conflict" };
+      }
+      const total = this.sql
+        .exec<{ count: number; bytes: number }>(
+          `SELECT COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS bytes FROM source_events`,
+        )
+        .toArray()[0]!;
+      if (total.count >= SOURCE_EVENT_STORE_MAX_COUNT || total.bytes + prepared.bytes > SOURCE_EVENT_STORE_MAX_BYTES) {
+        refusalContext = {
+          retainedCount: total.count,
+          retainedBytes: total.bytes,
+          maxCount: SOURCE_EVENT_STORE_MAX_COUNT,
+          maxBytes: SOURCE_EVENT_STORE_MAX_BYTES,
+        };
+        return { kind: "refused", reason: "capacity" };
+      }
+      const job = receivedSourceEventJob({ key: prepared.key, receivedAt: now });
+      const inserted = this.sql
+        .exec<{ seq: number }>(
+          `INSERT INTO source_events(key, event_json, body_hash, received_at, job_json, due_at, bytes)
+         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING seq`,
+          prepared.key,
+          prepared.json,
+          prepared.bodyHash,
+          now,
+          JSON.stringify(job),
+          job.nextAttemptAt,
+          prepared.bytes,
+        )
+        .toArray()[0]!;
+      // Alarm storage participates in this SQLite transaction. A rejected
+      // wake cannot leave an acknowledged event with no recovery path.
+      await this.ensurePlaneAlarm(now);
+      return {
+        kind: "received",
+        receipt: {
+          version: 1,
+          key: prepared.key,
+          sequence: inserted.seq,
+          receivedAt: now,
+          bodyHash: prepared.bodyHash,
+        },
+      };
+    });
+    if (result.kind === "refused")
+      console.warn("[source-events/receive] refused", {
+        eventKey: prepared.key,
+        reason: result.reason,
+        incomingBytes: prepared.bytes,
+        incomingBodyHash: prepared.bodyHash,
+        ...refusalContext,
+      });
+    return result;
+  }
+
+  async readSourceEvent(key: string): Promise<SourceEventRecord | undefined> {
+    if (!isSourceEventKey(key)) throw new Error("Invalid source event key");
+    const row = this.sourceEventRow(key);
+    if (!row) return;
+    const record = await sourceEventRecordOf({
+      event: parseStoredJson(row.event_json),
+      receipt: { version: 1, key: row.key, sequence: row.seq, receivedAt: row.received_at, bodyHash: row.body_hash },
+      job: parseStoredJson(row.job_json),
+    });
+    if (!record || record.receipt.key !== key) throw new Error("Stored source event is unreadable");
+    return record;
+  }
+
   /** The receipt key and poster become one durable, atomic right to publish.
    * A dead claimant can be replaced only after its bounded claim expires. */
   async claimIntakeDelivery(key: string, poster: string, claimedAt: number): Promise<boolean> {
@@ -11717,6 +11849,8 @@ export class SessionLogDO extends DurableObject<Env> {
 }
 
 const LEDGER_ROUTES = new Set([
+  "/runs/source-events/receive",
+  "/runs/source-events/read",
   "/runs/check-source",
   "/runs/context-checkpoint",
   "/runs/session/checkpoint",
@@ -13095,6 +13229,12 @@ async function handleLedger(
       );
       return json(r);
     }
+  }
+
+  if (pathname === "/runs/source-events/receive") return json(await stub.receiveSourceEvent(b.event, now));
+  if (pathname === "/runs/source-events/read") {
+    if (!isSourceEventKey(b.key)) return json({ error: "key must name a source event" }, 400);
+    return json({ record: (await stub.readSourceEvent(b.key)) ?? null });
   }
 
   // The intake receipts (run-history item 59): keyed by the message, not a run.

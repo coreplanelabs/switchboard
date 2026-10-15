@@ -1,3 +1,4 @@
+import { parseStoredJson } from "../storedJson.js";
 import {
   captureCheckArchive,
   hasRecordedCheckEvidence,
@@ -16,6 +17,17 @@ import {
 } from "./cancellation.js";
 import { originalPromotionArchiveKey } from "./workspaceDurability.js";
 import { RUN_STORE_KEY } from "../runStoreConstants.js";
+import { SOURCE_EVENT_STORE_MAX_BYTES, SOURCE_EVENT_STORE_MAX_COUNT, SOURCE_EVENT_WAKE_MS } from "../budgets.js";
+import {
+  isSourceEventKey,
+  prepareSourceEvent,
+  sourceEventReceiptOf,
+  sourceEventRecordOf,
+  receivedSourceEventJob,
+  type SourceEventReceipt,
+  type SourceEventReceiveResult,
+  type SourceEventRecord,
+} from "./sourceEvents.js";
 import {
   SOURCE_SEED_RECORD_PREFIX,
   sourceSeedOriginalKey,
@@ -997,6 +1009,9 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   readonly intake = new Map<string, IntakeReceipt>();
+  readonly sourceEvents = new Map<string, { json: string; receipt: SourceEventReceipt; job: unknown; bytes: number }>();
+  sourceEventWakeAt: number | undefined;
+  private sourceEventSequence = 0;
   readonly intakeDeliveries = new Map<string, { poster: string; claimUntil: number; delivered: boolean }>();
   /** The failure toggle (run-history item 59): tests flip a flag to make the
    *  next intake write or read throw, the way a lost Worker does. */
@@ -2534,6 +2549,49 @@ export class InMemoryRunLedger implements RunLedger {
     const out = decideIntakeInsert(this.intake.get(key), receipt);
     if (out.inserted) this.intake.set(key, receipt);
     return out;
+  }
+
+  async receiveSourceEvent(value: unknown): Promise<SourceEventReceiveResult> {
+    const prepared = await prepareSourceEvent(value);
+    if (!prepared) return { kind: "refused", reason: "invalid-event" };
+    const prior = this.sourceEvents.get(prepared.key);
+    if (prior) {
+      const receipt = sourceEventReceiptOf(prior.receipt);
+      if (!receipt || receipt.key !== prepared.key) throw new Error("Stored source receipt is unreadable");
+      return prior.json === prepared.json && receipt.bodyHash === prepared.bodyHash
+        ? { kind: "duplicate", receipt: structuredClone(receipt) }
+        : { kind: "refused", reason: "delivery-conflict" };
+    }
+    const bytes = [...this.sourceEvents.values()].reduce((sum, row) => sum + row.bytes, 0);
+    if (this.sourceEvents.size >= SOURCE_EVENT_STORE_MAX_COUNT || bytes + prepared.bytes > SOURCE_EVENT_STORE_MAX_BYTES)
+      return { kind: "refused", reason: "capacity" };
+    const now = this.now();
+    const receipt: SourceEventReceipt = {
+      version: 1,
+      key: prepared.key,
+      sequence: ++this.sourceEventSequence,
+      receivedAt: now,
+      bodyHash: prepared.bodyHash,
+    };
+    this.sourceEvents.set(prepared.key, {
+      json: prepared.json,
+      receipt,
+      job: receivedSourceEventJob(receipt),
+      bytes: prepared.bytes,
+    });
+    this.sourceEventWakeAt = Math.min(this.sourceEventWakeAt ?? Infinity, now + SOURCE_EVENT_WAKE_MS);
+    return { kind: "received", receipt: structuredClone(receipt) };
+  }
+
+  async readSourceEvent(key: string): Promise<SourceEventRecord | undefined> {
+    if (!isSourceEventKey(key)) throw new Error("Invalid source event key");
+    const row = this.sourceEvents.get(key);
+    if (!row) return;
+    const record = await sourceEventRecordOf(
+      structuredClone({ event: parseStoredJson(row.json), receipt: row.receipt, job: row.job }),
+    );
+    if (!record || record.receipt.key !== key) throw new Error("Stored source event is unreadable");
+    return structuredClone(record);
   }
 
   async readIntake(key: string): Promise<IntakeReceipt | undefined> {
