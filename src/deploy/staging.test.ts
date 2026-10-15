@@ -186,6 +186,80 @@ describe("isolated staging deployment", () => {
 });
 
 describe("staging workflow isolation", () => {
+  it.each([true, false, undefined])(
+    "passes retained mode through planning, deployment and acceptance only when selected: %s",
+    (retain) => {
+      const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
+      const inputs = { retain_maintenance: retain };
+      const env = Object.fromEntries(
+        Object.entries(workflow.env ?? {}).map(([key, value]) => [
+          key,
+          String(Function("inputs", `return (${String(value).slice(3, -2)});`)(inputs) ?? ""),
+        ]),
+      );
+      const steps = workflow.jobs.deploy.steps.filter(
+        (step: { id?: string; name: string }) =>
+          step.name === "validate acceptance configuration before upload" || step.id === "deploy" || step.id === "e2e",
+      );
+      const directory = mkdtempSync(join(tmpdir(), "staging-retained-workflow-"));
+      try {
+        const receipt = join(directory, "calls.jsonl");
+        writeFileSync(
+          join(directory, "npm"),
+          `#!${process.execPath}\nrequire("node:fs").appendFileSync(process.env.STAGING_TEST_RECEIPT, JSON.stringify(process.argv.slice(2))+"\\n");\n`,
+          { mode: 0o700 },
+        );
+        writeFileSync(join(directory, "jq"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+        for (const step of steps) {
+          const result = spawnSync("bash", ["-e", "-c", step.run], {
+            encoding: "utf8",
+            env: {
+              ...env,
+              PATH: `${directory}:${process.env.PATH}`,
+              RUNNER_TEMP: directory,
+              STAGING_TEST_RECEIPT: receipt,
+              TARGETS: "all",
+              GITHUB_OUTPUT: join(directory, "output"),
+            },
+          });
+          expect(result.status, result.stderr).toBe(0);
+        }
+        const calls = readFileSync(receipt, "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as string[])
+          .filter((args) => args.includes("cli") || args.includes("staging:deploy"));
+        expect(calls).toEqual([
+          [
+            "run",
+            "--silent",
+            "cli",
+            "--",
+            "deploy",
+            "plan",
+            "--allow-branch",
+            "--json",
+            ...(retain ? ["--retain-maintenance"] : []),
+          ],
+          ["run", "--silent", "staging:deploy", "--", ...(retain ? ["--retain-maintenance"] : [])],
+          [
+            "run",
+            "--silent",
+            "cli",
+            "--",
+            "deploy",
+            "plan",
+            "--allow-branch",
+            "--json",
+            ...(retain ? ["--retain-maintenance"] : []),
+          ],
+        ]);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("executes source gates: captures an origin head and refuses forks, unauthorized manual actors and stale heads", () => {
     const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
     const script = workflow.jobs.authorize.steps[0].run;
