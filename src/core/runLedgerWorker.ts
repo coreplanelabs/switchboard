@@ -187,6 +187,7 @@ import {
 } from "./runLedger/types.js";
 import type { Secrets } from "../secrets.js";
 import { systemClock } from "./trace/clock.js";
+import { STORE_RETRY_BACKOFFS_MS } from "./budgets.js";
 import { UncertainStoreError, type StoreRequestWitness } from "./storeFailure.js";
 import { readStoreResponse, storeRequestWitness, type StoreOperationKind } from "./storeResponse.js";
 import {
@@ -284,6 +285,7 @@ export class WorkerRunLedger implements RunLedger {
     kind: StoreOperationKind = "write",
     encodedBody?: string,
     expectedSeedHeader?: string,
+    signal = AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
   ): Promise<{ status: number; data: Record<string, unknown>; request: StoreRequestWitness }> {
     const payload = encodedBody ?? JSON.stringify(body);
     const request = await storeRequestWitness(path, payload);
@@ -307,7 +309,6 @@ export class WorkerRunLedger implements RunLedger {
     let res: Response | undefined;
     let phase: StorageFailureDiagnostic["phase"] = "transport";
     let server: StateWriteFailure | undefined;
-    const signal = AbortSignal.timeout(RUN_STORE_TIMEOUT_MS);
     const startedAt = systemClock();
     this.requestObservations.set(request, { requestId, startedAt, signal });
     try {
@@ -347,6 +348,9 @@ export class WorkerRunLedger implements RunLedger {
           });
         throw new TransientStoreError(`run ledger ${path}: HTTP ${res.status}`);
       }
+      // A definite refusal stays permanent even when its response body is interrupted.
+      if (kind === "read" && !res.ok && res.status !== 409 && res.status !== 423)
+        throw new PermanentStoreError(`run ledger ${path}: HTTP ${res.status}`);
       phase = "response";
       const data = await readStoreResponse(res, kind, request);
       const askedRun =
@@ -426,8 +430,28 @@ export class WorkerRunLedger implements RunLedger {
     return error;
   }
 
-  private read(path: string, body: Record<string, unknown>) {
-    return this.post(path, body, false, "read");
+  private async read(path: string, body: Record<string, unknown>) {
+    const payload = JSON.stringify(body);
+    const signal = AbortSignal.timeout(RUN_STORE_TIMEOUT_MS);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.post(path, body, false, "read", payload, undefined, signal);
+      } catch (error) {
+        if (!(error instanceof TransientStoreError) || signal.aborted || attempt >= STORE_RETRY_BACKOFFS_MS.length)
+          throw error;
+        // Only observational reads can repeat; an uncertain write may already have committed.
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            clearTimeout(timer);
+            signal.removeEventListener("abort", done);
+            resolve();
+          };
+          const timer = setTimeout(done, STORE_RETRY_BACKOFFS_MS[attempt]);
+          signal.addEventListener("abort", done, { once: true });
+        });
+        if (signal.aborted) throw error;
+      }
+    }
   }
 
   private fenceResult(r: { status: number; data: Record<string, unknown>; request: StoreRequestWitness }): FenceResult {

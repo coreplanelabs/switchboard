@@ -80,7 +80,7 @@ describe("original uncertain write diagnostics", () => {
       await expect(wire.listLive()).rejects.toMatchObject({ name: "PermanentStoreError" });
       expect(notices).toMatchObject([
         { phase: "response-body", httpStatus: 200, response: { contentType: "json", bodyKind: "unreadable" } },
-        { phase: "http", httpStatus: 401, response: { contentType: "json", bodyKind: "json" } },
+        { phase: "http", httpStatus: 401, response: { contentType: "json", bodyKind: "not-read" } },
       ]);
       expect(JSON.stringify(notices)).not.toMatch(/private body failure|private refusal/);
     } finally {
@@ -396,13 +396,15 @@ describe("original uncertain write diagnostics", () => {
       token: "fixture",
       storeKey: "fixture",
       onFailure: (notice) => notices.push(notice),
-      fetch: async () => {
+      fetch: async (url) => {
         if (++calls === 1)
           throw Object.assign(new Error("connection reset token=fixture-credential"), { code: "ECONNRESET" });
+        if (new URL(String(url)).pathname === "/runs/inbox/read")
+          return Response.json({ items: [{ seq: 1, message: { text: "recovered" } }] });
         return Response.json({ unexpected: "private acknowledgment" });
       },
     });
-    expect(await wire.readInbox(id, 0).catch(() => "failed")).toBe("failed");
+    expect(await wire.readInbox(id, 0)).toEqual([{ seq: 1, message: { text: "recovered" } }]);
     expect(await wire.setState(id, gen, {}).catch(() => "held")).toBe("held");
     expect(notices).toMatchObject([
       {
@@ -419,7 +421,7 @@ describe("original uncertain write diagnostics", () => {
         diagnostic: { operation: "/runs/state", kind: "write", phase: "acknowledgement", httpStatus: 200 },
       },
     ]);
-    expect(calls).toBe(2);
+    expect(calls).toBe(3);
     expect(JSON.stringify(notices)).not.toMatch(/fixture-credential|private acknowledgment/);
   });
 

@@ -12640,15 +12640,14 @@ describe("state-write holds across Durable Object RPC", () => {
         },
       });
       expect(await wire.readInbox(id, 0).catch(() => "failed")).toBe("failed");
-      expect(notices).toMatchObject([
-        {
-          runIds: [id],
-          diagnostic: {
-            httpStatus: 500,
-            server: { stage: "request", exception: { name: "SyntaxError", message: "Stored JSON is unreadable" } },
-          },
+      const failure = {
+        runIds: [id],
+        diagnostic: {
+          httpStatus: 500,
+          server: { stage: "request", exception: { name: "SyntaxError", message: "Stored JSON is unreadable" } },
         },
-      ]);
+      };
+      expect(notices).toMatchObject([failure, failure, failure]);
       expect(JSON.stringify({ notices, headers, logs })).not.toContain("PRIVATE");
     } finally {
       log.mockRestore();
@@ -12682,7 +12681,7 @@ describe("state-write holds across Durable Object RPC", () => {
   });
 
   it.each(["readInbox", "append"] as const)(
-    "captures non-state RPC exceptions from %s without replay or private bodies",
+    "captures non-state RPC exceptions from %s with bounded reads and no write replay or private bodies",
     async (method) => {
       const key = "runs:shared-failure:" + method;
       const stub = env.RUNS.get(env.RUNS.idFromName(key));
@@ -12724,26 +12723,25 @@ describe("state-write holds across Durable Object RPC", () => {
                 .append(id, gen, [{ seq: 1, type: "assistant", text: "private request bytes" }])
                 .catch(() => "held");
         expect(outcome).toBe(method === "readInbox" ? "failed" : "held");
-        expect(notices).toMatchObject([
-          {
-            runIds: [id],
-            diagnostic: {
-              operation: method === "readInbox" ? "/runs/inbox/read" : "/runs/append",
-              phase: "http",
-              httpStatus: 500,
-              server: {
-                stage: "request",
-                exception: {
-                  message: "Durable Object unavailable token=«redacted»",
-                  remote: true,
-                  retryable: true,
-                  code: "E_STORAGE",
-                },
+        const failure = {
+          runIds: [id],
+          diagnostic: {
+            operation: method === "readInbox" ? "/runs/inbox/read" : "/runs/append",
+            phase: "http",
+            httpStatus: 500,
+            server: {
+              stage: "request",
+              exception: {
+                message: "Durable Object unavailable token=«redacted»",
+                remote: true,
+                retryable: true,
+                code: "E_STORAGE",
               },
             },
           },
-        ]);
-        expect(calls).toBe(1);
+        };
+        expect(notices).toMatchObject(method === "readInbox" ? [failure, failure, failure] : [failure]);
+        expect(calls).toBe(method === "readInbox" ? 3 : 1);
         expect(logs.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))).toContainEqual(
           expect.objectContaining({
             event: "storage.request.failure",
