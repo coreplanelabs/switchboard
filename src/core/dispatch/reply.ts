@@ -667,16 +667,8 @@ export async function replyCommandOutput(
     if (display.cardShown) return;
     text = display.quietText ?? text;
   }
-  // `steer.run`'s successful text is the same routine fold acknowledgement as
-  // admission's `steerAck`, even when it came through a direct typed command
-  // or the operator. A failed steer is action-required and always speaks.
-  if (
-    parsed.kind === "invoke" &&
-    parsed.id === "steer.run" &&
-    display.ok === true &&
-    !shows(display.verbosity ?? "quiet", "verbose")
-  )
-    return;
+  // Commands can omit routine acknowledgements from their quiet projection.
+  if (display.ok === true && text === "") return;
   if (!io.attach || text.length <= LONG_COMMAND_REPLY_CHARS) return io.reply(text);
   const nl = text.indexOf("\n");
   const lead = nl === -1 ? text : text.slice(0, nl);

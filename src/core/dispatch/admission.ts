@@ -12,6 +12,7 @@
 import { planeAdmissionOf, type ConfigStore } from "../../config.js";
 import type { CoordinatorTag } from "../coordinator/contract.js";
 import { CommandError } from "../commandRegistry.js";
+import type { SteerReceipt } from "../commands/steer.js";
 import { effectiveGrants } from "../authz/authorize.js";
 import type { Actor } from "../authz/types.js";
 import { authorizeSteerOwner } from "./authorize.js";
@@ -885,7 +886,7 @@ export function createSteerSender(deps: {
   /** The run the id names, as the process knows it (the registry's live row). */
   runs: { getById(id: string): SteerableRun | null | Promise<SteerableRun | null> };
   admission: Pick<ThreadAdmission<DispatchFollowUp>, "get">;
-}): { send(runId: string, words: string, caller: SteerSendCaller): Promise<string> } {
+}): { send(runId: string, words: string, caller: SteerSendCaller): Promise<SteerReceipt> } {
   return {
     async send(runId, words, caller) {
       const run = await deps.runs.getById(runId);
@@ -929,6 +930,11 @@ export function createSteerSender(deps: {
       );
       switch (out.kind) {
         case "steered":
+          if (out.where === "elsewhere" && run.recoveryPending)
+            return {
+              text: `↪ Saved your message for the *${run.agent}* work (${runId}). This run is paused for storage recovery; your message does not resume it.`,
+              recoveryPending: true,
+            };
           return `↪ Added your message to the *${run.agent}* work (${runId}). It will read it at its next step.`;
         case "refused":
           throw new CommandError(
@@ -952,6 +958,7 @@ export function createSteerSender(deps: {
 export interface SteerableRun {
   id: string;
   finished: boolean;
+  recoveryPending?: true;
   finishedAt?: number;
   agent?: string;
   threadKey?: string;
