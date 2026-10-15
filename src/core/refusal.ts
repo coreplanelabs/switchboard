@@ -61,6 +61,7 @@ const CAUSE_OF = {
   // the seed thread of a live pipeline runner (record 0051's owner rule):
   // a reply there is refused naming the unit thread, never run beside it
   pipeline_thread_owned: "request",
+  unit_delivery_unconfirmed: "system",
   elsewhere_agent_allowlist: "policy",
   elsewhere_follow_up_refused: "request",
   slack_direct_audience_unverified: "system",
