@@ -81,6 +81,14 @@ For a pool, choose the member to rebuild from the number shown in the list:
 
 Rebuild and full reset require that member number when more than one member exists. Repository command settings remain shared.
 
+To inspect the workload slots on one active member, use its listed number:
+
+```text
+@switchboard repo workload acme/api --resident 2
+```
+
+Without `--resident`, the command reads the primary. A pending member has no workload to inspect. The report distinguishes a complete count from unknown owner evidence and does not release work.
+
 ## Disk
 
 The gauge is on every surface: `repo list` appends `· disk 4.06 GiB/14.4 GiB (28%)`, the residents index shows it per row, the detail page has a **Disk** section.

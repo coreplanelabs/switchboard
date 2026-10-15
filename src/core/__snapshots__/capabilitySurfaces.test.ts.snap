@@ -140,7 +140,7 @@ commands:
   friction propose     — Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.
   friction analyze     — Read-only friction diagnosis of a saved run-event stream (JSONL or an SSE capture) — the former frictionCli.
   repo list            — Every registered repo, including cold entries; resident state, ref, sha, last refresh, and disk gauge.
-  repo workload        — Read the primary resident's workload count, owner records and missing evidence. Does not change or release work.
+  repo workload        — Read one resident's workload count, owner records and missing evidence. Does not change or release work.
   repo onboard         — Register a repo, optionally without a resident (--no-resident); resident provisioning is billable and admin-gated.
   repo offboard        — Remove a repo registration and tear down its resident when present (admin-gated; --dry-run plans only).
   repo reconfigure     — Change a registered repo's branch, commands or warm resident count (admin-gated; additional warm capacity is billable).
@@ -347,7 +347,7 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 • \`friction propose\` — Clusters recent friction, deduplicates against open issues, and files the top proposals as labeled issues.
 *repo*
 • \`repo list\` — Every registered repo, including cold entries; resident state, ref, sha, last refresh, and disk gauge.
-• \`repo workload\` — Read the primary resident's workload count, owner records and missing evidence. Does not change or release work.
+• \`repo workload\` — Read one resident's workload count, owner records and missing evidence. Does not change or release work.
 • \`repo onboard\` — Register a repo, optionally without a resident (--no-resident); resident provisioning is billable and admin-gated.
 • \`repo offboard\` — Remove a repo registration and tear down its resident when present (admin-gated; --dry-run plans only).
 • \`repo reconfigure\` — Change a registered repo's branch, commands or warm resident count (admin-gated; additional warm capacity is billable).

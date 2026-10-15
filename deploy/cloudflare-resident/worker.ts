@@ -7902,7 +7902,15 @@ export class ResidentDO extends Sandbox<Env> {
       audit.uidHistory = { issued: null, complete: false };
       audit.issues.push("uid-history-unavailable");
     }
-    return this.workloadAuditReport(resource, owners, audit, expectedResidentId);
+    const report = await this.workloadAuditReport(resource, owners, audit, expectedResidentId);
+    try {
+      console.log(
+        `[workload] ${JSON.stringify({ event: "workload-audit", resource: report.resource, residentId: report.residentId, asOf: report.asOf, finishedAt: report.finishedAt, used: report.used, complete: report.complete, ownersOmitted: report.ownersOmitted, issues: report.issues })}`,
+      );
+    } catch {
+      /* A failed summary sink cannot change the returned audit evidence. */
+    }
+    return report;
   }
 
   /** Serialize the capacity read and reservation, not the clone or command.

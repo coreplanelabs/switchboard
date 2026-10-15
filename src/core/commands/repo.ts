@@ -364,10 +364,10 @@ export const repoWorkload = defineCommand({
   id: "repo.workload",
   enabledWhen: (caps) => caps.residents,
   args: [slugArg],
+  options: z.object({ resident: z.coerce.number().int().positive().optional() }),
   action: "repo:read",
   effect: "read",
-  describe:
-    "Read the primary resident's workload count, owner records and missing evidence. Does not change or release work.",
+  describe: "Read one resident's workload count, owner records and missing evidence. Does not change or release work.",
   render: (output) => {
     const o = workloadReport.parse(output);
     return [
@@ -380,11 +380,46 @@ export const repoWorkload = defineCommand({
       ...o.issues.map((issue) => `Evidence note: ${issue}.`),
     ].join("\n");
   },
-  handler: async ({ args, caller, deps, span }) => {
+  handler: async ({ args, options, caller, deps, span }) => {
     if (!(await deps.repo.canUseRepo(caller.actor, args.slug)))
       throw new CommandError("unauthorized", `You do not have access to the \`${args.slug}\` repo environment.`);
     const resource = repoResourceId(args.slug);
-    const response = await call(async () => (await adminOf(deps, span)).workload(resource));
+    const api = await adminOf(deps, span);
+    let expectedResidentId = resource;
+    const selectedNumber = options.resident;
+    if (selectedNumber !== undefined) {
+      const listing = await call(() => api.residents());
+      const members = listing.data.residents;
+      if (
+        listing.status !== 200 ||
+        !Array.isArray(members) ||
+        !Number.isSafeInteger(listing.data.count) ||
+        listing.data.count !== members.length
+      )
+        throw new CommandError("unavailable", "The resident list could not verify the selected workload target.");
+      const matches = members.filter(
+        (value) =>
+          value &&
+          typeof value === "object" &&
+          !Array.isArray(value) &&
+          value.resource === resource &&
+          (value.replicaOrdinal === selectedNumber - 1 ||
+            (selectedNumber === 1 &&
+              value.replicaOrdinal === undefined &&
+              (value.residentId === undefined || value.residentId === resource))),
+      );
+      if (matches.length === 0)
+        throw new CommandError("not_found", `Resident ${selectedNumber} is not active for \`${args.slug}\`.`);
+      if (matches.length !== 1)
+        throw new CommandError("unavailable", "The resident list has duplicate member positions.");
+      const identity = matches[0].residentId;
+      if (!(typeof identity === "string" && identity.length > 0) && !(selectedNumber === 1 && identity === undefined))
+        throw new CommandError("unavailable", "The selected resident address could not be verified.");
+      expectedResidentId = typeof identity === "string" ? identity : resource;
+    }
+    const response = await call(() =>
+      selectedNumber === undefined ? api.workload(resource) : api.workload(resource, selectedNumber),
+    );
     if (response.status !== 200)
       throw new CommandError("unavailable", "The resident workload audit is unavailable on this Worker.");
     const parsed = workloadReport.safeParse(response.data);
@@ -393,7 +428,7 @@ export const repoWorkload = defineCommand({
     const report = parsed.data;
     if (
       report.resource !== resource ||
-      report.residentId !== resource ||
+      report.residentId !== expectedResidentId ||
       (report.used !== null && report.used < report.owners.length) ||
       (report.complete && (report.used === null || report.used !== report.owners.length)) ||
       new Set(report.owners.map((owner) => owner.key)).size !== report.owners.length

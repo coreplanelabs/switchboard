@@ -100,7 +100,7 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 | Command | What it does | Who can run it |
 |---|---|---|
 | `repo list` | Every registered repo, including cold entries; resident state, ref, sha, last refresh, and disk gauge. | anyone |
-| `repo workload <slug>` | Read the primary resident's workload count, owner records and missing evidence. Does not change or release work. | anyone |
+| `repo workload <slug> [--resident <integer>]` | Read one resident's workload count, owner records and missing evidence. Does not change or release work. | anyone |
 | `repo onboard <slug> [--ref <string>] [--test <string>] [--build <string>] [--install <string>] [--no-resident] [--evict-coldest]` | Register a repo, optionally without a resident (--no-resident); resident provisioning is billable and admin-gated. | repo managers (`repo:write`) |
 | `repo offboard <slug> [--dry-run]` | Remove a repo registration and tear down its resident when present (admin-gated; --dry-run plans only). | repo managers (`repo:write`) |
 | `repo reconfigure <slug> [--warm-residents <integer>] [--ref <string>] [--test <string>] [--build <string>] [--install <string>]` | Change a registered repo's branch, commands or warm resident count (admin-gated; additional warm capacity is billable). | repo managers (`repo:write`) |
