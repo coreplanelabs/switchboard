@@ -11,6 +11,7 @@ import {
   type SpanStreamEvent,
 } from "./runStreamSink.js";
 import { createTracer } from "./tracer.js";
+import { classifyError } from "./classify.js";
 
 function setup() {
   const clock = createTickingClock(1_000);
@@ -32,6 +33,21 @@ const names = (events: SpanStreamEvent[]) =>
   events.map((e) => (e.type === "run_note" ? `note:${e.kind}` : `${e.type}:${e.name}`));
 
 describe("createRunStreamSink", () => {
+  it("keeps a classified setup failure's kind and code on the run stream without remote prose", async () => {
+    const { root, bind } = setup();
+    const events = bind("run");
+    await expect(
+      root.span("dispatch.gate.attached_head.initial_head", () => {
+        throw classifyError(new Error("remote body with private bytes"), { kind: "http", code: "503" });
+      }),
+    ).rejects.toThrow("remote body");
+    expect(events.at(-1)).toMatchObject({
+      type: "span_end",
+      status: "error",
+      attrs: { errorKind: "http", errorCode: "503" },
+    });
+    expect(JSON.stringify(events)).not.toContain("private bytes");
+  });
   it("retains streamed spans before any run exists, backfills them at bind as fresh objects, then routes live; log-only spans never stream", async () => {
     const { clock, root, bind } = setup();
     await root.span("dispatch.history", () => clock.tick(100));

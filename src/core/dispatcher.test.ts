@@ -1,6 +1,7 @@
 import { startRequestRoot } from "./requestTrace.js";
 import { humanReview } from "./testing/humanReview.js";
 import { preapprovedCaller } from "./testing/callers.js";
+import { registerRunsCommands, type RunsCommandDeps } from "./commands/runs.js";
 import { runShipBranch } from "./dispatch/ship.js";
 import { TerminalCommitmentUnknownError, terminalCommitmentUnknown } from "./runLedger/writeThrough.js";
 import { UncertainStoreError } from "./storeFailure.js";
@@ -3201,10 +3202,14 @@ describe("executor provisioning by agent resources", () => {
     let checkoutSignal: AbortSignal | undefined;
     vi.mocked(makeExecutor).mockResolvedValueOnce({
       executor: {
-        exec: (_command: string, options?: { signal?: AbortSignal }) =>
-          new Promise<string>((resolve) => {
+        execResult: (_command: string, options?: { signal?: AbortSignal }) =>
+          new Promise<import("../execution/executor.js").ExecResult>((resolve) => {
             checkoutSignal = options?.signal;
-            checkoutSignal?.addEventListener("abort", () => resolve("exit 143"), { once: true });
+            checkoutSignal?.addEventListener(
+              "abort",
+              () => resolve({ stdout: "", stderr: "stopped", exitCode: 143, truncated: false }),
+              { once: true },
+            );
           }),
         readFile: async () => "",
         writeFile: async () => "",
@@ -3452,7 +3457,7 @@ describe("executor provisioning by agent resources", () => {
       [
         "dispatch.workspace.attach.install",
         "error",
-        { backend: "resident", exitCode: 1, timedOut: true },
+        { backend: "resident", exitCode: 1, timedOut: true, errorKind: "infra" },
         attach.spanId,
       ],
     ]);
@@ -3537,6 +3542,73 @@ describe("executor provisioning by agent resources", () => {
     expect(events.find((e) => e.type === "run_note" && e.kind === "drain_wait")).toMatchObject({
       summary: "waited 3 min at the fleet drain for a deploy to finish",
     });
+  });
+
+  it("stores fallback and setup failure evidence when review refuses before its first model turn", async () => {
+    vi.stubEnv("SANDBOX_TOKEN", "tok");
+    const provider = capturingProvider();
+    const deps = makeDeps(REMOTE_YAML_FIXTURE, provider);
+    const registry = new RunRegistry({ genId: () => "setup-evidence", genToken: () => "tok" });
+    const store = new InMemoryRunStore();
+    deps.runRegistry = registry;
+    deps.runStore = store;
+    deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+    deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: "a".repeat(40) });
+    vi.mocked(makeExecutor).mockImplementationOnce(async () => ({
+      executor: {
+        exec: async () => "b".repeat(40),
+        execResult: async () => ({ stdout: "b".repeat(40), stderr: "", exitCode: 0, truncated: false }),
+        readFile: async () => "",
+        writeFile: async () => "",
+        moveTo: async () => {
+          throw new Error("checkout transport failed token=private-value");
+        },
+      },
+      backend: "sandbox",
+      note: "resident full — using fresh sandbox (seed failed: password=private-value)",
+      setup: { version: 1, requested: "resident", seeding: "fresh_after_seed_failure", reason: "workload_full" },
+    }));
+    deps.fetchPrHead = async () => "c".repeat(40);
+    await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), fakeIO().io);
+    const runs = createRunsService({ registry: new RunRegistry(), store });
+    const read = await runs.getRun("setup-evidence", { include: "messages", requireFinalRecord: true });
+    if (!read.ok) throw new Error("stored setup run missing");
+    const events = read.value.events ?? [];
+    expect(events.find((event) => event.type === "run_note" && event.kind === "cold_sandbox")).toMatchObject({
+      summary: "resident full — using fresh sandbox (seed failed: password=«redacted»",
+    });
+    expect(
+      events.find((event) => event.type === "span_end" && event.name === "dispatch.gate.attached_head.reprovision"),
+    ).toMatchObject({ status: "error", error: "checkout transport failed token=«redacted»" });
+    expect(read.value).toMatchObject({ status: "failed", diagnosis: { byCategory: { infra_failure: { count: 1 } } } });
+    expect(provider.requests).toEqual([]);
+    expect(JSON.stringify(events)).not.toContain("private-value");
+    const commands = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
+    registerRunsCommands(commands);
+    const response = await commands.invoke(
+      "runs.get",
+      { args: ["setup-evidence"], options: { include: "messages" } },
+      preapprovedCaller({
+        kind: "mcp",
+        id: "mcp:setup-reader",
+        actor: { kind: "service", id: "mcp:setup-reader", grants: { actions: "all", channels: "all", repos: "all" } },
+      }),
+      { runs: async () => runs },
+    );
+    expect(response).toMatchObject({
+      ok: true,
+      value: {
+        events: expect.arrayContaining([
+          expect.objectContaining({
+            type: "span_end",
+            name: "dispatch.gate.attached_head.reprovision",
+            error: expect.stringContaining("UNTRUSTED CONTENT"),
+          }),
+        ]),
+      },
+    });
+    expect(JSON.stringify(response)).toContain("checkout transport failed token=«redacted»");
+    expect(JSON.stringify(response)).not.toContain("private-value");
   });
 
   // Feature: docs/reference/specs/tracing.md item 19 — a resident attach that FAILS still
@@ -4914,6 +4986,67 @@ describe("repo/ref resolution + resident prompt selection", () => {
     expect(replies.some((r) => /No review started|review did not start/i.test(r))).toBe(false);
   });
 
+  it.each([true, false])(
+    "retains resident repair command-step evidence through setup (success=%s)",
+    async (success) => {
+      vi.stubEnv("SANDBOX_TOKEN", "tok");
+      vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const head = "e".repeat(40);
+      let attaches = 0;
+      residentFetchStub({
+        attach: () => {
+          attaches++;
+          const trace = [
+            {
+              name: "advance-tree-check",
+              startMs: 0,
+              durationMs: 1,
+              status: success ? "ok" : "error",
+              exitCode: success ? 0 : 1,
+            },
+          ];
+          return new Response(
+            JSON.stringify(
+              attaches > 1 && !success
+                ? { error: "workspace repair refused", trace, attachMs: 1 }
+                : {
+                    workspace: "/workspace/threads/t-9f/patch-1",
+                    ref: "patch-1",
+                    sha: attaches === 1 ? "b".repeat(40) : head,
+                    user: "worker3",
+                    ...(attaches > 1 ? { trace, attachMs: 1 } : {}),
+                  },
+            ),
+            { status: attaches > 1 && !success ? 409 : 200 },
+          );
+        },
+      });
+      const provider = capturingProvider();
+      const deps = makeDeps(RESIDENT_YAML_FIXTURE, provider);
+      deps.resolveRepoContext = () => ({ repo: "acme/api", ref: "patch-1", pr: 42, headSha: head, baseRef: "main" });
+      deps.fetchPrHead = async () => head;
+      const registry = new RunRegistry({ genId: () => "repair-steps", genToken: () => "tok" });
+      deps.runRegistry = registry;
+      if (deps.runLedger instanceof NullLedgerWriteThrough) wireChildLedger(deps);
+      deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
+      await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42", "slack:UADMIN"), fakeIO().io);
+      expect(
+        registry
+          .snapshotById("repair-steps")!
+          .events.find(
+            (event) =>
+              event.type === "span_end" && event.name === "dispatch.gate.attached_head.reprovision.advance-tree-check",
+          ),
+      ).toMatchObject({ status: success ? "ok" : "error", attrs: { backend: "resident", exitCode: success ? 0 : 1 } });
+      expect(
+        registry
+          .snapshotById("repair-steps")!
+          .events.find((event) => event.type === "span_end" && event.name === "dispatch.gate.attached_head"),
+      ).toMatchObject({ attrs: { outcome: success ? "verified" : "refused" } });
+    },
+  );
+
   it("a genuine push during workspace preparation is reprovisioned at the reviewed head and the review runs", async () => {
     vi.stubEnv("SANDBOX_TOKEN", "tok");
     vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
@@ -5259,6 +5392,12 @@ describe("repo/ref resolution + resident prompt selection", () => {
     vi.mocked(makeExecutor).mockResolvedValueOnce({
       executor: {
         exec: async (command: string) => (/git rev-parse HEAD/.test(command) ? `${ctx.headSha}\n` : ""),
+        execResult: async (command: string) => ({
+          stdout: /git rev-parse HEAD/.test(command) ? `${ctx.headSha}\n` : "",
+          stderr: "",
+          exitCode: 0,
+          truncated: false,
+        }),
         readFile: async () => "",
         writeFile: async () => "",
         release: async () => ({ released: true }),
@@ -5335,7 +5474,7 @@ describe("review post-step", () => {
     const executor = {
       exec: async (cmd: string) => {
         order.push(`exec:${cmd}`);
-        if (/git rev-parse HEAD/.test(cmd)) {
+        if (/git rev-parse(?: --verify)? HEAD/.test(cmd)) {
           const observed = heads.length > 1 ? heads.shift() : heads[0];
           return observed
             ? `${observed}\n`
@@ -5345,6 +5484,8 @@ describe("review post-step", () => {
       },
       execResult: async (cmd: string) => {
         order.push(`exec:${cmd}`);
+        if (!/git rev-parse(?: --verify)? HEAD/.test(cmd))
+          return { exitCode: 0, stdout: "", stderr: "", truncated: false };
         const observed = heads.length > 1 ? heads.shift() : heads[0];
         return { exitCode: observed ? 0 : 128, stdout: observed ? observed + "\n" : "", stderr: "", truncated: false };
       },
@@ -6112,7 +6253,13 @@ describe("review post-step", () => {
       expect(reviewTurns(provider)).toHaveLength(1); // no re-review
       expect(ex.moves).toEqual([]);
       expect(ex.probeSpans.length).toBeGreaterThan(0);
-      expect(new Set(ex.probeSpans)).toEqual(new Set(["dispatch.gate.attached_head", "run.settle_reviewed_head"]));
+      expect(new Set(ex.probeSpans)).toEqual(
+        new Set([
+          "dispatch.gate.attached_head.prepare_checkout",
+          "dispatch.gate.attached_head.initial_head",
+          "run.settle_reviewed_head",
+        ]),
+      );
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: OTHER_HEAD });
       expect(spy.calls[0].body).toMatch(
@@ -6957,7 +7104,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
       }
       if (/rev-parse '[^']+@\{u\}'/.test(cmd))
         return "exit 128:\nfatal: upstream branch not stored as a remote-tracking branch\n";
-      if (/rev-parse HEAD/.test(cmd)) return opts.head ? `${opts.head}\n` : notARepo;
+      if (/rev-parse(?: --verify)? HEAD/.test(cmd)) return opts.head ? `${opts.head}\n` : notARepo;
       const tip = /rev-parse 'refs\/heads\/([^']+)'/.exec(cmd);
       if (tip)
         return opts.pushed && tip[1] === opts.pushed.branch
@@ -6984,6 +7131,7 @@ describe("coding PR post-step (docs/reference/specs/pr-description.md)", () => {
             : notARepo;
         return opts.cloneDir ? notARepo : git(cmd);
       },
+      execResult: async (cmd: string) => ({ stdout: git(cmd), stderr: "", exitCode: 0, truncated: false }),
       readFile: async () => "",
       writeFile: async () => "",
       release: async () => {
@@ -12394,6 +12542,7 @@ describe("reading-diff artifact on review runs", () => {
           return meatExec ? meatExec(cmd) : "exit 127: meat: command not found";
         return "e".repeat(40);
       },
+      execResult: async () => ({ stdout: "e".repeat(40), stderr: "", exitCode: 0, truncated: false }),
       readFile: async () => "",
       writeFile: async () => "",
     };
@@ -15749,10 +15898,14 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       let checkoutSignal: AbortSignal | undefined;
       vi.mocked(makeExecutor).mockResolvedValueOnce({
         executor: {
-          exec: (_command: string, options?: { signal?: AbortSignal }) =>
-            new Promise<string>((resolve) => {
+          execResult: (_command: string, options?: { signal?: AbortSignal }) =>
+            new Promise<import("../execution/executor.js").ExecResult>((resolve) => {
               checkoutSignal = options?.signal;
-              checkoutSignal?.addEventListener("abort", () => resolve("exit 143"), { once: true });
+              checkoutSignal?.addEventListener(
+                "abort",
+                () => resolve({ stdout: "", stderr: "stopped", exitCode: 143, truncated: false }),
+                { once: true },
+              );
             }),
           readFile: async () => "",
           writeFile: async () => "",
@@ -15822,10 +15975,14 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     let checkoutSignal: AbortSignal | undefined;
     vi.mocked(makeExecutor).mockResolvedValueOnce({
       executor: {
-        exec: (_command: string, options?: { signal?: AbortSignal }) =>
-          new Promise<string>((resolve) => {
+        execResult: (_command: string, options?: { signal?: AbortSignal }) =>
+          new Promise<import("../execution/executor.js").ExecResult>((resolve) => {
             checkoutSignal = options?.signal;
-            checkoutSignal?.addEventListener("abort", () => resolve("exit 143"), { once: true });
+            checkoutSignal?.addEventListener(
+              "abort",
+              () => resolve({ stdout: "", stderr: "stopped", exitCode: 143, truncated: false }),
+              { once: true },
+            );
           }),
         readFile: async () => "",
         writeFile: async () => "",
@@ -24678,6 +24835,12 @@ describe("a follow-up seeds from its session (docs/reference/specs/session-log.m
   /** The coding run's workspace: a fake executor that answers every command with nothing. */
   const fakeExecutor = (head?: string) => ({
     exec: async (command: string) => (/git rev-parse HEAD/.test(command) && head ? `${head}\n` : ""),
+    execResult: async (command: string) => ({
+      stdout: /git rev-parse HEAD/.test(command) && head ? `${head}\n` : "",
+      stderr: "",
+      exitCode: 0,
+      truncated: false,
+    }),
     readFile: async () => "",
     writeFile: async () => "",
     release: async () => ({ released: true }),

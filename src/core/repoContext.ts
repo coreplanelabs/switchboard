@@ -1,3 +1,5 @@
+import type { Span } from "./trace/types.js";
+import { classifyError } from "./trace/classify.js";
 import { resolveGithubToken } from "../execution/githubApp.js";
 import {
   GithubApiError,
@@ -1458,8 +1460,14 @@ async function openPrHeadSha(pr: {
 /** The PR's head SHA as GitHub reports it NOW (40-hex), or undefined when the
  *  fetch fails or the SHA is malformed. Never throws — the review post-step's
  *  head-moved note (agent-review.md item 10) degrades to silence on unknown. */
-export async function currentPrHeadSha(pr: { repo: string; number: number }): Promise<string | undefined> {
-  const head = await prHead(pr).catch(() => undefined);
+export async function currentPrHeadSha(pr: { repo: string; number: number }, span?: Span): Promise<string | undefined> {
+  const head = await prHead(pr, span).catch((error: unknown) => {
+    if (span && !span.ended) {
+      span.fail(classifyError(error, { kind: "other", code: "lookup_failed" }));
+      span.end("error", { outcome: "lookup_failed" });
+    }
+    return undefined;
+  });
   return head?.state === "open" ? head.sha : undefined;
 }
 
@@ -1520,7 +1528,10 @@ const COMPARE_FILES_CAP = 300;
  *  don't resolve in the resident's mirror); the SHA is, since it only pins the
  *  review post. Never throws to the caller's happy path — callers .catch() to
  *  degrade. */
-async function prHead(pr: { repo: string; number: number }): Promise<
+async function prHead(
+  pr: { repo: string; number: number },
+  span?: Span,
+): Promise<
   | {
       ref?: string;
       sha?: string;
@@ -1543,28 +1554,40 @@ async function prHead(pr: { repo: string; number: number }): Promise<
     const http = error instanceof GithubApiError;
     const decode = error instanceof SyntaxError;
     const timeout = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
-    console.warn(
-      JSON.stringify({
-        event: "github.pr_head.failure",
-        stage: credential ? "credential" : decode ? "decode" : "read",
-        code: credential
-          ? error.reason === "missing"
-            ? "credential_unavailable"
-            : "credential_failed"
-          : http
-            ? "http_failed"
-            : decode
-              ? "invalid_response"
-              : timeout
-                ? "timeout"
-                : "transport_failed",
-        ...(http && (!credential || error.reason === "missing") ? { httpStatus: error.status } : {}),
-        ...(error instanceof GithubResponseDecodeError ? { httpStatus: error.httpStatus } : {}),
-        ...((http || error instanceof GithubResponseDecodeError) && error.requestId
-          ? { requestId: error.requestId }
-          : {}),
-      }),
-    );
+    const diagnostic = {
+      event: "github.pr_head.failure",
+      stage: credential ? "credential" : decode ? "decode" : "read",
+      code: credential
+        ? error.reason === "missing"
+          ? "credential_unavailable"
+          : "credential_failed"
+        : http
+          ? "http_failed"
+          : decode
+            ? "invalid_response"
+            : timeout
+              ? "timeout"
+              : "transport_failed",
+      ...(http && (!credential || error.reason === "missing") ? { httpStatus: error.status } : {}),
+      ...(error instanceof GithubResponseDecodeError ? { httpStatus: error.httpStatus } : {}),
+      ...((http || error instanceof GithubResponseDecodeError) && error.requestId
+        ? { requestId: error.requestId }
+        : {}),
+    };
+    console.warn(JSON.stringify(diagnostic));
+    if (span) {
+      span.fail(
+        classifyError(error, {
+          kind: credential ? "refused" : http ? "http" : timeout ? "timeout" : decode ? "other" : "transport",
+          code: diagnostic.code,
+        }),
+      );
+      span.end("error", {
+        outcome: diagnostic.code,
+        ...(diagnostic.httpStatus === undefined ? {} : { httpStatus: diagnostic.httpStatus }),
+        ...(diagnostic.requestId ? { githubRequestId: diagnostic.requestId } : {}),
+      });
+    }
     return undefined;
   }
   const facts =
@@ -1577,7 +1600,11 @@ async function prHead(pr: { repo: string; number: number }): Promise<
     typeof data.mergedAt === "string" && !Number.isNaN(Date.parse(data.mergedAt))
       ? new Date(data.mergedAt).toISOString()
       : undefined;
-  if (sha === undefined)
+  if (sha === undefined) {
+    if (span) {
+      span.fail(classifyError(new Error("PR head unavailable"), { kind: "other", code: "head_unknown" }));
+      span.end("error", { outcome: "head_unknown" });
+    }
     console.warn(
       JSON.stringify({
         event: "github.pr_head.failure",
@@ -1586,6 +1613,7 @@ async function prHead(pr: { repo: string; number: number }): Promise<
         ...(data.headFacts?.requestId ? { requestId: data.headFacts.requestId } : {}),
       }),
     );
+  }
   return {
     ref,
     sha,

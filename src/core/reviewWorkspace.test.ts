@@ -291,7 +291,7 @@ describe("review settlement in a bound non-root checkout", () => {
     const w = await workspace();
     const missing: SettleReviewedHeadInput = { ...w.input };
     delete missing.checkout;
-    await expect(settleReviewedHead(missing)).rejects.toThrow("workspace advance command did not complete");
+    await expect(settleReviewedHead(missing)).rejects.toThrow("prior_head failed (exit 128, truncated false)");
     expect((await w.repo.execResult("git rev-parse HEAD")).stdout.trim()).toBe(OLD_HEAD);
     expect(await w.repo.readFile("source.txt")).toBe("before\n");
   });
@@ -307,7 +307,7 @@ describe("review settlement in a bound non-root checkout", () => {
     const w = await workspace(async (command, result) =>
       command.includes(" fetch origin ") ? { ...result, truncated: true } : result,
     );
-    await expect(settleReviewedHead(w.input)).rejects.toThrow("workspace advance command did not complete");
+    await expect(settleReviewedHead(w.input)).rejects.toThrow("fetch failed (exit 0, truncated true)");
     expect((await w.repo.execResult("git rev-parse HEAD")).stdout.trim()).toBe(OLD_HEAD);
     expect(await w.repo.readFile("source.txt")).toBe("before\n");
   });

@@ -76,6 +76,7 @@ export interface GraftInput {
   prefix:
     | "dispatch.workspace.attach"
     | "dispatch.gate.attached_head"
+    | "dispatch.gate.attached_head.reprovision"
     | "run.command"
     | "run.settle_reviewed_head"
     | "resident";

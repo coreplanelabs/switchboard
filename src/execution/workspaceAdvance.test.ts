@@ -38,6 +38,17 @@ async function repository() {
   return { executor, old, target };
 }
 describe("executor workspace advance", () => {
+  it("identifies the failed command stage, exit status and redacted output", async () => {
+    let call = 0;
+    await expect(
+      advanceWorkspace(async () => {
+        call++;
+        return call === 3
+          ? { stdout: "", stderr: "fatal: fetch denied password=private-value", exitCode: 128, truncated: true }
+          : { stdout: call === 1 ? "a".repeat(40) : "", stderr: "", exitCode: 0, truncated: false };
+      }, "b".repeat(40)),
+    ).rejects.toThrow("fetch failed (exit 128, truncated true): fatal: fetch denied password=«redacted»");
+  });
   it("a hard stop during the final command cannot confirm an advance", async () => {
     const control = new AbortController();
     let calls = 0;

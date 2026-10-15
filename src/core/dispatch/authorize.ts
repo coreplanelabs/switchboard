@@ -1,4 +1,4 @@
-import { gitInCheckout } from "../../execution/workspaceAdvance.js";
+import { gitInCheckout, runWorkspaceCommand } from "../../execution/workspaceAdvance.js";
 import { checkoutOfSelection } from "../../execution/factory.js";
 // The authorize stage of the dispatch pipeline (docs/decisions/0024-dispatcher-as-a-staged-pipeline.md):
 // the gates a resolved request passes before a model turn, each asked against
@@ -21,6 +21,7 @@ import { currentPrHeadSha, type RepoContext, type ResidentSlugs } from "../repoC
 import { nearMatch } from "../nearMatch.js";
 import { residentSlugsLister } from "../../execution/factory.js";
 import { BASH_TIMEOUT_MS } from "../../execution/bashTimeout.js";
+import { redactAndCap } from "../redact.js";
 import { isRunStopError } from "../../execution/executor.js";
 import { shellQuote } from "../../execution/shellQuote.js";
 import { seedDoorRemote } from "../../execution/seedPlan.js";
@@ -547,75 +548,115 @@ export async function authorizeAttachedHead(
     let guard = await root
       .span("dispatch.gate.attached_head", async (span) => {
         const checkout = () => checkoutOfSelection(selection);
+        const checkedCommand = (command: string, stage: string, timeoutMs: number, parent = span) => {
+          if (!executor.execResult)
+            throw new RefusalError(refusalOf("setup_failed", "review setup requires structured command results"));
+          return runWorkspaceCommand(executor.execResult.bind(executor), command, stage, {
+            timeoutMs,
+            signal: stopSignal,
+            span: parent,
+          });
+        };
         if (!resume && !resident && selection.seeded === undefined && expectedHeadSha !== undefined) {
-          await executor.exec(
+          await checkedCommand(
             coldReviewCheckoutCommand(
               { ...repoCtx, repo: pr.repo, pr: pr.number, headSha: expectedHeadSha },
               ctx.githubDoor?.baseUrl,
             ),
-            { timeoutMs: BASH_TIMEOUT_MS, signal: stopSignal, span },
+            "prepare_checkout",
+            BASH_TIMEOUT_MS,
           );
         }
         if (stopSignal.aborted) return { outcome: "stopped" as const };
-        const observeHead = () =>
-          executor
-            .exec(`${gitInCheckout(checkout())} rev-parse HEAD`, { timeoutMs: 30_000, signal: stopSignal, span })
-            .then(parseRevParseOutput)
+        const observeHead = (stage: "initial_head" | "retry_head", parent = span) =>
+          parent
+            .span(`${parent.name}.${stage}`, async (step) => {
+              const command = `${gitInCheckout(checkout())} rev-parse HEAD`;
+              const options = { timeoutMs: 30_000, signal: stopSignal, span: step };
+              let output: string;
+              if (executor.execResult) {
+                const result = await executor.execResult(command, options);
+                step.setAttrs({ exitCode: result.exitCode, outputTruncated: result.truncated });
+                if (result.exitCode !== 0 || result.truncated)
+                  throw new RefusalError(
+                    refusalOf(
+                      "workspace_head_mismatch",
+                      `HEAD read failed (exit ${result.exitCode}, truncated ${result.truncated}): ${redactAndCap(result.stderr || result.stdout, 1000)}`,
+                    ),
+                  );
+                output = result.stdout;
+              } else output = await executor.exec(command, options);
+              const head = parseRevParseOutput(output);
+              if (!head)
+                throw new RefusalError(refusalOf("workspace_head_mismatch", "HEAD read returned no full commit SHA"));
+              step.setAttrs({ outcome: head === expectedHeadSha ? "matched" : "mismatched" });
+              return head;
+            })
             .catch(() => undefined);
-        const sha = await observeHead();
+        const sha = await observeHead("initial_head");
         if (stopSignal.aborted) return { outcome: "stopped" as const };
         const g = await guardAttachedHead({
           pr,
           expectedHeadSha,
           attached: { sha, ref: binding?.ref ?? repoCtx.ref, source: "workspace-observed" },
           fallbackRef: repoCtx.ref,
-          fetchPrHead: deps.fetchPrHead ?? currentPrHeadSha,
-          reprovision: async (headSha) => {
-            if (stopSignal.aborted) return { sha: undefined };
-            if (executor.moveTo) {
-              const beforeCheckout = checkout();
-              await executor.moveTo(headSha, {
-                signal: stopSignal,
-                span,
-                ...(beforeCheckout !== undefined ? { checkout: beforeCheckout } : {}),
-              });
+          fetchPrHead: (target) =>
+            span.span(`${span.name}.current_head`, async (step) => {
+              const head = await (deps.fetchPrHead ? deps.fetchPrHead(target) : currentPrHeadSha(target, step));
+              if (!step.ended) step.setAttrs({ outcome: head ? "available" : "unavailable" });
+              return head;
+            }),
+          reprovision: (headSha) =>
+            span.span(`${span.name}.reprovision`, async (repair) => {
               if (stopSignal.aborted) return { sha: undefined };
-              const observedSha = await observeHead();
-              if (selection.binding && observedSha !== undefined) {
-                selection.binding = {
-                  ...selection.binding,
-                  ref: repoCtx.ref ?? selection.binding.ref,
+              if (executor.moveTo) {
+                const beforeCheckout = checkout();
+                await executor.moveTo(headSha, {
+                  signal: stopSignal,
+                  span: repair,
+                  ...(beforeCheckout !== undefined ? { checkout: beforeCheckout } : {}),
+                });
+                if (stopSignal.aborted) return { sha: undefined };
+                const observedSha = await observeHead("retry_head", repair);
+                if (selection.binding && observedSha !== undefined) {
+                  selection.binding = {
+                    ...selection.binding,
+                    ref: repoCtx.ref ?? selection.binding.ref,
+                    sha: observedSha,
+                    ...(checkout() !== undefined ? { workspace: checkout() } : {}),
+                  };
+                }
+                return {
                   sha: observedSha,
-                  ...(checkout() !== undefined ? { workspace: checkout() } : {}),
+                  ref: repoCtx.ref,
+                  source: "workspace-observed" as const,
                 };
               }
-              return {
-                sha: observedSha,
-                ref: repoCtx.ref,
-                source: "workspace-observed" as const,
-              };
-            }
-            if (selection.seeded?.workspace) {
-              await executor.exec(
-                seededReviewCheckoutCommand(
-                  { ...repoCtx, repo: pr.repo, pr: pr.number, headSha },
-                  selection.seeded.workspace,
-                ),
-                { timeoutMs: BASH_TIMEOUT_MS, signal: stopSignal, span },
-              );
-            } else {
-              await executor.exec(
-                coldReviewCheckoutCommand(
-                  { ...repoCtx, repo: pr.repo, pr: pr.number, headSha },
-                  ctx.githubDoor?.baseUrl,
-                ),
-                { timeoutMs: BASH_TIMEOUT_MS, signal: stopSignal, span },
-              );
-            }
-            if (stopSignal.aborted) return { sha: undefined };
-            const retried = await observeHead();
-            return { sha: retried, ref: repoCtx.ref, source: "workspace-observed" as const };
-          },
+              if (selection.seeded?.workspace) {
+                await checkedCommand(
+                  seededReviewCheckoutCommand(
+                    { ...repoCtx, repo: pr.repo, pr: pr.number, headSha },
+                    selection.seeded.workspace,
+                  ),
+                  "prepare_checkout",
+                  BASH_TIMEOUT_MS,
+                  repair,
+                );
+              } else {
+                await checkedCommand(
+                  coldReviewCheckoutCommand(
+                    { ...repoCtx, repo: pr.repo, pr: pr.number, headSha },
+                    ctx.githubDoor?.baseUrl,
+                  ),
+                  "prepare_checkout",
+                  BASH_TIMEOUT_MS,
+                  repair,
+                );
+              }
+              if (stopSignal.aborted) return { sha: undefined };
+              const retried = await observeHead("retry_head", repair);
+              return { sha: retried, ref: repoCtx.ref, source: "workspace-observed" as const };
+            }),
           logKey: msg.threadKey,
         });
         if (stopSignal.aborted) {

@@ -61,7 +61,8 @@ const ERROR_CODE_COMPONENT = /^(failed|failure|error|err|refused|denied|invalid|
  *  between the name and the separator). Name-gated so ordinary config
  *  assignments are untouched. */
 function redactNamedAssignments(text: string): string {
-  return text.replace(
+  // Skipped prefixes must not consume a later assignment in their value.
+  const pattern =
     // The identifier is the WHOLE `[A-Za-z0-9_-]` run, anchored to its start by
     // the lookbehind: without an anchor a long unbroken token (pasted base64, a
     // minified line) is retried from every offset and each attempt backtracks
@@ -71,15 +72,26 @@ function redactNamedAssignments(text: string): string {
     // is still retried at every letter of a mixed alphanumeric run. Taking the
     // maximal run means one attempt per run; the component check below still
     // decides whether it names a secret (`_SECRET` → ["", "SECRET"]).
-    /(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)("?)(\s*[=:]\s*)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s]{4,})/g,
-    (whole, id: string, close: string, sep: string, val: string) => {
-      const parts = id.split(/[_-]/);
-      if (!parts.some((p) => SECRET_COMPONENT.test(p))) return whole;
-      if (parts.some((p) => ERROR_CODE_COMPONENT.test(p))) return whole;
-      const quote = val[0] === '"' || val[0] === "'" ? val[0] : "";
-      return `${id}${close}${sep}${quote}«redacted»${quote}`;
-    },
-  );
+    /(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)("?)(\s*[=:]\s*)/g;
+  const value = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s]{4,}/y;
+  let out = "";
+  let copied = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    const [, id, close, sep] = match;
+    const parts = id.split(/[_-]/);
+    if (!parts.some((p) => SECRET_COMPONENT.test(p)) || parts.some((p) => ERROR_CODE_COMPONENT.test(p))) {
+      continue;
+    }
+    value.lastIndex = pattern.lastIndex;
+    const found = value.exec(text);
+    if (!found) continue;
+    const val = found[0];
+    const quote = val[0] === '"' || val[0] === "'" ? val[0] : "";
+    out += text.slice(copied, match.index) + `${id}${close}${sep}${quote}«redacted»${quote}`;
+    copied = pattern.lastIndex = value.lastIndex;
+  }
+  return out + text.slice(copied);
 }
 
 /** Strip known credential formats from text before it enters a run-visibility

@@ -1598,7 +1598,12 @@ export class ResidentExecutor implements Executor {
     const baseAt = systemClock();
     const phase = opts?.span?.record().name;
     const graft = (steps: readonly ResidentStep[], residentTotalMs?: number) => {
-      if (opts?.span && (phase === "dispatch.gate.attached_head" || phase === "run.settle_reviewed_head"))
+      if (
+        opts?.span &&
+        (phase === "dispatch.gate.attached_head" ||
+          phase === "dispatch.gate.attached_head.reprovision" ||
+          phase === "run.settle_reviewed_head")
+      )
         graftResidentSteps(steps, {
           parent: opts.span,
           prefix: phase,

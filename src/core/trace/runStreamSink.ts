@@ -139,6 +139,11 @@ export function createRunStreamSink(opts: RunStreamSinkOptions): RunStreamSink {
       const ok = accept(rec);
       ended.add(rec.spanId);
       if (ok) {
+        const attrs: SpanAttrs = {
+          ...rec.attrs,
+          ...(rec.errorKind ? { errorKind: rec.errorKind } : {}),
+          ...(rec.errorCode ? { errorCode: rec.errorCode } : {}),
+        };
         emit({
           type: "span_end",
           spanId: rec.spanId,
@@ -148,7 +153,7 @@ export function createRunStreamSink(opts: RunStreamSinkOptions): RunStreamSink {
           durationMs: rec.durationMs ?? 0,
           status: rec.status ?? "ok",
           ...(rec.errorMessage ? { error: rec.errorMessage } : {}),
-          ...(Object.keys(rec.attrs).length > 0 ? { attrs: rec.attrs } : {}),
+          ...(Object.keys(attrs).length > 0 ? { attrs } : {}),
           at: rec.endedAt ?? rec.startedAt,
         });
       }

@@ -436,6 +436,17 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
         });
       }
     }
+    if (ev.type === "refusal") {
+      sideFactEvents++;
+      if (ev.cause === "system")
+        findings.push({
+          category: "infra_failure",
+          severity: "high",
+          summary: `system refusal (${ev.code}): ${ev.text}`,
+          eventIndex: index,
+        });
+      return;
+    }
     if (
       ev.type === "skill_use" ||
       ev.type === "artifact" ||
@@ -451,7 +462,6 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       ev.type === "ship_unit" ||
       ev.type === "route" ||
       ev.type === "operator" ||
-      ev.type === "refusal" ||
       ev.type === "reference" ||
       ev.type === "run_state" ||
       ev.type === "lease" ||
