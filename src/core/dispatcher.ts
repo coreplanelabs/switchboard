@@ -1139,11 +1139,24 @@ export async function dispatch(
       typedAgent === "ship" &&
       Object.keys(typed).every((key) => key === "agent" || key === "text") &&
       parseOriginalUnitAdoptionRequest(typed.text) !== undefined;
+    // The caller already selected the orchestrator. Its own loop handles the
+    // request; a preceding model cannot improve that explicit selection.
     let operatorMode =
+      typedAgent === "orchestrator" ||
       (mainDm && typedAgent !== "ship" && !bareShipPrRequest) ||
       (configuredOperator === "on" && (originalRecoveryCommand || originalAdoptionCommand))
         ? "off"
         : configuredOperator;
+    if (typedAgent === "orchestrator")
+      console.log("[dispatch] operator skipped", {
+        agent: typedAgent,
+        userId: msg.userId,
+        channelId: msg.channelId,
+        messageId: msg.messageId,
+        threadKey: msg.threadKey,
+        reason: "explicit_agent",
+        configuredOperator,
+      });
     // The preset an `on` decision binds on the person's own words, with the
     // decision's event on the run.
     let operatorPreset: string | undefined;
