@@ -28,6 +28,7 @@ export const GITHUB_ACCESS_REASONS = [
 export const GITHUB_ACCESS_OPERATIONS = [
   "none",
   "listRepos",
+  "isPublicRepo",
   "readFile",
   "listTree",
   "searchCode",
@@ -41,6 +42,7 @@ export const GITHUB_ACCESS_OPERATIONS = [
 ] as const;
 export const GITHUB_ACCESS_ROUTES = [
   "installation_repos",
+  "repository",
   "repository_user_permission",
   "contents",
   "contents_raw",
