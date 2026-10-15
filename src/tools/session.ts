@@ -16,6 +16,7 @@
 import type { ChatMessage, ContentPart, ToolResultContent } from "../core/chatMessage.js";
 import {
   boundChildHandoff,
+  orchestratorOwnerForHandoff,
   parentContextOf,
   sameHandoffSource,
   snapshotNotepad,
@@ -98,7 +99,9 @@ export interface InheritedSessionContext {
 }
 
 export function sessionCapabilityFor(
-  run: Pick<LedgerRun, "session" | "runId"> | undefined,
+  run:
+    | (Pick<LedgerRun, "session" | "runId"> & { agent?: string; parentRunId?: string; parentInstanceId?: string })
+    | undefined,
   ledger: Pick<LedgerWriteThrough, "readSession" | "searchSession" | "readNotepad" | "writeNotepad"> &
     Partial<Pick<LedgerWriteThrough, "readSessionTail">>,
   assets?: SessionAssets,
@@ -211,8 +214,13 @@ export function sessionCapabilityFor(
               !request.messages[0].content.some((p) => p.type === "text" || p.type === "image" || p.type === "document")
             )
               throw new Error("the original source request could not be captured");
+            const orchestratorOwner = orchestratorOwnerForHandoff(
+              { ...source, agent: run.agent, parentRunId: run.parentRunId, parentInstanceId: run.parentInstanceId },
+              inherited?.handoff,
+            );
             const snapshot: ChildHandoff = {
               version: 1,
+              ...(orchestratorOwner ? { orchestratorOwner } : {}),
               source,
               session: { key: session.key, from: 0, to: tail.from + tail.transcript.turns - 1 },
               window: {
@@ -232,6 +240,9 @@ export function sessionCapabilityFor(
                 ? {
                     ancestors: [
                       {
+                        ...(inherited.handoff.orchestratorOwner
+                          ? { orchestratorOwner: inherited.handoff.orchestratorOwner }
+                          : {}),
                         source: inherited.handoff.source,
                         session: inherited.handoff.session,
                         snapshotRunId: inherited.handoff.snapshotRunId ?? run.runId,

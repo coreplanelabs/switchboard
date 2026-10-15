@@ -1777,6 +1777,12 @@ describe("dispatch", () => {
           version: 1,
           handoff: {
             source: { requester: "slack:UADMIN", threadKey: directMainAudience.threadKey },
+            orchestratorOwner: {
+              runId: (starts[0] as { mainRunId: string }).mainRunId,
+              requesterId: "slack:UADMIN",
+              channelId: directMainAudience.channelId,
+              threadKey: directMainAudience.threadKey,
+            },
             dependencies: { value: { status: "known" } },
           },
         },
@@ -31800,8 +31806,15 @@ describe("durable structured child context", () => {
       expect(
         await ledger.appendSession("seed-parent-log", "parent-evidence", turnRows(0, evidence[0]!).rows, dependencies),
       ).toMatchObject({ ok: true });
+      const orchestratorOwner = {
+        runId: source.runId,
+        requesterId: source.requester,
+        channelId: source.channelId,
+        threadKey: source.threadKey,
+      };
       const handoff = {
         version: 1 as const,
+        ...(workBrief ? { orchestratorOwner } : {}),
         source,
         session: { key: "seed-parent-log", from: 0, to: 0 },
         window: { from: 0, to: 0, hash: await sourceHash({ messages: evidence, actors: [] }) },
@@ -31858,6 +31871,7 @@ describe("durable structured child context", () => {
           if (runId === source.runId)
             return {
               ...source,
+              ...(workBrief ? { agent: "orchestrator" } : {}),
               session: { key: "seed-parent-log", seedFrom: 0, request: 0, range: { from: 0, to: 0 } },
               writtenThrough: 0,
               dependencies,
@@ -31907,6 +31921,7 @@ describe("durable structured child context", () => {
         }
         expect(isUnitSeedReceipt(receipt)).toBe(true);
         if (!isUnitSeedReceipt(receipt)) throw new Error("The first provider call has no acknowledged seed.");
+        expect(row?.meta.childHandoff?.orchestratorOwner).toEqual(orchestratorOwner);
         expect(receipt.binding).toEqual(binding);
         expect(receipt.contractHash).toBe(await sourceHash(contract.unit));
         expect(receipt.capsuleHash).toBe(await sourceHash(unit.context));
@@ -31965,8 +31980,10 @@ describe("durable structured child context", () => {
       if (acknowledge) expect(outcome.status, JSON.stringify(outcome)).toBe("completed");
       await deps.runHistoryWriter.settled();
       const record = [...ledger.finished.values()][0];
-      if (acknowledge && workBrief) expect(record?.unitSeedReceipt?.binding).toEqual(binding);
-      else expect(record?.unitSeedReceipt).toBeUndefined();
+      if (acknowledge && workBrief) {
+        expect(record?.unitSeedReceipt?.binding).toEqual(binding);
+        expect(record?.childHandoff?.orchestratorOwner).toEqual(orchestratorOwner);
+      } else expect(record?.unitSeedReceipt).toBeUndefined();
     },
   );
 

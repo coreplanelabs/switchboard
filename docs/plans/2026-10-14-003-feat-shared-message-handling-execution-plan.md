@@ -81,6 +81,12 @@ The source trace identifies these entry paths and remaining changes:
 
 Context links, recorded internal decisions and removal of routing bypasses remain pending. The complete Step 1 acceptance condition above remains a gap.
 
+### Delegated conversation link, 2026-10-15
+
+A new handoff from a known orchestrator root now names its original run, requester, channel and thread. The existing handoff record carries this link into the saved unit capsule and child admission. Nested workers preserve the original link instead of making themselves the routing owner. Canonical source validation checks the source agent and all four owner fields. It refuses changed links and loss of an inherited link.
+
+This is a context reference, not an execution grant or a delivery decision. Older unlinked handoffs remain readable. A standalone specialist and a delegated orchestrator with unlinked source context remain unlinked; neither is guessed to be the original front door. The remaining routing migration must establish a verified context for those paths before source evidence can use them. Shared fold decisions and removal of the separate operator model pass remain pending.
+
 ### Command binding cut, 2026-10-14
 
 The context extraction is merged in [the first cut](https://github.com/coreplanelabs/switchboard/pull/3130). The next cut connects requester-bound orchestrator commands to that preparation and the existing typed registry binder. It records the original conversation and source in the run's existing state before a command or confirmation offer can proceed. The command's existing history carries the same link after completion.

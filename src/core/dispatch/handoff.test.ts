@@ -115,6 +115,13 @@ describe("structured child handoff", () => {
     expect(isChildHandoff({ ...handoff, source: { ...handoff.source, requester: null } })).toBe(false);
     expect(isChildHandoff({ ...handoff, assets: [{ ...handoff.assets[0], key: 3 }] })).toBe(false);
     expect(isChildHandoff({ ...handoff, consumer: null })).toBe(false);
+    for (const orchestratorOwner of [
+      null,
+      [],
+      {},
+      { runId: "x", requesterId: "u", channelId: "c", threadKey: "t", extra: true },
+    ])
+      expect(isChildHandoff({ ...handoff, orchestratorOwner })).toBe(false);
     expect(
       isChildHandoff({
         ...handoff,
