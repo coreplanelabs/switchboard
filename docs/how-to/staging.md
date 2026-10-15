@@ -9,7 +9,7 @@ Staging is a separate Cloudflare installation. It uses the same four Worker temp
 3. Point `runHistory.worker`, `runtimeOverrides.worker`, `memory.worker`, and every other state-Worker client at staging Memory. Point `execution.url` at staging Sandbox and `execution.resident.baseUrl` at staging Resident. Match the runtime artifact bucket and metrics dataset to the profile.
 4. Create separate API Credential items named `Switchboard: <SECRET_NAME> (Staging)` in the existing vault, with values in the concealed `credential` field. Materialize the required fields into a private staging-only directory and name it as `secretsSource`; never use the production default directory. Mint distinct runtime bearers, staging-only provider keys and a staging-account-only Cloudflare deploy token. Deploy secrets with the existing `deploy secrets <worker>` command against the explicit staging profile.
 5. Install a separate Socket Mode Slack app in the testing workspace. Install a separate GitHub App on disposable fixture repositories only. Route its webhook to staging. Configure a separate Cloudflare Access application and restrict its users. Do not copy production MCP credentials, schedules or data.
-6. Bootstrap Memory first. The Bot config-publication gate requires readable canonical state and native application evidence. If cold bootstrap refuses, preserve the refusal and complete the reviewed bootstrap procedure; `--force` is not a staging bootstrap method.
+6. Bootstrap Memory first. The Bot config-publication gate requires readable canonical state and native application evidence. If cold bootstrap refuses, preserve the refusal and complete the reviewed creation procedure. Use [first installation](#first-installation) for an empty installation; the selected recovery sequence below covers maintenance support on an existing Resident.
 
 ## CLI
 
@@ -47,6 +47,54 @@ gh workflow run deploy-staging.yml --ref <candidate-branch> -f pr=<pr-number> -f
 The branch must contain the retained-mode workflow. Existing writer, same-repository, current-head and validation checks still apply. `retain_maintenance` defaults to false and automatic requests do not select it. The workflow passes the explicit option to both acceptance plans and the deployment wrapper. It keeps the shared staging lock while the wrapper deploys with force zero, proves image readiness, seals the selected upload window and waits for an explicit Admin release. The operator uses `POST /staging-release-maintenance` with the unchanged full request quote, selected deployment data and a fresh release decision. Release refuses unknown or busy member views and other unfinished requests. The wrapper only reads that release receipt; it cannot release or renew maintenance itself.
 
 E2E runs after the exact release is verified. Failed state reads, HTTP refusals, changed inputs or deadline expiry stop the selected deployment. Do not retry it through force or remove its policy. The separately qualified first producer upload remains outside this workflow. Do not consume the selected window in a manual deployment before asking CI to use it. After release the original request remains stored; this decision does not authorize a later deployment.
+
+### Share the same inputs with the operator and CI
+
+The operator host and GitHub runner have separate filesystems. A local frozen profile or configuration path cannot supply the runner's inputs. Use one immutable profile reference in the private configuration repository. Its nested `configSource` must also name an immutable source that the existing configuration reader can read.
+
+The workflow reads the existing staging Environment variable `SWITCHBOARD_STAGING_PROFILE` and passes it as `SWITCHBOARD_DEPLOY_PROFILE`. Its existing configuration App uses `CONFIG_REPO_OWNER`, `CONFIG_REPO_NAME` and Contents read permission. It supplies `CONFIG_REPO_TOKEN` to the loaders. `retain_maintenance=true` selects the mode; it does not supply a profile or change credentials.
+
+The operator can load the same immutable profile URI or freeze an exact local copy. CI reads the private references and creates its own protected temporary copies. Preserve the same parsed profile, selected `residentMaintenance` policy and configuration text. The profile digest uses `maintenanceProfileMaterial` in `src/deploy/profile.ts`: it excludes `residentMaintenance` and `configSource`, because the policy and configuration text have separate checks. A changed temporary configuration path is permitted. Other parsed profile fields, including the `secretsSource` reference, must match. `deploy all` uses environment credentials and does not run `deploy secrets` or require that secret directory on the CI runner.
+
+Select these policy inputs before the qualified bootstrap:
+
+| Input | Required value |
+| --- | --- |
+| `schema` | `1` |
+| `stagingAccount`, `productionAccount`, `residentScript`, `residentOrigin` | Actual separate accounts and the original staging Worker/origin, matching the profile and independently configured account pair. |
+| `fixtureSha256`, `resources`, `decisionSha256` | Digests of retained fixture/risk evidence and its exact allowed repository resources. A digest identifies evidence; it does not certify that evidence. |
+| `holdId`, `generation` | One UUID and positive generation for the original Registry. |
+| Deployment `id`, `controllerId` | One deployment UUID and operator-selected controller label. The code does not derive this label from a GitHub run ID; retain the actual writer and run receipts separately. |
+| Deployment `sourceCommit` | One exact qualified candidate for both the bootstrap and selected CI upload. |
+| Deployment `profileSha256`, `configSha256` | Canonical parsed profile-material digest and digest of the exact validated configuration text. Do not hash raw profile JSON as the material digest. |
+| Deployment `deadline` | Absolute epoch milliseconds. Installation permits at most 90 minutes; each fence requires at least 20 minutes left. The deadline continues during publication, bootstrap and CI. |
+
+If the old configuration reference refuses, retain its refusal. A local protected copy can prove bytes, but cannot prove the CI reader has current access. An authorized configuration writer can publish those same validated bytes as commit `R` on one new private branch. Keep the normal configuration path. Publish the selected normal profile as commit `P`, with parent `R` and `configSource` naming `@R`. Retain the branch at `P` through completion so both commits remain reachable. Preserve `main`, existing owner branches, credential scope and cloud settings.
+
+For API publication, GitHub documents [blob creation](https://docs.github.com/en/rest/git/blobs#create-a-blob), [tree creation](https://docs.github.com/en/rest/git/trees#create-a-tree), [commit creation](https://docs.github.com/en/rest/git/commits#create-a-commit) and [reference creation/update](https://docs.github.com/en/rest/git/refs). Start each tree from its known `base_tree` and change only the selected configuration or profile path. Create the new branch at `R`, then advance only that owned branch to `P` with `force:false`. This is a fast-forward guard, not an atomic expected-old-SHA check. Record one writer, accepted object/ref receipts and exact readbacks. A changed or unknown ref, refused write or uncertain reply stops; do not repeat the mutation blindly.
+
+Pin the existing `SWITCHBOARD_STAGING_PROFILE` variable to the accepted immutable profile URI before the selected job reads it. Keep it stable through deployment, release wait and E2E. The publication writer's successful readback does not prove access for the separate CI App. Inside the admitted job, the original CI reader must load the exact profile and nested configuration through the normal raw Contents route and validate them before upload. A refusal stops while maintenance stays held. The existing workflow provides this check before upload; it does not require a separate check-only CI dispatch.
+
+### Install the maintenance support, then use one CI window
+
+This sequence requires separately qualified authority for the finite staging fixture risk and loss, the original controller and all remaining native/private guards. It is an upgrade of an existing installation. It does not claim that an unfinished request or its remote effects ended.
+
+1. Settle competing controllers and complete the approved original fixture reset before installing maintenance. Retain its actual completion evidence; an HTTP 202 acknowledgement is not completion. The held Worker blocks ordinary reset, rebuild, registration and configuration work.
+2. From a clean checkout at the selected full source commit and the shared frozen inputs, run the separately qualified first upload:
+
+   ```bash
+   npm run cli -- deploy all --only resident --force --retain-maintenance --allow-branch
+   ```
+
+   This direct runner retains the selected policy and requires an acknowledged drain. A successful JSON answer from the known old `/deploy-fence` can permit this qualified force upload. HTTP 409/404, invalid JSON, timeout or transport failure still refuses. Do not remove the policy or deployment data to bypass that refusal. The ordinary staging wrapper continues to reject force.
+
+3. Verify the new exact Worker build, complete current member image reports and `GET /staging-maintenance` with the existing read bearer. Match its hold ID, generation, selected deployment data and fixture/decision digests to the frozen policy; no risk window exists yet. Qualify the account, script and resource scope against the actual installation. Success is image readiness under maintenance, not live acceptance. The new Registry installs this durable hold before new RPC delivery; drain expiry or a successful image report cannot release it.
+4. Use the existing Admin bearer to read the original request quote through the [staging risk API contract](../reference/specs/resident-repos.md#explicit-staging-risk). Retain its `startedAt` and full stored-record `recordSha256`. A compact inventory or diagnostic projection is not that quote. A changed, absent or unreadable original stops the sequence.
+5. Create a fresh `POST /drain` with the existing drain bearer, `minutes=90`, a `reason`, the operator label in `by` and exact selected deployment data. The server clamps its end to the fixed policy deadline. Then submit the contract's Admin risk decision once, with the exact request quote, fixture/risk digests and selected deployment data. The reference contract gives the exact HTTP field names. This Admin action sets its decision fence itself; do not separately call `/deploy-fence` first. Verify the immutable decision and `authorized` window. With only the original row, counts are `stored=1`, `excluded=1`, `blocking=0`; other rows remain blocking. Request ending remains unobserved.
+6. Dispatch the selected current candidate branch through the existing workflow with `retain_maintenance=true` and E2E enabled. This must be the first normal deployment that claims the window. Do not consume it with a manual normal deployment first. CI uses the same full source commit, force zero and its own frozen input files. Its normal drain claims the window atomically; ordinary native, owner, process, private and image guards still apply. Exact readiness precedes the runner's `/staging-seal-window` call and `completed` window. Maintenance remains held while that same job waits for release.
+7. Under fresh qualified reopening authority, submit `POST /staging-release-maintenance` once with the Admin bearer. Its body requires the unchanged `expectedStartedAt`/`expectedRecordSha256`, selected deployment data and a fresh `releaseDecisionSha256` different from the original risk decision. The server independently requires idle member owner/lifecycle/process views, the original audit/row and no other global requests. Verify the exact `released` state, selected identity, new release digest and timestamp. The waiting CI can then continue to its own E2E.
+
+Retained mode never automatically calls `/undrain`, including failure, cancellation or an unknown upload. A lost risk or release commit reply permits the handler's one exact receipt read, not another operator mutation. An expired upload window leaves the durable hold in place. A separately qualified release after expiry cannot renew upload eligibility or turn an expired CI wait into success. The original request and audit remain stored after release; a later ordinary deployment still has that request debt.
 
 ## GitHub
 
