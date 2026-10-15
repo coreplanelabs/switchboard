@@ -15,6 +15,7 @@ export const GITHUB_ACCESS_STAGES = ["tool-family", "catalog", "repository", "co
 export const GITHUB_ACCESS_REASONS = [
   "unsupported-tool",
   "repository-missing",
+  "public-result-changed",
   "no-api-call",
   "credential-missing",
   "credential-failed",

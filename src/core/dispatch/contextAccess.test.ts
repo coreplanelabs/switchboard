@@ -494,6 +494,10 @@ describe("message-bound context access", () => {
     const admissionHash = (await executionAdmissionHash(meta))!;
     const sourceRepo = source === "public" ? "upstream/provider" : "acme/api";
     const input = { repo: sourceRepo, path: "src/x.ts" };
+    const originalResult =
+      source === "public"
+        ? "https://github.com/upstream/provider/blob/main/src/x.ts (12 bytes):\n\ncurrent code"
+        : "original code";
     const receipt = {
       version: 2 as const,
       runId: "review",
@@ -502,13 +506,13 @@ describe("message-bound context access", () => {
       repos: [sourceRepo],
       admissionHash,
       inputHash: await sourceHash(input),
-      resultHash: await sourceHash("original code"),
+      resultHash: await sourceHash(originalResult),
     };
     const messages: ChatMessage[] = [
       { role: "assistant", content: [{ type: "tool_use", id: "read", name: "github_file", input }] },
       {
         role: "user",
-        content: [{ type: "tool_result", toolUseId: "read", content: "original code" }],
+        content: [{ type: "tool_result", toolUseId: "read", content: originalResult }],
         sourceResults: [receipt],
       },
     ];

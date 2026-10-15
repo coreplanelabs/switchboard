@@ -2,7 +2,7 @@ import { isRunProfile } from "../../config/profile.js";
 import type { LiveRunMeta } from "../runLedger/types.js";
 import { sourceHash } from "../references/receipts.js";
 import { GITHUB_READ_TOOLS, type GithubCapability } from "../../tools/github.js";
-import type { ChatMessage } from "../chatMessage.js";
+import { capToolResultContent, type ChatMessage } from "../chatMessage.js";
 import {
   GithubApiError,
   GithubCredentialUnavailable,
@@ -169,6 +169,7 @@ export async function currentGithubReadCapability(
   };
   if (!tool) return denied("unsupported-tool");
   let called = 0;
+  let usesPublicAccess = false;
   let firstFailure: ReturnType<typeof failedRead> | undefined;
   const api = new Proxy(github.api, {
     get(target, property, receiver) {
@@ -198,6 +199,7 @@ export async function currentGithubReadCapability(
       // Public upstream sources need not belong to this App installation.
       operation = "isPublicRepo";
       if (!(await github.api.isPublicRepo(repo))) return denied("repository-missing");
+      usesPublicAccess = true;
     }
     if (receipt.tool === "github_search_code") {
       stage = "contents";
@@ -206,8 +208,13 @@ export async function currentGithubReadCapability(
     }
     stage = "tool-read";
     operation = "none";
-    await tool.run(input, { executor: {} as never, agentName, github: { ...github, api } });
-    return firstFailure ?? (called > 0 ? { ok: true } : denied("no-api-call"));
+    const result = await tool.run(input, { executor: {} as never, agentName, github: { ...github, api } });
+    if (firstFailure) return firstFailure;
+    if (called === 0) return denied("no-api-call");
+    // Current public visibility cannot authorize different, formerly private bytes.
+    if (usesPublicAccess && (await sourceHash(capToolResultContent(result))) !== receipt.resultHash)
+      return denied("public-result-changed");
+    return { ok: true };
   } catch (error) {
     return firstFailure ?? failedRead(error);
   }

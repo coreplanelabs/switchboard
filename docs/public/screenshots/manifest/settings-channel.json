@@ -146,7 +146,7 @@
     "src/core/redact.ts": "f7c73ea65d1133caeb1976f25d4f17ad0c5d8b672462dd581859451debea8e37",
     "src/core/references/contextCheckpoint.ts": "d9106ef74e5c9489bb931306728812d1a806e6b32ad4e866518cde5a04741a3c",
     "src/core/references/contextDependencies.ts": "0d1c503205eb16a15d95711667a2c9b6a6bbaabf5cf2b7894c156ffeff7283e9",
-    "src/core/references/githubAccessDiagnostic.ts": "7452b9d309eaa5c102e1391c3ced34749fb68d334169505b67e252db5c218a79",
+    "src/core/references/githubAccessDiagnostic.ts": "d8617330ef044c08aaecff5d7b3a8434100c4e561b6a059c324e3c4210ec4083",
     "src/core/references/receipts.ts": "011458ca2fb30c26547b0b8be700046a9cb67854c6cfc0d8fcd4937b8ff8ed64",
     "src/core/references/sourceReceipt.ts": "03a4fc0fe383095f85ef21a56d03a6ba5fc3f863ccf0e1ac3bd08f198c48b647",
     "src/core/references/unitStatusReference.ts": "a7d07aa188ec78fcfd8763a3d6f1ae3a814e5aa50f3c8d55edc085a3b9203084",
