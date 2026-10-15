@@ -15,6 +15,7 @@ import {
   REFRESH_STEP_RETRIES,
   refreshCycleBlocked,
   refreshInstanceId,
+  refreshBucket,
   shouldCreateRefreshInstance,
   stepTimeoutMs,
   type RefreshRow,
@@ -44,6 +45,7 @@ import type { Env, InstanceStepTrace } from "./worker";
  *  other input is read from the resident's rows at each step, never carried. */
 export interface RefreshInstanceParams {
   resource: string;
+  residentId?: string;
 }
 
 /** What a creator did about one resident's refresh instance. */
@@ -78,7 +80,8 @@ async function refreshInstanceExists(env: Env, id: string): Promise<boolean> {
 }
 
 /** The deterministic id for this resident's current bucket. */
-function bucketInstanceId(resource: string, nowMs: number): string {
+function bucketInstanceId(resource: string, nowMs: number, residentId = resource): string {
+  if (residentId !== resource) return `refresh__replica_${residentId}_${refreshBucket(nowMs)}`;
   const slug = resource.slice("repo:".length);
   const slash = slug.indexOf("/");
   return refreshInstanceId(slug.slice(0, slash), slug.slice(slash + 1), nowMs);
@@ -96,9 +99,10 @@ async function createInstance(
   id: string,
   nowMs: number,
   why: string,
+  residentId = resource,
 ): Promise<RefreshInstanceAction> {
   try {
-    await env.RESIDENT_REFRESH.create({ id, params: { resource } });
+    await env.RESIDENT_REFRESH.create({ id, params: { resource, ...(residentId !== resource ? { residentId } : {}) } });
   } catch (err) {
     const message = errMsg(err);
     if (await refreshInstanceExists(env, id)) {
@@ -124,19 +128,20 @@ export async function createRefreshInstance(
   stub: ReturnType<typeof residentStub>,
   resource: string,
   row: RefreshRow,
+  residentId = resource,
 ): Promise<RefreshInstanceAction> {
   const now = systemClock();
   const decision = shouldCreateRefreshInstance(row, now, {
     intervalS: REFRESH_INTERVAL_S,
     idleIntervalS: IDLE_REFRESH_INTERVAL_S,
   });
-  const id = bucketInstanceId(resource, now);
+  const id = bucketInstanceId(resource, now, residentId);
   if (!decision.create) {
     if (decision.why === "mid-cycle" || decision.why === "running")
       await stub.recordRefreshSkipped(id, now, decision.why);
     return { id, action: "skipped", why: decision.why };
   }
-  return createInstance(env, stub, resource, id, now, decision.why);
+  return createInstance(env, stub, resource, id, now, decision.why, residentId);
 }
 
 /** The admin `refresh-now` op (item 13): this bucket's instance, created now,
@@ -150,12 +155,13 @@ export async function createRefreshInstanceNow(
   env: Env,
   stub: ReturnType<typeof residentStub>,
   resource: string,
+  residentId = resource,
 ): Promise<RefreshInstanceAction> {
   const now = systemClock();
-  const id = bucketInstanceId(resource, now);
+  const id = bucketInstanceId(resource, now, residentId);
   const blocked = refreshCycleBlocked(await stub.refreshRow(), now);
   if (blocked) return { id, action: "skipped", why: blocked };
-  return createInstance(env, stub, resource, id, now, "refresh-now");
+  return createInstance(env, stub, resource, id, now, "refresh-now", residentId);
 }
 
 /** What an instance answers when it ends: small facts for the engine's record. */
@@ -206,7 +212,7 @@ export class ResidentRefresh extends WorkflowEntrypoint<Env, RefreshInstancePara
   ): Promise<RefreshInstanceSummary> {
     const { resource } = event.payload;
     const instance = event.instanceId;
-    const stub = residentStub(this.env, resource);
+    const stub = residentStub(this.env, event.payload.residentId ?? resource);
     const root = startAdoptedRoot(tracer, "resident.refresh", {
       sinks: traceSinks,
       startedAt: event.timestamp.getTime(),

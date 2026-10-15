@@ -21,6 +21,8 @@ export const RESIDENT_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\/[a-z0-9]
 export interface ResidentRecordView {
   noResident?: unknown;
   resource?: unknown;
+  residentId?: unknown;
+  replicaOrdinal?: unknown;
   commands?: unknown;
   effects?: unknown;
   defaultRef?: unknown;
@@ -35,6 +37,8 @@ export interface ResidentRecordView {
 export interface ResidentListing {
   cap?: unknown;
   count?: unknown;
+  pendingReplicas?: unknown;
+  reservedCount?: unknown;
   draining?: unknown;
   residents: ResidentRecordView[];
   repositories?: ResidentRecordView[];
@@ -83,6 +87,42 @@ export const rec = (v: unknown): Record<string, unknown> =>
 
 export function residentSlug(record: ResidentRecordView): string {
   return str(record.resource).replace(/^repo:/, "");
+}
+
+export function residentIdentity(record: ResidentRecordView): string {
+  return str(record.residentId) || str(record.resource);
+}
+
+export function residentLabel(record: ResidentRecordView): string {
+  const slug = residentSlug(record) || str(record.resource) || "?";
+  return typeof record.replicaOrdinal === "number" &&
+    Number.isSafeInteger(record.replicaOrdinal) &&
+    record.replicaOrdinal >= 0
+    ? `${slug} · resident ${record.replicaOrdinal + 1}`
+    : slug;
+}
+
+export function residentDetailHref(record: ResidentRecordView): string | null {
+  const slug = residentSlug(record);
+  if (record.noResident === true || !RESIDENT_SLUG_RE.test(slug)) return null;
+  return `/residents/${slug}${record.residentId ? `?resident=${encodeURIComponent(str(record.residentId))}` : ""}`;
+}
+
+/** The same thread can have history, but one live run appears in one member.
+ * Before a thread has a binding, preserve the primary row's preparing view. */
+export function runsOnResidentMember<
+  T extends { repo?: string; threadKey?: string; finished: boolean; startedAt: number },
+>(runs: Iterable<T>, record: ResidentRecordView, members: readonly ResidentRecordView[]): T[] {
+  const slug = residentSlug(record);
+  const siblings = members.filter((member) => residentSlug(member) === slug);
+  return runsOnResident(runs, slug).filter((run) => {
+    const owner = siblings.find((member) =>
+      residentThreads(member).some((thread) => thread.threadKey === run.threadKey),
+    );
+    return owner
+      ? residentIdentity(owner) === residentIdentity(record)
+      : residentIdentity(siblings[0] ?? record) === residentIdentity(record);
+  });
 }
 
 /** The live view's `disk` (docs/reference/specs/resident-repos.md item 55): the resident's
@@ -251,6 +291,8 @@ export function diskHeadroom(disk: ResidentDiskView, diskBudgetMb: number | unde
 export interface ResidentsIndexState {
   cap: unknown;
   count: unknown;
+  pendingReplicas?: unknown;
+  reservedCount?: unknown;
   draining: unknown;
   residents: unknown[];
   repositories?: unknown[];
@@ -274,6 +316,8 @@ export function applyResidentsFrame(state: ResidentsIndexState, frame: Residents
   } else if (frame.type === "residents") {
     state.cap = frame.cap;
     state.count = frame.count;
+    state.pendingReplicas = frame.pendingReplicas;
+    state.reservedCount = frame.reservedCount;
     state.draining = frame.draining;
     state.residents = Array.isArray(frame.residents) ? frame.residents : [];
     state.repositories = Array.isArray(frame.repositories) ? frame.repositories : [];

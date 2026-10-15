@@ -53,11 +53,11 @@ Each UID (Linux user ID) stays with its first owner for the VM generation. Detac
 
 Each refresh cycle releases eligible idle trees and reclaims worktrees whose branch is gone or whose pull request is closed. A known owner's workspace stays protected until terminal ownership, publication metadata and private-tree preservation are verified. Retained workspaces can therefore block an exhausted pool's safe VM recycle even after their runs end. Increasing the pool delays exhaustion; it does not settle those obligations.
 
-An unused resident parks its refresh and sleeps. The fleet caps warm residents; onboarding over the cap can, per request, offboard the coldest eligible resident instead.
+An unused resident can park its refresh and sleep unless it belongs to a configured warm minimum. The fleet caps resident addresses. Onboarding over the cap can, per request, offboard the coldest eligible single resident; pools require explicit offboard.
 
 ## Identity slots and active work
 
-A resident creates fresh unprivileged UID identities on demand and admits at most 16 active owners. Historical identities stay with their recorded owners and do not form a fixed work budget. The fleet cap is five repositories, with a platform ceiling of ten containers. Lowering the cap leaves existing residents registered; onboarding another resident fails at or above the cap. Cold repository registrations use no resident slots. Each repository still routes to one VM with four vCPUs, 12 GiB memory and 20 GB disk. Extra identities provide room for historical owners; they do not add compute or promise more concurrent work.
+A resident creates fresh unprivileged UID identities on demand and admits at most 16 active owners. Historical identities stay with their recorded owners and do not form a fixed work budget. The fleet cap is five resident addresses, including pending and retained members, with a platform ceiling of ten containers. Lowering the cap leaves existing residents registered; onboarding another resident fails at or above the cap. Cold repository registrations use no resident slots. Each member is one VM with four vCPUs, 12 GiB memory and 20 GB disk. A repository can request several warm members; new threads spread across serving members while existing threads keep their assigned member. Extra identities provide room for historical owners; they do not add compute or promise more concurrent work.
 
 An attach or operator command reserves capacity before cloning or executing. The exact existing owner may reattach at capacity. Live or uncertain owners, unacknowledged native operations and processes still running under old UIDs remain occupied. Verified finished owners can retain private files without using an active-work slot. Their disk use and preservation obligations remain subject to the existing checks.
 
@@ -65,7 +65,7 @@ The UID display reports historical spends against the image's pool size. `worklo
 
 Cleanup processes at most sixteen bindings per pass with a durable cursor. Protected early entries do not starve later eligible entries. Its configured step budget stays below the Workflow ceiling.
 
-The existing overflow path uses a separate seeded sandbox for each run. Several warm residents for one repository would need placement and durable ownership changes. Raising the repository cap or UID count does not supply that routing. Dynamic UID provisioning is a later change; this version retains a finite pool and never transfers a spent identity to another owner. See [decision 0095](../decisions/0095-identity-allocation-is-separate-from-active-work.md).
+The existing overflow path uses a separate seeded sandbox for each new run. A fixed pool adds compute through `repo reconfigure <slug> --warm-residents N`; it does not raise the sixteen-owner limit within a VM. The theoretical pool ceiling is `16 × N` active owners before memory, disk, provider and gateway limits. This is not measured throughput. Additional addresses activate during deployment maintenance after historical placement import. Reducing the desired count preserves old assignments and reserves their capacity until explicit pool offboard. See [onboarding](../how-to/onboard-a-repo.md) and [the placement contract](../reference/specs/resident-repos.md#durable-resident-placement).
 
 ## Read next
 

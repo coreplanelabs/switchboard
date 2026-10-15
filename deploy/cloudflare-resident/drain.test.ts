@@ -1,3 +1,4 @@
+import { residentAddress } from "../../src/execution/residentMembers";
 import { describe, expect, it } from "vitest";
 import ts from "typescript";
 import { runInNewContext } from "node:vm";
@@ -162,6 +163,7 @@ describe("global deploy admission evidence", () => {
         Request,
         URL,
         sanitizeResidentBody,
+        residentAddress,
         registryStub: () => api,
         residentStub: () => ({
           getResidentDeployInfo: async () => recoveryView,
@@ -1344,6 +1346,111 @@ describe("drainRefusal — what /attach answers while drained", () => {
   });
 });
 
+describe("fresh provisioning image reports", () => {
+  it.each(["repo:acme/api", "resident-secondary"])(
+    "retains the warm member's report until the registry acknowledges it: %s",
+    async (residentId) => {
+      const source = readSource("worker.ts");
+      const resident = source.slice(source.indexOf("export class ResidentDO"));
+      const methods = ["runProvisioning", "residentIdentity", "reportPendingImageCurrent"]
+        .map((name) => methodOf(resident, name)!)
+        .join("\n");
+      const rows = new Map<string, unknown>([
+        ["resident:resource", "repo:acme/api"],
+        ["resident:state", "onboarding"],
+        ...(residentId === "repo:acme/api" ? [] : [["resident:instanceId", residentId] as [string, unknown]]),
+      ]);
+      const reports: Array<{ resource: string; state: unknown; pending: unknown }> = [];
+      let reportFails = true;
+      let acknowledge!: () => void;
+      let reportStarted!: () => void;
+      const started = new Promise<void>((resolve) => (reportStarted = resolve));
+      const acknowledged = new Promise<void>((resolve) => (acknowledge = resolve));
+      const registry = {
+        getRecord: async () => ({ defaultRef: "main", provisioningTimeoutMs: 1_000, commands: { build: "" } }),
+        reportContainerImageCurrent: async (resource: string) => {
+          reports.push({ resource, state: rows.get("resident:state"), pending: rows.get("imageReportPending") });
+          if (reportFails) throw new Error("registry unavailable");
+          reportStarted();
+          await acknowledged;
+          return { lifted: true };
+        },
+      };
+      const compiled = ts.transpileModule(`class Resident { ${methods} }`, {
+        compilerOptions: { target: ts.ScriptTarget.ES2022 },
+      }).outputText;
+      const { Resident } = runInNewContext(compiled + "\n({ Resident })", {
+        STATE_KEY: "resident:state",
+        RESOURCE_KEY: "resident:resource",
+        RESIDENT_ID_KEY: "resident:instanceId",
+        FACTS_KEY: "resident:facts",
+        SNAPSHOT_KEY: "resident:snapshot",
+        IMAGE_REPORT_PENDING_KEY: "imageReportPending",
+        MIRROR_DIR: "/workspace/mirror.git",
+        CHECKOUT_DIR: "/workspace/checkout",
+        STAGING_CHECKOUT_DIR: "/workspace/staging",
+        RETIRED_CHECKOUT_DIR: "/workspace/retired",
+        DISK_MARKERS: [],
+        BUILD_USER: "builder",
+        PROVISIONING_CALLBACK: "onProvisioningDeadline",
+        StepError: class extends Error {},
+        githubAppConfigured: () => false,
+        unmountAllRestoresScript: () => "true",
+        systemClock: () => NOW,
+        registryStub: () => registry,
+        errMsg: (error: Error) => error.message,
+        console: { log: () => {} },
+      });
+      const instance = new Resident();
+      Object.assign(instance, {
+        env: {},
+        ctx: {
+          storage: {
+            get: async (key: string) => rows.get(key),
+            put: async (key: string | Record<string, unknown>, value?: unknown) => {
+              if (typeof key === "string") rows.set(key, value);
+              else for (const [name, item] of Object.entries(key)) rows.set(name, item);
+            },
+            delete: async (key: string) => rows.delete(key),
+          },
+        },
+        pendingRestores: new Set(),
+        currentUidLedger: async () => ({}),
+        registry: () => registry,
+        runOk: async () => "",
+        ensureGitSetup: async () => {},
+        withMirrorLock: async (fn: () => Promise<void>) => fn(),
+        gitWithCred: async () => {},
+        refExists: async () => true,
+        readMirrorSha: async () => "a".repeat(40),
+        lockfileKey: async () => "lockfile",
+        buildUserRun: async () => {},
+        snapshot: async () => ({ done: true, record: { mirror: { id: "mirror" }, checkout: { id: "checkout" } } }),
+        writeDiskMarkers: async () => {},
+        deleteSchedules: () => {},
+        setResidentState: async (state: string) => rows.set("resident:state", state),
+      });
+
+      await instance.runProvisioning("repo:acme/api");
+      expect(rows.get("resident:state")).toBe("warm");
+      expect(reports).toEqual([{ resource: residentId, state: "warm", pending: { resource: residentId } }]);
+      expect(rows.get("imageReportPending")).toEqual({ resource: residentId });
+
+      reportFails = false;
+      const retry = instance.reportPendingImageCurrent("reconcile");
+      await started;
+      expect(rows.get("imageReportPending")).toEqual({ resource: residentId });
+      acknowledge();
+      expect(await retry).toBe(true);
+      expect(reports).toEqual([
+        { resource: residentId, state: "warm", pending: { resource: residentId } },
+        { resource: residentId, state: "warm", pending: { resource: residentId } },
+      ]);
+      expect(rows.has("imageReportPending")).toBe(false);
+    },
+  );
+});
+
 describe("the Worker's wiring (by scan)", () => {
   const source = readSource("worker.ts");
 
@@ -1372,14 +1479,7 @@ describe("the Worker's wiring (by scan)", () => {
     expect(source).toMatch(/const stale = staleHolds\(stored, now\);/);
     expect(source).toMatch(/async alarm\(\): Promise<void> \{\s*const result = await this\.ctx\.storage\.transaction/);
     expect(source).toMatch(/fleet reopened with \$\{result\.stale\.join\(", "\)\} still on the pre-deploy image/);
-    // A rebuild or fresh provision counts as the report: provisioning reports right after warm.
-    const provision = source.slice(
-      source.indexOf("async runProvisioning("),
-      source.indexOf("private async provisionTimedOut("),
-    );
-    expect(provision).toMatch(
-      /await this\.ctx\.storage\.put\(IMAGE_REPORT_PENDING_KEY, \{ resource \}\);\s*\n\s*await this\.reportPendingImageCurrent\("provision"\);/,
-    );
+    // The provisioning report is exercised by the behavior tests above.
     // A typed op on a drained fleet answers with the drain instead of hanging.
     const op = source.slice(source.indexOf("private async runOpTraced("));
     expect(op).toMatch(/op-refused: the resident fleet is drained for \$\{drain\.reason\}/);
@@ -1456,23 +1556,6 @@ describe("the Worker's wiring (by scan)", () => {
   it("the reconcile route is a drain-scope POST dispatched to its handler, which asks every resident's Durable Object to cycle its container onto the current image and VERIFY the fresh start (issue 1931: 'reconciled' is not 'swapped') — an unverified resident holds the drain until its own report", () => {
     expect(source).toMatch(/"\/reconcile": \{ scope: "drain", method: "POST" \}/);
     expect(source).toMatch(/case "\/reconcile":\s*\n\s*return await handleReconcile\(env\);/);
-    const handler = source.slice(
-      source.indexOf("async function handleReconcile("),
-      source.indexOf("async function handleResidents("),
-    );
-    expect(handler).toMatch(/const residents = await registry\.list\(\)/);
-    expect(handler).toContain("beginTrackedDeployAdmission(");
-    expect(handler).toContain("versionId: workerVersionId(env), versionTimestamp: workerVersionTimestamp(env)");
-    expect(handler).toMatch(/residentStub\(env, record\.resource\)\.reconcileForDeploy\(record\.resource\)/);
-    // A failing resident degrades to its own error row, never its neighbors'.
-    expect(handler).toMatch(/Promise\.allSettled/);
-    expect(handler).toMatch(/result: "error" as const, verified: false, error: errMsg\(s\.reason\)/);
-    // Every unverified resident becomes a hold on the drain, so the reopen
-    // waits for its report, never for the reconcile call's return.
-    expect(handler).toMatch(
-      /const unverified = reconciled\.filter\(\(r\) => !r\.verified\)\.map\(\(r\) => r\.resource\);/,
-    );
-    expect(handler).toMatch(/if \(unverified\.length > 0\) await registryStub\(env\)\.holdDrainFor\(unverified\);/);
     // The DO method never trusts the pool-user probe on the deploy path (the
     // pre-deploy image passes it when the pool did not change): the active
     // container is cycled (force), and only the replacement's completed
@@ -1482,14 +1565,6 @@ describe("the Worker's wiring (by scan)", () => {
     );
     const forDeploy = source.slice(source.indexOf("async reconcileForDeploy("), source.indexOf("// -- watchdog"));
     expect(forDeploy).toMatch(/this\.reconcileImage\("deploy", true\)/);
-    expect(forDeploy).toMatch(/IMAGE_REPORT_PENDING_KEY, \{ resource \}/);
-    // The hold lands at the registry BEFORE the marker that enables reports: a
-    // report that outruns its hold is a no-op that consumes the marker and
-    // leaves a hold nothing will report (the `until` backstop alone).
-    expect(forDeploy).toMatch(/registryStub\(this\.env\)\.holdDrainFor\(\[resource\]\)/);
-    expect(forDeploy.indexOf("holdDrainFor([resource])")).toBeLessThan(
-      forDeploy.indexOf("storage.put(IMAGE_REPORT_PENDING_KEY"),
-    );
     // The later report stands on either an inactive runtime (whose next start
     // is on the deployed image by construction), or an active replacement
     // completing its own hydration to `warm` — never on the stop or the

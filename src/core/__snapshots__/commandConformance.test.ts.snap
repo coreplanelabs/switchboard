@@ -1569,6 +1569,11 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
         "type": "boolean",
       },
       {
+        "name": "resident",
+        "required": false,
+        "type": "integer",
+      },
+      {
         "name": "full",
         "required": false,
         "type": "boolean",
@@ -1594,6 +1599,11 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     "effect": "write",
     "id": "repo.reconfigure",
     "options": [
+      {
+        "name": "warmResidents",
+        "required": false,
+        "type": "integer",
+      },
       {
         "name": "ref",
         "required": false,

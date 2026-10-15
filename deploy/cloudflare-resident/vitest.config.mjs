@@ -44,6 +44,8 @@ export default defineConfig({
       "preflight.test.mjs",
       "gc.test.ts",
       "repoRegistration.test.ts",
+      "replicaMigration.test.ts",
+      "replicaFleet.test.ts",
       "reset.test.ts",
       "instanceSizing.test.ts",
       "refresh.test.ts",

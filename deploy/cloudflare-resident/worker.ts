@@ -108,8 +108,19 @@ import {
   REPOSITORY_KEY_PREFIX,
   repositoryKey,
   registerRepository,
-  residentRecords,
+  type RepositoryRegistration,
 } from "../../src/execution/repoRegistration.js";
+import {
+  residentAddress,
+  selectedResidentMember,
+  residentMembers,
+  residentPoolOf,
+  reservedResidentCount,
+  planResidentPool,
+  nextResidentMember,
+  type ResidentMember,
+} from "../../src/execution/residentMembers.js";
+import { replicaMaintenanceFence, placementHistoryThreads, type ReplicaMaintenanceFence } from "./replicaMigration.js";
 import {
   readResidentPlacement,
   recordResidentPlacement,
@@ -289,7 +300,7 @@ import {
   type ScheduleFiring,
   type WatchdogSummary,
 } from "../../src/core/schedules.js";
-import type { ResidentLifecycleState } from "../../src/execution/residentState.js";
+import { isServiceable, type ResidentLifecycleState } from "../../src/execution/residentState.js";
 import { RestoreWaiters } from "../../src/execution/restoreWaiters.js";
 import {
   isRuntimeBusySignal,
@@ -1241,7 +1252,7 @@ interface ResidentStatus {
 
 /** Registry record: the onboarded set + command table (writable only via
  *  the admin routes onboard/reconfigure). */
-interface ResidentRecord {
+interface ResidentRecord extends RepositoryRegistration {
   /** Metadata-only registration: never routes to a resident DO. */
   noResident?: boolean;
   resource: string;
@@ -1812,6 +1823,8 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  no longer registered (someone offboarded it meanwhile) or `record` is
    *  already onboarded; the cap check is the same as onboard's. */
   async replace(evict: string, record: ResidentRecord): Promise<OnboardResult> {
+    if ((await this.getRepository(evict))?.pool)
+      return { ok: false, status: 409, error: "resident pools require explicit offboarding" };
     if (!(await this.ctx.storage.get(registryKey(evict)))) {
       return { ok: false, status: 409, error: `${evict} is no longer onboarded — nothing to evict` };
     }
@@ -1819,12 +1832,12 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       return { ok: false, status: 409, error: `${record.resource} is already onboarded` };
     }
     const { cap } = await this.limits();
-    const existing = await this.list();
-    if (existing.length - 1 >= cap) {
+    const existing = reservedResidentCount(await this.listRepositories());
+    if (existing - 1 >= cap) {
       return {
         ok: false,
         status: 429,
-        error: `resident cap reached (${existing.length}/${cap}) even after evicting ${evict}`,
+        error: `resident cap reached (${existing}/${cap}) even after evicting ${evict}`,
       };
     }
     await this.ctx.storage.delete(registryKey(evict));
@@ -1834,35 +1847,41 @@ export class ResidentRegistryDO extends DurableObject<Env> {
 
   async getRecord(resource: string): Promise<ResidentRecord | null> {
     const record = await this.getRepository(resource);
-    return record?.noResident === true ? null : record;
+    return record?.noResident === true || record?.offboarding === true ? null : record;
   }
 
-  /** Record primary placement before attach. This migration does not yet
-   * admit secondary replicas or move any thread's existing workspace. */
+  /** Keep saved placement. Only new threads can select another serving member. */
   async resolveThreadPlacement(
     resource: string,
     threadKey: string,
+    serving?: string[],
   ): Promise<
     { ok: true; record: ResidentRecord; placement: ResidentPlacement } | { ok: false; status: number; error: string }
   > {
     const placementId = crypto.randomUUID();
     return this.ctx.storage.transaction(async (txn) => {
       const record = await txn.get<ResidentRecord>(registryKey(resource));
-      if (!record || record.noResident === true)
+      if (!record || record.noResident === true || record.offboarding)
         return { ok: false, status: 404, error: `${resource} is not onboarded` };
-      const result = await recordResidentPlacement(txn, {
-        schema: 1,
-        resource,
-        threadKey,
-        residentId: resource,
-        placementId,
-      });
-      if (!result.ok || result.placement.residentId !== resource) {
+      const pool = residentPoolOf(record);
+      const saved = await readResidentPlacement(txn, resource, threadKey);
+      if (
+        saved === null ||
+        (saved && !(pool?.members.slice(0, pool.active) ?? [resource]).includes(saved.residentId))
+      ) {
         console.log(
-          `[placement] refused ${resource} for ${threadKey}: ${result.ok ? "unsupported-address" : result.reason}`,
+          `[placement] refused ${resource} for ${threadKey}: ${saved ? "unsupported-address" : "placement-unverified"}`,
         );
         return { ok: false, status: 503, error: "resident placement could not be verified" };
       }
+      if (saved) return { ok: true, record, placement: saved };
+      const cursorKey = `replica-cursor:${resource}`;
+      const cursor = (await txn.get<number>(cursorKey)) ?? 0;
+      const residentId = serving === undefined ? resource : nextResidentMember(record, serving, cursor);
+      if (!residentId) return { ok: false, status: 503, error: "no warm resident can accept a new placement" };
+      const result = await recordResidentPlacement(txn, { schema: 1, resource, threadKey, residentId, placementId });
+      if (!result.ok) return { ok: false, status: 503, error: "resident placement could not be verified" };
+      if (serving !== undefined) await txn.put(cursorKey, cursor === Number.MAX_SAFE_INTEGER ? 0 : cursor + 1);
       return { ok: true, record, placement: result.placement };
     });
   }
@@ -1875,8 +1894,135 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     return (await this.ctx.storage.get<ResidentRecord>(registryKey(resource))) ?? null;
   }
 
-  async list(): Promise<ResidentRecord[]> {
-    return residentRecords(await this.listRepositories());
+  async list(): Promise<ResidentMember<ResidentRecord>[]> {
+    return residentMembers(await this.listRepositories());
+  }
+
+  /** Reserve addresses and capacity now; maintenance activates new members
+   * only after primary workspace placements have been imported. */
+  async requestWarmReplicas(resource: string, desired: number): Promise<OnboardResult> {
+    const revision = crypto.randomUUID();
+    const addresses = Array.from(
+      { length: Math.max(0, Math.min(desired, RESIDENT_CAP)) },
+      () => `resident-${crypto.randomUUID()}`,
+    );
+    return this.ctx.storage.transaction(async (txn) => {
+      const record = await txn.get<ResidentRecord>(registryKey(resource));
+      if (!record || record.noResident || record.offboarding)
+        return { ok: false, status: 404, error: `${resource} has no resident` };
+      const { cap } = effectiveLimits(await txn.get<StoredTestOverrides>(TEST_OVERRIDES_KEY), BUILD_ID, {
+        cap: RESIDENT_CAP,
+        floorS: LRU_FLOOR_S,
+      });
+      const prior = residentPoolOf(record);
+      const retained = prior?.members.length ?? 1;
+      if (!Number.isSafeInteger(desired) || desired < 1 || desired > Math.max(cap, retained))
+        return {
+          ok: false,
+          status: 400,
+          error: `warm resident count must be between 1 and ${Math.max(cap, retained)}`,
+        };
+      if (prior?.desired === desired) return { ok: true, record };
+      const pool = planResidentPool(record, desired, addresses, revision);
+      const all = await txn.list<ResidentRecord>({ prefix: REGISTRY_KEY_PREFIX });
+      const others = [...all.values()].filter((r) => r.resource !== resource);
+      if (pool.members.length > retained && reservedResidentCount([...others, { ...record, pool }]) > cap)
+        return { ok: false, status: 429, error: "resident capacity is already reserved" };
+      const occupied = new Set(
+        others.flatMap((r) => (r.noResident ? [] : (residentPoolOf(r)?.members ?? [r.resource]))),
+      );
+      if (pool.members.some((id) => occupied.has(id)))
+        return { ok: false, status: 409, error: "resident address is already registered" };
+      const updated = { ...record, pool, updatedAt: new Date(systemClock()).toISOString() };
+      await txn.put(registryKey(resource), updated);
+      return { ok: true, record: updated };
+    });
+  }
+
+  async replicaMaintenance(admissionId: string): Promise<ReplicaMaintenanceFence | undefined> {
+    return this.ctx.storage.transaction(async (txn) =>
+      replicaMaintenanceFence(
+        await txn.get(DRAIN_KEY),
+        await txn.list({ prefix: DEPLOY_ADMISSION_KEY_PREFIX }),
+        admissionId,
+        systemClock(),
+      ),
+    );
+  }
+
+  /** Import bounded chunks; only a page's final chunk commits its cursor.
+   * A lost reply replays the page or reads its completed cursor. */
+  async importPrimaryPlacements(
+    resource: string,
+    revision: string,
+    admissionId: string,
+    fence: ReplicaMaintenanceFence,
+    page?: { startAfter?: string; after?: string; done: boolean; threads: string[]; moreThreads?: boolean },
+  ): Promise<{ ok: true; after?: string; done: boolean } | { ok: false }> {
+    const identities = page?.threads.map(() => crypto.randomUUID()) ?? [];
+    return this.ctx.storage.transaction(async (txn) => {
+      if (
+        !replicaMaintenanceFence(
+          await txn.get(DRAIN_KEY),
+          await txn.list({ prefix: DEPLOY_ADMISSION_KEY_PREFIX }),
+          admissionId,
+          systemClock(),
+          fence,
+        )
+      )
+        return { ok: false };
+      const record = await txn.get<ResidentRecord>(registryKey(resource));
+      const pool = record && residentPoolOf(record);
+      if (!pool || pool.revision !== revision) return { ok: false };
+      const key = `replica-import:${resource}`;
+      const saved = await txn.get<{ revision: string; fence: ReplicaMaintenanceFence; after?: string; done: boolean }>(
+        key,
+      );
+      const sameFence =
+        saved?.fence &&
+        saved.fence.since === fence.since &&
+        saved.fence.until === fence.until &&
+        saved.fence.swapVersion === fence.swapVersion &&
+        saved.fence.swapAt === fence.swapAt;
+      const progress = saved?.revision === revision && sameFence ? saved : { revision, fence, done: false };
+      if (typeof progress.done !== "boolean" || (progress.after !== undefined && typeof progress.after !== "string"))
+        return { ok: false };
+      if (progress.done && pool.active !== pool.members.length) return { ok: false };
+      if (!page) return { ok: true, ...progress };
+      if (page.startAfter !== progress.after || progress.done) return { ok: false };
+      if (
+        page.threads.length > 256 ||
+        (page.moreThreads !== undefined && typeof page.moreThreads !== "boolean") ||
+        (page.moreThreads === true && page.threads.length === 0) ||
+        (page.after !== undefined &&
+          (typeof page.after !== "string" ||
+            (progress.after !== undefined &&
+              page.after <= progress.after &&
+              !(page.done && page.threads.length === 0 && page.after === progress.after)))) ||
+        (!page.done && !page.after)
+      )
+        return { ok: false };
+      for (const [i, threadKey] of page.threads.entries()) {
+        if (!THREAD_KEY_RE.test(threadKey)) throw new Error("replica import thread is invalid");
+        const placed = await recordResidentPlacement(txn, {
+          schema: 1,
+          resource,
+          threadKey,
+          residentId: resource,
+          placementId: identities[i],
+        });
+        if (!placed.ok || placed.placement.residentId !== resource)
+          throw new Error("replica import conflicts with saved placement");
+      }
+      // A legacy ownership row can expand beyond one transaction's thread limit.
+      // Replay its source page after a lost chunk reply; only the final chunk moves the cursor.
+      if (page.moreThreads === true) return { ok: true, ...progress, done: false };
+      const next = { revision, fence, ...(page.after ? { after: page.after } : {}), done: page.done };
+      await txn.put(key, next);
+      if (page.done)
+        await txn.put(registryKey(resource), { ...record, pool: { ...pool, active: pool.members.length } });
+      return { ok: true, ...next };
+    });
   }
 
   async listRepositories(): Promise<ResidentRecord[]> {
@@ -1911,6 +2057,60 @@ export class ResidentRegistryDO extends DurableObject<Env> {
 
   async remove(resource: string): Promise<boolean> {
     return this.ctx.storage.delete(registryKey(resource));
+  }
+
+  async beginPoolOffboard(resource: string, revision: string): Promise<ResidentRecord | undefined> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const record = await txn.get<ResidentRecord>(registryKey(resource));
+      if (!record?.pool || record.pool.revision !== revision) return undefined;
+      const held = { ...record, offboarding: true as const };
+      await txn.put(registryKey(resource), held);
+      return held;
+    });
+  }
+
+  /** Called only after all active members confirm teardown. Pending members
+   * never started. Keep the registration closed until every placement page is removed. */
+  async finishPoolOffboard(resource: string, revision: string): Promise<boolean> {
+    for (;;) {
+      const result = await this.ctx.storage.transaction(async (txn) => {
+        const record = await txn.get<ResidentRecord>(registryKey(resource));
+        if (!record?.offboarding || record.pool?.revision !== revision) return "refused";
+        const pool = residentPoolOf(record)!;
+        if (pool.members.slice(0, pool.active).some((id) => !pool.removed?.[id])) return "refused";
+        const placements = await txn.list({ prefix: `placement:[${JSON.stringify(resource)},`, limit: 128 });
+        if (placements.size) {
+          await txn.delete([...placements.keys()]);
+          return "more";
+        }
+        await txn.delete([registryKey(resource), `replica-import:${resource}`, `replica-cursor:${resource}`]);
+        return "done";
+      });
+      if (result !== "more") return result === "done";
+    }
+  }
+
+  async recordPoolRemoval(
+    resource: string,
+    revision: string,
+    residentId: string,
+    receipt: { backupObjectsDeleted: number; r2ObjectsDeleted: number },
+  ): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const record = await txn.get<ResidentRecord>(registryKey(resource));
+      const pool = record && residentPoolOf(record);
+      if (
+        !record?.offboarding ||
+        !pool ||
+        pool.revision !== revision ||
+        !pool.members.slice(0, pool.active).includes(residentId)
+      )
+        return false;
+      const next = { ...record, pool: { ...pool, removed: { ...pool.removed, [residentId]: receipt } } };
+      residentPoolOf(next);
+      await txn.put(registryKey(resource), next);
+      return true;
+    });
   }
 
   /** The stored drain record as it is — `liveDrain` (drain.ts) decides at the
@@ -2428,6 +2628,8 @@ const RETIRED_SCHEDULE_CALLBACKS = ["onRefreshAlarm", "onWorktreeSweep", "onDisk
 const STATE_KEY = "resident:state";
 const REASON_KEY = "resident:reason";
 const RESOURCE_KEY = "resident:resource";
+const RESIDENT_ID_KEY = "resident:instanceId";
+const RESIDENT_RETIRED_KEY = "resident:retired";
 const UPDATED_KEY = "resident:updatedAt";
 const FACTS_KEY = "resident:facts";
 const SNAPSHOT_KEY = "resident:snapshot";
@@ -3989,7 +4191,12 @@ export class ResidentDO extends Sandbox<Env> {
    *  the provisioning work and its fail-closed deadline. Does NOT start the
    *  container — onboard must return immediately; the container first starts
    *  when runProvisioning's schedule fires (~1s later). */
-  async initResident(resource: string, provisioningTimeoutMs: number, rebuilding = false): Promise<ResidentStatus> {
+  async initResident(
+    resource: string,
+    provisioningTimeoutMs: number,
+    rebuilding = false,
+    residentId?: string,
+  ): Promise<ResidentStatus> {
     if ((await this.ctx.storage.get(CLEANUP_PENDING_KEY)) !== undefined)
       throw new Error("full-rebuild-cleanup-incomplete: provisioning is paused until cleanup completes");
     if (this.destroying || (await this.ctx.storage.get(DESTROY_UNCONFIRMED_KEY))) {
@@ -4003,12 +4210,13 @@ export class ResidentDO extends Sandbox<Env> {
     await this.rebuildPoolBindingIndex();
     await this.ctx.storage.put({
       [RESOURCE_KEY]: resource,
+      [RESIDENT_ID_KEY]: residentId ?? (await this.ctx.storage.get<string>(RESIDENT_ID_KEY)) ?? resource,
       [STATE_KEY]: "onboarding" satisfies ResidentState,
       [REASON_KEY]: "",
       [UPDATED_KEY]: new Date(systemClock()).toISOString(),
       [DEADLINE_AT_KEY]: systemClock() + provisioningTimeoutMs,
     });
-    await this.ctx.storage.delete([FACTS_KEY, SNAPSHOT_KEY, RETIRED_SNAPSHOT_KEY]); // defensive: no stale facts from a past life
+    await this.ctx.storage.delete([FACTS_KEY, SNAPSHOT_KEY, RETIRED_SNAPSHOT_KEY, RESIDENT_RETIRED_KEY]); // defensive: no stale facts from a past life
     try {
       this.deleteSchedules(PROVISIONING_CALLBACK);
       this.deleteSchedules(PROVISION_RUN_CALLBACK);
@@ -4024,6 +4232,96 @@ export class ResidentDO extends Sandbox<Env> {
       throw err;
     }
     return { state: "onboarding", reason: "" };
+  }
+
+  private async residentIdentity(): Promise<string> {
+    const id =
+      (await this.ctx.storage.get<string>(RESIDENT_ID_KEY)) ?? (await this.ctx.storage.get<string>(RESOURCE_KEY));
+    if (!id) throw new Error("resident identity is unavailable");
+    return id;
+  }
+
+  /** Only a new catalog member can initialize an empty DO. A retry cannot
+   * replace another repository or an already recorded resident address. */
+  async ensureResidentMember(resource: string, residentId: string, timeoutMs: number): Promise<void> {
+    if (await this.ctx.storage.get(RESIDENT_RETIRED_KEY)) throw new Error("resident member is retired");
+    const prior = await this.ctx.storage.get<string>(RESOURCE_KEY);
+    const identity = await this.ctx.storage.get<string>(RESIDENT_ID_KEY);
+    if (
+      (prior && prior !== resource) ||
+      (identity && identity !== residentId) ||
+      (prior && !identity && residentId !== resource)
+    )
+      throw new Error("resident member identity does not match");
+    if (!prior) await this.initResident(resource, timeoutMs, false, residentId);
+  }
+
+  async prepareMemberRemoval(resource: string, residentId: string): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const prior = await txn.get<string>(RESOURCE_KEY);
+      const identity = await txn.get<string>(RESIDENT_ID_KEY);
+      const pending = await txn.get<string>(CLEANUP_PENDING_KEY);
+      if ((prior && prior !== resource) || (identity && identity !== residentId) || (pending && pending !== resource))
+        throw new Error("resident removal target does not match");
+      await txn.put({ [RESIDENT_ID_KEY]: residentId, [RESIDENT_RETIRED_KEY]: true, [CLEANUP_PENDING_KEY]: resource });
+    });
+  }
+
+  /** Recheck the original catalog inside the existing per-DO recreate lock.
+   * Delayed offboard retries cannot cross a completed removal and new onboard. */
+  async removePoolMember(resource: string, residentId: string, revision: string) {
+    const refused = (error: string) => ({
+      schedulesCancelled: false,
+      containerStopped: false,
+      storageCleared: false,
+      backupObjectsDeleted: 0,
+      r2ObjectsDeleted: 0,
+      errors: [error],
+    });
+    const admission = await this.recreateAdmission.run(async () => {
+      const record = await this.registry().getRepository(resource);
+      const pool = record && residentPoolOf(record);
+      if (
+        !record?.offboarding ||
+        pool?.revision !== revision ||
+        !pool.members.slice(0, pool.active).includes(residentId)
+      )
+        return refused("resident removal catalog changed");
+      await this.prepareMemberRemoval(resource, residentId);
+      const saved = pool.removed?.[residentId];
+      const result = saved
+        ? { ...saved, schedulesCancelled: true, containerStopped: true, storageCleared: true, errors: [] as string[] }
+        : await teardownResident(this.env, resource, residentId, false, this);
+      if (result.containerStopped && result.storageCleared && result.errors.length === 0) {
+        const recorded =
+          saved ||
+          (await this.registry().recordPoolRemoval(resource, revision, residentId, {
+            backupObjectsDeleted: result.backupObjectsDeleted,
+            r2ObjectsDeleted: result.r2ObjectsDeleted,
+          }));
+        if (!recorded) result.errors.push("pool cleanup receipt was not saved");
+        else {
+          try {
+            await this.confirmCleanup(resource);
+          } catch (err) {
+            result.errors.push(`cleanup confirmation failed: ${errMsg(err)}`);
+          }
+        }
+      }
+      return result;
+    });
+    return admission.busy ? refused("resident removal is already in progress") : admission.value;
+  }
+
+  /** Read metadata under the fleet maintenance fence. This includes UID
+   * reservations from attachments which never completed. It reads no files. */
+  async placementHistoryPage(startAfter?: string): Promise<{ after?: string; done: boolean; threads: string[] }> {
+    const rows = await this.ctx.storage.list<unknown>({ limit: 128, ...(startAfter ? { startAfter } : {}) });
+    return {
+      ...(rows.size ? { after: [...rows.keys()].at(-1)! } : startAfter ? { after: startAfter } : {}),
+      done: rows.size < 128,
+      threads: placementHistoryThreads(rows),
+    };
   }
 
   /** The provisioning engine (schedule-driven): clone bare mirror → resolve the
@@ -4167,7 +4465,7 @@ export class ResidentDO extends Sandbox<Env> {
       // report `reconcileImage` would never send for a container it never saw
       // as stale. The marker is cleared with the report; a failure keeps both
       // for the next reconcile, and the hold's cycle bound is the backstop.
-      await this.ctx.storage.put(IMAGE_REPORT_PENDING_KEY, { resource });
+      await this.ctx.storage.put(IMAGE_REPORT_PENDING_KEY, { resource: await this.residentIdentity() });
       await this.reportPendingImageCurrent("provision");
       // The first refresh instance is the cron's: the row now reads `warm`
       // with no instance recorded, so the next firing creates it (item 9).
@@ -4199,9 +4497,11 @@ export class ResidentDO extends Sandbox<Env> {
     const resource = await this.ctx.storage.get<string>(RESOURCE_KEY);
     if (resource) {
       try {
-        await this.registry().remove(resource); // release the cap slot
-      } catch {
+        const record = await this.registry().getRepository(resource);
+        if (!record?.pool) await this.registry().remove(resource); // pools retain failed members for recovery
+      } catch (err) {
         // the Worker-side watchdog also removes on "provision-timed-out"
+        console.log(`[provision] ${resource}: capacity release failed: ${residentText(errMsg(err))}`);
       }
     }
   }
@@ -4460,7 +4760,9 @@ export class ResidentDO extends Sandbox<Env> {
       // time. Never settled; streak reset.
       await this.ctx.storage.delete(DEGRADED_STREAK_KEY);
     }
-    if (settled && (await this.isIdle())) {
+    const pool = residentPoolOf(record);
+    const keepWarm = pool ? pool.members.slice(0, pool.desired).includes(await this.residentIdentity()) : false;
+    if (!keepWarm && settled && (await this.isIdle())) {
       // isIdle awaited (the bindings listing) — re-read before writing.
       const now = (await this.ctx.storage.get<RepoFacts>(FACTS_KEY)) ?? facts;
       if (!now.idleSince)
@@ -6198,15 +6500,15 @@ export class ResidentDO extends Sandbox<Env> {
   }
 
   private async reconcileForDeployAdmitted(
-    resource: string,
+    _resource: string,
   ): Promise<{ result: ImageReconcileResult; verified: boolean }> {
     const progress = await this.ctx.storage.get<DeployImageReconcileState>(IMAGE_RECONCILE_KEY);
     const pending = await this.ctx.storage.get<{ resource: string }>(IMAGE_REPORT_PENDING_KEY);
     const action = nextDeployImageReconcile(BUILD.commit, progress, pending !== undefined);
     if (action === "verified") return { result: "current", verified: true };
     if (action === "start") {
-      await registryStub(this.env).holdDrainFor([resource]);
-      await this.ctx.storage.put(IMAGE_REPORT_PENDING_KEY, { resource });
+      await registryStub(this.env).holdDrainFor([await this.residentIdentity()]);
+      await this.ctx.storage.put(IMAGE_REPORT_PENDING_KEY, { resource: await this.residentIdentity() });
       await this.ctx.storage.put(IMAGE_RECONCILE_KEY, { build: BUILD.commit, cycleIssued: false });
     }
     if (action === "await-report") {
@@ -6987,11 +7289,30 @@ export class ResidentDO extends Sandbox<Env> {
     }
   }
 
-  private workloadAuditReport(
+  private async workloadAuditReport(
     resource: string,
     owners: Set<string> | null,
     audit: WorkloadAuditCapture,
-  ): WorkloadAudit {
+    expectedResidentId?: string,
+  ): Promise<WorkloadAudit> {
+    let residentId = resource;
+    try {
+      const stored = await this.ctx.storage.get<unknown>(RESIDENT_ID_KEY);
+      if (stored === undefined) {
+        if (expectedResidentId !== undefined && expectedResidentId !== resource)
+          throw new Error("resident identity is not initialized");
+      } else {
+        if (typeof stored !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_:/.-]{0,62}$/.test(stored))
+          throw new Error("resident identity is invalid");
+        if (expectedResidentId !== undefined && stored !== expectedResidentId)
+          throw new Error("resident identity does not match");
+        residentId = stored;
+      }
+    } catch {
+      residentId = "unknown";
+      audit.complete = false;
+      audit.issues.push("resident-identity-unavailable");
+    }
     const entries = [...(owners ?? audit.owners ?? [])].sort();
     const selected = entries.slice(0, 128);
     let sourcesOmitted = 0;
@@ -7005,7 +7326,7 @@ export class ResidentDO extends Sandbox<Env> {
     const report: WorkloadAudit = {
       schema: 1,
       resource,
-      residentId: resource,
+      residentId,
       build: injectedBuildStamp(),
       asOf: audit.asOf,
       finishedAt: new Date(systemClock()).toISOString(),
@@ -7056,7 +7377,7 @@ export class ResidentDO extends Sandbox<Env> {
 
   /** Read the admission algorithm's evidence without allocating an identity,
    * starting an inactive VM, or interpreting an unknown hold as leaked work. */
-  async getWorkloadAudit(resource: string): Promise<WorkloadAudit> {
+  async getWorkloadAudit(resource: string, expectedResidentId = resource): Promise<WorkloadAudit> {
     const audit: WorkloadAuditCapture = {
       asOf: new Date(systemClock()).toISOString(),
       sources: new Map(),
@@ -7082,7 +7403,7 @@ export class ResidentDO extends Sandbox<Env> {
       } catch {
         /* A failed warning cannot replace the captured partial report. */
       }
-      return this.workloadAuditReport(resource, null, audit);
+      return this.workloadAuditReport(resource, null, audit, expectedResidentId);
     }
     // The captured counter is stable evidence. Optional enrichment must not
     // hold admission while waiting for historical owners or UID metadata.
@@ -7156,7 +7477,7 @@ export class ResidentDO extends Sandbox<Env> {
       audit.uidHistory = { issued: null, complete: false };
       audit.issues.push("uid-history-unavailable");
     }
-    return this.workloadAuditReport(resource, owners, audit);
+    return this.workloadAuditReport(resource, owners, audit, expectedResidentId);
   }
 
   /** Serialize the capacity read and reservation, not the clone or command.
@@ -7173,7 +7494,7 @@ export class ResidentDO extends Sandbox<Env> {
       await this.hashWorkloadAudit(owners ?? audit.owners ?? new Set(), audit);
       const resource = (await this.ctx.storage.get<string>(RESOURCE_KEY)) ?? "unknown";
       console.log(
-        `[workload] ${JSON.stringify({ event: "admission-refused", reason, requestedOwner, ...this.workloadAuditReport(resource, owners, audit) })}`,
+        `[workload] ${JSON.stringify({ event: "admission-refused", reason, requestedOwner, ...(await this.workloadAuditReport(resource, owners, audit)) })}`,
       );
     } catch (error) {
       try {
@@ -13635,12 +13956,13 @@ export class ResidentDO extends Sandbox<Env> {
    * resident fact after confirmed destruction. A retained operation's result
    * remains unknown; resetting the runtime is not its completion receipt. */
   async reset(resource: string, defaultRef: string, provisioningTimeoutMs: number, dryRun: boolean) {
+    const residentId = await this.residentIdentity();
     const plan = {
       resource,
       dryRun,
       wouldRemove: {
         ...(await this.teardownPlan()),
-        r2Objects: await countR2Prefix(this.env.BACKUP_BUCKET, r2Prefix(resource)),
+        r2Objects: await countR2Prefix(this.env.BACKUP_BUCKET, r2Prefix(residentId)),
       },
       keeps: { registryRecord: true as const },
       reprovision: { defaultRef, provisioningTimeoutMs },
@@ -13658,9 +13980,9 @@ export class ResidentDO extends Sandbox<Env> {
       if (removed.errors.length > 0)
         return { ...removed, status: 503, error: `reset-incomplete: ${removed.errors.join("; ")}` };
       try {
-        const r2ObjectsDeleted = await deleteR2Prefix(this.env.BACKUP_BUCKET, r2Prefix(resource));
+        const r2ObjectsDeleted = await deleteR2Prefix(this.env.BACKUP_BUCKET, r2Prefix(residentId));
         await this.confirmCleanup(resource);
-        await this.initResident(resource, provisioningTimeoutMs);
+        await this.initResident(resource, provisioningTimeoutMs, false, residentId);
         return { ...plan, ...removed, r2ObjectsDeleted, state: "onboarding" as const };
       } catch (err) {
         await this.setResidentState("down", `full-rebuild-cleanup-incomplete: ${errMsg(err)}`);
@@ -13724,7 +14046,9 @@ export class ResidentDO extends Sandbox<Env> {
     // empty — its rows are the two schedules cancelled above.
     this.swapIncarnation(); // retired object, retired memos
     await this.ctx.storage.deleteAlarm();
-    const keys = [...(await this.ctx.storage.list()).keys()].filter((key) => key !== CLEANUP_PENDING_KEY);
+    const keys = [...(await this.ctx.storage.list()).keys()].filter(
+      (key) => key !== CLEANUP_PENDING_KEY && key !== RESIDENT_ID_KEY && key !== RESIDENT_RETIRED_KEY,
+    );
     for (let i = 0; i < keys.length; i += 128) await this.ctx.storage.delete(keys.slice(i, i + 128));
     return { schedulesCancelled: true, containerStopped, storageCleared: true, backupObjectsDeleted, errors };
   }
@@ -13744,7 +14068,10 @@ export class ResidentDO extends Sandbox<Env> {
     if (
       backups.length ||
       (await this.allDepsBackups()).length ||
-      (await countR2Prefix(this.env.BACKUP_BUCKET, r2Prefix(resource))) > 0
+      (await countR2Prefix(
+        this.env.BACKUP_BUCKET,
+        r2Prefix((await this.ctx.storage.get<string>(RESIDENT_ID_KEY)) ?? resource),
+      )) > 0
     )
       throw new Error("resident-cleanup-unconfirmed");
     await this.ctx.storage.delete(CLEANUP_PENDING_KEY);
@@ -13964,17 +14291,23 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/onboard": { scope: "admin", method: "POST" },
   "/offboard": { scope: "admin", method: "POST" },
   "/reconfigure": { scope: "admin", method: "POST" },
+  "/replicas": { scope: "admin", method: "POST" },
   "/rebuild": { scope: "admin", method: "POST" },
+  "/replica-rebuild": { scope: "admin", method: "POST" },
+  "/replica-reset": { scope: "admin", method: "POST" },
+  "/replica-status": { scope: "operator", method: "GET" },
   "/reset": { scope: "admin", method: "POST" },
   "/drain": { scope: "drain", method: "POST" }, // close the fleet to new runs for a deploy (item 69; admin implied)
   "/deploy-fence": { scope: "drain", method: "POST" }, // fence reattach and read executing activity
   "/deploy-admissions": { scope: "admin", method: "GET" }, // targeted recovery inventory, never a drain-bearer route
+  "/replica-recover-native-operation": { scope: "admin", method: "POST" },
   "/recover-native-operation": { scope: "admin", method: "POST" }, // exact journal plus original native receipt
   "/recover-admission": { scope: "admin", method: "POST" }, // legacy requests refuse without mutation
   "/recover-quoted-admission": { scope: "admin", method: "POST" }, // original record plus operator evidence
   "/undrain": { scope: "drain", method: "POST" }, // reopen it
   "/reconcile": { scope: "drain", method: "POST" }, // reconcile every container onto the current image, inside the drain window
   "/residents": { scope: "read", method: "GET" }, // admin implied; read-only bearer allowed
+  "/debug-replica": { scope: "read", method: "POST" },
   "/debug": { scope: "read", method: "POST" }, // per-op: READ_DEBUG_OPS for read scope, everything for admin
   "/status": { scope: "operator", method: "GET" },
   "/attach": { scope: "operator", method: "POST" },
@@ -14083,6 +14416,16 @@ export default {
     const body: Record<string, unknown> =
       route.method === "POST" ? ((await request.json().catch(() => ({}))) as Record<string, unknown>) : {};
 
+    if (
+      ["/replica-rebuild", "/replica-reset", "/debug-replica", "/replica-recover-native-operation"].includes(
+        url.pathname,
+      ) &&
+      body.resident === undefined
+    )
+      return json({ error: "resident number is required" }, 400);
+    if (url.pathname === "/replica-status" && !url.searchParams.has("resident"))
+      return json({ error: "resident number is required" }, 400);
+
     // Authenticated from here (docs/reference/specs/tracing.md item 22): the bot's trace
     // context is read only now. The streamed routes hand it to the DO, whose
     // own root covers the work; every other route is one `resident.fetch` root.
@@ -14095,6 +14438,13 @@ export default {
         switch (url.pathname) {
           case "/register":
             return await handleOnboard(env, { ...body, noResident: true });
+          case "/replicas":
+            return await withFleetAdmission(env, () => handleReplicas(env, body), {
+              resource: body.resource,
+              sourceId: "replicas",
+              traceId: root?.traceId,
+              requesterScope: tokenScope(env, bearer),
+            });
           case "/onboard":
             return await withFleetAdmission(env, () => handleOnboard(env, body), {
               resource: body.resource,
@@ -14111,6 +14461,7 @@ export default {
             });
           case "/reconfigure":
             return await handleReconfigure(env, body);
+          case "/replica-rebuild":
           case "/rebuild":
             return await withFleetAdmission(env, () => handleRebuild(env, body), {
               resource: body.resource,
@@ -14118,6 +14469,7 @@ export default {
               traceId: root?.traceId,
               requesterScope: tokenScope(env, bearer),
             });
+          case "/replica-reset":
           case "/reset":
             return await withFleetAdmission(env, () => handleReset(env, body), {
               resource: body.resource,
@@ -14131,24 +14483,9 @@ export default {
             return await handleDeployFence(env);
           case "/deploy-admissions":
             return await handleDeployAdmissions(env, url);
-          case "/recover-native-operation": {
-            const resource = parseResource(body.resource);
-            if ("error" in resource) return json({ error: resource.error }, 400);
-            if (
-              !validNativeOperationKey(body.key) ||
-              typeof body.recordHash !== "string" ||
-              !/^[0-9a-f]{64}$/.test(body.recordHash)
-            )
-              return json({ error: "exact native operation key and recordHash are required" }, 400);
-            if (body.terminate !== undefined && typeof body.terminate !== "boolean")
-              return json({ error: "terminate must be a boolean" }, 400);
-            const result = await residentStub(env, resource.resource).recoverNativeOperation(
-              body.key,
-              body.recordHash,
-              body.terminate === true,
-            );
-            return json(result, "error" in result ? result.status : 200);
-          }
+          case "/replica-recover-native-operation":
+          case "/recover-native-operation":
+            return await handleRecoverNativeOperation(env, body);
           case "/recover-admission":
             return json({ error: "legacy permit recovery is unavailable" }, 409);
           case "/recover-quoted-admission":
@@ -14159,6 +14496,7 @@ export default {
             return await handleReconcile(env);
           case "/residents":
             return await handleResidents(env);
+          case "/debug-replica":
           case "/debug": {
             // Read scope may only run the pure-read ops; the check happens AFTER
             // auth so an unauthenticated caller still learns nothing extra.
@@ -14175,6 +14513,7 @@ export default {
                   requesterScope: tokenScope(env, bearer),
                 });
           }
+          case "/replica-status":
           case "/status":
             return await handleStatus(env, url);
           case "/attach":
@@ -14200,7 +14539,13 @@ export default {
               env.MEMORY_TOKEN,
             );
             if (!("prepared" in preparation)) return json(preparation, 409);
-            const route = await residentRouteFor(env, resource.resource, cancellation.threadKey, body.binding);
+            // Preparation binds this exact target to the original run. Keep its
+            // address usable even after an authorized pool offboard removes placement.
+            const route =
+              body.binding === null
+                ? await residentRouteFor(env, resource.resource, cancellation.threadKey, null, true)
+                : residentRouteOf(body.binding);
+            if (route === null) return json({ error: "invalid resident address" }, 400);
             if (route instanceof Response) return route;
             return json(
               await residentStub(env, route?.residentId ?? resource.resource).cancelRun(cancellation, body.binding),
@@ -14433,9 +14778,9 @@ async function handleOnboard(env: Env, body: Record<string, unknown>): Promise<R
  *  picker. A live view that failed reads as `state:"unknown"` / `inFlight:null`
  *  — never as a cold candidate. */
 async function collectResidentViews(env: Env): Promise<ResidentView[]> {
-  const residents = await registryStub(env).list();
+  const residents = (await registryStub(env).list()).filter((record) => !record.pool);
   const settled = await Promise.allSettled(
-    residents.map((record) => residentStub(env, record.resource).getResidentInfo()),
+    residents.map((record) => residentStub(env, residentAddress(record)).getResidentInfo()),
   );
   return residents.map((record, i) => {
     const s = settled[i];
@@ -14471,6 +14816,53 @@ async function handleOffboard(env: Env, body: Record<string, unknown>): Promise<
     const old = await residentStub(env, resource.resource).getResidentInfo();
     if (old.resource !== resource.resource && old.cleanupPending !== resource.resource)
       return json({ error: `${resource.resource} is not onboarded` }, 404);
+  }
+
+  if (record?.pool) {
+    const members = residentMembers([record]);
+    if (body.dryRun === true) {
+      const plans = await Promise.all(
+        members.map(async (member) => ({
+          residentId: residentAddress(member),
+          ...(await residentStub(env, residentAddress(member)).teardownPlan()),
+        })),
+      );
+      return json({
+        resource: record.resource,
+        dryRun: true,
+        wouldRemove: {
+          registryRecord: true,
+          members: plans,
+          pendingMembers: record.pool.members.length - record.pool.active,
+        },
+      });
+    }
+    const held = await registry.beginPoolOffboard(record.resource, record.pool.revision);
+    if (!held?.pool) return json({ error: "resident pool changed before offboard" }, 409);
+    const results = [];
+    for (const member of residentMembers([held])) {
+      const residentId = residentAddress(member);
+      results.push({
+        residentId,
+        ...(await residentStub(env, residentId).removePoolMember(held.resource, residentId, held.pool.revision)),
+      });
+    }
+    const complete = results.every((r) => r.containerStopped && r.storageCleared && r.errors.length === 0);
+    const registryRemoved = complete && (await registry.finishPoolOffboard(held.resource, held.pool.revision));
+    return json({
+      resource: held.resource,
+      registryRemoved,
+      members: results,
+      schedulesCancelled: results.every((r) => r.schedulesCancelled),
+      containerStopped: results.every((r) => r.containerStopped),
+      storageCleared: results.every((r) => r.storageCleared),
+      backupObjectsDeleted: results.reduce((n, r) => n + r.backupObjectsDeleted, 0),
+      r2ObjectsDeleted: results.reduce((n, r) => n + r.r2ObjectsDeleted, 0),
+      errors: [
+        ...results.flatMap((r) => r.errors.map((error) => `${r.residentId}: ${error}`)),
+        ...(!registryRemoved ? ["resident pool cleanup is incomplete"] : []),
+      ],
+    });
   }
 
   if (record?.noResident === true) {
@@ -14554,6 +14946,9 @@ async function offboardResident(
 async function teardownResident(
   env: Env,
   resource: string,
+  residentId = resource,
+  confirm = true,
+  stub: Pick<ResidentDO, "teardown" | "confirmCleanup"> = residentStub(env, residentId),
 ): Promise<{
   schedulesCancelled: boolean;
   containerStopped: boolean;
@@ -14562,31 +14957,29 @@ async function teardownResident(
   r2ObjectsDeleted: number;
   errors: string[];
 }> {
-  const teardown = await residentStub(env, resource)
-    .teardown()
-    .catch((err: unknown): Awaited<ReturnType<ResidentDO["teardown"]>> => ({
-      schedulesCancelled: false,
-      containerStopped: false,
-      storageCleared: false,
-      backupObjectsDeleted: 0,
-      errors: [`teardown failed: ${errMsg(err)}`],
-    }));
+  const teardown = await stub.teardown().catch((err: unknown): Awaited<ReturnType<ResidentDO["teardown"]>> => ({
+    schedulesCancelled: false,
+    containerStopped: false,
+    storageCleared: false,
+    backupObjectsDeleted: 0,
+    errors: [`teardown failed: ${errMsg(err)}`],
+  }));
   // If destroy was uncertain, preserve its durable refusal and all resident
   // objects. A later admin offboard can retry the same DO identity.
   const r2Sweep = teardown.containerStopped
-    ? await deleteR2Prefix(env.BACKUP_BUCKET, r2Prefix(resource))
+    ? await deleteR2Prefix(env.BACKUP_BUCKET, r2Prefix(residentId))
         .then((deleted) => ({ deleted, error: undefined as string | undefined }))
         .catch((err: unknown) => ({
           deleted: 0,
-          error: `r2 prefix sweep failed for ${r2Prefix(resource)}: ${errMsg(err)}`,
+          error: `r2 prefix sweep failed for ${r2Prefix(residentId)}: ${errMsg(err)}`,
         }))
     : { deleted: 0, error: undefined };
 
   const errors = [...teardown.errors];
   if (r2Sweep.error) errors.push(r2Sweep.error);
-  if (teardown.storageCleared && errors.length === 0) {
+  if (confirm && teardown.storageCleared && errors.length === 0) {
     try {
-      await residentStub(env, resource).confirmCleanup(resource);
+      await stub.confirmCleanup(resource);
     } catch (err) {
       errors.push(`cleanup confirmation failed: ${errMsg(err)}`);
     }
@@ -14600,6 +14993,25 @@ async function teardownResident(
     r2ObjectsDeleted: r2Sweep.deleted,
     errors,
   };
+}
+
+async function handleReplicas(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const resource = parseResource(body.resource);
+  if ("error" in resource) return json({ error: resource.error }, 400);
+  if (
+    Object.keys(body).some((key) => key !== "resource" && key !== "warmReplicas") ||
+    typeof body.warmReplicas !== "number"
+  )
+    return json({ error: "replica configuration requires resource and warmReplicas only" }, 400);
+  const result = await registryStub(env).requestWarmReplicas(resource.resource, body.warmReplicas);
+  if (!result.ok) return json({ error: result.error }, result.status);
+  const pool = residentPoolOf(result.record);
+  return json({
+    resource: resource.resource,
+    warmReplicas: pool?.desired ?? 1,
+    activeReplicas: pool?.active ?? 1,
+    record: result.record,
+  });
 }
 
 async function handleReconfigure(env: Env, body: Record<string, unknown>): Promise<Response> {
@@ -14660,9 +15072,14 @@ async function handleReset(env: Env, body: Record<string, unknown>): Promise<Res
     return json({ error: "dryRun must be a boolean" }, 400);
   const record = await registryStub(env).getRepository(resource.resource);
   if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
-  if (record.noResident === true) return json({ error: `${record.resource} has no resident to reset` }, 409);
+  if (record.noResident === true || record.offboarding)
+    return json({ error: `${record.resource} has no resident to reset` }, 409);
   const dryRun = body.dryRun === true;
-  const result = await residentStub(env, resource.resource).reset(
+  if (body.resident !== undefined && typeof body.resident !== "number")
+    return json({ error: "resident number must be an integer" }, 400);
+  const member = selectedResidentMember(record, body.resident as number | undefined);
+  if (!member) return json({ error: "an active resident number is required for this repository" }, 409);
+  const result = await residentStub(env, member).reset(
     resource.resource,
     record.defaultRef,
     record.provisioningTimeoutMs,
@@ -14680,9 +15097,14 @@ async function handleRebuild(env: Env, body: Record<string, unknown>): Promise<R
   const record = await registryStub(env).getRepository(resource.resource);
   if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
 
-  if (record.noResident === true) return json({ error: `${record.resource} has no resident to rebuild` }, 409);
+  if (record.noResident === true || record.offboarding)
+    return json({ error: `${record.resource} has no resident to rebuild` }, 409);
 
-  const result = await residentStub(env, resource.resource).rebuild(
+  if (body.resident !== undefined && typeof body.resident !== "number")
+    return json({ error: "resident number must be an integer" }, 400);
+  const member = selectedResidentMember(record, body.resident as number | undefined);
+  if (!member) return json({ error: "an active resident number is required for this repository" }, 409);
+  const result = await residentStub(env, member).rebuild(
     resource.resource,
     record.defaultRef,
     record.provisioningTimeoutMs,
@@ -14741,7 +15163,7 @@ async function handleDeployFence(env: Env): Promise<Response> {
   try {
     const residents = await registry.list();
     const settled = await Promise.allSettled(
-      residents.map((record) => residentStub(env, record.resource).getResidentDeployInfo()),
+      residents.map((record) => residentStub(env, residentAddress(record)).getResidentDeployInfo()),
     );
     const enriched = residents.map((record, i) => {
       const result = settled[i];
@@ -14828,8 +15250,8 @@ async function handleRecoverAdmission(env: Env, body: Record<string, unknown>): 
     const residents = await registry.list();
     const settled = await Promise.allSettled(
       residents.map(async (record) => ({
-        ...(await residentStub(env, record.resource).getResidentDeployInfo()),
-        ...(await residentStub(env, record.resource).getResidentRecoveryProbe()),
+        ...(await residentStub(env, residentAddress(record)).getResidentDeployInfo()),
+        ...(await residentStub(env, residentAddress(record)).getResidentRecoveryProbe()),
       })),
     );
     const views = settled.map((result) =>
@@ -14881,6 +15303,32 @@ async function handleRecoverAdmission(env: Env, body: Record<string, unknown>): 
   }
 }
 
+async function handleRecoverNativeOperation(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const resource = parseResource(body.resource);
+  if ("error" in resource) return json({ error: resource.error }, 400);
+  if (
+    !validNativeOperationKey(body.key) ||
+    typeof body.recordHash !== "string" ||
+    !/^[0-9a-f]{64}$/.test(body.recordHash)
+  )
+    return json({ error: "exact native operation key and recordHash are required" }, 400);
+  if (body.terminate !== undefined && typeof body.terminate !== "boolean")
+    return json({ error: "terminate must be a boolean" }, 400);
+  const record = await registryStub(env).getRepository(resource.resource);
+  const member = record
+    ? selectedResidentMember(record, body.resident as number | undefined)
+    : body.resident === undefined
+      ? resource.resource
+      : undefined;
+  if (!member) return json({ error: "an active resident number is required for this repository" }, 409);
+  const result = await residentStub(env, member).recoverNativeOperation(
+    body.key,
+    body.recordHash,
+    body.terminate === true,
+  );
+  return json(result, "error" in result ? result.status : 200);
+}
+
 /** POST /reconcile (drain scope): reconcile every resident's container onto
  *  the current image — the deploy runner posts it after its Worker deploy
  *  landed and BEFORE its `/undrain`, so a stale container restarts inside the
@@ -14898,21 +15346,70 @@ async function handleReconcile(env: Env): Promise<Response> {
   );
   if (!admission) return json({ error: "deploy-fence: reconcile waits for the uploaded Worker" }, 409);
   try {
-    const residents = await registry.list();
+    const registered = await registry.listRepositories();
+    for (const record of registered) {
+      const pool = residentPoolOf(record);
+      if (!pool || record.offboarding || pool.active === pool.members.length) continue;
+      const fence = await registry.replicaMaintenance(admission.id);
+      if (!fence)
+        return json({ error: "replica activation waits for an exclusive deployment maintenance window" }, 409);
+      const primary = residentStub(env, record.resource);
+      const view = await primary.getResidentDeployInfo();
+      if (view.executingRuns !== 0 || view.unknownRuns !== 0)
+        return json({ error: "replica activation waits for confirmed primary quiescence" }, 409);
+      let progress = await registry.importPrimaryPlacements(record.resource, pool.revision, admission.id, fence);
+      while (progress.ok && !progress.done) {
+        const page = await primary.placementHistoryPage(progress.after);
+        const startAfter = progress.after;
+        for (let offset = 0; offset < Math.max(1, page.threads.length); offset += 256) {
+          progress = await registry.importPrimaryPlacements(record.resource, pool.revision, admission.id, fence, {
+            ...page,
+            startAfter,
+            threads: page.threads.slice(offset, offset + 256),
+            moreThreads: offset + 256 < page.threads.length,
+          });
+          if (!progress.ok) break;
+        }
+      }
+      if (!progress.ok) {
+        console.log(
+          "[replica-activation] aborted: primary placement import incomplete",
+          JSON.stringify({ resource: record.resource, revision: pool.revision, admission: admission.id, fence }),
+        );
+        return json({ error: "replica activation could not confirm complete primary placement" }, 409);
+      }
+    }
+    const residents = (await registry.list()).filter((record) => !record.offboarding);
     const settled = await Promise.allSettled(
-      residents.map((record) => residentStub(env, record.resource).reconcileForDeploy(record.resource)),
+      residents.map(async (record) => {
+        const stub = residentStub(env, residentAddress(record));
+        if (record.residentId)
+          await stub.ensureResidentMember(record.resource, residentAddress(record), record.provisioningTimeoutMs);
+        return stub.reconcileForDeploy(record.resource);
+      }),
     );
     const reconciled = residents.map((record, i) => {
       const s = settled[i];
       return s.status === "fulfilled"
-        ? { resource: record.resource, result: s.value.result, verified: s.value.verified }
-        : { resource: record.resource, result: "error" as const, verified: false, error: errMsg(s.reason) };
+        ? {
+            resource: record.resource,
+            ...(record.residentId ? { residentId: record.residentId } : {}),
+            result: s.value.result,
+            verified: s.value.verified,
+          }
+        : {
+            resource: record.resource,
+            ...(record.residentId ? { residentId: record.residentId } : {}),
+            result: "error" as const,
+            verified: false,
+            error: errMsg(s.reason),
+          };
     });
     // Each resident held ITSELF before its marker (reconcileForDeploy), so no
     // report can outrun its hold; this pass is the backstop for a resident whose
     // call rejected before it could — holdDrain deduplicates, so re-holding a
     // deferred resident changes nothing.
-    const unverified = reconciled.filter((r) => !r.verified).map((r) => r.resource);
+    const unverified = reconciled.filter((r) => !r.verified).map((r) => residentAddress(r));
     if (unverified.length > 0) await registryStub(env).holdDrainFor(unverified);
     console.log(`[reconcile] deploy image reconcile: ${JSON.stringify(reconciled)}`);
     return json({ reconciled });
@@ -14923,9 +15420,9 @@ async function handleReconcile(env: Env): Promise<Response> {
 
 async function handleResidents(env: Env): Promise<Response> {
   const registered = await registryStub(env).listRepositories();
-  const residents = residentRecords(registered);
+  const residents = residentMembers(registered);
   const settled = await Promise.allSettled(
-    residents.map((record) => residentStub(env, record.resource).getResidentInfo()),
+    residents.map((record) => residentStub(env, residentAddress(record)).getResidentInfo()),
   );
   // Fleet-wide in-flight view: one call answers "is anything running anywhere?".
   // `inFlight` is the sum over residents whose live view answered with a count;
@@ -14955,6 +15452,11 @@ async function handleResidents(env: Env): Promise<Response> {
       ? { testOverrides: { ...limits.override, floorS: limits.floorS, floorDefaultS: LRU_FLOOR_S } }
       : {}),
     count: residents.length,
+    reservedCount: reservedResidentCount(registered),
+    pendingReplicas: registered.reduce((count, record) => {
+      const pool = residentPoolOf(record);
+      return count + (pool ? pool.members.length - pool.active : 0);
+    }, 0),
     repositoryCount: registered.length,
     repositories: registered
       .filter((record) => record.noResident === true)
@@ -14991,9 +15493,14 @@ async function handleStatus(env: Env, url: URL): Promise<Response> {
     resource.resource,
     typeof selector.threadKey === "string" ? selector.threadKey : undefined,
     selector,
+    true,
   );
   if (route instanceof Response) return route;
-  const stub = residentStub(env, route?.residentId ?? resource.resource);
+  const candidates = !route && selector.threadKey && record.pool ? await servingResidentIds(env, record) : [];
+  const number = url.searchParams.get("resident");
+  const selected = number === null ? undefined : selectedResidentMember(record, Number(number));
+  if (number !== null && !selected) return json({ error: "resident number is not active" }, 404);
+  const stub = residentStub(env, selected ?? route?.residentId ?? candidates[0] ?? resource.resource);
   const [status, inFlight, refresh, snapshot, memory, levels] = await Promise.all([
     stub.getStatus(),
     stub.getInFlightCount(),
@@ -15086,6 +15593,35 @@ async function handleRecordedCheck(env: Env, body: unknown, settle: boolean): Pr
  *  routes fail closed anyway (no binding → `not-attached`/`no-binding`; a
  *  never-onboarded resource's DO has no state → 503 `not-serviceable`), and a
  *  binding can only exist because an attach passed the real check. */
+async function servingResidentIds(env: Env, record: ResidentRecord): Promise<string[]> {
+  const members = residentMembers([record]).filter((member) => member.keepWarm !== false);
+  const views = await Promise.all(
+    members.map(async (member) => {
+      const stub = residentStub(env, residentAddress(member));
+      try {
+        const [status, levels] = await Promise.all([stub.getStatus(), stub.residentLevels()]);
+        return { status, levels };
+      } catch (err) {
+        console.log(
+          `resident-capacity: ${record.resource} member ${residentAddress(member)} probe failed: ${residentText(errMsg(err))}`,
+        );
+        return null;
+      }
+    }),
+  );
+  return members
+    .filter((_member, i) => {
+      const view = views[i];
+      return (
+        view &&
+        isServiceable(view.status.state, view.status.reason) &&
+        view.levels.seat.side === "below" &&
+        view.levels.memory.side === "below"
+      );
+    })
+    .map(residentAddress);
+}
+
 /** A selector is checked against durable placement before a native target is
  * resolved. Missing selectors retain the legacy primary address in this release. */
 async function residentRouteFor(
@@ -15093,10 +15629,20 @@ async function residentRouteFor(
   resource: string,
   threadKey: string | undefined,
   selector: unknown,
+  discover = false,
 ): Promise<ResidentRoute | undefined | Response> {
   const route = residentRouteOf(selector);
   if (route === null) return json({ error: "invalid resident address" }, 400);
-  if (!route) return undefined;
+  if (!route) {
+    if (!threadKey) return undefined;
+    const saved = await registryStub(env).readThreadPlacement(resource, threadKey);
+    if (saved === null) return json({ error: "resident placement could not be verified" }, 409);
+    if (saved && saved.residentId !== resource) {
+      if (discover) return { residentId: saved.residentId, placementId: saved.placementId };
+      return json({ error: "the saved workspace requires its resident address" }, 409);
+    }
+    return saved && discover ? { residentId: saved.residentId, placementId: saved.placementId } : undefined;
+  }
   if (!threadKey) return json({ error: "resident address requires its thread" }, 400);
   const saved = await registryStub(env).readThreadPlacement(resource, threadKey);
   if (!saved || !sameResidentRoute(saved, route))
@@ -15122,7 +15668,13 @@ async function resolveThreadRoute(
   if ("error" in resource) return json({ error: resource.error }, 400);
   const threadKey = parseThreadKey(body.threadKey);
   if ("error" in threadKey) return json({ error: threadKey.error }, 400);
-  const route = await residentRouteFor(env, resource.resource, threadKey.threadKey, body);
+  const route = await residentRouteFor(
+    env,
+    resource.resource,
+    threadKey.threadKey,
+    body,
+    requireOnboarded && body.replicaRouting === 1,
+  );
   if (route instanceof Response) return route;
   if (!requireOnboarded) {
     return {
@@ -15131,7 +15683,11 @@ async function resolveThreadRoute(
       threadKey: threadKey.threadKey,
     };
   }
-  const resolved = await registryStub(env).resolveThreadPlacement(resource.resource, threadKey.threadKey);
+  const record = await registryStub(env).getRecord(resource.resource);
+  if (!record) return json({ error: `${resource.resource} is not onboarded` }, 404);
+  const serving =
+    body.replicaRouting === 1 && record.pool && !route ? await servingResidentIds(env, record) : undefined;
+  const resolved = await registryStub(env).resolveThreadPlacement(resource.resource, threadKey.threadKey, serving);
   if (!resolved.ok) return json({ error: resolved.error }, resolved.status);
   return {
     stub: residentStub(env, resolved.placement.residentId),
@@ -15292,6 +15848,7 @@ async function handleAwaitRestore(env: Env, body: Record<string, unknown>): Prom
     resource.resource,
     typeof body.threadKey === "string" ? body.threadKey : undefined,
     body,
+    true,
   );
   if (route instanceof Response) return route;
   return streamHeartbeatJson(
@@ -15649,9 +16206,23 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
 
   const resource = parseResource(body.resource);
   if ("error" in resource) return json({ error: resource.error }, 400);
+  const catalog = await registryStub(env).getRepository(resource.resource);
+  if (catalog?.offboarding && !READ_DEBUG_OPS.has(op))
+    return json({ error: "resident pool cleanup is in progress" }, 409);
+  if (body.resident !== undefined && typeof body.resident !== "number")
+    return json({ error: "resident number must be an integer" }, 400);
+  const selected = catalog
+    ? selectedResidentMember(
+        catalog,
+        body.resident === undefined && op === "workload-audit" ? 1 : (body.resident as number | undefined),
+      )
+    : body.resident === undefined
+      ? resource.resource
+      : undefined;
+  if (!selected) return json({ error: "an active resident number is required for this repository" }, 409);
   let threadSelection: { threadKey: string; runId: string } | undefined;
   if (op === "workload-audit" && (body.residentId !== undefined || body.placementId !== undefined))
-    return json({ error: "Workload inspection supports the primary resident only." }, 400);
+    return json({ error: "Workload inspection uses resident numbers, not thread placement IDs." }, 400);
   if (op === "threads" && (body.threadKey !== undefined || body.runId !== undefined)) {
     const thread = parseThreadKey(body.threadKey);
     if ("error" in thread || typeof body.runId !== "string" || !RUN_ID_PATTERN.test(body.runId))
@@ -15660,15 +16231,15 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
   }
   if (threadSelection) {
     try {
-      return json(await residentStub(env, resource.resource).debugThreads(threadSelection));
+      return json(await residentStub(env, selected).debugThreads(threadSelection));
     } catch {
       return json({ error: "The saved shutdown report is unavailable." }, 503);
     }
   }
-  const stub = residentStub(env, resource.resource);
+  const stub = residentStub(env, selected);
   switch (op) {
     case "workload-audit":
-      return json(await stub.getWorkloadAudit(resource.resource));
+      return json(await stub.getWorkloadAudit(resource.resource, selected));
     case "info":
       return json(await stub.getResidentInfo());
     case "schedules":
@@ -15679,7 +16250,7 @@ async function handleDebug(env: Env, body: Record<string, unknown>): Promise<Res
       return json({
         op,
         resource: resource.resource,
-        ...(await createRefreshInstanceNow(env, stub, resource.resource)),
+        ...(await createRefreshInstanceNow(env, stub, resource.resource, selected)),
       });
     case "stop-container":
       return json(await stub.debugStopContainer());
@@ -15800,18 +16371,26 @@ async function runWatchdog(env: Env, parent?: TraceSpan): Promise<WatchdogSummar
   });
   if (!admission) throw new Error("deploy-fence: watchdog work is paused during Worker upload");
   try {
-    const residents = await registry.list();
+    const residents = (await registry.list()).filter((record) => !record.offboarding);
     // Each check is a `resident.check` child of the firing's root when it has
     // one (the cron path; the /debug op runs bare), ending with the action taken
     // — never the resource, which names a repo.
-    const checkOne = async (record: { resource: string }, span?: TraceSpan) => {
-      const stub = residentStub(env, record.resource);
+    const checkOne = async (record: ResidentMember<ResidentRecord>, span?: TraceSpan) => {
+      const stub = residentStub(env, residentAddress(record));
+      if (record.residentId)
+        await stub.ensureResidentMember(record.resource, residentAddress(record), record.provisioningTimeoutMs);
       const check = await stub.watchdogCheck();
       if (check.action === "provision-timed-out") {
         // The DO already tried to release its own slot; this is the backstop.
-        await registry.remove(record.resource);
+        if (!record.pool) await registry.remove(record.resource);
       }
-      const instance = await createRefreshInstance(env, stub, record.resource, check.refresh);
+      const instance = await createRefreshInstance(
+        env,
+        stub,
+        record.resource,
+        record.keepWarm ? { ...check.refresh, idleSince: null } : check.refresh,
+        residentAddress(record),
+      );
       span?.setAttrs({ outcome: check.action });
       return { ...check, instance };
     };

@@ -1023,6 +1023,7 @@ async function selectExecutor(
       span,
       ctx.stopSignal,
       leaseClippedBudget(ctx.remainingMs?.()),
+      { threadKey: ctx.threadKey },
     );
     let probe: ResidentStatusProbe = through.probe;
     /** How long the selection probe waited through a blip the Worker typed
@@ -1045,6 +1046,7 @@ async function selectExecutor(
         restoreHoldBudget(ctx.remainingMs?.()),
         span,
         ctx.stopSignal,
+        { threadKey: ctx.threadKey },
       );
       // The run's own stop ended the hold: the stop's typed shape, read by the
       // dispatch as the stop it is — a stopped run is never provisioned cold.
@@ -1565,7 +1567,7 @@ async function reattachWorkspace(
   const resource = repoResourceId(ctx.repo);
   const route = residentRouteOf(recorded);
   if (route === null) throw refuse("the saved resident address is malformed");
-  const selector = route ? { ...route, threadKey: ctx.threadKey } : undefined;
+  const selector = { ...route, threadKey: ctx.threadKey };
   // The selection probe waited through a blip the Worker typed transient, as a
   // fresh run's is (execution.md item 9): drawn from the first attach's budget
   // clipped to the run's lease, the run's stop riding in, named on the note. A
@@ -1902,7 +1904,7 @@ async function probeResident(
    *  the wait too. */
   stop?: AbortSignal,
   remainingMs?: number,
-  route?: ResidentRoute & { threadKey: string },
+  route?: Partial<ResidentRoute> & { threadKey: string },
 ): Promise<ResidentStatusProbe> {
   if (probeOutage && systemClock() < probeOutage.until) {
     return { kind: "unreachable", error: `${probeOutage.error}; probe skipped during outage window`, transport: true };
@@ -1961,7 +1963,7 @@ async function probeThroughBlip(
   stopSignal?: AbortSignal,
   /** How long the wait may probe: the first attach's budget, or what a resumed run's lease leaves of it (`leaseClippedBudget`). */
   budgetMs: number = FIRST_ATTACH_WAIT_MS,
-  route?: ResidentRoute & { threadKey: string },
+  route?: Partial<ResidentRoute> & { threadKey: string },
 ): Promise<{ probe: ResidentStatusProbe; waitedMs: number }> {
   const since = systemClock();
   const left = () => Math.max(0, budgetMs - (systemClock() - since));

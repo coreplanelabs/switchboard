@@ -158,6 +158,37 @@ afterEach(() => {
 });
 
 describe("ResidentsIndexPage", () => {
+  it("shows reserved slots before replicas activate and updates active and pending counts from the feed", async () => {
+    const { wrapper: w, es } = mountIndex({ ...indexSeed([WARM], 5, 1), pendingReplicas: 4, reservedCount: 5 });
+    expect(w.text()).toContain("5/5 resident slots reserved · 1 active · 4 pending");
+    expect(w.findAll("li.resident")).toHaveLength(1);
+
+    es().emitMessage({ type: "residents", cap: 5, count: 1, pendingReplicas: 2, residents: [WARM] });
+    await nextTick();
+    expect(w.text()).toContain("3/5 resident slots reserved · 1 active · 2 pending");
+
+    // A downscale keeps all occupied members until they can be retired.
+    const members = [0, 1, 2].map((replicaOrdinal) => ({
+      ...WARM,
+      replicaOrdinal,
+      residentId: `member-${replicaOrdinal}`,
+    }));
+    es().emitMessage({ type: "residents", cap: 5, count: 3, pendingReplicas: 0, residents: members });
+    await nextTick();
+    expect(w.text()).toContain("3/5 resident slots reserved · 3 active · 0 pending");
+    expect(w.findAll("li.resident")).toHaveLength(3);
+
+    es().emitMessage({ type: "residents", cap: 5, count: 1, pendingReplicas: 2, reservedCount: 5, residents: [WARM] });
+    await nextTick();
+    expect(w.text()).toContain("5/5 resident slots reserved · 1 active · 2 pending");
+
+    es().emitMessage({ type: "residents", cap: 5, count: 1, residents: [WARM] });
+    await nextTick();
+    expect(w.text()).toContain("1/5 resident slots in use");
+    expect(w.text()).not.toContain("slots reserved");
+    expect(w.text()).not.toContain("pending");
+  });
+
   it("shows cold registrations beside highlighted warm residents and keeps both current", async () => {
     const cold = { resource: "repo:acme/infra", noResident: true, defaultRef: "main", live: { state: "cold" } };
     const seed = Object.assign(indexSeed([WARM]), { repositories: [cold] });
@@ -173,10 +204,11 @@ describe("ResidentsIndexPage", () => {
   });
   it("shows an all-cold repository fleet without claiming a warm slot", () => {
     const seed = Object.assign(indexSeed([]), {
+      pendingReplicas: 0,
       repositories: [{ resource: "repo:acme/infra", noResident: true, defaultRef: "main", live: { state: "cold" } }],
     });
     const { wrapper: w } = mountIndex(seed);
-    expect(w.text()).toContain("0/5 resident slots in use · 1 cold");
+    expect(w.text()).toContain("0/5 resident slots reserved · 0 active · 0 pending · 1 cold");
     expect(w.text()).toContain("acme/infra");
     expect(w.text()).not.toContain("No repos onboarded");
   });

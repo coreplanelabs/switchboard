@@ -1,3 +1,4 @@
+import { selectedResidentMember } from "../../src/execution/residentMembers";
 import ts from "typescript";
 import { runInNewContext } from "node:vm";
 import { readSource } from "./testing/sourceScan.js";
@@ -676,6 +677,7 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false, reportError
     "parseResource",
     "parseThreadKey",
     "handleDebug",
+    "handleRecoverNativeOperation",
     "json",
   ].map((name) =>
     source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name)!.getText(source),
@@ -716,6 +718,8 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false, reportError
     URL,
     TextEncoder,
     sanitizeResidentBody,
+    selectedResidentMember,
+    registryStub: () => ({ getRepository: async (resource: string) => ({ resource }) }),
     validNativeOperationKey,
     RUN_ID_PATTERN,
     STREAMED_ROUTES: new Set(),

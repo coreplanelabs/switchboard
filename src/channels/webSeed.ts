@@ -367,6 +367,8 @@ export interface ResidentsIndexSeed {
   page: "residents";
   cap?: unknown;
   count?: unknown;
+  pendingReplicas?: unknown;
+  reservedCount?: unknown;
   draining?: unknown;
   residents: unknown[];
   repositories?: unknown[];
@@ -386,6 +388,8 @@ export type ResidentsFeedFrame =
       type: "residents";
       cap?: unknown;
       count?: unknown;
+      pendingReplicas?: unknown;
+      reservedCount?: unknown;
       draining?: unknown;
       residents: unknown[];
       repositories?: unknown[];

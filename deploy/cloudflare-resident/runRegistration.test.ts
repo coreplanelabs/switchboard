@@ -1512,6 +1512,7 @@ function workloadResident(
     BUILD_USER: "worker1",
     RUN_REG_KEY_PREFIX: "run:",
     RESOURCE_KEY: "resource",
+    RESIDENT_ID_KEY: "resident:instanceId",
     SPENT_POOL_USERS_KEY: "resident:spentPoolUsers",
     THREAD_KEY_PREFIX: "thread:",
     IMAGE_REPORT_PENDING_KEY: "image-pending",
@@ -2001,6 +2002,65 @@ describe("resident launch acknowledgement recovery", () => {
 });
 
 describe("resident workload admission", () => {
+  it("labels separate members and their admission refusals with the stored physical resident ID", async () => {
+    const primary = workloadResident({ live: 1 });
+    const secondary = workloadResident({ live: 16 });
+    primary.rows.set("resource", "repo:acme/app");
+    secondary.rows.set("resource", "repo:acme/app");
+    secondary.rows.set("resident:instanceId", "resident-secondary");
+    const reports = await Promise.all([
+      primary.instance.getWorkloadAudit("repo:acme/app"),
+      secondary.instance.getWorkloadAudit("repo:acme/app", "resident-secondary"),
+    ]);
+    expect(reports.map(({ resource, residentId, used }: any) => ({ resource, residentId, used }))).toEqual([
+      { resource: "repo:acme/app", residentId: "repo:acme/app", used: 1 },
+      { resource: "repo:acme/app", residentId: "resident-secondary", used: 16 },
+    ]);
+    expect(await secondary.instance.reserveWorkloadSlot("op:new")).toMatchObject({ reason: "workload-full" });
+    const refusal = secondary.native.logs
+      .map((line) => JSON.parse(line.slice(11)))
+      .find((event) => event.event === "admission-refused");
+    expect(refusal).toMatchObject({ resource: "repo:acme/app", residentId: "resident-secondary", used: 16 });
+  });
+
+  it("keeps workload evidence incomplete when the resident identity cannot be read", async () => {
+    const h = workloadResident({ live: 1 });
+    const get = h.instance.ctx.storage.get;
+    h.instance.ctx.storage.get = async (key: string) => {
+      if (key === "resident:instanceId") throw new Error("identity read unavailable");
+      return get(key);
+    };
+    expect(await h.instance.getWorkloadAudit("repo:acme/app")).toMatchObject({
+      resource: "repo:acme/app",
+      residentId: "unknown",
+      used: 1,
+      complete: false,
+      issues: ["resident-identity-unavailable"],
+    });
+  });
+
+  it("does not label an uninitialized or mismatched secondary as the primary", async () => {
+    const h = workloadResident();
+    for (const stored of [undefined, "resident-other"]) {
+      if (stored === undefined) h.rows.delete("resident:instanceId");
+      else h.rows.set("resident:instanceId", stored);
+      expect(await h.instance.getWorkloadAudit("repo:acme/app", "resident-secondary")).toMatchObject({
+        resource: "repo:acme/app",
+        residentId: "unknown",
+        used: 0,
+        complete: false,
+        issues: ["resident-identity-unavailable"],
+      });
+    }
+    h.rows.set("resident:instanceId", "resident-secondary");
+    expect(await h.instance.getWorkloadAudit("repo:acme/app", "resident-secondary")).toMatchObject({
+      resource: "repo:acme/app",
+      residentId: "resident-secondary",
+      used: 0,
+      complete: true,
+    });
+  });
+
   it("refuses operation recovery while a request is active or its thread owner changed", async () => {
     const h = workloadResident({ retained: 1 });
     const journal = new NativeOperationJournal(h.instance.ctx.storage);

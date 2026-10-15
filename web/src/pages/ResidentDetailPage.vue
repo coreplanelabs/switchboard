@@ -12,6 +12,7 @@ import {
   residentImageReport,
   residentLive,
   residentSlug,
+  residentLabel,
   residentStateTone,
   residentThreads,
   str,
@@ -114,7 +115,7 @@ const diskParts = computed(() => {
 </script>
 
 <template>
-  <AppShell :title="slug || 'Resident'" nav="residents">
+  <AppShell :title="residentLabel(record)" nav="residents">
     <template #leading>
       <RouterLink class="back text-sm text-muted no-underline hover:text-primary" to="/residents"
         >← All residents</RouterLink
@@ -392,8 +393,12 @@ const diskParts = computed(() => {
     </section>
 
     <p class="mt-4 text-xs text-muted">
-      Manage from chat: <code class="rounded bg-elevated px-1 py-0.5">repo rebuild {{ slug }}</code> ·
-      <code class="rounded bg-elevated px-1 py-0.5">repo reconfigure {{ slug }} …</code> ·
+      Manage from chat:
+      <code class="rounded bg-elevated px-1 py-0.5"
+        >repo rebuild {{ slug
+        }}{{ typeof record.replicaOrdinal !== "number" ? "" : ` --resident ${record.replicaOrdinal + 1}` }}</code
+      >
+      · <code class="rounded bg-elevated px-1 py-0.5">repo reconfigure {{ slug }} …</code> ·
       <code class="rounded bg-elevated px-1 py-0.5">repo offboard {{ slug }} --dry-run</code>
     </p>
   </AppShell>

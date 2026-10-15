@@ -143,7 +143,7 @@ commands:
   repo workload        — Read the primary resident's workload count, owner records and missing evidence. Does not change or release work.
   repo onboard         — Register a repo, optionally without a resident (--no-resident); resident provisioning is billable and admin-gated.
   repo offboard        — Remove a repo registration and tear down its resident when present (admin-gated; --dry-run plans only).
-  repo reconfigure     — Change a registered repo's default branch and/or command table (admin-gated; resident changes take effect on refresh/attach).
+  repo reconfigure     — Change a registered repo's branch, commands or warm resident count (admin-gated; additional warm capacity is billable).
   repo rebuild         — Rebuild the container and snapshot to repair provisioning; keep bindings and operation records. --full also clears all resident state and backups for a clean start or stale hold. Both discard container files and keep repo settings. --dry-run plans only (admin-gated).
   repo test            — Executes the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
   repo build           — Executes the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
@@ -350,7 +350,7 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 • \`repo workload\` — Read the primary resident's workload count, owner records and missing evidence. Does not change or release work.
 • \`repo onboard\` — Register a repo, optionally without a resident (--no-resident); resident provisioning is billable and admin-gated.
 • \`repo offboard\` — Remove a repo registration and tear down its resident when present (admin-gated; --dry-run plans only).
-• \`repo reconfigure\` — Change a registered repo's default branch and/or command table (admin-gated; resident changes take effect on refresh/attach).
+• \`repo reconfigure\` — Change a registered repo's branch, commands or warm resident count (admin-gated; additional warm capacity is billable).
 • \`repo rebuild\` — Rebuild the container and snapshot to repair provisioning; keep bindings and operation records. --full also clears all resident state and backups for a clean start or stale hold. Both discard container files and keep repo settings. --dry-run plans only (admin-gated).
 • \`repo test\` — Executes the repo's onboarded test command with zero model turns (needs coding-agent access; the ref must be a plausible branch).
 • \`repo build\` — Executes the repo's onboarded build command with zero model turns (needs coding-agent access; the ref must be a plausible branch).

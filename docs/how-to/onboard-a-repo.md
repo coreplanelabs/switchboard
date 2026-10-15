@@ -61,6 +61,26 @@ Ask as before: any coding or review request naming the repository (`owner/name`,
 
 Run `--dry-run` before anything destructive.
 
+## Several warm residents
+
+Request a fixed warm count for an existing resident-enabled repository:
+
+```text
+@switchboard repo reconfigure acme/api --warm-residents 3
+```
+
+The response shows the requested count and the registered count. New members reserve capacity immediately and activate during the next deployment maintenance reconciliation. The fleet cap includes pending and retained addresses. This request alone does not prove that the new members are warm; check each member in `repo list` or the Repositories page after reconciliation.
+
+New threads spread across serving members. Existing threads, resumed runs and cancellation keep their original member. A lower count stops new placement on excess members but preserves their work and reservations. Offboarding the repository removes all its members after confirmed cleanup.
+
+For a pool, choose the member to rebuild from the number shown in the list:
+
+```text
+@switchboard repo rebuild acme/api --resident 2 --dry-run
+```
+
+Rebuild and full reset require that member number when more than one member exists. Repository command settings remain shared.
+
 ## Disk
 
 The gauge is on every surface: `repo list` appends `· disk 4.06 GiB/14.4 GiB (28%)`, the residents index shows it per row, the detail page has a **Disk** section.

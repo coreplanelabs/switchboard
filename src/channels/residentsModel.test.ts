@@ -7,6 +7,9 @@ import {
   residentsFleetTone,
   residentThreads,
   runsOnResident,
+  runsOnResidentMember,
+  residentDetailHref,
+  residentLabel,
   threadTreeKiB,
   type ResidentsIndexState,
 } from "./residentsModel.js";
@@ -88,6 +91,27 @@ describe("residentThreads", () => {
 });
 
 describe("runsOnResident + bindingFor", () => {
+  it("gives replicas separate links and assigns each live run to one resident row", () => {
+    const primary = { ...RECORD, residentId: RECORD.resource, replicaOrdinal: 0, live: { threads: [THREADS[0]] } };
+    const secondary = {
+      ...RECORD,
+      residentId: "resident-secondary",
+      replicaOrdinal: 1,
+      live: { threads: [THREADS[1]] },
+    };
+    const runs = [
+      run("primary", { repo: "jshttp/vary", threadKey: THREADS[0].threadKey }),
+      run("secondary", { repo: "jshttp/vary", threadKey: THREADS[1].threadKey }),
+      run("preparing", { repo: "jshttp/vary", threadKey: "mcp:default:new" }),
+    ];
+    expect(residentDetailHref(secondary)).toBe("/residents/jshttp/vary?resident=resident-secondary");
+    expect(residentLabel(secondary)).toBe("jshttp/vary · resident 2");
+    expect(runsOnResidentMember(runs, primary, [primary, secondary]).map((r) => r.id)).toEqual([
+      "primary",
+      "preparing",
+    ]);
+    expect(runsOnResidentMember(runs, secondary, [primary, secondary]).map((r) => r.id)).toEqual(["secondary"]);
+  });
   it("picks the live rows whose repo is the slug, oldest first, and joins each to its live binding by thread key", () => {
     const rows = [
       run("late", { repo: "jshttp/vary", threadKey: "slack:C1:1.1", startedAt: 3000 }),

@@ -1067,7 +1067,7 @@ export class ResidentExecutor implements Executor {
     /** The run's stop, where the caller has one (the wake wait's probes): it
      *  drops the request at once, as it does every other send. */
     signal?: AbortSignal,
-    route?: ResidentRoute & { threadKey: string },
+    route?: Partial<ResidentRoute> & { threadKey: string },
   ): Promise<ResidentStatusProbe> {
     const query = new URLSearchParams({ resource, ...(route ?? {}) });
     const url = `${baseUrl.replace(/\/$/, "")}/status?${query}`;
@@ -1142,7 +1142,7 @@ export class ResidentExecutor implements Executor {
     timeoutMs: number,
     span?: Span,
     signal?: AbortSignal,
-    route?: ResidentRoute & { threadKey: string },
+    route?: Partial<ResidentRoute> & { threadKey: string },
   ): Promise<ResidentRestoreWait> {
     try {
       const res = await tracedFetch(
@@ -1431,7 +1431,7 @@ export class ResidentExecutor implements Executor {
    *  stop where the caller has one (the wake wait's re-attach): it drops the
    *  request at once, and the failure is `aborted`, never the transport lost. */
   private async attachOnce(span?: Span, timeoutMs?: number, signal?: AbortSignal): Promise<AttachAnswer> {
-    const body: Record<string, unknown> = {};
+    const body: Record<string, unknown> = { replicaRouting: 1 };
     if (this.opts.runId !== undefined) body.runId = this.opts.runId;
     if (this.opts.ownerGen !== undefined) body.ownerGen = this.opts.ownerGen;
     if (this.opts.ownerFence !== undefined) body.ownerFence = this.opts.ownerFence;
@@ -1981,7 +1981,7 @@ export class ResidentExecutor implements Executor {
         WAKE_PROBE_TIMEOUT_MS,
         opts.span,
         signal,
-        route ? { ...route, threadKey: this.opts.threadKey } : undefined,
+        { ...route, threadKey: this.opts.threadKey },
       );
     };
     let first: ResidentStatusProbe;

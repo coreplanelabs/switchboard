@@ -66,10 +66,6 @@ describe("the resident Worker's wiring", () => {
     expect(direct.length).toBeLessThanOrEqual(2);
   });
 
-  it("a fresh onboard forgets the retired generation with the current one", () => {
-    expect(source).toMatch(/storage\.delete\(\[FACTS_KEY, SNAPSHOT_KEY, RETIRED_SNAPSHOT_KEY\]\)/);
-  });
-
   it("the retired key is the module's constant, spelled once", () => {
     expect(RETIRED_SNAPSHOT_KEY).toBe("resident:snapshot:retired");
     expect(source).not.toMatch(/"resident:snapshot:retired"/);

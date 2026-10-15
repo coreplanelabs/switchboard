@@ -26,6 +26,8 @@ export function residentRegistryProblem(
   if ("error" in read || read.status !== 200) return imageProblem;
   const body = object(read.body);
   const problems = imageProblem ? [imageProblem] : [];
+  if (body?.pendingReplicas !== undefined && body.pendingReplicas !== 0)
+    problems.push("pending resident replicas require deployment reconciliation");
   if (body?.draining !== null) {
     const held = object(body?.draining)?.holds;
     problems.unshift(`registry not undrained${Array.isArray(held) ? `; held: ${held.join(", ")}` : ""}`);
@@ -44,18 +46,32 @@ export function residentImageReportsProblem(
   if (!body || !Array.isArray(body.residents) || body.count !== body.residents.length)
     return "registry listing missing or incomplete";
   const problems: string[] = [];
+  if (
+    body.pendingReplicas !== undefined &&
+    (typeof body.pendingReplicas !== "number" ||
+      !Number.isSafeInteger(body.pendingReplicas) ||
+      body.pendingReplicas < 0)
+  )
+    problems.push("registry pending replica count is invalid");
   const seen = new Set<string>();
   for (const value of body.residents) {
     const row = object(value);
-    if (typeof row?.resource !== "string" || row.resource === "" || seen.has(row.resource)) {
+    const identity = row?.residentId === undefined ? row?.resource : row.residentId;
+    if (
+      typeof row?.resource !== "string" ||
+      !row.resource ||
+      typeof identity !== "string" ||
+      identity === "" ||
+      seen.has(identity)
+    ) {
       problems.push("registry has missing or duplicate resident identity");
       continue;
     }
-    seen.add(row.resource);
+    seen.add(identity);
     const live = object(row.live);
     if (live?.imageReport !== "current" || live.error !== undefined)
       problems.push(
-        `${row.resource}: image report ${String(live?.imageReport ?? "missing")}${live?.error ? " (live view failed)" : ""}`,
+        `${identity}: image report ${String(live?.imageReport ?? "missing")}${live?.error ? " (live view failed)" : ""}`,
       );
   }
   for (const resource of expectedResources)
@@ -71,16 +87,19 @@ export function reconciledResources(
   const resources: string[] = [];
   for (const value of answer.body.reconciled) {
     const row = object(value);
+    const identity = row?.residentId === undefined ? row?.resource : row.residentId;
     if (
       typeof row?.resource !== "string" ||
       !row.resource ||
-      resources.includes(row.resource) ||
+      typeof identity !== "string" ||
+      !identity ||
+      resources.includes(identity) ||
       typeof row.verified !== "boolean" ||
       typeof row.result !== "string" ||
       !["restarted", "current", "inactive", "deferred", "stale"].includes(row.result)
     )
       return undefined;
-    resources.push(row.resource);
+    resources.push(identity);
   }
   return resources;
 }

@@ -26,13 +26,13 @@ export interface ResidentAdminClient {
   onboard(body: Record<string, unknown>): Promise<ResidentAdminResponse>;
   offboard(resource: string, dryRun: boolean): Promise<ResidentAdminResponse>;
   reconfigure(body: Record<string, unknown>): Promise<ResidentAdminResponse>;
-  rebuild(resource: string, dryRun: boolean, full?: boolean): Promise<ResidentAdminResponse>;
+  rebuild(resource: string, dryRun: boolean, full?: boolean, resident?: number): Promise<ResidentAdminResponse>;
   residents(): Promise<ResidentAdminResponse>;
   /** Read the primary resident's workload count and the records behind it. */
   workload(resource: string): Promise<ResidentAdminResponse>;
   /** One resident's `{ state, reason, inFlight }` (`GET /status`; 404 when not
    *  onboarded) — what the onboard/rebuild follow-up polls. */
-  status(resource: string): Promise<ResidentAdminResponse>;
+  status(resource: string, resident?: number): Promise<ResidentAdminResponse>;
   /** The same client bound to one span: every call the view makes is an
    *  `http.client` child of it (docs/reference/specs/tracing.md item 24). Optional so a
    *  test double stays a plain object; a command uses a client without the
@@ -82,7 +82,19 @@ export class NullResidentAdminClient implements ResidentAdminClient {
 
 /** The admin routes, as the span names them: the path literal, never a query. */
 type AdminRoute =
-  "/register" | "/onboard" | "/offboard" | "/reconfigure" | "/rebuild" | "/reset" | "/residents" | "/status" | "/debug";
+  | "/register"
+  | "/onboard"
+  | "/offboard"
+  | "/reconfigure"
+  | "/replicas"
+  | "/replica-rebuild"
+  | "/replica-reset"
+  | "/replica-status"
+  | "/rebuild"
+  | "/reset"
+  | "/residents"
+  | "/status"
+  | "/debug";
 
 export function makeResidentAdminClient(baseUrl: string, token: string): ResidentAdminClient {
   // One closure per parent: the unbound client, and the view `withSpan` makes
@@ -127,12 +139,24 @@ export function makeResidentAdminClient(baseUrl: string, token: string): Residen
       // a new flag on /onboard and provision billable compute.
       onboard: (body) => call(body.noResident === true ? "/register" : "/onboard", "POST", body),
       offboard: (resource, dryRun) => call("/offboard", "POST", { resource, ...(dryRun ? { dryRun: true } : {}) }),
-      reconfigure: (body) => call("/reconfigure", "POST", body),
-      rebuild: (resource, dryRun, full) =>
-        call(full ? "/reset" : "/rebuild", "POST", { resource, ...(dryRun ? { dryRun: true } : {}) }),
+      reconfigure: (body) => call(body.warmReplicas === undefined ? "/reconfigure" : "/replicas", "POST", body),
+      rebuild: (resource, dryRun, full, resident) =>
+        call(
+          resident !== undefined ? (full ? "/replica-reset" : "/replica-rebuild") : full ? "/reset" : "/rebuild",
+          "POST",
+          { resource, ...(dryRun ? { dryRun: true } : {}), ...(resident === undefined ? {} : { resident }) },
+        ),
       residents: () => call("/residents", "GET"),
       workload: (resource) => call("/debug", "POST", { op: "workload-audit", resource }),
-      status: (resource) => call("/status", "GET", undefined, `/status?resource=${encodeURIComponent(resource)}`),
+      status: (resource, resident) => {
+        const route = resident === undefined ? "/status" : "/replica-status";
+        return call(
+          route,
+          "GET",
+          undefined,
+          `${route}?resource=${encodeURIComponent(resource)}${resident === undefined ? "" : `&resident=${resident}`}`,
+        );
+      },
       withSpan: (span) => clientFor(span),
     };
   };

@@ -1,3 +1,4 @@
+import { residentAddress } from "../execution/residentMembers.js";
 import { observePublicInventory, type PublicInventoryObservation } from "./publicInventoryObservation.js";
 import {
   consumerConfigKey,
@@ -2008,6 +2009,7 @@ async function deployStepTraced(
         if (deps.signal?.aborted)
           return { ok: false, live: "upload outcome uncertain", reason: "deployment cancelled" };
         const application = residentApplicationChange(residentBefore, residentAfter, step.residentContainerApp);
+        let reconcileRequired = application.kind === "changed" || residentPrintedTarget !== null;
         if (application.kind === "unknown") result = residentNotReady(result, application.reason);
         else if (application.kind === "unchanged" && residentPrintedTarget === null) {
           const base = step.drain?.url ?? step.setEnv.RESIDENT_BASE_URL;
@@ -2025,18 +2027,29 @@ async function deployStepTraced(
             return { ok: false, live: "upload outcome uncertain", reason: "deployment cancelled" };
           const problem = residentImageReportsProblem(registry);
           if (problem) result = residentNotReady(result, problem);
+          else if (
+            !("error" in registry) &&
+            registry.body &&
+            "pendingReplicas" in registry.body &&
+            typeof registry.body.pendingReplicas === "number" &&
+            registry.body.pendingReplicas > 0
+          )
+            reconcileRequired = true;
           else {
             resources = (
-              "error" in registry ? [] : (registry.body as { residents: { resource: string }[] }).residents
-            ).map((row) => row.resource);
+              "error" in registry
+                ? []
+                : (registry.body as { residents: { resource: string; residentId?: string }[] }).residents
+            ).map(residentAddress);
             retryImageReconcile = false;
             safeToLift = true;
             io.log(
               `[deploy:all] resident: unchanged container application ${step.residentContainerApp} at version ${application.version} and image ${shortImage(application.image)}; image reconcile skipped`,
             );
           }
-        } else {
-          // A changed application still uses the existing guarded image cycle.
+        }
+        if (application.kind !== "unknown" && reconcileRequired) {
+          // New pool members also need reconciliation when the image is unchanged.
           // Without this deploy's reconcile, an absent pending marker reads as
           // current even on an old image. Missing reconcile capability fails closed.
           const answer = await reconcileFleet(step, io, deps);
