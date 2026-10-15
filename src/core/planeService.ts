@@ -90,7 +90,13 @@ export interface PlaneService {
   /** `plane stop <instance>` (record 0064): terminate the runner instance
    *  and end its live children in one move. An instance the viewer's predicate
    *  does not admit is `unknown_instance`, like a run they may not see. */
-  stop(instanceId: string, actor: RunActor, visibleTo: Predicate, binding?: MainTaskBinding): Promise<PlaneStopReport>;
+  stop(
+    instanceId: string,
+    actor: RunActor,
+    visibleTo: Predicate,
+    binding?: MainTaskBinding,
+    authority?: { verify(): Promise<boolean>; active(): boolean },
+  ): Promise<PlaneStopReport>;
 }
 
 export const DEFAULT_RECENT_MS = minutesToMs(PLANE.recentMinutes);
@@ -193,7 +199,7 @@ export function createPlaneService(deps: PlaneServiceDeps): PlaneService {
       return buildPlaneTable({ now, runs, instances, pullRequests });
     },
 
-    async stop(instanceId, actor, visibleTo, binding) {
+    async stop(instanceId, actor, visibleTo, binding, authority) {
       const { stopRun } = deps.runs;
       const { listUnits, markStopped } = deps.instances;
       if (stopRun === undefined || listUnits === undefined || markStopped === undefined)
@@ -209,6 +215,16 @@ export function createPlaneService(deps: PlaneServiceDeps): PlaneService {
         })
       )
         return { kind: "unknown_instance", instanceId };
+      // A newer requester turn can arrive during the read. Check the original
+      // call's source again before the first stop mutation.
+      if (authority) {
+        try {
+          if (!(await authority.verify()) || !authority.active())
+            return { kind: "unavailable", reason: "requester authority changed before stop" };
+        } catch {
+          return { kind: "unavailable", reason: "requester authority could not be verified before stop" };
+        }
+      }
       // The mark first (record 0060; issue 1924): the runner reads it back
       // before every unit start and at every spawn, so it starts nothing more.
       // Best effort — a mark that could not be written still ends the runs.

@@ -318,6 +318,14 @@ class ContextCheckpointDeferred extends Error {}
 
 /** What `runLoop` reads off the dispatch. */
 export interface RunLoopContext {
+  recordWorkDecision?: (
+    message: IncomingMessage,
+    callId: string,
+    action: import("./orchestratorDecisions.js").OrchestratorWorkAction,
+    input: unknown,
+    context?: import("./unitContext.js").UnitContext,
+  ) => Promise<boolean>;
+  orchestratorDecisions?: () => import("./orchestratorDecisions.js").OrchestratorDecision[];
   executeCommand?: (
     message: IncomingMessage,
     id: string,
@@ -2075,6 +2083,22 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // A private work source comes only from a delivered requester message, never
   // the operator's combined prompt. Follow-ups bind after confirmed delivery.
   const mainSources = new MainSourceTracker(msg, (source) => chatActorOf(deps.config, source));
+  const recordWorkDecision = async (
+    message: IncomingMessage,
+    callId: string | undefined,
+    action: import("./orchestratorDecisions.js").OrchestratorWorkAction,
+    input: unknown,
+    context?: import("./unitContext.js").UnitContext,
+  ) => {
+    const current = () =>
+      mainWorkTrusted &&
+      !privateAudienceLatch.revoked &&
+      run.control.requested === undefined &&
+      mainSources.current()?.msg === message;
+    if (!callId || !ctx.recordWorkDecision || !current()) return undefined;
+    if (!(await ctx.recordWorkDecision(message, callId, action, input, context)) || !current()) return undefined;
+    return current;
+  };
   const command: ConversationCommand | undefined =
     mainWorkAudienceAllowed({
       agentName: agent.name,
@@ -2216,6 +2240,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     : undefined;
   const progressSourceTrusted = privateProgressSourceTrusted(msg.userId, admitted.inbox, resume?.events);
   const mainWork = mainWorkForRun({
+    recordDecision: async (action, callId) => {
+      const source = mainSources.current();
+      if (!source) return undefined;
+      return recordWorkDecision(source.msg, callId, { tool: action.tool, target: { actId: action.actId } }, action);
+    },
     observeRead: workFreshness.observe,
     readTrusted: () => !privateAudienceLatch.revoked && progressSourceTrusted(),
     agentName: agent.name,
@@ -2249,6 +2278,14 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // budget are lossy, so keep each bounded reason for the finish record itself.
   const contextRefusals = contextRefusalsOf(resume?.row.state.contextRefusals);
   const mainStart = mainStartForRun({
+    recordDecision: (input, callId) =>
+      recordWorkDecision(
+        input.msg,
+        callId,
+        { tool: "work_start", target: { repo: input.repo } },
+        { repo: input.repo, brief: input.brief, authority: input.authority },
+        input.context,
+      ),
     agentName: agent.name,
     channelVisibility,
     initial: { actor: chatActorOf(deps.config, msg), msg },
@@ -4800,6 +4837,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         ...(ctx.runSetup !== undefined ? { setup: ctx.runSetup } : {}),
         audience: privateAudienceLatch,
         ...(contextRefusals.length ? { contextRefusals } : {}),
+        ...(ctx.orchestratorDecisions ? { orchestratorDecisions: ctx.orchestratorDecisions() } : {}),
         ending,
         run,
         snap,

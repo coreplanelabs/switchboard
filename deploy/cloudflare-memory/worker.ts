@@ -9302,6 +9302,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     }
     const events: RunEvent[] = parseEventRows(this.eventRows(id, 0, Number.MAX_SAFE_INTEGER));
     let sourceReads: unknown;
+    let orchestratorDecisions: unknown;
     let branchPublication: unknown;
     let reviewPublication: unknown;
     let branchPushReceipts: unknown;
@@ -9321,6 +9322,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       branchPushReceipts = (parseStoredJson(row.summary_json) as Record<string, unknown>).branchPushReceipts;
       if (branchPushReceipts !== undefined && !branchPushReceiptsOf(branchPushReceipts)) return null;
       sourceReads = row.source_reads_json == null ? undefined : parseStoredJson(row.source_reads_json);
+      orchestratorDecisions = (parseStoredJson(row.summary_json) as Record<string, unknown>).orchestratorDecisions;
       if (row.work_evidence_json != null) {
         const evidence = parseWorkEvidence(parseStoredJson(row.work_evidence_json), summary);
         if (evidence === undefined) return null;
@@ -9346,6 +9348,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       ...(reviewPublication === undefined ? {} : { reviewPublication }),
       ...(branchPushReceipts === undefined ? {} : { branchPushReceipts }),
       ...(sourceReads === undefined ? {} : { sourceReads }),
+      ...(orchestratorDecisions === undefined ? {} : { orchestratorDecisions }),
       ...(workReads === undefined ? {} : { workReads }),
       ...(unitSeedReceipt === undefined ? {} : { unitSeedReceipt }),
       ...(branchIdentityBaseline === undefined ? {} : { branchIdentityBaseline }),
@@ -9809,6 +9812,7 @@ function parseSummary(row: Pick<RunRow, "summary_json">): RunListItem | null {
     if (typeof parsed !== "object" || parsed === null) return null;
     const {
       branchPublication: _branchPublication,
+      orchestratorDecisions: _orchestratorDecisions,
       reviewPublication: _reviewPublication,
       branchPushReceipts: _branchPushReceipts,
       ...summary

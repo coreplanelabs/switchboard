@@ -14,7 +14,7 @@ type ReadySource = Extract<MainSourceResolution, { kind: "ready" }> & { authorit
 
 /** The requester and source message come from dispatch, never tool input. */
 export interface MainStartCapability {
-  start(repo: string, brief: Brief, sourceMessage: string): Promise<MainStartResult>;
+  start(repo: string, brief: Brief, sourceMessage: string, toolCallId?: string): Promise<MainStartResult>;
 }
 
 /** The private worker's progress and completion path is proved only for a
@@ -61,6 +61,7 @@ export function mainStartForRun(deps: {
   onContextRefusal?: (code: MainContextRefusalCode) => Promise<void> | void;
   verifyDirectAudience?: (audience: SlackDirectAudience) => Promise<AudienceCheck>;
   start?: (input: MainStartInput) => Promise<MainStartResult>;
+  recordDecision: (input: MainStartInput, toolCallId?: string) => Promise<(() => boolean) | undefined>;
 }): MainStartCapability | undefined {
   // The model's tool call and evidence are logged in the conversation. Only a
   // verified direct Slack DM may carry private work through this tool.
@@ -71,7 +72,7 @@ export function mainStartForRun(deps: {
   )
     return undefined;
   return {
-    start: async (repo, brief, sourceMessage) => {
+    start: async (repo, brief, sourceMessage, toolCallId) => {
       if (!deps.live()) return Promise.resolve({ kind: "refused", reply: "The main run stopped, so no work started." });
       const source = await deps.source(sourceMessage, repo);
       if (source.kind === "refused") {
@@ -121,7 +122,7 @@ export function mainStartForRun(deps: {
           return { kind: "refused", reply: "I couldn't verify this private conversation; no work started." };
         }
       }
-      return deps.start!({
+      const input: MainStartInput = {
         actor: source.actor,
         msg: source.msg,
         mainRunId: deps.runId,
@@ -138,7 +139,13 @@ export function mainStartForRun(deps: {
             return false;
           }
         },
-      });
+      };
+      const current = await deps.recordDecision(input, toolCallId);
+      if (!current) return { kind: "refused", reply: "The work decision could not be saved; no worker started." };
+      input.stillLive = () => deps.live() && current();
+      if (!(await input.stillPrivate()) || !input.stillLive())
+        return { kind: "refused", reply: "Requester authority changed; no worker started." };
+      return deps.start!(input);
     },
   };
 }
@@ -268,7 +275,7 @@ export const workStartTool: RunnableTool = {
     if (!checked.ok) return `error: ${JSON.stringify({ kind: "invalid_brief", issues: checked.issues })}`;
     const sourceMessage = typeof input.sourceMessage === "string" ? input.sourceMessage : "";
     if (sourceMessage.length > 1000) return "error: The request quote is too long; nothing started.";
-    const result = await ctx.mainStart.start(input.repo, checked.brief, sourceMessage);
+    const result = await ctx.mainStart.start(input.repo, checked.brief, sourceMessage, ctx.callId);
     switch (result.kind) {
       case "accepted":
         return `Started one private worker. Work id: ${result.actId}. The main conversation stays here while it works.`;

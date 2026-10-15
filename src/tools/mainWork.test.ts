@@ -75,7 +75,10 @@ function requester(over: Partial<Actor> = {}): Actor {
   };
 }
 
-async function fixture(over: Partial<CoordinatorUnit> = {}) {
+async function fixture(
+  over: Partial<CoordinatorUnit> = {},
+  recordDecision: Parameters<typeof mainWorkForRun>[0]["recordDecision"] = async () => () => true,
+) {
   const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
   await instances.recordRequesterTurn({ threadKey: THREAD, requesterId: INSTANCE.userId, messageId: "1" });
   expect(
@@ -122,6 +125,7 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
     readTrusted?: () => boolean,
   ) =>
     mainWorkForRun({
+      recordDecision,
       agentName: "orchestrator",
       actor,
       message: {
@@ -155,6 +159,80 @@ async function fixture(over: Partial<CoordinatorUnit> = {}) {
 }
 
 describe("main work tools", () => {
+  it.each(["steer", "stop"] as const)("binds the %s source before the first audience wait", async (action) => {
+    let revision = 1;
+    const selected: number[] = [];
+    const { bind, context } = await fixture({}, async () => {
+      const original = revision;
+      selected.push(original);
+      return () => revision === original;
+    });
+    const delayed = bind(
+      requester(),
+      "original-run",
+      { channelId: INSTANCE.channelId, threadKey: THREAD, userId: INSTANCE.userId },
+      () => true,
+      async () => {
+        revision = 2;
+        return true;
+      },
+    );
+    const run = (capability: MainWorkCapability | undefined) =>
+      action === "steer"
+        ? workSteerTool.run({ actId: ACT, words: "Check billing" }, context(capability))
+        : workStopTool.run({ actId: ACT }, context(capability));
+    expect(await run(delayed)).toContain("Saved work is unavailable");
+    expect(await run(bind())).toContain(action === "steer" ? "Update queued" : "Stop mark saved");
+    expect(selected).toEqual([1, 2]);
+  });
+
+  it.each(["steer", "stop"] as const)(
+    "holds %s until its decision is saved and keeps the source guard through lookup",
+    async (action) => {
+      let admitted = false;
+      let current = true;
+      const { instances, context, stop, bind } = await fixture({}, async () => (admitted ? () => current : undefined));
+      const run = () =>
+        action === "steer"
+          ? workSteerTool.run({ actId: ACT, words: "Also check billing" }, context())
+          : workStopTool.run({ actId: ACT }, context());
+      expect(await run()).toContain("Saved work is unavailable");
+      expect(await instances.listEvents({ instanceId: INSTANCE.id, unit: "task" })).toEqual([]);
+      expect(stop).not.toHaveBeenCalled();
+      admitted = true;
+      const get = instances.get.bind(instances);
+      vi.spyOn(instances, "get").mockImplementationOnce(async (...args) => {
+        current = false;
+        return get(...args);
+      });
+      expect(await run()).toContain("Saved work is unavailable");
+      expect(await instances.listEvents({ instanceId: INSTANCE.id, unit: "task" })).toEqual([]);
+      expect(stop).not.toHaveBeenCalled();
+      current = true;
+      if (action === "stop") {
+        const delayed = bind(
+          requester(),
+          "later-run",
+          { channelId: INSTANCE.channelId, threadKey: THREAD, userId: INSTANCE.userId },
+          () => true,
+          async () => true,
+          async () => {
+            current = false;
+            return { stop };
+          },
+        );
+        expect(await workStopTool.run({ actId: ACT }, context(delayed))).toContain("Saved work is unavailable");
+        expect(stop).not.toHaveBeenCalled();
+        current = true;
+      }
+      expect(await run()).toContain(action === "steer" ? "Update queued" : "Stop mark saved");
+      if (action === "steer")
+        expect(await instances.listEvents({ instanceId: INSTANCE.id, unit: "task" })).toMatchObject([
+          { text: "Also check billing", sender: INSTANCE.userId },
+        ]);
+      else expect(stop.mock.calls[0]?.[0]).toBe(INSTANCE.id);
+    },
+  );
   it("restores a current authorized status without restoring mutation authority", async () => {
     const { bind, instances, context, sent, stop } = await fixture({ startedAt: 1_100 });
     const reads: MainWorkRead[] = [];
@@ -414,6 +492,7 @@ describe("main work tools", () => {
   it("refuses a Slack Connect D-channel or missing and failed action-time verification", async () => {
     const { bind, instances } = await fixture();
     const shared = mainWorkForRun({
+      recordDecision: async () => () => true,
       agentName: "orchestrator",
       actor: requester(),
       message: { channelId: INSTANCE.channelId, threadKey: THREAD, userId: INSTANCE.userId },
@@ -467,6 +546,7 @@ describe("main work tools", () => {
   it("does not bind linked-work controls for a shared channel even when the requester owns the unit", async () => {
     const { instances } = await fixture();
     const capability = mainWorkForRun({
+      recordDecision: async () => () => true,
       agentName: "orchestrator",
       actor: requester({ origin: { channelId: "slack:CPUB", threadKey: "slack:CPUB:1.0" } }),
       runId: "run-public",
@@ -490,6 +570,7 @@ describe("main work tools", () => {
     ] as const) {
       expect(
         mainWorkForRun({
+          recordDecision: async () => () => true,
           agentName: "orchestrator",
           actor: requester({ origin: { channelId, threadKey: `${channelId}:1.0` } }),
           message: { channelId, threadKey: `${channelId}:1.0`, userId: INSTANCE.userId },
@@ -504,6 +585,7 @@ describe("main work tools", () => {
     }
     expect(
       mainWorkForRun({
+        recordDecision: async () => () => true,
         agentName: "orchestrator",
         actor: requester({ kind: "agent", id: "slack:bot:B1", onBehalfOf: requester() }),
         message: {
@@ -622,6 +704,49 @@ describe("main work tools", () => {
     expect(await workStopTool.run({ actId: ACT }, context())).toContain("a worker did not confirm it stopped");
   });
 
+  it("a newer source during the real plane's final lookup leaves the original work running", async () => {
+    let current = true;
+    let supersede = true;
+    const { instances, bind, context } = await fixture({}, async () => () => current);
+    const stoppedRuns: string[] = [];
+    const plane = createPlaneService({
+      instances: {
+        get: async (id) => {
+          const instance = await instances.get(id);
+          if (supersede) current = false;
+          return instance;
+        },
+        listUnits: instances.listUnits.bind(instances),
+        markStopped: instances.markStopped.bind(instances),
+      },
+      runs: {
+        listRuns: async () => ({ runs: [] }),
+        listInstanceUnits: async () => [],
+        stopRun: async (id, mode) => {
+          stoppedRuns.push(id);
+          return { ok: true, value: { id, mode, state: "stopping" } };
+        },
+      },
+      clock: () => 2_000,
+    });
+    const capability = bind(
+      requester(),
+      "run-final-lookup",
+      undefined,
+      () => true,
+      async () => true,
+      async () => plane,
+    );
+    expect(await workStopTool.run({ actId: ACT }, context(capability))).toContain("Saved work is unavailable");
+    expect((await instances.get(INSTANCE.id))?.stop).toBeUndefined();
+    expect(stoppedRuns).toEqual([]);
+    supersede = false;
+    current = true;
+    expect(await workStopTool.run({ actId: ACT }, context(capability))).toContain("Stop mark saved");
+    expect((await instances.get(INSTANCE.id))?.stop).toMatchObject({ at: 2_000 });
+    expect(stoppedRuns).toEqual(["run-parent"]);
+  });
+
   it("a branch change during the work_stop tool cannot stop the former claimed unit", async () => {
     const { instances, bind, context } = await fixture();
     const stoppedRuns: string[] = [];
@@ -728,6 +853,7 @@ describe("main work tools", () => {
     expect(await workStopTool.run({ actId: ACT }, context(null))).toMatch(/^error: Saved work is unavailable/);
     expect(
       mainWorkForRun({
+        recordDecision: async () => () => true,
         agentName: "review",
         actor: requester(),
         message: { channelId: INSTANCE.channelId, threadKey: THREAD, userId: INSTANCE.userId },

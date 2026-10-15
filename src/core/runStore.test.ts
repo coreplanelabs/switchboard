@@ -182,8 +182,28 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
         branches: [],
         pending: { id: "intent-a", ref: "private/branch", headSha: "a".repeat(40), pr: 7 },
       };
-      await store.put({ ...base, sourceReads, contextDependencies, workReads, branchPublication });
+      const orchestratorDecisions: NonNullable<RunRecord["orchestratorDecisions"]> = [
+        {
+          version: 1,
+          id: JSON.stringify([base.id, "private-decision-call"]),
+          owner: { runId: base.id, requesterId: base.userId, channelId: base.channelId, threadKey: base.threadKey },
+          source: { kind: "request", messageId: "1.0", textHash: "a".repeat(64) },
+          tool: "work_stop",
+          targetHash: "b".repeat(64),
+          inputHash: "c".repeat(64),
+          contextHash: "d".repeat(64),
+        },
+      ];
+      await store.put({
+        ...base,
+        sourceReads,
+        contextDependencies,
+        workReads,
+        branchPublication,
+        orchestratorDecisions,
+      });
       expect((await store.get(base.id))?.branchPublication).toEqual(branchPublication);
+      expect((await store.get(base.id))?.orchestratorDecisions).toEqual(orchestratorDecisions);
       expect((await store.get(base.id))?.workReads).toEqual(workReads);
       expect((await store.get(base.id))?.sourceReads).toEqual(sourceReads);
       for (const summary of [await store.getSummary(base.id), ...(await store.list({}))]) {
@@ -192,6 +212,7 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
         expect(JSON.stringify(summary)).not.toContain("private/branch");
         expect(summary).not.toHaveProperty("sourceReads");
         expect(summary).not.toHaveProperty("workReads");
+        expect(summary).not.toHaveProperty("orchestratorDecisions");
         expect(JSON.stringify(summary)).not.toContain("original private source");
       }
     });

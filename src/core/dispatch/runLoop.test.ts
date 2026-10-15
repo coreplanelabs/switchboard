@@ -497,6 +497,7 @@ function setup(
   const published: string[] = [];
   const ending = createRunEnding({ registry });
   const ctx = {
+    recordWorkDecision: async () => true,
     msg: message,
     io,
     agent,
@@ -1967,11 +1968,11 @@ describe("runLoop — the model turn and everything that rides on it", () => {
           ...watchedPi.harness,
           open: async (deps, run) => {
             const brief = { question: "What failed?", findings: [], requestedChange: "Fix it" };
-            before = await run.toolContext.mainStart?.start("acme/api", brief, "fix it in acme/api");
+            before = await run.toolContext.mainStart?.start("acme/api", brief, "fix it in acme/api", "start-call");
             await run.stageFollowUps!([
               { text: "please start work", userId: "slack:UOTHER", postedBy: "slack:bot:B1", at: 2_000 },
             ]);
-            after = await run.toolContext.mainStart?.start("acme/api", brief, "fix it in acme/api");
+            after = await run.toolContext.mainStart?.start("acme/api", brief, "fix it in acme/api", "start-call");
             return watchedPi.harness.open(deps, run);
           },
         }),
@@ -2007,6 +2008,77 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(before).toEqual({ kind: "refused", reply: "fixture" });
     expect(after).toMatchObject({ kind: "refused" });
     expect(started).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds a worker start when a newer requester turn arrives during the decision save", async () => {
+    const channelId = "slack:DPRIVATE";
+    const threadKey = `${channelId}:1.0`;
+    const audience = { kind: "slack-unshared-im" as const, channelId, threadKey, userId: "slack:UADMIN" };
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.recordRequesterTurn({ threadKey, requesterId: audience.userId, messageId: "1.0" });
+    const started: string[] = [];
+    const selected: string[] = [];
+    let liveHarness: HarnessRun | undefined;
+    const watchedPi = watched(piHarness);
+    const s = setup("Done.", {
+      agent: "orchestrator",
+      userId: audience.userId,
+      io: { verifyDirectAudience: booleanAudienceVerifier(async () => true) } as Partial<ChannelIO>,
+      harness: {
+        harnesses: roster({
+          ...watchedPi.harness,
+          open: async (deps, run) => {
+            liveHarness = run;
+            const brief = { question: "Why?", findings: [], requestedChange: "Fix it" };
+            expect(await run.toolContext.mainStart!.start("acme/api", brief, "fix first", "first-call")).toEqual({
+              kind: "refused",
+              reply: "The work decision could not be saved; no worker started.",
+            });
+            expect(
+              await run.toolContext.mainStart!.start("acme/api", brief, "fix latest", "latest-call"),
+            ).toMatchObject({ kind: "accepted", actId: "latest-work" });
+            return watchedPi.harness.open(deps, run);
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    s.deps.coordinatorInstances = instances;
+    s.deps.mainTaskStart = async (input) => {
+      started.push(input.msg.messageId!);
+      return { kind: "accepted", actId: "latest-work", instanceId: "unit-one", reply: "started" };
+    };
+    await runLoop(s.deps, {
+      ...s.ctx,
+      configuredRepo: "acme/api",
+      channelVisibility: "dm",
+      msg: { ...s.ctx.msg, channelId, threadKey, directAudience: audience, messageId: "1.0", text: "fix first" },
+      captureUnitContext: async () =>
+        contextCapsuleOf({
+          version: 1,
+          source: { runId: s.run.id, requester: audience.userId, channelId, threadKey },
+          session: { key: `${threadKey}:@thread`, from: 0, to: -1 },
+          assets: [],
+        }),
+      recordWorkDecision: async (source) => {
+        selected.push(source.messageId!);
+        if (source.messageId === "1.0") {
+          const inputs = [
+            { text: "fix latest", userId: audience.userId, directAudience: audience, messageId: "2.0", at: 2_000 },
+          ];
+          await liveHarness!.stageFollowUps!(inputs);
+          liveHarness!.confirmedFollowUps!(inputs);
+        }
+        return true;
+      },
+    });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect(selected).toEqual(["1.0", "2.0"]);
+    expect(started).toEqual(["2.0"]);
   });
 
   it("persists a verified live follow-up before it can start work or revoke an older request", async () => {
@@ -2051,6 +2123,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
                 "acme/api",
                 { question: "Why did signup fail?", findings: [], requestedChange: "Fix signup" },
                 sourceMessage,
+                "start-call",
               );
               return watchedPi.harness.open(deps, run);
             },
@@ -2127,11 +2200,13 @@ describe("runLoop — the model turn and everything that rides on it", () => {
               "acme/api",
               { question: "Why did signup fail?", findings: [], requestedChange: "Fix signup" },
               "fix first",
+              "start-call",
             );
             latest = await run.toolContext.mainStart?.start(
               "acme/api",
               { question: "Why did signup fail?", findings: [], requestedChange: "Fix signup" },
               "fix latest",
+              "start-call",
             );
             return watchedPi.harness.open(deps, run);
           },
@@ -2197,6 +2272,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
               "acme/api",
               { question: "Why?", findings: [], requestedChange: "Fix it" },
               "Fix it.",
+              "start-call",
             );
             return watchedPi.harness.open(deps, run);
           },
@@ -2279,6 +2355,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
                   "acme/api",
                   { question: "Why?", findings: [], requestedChange: "Fix it" },
                   "Fix it.",
+                  "start-call",
                 );
                 expect(result).toMatchObject({ kind: "refused", reply: expect.stringContaining("couldn't save") });
                 expect(JSON.stringify(result)).not.toContain(code);
@@ -2348,6 +2425,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
                 "acme/api",
                 { question: "Why?", findings: [], requestedChange: "Fix it" },
                 fault === "quote" ? "Fix another thing" : fault === "quote_missing" ? "" : "Fix it.",
+                "start-call",
               );
               return watchedPi.harness.open(deps, run);
             },
@@ -2415,6 +2493,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
               "acme/api",
               { question: "What failed?", findings: [], requestedChange: "Fix signup" },
               "Please fix signup in acme/api",
+              "start-call",
             );
             return watchedPi.harness.open(deps, run);
           },
@@ -2458,7 +2537,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         harnesses: roster({
           ...watchedPi.harness,
           open: async (deps, run) => {
-            const effect = run.toolContext.mainWork!.stop("fix-signup");
+            const effect = run.toolContext.mainWork!.stop("fix-signup", "stop-call");
             await stopping;
             s.ctx.admitted.inbox.markUntrustedFollowUp();
             const staged = run.stageFollowUps!([

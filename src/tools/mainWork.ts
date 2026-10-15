@@ -71,7 +71,7 @@ export interface MainWorkCapability {
   ): Promise<void>;
   restoreRead?(receipt: MainWorkReadReceipt): (() => Promise<MainWorkReadRefresh>) | undefined;
   steer(actId: string, words: string, toolCallId: string): ReturnType<Actions["steer"]>;
-  stop(actId: string): ReturnType<Actions["stop"]>;
+  stop(actId: string, toolCallId?: string): ReturnType<Actions["stop"]>;
 }
 
 export interface MainWorkEffectGate {
@@ -124,6 +124,11 @@ export function mainWorkForRun(
     verify?: (audience: DirectAudience) => Promise<boolean>;
     observeRead?: MainWorkReadObserver;
     readSeedReceipt?: UnitSeedReader;
+    /** Capture the source before waiting; return its guard only after the save. */
+    recordDecision: (
+      action: { tool: "work_steer"; actId: string; words: string } | { tool: "work_stop"; actId: string },
+      toolCallId?: string,
+    ) => Promise<(() => boolean) | undefined>;
   },
 ): MainWorkCapability | undefined {
   if (
@@ -156,9 +161,9 @@ export function mainWorkForRun(
       plane: {
         stop: async (id, actor, visibleTo, binding) => {
           const plane = await deps.plane!();
-          if (!(await canAct()) || !trusted())
-            return { kind: "unavailable" as const, reason: "direct audience changed before stop" };
-          return plane.stop(id, actor, visibleTo, binding);
+          if (!(await liveAuthority.verify()) || !liveAuthority.active())
+            return { kind: "unavailable" as const, reason: "requester authority changed before stop" };
+          return plane.stop(id, actor, visibleTo, binding, liveAuthority);
         },
       },
       clock: deps.clock,
@@ -216,19 +221,35 @@ export function mainWorkForRun(
         }
       : {}),
     steer: async (actId, words, toolCallId) => {
-      if (!(await canAct())) return { kind: "unavailable" as const };
+      // Bind the delivered source before the first wait. A newer turn cannot
+      // become the source of an older call during an audience check or queue wait.
+      const current = await deps.recordDecision({ tool: "work_steer", actId, words }, toolCallId);
+      if (!current || !(await canAct())) return { kind: "unavailable" as const };
       // A provider call id may repeat in another run. Both durable identities
       // enter the hash so one call replays once and a later call stays distinct.
       const eventId = createHash("sha256").update(deps.runId).update("\0").update(toolCallId).digest("hex");
       return (
-        (await deps.effectGate.run(() => actions.steer(deps.actor, { actId, words, eventId }))) ?? {
+        (await deps.effectGate.run(async () => {
+          return actionsFor({
+            verify: async () => (await canAct()) && current(),
+            active: () => trusted() && current(),
+          }).steer(deps.actor, { actId, words, eventId });
+        })) ?? {
           kind: "unavailable" as const,
         }
       );
     },
-    stop: async (actId) => {
-      if (!(await canAct())) return { kind: "unavailable" as const };
-      return (await deps.effectGate.run(() => actions.stop(deps.actor, actId))) ?? { kind: "unavailable" as const };
+    stop: async (actId, toolCallId) => {
+      const current = await deps.recordDecision({ tool: "work_stop", actId }, toolCallId);
+      if (!current || !(await canAct())) return { kind: "unavailable" as const };
+      return (
+        (await deps.effectGate.run(async () => {
+          return actionsFor({
+            verify: async () => (await canAct()) && current(),
+            active: () => trusted() && current(),
+          }).stop(deps.actor, actId);
+        })) ?? { kind: "unavailable" as const }
+      );
     },
   };
 }
@@ -343,7 +364,7 @@ export const workStopTool: RunnableTool = {
     if (!ctx.mainWork) return UNAVAILABLE;
     const actId = actIdOf(input);
     if (!actId) return "error: I need the work id from the earlier handoff before stopping it.";
-    const result = await ctx.mainWork.stop(actId);
+    const result = await ctx.mainWork.stop(actId, ctx.callId);
     switch (result.kind) {
       case "stopped":
         return `Stop mark saved for this work. ${result.childOutcomes.length} child stop result(s) returned; check status for their final state.`;

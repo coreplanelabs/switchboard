@@ -1,4 +1,5 @@
 import { startRequestRoot } from "./requestTrace.js";
+import type { PlaneService } from "./planeService.js";
 import { humanReview } from "./testing/humanReview.js";
 import { preapprovedCaller } from "./testing/callers.js";
 import { registerRunsCommands, type RunsCommandDeps } from "./commands/runs.js";
@@ -1660,9 +1661,15 @@ describe("dispatch", () => {
     }
   });
 
-  it.each([false, true])(
-    "uses the configured pilot repository for a later main-run fix after a GitHub read: %s",
-    async (readGithub) => {
+  it.each([
+    [false, "saved"],
+    [true, "saved"],
+    [false, "refused"],
+    [false, "unavailable"],
+    [false, "revoked"],
+  ] as const)(
+    "uses the configured pilot repository for a later main-run fix after a GitHub read: %s, decision: %s",
+    async (readGithub, saveMode) => {
       let turns = 0;
       const provider: Provider = {
         name: "fake",
@@ -1707,7 +1714,17 @@ describe("dispatch", () => {
         },
       };
       const deps = makeDeps(pilotMainDmYaml, provider);
-      wireChildLedger(deps);
+      const ledger = wireChildLedger(deps);
+      let privateNow = true;
+      const save = ledger.setState.bind(ledger);
+      vi.spyOn(ledger, "setState").mockImplementation(async (runId, gen, state) => {
+        if (state.orchestratorDecisions !== undefined) {
+          if (saveMode === "refused") return { ok: false, reason: "fenced" };
+          if (saveMode === "unavailable") throw new PermanentStoreError("decision acknowledgement unavailable");
+          if (saveMode === "revoked") privateNow = false;
+        }
+        return save(runId, gen, state);
+      });
       deps.githubApi = new InMemoryGithubApi({
         "acme/api": { private: false, files: { "README.md": "original GitHub source evidence" } },
       });
@@ -1720,13 +1737,37 @@ describe("dispatch", () => {
       });
       deps.coordinatorInstances = instances;
       const starts: unknown[] = [];
+      let selected: unknown;
       deps.mainTaskStart = async (input) => {
+        selected = structuredClone(ledger.live.get(input.mainRunId)?.state.orchestratorDecisions);
         starts.push(input);
         return { kind: "accepted", actId: "work-one", instanceId: "unit-one", reply: "started" };
       };
       const { io } = mainDmIO([{ role: "user", user: "slack:UADMIN", text: "Why did signup fail in acme/api?" }]);
+      io.verifyDirectAudience = booleanAudienceVerifier(async () => privateNow);
       await dispatch(deps, { ...mainDm("fix it"), messageId: "2" }, io);
+      if (saveMode !== "saved") {
+        expect(starts).toEqual([]);
+        return;
+      }
       expect(starts).toHaveLength(1);
+      expect(selected).toMatchObject([
+        {
+          id: expect.stringContaining("start-fix"),
+          owner: { requesterId: "slack:UADMIN", threadKey: directMainAudience.threadKey },
+          source: {
+            kind: "request",
+            messageId: "2",
+            textHash: "bff5d2ae408038d9d63d0a85719035de711808b9c731520558dad8f9d3215fba",
+          },
+          tool: "work_start",
+          targetHash: "8dd1a390ef1282d683f233877c83288e159521806b8bc72bd59ddb14f9a95908",
+          inputHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+          contextHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+      ]);
+      const finished = await deps.runStore!.get((starts[0] as { mainRunId: string }).mainRunId);
+      expect(finished).toMatchObject({ orchestratorDecisions: selected });
       expect(starts[0]).toMatchObject({
         authorizedRepo: "acme/api",
         repo: "acme/api",
@@ -1756,6 +1797,113 @@ describe("dispatch", () => {
       }
     },
   );
+
+  it("records commands and linked-worker changes in one original conversation history", async () => {
+    const tools = [
+      {
+        type: "tool_use" as const,
+        id: "command-call",
+        name: "command_run",
+        input: { command: "config.show", parameters: {}, sourceMessage: "update my work" },
+      },
+      {
+        type: "tool_use" as const,
+        id: "steer-call",
+        name: "work_steer",
+        input: { actId: "fix-signup", words: "Check billing too" },
+      },
+      { type: "tool_use" as const, id: "stop-call", name: "work_stop", input: { actId: "fix-signup" } },
+    ];
+    const provider: Provider = {
+      name: "fake",
+      complete: async () => {
+        const tool = tools.shift();
+        return tool
+          ? { content: [tool], stopReason: "tool_use" }
+          : { content: [{ type: "text", text: "Work updated and stopped." }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(pilotMainDmYaml, provider);
+    const ledger = wireChildLedger(deps);
+    const instances = new InMemoryCoordinatorInstanceStore(ledger);
+    deps.coordinatorInstances = instances;
+    const msg = { ...mainDm("update my work"), messageId: "1" };
+    await instances.recordRequesterTurn({ threadKey: msg.threadKey, requesterId: msg.userId, messageId: "1" });
+    const instance = {
+      id: "original-unit",
+      kind: "ship" as const,
+      channelId: msg.channelId,
+      userId: msg.userId,
+      threadKey: msg.threadKey,
+      repo: "acme/api",
+      branch: "ship/original",
+      base: "main",
+      plan: { id: "original" },
+      merge: "person" as const,
+      createdAt: 1_000,
+      runId: "original-parent",
+    };
+    expect(
+      await instances.claimMainTask(
+        { mainThreadKey: msg.threadKey, actId: "fix-signup" },
+        instance,
+        {
+          instanceId: instance.id,
+          unit: "task",
+          slug: "signup",
+          branch: instance.branch,
+          dependsOn: [],
+          rounds: [],
+          workBrief: {
+            requesterId: msg.userId,
+            mainThreadKey: msg.threadKey,
+            actId: "fix-signup",
+            repo: instance.repo,
+            base: "main",
+            question: "Why?",
+            findings: [],
+            requestedChange: "Fix signup",
+          },
+        },
+        { requesterId: msg.userId, sourceMessageId: "1", revision: 1, repo: instance.repo },
+      ),
+    ).toMatchObject({ ok: true });
+    const selectedBeforeEffects: unknown[] = [];
+    const snapshot = () =>
+      structuredClone(
+        [...ledger.live.values()].find((row) => row.meta.agent === "orchestrator")?.state.orchestratorDecisions,
+      );
+    const append = instances.appendEvent.bind(instances);
+    vi.spyOn(instances, "appendEvent").mockImplementation(async (...args) => {
+      selectedBeforeEffects.push(snapshot());
+      return append(...args);
+    });
+    deps.plane = async (): Promise<PlaneService> => ({
+      table: async () => {
+        throw new Error("This fixture does not read the plane");
+      },
+      stop: async (id: string) => {
+        selectedBeforeEffects.push(snapshot());
+        expect(id).toBe("original-unit");
+        return { kind: "stopped", instanceId: id, runnerStopped: true, stopsSucceeded: true, children: [] };
+      },
+    });
+    deps.operatorModel = async () => {
+      throw new Error("A second routing model must not run");
+    };
+    const { io, replies } = mainDmIO();
+    await dispatch(deps, msg, io);
+    expect(replies).toContain("Work updated and stopped.");
+    expect(await instances.listEvents({ instanceId: instance.id, unit: "task" })).toMatchObject([
+      { text: "Check billing too", sender: msg.userId },
+    ]);
+    expect(selectedBeforeEffects).toMatchObject([
+      [{ command: "config.show" }, { tool: "work_steer", source: { messageId: "1" } }],
+      [{ command: "config.show" }, { tool: "work_steer" }, { tool: "work_stop", source: { messageId: "1" } }],
+    ]);
+    const owner = (selectedBeforeEffects[1] as { owner: { runId: string } }[])[0].owner.runId;
+    expect((await deps.runStore!.get(owner))?.orchestratorDecisions).toEqual(selectedBeforeEffects[1]);
+  });
 
   it("does not promote raw Slack history into a cross-run work target", async () => {
     let turns = 0;

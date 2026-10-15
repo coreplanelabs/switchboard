@@ -39,7 +39,7 @@ import {
   type AudienceRefusalCode,
   type AudienceTrace,
 } from "./audienceDecision.js";
-import { sourceBinding, type SessionSources } from "./references/receipts.js";
+import { sourceBinding, sourceHash, type SessionSources } from "./references/receipts.js";
 import { configuredAgent } from "../config/agents.js";
 import { isRunProfile } from "../config/profile.js";
 import { MINUTE_MS, minutesToMs } from "./budgets.js";
@@ -4604,13 +4604,33 @@ export async function dispatch(
     // The agent loop (dispatch/runLoop.ts): the model turn, the follow-up inbox,
     // the settle and the post-steps, the finish. A throw propagates to the
     // outer catch after the workspace is released.
-    const commandDecisions = createOrchestratorDecisions({
+    const orchestratorDecisions = createOrchestratorDecisions({
       owner: { runId: run.id, requesterId: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey },
       previous: (resume?.row.state ?? restart?.row.state ?? ledgerRun?.harnessLaunchState)?.orchestratorDecisions,
       save: async (entries) =>
         ledgerRun?.tracked() === true && (await ledgerRun.setStateAndFlush({ orchestratorDecisions: entries })),
     });
     const ran = await runLoop(deps, {
+      orchestratorDecisions: orchestratorDecisions.snapshot,
+      recordWorkDecision: async (message, callId, action, input, context) => {
+        if (!message.messageId || !(await revalidateAdmitted()).ok) return false;
+        const saved = await orchestratorDecisions.record({
+          version: 1,
+          id: JSON.stringify([run.id, callId]),
+          owner: {
+            runId: run.id,
+            requesterId: message.userId,
+            channelId: message.channelId,
+            threadKey: message.threadKey,
+          },
+          source: { kind: "request", messageId: message.messageId, textHash: await sourceHash(message.text) },
+          tool: action.tool,
+          targetHash: await sourceHash(action.target),
+          inputHash: await sourceHash(input),
+          contextHash: await sourceHash(context ?? structuredClone(admittedContext)),
+        });
+        return saved && (await revalidateAdmitted()).ok;
+      },
       executeCommand: async (message, id, input, authority, callId) =>
         executeConversationCommand(
           deps,
@@ -4621,7 +4641,7 @@ export async function dispatch(
             ending,
             invocationId: JSON.stringify([run.id, callId]),
             context: structuredClone(admittedContext),
-            recordDecision: (decision) => commandDecisions.record(decision),
+            recordDecision: (decision) => orchestratorDecisions.record(decision),
             check: async (currentSource = true) => {
               if (!(await authority(currentSource))) return { ok: false, code: "direct-audience-denied" };
               const checked = await revalidateAdmitted();

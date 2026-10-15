@@ -89,6 +89,14 @@ This is a saved selection, not a completed action or a job queue. The existing r
 
 The main conversation's private audience and latest-delivered-source checks remain in force. This cut adds no specialist delegation, external evidence delivery, source listener or second model loop. Unit-thread, live-run and explicit external steer paths still need the recorded ownership boundary. Step 1 remains in progress.
 
+### Private worker controls, 2026-10-15
+
+The command binding cut is merged in [PR #3134](https://github.com/coreplanelabs/switchboard/pull/3134). The next cut extends its existing decision writer to the orchestrator's private `work_start`, `work_steer` and `work_stop` tools. Commands and worker controls share one owned history and its count and byte limits. Before a worker can start or receive a change, the writer must acknowledge the conversation, requester, latest delivered source message and selected tool. It retains hashes of the target, input and context. Private target names and request bodies do not enter this metadata.
+
+The existing starter and linked-work executor still check permissions and exact task bindings. The call keeps a check against its original source after the decision save and through later asynchronous lookups. A newer delivered requester turn or withdrawn authority stops the older call. Acknowledged selections also enter the finished run record, including terminal recovery from retained live state. A selection remains separate from permission, action completion and replay safety.
+
+This cut uses the existing orchestrator loop. It adds no model router or new delivery queue. External live replies, unit-thread replies, explicit steer commands and the remaining operator model path still need migration. Step 1 remains in progress.
+
 ## Step 2: save input and recover shared work
 
 **Current source:** [state worker](../../deploy/cloudflare-memory/worker.ts), [run-ledger contract](../../src/core/runLedger/types.ts), and [write-through client](../../src/core/runLedger/writeThrough.ts).

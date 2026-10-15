@@ -684,6 +684,7 @@ function persistedView(
     Pick<
       RunRecord,
       | "sourceReads"
+      | "orchestratorDecisions"
       | "branchIdentityBaseline"
       | "workReads"
       | "unitSeedReceipt"
@@ -700,6 +701,7 @@ function persistedView(
     workspaceDisposition: _workspaceDisposition,
     audienceRefusal: _audienceRefusal,
     sourceReads: _sourceReads,
+    orchestratorDecisions: _orchestratorDecisions,
     branchIdentityBaseline: _branchIdentityBaseline,
     workReads: _workReads,
     unitSeedReceipt: _unitSeedReceipt,
