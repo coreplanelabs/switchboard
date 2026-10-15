@@ -72,6 +72,149 @@ const rows = (unit?: CoordinatorUnit) => ({
   effects: [],
 });
 describe("durable maintenance admission", () => {
+  it.each(["owner", "watch"] as const)(
+    "selects the explicit %s work among settled PR history and preserves rival authority",
+    async (source) => {
+      const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+      const older: CoordinatorUnit = {
+        ...ended,
+        unit: "OLDER",
+        slug: "older",
+        publication: { ...ended.publication!, owner: { instanceId: instance.id, unit: "OLDER" } },
+      };
+      expect(await store.put(instance)).toEqual({ ok: true });
+      for (const work of [older, ended]) {
+        expect(await store.putUnits([{ ...work, ending: undefined }])).toEqual({ ok: true });
+        expect(await store.putUnits([work])).toEqual({ ok: true });
+      }
+      expect(await store.findPullOwners({ repo: "acme/api", pr: 7 })).toEqual({ ok: true, owners: [] });
+      expect(await store.admitMaintenance(input)).toEqual({ ok: false, reason: "owned" });
+      expect(await store.listUnits(instance.id)).toEqual([older, ended]);
+      const selected: MaintenanceAdmissionInput =
+        source === "owner"
+          ? { ...input, owner: { instanceId: instance.id, unit: "OLDER" } }
+          : {
+              ...input,
+              intent: {
+                kind: "watch",
+                eventId: "watch:pr-7",
+                instanceId: instance.id,
+                unit: "OLDER",
+                requester: instance.userId,
+              },
+            };
+      if (source === "owner") {
+        expect(await store.admitMaintenance({ ...selected, target: { ...input.target, repo: "other/api" } })).toEqual({
+          ok: false,
+          reason: "stale",
+        });
+        expect(await store.admitMaintenance({ ...selected, target: { ...input.target, pr: 8 } })).toEqual({
+          ok: false,
+          reason: "conflict",
+        });
+        expect(await store.admitMaintenance({ ...selected, target: { ...input.target, ref: "fix/other" } })).toEqual({
+          ok: false,
+          reason: "conflict",
+        });
+        expect(
+          await store.admitMaintenance({
+            ...selected,
+            intent: {
+              kind: "watch",
+              eventId: "watch:contradictory",
+              instanceId: instance.id,
+              unit: "ONE",
+              requester: instance.userId,
+            },
+          }),
+        ).toEqual({ ok: false, reason: "stale" });
+        expect(await store.listUnits(instance.id)).toEqual([older, ended]);
+      }
+      const admitted = await store.admitMaintenance(selected);
+      expect(admitted).toMatchObject({
+        ok: true,
+        replayed: false,
+        instance,
+        unit: {
+          instanceId: "original_ship",
+          unit: "OLDER",
+          ending: ended.ending,
+          currentEffect: { phase: "active", target: { repo: "acme/api", pr: 7, ref: "fix/pr", base: "main", headSha } },
+        },
+      });
+      const after = await store.listUnits(instance.id);
+      expect(after[1]).toEqual(ended);
+      expect(await store.admitMaintenance(selected)).toMatchObject({
+        ok: true,
+        replayed: true,
+        unit: { unit: "OLDER" },
+      });
+      expect(await store.listUnits(instance.id)).toEqual(after);
+      expect(await store.admitMaintenance({ ...input, owner: { instanceId: instance.id, unit: "ONE" } })).toEqual({
+        ok: false,
+        reason: "owned",
+      });
+      expect(await store.listUnits(instance.id)).toEqual(after);
+    },
+  );
+
+  it("does not let explicit work selection bypass another unit's unknown review publication", async () => {
+    const ledger = new InMemoryRunLedger();
+    const store = new InMemoryCoordinatorInstanceStore(ledger);
+    const older: CoordinatorUnit = {
+      ...ended,
+      unit: "OLDER",
+      slug: "older",
+      publication: { ...ended.publication!, owner: { instanceId: instance.id, unit: "OLDER" } },
+    };
+    expect(await store.put(instance)).toEqual({ ok: true });
+    for (const work of [older, ended]) {
+      expect(await store.putUnits([{ ...work, ending: undefined }])).toEqual({ ok: true });
+      expect(await store.putUnits([work])).toEqual({ ok: true });
+    }
+    const receipt = {
+      version: 1,
+      runId: "original-review",
+      target: { repo: "acme/api", number: 7, commitId: headSha },
+      bodyHash: "b".repeat(64),
+      state: "uncertain",
+    };
+    expect(
+      await ledger.claim({
+        runId: "original-review",
+        threadKey: instance.threadKey,
+        gen: "g1",
+        leaseMs: 1000,
+        startedAt: 3,
+        meta: {
+          agent: "review",
+          repo: instance.repo,
+          userId: instance.userId,
+          channelId: instance.channelId,
+          threadKey: instance.threadKey,
+          parentInstanceId: instance.id,
+          coordinatorUnit: "OLDER",
+          idempotencyKey: `${instance.id}:OLDER/1/review`,
+          pr: 7,
+        },
+        card: null,
+        system: "",
+        tools: [],
+        state: { reviewPublication: receipt },
+      }),
+    ).toMatchObject({ ok: true });
+    expect(await store.findPullOwners({ repo: "acme/api", pr: 7 })).toEqual({
+      ok: true,
+      owners: [{ kind: "run", runId: "original-review" }],
+    });
+    expect(await store.admitMaintenance({ ...input, owner: { instanceId: instance.id, unit: "ONE" } })).toEqual({
+      ok: false,
+      reason: "owned",
+    });
+    expect(await store.listUnits(instance.id)).toEqual([older, ended]);
+    expect(ledger.live.get("original-review")?.state.reviewPublication).toEqual(receipt);
+  });
+
   it("recovers exact no-op cancellation ACK loss but never cancels a begun or foreign action", async () => {
     const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const first = await store.admitMaintenance(input);
