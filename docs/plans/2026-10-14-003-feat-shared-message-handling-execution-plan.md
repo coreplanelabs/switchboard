@@ -81,6 +81,14 @@ The source trace identifies these entry paths and remaining changes:
 
 Context links, recorded internal decisions and removal of routing bypasses remain pending. The complete Step 1 acceptance condition above remains a gap.
 
+### Command binding cut, 2026-10-14
+
+The context extraction is merged in [the first cut](https://github.com/coreplanelabs/switchboard/pull/3130). The next cut connects requester-bound orchestrator commands to that preparation and the existing typed registry binder. It records the original conversation and source in the run's existing state before a command or confirmation offer can proceed. The command's existing history carries the same link after completion.
+
+This is a saved selection, not a completed action or a job queue. The existing registry still checks permissions and confirmations. Missing or failed decision storage stops the command. The writer retains at most 256 selections and 256 KiB of metadata in one run; full input and source bodies have hashes; the existing redacted command line remains display metadata. Native output still goes directly to the requester.
+
+The main conversation's private audience and latest-delivered-source checks remain in force. This cut adds no specialist delegation, external evidence delivery, source listener or second model loop. Unit-thread, live-run and explicit external steer paths still need the recorded ownership boundary. Step 1 remains in progress.
+
 ## Step 2: save input and recover shared work
 
 **Current source:** [state worker](../../deploy/cloudflare-memory/worker.ts), [run-ledger contract](../../src/core/runLedger/types.ts), and [write-through client](../../src/core/runLedger/writeThrough.ts).

@@ -1006,6 +1006,67 @@ describe("dispatch", () => {
     return { provider, requests };
   };
 
+  it("records the main command owner and source before the native mutation", async () => {
+    const { provider } = commandProvider(
+      { scope: "me", effort: "high", sourceMessage: "set my effort high" },
+      "config.set",
+    );
+    const deps = makeDeps(
+      mainDmYaml.replace("agent: orchestrator }", "agent: orchestrator, boundary: { confirm: destructive } }"),
+      provider,
+    );
+    const ledger = wireChildLedger(deps);
+    deps.operatorModel = async () => {
+      throw new Error("A second routing model must not run");
+    };
+    let before: unknown;
+    const apply = deps.config.setUserOverride.bind(deps.config);
+    vi.spyOn(deps.config, "setUserOverride").mockImplementation(async (...args) => {
+      const owner = [...ledger.live.values()].find((row) => row.meta.agent === "orchestrator");
+      before = structuredClone(owner?.state.orchestratorDecisions);
+      return apply(...args);
+    });
+    await dispatch(deps, { ...mainDm("set my effort high"), messageId: "1" }, mainDmIO().io);
+    expect(deps.config.scopes("slack:DALICE", "slack:UADMIN").user).toEqual({ effort: "high" });
+    expect(before).toMatchObject([
+      {
+        version: 1,
+        owner: { requesterId: "slack:UADMIN", channelId: "slack:DALICE", threadKey: "slack:DALICE:1.0" },
+        source: { kind: "request", messageId: "1" },
+        command: "config.set",
+        line: "config set me --effort high",
+      },
+    ]);
+  });
+
+  it("holds main command effects without tracked decision storage", async () => {
+    const { provider, requests } = commandProvider(
+      { scope: "me", effort: "high", sourceMessage: "set my effort high" },
+      "config.set",
+    );
+    const deps = makeDeps(
+      mainDmYaml.replace("agent: orchestrator }", "agent: orchestrator, boundary: { confirm: destructive } }"),
+      provider,
+    );
+    await dispatch(deps, { ...mainDm("set my effort high"), messageId: "1" }, mainDmIO().io);
+    expect(JSON.stringify(requests[1]?.messages)).toContain("The command decision could not be saved; no command ran.");
+    expect(deps.config.scopes("slack:DALICE", "slack:UADMIN").user).toEqual({});
+    wireChildLedger(deps);
+    const fresh = commandProvider({ scope: "me", effort: "high", sourceMessage: "set my effort high" }, "config.set");
+    deps.completions = { get: () => fresh.provider };
+    deps.harness!.containerFor = () => {
+      const container = new FakeHarnessContainer();
+      scriptPiFromProvider(container, {
+        provider: fresh.provider,
+        registry: deps.harness!.registry,
+        bearers: deps.runBearers,
+      });
+      return container;
+    };
+    await dispatch(deps, { ...mainDm("set my effort high"), messageId: "2" }, mainDmIO().io);
+    expect(deps.config.scopes("slack:DALICE", "slack:UADMIN").user).toEqual({ effort: "high" });
+  });
+
   it("persists both same-command results from one requester turn", async () => {
     let turn = 0;
     const requests: CompletionRequest[] = [];
@@ -1122,6 +1183,7 @@ describe("dispatch", () => {
   it("offers a channel reset and executes it only after its requester confirms", async () => {
     const { provider } = commandProvider({ scope: "channel", sourceMessage: "reset this channel" });
     const deps = makeDeps(mainDmYaml, provider);
+    wireChildLedger(deps);
     const store = new InMemoryConfirmationStore();
     deps.confirmations = store;
     await deps.config.setChannelOverride("slack:DALICE", { effort: "high" });
@@ -1153,6 +1215,7 @@ describe("dispatch", () => {
   it("keeps channel settings when the conversation requester lacks config write access", async () => {
     const { provider } = commandProvider({ scope: "channel", sourceMessage: "reset this channel" });
     const deps = makeDeps(mainDmYaml.replace("actions: all", "actions: [config:read]"), provider);
+    wireChildLedger(deps);
     const store = new InMemoryConfirmationStore();
     deps.confirmations = store;
     await deps.config.setChannelOverride("slack:DALICE", { effort: "high" });
@@ -1178,6 +1241,7 @@ describe("dispatch", () => {
     const body = "protected command source body";
     const { provider, requests } = commandProvider({ sourceMessage: "show the backend result" }, "backend.peek");
     const deps = makeDeps(mainDmYaml, provider);
+    wireChildLedger(deps);
     const registry = new CommandRegistry<Record<string, never>>({ audit: () => {} });
     registry.register({
       id: "backend.peek",
@@ -1201,6 +1265,7 @@ describe("dispatch", () => {
     });
     const { provider, requests } = commandProvider({ sourceMessage: "start the query" }, "backend.wait");
     const deps = makeDeps(mainDmYaml, provider);
+    wireChildLedger(deps);
     const registry = new CommandRegistry<Record<string, never>>({ audit: () => {} });
     registry.register({
       id: "backend.wait",
@@ -1295,6 +1360,7 @@ describe("dispatch", () => {
       },
     };
     const deps = makeDeps(mainDmYaml, provider);
+    wireChildLedger(deps);
     deps.admission = new ThreadAdmission();
     const registry = new CommandRegistry<Record<string, never>>({ audit: () => {} });
     registry.register({
@@ -1393,6 +1459,7 @@ describe("dispatch", () => {
           .replace("agent: orchestrator }", "agent: orchestrator, boundary: { confirm: destructive } }"),
         provider,
       );
+      wireChildLedger(deps);
       await deps.config.setUserOverride("slack:UADMIN", { effort: "high" });
       const { io, replies } = mainDmIO();
       await dispatch(deps, { ...mainDm("reset my config"), messageId: "1" }, io);

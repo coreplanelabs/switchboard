@@ -1,3 +1,4 @@
+import { isOrchestratorCommandDecision } from "./dispatch/orchestratorDecisions.js";
 import { cancellationOf, cancellationRecordMatches } from "./runLedger/cancellation.js";
 import { RUN_ID_PATTERN } from "./runIdentity.js";
 import { isBranchIdentityBaseline, type BranchIdentityBaseline } from "./branchIdentityBaseline.js";
@@ -589,6 +590,8 @@ export function routeOfEvents(events: readonly RunEvent[]): RunRouteDecision | u
 /** The operator's decision as a record carries it — the `operator` event's
  *  fields less the stream bookkeeping (record 0057; run-history item 60). */
 export interface RunOperatorDecision {
+  /** Selection evidence only; command outcome and current policy remain separate. */
+  orchestratorDecision?: import("./dispatch/orchestratorDecisions.js").OrchestratorCommandDecision;
   mode: "shadow" | "on";
   outcome: "binds" | "question" | "refusal" | "non_decision";
   reason: string;
@@ -666,6 +669,7 @@ export function operatorOfEvents(events: readonly RunEvent[]): RunOperatorDecisi
   if (e?.type !== "operator") return undefined;
   return {
     mode: e.mode,
+    ...(e.orchestratorDecision !== undefined ? { orchestratorDecision: structuredClone(e.orchestratorDecision) } : {}),
     outcome: e.outcome,
     reason: e.reason,
     ...(e.binds
@@ -1354,6 +1358,17 @@ export function isRunRecord(v: unknown): v is RunRecord {
     )
       return false;
   }
+  const selection = (r.operator as RunOperatorDecision | undefined)?.orchestratorDecision;
+  if (
+    selection !== undefined &&
+    !isOrchestratorCommandDecision(selection, {
+      runId: (r.parentRunId ?? r.id) as string,
+      requesterId: r.userId as string,
+      channelId: r.channelId as string,
+      threadKey: r.threadKey as string,
+    })
+  )
+    return false;
   // The review's verdict and head and the fix round's dispositions (item 2):
   // shape only, like the handoff — redaction may lengthen a stored string.
   if (r.reviewIncomplete !== undefined && typeof r.reviewIncomplete !== "string") return false;

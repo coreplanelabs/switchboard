@@ -189,6 +189,9 @@ export const DRAIN = {
  *  of deciding the reply again. The window is clamped to a month so a
  *  misconfigured writer cannot make retention unbounded. */
 export const INTAKE_WINDOW_MAX_MS = 30 * DAY_MS;
+/** Bound decision metadata in one orchestrator run's existing state row. */
+export const ORCHESTRATOR_DECISIONS_MAX = 256;
+export const ORCHESTRATOR_DECISION_BYTES_MAX = 256 * 1024;
 export function intakeReceiptRetentionMs(catchUpWindowMs: number): number {
   const window = Math.min(Math.max(0, catchUpWindowMs), INTAKE_WINDOW_MAX_MS);
   return Math.max(DAY_MS, window + minutesToMs(DRAIN.maxMinutes));
