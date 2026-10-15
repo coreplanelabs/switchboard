@@ -1649,6 +1649,26 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "repo:read",
+    "args": [
+      {
+        "name": "slug",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "read",
+    "id": "repo.workload",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "review:write",
     "args": [
       {

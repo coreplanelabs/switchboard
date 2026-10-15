@@ -61,7 +61,7 @@ A command under two capabilities is on when either gives it a backend.
 | Capability | Commands that depend on it |
 |---|---|
 | `execution` | `repo test`, `repo build` |
-| `residents` | `repo list`, `repo onboard`, `repo offboard`, `repo reconfigure`, `repo rebuild`, `repo test`, `repo build` |
+| `residents` | `repo list`, `repo workload`, `repo onboard`, `repo offboard`, `repo reconfigure`, `repo rebuild`, `repo test`, `repo build` |
 | `memory` | `memory list`, `memory forget`, `memory sweep` |
 | `runHistory` | `runs findings`, `review abridge`, `review status`, `friction report`, `friction propose` |
 | `runLedger` | — |

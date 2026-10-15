@@ -730,6 +730,14 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false, reportError
       if (reportError && failStub) throw reportError;
       residentResources.push(resource);
       return {
+        getWorkloadAudit: async (requestedResource: string) => ({
+          schema: 1,
+          resource: requestedResource,
+          residentId: resource,
+          used: 1,
+          complete: true,
+          owners: [{ key: "op:original", sources: [{ kind: "native-operation" }] }],
+        }),
         debugThreads: async (selection?: { threadKey: string; runId: string }) => {
           reports.push({ resource, selection });
           if (reportError) throw reportError;
@@ -846,6 +854,42 @@ describe("resident cancellation inspection HTTP", () => {
     const response = await api.request("/debug", "reader", { op: "threads", resource: "repo:acme/app" });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ threads: [] });
+  });
+});
+
+describe("resident workload audit HTTP", () => {
+  it("read and admin bearers inspect the named primary without native controls", async () => {
+    const api = httpFixture(fixture());
+    for (const token of ["reader", "admin"]) {
+      const response = await api.request("/debug", token, { op: "workload-audit", resource: "repo:acme/app" });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        schema: 1,
+        resource: "repo:acme/app",
+        residentId: "repo:acme/app",
+        used: 1,
+        owners: [{ key: "op:original" }],
+      });
+    }
+    for (const token of ["operator", "drain", null])
+      expect((await api.request("/debug", token, { op: "workload-audit", resource: "repo:acme/app" })).status).toBe(
+        401,
+      );
+    expect(api.nativeControls()).toBe(0);
+  });
+
+  it("refuses replica and malformed resource selectors before reading another resident", async () => {
+    const api = httpFixture(fixture());
+    for (const body of [
+      { op: "workload-audit", resource: "invalid" },
+      { op: "workload-audit", resource: "repo:acme/app", residentId: "replica-other" },
+      { op: "workload-audit", resource: "repo:acme/app", placementId: "unverified" },
+    ])
+      expect((await api.request("/debug", "reader", body)).status).toBe(400);
+    const response = await api.request("/debug", "reader", { op: "workload-audit", resource: "repo:acme/app" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ resource: "repo:acme/app", used: 1 });
+    expect(api.residentResources).toEqual(["repo:acme/app"]);
   });
 });
 

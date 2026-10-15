@@ -93,7 +93,15 @@ function ok(data: Record<string, unknown>): ResidentAdminResponse {
 
 function fakeClient(residents: () => Promise<ResidentAdminResponse>): ResidentAdminClient {
   const never = () => Promise.reject(new Error("not used by the residents view"));
-  return { residents, onboard: never, offboard: never, reconfigure: never, rebuild: never, status: never };
+  return {
+    residents,
+    workload: never,
+    onboard: never,
+    offboard: never,
+    reconfigure: never,
+    rebuild: never,
+    status: never,
+  };
 }
 
 function fakeReqRes(method: string, url: string) {

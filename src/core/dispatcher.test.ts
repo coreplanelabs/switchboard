@@ -4272,6 +4272,7 @@ describe("repo management commands", () => {
       offboard: vi.fn(async () => ({ status: 200, data: {} })),
       reconfigure: vi.fn(async () => ({ status: 200, data: {} })),
       rebuild: vi.fn(async () => ({ status: 202, data: {} })),
+      workload: vi.fn(async () => ({ status: 503, data: {} })),
       residents: vi.fn(async () => ({
         status: 200,
         data: {

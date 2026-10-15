@@ -72,6 +72,7 @@ const GATES: Record<string, (c: Capabilities) => boolean> = {
   "review.abridge": (c) => c.runHistory && c.readingDiffAbridge,
   "review.status": (c) => c.runHistory && c.readingDiffAbridge,
   "repo.list": (c) => c.residents,
+  "repo.workload": (c) => c.residents,
   "repo.onboard": (c) => c.residents,
   "repo.offboard": (c) => c.residents,
   "repo.rebuild": (c) => c.residents,

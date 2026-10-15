@@ -16,10 +16,13 @@ import { webcrypto } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { idleForPoolRecycle, retryPoolRecycleAfterRefresh } from "../../src/execution/residentRecreateAdmission.js";
 import { liveDrain } from "./drain.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
+import { runtimeUnreachableReason, runtimeUnreachableRung } from "../../src/execution/residentRefresh.js";
+import { ControlResetError } from "./threadErr.js";
+import { SandboxRuntimeBusyError } from "../../src/execution/sandboxErrors.js";
 import { methodOf, readSource } from "./testing/sourceScan";
 import {
   mayRunAsPoolUser,
@@ -1412,33 +1415,46 @@ function workloadResident(
   options: { live?: number; retained?: number; unknown?: number; processes?: string; probeFails?: boolean } = {},
 ) {
   const compiled = ts.transpileModule(
-    `class Resident { ${[
-      "activeWorkloadOwners",
-      "observeRunForEviction",
-      "residentLevels",
-      "getResidentRecoveryProbe",
-      "reserveWorkloadSlot",
-      "allocateOpUser",
-      "withOpNativeOperation",
-      "withNativeOperationScope",
-      "runOp",
-      "run",
-      "beginThreadNativeOperation",
-      "getNativeOperations",
-      "recoverNativeOperation",
-      "withRecreateSafeAdmin",
-      "registeredRunsBeyondOps",
-      "automaticContainerLoss",
-      "recreateContainer",
-      "inFlightCount",
-      "runsInFlightCount",
-      "reserveSafePoolUser",
-      "ensurePoolAccount",
-      "markPoolUserSpent",
-      "currentUidLedger",
-    ]
-      .map((name) => methodOf(workloadSource, name) ?? "")
-      .join("\n")} }`,
+    `${ts
+      .createSourceFile("worker.ts", workloadSource, ts.ScriptTarget.Latest, true)
+      .statements.find((node) => ts.isClassDeclaration(node) && node.name?.text === "RuntimeUnreachableError")!
+      .getText()}
+     class Resident { ${[
+       "activeWorkloadOwners",
+       "getWorkloadAudit",
+       "workloadRecordHash",
+       "hashWorkloadAudit",
+       "logWorkloadRefusal",
+       "workloadAuditReport",
+       "observeRunForEviction",
+       "workloadOwnerObservation",
+       "residentLevels",
+       "getResidentRecoveryProbe",
+       "reserveWorkloadSlot",
+       "allocateOpUser",
+       "withOpNativeOperation",
+       "withNativeOperationScope",
+       "runOp",
+       "run",
+       "noteRuntimeUnreachable",
+       "runtimeUnreachableRow",
+       "clearRuntimeUnreachable",
+       "beginThreadNativeOperation",
+       "getNativeOperations",
+       "recoverNativeOperation",
+       "withRecreateSafeAdmin",
+       "registeredRunsBeyondOps",
+       "automaticContainerLoss",
+       "recreateContainer",
+       "inFlightCount",
+       "runsInFlightCount",
+       "reserveSafePoolUser",
+       "ensurePoolAccount",
+       "markPoolUserSpent",
+       "currentUidLedger",
+     ]
+       .map((name) => methodOf(workloadSource, name) ?? "")
+       .join("\n")} }`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
   ).outputText;
   const native = {
@@ -1451,9 +1467,13 @@ function workloadResident(
     outputCount: 0,
     logs: [] as string[],
     failLog: false,
+    failWarnLog: undefined as boolean | undefined,
     launchError: undefined as Error | undefined,
+    output: undefined as
+      { stdout: string; stderr: string; exitCode: number; timedOut: boolean; truncated?: boolean } | undefined,
   };
   const owners = new Map<string, unknown>();
+  let onOwnerRead: ((runId: string) => Promise<void>) | undefined;
   const Native = runInNewContext(`${compiled}\nResident`, {
     uidLedger,
     uidOwner,
@@ -1467,14 +1487,20 @@ function workloadResident(
     unstartedNativeOperator,
     registeredRunOwnsRelease,
     URL,
+    TextEncoder,
     AbortSignal,
     RUN_STORE_KEY: "runs",
     RUN_STORE_TIMEOUT_MS: 10000,
     fetch: async (_url: unknown, init: { body: string }) => ({
       ok: true,
-      json: async () => owners.get(JSON.parse(init.body).runId) ?? null,
+      json: async () => {
+        const runId = JSON.parse(init.body).runId;
+        await onOwnerRead?.(runId);
+        return owners.get(runId) ?? null;
+      },
     }),
     RESIDENT_WORKLOAD_LIMIT,
+    injectedBuildStamp: () => ({ commit: "test-build", builtAt: "2026-10-14T00:00:00Z" }),
     levelPosts,
     memorySide,
     mergeOutbox,
@@ -1485,6 +1511,7 @@ function workloadResident(
     THREAD_USERS: workloadPool,
     BUILD_USER: "worker1",
     RUN_REG_KEY_PREFIX: "run:",
+    RESOURCE_KEY: "resource",
     SPENT_POOL_USERS_KEY: "resident:spentPoolUsers",
     THREAD_KEY_PREFIX: "thread:",
     IMAGE_REPORT_PENDING_KEY: "image-pending",
@@ -1505,7 +1532,9 @@ function workloadResident(
     poolBindingKey: (user: string) => `claim:${user}`,
     systemClock: () => 10_000_000,
     classifyDeployRegistrationWithLedger,
+    isAcknowledgedWorkspaceOwner,
     parseSpentPoolUsers,
+    parsePoolBindings,
     validRunOwner,
     createStepTrace: () => ({ steps: () => [] }),
     emitStepRoot: () => {},
@@ -1513,6 +1542,13 @@ function workloadResident(
     DESTROY_UNCONFIRMED_KEY: "destroy-unconfirmed",
     CLEANUP_PENDING_KEY: "cleanup",
     DEFAULT_EXEC_TIMEOUT_MS: 1000,
+    RUNTIME_UNREACHABLE_KEY: "resident:runtimeUnreachable",
+    RUNTIME_UNREACHABLE_DOWN_AT: 6,
+    SDK_CONNECT_TIMEOUT_MS: 30_000,
+    runtimeUnreachableReason,
+    ControlResetError,
+    SandboxRuntimeBusyError,
+    errMsg: (error: Error) => error.message,
     createExtensionProcessSandbox: () => ({
       getProcess: async (id: string) => ({
         status: async () => ({
@@ -1543,6 +1579,7 @@ function workloadResident(
           output: async () => {
             native.outputCount++;
             if (native.loseOutput) throw new Error("native output lost");
+            if (native.output) return native.output;
             return {
               stdout: native.accountCommands
                 ? argv[0] === "/bin/sh"
@@ -1558,18 +1595,21 @@ function workloadResident(
         };
       },
     }),
-    isControlReset: () => false,
+    isControlReset: (error: Error) => error.message === "fixture-control-reset",
     isRuntimeReplacement: () => false,
-    isRuntimeBusy: () => false,
-    isRuntimeUnreachable: () => false,
+    isRuntimeBusy: (error: Error) => error.message === "fixture-runtime-busy",
+    isRuntimeUnreachable: (error: Error) => error.name === "AbortError",
     ProcessWaitTimeoutError: class extends Error {},
     RPCTransportError,
     OperationInterruptedError,
     selfAndCauses: (error: unknown) => [error, (error as { cause?: unknown })?.cause].filter(Boolean),
     console: {
-      log: () => {},
-      warn: (line: string) => {
+      log: (line: string) => {
         if (native.failLog) throw new Error("diagnostic sink unavailable");
+        native.logs.push(line);
+      },
+      warn: (line: string) => {
+        if (native.failWarnLog ?? native.failLog) throw new Error("diagnostic sink unavailable");
         native.logs.push(line);
       },
     },
@@ -1646,6 +1686,7 @@ function workloadResident(
     threadOpsInFlight: new Map<string, number>(),
     runNativeScopes: new Map(),
     ctx: {
+      id: { toString: () => "fixture-container" },
       storage: {
         get: async (key: string) => structuredClone(rows.get(key)),
         list: async ({ prefix, limit, startAfter = "" }: { prefix: string; limit?: number; startAfter?: string }) =>
@@ -1674,7 +1715,16 @@ function workloadResident(
   const storageLock = new KeyedAsyncLock();
   instance.ctx.storage.transaction = async (fn: (store: unknown) => Promise<unknown>) =>
     storageLock.run("storage", () => fn(instance.ctx.storage));
-  return { instance, rows, native, lifecycle };
+  return {
+    instance,
+    rows,
+    native,
+    lifecycle,
+    owners,
+    onOwnerRead: (read: typeof onOwnerRead) => {
+      onOwnerRead = read;
+    },
+  };
 }
 
 function statusObservationFailure(kind: "invalid_frame" | "protocol_error" = "invalid_frame") {
@@ -2053,6 +2103,382 @@ describe("resident workload admission", () => {
     expect(await instance.residentLevels()).toMatchObject({ seat: { used: 16, total: 16, side: "above" } });
   });
 
+  it("audits the same unique owners as admission, with original native evidence and terminal trees excluded", async () => {
+    const h = workloadResident({ live: 1, retained: 1, unknown: 1, processes: "root\nworker2\nworker2\n" });
+    h.instance.workloadReservations.add("thread:mcp:owner-0");
+    h.rows.set("resident:spentPoolUsers", [
+      ...(h.rows.get("resident:spentPoolUsers") as { user: string; owner: string }[]),
+      { user: "worker40", owner: "op:building" },
+    ]);
+    h.instance.opUsersInUse.set("worker40", "op:building");
+    h.rows.set("native-operation:mcp:owner-0:run-0:call", {
+      runId: "run-0",
+      ownerGen: "generation",
+      ownerFence: 1,
+      native: {
+        version: 1,
+        closed: true,
+        threadKey: "mcp:owner-0",
+        pending: {
+          launch: { kind: "process", process: { id: "original", pid: 42, startedAt: "2026-10-14T00:00:00Z" } },
+        },
+      },
+    });
+    h.rows.set("native-operation:op:old", { opOwner: "op:old", privateOptions: "fixture-private" });
+    const original = (await h.instance.getNativeOperations()).operations.find((o: { key: string }) =>
+      o.key.endsWith(":call"),
+    );
+    const report = await h.instance.getWorkloadAudit("repo:acme/app");
+    expect(report).toMatchObject({
+      schema: 1,
+      resource: "repo:acme/app",
+      residentId: "repo:acme/app",
+      build: { commit: "test-build" },
+      used: 4,
+      workloadLimit: 16,
+      complete: true,
+      processes: "identities-only",
+      consistency: "best-effort",
+    });
+    expect(report.owners.map((o: { key: string }) => o.key)).toEqual([
+      "op:building",
+      "op:old",
+      "thread:mcp:owner-0",
+      "thread:mcp:owner-2",
+    ]);
+    const live = report.owners.find((o: { key: string }) => o.key === "thread:mcp:owner-0");
+    expect(live.sources.map((s: { kind: string }) => s.kind)).toEqual([
+      "reservation",
+      "binding",
+      "native-operation",
+      "process",
+      "uid-allocation",
+    ]);
+    expect(report.uidHistory).toEqual({ issued: 4, complete: true });
+    expect(live.sources.find((s: { kind: string }) => s.kind === "native-operation")).toMatchObject({
+      key: original.key,
+      recordHash: original.recordHash,
+      runId: "run-0",
+      ownerGen: "generation",
+      ownerFence: 1,
+      processes: [{ id: "original", pid: 42, startedAt: "2026-10-14T00:00:00Z" }],
+    });
+    expect(report.owners.find((o: { key: string }) => o.key === "thread:mcp:owner-2").sources[0]).toMatchObject({
+      kind: "binding",
+      state: "unknown",
+      reason: "owner-unverified",
+      user: "worker4",
+    });
+    expect(JSON.stringify(report)).not.toContain("fixture-private");
+    expect(await h.instance.reserveWorkloadSlot("op:next")).toBeNull();
+  });
+
+  it("keeps an incomplete process or UID observation explicitly unverified without clearing holds", async () => {
+    const h = workloadResident({ live: 1, probeFails: true });
+    h.rows.set("native-operation:op:unknown", { opOwner: "op:unknown" });
+    const original = structuredClone(h.rows.get("native-operation:op:unknown"));
+    expect(await h.instance.getWorkloadAudit("repo:acme/app")).toMatchObject({
+      used: null,
+      complete: false,
+      processes: "unavailable",
+      issues: ["workload-observation-unavailable"],
+    });
+    expect(h.rows.get("native-operation:op:unknown")).toEqual(original);
+    expect(await h.instance.reserveWorkloadSlot("op:new")).toMatchObject({
+      reason: "workload-unverified",
+      status: 503,
+    });
+    const refusal = JSON.parse(
+      h.native.logs
+        .find((line) => line.startsWith("[workload] ") && JSON.parse(line.slice(11)).event === "admission-refused")!
+        .slice(11),
+    );
+    expect(refusal).toMatchObject({
+      event: "admission-refused",
+      requestedOwner: "op:new",
+      reason: "workload-unverified",
+      used: null,
+      complete: false,
+      processes: "unavailable",
+      issues: ["workload-observation-unavailable"],
+    });
+    h.rows.set("uid:state", null);
+    expect(await h.instance.getWorkloadAudit("repo:acme/app")).toMatchObject({ used: null, complete: false });
+  });
+
+  it("an early audit failure warns without exception payload and a failed warning cannot replace partial evidence", async () => {
+    const h = workloadResident();
+    const held = { opOwner: "op:held" };
+    const counter = { count: 2, firstAt: "1970-01-01T00:00:00.000Z", lastAt: "1970-01-01T00:00:01.000Z" };
+    h.instance.workloadReservations.add("op:held");
+    h.rows.set("native-operation:op:held", held);
+    h.rows.set("resident:runtimeUnreachable", counter);
+    h.rows.set("uid:state", null);
+    const expected = {
+      used: null,
+      complete: false,
+      issues: ["workload-observation-unavailable"],
+      owners: [{ key: "op:held", sources: [{ kind: "reservation" }] }],
+    };
+    expect(await h.instance.getWorkloadAudit("repo:acme/app")).toMatchObject(expected);
+    expect(h.native.logs.map((line) => JSON.parse(line.slice(11)))).toEqual([
+      { event: "workload-observation-unavailable", resource: "repo:acme/app", errorType: "Error" },
+    ]);
+    h.native.failWarnLog = true;
+    expect(await h.instance.getWorkloadAudit("repo:acme/app")).toMatchObject(expected);
+    expect(h.rows.get("native-operation:op:held")).toEqual({ opOwner: "op:held" });
+    expect(h.rows.get("resident:runtimeUnreachable")).toEqual(counter);
+  });
+
+  it("bounds audit output and records the original full-capacity contributors without admitting work", async () => {
+    const h = workloadResident({ live: 16 });
+    expect(await h.instance.reserveWorkloadSlot("op:new")).toMatchObject({ reason: "workload-full", status: 503 });
+    const refusal = JSON.parse(
+      h.native.logs
+        .find((line) => line.startsWith("[workload] ") && JSON.parse(line.slice(11)).event === "admission-refused")!
+        .slice(11),
+    );
+    expect(refusal).toMatchObject({
+      schema: 1,
+      event: "admission-refused",
+      reason: "workload-full",
+      used: 16,
+      complete: true,
+      processes: "identities-only",
+    });
+    expect(refusal.owners.map((o: { key: string }) => o.key)).toContain("thread:mcp:owner-15");
+    for (let i = 0; i < 140; i++) h.rows.set(`native-operation:op:${i}`, { opOwner: `op:extra-${i}` });
+    const report = await h.instance.getWorkloadAudit("repo:acme/app");
+    expect(report).toMatchObject({ used: 156, complete: false, ownersOmitted: 28 });
+    expect(report.owners).toHaveLength(128);
+  });
+
+  it("bounds both audit and original refusal JSON bytes while retaining all sixteen compact owner identities", async () => {
+    const h = workloadResident();
+    for (let i = 0; i < 16; i++)
+      h.rows.set(`native-operation:mcp:large-${i}:run-${i}:call`, {
+        runId: `run-${i}`,
+        ownerGen: "generation",
+        ownerFence: 1,
+        native: {
+          version: 1,
+          closed: true,
+          threadKey: `mcp:large-${i}`,
+          pending: Object.fromEntries(
+            Array.from({ length: 64 }, (_, j) => [
+              `attempt-${j}`,
+              { kind: "process", process: { id: "x".repeat(256), pid: j + 1, startedAt: "2026-10-14T00:00:00Z" } },
+            ]),
+          ),
+        },
+      });
+    const original = structuredClone([...h.rows].filter(([key]) => key.startsWith("native-operation:")));
+    const report = await h.instance.getWorkloadAudit("repo:acme/app");
+    expect(report).toMatchObject({ used: 16, complete: false, ownersOmitted: 0 });
+    expect(report.owners).toHaveLength(16);
+    expect(report.detailsOmitted).toBeGreaterThan(0);
+    expect(report.issues).toContain("workload-details-omitted");
+    expect(new TextEncoder().encode(JSON.stringify(report)).byteLength).toBeLessThanOrEqual(60 * 1024);
+    expect(
+      report.owners.every(
+        (row: { sources: { kind: string }[] }) => row.sources.length > 0 && row.sources[0].kind === "native-operation",
+      ),
+    ).toBe(true);
+    expect(await h.instance.reserveWorkloadSlot("op:new")).toMatchObject({ reason: "workload-full", status: 503 });
+    const line = h.native.logs.find((entry) => entry.startsWith("[workload] "))!;
+    expect(new TextEncoder().encode(line).byteLength).toBeLessThanOrEqual(64 * 1024);
+    const refusal = JSON.parse(line.slice(11));
+    expect(refusal).toMatchObject({ event: "admission-refused", used: 16, complete: false, ownersOmitted: 0 });
+    expect(refusal.owners).toHaveLength(16);
+    expect(refusal.issues).toContain("workload-details-omitted");
+    expect([...h.rows].filter(([key]) => key.startsWith("native-operation:"))).toEqual(original);
+    for (let i = 0; i < 20; i++) h.rows.set(`native-operation:${String(i).padStart(2, "0")}:${"x".repeat(4000)}`, {});
+    const oversizedKeys = await h.instance.getWorkloadAudit("repo:acme/app");
+    expect(oversizedKeys).toMatchObject({ used: 36, complete: false });
+    expect(oversizedKeys.ownersOmitted).toBeGreaterThan(0);
+    expect(oversizedKeys.owners.length + oversizedKeys.ownersOmitted).toBe(36);
+    expect(new TextEncoder().encode(JSON.stringify(oversizedKeys)).byteLength).toBeLessThanOrEqual(60 * 1024);
+  });
+
+  it("an incomplete observation lists only the counter's captured members, excluding retained terminal bindings", async () => {
+    const h = workloadResident({ live: 1, retained: 1, probeFails: true });
+    const report = await h.instance.getWorkloadAudit("repo:acme/app");
+    expect(report).toMatchObject({ used: null, complete: false, processes: "unavailable" });
+    expect(report.owners.map((row: { key: string }) => row.key)).toEqual(["thread:mcp:owner-0"]);
+    expect(await h.instance.reserveWorkloadSlot("op:new")).toMatchObject({
+      reason: "workload-unverified",
+      status: 503,
+    });
+    const refusal = JSON.parse(
+      h.native.logs
+        .find((line) => line.startsWith("[workload] ") && JSON.parse(line.slice(11)).event === "admission-refused")!
+        .slice(11),
+    );
+    expect(refusal).toMatchObject({ used: null, complete: false });
+    expect(refusal.owners.map((row: { key: string }) => row.key)).toEqual(["thread:mcp:owner-0"]);
+  });
+
+  it("reads an inactive resident without creating a native runtime", async () => {
+    const h = workloadResident({ retained: 1 });
+    h.instance.isRuntimeActive = async () => false;
+    h.instance.run = async () => {
+      throw new Error("audit must not start an inactive runtime");
+    };
+    expect(await h.instance.getWorkloadAudit("repo:acme/app")).toMatchObject({
+      used: 0,
+      complete: true,
+      processes: "runtime-inactive",
+      owners: [],
+    });
+  });
+
+  it("joins a held native owner's recorded UID without turning retained history into workloads", async () => {
+    const h = workloadResident({ retained: 2 });
+    h.rows.set("native-operation:mcp:owner-0:run-0:legacy", { runId: "run-0", ownerGen: "generation", ownerFence: 1 });
+    const report = await h.instance.getWorkloadAudit("repo:acme/app");
+    expect(report).toMatchObject({
+      used: 1,
+      uidHistory: { issued: 2, complete: true },
+      complete: true,
+      owners: [{ key: "thread:mcp:owner-0" }],
+    });
+    expect(report.owners[0].sources).toContainEqual({
+      kind: "uid-allocation",
+      user: "worker2",
+      reason: "recorded-owner",
+    });
+    h.rows.set("claim:worker2", ["mcp:owner-0", "mcp:foreign"]);
+    expect(await h.instance.getWorkloadAudit("repo:acme/app")).toMatchObject({
+      used: 1,
+      complete: true,
+      issues: ["uid-claims-unverified"],
+    });
+    expect(await h.instance.reserveWorkloadSlot("op:new")).toBeNull();
+  });
+
+  it("a failed diagnostic sink leaves the full-workload refusal and held owners unchanged", async () => {
+    const h = workloadResident({ live: 16 });
+    h.native.failLog = true;
+    h.native.failWarnLog = false;
+    expect(await h.instance.reserveWorkloadSlot("op:new")).toMatchObject({ reason: "workload-full", status: 503 });
+    expect(h.native.logs.map((line) => JSON.parse(line.slice(11)))).toEqual([
+      {
+        event: "refusal-diagnostics-unavailable",
+        reason: "workload-full",
+        requestedOwner: "op:new",
+        errorType: "Error",
+      },
+    ]);
+    h.native.failWarnLog = true;
+    expect(await h.instance.reserveWorkloadSlot("op:other")).toMatchObject({ reason: "workload-full", status: 503 });
+    expect(await h.instance.getWorkloadAudit("repo:acme/app")).toMatchObject({ used: 16, complete: true });
+  });
+
+  it.each(["success", "output-failure", "nonzero", "timedout", "truncated", "stderr", "invalid"])(
+    "manual audit preserves the durable recovery counter through a real runner %s",
+    async (boundary) => {
+      const h = workloadResident();
+      h.instance.run = Object.getPrototypeOf(h.instance).run;
+      h.instance.clearRuntimeUnreachable = Object.getPrototypeOf(h.instance).clearRuntimeUnreachable;
+      const prior = { count: 2, firstAt: "1970-01-01T00:00:00.000Z", lastAt: "1970-01-01T00:00:01.000Z" };
+      h.rows.set("resident:runtimeUnreachable", prior);
+      h.native.output = {
+        stdout: boundary === "invalid" ? "worker!invalid\n" : "root\nworker1\n",
+        stderr: boundary === "stderr" ? "fixture-warning" : "",
+        exitCode: boundary === "nonzero" ? 1 : 0,
+        timedOut: boundary === "timedout",
+        truncated: boundary === "truncated",
+      };
+      h.native.loseOutput = boundary === "output-failure";
+      expect(await h.instance.getWorkloadAudit("repo:acme/app")).toMatchObject({
+        used: boundary === "success" ? 0 : null,
+        complete: boundary === "success",
+      });
+      expect(h.rows.get("resident:runtimeUnreachable")).toEqual(prior);
+      expect(runtimeUnreachableRung((h.rows.get("resident:runtimeUnreachable") as { count: number }).count)).toBe(
+        "re-arm",
+      );
+    },
+  );
+
+  it("manual unreachable observation preserves count two so the next ordinary failure uses the stop rung", async () => {
+    const h = workloadResident();
+    h.instance.run = Object.getPrototypeOf(h.instance).run;
+    h.instance.clearRuntimeUnreachable = Object.getPrototypeOf(h.instance).clearRuntimeUnreachable;
+    const prior = { count: 2, firstAt: "1970-01-01T00:00:00.000Z", lastAt: "1970-01-01T00:00:01.000Z" };
+    h.rows.set("resident:runtimeUnreachable", prior);
+    h.native.launchError = Object.assign(new Error("fixture-connect-failed"), { name: "AbortError" });
+    expect(await h.instance.getWorkloadAudit("repo:acme/app")).toMatchObject({ used: null, complete: false });
+    expect(h.rows.get("resident:runtimeUnreachable")).toEqual(prior);
+    expect(runtimeUnreachableRung((h.rows.get("resident:runtimeUnreachable") as { count: number }).count)).toBe(
+      "re-arm",
+    );
+    const failure = await h.instance.run(["true"]).catch((error: { count: number; name: string }) => error);
+    expect(failure).toMatchObject({ name: "RuntimeUnreachableError", count: 3 });
+    expect(runtimeUnreachableRung(failure.count)).toBe("stop");
+    h.native.launchError = undefined;
+    h.native.output = { stdout: "root\nworker1\n", stderr: "", exitCode: 0, timedOut: false };
+    expect([...(await h.instance.activeWorkloadOwners())]).toEqual([]);
+    expect(h.rows.get("resident:runtimeUnreachable")).toBeUndefined();
+  });
+
+  it("ordinary admission and maintenance retain their original unreachable accounting after an audit", async () => {
+    const h = workloadResident();
+    h.instance.run = Object.getPrototypeOf(h.instance).run;
+    h.instance.clearRuntimeUnreachable = Object.getPrototypeOf(h.instance).clearRuntimeUnreachable;
+    h.rows.set("resident:runtimeUnreachable", {
+      count: 2,
+      firstAt: "1970-01-01T00:00:00.000Z",
+      lastAt: "1970-01-01T00:00:01.000Z",
+    });
+    h.native.launchError = Object.assign(new Error("fixture-connect-failed"), { name: "AbortError" });
+    expect(await h.instance.getWorkloadAudit("repo:acme/app")).toMatchObject({ used: null, complete: false });
+    expect(await h.instance.reserveWorkloadSlot("op:new")).toMatchObject({
+      reason: "workload-unverified",
+      status: 503,
+    });
+    expect(h.rows.get("resident:runtimeUnreachable")).toMatchObject({ count: 3 });
+    expect(runtimeUnreachableRung((h.rows.get("resident:runtimeUnreachable") as { count: number }).count)).toBe("stop");
+    const maintenance = await h.instance.activeWorkloadOwners().catch((error: { count: number }) => error);
+    expect(maintenance).toMatchObject({ name: "RuntimeUnreachableError", count: 4 });
+    expect(runtimeUnreachableRung(maintenance.count)).toBe("recreate");
+  });
+
+  it.each([
+    "other-spawn",
+    "control-reset",
+    "runtime-busy",
+    "cleanup",
+    "destroy-unconfirmed",
+    "inactive",
+    "earlier-capture",
+    "enrichment",
+  ])("manual audit preserves recovery accounting at the %s boundary", async (boundary) => {
+    const h = workloadResident();
+    h.instance.run = Object.getPrototypeOf(h.instance).run;
+    h.instance.clearRuntimeUnreachable = Object.getPrototypeOf(h.instance).clearRuntimeUnreachable;
+    const prior = { count: 2, firstAt: "1970-01-01T00:00:00.000Z", lastAt: "1970-01-01T00:00:01.000Z" };
+    h.rows.set("resident:runtimeUnreachable", prior);
+    h.native.output = { stdout: "root\nworker1\n", stderr: "", exitCode: 0, timedOut: false };
+    if (boundary === "other-spawn") h.native.launchError = new Error("fixture-permission-failure");
+    if (boundary === "control-reset") h.native.launchError = new Error("fixture-control-reset");
+    if (boundary === "runtime-busy") h.native.launchError = new Error("fixture-runtime-busy");
+    if (boundary === "cleanup") h.rows.set("cleanup", { pending: true });
+    if (boundary === "destroy-unconfirmed") h.rows.set("destroy-unconfirmed", true);
+    if (boundary === "inactive") h.instance.isRuntimeActive = async () => false;
+    if (boundary === "earlier-capture") h.rows.set("uid:state", null);
+    if (boundary === "enrichment")
+      h.instance.currentUidLedger = async () => {
+        throw new Error("fixture-ledger-unavailable");
+      };
+    const report = await h.instance.getWorkloadAudit("repo:acme/app");
+    expect(report).toMatchObject({
+      used: ["inactive", "enrichment"].includes(boundary) ? 0 : null,
+      complete: boundary === "inactive",
+    });
+    expect(h.rows.get("resident:runtimeUnreachable")).toEqual(prior);
+  });
+
   it("does not carry a cached terminal result into a newer owner fence", async () => {
     const { instance, rows } = workloadResident({ retained: 1 });
     await instance.activeWorkloadOwners();
@@ -2062,6 +2488,115 @@ describe("resident workload admission", () => {
       throw new Error("levels must not read the state Worker");
     };
     expect(await instance.residentLevels()).toMatchObject({ seat: { used: 1, total: 16, side: "below" } });
+  });
+
+  it("a delayed old owner observation cannot overwrite the current workload hint", async () => {
+    const h = workloadResident({ retained: 1 });
+    const old = { threadKey: "mcp:owner-0", runId: "run-0", ownerGen: "generation", ownerFence: 1 };
+    const next = { ...old, runId: "run-new", ownerFence: 2 };
+    const currentHint = {
+      runId: next.runId,
+      ownerGen: next.ownerGen,
+      ownerFence: next.ownerFence,
+      observation: { kind: "acknowledged", owner: next, revision: 5 },
+    };
+    h.onOwnerRead(async () => {
+      h.rows.set("run:mcp:owner-0", next);
+      h.rows.set("fence:mcp:owner-0", next);
+      h.rows.set("resident:workloadOwner:mcp:owner-0", currentHint);
+    });
+    expect(await h.instance.observeRunForEviction(old)).toMatchObject({ kind: "terminal", record: { id: "run-0" } });
+    expect(h.rows.get("resident:workloadOwner:mcp:owner-0")).toEqual(currentHint);
+    expect(await h.instance.residentLevels()).toMatchObject({ seat: { used: 0, total: 16 } });
+  });
+
+  it("does not attribute a foreign or moved-fence canonical response to the held native owner", async () => {
+    const h = workloadResident({ retained: 1 });
+    const owner = { runId: "run-0", ownerGen: "generation", ownerFence: 1 };
+    h.rows.set("native-operation:mcp:owner-0:run-0:call", owner);
+    for (const response of [
+      { kind: "terminal", record: { id: "foreign", threadKey: "mcp:owner-0", status: "completed" } },
+      { kind: "acknowledged", owner: { ...owner, ownerFence: 2 }, revision: 1 },
+      { kind: "live", row: { ...owner, threadKey: "mcp:owner-0", binding: { ownerGen: "generation", ownerFence: 2 } } },
+      {
+        kind: "terminal",
+        record: { id: "run-0", threadKey: "mcp:owner-0", status: "completed" },
+        settlement: { owner: { ...owner, ownerFence: 2 } },
+      },
+    ]) {
+      h.owners.set("run-0", response);
+      const report = await h.instance.getWorkloadAudit("repo:acme/app");
+      expect(report).toMatchObject({ used: 1, complete: true });
+      expect(report.owners[0].sources.find((s: { kind: string }) => s.kind === "native-operation")).toMatchObject({
+        canonicalKind: "unknown",
+        runId: "run-0",
+        ownerFence: 1,
+      });
+    }
+    h.owners.set("run-0", { kind: "acknowledged", owner, revision: 4 });
+    const report = await h.instance.getWorkloadAudit("repo:acme/app");
+    expect(report.owners[0].sources.find((s: { kind: string }) => s.kind === "native-operation")).toMatchObject({
+      canonicalKind: "acknowledged",
+      canonicalRevision: 4,
+    });
+  });
+
+  it("a delayed diagnostic owner read does not block new admission or rescan the captured count", async () => {
+    const h = workloadResident();
+    h.rows.set("native-operation:mcp:old:old-run:call", { runId: "old-run", ownerGen: "old-gen", ownerFence: 1 });
+    let entered!: () => void;
+    let release!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.onOwnerRead(async () => {
+      entered();
+      await blocked;
+    });
+    const audit = h.instance.getWorkloadAudit("repo:acme/app");
+    await reading;
+    let result: unknown = "pending";
+    const admission = h.instance.reserveWorkloadSlot("op:new").then((response: unknown) => {
+      result = response;
+    });
+    try {
+      await vi.waitFor(() => expect(result).toBeNull(), { timeout: 250 });
+    } finally {
+      release();
+      await admission;
+    }
+    expect(await audit).toMatchObject({ used: 1, complete: true, owners: [{ key: "thread:mcp:old" }] });
+    expect([...(await h.instance.activeWorkloadOwners())]).toEqual(["op:new", "thread:mcp:old"]);
+  });
+
+  it("fresh native owner reads are deduplicated and bounded to the returned contributor projection", async () => {
+    const h = workloadResident();
+    const reads: string[] = [];
+    h.onOwnerRead(async (runId) => {
+      reads.push(runId);
+    });
+    h.rows.set("native-operation:mcp:old:run-old:first", { runId: "run-old", ownerGen: "old-gen", ownerFence: 1 });
+    h.rows.set("native-operation:mcp:old:run-old:second", { runId: "run-old", ownerGen: "old-gen", ownerFence: 1 });
+    expect(await h.instance.getWorkloadAudit("repo:acme/app")).toMatchObject({
+      used: 1,
+      complete: true,
+      owners: [{ key: "thread:mcp:old", sources: [{ canonicalKind: "unknown" }, { canonicalKind: "unknown" }] }],
+    });
+    expect(reads).toEqual(["run-old"]);
+    for (let i = 0; i < 140; i++)
+      h.rows.set(`native-operation:mcp:extra-${i}:run-${i}:call`, {
+        runId: `run-${i}`,
+        ownerGen: "generation",
+        ownerFence: 1,
+      });
+    reads.length = 0;
+    const report = await h.instance.getWorkloadAudit("repo:acme/app");
+    expect(report).toMatchObject({ used: 141, ownersOmitted: 13, complete: false });
+    expect(report.owners).toHaveLength(128);
+    expect(reads).toHaveLength(128);
   });
 
   it("creates fresh identities for 252 completed operations through the native admission boundary", async () => {

@@ -59,9 +59,21 @@ describe("display names", () => {
 // a label fails, and a label for a step the Worker no longer names is noise.
 describe("resident step labels (docs/reference/specs/tracing.md item 15)", () => {
   const source = readFileSync(new URL("../../../deploy/cloudflare-resident/worker.ts", import.meta.url), "utf8");
-  const named = new Set<string>();
-  for (const m of source.matchAll(/(?:runOk|run|gitWithCred|runAs|runStep)\([^)]*"([a-z][a-z0-9_-]{2,30})"/g))
-    named.add(m[1]!);
+  const namedSteps = (text: string) =>
+    new Set(
+      [...text.matchAll(/this\.(?:runOk|gitWithCred|runAs|runStep)\([^)]*"([a-z][a-z0-9_-]{2,30})"/g)].map(
+        (m) => m[1]!,
+      ),
+    );
+  const named = namedSteps(source);
+
+  it("reads step labels without treating mutex keys or raw process options as steps", () => {
+    expect([
+      ...namedSteps(
+        'this.workloadAdmissions.run("workload", () => read()); this.run(["ps"], { runtimeRecovery: "observe" }); this.runOk(argv, "fetch"); this.runStep("snapshot", action);',
+      ),
+    ]).toEqual(["fetch", "snapshot"]);
+  });
 
   it("every step name the resident Worker passes to a command runner has a label, under both graft prefixes", () => {
     expect(named.size).toBeGreaterThan(20); // the scan found the call sites

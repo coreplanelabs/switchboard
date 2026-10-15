@@ -50,12 +50,24 @@ const RESIDENTS = {
   ],
 };
 
+const WORKLOAD_AUDIT = {
+  schema: 1,
+  resource: "repo:jshttp/vary",
+  residentId: "repo:jshttp/vary",
+  workloadLimit: 16,
+  used: 1,
+  complete: true,
+  owners: [{ key: "thread:mcp:ops:one", sources: [{ kind: "binding", user: "worker2" }] }],
+  issues: [],
+};
+
 const residentAdmin: ResidentAdminClient = {
   onboard: async () => ({ status: 500, data: {} }),
   offboard: async () => ({ status: 500, data: {} }),
   reconfigure: async () => ({ status: 500, data: {} }),
   rebuild: async () => ({ status: 500, data: {} }),
   residents: async () => ({ status: 200, data: RESIDENTS }),
+  workload: async () => ({ status: 200, data: WORKLOAD_AUDIT }),
   status: async () => ({ status: 200, data: { state: "warm", reason: "", inFlight: 0 } }),
 };
 
@@ -548,6 +560,32 @@ describe("derived naming across surfaces", () => {
 });
 
 describe("migrated commands over MCP — grants (AE12)", () => {
+  it("repo_workload requires repository access on the resolved MCP actor", async () => {
+    const f = await fixture();
+    const request = {
+      method: "POST",
+      headers: { authorization: "Bearer tok" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "repo_workload", arguments: { slug: "jshttp/vary" } },
+      }),
+    };
+    const refused = await handleMcpRequest(request, {} as CoreDeps, {
+      auth: { tokens: { tok: { subject: "alice" } } },
+      commands: f.commands,
+      grantsFor: grantsOf(["repo:read"]),
+    });
+    expect(refused.body).toMatchObject({ error: { data: { code: "unauthorized" } } });
+    const accepted = await handleMcpRequest(request, {} as CoreDeps, {
+      auth: { tokens: { tok: { subject: "alice" } } },
+      commands: f.commands,
+      grantsFor: () => ({ actions: new Set(["repo:read"]), channels: "all", repos: new Set(["jshttp/vary"]) }),
+    });
+    const text = (accepted.body as { result: { content: { text: string }[] } }).result.content[0].text;
+    expect(JSON.parse(text.slice(text.indexOf("\n") + 1))).toEqual(WORKLOAD_AUDIT);
+  });
   async function callAs(commands: CommandInvoker, scopes: string[], name: string, args: Record<string, string> = {}) {
     const res = await handleMcpRequest(
       {
@@ -563,7 +601,7 @@ describe("migrated commands over MCP — grants (AE12)", () => {
 
   it("a dispatch-only token is refused on friction_report, repo_list, and friction_propose; runs:write is refused on friction_propose; friction:write still requires approval", async () => {
     const f = await fixture();
-    for (const name of ["friction_report", "repo_list", "friction_propose"]) {
+    for (const name of ["friction_report", "repo_list", "repo_workload", "friction_propose"]) {
       const body = await callAs(f.commands, ["dispatch"], name);
       expect(body.error?.data?.code, name).toBe("unauthorized");
     }

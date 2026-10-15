@@ -28,6 +28,8 @@ export interface ResidentAdminClient {
   reconfigure(body: Record<string, unknown>): Promise<ResidentAdminResponse>;
   rebuild(resource: string, dryRun: boolean, full?: boolean): Promise<ResidentAdminResponse>;
   residents(): Promise<ResidentAdminResponse>;
+  /** Read the primary resident's workload count and the records behind it. */
+  workload(resource: string): Promise<ResidentAdminResponse>;
   /** One resident's `{ state, reason, inFlight }` (`GET /status`; 404 when not
    *  onboarded) — what the onboard/rebuild follow-up polls. */
   status(resource: string): Promise<ResidentAdminResponse>;
@@ -67,6 +69,9 @@ export class NullResidentAdminClient implements ResidentAdminClient {
   residents(): Promise<ResidentAdminResponse> {
     return this.answer();
   }
+  workload(_resource: string): Promise<ResidentAdminResponse> {
+    return this.answer();
+  }
   status(_resource: string): Promise<ResidentAdminResponse> {
     return this.answer();
   }
@@ -77,7 +82,7 @@ export class NullResidentAdminClient implements ResidentAdminClient {
 
 /** The admin routes, as the span names them: the path literal, never a query. */
 type AdminRoute =
-  "/register" | "/onboard" | "/offboard" | "/reconfigure" | "/rebuild" | "/reset" | "/residents" | "/status";
+  "/register" | "/onboard" | "/offboard" | "/reconfigure" | "/rebuild" | "/reset" | "/residents" | "/status" | "/debug";
 
 export function makeResidentAdminClient(baseUrl: string, token: string): ResidentAdminClient {
   // One closure per parent: the unbound client, and the view `withSpan` makes
@@ -126,6 +131,7 @@ export function makeResidentAdminClient(baseUrl: string, token: string): Residen
       rebuild: (resource, dryRun, full) =>
         call(full ? "/reset" : "/rebuild", "POST", { resource, ...(dryRun ? { dryRun: true } : {}) }),
       residents: () => call("/residents", "GET"),
+      workload: (resource) => call("/debug", "POST", { op: "workload-audit", resource }),
       status: (resource) => call("/status", "GET", undefined, `/status?resource=${encodeURIComponent(resource)}`),
       withSpan: (span) => clientFor(span),
     };

@@ -555,6 +555,19 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
             },
       }),
     reconfigure: async (body) => exec(`admin.reconfigure ${String(body.resource)}`, { status: 200, data: {} }),
+    workload: async (resource) => ({
+      status: 200,
+      data: {
+        schema: 1,
+        resource,
+        residentId: resource,
+        workloadLimit: 16,
+        used: 1,
+        complete: true,
+        owners: [{ key: "op:fixture", sources: [{ kind: "operator", user: "worker2" }] }],
+        issues: [],
+      },
+    }),
     status: async (resource) =>
       exec(`admin.status ${resource}`, { status: 200, data: { state: "warm", reason: "", inFlight: 0 } }),
     rebuild: async (resource, dryRun, full) =>
