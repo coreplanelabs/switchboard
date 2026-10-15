@@ -51,6 +51,43 @@ function response(mode: string): Response {
 }
 
 describe("original uncertain write diagnostics", () => {
+  it("retains body evidence from the original decoder without reading a ledger response twice", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const notices: Parameters<typeof storageFailureNote>[0][] = [];
+    const replies = [
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new Error("private body failure"));
+          },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+      Response.json({ error: "private refusal" }, { status: 401 }),
+    ];
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://state.invalid",
+      token: "fixture",
+      storeKey: "fixture",
+      onFailure: ({ diagnostic }) => notices.push(diagnostic),
+      fetch: async () => replies.shift()!,
+    });
+    try {
+      await expect(wire.setState(id, gen, {})).rejects.toMatchObject({ outcome: "unknown" });
+      await expect(wire.listLive()).rejects.toMatchObject({ name: "PermanentStoreError" });
+      expect(notices).toMatchObject([
+        { phase: "response-body", httpStatus: 200, response: { contentType: "json", bodyKind: "unreadable" } },
+        { phase: "http", httpStatus: 401, response: { contentType: "json", bodyKind: "json" } },
+      ]);
+      expect(JSON.stringify(notices)).not.toMatch(/private body failure|private refusal/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("distinguishes identical requests with malformed acknowledgments by their original transport observations", async () => {
     const now = vi.spyOn(clock, "systemClock").mockReturnValue(1000);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -475,6 +512,7 @@ describe("original uncertain write diagnostics", () => {
           requestId: expect.stringMatching(/^[a-f0-9-]{36}$/),
           rayId: "a49d0ab74f2e09ac-DFW",
           timing: { elapsedMs: expect.any(Number), timeoutMs: 10000, deadlineExceeded: false },
+          response: { contentType: "text", bodyKind: "not-read" },
           server: {
             stage: "state-rpc",
             errorKind: "error",

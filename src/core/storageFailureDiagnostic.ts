@@ -8,7 +8,14 @@ import {
 } from "./runStateWriteDiagnostic.js";
 import { TransientStoreError, UncertainStoreError } from "./storeFailure.js";
 import type { StoreRequestWitness } from "./storeFailure.js";
-import type { StoreOperationKind } from "./storeResponse.js";
+import {
+  storeRequestWitness,
+  observedStoreResponseBodyKind,
+  unparsedStoreResponseBodyKind,
+  STORE_RESPONSE_BODY_KINDS,
+  type StoreOperationKind,
+} from "./storeResponse.js";
+import { systemClock } from "./trace/clock.js";
 import { RUN_ID_PATTERN } from "./runIdentity.js";
 
 export const STORAGE_FAILURE_DIAGNOSTIC_HEADER = "x-switchboard-storage-failure";
@@ -19,6 +26,14 @@ export function storageRequestIdOf(value: unknown): string | undefined {
     ? value
     : undefined;
 }
+
+export function newStorageRequestId(): string | undefined {
+  try {
+    return storageRequestIdOf(crypto.randomUUID());
+  } catch {
+    return undefined;
+  }
+}
 const phases = [
   "transport",
   "http",
@@ -28,6 +43,35 @@ const phases = [
   "response-shape",
   "acknowledgement",
 ] as const;
+const responseContentTypes = ["json", "html", "text", "other", "missing"] as const;
+
+export interface StorageResponseMetadata {
+  contentType: (typeof responseContentTypes)[number];
+  bodyKind: (typeof STORE_RESPONSE_BODY_KINDS)[number];
+}
+
+/** Response format is evidence, never proof that a particular service answered. */
+export function storageResponseMetadata(response: Response, body?: string | null): StorageResponseMetadata {
+  const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  const contentType = !mediaType
+    ? "missing"
+    : mediaType === "application/json" || mediaType.endsWith("+json")
+      ? "json"
+      : mediaType === "text/html"
+        ? "html"
+        : mediaType.startsWith("text/")
+          ? "text"
+          : "other";
+  if (body === undefined) return { contentType, bodyKind: observedStoreResponseBodyKind(response) };
+  if (body === null) return { contentType, bodyKind: "unreadable" };
+  if (body.trim() === "") return { contentType, bodyKind: "empty" };
+  try {
+    JSON.parse(body);
+    return { contentType, bodyKind: "json" };
+  } catch {
+    return { contentType, bodyKind: unparsedStoreResponseBodyKind(body) };
+  }
+}
 
 /** Diagnosis only. It neither acknowledges nor permits replay of a mutation. */
 export interface StorageFailureDiagnostic {
@@ -35,6 +79,7 @@ export interface StorageFailureDiagnostic {
   operation: string;
   requestDigest: string;
   requestId?: string;
+  requestedAt?: number;
   kind?: StoreOperationKind;
   phase: (typeof phases)[number];
   ownerGen?: string;
@@ -42,11 +87,57 @@ export interface StorageFailureDiagnostic {
   rayId?: string;
   exception?: StateWriteException;
   server?: StateWriteFailure;
+  response?: StorageResponseMetadata;
   timing?: { elapsedMs: number; timeoutMs: number; deadlineExceeded: boolean };
 }
 export interface StorageFailureNotice {
   runIds: readonly string[];
   diagnostic: StorageFailureDiagnostic;
+}
+
+export interface StorageFailureCapture {
+  operation: string;
+  payload: string;
+  kind: StoreOperationKind;
+  requestId?: string;
+  requestedAt: number;
+  timeoutMs: number;
+  signal?: AbortSignal;
+}
+
+/** Config failures use the same notice without making diagnostics a request prerequisite. */
+export async function captureStorageFailure(
+  capture: StorageFailureCapture,
+  phase: StorageFailureDiagnostic["phase"],
+  response?: Response,
+  body?: string | null,
+  onFailure?: (notice: StorageFailureNotice) => void,
+): Promise<void> {
+  try {
+    const timing = {
+      elapsedMs: Math.max(0, systemClock() - capture.requestedAt),
+      timeoutMs: capture.timeoutMs,
+      deadlineExceeded: capture.signal?.aborted === true,
+    };
+    const responseFacts = response ? storageResponseMetadata(response, body) : undefined;
+    const notice = storageFailureNotice(
+      await storeRequestWitness(capture.operation, capture.payload),
+      capture.kind,
+      phase,
+      new Error("Storage request failed"),
+      response,
+      undefined,
+      {
+        requestId: capture.requestId,
+        requestedAt: capture.requestedAt,
+        ...(responseFacts ? { response: responseFacts } : {}),
+        timing,
+      },
+    );
+    emitStorageFailure(notice, onFailure);
+  } catch {
+    // A diagnostic failure cannot replace the original request outcome.
+  }
 }
 
 /** Correlation comes from the frozen request, never a caller's later edits. */
@@ -57,7 +148,7 @@ export function storageFailureNotice(
   error: unknown,
   response?: Response,
   server?: StateWriteFailure,
-  observation?: Pick<StorageFailureDiagnostic, "timing" | "requestId">,
+  observation?: Pick<StorageFailureDiagnostic, "timing" | "requestId" | "requestedAt" | "response">,
 ): StorageFailureNotice {
   let body: Record<string, unknown> = {};
   try {
@@ -98,6 +189,7 @@ export function storageFailureNotice(
       phase: observedPhase,
       ...(observation?.timing ? { timing: observation.timing } : {}),
       ...(requestId ? { requestId } : {}),
+      ...(observation?.requestedAt !== undefined ? { requestedAt: observation.requestedAt } : {}),
       ...(typeof ownerGen === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(ownerGen) ? { ownerGen } : {}),
       ...(response
         ? { httpStatus: response.status }
@@ -105,6 +197,7 @@ export function storageFailureNotice(
           ? { httpStatus: diagnosis.status }
           : {}),
       ...(ray && /^[a-f0-9]{16}(?:-[A-Z]{3})?$/.test(ray) ? { rayId: ray } : {}),
+      ...(response ? { response: observation?.response ?? storageResponseMetadata(response) } : {}),
       // Decoder exceptions can quote private response bytes. Capture only the
       // transport exception; remote exceptions come from the validated header.
       ...(observedPhase === "transport"
@@ -124,6 +217,23 @@ export function storageFailureNotice(
           : {}),
     },
   };
+}
+
+/** A failed log or observer must not replace the original storage outcome. */
+export function emitStorageFailure(
+  notice: StorageFailureNotice,
+  onFailure?: (notice: StorageFailureNotice) => void,
+): void {
+  try {
+    console.warn(JSON.stringify({ event: "storage.request.failure", side: "client", ...notice }));
+  } catch {
+    // The observer remains useful when the log sink fails.
+  }
+  try {
+    onFailure?.(notice);
+  } catch {
+    // Telemetry cannot authorize a retry or change the original result.
+  }
 }
 
 /** A diagnostic append cannot recursively create another diagnostic append. */
@@ -178,6 +288,7 @@ export function storageFailureDiagnosticOf(value: unknown): StorageFailureDiagno
           "operation",
           "requestDigest",
           "requestId",
+          "requestedAt",
           "kind",
           "phase",
           "ownerGen",
@@ -186,11 +297,12 @@ export function storageFailureDiagnosticOf(value: unknown): StorageFailureDiagno
           "exception",
           "server",
           "timing",
+          "response",
         ].includes(key),
     ) ||
     v.version !== 1 ||
     typeof v.operation !== "string" ||
-    !/^\/(?:runs|plane)\/[a-z-]+(?:\/[a-z-]+){0,2}$/.test(v.operation) ||
+    !/^(?:\/(?:runs|plane)\/[a-z-]+(?:\/[a-z-]+){0,2}|\/config\/(?:get|put))$/.test(v.operation) ||
     v.operation.length > 100 ||
     typeof v.requestDigest !== "string" ||
     !/^[a-f0-9]{64}$/.test(v.requestDigest) ||
@@ -207,6 +319,17 @@ export function storageFailureDiagnosticOf(value: unknown): StorageFailureDiagno
     return;
   if (v.rayId !== undefined && (typeof v.rayId !== "string" || !/^[a-f0-9]{16}(?:-[A-Z]{3})?$/.test(v.rayId))) return;
   if (v.requestId !== undefined && !storageRequestIdOf(v.requestId)) return;
+  if (v.requestedAt !== undefined && (!Number.isSafeInteger(v.requestedAt) || Number(v.requestedAt) < 0)) return;
+  if (v.response !== undefined) {
+    if (!v.response || typeof v.response !== "object" || Array.isArray(v.response)) return;
+    const response = v.response as Record<string, unknown>;
+    if (
+      Object.keys(response).some((key) => !["contentType", "bodyKind"].includes(key)) ||
+      !(responseContentTypes as readonly unknown[]).includes(response.contentType) ||
+      !(STORE_RESPONSE_BODY_KINDS as readonly unknown[]).includes(response.bodyKind)
+    )
+      return;
+  }
   const server = v.server === undefined ? undefined : stateWriteFailureOf(v.server);
   if (v.timing !== undefined) {
     if (!v.timing || typeof v.timing !== "object" || Array.isArray(v.timing)) return;

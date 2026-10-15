@@ -15,6 +15,15 @@ import { createHash } from "node:crypto";
 import { isConfigPublicationSnapshotKey, type ConfigSourcePrecondition } from "./configPublicationProtocol.js";
 export { isConfigPublicationSnapshotKey, type ConfigSourcePrecondition } from "./configPublicationProtocol.js";
 import type { EnvRecord, Secret, Secrets } from "./secrets.js";
+import {
+  captureStorageFailure,
+  newStorageRequestId,
+  STORAGE_REQUEST_ID_HEADER,
+  type StorageFailureCapture,
+  type StorageFailureDiagnostic,
+  type StorageFailureNotice,
+} from "./core/storageFailureDiagnostic.js";
+import { systemClock } from "./core/trace/clock.js";
 
 /** The ConfigDO key the base config lives under; the overrides key is `overrides`. */
 export const BASE_CONFIG_DOCUMENT_KEY = "base";
@@ -105,6 +114,7 @@ export interface ConfigDocumentClientOptions {
   token: string;
   fetch?: typeof fetch;
   timeoutMs?: number;
+  onFailure?: (notice: StorageFailureNotice) => void;
 }
 
 export type ReadBaseOutcome =
@@ -333,15 +343,31 @@ export class ConfigDocumentClient {
     path: string,
     payload: Record<string, unknown>,
   ): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; problem: string; status?: number }> {
+    const capture: StorageFailureCapture = {
+      operation: path,
+      payload: JSON.stringify(payload),
+      kind: path === "/config/get" ? "read" : "write",
+      requestId: newStorageRequestId(),
+      requestedAt: systemClock(),
+      timeoutMs: this.timeoutMs,
+    };
+    const report = (phase: StorageFailureDiagnostic["phase"], response?: Response, body?: string | null) =>
+      captureStorageFailure(capture, phase, response, body, this.opts.onFailure);
     let res: Response;
     try {
+      capture.signal = AbortSignal.timeout(this.timeoutMs);
       res = await this.fetchImpl(`${this.baseUrl}${path}`, {
         method: "POST",
-        headers: { authorization: `Bearer ${this.opts.token}`, "content-type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(this.timeoutMs),
+        headers: {
+          authorization: `Bearer ${this.opts.token}`,
+          "content-type": "application/json",
+          ...(capture.requestId ? { [STORAGE_REQUEST_ID_HEADER]: capture.requestId } : {}),
+        },
+        body: capture.payload,
+        signal: capture.signal,
       });
     } catch (error) {
+      await report("transport");
       const cause = configTransportCause(error);
       return { ok: false, problem: `${this.describe()}: ${path} request failed${cause ? ` — ${cause}` : ""}` };
     }
@@ -349,16 +375,23 @@ export class ConfigDocumentClient {
     try {
       text = await res.text();
     } catch {
+      await report("response-body", res, null);
       return { ok: false, problem: `${this.describe()}: ${path} response body was not received` };
     }
     let body: Record<string, unknown> = {};
     try {
       const parsed: unknown = text ? JSON.parse(text) : {};
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-        if (res.ok) return { ok: false, problem: `${this.describe()}: ${path} answered a non-object` };
+        if (res.ok) {
+          await report("response-shape", res, text);
+          return { ok: false, problem: `${this.describe()}: ${path} answered a non-object` };
+        }
       } else body = parsed as Record<string, unknown>;
     } catch {
-      if (res.ok) return { ok: false, problem: `${this.describe()}: ${path} answered non-JSON` };
+      if (res.ok) {
+        await report("response-json", res, text);
+        return { ok: false, problem: `${this.describe()}: ${path} answered non-JSON` };
+      }
     }
     if (res.status === 409)
       return {
@@ -366,12 +399,14 @@ export class ConfigDocumentClient {
         status: res.status,
         problem: `${this.describe()}: ${path} → 409 version conflict (another push landed first)`,
       };
-    if (!res.ok)
+    if (!res.ok) {
+      await report("http", res, text);
       return {
         ok: false,
         status: res.status,
         problem: `${this.describe()}: ${path} → HTTP ${res.status}${res.status === 401 || res.status === 403 ? ` — is ${STATE_WORKER_TOKEN_ENV} the Worker's bearer?` : ""}`,
       };
+    }
     return { ok: true, body };
   }
 }

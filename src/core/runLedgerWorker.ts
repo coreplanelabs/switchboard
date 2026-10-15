@@ -185,6 +185,7 @@ import {
   STORAGE_FAILURE_DIAGNOSTIC_HEADER,
   STORAGE_REQUEST_ID_HEADER,
   storageFailureNotice,
+  emitStorageFailure,
   isStorageDiagnosticAppend,
   type StorageFailureDiagnostic,
   type StorageFailureNotice,
@@ -401,12 +402,7 @@ export class WorkerRunLedger implements RunLedger {
           }
         : undefined;
       const notice = storageFailureNotice(request, kind, phase, error, response, server, observation);
-      try {
-        console.warn(JSON.stringify({ event: "storage.request.failure", side: "client", ...notice }));
-      } catch {
-        /* Keep the event sink independent of logging. */
-      }
-      if (!isStorageDiagnosticAppend(request)) this.opts.onFailure?.(notice);
+      emitStorageFailure(notice, isStorageDiagnosticAppend(request) ? undefined : this.opts.onFailure);
     } catch {
       // Telemetry must never replace the original exception or change retries.
     }
