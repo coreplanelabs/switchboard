@@ -115,6 +115,12 @@ Implement bounded claims, claim tokens, expiry, retry delay, fair service and vi
 
 **Done when `[gap]`:** failure before/after every save and notification leaves either a recoverable job or an explicit failed result. A repeated delivery returns the original result. Recovery continues with no active agent heartbeat.
 
+### Shared wake prerequisite, 2026-10-15
+
+The state alarm now acknowledges its next wake before Workflow discovery or maintenance starts. It uses the same scheduling path after the pass to refresh changed deadlines and preserve earlier deadlines for other work. A failed wake write prevents the external lookup. The existing later alarm can retry the pass. SQLite tests cover no live runs, paused maintenance, an earlier deadline and a failed wake acknowledgment.
+
+This prepares the existing recovery path for shared intake jobs. It adds no event job, source writer, listener or new timer interval. Atomic event/job/wake reception, bounded job claims and keyed internal delivery still remain pending. Local Worker proof remains separate from production acceptance.
+
 ## Step 3: preserve evidence through internal handoffs
 
 **Current source:** [intake](../../src/core/intake.ts), [inbox schema](../../src/core/runLedger/inboxMessage.ts), [thread admission](../../src/core/threadAdmission.ts), [unit events](../../src/core/coordinator/instanceStore.ts), and both runtime implementations.

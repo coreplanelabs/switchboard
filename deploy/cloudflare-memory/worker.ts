@@ -9117,6 +9117,9 @@ export class RunHistoryDO extends DurableObject<Env> {
     const root = startAdoptedRoot(tracer, "state.alarm", { sinks: traceSinks });
     try {
       const now = systemClock();
+      // The process can stop during external work, before finally can re-arm.
+      // Save the next shared deadline before starting that work.
+      await this.ensureNextAlarm(now);
       await this.discoverCoordinatorWorkflows(now);
       let deleted = 0;
       if (this.env.RUN_HISTORY_MAINTENANCE === "enabled") {

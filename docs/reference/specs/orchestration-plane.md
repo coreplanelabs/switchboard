@@ -196,3 +196,7 @@ The embedded chat shows the same saved-action confirmation control as Threads. C
 | Saved confirmation in the embedded chat executes by id, without pasting or retargeting | `[unit]` `web/src/pages/plane.test.ts::PlanePage — the chat column (record 0070)::confirms a saved offer by id through the same send route` |
 
 | Merge and queue entry use the verified linked person's GitHub binding after MCP approval. The credential remains the audit actor, and approval is consumed once. | `[unit]` `src/channels/mcpApprovals.test.ts::MCP approval parity::a browser-approved MCP…` |
+
+| Criterion | Proof |
+| --- | --- |
+| The shared state alarm saves its next wake before native Workflow discovery or other external work starts. A process loss before `finally` cannot remove that saved wake. An earlier deadline for other work is preserved. This also applies with no live agent runs and with physical history maintenance paused. | `[unit]` `deploy/cloudflare-memory/runLedger.test.ts::durable coordinator Workflow reconciliation::saves the next wake before native discovery…`; `::blocks native discovery until the next wake is acknowledged and resumes on a later alarm` |
