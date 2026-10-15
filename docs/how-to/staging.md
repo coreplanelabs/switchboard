@@ -190,8 +190,32 @@ gh workflow run deploy-staging-bootstrap.yml --ref "$BOOTSTRAP_BRANCH" \
   -f previous_worker_version="$BOOTSTRAP_PREVIOUS_WORKER_VERSION"
 ```
 
-The job uses the existing staging Environment and `deploy-staging` lock. It checks positive original GitHub run metadata and complete preserved workflow history. A rerun or another run for the same selected operation refuses. Missing or changed old source/version and unreadable preflight data refuse before upload. An existing maintenance record also refuses a new bootstrap. The job does not reset the fixture.
+The job uses the existing staging Environment and `deploy-staging` lock. It checks positive original GitHub run metadata and complete preserved workflow history. A rerun or another run for the same selected operation refuses. Missing or changed old source/version and unreadable preflight data refuse before upload. An existing maintenance record refuses a first bootstrap. A successor requires the exact released predecessor described below. The job does not reset the fixture.
 
 The expected result is the distinct `staging / bootstrap held` job and its `staging-held-bootstrap-<run>-1` artifact. A successful artifact reports image readiness, the exact maintenance hold and a null risk window. The job reconciles the original members against the exact native application, version and image, including when that image is unchanged. Missing members or pending activation refuse. It grants no normal staging, release, production or FE acceptance. It records no original request or native ending.
 
 If upload, readiness or receipt delivery is uncertain, retain the original run and result. Do not rerun it or reuse its operation ID. The operator must reconcile the original outcome before selecting any new operation. Read-only adoption of a proved original result is separate from another upload. After a verified held bootstrap, the operator makes the one finite risk decision. Only the later first normal retained CI run can claim its window, seal completion, wait for explicit release and run its own E2E.
+
+### Select a successor after release
+
+A successor is a new selected operation after a released operation has consumed its window. It does not restart the old CI run or extend its deadline. Keep the old maintenance, window, release, immutable audit, original request quote and private failure evidence. The original request and native outcome can remain unknown.
+
+First finish the source review and CI gates for the exact containing candidate. Before any physical selection, positively reconcile prior uploaders and their deployment-credential boundary. An empty controller list, age or a stopped process does not prove that old control authority is gone. Any unknown remaining upload or fixture-control authority stops this operation. Independently verify the complete native, member, owner and private workspace state. A retained acknowledged workspace may keep positive display counters. Use the final fenced activity classification: executing and unknown work must be zero, while retained custody remains protected. That acknowledgement does not prove native ending. Do not remove files or clear registration merely to zero a counter. Accept that a failed post-upload policy comparison can leave staging unavailable; no automatic rollback or restoration time is promised.
+
+The new immutable policy uses the same account, script, origin, resources and fixture. It selects a distinct hold ID, generation plus one, distinct operation ID, new source and fresh decision digest. Its fixed deadline belongs only to that original new CI run. Add `predecessor` with these exact old fields:
+
+| Field | Retained value |
+| --- | --- |
+| `holdId`, `generation`, selected operation object | Full prior hold identity and all selected operation fields shown below. |
+| `fixtureSha256`, `decisionSha256` | Prior fixture and accepted risk decision digests. |
+| `releasedAt`, `releaseDecisionSha256` | Prior explicit release time and decision. |
+| `policySha256` | Prior full parsed policy digest. Current readback supplies it. For the legacy producer, calculate it from the retained immutable parsed policy using SHA-256 of compact JSON with recursively sorted object keys; the unavailable field is not a service certificate. |
+| `request` | Original `id`, `startedAt`, `recordSha256`. Keep the complete stored-record quote unchanged. |
+
+Copy the complete original operation object with the exact property names in the [successor reference contract](../reference/specs/resident-repos.md#staging-successor-operations).
+
+Use the same six-input manual bootstrap workflow. Its old source and Worker version must still match the selected predecessor. The legacy released producer reports one blocking request and a withdrawn swap fence. Only this selected installer can accept that exact projection under the qualification above. A generic force request cannot replace the policy. Startup compares the full stored predecessor policy, completed window, original audit/request and release receipt in one transaction before selecting the new hold.
+
+Verify the new exact source, native target, all original members, held maintenance, `installation.state=installed`, matching policy digest and a null risk window. A reconciliation GET can finish the original uploaded policy's initialization on first Durable Object construction; it cannot choose another policy or repeat the physical upload. Same-policy restarts preserve installation time, deadline and released state. Unknown upload or receipt outcomes stop without resubmission.
+
+After this installation is verified, the operator can accept a fresh risk decision for the same original request. It creates a window for this successor only. The first later normal retained CI run still uses force zero, seals its own window and waits for an explicit release before acceptance checks. `GET /staging-maintenance?holdId=<old-hold-id>` reads retained history without moving the current pointer. Its window `recordedState` reports the retained phase; the projected `state` remains the current eligibility result. A successor requires the prior recorded phase to be `completed`. These reads and a successful source merge grant no deployment or E2E acceptance.

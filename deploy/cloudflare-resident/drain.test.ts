@@ -2,7 +2,7 @@ import { residentAddress } from "../../src/execution/residentMembers";
 import { describe, expect, it } from "vitest";
 import ts from "typescript";
 import { runInNewContext } from "node:vm";
-import { webcrypto } from "node:crypto";
+import { webcrypto, createHash } from "node:crypto";
 import { sanitizeResidentBody } from "../../src/execution/residentText.js";
 import { admissionRecordHash, recoveryEvidenceUrl, recoveryQuote, recoveryViewsAreIdle } from "./admissionRecovery";
 import {
@@ -35,12 +35,21 @@ import {
   stagingAttemptMatches,
   abandonmentAuditSchema,
   type StagingMaintenancePolicy,
+  stagingInstallationSchema,
   residentImageTargetSchema,
 } from "./admissionRisk.js";
 
+import {
+  installStagingEpisode,
+  readStagingEpisode,
+  stagingEpisodeKeys,
+  stagingEpisodeAuditKey,
+} from "./stagingEpisodes.js";
+import { stagingEvidenceSha256 } from "../../src/deploy/residentMaintenance.js";
+
 describe("global deploy admission evidence", () => {
   function fixture(
-    options: { stamp?: BuildStamp; policy?: StagingMaintenancePolicy; rows?: Map<string, unknown> } = {},
+    options: { stamp?: BuildStamp; policy?: StagingMaintenancePolicy; rows?: Map<string, unknown>; now?: number } = {},
   ) {
     const source = readSource("worker.ts");
     const registry = source.slice(
@@ -150,7 +159,7 @@ describe("global deploy admission evidence", () => {
     const stamp = options.stamp ?? resolveBuildStamp("a".repeat(40), undefined);
     let initialization = Promise.resolve();
     const events: Array<Record<string, unknown>> = [];
-    let now = 1000,
+    let now = options.now ?? 1000,
       failDelete = false,
       loseDeleteAck = false,
       failOrigin = false,
@@ -163,7 +172,8 @@ describe("global deploy admission evidence", () => {
       get: async (key: string) => rows.get(key),
       put: async (key: string, value: unknown) => {
         if (failOrigin) throw new Error("private-origin-error");
-        if (failAuditWrite && key.startsWith("deploy:recovered:")) throw new Error("audit-write-failed");
+        if (failAuditWrite && (key.startsWith("deploy:recovered:") || key.startsWith("deploy:staging-installation:")))
+          throw new Error("audit-write-failed");
         rows.set(key, value);
       },
       delete: async (key: string) => {
@@ -249,6 +259,12 @@ describe("global deploy admission evidence", () => {
         recoveryViewsAreIdle,
         admissionRecordHash,
         deployObligations,
+        installStagingEpisode,
+        readStagingEpisode,
+        stagingEpisodeKeys,
+        stagingEpisodeAuditKey,
+        stagingEvidenceSha256,
+        stagingInstallationSchema,
         liveMaintenanceWindow,
         maintenanceRecordSchema,
         releaseWindowSchema,
@@ -629,6 +645,342 @@ describe("global deploy admission evidence", () => {
     expect((await h.http("GET", "/staging-maintenance")).status).toBe(500);
     expect([...rows]).toEqual([["deploy:staging-maintenance", original]]);
   });
+
+  async function successorFixture() {
+    const policy = { ...TEST_MAINTENANCE, attempt: { ...TEST_MAINTENANCE.attempt, deadline: 3_600_000 } };
+    const original = { startedAt: 1000, kind: "watchdog" };
+    const originalRecordSha256 = (await admissionRecordHash(original))!;
+    const fence = {
+      since: "1970-01-01T00:00:00.000Z",
+      until: "1970-01-01T01:00:00.000Z",
+      versionId: "00000000-0000-4000-8000-000000000002",
+    };
+    const released = {
+      schema: 1,
+      state: "released",
+      installedAt: 1000,
+      releasedAt: 1000,
+      releaseDecisionSha256: "7".repeat(64),
+      policy,
+    };
+    const window = {
+      schema: 1,
+      state: "completed",
+      recordId: recoveryRequest.id,
+      holdId: policy.holdId,
+      generation: 1,
+      attemptId: policy.attempt.id,
+      drain: fence,
+    };
+    const audit = {
+      schema: 1,
+      id: recoveryRequest.id,
+      disposition: "operator-abandoned",
+      requestEnd: "unobserved",
+      nativeOutcome: "unverified",
+      independentObligations: "unchanged",
+      policy,
+      originalRecord: original,
+      originalRecordSha256,
+      decidedAt: 1000,
+      fence,
+    };
+    const release = {
+      schema: 1,
+      holdId: policy.holdId,
+      generation: 1,
+      fixtureSha256: policy.fixtureSha256,
+      decisionSha256: released.releaseDecisionSha256,
+      releasedAt: 1000,
+      originalRecordSha256,
+      requestEnd: "unobserved",
+      nativeOutcome: "unverified",
+    };
+    const rows = new Map<string, unknown>([
+      ["deploy:staging-maintenance", released],
+      ["deploy:staging-window", window],
+      [`deploy:abandoned:${recoveryRequest.id}`, audit],
+      [`deploy:admission:${recoveryRequest.id}`, original],
+      [`deploy:staging-release:${policy.holdId}`, release],
+    ]);
+    const retained = structuredClone([...rows]);
+    const old = fixture({ rows });
+    expect((await old.http("GET", "/staging-maintenance")).status).toBe(200);
+    const successor = {
+      ...policy,
+      generation: 2,
+      holdId: "33333333-3333-4333-8333-333333333333",
+      decisionSha256: "5".repeat(64),
+      attempt: { ...policy.attempt, id: "44444444-4444-4444-8444-444444444444", sourceCommit: "b".repeat(40) },
+      predecessor: {
+        holdId: policy.holdId,
+        generation: 1,
+        attempt: policy.attempt,
+        fixtureSha256: policy.fixtureSha256,
+        decisionSha256: policy.decisionSha256,
+        releasedAt: 1000,
+        releaseDecisionSha256: released.releaseDecisionSha256,
+        policySha256: createHash("sha256")
+          .update(
+            JSON.stringify(policy, (_key, item) =>
+              item && typeof item === "object" && !Array.isArray(item)
+                ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+                : item,
+            ),
+          )
+          .digest("hex"),
+        request: { id: recoveryRequest.id, startedAt: 1000, recordSha256: originalRecordSha256 },
+      },
+    };
+    return { rows, policy: successor, retained, original, legacy: old };
+  }
+
+  it("installs a separately selected successor without changing consumed predecessor evidence", async () => {
+    const { rows, policy: successor, retained } = await successorFixture();
+    const h = fixture({
+      rows,
+      policy: successor,
+      stamp: resolveBuildStamp("b".repeat(40), "2026-10-15T00:00:00.000Z"),
+    });
+    await h.boot();
+    const response = await h.http("GET", "/staging-maintenance");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      maintenance: {
+        state: "held",
+        holdId: "33333333-3333-4333-8333-333333333333",
+        generation: 2,
+        attempt: { sourceCommit: "b".repeat(40) },
+        window: null,
+        installation: { state: "installed" },
+      },
+    });
+    expect(retained.map(([key]) => [key, rows.get(key)])).toEqual(retained);
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+  });
+
+  it("refuses changed predecessor evidence and leaves the stored episode untouched", async () => {
+    for (const problem of ["policy", "release", "window", "quote", "neighbor", "generation", "auditTime"] as const) {
+      const seed = await successorFixture();
+      if (problem === "policy") seed.policy.predecessor.policySha256 = "0".repeat(64);
+      if (problem === "release") seed.rows.delete(`deploy:staging-release:${seed.policy.predecessor.holdId}`);
+      if (problem === "window")
+        seed.rows.set("deploy:staging-window", {
+          ...(seed.rows.get("deploy:staging-window") as object),
+          state: "fenced",
+        });
+      if (problem === "quote")
+        seed.rows.set(`deploy:admission:${recoveryRequest.id}`, { startedAt: 1001, kind: "watchdog" });
+      if (problem === "neighbor") seed.rows.set(`deploy:admission:${identity.id}`, { startedAt: 1000 });
+      if (problem === "generation") seed.policy.generation = 3;
+      if (problem === "auditTime")
+        seed.rows.set(`deploy:abandoned:${recoveryRequest.id}`, {
+          ...(seed.rows.get(`deploy:abandoned:${recoveryRequest.id}`) as object),
+          decidedAt: 2000,
+        });
+      const before = structuredClone([...seed.rows]);
+      const h = fixture({
+        rows: seed.rows,
+        policy: seed.policy,
+        stamp: resolveBuildStamp("b".repeat(40), "2026-10-15T00:00:00.000Z"),
+      });
+      if (problem === "policy")
+        await expect(h.boot()).rejects.toThrow(
+          "staging-successor-predecessor-unverified: hold=33333333-3333-4333-8333-333333333333 generation=2 condition=predecessor-policy-digest",
+        );
+      else await expect(h.boot()).rejects.toThrow(/staging/);
+      expect([...seed.rows]).toEqual(before);
+    }
+  });
+
+  it("rolls back a failed installation receipt without changing predecessor or pointer", async () => {
+    const seed = await successorFixture();
+    const before = structuredClone([...seed.rows]);
+    const h = fixture({
+      rows: seed.rows,
+      policy: seed.policy,
+      stamp: resolveBuildStamp("b".repeat(40), "2026-10-15T00:00:00.000Z"),
+    });
+    h.failAuditWrite();
+    await expect(h.boot()).rejects.toThrow("audit-write-failed");
+    expect([...seed.rows]).toEqual(before);
+  });
+
+  it("reconciles a committed installation after lost acknowledgement without renewing it", async () => {
+    const seed = await successorFixture();
+    const options = {
+      rows: seed.rows,
+      policy: seed.policy,
+      stamp: resolveBuildStamp("b".repeat(40), "2026-10-15T00:00:00.000Z"),
+    };
+    const h = fixture(options);
+    h.loseDeleteAck();
+    await expect(h.boot()).rejects.toThrow("private-delete-ack-error");
+    const committed = structuredClone([...seed.rows]);
+    const restarted = fixture({ ...options, now: 4_000_000 });
+    await restarted.boot();
+    expect(await restarted.api.getStagingMaintenanceReadback()).toMatchObject({
+      state: "held",
+      holdId: "33333333-3333-4333-8333-333333333333",
+      installation: { state: "installed", installedAt: 1000 },
+      window: null,
+    });
+    expect([...seed.rows]).toEqual(committed);
+  });
+
+  it("refuses missing selection or changed retained evidence instead of falling back to legacy", async () => {
+    for (const problem of ["pointer", "receipt", "origin", "corrupt-pointer"] as const) {
+      const seed = await successorFixture();
+      const h = fixture({
+        rows: seed.rows,
+        policy: seed.policy,
+        stamp: resolveBuildStamp("b".repeat(40), "2026-10-15T00:00:00.000Z"),
+      });
+      await h.boot();
+      expect(await h.api.getStagingMaintenance()).toMatchObject({ state: "held", policy: { generation: 2 } });
+      if (problem === "pointer") seed.rows.delete("deploy:staging-active");
+      if (problem === "corrupt-pointer")
+        seed.rows.set("deploy:staging-active", { holdId: "not-an-identifier", generation: -1 });
+      if (problem === "receipt") seed.rows.delete(`deploy:staging-installation:${seed.policy.holdId}`);
+      if (problem === "origin") seed.rows.delete(`deploy:abandoned:${recoveryRequest.id}`);
+      if (problem === "pointer")
+        await expect(h.api.beginDeployAdmission(origin)).rejects.toThrow(
+          "staging-episode-pointer-unverified: hold=33333333-3333-4333-8333-333333333333 generation=2 condition=active-pointer-missing",
+        );
+      else if (problem === "corrupt-pointer")
+        await expect(h.api.beginDeployAdmission(origin)).rejects.toThrow(
+          "staging-episode-pointer-unverified: hold=unverified generation=unverified condition=active-pointer-shape",
+        );
+      else await expect(h.api.beginDeployAdmission(origin)).rejects.toThrow(/unverified|changed/);
+      expect(seed.rows.get("deploy:staging-maintenance")).toMatchObject({
+        state: "released",
+        policy: { generation: 1 },
+      });
+    }
+  });
+
+  it("rejects a competing successor selected from an already superseded predecessor", async () => {
+    const seed = await successorFixture();
+    const h = fixture({
+      rows: seed.rows,
+      policy: seed.policy,
+      stamp: resolveBuildStamp("b".repeat(40), "2026-10-15T00:00:00.000Z"),
+    });
+    await h.boot();
+    const committed = structuredClone([...seed.rows]);
+    const competitor = {
+      ...seed.policy,
+      holdId: "55555555-5555-4555-8555-555555555555",
+      attempt: { ...seed.policy.attempt, id: "66666666-6666-4666-8666-666666666666", sourceCommit: "c".repeat(40) },
+    };
+    const other = fixture({
+      rows: seed.rows,
+      policy: competitor,
+      stamp: resolveBuildStamp("c".repeat(40), "2026-10-15T00:00:00.000Z"),
+    });
+    await expect(other.boot()).rejects.toThrow("staging-successor-predecessor-unverified");
+    expect([...seed.rows]).toEqual(committed);
+  });
+
+  it("uses a fresh successor risk window through normal claim seal and explicit release", async () => {
+    const seed = await successorFixture();
+    const h = fixture({
+      rows: seed.rows,
+      policy: seed.policy,
+      stamp: resolveBuildStamp("b".repeat(40), "2026-10-15T00:00:00.000Z"),
+    });
+    await h.boot();
+    const attempt = { ...seed.policy.attempt, holdId: seed.policy.holdId, generation: 2 };
+    const drain = { minutes: 90, reason: "selected successor", by: "new-controller", attempt };
+    const body = {
+      id: recoveryRequest.id,
+      expectedStartedAt: 1000,
+      expectedRecordSha256: seed.policy.predecessor.request.recordSha256,
+      expectedFixtureSha256: seed.policy.fixtureSha256,
+      expectedDecisionSha256: seed.policy.decisionSha256,
+      attempt,
+    };
+    expect((await h.http("POST", "/drain", drain)).status).toBe(200);
+    expect((await h.http("POST", "/staging-abandon-admission", body)).status).toBe(200);
+    expect(await h.api.activeDeployAdmissions()).toBe(0);
+    expect((await h.http("POST", "/staging-abandon-admission", body)).status).toBe(409);
+    expect((await h.http("POST", "/drain", drain)).status).toBe(200);
+    expect((await h.http("POST", "/deploy-fence", { attempt })).status).toBe(200);
+    expect(
+      (await h.http("POST", "/staging-seal-window", { attempt }, "00000000-0000-4000-8000-000000000003")).status,
+    ).toBe(200);
+    expect(
+      (
+        await h.http("POST", "/staging-release-maintenance", {
+          ...body,
+          releaseDecisionSha256: seed.policy.predecessor.releaseDecisionSha256,
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (await h.http("POST", "/staging-release-maintenance", { ...body, releaseDecisionSha256: "8".repeat(64) })).status,
+    ).toBe(200);
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+    expect(await h.api.getStagingMaintenanceReadback()).toMatchObject({
+      state: "released",
+      generation: 2,
+      window: { state: "unverified", stored: 1, excluded: 0, blocking: 1 },
+    });
+    await expect(h.api.endDeployAdmission(recoveryRequest.id)).rejects.toThrow("deploy-release-abandoned-request-held");
+    expect(retainLegacy(seed)).toEqual(seed.retained);
+    expect((await h.http("GET", "/staging-maintenance?holdId=invalid")).status).toBe(400);
+    const historical = await h.http("GET", `/staging-maintenance?holdId=${seed.policy.predecessor.holdId}`);
+    expect(await historical.json()).toMatchObject({
+      maintenance: {
+        state: "released",
+        generation: 1,
+        attempt: { sourceCommit: "a".repeat(40) },
+        window: { recordedState: "completed" },
+      },
+    });
+    const released = await h.api.getStagingMaintenanceReadback();
+    const previousRows = structuredClone([...seed.rows].filter(([key]) => key !== "deploy:staging-active"));
+    const policy = {
+      ...seed.policy,
+      generation: 3,
+      holdId: "55555555-5555-4555-8555-555555555555",
+      decisionSha256: "9".repeat(64),
+      attempt: { ...seed.policy.attempt, id: "66666666-6666-4666-8666-666666666666", sourceCommit: "c".repeat(40) },
+      predecessor: {
+        holdId: seed.policy.holdId,
+        generation: 2,
+        attempt: seed.policy.attempt,
+        fixtureSha256: seed.policy.fixtureSha256,
+        decisionSha256: seed.policy.decisionSha256,
+        policySha256: released.policySha256,
+        releasedAt: released.releasedAt,
+        releaseDecisionSha256: released.releaseDecisionSha256,
+        request: seed.policy.predecessor.request,
+      },
+    };
+    const next = fixture({
+      rows: seed.rows,
+      policy,
+      stamp: resolveBuildStamp("c".repeat(40), "2026-10-15T00:00:00.000Z"),
+    });
+    await next.boot();
+    expect(await next.api.getStagingMaintenanceReadback()).toMatchObject({
+      state: "held",
+      generation: 3,
+      window: null,
+      installation: { state: "installed", generation: 3 },
+    });
+    expect(await next.api.getStagingMaintenanceReadback(seed.policy.holdId)).toMatchObject({
+      state: "released",
+      generation: 2,
+    });
+    expect(previousRows.map(([key]) => [key, seed.rows.get(key)])).toEqual(previousRows);
+    expect(await next.api.activeDeployAdmissions()).toBe(1);
+  });
+
+  function retainLegacy(seed: Awaited<ReturnType<typeof successorFixture>>) {
+    return seed.retained.map(([key]) => [key, seed.rows.get(key)]);
+  }
 
   it("excludes only the exact staging record while retaining its original data and unknown result", async () => {
     const h = fixture();
