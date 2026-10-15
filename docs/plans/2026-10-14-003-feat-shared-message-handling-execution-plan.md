@@ -103,6 +103,12 @@ The private worker controls are merged in [PR #3139](https://github.com/coreplan
 
 The next cut separates those outcomes in the existing inbox protocol. Only an explicit `not-live` response permits the caller's existing target-absence behavior. Storage errors, invalid messages, unclear replies and older servers' unqualified rejections stop delivery. The CLI and bot use the same sequence reader. This change adds no delivery queue, automatic retry or listener. Live-reply decision records and unit-event migration remain pending; Step 1 remains in progress.
 
+### Unit reply delivery boundary, 2026-10-15
+
+The live inbox outcome boundary is merged in [PR #3140](https://github.com/coreplanelabs/switchboard/pull/3140). The unit-event path had the same failure: a failed append acknowledgment could start fresh work even if the original event had committed. A failed or rejected unit append now retains the original owner and returns a system refusal. It starts no replacement and does not claim that delivery succeeded or retry the write.
+
+This closes another failure branch before shared decision records are added. Confirmed Workflow absence still follows its existing termination and requester routing policy. Conversation links, live and unit fold decisions, and removal of the separate operator model pass remain pending. Step 1 is in progress.
+
 ## Step 2: save input and recover shared work
 
 **Current source:** [state worker](../../deploy/cloudflare-memory/worker.ts), [run-ledger contract](../../src/core/runLedger/types.ts), and [write-through client](../../src/core/runLedger/writeThrough.ts).

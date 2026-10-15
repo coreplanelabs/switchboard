@@ -28528,15 +28528,46 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     expect(s.provider.requests).toHaveLength(0);
   });
 
-  it("a store whose append throws (the Worker store on a failed call) routes the message fresh instead of losing it", async () => {
+  it.each(["throws", "unavailable", "stale", "ended"] as const)(
+    "an unconfirmed unit append (%s) retains the owner and starts no replacement",
+    async (failure) => {
+      const s = await unitOwnedSetup();
+      s.instances.appendEvent = async () => {
+        if (failure === "throws") throw new Error("coordinator store /runs/coordinator/events/append: HTTP 503");
+        return { ok: false, reason: failure };
+      };
+      const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
+
+      const outcome = await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+
+      expect(outcome).toEqual({ status: "refused", refusal: "unit_delivery_unconfirmed", cause: "system" });
+      expect(replies).toEqual(["I could not confirm delivery to the existing task. No replacement work started."]);
+      expect(await s.instances.listUnits(INSTANCE)).toEqual([unitRow()]);
+      expect(await s.instances.listEvents(s.key)).toEqual([]);
+      expect(s.sends).toEqual([]);
+      expect(s.provider.requests).toHaveLength(0);
+    },
+  );
+
+  it("a lost unit append acknowledgment keeps the saved reply without starting replacement work", async () => {
     const s = await unitOwnedSetup();
-    s.instances.appendEvent = async () => {
-      throw new Error("coordinator store /runs/coordinator/events/append: HTTP 503");
+    const append = s.instances.appendEvent.bind(s.instances);
+    s.instances.appendEvent = async (...args) => {
+      await append(...args);
+      throw new Error("append acknowledgment lost");
     };
-    const { io } = fakeIO([{ role: "user", text: "hi" }]);
-    await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+    const { io, replies } = fakeIO([{ role: "user", text: "hi" }]);
+
+    const outcome = await dispatch(s.deps, msg("what about the tests", "slack:UADMIN"), io);
+
+    expect(outcome).toEqual({ status: "refused", refusal: "unit_delivery_unconfirmed", cause: "system" });
+    expect(replies).toEqual(["I could not confirm delivery to the existing task. No replacement work started."]);
+    expect(await s.instances.listUnits(INSTANCE)).toEqual([unitRow()]);
+    expect(await s.instances.listEvents(s.key)).toEqual([
+      expect.objectContaining({ seq: 1, sender: "slack:UADMIN", text: "what about the tests", mode: "steer" }),
+    ]);
     expect(s.sends).toEqual([]);
-    expect(s.provider.requests[0]!.model).toBe("general-model");
+    expect(s.provider.requests).toHaveLength(0);
   });
 
   it("a reply after terminal original-unit recovery cannot reissue replacement work", async () => {

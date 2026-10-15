@@ -623,6 +623,9 @@ describe("renderRefusal — the one rendering of a Refusal", () => {
       // dispatcher.test.ts proves this DM refusal runs before history and
       // session reads and names the verification remedy.
       "slack_direct_audience_unverified",
+      // dispatcher.test.ts proves the system outcome and exact reply for
+      // rejected appends and a saved event whose acknowledgment was lost.
+      "unit_delivery_unconfirmed",
     ];
     const silent: RefusalCode[] = ["coordinator_thread_live", "workspace_lost", "setup_failed", "uncaught"];
     const covered = new Set<RefusalCode>([...table.map((r) => r.code), ...provenElsewhere, ...silent]);

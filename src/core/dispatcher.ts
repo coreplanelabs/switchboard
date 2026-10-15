@@ -374,9 +374,9 @@ export interface CoreDeps
  *  through the shim's event relay, and the sender is acked with where the
  *  message went; the router is never called. `route-fresh` when the instance
  *  is gone — the relay's "no such instance", or a status of complete, errored
- *  or terminated — with the row ended `terminated` and the thread told, or
- *  when no durable store could hold the event: the request runs on as if the
- *  thread were unowned. Any other send failure keeps the event appended and
+ *  or terminated — with the row ended `terminated` and the thread told. A
+ *  failed or rejected append returns `unconfirmed`; the caller refuses it
+ *  without selecting new work. Any other send failure keeps the event appended and
  *  acks it as queued for the pipeline's next step (which reads the unconsumed
  *  list whether or not a nudge arrived), and nothing routes fresh. */
 async function answerUnitOwnedThread(
@@ -391,7 +391,7 @@ async function answerUnitOwnedThread(
     /** The request's level (routing-and-config item 28): the ack is `verbose` material. */
     verbosity: Verbosity;
   },
-): Promise<"acked" | "route-fresh"> {
+): Promise<"acked" | "route-fresh" | "unconfirmed"> {
   const { msg, io, owner } = ctx;
   const store = deps.coordinatorInstances!;
   const key = { instanceId: owner.instanceId, unit: owner.unit.unit };
@@ -407,10 +407,8 @@ async function answerUnitOwnedThread(
     data: a.data,
     ...(a.name !== undefined ? { name: a.name } : {}),
   }));
-  // No durable store to hold the event — the null store's `unavailable`, or
-  // the Worker store's throw on a failed call (a 5xx, a timeout, a body it
-  // cannot read): the thread cannot be owned durably, so the request runs as
-  // today rather than vanish, unacked and unrouted, into the adapter's error path.
+  // A failed acknowledgment can follow a committed append. Keep this request
+  // with its known owner; absence or failure does not select a fresh task.
   const appended = await store
     .appendEvent(key, {
       ...(messageId !== undefined ? { id: messageId } : {}),
@@ -423,11 +421,14 @@ async function answerUnitOwnedThread(
     })
     .catch((err: unknown) => {
       console.warn(
-        `[dispatch] ${msg.threadKey}: unit ${unitKey} event append failed (${err instanceof Error ? err.message : String(err)}) — routing fresh`,
+        `[dispatch] ${msg.threadKey}: unit ${unitKey} event append failed (${err instanceof Error ? err.message : String(err)}) — delivery unconfirmed`,
       );
       return { ok: false as const, reason: "unavailable" as const };
     });
-  if (!appended.ok) return "route-fresh";
+  if (!appended.ok) {
+    console.warn(`[dispatch] ${msg.threadKey}: unit ${unitKey} event append not confirmed (${appended.reason})`);
+    return "unconfirmed";
+  }
   // The nudge (record 0051): every append nudges, so the send doubles as the liveness probe.
   try {
     if (deps.workflow === undefined) throw new Error("no workflow sender in this process");
@@ -1949,6 +1950,15 @@ export async function dispatch(
             verbosity: deps.config.verbosityFor(msg.channelId, msg.userId, directives.verbosity),
           }),
         );
+        if (answer === "unconfirmed") {
+          await refuse(
+            refusalOf(
+              "unit_delivery_unconfirmed",
+              "I could not confirm delivery to the existing task. No replacement work started.",
+            ),
+          );
+          return ended;
+        }
         if (answer === "acked") {
           await recordPendingOperator();
           return ended;
