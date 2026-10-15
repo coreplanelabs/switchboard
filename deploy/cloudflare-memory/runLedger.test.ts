@@ -4287,7 +4287,10 @@ describe("cross-channel named steer custody", () => {
       { ...message, target },
       { ...message, userId: "plane", kind: "provider-reissue" },
     ])
-      expect((await post("/runs/inbox", { storeKey: key, runId, message: refused })).data).toEqual({ ok: false });
+      expect((await post("/runs/inbox", { storeKey: key, runId, message: refused })).data).toEqual({
+        ok: false,
+        reason: "invalid-message",
+      });
     expect((await post("/runs/inbox/read", { storeKey: key, runId })).data).toEqual(read.data);
   });
 });
@@ -5158,7 +5161,11 @@ describe("run ledger — steps, events, inbox, state (items 30–31)", () => {
     });
     expect(await post("/runs/inbox", { storeKey: key, runId: "nope", message: { text: "c" } })).toEqual({
       status: 200,
-      data: { ok: false },
+      data: { ok: false, reason: "not-live" },
+    });
+    expect(await post("/runs/inbox", { storeKey: key, runId: "r1", message: { text: "c", userId: "plane" } })).toEqual({
+      status: 200,
+      data: { ok: false, reason: "invalid-message" },
     });
     // Read back past a seq (item 40): the resume's re-read at adopt time.
     expect(await post("/runs/inbox/read", { storeKey: key, runId: "r1", afterSeq: 1 })).toEqual({

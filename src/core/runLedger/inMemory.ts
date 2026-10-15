@@ -30,7 +30,7 @@ import {
   type SourceSeedReleaseReceipt,
   type PromotionConfirmationResult,
 } from "./seedVerification.js";
-import { bindInboxCustody } from "./inboxMessage.js";
+import { bindInboxCustody, type InboxPushResult } from "./inboxMessage.js";
 import { closeInboxSegment, encodeInboxSegment, inboxSegmentFloor, type StepHistory } from "./inboxSegment.js";
 import {
   sourceSeedReferenceOf,
@@ -1880,9 +1880,9 @@ export class InMemoryRunLedger implements RunLedger {
     return { ok: true };
   }
 
-  async pushInbox(runId: string, message: Record<string, unknown>): Promise<{ ok: boolean; seq?: number }> {
+  async pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult> {
     const row = this.live.get(runId);
-    if (!row) return { ok: false };
+    if (!row) return { ok: false, reason: "not-live" };
     const stored = bindInboxCustody(message, {
       runId,
       channelId: row.meta.channelId,
@@ -1890,7 +1890,7 @@ export class InMemoryRunLedger implements RunLedger {
       requester: row.meta.userId,
       producerGen: row.ownerGen,
     });
-    if (!stored) return { ok: false };
+    if (!stored) return { ok: false, reason: "invalid-message" };
     const list = this.inbox.get(runId) ?? [];
     const seq = list.length + 1;
     list.push({ seq, message: stored });

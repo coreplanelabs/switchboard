@@ -3615,7 +3615,7 @@ describe("finishing and finish", () => {
     expect(inner.finished.get("r1")?.status).toBe("stopped_hard");
   });
 
-  it("the step record carries the inbox seq the run has consumed (run-history item 40); pushInbox hands back the ledger's seq for a live run — undefined, with a warning, when the ledger refuses or fails", async () => {
+  it("the step record carries the inbox seq the run has consumed; pushInbox distinguishes delivery, target absence and storage failure", async () => {
     const { ledger, wt, warnings } = harness();
     const run = (await openRun(wt, openReq()))!;
     expect(await wt.pushInbox("r1", { text: "also the numbers" })).toBe(1);
@@ -3635,7 +3635,7 @@ describe("finishing and finish", () => {
         },
       }),
     });
-    expect(await down.wt.pushInbox("r1", { text: "x" })).toBeUndefined();
+    await expect(down.wt.pushInbox("r1", { text: "x" })).rejects.toThrow("HTTP 503");
     expect(down.warnings.at(-1)).toMatch(/inbox push failed .*HTTP 503/);
   });
 

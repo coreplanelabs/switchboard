@@ -97,6 +97,12 @@ The existing starter and linked-work executor still check permissions and exact 
 
 This cut uses the existing orchestrator loop. It adds no model router or new delivery queue. External live replies, unit-thread replies, explicit steer commands and the remaining operator model path still need migration. Step 1 remains in progress.
 
+### Live reply delivery boundary, 2026-10-15
+
+The private worker controls are merged in [PR #3139](https://github.com/coreplanelabs/switchboard/pull/3139). Tracing the next live-reply path exposed a prerequisite: the shared inbox client used the same result for storage failure and target absence. A reply could then enter memory without its durable copy or start fresh work while its original target still existed.
+
+The next cut separates those outcomes in the existing inbox protocol. Only an explicit `not-live` response permits the caller's existing target-absence behavior. Storage errors, invalid messages, unclear replies and older servers' unqualified rejections stop delivery. The CLI and bot use the same sequence reader. This change adds no delivery queue, automatic retry or listener. Live-reply decision records and unit-event migration remain pending; Step 1 remains in progress.
+
 ## Step 2: save input and recover shared work
 
 **Current source:** [state worker](../../deploy/cloudflare-memory/worker.ts), [run-ledger contract](../../src/core/runLedger/types.ts), and [write-through client](../../src/core/runLedger/writeThrough.ts).

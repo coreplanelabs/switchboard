@@ -19,6 +19,7 @@ import { createRunsService } from "../runsService.js";
 import {
   NullLedgerRun,
   NullLedgerWriteThrough,
+  createLedgerWriteThrough,
   type AdoptRunRequest,
   type LedgerRun,
   type ReserveOutcome,
@@ -283,6 +284,60 @@ async function resumeOf(
 }
 
 describe("admit — the thread admission claim", () => {
+  it.each([
+    ["here", "storage error"],
+    ["elsewhere", "storage error"],
+    ["here", "invalid message"],
+    ["elsewhere", "invalid message"],
+    ["here", "legacy rejection"],
+    ["elsewhere", "legacy rejection"],
+  ] as const)("holds a %s reply on inbox %s without delivery or fresh routing", async (where, fault) => {
+    const inner = new InMemoryRunLedger(() => NOW);
+    await inner.claim({
+      runId: "run-owned",
+      threadKey: THREAD,
+      gen: "remote",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: { channelId: "slack:CX", userId: "slack:UX", threadKey: THREAD, agent: "general" },
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    let unavailable = true;
+    const push = inner.pushInbox.bind(inner);
+    inner.pushInbox = async (...args) => {
+      if (unavailable) {
+        if (fault === "storage error") throw new TransientStoreError("HTTP 503");
+        return fault === "invalid message" ? { ok: false, reason: "invalid-message" } : { ok: false };
+      }
+      return push(...args);
+    };
+    const s = setup("also check the migration");
+    s.deps.runLedger = createLedgerWriteThrough({
+      ledger: inner,
+      gen: "local",
+      fallback: new NullRunStore(),
+      warn: () => {},
+    });
+    if (where === "here") s.admission.claim(THREAD, { agent: "general" }).live.runId = "run-owned";
+    else s.elsewhere.replace([{ threadKey: THREAD, runId: "run-owned", startedAt: 5_000, meta: { agent: "general" } }]);
+    await expect(admit(s.deps, s.ctx)).rejects.toThrow(
+      fault === "storage error" ? "HTTP 503" : "could not confirm message delivery",
+    );
+    expect(s.admission.get(THREAD)?.inbox.size ?? 0).toBe(0);
+    if (where === "elsewhere") expect(s.elsewhere.get(THREAD)?.runId).toBe("run-owned");
+    unavailable = false;
+    expect(await admit(s.deps, s.ctx)).toEqual({ kind: "steered", where });
+    expect((await inner.readInbox("run-owned", 0)).map((entry) => [entry.seq, entry.message.text])).toEqual([
+      [1, "also check the migration"],
+    ]);
+    if (where === "elsewhere") {
+      inner.live.delete("run-owned");
+      expect(await admit(s.deps, s.ctx)).toMatchObject({ kind: "proceed" });
+      expect(s.elsewhere.get(THREAD)).toBeUndefined();
+    }
+  });
   it("a free thread is claimed for the resolved agent: proceed, and the slot is the thread's live run", async () => {
     const { deps, ctx, admission, replies } = setup("write the report");
     const outcome = await admit(deps, ctx);

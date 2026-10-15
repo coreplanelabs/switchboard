@@ -6,6 +6,7 @@ import type {
 export type { ContextCheckpointRequest, ContextCheckpointResult } from "../references/contextCheckpoint.js";
 import type { ContextDependencies } from "../references/contextDependencies.js";
 import type { SessionSources } from "../references/receipts.js";
+import type { InboxPushResult } from "./inboxMessage.js";
 // The ledger seam (docs/reference/specs/run-history.md item 28): what the bot calls, with
 // two implementations — `WorkerRunLedger` (HTTPS to the state Worker; the
 // production choice) and `InMemoryRunLedger` (tests, and the shape every
@@ -257,7 +258,7 @@ export interface RunLedger {
   assignLiveState(runId: string, gen: string, assignment: LiveStateAssignRequest): Promise<LiveStateAssignResult>;
   setState(runId: string, gen: string, state: RunState): Promise<FenceResult>;
   /** Any generation: a steer arrives on whichever container is up. */
-  pushInbox(runId: string, message: Record<string, unknown>): Promise<{ ok: boolean; seq?: number }>;
+  pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult>;
   /** The inbox items with `seq > afterSeq`, in seq order — the resume's re-read
    *  at adopt time (run-history item 40), so a steer that landed after the
    *  reclaim's snapshot is not lost. Empty for an unknown run. */

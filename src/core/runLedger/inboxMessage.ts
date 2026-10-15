@@ -5,6 +5,21 @@
 
 import type { IncomingMessage, SlackDirectAudience, StagedFile } from "../types.js";
 
+export interface InboxPushResult {
+  ok: boolean;
+  seq?: number;
+  /** Missing on older servers. A rejection alone does not prove target absence. */
+  reason?: "not-live" | "invalid-message";
+}
+
+/** Only confirmed target absence can select the caller's ended-run fallback. */
+export function inboxPushSequence(result: InboxPushResult): number | undefined {
+  if (result.ok === true && result.reason === undefined && Number.isSafeInteger(result.seq) && Number(result.seq) > 0)
+    return result.seq;
+  if (result.ok === false && result.seq === undefined && result.reason === "not-live") return undefined;
+  throw new Error("I could not confirm message delivery.");
+}
+
 /** Durable provenance only; every private action still verifies Slack live. */
 export type DirectAudienceStamp = SlackDirectAudience;
 
