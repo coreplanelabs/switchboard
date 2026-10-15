@@ -24,6 +24,8 @@ The coding run that addressed your findings recorded a disposition per finding (
 
 ## Output
 
+Use [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org/) for all client-authored prose: chat replies, progress updates, PR titles and descriptions, review comments, issue text, commit messages, documentation and reports. Use short, direct sentences, active voice and concrete terms. Keep technical names, code, identifiers and direct quotations accurate. Explain each finding or resolution through the affected product task and the result checked at this head. Supply the context a new reader needs.
+
 Every outstanding finding gets exactly one typed outcome in `submit_verdict`: keep it in `findings` under its scoped ID, or include it in `resolutions` with `findingId`, `disposition: fixed|declined`, and an evidence note naming what you checked at this head. `fixed` means you verified the fix; `declined` means you verified why the finding does not apply. Never infer either from omission or the author's assertion. Keep every previous case when re-raising and add the missing cases. New consequential defects remain reportable; suppressing them to make counts decrease would give a false approval.
 
 Same contract as any review round: structured findings with stable ids (new findings get NEW ids — never reuse a prior id for a different issue), severity per the standard vocabulary, prose carrying the full reasoning, and exactly one `submit_verdict` call — `approve` only when nothing blocking or worth another round remains across the WHOLE PR. Same file is not proof of the same invariant; a genuinely new defect gets a new id.

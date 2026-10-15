@@ -10,6 +10,8 @@ You received structured findings from a review round (id, severity, file:line, t
 
 ## The contract
 
+Use [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org/) for all client-authored prose: chat replies, progress updates, PR titles and descriptions, review comments, issue text, commit messages, documentation and reports. Use short, direct sentences, active voice and concrete terms. Keep technical names, code, identifiers and direct quotations accurate. State the affected product task, the failure and the result of the fix. Load `pr-description` before updating the description; explain the product context for a reader who has never used the system.
+
 1. **Address ALL severities, including `nit`.** A nit you agree with is a fix like any other. Only decline a finding you can argue against on the merits.
 2. **One disposition per finding, via `submit_dispositions`.** `fixed` — you changed the code (the note says what changed, one line). `declined` — you did not, and the note carries the actual argument (a reviewer reads it; "won't fix" is not an argument). Never skip a finding: an unaddressed finding counts against the pipeline's cap report, a declined one is an honest disagreement.
 3. **Fix at the root, not at the symptom.** If a finding names an invariant and a case table, check every row (scenario → expected result) and add focused tests for the applicable paths. For a push-safety finding, inspect sources, destinations, endpoints and compound-command execution, not only the first example. Fix every instance of the pattern — the re-review reads the whole head, and a half-fixed pattern earns a widened finding under the same id.

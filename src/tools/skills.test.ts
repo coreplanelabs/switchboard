@@ -54,11 +54,19 @@ describe("list_skills tool", () => {
 });
 
 describe("use_skill tool", () => {
-  it("returns the requested skill's full body into the tool result", async () => {
-    const out = await useSkillTool.run({ name: "code-review-and-quality" }, ctx("review"));
-    expect(out).toContain("REVIEW BODY");
-    expect(out).toContain("code-review-and-quality");
-    expect(out).toContain("https://example.com/cr"); // source footer
+  it("adds the shared writing rules to local and vendored skill loads", async () => {
+    const writingRules =
+      "Use ASD-STE100 Simplified Technical English for all client-authored prose: chat replies, progress updates, " +
+      "PR titles and descriptions, review comments, issue text, commit messages, documentation and reports. " +
+      "Use short, direct sentences, active voice and concrete terms. " +
+      "Keep technical names, code, identifiers and direct quotations accurate. " +
+      "Official reference: https://www.asd-ste100.org/.";
+    const review = await useSkillTool.run({ name: "code-review-and-quality" }, ctx("review"));
+    expect(review).toBe(
+      `# Skill: code-review-and-quality\n\nREVIEW BODY\n\n## Writing rules\n\n${writingRules}\n\n_(Skill source: https://example.com/cr)_`,
+    );
+    const coding = await useSkillTool.run({ name: "test-driven-development" }, ctx("coding"));
+    expect(coding).toBe(`# Skill: test-driven-development\n\nCODING BODY\n\n## Writing rules\n\n${writingRules}`);
   });
 
   // docs/reference/specs/skills.md — a load is a first-class fact in the run data: the tool
