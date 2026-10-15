@@ -2514,3 +2514,184 @@ describe("saved source-event reception", () => {
     expect((await ledger.readSourceEvent(first.receipt.key))?.event).toEqual(event);
   });
 });
+
+describe("saved source-event jobs", () => {
+  const event = {
+    version: 1,
+    sourceId: "fixture:host:installation:1",
+    deliveryId: "job-a",
+    objectId: "comment:7",
+    changeId: "revision:1",
+    kind: "source-evidence",
+    payload: { text: "review evidence" },
+  };
+  const request = { owner: "g1", readerVersion: 2, limit: 1 };
+
+  it("claims bounded work without a live run and lets another owner claim the next event", async () => {
+    const ledger = new InMemoryRunLedger(() => 1_000);
+    const first = await ledger.receiveSourceEvent(event);
+    const second = await ledger.receiveSourceEvent({ ...event, deliveryId: "job-b" });
+    if (first.kind === "refused" || second.kind === "refused") throw new Error("expected reception");
+    const batch = await ledger.claimSourceEvents(request);
+    expect(batch.kind).toBe("claimed");
+    if (batch.kind !== "claimed") throw new Error("expected claim");
+    expect(batch.claims).toHaveLength(1);
+    expect(batch.claims[0]).toMatchObject({
+      receipt: first.receipt,
+      attempts: 1,
+      lease: { owner: "g1", until: 61_000 },
+    });
+    const next = await ledger.claimSourceEvents({ ...request, owner: "g2" });
+    if (next.kind !== "claimed") throw new Error("expected claim");
+    expect(next.claims).toHaveLength(1);
+    expect(next.claims[0]).toMatchObject({
+      receipt: second.receipt,
+      attempts: 1,
+      lease: { owner: "g2", until: 61_000 },
+    });
+    expect((await ledger.readSourceEvent(first.receipt.key))?.job).toMatchObject({
+      version: 2,
+      state: "leased",
+      attempts: 1,
+    });
+  });
+
+  it("fences an expired owner after reclaim and retains the original source receipt", async () => {
+    let now = 1_000;
+    const ledger = new InMemoryRunLedger(() => now);
+    const received = await ledger.receiveSourceEvent(event);
+    if (received.kind === "refused") throw new Error("expected reception");
+    const old = await ledger.claimSourceEvents(request);
+    if (old.kind !== "claimed") throw new Error("expected claim");
+    now = 61_000;
+    const current = await ledger.claimSourceEvents({ ...request, owner: "g2" });
+    if (current.kind !== "claimed") throw new Error("expected claim");
+    expect(current.claims[0]).toMatchObject({ attempts: 2, lease: { owner: "g2", until: 121_000 } });
+    expect(
+      await ledger.releaseSourceEvent({
+        key: received.receipt.key,
+        owner: "g1",
+        token: old.claims[0]!.lease.token,
+        disposition: "retry",
+        reason: "source-unavailable",
+      }),
+    ).toEqual({ kind: "refused", reason: "fenced" });
+    expect((await ledger.readSourceEvent(received.receipt.key))?.job).toMatchObject({
+      state: "leased",
+      lease: { owner: "g2" },
+    });
+    expect(await ledger.receiveSourceEvent(event)).toEqual({ kind: "duplicate", receipt: received.receipt });
+  });
+
+  it("returns the original retry receipt after another claim and refuses a changed release", async () => {
+    let now = 1_000;
+    const ledger = new InMemoryRunLedger(() => now);
+    const received = await ledger.receiveSourceEvent(event);
+    if (received.kind === "refused") throw new Error("expected reception");
+    const claimed = await ledger.claimSourceEvents(request);
+    if (claimed.kind !== "claimed") throw new Error("expected claim");
+    const release = {
+      key: received.receipt.key,
+      owner: "g1",
+      token: claimed.claims[0]!.lease.token,
+      disposition: "retry",
+      reason: "source-unavailable",
+    };
+    const saved = await ledger.releaseSourceEvent(release);
+    expect(saved).toMatchObject({
+      kind: "released",
+      receipt: { state: "ready", attempts: 1, at: 1_000, nextAttemptAt: 6_000 },
+    });
+    now = 6_000;
+    const next = await ledger.claimSourceEvents({ ...request, owner: "g2" });
+    if (next.kind !== "claimed") throw new Error("expected claim");
+    expect(next.claims[0]).toMatchObject({ attempts: 2, lease: { owner: "g2" } });
+    expect(await ledger.releaseSourceEvent(release)).toEqual(saved);
+    expect(await ledger.releaseSourceEvent({ ...release, disposition: "hold", reason: "permission-refused" })).toEqual({
+      kind: "refused",
+      reason: "release-conflict",
+    });
+    expect((await ledger.readSourceEvent(received.receipt.key))?.job).toMatchObject({
+      state: "leased",
+      lease: { owner: "g2" },
+    });
+  });
+
+  it("refuses an incapable reader without consuming an attempt", async () => {
+    const ledger = new InMemoryRunLedger(() => 1_000);
+    const received = await ledger.receiveSourceEvent(event);
+    if (received.kind === "refused") throw new Error("expected reception");
+    expect(await ledger.claimSourceEvents({ ...request, readerVersion: 1 })).toEqual({
+      kind: "refused",
+      reason: "unsupported-reader",
+    });
+    expect((await ledger.readSourceEvent(received.receipt.key))?.job).toEqual({
+      version: 1,
+      eventKey: received.receipt.key,
+      stage: "received",
+      attempts: 0,
+      nextAttemptAt: 1_000,
+    });
+    const accepted = await ledger.claimSourceEvents(request);
+    if (accepted.kind !== "claimed") throw new Error("expected claim");
+    expect(accepted.claims[0]).toMatchObject({ attempts: 1, lease: { owner: "g1" } });
+  });
+  it("holds a retained retry outside its bounded delay without rewriting or replaying it", async () => {
+    const ledger = new InMemoryRunLedger(() => 1_000);
+    const received = await ledger.receiveSourceEvent(event);
+    if (received.kind === "refused") throw new Error("expected reception");
+    const batch = await ledger.claimSourceEvents(request);
+    if (batch.kind !== "claimed") throw new Error("expected claim");
+    const release = {
+      key: received.receipt.key,
+      owner: "g1",
+      token: batch.claims[0]!.lease.token,
+      disposition: "retry",
+      reason: "source-unavailable",
+    };
+    expect(await ledger.releaseSourceEvent(release)).toMatchObject({
+      kind: "released",
+      receipt: { attempts: 1, at: 1_000, nextAttemptAt: 6_000 },
+    });
+    const row = ledger.sourceEvents.get(received.receipt.key)!;
+    const saved = await ledger.readSourceEvent(received.receipt.key);
+    if (!saved || saved.job.version !== 2 || saved.job.state !== "ready") throw new Error("expected retry");
+    row.job = {
+      ...saved.job,
+      nextAttemptAt: 86_401_000,
+      releases: saved.job.releases.map((receipt) => ({ ...receipt, nextAttemptAt: 86_401_000 })),
+    };
+    const retained = structuredClone(row);
+    await expect(ledger.readSourceEvent(received.receipt.key)).rejects.toThrow("Stored source event is unreadable");
+    expect(await ledger.releaseSourceEvent(release)).toEqual({ kind: "refused", reason: "unsupported-job" });
+    expect(ledger.sourceEvents.get(received.receipt.key)).toEqual(retained);
+    expect(await ledger.receiveSourceEvent(event)).toEqual({ kind: "duplicate", receipt: received.receipt });
+  });
+
+  it("holds a stored lease that contradicts an earlier permanent failure", async () => {
+    const ledger = new InMemoryRunLedger(() => 1_000);
+    const received = await ledger.receiveSourceEvent(event);
+    if (received.kind === "refused") throw new Error("expected reception");
+    const batch = await ledger.claimSourceEvents(request);
+    if (batch.kind !== "claimed") throw new Error("expected claim");
+    await ledger.releaseSourceEvent({
+      key: received.receipt.key,
+      owner: "g1",
+      token: batch.claims[0]!.lease.token,
+      disposition: "hold",
+      reason: "permission-refused",
+    });
+    const saved = await ledger.readSourceEvent(received.receipt.key);
+    if (!saved || saved.job.version !== 2 || saved.job.state !== "failed") throw new Error("expected failed job");
+    const { failure: _failure, ...prior } = saved.job;
+    ledger.sourceEvents.get(received.receipt.key)!.job = {
+      ...prior,
+      state: "leased",
+      attempts: 2,
+      nextAttemptAt: 61_000,
+      lease: { owner: "g2", token: "later-token", claimedAt: 1_000, until: 61_000 },
+    };
+    await expect(ledger.readSourceEvent(received.receipt.key)).rejects.toThrow("Stored source event is unreadable");
+    expect(await ledger.receiveSourceEvent(event)).toEqual({ kind: "duplicate", receipt: received.receipt });
+  });
+});

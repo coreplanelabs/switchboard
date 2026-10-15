@@ -151,6 +151,12 @@ The next cut adds source-event reception to the existing ledger and state object
 
 This is an inactive storage capability. No source producer, orchestrator routing, job claim or internal delivery is enabled. Pending jobs contribute to the existing alarm even with no live agent and physical maintenance paused. Later receptions, lease refreshes and alarm finalization keep an earlier armed source wake until it fires. Initial count and byte limits bound retained input. Job lifecycle, retention and measured enablement limits remain pending. Step 2 is in progress.
 
+### Source job ownership, 2026-10-15
+
+The next cut extends the existing saved job with bounded claims, expiring ownership tokens and retained retry receipts. A compatible reader can claim known work without a live agent. A saved cursor moves past unsupported records without rewriting them. Retry delays and eight attempts bound automatic recovery; permanent refusal retains failed input. A repeated source delivery still returns its original receipt and cannot reopen a failed job.
+
+Claim and retry changes include their shared wake in one transaction. A stale process cannot release a newer process's job. A saved release returns its original result on replay, even after a later claim. Queue leases remain separate from agent execution time and permissions. No processor or completion path is enabled. Routing, saved handling stages and keyed internal delivery remain pending, so Step 2 is still in progress.
+
 ## Step 3: preserve evidence through internal handoffs
 
 **Current source:** [intake](../../src/core/intake.ts), [inbox schema](../../src/core/runLedger/inboxMessage.ts), [thread admission](../../src/core/threadAdmission.ts), [unit events](../../src/core/coordinator/instanceStore.ts), and both runtime implementations.

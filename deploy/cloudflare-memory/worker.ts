@@ -5,9 +5,17 @@ import {
   sourceEventReceiptOf,
   sourceEventRecordOf,
   receivedSourceEventJob,
+  sourceEventJobOf,
+  prepareSourceJobClaim,
+  sourceJobReleaseRequestOf,
+  type SourceJobClaim,
+  type SourceJobClaimResult,
+  type SourceJobReleaseResult,
+  type SourceEventReceipt,
   type SourceEventReceiveResult,
   type SourceEventRecord,
 } from "../../src/core/runLedger/sourceEvents.js";
+import { planSourceJobClaim, planSourceJobRelease } from "../../src/core/runLedger/sourceEventJobs.js";
 import {
   captureCheckArchive,
   hasRecordedCheckEvidence,
@@ -362,6 +370,7 @@ import {
   SOURCE_EVENT_STORE_MAX_BYTES,
   SOURCE_EVENT_STORE_MAX_COUNT,
   SOURCE_EVENT_WAKE_MS,
+  SOURCE_JOB_SCAN_LIMIT,
   intakeReceiptRetentionMs,
   minutesToMs,
   PLANE,
@@ -2415,10 +2424,18 @@ export class RunHistoryDO extends DurableObject<Env> {
         received_at INTEGER NOT NULL,
         job_json TEXT NOT NULL,
         due_at INTEGER NOT NULL,
+        closed_at INTEGER,
         bytes INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS source_events_due ON source_events(due_at);
     `);
+    const sourceColumns = new Set(
+      this.sql
+        .exec<{ name: string }>(`PRAGMA table_info(source_events)`)
+        .toArray()
+        .map((row) => row.name),
+    );
+    if (!sourceColumns.has("closed_at")) this.sql.exec(`ALTER TABLE source_events ADD COLUMN closed_at INTEGER`);
     const allocationColumns = new Set(
       this.sql
         .exec<{ name: string }>(`PRAGMA table_info(workspace_settlements)`)
@@ -3075,7 +3092,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   private planeEarliestDue(now: number): number | undefined {
     const dues: number[] = [];
     const sourceDue = this.sql
-      .exec<{ due: number | null }>(`SELECT MIN(due_at) AS due FROM source_events`)
+      .exec<{ due: number | null }>(`SELECT MIN(due_at) AS due FROM source_events WHERE closed_at IS NULL`)
       .toArray()[0]?.due;
     if (sourceDue !== undefined && sourceDue !== null)
       dues.push(sourceDue > now ? sourceDue : now + SOURCE_EVENT_WAKE_MS);
@@ -3120,7 +3137,8 @@ export class RunHistoryDO extends DurableObject<Env> {
     const due = Math.min(raw, now + RUN_SWEEP_INTERVAL_MS);
     const set = await this.ctx.storage.getAlarm();
     const sourceOverdue =
-      this.sql.exec(`SELECT key FROM source_events WHERE due_at <= ? LIMIT 1`, now).toArray().length > 0;
+      this.sql.exec(`SELECT key FROM source_events WHERE closed_at IS NULL AND due_at <= ? LIMIT 1`, now).toArray()
+        .length > 0;
     // Re-arm when the slot is empty, later than the due, or holds an alarm
     // this plane armed itself. Due source work keeps its earlier armed wake
     // until it fires; traffic must not restart that recovery delay.
@@ -8462,6 +8480,117 @@ export class RunHistoryDO extends DurableObject<Env> {
     return record;
   }
 
+  async claimSourceEvents(value: unknown, now = systemClock()): Promise<SourceJobClaimResult> {
+    const prepared = prepareSourceJobClaim(value);
+    if ("refusal" in prepared) return prepared.refusal;
+    const request = prepared.request;
+    if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid source claim time");
+    const heldJobs: { eventKey: string; reason: string }[] = [];
+    const result: SourceJobClaimResult = await this.ctx.storage.transaction(async () => {
+      const cursorRow = this.sql
+        .exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'source_job_cursor'`)
+        .toArray()[0];
+      let cursor = cursorRow ? Number(cursorRow.value) : 0;
+      if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error("Source job scan position is unreadable");
+      type Candidate = { seq: number; key: string; body_hash: string; received_at: number; job_json: string };
+      const candidates = this.sql
+        .exec<Candidate>(
+          `SELECT seq, key, body_hash, received_at, job_json FROM source_events
+         WHERE closed_at IS NULL AND due_at <= ? AND seq > ? ORDER BY seq LIMIT ?`,
+          now,
+          cursor,
+          SOURCE_JOB_SCAN_LIMIT,
+        )
+        .toArray();
+      if (candidates.length < SOURCE_JOB_SCAN_LIMIT)
+        candidates.push(
+          ...this.sql
+            .exec<Candidate>(
+              `SELECT seq, key, body_hash, received_at, job_json FROM source_events
+           WHERE closed_at IS NULL AND due_at <= ? AND seq <= ? ORDER BY seq LIMIT ?`,
+              now,
+              cursor,
+              SOURCE_JOB_SCAN_LIMIT - candidates.length,
+            )
+            .toArray(),
+        );
+      const claims: SourceJobClaim[] = [],
+        failed: SourceEventReceipt[] = [];
+      let held = 0;
+      for (const row of candidates) {
+        cursor = row.seq;
+        let job;
+        try {
+          job = sourceEventJobOf(parseStoredJson(row.job_json));
+        } catch {
+          job = undefined;
+        }
+        const receipt = sourceEventReceiptOf({
+          version: 1,
+          key: row.key,
+          sequence: row.seq,
+          receivedAt: row.received_at,
+          bodyHash: row.body_hash,
+        });
+        if (!job || !receipt || job.eventKey !== row.key) {
+          held++;
+          heldJobs.push({
+            eventKey: row.key,
+            reason: !job ? "unreadable-job" : !receipt ? "invalid-receipt" : "job-key-mismatch",
+          });
+          continue;
+        }
+        const change = planSourceJobClaim(job, request.owner, now);
+        if (change.kind === "not-due") continue;
+        this.sql.exec(
+          `UPDATE source_events SET job_json = ?, due_at = ?, closed_at = ? WHERE key = ?`,
+          JSON.stringify(change.job),
+          change.job.nextAttemptAt ?? now,
+          change.kind === "failed" ? now : null,
+          row.key,
+        );
+        if (change.kind === "failed") failed.push(receipt);
+        else claims.push({ receipt, lease: change.lease, attempts: change.job.attempts });
+        if (claims.length === request.limit) break;
+      }
+      this.sql.exec(`INSERT OR REPLACE INTO meta(key, value) VALUES('source_job_cursor', ?)`, String(cursor));
+      await this.ensurePlaneAlarm(now);
+      return { kind: "claimed", claims, held, failed };
+    });
+    for (const job of heldJobs) console.warn("[source-events/claim] held", job);
+    return result;
+  }
+
+  async releaseSourceEvent(value: unknown, now = systemClock()): Promise<SourceJobReleaseResult> {
+    const request = sourceJobReleaseRequestOf(value);
+    if (!request) return { kind: "refused", reason: "invalid-request" };
+    if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid source release time");
+    return this.ctx.storage.transaction(async () => {
+      const row = this.sourceEventRow(request.key);
+      if (!row) return { kind: "refused", reason: "missing" };
+      let job;
+      try {
+        job = sourceEventJobOf(parseStoredJson(row.job_json));
+      } catch {
+        job = undefined;
+      }
+      if (!job || job.eventKey !== request.key) return { kind: "refused", reason: "unsupported-job" };
+      const change = planSourceJobRelease(job, request, now);
+      if (change.kind === "refused") return change;
+      if (change.kind === "changed") {
+        this.sql.exec(
+          `UPDATE source_events SET job_json = ?, due_at = ?, closed_at = ? WHERE key = ?`,
+          JSON.stringify(change.job),
+          change.job.nextAttemptAt ?? now,
+          change.job.state === "failed" ? now : null,
+          request.key,
+        );
+        await this.ensurePlaneAlarm(now);
+      }
+      return { kind: "released", receipt: change.receipt };
+    });
+  }
+
   /** The receipt key and poster become one durable, atomic right to publish.
    * A dead claimant can be replaced only after its bounded claim expires. */
   async claimIntakeDelivery(key: string, poster: string, claimedAt: number): Promise<boolean> {
@@ -11851,6 +11980,8 @@ export class SessionLogDO extends DurableObject<Env> {
 const LEDGER_ROUTES = new Set([
   "/runs/source-events/receive",
   "/runs/source-events/read",
+  "/runs/source-events/claim",
+  "/runs/source-events/release",
   "/runs/check-source",
   "/runs/context-checkpoint",
   "/runs/session/checkpoint",
@@ -13232,6 +13363,32 @@ async function handleLedger(
   }
 
   if (pathname === "/runs/source-events/receive") return json(await stub.receiveSourceEvent(b.event, now));
+  if (pathname === "/runs/source-events/claim") {
+    const result = await stub.claimSourceEvents(b.request, now);
+    if (result.kind === "claimed")
+      console.log("[source-events/claim] completed", {
+        storeKey: key.value,
+        claimed: result.claims.map((claim) => claim.receipt.key),
+        heldCount: result.held,
+        failed: result.failed.map((receipt) => receipt.key),
+      });
+    else console.warn("[source-events/claim] refused", { storeKey: key.value, reason: result.reason });
+    return json(result);
+  }
+  if (pathname === "/runs/source-events/release") {
+    const result = await stub.releaseSourceEvent(b.request, now);
+    if (result.kind === "released")
+      console.log("[source-events/release] completed", {
+        storeKey: key.value,
+        eventKey: result.receipt.key,
+        owner: result.receipt.owner,
+        state: result.receipt.state,
+        attempts: result.receipt.attempts,
+        reason: result.receipt.reason,
+      });
+    else console.warn("[source-events/release] refused", { storeKey: key.value, reason: result.reason });
+    return json(result);
+  }
   if (pathname === "/runs/source-events/read") {
     if (!isSourceEventKey(b.key)) return json({ error: "key must name a source event" }, 400);
     return json({ record: (await stub.readSourceEvent(b.key)) ?? null });
