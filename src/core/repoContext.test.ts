@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as githubApp from "../execution/githubApp.js";
+import { startRequestRoot } from "./requestTrace.js";
+import type { RunEvent } from "./runEvents.js";
 import {
   currentPrHeadSha,
   explicitPrOf,
@@ -222,6 +224,27 @@ describe("resolveRepoContext: read-scoped PR lookup", () => {
 });
 
 describe("currentPrHeadSha — the review post transition guard", () => {
+  it("retains a default GitHub lookup failure on the setup run without response prose", async () => {
+    vi.stubEnv("GH_TOKEN", "read-fixture-token");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ message: "private response prose" }), { status: 503 })),
+    );
+    const events: RunEvent[] = [];
+    const trace = startRequestRoot({ clock: () => 1000 }, { channel: "mcp", receivedAt: 1000 });
+    trace.bindRun("setup", (event) => events.push(event));
+    await expect(
+      trace.root.span("dispatch.gate.attached_head.current_head", (step) =>
+        currentPrHeadSha({ repo: "acme/api", number: 7 }, step),
+      ),
+    ).resolves.toBeUndefined();
+    expect(events.at(-1)).toMatchObject({
+      type: "span_end",
+      status: "error",
+      attrs: { errorKind: "http", errorCode: "http_failed", httpStatus: 503 },
+    });
+    expect(JSON.stringify(events)).not.toContain("private response prose");
+  });
   it("returns a head only while the pull request is open; merged or closed is terminal", async () => {
     const sha = "a".repeat(40);
     stubFetch({ body: { state: "open", merged: false, head: { sha } } });

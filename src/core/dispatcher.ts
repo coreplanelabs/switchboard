@@ -3755,6 +3755,24 @@ export async function dispatch(
     const { round } = attach;
     setupRound = round;
     runSetup = resume ? runSetupOf(resume.row.state.setup) : reallocatedSetup(round.selection.setup, opts.restartOf);
+    const { executor, note, resident } = round.selection;
+    // The workspace the run is on — `debug` material (routing-and-config item 28).
+    const setupNote = note ? oneLine(redactAndCap(note, 2000)) : undefined;
+    if (setupNote) shell.note("debug", setupNote);
+    // A run that went to a cold sandbox says why on its stream too (resident-
+    // repos item 24): the card is not the only witness — the run page would
+    // otherwise show resident steps grafted under an attach that ended on the
+    // sandbox backend, with nothing saying the resident gave up. Only a
+    // sandbox-backed run: a resident run's note is the positive `resident ·
+    // <repo> · <ref>@<sha7>` (or "attached to the last snapshot"), not a
+    // fallback. Head material, like every setup event ahead of the loop.
+    if (setupNote && !resident)
+      registry.publish(run.id, {
+        type: "run_note",
+        kind: "cold_sandbox",
+        summary: setupNote,
+        at: clock(),
+      });
     // Cold registration preparation resolved and observed the effective ref.
     // Keep it in the run context as well as the checkout and durable binding.
     if (repoCtx.ref === undefined && round.selection.cold !== undefined) {
@@ -3837,7 +3855,6 @@ export async function dispatch(
         clock,
         ...(deps.workflow !== undefined ? { workflow: deps.workflow } : {}),
       });
-    const { executor, note, resident } = round.selection;
     // A run admitted onto a drained fleet says so on its record (issue 2044):
     // the note is what `runs friction` reads as the wait's category and the
     // plane's table shows as the run's cause — a half-hour wait with a card
@@ -4209,17 +4226,6 @@ export async function dispatch(
     // attach; the head settle (item 12) advances it after the model turn.
     const reviewHead = prompt.reviewHead;
 
-    // The workspace the run is on — `debug` material (routing-and-config item 28).
-    if (note) shell.note("debug", oneLine(note));
-    // A run that went to a cold sandbox says why on its stream too (resident-
-    // repos item 24): the card is not the only witness — the run page would
-    // otherwise show resident steps grafted under an attach that ended on the
-    // sandbox backend, with nothing saying the resident gave up. Only a
-    // sandbox-backed run: a resident run's note is the positive `resident ·
-    // <repo> · <ref>@<sha7>` (or "attached to the last snapshot"), not a
-    // fallback. Head material, like every setup event ahead of the loop.
-    if (note && !resident)
-      registry.publish(run.id, { type: "run_note", kind: "cold_sandbox", summary: oneLine(note), at: clock() });
     // A follow-up the resident kept off its thread's own PR branch says so on
     // its stream too (resident-repos item 16): the run page explains a run on
     // the default where the thread's pull request was expected, with the

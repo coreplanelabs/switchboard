@@ -11,6 +11,7 @@ import { NO_CAPABILITIES } from "../capabilities.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import type { RepoContext } from "../repoContext.js";
 import type { Refusal } from "../refusal.js";
+import type { RunEvent } from "../runEvents.js";
 import { createCardShell } from "../statusCardFrame.js";
 import type { ChannelIO, IncomingMessage, StatusHandle, StatusUpdate } from "../types.js";
 import type { ResumeContext } from "./admission.js";
@@ -112,7 +113,9 @@ function setup(over: { user?: string; text?: string; residents?: boolean } = {})
     capabilities: { ...NO_CAPABILITIES, residents: over.residents ?? true },
   };
   const trace = startRequestRoot({ clock: () => NOW }, { channel: channelOf(message.channelId), receivedAt: NOW });
-  return { deps, gate, cardCtx, replies, refusals, refusalObjects, closes, root: trace.root, message };
+  const events: RunEvent[] = [];
+  trace.bindRun("setup", (event) => events.push(event));
+  return { deps, gate, cardCtx, replies, refusals, refusalObjects, closes, root: trace.root, message, events };
 }
 
 /** The reason a closed card carries — somewhere in the frame's text. */
@@ -636,6 +639,12 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
         return { released: true };
       },
     } as unknown as ExecutorSelection["executor"];
+    executor.execResult = async (command, opts) => ({
+      stdout: await executor.exec(command, opts),
+      stderr: "",
+      exitCode: 0,
+      truncated: false,
+    });
     const selection: ExecutorSelection = {
       executor,
       resident: over.resident ?? true,
@@ -673,6 +682,83 @@ describe("authorizeAttachedHead — every review workspace is at the PR head bef
       root: s.root,
     };
   }
+
+  it("retains failed HEAD reads and repair errors in the run stream with secrets removed", async () => {
+    const s = setup();
+    const { selection: sel } = selection();
+    sel.executor.exec = async () => {
+      throw new Error("HEAD read failed: token=private-value");
+    };
+    sel.executor.moveTo = async () => {
+      throw new Error("checkout repair failed: password=private-value");
+    };
+    expect(await authorizeAttachedHead(s.deps, ctx(s, sel))).toEqual({
+      kind: "refused",
+      reason: "workspace_head_mismatch",
+    });
+    expect(s.events.filter((event) => event.type === "span_end" && event.status === "error")).toMatchObject([
+      { name: "dispatch.gate.attached_head.initial_head", error: "HEAD read failed: token=«redacted»" },
+      { name: "dispatch.gate.attached_head.reprovision", error: "checkout repair failed: password=«redacted»" },
+    ]);
+    expect(JSON.stringify(s.events)).not.toContain("private-value");
+  });
+
+  it("retains the current-head lookup failure before a mismatched repair refuses", async () => {
+    const s = setup();
+    const { selection: sel } = selection({ observed: SHA_B });
+    expect(
+      await authorizeAttachedHead(
+        {
+          ...s.deps,
+          fetchPrHead: async () => {
+            throw new Error("GitHub lookup unavailable");
+          },
+        },
+        ctx(s, sel),
+      ),
+    ).toEqual({ kind: "refused", reason: "workspace_head_mismatch" });
+    expect(
+      s.events.find((event) => event.type === "span_end" && event.name === "dispatch.gate.attached_head.current_head"),
+    ).toMatchObject({ status: "error", error: "GitHub lookup unavailable" });
+  });
+
+  it("refuses a failed initial checkout using its exit status and retains redacted command evidence", async () => {
+    const s = setup();
+    const { selection: sel } = selection({ resident: false });
+    sel.executor.execResult = async () => ({
+      stdout: "",
+      stderr: "fatal: fetch denied token=private-value",
+      exitCode: 128,
+      truncated: false,
+    });
+    await expect(authorizeAttachedHead(s.deps, ctx(s, sel))).rejects.toThrow(
+      "prepare_checkout failed (exit 128, truncated false): fatal: fetch denied token=«redacted»",
+    );
+    expect(
+      s.events.find(
+        (event) => event.type === "span_end" && event.name === "dispatch.gate.attached_head.prepare_checkout",
+      ),
+    ).toMatchObject({ status: "error", attrs: { exitCode: 128, outputTruncated: false } });
+  });
+
+  it.each([
+    { exitCode: 128, truncated: false },
+    { exitCode: 0, truncated: true },
+  ])("does not verify a HEAD from an unsuccessful command result: %j", async (result) => {
+    const s = setup();
+    const { selection: sel } = selection();
+    sel.executor.execResult = async () => ({ stdout: SHA_A, stderr: "incomplete HEAD result", ...result });
+    sel.executor.moveTo = async () => {
+      throw new Error("repair unavailable");
+    };
+    expect(await authorizeAttachedHead(s.deps, ctx(s, sel))).toEqual({
+      kind: "refused",
+      reason: "workspace_head_mismatch",
+    });
+    expect(
+      s.events.find((event) => event.type === "span_end" && event.name === "dispatch.gate.attached_head.initial_head"),
+    ).toMatchObject({ status: "error", attrs: { exitCode: result.exitCode, outputTruncated: result.truncated } });
+  });
 
   it("a pinned review refuses attachment adoption but verifies its unchanged checkout", async () => {
     for (const observed of [SHA_B, SHA_A]) {

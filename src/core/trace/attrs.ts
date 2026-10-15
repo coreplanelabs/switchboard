@@ -1,4 +1,5 @@
 import type { GithubAccessDiagnostic } from "../references/githubAccessDiagnostic.js";
+import type { ErrorKind } from "./types.js";
 
 /** Span attributes: one flat key union with a value domain per key, and the
  *  keys each span name may carry (docs/reference/specs/tracing.md). Literal unions,
@@ -14,6 +15,8 @@ export type Channel = "slack" | "http" | "mcp" | "cli" | "web";
 
 /** Every attribute key any span may carry, with its value domain. */
 export interface AttrDomain {
+  errorKind: ErrorKind;
+  errorCode: string;
   // request
   channel: Channel;
   status: "completed" | "failed" | "refused" | "stopped";
@@ -107,6 +110,7 @@ export interface AttrDomain {
   callId: string;
   ok: boolean;
   exitCode: number;
+  outputTruncated: boolean;
   infra: boolean;
   execMs: number;
   serverMs: number;
@@ -166,6 +170,8 @@ export type SpanAttrs = { readonly [K in SpanAttrKey]?: AttrDomain[K] };
  *  from a closed table, never free text (no whitespace, no `?`/`&`, at most 64
  *  chars). */
 const IDENTIFIER_KEYS: ReadonlySet<SpanAttrKey> = new Set<SpanAttrKey>([
+  "errorKind",
+  "errorCode",
   "restartOfRunId",
   "runId",
   "outcome",
@@ -224,6 +230,8 @@ export function invalidAttrKeys(attrs: SpanAttrs): string[] {
 /** The runtime type of each key — the one place the domain is spelled twice
  *  (type and value), kept adjacent so they cannot drift. */
 const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
+  errorKind: "string",
+  errorCode: "string",
   githubStage: "string",
   githubReason: "string",
   githubTool: "string",
@@ -282,6 +290,7 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   callId: "string",
   ok: "boolean",
   exitCode: "number",
+  outputTruncated: "boolean",
   infra: "boolean",
   execMs: "number",
   serverMs: "number",

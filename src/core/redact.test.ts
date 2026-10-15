@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { oneLine, redactAndCap } from "./redact.js";
 
 describe("oneLine", () => {
+  it("redacts named credentials after an error prefix without hiding the error code", () => {
+    expect(redactAndCap("HEAD read failed: token=private-value")).toBe("HEAD read failed: token=«redacted»");
+    expect(redactAndCap("github-token-mint-failed: HTTP 422 password=private-value")).toBe(
+      "github-token-mint-failed: HTTP 422 password=«redacted»",
+    );
+  });
   it("redacts run bearers from earlier generations before truncating the text", () => {
     const token = `sbr_run-7.${"A".repeat(43)}`;
     expect(redactAndCap(`bearer=${token}`, 100)).toBe("bearer=«redacted-run-bearer»");

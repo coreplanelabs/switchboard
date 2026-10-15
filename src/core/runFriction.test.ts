@@ -167,6 +167,23 @@ function bash(cmd: string, at: number, ms: number, ok = true, out = "ok"): RunEv
 const categories = (d: FrictionDiagnosis) => d.findings.map((f) => f.category);
 
 describe("analyzeRunFriction — empty / untimed input", () => {
+  it("reports system setup refusals as infrastructure failures while keeping policy and request refusals separate", () => {
+    const diagnosis = analyzeRunFriction([
+      { type: "refusal", code: "workspace_head_mismatch", cause: "system", text: "Workspace setup failed." },
+      { type: "refusal", code: "agent_allowlist", cause: "policy", text: "Access denied." },
+      { type: "refusal", code: "which_branch", cause: "request", text: "Choose a branch." },
+    ]);
+    expect(diagnosis.findings).toEqual([
+      {
+        category: "infra_failure",
+        severity: "high",
+        summary: "system refusal (workspace_head_mismatch): Workspace setup failed.",
+        eventIndex: 0,
+      },
+    ]);
+    expect(diagnosis.verdict).toContain("infra failures");
+    expect(diagnosis.eventCount).toBe(0);
+  });
   it("an empty stream yields a clean, zeroed diagnosis (no findings, no timings)", () => {
     const d = analyzeRunFriction([]);
     expect(d.eventCount).toBe(0);
