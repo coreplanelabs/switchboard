@@ -145,7 +145,7 @@ export function planStagingRecreation(
       throw new Error("staging dependency is outside the selected staging installation");
     const refs = record(dependency.references);
     const unknownFields = Object.keys(refs).filter(
-      (key) => !["services", "durable_objects", "dispatch_outbounds"].includes(key),
+      (key) => !["services", "durable_objects", "dispatch_outbounds", "domains"].includes(key),
     );
     if (unknownFields.length) throw new StagingDependencyFieldsError(name, refs, unknownFields);
     const services = refs.services === undefined ? {} : record(refs.services);

@@ -47,10 +47,19 @@ function fixture() {
       { name: "switchboard-staging-ship-coordinator", script_name: "switchboard-staging" },
       { name: "switchboard-staging-resident-refresh", script_name: "switchboard-staging-resident" },
     ]),
-    dependencies: Object.fromEntries(names.map((name) => [name, { references: {}, tails: [] }])) as Record<
-      string,
-      { references: Record<string, unknown>; tails: unknown[] }
-    >,
+    dependencies: Object.fromEntries(
+      names.map((name) => [
+        name,
+        {
+          references: {
+            services: { incoming: [], outgoing: [] },
+            durable_objects: [],
+            domains: [{ service: name, hostname: name + ".example.test" }],
+          },
+          tails: [],
+        },
+      ]),
+    ) as Record<string, { references: Record<string, unknown>; tails: unknown[] }>,
   };
   return { profile, inventory, production: "f".repeat(32) };
 }
@@ -228,6 +237,10 @@ describe("staging installation recreation", () => {
     };
     expect(() => planStagingRecreation(h.profile, h.production, h.inventory, source)).toThrow(
       "outside the selected staging installation",
+    );
+    h.inventory.dependencies["switchboard-staging"].references = { unknown_kind: [] };
+    expect(() => planStagingRecreation(h.profile, h.production, h.inventory, source)).toThrow(
+      "staging dependency kind is unverified",
     );
     h.inventory.dependencies["switchboard-staging"].references = {};
     h.inventory.scripts = { ...h.inventory.scripts, result_info: { total_pages: 2 } } as typeof h.inventory.scripts;
