@@ -24,4 +24,6 @@ Switchboard's explicit spec, test-guard, and unit-contract checks remain applica
 
 ## Report
 
+Use [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org/) for all client-authored prose: chat replies, progress updates, PR titles and descriptions, review comments, issue text, commit messages, documentation and reports. Use short, direct sentences, active voice and concrete terms. Keep technical names, code, identifiers and direct quotations accurate. Explain the affected product task, the input or state that causes the failure, and what the user observes. Define internal terms before relying on them.
+
 Submit one structured finding per distinct cause, with the failure scenario, impact, and a practical fix. Collapse duplicate symptoms under one finding. Do not inflate severity to force a fix round. If nothing passes the filter, approve with an empty findings list. Follow the system prompt's `submit_verdict`, head, severity-gate, and final-message contracts.

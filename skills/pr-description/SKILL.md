@@ -1,12 +1,24 @@
 ---
 name: pr-description
-description: How to write the PR description — a fixed-size map for the reader (TL;DR, why, at most seven linked pointers, feedback wanted, risk, verified) with everything for agents below a fold. Load before submitting any PR description.
+description: Write a concise PR description in Simplified Technical English. Explain the product, user task and changed result for a reader with no system context. Load before submitting any PR description.
 agents: [coding]
 ---
 
 # The PR description
 
 The description is the `PrDescription` object you submit through `submit_pr_description`; Switchboard renders the GitHub body from it at your pushed head. The body has two parts. Above the fold, the **map**: what a person reads in a minute and clicks from. Below the fold, collapsed: what agents and the record need. You write it right after implementing, when you have more context about the change than anyone will ever have again.
+
+## Language and product context
+
+Use [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org/) for all client-authored prose: chat replies, progress updates, PR titles and descriptions, review comments, issue text, commit messages, documentation and reports. Use short, direct sentences, active voice and concrete terms. Keep technical names, code, identifiers and direct quotations accurate.
+
+Assume the reader has no context about the product, system, repository or prior discussion. Start with what the product lets a person do. Name the affected user task and explain the result before and after this change. Use the product in the target repository, including when Switchboard writes a PR for another product. Include only the product context needed to understand this change.
+
+Keep that context through the whole map. Explain each internal component by its role in the user task before naming its mechanism. Define an unfamiliar term at first use or replace it with concrete words. An issue link, file name or component name cannot supply the explanation.
+
+For example: "Switchboard lets people ask an agent to review a pull request. This change explains each review finding in short, direct sentences so the author can understand the failure and fix it." This gives the product, task and result; "Add prose policy to skill hydration" does not.
+
+Before submitting, read only the map as a new reader. It must answer: What does the product do here? Who uses this part? What happens today? What changes, and why does it help? Shorten repeated detail to meet the caps; preserve the context needed to answer those questions.
 
 The map is the same size for a 3-file and an 80-file PR. The schema enforces that: every field has a cap and the tool refuses an object over it, naming every field over its cap with the count. Caps count visible characters; a markdown link's target is not counted, so link freely. When a refusal names a count, remove at least that many visible characters from that field: a link's target does not count, so shortening a URL removes nothing; the refusal quotes a prefix that fits, cut at a word boundary, which you may use as is.
 
@@ -16,11 +28,11 @@ The map is the same size for a 3-file and an 80-file PR. The schema enforces tha
 
 ## The map (above the fold, in this order)
 
-1. `tldr` (300): two sentences for a reader with zero context, what this PR does and why it matters.
-2. `why` (400): the problem and the motivation, with the triggering issue, the record and the stack position hyperlinked. Why, never what: the diff shows what.
+1. `tldr` (300): two sentences for a reader with zero system context. Name the product and affected user task, then state what changes and why it matters.
+2. `why` (400): the current user problem and its effect, with the triggering issue, the record and the stack position hyperlinked where applicable. Explain the problem in the body; links provide supporting detail.
 3. `pointers` (1 to 7): **Where to look**, in reading order. Each is `{ label, text, risk?, anchor }`: `label` (60) names the thing, `text` (160) is one sentence on what it does or why it is shaped so, `risk` (100) is set only where a mistake would matter and renders as `⚠`, `anchor` is the `{ path, from, to }` line range at your pushed head. Rendered as `N. [label](permalink) text ⚠ risk`, a link, never embedded code.
 4. `feedbackWanted` (200): the one or two things you want the reviewer's judgement on. An explicit ask gets engagement; "please review" gets none.
-5. `risk` (300): what breaks if this is wrong, the blast radius, how to roll back. When the change exceeds 400 changed lines, say so here and name the split you considered.
+5. `risk` (300): what user task can fail if this is wrong, who is affected, how to roll back. When the change exceeds 400 changed lines, say so here and name the split you considered.
 6. `verified` (200): one line for a person: which suites ran and passed, what is still human-gated.
 
 ## Choosing the pointers
