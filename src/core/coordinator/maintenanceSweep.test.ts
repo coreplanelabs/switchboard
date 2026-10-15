@@ -4,6 +4,8 @@ import { InMemoryCoordinatorInstanceStore } from "./instanceStore.js";
 import { prepareMaintenanceAdmission } from "./maintenanceAdmission.js";
 import { seedCoordinatorInstance, seedCoordinatorUnit } from "../testing/coordinatorInstance.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
+import { analyzeRunFriction } from "../runFriction.js";
+import type { RunRecord } from "../runRecord.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "./contract.js";
 import type { SweepDispatchRequest } from "../pullSweepWiring.js";
 import type { UnitEffectCompletionOutcome } from "./unitEffect.js";
@@ -87,6 +89,193 @@ function setup() {
   };
 }
 describe("durable maintenance sweep integration", () => {
+  it.each(["live", "terminal"] as const)(
+    "replays only the original accepted maintenance child with a %s unknown review receipt",
+    async (retention) => {
+      const h = setup();
+      const base = h.deps.build();
+      h.deps.build = () => ({
+        ...base,
+        git: { ...base.git, patchUnchanged: async () => false },
+        effects: {
+          ...base.effects,
+          prepareNativeCalls: async () => [
+            {
+              operation: "spawn",
+              state: "unstarted",
+              request: {
+                channelId: h.origin.channelId,
+                userId: h.origin.userId,
+                threadKey: h.origin.threadKey,
+                text: "Review the original PR",
+              },
+            },
+          ],
+        },
+      });
+      const runId = "original-maintenance-review";
+      const receipt = {
+        version: 1 as const,
+        runId,
+        target: { repo: pr.repo, number: 7, commitId: newHead },
+        bodyHash: "c".repeat(64),
+        state: "uncertain" as const,
+      };
+      h.deps.dispatch.mockImplementation(async ({ instance, unit }, request) => {
+        const cell = unit.currentEffect!;
+        const meta = {
+          agent: "review",
+          channelId: instance.channelId,
+          userId: instance.userId,
+          threadKey: request.threadKey,
+          repo: pr.repo,
+          ref: pr.branch,
+          pr: 7,
+          headSha: newHead,
+          parentInstanceId: instance.id,
+          coordinatorUnit: unit.unit,
+          coordinatorAttempt: 0,
+          idempotencyKey: `${instance.id}:${cell.id}`,
+          maintenanceActionId: cell.execution.maintenance!.id,
+        };
+        expect(
+          await h.deps.ledger.claim({
+            runId,
+            threadKey: request.threadKey,
+            gen: "g1",
+            leaseMs: 1000,
+            startedAt: 4,
+            meta,
+            card: null,
+            system: "",
+            tools: [],
+            state: {
+              reviewPublication: receipt,
+              branchPublication: { version: 1, repo: pr.repo, branches: [], complete: true },
+            },
+          }),
+        ).toMatchObject({ ok: true });
+        const tag = {
+          type: "coordinator_tag" as const,
+          seq: 1,
+          parentInstanceId: instance.id,
+          unit: unit.unit,
+          branch: pr.branch,
+          base: pr.base,
+          publication: unit.publication,
+          maintenanceActionId: cell.execution.maintenance!.id,
+        };
+        await h.deps.ledger.append(runId, "g1", [tag]);
+        if (retention === "terminal") {
+          const record: RunRecord = {
+            ...meta,
+            id: runId,
+            pr: undefined,
+            targetPr: 7,
+            channelVisibility: "unknown",
+            startedAt: 4,
+            finishedAt: 5,
+            status: "completed",
+            eventCount: 2,
+            storedEventCount: 2,
+            truncated: false,
+            events: [{ type: "run_meta", seq: 2, ...meta }, tag],
+            diagnosis: analyzeRunFriction([]),
+          };
+          expect(await h.deps.ledger.finish(runId, "g1", record)).toEqual({ ok: true, stored: true });
+        }
+        return { state: "accepted", runId };
+      });
+      const advance = h.instances.transitionUnitEffect.bind(h.instances);
+      let loseSettlement = true;
+      vi.spyOn(h.instances, "transitionUnitEffect").mockImplementation(async (change) =>
+        change.kind === "settle" && loseSettlement ? { ok: false, reason: "unavailable" } : advance(change),
+      );
+      const service = createMaintenanceSweepService(h.origin, h.deps);
+      expect((await service.sweep({ repo: pr.repo })).results[0]?.outcome).toBe("error");
+      const prepared = await prepareMaintenanceAdmission({
+        version: 1,
+        intent: h.origin.intent,
+        target: { repo: pr.repo, pr: 7, ref: pr.branch, base: pr.base, headSha: oldHead },
+        createdAt: 3,
+        bounds: { leaseMinutes: 15, spendCapUsd: 5 },
+      });
+      const instance = await h.instances.get(prepared.actionId);
+      expect((await h.instances.listUnits(instance!.id))[0]?.currentEffect).toMatchObject({
+        phase: "active",
+        calls: [
+          { operation: "rebase_push", state: "accepted" },
+          { operation: "spawn", state: "accepted", runId },
+        ],
+      });
+      loseSettlement = false;
+      if (retention === "live") {
+        const live = h.deps.ledger.live.get(runId)!;
+        const original = structuredClone(live.meta);
+        for (const foreign of [
+          { maintenanceActionId: `m_${"d".repeat(64)}` },
+          { idempotencyKey: `${instance!.id}:ONE/another-review` },
+        ]) {
+          live.meta = { ...original, ...foreign };
+          expect(
+            (await createMaintenanceSweepService(h.origin, h.deps).sweep({ repo: pr.repo })).results[0]?.outcome,
+          ).toBe("error");
+          expect((await h.instances.listUnits(instance!.id))[0]?.currentEffect?.phase).toBe("active");
+        }
+        live.meta = original;
+        const initialized = structuredClone(live.state.branchPublication);
+        live.state.branchPublication = {
+          version: 1,
+          repo: pr.repo,
+          branches: [],
+          complete: false,
+          pending: { id: "independent-branch-write", ref: pr.branch, pr: 7, headSha: newHead },
+        };
+        expect(
+          (await createMaintenanceSweepService(h.origin, h.deps).sweep({ repo: pr.repo })).results[0]?.outcome,
+        ).toBe("error");
+        expect((await h.instances.listUnits(instance!.id))[0]?.currentEffect?.phase).toBe("active");
+        live.state.branchPublication = initialized;
+      }
+      expect((await createMaintenanceSweepService(h.origin, h.deps).sweep({ repo: pr.repo })).results[0]?.outcome).toBe(
+        "delta-review",
+      );
+      const settled = (await h.instances.listUnits(instance!.id))[0]!;
+      expect(settled.currentEffect?.phase).toBe("settled");
+      expect(await h.instances.findPullOwners({ repo: pr.repo, pr: 7 })).toEqual({
+        ok: true,
+        owners:
+          retention === "live"
+            ? [
+                { kind: "unit", instanceId: instance!.id, unit: "ONE" },
+                { kind: "run", runId },
+              ]
+            : [{ kind: "run", runId }],
+      });
+      expect(
+        (
+          await createMaintenanceSweepService(
+            { ...h.origin, intent: { ...h.origin.intent, requestId: "cli:another-action" } },
+            h.deps,
+          ).sweep({ repo: pr.repo })
+        ).results[0]?.outcome,
+      ).toBe("error");
+      expect(await h.instances.listUnits(instance!.id)).toEqual([settled]);
+      expect(
+        retention === "live"
+          ? h.deps.ledger.live.get(runId)?.state.reviewPublication
+          : h.deps.ledger.finished.get(runId)?.reviewPublication,
+      ).toEqual(receipt);
+      expect(
+        retention === "live"
+          ? h.deps.ledger.live.get(runId)?.state.branchPublication
+          : h.deps.ledger.finished.get(runId)?.branchPublication,
+      ).toEqual({ version: 1, repo: pr.repo, branches: [], complete: true });
+      expect(h.push).toHaveBeenCalledTimes(1);
+      expect(h.deps.dispatch).toHaveBeenCalledTimes(1);
+      expect(h.perform).not.toHaveBeenCalled();
+    },
+  );
   it("separate maintenance services share throughput and preserve each durable PR owner", async () => {
     const h = setup();
     const throughput = createPullSweepThroughput();

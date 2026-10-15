@@ -15,11 +15,13 @@ import {
 } from "./historicalNativeAudit.js";
 import { publicationSettlementForRun } from "../publicationSettlement.js";
 import { workspaceSettlementOf } from "../workspaceSettlement.js";
+import { reviewPublicationOf, type ReviewPublicationReceipt } from "../reviewPublication.js";
 import { isCoordinatorReconcileEffect } from "./workflowReconciliation.js";
 import {
   isCoordinatorInstance,
   isCoordinatorUnit,
   permitsRecoveryMetadataWrite,
+  unitOfIdempotencyKey,
   type CoordinatorInstance,
   type CoordinatorUnit,
 } from "./contract.js";
@@ -79,6 +81,8 @@ export const PULL_OWNERSHIP_CHECKS = [
   "unit_effect_binding",
   "run_shape",
   "run_publication",
+  "run_review_publication",
+  "run_review_owner",
   "run_initial_coding_owner",
   "run_door",
   "settlement_shape",
@@ -235,6 +239,7 @@ export interface PullOwnershipRows {
     live: boolean;
     publication?: unknown;
     door?: unknown;
+    reviewPublication?: unknown;
     record?: unknown;
     pushReceipts?: unknown;
     historicalEvents?: readonly HistoricalOwnerEvent[];
@@ -272,6 +277,14 @@ export function terminalPullOwnerTargets(
   if (run.live || !isRunWorkOwner(run.record) || run.record.id !== run.runId || run.record.repo !== run.repo)
     return fail("run_shape");
   const targets: PullTarget[] = [];
+  const review = managedReviewPublication(run);
+  if (review === null) return fail("run_review_publication");
+  if (review && (review.state === "pending" || review.state === "uncertain")) {
+    targets.push({ repo: review.target.repo, pr: review.target.number });
+    // A review receipt names a commit, not a branch. Ref-only reads must load
+    // it and check the original unit's binding before deciding ownership.
+    targets.push({ repo: review.target.repo });
+  }
   if (run.publication !== undefined) {
     const publication = branchPublicationOf(run.publication, typeof run.repo === "string" ? run.repo : undefined);
     if (!publication || (!publication.complete && !publication.repo)) return fail("run_publication");
@@ -335,6 +348,43 @@ export function unitHoldsPulls(unit: CoordinatorUnit, instance?: CoordinatorInst
     !!unit.recovery ||
     (unit.adoption !== undefined && unit.adoption.state !== "bound")
   );
+}
+
+/** A managed review keeps its original publication obligation. Independent
+ * reviews do not acquire a shared PR claim through this owner read. */
+function managedReviewPublication(run: PullOwnershipRows["runs"][number]): ReviewPublicationReceipt | null | undefined {
+  if (run.reviewPublication === undefined) return;
+  if (!run.record || typeof run.record !== "object" || Array.isArray(run.record)) return null;
+  const record = run.record as Record<string, unknown>;
+  if (
+    record.parentInstanceId === undefined &&
+    record.coordinatorUnit === undefined &&
+    record.idempotencyKey === undefined
+  )
+    return;
+  const review = reviewPublicationOf(run.reviewPublication);
+  const unit =
+    record.coordinatorUnit ??
+    (typeof record.idempotencyKey === "string" ? unitOfIdempotencyKey(record.idempotencyKey) : undefined);
+  if (
+    !review ||
+    !isRunWorkOwner({ ...record, id: run.runId }) ||
+    (!run.live && record.id !== run.runId) ||
+    record.agent !== "review" ||
+    typeof run.repo !== "string" ||
+    record.repo !== run.repo ||
+    review.runId !== run.runId ||
+    review.target.repo.toLowerCase() !== run.repo.toLowerCase() ||
+    (run.live
+      ? record.pr !== undefined && record.pr !== review.target.number
+      : record.targetPr !== undefined && record.targetPr !== review.target.number) ||
+    typeof unit !== "string" ||
+    typeof record.parentInstanceId !== "string" ||
+    typeof record.idempotencyKey !== "string" ||
+    !record.idempotencyKey.startsWith(`${record.parentInstanceId}:${unit}/`)
+  )
+    return null;
+  return review;
 }
 
 /** A complete snapshot is useful only inside the same owner's admission transaction. */
@@ -569,6 +619,38 @@ export function findPullOwnersInRows(
     const origin = diagnostics?.runOrigins?.[rowIndex];
     if (typeof run.runId !== "string" || !run.runId || typeof run.live !== "boolean")
       return fail("run_shape", origin?.source ?? "runs", origin?.rowIndex ?? rowIndex);
+    const review = managedReviewPublication(run);
+    if (review === null) return fail("run_review_publication", origin?.source ?? "runs", origin?.rowIndex ?? rowIndex);
+    if (review && (review.state === "pending" || review.state === "uncertain")) {
+      const record = run.record as Record<string, unknown>;
+      const unitId = record.coordinatorUnit ?? unitOfIdempotencyKey(record.idempotencyKey as string);
+      const original = rows.units.filter(
+        (row) =>
+          (row.unit as CoordinatorUnit).instanceId === record.parentInstanceId &&
+          (row.unit as CoordinatorUnit).unit === unitId,
+      );
+      const unit = original[0]?.unit as CoordinatorUnit | undefined;
+      const instance = original[0]?.instance as CoordinatorInstance | undefined;
+      if (
+        original.length !== 1 ||
+        !unit ||
+        !instance ||
+        instance.repo.toLowerCase() !== review.target.repo.toLowerCase() ||
+        ![unit.pr?.number, unit.resume?.pr, unit.publication?.pr].some((pr) => pr === review.target.number) ||
+        [unit.pr?.number, unit.resume?.pr, unit.publication?.pr].some(
+          (pr) => pr !== undefined && pr !== review.target.number,
+        ) ||
+        instance.userId !== record.userId ||
+        instance.channelId !== record.channelId ||
+        (unit.reviewThread?.threadKey ?? unit.threadKey ?? instance.threadKey) !== record.threadKey
+      )
+        return fail("run_review_owner", origin?.source ?? "runs", origin?.rowIndex ?? rowIndex);
+      if (
+        sameRepo(review.target.repo) &&
+        matches(review.target.number, unit.publication?.publicationRef ?? unit.branch)
+      )
+        add({ kind: "run", runId: run.runId });
+    }
     if (run.publication !== undefined) {
       const publication = branchPublicationOf(run.publication, typeof run.repo === "string" ? run.repo : undefined);
       if (!publication || (!publication.complete && publication.repo === undefined))

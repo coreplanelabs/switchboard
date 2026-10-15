@@ -1,4 +1,5 @@
-import { isPublicationRepo } from "../branchPublication.js";
+import { branchPublicationOf, isPublicationRepo } from "../branchPublication.js";
+import { reviewPublicationOf } from "../reviewPublication.js";
 import {
   isCoordinatorInstance,
   isCoordinatorUnit,
@@ -102,6 +103,53 @@ function sameMaintenanceRequester(instance: CoordinatorInstance, intent: Mainten
         intent.authenticatedAs === instance.authenticatedAs &&
         intent.postedBy === instance.postedBy;
 }
+/** An accepted child belongs to this saved action. Reading its result does not
+ * settle its separate review POST or authorize another native call. */
+function originalReviewChild(
+  runId: string,
+  original: { instance: CoordinatorInstance; unit: CoordinatorUnit },
+  rows: PullOwnershipRows,
+): boolean {
+  const { instance, unit } = original;
+  const cell = unit.currentEffect!;
+  if (!cell.calls.some((call) => call.operation === "spawn" && call.state === "accepted" && call.runId === runId))
+    return false;
+  const runs = rows.runs.filter((run) => run.runId === runId);
+  if (runs.length !== 1) return false;
+  const run = runs[0]!;
+  const record = run.record;
+  const receipt = reviewPublicationOf(run.reviewPublication);
+  const publication = branchPublicationOf(run.publication, typeof run.repo === "string" ? run.repo : undefined);
+  return (
+    object(record) &&
+    receipt !== undefined &&
+    (receipt.state === "pending" || receipt.state === "uncertain") &&
+    receipt.runId === runId &&
+    receipt.target.repo.toLowerCase() === cell.target.repo.toLowerCase() &&
+    receipt.target.number === cell.target.pr &&
+    (run.publication === undefined ||
+      (publication !== undefined &&
+        publication.complete &&
+        publication.branches.length === 0 &&
+        !publication.targets?.length &&
+        publication.pending === undefined)) &&
+    (run.door === undefined || run.door === null) &&
+    record.agent === "review" &&
+    record.parentInstanceId === instance.id &&
+    record.coordinatorUnit === unit.unit &&
+    record.coordinatorAttempt === (instance.attempt ?? 0) &&
+    record.idempotencyKey === `${instance.id}:${cell.id}` &&
+    record.maintenanceActionId === cell.execution.maintenance!.id &&
+    typeof record.repo === "string" &&
+    record.repo.toLowerCase() === cell.target.repo.toLowerCase() &&
+    (record.ref === undefined || record.ref === cell.target.ref) &&
+    record.userId === instance.userId &&
+    record.channelId === instance.channelId &&
+    record.authenticatedAs === instance.authenticatedAs &&
+    record.postedBy === instance.postedBy &&
+    record.threadKey === (unit.reviewThread?.threadKey ?? unit.threadKey ?? instance.threadKey)
+  );
+}
 /** One synchronous decision inside the existing owner transaction; no new scheduler. */
 export function planMaintenanceAdmission(
   prepared: PreparedMaintenanceAdmission,
@@ -172,7 +220,9 @@ export function planMaintenanceAdmission(
       !same({ ...cell.target, headSha: target.headSha }, target) ||
       (cell.target.headSha !== target.headSha && replayHead?.toLowerCase() !== target.headSha) ||
       owners.owners.some(
-        (o) => o.kind !== "unit" || o.instanceId !== original!.instance.id || o.unit !== original!.unit.unit,
+        (o) =>
+          !(o.kind === "unit" && o.instanceId === original!.instance.id && o.unit === original!.unit.unit) &&
+          !(o.kind === "run" && originalReviewChild(o.runId, original!, rows)),
       )
     )
       return { ok: false, reason: "conflict" };

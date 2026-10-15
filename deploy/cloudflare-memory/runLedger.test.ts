@@ -8830,6 +8830,141 @@ describe("maintenance server clock", () => {
 });
 
 describe("durable maintenance admission", () => {
+  it.each(["live", "terminal"] as const)(
+    "reattaches only the original maintenance action to its %s accepted review child",
+    async (retention) => {
+      const key = storeKey(),
+        runId = `maintenance-review-${retention}`;
+      const input = {
+        version: 1 as const,
+        intent: {
+          kind: "command" as const,
+          requestId: "command:original-review",
+          actorId: "slack:UALICE",
+          userId: "slack:UALICE",
+          channelId: "slack:C1",
+          threadKey: "slack:C1:maintenance",
+        },
+        target: { repo: "acme/api", pr: 7, ref: "fix/maintenance", base: "main", headSha: "a".repeat(40) },
+        createdAt: 1000,
+        bounds: { leaseMinutes: 30, spendCapUsd: 1 },
+      };
+      const admitted = (await post("/runs/coordinator/maintenance/admit", { storeKey: key, input })).data;
+      expect(admitted.ok).toBe(true);
+      const { instance, execution, effectId } = admitted;
+      const unit: CoordinatorUnit = {
+        ...admitted.unit,
+        publication: { ...admitted.unit.publication, expectedHeadSha: "b".repeat(40) },
+        currentEffect: {
+          ...admitted.unit.currentEffect,
+          preparation: undefined,
+          calls: [
+            { operation: "rebase_push", state: "accepted", commitSha: "b".repeat(40) },
+            { operation: "spawn", state: "accepted", runId },
+          ],
+        },
+      };
+      delete unit.currentEffect!.preparation;
+      const meta = {
+        agent: "review",
+        repo: input.target.repo,
+        ref: input.target.ref,
+        pr: 7,
+        userId: instance.userId,
+        channelId: instance.channelId,
+        threadKey: instance.threadKey,
+        parentInstanceId: instance.id,
+        coordinatorUnit: unit.unit,
+        coordinatorAttempt: 0,
+        idempotencyKey: `${instance.id}:${effectId}`,
+        maintenanceActionId: execution.maintenance.id,
+      };
+      const receipt = {
+        version: 1,
+        runId,
+        target: { repo: input.target.repo, number: 7, commitId: "b".repeat(40) },
+        state: "uncertain",
+        bodyHash: "c".repeat(64),
+      };
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+        // Original accepted push/spawn snapshot after a lost settlement. The
+        // high-entry sweep proof exercises production of these exact outcomes.
+        state.storage.sql.exec(
+          `UPDATE coordinator_units SET json=? WHERE instance_id=? AND unit=?`,
+          JSON.stringify(unit),
+          instance.id,
+          unit.unit,
+        );
+      });
+      expect(
+        (
+          await post(
+            "/runs/claim",
+            claimBody(key, runId, instance.threadKey, "g1", {
+              meta,
+              state: {
+                reviewPublication: receipt,
+                branchPublication: { version: 1, repo: input.target.repo, branches: [], complete: true },
+              },
+            }),
+          )
+        ).status,
+      ).toBe(200);
+      if (retention === "terminal") {
+        expect(
+          (
+            await post("/runs/finish", {
+              storeKey: key,
+              runId,
+              gen: "g1",
+              record: {
+                ...record(runId, instance.threadKey),
+                ...meta,
+                pr: undefined,
+                targetPr: 7,
+              },
+            })
+          ).status,
+        ).toBe(200);
+        await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+          state.storage.sql.exec(
+            `INSERT OR REPLACE INTO meta (key,value) VALUES ('terminal_pull_owner_index_version','1')`,
+          );
+          state.storage.sql.exec(`DELETE FROM terminal_pull_owner_targets`);
+        });
+      }
+      const replay = await post("/runs/coordinator/maintenance/admit", { storeKey: key, input });
+      expect(replay).toMatchObject({ status: 200, data: { ok: true, replayed: true, unit, execution, effectId } });
+      await runInDurableObject(stub, async (owner: RunHistoryDO) => {
+        expect(
+          await owner.transitionUnitEffect({ kind: "settle", expected: unit, execution, effectId }, 2000),
+        ).toMatchObject({ ok: true, unit: { currentEffect: { phase: "settled" } } });
+      });
+      expect(
+        await post("/runs/coordinator/maintenance/admit", {
+          storeKey: key,
+          input: { ...input, intent: { ...input.intent, requestId: "command:rival" } },
+        }),
+      ).toMatchObject({ status: 409, data: { ok: false, reason: "owned" } });
+      await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+        const saved =
+          retention === "live"
+            ? JSON.parse(
+                state.storage.sql
+                  .exec<{ state_json: string }>(`SELECT state_json FROM live_runs WHERE run_id=?`, runId)
+                  .one().state_json,
+              )
+            : JSON.parse(
+                state.storage.sql
+                  .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id=?`, runId)
+                  .one().summary_json,
+              );
+        expect(saved.reviewPublication).toEqual(receipt);
+        expect(saved.branchPublication).toEqual({ version: 1, repo: input.target.repo, branches: [], complete: true });
+      });
+    },
+  );
   it("atomically rebinds only a settled same-requester intent and retains foreign or live owners", async () => {
     const key = storeKey();
     const input = {
@@ -9001,6 +9136,206 @@ describe("durable maintenance admission", () => {
 });
 
 describe("complete canonical pull ownership", () => {
+  it.each(["pending", "uncertain", "accepted", "refused"] as const)(
+    "retains the original managed review's %s receipt across settlement and index upgrade",
+    async (publicationState) => {
+      const key = storeKey(),
+        id = `managed-${publicationState}`;
+      const instance: CoordinatorInstance = {
+        id: "managed_review_owner",
+        kind: "ship",
+        userId: "slack:UALICE",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:original",
+        repo: "acme/api",
+        branch: "fix/managed",
+        base: "main",
+        createdAt: 1,
+      };
+      const row: CoordinatorUnit = {
+        instanceId: instance.id,
+        unit: "ONE",
+        slug: "managed",
+        branch: instance.branch,
+        dependsOn: [],
+        rounds: [],
+        threadKey: instance.threadKey,
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        publication: {
+          repo: instance.repo,
+          pr: 7,
+          headRef: instance.branch,
+          baseRef: "main",
+          publicationRef: instance.branch,
+          expectedHeadSha: "a".repeat(40),
+          owner: { instanceId: instance.id, unit: "ONE" },
+        },
+      };
+      expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+      expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [row] })).status).toBe(200);
+      const receipt = {
+        version: 1,
+        runId: id,
+        target: { repo: instance.repo, number: 7, commitId: "b".repeat(40) },
+        bodyHash: "c".repeat(64),
+        state: publicationState,
+      };
+      const meta = {
+        agent: "review",
+        repo: instance.repo,
+        userId: instance.userId,
+        channelId: instance.channelId,
+        threadKey: instance.threadKey,
+        parentInstanceId: instance.id,
+        coordinatorUnit: "ONE",
+        idempotencyKey: `${instance.id}:ONE/1/review`,
+        pr: 7,
+      };
+      expect(
+        (
+          await post(
+            "/runs/claim",
+            claimBody(key, id, instance.threadKey, "g1", { meta, state: { reviewPublication: receipt } }),
+          )
+        ).status,
+      ).toBe(200);
+      const effect = {
+        version: 1 as const,
+        id: "ONE/1/review",
+        ordinal: 1,
+        execution: { workflowId: instance.id },
+        phase: "active" as const,
+        target: { repo: instance.repo, ref: instance.branch, base: "main", headSha: "a".repeat(40), pr: 7 },
+        calls: [{ operation: "spawn" as const, state: "accepted" as const, runId: id }],
+      };
+      const stub = env.RUNS.get(env.RUNS.idFromName(key));
+      await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+        const active = { ...row, currentEffect: effect };
+        // Retained original spawn receipt, not a second admission.
+        state.storage.sql.exec(
+          `UPDATE coordinator_units SET json=? WHERE instance_id=? AND unit=?`,
+          JSON.stringify(active),
+          instance.id,
+          "ONE",
+        );
+        const settled = await owner.transitionUnitEffect(
+          { kind: "settle", expected: active, execution: effect.execution, effectId: effect.id },
+          2,
+        );
+        expect(settled).toMatchObject({ ok: true, unit: { currentEffect: { phase: "settled" } } });
+        if (!settled.ok) throw new Error("original effect did not settle");
+        const held = publicationState === "pending" || publicationState === "uncertain";
+        if (held)
+          expect(
+            await owner.transitionUnitEffect(
+              {
+                kind: "admit",
+                expected: settled.unit,
+                execution: effect.execution,
+                effect: {
+                  ...effect,
+                  id: "ONE/2/review",
+                  ordinal: 2,
+                  calls: [{ operation: "spawn", state: "unstarted" }],
+                },
+              },
+              3,
+            ),
+          ).toEqual({ ok: false, reason: "owned" });
+        const ended: CoordinatorUnit = {
+          ...settled.unit,
+          ending: {
+            kind: "aborted",
+            report: "Original review ended",
+            at: 3,
+            outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 },
+          },
+        };
+        expect(await owner.putUnits([ended], 3)).toEqual({ ok: true });
+        if (publicationState === "pending") {
+          // Retained legacy relation predates write binding; this read snapshot
+          // grants no new effect or publication authority.
+          state.storage.sql.exec(
+            `UPDATE coordinator_units SET json=? WHERE instance_id=? AND unit=?`,
+            JSON.stringify({ ...ended, publication: undefined }),
+            instance.id,
+            "ONE",
+          );
+        }
+      });
+      const final = {
+        ...record(id, instance.threadKey),
+        ...meta,
+        id,
+        pr: undefined,
+        targetPr: 7,
+        headSha: "a".repeat(40),
+      };
+      expect((await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: final })).status).toBe(200);
+      await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+        // Emulate a valid old index that had no review candidate. The new
+        // version must rebuild from the stored journal before reporting absence.
+        state.storage.sql.exec(
+          `INSERT OR REPLACE INTO meta (key,value) VALUES ('terminal_pull_owner_index_version','1')`,
+        );
+        state.storage.sql.exec(`DELETE FROM terminal_pull_owner_targets`);
+        state.storage.sql.exec(
+          `INSERT OR REPLACE INTO terminal_pull_owner_coverage (run_id,dirty,valid,target_count,targets_json) VALUES (?,0,1,0,'[]')`,
+          id,
+        );
+      });
+      const held = publicationState === "pending" || publicationState === "uncertain";
+      const expected = { ok: true, owners: held ? [{ kind: "run", runId: id }] : [] };
+      expect(
+        await post("/runs/coordinator/pull-owners", { storeKey: key, target: { repo: instance.repo, pr: 7 } }),
+      ).toMatchObject({ status: 200, data: expected });
+      expect(
+        await post("/runs/coordinator/pull-owners", {
+          storeKey: key,
+          target: { repo: instance.repo, ref: instance.branch },
+        }),
+      ).toMatchObject({ status: 200, data: expected });
+      expect(
+        await post("/runs/coordinator/pull-owners", { storeKey: key, target: { repo: "other/api", pr: 7 } }),
+      ).toMatchObject({ status: 200, data: { ok: true, owners: [] } });
+      const before = (await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data
+        .units;
+      const admission = await post("/runs/coordinator/maintenance/admit", {
+        storeKey: key,
+        input: {
+          version: 1,
+          intent: {
+            kind: "command",
+            requestId: "slack:other-request",
+            actorId: instance.userId,
+            userId: instance.userId,
+            channelId: instance.channelId,
+            threadKey: "slack:C1:another",
+          },
+          target: { repo: instance.repo, pr: 7, ref: instance.branch, base: "main", headSha: "b".repeat(40) },
+          createdAt: 4,
+          bounds: { leaseMinutes: 15 },
+        },
+      });
+      expect(admission).toMatchObject(
+        held
+          ? { status: 409, data: { ok: false, reason: "owned" } }
+          : { status: 200, data: { ok: true, replayed: false, instance: { id: instance.id }, unit: { unit: "ONE" } } },
+      );
+      if (held)
+        expect(
+          (await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).data.units,
+        ).toEqual(before);
+      await runInDurableObject(stub, async (_owner: RunHistoryDO, state) => {
+        expect(
+          state.storage.sql
+            .exec<{ value: string }>(`SELECT value FROM meta WHERE key='terminal_pull_owner_index_version'`)
+            .one().value,
+        ).toBe("2");
+      });
+    },
+  );
+
   it("refuses PR substitution without binding the whole conversation", async () => {
     const key = storeKey();
     const instance: CoordinatorInstance = {
@@ -11153,7 +11488,7 @@ describe("bounded SQLite terminal pull-owner candidates", () => {
         state.storage.sql
           .exec<{ value: string }>(`SELECT value FROM meta WHERE key='terminal_pull_owner_index_version'`)
           .one().value,
-      ).toBe("1");
+      ).toBe("2");
     });
   });
 
