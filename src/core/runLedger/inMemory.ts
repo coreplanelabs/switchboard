@@ -17,16 +17,28 @@ import {
 } from "./cancellation.js";
 import { originalPromotionArchiveKey } from "./workspaceDurability.js";
 import { RUN_STORE_KEY } from "../runStoreConstants.js";
-import { SOURCE_EVENT_STORE_MAX_BYTES, SOURCE_EVENT_STORE_MAX_COUNT, SOURCE_EVENT_WAKE_MS } from "../budgets.js";
+import {
+  SOURCE_EVENT_STORE_MAX_BYTES,
+  SOURCE_EVENT_STORE_MAX_COUNT,
+  SOURCE_EVENT_WAKE_MS,
+  SOURCE_JOB_SCAN_LIMIT,
+} from "../budgets.js";
+import { planSourceJobClaim, planSourceJobRelease } from "./sourceEventJobs.js";
 import {
   isSourceEventKey,
   prepareSourceEvent,
   sourceEventReceiptOf,
   sourceEventRecordOf,
   receivedSourceEventJob,
+  sourceEventJobOf,
+  prepareSourceJobClaim,
+  sourceJobReleaseRequestOf,
   type SourceEventReceipt,
   type SourceEventReceiveResult,
   type SourceEventRecord,
+  type SourceJobClaim,
+  type SourceJobClaimResult,
+  type SourceJobReleaseResult,
 } from "./sourceEvents.js";
 import {
   SOURCE_SEED_RECORD_PREFIX,
@@ -1009,9 +1021,13 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   readonly intake = new Map<string, IntakeReceipt>();
-  readonly sourceEvents = new Map<string, { json: string; receipt: SourceEventReceipt; job: unknown; bytes: number }>();
+  readonly sourceEvents = new Map<
+    string,
+    { json: string; receipt: SourceEventReceipt; job: unknown; bytes: number; dueAt: number; closedAt?: number }
+  >();
   sourceEventWakeAt: number | undefined;
   private sourceEventSequence = 0;
+  private sourceJobCursor = 0;
   readonly intakeDeliveries = new Map<string, { poster: string; claimUntil: number; delivered: boolean }>();
   /** The failure toggle (run-history item 59): tests flip a flag to make the
    *  next intake write or read throw, the way a lost Worker does. */
@@ -2578,6 +2594,7 @@ export class InMemoryRunLedger implements RunLedger {
       receipt,
       job: receivedSourceEventJob(receipt),
       bytes: prepared.bytes,
+      dueAt: now,
     });
     this.sourceEventWakeAt = Math.min(this.sourceEventWakeAt ?? Infinity, now + SOURCE_EVENT_WAKE_MS);
     return { kind: "received", receipt: structuredClone(receipt) };
@@ -2592,6 +2609,77 @@ export class InMemoryRunLedger implements RunLedger {
     );
     if (!record || record.receipt.key !== key) throw new Error("Stored source event is unreadable");
     return structuredClone(record);
+  }
+
+  private refreshSourceJobWake(now: number): void {
+    const pending = [...this.sourceEvents.values()].filter((row) => row.closedAt === undefined);
+    if (pending.length === 0) {
+      this.sourceEventWakeAt = undefined;
+      return;
+    }
+    const due = Math.min(...pending.map((row) => (row.dueAt > now ? row.dueAt : now + SOURCE_EVENT_WAKE_MS)));
+    if (
+      this.sourceEventWakeAt === undefined ||
+      this.sourceEventWakeAt > due ||
+      !pending.some((row) => row.dueAt <= now)
+    )
+      this.sourceEventWakeAt = due;
+  }
+
+  async claimSourceEvents(value: unknown): Promise<SourceJobClaimResult> {
+    const prepared = prepareSourceJobClaim(value);
+    if ("refusal" in prepared) return prepared.refusal;
+    const request = prepared.request,
+      now = this.now();
+    const eligible = [...this.sourceEvents.values()]
+      .filter((row) => row.closedAt === undefined && row.dueAt <= now)
+      .sort((a, b) => a.receipt.sequence - b.receipt.sequence);
+    const ordered = [
+      ...eligible.filter((row) => row.receipt.sequence > this.sourceJobCursor),
+      ...eligible.filter((row) => row.receipt.sequence <= this.sourceJobCursor),
+    ].slice(0, SOURCE_JOB_SCAN_LIMIT);
+    const claims: SourceJobClaim[] = [],
+      failed: SourceEventReceipt[] = [];
+    let held = 0;
+    for (const row of ordered) {
+      this.sourceJobCursor = row.receipt.sequence;
+      const job = sourceEventJobOf(row.job),
+        receipt = sourceEventReceiptOf(row.receipt);
+      if (!job || !receipt || job.eventKey !== receipt.key) {
+        held++;
+        continue;
+      }
+      const change = planSourceJobClaim(job, request.owner, now);
+      if (change.kind === "not-due") continue;
+      row.job = change.job;
+      row.dueAt = change.job.nextAttemptAt ?? now;
+      if (change.kind === "failed") {
+        row.closedAt = now;
+        failed.push(receipt);
+      } else claims.push({ receipt, lease: change.lease, attempts: change.job.attempts });
+      if (claims.length === request.limit) break;
+    }
+    this.refreshSourceJobWake(now);
+    return structuredClone({ kind: "claimed", claims, held, failed });
+  }
+
+  async releaseSourceEvent(value: unknown): Promise<SourceJobReleaseResult> {
+    const request = sourceJobReleaseRequestOf(value);
+    if (!request) return { kind: "refused", reason: "invalid-request" };
+    const row = this.sourceEvents.get(request.key);
+    if (!row) return { kind: "refused", reason: "missing" };
+    const job = sourceEventJobOf(row.job);
+    if (!job || job.eventKey !== request.key) return { kind: "refused", reason: "unsupported-job" };
+    const now = this.now(),
+      change = planSourceJobRelease(job, request, now);
+    if (change.kind === "refused") return change;
+    if (change.kind === "changed") {
+      row.job = change.job;
+      row.dueAt = change.job.nextAttemptAt ?? now;
+      if (change.job.state === "failed") row.closedAt = now;
+      this.refreshSourceJobWake(now);
+    }
+    return structuredClone({ kind: "released", receipt: change.receipt });
   }
 
   async readIntake(key: string): Promise<IntakeReceipt | undefined> {

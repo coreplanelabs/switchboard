@@ -7,7 +7,12 @@ export type { ContextCheckpointRequest, ContextCheckpointResult } from "../refer
 import type { ContextDependencies } from "../references/contextDependencies.js";
 import type { SessionSources } from "../references/receipts.js";
 import type { InboxPushResult } from "./inboxMessage.js";
-import type { SourceEventRecord, SourceEventReceiveResult } from "./sourceEvents.js";
+import type {
+  SourceEventRecord,
+  SourceEventReceiveResult,
+  SourceJobClaimResult,
+  SourceJobReleaseResult,
+} from "./sourceEvents.js";
 // The ledger seam (docs/reference/specs/run-history.md item 28): what the bot calls, with
 // two implementations — `WorkerRunLedger` (HTTPS to the state Worker; the
 // production choice) and `InMemoryRunLedger` (tests, and the shape every
@@ -295,6 +300,9 @@ export interface RunLedger {
   receiveSourceEvent?(event: unknown): Promise<SourceEventReceiveResult>;
   /** Unreadable retained input throws; only proven absence returns undefined. */
   readSourceEvent?(key: string): Promise<SourceEventRecord | undefined>;
+  /** Bounded queue leases grant no task execution or source permissions. */
+  claimSourceEvents?(request: unknown): Promise<SourceJobClaimResult>;
+  releaseSourceEvent?(request: unknown): Promise<SourceJobReleaseResult>;
   /** The stored receipt, or none — the read the gate and the catch-up make
    *  before deciding (item 59). */
   readIntake(key: string): Promise<IntakeReceipt | undefined>;

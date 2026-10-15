@@ -14574,3 +14574,341 @@ describe("saved source-event reception in SQLite", () => {
     });
   });
 });
+
+describe("saved source-event jobs in SQLite", () => {
+  const event = {
+    version: 1,
+    sourceId: "fixture:host:installation:1",
+    deliveryId: "job-a",
+    objectId: "comment:7",
+    changeId: "revision:1",
+    kind: "source-evidence",
+    payload: { text: "review evidence" },
+  };
+  const request = { owner: "g1", readerVersion: 2, limit: 1 };
+
+  it("claims through the private HTTP route without a live agent", async () => {
+    const key = storeKey();
+    const accepted = await post("/runs/source-events/receive", { storeKey: key, event });
+    expect(accepted.data.kind).toBe("received");
+    const batch = await post("/runs/source-events/claim", { storeKey: key, request });
+    expect(batch.status).toBe(200);
+    expect(batch.data.kind).toBe("claimed");
+    const claims = batch.data.claims as Array<{
+      receipt: { key: string };
+      lease: { owner: string; claimedAt: number; until: number };
+      attempts: number;
+    }>;
+    expect(claims).toHaveLength(1);
+    expect(claims[0]!.receipt).toEqual(accepted.data.receipt);
+    expect(claims[0]!.lease.owner).toBe("g1");
+    expect(claims[0]!.lease.until - claims[0]!.lease.claimedAt).toBe(60_000);
+    expect(claims[0]!.attempts).toBe(1);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      expect(await owner.listLive()).toEqual([]);
+      expect((await owner.readSourceEvent(claims[0]!.receipt.key))?.job).toMatchObject({
+        version: 2,
+        state: "leased",
+        attempts: 1,
+      });
+      await state.storage.deleteAlarm();
+    });
+  });
+
+  it("reclaims an expired lease and rejects an old owner's release", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const now = Date.now();
+      const accepted = await owner.receiveSourceEvent(event, now);
+      if (accepted.kind === "refused") throw new Error("expected reception");
+      const old = await owner.claimSourceEvents(request, now);
+      if (old.kind !== "claimed") throw new Error("expected claim");
+      const current = await owner.claimSourceEvents({ ...request, owner: "g2" }, now + 60_000);
+      if (current.kind !== "claimed") throw new Error("expected claim");
+      expect(current.claims[0]).toMatchObject({ attempts: 2, lease: { owner: "g2", until: now + 120_000 } });
+      expect(
+        await owner.releaseSourceEvent(
+          {
+            key: accepted.receipt.key,
+            owner: "g1",
+            token: old.claims[0]!.lease.token,
+            disposition: "retry",
+            reason: "source-unavailable",
+          },
+          now + 60_000,
+        ),
+      ).toEqual({ kind: "refused", reason: "fenced" });
+      expect((await owner.readSourceEvent(accepted.receipt.key))?.job).toMatchObject({
+        state: "leased",
+        lease: { owner: "g2" },
+      });
+      await state.storage.deleteAlarm();
+    });
+  });
+
+  it("replays a saved retry after a new claim without changing the new owner", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const now = Date.now();
+      const accepted = await owner.receiveSourceEvent(event, now);
+      if (accepted.kind === "refused") throw new Error("expected reception");
+      const claimed = await owner.claimSourceEvents(request, now);
+      if (claimed.kind !== "claimed") throw new Error("expected claim");
+      const release = {
+        key: accepted.receipt.key,
+        owner: "g1",
+        token: claimed.claims[0]!.lease.token,
+        disposition: "retry",
+        reason: "source-unavailable",
+      };
+      const saved = await owner.releaseSourceEvent(release, now);
+      expect(saved).toMatchObject({
+        kind: "released",
+        receipt: { state: "ready", attempts: 1, nextAttemptAt: now + 5_000 },
+      });
+      const next = await owner.claimSourceEvents({ ...request, owner: "g2" }, now + 5_000);
+      if (next.kind !== "claimed") throw new Error("expected claim");
+      expect(next.claims[0]).toMatchObject({ attempts: 2, lease: { owner: "g2" } });
+      expect(await owner.releaseSourceEvent(release, now + 5_000)).toEqual(saved);
+      expect(
+        await owner.releaseSourceEvent({ ...release, disposition: "hold", reason: "permission-refused" }, now + 5_000),
+      ).toEqual({ kind: "refused", reason: "release-conflict" });
+      expect((await owner.readSourceEvent(accepted.receipt.key))?.job).toMatchObject({
+        state: "leased",
+        lease: { owner: "g2" },
+      });
+      await state.storage.deleteAlarm();
+    });
+  });
+
+  it.each(["before", "after"] as const)("rolls back claim ownership on failure %s the wake write", async (point) => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const now = Date.now();
+      const accepted = await owner.receiveSourceEvent(event, now);
+      if (accepted.kind === "refused") throw new Error("expected reception");
+      const setAlarm = state.storage.setAlarm;
+      state.storage.setAlarm = async (...args) => {
+        if (point === "after") await setAlarm.call(state.storage, ...args);
+        throw new Error("claim wake refused");
+      };
+      try {
+        await expect(owner.claimSourceEvents(request, now)).rejects.toThrow("claim wake refused");
+        expect((await owner.readSourceEvent(accepted.receipt.key))?.job).toEqual({
+          version: 1,
+          eventKey: accepted.receipt.key,
+          stage: "received",
+          attempts: 0,
+          nextAttemptAt: now,
+        });
+        expect(await state.storage.getAlarm()).toBe(now + 30_000);
+      } finally {
+        state.storage.setAlarm = setAlarm;
+      }
+      const next = await owner.claimSourceEvents({ ...request, owner: "g2" }, now);
+      if (next.kind !== "claimed") throw new Error("expected claim");
+      expect(next.claims[0]).toMatchObject({ attempts: 1, lease: { owner: "g2" } });
+      await state.storage.deleteAlarm();
+    });
+  });
+
+  it("does not let a page of future job schemas starve known work", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const now = Date.now();
+      for (let i = 0; i < 64; i++) await owner.receiveSourceEvent({ ...event, deliveryId: `future-${i}` }, now);
+      const future = '{"version":9,"state":"future"}';
+      state.storage.sql.exec(`UPDATE source_events SET job_json = ?`, future);
+      const known = await owner.receiveSourceEvent({ ...event, deliveryId: "known" }, now);
+      if (known.kind === "refused") throw new Error("expected reception");
+      expect(await owner.claimSourceEvents(request, now)).toEqual({
+        kind: "claimed",
+        claims: [],
+        failed: [],
+        held: 64,
+      });
+      const next = await owner.claimSourceEvents(request, now);
+      if (next.kind !== "claimed") throw new Error("expected claim");
+      expect(next.claims).toHaveLength(1);
+      expect(next.claims[0]!.receipt).toEqual(known.receipt);
+      expect(
+        state.storage.sql.exec(`SELECT COUNT(*) AS count FROM source_events WHERE job_json = ?`, future).one(),
+      ).toEqual({ count: 64 });
+      await state.storage.deleteAlarm();
+    });
+  });
+
+  it.each(['{"private-source-text":', '{"version":9,"private-source-text":"retained"}'])(
+    "identifies an unreadable retained job only after its claim transaction commits: %s",
+    async (stored) => {
+      const key = storeKey();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+          const now = Date.now();
+          const held = await owner.receiveSourceEvent(event, now);
+          const known = await owner.receiveSourceEvent({ ...event, deliveryId: "known" }, now);
+          if (held.kind === "refused" || known.kind === "refused") throw new Error("expected reception");
+          state.storage.sql.exec(`UPDATE source_events SET job_json = ? WHERE key = ?`, stored, held.receipt.key);
+          await state.storage.deleteAlarm();
+          const setAlarm = state.storage.setAlarm;
+          state.storage.setAlarm = async () => {
+            throw new Error("claim wake refused");
+          };
+          try {
+            await expect(owner.claimSourceEvents(request, now)).rejects.toThrow("claim wake refused");
+            expect(warn.mock.calls).toEqual([]);
+          } finally {
+            state.storage.setAlarm = setAlarm;
+          }
+          const batch = await owner.claimSourceEvents(request, now);
+          expect(batch).toMatchObject({ kind: "claimed", held: 1, claims: [{ receipt: known.receipt }] });
+          expect(warn.mock.calls).toEqual([
+            ["[source-events/claim] held", { eventKey: held.receipt.key, reason: "unreadable-job" }],
+          ]);
+          expect(
+            state.storage.sql.exec(`SELECT job_json FROM source_events WHERE key = ?`, held.receipt.key).one(),
+          ).toEqual({
+            job_json: stored,
+          });
+          await state.storage.deleteAlarm();
+        });
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
+
+  it("retains exhausted input and reports its failure without reopening it on replay", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      let now = Date.now();
+      const accepted = await owner.receiveSourceEvent(event, now);
+      if (accepted.kind === "refused") throw new Error("expected reception");
+      for (let attempt = 1; attempt <= 8; attempt++) {
+        const batch = await owner.claimSourceEvents({ ...request, owner: `g${attempt}` }, now);
+        if (batch.kind !== "claimed") throw new Error("expected claim");
+        expect(batch.claims[0]).toMatchObject({ attempts: attempt, lease: { owner: `g${attempt}` } });
+        now = batch.claims[0]!.lease.until;
+      }
+      expect(await owner.claimSourceEvents(request, now)).toEqual({
+        kind: "claimed",
+        claims: [],
+        held: 0,
+        failed: [accepted.receipt],
+      });
+      expect((await owner.readSourceEvent(accepted.receipt.key))?.job).toMatchObject({
+        version: 2,
+        state: "failed",
+        attempts: 8,
+        nextAttemptAt: null,
+        failure: { reason: "attempts-exhausted", at: now },
+      });
+      expect(await owner.receiveSourceEvent(event, now)).toEqual({ kind: "duplicate", receipt: accepted.receipt });
+      expect((await owner.readSourceEvent(accepted.receipt.key))?.event).toEqual(event);
+      expect(
+        state.storage.sql.exec(`SELECT COUNT(*) AS count FROM source_events WHERE closed_at IS NULL`).one(),
+      ).toEqual({ count: 0 });
+      await state.storage.deleteAlarm();
+    });
+  });
+  it.each(["before", "after"] as const)(
+    "rolls back retry release on failure %s the earlier wake write",
+    async (point) => {
+      const key = storeKey();
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+        const now = Date.now();
+        const accepted = await owner.receiveSourceEvent(event, now);
+        if (accepted.kind === "refused") throw new Error("expected reception");
+        const batch = await owner.claimSourceEvents(request, now);
+        if (batch.kind !== "claimed") throw new Error("expected claim");
+        const lease = batch.claims[0]!.lease;
+        const release = {
+          key: accepted.receipt.key,
+          owner: "g1",
+          token: lease.token,
+          disposition: "retry",
+          reason: "source-unavailable",
+        };
+        const setAlarm = state.storage.setAlarm;
+        state.storage.setAlarm = async (...args) => {
+          if (point === "after") await setAlarm.call(state.storage, ...args);
+          throw new Error("retry wake refused");
+        };
+        try {
+          await expect(owner.releaseSourceEvent(release, now)).rejects.toThrow("retry wake refused");
+          expect((await owner.readSourceEvent(accepted.receipt.key))?.job).toMatchObject({
+            state: "leased",
+            attempts: 1,
+            lease,
+            releases: [],
+          });
+          expect(await state.storage.getAlarm()).toBe(lease.until);
+        } finally {
+          state.storage.setAlarm = setAlarm;
+        }
+        expect(await owner.releaseSourceEvent(release, now)).toMatchObject({
+          kind: "released",
+          receipt: { state: "ready", nextAttemptAt: now + 5_000 },
+        });
+        expect(await state.storage.getAlarm()).toBe(now + 5_000);
+        await state.storage.deleteAlarm();
+      });
+    },
+  );
+
+  it("holds permanent refusal without changing the source or consuming more attempts", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const now = Date.now();
+      const accepted = await owner.receiveSourceEvent(event, now);
+      if (accepted.kind === "refused") throw new Error("expected reception");
+      const batch = await owner.claimSourceEvents(request, now);
+      if (batch.kind !== "claimed") throw new Error("expected claim");
+      const release = {
+        key: accepted.receipt.key,
+        owner: "g1",
+        token: batch.claims[0]!.lease.token,
+        disposition: "hold",
+        reason: "permission-refused",
+      };
+      const held = await owner.releaseSourceEvent(release, now);
+      expect(held).toMatchObject({ kind: "released", receipt: { state: "failed", attempts: 1, nextAttemptAt: null } });
+      expect(await owner.claimSourceEvents(request, now + 60_000)).toEqual({
+        kind: "claimed",
+        claims: [],
+        held: 0,
+        failed: [],
+      });
+      expect(await owner.releaseSourceEvent(release, now + 60_000)).toEqual(held);
+      expect((await owner.readSourceEvent(accepted.receipt.key))?.job).toMatchObject({
+        state: "failed",
+        attempts: 1,
+        failure: { reason: "permission-refused", at: now },
+      });
+      expect(await owner.receiveSourceEvent(event, now)).toEqual({ kind: "duplicate", receipt: accepted.receipt });
+      expect((await owner.readSourceEvent(accepted.receipt.key))?.event).toEqual(event);
+      await state.storage.deleteAlarm();
+    });
+  });
+  it("gives one concurrent claimant the lease for a single queued event", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const now = Date.now();
+      const accepted = await owner.receiveSourceEvent(event, now);
+      if (accepted.kind === "refused") throw new Error("expected reception");
+      const batches = await Promise.all(
+        ["g1", "g2"].map((ownerId) => owner.claimSourceEvents({ ...request, owner: ownerId }, now)),
+      );
+      const claims = batches.flatMap((batch) => (batch.kind === "claimed" ? batch.claims : []));
+      expect(claims).toHaveLength(1);
+      expect(claims[0]).toMatchObject({ receipt: accepted.receipt, attempts: 1 });
+      expect((await owner.readSourceEvent(accepted.receipt.key))?.job).toMatchObject({
+        state: "leased",
+        attempts: 1,
+        lease: claims[0]!.lease,
+      });
+      await state.storage.deleteAlarm();
+    });
+  });
+});

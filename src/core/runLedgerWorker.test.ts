@@ -1265,3 +1265,96 @@ describe("saved source-event client", () => {
     expect(await good.ledger.readSourceEvent(receipt.key)).toEqual(record);
   });
 });
+
+describe("saved source-event job client", () => {
+  const key = `source:${"a".repeat(64)}`;
+  const receipt = { version: 1, key, sequence: 1, receivedAt: 1_000, bodyHash: "b".repeat(64) };
+  const lease = { owner: "g1", token: "claim-one", claimedAt: 1_000, until: 61_000 };
+  const claim = { receipt, lease, attempts: 1 };
+  const request = { owner: "g1", readerVersion: 2, limit: 1 };
+  const release = { key, owner: "g1", token: lease.token, disposition: "retry", reason: "source-unavailable" };
+  const released = { ...release, state: "ready", attempts: 1, at: 1_000, nextAttemptAt: 6_000 };
+
+  it("returns bound claims and retry receipts through the existing private store client", async () => {
+    const batch = { kind: "claimed", claims: [claim], held: 0, failed: [] };
+    const { ledger, calls } = stubWorker((path) => ({
+      status: 200,
+      data: path.endsWith("/claim") ? batch : { kind: "released", receipt: released },
+    }));
+    expect(await ledger.claimSourceEvents(request)).toEqual(batch);
+    expect(await ledger.releaseSourceEvent(release)).toEqual({ kind: "released", receipt: released });
+    expect(calls.map((call) => ({ path: call.path, body: call.body }))).toEqual([
+      { path: "/runs/source-events/claim", body: { storeKey: "runs:default", request } },
+      { path: "/runs/source-events/release", body: { storeKey: "runs:default", request: release } },
+    ]);
+  });
+
+  it.each([
+    {},
+    { kind: "claimed", claims: [{ ...claim, lease: { ...lease, owner: "g2" } }], held: 0, failed: [] },
+    { kind: "claimed", claims: [{ ...claim, lease: { ...lease, until: 9_999_999 } }], held: 0, failed: [] },
+    { kind: "claimed", claims: [claim, claim], held: 0, failed: [] },
+    {
+      kind: "claimed",
+      claims: [claim, { ...claim, receipt: { ...receipt, key: `source:${"d".repeat(64)}` } }],
+      held: 0,
+      failed: [],
+    },
+    { kind: "claimed", claims: [claim], held: 0, failed: [receipt] },
+  ])("holds malformed, foreign or over-limit claim acknowledgments (%j)", async (ack) => {
+    const { ledger } = stubWorker(() => ({ status: 200, data: ack }));
+    await expect(ledger.claimSourceEvents(request)).rejects.toMatchObject({
+      name: "UncertainStoreError",
+      request: { operation: "/runs/source-events/claim" },
+    });
+  });
+
+  it.each(["key", "owner", "token", "reason"])("holds a release receipt with a different %s", async (field) => {
+    const changed = {
+      ...released,
+      [field]: field === "key" ? `source:${"c".repeat(64)}` : field === "reason" ? "provider-unavailable" : "different",
+    };
+    const { ledger } = stubWorker(() => ({ status: 200, data: { kind: "released", receipt: changed } }));
+    await expect(ledger.releaseSourceEvent(release)).rejects.toMatchObject({
+      name: "UncertainStoreError",
+      request: { operation: "/runs/source-events/release" },
+    });
+  });
+
+  it.each([
+    [1, 5_999],
+    [1, 6_001],
+    [1, 86_401_000],
+    [7, 600_999],
+    [7, 601_001],
+  ])("holds a retry receipt outside the attempt's bounded delay (%i, %i)", async (attempts, nextAttemptAt) => {
+    const { ledger } = stubWorker(() => ({
+      status: 200,
+      data: { kind: "released", receipt: { ...released, attempts, nextAttemptAt } },
+    }));
+    await expect(ledger.releaseSourceEvent(release)).rejects.toMatchObject({
+      name: "UncertainStoreError",
+      request: { operation: "/runs/source-events/release" },
+    });
+  });
+
+  it("accepts the last bounded retry delay", async () => {
+    const receipt = { ...released, attempts: 7, nextAttemptAt: 601_000 };
+    const { ledger } = stubWorker(() => ({ status: 200, data: { kind: "released", receipt } }));
+    expect(await ledger.releaseSourceEvent(release)).toEqual({ kind: "released", receipt });
+  });
+
+  it("refuses an incapable reader or a retry of permanent refusal before any store call", async () => {
+    const { ledger, calls } = stubWorker(() => ({ status: 200, data: { kind: "released", receipt: released } }));
+    expect(await ledger.claimSourceEvents({ ...request, readerVersion: 1 })).toEqual({
+      kind: "refused",
+      reason: "unsupported-reader",
+    });
+    expect(await ledger.releaseSourceEvent({ ...release, reason: "permission-refused" })).toEqual({
+      kind: "refused",
+      reason: "invalid-request",
+    });
+    expect(calls).toEqual([]);
+    expect(await ledger.releaseSourceEvent(release)).toEqual({ kind: "released", receipt: released });
+  });
+});

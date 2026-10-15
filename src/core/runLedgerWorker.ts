@@ -5,8 +5,14 @@ import {
   prepareSourceEvent,
   sourceEventRecordOf,
   sourceEventReceiveResultOf,
+  prepareSourceJobClaim,
+  sourceJobReleaseRequestOf,
+  sourceJobClaimResultOf,
+  sourceJobReleaseResultOf,
   type SourceEventRecord,
   type SourceEventReceiveResult,
+  type SourceJobClaimResult,
+  type SourceJobReleaseResult,
 } from "./runLedger/sourceEvents.js";
 import { checkSelectorSchema, checkSourceReadOf, type CheckSelector, type CheckSourceRead } from "./checkInspection.js";
 import {
@@ -1572,6 +1578,52 @@ export class WorkerRunLedger implements RunLedger {
       if (record?.receipt.key === key) return record;
     }
     throw new PermanentStoreError("run ledger: source event read is unreadable");
+  }
+
+  async claimSourceEvents(value: unknown): Promise<SourceJobClaimResult> {
+    const prepared = prepareSourceJobClaim(value);
+    if ("refusal" in prepared) return prepared.refusal;
+    const response = await this.post("/runs/source-events/claim", {
+      storeKey: this.opts.storeKey,
+      request: prepared.request,
+    });
+    const result = sourceJobClaimResultOf(response.data);
+    if (
+      response.status === 200 &&
+      result &&
+      (result.kind === "refused" ||
+        (result.claims.length <= prepared.request.limit &&
+          result.claims.every((claim) => claim.lease.owner === prepared.request.owner)))
+    )
+      return result;
+    throw this.unknownAcknowledgement(
+      "run ledger: source claim acknowledgement is unreadable",
+      response.request,
+      response.status,
+    );
+  }
+
+  async releaseSourceEvent(value: unknown): Promise<SourceJobReleaseResult> {
+    const request = sourceJobReleaseRequestOf(value);
+    if (!request) return { kind: "refused", reason: "invalid-request" };
+    const response = await this.post("/runs/source-events/release", { storeKey: this.opts.storeKey, request });
+    const result = sourceJobReleaseResultOf(response.data);
+    if (
+      response.status === 200 &&
+      result &&
+      (result.kind === "refused" ||
+        (result.receipt.key === request.key &&
+          result.receipt.owner === request.owner &&
+          result.receipt.token === request.token &&
+          result.receipt.disposition === request.disposition &&
+          result.receipt.reason === request.reason))
+    )
+      return result;
+    throw this.unknownAcknowledgement(
+      "run ledger: source release acknowledgement is unreadable",
+      response.request,
+      response.status,
+    );
   }
 
   async readIntake(key: string): Promise<IntakeReceipt | undefined> {
