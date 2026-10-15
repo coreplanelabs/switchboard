@@ -231,7 +231,7 @@ import { registerFinishRecord } from "./record.js";
 import { artifactLink, cardActivity, compactActivity, replyAck, threadPageLink } from "./reply.js";
 import { shows } from "../verbosity.js";
 import { stageIntoWorkspace, stagingIndex, type WorkspaceFiles } from "./staging.js";
-import { MainSourceTracker, type MainSourceFailureCode } from "./mainSource.js";
+import { MainSourceTracker, type MainSource, type MainSourceFailureCode } from "./mainSource.js";
 import { githubCapabilityFor, shutdownNotice, webCapability, type RunDeps } from "./run.js";
 import { mainWorkerCapabilityFor, privateProgressSourceTrusted } from "./mainWorkerCapability.js";
 import { buildDepotCi } from "../../execution/depotCi.js";
@@ -2167,6 +2167,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           );
         }
       : undefined;
+  const requesterSourceCurrent = (quote: string, source: MainSource) =>
+    operatorModeOf(deps.config.config) === "on" &&
+    !privateAudienceLatch.revoked &&
+    registry.isActive(run.id, run.control) &&
+    mainSources.get(quote) === source;
   const delegationCalls = new Map<string, { identity: string; result: Promise<import("./spawn.js").SpawnOutcome> }>();
   const bindReadTask = ctx.bindReadTask;
   const delegate: RequesterSpawn | undefined =
@@ -2180,11 +2185,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           if (selected.kind === "refused")
             return refused("spawn_source_changed", "This call does not match the latest requester turn.");
           const source = selected.source;
-          const current = () =>
-            operatorModeOf(deps.config.config) === "on" &&
-            !privateAudienceLatch.revoked &&
-            registry.isActive(run.id, run.control) &&
-            mainSources.get(quote) === source;
+          const current = () => requesterSourceCurrent(quote, source);
           const identity = JSON.stringify([source.msg.messageId, quote, request, prTarget]);
           const previous = delegationCalls.get(callId);
           if (previous)
