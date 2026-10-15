@@ -103,6 +103,12 @@ The existing starter and linked-work executor still check permissions and exact 
 
 This cut uses the existing orchestrator loop. It adds no model router or new delivery queue. External live replies, unit-thread replies, explicit steer commands and the remaining operator model path still need migration. Step 1 remains in progress.
 
+### Explicit orchestrator selection, 2026-10-15
+
+An explicit `agent:orchestrator` request now goes to that agent's loop without an earlier operator model call. The shared dispatcher applies this rule to Slack, CLI, HTTP and MCP requests. The resolved sender and agent still pass normal authorization. Public and machine conversations gain no private command, start, steer, stop, progress or Slack-context tools.
+
+This removes the extra model pass for one explicit choice. Generic public conversations keep the existing operator path until its action tools move into the orchestrator. That migration must preserve plain-language actions. Typed Ship intent selection, existing private main conversations, live folds and unit folds retain their current paths. Full front-door convergence remains pending.
+
 ### Live reply delivery boundary, 2026-10-15
 
 The private worker controls are merged in [PR #3139](https://github.com/coreplanelabs/switchboard/pull/3139). Tracing the next live-reply path exposed a prerequisite: the shared inbox client used the same result for storage failure and target absence. A reply could then enter memory without its durable copy or start fresh work while its original target still existed.

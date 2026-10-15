@@ -956,6 +956,79 @@ describe("dispatch", () => {
     }
   });
 
+  it.each(["slack:CX", "cli:main", "http:ops", "mcp:default"])(
+    "an explicit orchestrator request on %s uses one agent loop",
+    async (channelId) => {
+      const yaml = YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }");
+      const provider = capturingProvider("The orchestrator handled this request.");
+      const deps = makeDeps(yaml, provider);
+      const ledger = wireChildLedger(deps);
+      deps.operatorModel = vi.fn<RouteModel>(async () => ({
+        tool: "bind_preset",
+        input: { preset: "orchestrator", reason: "already selected" },
+      }));
+      const request = {
+        ...msg("agent:orchestrator Show the active work", "slack:UADMIN"),
+        channelId,
+        threadKey: `${channelId}:one`,
+        messageId: "request-one",
+      };
+      const { io, replies } = fakeIO();
+
+      const result = await dispatch(deps, request, io);
+      await deps.runHistoryWriter.settled();
+
+      expect(result).toEqual({ status: "completed" });
+      expect(replies).toContain("The orchestrator handled this request.");
+      const records = [...ledger.finished.values()];
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        agent: "orchestrator",
+        userId: "slack:UADMIN",
+        channelId,
+        threadKey: `${channelId}:one`,
+      });
+      expect(records[0]!.operator).toBeUndefined();
+      expect(provider.requests).toHaveLength(1);
+      expect(deps.operatorModel).not.toHaveBeenCalled();
+      const tools = (provider.requests[0]!.tools ?? []).map((tool) => tool.name);
+      expect(tools).toContain("plane_show");
+      for (const privateTool of [
+        "command_run",
+        "work_start",
+        "work_steer",
+        "work_stop",
+        "work_progress",
+        "slack_context",
+      ])
+        expect(tools).not.toContain(privateTool);
+    },
+  );
+
+  it("an explicit orchestrator request still requires the resolved sender's permission", async () => {
+    const provider = capturingProvider("must not run");
+    const deps = makeDeps(
+      YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }").replace(
+        "agents: [coding]",
+        "agents: [coding, orchestrator]",
+      ),
+      provider,
+    );
+    deps.operatorModel = vi.fn<RouteModel>(async () => ({
+      tool: "bind_preset",
+      input: { preset: "general", reason: "must not run" },
+    }));
+    const { io, replies } = fakeIO();
+
+    const result = await dispatch(deps, msg("agent:orchestrator Show the active work", "slack:UX"), io);
+
+    expect(result).toEqual({ status: "refused", refusal: "agent_allowlist", cause: "policy" });
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("orchestrator");
+    expect(provider.requests).toEqual([]);
+    expect(deps.operatorModel).not.toHaveBeenCalled();
+  });
+
   // orchestration-plane item 12 pilot: the channel opts in once. Subsequent
   // plain sentences stay in one main agent; commands still use stage A.
   const mainDmYaml =
