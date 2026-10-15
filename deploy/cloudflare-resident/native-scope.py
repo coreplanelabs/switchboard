@@ -2,6 +2,7 @@
 """Trusted entry point. Requests arrive on stdin, never through a guest RPC."""
 import ctypes
 import fcntl
+import hashlib
 import json
 import os
 import pathlib
@@ -220,6 +221,12 @@ def prepare_view(ref, role, user):
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.unshare(0x00020000) != 0:  # CLONE_NEWNS
         raise OSError(ctypes.get_errno(), 'private mount view refused')
+    # Harness control files outlive individual exec views and generations.
+    # A run gets its own sticky /var/tmp, never the host's shared directory.
+    key = hashlib.sha256(json.dumps([ref['threadKey'], ref['owner']['runId']]).encode()).hexdigest()
+    harness = ROOT / ('harness-' + key)
+    harness.mkdir(mode=0o1777, exist_ok=True)
+    os.chmod(harness, 0o1777)
     mount_command('--make-rprivate', '/')
     mount_command('--rbind', '/', '/')
     mount_command('-o', 'remount,bind,ro', '/')
@@ -234,6 +241,8 @@ def prepare_view(ref, role, user):
     # Created by the outside launcher before entering the read-only view.
     mount_command('--bind', str(scratch), '/tmp')
     mount_command('-o', 'remount,bind,rw', '/tmp')
+    mount_command('--bind', str(harness), '/var/tmp')
+    mount_command('-o', 'remount,bind,rw', '/var/tmp')
     mount_command('-t', 'tmpfs', '-o', 'mode=755', 'none', '/run')
     mount_command('--bind', '/sys/fs/cgroup', '/sys/fs/cgroup')
     mount_command('-o', 'remount,bind,ro', '/sys/fs/cgroup')

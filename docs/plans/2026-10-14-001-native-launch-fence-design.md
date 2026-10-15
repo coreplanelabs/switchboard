@@ -128,3 +128,11 @@ The deployed image and kernel still require separate live qualification. A publi
 ### Retained consumer readiness amendment
 
 Resident upload still requires the selected fenced window. The Resident step seals it as completed after image readiness. The following Bot step consumes that completed window under the same current source, attempt and image checks. This readback does not authorize another Resident upload. The full runner regression performs the seal response transition before observing Bot upload. Adjacent unsealed, wrong, incomplete, foreign, stale, expired and non-current image cases refuse before Bot changes.
+
+### Amended 2026-10-15: persistent harness temporary files
+
+The read-only root view protected the controller and kernel controls, but it omitted the existing writable `/var/tmp` contract used by both Pi and OpenCode. Their first file write failed before the harness could start. Moving those files into model `/tmp` would expose control material to normal scratch cleanup. Reopening host `/var/tmp` would preserve old UID permissions but make a shared root writable.
+
+The narrower boundary is a private `/var/tmp` bind mount backed by controller-owned storage. Its key is the original thread and run, independent of attempt, generation and fence. Existing harness paths need no change. Separate exec views and a reattached generation see the same run files; a different run gets a separate view even on the same thread and UID. Model `/tmp` stays separate. The backing path is hidden by the private `/run` mount, no backing descriptor reaches the payload, and closure does not delete files. The root, controller, cgroup and kernel-control protections remain in force.
+
+The Linux proof renders real `ExecHarnessContainer.writeFile` commands for both path builders, executes those commands through the installed helper, and observes files and FIFOs. It also checks generation continuity, scratch cleanup, peer and host isolation, and the existing descendant-kill and privilege boundaries. A local derived test image is not a deployed image or live product acceptance receipt.

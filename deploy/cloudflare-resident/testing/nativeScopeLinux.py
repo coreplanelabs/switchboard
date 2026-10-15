@@ -1,4 +1,4 @@
-import json, os, pathlib, socket, subprocess, time, uuid
+import json, os, pathlib, socket, subprocess, sys, time, uuid
 
 HELPER='/opt/switchboard/native-scope.py'
 # Local-only cgroup mount in a disposable private cgroup namespace. This
@@ -25,12 +25,52 @@ def launch(r,label,role='trusted'):
     assert target.with_suffix('.child').exists(),(p.stdout.read(),p.stderr.read())
     return p
 a,b=ref('a'),ref('b')
+b['threadKey']=a['threadKey']  # A later run on the same thread still gets a private view.
 ctl('bootstrap',a);ctl('bootstrap',b)
 # The fixed provisioning role returns text rather than the control JSON.
 def invoke(r, **value):
     return subprocess.run(['/usr/bin/python3','-I',HELPER], input=json.dumps({'mode':'launch','ref':r,'attempt':str(uuid.uuid4()),**value}), text=True,capture_output=True,timeout=5)
 account=invoke(a,role='provision',user='worker2')
 assert account.returncode==0 and account.stdout=='account-ready\n',account.stderr
+# Harness state must survive separate exec mount views and model scratch
+# cleanup. Pi and OpenCode deliberately keep it under shared sticky /var/tmp.
+account_b=invoke(b,role='provision',user='worker3')
+assert account_b.returncode==0 and account_b.stdout=='account-ready\n',account_b.stderr
+fixtures={item['id']:item for item in json.loads(pathlib.Path(sys.argv[1]).read_text())}
+assert fixtures['a']['root']=='/var/tmp/switchboard-pi-a'
+assert fixtures['b']['root']=='/var/tmp/switchboard-oc-b'
+roots={'worker2':fixtures['a']['root'],'worker3':fixtures['b']['root']}
+for selected,user in ((a,'worker2'),(b,'worker3')):
+    root=roots[user]
+    for command in fixtures[selected['owner']['runId']]['commands']:
+        start=invoke(selected,role='user',user=user,argv=['/bin/bash','-c',command])
+        assert start.returncode==0,('real harness write failed',start.stderr)
+    fifo=invoke(selected,role='user',user=user,argv=['/bin/bash','-c','mkfifo "$1/input"', 'harness-root',root])
+    assert fifo.returncode==0,fifo.stderr
+    resumed=invoke(selected,role='user',user=user,argv=['/usr/bin/python3','-I','-c',
+        "import pathlib,stat,sys; p=pathlib.Path(sys.argv[1]); assert p.joinpath('driver').read_text()=='harness-state'; assert stat.S_ISFIFO(p.joinpath('input').stat().st_mode); assert p.stat().st_mode & 0o777==0o700",root])
+    assert resumed.returncode==0,resumed.stderr
+# Every exec is a fresh mount namespace. A new generation of the same run
+# sees its prior control files; model scratch cleanup cannot remove them.
+reattach={**a,'id':str(uuid.uuid4()),'owner':{**a['owner'],'ownerGen':'next-generation','ownerFence':2}}
+ctl('bootstrap',reattach)
+clean=invoke(reattach,role='user',user='worker2',argv=['/bin/bash','-c','touch /tmp/model-scratch; rm -rf -- /tmp/*; test -p "$1/input" && cat "$1/driver"', 'scratch-cleanup',roots['worker2']])
+assert clean.returncode==0 and clean.stdout=='harness-state',clean.stderr
+# Another run has a different /var/tmp view, even with the same OS UID.
+peer=invoke(b,role='user',user='worker2',argv=['/usr/bin/python3','-I','-c',
+    "import pathlib,sys; p=pathlib.Path(sys.argv[1]);\ntry: p.joinpath('driver').read_text()\nexcept (PermissionError,FileNotFoundError): pass\nelse: raise AssertionError('foreign harness readable')",roots['worker2']])
+assert peer.returncode==0,peer.stderr
+mutate=invoke(b,role='user',user='worker2',argv=['/bin/bash','-c','mkdir -p "$1"; printf foreign > "$1/driver"', 'peer-view',roots['worker2']])
+assert mutate.returncode==0,mutate.stderr
+original=invoke(a,role='user',user='worker2',argv=['/bin/bash','-c','cat "$1/driver"', 'own-view',roots['worker2']])
+assert original.returncode==0 and original.stdout=='harness-state',original.stderr
+# A payload cannot modify the host's /var/tmp through its private view.
+host=pathlib.Path('/var/tmp/native-host-marker');host.write_text('host-preserved')
+private=invoke(a,role='user',user='worker2',argv=['/bin/bash','-c','printf private > /var/tmp/native-host-marker'])
+assert private.returncode==0 and host.read_text()=='host-preserved',private.stderr
+ctl('close',reattach)
+retained=invoke(a,role='user',user='worker2',argv=['/bin/bash','-c','cat "$1/driver"', 'retained-root',roots['worker2']])
+assert retained.returncode==0 and retained.stdout=='harness-state',retained.stderr
 subprocess.run(['chmod','777','/workspace/proof'],check=True)
 pa,pb=launch(a,'a','user'),launch(b,'b')
 inventory=invoke(a,role='inventory',user='worker2')
@@ -100,4 +140,4 @@ late_boot=subprocess.run(['/usr/bin/python3','-I',HELPER],input=json.dumps({'mod
 assert late_boot.returncode==125
 ctl('close',b)
 pa.wait(timeout=3);pb.wait(timeout=3)
-print(json.dumps({'productionHelper':'passed','runA':'empty','detachedA':'stopped','runB':'unaffected','late_launch':'denied','late_bootstrap':'denied','host_inventory':'visible','root_profile':'contained','write':'passed','image_environment':'preserved','control_port':'denied','startup_privileges':'demoted','admission_observation':'locked','kernel_controls':'readonly','user_kernel_controls':'denied','private_write_links':'denied'}))
+print(json.dumps({'productionHelper':'passed','runA':'empty','detachedA':'stopped','runB':'unaffected','late_launch':'denied','late_bootstrap':'denied','host_inventory':'visible','root_profile':'contained','write':'passed','image_environment':'preserved','control_port':'denied','startup_privileges':'demoted','admission_observation':'locked','kernel_controls':'readonly','user_kernel_controls':'denied','private_write_links':'denied','harness_roots':'persistent','harness_peer':'protected'}))
