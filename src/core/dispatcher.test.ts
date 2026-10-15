@@ -1,3 +1,4 @@
+import { prepareFreshTurn } from "./dispatch/settle.js";
 import { startRequestRoot } from "./requestTrace.js";
 import type { PlaneService } from "./planeService.js";
 import { humanReview } from "./testing/humanReview.js";
@@ -1000,14 +1001,8 @@ describe("dispatch", () => {
       expect(deps.operatorModel).not.toHaveBeenCalled();
       const tools = (provider.requests[0]!.tools ?? []).map((tool) => tool.name);
       expect(tools).toContain("plane_show");
-      for (const privateTool of [
-        "command_run",
-        "work_start",
-        "work_steer",
-        "work_stop",
-        "work_progress",
-        "slack_context",
-      ])
+      expect(tools).toContain("command_run");
+      for (const privateTool of ["work_start", "work_steer", "work_stop", "work_progress", "slack_context"])
         expect(tools).not.toContain(privateTool);
     },
   );
@@ -1086,6 +1081,357 @@ describe("dispatch", () => {
     };
     return { provider, requests };
   };
+
+  it.each(["slack:CX", "cli:main", "http:ops", "mcp:default"])(
+    "records a shared orchestrator command before its authorized effect on %s",
+    async (channelId) => {
+      const { provider, requests } = commandProvider(
+        { scope: "me", effort: "high", sourceMessage: "set my effort high" },
+        "config.set",
+      );
+      const deps = makeDeps(
+        YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }") +
+          `channels:\n  "${channelId}": { boundary: { confirm: destructive } }\n`,
+        provider,
+      );
+      const ledger = wireChildLedger(deps);
+      deps.operatorModel = async () => {
+        throw new Error("A separate routing model must not run");
+      };
+      let before: unknown;
+      const apply = deps.config.setUserOverride.bind(deps.config);
+      vi.spyOn(deps.config, "setUserOverride").mockImplementation(async (...args) => {
+        const owner = [...ledger.live.values()].find((row) => row.meta.agent === "orchestrator");
+        before = structuredClone(owner?.state.orchestratorDecisions);
+        return apply(...args);
+      });
+      const request = {
+        ...msg("agent:orchestrator set my effort high", "slack:UADMIN"),
+        channelId,
+        threadKey: `${channelId}:one`,
+        ...(!/^(cli|http):/.test(channelId) ? { messageId: "request-one" } : {}),
+      };
+      await dispatch(deps, request, fakeIO().io);
+      expect(deps.config.scopes(channelId, request.userId).user).toEqual({ effort: "high" });
+      expect(before).toMatchObject([
+        {
+          owner: { requesterId: request.userId, channelId, threadKey: request.threadKey },
+          source: { kind: "request" },
+          command: "config.set",
+          line: "config set me --effort high",
+        },
+      ]);
+      const decision = (before as Array<{ owner: { runId: string }; source: { messageId: string } }>)[0]!;
+      expect(decision.source.messageId).toBe(request.messageId ?? decision.owner.runId);
+      const tools = (requests[0]!.tools ?? []).map((tool) => tool.name);
+      expect(tools).toContain("command_run");
+      expect(tools).not.toContain("work_start");
+      expect(tools).not.toContain("slack_context");
+    },
+  );
+
+  it.each(["resume", "setup restart", "carried request restart", "replacement request restart"] as const)(
+    "holds shared commands through dispatcher recovery: %s",
+    async (kind) => {
+      const { provider, requests } = commandProvider(
+        { scope: "me", effort: "high", sourceMessage: "set my effort high" },
+        "config.set",
+      );
+      const deps = makeDeps(
+        YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }") +
+          'channels:\n  "slack:CX": { boundary: { confirm: destructive } }\n',
+        provider,
+      );
+      const ledger = wireChildLedger(deps);
+      Object.defineProperty(deps.runLedger, "sessionPersistence", { value: false });
+      const request = { ...msg("agent:orchestrator set my effort high", "slack:UADMIN"), messageId: "original" };
+      const startedAt = Date.now();
+      expect(
+        await ledger.claim({
+          runId: "run-old",
+          threadKey: request.threadKey,
+          gen: "gen-child",
+          leaseMs: 30_000,
+          startedAt,
+          phase: "attaching",
+          meta: {
+            agent: "orchestrator",
+            mainAudienceChecked: true,
+            channelId: request.channelId,
+            userId: request.userId,
+            threadKey: request.threadKey,
+            request: durableInboxMessage(request, request.text, startedAt),
+            profile: { machine: AGENTS.orchestrator.machine, identity: "none", minutes: 10 },
+          },
+          system: "original",
+          tools: [],
+          state: { contextDependencies: { version: 1, status: "known", revision: 0, origins: [], slack: [], mcp: [] } },
+        }),
+      ).toMatchObject({ ok: true });
+      const row = ledger.live.get("run-old")!;
+      const restart = { row, events: [], inbox: [] };
+      const resume: ResumeContext = {
+        ...restart,
+        repoCtx: {},
+        lastSeq: 0,
+        lastStep: {
+          step: 1,
+          seq: 0,
+          turnIndex: 0,
+          inFlight: [],
+          inboxConsumedSeq: 0,
+          remainingMs: 300_000,
+          turn: 1,
+          iteration: 1,
+        },
+        plan: {
+          kind: "resume",
+          messages: [],
+          compactions: [],
+          settlements: [],
+          remainingMs: 300_000,
+          turn: 1,
+          iteration: 1,
+          inboxConsumedSeq: 0,
+          step: 1,
+          stepRecorded: true,
+        },
+      };
+      if (kind.includes("request restart")) await ledger.abandon("run-old", "gen-child");
+      const opts =
+        kind === "resume"
+          ? { resume }
+          : kind === "setup restart"
+            ? { restart }
+            : {
+                restartOf: "run-old",
+                ...(kind === "carried request restart"
+                  ? { restartCarried: { events: [], token: "original-token", startedAt, note: "container replaced" } }
+                  : {}),
+              };
+      const { io, replies } = fakeIO();
+      if (kind === "resume")
+        vi.mocked(makeExecutor).mockResolvedValueOnce({
+          executor: { exec: async () => "", readFile: async () => "", writeFile: async () => "" },
+        });
+      const recovered = await dispatch(deps, request, io, opts);
+      expect(recovered, replies.join("\n")).toEqual({ status: "completed" });
+      expect(replies).toContain("I checked the command result.");
+      expect(deps.config.scopes(request.channelId, request.userId).user).toEqual({});
+      expect((requests[0]!.tools ?? []).map((tool) => tool.name)).not.toContain("command_run");
+    },
+  );
+
+  it("MCP follow-up approval keeps its connection and refuses bare confirmation", async () => {
+    const deps = makeDeps(
+      YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }"),
+      capturingProvider("Done."),
+    );
+    wireChildLedger(deps);
+    const store = new InMemoryConfirmationStore();
+    deps.confirmations = store;
+    await deps.config.setUserOverride("slack:UADMIN", { effort: "high" });
+    const { io } = fakeIO();
+    const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+    io.offer = async (offer) => void offers.push(offer);
+    const approvalConnection = {
+      id: "connection-one",
+      credentialId: "credential-one",
+      requestHash: "b".repeat(64),
+      mode: "form" as const,
+    };
+    const initial = {
+      ...msg("agent:orchestrator hello", "slack:UADMIN"),
+      channelId: "mcp:default",
+      threadKey: "mcp:default:one",
+      messageId: "one",
+    };
+    let followUpOutcome: unknown;
+    let commandOutcome: unknown;
+    await vi.mocked(runPiHarnessOpen).withImplementation(
+      async (_deps, run) => {
+        followUpOutcome = await dispatch(
+          deps,
+          { ...initial, text: "agent:orchestrator reset my settings", messageId: "two", approvalConnection },
+          io,
+        );
+        const inputs = run.inbox!.drain();
+        run.confirmedFollowUps!(inputs);
+        commandOutcome = await run.toolContext.command!(
+          "reset my settings",
+          "config.clear",
+          { args: ["me"], options: {} },
+          "follow-up-command",
+        );
+        return piAnswered("Approval offered.");
+      },
+      async () => dispatch(deps, initial, io),
+    );
+    expect(followUpOutcome).toEqual({ status: "completed" });
+    expect(commandOutcome).toMatchObject({ ok: true });
+    expect(offers.map((offer) => offer.line)).toEqual(["config clear me"]);
+    const id = offers[0]!.id;
+    expect(await dispatch(deps, { ...initial, text: `confirm ${id}` }, fakeIO().io)).toMatchObject({
+      status: "refused",
+      refusal: "confirmation_foreign",
+    });
+    expect(deps.config.scopes("mcp:default", initial.userId).user).toEqual({ effort: "high" });
+    expect(await store.approve(id, [initial.userId], approvalConnection.id)).toMatchObject({ ok: true });
+    expect(await dispatch(deps, { ...initial, text: `confirm ${id}`, approvalConnection }, fakeIO().io)).toEqual({
+      status: "completed",
+    });
+    expect(deps.config.scopes("mcp:default", initial.userId).user).toEqual({});
+  });
+
+  it.each(["single", "same sender", "other sender"])(
+    "merged public input cannot borrow requester authority: %s",
+    async (kind) => {
+      const { provider, requests } = commandProvider(
+        { scope: "me", effort: "high", sourceMessage: "set my effort high" },
+        "config.set",
+      );
+      const deps = makeDeps(
+        YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }") +
+          'channels:\n  "slack:CX": { boundary: { confirm: destructive } }\n',
+        provider,
+      );
+      wireChildLedger(deps);
+      const { io, replies } = fakeIO();
+      const first = { ...msg("hello", "slack:UADMIN"), messageId: "one" };
+      const pending = [
+        { msg: first, userId: first.userId, text: kind === "single" ? "set my effort high" : "hello", at: 1, io },
+      ];
+      if (kind !== "single") {
+        const userId = kind === "same sender" ? first.userId : "slack:UOTHER";
+        pending.push({ msg: { ...first, userId, messageId: "two" }, userId, text: "set my effort high", at: 2, io });
+      }
+      const fresh = prepareFreshTurn({}, { agent: "orchestrator", pending, clock: () => 3 });
+      expect(await dispatch(deps, fresh.msg, fresh.io, fresh.opts)).toEqual({ status: "completed" });
+      expect(replies).toContain("I checked the command result.");
+      expect(deps.config.scopes("slack:CX", "slack:UADMIN").user).toEqual(kind === "single" ? { effort: "high" } : {});
+      expect((requests[0]!.tools ?? []).some((tool) => tool.name === "command_run")).toBe(kind === "single");
+    },
+  );
+
+  it.each(["all", "[config:read]"])("shared commands retain the bound credential's %s grants", async (actions) => {
+    const { provider } = commandProvider(
+      { scope: "me", effort: "high", sourceMessage: "set my effort high" },
+      "config.set",
+    );
+    const deps = makeDeps(
+      YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }").replace(
+        "restrict:\n",
+        `  "mcp:credential": { actions: ${actions}, channels: all, repos: all }\nrestrict:\n`,
+      ) + 'channels:\n  "mcp:default": { boundary: { confirm: destructive } }\n',
+      provider,
+    );
+    wireChildLedger(deps);
+    await dispatch(
+      deps,
+      {
+        ...msg("agent:orchestrator set my effort high", "slack:UADMIN"),
+        channelId: "mcp:default",
+        threadKey: "mcp:default:one",
+        authenticatedAs: "mcp:credential",
+        messageId: "request-one",
+      },
+      fakeIO().io,
+    );
+    expect(deps.config.scopes("mcp:default", "slack:UADMIN").user).toEqual(actions === "all" ? { effort: "high" } : {});
+  });
+
+  it("holds a shared command without decision storage and permits a later tracked request", async () => {
+    const run = async (tracked: boolean) => {
+      const { provider, requests } = commandProvider(
+        { scope: "me", effort: "high", sourceMessage: "set my effort high" },
+        "config.set",
+      );
+      const deps = makeDeps(
+        YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }") +
+          'channels:\n  "slack:CX": { boundary: { confirm: destructive } }\n',
+        provider,
+      );
+      if (tracked) wireChildLedger(deps);
+      await dispatch(
+        deps,
+        { ...msg("agent:orchestrator set my effort high", "slack:UADMIN"), messageId: "one" },
+        fakeIO().io,
+      );
+      return { scope: deps.config.scopes("slack:CX", "slack:UADMIN").user, requests };
+    };
+    const refused = await run(false);
+    expect(refused.scope).toEqual({});
+    expect(JSON.stringify(refused.requests[1]?.messages)).toContain(
+      "The command decision could not be saved; no command ran.",
+    );
+    expect((await run(true)).scope).toEqual({ effort: "high" });
+  });
+
+  it.each(["off", "shadow"])("keeps shared command effects off when operator mode is %s", async (mode) => {
+    const { provider, requests } = commandProvider(
+      { scope: "me", effort: "high", sourceMessage: "set my effort high" },
+      "config.set",
+    );
+    const deps = makeDeps(
+      YAML_FIXTURE.replace("routing: { operator: off }", `routing: { operator: ${mode} }`),
+      provider,
+    );
+    wireChildLedger(deps);
+    const { io, replies } = fakeIO();
+    const result = await dispatch(
+      deps,
+      { ...msg("agent:orchestrator set my effort high", "slack:UADMIN"), messageId: "one" },
+      io,
+    );
+    expect(result).toEqual({ status: "completed" });
+    expect(replies).toContain("I checked the command result.");
+    expect(deps.config.scopes("slack:CX", "slack:UADMIN").user).toEqual({});
+    expect((requests[0]!.tools ?? []).map((tool) => tool.name)).not.toContain("command_run");
+  });
+
+  it("shared command confirmation keeps the original requester and conversation", async () => {
+    const { provider } = commandProvider({ scope: "channel", sourceMessage: "reset this channel" });
+    const deps = makeDeps(YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }"), provider);
+    const ledger = wireChildLedger(deps);
+    deps.confirmations = new InMemoryConfirmationStore();
+    await deps.config.setChannelOverride("slack:CX", { effort: "high" });
+    const { io } = fakeIO();
+    const offers: Array<Parameters<NonNullable<ChannelIO["offer"]>>[0]> = [];
+    let selected: unknown;
+    io.offer = async (offer) => {
+      selected = structuredClone(
+        [...ledger.live.values()].find((row) => row.meta.agent === "orchestrator")?.state.orchestratorDecisions,
+      );
+      offers.push(offer);
+    };
+    await dispatch(deps, { ...msg("agent:orchestrator reset this channel", "slack:UADMIN"), messageId: "one" }, io);
+    expect(offers.map(({ line }) => line)).toEqual(["config clear channel"]);
+    expect(selected).toMatchObject([
+      {
+        command: "config.clear",
+        source: { messageId: "one" },
+        owner: { requesterId: "slack:UADMIN", channelId: "slack:CX" },
+      },
+    ]);
+    expect(deps.config.scopes("slack:CX", "slack:UADMIN").channel).toEqual({ effort: "high" });
+    expect(
+      (
+        await dispatchClick(deps, {
+          kind: "confirm",
+          io,
+          id: offers[0]!.id,
+          actor: { kind: "user", id: "slack:UOTHER", grants: NO_GRANTS },
+        })
+      ).refusal,
+    ).toBe("confirmation_foreign");
+    await dispatchClick(deps, {
+      kind: "confirm",
+      io,
+      id: offers[0]!.id,
+      actor: { kind: "user", id: "slack:UADMIN", grants: NO_GRANTS },
+    });
+    expect(deps.config.scopes("slack:CX", "slack:UADMIN").channel).toEqual({});
+  });
 
   it("records the main command owner and source before the native mutation", async () => {
     const { provider } = commandProvider(

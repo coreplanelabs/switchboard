@@ -30,6 +30,28 @@ const base: IncomingMessage = {
 };
 
 describe("durable inbox continuity", () => {
+  it("retains merged source context and refuses malformed approval metadata", () => {
+    const approvalConnection = {
+      id: "connection",
+      credentialId: "credential",
+      requestHash: "hash",
+      mode: "form" as const,
+    };
+    const row = durableInboxMessage({ ...base, approvalConnection, mergedFollowUps: true }, base.text, 1);
+    expect(messageFromInbox(row, 0)?.msg).toEqual({ ...base, approvalConnection, mergedFollowUps: true });
+    for (const approvalConnection of [
+      null,
+      [],
+      "connection",
+      { id: "connection" },
+      { id: 1, credentialId: "c", requestHash: "h" },
+      { id: "c", credentialId: "c", requestHash: "h", mode: "anything" },
+    ]) {
+      expect(messageFromInbox({ ...row, approvalConnection }, 0)).toBeUndefined();
+    }
+    expect(messageFromInbox({ ...row, mergedFollowUps: "true" }, 0)).toBeUndefined();
+  });
+
   it("binds the canonical destination independently of a named steer's source route", () => {
     const destination = {
       runId: "target-run",

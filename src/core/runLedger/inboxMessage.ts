@@ -190,6 +190,8 @@ export function durableInboxMessage(
   const base: Record<string, unknown> = {
     version: 1,
     kind: "message",
+    ...(msg.approvalConnection !== undefined ? { approvalConnection: msg.approvalConnection } : {}),
+    ...(msg.mergedFollowUps ? { mergedFollowUps: true } : {}),
     channelId: msg.channelId,
     userId: msg.userId,
     threadKey: msg.threadKey,
@@ -304,6 +306,16 @@ export function messageFromInbox(
   const channelId = str("channelId");
   if (text === undefined || userId === undefined || threadKey === undefined || channelId === undefined)
     return undefined;
+  const approval = m.approvalConnection;
+  if (approval !== undefined && (typeof approval !== "object" || approval === null || Array.isArray(approval))) return;
+  const binding = approval as Record<string, unknown> | undefined;
+  if (
+    binding &&
+    (["id", "credentialId", "requestHash"].some((key) => typeof binding[key] !== "string") ||
+      (binding.mode !== undefined && binding.mode !== "form"))
+  )
+    return;
+  if (m.mergedFollowUps !== undefined && m.mergedFollowUps !== true) return;
   const userName = str("userName");
   const authenticatedAs = str("authenticatedAs");
   const postedBy = str("postedBy");
@@ -333,6 +345,17 @@ export function messageFromInbox(
     channelId,
     userId,
     threadKey,
+    ...(binding
+      ? {
+          approvalConnection: {
+            id: String(binding.id),
+            credentialId: String(binding.credentialId),
+            requestHash: String(binding.requestHash),
+            ...(binding.mode === "form" ? { mode: "form" as const } : {}),
+          },
+        }
+      : {}),
+    ...(m.mergedFollowUps ? { mergedFollowUps: true as const } : {}),
     text: control ? inboxControlText(control) : note ? `${text}\n\n${note}` : text,
     ...(userName !== undefined ? { userName } : {}),
     ...(authenticatedAs !== undefined ? { authenticatedAs } : {}),

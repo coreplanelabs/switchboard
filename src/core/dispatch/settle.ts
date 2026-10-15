@@ -154,6 +154,7 @@ export function prepareFreshTurn(
     msg: {
       ...firstMsg,
       ...merged,
+      ...(pending.length > 1 ? { mergedFollowUps: true as const } : {}),
       ...(directAudience ? { directAudience } : {}),
       text: `agent:${agent} ${merged.text}`,
       receivedAt: freshAt,

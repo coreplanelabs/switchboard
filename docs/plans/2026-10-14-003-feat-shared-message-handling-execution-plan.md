@@ -115,6 +115,20 @@ An explicit `agent:orchestrator` request now goes to that agent's loop without a
 
 This removes the extra model pass for one explicit choice. Generic public conversations keep the existing operator path until its action tools move into the orchestrator. That migration must preserve plain-language actions. Typed Ship intent selection, existing private main conversations, live folds and unit folds retain their current paths. Full front-door convergence remains pending.
 
+### Shared registry commands, 2026-10-15
+
+The next cut gives the actual orchestrator loop the existing registry command tools in public and machine conversations when operator mode is `on`. It reuses `prepareActionContext`, typed command binding, the run's acknowledged decision writer and registry execution. An explicit orchestrator request uses one agent loop. The resolved credential, requester, command permissions and confirmation remain authoritative. No separate routing model selects these commands.
+
+The source tracker now preserves the original sender and credential across public follow-ups. Queue acceptance can revoke an untrusted source immediately; only confirmed runtime delivery can select a newer requester turn. Private work and Slack-context tools keep their verified-DM gates. Failed decision storage holds the command. Public command recovery remains held until source provenance can be proved; operator `off` and `shadow` do not enable this path.
+
+This prepares the remaining routing migration. Generic requests still use the old operator path, and live/unit fold decisions, direct-specialist context backfill and shared evidence delivery remain pending. Step 1 is in progress.
+
+### Shared command review fixes, 2026-10-15
+
+The shared command path now keeps MCP approval metadata through admission, saved inbox rows and delivered-source selection. Text confirmation still needs the recorded consent and connection. The dispatcher passes its existing recovery classification into the loop, so transcript resume, setup restart and both request-only restart paths keep shared commands held. Settlement marks combined follow-ups as context without a single command source. This hold survives inbox replay and later follow-ups.
+
+These fixes extend the existing inbox and registry boundaries. They add no listener, scheduler or new routing path. Local regression proof and current-head review remain separate from deployment and live acceptance.
+
 ### Live reply delivery boundary, 2026-10-15
 
 The private worker controls are merged in [PR #3139](https://github.com/coreplanelabs/switchboard/pull/3139). Tracing the next live-reply path exposed a prerequisite: the shared inbox client used the same result for storage failure and target absence. A reply could then enter memory without its durable copy or start fresh work while its original target still existed.

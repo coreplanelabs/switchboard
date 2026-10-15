@@ -1,5 +1,5 @@
 import { attributedText, foldThreadEvents } from "./threadEvents.js";
-import type { DocumentAttachment, ImageAttachment, SlackDirectAudience, StagedFile } from "./types.js";
+import type { DocumentAttachment, ImageAttachment, IncomingMessage, SlackDirectAudience, StagedFile } from "./types.js";
 import { systemClock } from "./trace/clock.js";
 
 // Thread admission (docs/reference/specs/thread-admission.md): ONE live run per thread.
@@ -32,6 +32,8 @@ import { systemClock } from "./trace/clock.js";
 
 /** One follow-up message admitted into a live run. */
 export interface FollowUpInput {
+  approvalConnection?: IncomingMessage["approvalConnection"];
+  mergedFollowUps?: true;
   text: string;
   userId: string;
   userName?: string;
