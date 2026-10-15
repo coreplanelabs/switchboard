@@ -12,6 +12,8 @@ import { registerRepository, residentRecords } from "../../src/execution/repoReg
 import { readResidentPlacement, recordResidentPlacement } from "../../src/execution/residentPlacement";
 import { effectiveLimits } from "./gc";
 import { methodOf, readSource } from "./testing/sourceScan";
+import { maintenanceRecordSchema } from "./admissionRisk.js";
+import { TEST_MAINTENANCE } from "../../src/deploy/testing/profile.js";
 
 const source = readSource("worker.ts");
 const handler = (name: string) => {
@@ -25,7 +27,7 @@ describe("metadata-only repo routes", () => {
     const cap = source.match(/^const RESIDENT_CAP = [^;]+;/m)?.[0];
     if (!cap) throw new Error("resident cap declaration missing");
     const compiled = ts.transpileModule(
-      `${cap}\nclass Registry { ${["onboard", "limits", "list", "listRepositories", "getRecord", "getRepository"].map((name) => methodOf(source, name)).join("\n")} }`,
+      `${cap}\nclass Registry { ${["onboard", "limits", "list", "listRepositories", "getRecord", "getRepository", "getStagingMaintenance"].map((name) => methodOf(source, name)).join("\n")} }`,
       { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
     ).outputText;
     const Registry = runInNewContext(`${compiled}\nRegistry`, {
@@ -38,11 +40,14 @@ describe("metadata-only repo routes", () => {
       TEST_OVERRIDES_KEY: "overrides",
       BUILD_ID: "test-build",
       LRU_FLOOR_S: 3600,
+      STAGING_MAINTENANCE_KEY: "deploy:staging-maintenance",
+      maintenanceRecordSchema,
     });
     const rows = new Map<string, any>();
     const instance = new Registry();
     instance.ctx = {
       storage: {
+        transaction: (body: (store: unknown) => Promise<unknown>) => body(instance.ctx.storage),
         get: async (key: string) => rows.get(key),
         put: async (key: string, record: unknown) => rows.set(key, record),
         list: async ({ prefix }: { prefix: string }) => new Map([...rows].filter(([key]) => key.startsWith(prefix))),
@@ -80,6 +85,17 @@ describe("metadata-only repo routes", () => {
       { resource: "repo:acme/repo-5" },
       { resource: "repo:acme/repo-6" },
     ]);
+    instance.env = {
+      CLOUDFLARE_ACCOUNT_ID: TEST_MAINTENANCE.stagingAccount,
+      RESIDENT_SCRIPT_NAME: TEST_MAINTENANCE.residentScript,
+    };
+    rows.set("deploy:staging-maintenance", { schema: 1, state: "held", installedAt: 0, policy: TEST_MAINTENANCE });
+    expect(await instance.onboard({ resource: "repo:acme/new-cold", noResident: true })).toEqual({
+      ok: false,
+      status: 409,
+      error: "staging maintenance blocks registration",
+    });
+    expect(rows.has("resident:repo:acme/new-cold")).toBe(false);
   });
 
   it("checks registration before status touches a resident and skips provisioning for cold onboarding", () => {

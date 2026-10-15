@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { describe, expect, it } from "vitest";
 import type { AppConfig } from "../config.js";
-import { stagingProblems } from "./staging.js";
-import { TEST_PROFILE } from "./testing/profile.js";
+import { stagingProblems, waitForStagingMaintenanceRelease } from "./staging.js";
+import { TEST_PROFILE, TEST_MAINTENANCE } from "./testing/profile.js";
 import type { DeploymentProfile } from "./profile.js";
 
 const accounts = { staging: "abcdef1234567890".repeat(2), production: TEST_PROFILE.account };
@@ -39,6 +39,63 @@ function fixture(): { profile: DeploymentProfile; config: AppConfig } {
 }
 
 describe("isolated staging deployment", () => {
+  it("waits only for the selected explicit release and stops at its deadline", async () => {
+    const policy = { ...TEST_MAINTENANCE, attempt: { ...TEST_MAINTENANCE.attempt, deadline: 60_000 } };
+    const held = {
+      schema: 1,
+      state: "held",
+      holdId: policy.holdId,
+      generation: 1,
+      fixtureSha256: policy.fixtureSha256,
+      attempt: policy.attempt,
+    };
+    let now = 0;
+    const reads: number[] = [];
+    await waitForStagingMaintenanceRelease(policy, {
+      now: () => now,
+      sleep: async (ms) => {
+        now += ms;
+      },
+      read: async (timeout) => {
+        reads.push(timeout);
+        return {
+          maintenance:
+            reads.length === 1 ? held : { ...held, state: "released", releaseDecisionSha256: "7".repeat(64) },
+        };
+      },
+    });
+    expect({ reads, now }).toEqual({ reads: [30_000, 30_000], now: 30_000 });
+    now = 0;
+    await expect(
+      waitForStagingMaintenanceRelease(
+        { ...policy, attempt: { ...policy.attempt, deadline: 20 } },
+        {
+          now: () => now,
+          sleep: async (ms) => {
+            now += ms;
+          },
+          read: async () => ({ maintenance: { ...held, attempt: { ...held.attempt, deadline: 20 } } }),
+        },
+      ),
+    ).rejects.toThrowError("staging release deadline expired; maintenance was not released by this controller");
+    expect(now).toBe(20);
+  });
+
+  it("binds a selected maintenance policy to the independently configured staging accounts", () => {
+    const { profile, config } = fixture();
+    profile.residentMaintenance = {
+      ...TEST_MAINTENANCE,
+      stagingAccount: accounts.staging,
+      productionAccount: accounts.production,
+      residentOrigin: "https://staging-resident.example.test",
+    };
+    expect(stagingProblems(profile, config, accounts)).toEqual([]);
+    profile.residentMaintenance.productionAccount = "f".repeat(32);
+    expect(stagingProblems(profile, config, accounts)).toEqual([
+      "residentMaintenance must match the independently configured staging and production accounts",
+    ]);
+  });
+
   it("the CLI checks real profile/config inputs without credentials and rejects a production state endpoint", () => {
     const { profile, config } = fixture();
     const directory = mkdtempSync(join(tmpdir(), "staging-cli-"));

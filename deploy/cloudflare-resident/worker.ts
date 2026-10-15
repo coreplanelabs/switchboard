@@ -485,6 +485,18 @@ import {
   recoveryViewsAreIdle,
   type AdmissionRecoveryQuote,
 } from "./admissionRecovery.js";
+import {
+  abandonmentAuditSchema,
+  deployObligations,
+  liveMaintenanceWindow,
+  maintenanceRecordSchema,
+  releaseWindowSchema,
+  selectedStagingAttempt,
+  stagingAttemptMatches,
+  stagingMaintenanceSchema,
+  stagingAttemptSchema,
+  type MaintenanceRecord,
+} from "./admissionRisk.js";
 import { createRefreshInstance, createRefreshInstanceNow, type RefreshInstanceParams } from "./refresh";
 import {
   deployFenceReady,
@@ -589,6 +601,8 @@ function emitStepRoot(
 }
 
 export interface Env {
+  RESIDENT_MAINTENANCE_POLICY?: string;
+  RESIDENT_SCRIPT_NAME?: string;
   CF_VERSION_METADATA?: { id: string; timestamp: string };
   RESIDENT: DurableObjectNamespace<ResidentDO>;
   REGISTRY: DurableObjectNamespace<ResidentRegistryDO>;
@@ -1105,6 +1119,12 @@ const githubTokenCache = new Map<string, MintedToken>(); // key: repo slug ("own
  *  Throws a command-level Error on any failure — callers MUST NOT
  *  translate that into a lifecycle transition. */
 export async function mintRepoScopedToken(env: Env, slug: string, opts?: { fresh?: boolean }): Promise<MintedToken> {
+  const checkMaintenance = async () => {
+    const hold = await registryStub(env).getStagingMaintenance();
+    if (hold?.state === "held" && !hold.policy.resources.includes(`repo:${slug}`))
+      throw new Error("staging maintenance refuses token access outside the selected fixture");
+  };
+  await checkMaintenance();
   if (!githubAppConfigured(env)) {
     throw new Error(
       "github-app-not-configured: GITHUB_APP_ID / GITHUB_APP_INSTALLATION_ID / GITHUB_APP_PRIVATE_KEY secrets are unset; cannot mint an installation token",
@@ -1122,6 +1142,7 @@ export async function mintRepoScopedToken(env: Env, slug: string, opts?: { fresh
   // The installation-token API scopes by repo NAME within the installation's
   // owner — the owner half of the slug is fixed by the installation itself.
   const repoName = slug.includes("/") ? slug.slice(slug.indexOf("/") + 1) : slug;
+  await checkMaintenance();
   let res: Response;
   try {
     res = await fetch(`https://api.github.com/app/installations/${env.GITHUB_APP_INSTALLATION_ID}/access_tokens`, {
@@ -1612,6 +1633,9 @@ const DRAIN_KEY = "drain";
 const DEPLOY_ADMISSION_KEY_PREFIX = "deploy:admission:";
 const DEPLOY_RELEASE_RECEIPTS_KEY = "deploy:release-receipts";
 const DEPLOY_RECOVERY_KEY_PREFIX = "deploy:recovered:";
+const STAGING_MAINTENANCE_KEY = "deploy:staging-maintenance";
+const STAGING_WINDOW_KEY = "deploy:staging-window";
+const DEPLOY_ABANDONED_KEY_PREFIX = "deploy:abandoned:";
 
 /** Safe request provenance, never an authority or a native completion receipt. */
 function deployAdmissionOrigin(input: unknown) {
@@ -1698,7 +1722,7 @@ async function beginTrackedDeployAdmission(
     "beginDeployAdmission" | "beginDeployReconcileAdmission" | "readDeployAdmissionReceipt"
   >,
   origin: unknown,
-  reconcile?: { versionId: string | null; versionTimestamp: string | null },
+  reconcile?: { versionId: string | null; versionTimestamp: string | null; attempt?: unknown },
 ): Promise<DeployAdmissionIdentity | null> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -1716,7 +1740,12 @@ async function beginTrackedDeployAdmission(
   });
   try {
     const result = reconcile
-      ? await registry.beginDeployReconcileAdmission(reconcile.versionId, reconcile.versionTimestamp, identity)
+      ? await registry.beginDeployReconcileAdmission(
+          reconcile.versionId,
+          reconcile.versionTimestamp,
+          identity,
+          reconcile.attempt,
+        )
       : await registry.beginDeployAdmission(origin, identity);
     if (result === null) return null;
     if (result === identity.id) return identity;
@@ -1782,6 +1811,320 @@ const IMAGE_RECONCILE_KEY = "imageReconcile";
 type OnboardResult = { ok: true; record: ResidentRecord } | { ok: false; status: number; error: string };
 
 export class ResidentRegistryDO extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    if (env.RESIDENT_MAINTENANCE_POLICY !== undefined)
+      ctx.blockConcurrencyWhile(() => this.initializeStagingMaintenance());
+  }
+
+  /** Only the rendered policy can install a hold. A restart keeps the same
+   * held/released generation; request data cannot replace it. */
+  async initializeStagingMaintenance(): Promise<void> {
+    if (this.env.RESIDENT_MAINTENANCE_POLICY === undefined) return;
+    const parsed = stagingMaintenanceSchema.safeParse(JSON.parse(this.env.RESIDENT_MAINTENANCE_POLICY));
+    if (!parsed.success) throw new Error("staging-maintenance-policy-invalid");
+    const policy = parsed.data;
+    if (
+      policy.stagingAccount !== this.env.CLOUDFLARE_ACCOUNT_ID ||
+      policy.stagingAccount === policy.productionAccount ||
+      policy.residentScript !== this.env.RESIDENT_SCRIPT_NAME ||
+      !policy.residentScript.includes("staging") ||
+      policy.attempt.sourceCommit !== BUILD_ID
+    )
+      throw new Error("staging-maintenance-scope-mismatch");
+    await this.ctx.storage.transaction(async (txn) => {
+      const current = await this.getStagingMaintenance(txn);
+      if (current) {
+        if (JSON.stringify(current.policy) !== JSON.stringify(policy))
+          throw new Error("staging-maintenance-generation-mismatch");
+        return;
+      }
+      const now = systemClock();
+      const held: MaintenanceRecord = { schema: 1, state: "held", installedAt: now, policy };
+      if (!liveMaintenanceWindow(held, now)) throw new Error("staging-maintenance-deadline-invalid");
+      await txn.put(STAGING_MAINTENANCE_KEY, held);
+    });
+  }
+
+  async getStagingMaintenance(
+    store: Pick<DurableObjectStorage, "get"> = this.ctx.storage,
+  ): Promise<MaintenanceRecord | null> {
+    const raw = await store.get(STAGING_MAINTENANCE_KEY);
+    if (raw === undefined) return null;
+    const parsed = maintenanceRecordSchema.safeParse(raw);
+    if (
+      !parsed.success ||
+      parsed.data.policy.stagingAccount !== this.env.CLOUDFLARE_ACCOUNT_ID ||
+      parsed.data.policy.residentScript !== this.env.RESIDENT_SCRIPT_NAME
+    )
+      throw new Error("staging-maintenance-record-unverified");
+    return parsed.data;
+  }
+
+  async getDeployObligations(
+    store: Pick<DurableObjectStorage, "get" | "list"> = this.ctx.storage,
+    purpose: "deploy" | "release" = "deploy",
+  ) {
+    const maintenance = await this.getStagingMaintenance(store);
+    const window = await store.get(STAGING_WINDOW_KEY);
+    const parsed = releaseWindowSchema.safeParse(window);
+    return deployObligations({
+      rows: await store.list({ prefix: DEPLOY_ADMISSION_KEY_PREFIX }),
+      maintenance,
+      window,
+      audit: parsed.success ? await store.get(`${DEPLOY_ABANDONED_KEY_PREFIX}${parsed.data.recordId}`) : null,
+      drain: await store.get(DRAIN_KEY),
+      now: systemClock(),
+      purpose,
+    });
+  }
+
+  async getStagingMaintenanceReadback() {
+    return this.ctx.storage.transaction(async (txn) => {
+      const hold = await this.getStagingMaintenance(txn);
+      if (!hold) return null;
+      const parsed = releaseWindowSchema.safeParse(await txn.get(STAGING_WINDOW_KEY));
+      const counts = await this.getDeployObligations(txn);
+      const audit = parsed.success
+        ? abandonmentAuditSchema.safeParse(await txn.get(`${DEPLOY_ABANDONED_KEY_PREFIX}${parsed.data.recordId}`))
+        : null;
+      return {
+        schema: 1,
+        state: hold.state,
+        holdId: hold.policy.holdId,
+        generation: hold.policy.generation,
+        releasedAt: hold.releasedAt,
+        releaseDecisionSha256: hold.releaseDecisionSha256,
+        fixtureSha256: hold.policy.fixtureSha256,
+        decisionSha256: hold.policy.decisionSha256,
+        attempt: hold.policy.attempt,
+        window:
+          parsed.success && audit?.success
+            ? {
+                state: !liveMaintenanceWindow(hold, systemClock())
+                  ? "expired"
+                  : counts.qualified
+                    ? parsed.data.state
+                    : "unverified",
+                recordId: audit.data.id,
+                originalRecordSha256: audit.data.originalRecordSha256,
+                decisionSha256: hold.policy.decisionSha256,
+                disposition: audit.data.disposition,
+                requestEnd: audit.data.requestEnd,
+                nativeOutcome: audit.data.nativeOutcome,
+                observedAt: systemClock(),
+                stored: counts.stored,
+                excluded: counts.excluded,
+                blocking: counts.blocking,
+              }
+            : null,
+      };
+    });
+  }
+
+  /** Accept the preselected staging risk, preserving the exact unfinished
+   * request. This audit grants no native ending or unrelated exemption. */
+  async abandonStagingAdmission(
+    id: string,
+    expected: AdmissionRecoveryQuote,
+    attempt: unknown,
+    fixtureSha256: unknown,
+    decisionSha256: unknown,
+    versionId: string,
+  ): Promise<boolean> {
+    if (
+      !stagingAttemptSchema.safeParse(attempt).success ||
+      !/^[0-9a-f-]{36}$/.test(id) ||
+      !recoveryQuote(expected?.startedAt, expected?.recordSha256)
+    )
+      return false;
+    return this.ctx.storage.transaction(async (txn) => {
+      const now = systemClock();
+      const held = await this.getStagingMaintenance(txn);
+      const fence = liveDrain(await txn.get(DRAIN_KEY), now);
+      if (
+        !held ||
+        !selectedStagingAttempt(held, attempt, now) ||
+        held.policy.fixtureSha256 !== fixtureSha256 ||
+        held.policy.decisionSha256 !== decisionSha256 ||
+        !fence?.swapFence ||
+        fence.swapVersion !== versionId ||
+        !deployFenceReady(fence, now) ||
+        held.policy.attempt.deadline > Date.parse(fence.until) ||
+        (await txn.get(`${DEPLOY_ABANDONED_KEY_PREFIX}${id}`)) !== undefined ||
+        (await txn.get(`${DEPLOY_RECOVERY_KEY_PREFIX}${id}`)) !== undefined ||
+        (await txn.get(STAGING_WINDOW_KEY)) !== undefined
+      )
+        return false;
+      const original = await txn.get(`${DEPLOY_ADMISSION_KEY_PREFIX}${id}`);
+      if (
+        (original as { startedAt?: unknown } | undefined)?.startedAt !== expected.startedAt ||
+        now < expected.startedAt ||
+        (await admissionRecordHash(original)) !== expected.recordSha256
+      )
+        return false;
+      const quotedFence = { since: fence.since, until: fence.until, versionId };
+      const audit = abandonmentAuditSchema.safeParse({
+        schema: 1,
+        id,
+        disposition: "operator-abandoned",
+        requestEnd: "unobserved",
+        nativeOutcome: "unverified",
+        independentObligations: "unchanged",
+        policy: held.policy,
+        originalRecord: original,
+        originalRecordSha256: expected.recordSha256,
+        decidedAt: now,
+        fence: quotedFence,
+      });
+      if (!audit.success) return false;
+      await txn.put(`${DEPLOY_ABANDONED_KEY_PREFIX}${id}`, audit.data);
+      await txn.put(STAGING_WINDOW_KEY, {
+        schema: 1,
+        state: "authorized",
+        recordId: id,
+        holdId: held.policy.holdId,
+        generation: held.policy.generation,
+        attemptId: held.policy.attempt.id,
+        drain: quotedFence,
+      });
+      return true;
+    });
+  }
+
+  /** A matching immutable audit proves the risk decision's commit only. */
+  async readStagingAbandonmentReceipt(
+    id: string,
+    expected: AdmissionRecoveryQuote,
+    attempt: unknown,
+    fixtureSha256: unknown,
+    decisionSha256: unknown,
+  ): Promise<boolean> {
+    const held = await this.getStagingMaintenance();
+    const audit = abandonmentAuditSchema.safeParse(await this.ctx.storage.get(`${DEPLOY_ABANDONED_KEY_PREFIX}${id}`));
+    const selected = stagingAttemptSchema.safeParse(attempt);
+    if (!held || !audit.success || !selected.success || !recoveryQuote(expected?.startedAt, expected?.recordSha256))
+      return false;
+    return (
+      audit.data.id === id &&
+      audit.data.originalRecord.startedAt === expected.startedAt &&
+      audit.data.originalRecordSha256 === expected.recordSha256 &&
+      (await admissionRecordHash(audit.data.originalRecord)) === expected.recordSha256 &&
+      JSON.stringify(audit.data.policy) === JSON.stringify(held.policy) &&
+      held.policy.fixtureSha256 === fixtureSha256 &&
+      held.policy.decisionSha256 === decisionSha256 &&
+      selected.data.holdId === held.policy.holdId &&
+      selected.data.generation === held.policy.generation &&
+      (Object.keys(held.policy.attempt) as Array<keyof typeof held.policy.attempt>).every(
+        (key) => selected.data[key] === held.policy.attempt[key],
+      )
+    );
+  }
+
+  /** A fresh manual release decision can reopen only this staging fixture.
+   * It preserves the request and never renews its upload window. */
+  async releaseStagingMaintenance(
+    expected: AdmissionRecoveryQuote,
+    attempt: unknown,
+    decisionSha256: unknown,
+  ): Promise<boolean> {
+    if (
+      !recoveryQuote(expected?.startedAt, expected?.recordSha256) ||
+      typeof decisionSha256 !== "string" ||
+      !/^[0-9a-f]{64}$/.test(decisionSha256)
+    )
+      return false;
+    const released = await this.ctx.storage.transaction(async (txn) => {
+      const hold = await this.getStagingMaintenance(txn);
+      if (
+        !hold ||
+        hold.state !== "held" ||
+        !stagingAttemptMatches(hold, attempt) ||
+        decisionSha256 === hold.policy.decisionSha256
+      )
+        return false;
+      const window = releaseWindowSchema.safeParse(await txn.get(STAGING_WINDOW_KEY));
+      const counts = await this.getDeployObligations(txn, "release");
+      if (!window.success || !counts.qualified || counts.blocking !== 0) return false;
+      const quote = recoveryQuote(expected.startedAt, expected.recordSha256);
+      const row = await txn.get(`${DEPLOY_ADMISSION_KEY_PREFIX}${window.data.recordId}`);
+      if (
+        !quote ||
+        (row as { startedAt?: unknown } | undefined)?.startedAt !== quote.startedAt ||
+        (await admissionRecordHash(row)) !== quote.recordSha256
+      )
+        return false;
+      const key = `deploy:staging-release:${hold.policy.holdId}`;
+      if ((await txn.get(key)) !== undefined) return false;
+      const releasedAt = systemClock();
+      await txn.put(key, {
+        schema: 1,
+        holdId: hold.policy.holdId,
+        generation: hold.policy.generation,
+        fixtureSha256: hold.policy.fixtureSha256,
+        decisionSha256,
+        releasedAt,
+        originalRecordSha256: quote.recordSha256,
+        requestEnd: "unobserved",
+        nativeOutcome: "unverified",
+      });
+      await txn.put(STAGING_MAINTENANCE_KEY, {
+        ...hold,
+        state: "released",
+        releasedAt,
+        releaseDecisionSha256: decisionSha256,
+      });
+      await txn.delete(DRAIN_KEY);
+      return true;
+    });
+    if (released) await this.pushDrainPost("below");
+    return released;
+  }
+
+  async readStagingReleaseReceipt(attempt: unknown, decisionSha256: unknown): Promise<boolean> {
+    const hold = await this.getStagingMaintenance();
+    if (
+      !hold ||
+      hold.state !== "released" ||
+      !stagingAttemptMatches(hold, attempt) ||
+      hold.releaseDecisionSha256 !== decisionSha256
+    )
+      return false;
+    const row = await this.ctx.storage.get<{ decisionSha256?: unknown; generation?: unknown; releasedAt?: unknown }>(
+      `deploy:staging-release:${hold.policy.holdId}`,
+    );
+    return (
+      row?.generation === hold.policy.generation &&
+      row.decisionSha256 === decisionSha256 &&
+      row.releasedAt === hold.releasedAt
+    );
+  }
+
+  async sealStagingWindow(
+    attempt: unknown,
+    versionId: string | null,
+    versionTimestamp: string | null,
+  ): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const held = await this.getStagingMaintenance(txn);
+      const window = releaseWindowSchema.safeParse(await txn.get(STAGING_WINDOW_KEY));
+      const fence = liveDrain(await txn.get(DRAIN_KEY), systemClock());
+      const counts = await this.getDeployObligations(txn);
+      if (
+        !held ||
+        !selectedStagingAttempt(held, attempt, systemClock()) ||
+        !window.success ||
+        window.data.state !== "fenced" ||
+        !counts.qualified ||
+        counts.blocking !== 0 ||
+        !fence ||
+        !postUploadVersion(fence, versionId, versionTimestamp)
+      )
+        return false;
+      await txn.put(STAGING_WINDOW_KEY, { ...window.data, state: "completed" });
+      return true;
+    });
+  }
   /** Atomic cap check + insert. Durable Objects deliver events through input
    *  gates: while a storage operation is in flight no other event is delivered
    *  to this object, and nothing below awaits anything except this object's
@@ -1789,7 +2132,11 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  interleave with a concurrent onboard. */
   async onboard(record: ResidentRecord): Promise<OnboardResult> {
     const { cap } = await this.limits();
-    return registerRepository<ResidentRecord>(this.ctx.storage, record, cap);
+    return this.ctx.storage.transaction(async (txn) => {
+      if ((await this.getStagingMaintenance(txn))?.state === "held")
+        return { ok: false, status: 409, error: "staging maintenance blocks registration" };
+      return registerRepository<ResidentRecord>(txn, record, cap);
+    });
   }
 
   /** The limits in force: the compiled constants, lowered by a test override
@@ -1823,26 +2170,30 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  no longer registered (someone offboarded it meanwhile) or `record` is
    *  already onboarded; the cap check is the same as onboard's. */
   async replace(evict: string, record: ResidentRecord): Promise<OnboardResult> {
-    if ((await this.getRepository(evict))?.pool)
-      return { ok: false, status: 409, error: "resident pools require explicit offboarding" };
-    if (!(await this.ctx.storage.get(registryKey(evict)))) {
-      return { ok: false, status: 409, error: `${evict} is no longer onboarded — nothing to evict` };
-    }
-    if (await this.ctx.storage.get(registryKey(record.resource))) {
-      return { ok: false, status: 409, error: `${record.resource} is already onboarded` };
-    }
-    const { cap } = await this.limits();
-    const existing = reservedResidentCount(await this.listRepositories());
-    if (existing - 1 >= cap) {
-      return {
-        ok: false,
-        status: 429,
-        error: `resident cap reached (${existing}/${cap}) even after evicting ${evict}`,
-      };
-    }
-    await this.ctx.storage.delete(registryKey(evict));
-    await this.ctx.storage.put(registryKey(record.resource), record);
-    return { ok: true, record };
+    return this.ctx.storage.transaction(async (txn) => {
+      if ((await this.getStagingMaintenance(txn))?.state === "held")
+        return { ok: false, status: 409, error: "staging maintenance blocks replacement" };
+      if ((await this.getRepository(evict))?.pool)
+        return { ok: false, status: 409, error: "resident pools require explicit offboarding" };
+      if (!(await txn.get(registryKey(evict)))) {
+        return { ok: false, status: 409, error: `${evict} is no longer onboarded — nothing to evict` };
+      }
+      if (await txn.get(registryKey(record.resource))) {
+        return { ok: false, status: 409, error: `${record.resource} is already onboarded` };
+      }
+      const { cap } = await this.limits();
+      const existing = reservedResidentCount(await this.listRepositories());
+      if (existing - 1 >= cap) {
+        return {
+          ok: false,
+          status: 429,
+          error: `resident cap reached (${existing}/${cap}) even after evicting ${evict}`,
+        };
+      }
+      await txn.delete(registryKey(evict));
+      await txn.put(registryKey(record.resource), record);
+      return { ok: true, record };
+    });
   }
 
   async getRecord(resource: string): Promise<ResidentRecord | null> {
@@ -2041,18 +2392,22 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       >
     >,
   ): Promise<ResidentRecord | null> {
-    const key = registryKey(resource);
-    const record = await this.ctx.storage.get<ResidentRecord>(key);
-    if (!record) return null;
-    const updated: ResidentRecord = { ...record, updatedAt: new Date(systemClock()).toISOString() };
-    if (patch.commands !== undefined) updated.commands = patch.commands;
-    if (patch.effects !== undefined) updated.effects = patch.effects;
-    if (patch.defaultRef !== undefined) updated.defaultRef = patch.defaultRef;
-    if (patch.diskBudgetMb !== undefined) updated.diskBudgetMb = patch.diskBudgetMb;
-    if (patch.provisioningTimeoutMs !== undefined) updated.provisioningTimeoutMs = patch.provisioningTimeoutMs;
-    if (patch.worktreeTtlDays !== undefined) updated.worktreeTtlDays = patch.worktreeTtlDays;
-    await this.ctx.storage.put(key, updated);
-    return updated;
+    return this.ctx.storage.transaction(async (txn) => {
+      if ((await this.getStagingMaintenance(txn))?.state === "held")
+        throw new Error("staging maintenance blocks configuration changes");
+      const key = registryKey(resource);
+      const record = await txn.get<ResidentRecord>(key);
+      if (!record) return null;
+      const updated: ResidentRecord = { ...record, updatedAt: new Date(systemClock()).toISOString() };
+      if (patch.commands !== undefined) updated.commands = patch.commands;
+      if (patch.effects !== undefined) updated.effects = patch.effects;
+      if (patch.defaultRef !== undefined) updated.defaultRef = patch.defaultRef;
+      if (patch.diskBudgetMb !== undefined) updated.diskBudgetMb = patch.diskBudgetMb;
+      if (patch.provisioningTimeoutMs !== undefined) updated.provisioningTimeoutMs = patch.provisioningTimeoutMs;
+      if (patch.worktreeTtlDays !== undefined) updated.worktreeTtlDays = patch.worktreeTtlDays;
+      await txn.put(key, updated);
+      return updated;
+    });
   }
 
   async remove(resource: string): Promise<boolean> {
@@ -2127,9 +2482,13 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     if (identity !== undefined && !validDeployAdmissionIdentity(identity))
       throw new Error("deploy-admission-identity-invalid");
     const admitted = await this.ctx.storage.transaction(async (txn) => {
+      if ((await this.getStagingMaintenance(txn))?.state === "held") return null;
       if (liveDrain(await txn.get(DRAIN_KEY), systemClock())?.swapFence) return null;
       const id = identity?.id ?? crypto.randomUUID();
-      if ((await txn.get(`${DEPLOY_RECOVERY_KEY_PREFIX}${id}`)) !== undefined)
+      if (
+        (await txn.get(`${DEPLOY_RECOVERY_KEY_PREFIX}${id}`)) !== undefined ||
+        (await txn.get(`${DEPLOY_ABANDONED_KEY_PREFIX}${id}`)) !== undefined
+      )
         throw new Error("deploy-admission-identity-used-or-unverified");
       if (identity) {
         const receipts = (await txn.get(DEPLOY_RELEASE_RECEIPTS_KEY)) ?? [];
@@ -2161,14 +2520,24 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     versionId: string | null,
     versionTimestamp: string | null,
     identity?: DeployAdmissionIdentity,
+    attempt?: unknown,
   ): Promise<string | null> {
     if (identity !== undefined && !validDeployAdmissionIdentity(identity))
       throw new Error("deploy-admission-identity-invalid");
     const admitted = await this.ctx.storage.transaction(async (txn) => {
+      const held = await this.getStagingMaintenance(txn);
+      if (
+        held?.state === "held" &&
+        (!selectedStagingAttempt(held, attempt, systemClock()) || held.policy.attempt.sourceCommit !== BUILD_ID)
+      )
+        return null;
       const record = liveDrain(await txn.get(DRAIN_KEY), systemClock());
       if (record?.swapFence && !postUploadVersion(record, versionId, versionTimestamp)) return null;
       const id = identity?.id ?? crypto.randomUUID();
-      if ((await txn.get(`${DEPLOY_RECOVERY_KEY_PREFIX}${id}`)) !== undefined)
+      if (
+        (await txn.get(`${DEPLOY_RECOVERY_KEY_PREFIX}${id}`)) !== undefined ||
+        (await txn.get(`${DEPLOY_ABANDONED_KEY_PREFIX}${id}`)) !== undefined
+      )
         throw new Error("deploy-admission-identity-used-or-unverified");
       if (identity) {
         const receipts = (await txn.get(DEPLOY_RELEASE_RECEIPTS_KEY)) ?? [];
@@ -2198,6 +2567,8 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       const deleted = await this.ctx.storage.transaction(async (txn) => {
         const key = `${DEPLOY_ADMISSION_KEY_PREFIX}${id}`;
         const row = await txn.get<{ schema?: number; startedAt?: number; requestHash?: string }>(key);
+        if ((await txn.get(`${DEPLOY_ABANDONED_KEY_PREFIX}${id}`)) !== undefined)
+          throw new Error("deploy-release-abandoned-request-held");
         if (requestHash !== undefined) {
           const identity = { id, requestHash };
           if (!validDeployAdmissionIdentity(identity)) throw new Error("deploy-release-identity-invalid");
@@ -2246,6 +2617,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     const unknown = { state: "unknown" as const };
     if (!validDeployAdmissionIdentity(identity)) return unknown;
     return this.ctx.storage.transaction(async (txn) => {
+      if ((await txn.get(`${DEPLOY_ABANDONED_KEY_PREFIX}${identity.id}`)) !== undefined) return unknown;
       const row = await txn.get<{ schema?: number; startedAt?: number; requestHash?: string }>(
         `${DEPLOY_ADMISSION_KEY_PREFIX}${identity.id}`,
       );
@@ -2269,6 +2641,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     if (!safe) return;
     try {
       const recorded = await this.ctx.storage.transaction(async (txn) => {
+        if ((await txn.get(`${DEPLOY_ABANDONED_KEY_PREFIX}${id}`)) !== undefined) return false;
         const key = `${DEPLOY_ADMISSION_KEY_PREFIX}${id}`;
         const row = await txn.get<{ schema?: number; startedAt?: number }>(key);
         if (row?.schema !== 1) return false;
@@ -2303,7 +2676,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
   }
 
   async activeDeployAdmissions(): Promise<number> {
-    return (await this.ctx.storage.list({ prefix: DEPLOY_ADMISSION_KEY_PREFIX })).size;
+    return this.ctx.storage.transaction(async (txn) => (await this.getDeployObligations(txn)).blocking);
   }
 
   async listDeployAdmissions(): Promise<Array<{ id: string; startedAt: number; kind: string }>> {
@@ -2425,13 +2798,15 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     return this.ctx.storage.transaction(async (txn) => {
       const now = systemClock();
       const current = liveDrain(await txn.get(DRAIN_KEY), now);
-      const active = await txn.list({ prefix: DEPLOY_ADMISSION_KEY_PREFIX });
+      const active = await this.getDeployObligations(txn);
+      const maintenance = await this.getStagingMaintenance(txn);
       return (
         deployFenceReady(current, now) &&
         current?.since === since &&
         current.until === until &&
         current.swapVersion === versionId &&
-        active.size === 0
+        active.blocking === 0 &&
+        (maintenance?.state !== "held" || active.qualified)
       );
     });
   }
@@ -2440,9 +2815,37 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  whatever drain stood — a second deploy's drain extends the first's. The
    *  set posts `above` for the plane (record 0064) and arms ONE alarm at
    *  `until`, so a drain nobody lifts posts its expiry itself. */
-  async setDrain(record: DrainRecord): Promise<DrainRecord | null> {
+  async setDrain(record: DrainRecord, attempt?: unknown): Promise<DrainRecord | null> {
     const stored = await this.ctx.storage.transaction(async (txn) => {
-      if (liveDrain(await txn.get(DRAIN_KEY), systemClock())?.swapFence) return false;
+      const now = systemClock();
+      const current = liveDrain(await txn.get(DRAIN_KEY), now);
+      const held = await this.getStagingMaintenance(txn);
+      if (held?.state === "held") {
+        if (!selectedStagingAttempt(held, attempt, now)) return false;
+        record = {
+          ...record,
+          until: new Date(Math.min(Date.parse(record.until), held.policy.attempt.deadline)).toISOString(),
+        };
+        const raw = await txn.get(STAGING_WINDOW_KEY);
+        if (raw !== undefined) {
+          const window = releaseWindowSchema.safeParse(raw);
+          const counts = await this.getDeployObligations(txn);
+          if (
+            !window.success ||
+            window.data.state !== "authorized" ||
+            !counts.qualified ||
+            current?.since !== window.data.drain.since ||
+            current.until !== window.data.drain.until ||
+            current.swapVersion !== window.data.drain.versionId
+          )
+            return false;
+          await txn.put(STAGING_WINDOW_KEY, {
+            ...window.data,
+            state: "claimed",
+            drain: { ...window.data.drain, since: record.since, until: record.until },
+          });
+        } else if (current?.swapFence) return false;
+      } else if (current?.swapFence) return false;
       await txn.put(DRAIN_KEY, record);
       return true;
     });
@@ -2454,10 +2857,12 @@ export class ResidentRegistryDO extends DurableObject<Env> {
 
   /** Close the reattach exception before reading deploy activity. The same
    * durable drain survives the Worker isolate swap and expires by itself. */
-  async setDeployFence(versionId: string | null): Promise<DrainRecord | null> {
+  async setDeployFence(versionId: string | null, attempt?: unknown): Promise<DrainRecord | null> {
     return this.ctx.storage.transaction(async (txn) => {
       if (!versionId) return null;
       const now = systemClock();
+      const held = await this.getStagingMaintenance(txn);
+      if (held?.state === "held" && !selectedStagingAttempt(held, attempt, now)) return null;
       const record = liveDrain(await txn.get(DRAIN_KEY), now);
       if (record === null || record.swapFence) return null;
       const fenced = {
@@ -2468,6 +2873,19 @@ export class ResidentRegistryDO extends DurableObject<Env> {
         swapAt: new Date(now).toISOString(),
       } as const;
       if (!deployFenceReady(fenced, now)) return null;
+      if (held?.state === "held") {
+        const raw = await txn.get(STAGING_WINDOW_KEY);
+        if (raw !== undefined) {
+          const window = releaseWindowSchema.safeParse(raw);
+          const counts = await this.getDeployObligations(txn);
+          if (!window.success || window.data.state !== "claimed" || !counts.qualified) return null;
+          await txn.put(STAGING_WINDOW_KEY, {
+            ...window.data,
+            state: "fenced",
+            drain: { since: fenced.since, until: fenced.until, versionId },
+          });
+        }
+      }
       await txn.put(DRAIN_KEY, fenced);
       return fenced;
     });
@@ -2496,10 +2914,12 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     versionTimestamp: string | null,
   ): Promise<{ cleared: boolean; held: string[]; error?: string }> {
     const result = await this.ctx.storage.transaction(async (txn) => {
+      if ((await this.getStagingMaintenance(txn))?.state === "held")
+        return { cleared: false, held: [], error: "staging maintenance requires explicit release" };
       const record = liveDrain(await txn.get(DRAIN_KEY), systemClock());
       if (record?.swapFence && !postUploadVersion(record, versionId, versionTimestamp))
         return { cleared: false, held: [], error: "deploy-fence: the pre-upload Worker cannot reopen the fleet" };
-      if (record?.swapFence && (await txn.list({ prefix: DEPLOY_ADMISSION_KEY_PREFIX })).size > 0)
+      if (record?.swapFence && (await this.getDeployObligations(txn)).blocking > 0)
         return { cleared: false, held: [], error: "deploy-fence: admitted work has not settled" };
       if (record !== null) {
         const lift = liftDrain(record);
@@ -2538,10 +2958,14 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  drain lifts here — the reopen fires on the last container's report. */
   async reportContainerImageCurrent(resource: string): Promise<{ lifted: boolean }> {
     const lifted = await this.ctx.storage.transaction(async (txn) => {
+      const maintenance = await this.getStagingMaintenance(txn);
       const record = liveDrain(await txn.get(DRAIN_KEY), systemClock());
       if (record === null) return false;
       const report = reportImageCurrent(record, resource);
-      if (report.record === null) return txn.delete(DRAIN_KEY);
+      if (report.record === null) {
+        if (maintenance?.state === "held") return false;
+        return txn.delete(DRAIN_KEY);
+      }
       await txn.put(DRAIN_KEY, report.record);
       return false;
     });
@@ -2558,6 +2982,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
    *  posted `below` like a clear — whoever forgot the drain, the plane's
    *  window lifts. A drain replaced with a later `until` re-arms via setDrain. */
   async alarm(): Promise<void> {
+    if ((await this.getStagingMaintenance())?.state === "held") return;
     const result = await this.ctx.storage.transaction(async (txn) => {
       const now = systemClock();
       const stored = await txn.get(DRAIN_KEY);
@@ -14304,6 +14729,10 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/recover-native-operation": { scope: "admin", method: "POST" }, // exact journal plus original native receipt
   "/recover-admission": { scope: "admin", method: "POST" }, // legacy requests refuse without mutation
   "/recover-quoted-admission": { scope: "admin", method: "POST" }, // original record plus operator evidence
+  "/staging-maintenance": { scope: "read", method: "GET" },
+  "/staging-abandon-admission": { scope: "admin", method: "POST" },
+  "/staging-release-maintenance": { scope: "admin", method: "POST" },
+  "/staging-seal-window": { scope: "drain", method: "POST" },
   "/undrain": { scope: "drain", method: "POST" }, // reopen it
   "/reconcile": { scope: "drain", method: "POST" }, // reconcile every container onto the current image, inside the drain window
   "/residents": { scope: "read", method: "GET" }, // admin implied; read-only bearer allowed
@@ -14437,6 +14866,8 @@ export default {
       try {
         switch (url.pathname) {
           case "/register":
+            if ((await registryStub(env).getStagingMaintenance())?.state === "held")
+              return json({ error: "staging maintenance blocks registration" }, 409);
             return await handleOnboard(env, { ...body, noResident: true });
           case "/replicas":
             return await withFleetAdmission(env, () => handleReplicas(env, body), {
@@ -14460,6 +14891,8 @@ export default {
               requesterScope: tokenScope(env, bearer),
             });
           case "/reconfigure":
+            if ((await registryStub(env).getStagingMaintenance())?.state === "held")
+              return json({ error: "staging maintenance blocks configuration changes" }, 409);
             return await handleReconfigure(env, body);
           case "/replica-rebuild":
           case "/rebuild":
@@ -14480,7 +14913,7 @@ export default {
           case "/drain":
             return await handleDrain(env, body);
           case "/deploy-fence":
-            return await handleDeployFence(env);
+            return await handleDeployFence(env, body.attempt);
           case "/deploy-admissions":
             return await handleDeployAdmissions(env, url);
           case "/replica-recover-native-operation":
@@ -14490,10 +14923,45 @@ export default {
             return json({ error: "legacy permit recovery is unavailable" }, 409);
           case "/recover-quoted-admission":
             return await handleRecoverAdmission(env, body);
+          case "/staging-maintenance":
+            return json({ maintenance: await registryStub(env).getStagingMaintenanceReadback() });
+          case "/staging-abandon-admission":
+            return await handleStagingAbandonment(env, body);
+          case "/staging-release-maintenance":
+            return await handleStagingMaintenanceRelease(env, body);
+          case "/staging-seal-window": {
+            const registry = registryStub(env);
+            let sealed: boolean;
+            try {
+              sealed = await registry.sealStagingWindow(
+                body.attempt,
+                workerVersionId(env),
+                workerVersionTimestamp(env),
+              );
+            } catch {
+              const selected = stagingAttemptSchema.safeParse(body.attempt);
+              emitDeployAdmission({
+                phase: "staging-seal-commit",
+                observedAt: systemClock(),
+                attemptId: selected.success ? selected.data.id : null,
+                commit: "unverified",
+                failure: "storage-or-rpc",
+                nativeOutcome: "unverified",
+              });
+              const receipt = await registry.getStagingMaintenanceReadback().catch(() => null);
+              const held = await registry.getStagingMaintenance().catch(() => null);
+              sealed =
+                held !== null &&
+                stagingAttemptMatches(held, body.attempt) &&
+                receipt?.state === "held" &&
+                receipt.window?.state === "completed";
+            }
+            return json({ sealed }, sealed ? 200 : 409);
+          }
           case "/undrain":
             return await handleUndrain(env);
           case "/reconcile":
-            return await handleReconcile(env);
+            return await handleReconcile(env, body.attempt);
           case "/residents":
             return await handleResidents(env);
           case "/debug-replica":
@@ -15128,7 +15596,7 @@ async function handleRebuild(env: Env, body: Record<string, unknown>): Promise<R
 async function handleDrain(env: Env, body: Record<string, unknown>): Promise<Response> {
   const parsed = parseDrainRequest(body, systemClock());
   if (!parsed.ok) return json({ error: parsed.error }, 400);
-  const record = await registryStub(env).setDrain(parsed.record);
+  const record = await registryStub(env).setDrain(parsed.record, body.attempt);
   if (!record) return json({ error: "deploy-fence: an upload already owns the fleet drain" }, 409);
   console.log(`[drain] fleet closed to new runs by ${record.by} for ${record.reason}: until ${record.until}`);
   return json({ draining: record, planeOutbox: await registryStub(env).getDrainOutbox() });
@@ -15153,11 +15621,11 @@ async function handleUndrain(env: Env): Promise<Response> {
 
 /** Fence registered reattach, then read every resident. A refusal removes
  * only this attempt's fence; the drain still protects new admissions. */
-async function handleDeployFence(env: Env): Promise<Response> {
+async function handleDeployFence(env: Env, attempt?: unknown): Promise<Response> {
   const registry = registryStub(env);
   const versionId = workerVersionId(env);
   if (!workerVersionTimestamp(env)) return json({ error: "Worker version timestamp is unavailable" }, 503);
-  const fence = await registry.setDeployFence(versionId);
+  const fence = await registry.setDeployFence(versionId, attempt);
   if (fence === null)
     return json({ error: "deploy-fence requires a live fleet drain with time for upload and readiness" }, 409);
   try {
@@ -15190,6 +15658,7 @@ async function handleDeployFence(env: Env): Promise<Response> {
       fenceReady: safe,
       activeAdmissions,
       admissionReadback,
+      stagingMaintenance: await registry.getStagingMaintenanceReadback(),
       deployDiagnostic: {
         schema: 1,
         producer: { build: BUILD_ID, workerVersion: versionId },
@@ -15218,10 +15687,104 @@ async function handleDeployAdmissions(env: Env, url: URL): Promise<Response> {
   return json({ admissions: await registryStub(env).listDeployAdmissions() });
 }
 
-/** Targeted recovery is deliberately manual. The operator supplies an
- * independent request-end receipt; the Worker fences new work, checks exact
- * run ownership and pool-user processes, then removes only the named permit.
- * The receipt is hashed for the audit row and never printed or stored raw. */
+/** Staging accepts the selected fixture risk without inventing an ending. */
+async function handleStagingAbandonment(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const id = body.id;
+  const expected = recoveryQuote(body.expectedStartedAt, body.expectedRecordSha256);
+  const selected = stagingAttemptSchema.safeParse(body.attempt);
+  if (typeof id !== "string" || !/^[0-9a-f-]{36}$/.test(id) || !expected || !selected.success)
+    return json({ error: "an exact stored request quote and selected staging attempt are required" }, 400);
+  const registry = registryStub(env);
+  const held = await registry.getStagingMaintenance();
+  if (
+    !held ||
+    !selectedStagingAttempt(held, selected.data, systemClock()) ||
+    body.expectedFixtureSha256 !== held.policy.fixtureSha256 ||
+    body.expectedDecisionSha256 !== held.policy.decisionSha256
+  )
+    return json({ error: "selected staging risk decision is unavailable" }, 409);
+  const versionId = workerVersionId(env);
+  if (!versionId) return json({ error: "Worker version metadata is unavailable" }, 503);
+  const fence = await registry.setDeployFence(versionId, selected.data);
+  if (!fence) return json({ error: "staging disposition requires a fresh selected deployment fence" }, 409);
+  let committed: boolean;
+  try {
+    committed = await registry.abandonStagingAdmission(
+      id,
+      expected,
+      selected.data,
+      body.expectedFixtureSha256,
+      body.expectedDecisionSha256,
+      versionId,
+    );
+  } catch {
+    emitDeployAdmission({ phase: "staging-risk-commit", id, observedAt: systemClock(), commit: "unverified" });
+    committed = await registry
+      .readStagingAbandonmentReceipt(
+        id,
+        expected,
+        selected.data,
+        body.expectedFixtureSha256,
+        body.expectedDecisionSha256,
+      )
+      .catch(() => false);
+    if (!committed) return json({ error: "staging risk decision outcome is unverified" }, 503);
+  }
+  if (!committed) {
+    await registry.clearDeployFence(fence.since, fence.until, versionId);
+    return json({ error: "stored request or staging decision changed; nothing excluded" }, 409);
+  }
+  return json({
+    id,
+    disposition: "operator-abandoned",
+    requestEnd: "unobserved",
+    nativeOutcome: "unverified",
+    maintenance: await registry.getStagingMaintenanceReadback(),
+  });
+}
+
+async function handleStagingMaintenanceRelease(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const quote = recoveryQuote(body.expectedStartedAt, body.expectedRecordSha256);
+  const attempt = stagingAttemptSchema.safeParse(body.attempt);
+  const decision = body.releaseDecisionSha256;
+  if (!quote || !attempt.success || typeof decision !== "string" || !/^[0-9a-f]{64}$/.test(decision))
+    return json({ error: "an exact request quote, selected attempt and fresh release decision are required" }, 400);
+  const registry = registryStub(env);
+  const held = await registry.getStagingMaintenance();
+  if (
+    !held ||
+    held.state !== "held" ||
+    !stagingAttemptMatches(held, attempt.data) ||
+    decision === held.policy.decisionSha256
+  )
+    return json({ error: "selected staging release decision is unavailable" }, 409);
+  const members = await registry.list();
+  const settled = await Promise.allSettled(
+    members.map(async (member) => ({
+      ...(await residentStub(env, residentAddress(member)).getResidentDeployInfo()),
+      ...(await residentStub(env, residentAddress(member)).getResidentRecoveryProbe()),
+    })),
+  );
+  if (!recoveryViewsAreIdle(settled.map((result) => (result.status === "fulfilled" ? result.value : null))))
+    return json({ error: "staging release requires idle owner, lifecycle and process evidence" }, 409);
+  let released: boolean;
+  try {
+    released = await registry.releaseStagingMaintenance(quote, attempt.data, decision);
+  } catch {
+    released = await registry.readStagingReleaseReceipt(attempt.data, decision).catch(() => false);
+    if (!released) return json({ error: "staging release outcome is unverified" }, 503);
+  }
+  if (!released) return json({ error: "staging release quote changed or another request remains" }, 409);
+  return json({
+    maintenance: await registry.getStagingMaintenanceReadback(),
+    requestEnd: "unobserved",
+    nativeOutcome: "unverified",
+    uploadWindowRenewed: false,
+  });
+}
+
+/** Request-ended recovery requires an independent ending receipt and idle
+ * owner, lifecycle and process views before deleting one quoted record. */
 async function handleRecoverAdmission(env: Env, body: Record<string, unknown>): Promise<Response> {
   const id = body.id;
   const evidence = body.evidence;
@@ -15337,12 +15900,12 @@ async function handleRecoverNativeOperation(env: Env, body: Record<string, unkno
  *  fresh container was VERIFIED on the deploy's image (issue 1931); one not
  *  verified — deferred, a failed fresh probe, an error — leaves a hold on the
  *  drain, so the fleet reopens only on that container's later report. */
-async function handleReconcile(env: Env): Promise<Response> {
+async function handleReconcile(env: Env, attempt?: unknown): Promise<Response> {
   const registry = registryStub(env);
   const admission = await beginTrackedDeployAdmission(
     registry,
     { kind: "reconcile", component: "http", build: BUILD_ID, workerVersion: workerVersionId(env) },
-    { versionId: workerVersionId(env), versionTimestamp: workerVersionTimestamp(env) },
+    { versionId: workerVersionId(env), versionTimestamp: workerVersionTimestamp(env), attempt },
   );
   if (!admission) return json({ error: "deploy-fence: reconcile waits for the uploaded Worker" }, 409);
   try {
@@ -15466,6 +16029,7 @@ async function handleResidents(env: Env): Promise<Response> {
     // The drain in force, or null (item 69): the deploy runner and the
     // dashboard read it here; the attach route reads the same record.
     draining: liveDrain(await registryStub(env).getDrain(), systemClock()),
+    stagingMaintenance: await registryStub(env).getStagingMaintenanceReadback(),
     residents: enriched,
   });
 }

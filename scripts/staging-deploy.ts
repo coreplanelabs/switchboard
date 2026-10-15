@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseAppConfigText } from "../src/config.js";
 import { loadProfileOnHost, readConfigForPush } from "../src/deploy/run.js";
-import { stagingProblems } from "../src/deploy/staging.js";
+import { stagingProblems, waitForStagingMaintenanceRelease } from "../src/deploy/staging.js";
+import { systemClock } from "../src/core/trace/clock.js";
 
 const args = process.argv.slice(2);
 const selection: string[] = [];
 let check = false;
 let initialize = false;
+let retainMaintenance = false;
 let receiptPath: string | undefined;
 let resumeMemory: string | undefined;
 for (let i = 0; i < args.length; i++) {
@@ -25,6 +27,7 @@ for (let i = 0; i < args.length; i++) {
     else if (arg === "--resume-memory" && !resumeMemory) resumeMemory = args[++i];
     else throw new Error("duplicate initialization receipt option");
   } else if (arg === "--initialize" && !initialize && selection.length === 0) initialize = true;
+  else if (arg === "--retain-maintenance" && !retainMaintenance && !initialize) retainMaintenance = true;
   else if (arg === "--check" && !check) check = true;
   else if (arg === "--affected" && !initialize && selection.length === 0) selection.push(arg);
   else if (
@@ -39,8 +42,13 @@ for (let i = 0; i < args.length; i++) {
       "staging:deploy accepts --check, --initialize, or --affected/--only <Worker list>; preflight bypass is not supported",
     );
 }
+if (retainMaintenance && initialize) throw new Error("retained maintenance cannot initialize a new installation");
 if (!process.env.SWITCHBOARD_DEPLOY_PROFILE) throw new Error("SWITCHBOARD_DEPLOY_PROFILE must explicitly name staging");
 const loaded = await loadProfileOnHost();
+if (retainMaintenance && !loaded.profile.residentMaintenance)
+  throw new Error("retained maintenance requires a selected staging Resident policy");
+if (loaded.profile.residentMaintenance && !retainMaintenance)
+  throw new Error("selected staging maintenance requires --retain-maintenance");
 const config = await readConfigForPush(loaded.profile.configSource);
 if (!config.ok) throw new Error(config.problem);
 const problems = stagingProblems(loaded.profile, parseAppConfigText(config.text), {
@@ -72,7 +80,17 @@ if (!check && initialize) {
     for (const verb of ["plan", "all"]) {
       const result = spawnSync(
         "npm",
-        ["run", "--silent", "cli", "--", "deploy", verb, ...selection, "--allow-branch"],
+        [
+          "run",
+          "--silent",
+          "cli",
+          "--",
+          "deploy",
+          verb,
+          ...selection,
+          "--allow-branch",
+          ...(retainMaintenance ? ["--retain-maintenance"] : []),
+        ],
         {
           env,
           stdio: "inherit",
@@ -80,6 +98,25 @@ if (!check && initialize) {
       );
       if (result.error) throw result.error;
       if (result.status !== 0) throw new Error(`staging deploy ${verb} failed (${result.status})`);
+    }
+    if (retainMaintenance && loaded.profile.residentMaintenance) {
+      const policy = loaded.profile.residentMaintenance;
+      const token =
+        process.env.RESIDENT_READ_TOKEN || process.env.RESIDENT_ADMIN_TOKEN || process.env.RESIDENT_OPERATOR_TOKEN;
+      if (!token) throw new Error("staging maintenance release wait requires an existing read bearer");
+      console.log("Staging image is ready under maintenance. Validation waits for explicit operator release.");
+      await waitForStagingMaintenanceRelease(policy, {
+        now: systemClock,
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        read: async (timeoutMs) => {
+          const response = await fetch(new URL("/staging-maintenance", policy.residentOrigin), {
+            headers: { authorization: `Bearer ${token}` },
+            signal: AbortSignal.timeout(timeoutMs),
+          });
+          if (!response.ok) throw new Error(`staging maintenance read refused: HTTP ${response.status}`);
+          return response.json();
+        },
+      });
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });

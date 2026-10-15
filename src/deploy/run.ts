@@ -17,6 +17,7 @@ import {
   type PagingObserver,
 } from "./pagingDiagnostic.js";
 import { spawn, execFileSync } from "node:child_process";
+import { maintenanceProfileMaterial } from "./profile.js";
 import { MINUTE_MS } from "../core/budgets.js";
 import {
   DRAINED_GAVE_UP_SUFFIX,
@@ -38,6 +39,7 @@ import {
   RESIDENT_READY_WAIT_MS,
   residentWorkerProblem,
   residentRegistryProblem,
+  residentMaintenanceProblem,
   residentImageReportsProblem,
   reconciledResources,
 } from "./residentReadiness.js";
@@ -1937,12 +1939,16 @@ async function deployStepTraced(
   root: Span,
   onUploadState: (mayHaveUploaded: boolean) => void,
 ): Promise<StepOutcome> {
+  if (step.maintenance && step.maintenance.attempt.sourceCommit !== expectedCommit)
+    return { ok: false, live: "not deployed", reason: "selected staging source does not match the upload" };
   const started = deps.now();
   // A step may carry its own budget (the resident's, sized for runs and a
   // provisioning rather than a rollout — plan.ts RESIDENT_WAIT_MAX_MS). A
   // drained fleet (release-and-deploy item 31) waits past a run's whole lease
   // instead: the wait ends when the runs in flight end, and nothing new lands.
   const drain = await beginDrain(step, expectedCommit, io, deps);
+  if (step.maintenance && !drain.drained)
+    return { ok: false, live: "not deployed", reason: "selected staging drain was not acknowledged" };
   let residentBefore: Read<AppState> | undefined;
   let residentPrintedTarget: RolloutTarget | null | undefined;
   const waitMaxMs = drain.drained
@@ -2069,7 +2075,8 @@ async function deployStepTraced(
       }
     }
   } finally {
-    if (drain.attempted && safeToLift) await endDrain(step, drain, io, deps);
+    if (step.maintenance) io.log("[deploy:all] resident: staging maintenance stays held for explicit release");
+    else if (drain.attempted && safeToLift) await endDrain(step, drain, io, deps);
     else if (drain.attempted)
       io.log(
         `[deploy:all] resident: ${drain.drained ? "fleet stays closed" : "any drain that landed stays closed"} — the uploaded image is not reconciled; verify the image and lift with the drain bearer, or wait for the drain backstop${drain.until ? ` at ${drain.until}` : ""}`,
@@ -2086,6 +2093,24 @@ async function deployStepTraced(
       retryImageReconcile,
     );
     if (problem) return residentNotReady(result, problem);
+    if (step.maintenance) {
+      if (!step.forcedBy) {
+        const bearer = step.drain ? deps.env[step.drain.tokenEnv] : undefined;
+        if (!step.drain || !bearer || !deps.postJson)
+          return residentNotReady(result, "selected staging completion receipt is unavailable");
+        const sealed = await deps.postJson(new URL("/staging-seal-window", step.drain.url).toString(), bearer, {
+          attempt: {
+            ...step.maintenance.attempt,
+            holdId: step.maintenance.holdId,
+            generation: step.maintenance.generation,
+          },
+        });
+        if ("error" in sealed || sealed.status !== 200 || sealed.body.sealed !== true)
+          return residentNotReady(result, "selected staging upload window could not be sealed");
+      }
+      io.log("[deploy:all] resident: uploaded, image-ready, maintenance held");
+      return { ...result, live: "uploaded, image-ready, maintenance held" };
+    }
     io.log("[deploy:all] resident: live — exact Worker commit, registry undrained, every image report current");
     return { ...result, live: "live" };
   }
@@ -2172,7 +2197,10 @@ async function waitForResident(
     if (deps.signal?.aborted) return "deployment cancelled";
     const problems = [
       residentWorkerProblem(health, expectedCommit),
-      registry && residentRegistryProblem(registry, resources),
+      registry &&
+        (step.maintenance
+          ? residentMaintenanceProblem(registry, step.maintenance, resources, step.forcedBy !== undefined)
+          : residentRegistryProblem(registry, resources)),
     ].filter(Boolean);
     if (problems.length === 0 && deps.now() <= deadline) return undefined;
     problem = problems.join("; ") || "readback arrived after the readiness deadline";
@@ -2219,11 +2247,18 @@ async function beginDrain(
     io.log(drainSkippedLine(step.name, step.drain.tokenEnv));
     return { attempted: false, drained: false, until: undefined };
   }
-  const answer = await deps.postJson(
-    drainUrl(step.drain.url),
-    bearer,
-    drainBody(RESIDENT_DRAINED_WAIT_MAX_MS, expectedCommit),
-  );
+  const answer = await deps.postJson(drainUrl(step.drain.url), bearer, {
+    ...drainBody(RESIDENT_DRAINED_WAIT_MAX_MS, expectedCommit),
+    ...(step.maintenance
+      ? {
+          attempt: {
+            ...step.maintenance.attempt,
+            holdId: step.maintenance.holdId,
+            generation: step.maintenance.generation,
+          },
+        }
+      : {}),
+  });
   io.log(drainBeganLine(step.name, answer));
   return { attempted: true, drained: drainSet(answer), until: drainUntil(answer) };
 }
@@ -2241,7 +2276,19 @@ async function reconcileFleet(
   if (deps.signal?.aborted) return;
   const bearer = step.drain ? deps.env[step.drain.tokenEnv] : undefined;
   if (!step.drain || !bearer || !deps.postJson) return;
-  const answer = await deps.postJson(reconcileUrl(step.drain.url), bearer, {});
+  const answer = await deps.postJson(
+    reconcileUrl(step.drain.url),
+    bearer,
+    step.maintenance
+      ? {
+          attempt: {
+            ...step.maintenance.attempt,
+            holdId: step.maintenance.holdId,
+            generation: step.maintenance.generation,
+          },
+        }
+      : {},
+  );
   if (log) io.log(reconcileLine(step.name, answer));
   return answer;
 }
@@ -2561,6 +2608,19 @@ async function runSelectedDeployPlan(
   // lives. Read and validated HERE, before any Worker deploys: an unreadable
   // source or an invalid config is a refusal up front, not a bot that fails to
   // start after the memory Worker has already rolled.
+  const maintenance = plan.steps.find((step) => step.maintenance)?.maintenance;
+  let selectedConfig: Extract<ConfigRead, { ok: true }> | undefined;
+  if (maintenance) {
+    if (
+      maintenance.attempt.sourceCommit !== expectedCommit ||
+      sha256Hex(maintenanceProfileMaterial(plan.profile.selection)) !== maintenance.attempt.profileSha256
+    )
+      return { kind: "refused", problems: ["selected staging source or frozen profile changed"] };
+    const config = await readConfigForPush(plan.config.source);
+    if (!config.ok || sha256Hex(config.text) !== maintenance.attempt.configSha256)
+      return { kind: "refused", problems: ["selected staging configuration changed or is unavailable"] };
+    selectedConfig = config;
+  }
   let configPublication: PreparedConfigPublication | undefined;
   let configSource: ConfigSourceObservation | undefined;
   const stateWorkerUrl = plan.config.stateWorkerUrl;
@@ -2570,7 +2630,7 @@ async function runSelectedDeployPlan(
         "[deploy:all] config: the profile has no state Worker — nothing is pushed; the bot reads SWITCHBOARD_CONFIG",
       );
     } else {
-      const read = await readConfigForPush(plan.config.source);
+      const read = selectedConfig ?? (await readConfigForPush(plan.config.source));
       if (cancelled()) return { kind: "refused", problems: ["deployment cancelled"] };
       if (!read.ok) return { kind: "refused", problems: [read.problem] };
       const identity = parseConfigConsumerIdentity(JSON.stringify({ commit: expectedCommit }));

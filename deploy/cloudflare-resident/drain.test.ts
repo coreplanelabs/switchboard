@@ -21,6 +21,18 @@ import {
 } from "./drain";
 import { DRAIN } from "../../src/core/budgets";
 import { methodOf, readSource } from "./testing/sourceScan";
+import { TEST_MAINTENANCE } from "../../src/deploy/testing/profile.js";
+import {
+  deployObligations,
+  liveMaintenanceWindow,
+  maintenanceRecordSchema,
+  releaseWindowSchema,
+  stagingMaintenanceSchema,
+  stagingAttemptSchema,
+  selectedStagingAttempt,
+  stagingAttemptMatches,
+  abandonmentAuditSchema,
+} from "./admissionRisk.js";
 
 describe("global deploy admission evidence", () => {
   function fixture() {
@@ -45,6 +57,8 @@ describe("global deploy admission evidence", () => {
             "workerVersionTimestamp",
             "handleDeployFence",
             "handleRecoverAdmission",
+            "handleStagingAbandonment",
+            "handleStagingMaintenanceRelease",
             "handleDeployAdmissions",
             "bearerToken",
             "timingSafeEqual",
@@ -71,6 +85,18 @@ describe("global deploy admission evidence", () => {
       (node) => ts.isMethodDeclaration(node) && node.name.getText(ast) === "fetch",
     )!;
     const methods = [
+      "initializeStagingMaintenance",
+      "abandonStagingAdmission",
+      "readStagingAbandonmentReceipt",
+      "getStagingMaintenance",
+      "getDeployObligations",
+      "getStagingMaintenanceReadback",
+      "releaseStagingMaintenance",
+      "readStagingReleaseReceipt",
+      "setDrain",
+      "clearDrain",
+      "reportContainerImageCurrent",
+      "alarm",
       "beginDeployAdmission",
       "beginDeployReconcileAdmission",
       "endDeployAdmission",
@@ -110,6 +136,7 @@ describe("global deploy admission evidence", () => {
     let onRecoveryProbe = () => {};
     let recoveryView = { state: "warm", executingRuns: 0, unknownRuns: 0 };
     const storage = {
+      setAlarm: async (_at: number) => {},
       get: async (key: string) => rows.get(key),
       put: async (key: string, value: unknown) => {
         if (failOrigin) throw new Error("private-origin-error");
@@ -181,6 +208,18 @@ describe("global deploy admission evidence", () => {
         recoveryEvidenceUrl,
         recoveryViewsAreIdle,
         admissionRecordHash,
+        deployObligations,
+        liveMaintenanceWindow,
+        maintenanceRecordSchema,
+        releaseWindowSchema,
+        stagingMaintenanceSchema,
+        stagingAttemptSchema,
+        selectedStagingAttempt,
+        stagingAttemptMatches,
+        liftDrain,
+        reportImageCurrent,
+        staleHolds,
+        abandonmentAuditSchema,
         recoveryQuote,
         STREAMED_ROUTES: new Set(),
         tracer: {},
@@ -193,6 +232,9 @@ describe("global deploy admission evidence", () => {
         RESOURCE_KEY: "resource",
         DEPLOY_RELEASE_RECEIPTS_KEY: "deploy:release-receipts",
         DEPLOY_RECOVERY_KEY_PREFIX: "deploy:recovered:",
+        STAGING_MAINTENANCE_KEY: "deploy:staging-maintenance",
+        STAGING_WINDOW_KEY: "deploy:staging-window",
+        DEPLOY_ABANDONED_KEY_PREFIX: "deploy:abandoned:",
         console: {
           log: (line: string) => {
             if (line.startsWith("[resident-deploy-admission] "))
@@ -202,6 +244,11 @@ describe("global deploy admission evidence", () => {
       },
     );
     const api = new Registry();
+    api.pushDrainPost = async () => {};
+    api.env = {
+      CLOUDFLARE_ACCOUNT_ID: TEST_MAINTENANCE.stagingAccount,
+      RESIDENT_SCRIPT_NAME: TEST_MAINTENANCE.residentScript,
+    };
     api.ctx = { storage };
     api.list = async () => [{ resource: "repo:acme/api" }];
     let recoveryMutations = 0;
@@ -336,6 +383,195 @@ describe("global deploy admission evidence", () => {
     expectedStartedAt: 1000,
     expectedRecordSha256: "a81747d391ba39d7ed7e15e4b633483a6104f8c6f9318d5548a2589a3f22ab6a",
   };
+
+  it("excludes only the exact staging record while retaining its original data and unknown result", async () => {
+    const h = fixture();
+    const policy = { ...TEST_MAINTENANCE, attempt: { ...TEST_MAINTENANCE.attempt, deadline: 3_600_000 } };
+    const original = { startedAt: 1000, kind: "watchdog" };
+    const originalRecordSha256 = await admissionRecordHash(original);
+    const fence = {
+      since: "1970-01-01T00:00:00.000Z",
+      until: "1970-01-01T01:00:00.000Z",
+      versionId: "00000000-0000-4000-8000-000000000002",
+    };
+    h.rows.set("deploy:staging-maintenance", { schema: 1, state: "held", installedAt: 1000, policy });
+    h.rows.set(`deploy:admission:${recoveryRequest.id}`, original);
+    h.rows.set(`deploy:abandoned:${recoveryRequest.id}`, {
+      schema: 1,
+      id: recoveryRequest.id,
+      disposition: "operator-abandoned",
+      requestEnd: "unobserved",
+      nativeOutcome: "unverified",
+      independentObligations: "unchanged",
+      policy,
+      originalRecord: original,
+      originalRecordSha256,
+      decidedAt: 1000,
+      fence,
+    });
+    h.rows.set("deploy:staging-window", {
+      schema: 1,
+      state: "fenced",
+      recordId: recoveryRequest.id,
+      holdId: policy.holdId,
+      generation: 1,
+      attemptId: policy.attempt.id,
+      drain: fence,
+    });
+    h.rows.set("drain", { ...fence, swapFence: true, swapVersion: fence.versionId });
+    expect(await h.api.activeDeployAdmissions()).toBe(0);
+    h.rows.set(`deploy:admission:${identity.id}`, { startedAt: 1000 });
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+    expect(h.rows.get(`deploy:admission:${recoveryRequest.id}`)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    expect(h.rows.get(`deploy:abandoned:${recoveryRequest.id}`)).toMatchObject({
+      requestEnd: "unobserved",
+      nativeOutcome: "unverified",
+      independentObligations: "unchanged",
+    });
+  });
+
+  it("installs a durable hold that refuses new work after ordinary drain removal", async () => {
+    const h = fixture();
+    const policy = { ...TEST_MAINTENANCE, attempt: { ...TEST_MAINTENANCE.attempt, deadline: 3_600_000 } };
+    h.api.env.RESIDENT_MAINTENANCE_POLICY = JSON.stringify(policy);
+    await h.api.initializeStagingMaintenance();
+    expect(await h.api.beginDeployAdmission(origin)).toBe(null);
+    h.rows.delete("drain");
+    delete h.api.env.RESIDENT_MAINTENANCE_POLICY;
+    expect(await h.api.beginDeployAdmission(origin)).toBe(null);
+    expect(h.rows.get("deploy:staging-maintenance")).toMatchObject({
+      state: "held",
+      policy: { holdId: "11111111-1111-4111-8111-111111111111" },
+    });
+  });
+
+  it("commits one exact staging abandonment audit without deleting the request", async () => {
+    const h = fixture();
+    const policy = { ...TEST_MAINTENANCE, attempt: { ...TEST_MAINTENANCE.attempt, deadline: 3_600_000 } };
+    h.api.env.RESIDENT_MAINTENANCE_POLICY = JSON.stringify(policy);
+    await h.api.initializeStagingMaintenance();
+    const original = { startedAt: 1000, kind: "watchdog" };
+    h.rows.set(`deploy:admission:${recoveryRequest.id}`, original);
+    h.rows.set("drain", {
+      since: "1970-01-01T00:00:00.000Z",
+      until: "1970-01-01T01:00:00.000Z",
+      swapFence: true,
+      swapVersion: "00000000-0000-4000-8000-000000000002",
+      swapBuild: "a".repeat(40),
+      swapAt: "1970-01-01T00:00:01.000Z",
+      reason: "release",
+      by: "selected-controller",
+    });
+    const quote = await h.api.getDeployAdmissionRecoveryQuote(recoveryRequest.id);
+    const attempt = { ...policy.attempt, holdId: policy.holdId, generation: 1 };
+    expect(
+      await h.api.abandonStagingAdmission(
+        recoveryRequest.id,
+        quote,
+        attempt,
+        policy.fixtureSha256,
+        policy.decisionSha256,
+        "00000000-0000-4000-8000-000000000002",
+      ),
+    ).toBe(true);
+    expect(h.rows.get(`deploy:admission:${recoveryRequest.id}`)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    expect(h.rows.get(`deploy:abandoned:${recoveryRequest.id}`)).toMatchObject({
+      disposition: "operator-abandoned",
+      requestEnd: "unobserved",
+      nativeOutcome: "unverified",
+      originalRecord: { startedAt: 1000, kind: "watchdog" },
+      originalRecordSha256: "a81747d391ba39d7ed7e15e4b633483a6104f8c6f9318d5548a2589a3f22ab6a",
+    });
+    expect(await h.api.activeDeployAdmissions()).toBe(0);
+  });
+
+  it("uses the authenticated HTTP risk path and releases only through a fresh decision after expiry", async () => {
+    const h = fixture();
+    const policy = { ...TEST_MAINTENANCE, attempt: { ...TEST_MAINTENANCE.attempt, deadline: 1500 } };
+    h.api.env.RESIDENT_MAINTENANCE_POLICY = JSON.stringify(policy);
+    await h.api.initializeStagingMaintenance();
+    h.rows.set(`deploy:admission:${recoveryRequest.id}`, { startedAt: 1000, kind: "watchdog" });
+    const attempt = { ...policy.attempt, holdId: policy.holdId, generation: 1 };
+    const body = {
+      ...recoveryRequest,
+      attempt,
+      expectedFixtureSha256: policy.fixtureSha256,
+      expectedDecisionSha256: policy.decisionSha256,
+    };
+    expect(
+      (await h.recover(body, () => {}, { path: "/staging-abandon-admission", token: "read-fixture" })).status,
+    ).toBe(401);
+    const committed = await h.recover(body, () => {}, { path: "/staging-abandon-admission" });
+    expect(committed.status).toBe(200);
+    expect(await committed.json()).toMatchObject({ disposition: "operator-abandoned", requestEnd: "unobserved" });
+    h.advance();
+    expect(await h.api.activeDeployAdmissions()).toBe(1);
+    expect(await h.api.clearDrain(null, null)).toMatchObject({
+      cleared: false,
+      error: "staging maintenance requires explicit release",
+    });
+    expect(await h.api.beginDeployAdmission(origin)).toBe(null);
+    const released = await h.recover({ ...body, releaseDecisionSha256: "7".repeat(64) }, () => {}, {
+      path: "/staging-release-maintenance",
+    });
+    expect(released.status).toBe(200);
+    expect(await released.json()).toMatchObject({ uploadWindowRenewed: false, requestEnd: "unobserved" });
+    expect(h.rows.get(`deploy:admission:${recoveryRequest.id}`)).toEqual({ startedAt: 1000, kind: "watchdog" });
+    expect(h.rows.get("deploy:staging-maintenance")).toMatchObject({
+      state: "released",
+      releaseDecisionSha256: "7".repeat(64),
+    });
+    await h.api.initializeStagingMaintenance();
+    expect(h.rows.get("deploy:staging-maintenance")).toMatchObject({ state: "released" });
+  });
+
+  it("keeps maintenance through ordinary alarm and last-image callbacks", async () => {
+    const h = fixture();
+    const policy = { ...TEST_MAINTENANCE, attempt: { ...TEST_MAINTENANCE.attempt, deadline: 3_600_000 } };
+    h.api.env.RESIDENT_MAINTENANCE_POLICY = JSON.stringify(policy);
+    await h.api.initializeStagingMaintenance();
+    h.rows.set("drain", {
+      since: "1970-01-01T00:00:00.000Z",
+      until: "1970-01-01T00:00:01.500Z",
+      holds: ["repo:acme/api"],
+      liftAsked: true,
+      reason: "release",
+      by: "controller",
+    });
+    expect(await h.api.reportContainerImageCurrent("repo:acme/api")).toEqual({ lifted: false });
+    h.advance();
+    await h.api.alarm();
+    expect(await h.api.beginDeployAdmission(origin)).toBe(null);
+    expect(h.rows.get("deploy:staging-maintenance")).toMatchObject({ state: "held" });
+  });
+
+  it("reports an uncertain seal without exposing raw errors or retrying it", async () => {
+    const h = fixture();
+    const policy = { ...TEST_MAINTENANCE, attempt: { ...TEST_MAINTENANCE.attempt, deadline: 3_600_000 } };
+    h.api.env.RESIDENT_MAINTENANCE_POLICY = JSON.stringify(policy);
+    await h.api.initializeStagingMaintenance();
+    let calls = 0;
+    h.api.sealStagingWindow = async () => {
+      calls++;
+      throw new Error("private-seal-detail");
+    };
+    const response = await h.recover(
+      { attempt: { ...policy.attempt, holdId: policy.holdId, generation: 1 } },
+      () => {},
+      { path: "/staging-seal-window" },
+    );
+    expect(response.status).toBe(409);
+    expect({ calls, event: h.events.at(-1) }).toMatchObject({
+      calls: 1,
+      event: {
+        phase: "staging-seal-commit",
+        commit: "unverified",
+        failure: "storage-or-rpc",
+        nativeOutcome: "unverified",
+      },
+    });
+    expect(JSON.stringify(h.events)).not.toContain("private-seal-detail");
+  });
 
   it("keeps an abandonment request held even with an upload URL and caller assertions", async () => {
     const h = fixture();
@@ -1477,7 +1713,9 @@ describe("the Worker's wiring (by scan)", () => {
     );
     // The reopen past the bound is a warning naming who never cycled, never a silence.
     expect(source).toMatch(/const stale = staleHolds\(stored, now\);/);
-    expect(source).toMatch(/async alarm\(\): Promise<void> \{\s*const result = await this\.ctx\.storage\.transaction/);
+    expect(source).toMatch(
+      /async alarm\(\): Promise<void> \{[\s\S]*?const result = await this\.ctx\.storage\.transaction/,
+    );
     expect(source).toMatch(/fleet reopened with \$\{result\.stale\.join\(", "\)\} still on the pre-deploy image/);
     // The provisioning report is exercised by the behavior tests above.
     // A typed op on a drained fleet answers with the drain instead of hanging.
@@ -1503,7 +1741,7 @@ describe("the Worker's wiring (by scan)", () => {
   it("the registry Durable Object stores the drain under its own key outside the `resident:` prefix and offers get, set, a gated clear, the deploy's holds and the per-container new-image report (issue 1931)", () => {
     expect(source).toMatch(/const DRAIN_KEY = "drain";/);
     expect(source).toMatch(/async getDrain\(\): Promise<unknown>/);
-    expect(source).toMatch(/async setDrain\(record: DrainRecord\): Promise<DrainRecord \| null>/);
+    expect(source).toMatch(/async setDrain\(record: DrainRecord, attempt\?: unknown\): Promise<DrainRecord \| null>/);
     expect(source).toContain("async clearDrain(");
     expect(source).toContain("versionTimestamp: string | null,");
     expect(source).toMatch(/async holdDrainFor\(resources: string\[\]\): Promise<void>/);
@@ -1519,7 +1757,6 @@ describe("the Worker's wiring (by scan)", () => {
       source.indexOf("/** The one alarm"),
     );
     expect(report).toMatch(/reportImageCurrent\(record, resource\)/);
-    expect(report).toMatch(/if \(report\.record === null\) return txn\.delete\(DRAIN_KEY\);/);
     expect(report).toMatch(/if \(lifted\) \{\s*await this\.pushDrainPost\("below"\);/);
   });
 
@@ -1555,7 +1792,7 @@ describe("the Worker's wiring (by scan)", () => {
 
   it("the reconcile route is a drain-scope POST dispatched to its handler, which asks every resident's Durable Object to cycle its container onto the current image and VERIFY the fresh start (issue 1931: 'reconciled' is not 'swapped') — an unverified resident holds the drain until its own report", () => {
     expect(source).toMatch(/"\/reconcile": \{ scope: "drain", method: "POST" \}/);
-    expect(source).toMatch(/case "\/reconcile":\s*\n\s*return await handleReconcile\(env\);/);
+    expect(source).toMatch(/case "\/reconcile":\s*\n\s*return await handleReconcile\(env, body\.attempt\);/);
     // The DO method never trusts the pool-user probe on the deploy path (the
     // pre-deploy image passes it when the pool did not change): the active
     // container is cycled (force), and only the replacement's completed

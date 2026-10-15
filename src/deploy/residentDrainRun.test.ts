@@ -15,6 +15,7 @@ import {
 } from "./residentDrain.js";
 import { RESIDENT_WAIT_MAX_MS, type DeployStep } from "./plan.js";
 import { deployStep, type SandboxGateDeps, type StepExec } from "./run.js";
+import { TEST_MAINTENANCE } from "./testing/profile.js";
 
 // Feature: docs/reference/specs/release-and-deploy.md item 31 — the resident
 // step drains the fleet before upload and lifts only after it can prove no
@@ -120,6 +121,76 @@ const exec =
     h.markUploaded();
     return { code: 0, output: DEPLOYED };
   };
+
+describe("retained staging deployment", () => {
+  const maintenance = {
+    ...TEST_MAINTENANCE,
+    attempt: { ...TEST_MAINTENANCE.attempt, sourceCommit: HEAD, deadline: 3_600_000 },
+  };
+  const step = { ...residentStep, maintenance, retryOnPreflightRefusal: false };
+  const registry = {
+    ...currentRegistry,
+    draining: drained.body.draining,
+    stagingMaintenance: {
+      schema: 1,
+      state: "held",
+      holdId: maintenance.holdId,
+      generation: 1,
+      fixtureSha256: maintenance.fixtureSha256,
+      decisionSha256: maintenance.decisionSha256,
+      attempt: maintenance.attempt,
+      window: {
+        state: "fenced",
+        blocking: 0,
+        stored: 1,
+        excluded: 1,
+        requestEnd: "unobserved",
+        nativeOutcome: "unverified",
+      },
+    },
+  };
+
+  it("returns image-ready under the exact hold without requesting undrain", async () => {
+    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn", RESIDENT_READ_TOKEN: "read" }, [
+      drained,
+      { status: 200, body: { sealed: true } },
+    ]);
+    h.deps.readAppState = async () => app;
+    h.deps.readHealth = async (url) => ({
+      status: 200,
+      body: url.endsWith("/residents") ? registry : { ok: true, build: { commit: HEAD } },
+    });
+    const result = await deployStep(step, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(result).toMatchObject({ ok: true, live: "uploaded, image-ready, maintenance held" });
+    expect(h.calls.filter((call) => call.dep === "postJson").map((call) => call.args[0])).toEqual([
+      "https://switchboard-resident.example.test/drain",
+      "https://switchboard-resident.example.test/staging-seal-window",
+    ]);
+  });
+
+  it("refuses a different source before upload and retains maintenance on cancellation", async () => {
+    const h = harness({ RESIDENT_DRAIN_TOKEN: "drn", RESIDENT_READ_TOKEN: "read" });
+    const wrong = await deployStep(step, plan, "b".repeat(40), h.io, h.deps, exec(h, 0));
+    expect(wrong).toMatchObject({
+      ok: false,
+      live: "not deployed",
+      reason: "selected staging source does not match the upload",
+    });
+    const control = new AbortController();
+    h.deps.signal = control.signal;
+    const original = h.deps.postJson!;
+    h.deps.postJson = async (...args) => {
+      const value = await original(...args);
+      control.abort();
+      return value;
+    };
+    const cancelled = await deployStep(step, plan, HEAD, h.io, h.deps, exec(h, 0));
+    expect(cancelled).toMatchObject({ ok: false, reason: "deployment cancelled" });
+    expect(h.calls.filter((call) => call.dep === "postJson").map((call) => call.args[0])).toEqual([
+      "https://switchboard-resident.example.test/drain",
+    ]);
+  });
+});
 
 describe("the pure pieces", () => {
   it("the drain asks for the drained wait plus the margin, named by the commit; `drainSet` and `drainUntil` read the answer", () => {

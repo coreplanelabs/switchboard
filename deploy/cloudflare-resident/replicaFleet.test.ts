@@ -314,6 +314,7 @@ describe("resident fleet lifecycle", () => {
         listRepositories: async () => registered,
         limits: async () => ({ cap: 5 }),
         getDrain: async () => null,
+        getStagingMaintenanceReadback: async () => null,
       }),
       residentStub: () => ({ getResidentInfo: async () => ({ state: "warm", inFlight: 0 }) }),
       json: (body: unknown) => Response.json(body),

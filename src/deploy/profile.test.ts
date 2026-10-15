@@ -9,7 +9,7 @@ import {
   PROFILE_EXAMPLE_PATH,
   profileUrls,
 } from "./profile.js";
-import { TEST_PROFILE } from "./testing/profile.js";
+import { TEST_PROFILE, TEST_MAINTENANCE, TEST_MAINTENANCE_PROFILE } from "./testing/profile.js";
 
 // The deployment profile: where an installation runs, as data the code reads
 // and never contains. Parsing names every problem by field; the URLs the
@@ -19,6 +19,32 @@ const root = fileURLToPath(new URL("../..", import.meta.url));
 const read = (p: string) => JSON.parse(readFileSync(new URL(p, `file://${root}`), "utf8")) as unknown;
 
 describe("parseProfile", () => {
+  it("keeps the exact selected staging maintenance policy and refuses production activation", () => {
+    expect(parseProfile(TEST_MAINTENANCE_PROFILE)).toMatchObject({
+      ok: true,
+      profile: { residentMaintenance: TEST_MAINTENANCE },
+    });
+    expect(parseProfile({ ...TEST_MAINTENANCE_PROFILE, account: TEST_MAINTENANCE.productionAccount })).toEqual({
+      ok: false,
+      problems: ["residentMaintenance: profile must use the selected staging account"],
+    });
+  });
+
+  it("refuses a maintenance policy whose selected Resident or scope differs from the profile", () => {
+    expect(
+      parseProfile({
+        ...TEST_MAINTENANCE_PROFILE,
+        residentMaintenance: { ...TEST_MAINTENANCE, residentOrigin: "https://elsewhere.test" },
+      }),
+    ).toEqual({ ok: false, problems: ["residentMaintenance: Resident script and origin must match the profile"] });
+    expect(
+      parseProfile({
+        ...TEST_MAINTENANCE_PROFILE,
+        residentMaintenance: { ...TEST_MAINTENANCE, productionAccount: TEST_MAINTENANCE.stagingAccount },
+      }),
+    ).toEqual({ ok: false, problems: ["residentMaintenance: staging and production accounts must differ"] });
+  });
+
   it("accepts the fixture and the committed example", () => {
     expect(parseProfile(TEST_PROFILE).ok).toBe(true);
     for (const p of [PROFILE_EXAMPLE_PATH]) {

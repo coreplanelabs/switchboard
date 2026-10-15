@@ -7,7 +7,12 @@ import { CommandRegistry, bindCommands, renderText, type Caller } from "../comma
 import { callerWith } from "../testing/callers.js";
 import { parseInvocation } from "../commandSurface.js";
 import { RESTART_TOKEN_ENV, type RestartPlan } from "../../deploy/restart.js";
-import { TEST_PROFILE, TEST_PUBLISHED_IMAGES, TEST_REGISTRY_PROFILE } from "../../deploy/testing/profile.js";
+import {
+  TEST_PROFILE,
+  TEST_PUBLISHED_IMAGES,
+  TEST_REGISTRY_PROFILE,
+  TEST_MAINTENANCE_PROFILE,
+} from "../../deploy/testing/profile.js";
 import { executionImageInputTags } from "../../deploy/imageInputs.js";
 import type { ImagesHostIO } from "../../deploy/imagesHost.js";
 import { containersEditProblem } from "../../deploy/registryTransfer.js";
@@ -259,6 +264,26 @@ describe("deploy.inspect public metadata", () => {
 });
 
 describe("deploy.plan", () => {
+  it("accepts the retained-maintenance CLI option only with a selected staging plan", async () => {
+    const { commands } = bind(
+      async () => {
+        throw new Error("plan must not upload");
+      },
+      () => true,
+      neverRestarts,
+      neverAffected,
+      async () => ({ ...LOADED, profile: TEST_MAINTENANCE_PROFILE }),
+    );
+    const invocation = parseInvocation(commands.get("deploy.plan")!, ["--only", "resident", "--retain-maintenance"]);
+    if (invocation.kind !== "invoke") throw new Error("retained-maintenance option was refused");
+    const actual = await commands.invoke("deploy.plan", invocation.input, cli);
+    if (!actual.ok) throw new Error(actual.message);
+    expect(actual.value).toMatchObject({
+      force: false,
+      steps: [{ name: "resident", maintenance: { holdId: "11111111-1111-4111-8111-111111111111" } }],
+    });
+  });
+
   it("computes the canonical plan (memory → bot → resident → sandbox) with the bot's live gate, and renders formatPlan", async () => {
     const { commands } = neverRuns();
     const res = await commands.invoke("deploy.plan", {}, admin);

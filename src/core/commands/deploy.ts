@@ -166,6 +166,7 @@ const deployOptions = z.object({
       "bypass the bot/resident preflights — deploy over a rollout in progress, or blind when a Worker cannot be consulted (in-flight bot runs hand off regardless)",
     ),
   allowBranch: flag.optional().describe("deploy from a branch other than origin/main (deliberately)"),
+  retainMaintenance: flag.optional().describe("keep the selected staging Resident closed after upload"),
   waitMax: positiveInt
     .optional()
     .describe("minutes to wait out a refusing preflight — a container rollout still settling (default 10)"),
@@ -184,6 +185,7 @@ function toOptions(
     dryRun,
     force: o.force ?? false,
     allowBranch: o.allowBranch ?? false,
+    ...(o.retainMaintenance ? { retainMaintenance: true } : {}),
     waitMaxMinutes: o.waitMax ?? 10,
     pollSeconds: o.poll ?? 60,
   };
@@ -217,7 +219,17 @@ async function computePlan(
     ? await deps.deploy.affected(options.base !== undefined ? { base: options.base } : {})
     : undefined;
   const images = await imagesInput(loaded, deps, dryRun);
-  const plan = planDeploy(toOptions(options, dryRun, affected), deps.deploy.host, loaded, images);
+  let plan: DeployPlan;
+  try {
+    plan = planDeploy(toOptions(options, dryRun, affected), deps.deploy.host, loaded, images);
+  } catch (error) {
+    throw new CommandError(
+      "invalid_input",
+      `${options.retainMaintenance ? "--retain-maintenance: " : ""}${
+        error instanceof Error ? error.message : "deployment plan is unavailable"
+      }`,
+    );
+  }
   if (plan.steps.length === 0 && !affected)
     throw new CommandError("invalid_input", "nothing to deploy after --only/--skip filters");
   return { plan, loaded, images, affected };

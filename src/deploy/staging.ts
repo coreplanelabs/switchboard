@@ -1,6 +1,48 @@
 import type { AppConfig } from "../config.js";
 import type { DeploymentProfile } from "./profile.js";
 import { EXAMPLE_ACCOUNT, WORKER_KINDS } from "./profile.js";
+import { DRAIN } from "../core/budgets.js";
+import { stagingAttemptMatches, type StagingMaintenancePolicy } from "./residentMaintenance.js";
+
+/** The existing CI controller waits for an explicit release. A missing or
+ * changed receipt stops it; this function never changes maintenance. */
+export async function waitForStagingMaintenanceRelease(
+  policy: StagingMaintenancePolicy,
+  io: { now(): number; read(timeoutMs: number): Promise<unknown>; sleep(ms: number): Promise<void> },
+): Promise<void> {
+  while (io.now() < policy.attempt.deadline) {
+    const response = await io.read(Math.min(DRAIN.pollMs, policy.attempt.deadline - io.now()));
+    const held = response && typeof response === "object" && "maintenance" in response ? response.maintenance : null;
+    if (
+      !held ||
+      typeof held !== "object" ||
+      !("state" in held) ||
+      !("attempt" in held) ||
+      !("holdId" in held) ||
+      !("generation" in held) ||
+      !("fixtureSha256" in held) ||
+      held.fixtureSha256 !== policy.fixtureSha256 ||
+      !stagingAttemptMatches(
+        { policy },
+        { ...(held.attempt as Record<string, unknown>), holdId: held.holdId, generation: held.generation },
+      )
+    )
+      throw new Error("selected staging maintenance readback is unavailable or changed");
+    if (
+      held.state === "released" &&
+      "releaseDecisionSha256" in held &&
+      typeof held.releaseDecisionSha256 === "string" &&
+      /^[0-9a-f]{64}$/.test(held.releaseDecisionSha256) &&
+      held.releaseDecisionSha256 !== policy.decisionSha256 &&
+      io.now() < policy.attempt.deadline
+    )
+      return;
+    if (held.state !== "held") throw new Error("explicit staging release decision is unverified");
+    const left = policy.attempt.deadline - io.now();
+    if (left > 0) await io.sleep(Math.min(DRAIN.pollMs, left));
+  }
+  throw new Error("staging release deadline expired; maintenance was not released by this controller");
+}
 
 /** Staging is a separate installation. Refuse incomplete isolation before any upload. */
 export function stagingProblems(
@@ -16,6 +58,12 @@ export function stagingProblems(
   if (!accounts.staging || !accounts.production) problems.push("both staging and production accounts are required");
   if (accounts.staging === accounts.production) problems.push("staging must use a separate Cloudflare account");
   if (profile.account !== accounts.staging) problems.push("profile account does not match the staging account");
+  if (
+    profile.residentMaintenance &&
+    (profile.residentMaintenance.stagingAccount !== accounts.staging ||
+      profile.residentMaintenance.productionAccount !== accounts.production)
+  )
+    problems.push("residentMaintenance must match the independently configured staging and production accounts");
   if (profile.images !== "build") problems.push("staging candidates require images: build");
   for (const kind of WORKER_KINDS) {
     const worker = profile.workers[kind];
