@@ -202,7 +202,14 @@ function wireCommands(deps: TestDeps, capabilities?: TestDeps["capabilities"]): 
       createSteerSender({
         config: deps.config,
         runLedger: deps.runLedger,
-        runs: { getById: (id) => (deps.runRegistry ?? defaultRunRegistry).getById(id) },
+        runs: {
+          getById: async (id) => {
+            const local = (deps.runRegistry ?? defaultRunRegistry).getById(id);
+            if (local) return local;
+            const result = await deps.runs?.getRun(id);
+            return result?.ok ? result.value : null;
+          },
+        },
         admission: { get: (k) => (deps.admission ?? defaultAdmission).get(k) },
       }),
   });
@@ -30142,6 +30149,51 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     expect(replies).toEqual([]);
     expect(replies.some((reply) => reply.includes("To run this:"))).toBe(false);
   });
+
+  it.each(["typed", "operator"] as const)(
+    "at quiet: %s steering reports a saved message awaiting checkpoint recovery",
+    async (path) => {
+      const { deps, registry, provider } = operatorDeps(path === "typed" ? YAML_FIXTURE : ON_YAML);
+      await deps.config.setChannelOverride("slack:CX", { verbosity: "quiet" });
+      const ledger = new InMemoryRunLedger(() => 10_000);
+      const store = new InMemoryRunStore();
+      await ledger.claim({
+        runId: "paused-review",
+        threadKey: "slack:CX:22.0",
+        gen: "g-held",
+        leaseMs: 30_000,
+        startedAt: 10_000,
+        meta: { channelId: "slack:CX", userId: "slack:UADMIN", threadKey: "slack:CX:22.0", agent: "review" },
+        card: null,
+        system: "sys",
+        tools: [],
+      });
+      await ledger.append("paused-review", "g-held", [
+        { type: "run_note", kind: "checkpoint_deferred", summary: "Original work remains held.", at: 10_000, seq: 1 },
+      ]);
+      deps.runStore = store;
+      deps.runLedger = createLedgerWriteThrough({ ledger, gen: "g-test", fallback: store, warn: () => {} });
+      deps.runs = createRunsService({ registry, store, ledger });
+      wireCommands(deps);
+      const line = "steer run paused-review also cover the docs";
+      if (path === "operator")
+        deps.operatorModel = decides({
+          reason: "update the held review",
+          binds: [{ line, reason: "names the review" }],
+        });
+      const { io, replies } = fakeIO();
+
+      await dispatch(deps, msg(path === "typed" ? line : "tell the review to also cover the docs", "slack:UADMIN"), io);
+
+      expect(replies).toEqual([
+        "↪ Saved your message for the *review* work (paused-review). This run is paused for storage recovery; your message does not resume it.",
+      ]);
+      expect(await ledger.readInbox("paused-review", 0)).toMatchObject([
+        { seq: 1, message: { text: "also cover the docs", target: { runId: "paused-review", producerGen: "g-held" } } },
+      ]);
+      expect(provider.requests).toEqual([]);
+    },
+  );
 
   it("on at verbose: a plain reply's steer resolves to the live owner, keeps its receipt, and never uses the finished transcript id", async () => {
     const { deps, registry } = operatorDeps(ON_YAML);

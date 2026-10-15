@@ -16,12 +16,14 @@ import { CommandError, commandDefiner, type CommandRegistry } from "../commandRe
 // is ITS gate, decided against the named run, which the command door cannot
 // see. The caller rides whole so the sender can ask it.
 
+export type SteerReceipt = string | { text: string; recoveryPending: true };
+
 export interface SteerCommandDeps {
   /** Absent — no sender wired in this process — the command answers
    *  `unavailable` by name. */
   steer?: {
     /** Fold the words into the named run's inbox at its next boundary; answers
-     *  the receipt line. Throws `CommandError` when the run is unknown, has
+     *  the receipt line or a typed recovery hold. Throws `CommandError` when the run is unknown, has
      *  ended, or the caller may not steer it (the owner rule). */
     send(
       runId: string,
@@ -33,7 +35,7 @@ export interface SteerCommandDeps {
         name?: string;
         origin?: { channelId: string; threadKey: string; directAudience?: import("../types.js").SlackDirectAudience };
       },
-    ): Promise<string>;
+    ): Promise<SteerReceipt>;
   };
 }
 
@@ -60,9 +62,14 @@ export const steerRun = defineCommand({
   },
   describe: "Fold words into a live run at its next step boundary, by run id.",
   render: (o) => String((o as { text?: unknown }).text ?? ""),
+  renderChat: (o, display) => {
+    const receipt = o as { text?: unknown; recoveryPending?: unknown };
+    if (display?.verbosity === "quiet" && receipt.recoveryPending !== true) return "";
+    return String(receipt.text ?? "");
+  },
   handler: async ({ args, caller, deps }) => {
     if (!deps.steer) throw new CommandError("unavailable", STEER_UNAVAILABLE);
-    const text = await deps.steer.send(args.id, args.words, {
+    const receipt = await deps.steer.send(args.id, args.words, {
       kind: caller.kind,
       id: caller.id,
       actor: caller.actor,
@@ -77,7 +84,7 @@ export const steerRun = defineCommand({
           }
         : {}),
     });
-    return { runId: args.id, text };
+    return { runId: args.id, ...(typeof receipt === "string" ? { text: receipt } : receipt) };
   },
 });
 

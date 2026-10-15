@@ -1726,6 +1726,64 @@ describe("createSteerSender — the wired sender behind `steer.run` (the one-doo
     ]);
   });
 
+  it.each([false, true])(
+    "reports a checkpoint hold after saving a named steer (handoff confirmed: %s)",
+    async (handedOff) => {
+      const ledger = new InMemoryRunLedger(() => NOW);
+      await ledger.claim({
+        runId: "run-held",
+        threadKey: U2_THREAD,
+        gen: "g-OTHER",
+        leaseMs: 30_000,
+        startedAt: NOW,
+        meta: { channelId: "slack:CX", userId: "slack:UREQ", threadKey: U2_THREAD, agent: "general" },
+        card: null,
+        system: "sys",
+        tools: [],
+      });
+      await ledger.append("run-held", "g-OTHER", [
+        { type: "tool_call", tool: "submit_verdict", callId: "c1", summary: "submit_verdict", at: NOW, seq: 1 },
+        { type: "run_note", kind: "checkpoint_deferred", summary: "Original work remains held.", at: NOW, seq: 2 },
+      ]);
+      if (handedOff) await ledger.handoff("g-OTHER", ["run-held"], { pausedForRetry: true });
+      const service = createRunsService({ registry: new RunRegistry(), store: new InMemoryRunStore(), ledger });
+      const sender = createSteerSender({
+        config: configStore(),
+        runLedger: { pushInbox: async (id, message) => (await ledger.pushInbox(id, message)).seq },
+        runs: {
+          getById: async (id) => {
+            const result = await service.getRun(id);
+            return result.ok ? result.value : null;
+          },
+        },
+        admission: new ThreadAdmission<DispatchFollowUp>(),
+      });
+      const caller = { kind: "cli", id: CLI_ACTOR.id, actor: CLI_ACTOR };
+      expect(await sender.send("run-held", "also cover the docs", caller)).toEqual({
+        text: "↪ Saved your message for the *general* work (run-held). This run is paused for storage recovery; your message does not resume it.",
+        recoveryPending: true,
+      });
+      expect(await service.getRun("run-held")).toMatchObject({
+        ok: true,
+        value: { id: "run-held", finished: false, recoveryPending: true, activity: "paused for storage recovery" },
+      });
+      expect(await ledger.readInbox("run-held", 0)).toMatchObject([
+        { seq: 1, message: { text: "also cover the docs", target: { runId: "run-held", producerGen: "g-OTHER" } } },
+      ]);
+
+      await ledger.append("run-held", "g-OTHER", [
+        { type: "run_note", kind: "resumed", summary: "Resumed after a restart.", at: NOW, seq: 3 },
+      ]);
+      expect(await sender.send("run-held", "check the tests too", caller)).toBe(
+        "↪ Added your message to the *general* work (run-held). It will read it at its next step.",
+      );
+      expect(await ledger.readInbox("run-held", 0)).toMatchObject([
+        { seq: 1, message: { text: "also cover the docs" } },
+        { seq: 2, message: { text: "check the tests too" } },
+      ]);
+    },
+  );
+
   it("a relay's caller (the app acting onBehalfOf the person, item 14) rides postedBy onto the live fold", async () => {
     const { admission, ledger, sender } = senderDeps();
     const u2 = admission.claim(U2_THREAD, { agent: "general" });

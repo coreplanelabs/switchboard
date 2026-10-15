@@ -137,6 +137,8 @@ export interface RunView {
   /** Server-owned live condition, absent only for legacy/pre-admission rows. */
   liveState?: RunRecord["liveState"];
   liveStateSeq?: number;
+  /** A deferred checkpoint still holds this producer until a recorded resume. */
+  recoveryPending?: true;
   /** Total events published (monotonic; the backlog/record may hold fewer). */
   eventCount: number;
   storedEventCount?: number;
@@ -593,7 +595,15 @@ export interface RunsServiceDeps {
  *  Never a token — the page token is the other generation's. */
 function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
   const m = row.meta;
-  const activity = activityOfEvents(events);
+  // A failed pause can retain a live owner after the producer stopped. Its
+  // checkpoint event survives even when the handoff state write did not.
+  let recoveryPending = false;
+  for (const event of events) {
+    if (event.type !== "run_note") continue;
+    if (event.kind === "checkpoint_deferred") recoveryPending = true;
+    else if (event.kind === "resumed") recoveryPending = false;
+  }
+  const activity = recoveryPending ? "paused for storage recovery" : activityOfEvents(events);
   // A hosted parent live under another generation still names its instance:
   // the ledger mirrors the run's events, so the record's rule reads it here.
   const instanceId = instanceIdOfEvents(events);
@@ -614,6 +624,7 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
     ...(m.repo !== undefined ? { repo: m.repo } : {}),
     startedAt: row.startedAt,
     finished: false,
+    ...(recoveryPending ? { recoveryPending: true as const } : {}),
     ...(row.liveState !== undefined ? { liveState: row.liveState } : {}),
     ...(row.liveStateSeq !== undefined ? { liveStateSeq: row.liveStateSeq } : {}),
     eventCount: events.length,

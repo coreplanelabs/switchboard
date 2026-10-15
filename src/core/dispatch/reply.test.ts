@@ -277,7 +277,11 @@ describe("replyCommandOutput", () => {
       input: { args: ["run-1", "continue"], options: {} },
     };
     const quiet = io(false);
-    await replyCommandOutput(quiet.io, steer, "↪ Added your message to the run", { verbosity: "quiet", ok: true });
+    await replyCommandOutput(quiet.io, steer, "↪ Added your message to the run", {
+      verbosity: "quiet",
+      ok: true,
+      quietText: "",
+    });
     expect(quiet.reply).not.toHaveBeenCalled();
     for (const verbosity of ["verbose", "debug"] as const) {
       const visible = io(false);
