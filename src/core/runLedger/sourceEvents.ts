@@ -142,6 +142,11 @@ function sourceJson(value: unknown, ancestors = new Set<object>(), depth = 0): s
   }
 }
 
+/** Detached canonical JSON for source adapters. Unsafe values throw. */
+export function sourceSnapshot(value: unknown): unknown {
+  return JSON.parse(sourceJson(value));
+}
+
 export async function prepareSourceEvent(value: unknown): Promise<
   | {
       event: SourceEvent;
