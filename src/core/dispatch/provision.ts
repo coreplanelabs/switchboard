@@ -883,10 +883,13 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
       request: requestRow,
     };
     const policy = resourceLifetimeSchema.safeParse(agent.resourceLifetime);
+    // Inheriting a saved work target does not opt its original execution into
+    // the separate prospective allocation protocol used by operator admission.
     const prospective =
       policy.success &&
       policy.data.purpose === "pull-request-review" &&
       operationTarget?.prTarget !== undefined &&
+      operationTarget.prTarget.source !== "parent" &&
       coordinator?.publication !== undefined &&
       (profile.machine === "repo-cold" || profile.machine === "repo-resident");
     const allocation = prospective

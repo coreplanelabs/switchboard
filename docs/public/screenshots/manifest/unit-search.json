@@ -104,7 +104,7 @@
     "src/core/budgets.ts": "7ce460a00a761b6f6eb1b510384ca2a705938ca7da6afb8134ef9a866043859c",
     "src/core/capabilities.ts": "5d95cfcefc532d454d583b1e267d591d1f013193fa954391d9975bec176ec481",
     "src/core/chatMessage.ts": "927d2931ac24b29555c29fcac1c077fb205aa7eead55352cec8b5a18df6afd04",
-    "src/core/coordinator/contract.ts": "ef170fd8a849f5ee5a18b9b28d60265e89f1766311c15b4039b9f68b07800fd3",
+    "src/core/coordinator/contract.ts": "f64ca321208d9cecdbffdcd2d70a83ec1e5da2d72e54ccc73d2ebfe038f086df",
     "src/core/coordinator/historicalNativeAudit.ts": "31f370b1ef57507079c291bf088ab06d7dd45715557ab2dff28baf7286146be5",
     "src/core/coordinator/mainWorkObservation.ts": "8336abc6d7bff35c873773758701967f5094ce888e58b7206920dfd3d6919bf3",
     "src/core/coordinator/maintenanceIdentity.ts": "aed570306a777c0f063942a388f97b2d39193e768405063bef2da6fa10ddc1d0",
@@ -286,6 +286,10 @@
         "accept": "*/*"
       },
       {
+        "path": "/assets/16704d97ec955079.woff2",
+        "accept": "*/*"
+      },
+      {
         "path": "/assets/185aa3500ac77e55.js",
         "accept": "*/*"
       },
@@ -302,6 +306,10 @@
         "accept": "*/*"
       },
       {
+        "path": "/assets/2a26c1a03ac535f1.woff2",
+        "accept": "*/*"
+      },
+      {
         "path": "/assets/30519f187e29203c.js",
         "accept": "*/*"
       },
@@ -311,10 +319,6 @@
       },
       {
         "path": "/assets/4b9aa599fd1e1c27.js",
-        "accept": "*/*"
-      },
-      {
-        "path": "/assets/4bc9835edd11b53c.woff2",
         "accept": "*/*"
       },
       {
@@ -343,10 +347,6 @@
       },
       {
         "path": "/assets/8c63b478a250d0ad.js",
-        "accept": "*/*"
-      },
-      {
-        "path": "/assets/9825f6c791051da3.woff2",
         "accept": "*/*"
       },
       {
@@ -383,27 +383,27 @@
       "src/docs/screenshotOutputPinned.ts": "be4be6869229593070c35867166a8fd60928504178f0c0f028a64759f82b0992",
       "src/docs/screenshotRenderedInputs.ts": "5b474d753207f6a2f72622cc9f872e99d1f6526252de2b981b883b4bd8f2259f",
       "response:*/*:/api/runs.search?session=slack%3AC1%3A1700000200.000100%3Acoding&query=lockfile&limit=20": "9d57d142a7f9a80816e43ff9983032f99b995624c133499ebf69d210e0a7089b",
+      "response:*/*:/assets/16704d97ec955079.woff2": "8242759635f72b65d7a1eae10ef8a97fe59a8b60d3d7f5a6f65e67d72693540e",
       "response:*/*:/assets/185aa3500ac77e55.js": "bd974607edd30f7e63df9a25df36afa8ee2eeda13d69df8c848f7fdfd27920c4",
-      "response:*/*:/assets/1c48cab215878781.js": "dcf882006707b846c182fdcf56efc537e616dcd6c8ed99cdefe2db511da38867",
-      "response:*/*:/assets/234d05a8be46e9e1.js": "17aaf404c73cd8a00b15c76dd1c0be3031b3ddabe05188a25b1d6259b5aa95c7",
-      "response:*/*:/assets/28904c3f6575692b.js": "6f1edda275858aed583e5aa864d49fb6efaca4579eda16231388915022ff9401",
+      "response:*/*:/assets/1c48cab215878781.js": "e6e08868d22f0773bb3b741d26dd85e4109d428ea6da804102a42a9bcd361af7",
+      "response:*/*:/assets/234d05a8be46e9e1.js": "0e008bf9af970058363ad4a37c33c543d0f57d689375b554ca3cc4d8a980c0e0",
+      "response:*/*:/assets/28904c3f6575692b.js": "b83a289b32e4f9544e6bd83abf3ad13865f3bd644e5a01662b6cad2411c2633b",
+      "response:*/*:/assets/2a26c1a03ac535f1.woff2": "117a54f5e0a35fa3c994d46f9f3596c4029817f06b45b546594c6671d68f1149",
       "response:*/*:/assets/30519f187e29203c.js": "19cf39bd88aeb9bb011fad6de45813fde5232df9535a780d3ae066f2ea1ff3a8",
-      "response:*/*:/assets/41f4b2f24d5ab282.js": "9c48447745b3889039689b474a9091b1352e015ed8aa089d60d60bb0fa920f23",
-      "response:*/*:/assets/4b9aa599fd1e1c27.js": "c79d295c1207b77c90e6ff0bba4ca3422486ee8f645d01aec1e27b7f66170b01",
-      "response:*/*:/assets/4bc9835edd11b53c.woff2": "117a54f5e0a35fa3c994d46f9f3596c4029817f06b45b546594c6671d68f1149",
-      "response:*/*:/assets/4fab5baaca5c14d2.js": "c65866129d1a015b418853d8d68340740fd3196393d182424f605de6a3beab66",
-      "response:*/*:/assets/5fd1e101e29ae073.js": "684922d286cbc3a1c5fc6d313421e6f262d0d379a9767aec686d3dc6c9a68d06",
+      "response:*/*:/assets/41f4b2f24d5ab282.js": "6f2233869d32412e5e1f556b99aff7637929f41231dc6b12e012a8abc918cc72",
+      "response:*/*:/assets/4b9aa599fd1e1c27.js": "1f08b0ebfa996c4f701acf752cba1fd0d793cccf87a9c24c3d1e4e010d6f8443",
+      "response:*/*:/assets/4fab5baaca5c14d2.js": "b99aaf9639b906f5ff23c2beafb231dc6151c50dd8d5c4d22c314d19f9fc56d9",
+      "response:*/*:/assets/5fd1e101e29ae073.js": "11f1584c1f24a9da8e8d07b25da6dd520cbb3d1d7354b823df19f9eb8fa01984",
       "response:*/*:/assets/7704038c40f6cb06.js": "de392972789d21c0ff01121dbb733954ef5eb4519cd576215dbcf3c2f156e94e",
-      "response:*/*:/assets/77aafe06ab1b0b9e.js": "2233872940f12c185081e00d08107b8da2fc4d493513e978fa40a0f206452654",
-      "response:*/*:/assets/7acfa189c572a6fd.js": "6594f7cd01136a3d98879db1508f88c03ec613f4161f355e3442f0423050df04",
-      "response:*/*:/assets/801c8f91d5264208.js": "765e6da98079d1b9c5c8f5ef6c2943ceba44bbe8df8abc8b3b978b1ad1cc449d",
-      "response:*/*:/assets/8c63b478a250d0ad.js": "0bb63afe412092021f6e45906fddafea37f4b7f365d04622b8845323139db66f",
-      "response:*/*:/assets/9825f6c791051da3.woff2": "8242759635f72b65d7a1eae10ef8a97fe59a8b60d3d7f5a6f65e67d72693540e",
-      "response:*/*:/assets/ae5af04fe564482b.js": "4d4b6eea891efaf4ec5f6bcdda4daa091f7baf1bba54944a61388886b7a72dd2",
+      "response:*/*:/assets/77aafe06ab1b0b9e.js": "6f8cb567c1095feedfda7df268f36c369df003ecf7ea25ca7a236d06756ef732",
+      "response:*/*:/assets/7acfa189c572a6fd.js": "51df58619a81f125ef23fa90bd9d950acc76c6883c231187d29d38c766baf94f",
+      "response:*/*:/assets/801c8f91d5264208.js": "2568939ba83e81d017a7a508844f3701f84b5e413389239ef3e66518957843f6",
+      "response:*/*:/assets/8c63b478a250d0ad.js": "a4b3ecee974c9e1ccf9b745c4be6b742f064ef22c58ef451c48ff269d22ee6b3",
+      "response:*/*:/assets/ae5af04fe564482b.js": "6e8a5bd282c933c9c7520eb9bdd0410d94bf9e48e2bf1e48ca7e0ae89412e3b6",
       "response:*/*:/assets/e2d5b96b99e916ef.js": "12a21290b18c32e8acad52f209ba85cce7b954ae5dc97ea5ac12a1d230690352",
       "response:*/*:/assets/e84c77bd8d4c7e31.js": "bdc4ce806ebb7f3147856e84b2a18c90467a90aecdc98b89b0c1ecaa98052473",
-      "response:*/*:/assets/e87d52e570baa2d6.js": "24e4ca3eb48ca0d05747443e02e3b7151d9341e214756a79f959ee370a033e8f",
-      "response:*/*:/assets/main.css": "279d9a506eac5342ca37c6503bfba0d9ea7f9e44a7256c82fd1f9c98691bdee8",
+      "response:*/*:/assets/e87d52e570baa2d6.js": "c238037d2f0f5b0394ea65550568235b17dc2a25d1d6aa21b35f687e61cfc3ce",
+      "response:*/*:/assets/main.css": "0e4b7ad0fe27c6992d1f0a66739c25ba12723ce59a2522f547165b7f566e2ec8",
       "response:*/*:/runs/unit/plan-acme-3:U13?session=coding&q=lockfile": "4de6fe086d311bfb3092e23a393dd83fa6957a7680459c0f49baf4fd59987ccc"
     }
   }

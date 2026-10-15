@@ -271,6 +271,7 @@ import { describeAsset, readThreadAssets, type ThreadAsset } from "./dispatch/th
 import { runToolCapabilities, type ParentRun } from "./dispatch/spawn.js";
 import { createRunsService, PRIVATE_WORKER_INTERNAL_READ, type RunsService, type RunView } from "./runsService.js";
 import {
+  isExistingPrPublicationBinding,
   unitKeyOf,
   unitNudgeEventType,
   unitOfIdempotencyKey,
@@ -1686,10 +1687,43 @@ export async function dispatch(
       : restart
         ? carriedOperationTarget(restart.row)
         : undefined;
-    const operationTarget =
-      operatorRepo !== undefined && operatorPrTarget !== undefined
-        ? { repo: operatorRepo, prTarget: operatorPrTarget }
-        : (opts.operationTarget ?? carriedTarget ?? (operatorRepo !== undefined ? { repo: operatorRepo } : undefined));
+    if (
+      coordinator?.publication !== undefined &&
+      (!isExistingPrPublicationBinding(coordinator.publication) ||
+        coordinator.publication.owner.instanceId !== coordinator.parentInstanceId ||
+        coordinator.publication.owner.unit !== unitOfIdempotencyKey(coordinator.idempotencyKey) ||
+        (coordinator.unit !== undefined && coordinator.unit !== coordinator.publication.owner.unit))
+    ) {
+      await refuseSilently("publication_ownership_unknown", async () => {});
+      return ended;
+    }
+    // The parent admitted this work's immutable PR identity. Prompts, other
+    // work in this conversation and operator observations cannot replace it.
+    // The publication gate still verifies access, native head and sole owner.
+    const parentOperationTarget: OperationTarget | undefined =
+      coordinator?.publication !== undefined
+        ? {
+            repo: coordinator.publication.repo,
+            ref: coordinator.publication.headRef,
+            prTarget: { number: coordinator.publication.pr, source: "parent" },
+          }
+        : undefined;
+    // Promotion retains the original reservation bytes, including legacy
+    // targets without a PR number. Resolution can use the parent independently.
+    const operationTarget: OperationTarget | undefined =
+      resume || restart
+        ? carriedTarget
+        : (parentOperationTarget ??
+          (operatorRepo !== undefined && operatorPrTarget !== undefined
+            ? { repo: operatorRepo, prTarget: operatorPrTarget }
+            : (opts.operationTarget ??
+              carriedTarget ??
+              (operatorRepo !== undefined ? { repo: operatorRepo } : undefined))));
+    const resolutionTarget = parentOperationTarget ?? operationTarget;
+    if (operationTarget?.prTarget?.source === "parent" && coordinator?.publication === undefined) {
+      await refuseSilently("publication_ownership_unknown", async () => {});
+      return ended;
+    }
     const historicalRoutePreset = restart?.row.meta.route?.preset;
     const resolveCurrent = () =>
       resolveRun(deps, {
@@ -2059,7 +2093,7 @@ export async function dispatch(
               ? { operatorRepo: operatorRepo ?? inheritedRepo }
               : {}),
             reviewBarePr: true,
-            ...(operationTarget?.prTarget !== undefined ? { operationTarget } : {}),
+            ...(resolutionTarget?.prTarget !== undefined ? { operationTarget: resolutionTarget } : {}),
           })
         : undefined;
     if (earlyRepoTarget !== undefined) {
@@ -2199,8 +2233,8 @@ export async function dispatch(
       root,
       ...(threadPr ? { records: { pr: threadPr } } : {}),
       ...(inheritedRepo !== undefined ? { operatorRepo: inheritedRepo } : {}),
-      ...(operationTarget !== undefined && (agent.name !== "review" || operationTarget.prTarget !== undefined)
-        ? { operationTarget }
+      ...(resolutionTarget !== undefined && (agent.name !== "review" || resolutionTarget.prTarget !== undefined)
+        ? { operationTarget: resolutionTarget }
         : {}),
       ...(earlyRepoTarget !== undefined ? { repoTarget: earlyRepoTarget } : {}),
     });

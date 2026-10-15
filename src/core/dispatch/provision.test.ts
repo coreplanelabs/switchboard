@@ -368,6 +368,15 @@ describe("original allocation before first reservation", () => {
       else expect(d.ledger.reserved[0].meta.workspaceAllocation).toBeUndefined();
     }
   });
+  it("retains a parent PR target without changing its resource admission protocol", async () => {
+    const d = deps(),
+      ctx = originalContext(d);
+    const target = { repo: "acme/api", ref: "unit/review", prTarget: { number: 42, source: "parent" as const } };
+    const result = await reserveRun(d, { ...ctx, operationTarget: target });
+    expect(result?.reserved?.runId).toBe("run-original-v2");
+    expect(d.ledger.reserved[0].meta.operationTarget).toEqual(target);
+    expect(d.ledger.reserved[0].meta.workspaceAllocation).toBeUndefined();
+  });
   it("refuses actor target and effective budget mismatch before sending any reserve", async () => {
     for (const mode of ["actor", "repo", "ref", "head", "pr", "budget", "identity"] as const) {
       const d = deps(),

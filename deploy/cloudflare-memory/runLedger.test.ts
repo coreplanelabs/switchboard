@@ -9001,6 +9001,59 @@ describe("durable maintenance admission", () => {
 });
 
 describe("complete canonical pull ownership", () => {
+  it("refuses PR substitution without binding the whole conversation", async () => {
+    const key = storeKey();
+    const instance: CoordinatorInstance = {
+      id: "pr_work",
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:work",
+      repo: "acme/api",
+      branch: "fix/first",
+      base: "main",
+      merge: "person",
+      createdAt: 1,
+    };
+    const first: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "FIRST",
+      slug: "first",
+      branch: "fix/first",
+      dependsOn: [],
+      rounds: [],
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      resume: { pr: 7 },
+    };
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [first] })).status).toBe(200);
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (owner: RunHistoryDO) => {
+      const changed = { ...first, pr: { number: 8, url: "https://github.com/acme/api/pull/8" } };
+      expect(await owner.compareAndReplaceUnit(first, changed, 2)).toEqual({ ok: false, reason: "stale" });
+      expect(await owner.putUnits([changed], 3)).toEqual({ ok: false, reason: "settled" });
+      const second = { ...first, unit: "SECOND", branch: "fix/second", pr: changed.pr, resume: { pr: 8 } };
+      expect(await owner.putUnits([second], 4)).toEqual({ ok: true });
+      expect(await owner.listUnits(instance.id)).toEqual([first, second]);
+    });
+    // A subsequent RPC reads the same durable relations, independent of run or thread state.
+    expect(await post("/runs/coordinator/units/list", { storeKey: key, instanceId: instance.id })).toMatchObject({
+      status: 200,
+      data: {
+        units: [
+          first,
+          {
+            ...first,
+            unit: "SECOND",
+            branch: "fix/second",
+            pr: { number: 8, url: "https://github.com/acme/api/pull/8" },
+            resume: { pr: 8 },
+          },
+        ],
+      },
+    });
+  });
+
   it.each(["checkpoint", "model"] as const)(
     "admits the original pre-PR %s child and retains its workspace obligation through PR binding",
     async (producer) => {

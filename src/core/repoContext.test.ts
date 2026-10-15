@@ -256,6 +256,44 @@ describe("currentPrHeadSha — the review post transition guard", () => {
 });
 
 describe("resolveRepoContext: accepted operation authority", () => {
+  it("resolves each parent work target despite another PR in the same conversation", async () => {
+    const history = [{ role: "user", text: "Review https://github.com/acme/other/pull/7" }];
+    const results = [];
+    const lookedUp = [];
+    for (const repo of ["acme/api", "acme/other"]) {
+      const head = "a".repeat(40);
+      const { calls } = stubFetch(
+        {
+          body: { state: "open", head: { ref: "fix/pr", sha: head, repo: { full_name: repo } }, base: { ref: "main" } },
+        },
+        { body: { object: { sha: head } } },
+      );
+      const target = { repo, ref: "fix/pr", prTarget: { number: 7, source: "parent" as const } };
+      expect(operationTargetOf(target)).toEqual(target);
+      results.push(
+        await resolveRepoContext(
+          msg("Review https://github.com/acme/unrelated/pull/99. Then compare with acme/api#8."),
+          history,
+          async () => true,
+          undefined,
+          undefined,
+          undefined,
+          true,
+          target,
+        ),
+      );
+      lookedUp.push(calls[0]?.url);
+    }
+    expect(results).toEqual([
+      { repo: "acme/api", pr: 7, ref: "fix/pr", headSha: "a".repeat(40), baseRef: "main" },
+      { repo: "acme/other", pr: 7, ref: "fix/pr", headSha: "a".repeat(40), baseRef: "main" },
+    ]);
+    expect(lookedUp).toEqual([
+      "https://api.github.com/repos/acme/api/pulls/7",
+      "https://api.github.com/repos/acme/other/pulls/7",
+    ]);
+  });
+
   it("keeps a verified PR identity in a persisted operation target", () => {
     const target = {
       repo: "acme/api",

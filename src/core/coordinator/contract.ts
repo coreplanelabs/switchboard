@@ -1281,6 +1281,16 @@ export function permitsRecoveryMetadataWrite(
   replacement: CoordinatorUnit,
   checked = false,
 ): boolean {
+  // The conversation can own many units. Each unit binds at most one PR;
+  // retaining the old number in another field does not permit substitution.
+  const prs = (unit: CoordinatorUnit | undefined) =>
+    [unit?.pr?.number, unit?.resume?.pr, unit?.publication?.pr, unit?.adoption?.pr?.number].filter(
+      (number): number is number => number !== undefined,
+    );
+  const priorPrs = prs(current),
+    nextPrs = prs(replacement);
+  if (nextPrs.some((number) => number !== nextPrs[0]) || priorPrs.some((number) => !nextPrs.includes(number)))
+    return false;
   if (
     JSON.stringify(current?.rounds.filter((round) => round.maintenance) ?? []) !==
     JSON.stringify(replacement.rounds.filter((round) => round.maintenance))
