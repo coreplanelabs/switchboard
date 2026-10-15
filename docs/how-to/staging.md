@@ -165,6 +165,23 @@ Creation checks complete native Worker, Container, namespace and Workflow invent
 
 Use one operator for first installation. A lost answer or failed phase leaves a partial installation and stops. Inspect the captured receipts and current native resources before further action; `--initialize` does not adopt, delete or reset a partial installation. Do not use force to finish it. Full product acceptance still requires the scenarios above.
 
+### Discard and recreate staging
+
+Use `.github/workflows/recreate-staging.yml` only for an explicitly authorized destructive staging reset. It uses the existing account, names and shared staging lock. Production and other Workers are excluded. A repository or container reset alone does not remove the global Registry maintenance state.
+
+First publish and select an ordinary staging profile with no `residentMaintenance`. Keep its account, hosts, config reference and existing identities. The staging Environment must also have `STAGING_RUNTIME_SECRETS_JSON`: a private JSON map containing only the original names in `STAGING_RESTORATION_KEYS` and their values from the existing staging secret source. Do not copy the whole directory or unrelated provider administration keys. This is provisioning input, not an artifact. The job checks the complete first-install requirements and matching Memory, Sandbox, Resident read and Resident drain bearers before deleting anything. A configured provider whose `apiKeyEnv` is outside this restoration list refuses the reset. Do not delete deployed Workers while that restoration path is unavailable.
+
+1. Dispatch the recreation workflow from `main` with the exact current same-repository PR head, PR number and immutable profile reference. Leave `approved_plan` empty. The trusted main controller checks the candidate's source checks before candidate code runs. This performs input and dependency reads and saves a plan; it makes no deletion or deployment.
+2. Verify the artifact's account, profile/config/source hashes, exact native IDs, all selected namespaces and deletion paths. Each Container application must map to a namespace owned by its expected Bot, Resident or Sandbox Worker. A missing or foreign owner, foreign dependencies or an incomplete read refuse the plan. Approve that exact plan hash only within the accepted staging loss scope.
+3. Dispatch one original apply run with that hash. The job rechecks the PR head, source checks, complete provisioning and unchanged plan under the shared lock. It deletes selected native applications and Workflows, then deletes Memory before Bot and the remaining Workers without a dependency override. It proves absence before the existing first-install protocol recreates them.
+4. Inspect the exact phase and native receipts after any failure. An uncertain mutation is not permission to repeat it. Existing first-install recovery rules still apply.
+5. Run the required automatic PR deployment and Review validation on the ordinary installation. Recreation reports no acceptance, does not add retained mode and cannot replace those required checks.
+
+Recreation discards staging state, including its old request records, without claiming their original effects ended. It does not delete shared R2 buckets or change SDK versions, accounts, Slack or GitHub identities. Any separately required data deletion needs its own scoped action.
+
+The script removes its private temporary files and bundle environment value on exit. After the final provisioning result is known, the original repository maintainer removes the transient `STAGING_RUNTIME_SECRETS_JSON` from the staging Environment. The recreation job has no repository-secret write credential and cannot remove that encrypted Environment secret itself. Do not grant a broader token for cleanup.
+
+
 ### Continue a recorded Memory checkpoint
 
 Creation writes a mode-600 `INITIALIZE_MEMORY_RECEIPT.json` under the staging secret directory before checking the new Memory domain. `--receipt <path>` chooses a different private path. DNS negative caching can outlive the first readiness check; the receipt preserves the accepted upload and provisioned version without deleting the Worker or its data.

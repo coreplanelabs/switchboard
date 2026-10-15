@@ -256,8 +256,8 @@
       "when": "Configured disposable scope; release acceptance."
     },
     "staging:deploy": {
-      "does": "Checks isolation and deploys a frozen staging candidate; --check makes no upload.",
-      "when": "Manual staging; separate account pins required."
+      "does": "Deploys isolated staging; --recreate plans explicit recreation.",
+      "when": "Staging CI and explicit operator setup."
     },
     "staging:validate": {
       "does": "Checks PR eligibility before staging.",

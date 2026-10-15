@@ -40,7 +40,7 @@ import { LIVE_GATE_POLL_MS, LIVE_GATE_DEADLINE_MS, servedCommit } from "../src/d
 export async function initializeOnHost(
   profile: DeploymentProfile,
   read: Extract<ConfigRead, { ok: true }>,
-  options: { receiptPath?: string; resumeMemory?: string } = {},
+  options: { receiptPath?: string; resumeMemory?: string; checkOnly?: boolean } = {},
 ) {
   const run = (cmd: string, args: string[], cwd = process.cwd(), env = process.env, capture = false) => {
     const result = spawnSync(cmd, args, {
@@ -128,6 +128,7 @@ export async function initializeOnHost(
   if (!published.ok) throw new Error(published.problem);
   const rendered = renderWorkerConfigs(profile, (path) => readFileSync(path, "utf8"), published.images);
   if (!rendered.ok) throw new Error(rendered.problems.join("\n"));
+  if (options.checkOnly) return;
   const directory = mkdtempSync(join(tmpdir(), "switchboard-initialize-"));
   const operation = basename(directory);
   const nativeConfig = join(directory, "account.json");

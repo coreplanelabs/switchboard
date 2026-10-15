@@ -1121,7 +1121,7 @@ describe("the production deploy is one reusable workflow", () => {
       for (const j of Object.values(wf.jobs ?? {})) {
         for (const s of j.steps ?? []) {
           if (!s.uses?.startsWith("actions/create-github-app-token@")) continue;
-          const staging = ["deploy-staging.yml", "deploy-staging-bootstrap.yml"].includes(f);
+          const staging = ["deploy-staging.yml", "deploy-staging-bootstrap.yml", "recreate-staging.yml"].includes(f);
           if (staging) expect(j.environment, `${f}: staging App requires the staging Environment`).toBe("staging");
           const prefix = staging ? "STAGING_" : "";
           expect(s.with?.["client-id"], `${f}: an App minted from something other than the secret`).toBe(

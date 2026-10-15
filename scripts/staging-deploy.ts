@@ -7,6 +7,12 @@ import { loadProfileOnHost, readConfigForPush } from "../src/deploy/run.js";
 import { stagingProblems, waitForStagingMaintenanceRelease } from "../src/deploy/staging.js";
 import { systemClock } from "../src/core/trace/clock.js";
 
+if (process.argv[2] === "--recreate") {
+  process.argv.splice(2, 1);
+  await import("./staging-recreate.js");
+  process.exit(0);
+}
+
 const args = process.argv.slice(2);
 const selection: string[] = [];
 let check = false;
