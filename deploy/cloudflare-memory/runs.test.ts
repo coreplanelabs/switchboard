@@ -2711,6 +2711,41 @@ describe("durable branch identity baseline", () => {
 });
 
 describe("retained source archive storage", () => {
+  it("retains orchestrator decisions in full records without exposing them in summaries", async () => {
+    const key = storeKey(),
+      base = record("orchestrator-history", Date.now());
+    const orchestratorDecisions: NonNullable<RunRecord["orchestratorDecisions"]> = [
+      {
+        version: 1,
+        id: JSON.stringify([base.id, "private-decision-call"]),
+        owner: { runId: base.id, requesterId: base.userId, channelId: base.channelId, threadKey: base.threadKey },
+        source: { kind: "request", messageId: "1.0", textHash: "a".repeat(64) },
+        tool: "work_stop",
+        targetHash: "b".repeat(64),
+        inputHash: "c".repeat(64),
+        contextHash: "d".repeat(64),
+      },
+    ];
+    expect((await post("/runs/put", { storeKey: key, record: { ...base, orchestratorDecisions } })).status).toBe(200);
+    expect(
+      ((await post("/runs/get", { storeKey: key, id: base.id })).data.record as RunRecord).orchestratorDecisions,
+    ).toEqual(orchestratorDecisions);
+    for (const result of [
+      await post("/runs/summary", { storeKey: key, id: base.id }),
+      await post("/runs/list", { storeKey: key }),
+    ]) {
+      expect(result.status).toBe(200);
+      expect(JSON.stringify(result.data)).not.toContain("private-decision-call");
+    }
+    await runInDurableObject(stubOf(key), async (_inst: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        "UPDATE runs SET summary_json = json_set(summary_json, '$.orchestratorDecisions[0].owner.requesterId', 'foreign') WHERE run_id = ?",
+        base.id,
+      );
+    });
+    expect((await post("/runs/get", { storeKey: key, id: base.id })).data.record).toBeNull();
+  });
+
   it("keeps exact work-read evidence out of summaries and rejects corrupt private evidence", async () => {
     const key = storeKey(),
       base = record("work-evidence", Date.now());

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { createOrchestratorDecisions, type OrchestratorCommandDecision } from "./orchestratorDecisions.js";
+import {
+  createOrchestratorDecisions,
+  type OrchestratorCommandDecision,
+  type OrchestratorDecision,
+} from "./orchestratorDecisions.js";
 
 const owner = {
   runId: "main-run",
@@ -19,8 +23,33 @@ const decision = (call = "first"): OrchestratorCommandDecision => ({
 });
 
 describe("orchestrator decision records", () => {
+  it("uses one history and identity space for commands and worker decisions", async () => {
+    let stored: readonly OrchestratorDecision[] = [];
+    const writer = createOrchestratorDecisions({
+      owner,
+      save: async (entries) => {
+        stored = entries;
+        return true;
+      },
+    });
+    const { command: _command, line: _line, ...source } = decision("worker");
+    const worker = { ...source, tool: "work_start" as const, targetHash: "d".repeat(64) };
+    expect(await writer.record(worker)).toBe(true);
+    expect(await writer.record(decision("command"))).toBe(true);
+    expect(await writer.record(decision("worker"))).toBe(false);
+    expect(stored.map((entry) => ("tool" in entry ? entry.tool : entry.command))).toEqual([
+      "work_start",
+      "config.show",
+    ]);
+    const restored = createOrchestratorDecisions({ owner, previous: stored, save: async () => true });
+    expect(await restored.record(worker)).toBe(true);
+    expect(await restored.record({ ...worker, targetHash: "e".repeat(64) })).toBe(false);
+    const snapshot = restored.snapshot();
+    snapshot[0].owner.requesterId = "slack:UOTHER";
+    expect(restored.snapshot()[0].owner.requesterId).toBe("slack:UREADER");
+  });
   it("retains concurrent selections and reuses only an identical saved decision", async () => {
-    let stored: readonly OrchestratorCommandDecision[] = [];
+    let stored: readonly OrchestratorDecision[] = [];
     const writer = createOrchestratorDecisions({
       owner,
       save: async (entries) => {
@@ -46,7 +75,7 @@ describe("orchestrator decision records", () => {
   });
 
   it("refuses another owner or an identity outside the original run", async () => {
-    let stored: readonly OrchestratorCommandDecision[] = [];
+    let stored: readonly OrchestratorDecision[] = [];
     const writer = createOrchestratorDecisions({
       owner,
       save: async (entries) => {
@@ -76,6 +105,7 @@ describe("orchestrator decision records", () => {
   ])("holds malformed or unsupported history: %j", async (previous) => {
     const held = createOrchestratorDecisions({ owner, previous, save: async () => true });
     expect(await held.record(decision("next"))).toBe(false);
+    expect(() => held.snapshot()).toThrow("The retained orchestrator decisions could not be verified.");
     const current = createOrchestratorDecisions({ owner, previous: [decision()], save: async () => true });
     expect(await current.record(decision("next"))).toBe(true);
   });
@@ -97,7 +127,7 @@ describe("orchestrator decision records", () => {
   });
 
   it("refuses capacity overflow while retaining the accepted records", async () => {
-    let stored: readonly OrchestratorCommandDecision[] = [];
+    let stored: readonly OrchestratorDecision[] = [];
     const writer = createOrchestratorDecisions({
       owner,
       save: async (entries) => {
@@ -118,7 +148,7 @@ describe("orchestrator decision records", () => {
       channelId: "slack:D" + "x".repeat(400),
       threadKey: "slack:D" + "x".repeat(400),
     };
-    let stored: readonly OrchestratorCommandDecision[] = [];
+    let stored: readonly OrchestratorDecision[] = [];
     const writer = createOrchestratorDecisions({
       owner: largeOwner,
       save: async (entries) => {

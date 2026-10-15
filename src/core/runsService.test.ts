@@ -166,7 +166,20 @@ describe("RunsService.getRun", () => {
         },
       },
     ];
+    const orchestratorDecisions: NonNullable<RunRecord["orchestratorDecisions"]> = [
+      {
+        version: 1,
+        id: JSON.stringify([base.id, "private-decision-call"]),
+        owner: { runId: base.id, requesterId: base.userId, channelId: base.channelId, threadKey: base.threadKey },
+        source: { kind: "request", messageId: "1.0", textHash: "a".repeat(64) },
+        tool: "work_stop",
+        targetHash: "b".repeat(64),
+        inputHash: "c".repeat(64),
+        contextHash: "d".repeat(64),
+      },
+    ];
     const internal = {
+      orchestratorDecisions,
       branchPublication: {
         version: 1 as const,
         repo: "private/repo",
@@ -229,6 +242,8 @@ describe("RunsService.getRun", () => {
         "private/branch",
         "sourceReads",
         "workReads",
+        "orchestratorDecisions",
+        "private-decision-call",
         "private-work-act",
         "childHandoff",
         "contextDependencies",

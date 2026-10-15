@@ -56,6 +56,7 @@ describe("work_start — plain-language private worker handoff", () => {
     const start = vi.fn<(value: MainStartInput) => Promise<MainStartResult>>();
     const secret = "private DM and store exception";
     const capability = mainStartForRun({
+      recordDecision: async () => () => true,
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
@@ -82,6 +83,7 @@ describe("work_start — plain-language private worker handoff", () => {
     let release!: () => void;
     const receiptSaved = new Promise<void>((resolve) => (release = resolve));
     const capability = mainStartForRun({
+      recordDecision: async () => () => true,
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
@@ -126,6 +128,7 @@ describe("work_start — plain-language private worker handoff", () => {
     let privateNow = true;
     const captureContext = vi.fn(async () => capsule);
     const capability = mainStartForRun({
+      recordDecision: async () => () => true,
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
@@ -162,6 +165,7 @@ describe("work_start — plain-language private worker handoff", () => {
       reply: "The saved Workflow exists under the same id.",
     });
     const capability = mainStartForRun({
+      recordDecision: async () => () => true,
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
@@ -185,6 +189,7 @@ describe("work_start — plain-language private worker handoff", () => {
     ]);
     const start = vi.fn<(input: MainStartInput) => Promise<MainStartResult>>();
     const capability = mainStartForRun({
+      recordDecision: async () => () => true,
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg: question },
@@ -225,6 +230,7 @@ describe("work_start — plain-language private worker handoff", () => {
       reply: "started",
     });
     const capability = mainStartForRun({
+      recordDecision: async () => () => true,
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
@@ -266,6 +272,7 @@ describe("work_start — plain-language private worker handoff", () => {
   it("refuses absent capability and invalid evidence without starting anything", async () => {
     const start = vi.fn<(input: MainStartInput) => Promise<MainStartResult>>();
     const capability = mainStartForRun({
+      recordDecision: async () => () => true,
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
@@ -283,6 +290,7 @@ describe("work_start — plain-language private worker handoff", () => {
     expect(start).not.toHaveBeenCalled();
     expect(
       mainStartForRun({
+        recordDecision: async () => () => true,
         agentName: "coding",
         channelVisibility: "dm",
         initial: { actor, msg },
@@ -300,6 +308,7 @@ describe("work_start — plain-language private worker handoff", () => {
     for (const channelVisibility of ["public", "private", "unknown"] as const) {
       expect(
         mainStartForRun({
+          recordDecision: async () => () => true,
           agentName: "orchestrator",
           channelVisibility,
           initial: { actor, msg },
@@ -351,6 +360,7 @@ describe("work_start — plain-language private worker handoff", () => {
     });
     let source = { kind: "ready" as const, actor, msg, authorizedRepo: input.repo };
     const capability = mainStartForRun({
+      recordDecision: async () => () => true,
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
@@ -378,6 +388,7 @@ describe("work_start — plain-language private worker handoff", () => {
       { userId: msg.userId, directAudience: msg.directAudience, text: "fix billing", messageId: "2", at: 2 },
     ]);
     const capability = mainStartForRun({
+      recordDecision: async () => () => true,
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
@@ -417,6 +428,7 @@ describe("work_start — plain-language private worker handoff", () => {
     });
     let privateNow = true;
     const capability = mainStartForRun({
+      recordDecision: async () => () => true,
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
@@ -450,6 +462,7 @@ describe("work_start — plain-language private worker handoff", () => {
   it("refuses a stopped main run before calling the starter", async () => {
     const start = vi.fn<(input: MainStartInput) => Promise<MainStartResult>>();
     const capability = mainStartForRun({
+      recordDecision: async () => () => true,
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },
@@ -467,6 +480,7 @@ describe("work_start — plain-language private worker handoff", () => {
     const start = vi.fn<(input: MainStartInput) => Promise<MainStartResult>>();
     const verify = vi.fn().mockResolvedValue(false);
     const capability = mainStartForRun({
+      recordDecision: async () => () => true,
       agentName: "orchestrator",
       channelVisibility: "dm",
       initial: { actor, msg },

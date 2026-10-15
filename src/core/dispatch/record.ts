@@ -10,6 +10,7 @@ import { audienceRefusalOf, type AudienceRefusalReceipt, type AudienceTrace } fr
 import type { IncomingMessage } from "../types.js";
 import { directAudienceStampOf } from "../runLedger/inboxMessage.js";
 import { contextRefusalsOf } from "../mainContextRefusal.js";
+import { orchestratorDecisionsOf } from "./orchestratorDecisions.js";
 import { privateMainEvent } from "../privateMainEvent.js";
 import type { Refusal } from "../refusal.js";
 import { redactAndCap } from "../runEvents.js";
@@ -221,6 +222,14 @@ export function reclaimedRunRecord(input: {
 }): RunRecord {
   const { row, events, status, finishedAt } = input;
   const saved = row.state;
+  const orchestratorDecisions = orchestratorDecisionsOf(saved.orchestratorDecisions, {
+    runId: row.runId,
+    requesterId: row.meta.userId,
+    channelId: row.meta.channelId,
+    threadKey: row.meta.threadKey,
+  });
+  if (saved.orchestratorDecisions !== undefined && orchestratorDecisions === undefined)
+    throw new Error("The retained orchestrator decisions could not be verified.");
   const publication = reviewPublicationOf(saved.reviewPublication);
   if (
     publication &&
@@ -270,6 +279,7 @@ export function reclaimedRunRecord(input: {
     answerOutcome: answerOutcomeOf(row.state.answerOutcome),
     setup: runSetupOf(row.state.setup),
     contextRefusals: contextRefusalsOf(row.state.contextRefusals),
+    orchestratorDecisions,
     ...(row.state.publicationSettlement !== undefined
       ? {
           publicationSettlement:
@@ -411,6 +421,7 @@ export function assembleRunRecord(input: {
   setup?: RunSetup;
   /** Closed private capture categories, held outside the lossy live backlog. */
   contextRefusals?: RunRecord["contextRefusals"];
+  orchestratorDecisions?: RunRecord["orchestratorDecisions"];
   run: Pick<RunHandle, "id" | "label">;
   snap: RunSnapshot | null;
   agent?: string;
@@ -543,6 +554,9 @@ export function assembleRunRecord(input: {
     ...(input.setup ? { setup: input.setup } : {}),
     ...(input.audienceRefusal ? { audienceRefusal: input.audienceRefusal } : {}),
     ...(privateMain && input.contextRefusals?.length ? { contextRefusals: [...input.contextRefusals] } : {}),
+    ...(input.orchestratorDecisions?.length
+      ? { orchestratorDecisions: structuredClone(input.orchestratorDecisions) }
+      : {}),
     ...(run.label !== undefined ? { label: run.label } : {}),
     ...(input.agent !== undefined ? { agent: input.agent } : {}),
     ...(input.model !== undefined ? { model: input.model } : {}),
@@ -812,6 +826,7 @@ export interface FinishRecordContext {
   setup?: RunSetup;
   audience?: AudienceTrace;
   contextRefusals?: RunRecord["contextRefusals"];
+  orchestratorDecisions?: RunRecord["orchestratorDecisions"];
   ending: RunEnding;
   run: RunHandle;
   snap: RunSnapshot | null;
@@ -913,6 +928,7 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           answerOutcome: ctx.answerOutcome,
           ...(ctx.setup !== undefined ? { setup: ctx.setup } : {}),
           ...(ctx.contextRefusals?.length ? { contextRefusals: ctx.contextRefusals } : {}),
+          ...(ctx.orchestratorDecisions?.length ? { orchestratorDecisions: ctx.orchestratorDecisions } : {}),
           run,
           snap,
           agent: agent.name,

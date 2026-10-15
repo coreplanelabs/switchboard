@@ -99,6 +99,10 @@ export class MainSourceTracker {
     return selected.kind === "selected" ? selected.source : undefined;
   }
 
+  current(): MainSource | undefined {
+    return this.compromised ? undefined : this.latest;
+  }
+
   /** The first pilot has one configured repository. Model text cannot select
    * a different target or turn a repository cited as evidence into authority. */
   bindRepository(source: MainSource, repo: string, configuredRepo?: string): MainSourceResolution {

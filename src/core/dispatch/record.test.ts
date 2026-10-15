@@ -24,6 +24,36 @@ import { contextDependenciesHash } from "../references/contextDependencies.js";
 import type { IncomingMessage } from "../types.js";
 
 describe("reclaimed terminal artifacts", () => {
+  it("retains acknowledged orchestrator decisions after terminal recovery without an event backlog", () => {
+    const decisions = [
+      {
+        version: 1,
+        id: '["terminal-run","steer-call"]',
+        owner: {
+          runId: "terminal-run",
+          requesterId: "slack:UACTOR",
+          channelId: "slack:C1",
+          threadKey: "slack:C1:terminal",
+        },
+        source: { kind: "request", messageId: "1.0", textHash: "a".repeat(64) },
+        tool: "work_steer",
+        targetHash: "b".repeat(64),
+        inputHash: "c".repeat(64),
+        contextHash: "d".repeat(64),
+      },
+    ];
+    const record = reclaimedRunRecord({
+      row: row({ orchestratorDecisions: decisions }),
+      events: [],
+      status: "interrupted",
+      finishedAt: 20,
+    });
+    expect(record.orchestratorDecisions).toEqual(decisions);
+    const restored = JSON.parse(JSON.stringify(record));
+    expect(isRunRecord(restored)).toBe(true);
+    restored.orchestratorDecisions[0].owner.requesterId = "slack:UOTHER";
+    expect(isRunRecord(restored)).toBe(false);
+  });
   const head = "a".repeat(40);
   const row = (state: Record<string, unknown>): LiveRunRow => ({
     runId: "terminal-run",

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "./chatMessage.js";
-import { closureNote, reclaimRuns, startReclaimSweep, threadsElsewhereOf } from "./boot.js";
+import { closeReclaimed, closureNote, reclaimRuns, startReclaimSweep, threadsElsewhereOf } from "./boot.js";
 import type { RunStatus } from "./runRecord.js";
 import { shipInterruptedNote } from "./shipPipeline.js";
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
@@ -109,6 +109,49 @@ const hostedClaim = (runId: string, thread: string, gen = "g1"): ClaimRequest =>
 });
 
 describe("reclaimRuns", () => {
+  it.each(["foreign owner", "unknown version", "null history"] as const)(
+    "keeps invalid-present orchestrator history on its live row: %s",
+    async (fault) => {
+      const ledger = new InMemoryRunLedger();
+      const req = claim("r1", "slack:C1:1.0");
+      await ledger.claim(req);
+      const selection = {
+        version: 1,
+        id: '["r1","stop-call"]',
+        owner: { runId: "r1", requesterId: "slack:UALICE", channelId: "slack:C1", threadKey: req.threadKey },
+        source: { kind: "request", messageId: "1", textHash: "a".repeat(64) },
+        tool: "work_stop",
+        targetHash: "b".repeat(64),
+        inputHash: "c".repeat(64),
+        contextHash: "d".repeat(64),
+      };
+      const invalid =
+        fault === "null history"
+          ? null
+          : [
+              {
+                ...selection,
+                ...(fault === "foreign owner"
+                  ? { owner: { ...selection.owner, requesterId: "slack:UOTHER" } }
+                  : { version: 2 }),
+              },
+            ];
+      await ledger.setState("r1", "g1", { orchestratorDecisions: invalid });
+      const close = () =>
+        closeReclaimed(ledger, "g1", {
+          row: ledger.live.get("r1")!,
+          events: [],
+          status: "interrupted",
+          finishedAt: 2_000,
+        });
+      await expect(close()).rejects.toThrow("The retained orchestrator decisions could not be verified.");
+      expect(ledger.live.get("r1")?.state.orchestratorDecisions).toEqual(invalid);
+      expect(ledger.finished.has("r1")).toBe(false);
+      await ledger.setState("r1", "g1", { orchestratorDecisions: [selection] });
+      expect(await close()).toMatchObject({ ok: true, record: { orchestratorDecisions: [selection] } });
+      expect(ledger.finished.get("r1")?.orchestratorDecisions).toEqual([selection]);
+    },
+  );
   it("a run whose transcript and last step record the completeness rule accepts is handed to the launcher untouched — row, steps, transcript and events all still there", async () => {
     const { ledger, run, logs } = harness();
     await ledger.claim(claim("r1", "slack:C1:1.0"));

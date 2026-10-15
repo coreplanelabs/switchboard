@@ -1,4 +1,4 @@
-import { isOrchestratorCommandDecision } from "./dispatch/orchestratorDecisions.js";
+import { isOrchestratorCommandDecision, orchestratorDecisionsOf } from "./dispatch/orchestratorDecisions.js";
 import { cancellationOf, cancellationRecordMatches } from "./runLedger/cancellation.js";
 import { RUN_ID_PATTERN } from "./runIdentity.js";
 import { isBranchIdentityBaseline, type BranchIdentityBaseline } from "./branchIdentityBaseline.js";
@@ -233,6 +233,8 @@ export interface RunRecord {
   /** Distinct private work capture refusals, independent of the bounded event backlog.
    *  Closed vocabulary only: no requester text, source names or store errors. */
   contextRefusals?: MainContextRefusalCode[];
+  /** Acknowledged selections, retained separately from the bounded event log. */
+  orchestratorDecisions?: import("./dispatch/orchestratorDecisions.js").OrchestratorDecision[];
   /** Events the run published in total — unchanged by truncation. */
   eventCount: number;
   /** Events actually present in `events` (= `events.length`). */
@@ -868,6 +870,7 @@ export type RunListItem = Omit<
   RunRecord,
   | "events"
   | "sourceReads"
+  | "orchestratorDecisions"
   | "branchIdentityBaseline"
   | "workReads"
   | "unitSeedReceipt"
@@ -1359,6 +1362,16 @@ export function isRunRecord(v: unknown): v is RunRecord {
       return false;
   }
   const selection = (r.operator as RunOperatorDecision | undefined)?.orchestratorDecision;
+  if (
+    r.orchestratorDecisions !== undefined &&
+    !orchestratorDecisionsOf(r.orchestratorDecisions, {
+      runId: r.id as string,
+      requesterId: r.userId as string,
+      channelId: r.channelId as string,
+      threadKey: r.threadKey as string,
+    })
+  )
+    return false;
   if (
     selection !== undefined &&
     !isOrchestratorCommandDecision(selection, {
