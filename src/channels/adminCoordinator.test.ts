@@ -4502,6 +4502,27 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
     };
   }
 
+  it("unit-start retains an incomplete ownership diagnostic without starting the unit", async () => {
+    const h = await planHarness();
+    const original = { ...(await h.instances.listUnits(PLAN_INSTANCE.id))[0]!, threadKey: "slack:C1:2.0" };
+    await h.instances.putUnits([original]);
+    const diagnostic = {
+      version: 1 as const,
+      stage: "inventory_byte_limit" as const,
+      cause: "byte-limit" as const,
+      source: "runs" as const,
+      rowIndex: 10,
+      rowsRead: 12,
+      sourceBytes: 16_777_218,
+    };
+    vi.spyOn(h.instances, "putUnits").mockResolvedValueOnce({ ok: false, reason: "incomplete", diagnostic });
+    expect(await call(h, "unit-start", { parentInstanceId: PLAN_INSTANCE.id, unit: original.unit })).toEqual({
+      status: 409,
+      body: { ok: false, error: "unit_write_refused", reason: "incomplete", diagnostic, at: NOW },
+    });
+    expect((await h.instances.listUnits(PLAN_INSTANCE.id))[0]).toEqual(original);
+  });
+
   it("unit-start opens a plan unit's thread through the requesting thread's channel and no review thread, finds the board issue titled by the unit id, and writes the thread on the row; a generated plan's unit runs in the requesting thread and opens nothing", async () => {
     const opened: string[] = [];
     const keys: string[] = [];

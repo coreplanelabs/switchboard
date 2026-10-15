@@ -1082,7 +1082,16 @@ describe("runShipBranch — the ship_handoff event (record 0051 R2)", () => {
 describe("Ship admission diagnostic events", () => {
   it("persists the exact refused stage and reason before closing the Ship request", async () => {
     const s = setup("slack:UADMIN");
-    s.instances.putUnits = async () => ({ ok: false, reason: "incomplete" });
+    const diagnostic = {
+      version: 1 as const,
+      stage: "run_initial_coding_owner" as const,
+      cause: "validation" as const,
+      source: "runs" as const,
+      rowIndex: 10,
+      rowsRead: 12,
+      sourceBytes: 1000,
+    };
+    s.instances.putUnits = async () => ({ ok: false, reason: "incomplete", diagnostic });
     await runShipBranch(s.deps, s.msg, s.io, s.ctx);
     const record = await s.store.get("run-s");
     expect(record?.events).toEqual(
@@ -1094,6 +1103,8 @@ describe("Ship admission diagnostic events", () => {
         }),
       ]),
     );
+    const note = record?.events.find((event) => event.type === "run_note" && event.kind === "ship_admission");
+    expect(note?.type === "run_note" ? JSON.parse(note.summary).diagnostic : undefined).toEqual(diagnostic);
     expect(s.created).toEqual([]);
   });
 });

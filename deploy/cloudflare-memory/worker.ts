@@ -382,6 +382,7 @@ import {
 } from "../../src/core/plane/decide.ts";
 import {
   type PullOwnershipDiagnostics,
+  type PullOwnerReadDiagnostic,
   type PullOwnershipCheck,
   pullOwnerReadDiagnosticFor,
   type PullOwnershipSource,
@@ -4271,10 +4272,16 @@ export class RunHistoryDO extends DurableObject<Env> {
     force = false,
     staged: readonly CoordinatorUnit[] = [],
     owner?: CoordinatorInstance,
+    receiveDiagnostic?: (diagnostic: PullOwnerReadDiagnostic | undefined) => void,
   ): PullBindingRefusal | undefined {
     const diagnostics: PullOwnershipDiagnostics = {};
     let stage: PullOwnershipCheck = "instance_read";
     const report = (reason: PullBindingRefusal, check?: PullOwnershipCheck): PullBindingRefusal => {
+      diagnostics.failure ??= { check: check ?? stage };
+      if (reason === "incomplete")
+        receiveDiagnostic?.(
+          pullOwnerReadDiagnosticFor(diagnostics, stage === "binding_validation" ? "validation" : "read"),
+        );
       console.log(
         JSON.stringify({
           event: "coordinator_unit_admission_refused",
@@ -4336,7 +4343,10 @@ export class RunHistoryDO extends DurableObject<Env> {
   async putUnits(
     units: CoordinatorUnit[],
     now: number,
-  ): Promise<{ ok: true } | { ok: false; reason: "settled" | PullBindingRefusal }> {
+  ): Promise<
+    { ok: true } | { ok: false; reason: "settled" | PullBindingRefusal; diagnostic?: PullOwnerReadDiagnostic }
+  > {
+    let diagnostic: PullOwnerReadDiagnostic | undefined;
     const result = await this.withRangePins(
       units.map((unit) => ({ id: `@unit:${unit.instanceId}:${unit.unit}`, handoff: unit.context?.handoff })),
       async () =>
@@ -4357,7 +4367,9 @@ export class RunHistoryDO extends DurableObject<Env> {
           }
           const staged = [...pending.values()].map((row) => row.next);
           for (const { current, next } of pending.values()) {
-            const reason = this.bindingRefusal(current, next, false, staged);
+            const reason = this.bindingRefusal(current, next, false, staged, undefined, (value) => {
+              diagnostic = value;
+            });
             if (reason) return reason;
           }
           for (const { current, next } of pending.values()) {
@@ -4374,7 +4386,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         }),
     );
     if (result.ok) await this.armCoordinatorReconciliation(now);
-    return result;
+    return !result.ok && result.reason === "incomplete" && diagnostic ? { ...result, diagnostic } : result;
   }
 
   /** One compare-and-replace transaction updates a unit for exactly one

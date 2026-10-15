@@ -4012,6 +4012,32 @@ describe("the plan runner's driver — a step that throws inside the walk become
     expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
   });
 
+  it("retains a complete closed ownership diagnostic in the failed unit-start report", async () => {
+    const diagnostic = {
+      version: 1,
+      stage: "inventory_byte_limit",
+      cause: "byte-limit",
+      source: "runs",
+      rowIndex: 10,
+      rowsRead: 12,
+      sourceBytes: 16_777_218,
+    };
+    const s = steps();
+    const b = bot({
+      plan: [planAnswer([row("U10")])],
+      "unit-start": [ok({ ok: false, error: "unit_write_refused", reason: "incomplete", diagnostic }, T0, 409)],
+      "unit-end": [acked()],
+      finish: [acked()],
+    });
+    await expect(runPlan(s.runner, b.client, INSTANCE)).rejects.toThrow("unit_write_refused");
+    const [end] = b.of("unit-end") as Array<{ ending: { report: string; cause: string; step: string } }>;
+    expect(end!.ending).toMatchObject({ cause: "step_threw", step: "U10/start" });
+    expect(end!.ending.report).toContain(
+      'Ownership diagnostic: {"version":1,"stage":"inventory_byte_limit","cause":"byte-limit","rowsRead":12,"sourceBytes":16777218,"source":"runs","rowIndex":10}',
+    );
+    expect(b.of("finish")).toEqual([{ parentInstanceId: INSTANCE, outcome: "failed" }]);
+  });
+
   it("a round-note throw names the note that failed, not the preceding machine action, and keeps the round structured", async () => {
     const s = steps();
     const b = bot({

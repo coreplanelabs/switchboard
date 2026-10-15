@@ -977,6 +977,35 @@ describe("recovery history Worker client", () => {
 });
 
 describe("pull-owner diagnostic reader", () => {
+  it("preserves only a closed diagnostic on an incomplete unit write", async () => {
+    const diagnostic = {
+      version: 1,
+      stage: "unit_shape",
+      cause: "validation",
+      source: "units",
+      rowIndex: 0,
+      rowsRead: 1,
+      sourceBytes: 100,
+    };
+    for (const [reason, payload, expected] of [
+      ["incomplete", diagnostic, diagnostic],
+      ["incomplete", { ...diagnostic, privateText: "DO_NOT_COPY" }, undefined],
+      ["incomplete", undefined, undefined],
+      ["owned", diagnostic, undefined],
+    ] as const) {
+      const client = new WorkerCoordinatorInstanceStore({
+        baseUrl: "https://memory.test",
+        token: "fixture",
+        storeKey: "runs:default",
+        fetch: async () => Response.json({ ok: false, reason, diagnostic: payload }, { status: 409 }),
+      });
+      expect(await client.putUnits([unitRow("U12")])).toEqual({
+        ok: false,
+        reason,
+        ...(expected ? { diagnostic: expected } : {}),
+      });
+    }
+  });
   it("opts into the existing read route and carries only a closed diagnostic", async () => {
     let sent: Record<string, unknown> | undefined;
     const diagnostic = {
