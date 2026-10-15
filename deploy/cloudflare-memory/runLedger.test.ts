@@ -8830,6 +8830,121 @@ describe("maintenance server clock", () => {
 });
 
 describe("durable maintenance admission", () => {
+  it.each(["owner", "watch"] as const)(
+    "selects an explicit %s work item through settled SQLite PR history",
+    async (source) => {
+      const key = storeKey();
+      const instance: CoordinatorInstance = {
+        id: "settled_pr_work",
+        kind: "ship",
+        userId: "slack:UALICE",
+        channelId: "slack:C1",
+        threadKey: "slack:C1:shared",
+        repo: "acme/api",
+        branch: "fix/shared",
+        base: "main",
+        createdAt: 1,
+      };
+      const units: CoordinatorUnit[] = ["ORIGINAL", "LATER"].map((unit) => ({
+        instanceId: instance.id,
+        unit,
+        slug: unit.toLowerCase(),
+        branch: instance.branch,
+        dependsOn: [],
+        rounds: [],
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        publication: {
+          repo: instance.repo,
+          pr: 7,
+          headRef: instance.branch,
+          publicationRef: instance.branch,
+          baseRef: "main",
+          expectedHeadSha: "a".repeat(40),
+          owner: { instanceId: instance.id, unit },
+        },
+        ending: {
+          kind: "aborted",
+          at: 2,
+          report: "Original work ended",
+          outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 0 },
+        },
+      }));
+      expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+      for (const work of units) {
+        expect(
+          (await post("/runs/coordinator/units/put", { storeKey: key, units: [{ ...work, ending: undefined }] }))
+            .status,
+        ).toBe(200);
+        expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [work] })).status).toBe(200);
+      }
+      const command = {
+        kind: "command" as const,
+        requestId: "command:selected-work",
+        actorId: instance.userId,
+        userId: instance.userId,
+        channelId: instance.channelId,
+        threadKey: "slack:C1:new-request",
+      };
+      const input = {
+        version: 1 as const,
+        intent: command,
+        target: { repo: instance.repo, pr: 7, ref: instance.branch, base: "main", headSha: "a".repeat(40) },
+        createdAt: 3,
+        bounds: { leaseMinutes: 15, spendCapUsd: 1 },
+      };
+      expect(await post("/runs/coordinator/maintenance/admit", { storeKey: key, input })).toMatchObject({
+        status: 409,
+        data: { ok: false, reason: "owned" },
+      });
+      const selected = {
+        ...input,
+        ...(source === "owner"
+          ? { owner: { instanceId: instance.id, unit: "ORIGINAL" } }
+          : {
+              intent: {
+                kind: "watch" as const,
+                eventId: "watch:selected-work",
+                instanceId: instance.id,
+                unit: "ORIGINAL",
+                requester: instance.userId,
+              },
+            }),
+      };
+      const first = await post("/runs/coordinator/maintenance/admit", { storeKey: key, input: selected });
+      expect(first).toMatchObject({
+        status: 200,
+        data: {
+          ok: true,
+          replayed: false,
+          instance,
+          unit: {
+            unit: "ORIGINAL",
+            ending: units[0]!.ending,
+            currentEffect: { phase: "active", target: input.target },
+          },
+        },
+      });
+      const client = new WorkerCoordinatorInstanceStore({
+        baseUrl: BASE,
+        token: "test-token",
+        storeKey: key,
+        fetch: fetchMemoryTest,
+      });
+      const saved = await client.listUnits(instance.id);
+      expect(saved[1]).toEqual(units[1]);
+      expect(await client.admitMaintenance(selected)).toMatchObject({
+        ok: true,
+        replayed: true,
+        unit: { unit: "ORIGINAL" },
+      });
+      expect(await client.admitMaintenance({ ...input, owner: { instanceId: instance.id, unit: "LATER" } })).toEqual({
+        ok: false,
+        reason: "owned",
+      });
+      expect(await client.listUnits(instance.id)).toEqual(saved);
+    },
+  );
+
   it.each(["live", "terminal"] as const)(
     "reattaches only the original maintenance action to its %s accepted review child",
     async (retention) => {

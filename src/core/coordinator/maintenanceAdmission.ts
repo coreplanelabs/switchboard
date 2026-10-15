@@ -190,8 +190,12 @@ export function planMaintenanceAdmission(
         (t) => t.repo.toLowerCase() === target.repo && (t.pr === target.pr || t.ref === target.ref),
       ),
   ) as Array<{ instance: CoordinatorInstance; unit: CoordinatorUnit }>;
-  if (matching.length > 1) return { ok: false, reason: "owned" };
-  let original = matching[0];
+  const requestedOwner = input.owner ?? (input.intent.kind === "watch" ? input.intent : undefined);
+  const candidates = requestedOwner
+    ? matching.filter((r) => r.instance.id === requestedOwner.instanceId && r.unit.unit === requestedOwner.unit)
+    : matching;
+  if (candidates.length > 1) return { ok: false, reason: "owned" };
+  let original = candidates[0];
   if (
     input.owner &&
     (!original || original.instance.id !== input.owner.instanceId || original.unit.unit !== input.owner.unit)
