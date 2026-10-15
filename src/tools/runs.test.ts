@@ -25,6 +25,7 @@ import {
   RUN_TOOLS,
   sendToRunTool,
   spawnRunTool,
+  requesterSpawnTool,
   type SteerCapability,
 } from "./runs.js";
 
@@ -40,6 +41,36 @@ import {
 
 const NOW = 100_000;
 const executor = {} as Executor;
+
+describe("requester delegation tool", () => {
+  it("keeps the existing spawn validation and binds a quote and tool call to the request", async () => {
+    const seen: unknown[] = [];
+    const tool = requesterSpawnTool(async (quote, request, at, callId) => {
+      seen.push({ quote, request, remainingMs: at.remainingMs, callId });
+      return { kind: "spawned", runId: "child", threadKey: "slack:C:child" };
+    });
+    const ctx = { executor, callId: "delegate-one", remainingMs: () => 300_000 };
+    expect(
+      await tool.run({ preset: "research", prompt: "explain storage", sourceMessage: "research storage" }, ctx),
+    ).toContain("spawned a research run: child");
+    expect(seen).toEqual([
+      {
+        quote: "research storage",
+        request: { preset: "research", prompt: "explain storage" },
+        remainingMs: 300_000,
+        callId: "delegate-one",
+      },
+    ]);
+    expect(await tool.run({ preset: "research", prompt: "explain storage" }, ctx)).toContain("sourceMessage");
+    expect(
+      await tool.run(
+        { preset: "research", prompt: "explain storage", sourceMessage: "research storage", budget: 1 },
+        ctx,
+      ),
+    ).toContain("budget");
+    expect(seen).toHaveLength(1);
+  });
+});
 
 function world() {
   let n = 0;

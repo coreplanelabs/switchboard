@@ -1130,6 +1130,70 @@ describe("dispatch", () => {
     },
   );
 
+  it.each(["slack:CX", "cli:main", "http:ops", "mcp:default"])(
+    "records requester delegation before opening a child thread on %s",
+    async (channelId) => {
+      let turns = 0;
+      const requests: CompletionRequest[] = [];
+      const provider: Provider = {
+        name: "fake",
+        async complete(request): Promise<CompletionResult> {
+          requests.push(request);
+          return turns++ === 0
+            ? {
+                content: [
+                  {
+                    type: "tool_use",
+                    id: "delegate",
+                    name: "spawn_run",
+                    input: { preset: "research", prompt: "Explain storage.", sourceMessage: "research storage" },
+                  },
+                ],
+                stopReason: "tool_use",
+              }
+            : { content: [{ type: "text", text: "Storage result." }], stopReason: "end_turn" };
+        },
+      };
+      const deps = makeDeps(YAML_FIXTURE.replace("routing: { operator: off }", "routing: { operator: on }"), provider);
+      deps.runRegistry = new RunRegistry();
+      deps.slackContextForRun = (_actor, incoming) => testSlackCapability(incoming, async () => "fixture source");
+      const ledger = wireChildLedger(deps);
+      deps.operatorModel = vi.fn(async () => {
+        throw new Error("No second routing model");
+      });
+      let before: unknown;
+      const childThread = `${channelId}:child`;
+      const parentIO = fakeIO().io;
+      parentIO.openThread = async () => {
+        const row = [...ledger.live.values()].find((value) => value.meta.agent === "orchestrator");
+        before = structuredClone(row?.state.orchestratorDecisions);
+        return { thread: { threadKey: childThread }, io: fakeIO().io };
+      };
+      const request = {
+        ...msg("agent:orchestrator research storage", "slack:UADMIN"),
+        channelId,
+        threadKey: `${channelId}:parent`,
+        messageId: "request-one",
+      };
+      await dispatch(deps, request, parentIO);
+      await vi.waitFor(() => expect(deps.runRegistry!.listActive().some((run) => run.agent === "research")).toBe(true));
+      expect(before).toMatchObject([
+        {
+          tool: "spawn_run",
+          owner: { requesterId: request.userId, channelId, threadKey: request.threadKey },
+          source: { kind: "request", messageId: "request-one" },
+        },
+      ]);
+      const tools = (requests[0]!.tools ?? []).map((tool) => tool.name);
+      expect(tools).toEqual(expect.arrayContaining(["spawn_run", "await_runs", "list_runs", "get_run_status"]));
+      expect(tools).not.toContain("send_to_run");
+      expect(tools).not.toContain("work_start");
+      expect(deps.operatorModel).not.toHaveBeenCalled();
+      const child = deps.runRegistry!.listActive().find((run) => run.agent === "research");
+      expect(child).toMatchObject({ userId: request.userId, threadKey: childThread, parentRunId: expect.any(String) });
+    },
+  );
+
   it.each(["resume", "setup restart", "carried request restart", "replacement request restart"] as const)(
     "holds shared commands through dispatcher recovery: %s",
     async (kind) => {

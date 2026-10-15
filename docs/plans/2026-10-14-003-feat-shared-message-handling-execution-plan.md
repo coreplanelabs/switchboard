@@ -141,6 +141,12 @@ The live inbox outcome boundary is merged in [PR #3140](https://github.com/corep
 
 This closes another failure branch before shared decision records are added. Confirmed Workflow absence still follows its existing termination and requester routing policy. Conversation links, live and unit fold decisions, and removal of the separate operator model pass remain pending. Step 1 is in progress.
 
+### Read delegation, 2026-10-15
+
+The shared command path and parent launch checks are merged. The next cut gives fresh public and machine orchestrators the existing read-child tools. The existing action binder checks the selected preset and current requester-authored PR target. The saved decision includes the exact source, selected target, request and frozen context hashes before child thread creation. Binding, queue and preparation waits consume the original budget. A source change during those waits prevents dispatch.
+
+The same live call ID cannot launch a second child. Recovery keeps delegation tools held rather than replaying a selection with an unknown result. The current write-start and internal steer paths remain unchanged. Generic routing and live/unit fold migration remain pending; Step 1 is still in progress.
+
 ## Step 2: save input and recover shared work
 
 **Current source:** [state worker](../../deploy/cloudflare-memory/worker.ts), [run-ledger contract](../../src/core/runLedger/types.ts), and [write-through client](../../src/core/runLedger/writeThrough.ts).

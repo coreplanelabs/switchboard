@@ -47,6 +47,16 @@ describe("orchestrator decision records", () => {
     const snapshot = restored.snapshot();
     snapshot[0].owner.requesterId = "slack:UOTHER";
     expect(restored.snapshot()[0].owner.requesterId).toBe("slack:UREADER");
+    const spawn = {
+      ...source,
+      id: JSON.stringify([owner.runId, "spawn"]),
+      tool: "spawn_run" as const,
+      targetHash: "f".repeat(64),
+    };
+    expect(await restored.record(spawn)).toBe(true);
+    const rehosted = createOrchestratorDecisions({ owner, previous: restored.snapshot(), save: async () => true });
+    expect(await rehosted.record(spawn)).toBe(true);
+    expect(rehosted.snapshot().at(-1)).toMatchObject({ tool: "spawn_run", targetHash: "f".repeat(64) });
   });
   it("retains concurrent selections and reuses only an identical saved decision", async () => {
     let stored: readonly OrchestratorDecision[] = [];

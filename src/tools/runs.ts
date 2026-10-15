@@ -15,7 +15,13 @@ import {
   type WaitCapability,
   type WaitEnd,
 } from "../core/dispatch/awaitChildren.js";
-import { nullSpawnCapability, type SpawnCapability, type SpawnRequest } from "../core/dispatch/spawn.js";
+import {
+  nullSpawnCapability,
+  type SpawnCapability,
+  type SpawnRequest,
+  type SpawnMoment,
+  type SpawnOutcome,
+} from "../core/dispatch/spawn.js";
 import type { RunEvent } from "../core/runEvents.js";
 import { clampListLimit, RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
 import { runResource, type RunListCursor, type RunsService, type RunView } from "../core/runsService.js";
@@ -204,6 +210,7 @@ async function listChildren(
   return children;
 }
 
+const SPAWN_REQUIRED = ["preset", "prompt"];
 export const spawnRunTool: RunnableTool = {
   name: "spawn_run",
   failsInText: true,
@@ -247,7 +254,7 @@ export const spawnRunTool: RunnableTool = {
         description: `The child's effort (optional): one of ${EFFORT_LEVELS_HINT}, the child's own \`effort:\` directive`,
       },
     },
-    required: ["preset", "prompt"],
+    required: SPAWN_REQUIRED,
   },
   async run(input, ctx) {
     const preset = String(input.preset ?? "");
@@ -288,6 +295,57 @@ export const spawnRunTool: RunnableTool = {
     );
   },
 };
+
+export type RequesterSpawn = (
+  quote: string,
+  request: SpawnRequest,
+  at: SpawnMoment,
+  callId: string,
+  prTarget?: unknown,
+) => Promise<SpawnOutcome>;
+
+/** Reuse the spawn parser while requiring the orchestrator's requester source. */
+export function requesterSpawnTool(spawn: RequesterSpawn): RunnableTool {
+  const presets = CHILD_PRESETS().filter((name) => AGENTS[name]?.routable);
+  return {
+    ...spawnRunTool,
+    description: `Delegate a read task through the existing child-run path. Read preset choices: ${presets.join(", ")}. Copy an exact quote from the latest requester turn into sourceMessage. The action binder checks requester permissions and PR target evidence. The child receives the recorded parent context and remaining budget.`,
+    inputSchema: {
+      ...spawnRunTool.inputSchema,
+      properties: Object.assign({}, spawnRunTool.inputSchema.properties, {
+        preset: { type: "string", enum: presets, description: "The read preset selected for this task" },
+        sourceMessage: { type: "string", description: "Exact quote from the latest requester turn" },
+        prTarget: {
+          type: "object",
+          additionalProperties: false,
+          required: ["number", "source", "quote"],
+          description: "For review, supply the exact PR identifier authored in the current requester message.",
+          properties: {
+            number: { type: "integer", minimum: 1 },
+            source: { type: "string", enum: ["request"] },
+            quote: { type: "string" },
+          },
+        },
+      }),
+      additionalProperties: false,
+      required: [...SPAWN_REQUIRED, "sourceMessage"],
+    },
+    async run(input, ctx) {
+      const quote = input.sourceMessage;
+      const callId = ctx.callId;
+      if (typeof quote !== "string" || !quote.trim())
+        return "error: sourceMessage must quote the latest requester turn.";
+      if (!callId) return "error: The delegation call could not be identified.";
+      return spawnRunTool.run(input, {
+        ...ctx,
+        spawn: {
+          ...(ctx.spawn ?? nullSpawnCapability),
+          spawn: (request, at) => spawn(quote, request, at, callId, input.prTarget),
+        },
+      });
+    },
+  };
+}
 
 export const sendToRunTool: RunnableTool = {
   name: "send_to_run",

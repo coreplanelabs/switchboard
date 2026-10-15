@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { requesterSpawnTool } from "../../../tools/runs.js";
 import { describe, expect, it } from "vitest";
 import type { ChatMessage } from "../../chatMessage.js";
 import { analyzeRunFriction, isSetupInstallCommand } from "../../runFriction.js";
@@ -51,6 +52,45 @@ const FINALE_MS = loopClock(0, CONFORMANCE_MAX_MINUTES * MINUTE_MS, "conformance
 // as it reads pi's.
 
 const NOW = 1_700_000_000_000;
+
+describe("relayed read delegation budget", () => {
+  it.each([
+    ["pi", piDriver],
+    ["opencode", openCodeDriver],
+  ] as const)("%s supplies its live lease to a requester delegation call", async (_name, driver) => {
+    const budgets: number[] = [];
+    const tool = requesterSpawnTool(async (_quote, _request, at) => {
+      budgets.push(at.remainingMs);
+      return Number.isFinite(at.remainingMs) && at.remainingMs > 0
+        ? { kind: "spawned", runId: "child", threadKey: "mcp:default:child" }
+        : { kind: "refused", reason: "spawn_budget", message: "Remaining lease unavailable." };
+    });
+    const result = await driver().run({
+      identity: "none",
+      relayed: [tool],
+      request: "research storage",
+      turns: [
+        {
+          content: [
+            {
+              type: "tool_use",
+              id: "delegate",
+              name: "spawn_run",
+              input: { preset: "research", prompt: "Inspect storage.", sourceMessage: "research storage" },
+            },
+          ],
+          stopReason: "tool_use",
+        },
+        { content: [{ type: "text", text: "Delegation recorded." }], stopReason: "end_turn" },
+      ],
+    });
+    expect(result.outcome).toEqual({ kind: "answered", answer: "Delegation recorded." });
+    expect(JSON.stringify(result.modelCalls[1]?.messages)).toContain("spawned a research run: child");
+    expect(budgets).toHaveLength(1);
+    expect(Number.isFinite(budgets[0])).toBe(true);
+    expect(budgets[0]).toBeGreaterThan(0);
+  });
+});
 
 function harness(opts: { identity?: "write" | "read" | "none"; relayed?: string[] } = {}) {
   const events: RunEvent[] = [];

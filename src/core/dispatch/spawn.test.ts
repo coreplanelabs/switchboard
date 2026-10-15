@@ -993,6 +993,59 @@ describe("tiers at spawn — the parent's model and effort in the child's reques
 });
 
 describe("child launch after asynchronous waits", () => {
+  it("passes the action binder's PR target without replacing it with child prompt citations", async () => {
+    const ch = channel();
+    const { dispatch, calls } = fakeDispatch(registers("run-child"));
+    const { remainingMs: _, ...run } = parent(ch.io, { agentName: "orchestrator" });
+    const cap = spawnCapabilityFor(deps(dispatch), run);
+    const out = await cap.spawn(
+      { preset: "review", repo: "acme/api", prompt: "Read https://github.com/acme/api/pull/8 for context." },
+      {
+        remainingMs: 600_000,
+        operationTarget: {
+          repo: "acme/api",
+          prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+        },
+      },
+    );
+    expect(out).toMatchObject({ kind: "spawned", runId: "run-child" });
+    expect(calls[0].opts?.operationTarget).toEqual({
+      repo: "acme/api",
+      prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+    });
+  });
+  it.each(["context", "thread"])("holds a revoked requester source after the %s wait", async (stage) => {
+    let current = true;
+    const ch = channel();
+    const open = ch.io.openThread!;
+    ch.io.openThread = async (lead) => {
+      if (stage === "thread") current = false;
+      return open(lead);
+    };
+    const { dispatch, calls } = fakeDispatch(registers("run-child"));
+    const { remainingMs: _, ...run } = parent(ch.io);
+    const cap = spawnCapabilityFor(deps(dispatch), run);
+    const out = await cap.spawn(
+      { preset: "research", prompt: "q" },
+      {
+        remainingMs: 600_000,
+        sourceCurrent: () => current,
+        context: async () => {
+          if (stage === "context") current = false;
+          return parentContextOf([]);
+        },
+      },
+    );
+    expect(out).toMatchObject({ kind: "refused", reason: "spawn_source_changed" });
+    expect(calls).toHaveLength(0);
+    expect(ch.leads).toHaveLength(stage === "thread" ? 1 : 0);
+    expect(
+      await cap.spawn(
+        { preset: "research", prompt: "new request" },
+        { remainingMs: 600_000, sourceCurrent: () => true },
+      ),
+    ).toMatchObject({ kind: "spawned", runId: "run-child" });
+  });
   it("subtracts context and thread waits from the read child's inherited budget", async () => {
     let now = NOW;
     const ch = channel();

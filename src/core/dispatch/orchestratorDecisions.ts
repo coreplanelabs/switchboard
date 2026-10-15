@@ -23,7 +23,9 @@ export interface OrchestratorCommandDecision extends DecisionSource {
 }
 
 export type OrchestratorWorkAction =
-  { tool: "work_start"; target: { repo: string } } | { tool: "work_steer" | "work_stop"; target: { actId: string } };
+  | { tool: "work_start"; target: { repo: string } }
+  | { tool: "spawn_run"; target: { preset: string; repo?: string; prNumber?: number } }
+  | { tool: "work_steer" | "work_stop"; target: { actId: string } };
 export interface OrchestratorWorkDecision extends DecisionSource {
   tool: OrchestratorWorkAction["tool"];
   targetHash: string;
@@ -66,7 +68,7 @@ export function isOrchestratorDecision(value: unknown, owner: OrchestratorOwner)
   const actionKeys = command ? ["command", "line"] : ["tool", "targetHash"];
   const validAction = command
     ? boundedText(entry.command) && typeof entry.line === "string" && entry.line.length <= 1_024
-    : ["work_start", "work_steer", "work_stop"].includes(entry.tool ?? "") &&
+    : ["work_start", "work_steer", "work_stop", "spawn_run"].includes(entry.tool ?? "") &&
       typeof entry.targetHash === "string" &&
       /^[a-f0-9]{64}$/.test(entry.targetHash);
   let identity: unknown;
