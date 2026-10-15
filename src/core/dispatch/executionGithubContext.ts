@@ -193,8 +193,12 @@ export async function currentGithubReadCapability(
     operation = "listRepos";
     const current = await github.api.listRepos();
     stage = "repository";
-    if (receipt.repos.some((repo) => !current.some((row) => row.fullName.toLowerCase() === repo)))
-      return denied("repository-missing");
+    for (const repo of receipt.repos) {
+      if (current.some((row) => row.fullName.toLowerCase() === repo)) continue;
+      // Public upstream sources need not belong to this App installation.
+      operation = "isPublicRepo";
+      if (!(await github.api.isPublicRepo(repo))) return denied("repository-missing");
+    }
     if (receipt.tool === "github_search_code") {
       stage = "contents";
       operation = "listTree";

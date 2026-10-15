@@ -11,6 +11,126 @@ import { currentGithubReadCapability } from "./executionGithubContext.js";
 import { githubFileTool } from "../../tools/github.js";
 
 describe("current native execution read authority", () => {
+  it.each([200, 403])(
+    "rechecks an uninstalled public source through its original read family (HTTP %s)",
+    async (status) => {
+      const api = new RestGithubApi({
+        token: async () => "read token",
+        fetch: async (url) => {
+          const path = String(url);
+          if (path.includes("/installation/repositories")) return Response.json({ repositories: [] });
+          if (path.endsWith("/repos/upstream/provider"))
+            return Response.json({ full_name: "Upstream/Provider", private: false, visibility: "public" });
+          if (path.endsWith("/contents/schema.go?ref=v1"))
+            return Response.json(
+              { type: "file", encoding: "base64", content: "Y29kZQ==", size: 4 },
+              { status, headers: { "x-github-request-id": "A1:B2" } },
+            );
+          return new Response(null, { status: 404 });
+        },
+      });
+      const result = await currentGithubReadCapability(
+        {
+          version: 2,
+          runId: "run",
+          callId: "call",
+          tool: "github_file",
+          repos: ["upstream/provider"],
+          resultHash: "a".repeat(64),
+          inputHash: "b".repeat(64),
+          admissionHash: "c".repeat(64),
+        },
+        { repo: "upstream/provider", path: "schema.go", ref: "v1" },
+        { api, canWrite: () => false },
+        "review",
+      );
+      expect(result).toEqual(
+        status === 200
+          ? { ok: true }
+          : {
+              ok: false,
+              githubAccess: {
+                tool: "github_file",
+                stage: "tool-read",
+                operation: "readFile",
+                route: "contents",
+                reason: "http",
+                httpStatus: 403,
+                requestId: "A1:B2",
+                sourceCallHash: "9fd6fd2ffd299ff3691b5e216c4778afe73ff2b7e23fb14e138b032cfc0994e0",
+              },
+            },
+      );
+    },
+  );
+
+  it("keeps a private dependency denied after proving a public source", async () => {
+    const api = new InMemoryGithubApi({
+      "upstream/provider": { private: false, files: { "schema.go": "code" } },
+      "acme/private": { private: true },
+    });
+    api.listRepos = async () => [];
+    api.searchCode = async () => [];
+    expect(
+      await currentGithubReadCapability(
+        {
+          version: 2,
+          runId: "run",
+          callId: "call",
+          tool: "github_search_code",
+          repos: ["upstream/provider", "acme/private"],
+          resultHash: "a".repeat(64),
+          inputHash: "b".repeat(64),
+          admissionHash: "c".repeat(64),
+        },
+        { query: "code" },
+        { api, canWrite: () => false },
+        "review",
+      ),
+    ).toMatchObject({
+      ok: false,
+      githubAccess: { stage: "repository", operation: "isPublicRepo", reason: "repository-missing" },
+    });
+  });
+
+  it.each([403, 404])("retains public visibility probe failures (HTTP %s)", async (status) => {
+    const api = new RestGithubApi({
+      token: async () => "read token",
+      fetch: async (url) =>
+        String(url).includes("/installation/repositories")
+          ? Response.json({ repositories: [] })
+          : new Response("private error body", { status, headers: { "x-github-request-id": "A1:B2" } }),
+    });
+    const result = await currentGithubReadCapability(
+      {
+        version: 2,
+        runId: "run",
+        callId: "call",
+        tool: "github_file",
+        repos: ["upstream/provider"],
+        resultHash: "a".repeat(64),
+        inputHash: "b".repeat(64),
+        admissionHash: "c".repeat(64),
+      },
+      { repo: "upstream/provider", path: "schema.go" },
+      { api, canWrite: () => false },
+      "review",
+    );
+    expect(result).toEqual({
+      ok: false,
+      githubAccess: {
+        tool: "github_file",
+        stage: "repository",
+        operation: "isPublicRepo",
+        route: "repository",
+        reason: "http",
+        httpStatus: status,
+        requestId: "A1:B2",
+        sourceCallHash: "9fd6fd2ffd299ff3691b5e216c4778afe73ff2b7e23fb14e138b032cfc0994e0",
+      },
+    });
+  });
+
   it.each(["AbortError", "TypeError"] as const)(
     "retains signed log body %s facts without changing the error",
     async (name) => {

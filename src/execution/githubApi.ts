@@ -157,6 +157,8 @@ export interface GithubApi {
    *  client without it (a test double) is used as is. */
   withSpan?(span: Span): GithubApi;
   listRepos(): Promise<InstallationRepo[]>;
+  /** Current public visibility for this exact name, independent of installation membership. */
+  isPublicRepo(repo: string): Promise<boolean>;
   getUserRepoPermission(repo: string, login: string): Promise<RepositoryUserPermission | null>;
   /** A file's text at a ref, clipped at `opts.maxChars` (the tool clip
    *  `MAX_FILE_CHARS` when absent) with `truncated` saying so; a reader that
@@ -287,6 +289,7 @@ export interface RestGithubApiOptions {
  *  which carries a repo, a file path or a query. */
 export type GithubRoute =
   | "installation_repos"
+  | "repository"
   | "repository_user_permission"
   | "contents"
   | "contents_raw"
@@ -362,6 +365,17 @@ export class RestGithubApi implements GithubApi {
         break;
     }
     return out;
+  }
+
+  async isPublicRepo(repo: string): Promise<boolean> {
+    const res = await this.request("read", "GET", "repository", `/repos/${repo}`);
+    const body = (await githubJson(res, "repository")) as Record<string, unknown> | null;
+    return (
+      typeof body?.full_name === "string" &&
+      body.full_name.toLowerCase() === repo.toLowerCase() &&
+      body.private === false &&
+      body.visibility === "public"
+    );
   }
 
   async getUserRepoPermission(repo: string, login: string): Promise<RepositoryUserPermission | null> {
@@ -1137,6 +1151,10 @@ export class InMemoryGithubApi implements GithubApi {
       defaultBranch: r.defaultBranch ?? "main",
       description: r.description ?? null,
     }));
+  }
+
+  async isPublicRepo(repo: string): Promise<boolean> {
+    return this.repos.get(repo.toLowerCase())?.private === false;
   }
 
   async getUserRepoPermission(repo: string, login: string): Promise<RepositoryUserPermission | null> {

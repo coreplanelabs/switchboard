@@ -230,6 +230,26 @@ describe("RestGithubApi — reads use the read token", () => {
     expect(calls[0].headers.accept).toBe("application/vnd.github.text-match+json");
   });
 
+  it("requires explicit current public metadata for the same repository on the read token", async () => {
+    const bodies: Record<string, unknown> = {
+      public: { full_name: "Acme/Public", private: false, visibility: "public" },
+      private: { full_name: "acme/private", private: true, visibility: "private" },
+      internal: { full_name: "acme/internal", private: false, visibility: "internal" },
+      unknown: { full_name: "acme/unknown" },
+      incomplete: { full_name: "acme/incomplete", visibility: "public" },
+      renamed: { full_name: "other/public", private: false, visibility: "public" },
+    };
+    const { api: gh, calls } = api(({ url }) => ({ status: 200, body: bodies[url.split("/").at(-1)!] }));
+    expect(await gh.isPublicRepo("acme/public")).toBe(true);
+    for (const name of ["private", "internal", "unknown", "incomplete", "renamed"])
+      expect(await gh.isPublicRepo(`acme/${name}`)).toBe(false);
+    expect(calls.map((call) => call.headers.authorization)).toEqual(Array(6).fill("Bearer tok-read"));
+    const memory = new InMemoryGithubApi({ "acme/public": { private: false }, "acme/private": {} });
+    expect(await memory.isPublicRepo("ACME/PUBLIC")).toBe(true);
+    expect(await memory.isPublicRepo("acme/private")).toBe(false);
+    expect(await memory.isPublicRepo("acme/absent")).toBe(false);
+  });
+
   it("listRepos pages the installation's repositories", async () => {
     const { api: gh } = api(({ url }) =>
       url.includes("page=1")

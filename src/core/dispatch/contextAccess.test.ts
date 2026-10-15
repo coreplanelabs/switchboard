@@ -478,7 +478,7 @@ describe("canonical saved operator decisions", () => {
 });
 
 describe("message-bound context access", () => {
-  it("names missing receipts, incomplete transcripts and changed result bytes while allowing proved execution", async () => {
+  it.each(["private", "public"])("checks source access, receipts, session and bytes (%s)", async (source) => {
     const f = setup();
     const meta: LiveRunRow["meta"] = {
       agent: "review",
@@ -492,13 +492,14 @@ describe("message-bound context access", () => {
       session: { key: "session", seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
     };
     const admissionHash = (await executionAdmissionHash(meta))!;
-    const input = { repo: "acme/api", path: "src/x.ts" };
+    const sourceRepo = source === "public" ? "upstream/provider" : "acme/api";
+    const input = { repo: sourceRepo, path: "src/x.ts" };
     const receipt = {
       version: 2 as const,
       runId: "review",
       callId: "read",
       tool: "github_file",
-      repos: ["acme/api"],
+      repos: [sourceRepo],
       admissionHash,
       inputHash: await sourceHash(input),
       resultHash: await sourceHash("original code"),
@@ -520,7 +521,10 @@ describe("message-bound context access", () => {
     f.live.push(row);
     const readSession = vi.fn(async () => ({ complete: true, messages }));
     f.deps.runLedger.readSession = readSession as never;
-    f.deps.githubApi = new InMemoryGithubApi({ "acme/api": { files: { "src/x.ts": "current code" } } });
+    f.deps.githubApi = new InMemoryGithubApi({
+      [sourceRepo]: { private: source !== "public", files: { "src/x.ts": "current code" } },
+    });
+    if (source === "public") f.deps.githubApi.listRepos = async () => [];
     const execution = contextAccessForExecution(f.deps, {
       msg,
       io: f.io,
