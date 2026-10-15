@@ -34,6 +34,24 @@ function boundedText(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 512;
 }
 
+export function isOrchestratorOwner(value: unknown): value is OrchestratorOwner {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const owner = value as Record<string, unknown>;
+  return (
+    Object.keys(owner).length === 4 &&
+    ["runId", "requesterId", "channelId", "threadKey"].every((key) => boundedText(owner[key]))
+  );
+}
+
+export function sameOrchestratorOwner(a: OrchestratorOwner | undefined, b: OrchestratorOwner | undefined): boolean {
+  return a === undefined || b === undefined
+    ? a === b
+    : a.runId === b.runId &&
+        a.requesterId === b.requesterId &&
+        a.channelId === b.channelId &&
+        a.threadKey === b.threadKey;
+}
+
 export function isOrchestratorCommandDecision(
   value: unknown,
   owner: OrchestratorOwner,
@@ -67,12 +85,8 @@ export function isOrchestratorDecision(value: unknown, owner: OrchestratorOwner)
     identity.length === 2 &&
     identity[0] === owner.runId &&
     boundedText(identity[1]) &&
-    entry.owner !== null &&
-    typeof entry.owner === "object" &&
-    !Array.isArray(entry.owner) &&
-    Object.keys(entry.owner).length === 4 &&
-    Object.values(entry.owner).every(boundedText) &&
-    Object.entries(owner).every(([key, expected]) => entry.owner?.[key as keyof OrchestratorOwner] === expected) &&
+    isOrchestratorOwner(entry.owner) &&
+    sameOrchestratorOwner(entry.owner, owner) &&
     entry.source !== null &&
     typeof entry.source === "object" &&
     !Array.isArray(entry.source) &&
