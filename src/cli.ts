@@ -101,6 +101,7 @@ import { buildRunStore, NullRunStore, type RunStore } from "./core/runStore.js";
 import { buildRunLedger } from "./core/runLedgerWorker.js";
 import { mintGeneration, NullLedgerWriteThrough } from "./core/runLedger/writeThrough.js";
 import { createSteerSender, defaultAdmission } from "./core/dispatch/admission.js";
+import { inboxPushSequence } from "./core/runLedger/inboxMessage.js";
 import { ThreadsElsewhere } from "./core/runLedger/threadsElsewhere.js";
 import { buildMemoryStore, NullMemoryStore } from "./core/memory/index.js";
 import { residentAdminFromConfig } from "./core/residentAdmin.js";
@@ -673,7 +674,9 @@ function wireCli(): CliWiring {
           const runs = createRunsService({ registry: defaultRunRegistry, store: runStore, ledger });
           return createSteerSender({
             config,
-            runLedger: { pushInbox: async (runId, message) => (await ledger.pushInbox(runId, message)).seq },
+            runLedger: {
+              pushInbox: async (runId, message) => inboxPushSequence(await ledger.pushInbox(runId, message)),
+            },
             runs: {
               getById: async (runId) => {
                 const result = await runs.getRun(runId);

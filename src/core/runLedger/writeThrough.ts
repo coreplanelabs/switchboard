@@ -44,12 +44,8 @@ import {
 // stream in batches, the dispatcher's state, the finishing CAS, the finish —
 // so the next container generation can pick the run up (the plan's D1–D3).
 //
-// Phase 2 rule: the ledger never changes what a run does. A refused or failed
-// write detaches the run from the ledger (one warning, this run is not
-// resumable) and the run goes on exactly as before; only the finish record is
-// never dropped — it falls back to the plain store. The resume phase turns a
-// fence refusal into a stop (a zombie must not keep working); this file is
-// where that lands.
+// A failed inbox write is not evidence that its target disappeared. Keep
+// its error so admission cannot start other work or bypass durable storage.
 
 import { randomUUID } from "node:crypto";
 import { systemClock } from "../trace/clock.js";
@@ -74,7 +70,7 @@ import {
 import { preserveHarnessPolicy } from "./checkpointState.js";
 import { assignLedgerLiveState } from "./decisions.js";
 import type { RunLiveState } from "../runLiveState.js";
-import { messageFromInbox } from "./inboxMessage.js";
+import { inboxPushSequence, messageFromInbox } from "./inboxMessage.js";
 import { createAppendFlusher } from "./flusher.js";
 import type { HeartbeatFacts, RequesterTarget, RunLedger } from "./ledger.js";
 import type { PlaneAckOutcome, PlaneAskAnswer, PlaneEffect, PlaneOutcomePost } from "../plane/decide.js";
@@ -554,9 +550,9 @@ export interface LedgerWriteThrough {
   readContextCheckpoint(runId: string): Promise<CanonicalCheckpointSource | undefined>;
   /** A durable copy of a steered follow-up (run-history item 40), under the
    *  run's row whichever generation holds it: the ledger's inbox seq, or
-   *  undefined (with a warning) when the ledger refuses — the row is gone — or
-   *  cannot be reached. Never fenced: a steer arrives on whichever container is
-   *  up. */
+   *  undefined for confirmed target absence. Failed or unclear writes throw;
+   *  they cannot select fresh routing or an in-memory fallback. The null
+   *  implementation returns undefined when durability is disabled. */
   pushInbox(runId: string, message: Record<string, unknown>): Promise<number | undefined>;
   /** The run's durable inbox past `afterSeq` (run-history item 40) — the
    *  resume's re-read at adopt time. Empty, with a warning, when the ledger
@@ -2961,13 +2957,13 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     async pushInbox(runId, message) {
       try {
         const result = await ledger.pushInbox(runId, message);
-        if (result.ok && result.seq !== undefined) return result.seq;
-        warn(`[ledger] inbox push refused for run ${runId}: no live row — the follow-up rides in memory only`);
-        return undefined;
+        const seq = inboxPushSequence(result);
+        if (seq === undefined) warn(`[ledger] inbox push refused for run ${runId}: no live row`);
+        return seq;
       } catch (err) {
         if (err instanceof UncertainStoreError) throw err;
-        warn(`[ledger] inbox push failed for run ${runId}: ${describe(err)} — the follow-up rides in memory only`);
-        return undefined;
+        warn(`[ledger] inbox push failed for run ${runId}: ${describe(err)} — delivery held`);
+        throw err;
       }
     },
 

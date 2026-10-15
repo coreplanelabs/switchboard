@@ -78,6 +78,19 @@ const claimReq: ClaimRequest = {
 };
 
 describe("durable ledger acknowledgement continuity", () => {
+  it.each([undefined, "not-live", "invalid-message"] as const)(
+    "retains an inbox rejection's target-state reason: %s",
+    async (reason) => {
+      let accepted = false;
+      const w = stubWorker(() => ({
+        status: 200,
+        data: accepted ? { ok: true, seq: 7 } : { ok: false, ...(reason ? { reason } : {}) },
+      }));
+      expect(await w.ledger.pushInbox("r1", { text: "update" })).toEqual({ ok: false, ...(reason ? { reason } : {}) });
+      accepted = true;
+      expect(await w.ledger.pushInbox("r1", { text: "update" })).toEqual({ ok: true, seq: 7 });
+    },
+  );
   const aborted = () =>
     new Response(
       new ReadableStream({

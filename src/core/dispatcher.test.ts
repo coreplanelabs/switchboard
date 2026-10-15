@@ -22122,6 +22122,41 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     ).toBe(true);
   });
 
+  it("an unavailable inbox keeps the remote work owner without starting another agent", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    await ledger.claim({
+      runId: "run-far",
+      threadKey: "slack:CX:1.0",
+      gen: "gen-OLD",
+      leaseMs: 30_000,
+      startedAt: 5_000,
+      meta: { channelId: "slack:CX", userId: "slack:UX", threadKey: "slack:CX:1.0", agent: "general" },
+      card: null,
+      system: "sys",
+      tools: [],
+    });
+    const provider = capturingProvider("fresh answer");
+    const { deps, registry } = wired(provider, { ledger });
+    const elsewhere = new ThreadsElsewhere();
+    elsewhere.replace([{ threadKey: "slack:CX:1.0", runId: "run-far", startedAt: 5_000, meta: { agent: "general" } }]);
+    deps.threadsElsewhere = elsewhere;
+    deps.admission = new ThreadAdmission();
+    vi.spyOn(ledger, "pushInbox").mockRejectedValueOnce(new TransientStoreError("HTTP 503"));
+    const failed = await dispatch(deps, msg("keep the original work", "slack:UY"), fakeIO().io);
+    expect(failed).toMatchObject({ status: "failed" });
+    expect(provider.requests).toEqual([]);
+    expect(elsewhere.get("slack:CX:1.0")?.runId).toBe("run-far");
+    expect(ledger.live.get("run-far")?.ownerGen).toBe("gen-OLD");
+    expect(registry.listActive()).toMatchObject([{ agent: "door", finished: true }]);
+    const accepted = fakeIO();
+    await dispatch(deps, msg("and also the numbers", "slack:UY"), accepted.io);
+    expect(accepted.replies[0]).toMatch(/^↪ Added your message to the \*general\* work in this thread/);
+    expect(ledger.inbox.get("run-far")!.map((entry) => [entry.seq, entry.message.text])).toEqual([
+      [1, "and also the numbers"],
+    ]);
+    expect(provider.requests).toEqual([]);
+  });
+
   it("a follow-up on a thread whose live run is on the ledger but not in this process (the boot gap) is steered into that run's durable inbox and acked — no card, no second run; a row the ledger no longer has means a fresh run and the thread is forgotten", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     await ledger.claim({

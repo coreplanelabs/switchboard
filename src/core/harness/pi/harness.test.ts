@@ -2741,7 +2741,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(effect.seq).toBe(3);
     const externalControl = { ...effect.message };
     delete externalControl.target;
-    expect(await ledger.pushInbox("run-7", externalControl)).toEqual({ ok: false });
+    expect(await ledger.pushInbox("run-7", externalControl)).toEqual({ ok: false, reason: "invalid-message" });
     expect(await ledger.readInbox("run-7", 0)).toEqual([priorOne.row, priorTwo.row, controlRow.row]);
     scriptedPi(w.container, (n, c) => {
       if (n === 0)

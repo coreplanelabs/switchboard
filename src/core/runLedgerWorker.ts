@@ -1,4 +1,5 @@
 import { EXECUTION_PROTOCOL_HEADER } from "./runLedger/types.js";
+import type { InboxPushResult } from "./runLedger/inboxMessage.js";
 import { checkSelectorSchema, checkSourceReadOf, type CheckSelector, type CheckSourceRead } from "./checkInspection.js";
 import {
   cancellationRecordMatches,
@@ -1244,11 +1245,23 @@ export class WorkerRunLedger implements RunLedger {
     return this.fenceResult(await this.post("/runs/state", { storeKey: this.opts.storeKey, runId, gen, state }));
   }
 
-  async pushInbox(runId: string, message: Record<string, unknown>): Promise<{ ok: boolean; seq?: number }> {
+  async pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult> {
     this.checkIds(runId);
     const r = await this.post("/runs/inbox", { storeKey: this.opts.storeKey, runId, message });
-    if (r.status === 200 && r.data.ok === false && r.data.seq === undefined) return { ok: false };
-    if (r.status === 200 && r.data.ok === true && Number.isSafeInteger(r.data.seq) && Number(r.data.seq) > 0)
+    if (
+      r.status === 200 &&
+      r.data.ok === false &&
+      r.data.seq === undefined &&
+      (r.data.reason === undefined || r.data.reason === "not-live" || r.data.reason === "invalid-message")
+    )
+      return { ok: false, ...(r.data.reason ? { reason: r.data.reason } : {}) };
+    if (
+      r.status === 200 &&
+      r.data.ok === true &&
+      r.data.reason === undefined &&
+      Number.isSafeInteger(r.data.seq) &&
+      Number(r.data.seq) > 0
+    )
       return { ok: true, seq: Number(r.data.seq) };
     throw this.unknownAcknowledgement("run ledger /runs/inbox: invalid storage acknowledgement", r.request, r.status);
   }

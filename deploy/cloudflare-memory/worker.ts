@@ -48,7 +48,7 @@ import {
   sourceSeedReferenceOfReceipt,
   type SourceSeedOriginalRecord,
 } from "../../src/core/runLedger/seedVerification.ts";
-import { bindInboxCustody } from "../../src/core/runLedger/inboxMessage.ts";
+import { bindInboxCustody, type InboxPushResult } from "../../src/core/runLedger/inboxMessage.ts";
 import {
   sourceSeedReleaseOf,
   confirmStoredSeedBoundary,
@@ -7252,8 +7252,8 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   /** Any generation: a steer arrives on whichever container is up. */
-  async pushInbox(runId: string, message: Record<string, unknown>): Promise<{ ok: boolean; seq?: number }> {
-    let out: { ok: boolean; seq?: number } = { ok: false };
+  async pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult> {
+    let out: InboxPushResult = { ok: false, reason: "not-live" };
     this.ctx.storage.transactionSync(() => {
       const owner = this.liveRow(runId);
       if (!owner) return;
@@ -7264,7 +7264,10 @@ export class RunHistoryDO extends DurableObject<Env> {
         requester: owner.meta.userId,
         producerGen: owner.ownerGen,
       });
-      if (!stored) return;
+      if (!stored) {
+        out = { ok: false, reason: "invalid-message" };
+        return;
+      }
       const last = this.sql
         .exec<{ m: number | null }>(`SELECT MAX(seq) AS m FROM run_inbox WHERE run_id = ?`, runId)
         .one().m;
