@@ -410,6 +410,19 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
             ? evidence.doorPublicationPending
             : record.doorPublicationPending,
       });
+      Object.assign(canonical, {
+        reviewPublication:
+          evidence && Object.hasOwn(evidence, "reviewPublication")
+            ? evidence.reviewPublication
+            : record.reviewPublication,
+      });
+      if (record.agent === "review")
+        Object.assign(canonical, {
+          targetPr: record.targetPr,
+          maintenanceActionId: record.maintenanceActionId,
+          authenticatedAs: record.authenticatedAs,
+          postedBy: record.postedBy,
+        });
       terminal.set(record.id, canonical);
       if (!targets) continue;
       if (!isRunRecord(record) || !isPullOwnerLiveMeta(canonical)) covered = false;
@@ -429,6 +442,10 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
                 record: canonical,
                 publication: canonical.branchPublication,
                 door: canonical.doorPublicationPending,
+                reviewPublication:
+                  evidence && Object.hasOwn(evidence, "reviewPublication")
+                    ? evidence.reviewPublication
+                    : record.reviewPublication,
               })
             : undefined;
         this.terminalPullIndex.set(record.id, { source, targets: keys, targetsJson: JSON.stringify(keys) });
@@ -484,6 +501,7 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
           record: row.meta,
           publication: row.state.branchPublication,
           door: row.state.doorPublicationPending,
+          reviewPublication: row.state.reviewPublication,
         })),
         ...[...this.runOwner.finished.values()]
           .filter((row) => selected.has(row.id))
@@ -493,7 +511,16 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
               runId: row.id,
               repo: row.repo,
               live: false,
-              record: historicalOwnerRecord(row),
+              record:
+                row.agent === "review"
+                  ? {
+                      ...historicalOwnerRecord(row),
+                      targetPr: row.targetPr,
+                      maintenanceActionId: row.maintenanceActionId,
+                      authenticatedAs: row.authenticatedAs,
+                      postedBy: row.postedBy,
+                    }
+                  : historicalOwnerRecord(row),
               historicalEvents: auditedRunIds.has(row.id) ? row.events.map(historicalOwnerEvent) : undefined,
               pushReceipts: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "branchPushReceipts")
                 ? this.runOwner!.finishedWorkEvidence.get(row.id)!.branchPushReceipts
@@ -504,6 +531,12 @@ export class InMemoryCoordinatorInstanceStore implements CoordinatorInstanceStor
               door: Object.hasOwn(this.runOwner!.finishedWorkEvidence.get(row.id) ?? {}, "doorPublicationPending")
                 ? this.runOwner!.finishedWorkEvidence.get(row.id)!.doorPublicationPending
                 : row.doorPublicationPending,
+              reviewPublication: Object.hasOwn(
+                this.runOwner!.finishedWorkEvidence.get(row.id) ?? {},
+                "reviewPublication",
+              )
+                ? this.runOwner!.finishedWorkEvidence.get(row.id)!.reviewPublication
+                : row.reviewPublication,
             };
           }),
       ],

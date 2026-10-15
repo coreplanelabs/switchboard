@@ -31,6 +31,67 @@ const unit: CoordinatorUnit = {
 };
 
 describe("complete canonical pull ownership", () => {
+  it("retains an original managed review's uncertain publication after its unit settles", () => {
+    const runId = "original_review";
+    const ended: CoordinatorUnit = {
+      ...unit,
+      threadKey: instance.threadKey,
+      publication: {
+        repo: instance.repo,
+        pr: 7,
+        headRef: unit.branch,
+        baseRef: "main",
+        publicationRef: unit.branch,
+        expectedHeadSha: "b".repeat(40),
+        owner: { instanceId: instance.id, unit: unit.unit },
+      },
+      ending: {
+        kind: "aborted",
+        report: "review response lost",
+        at: 2,
+        outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 1 },
+      },
+    };
+    const reviewPublication = {
+      version: 1,
+      runId,
+      target: { repo: instance.repo, number: 7, commitId: "a".repeat(40) },
+      bodyHash: "c".repeat(64),
+      state: "uncertain",
+    };
+    const run = {
+      runId,
+      repo: instance.repo,
+      live: false,
+      record: {
+        id: runId,
+        agent: "review",
+        status: "completed",
+        parentInstanceId: instance.id,
+        coordinatorUnit: unit.unit,
+        idempotencyKey: `${instance.id}:${unit.unit}/1/review`,
+        userId: instance.userId,
+        channelId: instance.channelId,
+        threadKey: instance.threadKey,
+        repo: instance.repo,
+        headSha: "a".repeat(40),
+        targetPr: 7,
+      },
+      reviewPublication,
+    };
+    expect(
+      findPullOwnersInRows(
+        { repo: instance.repo, pr: 7 },
+        {
+          complete: true,
+          units: [{ instance, unit: ended }],
+          runs: [run],
+          effects: [],
+        },
+      ),
+    ).toEqual({ ok: true, owners: [{ kind: "run", runId: "original_review" }] });
+  });
+
   it("keeps one PR per work item while another work item can bind another PR", async () => {
     const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await store.put(instance);

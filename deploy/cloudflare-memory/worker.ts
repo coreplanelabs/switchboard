@@ -2174,7 +2174,7 @@ const COORDINATOR_SCAN_LIMIT = 16;
 class CanonicalArchiveRefusal extends Error {}
 
 // Bump when terminal candidate projection or decoder semantics change.
-const TERMINAL_PULL_OWNER_INDEX_VERSION = "1";
+const TERMINAL_PULL_OWNER_INDEX_VERSION = "2";
 // The independent validation footprint detects missing and same-size wrong
 // keys without rereading canonical bodies or trusting a candidate count.
 const TERMINAL_PULL_TARGET_CONTENT = `(SELECT json_group_array(json_object('repo',repo,'pr',pr,'ref',ref))
@@ -2192,7 +2192,7 @@ const TERMINAL_PULL_OWNER_COLUMNS = `SELECT run_id,
               'parentInstanceId', 'coordinatorUnit', 'coordinatorAttempt',
               'idempotencyKey', 'session', 'agent', 'status', 'provisional', 'publicationSettlement',
               'startedAt', 'finishedAt', 'eventCount', 'storedEventCount', 'truncated', 'headSha', 'pushed', 'restarting', 'pr',
-              'branchPublication', 'branchPushReceipts', 'doorPublicationPending'))
+              'branchPublication', 'branchPushReceipts', 'doorPublicationPending', 'reviewPublication', 'targetPr', 'maintenanceActionId', 'authenticatedAs', 'postedBy'))
            ELSE 'null' END AS owner_json,
            work_evidence_json`;
 
@@ -4864,7 +4864,17 @@ export class RunHistoryDO extends DurableObject<Env> {
     };
     const raw = parse(row.owner_json, "inventory_terminal_producer");
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) fail("inventory_terminal_producer");
-    const { branchPublication, branchPushReceipts, doorPublicationPending, ...identity } = raw;
+    const {
+      branchPublication,
+      branchPushReceipts,
+      doorPublicationPending,
+      reviewPublication,
+      targetPr,
+      maintenanceActionId,
+      authenticatedAs,
+      postedBy,
+      ...identity
+    } = raw;
     if (!isRunWorkOwner(identity) || !isPullOwnerLiveMeta(identity) || identity.id !== row.run_id)
       fail("inventory_terminal_producer");
     const evidence =
@@ -4876,7 +4886,10 @@ export class RunHistoryDO extends DurableObject<Env> {
       runId: row.run_id,
       repo: identity.repo,
       live: false,
-      record: identity,
+      record:
+        identity.agent === "review"
+          ? { ...identity, targetPr, maintenanceActionId, authenticatedAs, postedBy }
+          : identity,
       pushReceipts:
         evidence && Object.hasOwn(evidence, "branchPushReceipts") ? evidence.branchPushReceipts : branchPushReceipts,
       publication:
@@ -4885,6 +4898,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         evidence && Object.hasOwn(evidence, "doorPublicationPending")
           ? evidence.doorPublicationPending
           : doorPublicationPending,
+      reviewPublication:
+        evidence && Object.hasOwn(evidence, "reviewPublication") ? evidence.reviewPublication : reviewPublication,
     };
   }
 
@@ -5021,6 +5036,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         record: meta,
         publication: state.branchPublication,
         door: state.doorPublicationPending,
+        reviewPublication: state.reviewPublication,
       });
       if (diagnostics) diagnostics.runOrigins!.push({ source: "live_runs", rowIndex: diagnostics.scan!.rowIndex });
     }
