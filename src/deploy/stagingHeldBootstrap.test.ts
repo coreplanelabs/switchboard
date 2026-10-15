@@ -12,7 +12,7 @@ const commit = "a".repeat(40);
 const previous = "b".repeat(40);
 const profileRef = `github://example/config/profile.json@${"c".repeat(40)}`;
 const version = "00000000-0000-4000-8000-000000000001";
-function fixture() {
+function fixture(successor = false) {
   const account = TEST_PROFILE.account;
   const profile: DeploymentProfile = {
     ...TEST_PROFILE,
@@ -41,7 +41,7 @@ function fixture() {
     metrics: { dataset: "staging_runs" },
   });
   const text = stringify(config);
-  const policy = {
+  const policy: NonNullable<DeploymentProfile["residentMaintenance"]> = {
     ...TEST_MAINTENANCE,
     residentScript: "staging-resident",
     residentOrigin: "https://staging-resident.example.test",
@@ -53,6 +53,25 @@ function fixture() {
       profileSha256: sha256Hex(maintenanceProfileMaterial(profile)),
     },
   };
+  if (successor) {
+    const predecessor = {
+      holdId: policy.holdId,
+      generation: policy.generation,
+      attempt: { ...policy.attempt, id: "44444444-4444-4444-8444-444444444444", sourceCommit: previous },
+      fixtureSha256: policy.fixtureSha256,
+      decisionSha256: policy.decisionSha256,
+      policySha256: "6".repeat(64),
+      releasedAt: 0,
+      releaseDecisionSha256: "7".repeat(64),
+      request: { id: "55555555-5555-4555-8555-555555555555", startedAt: 0, recordSha256: "8".repeat(64) },
+    };
+    Object.assign(policy, {
+      holdId: "33333333-3333-4333-8333-333333333333",
+      generation: 2,
+      decisionSha256: "5".repeat(64),
+      predecessor,
+    });
+  }
   profile.residentMaintenance = policy;
   expect(
     stagingProblems(profile, parseAppConfigText(text), { staging: account, production: policy.productionAccount }),
@@ -84,6 +103,52 @@ function fixture() {
     attempt: policy.attempt,
     window: null,
   };
+  const predecessorView = policy.predecessor
+    ? {
+        schema: 1,
+        state: "released",
+        ...policy.predecessor,
+        window: {
+          state: "unverified",
+          recordId: policy.predecessor.request.id,
+          originalRecordSha256: policy.predecessor.request.recordSha256,
+          decisionSha256: policy.predecessor.decisionSha256,
+          disposition: "operator-abandoned",
+          requestEnd: "unobserved",
+          nativeOutcome: "unverified",
+          stored: 1,
+          excluded: 0,
+          blocking: 1,
+        },
+      }
+    : undefined;
+  const policySha256 = sha256Hex(
+    JSON.stringify(policy, (_key, item) =>
+      item && typeof item === "object" && !Array.isArray(item)
+        ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+        : item,
+    ),
+  );
+  if (policy.predecessor)
+    Object.assign(held, {
+      policySha256,
+      installation: {
+        schema: 1,
+        state: "installed",
+        holdId: policy.holdId,
+        generation: 2,
+        installedAt: 0,
+        policySha256,
+        predecessor: policy.predecessor,
+        evidence: {
+          maintenance: "a".repeat(64),
+          window: "b".repeat(64),
+          audit: "c".repeat(64),
+          release: "d".repeat(64),
+          originAudit: "e".repeat(64),
+        },
+      },
+    });
   const history = [
     {
       id: 2,
@@ -128,7 +193,11 @@ function fixture() {
                 },
               },
             ],
-            ...(uploads ? { stagingMaintenance: held } : {}),
+            ...(uploads
+              ? { stagingMaintenance: held }
+              : predecessorView
+                ? { stagingMaintenance: predecessorView }
+                : {}),
           },
     }),
     deploy: async (loaded, config, selectedVersion) => {
@@ -163,6 +232,7 @@ function fixture() {
     policy,
     profile,
     held,
+    predecessorView,
     history,
     io,
     receipts,
@@ -188,6 +258,67 @@ describe("held CI bootstrap", () => {
     expect(result).not.toHaveProperty("accepted");
     expect(h.uploads()).toBe(1);
     expect(h.held.window).toBeNull();
+  });
+
+  it("bootstraps the exact released predecessor and verifies its new installation receipt", async () => {
+    const h = fixture(true);
+    expect(await runHeldStagingBootstrap(h.request, h.accounts, h.io)).toMatchObject({
+      outcome: "image-ready-maintenance-held",
+      riskWindow: null,
+      installation: { state: "installed", generation: 2 },
+    });
+    expect(h.uploads()).toBe(1);
+    expect(h.predecessorView).toMatchObject({
+      state: "released",
+      generation: 1,
+      window: { requestEnd: "unobserved", nativeOutcome: "unverified" },
+    });
+  });
+
+  it("keeps acknowledged retained workspace counters for the final fenced activity classification", async () => {
+    const h = fixture(true);
+    const retained = { threadKey: "retained-work", evicted: false, user: "worker2" };
+    const read = h.io.read;
+    h.io.read = async (...args) => {
+      const result = await read(...args);
+      if (args[0].endsWith("/residents") && !("error" in result)) {
+        const body = result.body as { residents: { live: object }[] };
+        return {
+          status: 200,
+          body: {
+            ...result.body,
+            residents: body.residents.map((row) => ({
+              ...row,
+              live: { ...row.live, inFlight: 1, runsInFlight: 1, threads: [retained] },
+            })),
+          },
+        };
+      }
+      return result;
+    };
+    expect(await runHeldStagingBootstrap(h.request, h.accounts, h.io)).toMatchObject({
+      outcome: "image-ready-maintenance-held",
+    });
+    expect(h.uploads()).toBe(1);
+    expect(retained).toEqual({ threadKey: "retained-work", evicted: false, user: "worker2" });
+  });
+
+  it("refuses changed released predecessor or missing new installation proof", async () => {
+    for (const problem of ["release", "quote", "source", "future", "phase", "receipt"] as const) {
+      const h = fixture(true);
+      if (problem === "release") h.predecessorView!.releaseDecisionSha256 = "0".repeat(64);
+      if (problem === "quote") h.predecessorView!.window.originalRecordSha256 = "0".repeat(64);
+      if (problem === "source") h.request.previousCommit = "c".repeat(40);
+      if (problem === "future") {
+        h.policy.predecessor!.releasedAt = 1000;
+        h.predecessorView!.releasedAt = 1000;
+      }
+      if (problem === "phase") Object.assign(h.predecessorView!.window, { recordedState: "authorized" });
+      if (problem === "receipt") delete (h.held as { installation?: unknown }).installation;
+      await expect(runHeldStagingBootstrap(h.request, h.accounts, h.io)).rejects.toThrow();
+      expect(h.uploads()).toBe(problem === "receipt" ? 1 : 0);
+      expect(h.receipts.at(-1)?.outcome).toBe("unverified");
+    }
   });
 
   it("refuses reruns, wrong source and mutable references before an upload", async () => {

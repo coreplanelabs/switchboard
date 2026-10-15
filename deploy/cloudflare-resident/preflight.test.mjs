@@ -114,6 +114,128 @@ describe("selected staging maintenance preflight", () => {
     }
   });
 
+  it("admits only the separately selected exact released predecessor under successor bootstrap", async () => {
+    const expected = "00000000-0000-4000-8000-000000000001";
+    const previous = {
+      holdId: attempt.holdId,
+      generation: 1,
+      attempt: Object.fromEntries(Object.entries(attempt).filter(([key]) => !["holdId", "generation"].includes(key))),
+      fixtureSha256: "1".repeat(64),
+      decisionSha256: "2".repeat(64),
+      policySha256: "6".repeat(64),
+      releasedAt: 1000,
+      releaseDecisionSha256: "7".repeat(64),
+      request: { id: "55555555-5555-4555-8555-555555555555", startedAt: 1000, recordSha256: "8".repeat(64) },
+    };
+    const next = {
+      ...attempt,
+      holdId: "33333333-3333-4333-8333-333333333333",
+      generation: 2,
+      id: "44444444-4444-4444-8444-444444444444",
+      sourceCommit: "b".repeat(40),
+    };
+    const maintenance = {
+      schema: 1,
+      state: "released",
+      holdId: previous.holdId,
+      generation: 1,
+      attempt: previous.attempt,
+      fixtureSha256: previous.fixtureSha256,
+      decisionSha256: previous.decisionSha256,
+      releasedAt: 1000,
+      releaseDecisionSha256: previous.releaseDecisionSha256,
+      window: {
+        state: "expired",
+        recordId: previous.request.id,
+        originalRecordSha256: previous.request.recordSha256,
+        decisionSha256: previous.decisionSha256,
+        disposition: "operator-abandoned",
+        requestEnd: "unobserved",
+        nativeOutcome: "unverified",
+        stored: 1,
+        excluded: 0,
+        blocking: 1,
+      },
+    };
+    let body = { ...bootstrapFence(expected), stagingMaintenance: maintenance };
+    const wire = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json(body));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const output = vi.spyOn(console, "log").mockImplementation(() => {});
+    const env = {
+      RESIDENT_BASE_URL: "https://resident.example.test",
+      RESIDENT_DRAIN_TOKEN: "fixture",
+      RESIDENT_DEPLOY_ATTEMPT: JSON.stringify(next),
+      RESIDENT_BOOTSTRAP_PREVIOUS_VERSION: expected,
+      RESIDENT_BOOTSTRAP_RESOURCES: JSON.stringify(["repo:acme/api"]),
+      RESIDENT_BOOTSTRAP_UPLOAD_RESERVE_MS: "1200000",
+      RESIDENT_BOOTSTRAP_PREDECESSOR: JSON.stringify(previous),
+    };
+    try {
+      expect(await main(["--force"], env)).toBe(0);
+      const completeFence = body;
+      body = { ...body, draining: undefined };
+      expect(await main(["--force"], env)).toBe(1);
+      body = completeFence;
+      body = {
+        ...body,
+        residents: [
+          {
+            ...body.residents[0],
+            live: {
+              ...body.residents[0].live,
+              inFlight: 1,
+              runsInFlight: 1,
+              executingRuns: 0,
+              retainedRuns: 1,
+              unknownRuns: 0,
+            },
+          },
+        ],
+      };
+      expect(await main(["--force"], env)).toBe(0);
+      for (const counts of [{ executingRuns: 1 }, { unknownRuns: 1 }, { retainedRuns: undefined }]) {
+        const retainedBody = body;
+        body = { ...body, residents: [{ ...body.residents[0], live: { ...body.residents[0].live, ...counts } }] };
+        expect(await main(["--force"], env)).toBe(1);
+        body = retainedBody;
+      }
+      body = { ...body, residents: bootstrapFence(expected).residents };
+      expect(await main(["--force"], { ...env, RESIDENT_BOOTSTRAP_PREDECESSOR: undefined })).toBe(1);
+      for (const changed of [
+        { ...previous, releaseDecisionSha256: "0".repeat(64) },
+        { ...previous, request: { ...previous.request, recordSha256: "0".repeat(64) } },
+        { ...previous, attempt: { ...previous.attempt, sourceCommit: "c".repeat(40) } },
+      ])
+        expect(await main(["--force"], { ...env, RESIDENT_BOOTSTRAP_PREDECESSOR: JSON.stringify(changed) })).toBe(1);
+      body = {
+        ...body,
+        stagingMaintenance: {
+          ...maintenance,
+          policySha256: previous.policySha256,
+          window: { ...maintenance.window, recordedState: "completed" },
+        },
+      };
+      expect(await main(["--force"], env)).toBe(0);
+      expect(
+        await main(["--force"], {
+          ...env,
+          RESIDENT_BOOTSTRAP_PREDECESSOR: JSON.stringify({ ...previous, policySha256: "0".repeat(64) }),
+        }),
+      ).toBe(1);
+      body = {
+        ...body,
+        stagingMaintenance: { ...maintenance, window: { ...maintenance.window, recordedState: "authorized" } },
+      };
+      expect(await main(["--force"], env)).toBe(1);
+      body = { ...body, stagingMaintenance: { ...maintenance, state: "held" } };
+      expect(await main(["--force"], env)).toBe(1);
+    } finally {
+      wire.mockRestore();
+      log.mockRestore();
+      output.mockRestore();
+    }
+  });
+
   it("rechecks the selected readiness reserve at the final bootstrap preflight", async () => {
     const expected = "00000000-0000-4000-8000-000000000001";
     const wire = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json(bootstrapFence(expected)));

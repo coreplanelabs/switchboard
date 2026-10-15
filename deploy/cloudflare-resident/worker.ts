@@ -497,7 +497,8 @@ import {
   abandonmentAuditSchema,
   deployObligations,
   liveMaintenanceWindow,
-  maintenanceRecordSchema,
+  stagingEvidenceSha256,
+  stagingInstallationSchema,
   releaseWindowSchema,
   selectedStagingAttempt,
   stagingAttemptMatches,
@@ -507,6 +508,12 @@ import {
   type ResidentImageTarget,
   type MaintenanceRecord,
 } from "./admissionRisk.js";
+import {
+  installStagingEpisode,
+  readStagingEpisode,
+  stagingEpisodeKeys,
+  stagingEpisodeAuditKey,
+} from "./stagingEpisodes.js";
 import { createRefreshInstance, createRefreshInstanceNow, type RefreshInstanceParams } from "./refresh";
 import {
   deployFenceReady,
@@ -1643,8 +1650,6 @@ const DRAIN_KEY = "drain";
 const DEPLOY_ADMISSION_KEY_PREFIX = "deploy:admission:";
 const DEPLOY_RELEASE_RECEIPTS_KEY = "deploy:release-receipts";
 const DEPLOY_RECOVERY_KEY_PREFIX = "deploy:recovered:";
-const STAGING_MAINTENANCE_KEY = "deploy:staging-maintenance";
-const STAGING_WINDOW_KEY = "deploy:staging-window";
 const DEPLOY_ABANDONED_KEY_PREFIX = "deploy:abandoned:";
 
 /** Safe request provenance, never an authority or a native completion receipt. */
@@ -1842,64 +1847,57 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       policy.attempt.sourceCommit !== BUILD.commit
     )
       throw new Error("staging-maintenance-scope-mismatch");
-    await this.ctx.storage.transaction(async (txn) => {
-      const current = await this.getStagingMaintenance(txn);
-      if (current) {
-        if (JSON.stringify(current.policy) !== JSON.stringify(policy))
-          throw new Error("staging-maintenance-generation-mismatch");
-        return;
-      }
-      const now = systemClock();
-      const held: MaintenanceRecord = { schema: 1, state: "held", installedAt: now, policy };
-      if (!liveMaintenanceWindow(held, now)) throw new Error("staging-maintenance-deadline-invalid");
-      await txn.put(STAGING_MAINTENANCE_KEY, held);
-    });
+    await this.ctx.storage.transaction((txn) => installStagingEpisode(txn, policy, systemClock()));
   }
 
   async getStagingMaintenance(
-    store: Pick<DurableObjectStorage, "get"> = this.ctx.storage,
+    store: Pick<DurableObjectStorage, "get" | "list"> = this.ctx.storage,
+    historicalHoldId?: string,
   ): Promise<MaintenanceRecord | null> {
-    const raw = await store.get(STAGING_MAINTENANCE_KEY);
-    if (raw === undefined) return null;
-    const parsed = maintenanceRecordSchema.safeParse(raw);
+    const record = await readStagingEpisode(store, historicalHoldId);
     if (
-      !parsed.success ||
-      parsed.data.policy.stagingAccount !== this.env.CLOUDFLARE_ACCOUNT_ID ||
-      parsed.data.policy.residentScript !== this.env.RESIDENT_SCRIPT_NAME
+      record &&
+      (record.policy.stagingAccount !== this.env.CLOUDFLARE_ACCOUNT_ID ||
+        record.policy.residentScript !== this.env.RESIDENT_SCRIPT_NAME)
     )
       throw new Error("staging-maintenance-record-unverified");
-    return parsed.data;
+    return record;
   }
 
   async getDeployObligations(
     store: Pick<DurableObjectStorage, "get" | "list"> = this.ctx.storage,
     purpose: "deploy" | "release" = "deploy",
+    selected?: MaintenanceRecord,
   ) {
-    const maintenance = await this.getStagingMaintenance(store);
-    const window = await store.get(STAGING_WINDOW_KEY);
+    const maintenance = selected ?? (await this.getStagingMaintenance(store));
+    const window = await store.get(stagingEpisodeKeys(maintenance?.policy).window);
     const parsed = releaseWindowSchema.safeParse(window);
     return deployObligations({
       rows: await store.list({ prefix: DEPLOY_ADMISSION_KEY_PREFIX }),
       maintenance,
       window,
-      audit: parsed.success ? await store.get(`${DEPLOY_ABANDONED_KEY_PREFIX}${parsed.data.recordId}`) : null,
+      audit: parsed.success ? await store.get(stagingEpisodeAuditKey(maintenance?.policy, parsed.data.recordId)) : null,
       drain: await store.get(DRAIN_KEY),
       now: systemClock(),
       purpose,
     });
   }
 
-  async getStagingMaintenanceReadback() {
+  async getStagingMaintenanceReadback(historicalHoldId?: string) {
     return this.ctx.storage.transaction(async (txn) => {
-      const hold = await this.getStagingMaintenance(txn);
+      const hold = await this.getStagingMaintenance(txn, historicalHoldId);
       if (!hold) return null;
-      const parsed = releaseWindowSchema.safeParse(await txn.get(STAGING_WINDOW_KEY));
-      const counts = await this.getDeployObligations(txn);
+      const parsed = releaseWindowSchema.safeParse(await txn.get(stagingEpisodeKeys(hold.policy).window));
+      const counts = await this.getDeployObligations(txn, "deploy", hold);
       const audit = parsed.success
-        ? abandonmentAuditSchema.safeParse(await txn.get(`${DEPLOY_ABANDONED_KEY_PREFIX}${parsed.data.recordId}`))
+        ? abandonmentAuditSchema.safeParse(await txn.get(stagingEpisodeAuditKey(hold.policy, parsed.data.recordId)))
         : null;
       return {
         schema: 1,
+        policySha256: await stagingEvidenceSha256(hold.policy),
+        installation: hold.policy.predecessor
+          ? stagingInstallationSchema.parse(await txn.get(stagingEpisodeKeys(hold.policy).installation))
+          : null,
         state: hold.state,
         holdId: hold.policy.holdId,
         generation: hold.policy.generation,
@@ -1916,6 +1914,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
                   : counts.qualified
                     ? parsed.data.state
                     : "unverified",
+                recordedState: parsed.data.state,
                 recordId: audit.data.id,
                 originalRecordSha256: audit.data.originalRecordSha256,
                 decisionSha256: hold.policy.decisionSha256,
@@ -1955,15 +1954,19 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       if (
         !held ||
         !selectedStagingAttempt(held, attempt, now) ||
+        (held.policy.predecessor &&
+          (id !== held.policy.predecessor.request.id ||
+            expected.startedAt !== held.policy.predecessor.request.startedAt ||
+            expected.recordSha256 !== held.policy.predecessor.request.recordSha256)) ||
         held.policy.fixtureSha256 !== fixtureSha256 ||
         held.policy.decisionSha256 !== decisionSha256 ||
         !fence?.swapFence ||
         fence.swapVersion !== versionId ||
         !deployFenceReady(fence, now) ||
         held.policy.attempt.deadline > Date.parse(fence.until) ||
-        (await txn.get(`${DEPLOY_ABANDONED_KEY_PREFIX}${id}`)) !== undefined ||
+        (await txn.get(stagingEpisodeAuditKey(held?.policy, id))) !== undefined ||
         (await txn.get(`${DEPLOY_RECOVERY_KEY_PREFIX}${id}`)) !== undefined ||
-        (await txn.get(STAGING_WINDOW_KEY)) !== undefined
+        (await txn.get(stagingEpisodeKeys(held?.policy).window)) !== undefined
       )
         return false;
       const original = await txn.get(`${DEPLOY_ADMISSION_KEY_PREFIX}${id}`);
@@ -1988,8 +1991,8 @@ export class ResidentRegistryDO extends DurableObject<Env> {
         fence: quotedFence,
       });
       if (!audit.success) return false;
-      await txn.put(`${DEPLOY_ABANDONED_KEY_PREFIX}${id}`, audit.data);
-      await txn.put(STAGING_WINDOW_KEY, {
+      await txn.put(stagingEpisodeAuditKey(held?.policy, id), audit.data);
+      await txn.put(stagingEpisodeKeys(held?.policy).window, {
         schema: 1,
         state: "authorized",
         recordId: id,
@@ -2011,7 +2014,9 @@ export class ResidentRegistryDO extends DurableObject<Env> {
     decisionSha256: unknown,
   ): Promise<boolean> {
     const held = await this.getStagingMaintenance();
-    const audit = abandonmentAuditSchema.safeParse(await this.ctx.storage.get(`${DEPLOY_ABANDONED_KEY_PREFIX}${id}`));
+    const audit = abandonmentAuditSchema.safeParse(
+      await this.ctx.storage.get(stagingEpisodeAuditKey(held?.policy, id)),
+    );
     const selected = stagingAttemptSchema.safeParse(attempt);
     if (!held || !audit.success || !selected.success || !recoveryQuote(expected?.startedAt, expected?.recordSha256))
       return false;
@@ -2050,10 +2055,14 @@ export class ResidentRegistryDO extends DurableObject<Env> {
         !hold ||
         hold.state !== "held" ||
         !stagingAttemptMatches(hold, attempt) ||
-        decisionSha256 === hold.policy.decisionSha256
+        decisionSha256 === hold.policy.decisionSha256 ||
+        (hold.policy.predecessor &&
+          [hold.policy.predecessor.decisionSha256, hold.policy.predecessor.releaseDecisionSha256].includes(
+            decisionSha256,
+          ))
       )
         return false;
-      const window = releaseWindowSchema.safeParse(await txn.get(STAGING_WINDOW_KEY));
+      const window = releaseWindowSchema.safeParse(await txn.get(stagingEpisodeKeys(hold?.policy).window));
       const counts = await this.getDeployObligations(txn, "release");
       if (!window.success || !counts.qualified || counts.blocking !== 0) return false;
       const quote = recoveryQuote(expected.startedAt, expected.recordSha256);
@@ -2078,7 +2087,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
         requestEnd: "unobserved",
         nativeOutcome: "unverified",
       });
-      await txn.put(STAGING_MAINTENANCE_KEY, {
+      await txn.put(stagingEpisodeKeys(hold.policy).maintenance, {
         ...hold,
         state: "released",
         releasedAt,
@@ -2117,7 +2126,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
   ): Promise<boolean> {
     return this.ctx.storage.transaction(async (txn) => {
       const held = await this.getStagingMaintenance(txn);
-      const window = releaseWindowSchema.safeParse(await txn.get(STAGING_WINDOW_KEY));
+      const window = releaseWindowSchema.safeParse(await txn.get(stagingEpisodeKeys(held?.policy).window));
       const fence = liveDrain(await txn.get(DRAIN_KEY), systemClock());
       const counts = await this.getDeployObligations(txn);
       if (
@@ -2131,7 +2140,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
         !postUploadVersion(fence, versionId, versionTimestamp)
       )
         return false;
-      await txn.put(STAGING_WINDOW_KEY, { ...window.data, state: "completed" });
+      await txn.put(stagingEpisodeKeys(held?.policy).window, { ...window.data, state: "completed" });
       return true;
     });
   }
@@ -2836,7 +2845,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
           ...record,
           until: new Date(Math.min(Date.parse(record.until), held.policy.attempt.deadline)).toISOString(),
         };
-        const raw = await txn.get(STAGING_WINDOW_KEY);
+        const raw = await txn.get(stagingEpisodeKeys(held?.policy).window);
         if (raw !== undefined) {
           const window = releaseWindowSchema.safeParse(raw);
           const counts = await this.getDeployObligations(txn);
@@ -2849,7 +2858,7 @@ export class ResidentRegistryDO extends DurableObject<Env> {
             current.swapVersion !== window.data.drain.versionId
           )
             return false;
-          await txn.put(STAGING_WINDOW_KEY, {
+          await txn.put(stagingEpisodeKeys(held?.policy).window, {
             ...window.data,
             state: "claimed",
             drain: { ...window.data.drain, since: record.since, until: record.until },
@@ -2884,12 +2893,12 @@ export class ResidentRegistryDO extends DurableObject<Env> {
       } as const;
       if (!deployFenceReady(fenced, now)) return null;
       if (held?.state === "held") {
-        const raw = await txn.get(STAGING_WINDOW_KEY);
+        const raw = await txn.get(stagingEpisodeKeys(held?.policy).window);
         if (raw !== undefined) {
           const window = releaseWindowSchema.safeParse(raw);
           const counts = await this.getDeployObligations(txn);
           if (!window.success || window.data.state !== "claimed" || !counts.qualified) return null;
-          await txn.put(STAGING_WINDOW_KEY, {
+          await txn.put(stagingEpisodeKeys(held?.policy).window, {
             ...window.data,
             state: "fenced",
             drain: { since: fenced.since, until: fenced.until, versionId },
@@ -15182,8 +15191,12 @@ export default {
             return json({ error: "legacy permit recovery is unavailable" }, 409);
           case "/recover-quoted-admission":
             return await handleRecoverAdmission(env, body);
-          case "/staging-maintenance":
-            return json({ maintenance: await registryStub(env).getStagingMaintenanceReadback() });
+          case "/staging-maintenance": {
+            const holdId = url.searchParams.get("holdId");
+            if (holdId !== null && !stagingAttemptSchema.shape.holdId.safeParse(holdId).success)
+              return json({ error: "a valid staging hold ID is required" }, 400);
+            return json({ maintenance: await registryStub(env).getStagingMaintenanceReadback(holdId ?? undefined) });
+          }
           case "/staging-abandon-admission":
             return await handleStagingAbandonment(env, body);
           case "/staging-release-maintenance":

@@ -508,6 +508,53 @@ function matchingMaintenance(receipt, attempt) {
   return true;
 }
 
+/** A successor installer names the released predecessor; ordinary force cannot. */
+function matchingReleasedPredecessor(receipt, previous, attempt) {
+  if (
+    !previous ||
+    !validAttempt(attempt) ||
+    !validAttempt({ ...previous.attempt, holdId: previous.holdId, generation: previous.generation }) ||
+    !sha256(previous.policySha256) ||
+    !sha256(previous.releaseDecisionSha256) ||
+    !sha256(previous.decisionSha256) ||
+    !sha256(previous.fixtureSha256) ||
+    !uuid(previous.request?.id) ||
+    !Number.isSafeInteger(previous.request?.startedAt) ||
+    previous.request.startedAt < 0 ||
+    !sha256(previous.request?.recordSha256) ||
+    !Number.isSafeInteger(previous.releasedAt) ||
+    previous.releasedAt < 0 ||
+    attempt.generation !== previous.generation + 1 ||
+    attempt.holdId === previous.holdId ||
+    attempt.id === previous.attempt.id ||
+    attempt.sourceCommit === previous.attempt.sourceCommit
+  )
+    return false;
+  return (
+    receipt?.schema === 1 &&
+    receipt.state === "released" &&
+    receipt.holdId === previous.holdId &&
+    receipt.generation === previous.generation &&
+    receipt.fixtureSha256 === previous.fixtureSha256 &&
+    receipt.decisionSha256 === previous.decisionSha256 &&
+    receipt.releasedAt === previous.releasedAt &&
+    receipt.releaseDecisionSha256 === previous.releaseDecisionSha256 &&
+    ATTEMPT_FIELDS.every((key) => receipt.attempt?.[key] === previous.attempt[key]) &&
+    (receipt.policySha256 === undefined || receipt.policySha256 === previous.policySha256) &&
+    ["unverified", "expired"].includes(receipt.window?.state) &&
+    (receipt.window.recordedState === undefined || receipt.window.recordedState === "completed") &&
+    receipt.window.recordId === previous.request.id &&
+    receipt.window.originalRecordSha256 === previous.request.recordSha256 &&
+    receipt.window.decisionSha256 === previous.decisionSha256 &&
+    receipt.window.disposition === "operator-abandoned" &&
+    receipt.window.requestEnd === "unobserved" &&
+    receipt.window.nativeOutcome === "unverified" &&
+    receipt.window.stored === 1 &&
+    receipt.window.excluded === 0 &&
+    receipt.window.blocking === 1
+  );
+}
+
 function qualifiedMaintenance(receipt, attempt, active) {
   if (!matchingMaintenance(receipt, attempt)) return false;
   const window = receipt.window;
@@ -533,10 +580,27 @@ function qualifiedMaintenance(receipt, attempt, active) {
 
 export function decide(
   fetched,
-  { force = false, attempt, bootstrapPreviousWorkerVersion, bootstrapResources, bootstrapReserveMs, now } = {},
+  {
+    force = false,
+    attempt,
+    bootstrapPreviousWorkerVersion,
+    bootstrapResources,
+    bootstrapReserveMs,
+    bootstrapPredecessor,
+    now,
+  } = {},
 ) {
+  const successorBootstrap =
+    bootstrapPreviousWorkerVersion !== undefined &&
+    Number.isSafeInteger(now) &&
+    now >= bootstrapPredecessor?.releasedAt &&
+    matchingReleasedPredecessor(fetched?.payload?.stagingMaintenance, bootstrapPredecessor, attempt);
   if (attempt && fetched?.ok !== true) force = false;
-  if (fetched?.payload?.stagingMaintenance && !matchingMaintenance(fetched.payload.stagingMaintenance, attempt))
+  if (
+    fetched?.payload?.stagingMaintenance &&
+    !matchingMaintenance(fetched.payload.stagingMaintenance, attempt) &&
+    !successorBootstrap
+  )
     force = false;
   const busy = [];
   const provisioning = [];
@@ -565,6 +629,10 @@ export function decide(
       force = false;
       problems.push("selected staging bootstrap upload reserve is exhausted or unverified");
     }
+  }
+  if (bootstrapPredecessor !== undefined && !successorBootstrap) {
+    force = false;
+    problems.push("selected staging successor predecessor is unverified");
   }
   let retained = 0;
 
@@ -700,13 +768,20 @@ export function decide(
       new Set(residents.map((row) => row?.residentId ?? row?.resource)).size !== residents.length ||
       residents.some(
         (row) =>
-          !bootstrapResources.includes(row?.resource) || row?.live?.inFlight !== 0 || row?.live?.runsInFlight !== 0,
+          !bootstrapResources.includes(row?.resource) ||
+          (successorBootstrap
+            ? ![row?.live?.inFlight, row?.live?.runsInFlight].every(
+                (count) => Number.isSafeInteger(count) && count >= 0,
+              )
+            : row?.live?.inFlight !== 0 || row?.live?.runsInFlight !== 0),
       ) ||
       bootstrapResources.some((resource) => !residents.some((row) => row?.resource === resource)) ||
       !Number.isSafeInteger(body?.activeAdmissions) ||
       body.activeAdmissions < 0 ||
       body.activeAdmissions > 1 ||
-      body.stagingMaintenance != null ||
+      (successorBootstrap
+        ? body.activeAdmissions !== 1 || body.fenceReady !== false || drain?.swapFence !== false
+        : body.stagingMaintenance != null) ||
       typeof body?.fenceReady !== "boolean" ||
       typeof drain?.swapFence !== "boolean" ||
       typeof drain?.since !== "string" ||
@@ -792,6 +867,14 @@ export async function main(argv = process.argv.slice(2), env = process.env, { cl
     attempt,
     bootstrapPreviousWorkerVersion: env.RESIDENT_BOOTSTRAP_PREVIOUS_VERSION,
     bootstrapReserveMs: Number(env.RESIDENT_BOOTSTRAP_UPLOAD_RESERVE_MS),
+    bootstrapPredecessor: (() => {
+      if (env.RESIDENT_BOOTSTRAP_PREDECESSOR === undefined) return undefined;
+      try {
+        return JSON.parse(env.RESIDENT_BOOTSTRAP_PREDECESSOR);
+      } catch {
+        return null;
+      }
+    })(),
     now: env.RESIDENT_BOOTSTRAP_PREVIOUS_VERSION === undefined ? undefined : clock(),
     bootstrapResources: (() => {
       try {

@@ -12,7 +12,7 @@ import { registerRepository, residentRecords } from "../../src/execution/repoReg
 import { readResidentPlacement, recordResidentPlacement } from "../../src/execution/residentPlacement";
 import { effectiveLimits } from "./gc";
 import { methodOf, readSource } from "./testing/sourceScan";
-import { maintenanceRecordSchema } from "./admissionRisk.js";
+import { readStagingEpisode } from "./stagingEpisodes.js";
 import { TEST_MAINTENANCE } from "../../src/deploy/testing/profile.js";
 
 const source = readSource("worker.ts");
@@ -40,8 +40,7 @@ describe("metadata-only repo routes", () => {
       TEST_OVERRIDES_KEY: "overrides",
       BUILD_ID: "test-build",
       LRU_FLOOR_S: 3600,
-      STAGING_MAINTENANCE_KEY: "deploy:staging-maintenance",
-      maintenanceRecordSchema,
+      readStagingEpisode,
     });
     const rows = new Map<string, any>();
     const instance = new Registry();

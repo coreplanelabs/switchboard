@@ -140,6 +140,10 @@ await runHeldStagingBootstrap(
         plan.steps[0]!.setEnv.RESIDENT_BOOTSTRAP_UPLOAD_RESERVE_MS = String(
           minutesToMs(DRAIN.deployFenceMinRemainingMinutes),
         );
+        if (loaded.profile.residentMaintenance!.predecessor)
+          plan.steps[0]!.setEnv.RESIDENT_BOOTSTRAP_PREDECESSOR = JSON.stringify(
+            loaded.profile.residentMaintenance!.predecessor,
+          );
         let target: ResidentImageTarget | undefined;
         const deadline = loaded.profile.residentMaintenance!.attempt.deadline;
         const signal = AbortSignal.timeout(Math.max(1, deadline - systemClock()));

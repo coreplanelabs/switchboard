@@ -8,6 +8,11 @@ import { residentImageReportsProblem, residentMaintenanceProblem, residentWorker
 import { residentImageTargetSchema, type ResidentImageTarget } from "./residentMaintenance.js";
 import type { DeployRunResult } from "./run.js";
 import type { HealthRead } from "./sandboxLiveGate.js";
+import {
+  releasedStagingPredecessorMatches,
+  stagingInstallationSchema,
+  stagingEvidenceSha256,
+} from "./residentMaintenance.js";
 import { residentAddress } from "../execution/residentMembers.js";
 
 export interface HeldBootstrapRequest {
@@ -149,10 +154,19 @@ export async function runHeldStagingBootstrap(
       pendingReplicas?: number;
     };
     if (
-      inventory.stagingMaintenance != null ||
+      (policy.predecessor
+        ? request.previousCommit !== policy.predecessor.attempt.sourceCommit ||
+          policy.predecessor.releasedAt > io.now() ||
+          !releasedStagingPredecessorMatches(inventory.stagingMaintenance, policy.predecessor)
+        : inventory.stagingMaintenance != null) ||
       (inventory.pendingReplicas ?? 0) !== 0 ||
       inventory.residents.some(
-        (row) => !policy.resources.includes(row.resource) || row.live.inFlight !== 0 || row.live.runsInFlight !== 0,
+        (row) =>
+          !policy.resources.includes(row.resource) ||
+          ![row.live.inFlight, row.live.runsInFlight].every(
+            (count) => Number.isSafeInteger(count) && Number(count) >= 0,
+          ) ||
+          (!policy.predecessor && (row.live.inFlight !== 0 || row.live.runsInFlight !== 0)),
       ) ||
       policy.resources.some((resource) => !inventory.residents.some((row) => row.resource === resource))
     )
@@ -187,6 +201,22 @@ export async function runHeldStagingBootstrap(
       (after.body as unknown as { stagingMaintenance: { window: unknown } }).stagingMaintenance.window !== null
     )
       throw new Error("bootstrap must not claim or consume a risk window");
+    if (policy.predecessor) {
+      const maintenance = (after.body as { stagingMaintenance?: Record<string, unknown> }).stagingMaintenance;
+      const installation = stagingInstallationSchema.safeParse(maintenance?.installation);
+      const policySha256 = await stagingEvidenceSha256(policy);
+      if (
+        !installation.success ||
+        installation.data.holdId !== policy.holdId ||
+        installation.data.generation !== policy.generation ||
+        installation.data.policySha256 !== policySha256 ||
+        maintenance?.policySha256 !== policySha256 ||
+        (await stagingEvidenceSha256(installation.data.predecessor)) !==
+          (await stagingEvidenceSha256(policy.predecessor))
+      )
+        throw new Error("successor installation receipt is unverified");
+      receipt = { ...receipt, installation: installation.data };
+    }
     const terminal = after.body as unknown as typeof inventory;
     if (
       (terminal.pendingReplicas ?? 0) !== 0 ||
