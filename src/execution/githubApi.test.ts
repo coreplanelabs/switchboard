@@ -54,6 +54,146 @@ const api = (routes: Parameters<typeof fakeFetch>[0]) => {
 };
 
 describe("pull request feedback", () => {
+  it("reads inline comments and replies across every page with their native source and location", async () => {
+    const raw = {
+      id: 1,
+      pull_request_review_id: 9,
+      user: { login: "review[bot]", id: 11, type: "Bot" },
+      body: "Keep the original owner",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-02T00:00:00Z",
+      html_url: "https://github.com/acme/api/pull/7#discussion_r1",
+      path: "src/queue.ts",
+      commit_id: "a".repeat(40),
+      original_commit_id: "b".repeat(40),
+      diff_hunk: "@@ -1 +1 @@\n-owner\n+next",
+      line: null,
+      original_line: 4,
+      start_line: null,
+      start_side: null,
+      side: "RIGHT",
+      subject_type: "line",
+    };
+    const { api: gh, calls } = api(({ url }) => {
+      if (url.includes("/pulls/7/comments"))
+        return {
+          status: 200,
+          body: url.endsWith("page=1")
+            ? Array.from({ length: 100 }, (_, i) => ({ ...raw, id: i + 1 }))
+            : [{ ...raw, id: 101, user: { login: "author", id: 12, type: "User" }, body: "Fixed", in_reply_to_id: 1 }],
+        };
+      return { status: 200, body: [] };
+    });
+    const result = await gh.getPullRequestFeedback("acme/api", 7);
+    expect(result.reviewComments).toHaveLength(101);
+    expect(result.reviewComments[100]).toEqual({
+      id: 101,
+      reviewId: 9,
+      author: "author",
+      authorId: 12,
+      authorType: "User",
+      body: "Fixed",
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-02T00:00:00Z",
+      url: raw.html_url,
+      path: "src/queue.ts",
+      head: "a".repeat(40),
+      originalHead: "b".repeat(40),
+      diffHunk: "@@ -1 +1 @@\n-owner\n+next",
+      line: null,
+      originalLine: 4,
+      startLine: null,
+      startSide: null,
+      side: "RIGHT",
+      subjectType: "line",
+      inReplyToId: 1,
+    });
+    expect(calls.map((c) => ({ method: c.method, token: c.headers.authorization }))).toEqual([
+      { method: "GET", token: "Bearer tok-read" },
+      { method: "GET", token: "Bearer tok-read" },
+      { method: "GET", token: "Bearer tok-read" },
+      { method: "GET", token: "Bearer tok-read" },
+    ]);
+  });
+
+  it.each(["failed", "malformed", "limit"])("refuses %s inline history rather than proving it empty", async (mode) => {
+    const { api: gh } = api(({ url }) => {
+      if (!url.includes("/pulls/7/comments")) return { status: 200, body: [] };
+      if (mode === "failed") return { status: 503, body: { message: "unavailable" } };
+      return { status: 200, body: mode === "malformed" ? [{}] : Array.from({ length: 100 }, () => ({})) };
+    });
+    await expect(gh.getPullRequestFeedback("acme/api", 7)).rejects.toThrow();
+  });
+
+  it("preserves file-level comments with no line or review association", async () => {
+    const { api: gh } = api(({ url }) => ({
+      status: 200,
+      body: url.includes("/pulls/7/comments")
+        ? [
+            {
+              id: 5,
+              pull_request_review_id: null,
+              user: { login: "reviewer", id: 12, type: "Mannequin" },
+              body: "This file needs a guard",
+              created_at: "2026-01-01T00:00:00Z",
+              updated_at: "2026-01-01T00:00:00Z",
+              html_url: "https://github.com/acme/api/pull/7#discussion_r5",
+              path: "src/queue.ts",
+              commit_id: "a".repeat(40),
+              original_commit_id: "a".repeat(40),
+              diff_hunk: "",
+              line: null,
+              start_line: null,
+              start_side: null,
+              subject_type: "file",
+            },
+          ]
+        : [],
+    }));
+    expect((await gh.getPullRequestFeedback("acme/api", 7)).reviewComments).toMatchObject([
+      {
+        id: 5,
+        reviewId: null,
+        authorId: 12,
+        authorType: "Mannequin",
+        subjectType: "file",
+        line: null,
+        startSide: null,
+      },
+    ]);
+  });
+
+  it.each([false, true])("retains an inline comment with a null native author (reply: %s)", async (reply) => {
+    const raw = {
+      id: 5,
+      pull_request_review_id: 9,
+      user: null,
+      body: "Keep this source evidence",
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z",
+      html_url: "https://github.com/acme/api/pull/7#discussion_r5",
+      path: "src/queue.ts",
+      commit_id: "a".repeat(40),
+      original_commit_id: "a".repeat(40),
+      diff_hunk: "@@ -1 +1 @@\n+guard",
+      line: 1,
+      ...(reply ? { in_reply_to_id: 1 } : {}),
+    };
+    const { api: gh } = api(({ url }) => ({ status: 200, body: url.includes("/pulls/7/comments") ? [raw] : [] }));
+    const result = await gh.getPullRequestFeedback("acme/api", 7);
+    expect(result.reviewComments).toMatchObject([
+      { id: 5, reviewId: 9, author: null, authorId: null, authorType: null, body: "Keep this source evidence" },
+    ]);
+    expect(result.reviewComments[0]!.inReplyToId).toBe(reply ? 1 : undefined);
+    for (const user of [undefined, {}]) {
+      const malformed = api(({ url }) => ({
+        status: 200,
+        body: url.includes("/pulls/7/comments") ? [{ ...raw, user }] : [],
+      })).api;
+      await expect(malformed.getPullRequestFeedback("acme/api", 7)).rejects.toThrow();
+    }
+  });
+
   it("reads every review and conversation page with the read token", async () => {
     const raw = {
       id: 1,
@@ -64,6 +204,7 @@ describe("pull request feedback", () => {
       submitted_at: "2026-01-01T00:00:00Z",
     };
     const { api: gh, calls } = api(({ url }) => {
+      if (url.includes("/pulls/7/comments")) return { status: 200, body: [] };
       if (url.includes("/pulls/7/reviews"))
         return {
           status: 200,

@@ -53,6 +53,7 @@ export const GITHUB_ACCESS_ROUTES = [
   "issue_comments",
   "pull",
   "pull_reviews",
+  "pull_review_comments",
   "head_ref",
   "compare",
   "actions_run",
