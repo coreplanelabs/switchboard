@@ -31,6 +31,66 @@ const unit: CoordinatorUnit = {
 };
 
 describe("complete canonical pull ownership", () => {
+  it("keeps one PR per work item while another work item can bind another PR", async () => {
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+    await store.put(instance);
+    const first = { ...unit, resume: { pr: 7 } };
+    expect(await store.putUnits([first])).toEqual({ ok: true });
+    const substituted = { ...first, pr: { number: 8, url: "https://github.com/acme/api/pull/8" } };
+    expect(await store.compareAndReplaceUnit(first, substituted)).toEqual({ ok: false, reason: "stale" });
+    await expect(store.putUnits([substituted])).rejects.toThrow("coordinator unit write conflicts with retained state");
+    const second = { ...unit, unit: "SECOND", branch: "fix/second", pr: substituted.pr };
+    expect(await store.putUnits([second])).toEqual({ ok: true });
+    expect(await store.listUnits(instance.id)).toEqual([first, second]);
+    const otherInstance = { ...instance, id: "other_repo", repo: "acme/other" };
+    const other = {
+      ...unit,
+      instanceId: otherInstance.id,
+      pr: { number: 7, url: "https://github.com/acme/other/pull/7" },
+    };
+    expect(await store.put(otherInstance)).toEqual({ ok: true });
+    expect(await store.putUnits([other])).toEqual({ ok: true });
+    expect(await store.listUnits(otherInstance.id)).toEqual([other]);
+  });
+
+  it("retains the PR relation after settlement and permits a new authorized work item", async () => {
+    const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+    await store.put(instance);
+    const bound = {
+      ...unit,
+      publication: {
+        repo: instance.repo,
+        pr: 7,
+        headRef: unit.branch,
+        baseRef: "main",
+        publicationRef: unit.branch,
+        expectedHeadSha: "a".repeat(40),
+        owner: { instanceId: instance.id, unit: unit.unit },
+      },
+    };
+    expect(await store.putUnits([bound])).toEqual({ ok: true });
+    const moved = { ...bound, publication: { ...bound.publication, expectedHeadSha: "b".repeat(40) } };
+    expect(await store.compareAndReplaceUnit(bound, moved)).toEqual({ ok: true });
+    const ended: CoordinatorUnit = {
+      ...moved,
+      ending: {
+        kind: "aborted",
+        report: "Work ended",
+        at: 2,
+        outcome: { schemaVersion: 1, kind: "aborted", reviewRounds: 0 },
+      },
+    };
+    expect(await store.putUnits([ended])).toEqual({ ok: true });
+    expect(await store.findPullOwners({ repo: instance.repo, pr: 7 })).toEqual({ ok: true, owners: [] });
+    const newWork = { ...unit, unit: "NEW", branch: "fix/new" };
+    expect(await store.putUnits([newWork])).toEqual({ ok: true });
+    expect(await store.listUnits(instance.id)).toEqual([ended, newWork]);
+    expect(await store.findPullOwners({ repo: instance.repo, pr: 7 })).toEqual({
+      ok: true,
+      owners: [{ kind: "unit", instanceId: instance.id, unit: "NEW" }],
+    });
+  });
+
   it.each(["checkpoint", "model"] as const)(
     "keeps an accepted pre-PR %s publication under its original unit",
     async (producer) => {

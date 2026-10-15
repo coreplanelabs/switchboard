@@ -111,17 +111,27 @@ export interface RunRecordSignals {
 
 /** An admitted operation's repository and optional branch, carried by value.
  * Unlike citations or channel defaults these fields are execution authority.
- * A review resolves its own PR target instead of consuming this binding. */
+ * A standalone review resolves its own PR target. A managed child uses its
+ * parent work's admitted PR identity. Neither binds a whole conversation. */
 export interface OperationTarget {
   repo: string;
   ref?: string;
-  /** The operator checked this PR against requester-authored evidence before admission. */
-  prTarget?: { number: number; source: "request" | "thread"; quote: string };
+  /** Host-created authority from either requester evidence or the parent's
+   * canonical publication binding; model text cannot supply this field. */
+  prTarget?: { number: number; source: "request" | "thread"; quote: string } | { number: number; source: "parent" };
 }
 
 function persistedPrTargetOf(raw: unknown): NonNullable<OperationTarget["prTarget"]> {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid operation target");
   const { number, source, quote } = raw as Record<string, unknown>;
+  if (
+    typeof number === "number" &&
+    Number.isSafeInteger(number) &&
+    number > 0 &&
+    source === "parent" &&
+    quote === undefined
+  )
+    return { number, source };
   if (
     typeof number !== "number" ||
     !Number.isSafeInteger(number) ||
@@ -981,13 +991,13 @@ export async function resolveRepoContext(
   fallbackRepo?: string,
   /** Review alone may pair a bare PR number with its vetted repository. */
   reviewBarePr = false,
-  /** Accepted non-review operation; citations remain evidence. */
+  /** Accepted operation or parent work target; citations remain evidence. */
   operationTarget?: OperationTarget,
 ): Promise<RepoContext> {
   const acceptedTarget = operationTargetOf(operationTarget);
-  // The operator has already checked this exact PR against an actor-stamped
-  // authored span. Resolve that identity directly; old chat and history
-  // readers cannot override or veto the typed choice.
+  // Admission checked requester evidence or the parent's canonical publication
+  // binding. Resolve that identity directly; chat cannot replace it. Native
+  // head and access checks still run before a child can act.
   if (acceptedTarget?.prTarget !== undefined) {
     const { repo, ref, prTarget } = acceptedTarget;
     const admitted = await safeProbe(probe, repo);

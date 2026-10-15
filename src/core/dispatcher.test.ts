@@ -120,7 +120,7 @@ import { analyzeRunFriction } from "./runFriction.js";
 import { InMemoryIssueTracker } from "../execution/githubIssues.js";
 import { InMemoryRunStore, NullRunStore, type RunStore } from "./runStore.js";
 import { createRunsService, type RunView } from "./runsService.js";
-import type { RepoContext } from "./repoContext.js";
+import type { OperationTarget, RepoContext } from "./repoContext.js";
 import { isRunRecord, type RunRecord } from "./runRecord.js";
 import { createRunHistoryWriter, NullRunHistoryWriter } from "./runHistoryWriter.js";
 import { InMemoryRunLedger } from "./runLedger/inMemory.js";
@@ -17035,6 +17035,194 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       return { ...h, provider, repoCtx, instance, admin, call, spawnBody, io, replies, started, finished, dispatched };
     }
 
+    it("a parent target without its original publication tag refuses before repository resolution", async () => {
+      const h = await setup("review");
+      const resolve = vi.fn(() => h.repoCtx);
+      h.deps.resolveRepoContext = resolve;
+      const outcome = await dispatch(h.deps, msg("agent:review acme/api#7", h.instance.userId), h.io, {
+        operationTarget: { repo: "acme/api", prTarget: { number: 7, source: "parent" } },
+      });
+      expect(outcome).toMatchObject({ status: "refused", refusal: "publication_ownership_unknown" });
+      expect(resolve).not.toHaveBeenCalled();
+      expect(h.provider.requests).toEqual([]);
+    });
+
+    it.each(["parent", "unit"])(
+      "a managed child refuses a foreign %s binding before target resolution",
+      async (drift) => {
+        const h = await setup("review");
+        const row = (await h.admin.instances.listUnits(h.instance.id))[0]!;
+        const resolve = vi.fn(() => h.repoCtx);
+        h.deps.resolveRepoContext = resolve;
+        const outcome = await dispatch(h.deps, msg("agent:review acme/other#99", h.instance.userId), h.io, {
+          coordinator: {
+            parentInstanceId: h.instance.id,
+            unit: row.unit,
+            idempotencyKey: `${h.instance.id}:${row.unit}/1/review`,
+            publication: {
+              ...row.publication!,
+              owner: {
+                instanceId: drift === "parent" ? "foreign" : h.instance.id,
+                unit: drift === "unit" ? "OTHER" : row.unit,
+              },
+            },
+          },
+        });
+        expect(outcome).toMatchObject({ status: "refused", refusal: "publication_ownership_unknown" });
+        expect(resolve).not.toHaveBeenCalled();
+        expect(h.provider.requests).toEqual([]);
+      },
+    );
+
+    it("a managed review inherits its parent target before reading misleading child text", async () => {
+      const h = await setup("review");
+      const row = (await h.admin.instances.listUnits(h.instance.id))[0]!;
+      let accepted: OperationTarget | undefined;
+      h.deps.resolveRepoContext = (_msg, _history, _records, _fallback, _review, target) => {
+        accepted = target;
+        return target?.prTarget?.source === "parent"
+          ? { ...h.repoCtx, repo: target.repo, pr: target.prTarget.number }
+          : { repo: "acme/other", pr: 99, headSha: "a".repeat(40), ref: "foreign", baseRef: "main" };
+      };
+      await dispatch(h.deps, msg("agent:review https://github.com/acme/other/pull/99", h.instance.userId), h.io, {
+        operationTarget: { repo: "acme/other", prTarget: { number: 99, source: "request", quote: "acme/other#99" } },
+        coordinator: {
+          parentInstanceId: h.instance.id,
+          unit: row.unit,
+          idempotencyKey: `${h.instance.id}:${row.unit}/1/review`,
+          branch: row.branch,
+          base: "main",
+          publication: row.publication,
+        },
+      });
+      await h.writer.settled();
+      expect(accepted).toEqual({ repo: "acme/api", ref: row.branch, prTarget: { number: 7, source: "parent" } });
+      expect(h.registry.snapshotById("run-l")?.events.find((event) => event.type === "run_meta")).toMatchObject({
+        repo: "acme/api",
+        pr: 7,
+        ref: row.branch,
+      });
+    });
+
+    it("a legacy PR-bound coding child promotes with its original reservation and parent PR", async () => {
+      const h = await setup("coding");
+      const request = msg("agent:coding compare with acme/other#99", h.instance.userId);
+      const row = (await h.admin.instances.listUnits(h.instance.id))[0]!;
+      const publication = {
+        repo: h.instance.repo,
+        pr: 7,
+        headRef: row.branch,
+        baseRef: "main",
+        publicationRef: row.branch,
+        expectedHeadSha: "a".repeat(40),
+        owner: { instanceId: h.instance.id, unit: row.unit },
+      };
+      expect(
+        await h.admin.instances.compareAndReplaceUnit(row, {
+          ...row,
+          pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+          publication,
+        }),
+      ).toEqual({ ok: true });
+      const operationTarget = { repo: h.instance.repo, ref: row.branch };
+      const tag = {
+        type: "coordinator_tag" as const,
+        seq: 1,
+        parentInstanceId: h.instance.id,
+        unit: row.unit,
+        branch: row.branch,
+        base: "main",
+        publication,
+      };
+      const start = Date.now();
+      expect(
+        await h.ledger.claim({
+          runId: "run-old",
+          threadKey: request.threadKey,
+          gen: "gen-OLD",
+          leaseMs: 30_000,
+          startedAt: start,
+          phase: "attaching",
+          meta: {
+            agent: "coding",
+            channelId: request.channelId,
+            userId: request.userId,
+            threadKey: request.threadKey,
+            repo: h.instance.repo,
+            ref: row.branch,
+            pr: 7,
+            headSha: publication.expectedHeadSha,
+            operationTarget,
+            parentInstanceId: h.instance.id,
+            coordinatorUnit: row.unit,
+            coordinatorAttempt: 0,
+            idempotencyKey: `${h.instance.id}:${row.unit}/0/coding`,
+            profile: { machine: AGENTS.coding.machine, identity: "write", minutes: 20 },
+            request: durableInboxMessage(request, request.text, start),
+          },
+          card: null,
+          system: "",
+          tools: [],
+          state: {},
+        }),
+      ).toMatchObject({ ok: true });
+      expect(await h.ledger.append("run-old", "gen-OLD", [tag])).toMatchObject({ ok: true });
+      expect(
+        await h.ledger.assignLiveState("run-old", "gen-OLD", {
+          expectedSeq: 0,
+          eventSeq: 2,
+          at: start,
+          state: "admitted",
+          bound: start + minutesToMs(20),
+        }),
+      ).toMatchObject({ ok: true });
+      h.ledger.live.get("run-old")!.leaseUntil = 0;
+      const [reclaimed] = await h.ledger.reclaim("gen-T", Date.now(), 30_000);
+      h.deps.resolveRepoContext = (_msg, _history, _records, _fallback, _review, target) => ({
+        ...h.repoCtx,
+        pr: target?.prTarget?.number,
+        headSha: publication.expectedHeadSha,
+        baseRef: "main",
+      });
+      const fresh = {
+        state: "open" as const,
+        headRef: row.branch,
+        baseRef: "main",
+        headSha: publication.expectedHeadSha,
+        sameRepoHead: true,
+        headBranchExists: true,
+        verifiedHead: { repo: h.instance.repo, ref: row.branch, sha: publication.expectedHeadSha },
+      };
+      h.deps.fetchPrFacts = async () => fresh;
+      vi.mocked(makeExecutor).mockResolvedValueOnce({
+        executor: {
+          exec: async () => publication.expectedHeadSha,
+          readFile: async () => "",
+          writeFile: async () => "",
+        },
+        resident: true,
+        backend: "resident",
+        binding: {
+          ref: row.branch,
+          sha: publication.expectedHeadSha,
+          workspace: "/workspace/checkout",
+          user: "worker2",
+        },
+      });
+      let promoted: { phase: string; target: unknown; pr: number | undefined } | undefined;
+      const complete = h.provider.complete.bind(h.provider);
+      h.provider.complete = async (...args) => {
+        const live = h.ledger.live.get("run-old")!;
+        promoted = { phase: live.phase, target: live.meta.operationTarget, pr: live.meta.pr };
+        return complete(...args);
+      };
+      const outcome = await dispatch(h.deps, request, h.io, {
+        restart: { row: reclaimed.row, inbox: [], events: await h.ledger.readEvents("run-old") },
+      });
+      await h.writer.settled();
+      expect(promoted, JSON.stringify(outcome)).toEqual({ phase: "live", target: operationTarget, pr: 7 });
+    });
+
     it("a restarted coordinator review retains its original publication before resolving a moved head", async () => {
       const h = await setup("review");
       const request = msg("agent:review in acme/api: https://github.com/acme/api/pull/7", h.instance.userId);
@@ -17089,13 +17277,18 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       const events = await h.ledger.readEvents("run-old");
       h.ledger.live.get("run-old")!.leaseUntil = 0;
       const [reclaimed] = await h.ledger.reclaim("gen-T", Date.now(), 30_000);
-      h.deps.resolveRepoContext = () => ({ ...h.repoCtx, headSha: "b".repeat(40) });
+      let accepted: OperationTarget | undefined;
+      h.deps.resolveRepoContext = (_msg, _history, _records, _fallback, _review, target) => {
+        accepted = target;
+        return { ...h.repoCtx, headSha: "b".repeat(40) };
+      };
       const callsBefore = vi.mocked(makeExecutor).mock.calls.length;
       const result = await dispatch(h.deps, request, h.io, {
         restart: { row: reclaimed.row, inbox: [], events },
       });
       await h.writer.settled();
       expect(result).toMatchObject({ refusal: "workspace_head_mismatch" });
+      expect(accepted).toEqual({ repo: "acme/api", ref: row.branch, prTarget: { number: 7, source: "parent" } });
       expect(vi.mocked(makeExecutor).mock.calls.length).toBe(callsBefore);
       expect(h.provider.requests).toEqual([]);
     });

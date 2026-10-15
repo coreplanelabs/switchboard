@@ -9255,6 +9255,7 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
       row({
         issue: board!.number,
         pr: { number: prIssue!.number, url: `https://github.com/acme/api/pull/${prIssue!.number}` },
+        publication: { ...row().publication!, pr: prIssue!.number },
       }),
     );
     const heldReport =
@@ -9275,7 +9276,13 @@ describe("POST /admin/coordinator/merge — the runner's squash of a unit's pull
     expect((await held.github.getIssue("acme/api", board!.number)).comments.map((c) => c.body)).toEqual([
       `**Plan runner — U10 ended \`held\`** · https://github.com/acme/api/pull/${prIssue!.number}\n\n${heldReport}`,
     ]);
-    const heldGone = await mergeHarness({}, { pr: { number: 4242, url: "https://github.com/acme/api/pull/4242" } });
+    const heldGone = await mergeHarness(
+      {},
+      {
+        pr: { number: 4242, url: "https://github.com/acme/api/pull/4242" },
+        publication: { ...row().publication!, pr: 4242 },
+      },
+    );
     expect(
       (
         await call(heldGone, "unit-end", {
