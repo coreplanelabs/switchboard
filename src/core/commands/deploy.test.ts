@@ -73,7 +73,7 @@ const REPORT: AffectedReport = {
     },
     { name: "sandbox", decision: "skip", base: { kind: "live", commit: "a".repeat(40) }, reasons: [] },
   ],
-  selected: ["bot", "resident"],
+  selected: ["resident", "bot"],
   unclassified: [],
   deployAll: false,
   markdown: "(md)",
@@ -284,14 +284,17 @@ describe("deploy.plan", () => {
     });
   });
 
-  it("computes the canonical plan (memory → bot → resident → sandbox) with the bot's live gate, and renders formatPlan", async () => {
+  it("computes the canonical plan (memory → resident → bot → sandbox) with the bot's live gate, and renders formatPlan", async () => {
     const { commands } = neverRuns();
     const res = await commands.invoke("deploy.plan", {}, admin);
     expect(res.ok).toBe(true);
     if (!res.ok) throw new Error("unreachable");
     const plan = res.value as unknown as DeployPlan;
-    expect(plan.steps.map((s) => s.name)).toEqual(["memory", "bot", "resident", "sandbox"]);
-    expect(plan.steps[1]).toMatchObject({ liveGate: { healthUrl: BOT_HEALTH_URL }, retryOnPreflightRefusal: true });
+    expect(plan.steps.map((s) => s.name)).toEqual(["memory", "resident", "bot", "sandbox"]);
+    expect(plan.steps.find((step) => step.name === "bot")).toMatchObject({
+      liveGate: { healthUrl: BOT_HEALTH_URL },
+      retryOnPreflightRefusal: true,
+    });
     expect(plan).toMatchObject({
       dryRun: true,
       force: false,
@@ -377,7 +380,7 @@ describe("deploy.plan", () => {
     expect(bad).toMatchObject({
       ok: false,
       error: "invalid_input",
-      message: "only: expected a comma list of Workers (memory, bot, resident, sandbox)",
+      message: "only: expected a comma list of Workers (memory, resident, bot, sandbox)",
     });
     expect(JSON.stringify(bad)).not.toContain("frontend");
     expect(await commands.invoke("deploy.plan", { options: { only: "bot", skip: "bot" } }, cli)).toMatchObject({
@@ -402,10 +405,10 @@ describe("deploy.plan", () => {
     if (!res.ok) throw new Error(res.message);
     const plan = res.value as unknown as DeployPlan;
     expect(affectedCalls).toEqual([{}]);
-    expect(plan.steps.map((s) => s.name)).toEqual(["bot", "resident"]);
+    expect(plan.steps.map((s) => s.name)).toEqual(["resident", "bot"]);
     expect(plan.affected).toEqual(REPORT);
     const text = renderText(commands.get("deploy.plan")!, res.value);
-    expect(text.startsWith("Affected: bot, resident (HEAD fffffff; judged per Worker against what it serves)")).toBe(
+    expect(text.startsWith("Affected: resident, bot (HEAD fffffff; judged per Worker against what it serves)")).toBe(
       true,
     );
     expect(text).toContain("  - resident: deploy — release v0.1.0 — deploy/cloudflare-resident/Dockerfile");
@@ -606,7 +609,7 @@ describe("deploy.all", () => {
     const res = await commands.invoke("deploy.all", { options: { affected: true } }, cli);
     expect(res.ok).toBe(true);
     expect(plans).toHaveLength(1);
-    expect(plans[0].steps.map((s) => s.name)).toEqual(["bot", "resident"]);
+    expect(plans[0].steps.map((s) => s.name)).toEqual(["resident", "bot"]);
     expect(plans[0]).toMatchObject({ dryRun: false, affected: REPORT });
     expect(renderText(commands.get("deploy.all")!, res.ok ? res.value : null)).toContain(
       "bot       switchboard            v-bot",
@@ -1555,8 +1558,8 @@ describe("deploy.images", () => {
     expect((res.value as unknown as DeployPlan).images).toEqual({
       mode: "build",
       images: [
-        { kind: "bot", dockerfile: "../../Dockerfile" },
         { kind: "resident", dockerfile: "./Dockerfile" },
+        { kind: "bot", dockerfile: "../../Dockerfile" },
         { kind: "sandbox", dockerfile: "./Dockerfile" },
       ],
     });
@@ -1650,12 +1653,12 @@ describe("deploy.plan / deploy.all in registry mode", () => {
     ]);
     expect(plan.images).toMatchObject({
       images: [
-        { kind: "bot", present: false },
         {
           kind: "resident",
           ref: `registry.cloudflare.com/${ACCOUNT}/switchboard-resident:${tags.resident}`,
           present: true,
         },
+        { kind: "bot", present: false },
         {
           kind: "sandbox",
           ref: `registry.cloudflare.com/${ACCOUNT}/switchboard-sandbox:${tags.sandbox}`,
@@ -1682,8 +1685,8 @@ describe("deploy.plan / deploy.all in registry mode", () => {
       mode: "registry",
       version: "1.2.3",
       images: [
-        { kind: "bot", ref: `registry.cloudflare.com/${ACCOUNT}/switchboard:1.2.3`, present: true },
         { kind: "resident", ref: `registry.cloudflare.com/${ACCOUNT}/switchboard-resident:1.2.3`, present: true },
+        { kind: "bot", ref: `registry.cloudflare.com/${ACCOUNT}/switchboard:1.2.3`, present: true },
         { kind: "sandbox", ref: `registry.cloudflare.com/${ACCOUNT}/switchboard-sandbox:1.2.3`, present: true },
       ],
     });
@@ -1719,8 +1722,8 @@ describe("deploy.plan / deploy.all in registry mode", () => {
     expect(plan.images).toMatchObject({
       mode: "registry",
       images: [
-        { kind: "bot", ref: `registry.cloudflare.com/${ACCOUNT}/switchboard:1.2.3`, present: true },
         { kind: "resident", present: true },
+        { kind: "bot", ref: `registry.cloudflare.com/${ACCOUNT}/switchboard:1.2.3`, present: true },
         { kind: "sandbox", present: true },
       ],
     });
@@ -1774,8 +1777,8 @@ describe("deploy.plan / deploy.all in registry mode", () => {
     expect((res.value as unknown as DeployPlan).images).toMatchObject({
       mode: "registry",
       images: [
-        { kind: "bot", present: true },
         { kind: "resident", present: false },
+        { kind: "bot", present: true },
         { kind: "sandbox", present: false },
       ],
     });
@@ -1810,8 +1813,8 @@ describe("deploy.plan / deploy.all in registry mode", () => {
     expect(plans[0].images).toMatchObject({
       mode: "registry",
       images: [
-        { kind: "bot", present: true },
         { kind: "resident", present: true },
+        { kind: "bot", present: true },
         { kind: "sandbox", present: true },
       ],
     });
@@ -1873,13 +1876,13 @@ describe("deploy.plan / deploy.all in registry mode", () => {
     // The report selects bot + resident; only the resident's image was missing and copied.
     expect(h.copies.map((c) => c.split(":")[0])).toEqual(["resident"]);
     expect(plans).toHaveLength(1);
-    expect(plans[0].steps.map((s) => s.name)).toEqual(["bot", "resident"]);
+    expect(plans[0].steps.map((s) => s.name)).toEqual(["resident", "bot"]);
     expect(plans[0].affected).toEqual(REPORT);
     expect(plans[0].images).toMatchObject({
       mode: "registry",
       images: [
-        { kind: "bot", present: true },
         { kind: "resident", present: true },
+        { kind: "bot", present: true },
       ],
     });
   });
@@ -1942,8 +1945,8 @@ describe("deploy.plan / deploy.all in registry mode", () => {
       mode: "registry",
       unprobed: "GET https://registry.cloudflare.com/v2/_catalog?tags=true answered 401",
       images: [
-        { kind: "bot", present: undefined },
         { kind: "resident", present: undefined },
+        { kind: "bot", present: undefined },
         { kind: "sandbox", present: undefined },
       ],
     });
@@ -1964,8 +1967,8 @@ describe("deploy.plan / deploy.all in registry mode", () => {
     expect((fromExample.value as unknown as DeployPlan).images).toMatchObject({
       mode: "registry",
       images: [
-        { kind: "bot", present: undefined },
         { kind: "resident", present: undefined },
+        { kind: "bot", present: undefined },
         { kind: "sandbox", present: undefined },
       ],
     });
@@ -1980,8 +1983,8 @@ describe("deploy.plan / deploy.all in registry mode", () => {
     expect((res.value as unknown as DeployPlan).images).toEqual({
       mode: "build",
       images: [
-        { kind: "bot", dockerfile: "../../Dockerfile" },
         { kind: "resident", dockerfile: "./Dockerfile" },
+        { kind: "bot", dockerfile: "../../Dockerfile" },
         { kind: "sandbox", dockerfile: "./Dockerfile" },
       ],
     });

@@ -14,6 +14,8 @@ import { COLD_START_ALLOWANCE_MS, DRAIN_DEADLINE_MS, heldRunsText, type HeldRun 
 /** What the gate needs from a `/healthz` body (src/channels/health.ts `HealthPayload`). */
 export interface HealthzBody {
   ok?: unknown;
+  /** Worker capability advertisement; the consuming gate validates its value. */
+  features?: unknown;
   inFlight?: unknown;
   draining?: unknown;
   drainStartedAt?: unknown;

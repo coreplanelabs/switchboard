@@ -43,6 +43,7 @@ export function residentMaintenanceProblem(
   policy: StagingMaintenancePolicy,
   expectedResources: readonly string[] = [],
   bootstrap = false,
+  windowState: "fenced" | "completed" = "fenced",
 ): string | undefined {
   const images = residentImageReportsProblem(read, expectedResources);
   if (images) return images;
@@ -60,7 +61,7 @@ export function residentMaintenanceProblem(
   const window = object(held.window);
   if (
     !bootstrap &&
-    (window?.state !== "fenced" ||
+    (window?.state !== windowState ||
       window.blocking !== 0 ||
       window.excluded !== 1 ||
       window.stored !== 1 ||

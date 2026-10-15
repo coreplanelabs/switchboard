@@ -38,9 +38,11 @@ const processes = vi.hoisted(() => ({
   uploads: [] as { name: string; account: string; bucketConfig?: string }[],
   onMemory: () => {},
   onBot: () => {},
+  onResident: () => {},
   onInstall: () => {},
   memoryCode: 0,
   botCode: 1,
+  residentCode: 1,
   botOutput: undefined as string | undefined,
   wrangler: undefined as
     ((args: string[], env: Record<string, string>) => { output: string; code: number }) | undefined,
@@ -67,7 +69,11 @@ vi.mock("node:child_process", () => ({
         processes.calls.push("install");
         processes.onInstall();
       } else if (cmd === "npm" && args.includes("deploy")) {
-        const name = opts.cwd.endsWith("cloudflare-memory") ? "memory" : "bot";
+        const name = opts.cwd.endsWith("cloudflare-memory")
+          ? "memory"
+          : opts.cwd.endsWith("cloudflare-resident")
+            ? "resident"
+            : "bot";
         processes.calls.push(`upload:${name}`);
         const configIndex = args.indexOf("--config");
         processes.uploads.push({
@@ -83,11 +89,12 @@ vi.mock("node:child_process", () => ({
           processes.onMemory();
           code = processes.memoryCode;
         } else {
-          processes.onBot();
-          code = processes.botCode;
+          if (name === "resident") processes.onResident();
+          else processes.onBot();
+          code = name === "resident" ? processes.residentCode : processes.botCode;
         }
         output = code === 0 ? "Current Version ID: worker-version" : "upload failed";
-        if (name === "bot" && processes.botOutput !== undefined) output = processes.botOutput;
+        if (name !== "memory" && processes.botOutput !== undefined) output = processes.botOutput;
       }
       child.stdout.emit("data", Buffer.from(output));
       child.emit("close", code);
@@ -186,9 +193,11 @@ afterEach(() => {
   processes.onMemory = () => {};
   processes.memoryCode = 0;
   processes.botCode = 1;
+  processes.residentCode = 1;
   processes.botOutput = undefined;
   processes.wrangler = undefined;
   processes.onBot = () => {};
+  processes.onResident = () => {};
   processes.onInstall = () => {};
 });
 
@@ -243,24 +252,28 @@ function runner(
   const logs: string[] = [];
   const app = { value: { version: 3, image: "registry.example/bot:old" } } as const;
   const deps: SandboxGateDeps = {
-    env: {},
+    env: { RESIDENT_READ_TOKEN: "fixture" },
     now: () => 0,
     sleep: async () => {},
     readAppState: async () => app,
     readListedAppState: async () => app,
-    readHealth: async () => ({
-      status: 200,
-      body: {
-        ok: true,
-        draining: false,
-        loadedBase: {
-          schema: 1,
-          source: { kind: "state", key: "base", version: 4 },
-          sha256: prior.sha256,
-          process: { commit: "b".repeat(40) },
-        },
-      },
-    }),
+    readHealth: async (url) =>
+      url.endsWith("/residents")
+        ? { status: 200, body: { draining: null, count: 0, residents: [] } }
+        : {
+            status: 200,
+            body: {
+              ok: true,
+              draining: false,
+              features: { nativeRunScopes: "native-v1" },
+              loadedBase: {
+                schema: 1,
+                source: { kind: "state", key: "base", version: 4 },
+                sha256: prior.sha256,
+                process: { commit: "b".repeat(40) },
+              },
+            },
+          },
     readInstances: async () => ({ value: [{ name: "singleton", state: "running", version: 3 }] }),
     probeExec: async () => {
       throw new Error("not a sandbox deployment");
@@ -379,6 +392,103 @@ describe("config publication inputs", () => {
 });
 
 describe("runDeployPlan config publication", () => {
+  it("seals the retained Resident window before the same plan uploads Bot", async () => {
+    const store = stateStore();
+    const h = runner(store, ["memory", "resident", "bot"], true, true);
+    for (const step of h.plan.steps) {
+      step.requiredEnv = [];
+      step.capabilities = [];
+    }
+    const maintenance = h.plan.steps.find((step) => step.name === "resident")!.maintenance!;
+    const commit = "a".repeat(40);
+    let clock = 0;
+    let state = "fenced";
+    const events: string[] = [];
+    h.deps.now = () => clock;
+    h.deps.sleep = async (ms) => {
+      clock += ms;
+    };
+    h.deps.env.RESIDENT_DRAIN_TOKEN = "fixture";
+    const oldHealth = h.deps.readHealth;
+    h.deps.readHealth = async (url, ...args) => {
+      if (url === "https://resident-staging.example.test/healthz")
+        return { status: 200, body: { ok: true, build: { commit }, features: { nativeRunScopes: "native-v1" } } };
+      if (url === "https://resident-staging.example.test/residents")
+        return {
+          status: 200,
+          body: {
+            draining: { holds: ["selected"] },
+            count: 0,
+            residents: [],
+            stagingMaintenance: {
+              schema: 1,
+              state: "held",
+              fixtureSha256: maintenance.fixtureSha256,
+              decisionSha256: maintenance.decisionSha256,
+              holdId: maintenance.holdId,
+              generation: maintenance.generation,
+              attempt: maintenance.attempt,
+              window: {
+                state,
+                blocking: 0,
+                excluded: 1,
+                stored: 1,
+                requestEnd: "unobserved",
+                nativeOutcome: "unverified",
+              },
+            },
+          },
+        };
+      return oldHealth(url, ...args);
+    };
+    h.deps.postJson = async (url) => {
+      if (url.endsWith("/drain")) return { status: 200, body: { draining: { since: "start", until: "later" } } };
+      if (url.endsWith("/staging-seal-window")) {
+        state = "completed";
+        events.push("seal");
+        return { status: 200, body: { sealed: true } };
+      }
+      throw new Error("unexpected control request");
+    };
+    processes.residentCode = 0;
+    processes.onResident = () => {
+      expect(store.slotState.document?.yaml).toBe(candidateText);
+      events.push("resident upload");
+    };
+    processes.onBot = () => {
+      expect(state).toBe("completed");
+      events.push("bot upload");
+    };
+    const result = await runDeployPlan(h.plan, h.io, h.deps);
+    expect(events, JSON.stringify(result)).toEqual(["resident upload", "seal", "bot upload"]);
+    expect(processes.calls).toEqual(["upload:memory", "upload:resident", "upload:bot"]);
+  });
+
+  it("publishes the frozen configuration before Resident and keeps Bot unattempted after a Resident refusal", async () => {
+    const store = stateStore();
+    const h = runner(store, ["memory", "resident", "bot"]);
+    for (const step of h.plan.steps) {
+      step.requiredEnv = [];
+      step.capabilities = [];
+      step.retryOnPreflightRefusal = false;
+    }
+    h.deps.env.RESIDENT_DRAIN_TOKEN = "fixture";
+    h.deps.postJson = async (url) =>
+      url.endsWith("/undrain")
+        ? { status: 200, body: { cleared: true, draining: null } }
+        : { status: 200, body: { draining: { since: "start", until: "later" } } };
+    let observed = false;
+    processes.onResident = () => {
+      observed = true;
+      expect(store.slotState.document?.yaml).toBe(candidateText);
+    };
+    const result = await runDeployPlan(h.plan, h.io, h.deps);
+    expect(observed).toBe(true);
+    expect(processes.calls).toEqual(["upload:memory", "upload:resident"]);
+    expect(result).toMatchObject({ kind: "ran", ok: false, notAttempted: ["bot"] });
+    expect(store.state.document).toEqual(prior);
+  });
+
   it("publishes the checked retained configuration even when its source changes after the read", async () => {
     const store = stateStore();
     const h = runner(store, ["memory", "bot", "resident"], true, true);
@@ -623,7 +733,6 @@ describe("runDeployPlan config publication", () => {
     async (evidence) => {
       const store = stateStore();
       const h = runner(store, ["resident", "bot"]);
-      h.plan.steps.reverse();
       for (const step of h.plan.steps) {
         step.requiredEnv = [];
         step.capabilities = [];
@@ -666,7 +775,7 @@ describe("runDeployPlan config publication", () => {
       expect(phases).toEqual(["pending", "landed"]);
       expect(processes.calls).toEqual([]);
       expect(store.state.document).toEqual(prior);
-      expect(store.slotState.document).toBeNull();
+      expect(store.slotState.document?.yaml).toBe(candidateText);
     },
   );
 
@@ -675,7 +784,6 @@ describe("runDeployPlan config publication", () => {
     async (cleanup) => {
       const store = stateStore();
       const h = runner(store, ["resident", "bot"]);
-      h.plan.steps.reverse();
       for (const step of h.plan.steps) {
         step.requiredEnv = [];
         step.capabilities = [];
@@ -716,7 +824,7 @@ describe("runDeployPlan config publication", () => {
       expect(h.logs.some((line) => line.includes("fleet reopened"))).toBe(cleanup === "ack");
       expect(processes.calls).toHaveLength(1);
       expect(store.state.document).toEqual(prior);
-      expect(store.slotState.document).toBeNull();
+      expect(store.slotState.document?.yaml).toBe(candidateText);
     },
   );
 
@@ -1107,7 +1215,7 @@ describe("runDeployPlan config publication", () => {
     h.plan.config.originalSource = observation.source;
     h.deps.readHealth = async () => ({ error: "unavailable" });
     expect(await runDeployPlan(h.plan, h.io, h.deps)).toMatchObject({ kind: "ran", ok: false });
-    expect(processes.calls).toEqual(["upload:memory", "upload:bot"]);
+    expect(processes.calls).toEqual(["upload:memory"]);
     expect(store.slotState.document?.yaml).toBe(candidateText);
     expect(store.state.document).toEqual(prior);
   });

@@ -102,13 +102,13 @@ describe("selected staging maintenance deployment", () => {
 });
 
 describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
-  it("is state Worker → bot → resident → sandbox, each once, each with its dir and command", () => {
-    expect(DEPLOY_ORDER).toEqual(["memory", "bot", "resident", "sandbox"]);
+  it("is state Worker → resident → bot → sandbox, each once, each with its dir and command", () => {
+    expect(DEPLOY_ORDER).toEqual(["memory", "resident", "bot", "sandbox"]);
     expect(WORKER_SPECS.map((w) => w.name)).toEqual(DEPLOY_ORDER);
     expect(WORKERS.map((w) => w.dir)).toEqual([
       "deploy/cloudflare-memory",
-      "deploy/cloudflare",
       "deploy/cloudflare-resident",
+      "deploy/cloudflare",
       "deploy/cloudflare-sandbox",
     ]);
     expect(new Set(WORKERS.map((w) => w.script)).size).toBe(4);
@@ -135,8 +135,8 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
     // Each Worker knows its own origin — what its preflight is pointed at.
     expect(WORKERS.map((w) => w.baseUrl)).toEqual([
       "https://switchboard-memory.example.test",
-      "https://switchboard.example.test",
       "https://switchboard-resident.example.test",
+      "https://switchboard.example.test",
       "https://switchboard-sandbox.example.test",
     ]);
     expect(byName.resident.requiredEnv).toEqual([
@@ -156,8 +156,8 @@ describe("WORKER_SPECS / workersFor / DEPLOY_ORDER", () => {
   it("the profile binds each Worker to its script name and hostname; the account, the health URLs and the config source are the profile's, never a constant", () => {
     expect(WORKERS.map((w) => [w.name, w.script, w.healthUrl])).toEqual([
       ["memory", "switchboard-memory", "https://switchboard-memory.example.test/healthz"],
-      ["bot", "switchboard", "https://switchboard.example.test/healthz"],
       ["resident", "switchboard-resident", "https://switchboard-resident.example.test/healthz"],
+      ["bot", "switchboard", "https://switchboard.example.test/healthz"],
       ["sandbox", "switchboard-sandbox", "https://switchboard-sandbox.example.test/healthz"],
     ]);
     const p = plan();
@@ -324,7 +324,7 @@ describe("planDeploy", () => {
 
   it("keeps the canonical order whatever order --only names them in", () => {
     expect(plan({ only: ["sandbox", "memory"] }).steps.map((s) => s.name)).toEqual(["memory", "sandbox"]);
-    expect(plan({ only: ["resident", "bot"] }).steps.map((s) => s.name)).toEqual(["bot", "resident"]);
+    expect(plan({ only: ["resident", "bot"] }).steps.map((s) => s.name)).toEqual(["resident", "bot"]);
   });
 
   it("binds a staging bot preflight to the profile's actual native application", () => {
@@ -342,8 +342,8 @@ describe("planDeploy", () => {
   });
 
   it("--skip removes steps; --only and --skip compose", () => {
-    expect(plan({ skip: ["sandbox"] }).steps.map((s) => s.name)).toEqual(["memory", "bot", "resident"]);
-    expect(plan({ only: ["bot", "resident"], skip: ["resident"] }).steps.map((s) => s.name)).toEqual(["bot"]);
+    expect(plan({ skip: ["sandbox"] }).steps.map((s) => s.name)).toEqual(["memory", "resident", "bot"]);
+    expect(plan({ only: ["resident", "bot"], skip: ["resident"] }).steps.map((s) => s.name)).toEqual(["bot"]);
   });
 
   it("each step spawns its dir's deploy script with only CLOUDFLARE_ACCOUNT_ID removed (the API token is CI's credential; the account is asserted, not assumed); a preflighted step gets its origin from the profile, and a force env only under --force", () => {
@@ -386,7 +386,7 @@ describe("planDeploy", () => {
     expect(formatPlan(forcedPlan)).toContain("preflight FORCED (RESIDENT_DEPLOY_FORCE=1)");
     expect(formatPlan(forcedPlan)).not.toContain("BASE_URL,");
     expect(forcedPlan.warnings).toEqual([
-      "--force: preflights are bypassed — in-flight runs on bot and resident are SIGTERM-drained (finish if they can, else killed at the drain deadline)",
+      "--force: preflights are bypassed — in-flight runs on resident and bot are SIGTERM-drained (finish if they can, else killed at the drain deadline)",
     ]);
   });
 
@@ -394,8 +394,8 @@ describe("planDeploy", () => {
     const p = plan({ waitMaxMinutes: 7, pollSeconds: 30 });
     expect(p.steps.map((s) => [s.name, s.retryOnPreflightRefusal])).toEqual([
       ["memory", false],
-      ["bot", true],
       ["resident", true],
+      ["bot", true],
       ["sandbox", false],
     ]);
     expect(p.waitMaxMs).toBe(7 * 60_000);
@@ -460,7 +460,7 @@ describe("planDeploy", () => {
     const text = formatPlan(p);
     expect(text.split("\n")[0]).toBe("Root: /srv/switchboard (the published package 1.12.0)");
     expect(text).toContain(
-      `Checks: wrangler account = ${TEST_PROFILE.account}; Worker sources are the package's (version 1.12.0), materialised under .switchboard/ — no git; deploy/cloudflare, deploy/cloudflare-resident, deploy/cloudflare-sandbox not installed under .switchboard/ — the runner will \`npm ci\` them there first`,
+      `Checks: wrangler account = ${TEST_PROFILE.account}; Worker sources are the package's (version 1.12.0), materialised under .switchboard/ — no git; deploy/cloudflare-resident, deploy/cloudflare, deploy/cloudflare-sandbox not installed under .switchboard/ — the runner will \`npm ci\` them there first`,
     );
     expect(text).not.toContain("origin/main");
     expect(text).not.toContain("clean tree");
@@ -480,8 +480,8 @@ describe("planDeploy", () => {
     const p = plan({}, partial);
     expect(probed).toEqual([
       "deploy/cloudflare-memory",
-      "deploy/cloudflare",
       "deploy/cloudflare-resident",
+      "deploy/cloudflare",
       "deploy/cloudflare-sandbox",
     ]);
     expect(p.checks.nodeModulesMissing).toEqual(["deploy/cloudflare-resident", "deploy/cloudflare-sandbox"]);
@@ -512,24 +512,24 @@ describe("planDeploy", () => {
           reasons: ["unsure: no base — /healthz: HTTP 401; no release tag before HEAD"],
         },
       ],
-      selected: ["bot", "resident", "sandbox"],
+      selected: ["resident", "bot", "sandbox"],
       unclassified: [],
       deployAll: false,
       markdown: "(md)",
     };
     const p = plan({ affected: report });
-    expect(p.steps.map((s) => s.name)).toEqual(["bot", "resident", "sandbox"]);
+    expect(p.steps.map((s) => s.name)).toEqual(["resident", "bot", "sandbox"]);
     // `--only` narrows the selection, never widens it: memory is asked for but not affected.
     expect(plan({ affected: report, only: ["memory", "resident"] }).steps.map((s) => s.name)).toEqual(["resident"]);
     expect(p.affected).toBe(report);
     const text = formatPlan(p);
-    expect(text.indexOf("Affected: bot, resident, sandbox")).toBe(0);
+    expect(text.indexOf("Affected: resident, bot, sandbox")).toBe(0);
     expect(text).toContain("  - memory: skip — live aaaaaaa — no input changed");
     expect(text).toContain(
       "  - sandbox: deploy — none — unsure: no base — /healthz: HTTP 401; no release tag before HEAD",
     );
     expect(text.indexOf("Affected:")).toBeLessThan(text.indexOf("Checks:"));
-    expect(plan({ affected: report, skip: ["sandbox"] }).steps.map((s) => s.name)).toEqual(["bot", "resident"]);
+    expect(plan({ affected: report, skip: ["sandbox"] }).steps.map((s) => s.name)).toEqual(["resident", "bot"]);
     const nothing = plan({
       affected: {
         ...report,
@@ -602,7 +602,7 @@ describe("planDeploy over a partial profile", () => {
 
   it("the full production-shaped profile plans exactly as before: every Worker, in order, the config pushed to the state Worker", () => {
     const p = plan();
-    expect(p.steps.map((s) => s.name)).toEqual(["memory", "bot", "resident", "sandbox"]);
+    expect(p.steps.map((s) => s.name)).toEqual(["memory", "resident", "bot", "sandbox"]);
     expect(p.config).toEqual({
       source: "config/config.production.yaml",
       document: "consumer slot (exact source unresolved)",
@@ -795,13 +795,13 @@ describe("the plan's images", () => {
     expect(p.images).toEqual({
       mode: "build",
       images: [
-        { kind: "bot", dockerfile: "../../Dockerfile" },
         { kind: "resident", dockerfile: "./Dockerfile" },
+        { kind: "bot", dockerfile: "../../Dockerfile" },
         { kind: "sandbox", dockerfile: "./Dockerfile" },
       ],
     });
     expect(formatPlan(p)).toContain(
-      "Images: build — wrangler builds bot: ../../Dockerfile, resident: ./Dockerfile, sandbox: ./Dockerfile at deploy time",
+      "Images: build — wrangler builds resident: ./Dockerfile, bot: ../../Dockerfile, sandbox: ./Dockerfile at deploy time",
     );
     expect(plan({ only: ["memory"] }).images).toEqual({ mode: "build", images: [] });
     expect(formatPlanImages(plan({ only: ["memory"] }).images)).toBe("Images: build — no step has a container");
@@ -820,8 +820,8 @@ describe("the plan's images", () => {
       mode: "registry",
       version: "1.2.3",
       images: [
-        { kind: "bot", ref: `registry.cloudflare.com/${account}/switchboard:1.2.3`, present: true },
         { kind: "resident", ref: `registry.cloudflare.com/${account}/switchboard-resident:1.2.3`, present: false },
+        { kind: "bot", ref: `registry.cloudflare.com/${account}/switchboard:1.2.3`, present: true },
         { kind: "sandbox", ref: `registry.cloudflare.com/${account}/switchboard-sandbox:1.2.3`, present: false },
       ],
     });
@@ -838,7 +838,7 @@ describe("the plan's images", () => {
       formatPlanImages(
         plan({}, installed, REGISTRY, { mode: "registry", published: TEST_PUBLISHED_IMAGES, registry: all }).images,
       ),
-    ).toContain("Images: registry (version 1.2.3) — 3 of 3 present — bot: ");
+    ).toContain("Images: registry (version 1.2.3) — 3 of 3 present — resident: ");
     expect(
       formatPlanImages(
         plan({}, installed, REGISTRY, {
@@ -848,7 +848,7 @@ describe("the plan's images", () => {
         }).images,
       ),
     ).toBe(
-      `Images: registry (version 1.2.3) — not probed (the example profile) — bot: registry.cloudflare.com/${account}/switchboard:1.2.3, resident: registry.cloudflare.com/${account}/switchboard-resident:1.2.3, sandbox: registry.cloudflare.com/${account}/switchboard-sandbox:1.2.3`,
+      `Images: registry (version 1.2.3) — not probed (the example profile) — resident: registry.cloudflare.com/${account}/switchboard-resident:1.2.3, bot: registry.cloudflare.com/${account}/switchboard:1.2.3, sandbox: registry.cloudflare.com/${account}/switchboard-sandbox:1.2.3`,
     );
     // Only the planned steps' images are judged: `--only memory` needs none.
     expect(
@@ -891,5 +891,15 @@ describe("the plan's images", () => {
     const bare = plan({ only: ["bot"] }, installed, REGISTRY, { mode: "registry", published: TEST_PUBLISHED_IMAGES });
     expect(bare.images).toMatchObject({ unprobed: "not read" });
     expect(formatPlan(bare)).toContain("not probed (not read)");
+  });
+});
+
+describe("native Resident producer dependency", () => {
+  it("keeps the Resident readiness gate when only Bot is selected or force is used", () => {
+    for (const force of [false, true]) {
+      const actual = plan({ only: ["bot"], force });
+      expect(actual.steps.map((step) => step.name)).toEqual(["bot"]);
+      expect(actual.steps[0]?.residentExecutionGate).toEqual({ baseUrl: "https://switchboard-resident.example.test" });
+    }
   });
 });

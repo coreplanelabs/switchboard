@@ -41,9 +41,9 @@ Deterministic, non-interactive commands. Credentials are named when required. CI
 | `npm run typecheck` | TypeScript over the bot and its scripts, no emit. | After type-level changes; `verify:root` runs it. A pipeline agent scopes it to the touched tsconfig. |
 | `npm run test` | The whole vitest suite from one entry, after `deploy:gen`. | Local sessions before pushing; CI runs it for relevant changes. |
 | `npm run cli` | The operator CLI over the command registry (`-- <group> <verb> …`), plus `ask` to drive the full pipeline without Slack. | Smoke tests, deploys, config, run history. |
-| `npm run resident:archive` | Captures a bounded retained resident tree through the old route and verifies an offline restore. | Reviewed disposable-resident rehearsal with exact binding and Worker build receipts. |
+| `npm run resident:archive` | Captures a retained resident and checks its offline restore. | Reviewed disposable rehearsal; verify the binding and builds. |
 | `npm run verify` | Runs every CI check across the repo and workspaces. | Local sessions before review; CI selects affected checks on each push. |
-| `npm run verify:root` | The bot package's gate: consistency checks, typecheck, lint, format, tests, dist. | When only the bot changed. |
+| `npm run verify:root` | Runs the bot package's CI gates. | Bot-only changes; scope checks in agent sessions. |
 | `npm run check:consistency` | The sub-second checks that generated and declared things equal the code, this table included. | After touching a generated or declared artifact; one CI leg. |
 | `npm run ci:gate` | Reads the `needs` context of a CI fan-out and accepts only successful legs or an explicitly planned skip. | CI only — the `bot`, `workers` and `image` gate jobs. |
 | `npm run ci:plan` | Selects checks and builds from the full diff; uncertainty runs all. | CI; locally with `-- --base <ref>`. |
@@ -93,6 +93,7 @@ Deterministic, non-interactive commands. Credentials are named when required. CI
 | `npm run smoke:ingress` | Checks three deployment capability families and writes an acceptance receipt; --check validates setup without network. | Explicitly configured disposable smoke scope; release acceptance. |
 | `npm run staging:deploy` | Validates staging isolation, freezes deployment inputs, and deploys the selected candidate Workers. --check validates without upload. | Manual staging candidates; requires separate staging and production account pins. |
 | `npm run staging:validate` | Checks PR eligibility before staging. | Staging CI and queued-head recheck. |
+| `npm run check:native-scope` | Tests the native gate and kill. | Docker; see the containment plan. |
 
 <!-- /generated:commands -->
 

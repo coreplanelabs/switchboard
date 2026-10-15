@@ -852,6 +852,7 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
     const directAudience = directAudienceStampOf(msg);
     const privateMain = agent.name === "orchestrator" && directAudience !== undefined;
     const meta: LiveRunMeta = {
+      residentExecution: "native-v1",
       agent: agent.name,
       model: resolved.modelRef,
       channelId: msg.channelId,

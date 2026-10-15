@@ -98,3 +98,33 @@ Update the existing execution, Resident, cancellation and hosted-stop spec rows 
 | Gate closure blocks delayed launch and reserved bootstrap; a process group and caller-controlled startup environment are insufficient. | Author-observed isolated Linux reproductions. Private fixture receipts retain the exact image ID, commands and results. These are neither checked-in helper tests nor production capability receipts. |
 | The proposed design accounts for creation and payload-startup races. | Two independent cold-reader rounds and an adversarial source review identified those gaps; this proposal now reserves creation before submission and separates trusted startup from payload inputs. This is design review, not current-head Switchboard approval. |
 | Complete native containment and live surgical shutdown work. | Open. No launch helper is wired by this proposal, and no positive production capability or live terminal receipt is supplied. |
+
+
+## Amendment: native cgroup implementation, 2026-10-14
+
+The implementation uses a controller outside each run's cgroup v2 subtree. It reserves the gate in DO storage, closes admission through the kernel freeze flag, uses `cgroup.kill`, and verifies an empty subtree. The gate remains closed on disk and in storage. A late wrapper validates its original kernel before it can run. A lost close reply is observed under the same gate; an open or absent gate resumes the same monotonic close. Incomplete bootstrap is never treated as ready.
+
+Ordinary payloads drop all capabilities. Privileged payloads receive a private mount/PID view and only the capabilities needed for ownership and UID changes. The host account and loader files stay read-only. Fixed account provisioning and UID inventory run in the controller lane without caller commands or environment. Per-run network hooks deny the image's SDK control port. Private write content stays on standard input. The helper preserves the image's test and build limits.
+
+Shared VM restore, Git setup, dependency producers, cache adoption and background backups keep independent maintenance ownership. They serve multiple worktrees and must not inherit one consumer's kill scope. Thread commands, writes, credential diagnostics, dependency views and publication use the run gate. This preserves the existing shared-resident architecture.
+
+A disposable Cloudflare Sandbox fixture qualified the kernel gate, cgroup kill, capability/mount restrictions, control-port exclusion and delayed admission. A separate local Linux test exercises the actual production helper, including its privileged profile. Neither result establishes the exact deployed Resident image/policy, product UI closure, or migration of historical unknown SDK work. Those remain acceptance prerequisites. New scopes cannot retrospectively contain old submissions; the old native recovery path remains explicit.
+
+
+### Amendment: execution birth and rolling deployment, 2026-10-14
+
+A lazy gate cannot cover old detached SDK work. First canonical execution admission therefore freezes the run's protocol in the existing durability archive. New plane placeholders bind their first execution client before attachment; old placeholders remain legacy. A native client declares its protocol at claim/reclaim. A client that lacks that declaration cannot take a native run's lease, even if it copied its metadata. Resident requests use a versioned namespace so old receivers refuse before effects.
+
+Attachment reads that original canonical contract, commits the local protocol and native reservation, then begins hydration and execution. A reset preserves that decision. Legacy work never gains a gate from an empty journal or missing workspace. Native commands use the reservation before VM start, so hard stop can close an unstarted run without waiting for startup. Legacy execution retains user demotion and the existing native recovery path.
+
+The payload environment is applied after the capability and UID transition, through an isolated Python stage with stdin data. The privileged loader receives a fixed clean environment. Closure observation takes the same admission lock as launch so it cannot ignore a delayed controller before cgroup membership.
+
+### Rollout dependency amendment
+
+The first implementation required a joint deploy in prose but left the old Bot-before-Resident plan intact. That order would send versioned routes to an old receiver. The runner now publishes the same prepared configuration after Memory and before either consumer, while it retains the original source version, hash and Bot application checks. Resident drains and proves its image ready before Bot uploads. A Bot-only or forced plan independently checks protocol support and a complete ready image registry before upload. Secret rotation remains a separate operation. This preserves the reason configuration preceded the execution workers in record 0015. The existing Bot SIGTERM handoff, Resident drain and live image gates remain in force. An unavailable dependency produces a known no-upload refusal.
+
+The deployed image and kernel still require separate live qualification. A public protocol flag proves route support, not kernel privileges, process closure or remote publication outcome. Pre-migration work retains its original legacy execution contract and requires its existing recovery receipts.
+
+### Retained consumer readiness amendment
+
+Resident upload still requires the selected fenced window. The Resident step seals it as completed after image readiness. The following Bot step consumes that completed window under the same current source, attempt and image checks. This readback does not authorize another Resident upload. The full runner regression performs the seal response transition before observing Bot upload. Adjacent unsealed, wrong, incomplete, foreign, stale, expired and non-current image cases refuse before Bot changes.

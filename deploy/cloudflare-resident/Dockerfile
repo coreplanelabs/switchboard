@@ -14,6 +14,7 @@ FROM --platform=linux/amd64 docker.io/library/node:24.21.0-slim AS node
 # The tag MUST match the @cloudflare/sandbox version in package.json exactly
 # (no 'latest' tag exists on the @next line) — bump both together.
 FROM docker.io/cloudflare/sandbox:0.13.0-next.751.1
+COPY --chmod=0755 native-scope.py /opt/switchboard/native-scope.py
 
 # Git identity only. The engine never uses the gh CLI (ops run git directly,
 # tokens are minted via the GitHub REST API in the Worker/DO, and per-attach

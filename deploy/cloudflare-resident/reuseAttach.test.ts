@@ -35,14 +35,14 @@ describe("the `reuse` body field reaches the worktree decision", () => {
     expect(handler).toMatch(/const reuse = parseReuse\(body\.reuse\);/);
     expect(handler).toMatch(/if \("error" in reuse\) return json\(\{ error: reuse\.error \}, 400\);/);
     expect(handler).toMatch(
-      /attachThread\(\s*ctx\.threadKey,\s*refHint,\s*readonly\.readonly,\s*want\.sha,\s*reuse\.reuse,\s*ctx\.record,\s*traceparent,\s*reason,\s*githubDoor,\s*runBudgetMs,\s*runId,\s*ownerGen,\s*ownerFence,?\s*\)/,
+      /attachThread\(\s*ctx\.threadKey,\s*refHint,\s*readonly\.readonly,\s*want\.sha,\s*reuse\.reuse,\s*ctx\.record,\s*traceparent,\s*reason,\s*githubDoor,\s*runBudgetMs,\s*runId,\s*ownerGen,\s*ownerFence,\s*nativeBirth,?\s*\)/,
     );
   });
 
   it("attachThread carries `reuse` through the traced body to the create step", () => {
     expect(method("attachThread")).toMatch(/reuse = false,/);
     expect(method("attachThread")).toMatch(
-      /attachThreadTraced\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*record,\s*t0,\s*reason,\s*githubDoor,\s*runBudgetMs,\s*runId,\s*ownerGen,\s*ownerFence,?\s*\)/,
+      /attachThreadTraced\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*record,\s*t0,\s*reason,\s*githubDoor,\s*runBudgetMs,\s*runId,\s*ownerGen,\s*ownerFence,\s*nativeBirth,?\s*\)/,
     );
     expect(method("attachThreadTraced")).toMatch(
       /attachThreadBody\(\s*threadKey,\s*refHint,\s*readonly,\s*wantSha,\s*reuse,\s*resourceId,\s*t0,\s*record,\s*reason,\s*githubDoor,[\s\S]*?registered && readonly && wantSha !== null && !reuse[\s\S]*?\)/,

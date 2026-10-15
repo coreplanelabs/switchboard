@@ -227,7 +227,7 @@ describe("recorded coding checks", () => {
           identities.push(original);
           throw new Error("metadata reply lost");
         }
-        if (path === "/exec-result")
+        if (path === "/native/exec-result")
           return Response.json({ kind: "completed", checkOperation: original, result: metadata });
         identities.push(body.checkOperation);
         return Response.json({ ...ok, stdout: "selected command executed once" });
@@ -238,7 +238,7 @@ describe("recorded coding checks", () => {
         kind: "recorded",
         receipt: { outcome: { kind: "completed", stdout: "selected command executed once" } },
       });
-      expect(requests).toEqual(["/exec", "/exec-result", "/exec"]);
+      expect(requests).toEqual(["/native/exec", "/native/exec-result", "/native/exec"]);
       expect(identities[0]).toMatchObject({ key: expect.stringMatching(/^[a-f0-9]{64}$/) });
       expect(identities[1]).not.toEqual(identities[0]);
       expect(s.saved[0]).toMatchObject({
@@ -445,11 +445,11 @@ describe("recorded coding checks", () => {
         const body = JSON.parse(String(init.body));
         requests.push(path);
         if (requests.length === 1) return Response.json(metadata);
-        if (path === "/exec") {
+        if (path === "/native/exec") {
           key = body.checkOperation;
           throw new TypeError("reply lost");
         }
-        if (path === "/exec-result")
+        if (path === "/native/exec-result")
           return Response.json({ kind: "completed", checkOperation: key, result: { ...ok, stdout: "one execution" } });
         throw new Error("unexpected route");
       }),
@@ -461,7 +461,7 @@ describe("recorded coding checks", () => {
         kind: "recorded",
         receipt: { outcome: { kind: "completed", stdout: "one execution", exitCode: 0 } },
       });
-      expect(requests).toEqual(["/exec", "/exec", "/exec-result"]);
+      expect(requests).toEqual(["/native/exec", "/native/exec", "/native/exec-result"]);
       expect(s.saved.at(-1)?.receipts[0]?.outcome).toEqual({ kind: "completed", ...ok, stdout: "one execution" });
     } finally {
       vi.unstubAllGlobals();

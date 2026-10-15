@@ -52,7 +52,13 @@ export interface CardHandle {
 /** The registry's `RunMeta` fields (spelled out rather than imported: the
  *  registry is a Node module and this file is shared with the state Worker)
  *  plus what a resume needs that the dispatcher otherwise keeps in closures. */
+export const EXECUTION_PROTOCOL_HEADER = "x-switchboard-execution-protocol";
+
 export interface LiveRunMeta {
+  /** Frozen at first admission; absent means legacy execution. */
+  residentExecution?: "native-v1";
+  /** Plane placeholder only; first execution owner freezes its own protocol. */
+  executionUnclaimed?: true;
   /** Explicit first-admission contract; missing on legacy allocations. */
   workspaceAllocation?: WorkspaceAllocation;
   agent?: string;

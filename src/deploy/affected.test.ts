@@ -615,7 +615,7 @@ describe("computeAffected", () => {
       live: allLive(LIVE),
       ancestors: [LIVE],
     });
-    expect((await computeAffected(disk.probe)).selected).toEqual(["bot", "resident"]);
+    expect((await computeAffected(disk.probe)).selected).toEqual(["resident", "bot"]);
   });
 
   it("docs, specs and tests alone deploy nothing", async () => {
@@ -676,7 +676,7 @@ describe("computeAffected", () => {
     const r = await computeAffected(probe);
     expect(r.deployAll).toBe(true);
     expect(r.unclassified).toEqual(["terraform/main.tf"]);
-    expect(r.selected).toEqual(["memory", "bot", "resident", "sandbox"]);
+    expect(r.selected).toEqual(["memory", "resident", "bot", "sandbox"]);
     for (const w of r.workers)
       expect(w.reasons, w.name).toEqual([
         "unsure: unclassified path terraform/main.tf — no rule claims it (src/deploy/affected.ts)",
@@ -693,7 +693,7 @@ describe("computeAffected", () => {
       lastRelease: { tag: "v0.1.0", commit: TAG },
     });
     const r = await computeAffected(probe);
-    expect(probed).toEqual(["memory", "bot", "resident", "sandbox"]);
+    expect(probed).toEqual(["memory", "resident", "bot", "sandbox"]);
     expect(r.workers.find((w) => w.name === "sandbox")).toMatchObject({
       decision: "deploy",
       base: { kind: "release", tag: "v0.1.0", commit: TAG },
@@ -748,7 +748,7 @@ describe("computeAffected", () => {
       decision: "skip",
       base: { kind: "live", commit: LIVE },
     });
-    expect(r.selected).toEqual(["memory", "bot", "resident"]);
+    expect(r.selected).toEqual(["memory", "resident", "bot"]);
     expect(r.deployAll).toBe(false);
     // With a release tag the same three fall back to it instead of guessing.
     const tagged = fakeProbe({
@@ -894,7 +894,7 @@ describe("computeAffected", () => {
     });
     const failing: AffectedProbe = { ...probe, changedPaths: async () => undefined };
     const r = await computeAffected(failing, { base: "v9.9.9" });
-    expect(r.selected).toEqual(["memory", "bot", "resident", "sandbox"]);
+    expect(r.selected).toEqual(["memory", "resident", "bot", "sandbox"]);
     for (const w of r.workers)
       expect(w.reasons, w.name).toEqual(["unsure: git diff v9.9.9..HEAD failed — is the base in this checkout?"]);
     // A 40-char base is shortened in the reason; a live base that cannot be diffed is unsure too.
@@ -909,7 +909,7 @@ describe("computeAffected", () => {
     const { probe, probed } = fakeProbe({ trees: { [HEAD]: BASE_TREE }, live: allLive(HEAD) });
     const r = await computeAffected({ ...probe, head: async () => "" });
     expect(probed).toEqual([]);
-    expect(r.selected).toEqual(["memory", "bot", "resident", "sandbox"]);
+    expect(r.selected).toEqual(["memory", "resident", "bot", "sandbox"]);
     expect(r.workers[0]).toMatchObject({
       base: { kind: "none", reason: 'HEAD could not be read ("") — not a git checkout?' },
       reasons: ['unsure: HEAD could not be read ("") — not a git checkout?'],

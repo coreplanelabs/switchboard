@@ -10,7 +10,7 @@ import {
   type StepExec,
 } from "./run.js";
 import { parseInstancesPage, type AppState, type HealthRead, type Read } from "./sandboxLiveGate.js";
-import { TEST_PROFILE } from "./testing/profile.js";
+import { TEST_PROFILE, TEST_MAINTENANCE } from "./testing/profile.js";
 
 const PRIOR_COMMIT = "903ae2855833637fbcc0c0a22d54e7268be75965";
 const NEWER_COMMIT = "c60b26943f774d0aa765bd42a0f94e3e428627a6";
@@ -419,4 +419,179 @@ describe("raw bot application read", () => {
     );
     expect(result).toEqual({ error: "raw application list HTTP 403" });
   });
+});
+
+describe("native Resident dependency before Bot upload", () => {
+  const guarded = { ...botStep, residentExecutionGate: { baseUrl: "https://resident.example.test" } };
+
+  it("refuses an old or unreadable Resident without uploading Bot, including a forced step", async () => {
+    for (const answer of [{ status: 200, body: { ok: true } }, { error: "unavailable" }]) {
+      const h = harness({ app: [before, after], health: [serving(PRIOR_COMMIT)] });
+      const original = h.deps.readHealth;
+      h.deps.env = { RESIDENT_READ_TOKEN: "fixture" };
+      h.deps.readHealth = async (url, ...args) =>
+        new URL(url).origin === "https://resident.example.test" ? answer : original(url, ...args);
+      const result = await deployStep(
+        { ...guarded, forcedBy: "SWITCHBOARD_DEPLOY_FORCE" },
+        plan,
+        PRIOR_COMMIT,
+        h.io,
+        h.deps,
+        h.exec,
+      );
+      expect(result).toMatchObject({ ok: false, live: "not deployed", noUpload: true });
+      expect(h.calls).not.toContain("exec");
+    }
+  });
+
+  it("requires a ready image registry before uploading against a versioned receiver", async () => {
+    for (const imageReport of ["unknown", "current"]) {
+      const h = harness({ app: [before, after], health: [serving(PRIOR_COMMIT)] });
+      const original = h.deps.readHealth;
+      h.deps.env = { RESIDENT_READ_TOKEN: "fixture" };
+      h.deps.readHealth = async (url, ...args) => {
+        if (url === "https://resident.example.test/healthz")
+          return { status: 200, body: { ok: true, features: { nativeRunScopes: "native-v1" } } };
+        if (url === "https://resident.example.test/residents")
+          return {
+            status: 200,
+            body: { draining: null, count: 1, residents: [{ resource: "repo:example/repo", live: { imageReport } }] },
+          };
+        return original(url, ...args);
+      };
+      const result = await deployStep(guarded, plan, PRIOR_COMMIT, h.io, h.deps, h.exec);
+      expect(result.ok).toBe(imageReport === "current");
+      expect(h.calls.includes("exec")).toBe(imageReport === "current");
+    }
+  });
+  it("accepts only the exact held staging window after image readiness", async () => {
+    const h = harness({ app: [before, after], health: [serving(PRIOR_COMMIT)] });
+    const original = h.deps.readHealth;
+    const maintenance = { ...TEST_MAINTENANCE, attempt: { ...TEST_MAINTENANCE.attempt, sourceCommit: PRIOR_COMMIT } };
+    h.deps.env = { RESIDENT_READ_TOKEN: "fixture" };
+    h.deps.readHealth = async (url, ...args) => {
+      if (url.endsWith("/healthz") && new URL(url).origin === "https://resident.example.test")
+        return { status: 200, body: { ok: true, features: { nativeRunScopes: "native-v1" } } };
+      if (url === "https://resident.example.test/residents")
+        return {
+          status: 200,
+          body: {
+            draining: { holds: ["selected"] },
+            count: 0,
+            residents: [],
+            stagingMaintenance: {
+              schema: 1,
+              state: "held",
+              fixtureSha256: maintenance.fixtureSha256,
+              decisionSha256: maintenance.decisionSha256,
+              holdId: maintenance.holdId,
+              generation: maintenance.generation,
+              attempt: maintenance.attempt,
+              window: {
+                state: "completed",
+                blocking: 0,
+                excluded: 1,
+                stored: 1,
+                requestEnd: "unobserved",
+                nativeOutcome: "unverified",
+              },
+            },
+          },
+        };
+      return original(url, ...args);
+    };
+    expect(
+      (
+        await deployStep(
+          { ...guarded, residentExecutionGate: { ...guarded.residentExecutionGate, maintenance } },
+          plan,
+          PRIOR_COMMIT,
+          h.io,
+          h.deps,
+          h.exec,
+        )
+      ).ok,
+    ).toBe(true);
+    expect(h.calls).toContain("exec");
+    const stale = { ...maintenance, attempt: { ...maintenance.attempt, sourceCommit: NEWER_COMMIT } };
+    h.calls.length = 0;
+    expect(
+      await deployStep(
+        { ...guarded, residentExecutionGate: { ...guarded.residentExecutionGate, maintenance: stale } },
+        plan,
+        PRIOR_COMMIT,
+        h.io,
+        h.deps,
+        h.exec,
+      ),
+    ).toMatchObject({ ok: false, noUpload: true });
+    expect(h.calls).not.toContain("exec");
+  });
+  it.each(["unsealed", "wrong-state", "incomplete", "foreign", "stale", "image", "expired"])(
+    "refuses the %s retained window without Bot upload",
+    async (fault) => {
+      const h = harness({ app: [before, after], health: [serving(PRIOR_COMMIT)] });
+      const original = h.deps.readHealth;
+      const maintenance = {
+        ...TEST_MAINTENANCE,
+        attempt: {
+          ...TEST_MAINTENANCE.attempt,
+          sourceCommit: PRIOR_COMMIT,
+          ...(fault === "expired" ? { deadline: 1 } : {}),
+        },
+      };
+      h.deps.now = () => 100;
+      h.deps.env = { RESIDENT_READ_TOKEN: "fixture" };
+      const held = {
+        schema: 1,
+        state: "held",
+        holdId: maintenance.holdId,
+        generation: maintenance.generation,
+        fixtureSha256: maintenance.fixtureSha256,
+        decisionSha256: maintenance.decisionSha256,
+        attempt: { ...maintenance.attempt },
+        window: {
+          state: "completed",
+          blocking: 0,
+          excluded: 1,
+          stored: 1,
+          requestEnd: "unobserved",
+          nativeOutcome: "unverified",
+        },
+      };
+      if (fault === "unsealed") held.window.state = "fenced";
+      if (fault === "wrong-state") held.window.state = "released";
+      if (fault === "incomplete") held.window.stored = 0;
+      if (fault === "foreign") held.holdId = "22222222-2222-4222-8222-222222222222";
+      if (fault === "stale") held.attempt.sourceCommit = NEWER_COMMIT;
+      h.deps.readHealth = async (url, ...args) => {
+        if (url === "https://resident.example.test/healthz")
+          return { status: 200, body: { ok: true, features: { nativeRunScopes: "native-v1" } } };
+        if (url === "https://resident.example.test/residents")
+          return {
+            status: 200,
+            body: {
+              draining: { holds: ["selected"] },
+              count: 1,
+              residents: [
+                { resource: "repo:example/repo", live: { imageReport: fault === "image" ? "pending" : "current" } },
+              ],
+              stagingMaintenance: held,
+            },
+          };
+        return original(url, ...args);
+      };
+      expect(
+        await deployStep(
+          { ...guarded, residentExecutionGate: { ...guarded.residentExecutionGate, maintenance } },
+          plan,
+          PRIOR_COMMIT,
+          h.io,
+          h.deps,
+          h.exec,
+        ),
+      ).toMatchObject({ ok: false, noUpload: true });
+      expect(h.calls).not.toContain("exec");
+    },
+  );
 });

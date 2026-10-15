@@ -92,7 +92,7 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    W1[["memory<br/>the state Worker"]] --> W2[["bot"]] --> W3[["resident"]] --> W4[["sandbox"]]
+    W1[["memory<br/>the state Worker"]] --> W2[["resident"]] --> W3[["bot"]] --> W4[["sandbox"]]
 ```
 
 <!-- /generated:deploy-order -->
@@ -107,3 +107,5 @@ The Slack adapter is a Socket Mode daemon, and a run holds a model conversation,
 
 - [Onboard a repo](../how-to/onboard-a-repo.md) — what happens inside the resident Worker.
 - [Capacity and sizing](capacity-and-sizing.md) — why the containers are the size they are.
+
+The runner validates and freezes the selected configuration before upload. After Memory, it publishes those same bytes against the original Bot application before either Resident or Bot. Resident must prove image readiness before Bot can use native execution. A Bot-only deploy also checks the Resident protocol and image registry. Existing bearer provisioning, run continuation, drain and rollback controls remain separate.

@@ -1,3 +1,4 @@
+import { EXECUTION_PROTOCOL_HEADER } from "./runLedger/types.js";
 import { checkSelectorSchema, checkSourceReadOf, type CheckSelector, type CheckSourceRead } from "./checkInspection.js";
 import {
   cancellationRecordMatches,
@@ -279,6 +280,7 @@ export class WorkerRunLedger implements RunLedger {
     const requestId = crypto.randomUUID();
     const ordinaryHeaders = {
       "content-type": "application/json",
+      [EXECUTION_PROTOCOL_HEADER]: "native-v1",
       authorization: `Bearer ${this.opts.token}`,
       [STORAGE_REQUEST_ID_HEADER]: requestId,
     };

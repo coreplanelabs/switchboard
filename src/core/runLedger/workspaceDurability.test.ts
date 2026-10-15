@@ -15,6 +15,7 @@ import { markdownOutput } from "../llmOutput/markdown.js";
 import { getAgent } from "../../agents/registry.js";
 import {
   workspaceAllocationOf,
+  prepareWorkspaceAllocation,
   allocationMatchesRun,
   sameWorkspaceAllocation,
   originalColdAllocation,
@@ -667,5 +668,22 @@ describe("canonical scratch custody disposition", () => {
     await store.finish(id, "g1", record);
     store.sessions.get(key)!.rows = [];
     expect(await store.workspaceDisposition(allocation)).toEqual({ kind: "held", reason: "custody-unavailable" });
+  });
+});
+
+describe("native execution first admission", () => {
+  it("freezes the native contract at first admission and never upgrades a legacy archive", () => {
+    const meta = claim().meta;
+    delete meta.workspaceAllocation;
+    const native = prepareWorkspaceAllocation(id, { ...meta, residentExecution: "native-v1" }, undefined, false, 1);
+    expect(native).toEqual({ version: 1, runId: id, startedAt: 1, allocation: null, residentExecution: "native-v1" });
+    expect(workspaceDurabilityArchiveOf(native)).toEqual(native);
+    const legacy = { version: 1, runId: id, startedAt: 1, allocation: null };
+    expect(prepareWorkspaceAllocation(id, { ...meta, residentExecution: "native-v1" }, legacy, true, 1)).toEqual(
+      legacy,
+    );
+    expect(prepareWorkspaceAllocation(id, { ...meta, residentExecution: "native-v1" }, undefined, true, 1)).toEqual(
+      legacy,
+    );
   });
 });

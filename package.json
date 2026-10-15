@@ -89,7 +89,8 @@
     "load": "tsx scripts/load.ts",
     "smoke:ingress": "tsx scripts/smoke-ingress.ts",
     "staging:deploy": "tsx scripts/staging-deploy.ts",
-    "staging:validate": "tsx scripts/staging-validate.ts"
+    "staging:validate": "tsx scripts/staging-validate.ts",
+    "check:native-scope": "node scripts/native-scope-qualify.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "1.0.4",

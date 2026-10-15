@@ -36,8 +36,8 @@
       "when": "Local sessions before review; CI selects affected checks on each push."
     },
     "verify:root": {
-      "does": "The bot package's gate: consistency checks, typecheck, lint, format, tests, dist.",
-      "when": "When only the bot changed."
+      "does": "Runs the bot package's CI gates.",
+      "when": "Bot-only changes; scope checks in agent sessions."
     },
     "check:consistency": {
       "does": "The sub-second checks that generated and declared things equal the code, this table included.",
@@ -88,8 +88,8 @@
       "when": "Smoke tests, deploys, config, run history."
     },
     "resident:archive": {
-      "does": "Captures a bounded retained resident tree through the old route and verifies an offline restore.",
-      "when": "Reviewed disposable-resident rehearsal with exact binding and Worker build receipts."
+      "does": "Captures a retained resident and checks its offline restore.",
+      "when": "Reviewed disposable rehearsal; verify the binding and builds."
     },
     "ci:gate": {
       "does": "Reads the `needs` context of a CI fan-out and accepts only successful legs or an explicitly planned skip.",
@@ -262,6 +262,10 @@
     "staging:validate": {
       "does": "Checks PR eligibility before staging.",
       "when": "Staging CI and queued-head recheck."
+    },
+    "check:native-scope": {
+      "does": "Tests the native gate and kill.",
+      "when": "Docker; see the containment plan."
     }
   }
 }

@@ -7468,6 +7468,45 @@ describe("the plane's admission stage — /plane/admit, reservations, the seal's
   const admit = (key: string, threadKey: string, text: string) =>
     post("/plane/admit", { storeKey: key, threadKey, requester, request: { text } });
 
+  it("freezes a queued run's protocol at its first actor claim and refuses an old-client takeover", async () => {
+    const key = storeKey(),
+      t = "slack:C1:native-birth";
+    await admit(key, t, "first");
+    expect((await post("/runs/claim", claimBody(key, "r-first-native", t))).status).toBe(200);
+    const queued = await admit(key, t, "queued"),
+      id = queued.data.id as string;
+    await post("/runs/finish", {
+      storeKey: key,
+      runId: "r-first-native",
+      gen: "g1",
+      record: record("r-first-native", t),
+    });
+    const modern = { ...AUTH, "x-switchboard-execution-protocol": "native-v1" };
+    const reclaimed = await post(
+      "/runs/reclaim",
+      { storeKey: key, gen: "g-native", now: Date.now() + 1000, leaseMs: LEASE_MS },
+      modern,
+    );
+    expect(reclaimed.status).toBe(200);
+    const read = () => post("/runs/preservation-owner", { storeKey: key, runId: id });
+    expect((await read()).data).toMatchObject({
+      kind: "live",
+      row: { runId: id, ownerGen: "g-native", residentExecution: "native-v1" },
+    });
+    const old = await post("/runs/reclaim", {
+      storeKey: key,
+      gen: "g-old",
+      now: Date.now() + LEASE_MS + 10000,
+      leaseMs: LEASE_MS,
+    });
+    expect(old.data.runs).toEqual([]);
+    expect((await read()).data).toMatchObject({ row: { ownerGen: "g-native", residentExecution: "native-v1" } });
+    const oldClaim = claimBody(key, id, t);
+    oldClaim.run.meta.residentExecution = "native-v1";
+    expect((await post("/runs/claim", oldClaim)).status).toBe(409);
+    expect((await read()).data).toMatchObject({ row: { ownerGen: "g-native" } });
+  });
+
   it("two asks a second apart on one thread: the first is admitted with a reservation, the second queued at position 1; the first's claim promotes the reservation; the seal admits the queued run with its attaching row", async () => {
     const key = storeKey();
     const t = "slack:C1:1.0";

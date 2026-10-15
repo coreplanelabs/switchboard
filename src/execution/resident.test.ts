@@ -356,10 +356,10 @@ describe("ResidentExecutor.exec", () => {
         ownerFence: sentBody(call).ownerFence,
       })),
     ).toEqual([
-      { route: "/exec", runId: "run-original", ownerGen: "gen-original", ownerFence: 7 },
-      { route: "/read", runId: "run-original", ownerGen: "gen-original", ownerFence: 7 },
-      { route: "/write", runId: "run-original", ownerGen: "gen-original", ownerFence: 7 },
-      { route: "/publish", runId: "run-original", ownerGen: "gen-original", ownerFence: 7 },
+      { route: "/native/exec", runId: "run-original", ownerGen: "gen-original", ownerFence: 7 },
+      { route: "/native/read", runId: "run-original", ownerGen: "gen-original", ownerFence: 7 },
+      { route: "/native/write", runId: "run-original", ownerGen: "gen-original", ownerFence: 7 },
+      { route: "/native/publish", runId: "run-original", ownerGen: "gen-original", ownerFence: 7 },
     ]);
   });
   it("keeps model env from replacing the door bearer and sends publication only through the typed route", async () => {
@@ -1035,7 +1035,7 @@ describe("ResidentExecutor.open (attach-on-open)", () => {
     const { calls } = stubFetch({ body: { deadlineAt: 1 } });
     const executor = new ResidentExecutor({ ...OPTS, runId: "run-1", ownerGen: "gen-1" });
     await executor.setRunDeadline(8 * 60_000);
-    expect(route(calls[0])).toBe("/run-deadline");
+    expect(route(calls[0])).toBe("/native/run-deadline");
     expect(sentBody(calls[0])).toMatchObject({ runId: "run-1", ownerGen: "gen-1", remainingMs: 8 * 60_000 });
   });
 

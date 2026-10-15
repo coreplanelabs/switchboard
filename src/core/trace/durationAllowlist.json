@@ -7,6 +7,7 @@
   "deploy/cloudflare/preflight.mjs": 1,
   "deploy/cloudflare/worker.ts": 1,
   "scripts/load.ts": 6,
+  "scripts/native-scope-qualify.mjs": 2,
   "scripts/web-preview.ts": 82,
   "src/agents/registry.ts": 1,
   "src/artifacts/config.ts": 1,
