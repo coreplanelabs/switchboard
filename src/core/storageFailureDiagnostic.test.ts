@@ -1,10 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { storageFailureNotice, storageFailureNote } from "./storageFailureDiagnostic.js";
+import { storageFailureDiagnosticOf, storageFailureNotice, storageFailureNote } from "./storageFailureDiagnostic.js";
 import { storeRequestWitness } from "./storeResponse.js";
 import { parseRunEventLines } from "./runEventLines.js";
 import { createRunTimeline } from "../channels/runTimeline.js";
 
 describe("storage diagnostic captures", () => {
+  it("does not label an externally consumed body as unread when no decoder evidence was retained", async () => {
+    const response = new Response("private body", { status: 403 });
+    await response.text();
+    const notice = storageFailureNotice(
+      await storeRequestWitness("/config/get", '{"key":"base"}'),
+      "read",
+      "http",
+      new Error("denied"),
+      response,
+    );
+    expect(notice.diagnostic).toMatchObject({
+      httpStatus: 403,
+      response: { contentType: "text", bodyKind: "unknown" },
+    });
+    expect(storageFailureDiagnosticOf(notice.diagnostic)).toEqual(notice.diagnostic);
+    expect(JSON.stringify(notice)).not.toContain("private body");
+  });
+
   it("shows the redacted exception on the run timeline and keeps bounded causal evidence in an exported capture", async () => {
     const request = await storeRequestWitness(
       "/runs/state",
@@ -78,6 +96,11 @@ describe("storage diagnostic captures", () => {
       },
       { ...valid.storageFailure, requestDigest: "bad" },
       { ...valid.storageFailure, requestId: "private request bytes" },
+      { ...valid.storageFailure, requestedAt: -1 },
+      { ...valid.storageFailure, requestedAt: "private time" },
+      { ...valid.storageFailure, response: { contentType: "text/html private", bodyKind: "html" } },
+      { ...valid.storageFailure, response: { contentType: "html", bodyKind: "html", body: "private" } },
+      { ...valid.storageFailure, response: { contentType: "json", bodyKind: "worker-refusal" } },
       { ...valid.storageFailure, timing: { elapsedMs: -1, timeoutMs: 10000, deadlineExceeded: true } },
       { ...valid.storageFailure, timing: { elapsedMs: 10000, timeoutMs: 10000 } },
       {

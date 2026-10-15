@@ -13,6 +13,15 @@ import type { ArtifactsConfig } from "./artifacts/config.js";
 import type { SelfImprovementConfig } from "./core/selfImprovement.js";
 import type { SchedulesConfig } from "./core/scheduleStore.js";
 import type { RunHistoryConfig } from "./core/runStore.js";
+import {
+  captureStorageFailure,
+  newStorageRequestId,
+  STORAGE_REQUEST_ID_HEADER,
+  type StorageFailureCapture,
+  type StorageFailureDiagnostic,
+  type StorageFailureNotice,
+} from "./core/storageFailureDiagnostic.js";
+import { systemClock } from "./core/trace/clock.js";
 import type { AddressSeverity, ShipConfig } from "./core/shipPipeline.js";
 import { resolveMergeWatch, type MergeWatchSettings, type PullsSettings } from "./core/mergeWatch.js";
 import type { ReadingDiffConfig } from "./core/readingDiff.js";
@@ -704,6 +713,7 @@ export interface WorkerOverridesBackingOptions {
   baseUrl: string;
   token: string;
   fetch?: typeof fetch;
+  onFailure?: (notice: StorageFailureNotice) => void;
 }
 
 /**
@@ -747,25 +757,57 @@ export class WorkerOverridesBacking implements OverridesBacking {
   }
 
   private async post(path: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const capture: StorageFailureCapture = {
+      operation: path,
+      payload: JSON.stringify(payload),
+      kind: path === "/config/get" ? "read" : "write",
+      requestId: newStorageRequestId(),
+      requestedAt: systemClock(),
+      timeoutMs: CONFIG_WORKER_TIMEOUT_MS,
+    };
+    const report = (phase: StorageFailureDiagnostic["phase"], response?: Response, body?: string | null) =>
+      captureStorageFailure(capture, phase, response, body, this.opts.onFailure);
     let res: Response;
     try {
+      capture.signal = AbortSignal.timeout(CONFIG_WORKER_TIMEOUT_MS);
       res = await this.fetchImpl(`${this.baseUrl}${path}`, {
         method: "POST",
-        headers: { authorization: `Bearer ${this.opts.token}`, "content-type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(CONFIG_WORKER_TIMEOUT_MS),
+        headers: {
+          authorization: `Bearer ${this.opts.token}`,
+          "content-type": "application/json",
+          ...(capture.requestId ? { [STORAGE_REQUEST_ID_HEADER]: capture.requestId } : {}),
+        },
+        body: capture.payload,
+        signal: capture.signal,
       });
     } catch (err) {
+      await report("transport");
       throw new Error(`config store unreachable: ${err instanceof Error ? err.message : String(err)}`, { cause: err });
     }
-    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    let text: string | null;
+    try {
+      text = await res.text();
+    } catch {
+      text = null;
+      await report("response-body", res, null);
+    }
+    let body: Record<string, unknown> = {};
+    try {
+      body = JSON.parse(text ?? "{}") as Record<string, unknown>;
+    } catch {
+      // Preserve the legacy empty-document handling of unreadable responses.
+      if (res.ok) await report("response-json", res, text);
+    }
     if (res.status === 409) {
       // Another writer (the CLI, an earlier bot) saved first: take its version so
       // the NEXT save can go through; the store reloads the document and rebases.
       if (typeof body.version === "number") this.version = body.version;
       throw new OverridesConflictError();
     }
-    if (!res.ok) throw new Error(`config store answered HTTP ${res.status} on ${path}`);
+    if (!res.ok) {
+      if (text !== null) await report("http", res, text);
+      throw new Error(`config store answered HTTP ${res.status} on ${path}`);
+    }
     return body;
   }
 }
