@@ -1,5 +1,7 @@
 import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
+import { WorkerRunLedger } from "../runLedgerWorker.js";
+import { turnRows } from "../runLedger/transcript.js";
 import { appendCoordinatorStatus } from "../coordinator/unitStatus.js";
 import { freezeCoordinatorReport } from "../coordinator/reportContext.js";
 import { readOperatorTailContext } from "./operatorTail.js";
@@ -546,7 +548,22 @@ describe("message-bound context access", () => {
         },
       ],
     };
+    let sessionReads = 0;
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "fixture",
+      storeKey: "runs:default",
+      fetch: async () => {
+        if (++sessionReads === 1) return Response.json({ error: "internal error" }, { status: 500 });
+        return Response.json({
+          rows: messages.flatMap((message, idx) => turnRows(idx, message).rows),
+          attachments: [],
+        });
+      },
+    });
+    f.deps.runLedger.readSession = wire.readSession.bind(wire);
     expect(await execution.validateDependencies(context)).toEqual({ ok: true });
+    f.deps.runLedger.readSession = readSession as never;
     const originalRead = f.deps.githubApi.readFile;
     f.deps.githubApi.readFile = async () => {
       throw new Error("private provider response");
