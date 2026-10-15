@@ -347,6 +347,7 @@ An operator can discard a staging installation and recreate it with an ordinary 
 | A reviewed plan and runtime restoration are required before deletion; initialization requires native absence; unknown deletion stops without retry. | `[unit]` `src/deploy/stagingRecreate.test.ts::staging installation recreation::requires the approved exact plan and positive absence before first installation`; `::stops an uncertain delete or missing absence proof without retry or initialization`; `::refuses to delete when runtime secret restoration is unavailable` |
 | Recreation is manual-only, uses the shared staging lock and cannot replace required automatic deployment or Review checks. | `[unit]` `src/deploy/stagingRecreate.test.ts::staging recreation workflow::*` |
 | Source qualification uses the trusted main controller before candidate code runs. | `[unit]` `src/deploy/stagingRecreate.test.ts::staging recreation workflow::qualifies the candidate with the trusted main controller before running candidate code` |
+| Unknown dependency fields still refuse before deletion. Their bounded diagnostic contains the selected Worker, field names and shapes, without provider values. The published legacy dependency shape remains accepted. | `[unit]` `src/deploy/stagingRecreate.test.ts::staging installation recreation::retains bounded dependency field shapes without provider values when an unknown field refuses`; `::accepts the published Wrangler dependency shape and preserves selected incoming Worker dependencies` |
 
 
 ## Native execution rollout

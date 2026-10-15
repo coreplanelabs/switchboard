@@ -89,6 +89,30 @@ const list = (value: unknown): unknown[] => {
   return value;
 };
 
+/** Retain only bounded field structure. Provider values never enter this diagnostic. */
+export class StagingDependencyFieldsError extends Error {
+  readonly diagnostic;
+  constructor(worker: string, references: Record<string, unknown>, unknownFields: string[]) {
+    const safeName = (name: string) => (/^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/.test(name) ? name : "unrecognized-field");
+    const fields = unknownFields
+      .sort()
+      .slice(0, 8)
+      .map((key) => {
+        const value = references[key];
+        const type = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+        const keys = type === "object" ? Object.keys(value as object) : [];
+        return {
+          name: safeName(key),
+          type,
+          ...(type === "array" ? { length: (value as unknown[]).length } : {}),
+          ...(type === "object" ? { keyCount: keys.length, keys: keys.sort().slice(0, 8).map(safeName) } : {}),
+        };
+      });
+    super(`staging dependency kind is unverified for ${worker}: ${fields.map((field) => field.name).join(", ")}`);
+    this.diagnostic = { worker, fieldCount: unknownFields.length, fields };
+  }
+}
+
 /** Plan only the selected installation. A provider dependency refusal is never overridden. */
 export function planStagingRecreation(
   profile: DeploymentProfile,
@@ -120,8 +144,10 @@ export function planStagingRecreation(
     if (!dependency || !Array.isArray(dependency.tails) || dependency.tails.length !== 0)
       throw new Error("staging dependency is outside the selected staging installation");
     const refs = record(dependency.references);
-    if (Object.keys(refs).some((key) => !["services", "durable_objects", "dispatch_outbounds"].includes(key)))
-      throw new Error("staging dependency kind is unverified");
+    const unknownFields = Object.keys(refs).filter(
+      (key) => !["services", "durable_objects", "dispatch_outbounds"].includes(key),
+    );
+    if (unknownFields.length) throw new StagingDependencyFieldsError(name, refs, unknownFields);
     const services = refs.services === undefined ? {} : record(refs.services);
     const incoming = [...list(services.incoming), ...list(refs.durable_objects)];
     if (

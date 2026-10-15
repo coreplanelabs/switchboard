@@ -9,7 +9,12 @@ import { MINUTE_MS } from "../src/core/budgets.js";
 import { loadProfileOnHost, readConfigForPush } from "../src/deploy/run.js";
 import { stagingProblems } from "../src/deploy/staging.js";
 import { nativeInventoryRows } from "../src/deploy/stagingBootstrap.js";
-import { planStagingRecreation, recreateStaging, stagingRestorationSecrets } from "../src/deploy/stagingRecreate.js";
+import {
+  planStagingRecreation,
+  recreateStaging,
+  stagingRestorationSecrets,
+  StagingDependencyFieldsError,
+} from "../src/deploy/stagingRecreate.js";
 import { initializeOnHost } from "./staging-initialize.js";
 
 const { values } = parseArgs({
@@ -107,12 +112,24 @@ try {
         }),
       ),
     );
-    return planStagingRecreation(
-      loaded.profile,
-      process.env.SWITCHBOARD_PRODUCTION_ACCOUNT!,
-      { ...native, dependencies },
-      { commit, configSha256: sha256Hex(read.text) },
-    );
+    try {
+      return planStagingRecreation(
+        loaded.profile,
+        process.env.SWITCHBOARD_PRODUCTION_ACCOUNT!,
+        { ...native, dependencies },
+        { commit, configSha256: sha256Hex(read.text) },
+      );
+    } catch (error) {
+      if (error instanceof StagingDependencyFieldsError)
+        save({
+          status: "refused",
+          commit,
+          dependencyFields: error.diagnostic,
+          nativeMutations: "not-started",
+          acceptance: "not-run",
+        });
+      throw error;
+    }
   };
   if (!values.apply) {
     await preflight();
