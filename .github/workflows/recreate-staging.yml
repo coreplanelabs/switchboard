@@ -1,0 +1,123 @@
+name: recreate staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Exact current same-repository PR head
+        required: true
+        type: string
+      pr:
+        description: Pull request whose source checks must pass
+        required: true
+        type: string
+      profile_ref:
+        description: Exact selected immutable ordinary staging profile
+        required: true
+        type: string
+      approved_plan:
+        description: Empty plans only; exact reviewed SHA256 deletes and recreates
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+  actions: read
+
+jobs:
+  recreate:
+    name: staging / explicit recreation
+    if: github.event_name == 'workflow_dispatch' && github.run_attempt == 1
+    runs-on: depot-ubuntu-24.04-4
+    timeout-minutes: 60
+    environment: staging
+    concurrency:
+      group: deploy-staging
+      queue: max
+      cancel-in-progress: false
+    steps:
+      - name: require the original main controller and exact PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ inputs.commit }}
+          PR: ${{ inputs.pr }}
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo '::error::Recreation requires the main controller'; exit 1; }
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] && [[ "$PR" =~ ^[1-9][0-9]*$ ]] || exit 1
+          permission=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$GITHUB_ACTOR/permission" --jq .permission)
+          case "$permission" in admin|maintain|write) ;; *) exit 1 ;; esac
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" | jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$COMMIT" '.state == "open" and .head.repo.full_name == $repo and .head.sha == $sha' > /dev/null
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: controller
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: controller/.nvmrc
+      - run: npm ci
+        working-directory: controller
+      - name: recheck source qualification under the staging lock
+        id: recheck
+        working-directory: controller
+        run: npm run staging:validate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_COMMIT: ${{ inputs.commit }}
+          STAGING_PR_NUMBER: ${{ inputs.pr }}
+          STAGING_AUTOMATIC: "false"
+          STAGING_ACTOR: ${{ github.actor }}
+          STAGING_VALIDATE_MODE: recheck
+      - name: require the qualified head and immutable ordinary profile
+        env:
+          ELIGIBLE: ${{ steps.recheck.outputs.eligible }}
+          EXPECTED_PROFILE: ${{ inputs.profile_ref }}
+          PROFILE: ${{ vars.SWITCHBOARD_STAGING_PROFILE }}
+        run: |
+          [ "$ELIGIBLE" = true ] && [ -n "$PROFILE" ] && [ "$PROFILE" = "$EXPECTED_PROFILE" ] || exit 1
+          [[ "$PROFILE" =~ ^github://[^@]+@[0-9a-f]{40}$ ]] || exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - run: npm ci
+        working-directory: candidate
+      - name: read the selected private configuration
+        id: config-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.STAGING_CONFIG_REPO_APP_CLIENT_ID }}
+          private-key: ${{ secrets.STAGING_CONFIG_REPO_APP_PRIVATE_KEY }}
+          owner: ${{ vars.CONFIG_REPO_OWNER }}
+          repositories: ${{ vars.CONFIG_REPO_NAME }}
+          permission-contents: read
+      - name: plan or recreate the selected staging installation once
+        working-directory: candidate
+        env:
+          SWITCHBOARD_DEPLOY_PROFILE: ${{ inputs.profile_ref }}
+          SWITCHBOARD_STAGING_ACCOUNT: ${{ vars.SWITCHBOARD_STAGING_ACCOUNT }}
+          SWITCHBOARD_PRODUCTION_ACCOUNT: ${{ vars.SWITCHBOARD_PRODUCTION_ACCOUNT }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_CLOUDFLARE_DEPLOY_TOKEN }}
+          MEMORY_TOKEN: ${{ secrets.STAGING_MEMORY_TOKEN }}
+          SANDBOX_TOKEN: ${{ secrets.STAGING_SANDBOX_TOKEN }}
+          RESIDENT_READ_TOKEN: ${{ secrets.STAGING_RESIDENT_READ_TOKEN }}
+          RESIDENT_DRAIN_TOKEN: ${{ secrets.STAGING_RESIDENT_DRAIN_TOKEN }}
+          STAGING_RUNTIME_SECRETS_JSON: ${{ secrets.STAGING_RUNTIME_SECRETS_JSON }}
+          CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
+          APPROVED_PLAN: ${{ inputs.approved_plan }}
+          WRANGLER_SEND_METRICS: "false"
+          CI: "1"
+        run: |
+          args=(--receipt "$RUNNER_TEMP/staging-recreation.json")
+          if [ -n "$APPROVED_PLAN" ]; then args+=(--apply "$APPROVED_PLAN"); fi
+          npm run --silent staging:deploy -- --recreate "${args[@]}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: staging-recreation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/staging-recreation.json*
+          if-no-files-found: ignore

@@ -91,7 +91,7 @@ Deterministic, non-interactive commands. Credentials are named when required. CI
 | `npm run screenshots:check` | Each surface's inputs still hash to what its screenshots were rendered from — no browser. | Part of `check:consistency`. |
 | `npm run load` | Load harness for infrastructure and route checks. | Model capacity receipts. |
 | `npm run smoke:ingress` | Checks three deployment capability families; --check makes no network request. | Configured disposable scope; release acceptance. |
-| `npm run staging:deploy` | Checks isolation and deploys a frozen staging candidate; --check makes no upload. | Manual staging; separate account pins required. |
+| `npm run staging:deploy` | Deploys isolated staging; --recreate plans explicit recreation. | Staging CI and explicit operator setup. |
 | `npm run staging:validate` | Checks PR eligibility before staging. | Staging CI and queued-head recheck. |
 | `npm run check:native-scope` | Tests the native gate and kill. | Docker; see the containment plan. |
 | `npm run staging:bootstrap-held` | Installs Resident support and keeps maintenance held. | Manual staging CI; separate readiness artifact. |
