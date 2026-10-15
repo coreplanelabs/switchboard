@@ -145,6 +145,12 @@ The state alarm now acknowledges its next wake before Workflow discovery or main
 
 This prepares the existing recovery path for shared intake jobs. It adds no event job, source writer, listener or new timer interval. Atomic event/job/wake reception, bounded job claims and keyed internal delivery still remain pending. Local Worker proof remains separate from production acceptance.
 
+### Atomic source reception, 2026-10-15
+
+The next cut adds source-event reception to the existing ledger and state object. One transaction retains the original event, first pending job and shared wake before returning a receipt. Source delivery IDs, object/change IDs and local receipt sequence remain separate. Repeated delivery returns its original receipt before reading a job or checking capacity; changed content under the same delivery identity is refused. Unknown retained schemas remain held.
+
+This is an inactive storage capability. No source producer, orchestrator routing, job claim or internal delivery is enabled. Pending jobs contribute to the existing alarm even with no live agent and physical maintenance paused. Later receptions, lease refreshes and alarm finalization keep an earlier armed source wake until it fires. Initial count and byte limits bound retained input. Job lifecycle, retention and measured enablement limits remain pending. Step 2 is in progress.
+
 ## Step 3: preserve evidence through internal handoffs
 
 **Current source:** [intake](../../src/core/intake.ts), [inbox schema](../../src/core/runLedger/inboxMessage.ts), [thread admission](../../src/core/threadAdmission.ts), [unit events](../../src/core/coordinator/instanceStore.ts), and both runtime implementations.

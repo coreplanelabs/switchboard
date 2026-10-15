@@ -14352,3 +14352,227 @@ describe("recorded check terminal custody in real SQLite", () => {
     });
   });
 });
+
+describe("saved source-event reception in SQLite", () => {
+  const event = {
+    version: 1,
+    sourceId: "fixture:host:installation:1",
+    deliveryId: "delivery-a",
+    objectId: "comment:7",
+    changeId: "revision:1",
+    kind: "source-evidence",
+    authorId: "fixture:user:2",
+    payload: { text: "The changed branch has a missing check." },
+  };
+
+  it("receives through the private HTTP route and reads the original event and pending job", async () => {
+    const key = storeKey();
+    const received = await post("/runs/source-events/receive", { storeKey: key, event });
+    expect(received.status).toBe(200);
+    expect(received.data.kind).toBe("received");
+    const receipt = received.data.receipt as { key: string; sequence: number; receivedAt: number };
+    const read = await post("/runs/source-events/read", { storeKey: key, key: receipt.key });
+    expect(read).toEqual({
+      status: 200,
+      data: {
+        record: {
+          event,
+          receipt: { ...receipt, sequence: 1 },
+          job: { version: 1, eventKey: receipt.key, stage: "received", attempts: 0, nextAttemptAt: receipt.receivedAt },
+        },
+      },
+    });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      expect(await owner.listLive()).toEqual([]);
+      expect(await state.storage.getAlarm()).toBe(receipt.receivedAt + 30_000);
+      await state.storage.deleteAlarm();
+    });
+  });
+
+  it.each(["before", "after"] as const)(
+    "rolls back the event, job and sequence on failure %s the wake write",
+    async (point) => {
+      const key = storeKey();
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+        await state.storage.deleteAlarm();
+        const setAlarm = state.storage.setAlarm;
+        state.storage.setAlarm = async (...args) => {
+          if (point === "after") await setAlarm.call(state.storage, ...args);
+          throw new Error("wake write refused");
+        };
+        try {
+          await expect(owner.receiveSourceEvent(event)).rejects.toThrow("wake write refused");
+          expect(state.storage.sql.exec(`SELECT COUNT(*) AS count FROM source_events`).one()).toEqual({ count: 0 });
+          expect(await state.storage.getAlarm()).toBeNull();
+        } finally {
+          state.storage.setAlarm = setAlarm;
+        }
+        const accepted = await owner.receiveSourceEvent(event);
+        expect(accepted.kind).toBe("received");
+        if (accepted.kind === "refused") throw new Error("expected reception");
+        expect((await owner.readSourceEvent(accepted.receipt.key))?.receipt.sequence).toBe(1);
+        await state.storage.deleteAlarm();
+      });
+    },
+  );
+
+  it("preserves an earlier shared deadline before and after an alarm with no live agents", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const now = Date.now();
+      const earlier = now + 10_000;
+      await state.storage.setAlarm(earlier);
+      const accepted = await owner.receiveSourceEvent(event, now);
+      expect(accepted.kind).toBe("received");
+      expect(await state.storage.getAlarm()).toBe(earlier);
+      await state.storage.deleteAlarm();
+      const holder = owner as unknown as { env: Record<string, unknown> };
+      const original = holder.env;
+      holder.env = { ...original, RUN_HISTORY_MAINTENANCE: "paused" };
+      try {
+        await owner.alarm();
+        expect(await owner.listLive()).toEqual([]);
+        const next = await state.storage.getAlarm();
+        expect(typeof next).toBe("number");
+        expect(next).toBeGreaterThanOrEqual(now + 30_000);
+        expect(next).toBeLessThanOrEqual(Date.now() + 30_000);
+      } finally {
+        holder.env = original;
+        await state.storage.deleteAlarm();
+      }
+    });
+  });
+
+  it("returns a receipt before examining a future job schema and never resets that job", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const accepted = await owner.receiveSourceEvent(event);
+      if (accepted.kind === "refused") throw new Error("expected reception");
+      const futureJob = JSON.stringify({ version: 2, stage: "completed", retained: true });
+      state.storage.sql.exec(`UPDATE source_events SET job_json = ? WHERE key = ?`, futureJob, accepted.receipt.key);
+      expect(await owner.receiveSourceEvent(event)).toEqual({ kind: "duplicate", receipt: accepted.receipt });
+      expect(
+        state.storage.sql.exec(`SELECT job_json FROM source_events WHERE key = ?`, accepted.receipt.key).one(),
+      ).toEqual({ job_json: futureJob });
+      await expect(owner.readSourceEvent(accepted.receipt.key)).rejects.toThrow("Stored source event is unreadable");
+      await state.storage.deleteAlarm();
+    });
+  });
+
+  it("refuses a changed delivery without overwriting the saved event", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const accepted = await owner.receiveSourceEvent(event);
+      if (accepted.kind === "refused") throw new Error("expected reception");
+      expect(await owner.receiveSourceEvent({ ...event, payload: { text: "changed" } })).toEqual({
+        kind: "refused",
+        reason: "delivery-conflict",
+      });
+      expect((await owner.readSourceEvent(accepted.receipt.key))?.event).toEqual(event);
+      await state.storage.deleteAlarm();
+    });
+  });
+
+  it("returns the original receipt at capacity and refuses only a new delivery", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const accepted = await owner.receiveSourceEvent(event);
+      if (accepted.kind === "refused") throw new Error("expected reception");
+      // Retained rows still count when this reader does not understand their schema.
+      state.storage.sql.exec(`WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i < 1023)
+        INSERT INTO source_events(key,event_json,body_hash,received_at,job_json,due_at,bytes)
+        SELECT 'source:' || printf('%064x', i), '{}', '', 0, '{"version":2}', 0, 2 FROM n`);
+      expect(await owner.receiveSourceEvent(event)).toEqual({ kind: "duplicate", receipt: accepted.receipt });
+      expect(await owner.receiveSourceEvent({ ...event, deliveryId: "new-delivery" })).toEqual({
+        kind: "refused",
+        reason: "capacity",
+      });
+      expect((await owner.readSourceEvent(accepted.receipt.key))?.event).toEqual(event);
+      await state.storage.deleteAlarm();
+    });
+  });
+  it("keeps one event when concurrent callers repeat the same delivery", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const received = await Promise.all(Array.from({ length: 10 }, () => owner.receiveSourceEvent(event)));
+      expect(received.map((r) => r.kind).sort()).toEqual([...Array.from({ length: 9 }, () => "duplicate"), "received"]);
+      const first = received[0]!;
+      if (first.kind === "refused") throw new Error("expected reception");
+      expect((await owner.readSourceEvent(first.receipt.key))?.event).toEqual(event);
+      expect(state.storage.sql.exec(`SELECT COUNT(*) AS count, MAX(seq) AS seq FROM source_events`).one()).toEqual({
+        count: 1,
+        seq: 1,
+      });
+      await state.storage.deleteAlarm();
+    });
+  });
+
+  it("requires the existing private bearer before accepting a source event", async () => {
+    const key = storeKey();
+    expect((await post("/runs/source-events/receive", { storeKey: key, event }, {})).status).toBe(401);
+    const accepted = await post("/runs/source-events/receive", { storeKey: key, event });
+    expect(accepted.status).toBe(200);
+    expect(accepted.data.kind).toBe("received");
+    expect(accepted.data.receipt).toMatchObject({ sequence: 1 });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner, state) => {
+      await state.storage.deleteAlarm();
+    });
+  });
+  it.each(["reception", "claim", "heartbeat"] as const)(
+    "later %s keeps the original pending source wake",
+    async (operation) => {
+      const key = storeKey();
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+        const now = Date.now();
+        const request = claimBody(key, "source-wake-owner", "slack:C1:source-wake", "g1", {
+          leaseMs: 30_000,
+          startedAt: now,
+        }).run;
+        try {
+          if (operation === "heartbeat") expect(await owner.claim(request, now)).toMatchObject({ ok: true });
+          const accepted = await owner.receiveSourceEvent(event, now);
+          expect(accepted.kind).toBe("received");
+          expect(await state.storage.getAlarm()).toBe(now + 30_000);
+          if (operation === "reception") {
+            expect((await owner.receiveSourceEvent({ ...event, deliveryId: "later" }, now + 10_000)).kind).toBe(
+              "received",
+            );
+          } else if (operation === "claim") {
+            expect(await owner.claim(request, now + 10_000)).toMatchObject({ ok: true });
+          } else {
+            expect(await owner.heartbeat(request.runId, "g1", 30_000, now + 10_000)).toMatchObject({ ok: true });
+            expect(await owner.heartbeat(request.runId, "g1", 30_000, now + 20_000)).toMatchObject({ ok: true });
+          }
+          expect(await state.storage.getAlarm()).toBe(now + 30_000);
+          expect(await owner.listLive()).toHaveLength(operation === "reception" ? 0 : 1);
+        } finally {
+          await state.storage.deleteAlarm();
+        }
+      });
+    },
+  );
+
+  it("keeps the pending source wake across external discovery and the alarm finally path", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const accepted = await owner.receiveSourceEvent(event);
+      if (accepted.kind === "refused") throw new Error("expected reception");
+      const expected = accepted.receipt.receivedAt + 30_000;
+      const mutable = owner as unknown as { discoverCoordinatorWorkflows(now: number): Promise<void> };
+      const original = mutable.discoverCoordinatorWorkflows;
+      let observed: number | null | undefined;
+      mutable.discoverCoordinatorWorkflows = async () => {
+        observed = await state.storage.getAlarm();
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      };
+      try {
+        await owner.alarm();
+        expect(observed).toBe(expected);
+        expect(await state.storage.getAlarm()).toBe(expected);
+      } finally {
+        mutable.discoverCoordinatorWorkflows = original;
+        await state.storage.deleteAlarm();
+      }
+    });
+  });
+});

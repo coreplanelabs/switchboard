@@ -7,6 +7,7 @@ export type { ContextCheckpointRequest, ContextCheckpointResult } from "../refer
 import type { ContextDependencies } from "../references/contextDependencies.js";
 import type { SessionSources } from "../references/receipts.js";
 import type { InboxPushResult } from "./inboxMessage.js";
+import type { SourceEventRecord, SourceEventReceiveResult } from "./sourceEvents.js";
 // The ledger seam (docs/reference/specs/run-history.md item 28): what the bot calls, with
 // two implementations — `WorkerRunLedger` (HTTPS to the state Worker; the
 // production choice) and `InMemoryRunLedger` (tests, and the shape every
@@ -290,6 +291,10 @@ export interface RunLedger {
    *  first writer's row stands and every caller acts on `stored`. Satisfies
    *  the intake seam (`IntakeLedger` in `src/core/intake.ts`) structurally. */
   recordIntake(key: string, receipt: IntakeReceipt): Promise<IntakeWriteResult>;
+  /** Reception only. A receipt grants no execution or delivery authority. */
+  receiveSourceEvent?(event: unknown): Promise<SourceEventReceiveResult>;
+  /** Unreadable retained input throws; only proven absence returns undefined. */
+  readSourceEvent?(key: string): Promise<SourceEventRecord | undefined>;
   /** The stored receipt, or none — the read the gate and the catch-up make
    *  before deciding (item 59). */
   readIntake(key: string): Promise<IntakeReceipt | undefined>;
