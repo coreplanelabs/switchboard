@@ -4463,7 +4463,15 @@ export async function dispatch(
       fromSession?.seed !== undefined && !savedContextValid && !isolateExecutionSession
         ? undefined
         : sessionCapabilityFor(
-            ledgerRun,
+            ledgerRun
+              ? {
+                  runId: ledgerRun.runId,
+                  session: ledgerRun.session,
+                  agent: agent.name,
+                  parentRunId,
+                  parentInstanceId: coordinator?.parentInstanceId,
+                }
+              : undefined,
             deps.runLedger,
             sourceIntake === "automatic" && deps.artifacts
               ? {

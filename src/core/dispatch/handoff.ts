@@ -6,6 +6,7 @@ import { sourceHash } from "../references/receipts.js";
 import type { Notepad } from "../runLedger/types.js";
 import type { ThreadAsset } from "../../artifacts/types.js";
 import { handoffBriefOf } from "./handoffBrief.js";
+import { isOrchestratorOwner, sameOrchestratorOwner, type OrchestratorOwner } from "./orchestratorDecisions.js";
 
 import { isContextDependencies, type ContextDependencies } from "../references/contextDependencies.js";
 export type { SourceReadReference } from "../references/contextDependencies.js";
@@ -20,6 +21,9 @@ export interface HandoffConsumer {
 }
 
 export interface HandoffSource {
+  /** Original routing owner, independent of this snapshot's producing worker.
+   * A link identifies context; it grants no permission or delivery authority. */
+  orchestratorOwner?: OrchestratorOwner;
   source: { runId: string; threadKey: string; channelId: string; requester: string };
   /** Inclusive source rows. An empty source has to === from - 1. */
   session: { key: string; from: number; to: number };
@@ -46,6 +50,24 @@ export interface ChildHandoff extends HandoffSource {
   consumer?: HandoffConsumer;
   /** Flat references retain two-hop context without recursively copying it. */
   ancestors?: HandoffSource[];
+}
+
+/** Only a known orchestrator root creates a link. Delegates preserve the
+ * source's link, including its absence on older or standalone work. */
+export function orchestratorOwnerForHandoff(
+  source: HandoffSource["source"] & { agent?: string; parentRunId?: string; parentInstanceId?: string },
+  inherited?: ChildHandoff,
+): OrchestratorOwner | undefined {
+  if (inherited !== undefined)
+    return inherited.orchestratorOwner ? structuredClone(inherited.orchestratorOwner) : undefined;
+  return source.agent === "orchestrator" && source.parentRunId === undefined && source.parentInstanceId === undefined
+    ? {
+        runId: source.runId,
+        requesterId: source.requester,
+        channelId: source.channelId,
+        threadKey: source.threadKey,
+      }
+    : undefined;
 }
 
 export const HANDOFF_MAX_SOURCES = 16;
@@ -91,6 +113,7 @@ function isHandoffSource(h: HandoffSource): boolean {
   const string = (v: unknown): v is string => typeof v === "string" && v.length > 0;
   return (
     Array.isArray(h.assets) &&
+    (h.orchestratorOwner === undefined || isOrchestratorOwner(h.orchestratorOwner)) &&
     !!h.source &&
     [h.source.runId, h.source.threadKey, h.source.channelId, h.source.requester].every(string) &&
     !!h.session &&
@@ -207,6 +230,7 @@ export function boundChildHandoff(input: ChildHandoff, maxBytes = HANDOFF_MAX_BY
 /** A recovered snapshot must identify the same source bytes and frozen range. */
 export function sameHandoffSource(expected: HandoffSource, actual: HandoffSource): boolean {
   return (
+    sameOrchestratorOwner(expected.orchestratorOwner, actual.orchestratorOwner) &&
     expected.source.runId === actual.source.runId &&
     expected.source.requester === actual.source.requester &&
     expected.source.channelId === actual.source.channelId &&

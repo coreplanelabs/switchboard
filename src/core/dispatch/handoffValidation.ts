@@ -1,6 +1,7 @@
 // Canonical checks for a child handoff. A manifest identifies evidence; it
 // never proves access or substitutes for the source run and durable log.
 import { sourceHash } from "../references/receipts.js";
+import { sameOrchestratorOwner } from "./orchestratorDecisions.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { Notepad } from "../runLedger/types.js";
 import type { LiveRunRow } from "../runLedger/types.js";
@@ -22,6 +23,7 @@ import {
 } from "./unitContext.js";
 import {
   isChildHandoff,
+  orchestratorOwnerForHandoff,
   parentContextOf,
   sameHandoffSource,
   snapshotNotepad,
@@ -32,6 +34,9 @@ import {
 } from "./handoff.js";
 
 export interface CanonicalHandoffRun {
+  agent?: string;
+  parentRunId?: string;
+  parentInstanceId?: string;
   runId: string;
   requester: string;
   channelId: string;
@@ -48,7 +53,18 @@ export interface CanonicalHandoffRun {
  * insufficient: the caller supplies the last committed row of this run. */
 export function canonicalHandoffRunOf(
   row:
-    | (Pick<RunRecord, "id" | "userId" | "channelId" | "threadKey" | "session" | "provisional"> & {
+    | (Pick<
+        RunRecord,
+        | "id"
+        | "userId"
+        | "channelId"
+        | "threadKey"
+        | "session"
+        | "provisional"
+        | "agent"
+        | "parentRunId"
+        | "parentInstanceId"
+      > & {
         childHandoff?: unknown;
       })
     | LiveRunRow,
@@ -68,6 +84,9 @@ export function canonicalHandoffRunOf(
   return {
     runId: live ? row.runId : row.id,
     requester,
+    ...(facts.agent !== undefined ? { agent: facts.agent } : {}),
+    ...(facts.parentRunId !== undefined ? { parentRunId: facts.parentRunId } : {}),
+    ...(facts.parentInstanceId !== undefined ? { parentInstanceId: facts.parentInstanceId } : {}),
     channelId: facts.channelId,
     threadKey: facts.threadKey,
     session,
@@ -167,6 +186,15 @@ export async function validateChildHandoff(input: {
         run.channelId !== source.source.channelId
       )
         return invalid("child context source does not match its original run");
+      if (run.childHandoff !== undefined && !isChildHandoff(run.childHandoff))
+        return invalid("the source run has invalid inherited context");
+      const inherited = isChildHandoff(run.childHandoff) ? run.childHandoff : undefined;
+      const expectedOwner = orchestratorOwnerForHandoff(run, inherited);
+      if (
+        (source.orchestratorOwner !== undefined || inherited?.orchestratorOwner !== undefined) &&
+        !sameOrchestratorOwner(source.orchestratorOwner, expectedOwner)
+      )
+        return invalid("child context changed or invented its orchestrator owner");
       if (
         run.session.range === "broken" ||
         source.session.key !== run.session.key ||
@@ -193,8 +221,6 @@ export async function validateChildHandoff(input: {
         if (source === handoff) immediateRequest = { message: request.messages[0], actor: request.actors?.[0] };
       }
       if (source === handoff) {
-        if (run.childHandoff !== undefined && !isChildHandoff(run.childHandoff))
-          return invalid("the source run has invalid inherited context");
         inheritedSources = isChildHandoff(run.childHandoff)
           ? [run.childHandoff, ...(run.childHandoff.ancestors ?? [])]
           : [];

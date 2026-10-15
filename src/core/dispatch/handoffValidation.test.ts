@@ -65,6 +65,83 @@ async function fixture() {
 }
 
 describe("canonical child handoff validation", () => {
+  it("checks the claimed orchestrator owner against the canonical source agent and identity", async () => {
+    const w = await fixture();
+    w.parent.agent = "orchestrator";
+    w.handoff.orchestratorOwner = {
+      runId: "run-parent",
+      requesterId: "cli:user",
+      channelId: "cli:main",
+      threadKey: "cli:parent",
+    };
+    const accepted = await w.validate();
+    expect(accepted.kind).toBe("valid");
+    if (accepted.kind !== "valid") throw new Error("original owner refused");
+    expect(accepted.context.handoff.orchestratorOwner).toEqual(w.handoff.orchestratorOwner);
+    for (const [field, value] of Object.entries({
+      runId: "foreign-run",
+      requesterId: "foreign-user",
+      channelId: "foreign-channel",
+      threadKey: "foreign-thread",
+    })) {
+      expect(
+        (await w.validate({ ...w.handoff, orchestratorOwner: { ...w.handoff.orchestratorOwner, [field]: value } }))
+          .kind,
+      ).toBe("invalid");
+    }
+    for (const lineage of [{ parentRunId: "legacy-parent" }, { parentInstanceId: "legacy-instance" }]) {
+      Object.assign(w.parent, lineage);
+      expect((await w.validate()).kind).toBe("invalid");
+      delete w.parent.parentRunId;
+      delete w.parent.parentInstanceId;
+    }
+    w.parent.agent = "review";
+    expect((await w.validate()).kind).toBe("invalid");
+    delete w.parent.agent;
+    expect((await w.validate()).kind).toBe("invalid");
+    const legacy = { ...w.handoff };
+    delete legacy.orchestratorOwner;
+    expect((await w.validate(legacy)).kind).toBe("valid");
+  });
+
+  it("refuses a nested handoff that drops or replaces the saved original orchestrator owner", async () => {
+    const w = await fixture();
+    w.parent.agent = "orchestrator";
+    const owner = { runId: "run-parent", requesterId: "cli:user", channelId: "cli:main", threadKey: "cli:parent" };
+    w.handoff.orchestratorOwner = owner;
+    const bound = await w.validate();
+    if (bound.kind !== "valid") throw new Error("original bind refused");
+    w.runs.set(consumer.runId, { ...w.parent, ...consumer, agent: "coding", childHandoff: bound.context.handoff });
+    const nested: ChildHandoff = {
+      ...w.handoff,
+      source: {
+        runId: consumer.runId,
+        requester: consumer.requester,
+        channelId: consumer.channelId,
+        threadKey: consumer.threadKey,
+      },
+      ancestors: [{ ...w.handoff, snapshotRunId: consumer.runId }],
+    };
+    const read = (value: ChildHandoff) =>
+      validateChildHandoff({
+        value,
+        consumer: { ...consumer, runId: "run-grandchild" },
+        mode: "bind",
+        deps: w.deps,
+      });
+    const accepted = await read(nested);
+    expect(accepted.kind).toBe("valid");
+    if (accepted.kind !== "valid") throw new Error("nested bind refused");
+    expect(accepted.context.handoff.orchestratorOwner).toEqual(owner);
+    const dropped = structuredClone(nested);
+    delete dropped.orchestratorOwner;
+    expect((await read(dropped)).kind).toBe("invalid");
+    expect((await read({ ...nested, orchestratorOwner: { ...owner, runId: "run-child" } })).kind).toBe("invalid");
+    const ancestorDropped = structuredClone(nested);
+    delete ancestorDropped.ancestors![0].orchestratorOwner;
+    expect((await read(ancestorDropped)).kind).toBe("invalid");
+  });
+
   it("accepts a finished source with no written turn and refuses an unproved live range", async () => {
     const w = await fixture();
     const emptySession = { key: w.parent.session.key, seedFrom: 0, request: 0, range: { from: 0 } };

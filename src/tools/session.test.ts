@@ -530,6 +530,55 @@ describe("inherited session context", () => {
     return { handoff, wt };
   };
 
+  it("keeps the original orchestrator owner through nested handoffs and a JSON restart", async () => {
+    const { wt } = await fixture();
+    const root = sessionCapabilityFor({ session: childSession, runId: source.runId, agent: "orchestrator" }, wt)!;
+    const first = await root.captureHandoff!(source);
+    const owner = {
+      runId: "run-parent",
+      requesterId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:parent",
+    };
+    expect(first.handoff!.orchestratorOwner).toEqual(owner);
+    const middle = sessionCapabilityFor(
+      { session: childSession, runId: "run-middle", agent: "coding" },
+      wt,
+      undefined,
+      { handoff: JSON.parse(JSON.stringify(first.handoff)), canRead: async () => true },
+    )!;
+    const next = await middle.captureHandoff!({ ...source, runId: "run-middle", threadKey: "slack:C1:middle" });
+    const restored = JSON.parse(JSON.stringify(next.handoff)) as ChildHandoff;
+    expect(restored.orchestratorOwner).toEqual(owner);
+    expect(restored.ancestors![0].orchestratorOwner).toEqual(owner);
+    expect(restored.source).toEqual({ ...source, runId: "run-middle", threadKey: "slack:C1:middle" });
+    expect(restored.consumer).toBeUndefined();
+  });
+
+  it("does not invent an orchestrator owner for a standalone specialist or an unlinked inherited context", async () => {
+    const { handoff, wt } = await fixture();
+    const specialist = sessionCapabilityFor({ session: childSession, runId: source.runId, agent: "research" }, wt)!;
+    const direct = await specialist.captureHandoff!(source);
+    expect(direct.handoff!.source).toEqual(source);
+    expect(direct.handoff!.orchestratorOwner).toBeUndefined();
+    const legacyChild = sessionCapabilityFor(
+      { session: childSession, runId: source.runId, agent: "orchestrator", parentRunId: "legacy-parent" },
+      wt,
+    )!;
+    const unlinked = await legacyChild.captureHandoff!(source);
+    expect(unlinked.handoff!.source).toEqual(source);
+    expect(unlinked.handoff!.orchestratorOwner).toBeUndefined();
+    const delegated = sessionCapabilityFor(
+      { session: childSession, runId: "run-middle", agent: "orchestrator" },
+      wt,
+      undefined,
+      { handoff, canRead: async () => true },
+    )!;
+    const nested = await delegated.captureHandoff!({ ...source, runId: "run-middle" });
+    expect(nested.handoff!.source.runId).toBe("run-middle");
+    expect(nested.handoff!.orchestratorOwner).toBeUndefined();
+  });
+
   it("captures typed log references, notes, assets and actors across compaction", async () => {
     const { wt } = await fixture();
     const cap = sessionCapabilityFor({ session: childSession, runId: source.runId }, wt, {
