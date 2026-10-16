@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  carriedFooter,
   classifyHeadMove,
-  headCarriedNote,
   headMovedNote,
   headRereviewNote,
   rereviewFollowUp,
@@ -34,10 +32,8 @@ describe("headMovedNote (review post-step, agent-review.md item 10)", () => {
   });
 });
 
-// agent-review.md item 12: a head that moved while the review ran is either a
-// rebase of the same commits (review carried forward) or a real change (the
-// same run re-reviews). The classification is pure over the two `base...head`
-// commit lists GitHub's compare endpoint answers.
+// The two commit lists describe matching or changed metadata. Neither proves
+// unchanged contents. A moved head needs a fresh review in the same run.
 describe("classifyHeadMove (item 12)", () => {
   const list = (msgs: string[], files: string[], filesTruncated = false): PrCommitList => ({
     commits: msgs.map((message, i) => ({ sha: `${i}`.repeat(40).slice(0, 40), message })),
@@ -45,7 +41,7 @@ describe("classifyHeadMove (item 12)", () => {
     filesTruncated,
   });
 
-  it("same count, same messages in order, same files → rebase (a rebase onto main, conflict fixes included)", () => {
+  it("same count, messages and files identify matching metadata, not unchanged contents", () => {
     const before = list(["feat: catalog\n\nbody", "fix: nits"], ["src/a.ts", "docs/b.md"]);
     const after = list(["feat: catalog\n\nbody", "fix: nits"], ["docs/b.md", "src/a.ts"]); // order of files is irrelevant
     expect(classifyHeadMove(before, after)).toEqual({ kind: "matching-metadata", commits: 2 });
@@ -53,7 +49,10 @@ describe("classifyHeadMove (item 12)", () => {
 
   it("message comparison ignores surrounding whitespace only — a reworded commit is a change", () => {
     const before = list(["feat: catalog\n"], ["src/a.ts"]);
-    expect(classifyHeadMove(before, list(["feat: catalog"], ["src/a.ts"]))).toEqual({ kind: "matching-metadata", commits: 1 });
+    expect(classifyHeadMove(before, list(["feat: catalog"], ["src/a.ts"]))).toEqual({
+      kind: "matching-metadata",
+      commits: 1,
+    });
     expect(classifyHeadMove(before, list(["feat: catalogue"], ["src/a.ts"])).kind).toBe("substantive");
   });
 
@@ -101,22 +100,7 @@ describe("classifyHeadMove (item 12)", () => {
   });
 });
 
-describe("item 12 thread notes and posted-body footer", () => {
-  it("carried note: both shas, the rebase fact, the pin", () => {
-    expect(headCarriedNote({ where: "acme/api#42", reviewed: A, current: B, commits: 3 })).toBe(
-      "ℹ️ acme/api#42: review carried to d75b5a5 — a rebase of the same 3 commits (reviewed e8e43f4).",
-    );
-    expect(headCarriedNote({ where: "acme/api#42", reviewed: A, current: B, commits: 1 })).toContain(
-      "the same 1 commit (",
-    );
-  });
-
-  it("carried footer for the posted body (italic, one line)", () => {
-    expect(carriedFooter({ reviewed: A, current: B, commits: 2 })).toBe(
-      "_Reviewed at e8e43f4; the head moved to d75b5a5 during the review — a rebase of the same 2 commits — so this review is posted against d75b5a5._",
-    );
-  });
-
+describe("item 12 head-change notices", () => {
   it("re-review note: both shas, what changed, what happens next", () => {
     const move: Sub = { kind: "substantive", before: 1, after: 3, added: ["fix: nits", "test: panel"], removed: [] };
     expect(headRereviewNote({ where: "acme/api#42", reviewed: A, current: B, move })).toBe(

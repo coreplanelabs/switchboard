@@ -245,6 +245,12 @@ Preserve immutable user pins and original publication authority. An update outsi
 
 **Done when `[gap]`:** identical full commit messages, count and file set with changed contents cannot carry an old verdict. Include conflict-resolution changes. Verify stale checkout repair, repeated heads, checkpoint loss, process replacement, pin refusal and lease exhaustion. No new top-level run or budget reset occurs.
 
+### Exact-head approval, 2026-10-15
+
+Matching commit messages and file paths no longer carry an approval to another head. A permitted unpinned head move uses the existing same-run review and verified checkout transition, even when its metadata matches. Without a session, the original review stays bound to its original head. Legacy carry fields cannot change a new publication target or add a misleading footer.
+
+This removes the unsafe proof shortcut. It does not connect shared GitHub head events or add a repeated-head loop. Canonical and explicitly pinned reviews keep their saved publication targets. Shared event-driven continuation and remaining failure qualification are still pending, so Step 5 remains in progress.
+
 ## Step 6: migrate without losing owed input
 
 Deploy readers before evidence or publication-matching writers. Gate new records on the current consumer's schema capability. Backfill native IDs and orchestrator owner links, or record a held gap.
