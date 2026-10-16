@@ -44,6 +44,23 @@ export function isPersonalTokenApproval(value: unknown): value is PersonalTokenA
   }
 }
 
+/** Current host identity, supplied by the trusted adapter rather than a request. */
+export type PersonalTokenApprovalPin = Pick<PersonalTokenApproval, "issuer" | "audience" | "organization">;
+
+/** A stored approval supplies provenance only within this current host realm. */
+export function personalTokenApprovalMatchesPin(
+  approval: PersonalTokenApproval | undefined,
+  pin: PersonalTokenApprovalPin | undefined,
+): boolean {
+  return (
+    !!pin &&
+    isPersonalTokenApproval(approval) &&
+    approval.issuer === pin.issuer &&
+    approval.audience === pin.audience &&
+    approval.organization === pin.organization
+  );
+}
+
 export function personalTokenApprovalMatches(first?: PersonalTokenApproval, second?: PersonalTokenApproval): boolean {
   return first === undefined || second === undefined
     ? first === second

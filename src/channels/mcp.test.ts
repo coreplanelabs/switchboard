@@ -614,6 +614,60 @@ describe("createMcpHandler (node:http wrapper)", () => {
     expect(reads).toBe(1);
   });
 
+  it("fences a changed personal realm before reading the body while preserving static ingress", async () => {
+    const token = "f".repeat(64);
+    const store = new InMemoryPersonalTokenStore();
+    const approval = {
+      version: 1 as const,
+      issuer: "https://access.test",
+      audience: "application",
+      organization: "installation",
+      subject: "alice",
+    };
+    await store.put({
+      digest: digestBearer(token),
+      subject: "personal:alice",
+      email: "unused@example.test",
+      userId: "access:alice",
+      createdAt: 1,
+      approval,
+    });
+    let current = approval;
+    const handler = createMcpHandler(deps, { auth: good, personalTokens: store, personalApprovalPin: () => current });
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: DEFAULT_NEGOTIATED_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "test", version: "1" },
+      },
+    });
+    let reads = 0;
+    const accepted = fakeReqRes("POST", bearer(token), body);
+    accepted.reqRaw[Symbol.asyncIterator] = async function* () {
+      reads++;
+      yield Buffer.from(body);
+    };
+    handler(accepted.req, accepted.res);
+    await vi.waitFor(() => expect(accepted.status()).toBe(200));
+    expect(accepted.json().result.serverInfo.name).toBe("switchboard");
+    expect(reads).toBe(1);
+    current = { ...approval, audience: "changed-app" };
+    const refused = fakeReqRes("POST", bearer(token), body);
+    refused.reqRaw[Symbol.asyncIterator] = async function* () {
+      reads++;
+      yield Buffer.from(body);
+    };
+    handler(refused.req, refused.res);
+    await vi.waitFor(() => expect(refused.status()).toBe(401));
+    expect(reads).toBe(1);
+    const ordinary = fakeReqRes("POST", bearer("tok"), body);
+    handler(ordinary.req, ordinary.res);
+    await vi.waitFor(() => expect(ordinary.status()).toBe(200));
+    expect(ordinary.json().result.serverInfo.name).toBe("switchboard");
+  });
   it("authenticates a personal bearer before reading the request body", async () => {
     const token = "e".repeat(64);
     const store = new InMemoryPersonalTokenStore();

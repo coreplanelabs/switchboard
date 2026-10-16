@@ -658,6 +658,61 @@ describe("MCP approval parity", () => {
     },
   );
 
+  it("holds a personal form choice when its realm changes during consent recording and resumes the exact id after current proof", async () => {
+    const f = fixture(ALL_GRANTS, false);
+    const token = "a".repeat(64);
+    const store = new InMemoryPersonalTokenStore();
+    const approval = {
+      version: 1 as const,
+      issuer: "https://access.test",
+      audience: "application",
+      organization: "installation",
+      subject: "alice",
+    };
+    await store.put({
+      digest: digestBearer(token),
+      subject: "personal:alice",
+      email: "unused@example.test",
+      userId: "access:alice",
+      createdAt: 1,
+      approval,
+    });
+    let current = approval;
+    const grantsFor = (id: string) => (id === "mcp:personal:alice" || id === "access:alice" ? ALL_GRANTS : NO_GRANTS);
+    f.options.personalTokens = store;
+    f.options.personalApprovalPin = () => current;
+    f.options.grantsFor = grantsFor;
+    f.deps.config.grantsFor = grantsFor;
+    const first = await f.call("repo_offboard", {}, token, { _meta: FORM_META });
+    expect(first.body).toMatchObject({ result: { inputRequests: { approval: { params: { mode: "form" } } } } });
+    const requestState = (first.body as { result: { requestState: string } }).result.requestState;
+    expect(f.removed()).toBe(0);
+    const confirmations = f.deps.confirmations!;
+    const approve = confirmations.approve!.bind(confirmations);
+    confirmations.approve = async (...args) => {
+      const result = await approve(...args);
+      current = { ...approval, audience: "changed-app" };
+      return result;
+    };
+    const choice = {
+      _meta: FORM_META,
+      requestState,
+      inputResponses: { approval: { action: "accept", content: { decision: "approve" } } },
+    };
+    expect((await f.call("repo_offboard", {}, token, choice)).body).toMatchObject({
+      result: { content: [{ text: expect.stringContaining("revoked; nothing ran") }] },
+    });
+    expect(f.removed()).toBe(0);
+    expect(await confirmations.get!(requestState)).toMatchObject({ id: requestState, approvedBy: "mcp-form" });
+    current = approval;
+    confirmations.approve = approve;
+    expect((await f.call("repo_offboard", {}, token, choice)).body).toMatchObject({
+      result: { content: [{ text: expect.stringContaining("removed: 1") }] },
+    });
+    expect(f.removed()).toBe(1);
+    expect((await f.call("repo_offboard", {}, token, choice)).body).toMatchObject({ error: { code: -32001 } });
+    expect(f.removed()).toBe(1);
+  });
   it("regenerated forms retain the frozen implicit repository and execute that repository", async () => {
     const f = fixture();
     let currentRepo = "acme/api";
