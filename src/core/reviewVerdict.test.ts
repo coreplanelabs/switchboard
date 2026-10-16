@@ -301,6 +301,36 @@ describe("review verdict → post body", () => {
   const HEAD = "ca726ad9d4f3b1c2e5a6b7c8d9e0f1a2b3c4d5e6";
   const TARGET = { repo: "acme/site", head: HEAD };
 
+  it("omits the feedback invitation from LGTM reviews and keeps it on changes requested", () => {
+    for (const findings of [[], [{ ...NIT, severity: "nit" as const }]]) {
+      const body = buildReviewPostBody(
+        "Review details.",
+        {
+          verdict: "approve",
+          summary: "approved",
+          findings,
+          humanFindings: humanReview(...findings.map((finding) => finding.id)),
+        },
+        TARGET,
+      );
+      expect(body).toMatch(/^LGTM:/);
+      expect(body).not.toContain("Did this review help");
+      expect(body).not.toContain("👍");
+      expect(body).not.toContain("👎");
+    }
+    const body = buildReviewPostBody(
+      "Review details.",
+      {
+        verdict: "request_changes",
+        summary: "changes needed",
+        findings: [{ ...MINOR, severity: "minor" }],
+        humanFindings: humanReview("F1"),
+      },
+      TARGET,
+    );
+    expect(body.split("<details>")[0]).toContain("React 👍 for yes or 👎 for no.");
+  });
+
   it("keeps the human summary above one fold and all scoped IDs, pattern cases and closure evidence below it", () => {
     const v = parseVerdictInput({
       verdict: "request_changes",

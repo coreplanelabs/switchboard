@@ -1585,7 +1585,7 @@ describe("runReviewPostStep durable original publication", () => {
     };
     return { input, posts, events, replies, receipts, publicationJournal, read: () => saved };
   }
-  it("retains invitation metadata and native identity on acceptance, then replays without a second publication", async () => {
+  it("retains feedback metadata and native identity on acceptance, then replays without a second publication", async () => {
     const h = setup();
     const nativeReview = {
       id: "71",
@@ -1603,7 +1603,8 @@ describe("runReviewPostStep durable original publication", () => {
     };
     expect(await runReviewPostStep(input)).toMatchObject({ posted: true, verdict: "approve", head: HEAD });
     expect(h.read()).toMatchObject({ state: "accepted", nativeReview, feedback: { format: 1, findings: 0 } });
-    expect(h.posts[0].body.split("<details>")[0]).toContain("React 👍 for yes or 👎 for no.");
+    expect(h.posts[0].body).toMatch(/^LGTM:/);
+    expect(h.posts[0].body).not.toContain("React 👍 for yes or 👎 for no.");
     expect(await runReviewPostStep(input)).toMatchObject({ posted: true, verdict: "approve", head: HEAD });
     expect(h.posts).toHaveLength(1);
   });
