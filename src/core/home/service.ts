@@ -5,6 +5,7 @@ import type { CoordinatorInstance, CoordinatorUnit } from "../coordinator/contra
 import { instanceFactsOf, unitFactsOf, type InstanceFacts, type UnitFacts } from "../unitRuns.js";
 
 export interface HomeInventory {
+  get?(id: string): Promise<CoordinatorInstance | null>;
   listInstances(options: {
     limit: number;
     cursor?: string;
@@ -72,6 +73,15 @@ export interface HomePipeline {
   moving: number;
   waiting: number;
 }
+export type HomePipelineRead =
+  | { status: "not_found" }
+  | { status: "unavailable" }
+  | {
+      status: "complete" | "partial";
+      organizationId: string;
+      pipeline: HomePipeline & { units: HomeUnit[] };
+      movingUnitKeys: string[];
+    };
 export interface HomeSnapshot {
   organizationId: string;
   status: HomeReadStatus;
@@ -136,6 +146,7 @@ function visibleInstance(instance: CoordinatorInstance, unit: CoordinatorUnit): 
 
 export function createHomeService(deps: HomeServiceDeps): {
   snapshot(input: HomeReader): Promise<HomeSnapshot>;
+  pipeline(input: HomeReader, id: string): Promise<HomePipelineRead>;
   history(input: HomeReader, options?: { limit?: number; cursor?: string }): Promise<HomeHistory>;
 } {
   if (!deps.organizationId.trim()) throw new Error("Home requires an installation organization");
@@ -312,6 +323,112 @@ export function createHomeService(deps: HomeServiceDeps): {
   }
 
   return {
+    async pipeline(input, id) {
+      if (input.visibleTo.kind === "none") return { status: "not_found" };
+      let instance: CoordinatorInstance | null | undefined;
+      if (deps.instances.get) {
+        try {
+          instance = await deps.instances.get(id);
+        } catch {
+          return { status: "unavailable" };
+        }
+        if (instance === null) return { status: "not_found" };
+      } else {
+        let cursor: string | undefined;
+        const seen = new Set<string>();
+        for (let pageNumber = 0; pageNumber < maxPages; pageNumber++) {
+          let page: Awaited<ReturnType<HomeInventory["listInstances"]>>;
+          try {
+            page = await deps.instances.listInstances({ limit: PAGE_SIZE, ...(cursor ? { cursor } : {}) });
+          } catch {
+            return { status: "unavailable" };
+          }
+          instance = page.items.find((row) => row.id === id);
+          if (instance) break;
+          if (page.cursor === undefined) return { status: "not_found" };
+          if (!page.cursor || seen.has(page.cursor)) return { status: "unavailable" };
+          seen.add(page.cursor);
+          cursor = page.cursor;
+        }
+      }
+      if (!instance || instance.id !== id) return { status: "unavailable" };
+      if (
+        !matchesPredicate(input.visibleTo, {
+          userId: instance.userId,
+          channelId: instance.channelId,
+          repo: instance.repo,
+          channelVisibility: "unknown",
+        })
+      )
+        return { status: "not_found" };
+      let units: CoordinatorUnit[];
+      try {
+        units = await deps.instances.listUnits(instance.id);
+      } catch {
+        return { status: "unavailable" };
+      }
+      let status: "complete" | "partial" = "complete";
+      let live: ReadonlySet<string> = new Set();
+      if (deps.liveUnitKeys) {
+        try {
+          live = await deps.liveUnitKeys(input.visibleTo);
+        } catch {
+          status = "partial";
+        }
+      }
+      const privateUnit = units.find((unit) => unit.workBrief !== undefined);
+      const shownInstance = privateUnit ? visibleInstance(instance, privateUnit) : instanceFactsOf(instance);
+      const pipeline: HomePipeline & { units: HomeUnit[] } = {
+        instance: shownInstance,
+        unresolved: 0,
+        needsYou: 0,
+        moving: 0,
+        waiting: 0,
+        units: [],
+      };
+      const movingUnitKeys: string[] = [];
+      const seenUnits = new Set<string>();
+      let scanned = 0;
+      for (const unit of units) {
+        if (scanned++ >= maxUnits) {
+          status = "partial";
+          break;
+        }
+        if (unit.instanceId !== instance.id) {
+          status = "partial";
+          continue;
+        }
+        let projected: Awaited<ReturnType<typeof project>>;
+        try {
+          projected = await project(instance, unit, input);
+        } catch {
+          status = "partial";
+          continue;
+        }
+        const key = projected.row.unit.unit;
+        if (seenUnits.has(key)) {
+          status = "partial";
+          continue;
+        }
+        seenUnits.add(key);
+        // A private worker's provenance stays redacted throughout this entity projection.
+        projected.row.instance = shownInstance;
+        pipeline.units.push(projected.row);
+        if (!projected.conditionsComplete) status = "partial";
+        if (projected.terminal) continue;
+        pipeline.unresolved++;
+        if (live.has(key)) movingUnitKeys.push(key);
+        const group = projected.row.conditions.some(
+          (condition) => condition.owner.kind === "person" && condition.owner.id === input.actorId,
+        )
+          ? "needsYou"
+          : live.has(key)
+            ? "moving"
+            : "waiting";
+        pipeline[group]++;
+      }
+      return { status, organizationId: deps.organizationId, pipeline, movingUnitKeys };
+    },
     async snapshot(input) {
       const rows = await read(input);
       const result: HomeSnapshot = {
