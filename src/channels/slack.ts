@@ -190,7 +190,12 @@ const LOADING_PHRASES = [
  *  bounded by the threads a process ever spoke in. */
 const shimmerOwners = new Map<string, string>();
 
-export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
+export function createSlackApp(
+  deps: CoreDeps,
+  intake?: SlackIntakeGate,
+  dispatchMessage: typeof dispatch = dispatch,
+  confirmChoice: typeof dispatchClick = dispatchClick,
+) {
   const clock = deps.clock ?? systemClock;
   // The receiver is built explicitly (rather than `socketMode: true`) so the
   // adapter can listen to its websocket lifecycle: every `connected` — first
@@ -307,6 +312,7 @@ export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
                     ...extra,
                   },
                   intake,
+                  dispatchMessage,
                 ).catch((err: Error) => console.error(`[catch-up] ${m.channel}:${m.ts}: ${err.message}`));
               },
             });
@@ -355,6 +361,7 @@ export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
         trigger: "mention",
       },
       intake,
+      dispatchMessage,
     );
   });
 
@@ -404,6 +411,7 @@ export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
         trigger: decision === "handle-if-bot-in-thread" ? "thread-follow-up" : "dm",
       },
       intake,
+      dispatchMessage,
     );
   });
 
@@ -412,7 +420,7 @@ export function createSlackApp(deps: CoreDeps, intake?: SlackIntakeGate) {
   // connection as the events, once the Slack app's interactivity is on; the
   // handler acks first and hands the core the id, the actor and the handle.
   app.action<BlockAction<ButtonAction>>(/^confirm\./, ({ ack, body, action, client }) =>
-    handleConfirmClick(deps, { client, statusClient }, { ack, body, action }, botUserId),
+    handleConfirmClick(deps, { client, statusClient }, { ack, body, action }, botUserId, confirmChoice),
   );
 
   // The receiver rides along for the Bolt-level wiring test: emitting
@@ -688,6 +696,7 @@ async function handle(
   { client, statusClient }: SlackClients,
   ev: SlackEvent,
   intake?: SlackIntakeGate,
+  dispatchMessage: typeof dispatch = dispatch,
 ): Promise<void> {
   // The request's root (docs/reference/specs/tracing.md): our process saw the message NOW,
   // before the redelivery guard — a dropped redelivery is a root with one
@@ -718,7 +727,7 @@ async function handle(
       trace.root.end("ok", { status: "refused" });
       return;
     }
-    await dispatch(
+    await dispatchMessage(
       deps,
       { ...received.message, receivedAt, originAt: tsMs(ev.ts) },
       new SlackIO(client, ev, { statusClient }),
@@ -1343,6 +1352,7 @@ export async function handleConfirmClick(
   { client, statusClient }: SlackClients,
   { ack, body, action }: ConfirmClick,
   botUserId?: string,
+  confirmChoice: typeof dispatchClick = dispatchClick,
 ): Promise<void> {
   await ack();
   const kind =
@@ -1401,7 +1411,7 @@ export async function handleConfirmClick(
       },
       { statusClient },
     );
-    await dispatchClick(deps, { kind, id, actor, io });
+    await confirmChoice(deps, { kind, id, actor, io });
   } catch (err) {
     console.error(
       `[confirm] ${kind} click on ${id} in ${channel}:${message.ts} failed — ${err instanceof Error ? err.message : String(err)}`,

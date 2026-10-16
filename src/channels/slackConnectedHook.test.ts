@@ -61,11 +61,12 @@ function fakeWebApi(historyMessages: object[]) {
 function makeApp(
   config: { defaults?: { verbosity?: "quiet" | "verbose" | "debug" }; slack?: object },
   api: ReturnType<typeof fakeWebApi>,
+  dispatchMessage: typeof dispatch = dispatch,
 ) {
   const deps = {
     config: { config, verbosityFor: () => config.defaults?.verbosity ?? "quiet" },
   } as unknown as CoreDeps;
-  const { app, receiver } = createSlackApp(deps);
+  const { app, receiver } = createSlackApp(deps, undefined, dispatchMessage);
   Object.assign(app.client as unknown as Record<string, unknown>, api);
   return { app, receiver };
 }
@@ -97,6 +98,51 @@ describe("connected-hook wiring (Bolt-level harness)", () => {
     resetCatchUpStatus();
     resetSocketStatus();
     vi.restoreAllMocks();
+  });
+
+  it("passes live mentions and reconnect delivery to the trusted source callback with the original author and message id", async () => {
+    const ts = (Date.now() / 1000 - 90).toFixed(6);
+    const api = fakeWebApi([{ ts, user: "UA", text: `<@${BOT}> Original reconnect request` }]);
+    const messages: { channelId: string; threadKey: string; userId: string; messageId?: string; text: string }[] = [];
+    const dispatchMessage: typeof dispatch = async (_deps, message) => {
+      messages.push(message);
+      return { status: "completed" };
+    };
+    const { app, receiver } = makeApp({}, api, dispatchMessage);
+    await app.processEvent({
+      body: {
+        type: "event_callback",
+        team_id: "T1",
+        event: {
+          type: "app_mention",
+          channel: "C1",
+          user: "UA",
+          text: `<@${BOT}> Original live request`,
+          ts: "1000000000.000222",
+          thread_ts: "1000000000.000111",
+        },
+      },
+      ack: async () => {},
+    });
+    receiver.client.emit("connected");
+    await vi.waitFor(() => expect(messages).toHaveLength(2));
+    expect(messages).toMatchObject([
+      {
+        channelId: "slack:C1",
+        threadKey: "slack:C1:1000000000.000111",
+        userId: "slack:UA",
+        messageId: "1000000000.000222",
+        text: "Original live request",
+      },
+      {
+        channelId: "slack:C1",
+        threadKey: `slack:C1:${ts}`,
+        userId: "slack:UA",
+        messageId: ts,
+        text: "Original reconnect request",
+      },
+    ]);
+    expect(dispatchMock).not.toHaveBeenCalled();
   });
 
   it("registers exactly one connected hook by default, and emitting `connected` runs the scan against the Web API", async () => {
