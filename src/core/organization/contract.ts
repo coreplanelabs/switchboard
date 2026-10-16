@@ -37,6 +37,8 @@ export const sourceReferenceSchema = z
     /** Server-attested private source and its retained-data policy at admission. */
     privateSource: z.literal(true).optional(),
     capturedPrivateEpoch: digest.optional(),
+    /** Server-selected empty context for a new, fully specified Review. */
+    contextMode: z.literal("request").optional(),
     /** One source-bound repository selected and authorized by the host. */
     sourceRepository: z
       .string()

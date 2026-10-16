@@ -328,6 +328,8 @@ export interface AdmissionContext {
   directives: RequestDirectives;
   /** The resolved agent the thread is claimed for. */
   agentName: AgentDef["name"];
+  /** This request must start with its own empty context, never an owner's inbox. */
+  contextMode?: "request";
   resume: ResumeContext | undefined;
   restart: RestartContext | undefined;
   /** A resume's or restart's ledger row; undefined for a fresh request. */
@@ -526,6 +528,20 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
     agent: agentName,
     ...(carriedRow ? { now: carriedRow.startedAt } : {}),
   });
+  if (claim.kind === "live" && ctx.contextMode === "request") {
+    try {
+      root.setAttrs({ requestContextGate: "local_owner", requestContextReason: "thread_occupied" });
+    } catch {
+      /* Reporting is optional. */
+    }
+    await refuse(
+      refusalOf(
+        "follow_up_refused",
+        "This thread already has a run. This Review requires a new run. No message was added to the existing run.",
+      ),
+    );
+    return { kind: "refused", reason: "follow_up_refused" };
+  }
   if (
     claim.kind === "live" &&
     claim.live.unknownClaim &&
@@ -686,6 +702,21 @@ async function claimThread(deps: AdmissionDeps, ctx: AdmissionContext): Promise<
   // runs fresh and the thread is forgotten until the next sweep.
   // (A restart's own row is in that map: it is not steered into itself.)
   let elsewhere = resume || restart ? undefined : deps.threadsElsewhere.get(msg.threadKey);
+  if (elsewhere && ctx.contextMode === "request") {
+    try {
+      root.setAttrs({ requestContextGate: "remote_owner", requestContextReason: "thread_occupied" });
+    } catch {
+      /* Reporting is optional. */
+    }
+    admission.release(msg.threadKey, claim.live);
+    await refuse(
+      refusalOf(
+        "elsewhere_follow_up_refused",
+        "This thread already has a run on another worker. This Review requires a new run. No message was added to the existing run.",
+      ),
+    );
+    return { kind: "refused", reason: "elsewhere_follow_up_refused" };
+  }
   if (elsewhere !== undefined && elsewhere.runId === ctx.restartOf) {
     // The map names the run this request restarts (harness-pi item 16;
     // run-history item 54). The dispatch handing the request on closed that

@@ -7,6 +7,31 @@ import { InMemoryOrganizationStore } from "./memory.js";
 import { OrganizationService } from "./service.js";
 import type { OrganizationEnvelope, OrganizationLimits, OrganizationStore } from "./contract.js";
 import { nativeMediaDigest } from "../nativeMedia.js";
+import { sourceReferenceSchema } from "./contract.js";
+import { sourceAuthority } from "./accessCatalogue.js";
+
+describe("canonical request context policy", () => {
+  it("keeps legacy authority bytes and refuses a mode an old receiver cannot preserve", () => {
+    const actor = { identity: { issuer: "native", tenant: null, subject: "alice" }, onBehalfOf: null };
+    const reference = {
+      actorId: "access:alice",
+      userId: "access:alice",
+      channelId: "mcp:default",
+      threadKey: "mcp:default:t",
+    };
+    expect(sourceAuthority("mcp", actor, reference)).toBe(
+      '["mcp",{"issuer":"native","tenant":null,"subject":"alice"},null,["access:alice","access:alice",null,null,null,null,"mcp:default","mcp:default:t",null]]',
+    );
+    const current = sourceReferenceSchema.parse({ ...reference, contextMode: "request" });
+    expect(sourceAuthority("mcp", actor, current)).toBe(
+      '["mcp",{"issuer":"native","tenant":null,"subject":"alice"},null,["access:alice","access:alice",null,null,null,null,"mcp:default","mcp:default:t",null,"request"]]',
+    );
+    const legacy = sourceReferenceSchema.omit({ contextMode: true });
+    expect(legacy.safeParse(reference).success).toBe(true);
+    expect(legacy.safeParse(current).success).toBe(false);
+    expect(sourceReferenceSchema.safeParse({ ...reference, contextMode: "history" }).success).toBe(false);
+  });
+});
 
 const identity = { issuer: "access:test", tenant: null, subject: "alice" };
 const limits: OrganizationLimits = {

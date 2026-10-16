@@ -42,6 +42,7 @@ export function sourceAuthority(
           reference.questionOwnership
             ? [reference.questionOwnership.unitKey, reference.questionOwnership.requester]
             : null,
+          ...(reference.contextMode ? [reference.contextMode] : []),
         ]
       : null,
   ]);

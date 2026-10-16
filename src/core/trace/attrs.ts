@@ -3,6 +3,7 @@ import type {
   AdmissionReason,
   AdmissionRefreshFailure,
   AdmissionExceptionKind,
+  RequestContextSelection,
 } from "../organization/admissionTrace.js";
 import type { OrganizationSource } from "../organization/contract.js";
 import type { OrganizationOwnerFailure } from "../organization/contract.js";
@@ -64,6 +65,9 @@ export interface AttrDomain {
   /** The refusal's code (src/core/refusal.ts) — on the `dispatch.refuse` span
    *  and the request's root, so refusals are countable from the trace alone. */
   refusal: string;
+  /** Request-only context gates; no requester, target or model payload. */
+  requestContextGate: "input" | "operator_mode" | "operator_decision" | "typed_route" | "local_owner" | "remote_owner";
+  requestContextReason: "invalid_input" | "routing_disabled" | "invalid_bind" | "thread_occupied";
   /** The refusal's cause, from the one code→cause table in src/core/refusal.ts. */
   cause: "request" | "policy" | "system";
   /** The operator's decision, separate from the request's final outcome. */
@@ -148,6 +152,7 @@ export interface AttrDomain {
   admissionRefreshFailure: AdmissionRefreshFailure;
   admissionExceptionKind: AdmissionExceptionKind;
   admissionSource: OrganizationSource;
+  requestContextSelection: RequestContextSelection;
   credentialRelation: "same" | "different" | "unknown";
   receiptObserved: boolean;
   buildCommit: string;
@@ -205,6 +210,9 @@ const IDENTIFIER_KEYS: ReadonlySet<SpanAttrKey> = new Set<SpanAttrKey>([
   "sourceCallHash",
   "githubRequestId",
   "refusal",
+  "requestContextGate",
+  "requestContextReason",
+  "requestContextSelection",
   "cause",
   "operatorOutcome",
   "operatorRepoSource",
@@ -278,6 +286,8 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   intakeReceipt: "string",
   outcome: "string",
   refusal: "string",
+  requestContextGate: "string",
+  requestContextReason: "string",
   cause: "string",
   operatorOutcome: "string",
   operatorRepoSource: "string",
@@ -339,6 +349,7 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   admissionRefreshFailure: "string",
   admissionExceptionKind: "string",
   admissionSource: "string",
+  requestContextSelection: "string",
   credentialRelation: "string",
   receiptObserved: "boolean",
   buildCommit: "string",

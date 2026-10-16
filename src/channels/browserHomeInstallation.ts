@@ -1,4 +1,8 @@
-import { observeAdmission, admissionExceptionKindOf } from "../core/organization/admissionTrace.js";
+import {
+  observeAdmission,
+  admissionExceptionKindOf,
+  type RequestContextSelection,
+} from "../core/organization/admissionTrace.js";
 import type { TraceOptions } from "../core/trace/types.js";
 import { historyFailure } from "../core/organization/ownerFailure.js";
 import { contextAccessForMessage } from "../core/dispatch/contextAccess.js";
@@ -62,6 +66,7 @@ import { parsePrivateWorkerThreadKey, type PrivateWorkerLog } from "../core/priv
 import { privateWorkerAudienceFor } from "./privateWorker.js";
 import { isUnitContext } from "../core/dispatch/unitContext.js";
 import { ownerOf, readThread as readOwnedThread } from "../core/dispatch/thread.js";
+import { requestOnlyReviewTarget } from "../core/dispatch/requestOnlyReview.js";
 import { nativeMediaDigest, nativeMediaSchema, matchesNativeMedia } from "../core/nativeMedia.js";
 import type { HomeRuntimeContext, HomeThreadProjection } from "./homeRuntime.js";
 import type { HomeAnswerTarget, HomeMergeAction } from "./homeSeed.js";
@@ -885,6 +890,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
         organizationSequence: saved.receipt.revision,
         ...(envelope.nativeMediaDigest ? { nativeMediaDigest: envelope.nativeMediaDigest } : {}),
         ...(reference.sourceRepository ? { organizationRepo: reference.sourceRepository } : {}),
+        ...(reference.contextMode ? { contextMode: reference.contextMode } : {}),
       }),
     };
     return { ...request, originalStatus: original.record.status, io: sink(request) };
@@ -1309,6 +1315,9 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
           ...owner,
           authoritativeHistory: true,
           organizationConversation: true,
+          ...(request.envelope.sourceReference?.contextMode
+            ? { contextMode: request.envelope.sourceReference.contextMode }
+            : {}),
           seed: await request.io.authoritativePrivateHistory!(),
         }
       : owner;
@@ -1613,8 +1622,10 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
           !msg.nativeMediaDigest ||
           msg.nativeMediaDigest !== (await nativeMediaDigest(media.data)) ||
           !(await matchesNativeMedia(media.data, msg))))
-    )
+    ) {
+      if (hasMedia) observeAdmission(trace, { contextSelection: "media" });
       return { status: "unavailable" as const };
+    }
     observeAdmission(trace, { stage: "native-proof" });
     const current = await options.authentication.resolveNative(msg, evidence);
     if (current.status !== "resolved") return { status: current.status };
@@ -1642,6 +1653,9 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     });
     if (original.status === "submission") {
       const reference = original.envelope.sourceReference;
+      observeAdmission(trace, {
+        contextSelection: reference?.contextMode === "request" ? "retained_request" : "existing_key",
+      });
       if (
         !reference ||
         reference.userId !== msg.userId ||
@@ -1682,20 +1696,43 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
         (current.authentication.source === "mcp" && continuation.kind === "confirm" && !hasConfirmationConsent(choice)))
     )
       return { status: "not_found" as const };
-    const repository = choice?.originalOrganization
-      ? choice.originalOrganization.organizationRepo
-      : await options.sourceRepository?.(context, input);
+    let independent: ReturnType<typeof requestOnlyReviewTarget>;
+    const selectContext = (): RequestContextSelection => {
+      if (original.status !== "not_found")
+        return original.status === "submission" && original.envelope.sourceReference?.contextMode === "request"
+          ? "retained_request"
+          : "existing_key";
+      if (evidence.source !== "mcp") return "source";
+      if (current.authentication.kind !== "human") return "actor";
+      if (!current.privateSource) return "private_source";
+      if (current.actor.viewingAs || current.actor.onBehalfOf) return "delegation";
+      if (continuation) return "continuation";
+      if (hasMedia) return "media";
+      if (core.config.config.routing?.operator !== "on") return "routing";
+      independent = requestOnlyReviewTarget(msg.text);
+      return independent ? "selected" : "target";
+    };
+    observeAdmission(trace, { contextSelection: selectContext() });
+    const repository =
+      independent?.repo ??
+      (choice?.originalOrganization
+        ? choice.originalOrganization.organizationRepo
+        : await options.sourceRepository?.(context, input));
     let authentication = current.authentication;
     if (authentication.sourceReference)
       authentication = {
         ...authentication,
-        sourceReference: { ...authentication.sourceReference, ...(repository ? { sourceRepository: repository } : {}) },
+        sourceReference: {
+          ...authentication.sourceReference,
+          ...(repository ? { sourceRepository: repository } : {}),
+          ...(independent ? { contextMode: "request" as const } : {}),
+        },
       };
     const addressed = await organization.resolve(authentication);
     if (!addressed) return { status: "not_found" as const };
     if (current.privateSource && addressed.actor.stream !== null && authentication.sourceReference) {
       observeAdmission(trace, { stage: "private-epoch" });
-      const epoch = await host.currentEpoch(context, trace);
+      const epoch = await host.currentEpoch({ actor: current.actor, authentication }, trace);
       if (!epoch) return { status: "unavailable" as const };
       authentication = {
         ...authentication,

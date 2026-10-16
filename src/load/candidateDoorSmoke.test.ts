@@ -176,7 +176,7 @@ describe("fixed candidate smoke repository dependency", () => {
     "preserves the fixed Review candidate target for $name",
     async (entry) => {
       const preset =
-        entry.name === "standalone PR review"
+        entry.name === "standalone PR review" || entry.context?.contextMode === "request"
           ? "review"
           : entry.name === "read about review severity"
             ? "general"
@@ -212,4 +212,34 @@ describe("fixed candidate smoke repository dependency", () => {
       expect(model.mock.calls.length).toBeLessThanOrEqual(1);
     },
   );
+  it("routes a request-only Review after an attempted old-context lookup without reading that context", async () => {
+    const entry = candidateDoorSmokeCases(projection).find((v) => v.name === "request-only MCP review")!;
+    let attempt = 0;
+    const model = vi.fn<RouteModel>(async () =>
+      attempt++ === 0
+        ? { tool: OPERATOR_READ_TOOLS.threadState, input: {} }
+        : {
+            tool: OPERATOR_BIND_TOOL,
+            input: {
+              preset: "review",
+              repo: "acme/api",
+              prTarget: { number: 7, source: "request", quote: "https://github.com/acme/api/pull/7" },
+              reason: "Current request",
+              settingsEvidence: operatorSettingsEvidence(),
+            },
+          },
+    );
+    const readContext = vi.fn(async () => {
+      throw new Error("Old private context must stay held");
+    });
+    const answer = await runOperator(candidateDoorSmokeInput(entry, projection, "openai"), model, { readContext });
+    expect(answer.decision).toMatchObject({
+      kind: "binds",
+      binds: [{ preset: "review", repo: "acme/api", prTarget: { number: 7, source: "request" } }],
+    });
+    expect(readContext.mock.calls.length).toBe(0);
+    expect(model.mock.calls[0]![0].system).not.toContain("OLD-CONTEXT-MUST-NOT-ENTER");
+    expect(model.mock.calls[0]![0].user).not.toContain("OLD-CONTEXT-MUST-NOT-ENTER");
+    expect(model.mock.calls[0]![0].tools?.map((t) => t.name)).not.toContain(OPERATOR_READ_TOOLS.threadState);
+  });
 });

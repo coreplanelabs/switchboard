@@ -1,5 +1,6 @@
 import { authorize } from "../core/authz/authorize.js";
 import { createSpanLog } from "../core/trace/spanLog.js";
+import { startRequestRoot } from "../core/requestTrace.js";
 import { handleAdminTraceLog, TRACE_LOG_PATH } from "./adminTraceLog.js";
 import { Secret } from "../secrets.js";
 import { NO_GRANTS } from "../core/authz/types.js";
@@ -29,7 +30,12 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { handleIngressRequest } from "./http.js";
 import { InMemoryPersonalTokenStore, digestBearer } from "../mcp/personalTokens.js";
-import type { Provider } from "../core/provider.js";
+import type { Provider, CompletionRequest } from "../core/provider.js";
+import * as executorFactory from "../execution/factory.js";
+import { TEST_GITHUB_CREDENTIALS } from "../execution/testing/githubCredentials.js";
+import { operatorSettingsEvidence } from "../core/testing/operatorSettings.js";
+import { OPERATOR_READ_TOOLS } from "../core/dispatch/operator.js";
+import { ThreadAdmission } from "../core/threadAdmission.js";
 import { InMemoryGithubApi } from "../execution/githubApi.js";
 import { createOriginalUnitRecipient } from "./originalUnitRecipient.js";
 import { createHomeRepositories } from "./homeRepositories.js";
@@ -139,6 +145,7 @@ async function fixture(
   sqlOrganization = false,
   materializeNativeMedia?: BrowserHomeInstallationOptions["materializeNativeMedia"],
   nativeMcp?: ReturnType<typeof createOrganizationNativeSources>,
+  configureCore?: (core: CoreDeps, github: InMemoryGithubApi) => void,
 ) {
   let now = 1000,
     policy = "config";
@@ -318,6 +325,7 @@ async function fixture(
     core.runLedger = createLedgerWriteThrough({ ledger, gen: "sso-original", fallback: runStore, warn: () => {} });
     core.runHistoryWriter = createRunHistoryWriter({ store: runStore, warn: () => {}, sleep: async () => {} });
   }
+  configureCore?.(core, github);
   const slackIdentity = { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" };
   const mappings = [
     { source: "http" as const, issuer: "installation:fixture:http", tenant: null, organization: "fixture" },
@@ -3608,9 +3616,14 @@ describe("browser installation", () => {
       status: "unavailable",
     });
   });
-  async function ssoInstallation(mode: "access" | "oauth" | "token" | "hex") {
+  async function ssoInstallation(
+    mode: "access" | "oauth" | "token" | "hex",
+    provider?: Provider,
+    configureCore?: (core: CoreDeps, github: InMemoryGithubApi) => void,
+  ) {
     let clock = 1000,
-      unavailable = false;
+      unavailable = false,
+      revoked = false;
     const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const unsigned = [
       { alg: "RS256", kid: "fixture-sso" },
@@ -3643,9 +3656,11 @@ describe("browser installation", () => {
     const sso = {
       ...verifier,
       verify: (req: Parameters<typeof verifier.verify>[0]) =>
-        unavailable
-          ? Promise.resolve({ ok: false as const, status: 503, body: "authentication unavailable" })
-          : verifier.verify(req),
+        revoked
+          ? Promise.resolve({ ok: false as const, status: 403, body: "credential revoked" })
+          : unavailable
+            ? Promise.resolve({ ok: false as const, status: 503, body: "authentication unavailable" })
+            : verifier.verify(req),
     };
     const nativeOptions: Parameters<typeof createOrganizationNativeSources>[0] = {
       organization: "fixture",
@@ -3657,8 +3672,12 @@ describe("browser installation", () => {
         conversations: { info: async () => ({}) },
       },
     };
-    const native = createOrganizationNativeSources(nativeOptions);
-    const s = await fixture(false, false, undefined, false, false, false, 10, false, undefined, native);
+    let currentNative = createOrganizationNativeSources(nativeOptions);
+    const native = {
+      ...currentNative,
+      currentMcp: (...args: Parameters<typeof currentNative.currentMcp>) => currentNative.currentMcp(...args),
+    };
+    const s = await fixture(false, false, provider, false, false, false, 10, false, undefined, native, configureCore);
     const options: McpOptions = {
       auth: { tokens: s.tokens },
       sso,
@@ -3738,6 +3757,9 @@ describe("browser installation", () => {
       native,
       nativeOptions,
       credentials: [assertion, bearer, "oauth:opaque"],
+      restartNative: () => {
+        currentNative = createOrganizationNativeSources(nativeOptions);
+      },
       rotatedHeaders: () => {
         const [header, payload] = unsigned.split(".");
         const updated = { ...JSON.parse(Buffer.from(payload!, "base64url").toString()), exp: 302 };
@@ -3755,8 +3777,592 @@ describe("browser installation", () => {
       fault: (value: boolean) => {
         unavailable = value;
       },
+      revokeSession: () => {
+        revoked = true;
+      },
     };
   }
+  it("admits a fresh request-only Review after restart and a new signed credential", async () => {
+    const s = await ssoInstallation("access");
+    const log = createSpanLog();
+    s.core.spanLog = log;
+    const first = await s.send({ text: "memory forget", thread: "reauth", idempotencyKey: "prior-credential" });
+    expect(log.read({ span: "request" }).lines.at(-1)?.attrs.requestContextSelection).toBe("routing");
+    const oldRun = first.wire.result.structuredContent.admission.runId;
+    const old = await s.ledger.readIngressByRun(oldRun);
+    if (old.status !== "record" || !old.record.origin) throw new Error("No original fixture owner");
+    s.restartNative();
+    expect(await s.authentication.resolveEnvelope(old.record.origin)).toEqual({ status: "unavailable" });
+    s.core.config.config.routing!.operator = "on";
+    const result = await s.send(
+      {
+        text: "agent:review model:anthropic/general-model effort:high https://github.com/sample/api/pull/42",
+        thread: "reauth",
+        idempotencyKey: "new-credential-review",
+      },
+      s.rotatedHeaders(),
+    );
+    expect(result.wire.result).toMatchObject({
+      structuredContent: {
+        admission: { status: "accepted", receiptId: expect.stringMatching(/^organization:fixture:\d+$/) },
+      },
+    });
+    expect(log.read({ span: "request" }).lines.at(-1)?.attrs.requestContextSelection).toBe("selected");
+    const fresh = await s.ledger.readIngressByRun(result.wire.result.structuredContent.admission.runId);
+    expect(result.wire.result.structuredContent.admission.receiptId).not.toBe(
+      first.wire.result.structuredContent.admission.receiptId,
+    );
+    expect(fresh).toMatchObject({
+      status: "record",
+      record: { origin: { sourceReference: { contextMode: "request" } } },
+    });
+    const owned = await s.installation.originalBinding(result.wire.result.structuredContent.admission.runId);
+    if (!owned) throw new Error("No new original owner");
+    expect(await owned.io.authoritativePrivateHistory!(owned.msg)).toEqual([]);
+    const repeat = await s.send(
+      {
+        text: "agent:review model:anthropic/general-model effort:high https://github.com/sample/api/pull/42",
+        thread: "reauth",
+        idempotencyKey: "new-credential-review",
+      },
+      s.rotatedHeaders(),
+    );
+    expect(repeat.wire.result).toMatchObject({
+      structuredContent: {
+        admission: { status: "accepted", duplicate: true, runId: result.wire.result.structuredContent.admission.runId },
+      },
+    });
+    expect(log.read({ span: "request" }).lines.at(-1)?.attrs.requestContextSelection).toBe("retained_request");
+    expect(
+      (
+        await s.send(
+          { text: "memory forget", thread: "reauth", idempotencyKey: "prior-credential" },
+          s.rotatedHeaders(),
+        )
+      ).wire.result,
+    ).toMatchObject({ isError: true, structuredContent: { admission: { status: "conflict" } } });
+    expect(log.read({ span: "request" }).lines.at(-1)?.attrs.requestContextSelection).toBe("existing_key");
+    expect(await s.authentication.resolveEnvelope(old.record.origin)).toEqual({ status: "unavailable" });
+    expect(await s.ledger.readIngressByRun(oldRun)).toMatchObject({
+      status: "record",
+      record: { origin: old.record.origin, status: "dispatching" },
+    });
+    expect(s.effects).toEqual([]);
+  });
+  it.each(["client-marker", "machine-credential"] as const)(
+    "keeps %s from selecting request-only context",
+    async (variant) => {
+      const s = await ssoInstallation(variant === "machine-credential" ? "token" : "access");
+      const log = createSpanLog();
+      s.core.spanLog = log;
+      s.core.config.config.routing!.operator = "on";
+      const result = await s.send({
+        text: variant === "machine-credential" ? "agent:review https://github.com/sample/api/pull/42" : "memory forget",
+        idempotencyKey: "unmarked-request",
+        contextMode: "request",
+        sourceReference: { contextMode: "request" },
+      });
+      expect(result.wire.result).toMatchObject({ structuredContent: { admission: { status: "accepted" } } });
+      const stored = await s.ledger.readIngressByRun(result.wire.result.structuredContent.admission.runId);
+      expect(stored).toMatchObject({ status: "record", record: { origin: { source: "mcp" } } });
+      if (stored.status !== "record") throw new Error("No original request");
+      expect(stored.record.origin?.sourceReference?.contextMode).toBeUndefined();
+      expect(log.read({ span: "request" }).lines.at(-1)?.attrs.requestContextSelection).toBe(
+        variant === "machine-credential" ? "actor" : "target",
+      );
+      expect(s.effects).toEqual([]);
+    },
+  );
+  it.each(["sync", "async", "mutation"] as const)(
+    "keeps a selected request-only admission when its %s observer fails",
+    async (mode) => {
+      const s = await ssoInstallation("access");
+      const log = createSpanLog();
+      s.core.spanLog = log;
+      s.core.config.config.routing!.operator = "on";
+      const admit = s.options.admit!;
+      const result = await s.send(
+        {
+          text: "agent:review https://github.com/sample/api/pull/42 PRIVATE-SELECTION-MARKER",
+          idempotencyKey: "selection-observer",
+        },
+        {},
+        "dispatch",
+        {
+          ...s.options,
+          admit: (message, io, evidence, choice, trace) => {
+            if (trace?.span) {
+              const set = trace.span.setAttrs.bind(trace.span);
+              trace.span.setAttrs = (attrs) => {
+                if (attrs.requestContextSelection !== undefined) {
+                  if (mode === "mutation") {
+                    Reflect.set(attrs, "requestContextSelection", "wrong-mode");
+                    return set(attrs);
+                  }
+                  if (mode === "sync") throw new Error("PRIVATE-SELECTION-OBSERVER");
+                  return Promise.reject(new Error("PRIVATE-SELECTION-OBSERVER"));
+                }
+                return set(attrs);
+              };
+            }
+            return admit(message, io, evidence, choice, trace);
+          },
+        },
+      );
+      expect(result.wire.result).toMatchObject({ structuredContent: { admission: { status: "accepted" } } });
+      expect(await s.ledger.readIngressByRun(result.wire.result.structuredContent.admission.runId)).toMatchObject({
+        status: "record",
+        record: { origin: { sourceReference: { contextMode: "request" } } },
+      });
+      expect(s.tasks).toHaveLength(1);
+      expect(s.effects).toEqual([]);
+      expect(JSON.stringify(log.read())).not.toMatch(/PRIVATE-SELECTION/);
+    },
+  );
+  it("records media as the request-only selection decline without admitting a second request", async () => {
+    const s = await ssoInstallation("access");
+    const log = createSpanLog();
+    s.core.spanLog = log;
+    s.core.config.config.routing!.operator = "on";
+    const text = "agent:review https://github.com/sample/api/pull/42 PRIVATE-SELECTION-MARKER";
+    expect((await s.send({ text, idempotencyKey: "selection-control" })).wire.result).toMatchObject({
+      structuredContent: { admission: { status: "accepted" } },
+    });
+    expect(log.read({ span: "request" }).lines.at(-1)?.attrs.requestContextSelection).toBe("selected");
+    const admit = s.options.admit!;
+    const rejected = await s.send({ text, idempotencyKey: "selection-media" }, {}, "dispatch", {
+      ...s.options,
+      admit: (message, io, evidence, choice, trace) =>
+        admit({ ...message, images: [{ mediaType: "image/png", data: "AA==" }] }, io, evidence, choice, trace),
+    });
+    expect(rejected.wire.result).toMatchObject({
+      isError: true,
+      structuredContent: { admission: { status: "unavailable" } },
+    });
+    expect(log.read({ span: "request" }).lines.at(-1)?.attrs.requestContextSelection).toBe("media");
+    expect(JSON.stringify(log.read())).not.toMatch(/PRIVATE-SELECTION|sample\/api/);
+    expect(s.tasks).toHaveLength(1);
+    expect(s.effects).toEqual([]);
+  });
+  it.each(["healthy", "throws"] as const)(
+    "records an invalid request-only context when its trace observer %s",
+    async (observer) => {
+      const log = createSpanLog();
+      const s = await ssoInstallation("access", undefined, (core) => {
+        core.sinks = [
+          log.sink,
+          {
+            onEnd() {
+              if (observer === "throws") throw new Error("Observer failed");
+            },
+          },
+        ];
+      });
+      const replies: string[] = [];
+      const result = await dispatch(
+        s.core,
+        {
+          channelId: "mcp:default",
+          userId: "access:alice",
+          threadKey: "mcp:default:invalid-context",
+          text: "agent:review https://github.com/sample/api/pull/42 PRIVATE-REQUEST-MARKER",
+        },
+        {
+          reply: async (text) => {
+            replies.push(text);
+          },
+          history: async () => [],
+          status: async () => ({ update() {}, async done() {} }),
+        },
+        {
+          contextMode: "request",
+          ...(observer === "healthy" ? { trace: startRequestRoot(s.core, { channel: "mcp", receivedAt: 1000 }) } : {}),
+        },
+      );
+      expect(result).toEqual({ status: "refused", refusal: "setup_failed" });
+      expect(replies).toEqual(["This Review could not be verified as a new request."]);
+      expect(log.read({ span: "dispatch.refuse" }).lines[0]?.attrs).toMatchObject({
+        requestContextGate: "input",
+        requestContextReason: "invalid_input",
+        refusal: "setup_failed",
+      });
+      expect(log.read({ span: "request" }).lines[0]?.attrs).toMatchObject({
+        status: "refused",
+        requestContextGate: "input",
+      });
+      expect(JSON.stringify(log.read())).not.toMatch(/PRIVATE-REQUEST-MARKER|sample\/api/);
+      expect(s.effects).toEqual([]);
+    },
+  );
+  it.each([
+    "plain",
+    "multiline-request",
+    "long-request",
+    "prior-child",
+    "read-first",
+    "expires-at-door",
+    "revoked-at-door",
+    "rights-loss",
+    "directory-rebind",
+    "operator-off",
+    "operator-shadow",
+    "context-stuck",
+    "wrong-target",
+    "same-pr-live",
+    "same-pr-unknown",
+    "unrelated-held",
+    "late-local-live",
+    "late-local-unknown",
+    "late-remote-live",
+    "late-remote-unnamed",
+    "context-observer-fails",
+  ] as const)(
+    "isolates a new Review and rechecks its current authority: %s",
+    async (variant) => {
+      const head = "e".repeat(40);
+      const succeeds = [
+        "plain",
+        "multiline-request",
+        "long-request",
+        "prior-child",
+        "read-first",
+        "unrelated-held",
+      ].includes(variant);
+      let phase: "old" | "fresh" = "old";
+      let operatorCalls = 0;
+      const contextLog = createSpanLog();
+      const admission = new ThreadAdmission<import("../core/dispatch/admission.js").DispatchFollowUp>();
+      const elsewhere = new ThreadsElsewhere();
+      let held: ReturnType<typeof admission.get>;
+      const heldId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+      const installLateOwner = () => {
+        if (variant.startsWith("late-remote")) {
+          elsewhere.remember("mcp:default:reused-review", {
+            runId: heldId,
+            startedAt: 1000,
+            ...(variant === "late-remote-live" ? { agent: "review" } : {}),
+          });
+        } else if (variant.startsWith("late-local") && !held) {
+          const claim = admission.claim("mcp:default:reused-review", { agent: "review", now: 1000 });
+          if (claim.kind !== "start") throw new Error("Occupied late fixture slot");
+          claim.live.runId = heldId;
+          if (variant === "late-local-unknown") claim.live.unknownClaim = { runId: heldId };
+          held = claim.live;
+        }
+      };
+      const requests: { phase: string; request: CompletionRequest }[] = [];
+      const provider: Provider = {
+        name: "fixture",
+        async complete(request) {
+          requests.push({ phase, request: { ...request, messages: structuredClone(request.messages) } });
+          const results = request.messages
+            .flatMap((m) => m.content)
+            .filter((p) => p.type === "tool_result")
+            .map((p) => p.toolUseId);
+          const call = (id: string, name: string, input: Record<string, unknown>) => ({
+            content: [{ type: "tool_use" as const, id, name, input }],
+            stopReason: "tool_use" as const,
+          });
+          if (!results.includes("github-source"))
+            return call("github-source", "github_pull_get", {
+              repo: "sample/api",
+              number: 42,
+              includeReviewHistory: true,
+            });
+          if (phase === "old" && !results.includes("old-notes"))
+            return call("old-notes", "notes", { text: "OLD-NOTEPAD-MARKER" });
+          if (!results.includes("verdict"))
+            return call("verdict", "submit_verdict", {
+              verdict: "approve",
+              findings: [],
+              summary: phase === "old" ? "OLD-SUMMARY-MARKER" : "Current Review passes.",
+              head,
+            });
+          return {
+            content: [{ type: "text", text: phase === "old" ? "OLD-ANSWER-MARKER" : "Current Review passes." }],
+            stopReason: "end_turn",
+          };
+        },
+      };
+      const posts: { target: unknown; body: string }[] = [];
+      const s = await ssoInstallation("access", provider, (core) => {
+        core.sinks = [
+          contextLog.sink,
+          {
+            onEnd(record) {
+              if (variant === "context-observer-fails" && record.attrs.requestContextGate)
+                throw new Error("Context observer failed");
+            },
+          },
+        ];
+        core.admission = admission;
+        core.threadsElsewhere = elsewhere;
+        core.githubCredentials = TEST_GITHUB_CREDENTIALS;
+        core.resolveRepoContext = () => {
+          if (phase === "fresh") installLateOwner();
+          return { repo: "sample/api", ref: "patch-1", baseRef: "main", pr: 42, headSha: head };
+        };
+        core.fetchPrHead = async () => head;
+        core.fetchPrFacts = async () => ({
+          state: "open",
+          headRef: "patch-1",
+          baseRef: "main",
+          headSha: head,
+          headBranchExists: true,
+          sameRepoHead: true,
+          verifiedHead: { repo: "sample/api", ref: "patch-1", sha: head },
+        });
+        core.postReviewComment = async (target, body) => {
+          posts.push({ target, body });
+          return { state: "accepted" };
+        };
+        core.operatorModel = async () => {
+          operatorCalls++;
+          if (variant === "expires-at-door") s.expireSession();
+          if (variant === "revoked-at-door") s.revokeSession();
+          if (variant === "rights-loss") s.setSourceGrants(NO_GRANTS);
+          if (variant === "directory-rebind") {
+            const person = await s.store.directory.createPerson();
+            if (person.status !== "created") throw new Error("No replacement fixture person");
+            const id = { issuer: s.native.mcpIssuer, tenant: null, subject: "alice" };
+            expect(
+              await s.store.directory.change({
+                action: "recover",
+                identity: id,
+                personId: person.person.id,
+                expectedRevision: 1,
+                actor: id,
+                proof: { method: "administrator-recovery", version: 1 },
+              }),
+            ).toMatchObject({ status: "changed", binding: { revision: 2 } });
+          }
+          if (variant === "context-stuck" || (variant === "read-first" && operatorCalls === 1))
+            return { tool: OPERATOR_READ_TOOLS.threadState, input: {} };
+          return {
+            tool: "bind_preset",
+            input: {
+              preset: "review",
+              model: "anthropic/general-model",
+              repo: "sample/api",
+              prTarget: { number: 42, source: "request", quote: "https://github.com/sample/api/pull/42" },
+              reason: "New current request",
+              effort: "high",
+              settingsEvidence: operatorSettingsEvidence({ effort: { intent: "requested", quote: "effort:high" } }),
+              ...(["wrong-target", "context-observer-fails"].includes(variant)
+                ? { prTarget: { number: 43, source: "request", quote: "https://github.com/sample/api/pull/43" } }
+                : {}),
+            },
+          };
+        };
+      });
+      const factory = vi.spyOn(executorFactory, "makeExecutor").mockResolvedValue({
+        executor: {
+          exec: async (command) => (command.includes("rev-parse") ? head + "\n" : ""),
+          execResult: async (command) => ({
+            exitCode: 0,
+            stdout: command.includes("rev-parse") ? head + "\n" : "",
+            stderr: "",
+            truncated: false,
+          }),
+          readFile: async () => "",
+          writeFile: async () => "",
+          release: async () => ({ released: true }),
+        },
+      });
+      cleanups.push(() => factory.mockRestore());
+      const repo = s.github.repos.get("sample/api")!;
+      repo.private = true;
+      repo.pulls = [
+        {
+          id: 42,
+          number: 42,
+          title: "Current change",
+          body: "OLD-GITHUB-RESULT-MARKER",
+          state: "open",
+          draft: false,
+          url: "https://github.com/sample/api/pull/42",
+          author: "alice",
+          updatedAt: "2026-01-01T00:00:00Z",
+          head: { repo: "sample/api", ref: "patch-1", sha: head },
+          base: { repo: "sample/api", ref: "main" },
+        },
+      ];
+      const text = `agent:review model:anthropic/general-model effort:high review-head:${head} https://github.com/sample/api/pull/42`;
+      const historyReads = vi.spyOn(s.installation.organization, "streamTail");
+      const prior = await s.send({
+        text: text + " OLD-REQUEST-MARKER",
+        thread: "reused-review",
+        idempotencyKey: "completed-review",
+      });
+      const oldId = prior.wire.result.structuredContent.admission.runId;
+      await s.execute();
+      const old = await s.runStore.get(oldId);
+      expect(old).toMatchObject({
+        status: "completed",
+        reviewPost: { posted: true, head },
+        contextDependencies: { status: "known", executionGithub: [expect.objectContaining({ runId: oldId })] },
+      });
+      if (!old) throw new Error("No completed Review");
+      expect(historyReads.mock.calls.length).toBeGreaterThan(0);
+      historyReads.mockClear();
+      if (variant === "prior-child") {
+        const { contextCheckpointReceipt: _checkpoint, reviewPublication: _publication, ...metadata } = old;
+        expect(
+          (
+            await s.runStore.put({
+              ...metadata,
+              id: "ffffffff-ffff-4fff-bfff-ffffffffffff",
+              parentRunId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            })
+          ).stored,
+        ).toBe(true);
+      }
+      phase = "fresh";
+      const inboxWrites = vi.spyOn(s.core.runLedger, "pushInbox");
+      if (variant === "directory-rebind") {
+        const person = await s.store.directory.createPerson();
+        if (person.status !== "created") throw new Error("No initial fixture person");
+        const id = { issuer: s.native.mcpIssuer, tenant: null, subject: "alice" };
+        expect(
+          await s.store.directory.change({
+            action: "link",
+            identity: id,
+            personId: person.person.id,
+            expectedRevision: 0,
+            actor: id,
+            proof: { method: "dual-authentication", version: 1 },
+          }),
+        ).toMatchObject({ status: "changed", binding: { revision: 1 } });
+      }
+      repo.pulls[0]!.body = "FRESH-GITHUB-DATA";
+      s.restartNative();
+      s.core.config.config.routing!.operator = "on";
+      const freshText =
+        variant === "multiline-request"
+          ? text.replace(" https://", " Please review the change below.\nhttps://")
+          : variant === "long-request"
+            ? text.replace(" https://", ` ${"Please check this change. ".repeat(20)}https://`)
+            : text;
+      const fresh = await s.send(
+        { text: freshText, thread: "reused-review", idempotencyKey: "reauthenticated-review" },
+        s.rotatedHeaders(),
+      );
+      expect(fresh.wire.result).toMatchObject({ structuredContent: { admission: { status: "accepted" } } });
+      const freshId = fresh.wire.result.structuredContent.admission.runId;
+      if (variant === "operator-off" || variant === "operator-shadow")
+        s.core.config.config.routing!.operator = variant === "operator-off" ? "off" : "shadow";
+      if (["same-pr-live", "same-pr-unknown", "unrelated-held"].includes(variant)) {
+        const key = variant === "unrelated-held" ? "mcp:default:unrelated-review" : "mcp:default:reused-review";
+        const claim = admission.claim(key, { agent: "review", now: 1000 });
+        if (claim.kind !== "start") throw new Error("Occupied fixture slot");
+        claim.live.runId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        if (variant !== "same-pr-live") claim.live.unknownClaim = { runId: claim.live.runId };
+        held = claim.live;
+      }
+      await s.execute();
+      const record = await s.runStore.get(freshId);
+      const refusedGate =
+        variant === "operator-off" || variant === "operator-shadow"
+          ? "operator_mode"
+          : ["context-stuck", "wrong-target", "context-observer-fails"].includes(variant)
+            ? "operator_decision"
+            : variant.startsWith("late-local")
+              ? "local_owner"
+              : variant.startsWith("late-remote")
+                ? "remote_owner"
+                : ["same-pr-live", "same-pr-unknown"].includes(variant)
+                  ? "typed_route"
+                  : undefined;
+      if (refusedGate) {
+        const diagnostic = contextLog.read().lines.find((line) => line.attrs.requestContextGate === refusedGate);
+        expect(diagnostic?.attrs).toMatchObject({
+          requestContextGate: refusedGate,
+          requestContextReason:
+            refusedGate === "operator_mode"
+              ? "routing_disabled"
+              : refusedGate.endsWith("owner")
+                ? "thread_occupied"
+                : "invalid_bind",
+        });
+        expect(JSON.stringify(diagnostic?.attrs)).not.toMatch(/sample\/api|OLD-|https:|credential|New current request/);
+        if (refusedGate !== "operator_mode") {
+          const doors = await s.runStore.list({ agent: "door", threadKey: "mcp:default:reused-review" });
+          expect(doors).toHaveLength(1);
+          const door = await s.runStore.get(doors[0]!.id);
+          const decision = door?.events.filter((event) => event.type === "operator");
+          expect(decision).toMatchObject([
+            { type: "operator", outcome: refusedGate === "operator_decision" ? "non_decision" : "binds" },
+          ]);
+          if (refusedGate === "operator_decision")
+            expect(decision?.[0]).toMatchObject({
+              attempts: [{ outcome: "violation" }, { outcome: "violation" }, { outcome: "violation" }],
+            });
+          expect(door?.events.filter((event) => event.type === "refusal")).toMatchObject([
+            {
+              type: "refusal",
+              code:
+                refusedGate === "local_owner"
+                  ? "follow_up_refused"
+                  : refusedGate === "remote_owner"
+                    ? "elsewhere_follow_up_refused"
+                    : "setup_failed",
+            },
+          ]);
+          expect(door).toMatchObject({ agent: "door", status: "completed" });
+        }
+      }
+      expect(historyReads.mock.calls.length).toBe(0);
+      if (held) expect(held.inbox.size).toBe(0);
+      expect(inboxWrites.mock.calls.length).toBe(0);
+      if (variant.startsWith("late-local")) expect(admission.get("mcp:default:reused-review")).toBe(held);
+      if (variant.startsWith("late-remote"))
+        expect(elsewhere.get("mcp:default:reused-review")).toEqual({
+          runId: heldId,
+          startedAt: 1000,
+          ...(variant === "late-remote-live" ? { agent: "review" } : {}),
+        });
+      if (!succeeds) {
+        expect(posts).toHaveLength(1);
+        expect(record?.reviewPost?.posted).not.toBe(true);
+        expect(requests.filter((r) => r.phase === "fresh")).toEqual([]);
+        expect(s.effects).toEqual([]);
+        if (variant === "context-stuck" || variant === "context-observer-fails") {
+          expect(operatorCalls).toBe(3);
+          expect(await s.ledger.readIngressByRun(freshId)).toMatchObject({
+            status: "record",
+            record: { status: "completed", outcome: "setup_failed" },
+          });
+          if (variant === "context-observer-fails")
+            expect(s.nativeReplies.at(-1)).toBe("This Review could not be bound to the current request.");
+        }
+        expect(await s.runStore.get(oldId)).toEqual(old);
+        return;
+      }
+      expect(record).toMatchObject({
+        status: "completed",
+        agent: "review",
+        model: "anthropic/general-model",
+        reviewPost: { posted: true, target: { repo: "sample/api", number: 42 }, head },
+      });
+      expect(posts).toHaveLength(2);
+      expect(record?.parentRunId).toBeUndefined();
+      expect(record?.session?.key).not.toBe(old.session?.key);
+      expect(JSON.stringify(requests.filter((r) => r.phase === "fresh"))).not.toMatch(
+        /OLD-(?:REQUEST|ANSWER|SUMMARY|NOTEPAD|GITHUB-RESULT)-MARKER/,
+      );
+      expect(JSON.stringify(requests.filter((r) => r.phase === "fresh"))).toContain("FRESH-GITHUB-DATA");
+      expect(record?.events).toContainEqual(
+        expect.objectContaining({
+          type: "run_note",
+          kind: "seed",
+          summary: "This Review uses your current request and GitHub. Earlier conversation context is not included.",
+        }),
+      );
+      if (variant === "read-first") expect(operatorCalls).toBe(2);
+      expect(await s.runStore.get(oldId)).toEqual(old);
+    },
+    30_000,
+  );
   it.each(["access", "oauth", "token", "hex"] as const)(
     "admits the actual %s MCP account through Node and the original-owner installation",
     async (mode) => {

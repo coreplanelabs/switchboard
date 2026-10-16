@@ -2,6 +2,28 @@
 import { describe, expect, it } from "vitest";
 import { originalOrganizationDispatchOf, withOriginalOrganizationDispatch } from "./originalOrganizationInput.js";
 describe("Original media input marker", () => {
+  it("preserves request-only context only for the same original run and sequence", () => {
+    const context = { ingressRunId: "review-B", organizationSequence: 2, contextMode: "request" as const };
+    const source = withOriginalOrganizationDispatch({ text: "Review this PR" }, context);
+    expect(
+      originalOrganizationDispatchOf(
+        withOriginalOrganizationDispatch(source, { ingressRunId: "review-B", organizationSequence: 2 }),
+      ),
+    ).toEqual(context);
+    expect(
+      originalOrganizationDispatchOf(
+        withOriginalOrganizationDispatch(source, { ingressRunId: "other", organizationSequence: 2 }),
+      ),
+    ).toEqual({ ingressRunId: "other", organizationSequence: 2 });
+    expect(
+      originalOrganizationDispatchOf(
+        withOriginalOrganizationDispatch(source, { ingressRunId: "review-B", organizationSequence: 3 }),
+      ),
+    ).toEqual({ ingressRunId: "review-B", organizationSequence: 3 });
+    expect(
+      originalOrganizationDispatchOf({ contextMode: "request", originalOrganizationInput: context }),
+    ).toBeUndefined();
+  });
   it("keeps saved source A as bounded read provenance only on the same protected execution B", () => {
     const reference = {
       version: 1 as const,

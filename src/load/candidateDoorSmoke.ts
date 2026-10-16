@@ -61,6 +61,21 @@ export function candidateDoorSmokeCases(projection: OperatorInput["projection"])
         bind.prTarget.quote === "https://github.com/acme/api/pull/7",
     },
     {
+      name: "request-only MCP review",
+      text: "agent:review review https://github.com/acme/api/pull/7 at head 1111111111111111111111111111111111111111.",
+      context: {
+        contextMode: "request",
+        requesterId: "access:current-request",
+        tail: [{ actor: "access:current-request", text: "OLD-CONTEXT-MUST-NOT-ENTER" }],
+      },
+      expected: (bind) =>
+        bind.preset === "review" &&
+        bind.repo === "acme/api" &&
+        bind.prTarget?.number === 7 &&
+        bind.prTarget.source === "request" &&
+        bind.prTarget.quote === "https://github.com/acme/api/pull/7",
+    },
+    {
       name: "review with requested renewals",
       text: "Review https://github.com/acme/api/pull/7 with two renewals.",
       expected: (bind: OperatorBind) =>
