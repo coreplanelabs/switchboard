@@ -245,6 +245,9 @@ describe("SQLite person directory", () => {
   it("arbitrates independent processes contending for one identity", async () => {
     const path = dbPath();
     const { db, directory } = database(path);
+    // Contenders can hold shared reads while waiting for the writer. WAL lets
+    // this fixture release its barrier without requiring their reads to end.
+    db.exec("PRAGMA journal_mode = WAL");
     const ids = await Promise.all([person(directory), person(directory)]);
     const script = `
       import { DatabaseSync } from 'node:sqlite';
@@ -292,7 +295,11 @@ describe("SQLite person directory", () => {
           new Promise<ChangeResult>((resolve, reject) => {
             child.on("message", (message) => {
               if (message === "starting") {
-                if (++starting === 2) db.exec("COMMIT");
+                try {
+                  if (++starting === 2) db.exec("COMMIT");
+                } catch (error) {
+                  reject(error);
+                }
               } else resolve(message as ChangeResult);
             });
             child.once("error", reject);
@@ -300,8 +307,20 @@ describe("SQLite person directory", () => {
             child.send(link(ids[index]));
           }),
       );
-      expect((await Promise.all(results)).map((r) => r.status).sort()).toEqual(["changed", "conflict"]);
-      expect(await receipts(directory)).toHaveLength(1);
+      const outcomes = await Promise.all(results);
+      expect(outcomes.map((r) => r.status).sort()).toEqual(["changed", "conflict"]);
+      const winner = ids[outcomes.findIndex((r) => r.status === "changed")];
+      expect(await directory.resolve(first)).toMatchObject({
+        status: "bound",
+        binding: { personId: winner, identity: first, revision: 1, state: "active", proof },
+      });
+      expect(await receipts(directory)).toEqual([
+        {
+          action: "link",
+          actor: first,
+          binding: { personId: winner, identity: first, revision: 1, state: "active", proof, changedAt: 42 },
+        },
+      ]);
     } finally {
       if (db.isTransaction) db.exec("ROLLBACK");
       for (const child of children) child.kill();

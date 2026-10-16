@@ -1737,6 +1737,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     },
 
     authorizeLive(id, token) {
+      if (token === "") return null;
       const summary = registry.getById(id);
       if (!summary || privateWorkerRun(summary)) return null;
       if (!registry.has(id, token)) return null;

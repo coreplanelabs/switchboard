@@ -12599,18 +12599,96 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
       admitted.push(id);
       return { kind: "created", id };
     };
-    const responses = await Promise.all([
-      callRecovery(h, "slack:C1:later-request"),
-      callRecovery(h, "slack:C1:later-request"),
-    ]);
-    expect(responses.map((r) => r.status)).toEqual([200, 200]);
-    expect([...new Set(admitted)]).toEqual([
-      "recovery-r_2a7b4146107649167ee86be55a3153f9a6a6441cf82602934e7507102be544e1",
-    ]);
+    let readStarted!: () => void;
+    let releaseRead!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      readStarted = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const readAction = h.instances.getRecoveryAction.bind(h.instances);
+    vi.spyOn(h.instances, "getRecoveryAction").mockImplementationOnce(async (...args) => {
+      readStarted();
+      await held;
+      return readAction(...args);
+    });
+    const delayed = callRecovery(h, "slack:C1:later-request");
+    await reading;
+    let responses: Awaited<ReturnType<typeof callRecovery>>[];
+    try {
+      const concurrent = await callRecovery(h, "slack:C1:later-request");
+      releaseRead();
+      responses = [await delayed, concurrent];
+    } finally {
+      releaseRead();
+    }
+    expect(responses).toMatchObject([{ status: 200 }, { status: 200 }]);
+    expect(admitted).toEqual(["recovery-r_2a7b4146107649167ee86be55a3153f9a6a6441cf82602934e7507102be544e1"]);
     const [claimed] = await h.instances.listUnits(INSTANCE.id);
     expect((await h.instances.getRecoveryAction(claimed!, claimed!.recovery!.actionId!))?.state).toBe("pending");
     expect(await pullOwners(h)).toEqual([{ kind: "unit", ...owner, actionId: claimed!.recovery!.actionId }]);
   });
+
+  it.each([
+    ["conflict", 409, "recovery_claim_mismatch"],
+    ["changed head", 409, "recovery_binding_mismatch"],
+    ["unreadable", 503, "recovery_history_unavailable"],
+  ] as const)(
+    "post-approval recovery refuses a delayed action read after %s without another admission",
+    async (scenario, status, error) => {
+      const h = await approvedHarness();
+      const before = (await h.instances.listUnits(INSTANCE.id))[0]!;
+      const admitted: string[] = [];
+      h.deps.startRecovery = async (id) => {
+        admitted.push(id);
+        return { kind: "created", id };
+      };
+      let readStarted!: () => void;
+      let releaseRead!: () => void;
+      const reading = new Promise<void>((resolve) => {
+        readStarted = resolve;
+      });
+      const held = new Promise<void>((resolve) => {
+        releaseRead = resolve;
+      });
+      const readAction = h.instances.getRecoveryAction.bind(h.instances);
+      vi.spyOn(h.instances, "getRecoveryAction").mockImplementationOnce(async (...args) => {
+        readStarted();
+        await held;
+        return readAction(...args);
+      });
+      const delayed = callRecovery(h, "slack:C1:delayed-request");
+      await reading;
+      try {
+        expect((await callRecovery(h, "slack:C1:delayed-request")).status).toBe(200);
+        const claimed = (await h.instances.listUnits(INSTANCE.id))[0]!;
+        const retained =
+          scenario === "conflict"
+            ? before
+            : scenario === "changed head"
+              ? {
+                  ...claimed,
+                  lastPush: HEAD,
+                  publication: { ...claimed.publication!, expectedHeadSha: HEAD },
+                }
+              : claimed;
+        if (scenario !== "unreadable") seedCoordinatorUnit(h.instances, retained);
+        const unavailable =
+          scenario === "unreadable"
+            ? vi.spyOn(h.instances, "listUnits").mockRejectedValueOnce(new Error("store unavailable"))
+            : undefined;
+        releaseRead();
+        expect(await delayed).toMatchObject({ status, body: { ok: false, error } });
+        unavailable?.mockRestore();
+        expect(admitted).toHaveLength(1);
+        expect(await h.instances.listUnits(INSTANCE.id)).toEqual([retained]);
+        expect((await h.instances.getRecoveryAction(claimed, claimed.recovery!.actionId!))?.state).toBe("pending");
+      } finally {
+        releaseRead();
+      }
+    },
+  );
 
   it.each([
     "wrong head",

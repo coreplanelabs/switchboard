@@ -2198,6 +2198,9 @@ describe("RunsService.authorizeLive", () => {
     const { reg, svc } = setup();
     const { id, token } = reg.create();
     reg.publish(id, call("$ ls"));
+    const empty = reg.create("stored empty capability", undefined, { id: "empty-run", token: "" });
+    expect(svc.authorizeLive(empty.id, "")).toBeNull();
+    expect(svc.authorizeLive(id, "")).toBeNull();
     expect(svc.authorizeLive(id, "tok-wrong")).toBeNull();
     expect(svc.authorizeLive("nope", token)).toBeNull();
 
