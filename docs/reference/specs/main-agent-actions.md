@@ -1,5 +1,7 @@
 # Main agent actions on linked work
 
+- **Tests**: `src/core/dispatch/orchestratorSourceFold.test.ts`
+
 For status, steer, and stop, the main agent addresses one existing Ship unit by the durable `(main thread, act id)` link. The requester's resolved identity and current thread are trusted context; model text cannot pick another task or requester. Those linked-work actions do not start a worker or expose its private brief; typed start is a separate path. The shared task-link and observation schemas are independent of the store implementations so Workers can consume them without host filesystem dependencies.
 
 - **Code**: `src/core/coordinator/mainTaskLink.ts`, `src/core/coordinator/mainWorkObservation.ts`, `src/core/coordinator/unitSeedReceipt.ts`, `src/core/coordinator/mainActions.ts`, `src/core/coordinator/instanceStore.ts`, `src/core/coordinator/contract.ts`, `src/core/planeService.ts`, `src/core/authz/policy.ts`, `src/tools/mainWork.ts`, `src/tools/toolsets.ts`, `src/tools/runnableTool.ts`, `src/tools/commands.ts`, `src/core/dispatch/conversationCommand.ts`, `src/core/dispatch/orchestratorDecisions.ts`, `src/core/dispatch/commandRun.ts`, `src/core/commandConfirmations.ts`, `src/core/dispatcher.ts`, `src/core/dispatch/runLoop.ts`, `src/core/dispatch/run.ts`, `src/core/resumeLaunch.ts`, `src/core/runLedger/types.ts`, `src/agents/registry.ts`, `deploy/cloudflare-memory/worker.ts`
@@ -33,3 +35,17 @@ For status, steer, and stop, the main agent addresses one existing Ship unit by 
 | A failed Workflow nudge retains the admitted steer and offers reconciliation for the original unit through the existing durable outbox. | `[unit]` `src/core/coordinator/mainActions.test.ts::*::a failed nudge leaves the event queued and offers reconciliation to its original owner` |
 
 | A private current-history command does not read or change an earlier requester target. It still records its current owner/source decision, rechecks source access and delivers only native result metadata; ordinary commands retain requester checkpoint behavior. | `[unit]` `src/core/dispatch/conversationCommand.test.ts::conversation command receipts::keeps private command preparation off retained requester checkpoints while ordinary commands still update them` |
+
+
+## Recorded source-evidence folds
+
+The existing orchestrator decision history accepts a version 2 source-fold record for source evidence or source facts. It keeps the original orchestrator owner, the source receipt, a run or unit target hash, and input/context hashes. It cannot carry requester identity, command fields or worker controls from the evidence. Version 1 requester commands and worker selections retain their current format. Both kinds use the same identity space, serialized writer, storage acknowledgment and count/byte limits.
+
+A source receipt and target hash are references, not authentication or permission. A future caller must read the canonical source and original decision, verify the target and current context/access, and qualify the internal delivery before use. This change enables no caller, routing, delivery, consumption or cleanup. Older readers hold the new variant; compatible readers must precede any writer.
+
+| Criterion | Proof |
+| --- | --- |
+| Source evidence and source facts keep their type and exact run/unit target reference through recovery. Identical replay uses the existing record; changed context or target conflicts. | `[unit]` `src/core/dispatch/orchestratorSourceFold.test.ts::orchestrator source fold decisions::retains source evidence and its exact destination reference through history recovery`; `::keeps requester commands and source folds in one immutable identity space`; `src/core/runRecord.test.ts::full records validate source folds across JSON without requester conversion` |
+| Foreign owners, malformed receipts, unsupported schemas and injected requester/action fields stay held. | `[unit]` `src/core/dispatch/orchestratorSourceFold.test.ts::orchestrator source fold decisions::holds malformed references and injected requester or action fields` |
+| An unknown save prevents later admissions; stored input retains its original receipt across the awaited write. Existing requester decisions remain readable. | `[unit]` `src/core/dispatch/orchestratorSourceFold.test.ts::orchestrator source fold decisions::keeps an unknown save held and captures the original receipt before awaiting storage`; `src/core/dispatch/orchestratorDecisions.test.ts::orchestrator decision records::*` |
+| Canonical source/context/access checks authenticate an orchestrator decision before typed internal delivery and exact native consumption. | `[gap]` No source-fold caller, processor or producer is enabled by this record format. |

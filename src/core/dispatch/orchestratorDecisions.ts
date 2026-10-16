@@ -1,4 +1,5 @@
 import { ORCHESTRATOR_DECISION_BYTES_MAX, ORCHESTRATOR_DECISIONS_MAX } from "../budgets.js";
+import { sourceEventReceiptOf, type SourceEventReceipt } from "../runLedger/sourceEvents.js";
 
 export interface OrchestratorOwner {
   runId: string;
@@ -31,7 +32,19 @@ export interface OrchestratorWorkDecision extends DecisionSource {
   tool: OrchestratorWorkAction["tool"];
   targetHash: string;
 }
-export type OrchestratorDecision = OrchestratorCommandDecision | OrchestratorWorkDecision;
+/** A source reference is evidence, never an imported requester or grant. */
+export interface OrchestratorSourceFoldDecision {
+  version: 2;
+  kind: "source-fold";
+  id: string;
+  owner: OrchestratorOwner;
+  source: { kind: "source-evidence" | "source-fact"; receipt: SourceEventReceipt };
+  target: { kind: "run" | "unit"; hash: string };
+  inputHash: string;
+  contextHash: string;
+}
+export type OrchestratorDecision =
+  OrchestratorCommandDecision | OrchestratorWorkDecision | OrchestratorSourceFoldDecision;
 
 function boundedText(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 512;
@@ -64,6 +77,7 @@ export function isOrchestratorCommandDecision(
 
 export function isOrchestratorDecision(value: unknown, owner: OrchestratorOwner): value is OrchestratorDecision {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if ((value as { version?: unknown }).version === 2) return isSourceFoldDecision(value, owner);
   const entry = value as Partial<OrchestratorCommandDecision & OrchestratorWorkDecision>;
   const command = "command" in value;
   const actionKeys = command ? ["command", "line"] : ["tool", "targetHash"];
@@ -103,6 +117,44 @@ export function isOrchestratorDecision(value: unknown, owner: OrchestratorOwner)
     /^[a-f0-9]{64}$/.test(entry.inputHash) &&
     typeof entry.contextHash === "string" &&
     /^[a-f0-9]{64}$/.test(entry.contextHash)
+  );
+}
+
+function isSourceFoldDecision(value: object, owner: OrchestratorOwner): value is OrchestratorSourceFoldDecision {
+  const entry = value as Partial<OrchestratorSourceFoldDecision>;
+  let identity: unknown;
+  try {
+    identity = typeof entry.id === "string" ? JSON.parse(entry.id) : undefined;
+  } catch {
+    return false;
+  }
+  return (
+    Object.keys(value).every((key) =>
+      ["version", "kind", "id", "owner", "source", "target", "inputHash", "contextHash"].includes(key),
+    ) &&
+    entry.version === 2 &&
+    entry.kind === "source-fold" &&
+    boundedText(entry.id) &&
+    Array.isArray(identity) &&
+    identity.length === 2 &&
+    identity[0] === owner.runId &&
+    boundedText(identity[1]) &&
+    isOrchestratorOwner(entry.owner) &&
+    sameOrchestratorOwner(entry.owner, owner) &&
+    entry.source !== null &&
+    typeof entry.source === "object" &&
+    !Array.isArray(entry.source) &&
+    Object.keys(entry.source).length === 2 &&
+    (entry.source.kind === "source-evidence" || entry.source.kind === "source-fact") &&
+    sourceEventReceiptOf(entry.source.receipt) !== undefined &&
+    entry.target !== null &&
+    typeof entry.target === "object" &&
+    !Array.isArray(entry.target) &&
+    Object.keys(entry.target).length === 2 &&
+    (entry.target.kind === "run" || entry.target.kind === "unit") &&
+    [entry.target.hash, entry.inputHash, entry.contextHash].every(
+      (hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash),
+    )
   );
 }
 

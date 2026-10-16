@@ -34,6 +34,30 @@ import { planContextCheckpoint } from "./references/contextCheckpoint.js";
 import { contextDependenciesHash } from "./references/contextDependencies.js";
 import { pendingQuestionOf, bindFromAnswer } from "./dispatch/operator.js";
 import type { ChildHandoff } from "./dispatch/handoff.js";
+import type { OrchestratorSourceFoldDecision } from "./dispatch/orchestratorDecisions.js";
+
+it("full records validate source folds across JSON without requester conversion", () => {
+  const selection: OrchestratorSourceFoldDecision = {
+    version: 2,
+    kind: "source-fold",
+    id: '["run-1","incoming"]',
+    owner: { runId: "run-1", requesterId: "slack:UALICE", channelId: "slack:C1", threadKey: "slack:C1:1.0" },
+    source: {
+      kind: "source-evidence",
+      receipt: { version: 1, key: "source:" + "a".repeat(64), sequence: 7, receivedAt: 1000, bodyHash: "b".repeat(64) },
+    },
+    target: { kind: "unit", hash: "c".repeat(64) },
+    inputHash: "d".repeat(64),
+    contextHash: "e".repeat(64),
+  };
+  const kept = JSON.parse(JSON.stringify(record({ orchestratorDecisions: [selection] })));
+  expect(isRunRecord(kept)).toBe(true);
+  kept.orchestratorDecisions[0].source.kind = "request";
+  expect(isRunRecord(kept)).toBe(false);
+  kept.orchestratorDecisions[0].source.kind = "source-evidence";
+  kept.orchestratorDecisions[0].source.receipt.sequence = -1;
+  expect(isRunRecord(kept)).toBe(false);
+});
 
 it("retains routing phases and estimate provenance through record and JSONL reconstruction", () => {
   const event: RunEvent = {

@@ -37,10 +37,9 @@ describe("orchestrator decision records", () => {
     expect(await writer.record(worker)).toBe(true);
     expect(await writer.record(decision("command"))).toBe(true);
     expect(await writer.record(decision("worker"))).toBe(false);
-    expect(stored.map((entry) => ("tool" in entry ? entry.tool : entry.command))).toEqual([
-      "work_start",
-      "config.show",
-    ]);
+    expect(
+      stored.map((entry) => ("tool" in entry ? entry.tool : "command" in entry ? entry.command : entry.kind)),
+    ).toEqual(["work_start", "config.show"]);
     const restored = createOrchestratorDecisions({ owner, previous: stored, save: async () => true });
     expect(await restored.record(worker)).toBe(true);
     expect(await restored.record({ ...worker, targetHash: "e".repeat(64) })).toBe(false);
