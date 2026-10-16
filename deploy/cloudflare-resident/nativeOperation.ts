@@ -71,9 +71,9 @@ export interface NativeOperationRows {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
   delete(key: string): Promise<boolean>;
+  list<T>(options: { prefix: string; limit: number; startAfter?: string }): Promise<Map<string, T>>;
 }
 export interface NativeOperationStorage extends NativeOperationRows {
-  list<T>(options: { prefix: string; limit: number; startAfter?: string }): Promise<Map<string, T>>;
   transaction<T>(action: (rows: NativeOperationRows) => Promise<T>): Promise<T>;
 }
 export type NativeOperationReceipt = {

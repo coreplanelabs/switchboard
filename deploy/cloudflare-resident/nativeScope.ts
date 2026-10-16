@@ -4,22 +4,10 @@ import { z } from "zod";
 export const NATIVE_SCOPE_CONTROL_MS = 2_000;
 import type { WorkspaceOwner } from "../../src/core/workspaceSettlement.js";
 import type { NativeOperationStorage } from "./nativeOperation.js";
+import { nativeScopeRefSchema, type NativeScopeRef } from "../../src/execution/nativeScope.js";
+export { nativeScopeRefSchema, type NativeScopeRef } from "../../src/execution/nativeScope.js";
 
-const ownerSchema = z.object({
-  runId: z.string().min(1),
-  ownerGen: z.string().min(1),
-  ownerFence: z.number().int().positive(),
-});
-export const nativeScopeRefSchema = z
-  .object({
-    version: z.literal(1),
-    id: z.string().uuid(),
-    boot: z.string().uuid(),
-    threadKey: z.string().min(1),
-    owner: ownerSchema,
-  })
-  .strict();
-export type NativeScopeRef = z.infer<typeof nativeScopeRefSchema>;
+const ownerSchema = nativeScopeRefSchema.shape.owner;
 const rowSchema = z
   .object({
     id: z.string().uuid(),

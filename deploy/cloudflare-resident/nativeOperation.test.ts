@@ -19,6 +19,13 @@ function fixture() {
       data.set(key, structuredClone(value));
     },
     delete: async (key) => data.delete(key),
+    list: async <T>({ prefix, limit, startAfter = "" }: { prefix: string; limit: number; startAfter?: string }) =>
+      new Map(
+        [...data]
+          .filter(([key]) => key.startsWith(prefix) && key > startAfter)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .slice(0, limit),
+      ) as Map<string, T>,
   });
   const storage: NativeOperationStorage = {
     ...access(rows),
