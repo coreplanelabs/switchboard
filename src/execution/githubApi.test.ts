@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { GithubCredentialSource } from "./githubApp.js";
 import { GithubApiError, InMemoryGithubApi, MAX_FILE_CHARS, RestGithubApi, readTextCapped } from "./githubApi.js";
 import { createTracer } from "../core/trace/tracer.js";
 import { recordingSink } from "../core/testing/recordingSink.js";
@@ -1288,6 +1289,103 @@ describe("GitHub native read identities", () => {
     head: { ref: "fix/retry", sha: "a".repeat(40), repo: { id: 22, full_name: "fork/api" } },
     base: { ref: "main", repo: { id: 11, full_name: "acme/api" } },
   };
+
+  it("binds concurrent reads to their own credential and keeps opaque tokens unknown", async () => {
+    const source: GithubCredentialSource = { host: "github.com", appId: 1, installationId: 2 };
+    let finishFirst!: () => void;
+    const firstPending = new Promise<void>((resolve) => {
+      finishFirst = resolve;
+    });
+    const f = fakeFetch(() => ({ status: 200, body: row }));
+    let calls = 0;
+    const gh = new RestGithubApi({
+      fetch: (async (url, init) => {
+        if (String(url).endsWith("/7")) await firstPending;
+        return f.fetch(url, init);
+      }) as typeof fetch,
+      token: async () =>
+        ++calls === 1
+          ? { token: "first", expiresAtMs: null, source }
+          : { token: "second", expiresAtMs: null, source: { ...source, installationId: 3 } },
+    });
+    const first = gh.getPullRequest("acme/api", 7);
+    const second = await gh.getPullRequest("acme/api", 8);
+    finishFirst();
+    expect(await first).toMatchObject({ id: 101, source: { host: "github.com", appId: 1, installationId: 2 } });
+    expect(second).toMatchObject({ id: 101, source: { host: "github.com", appId: 1, installationId: 3 } });
+    const unknown = await api(() => ({ status: 200, body: row })).api.getPullRequest("acme/api", 7);
+    expect(unknown.id).toBe(101);
+    expect(Object.hasOwn(unknown, "source")).toBe(false);
+  });
+
+  it("does not combine a PR with a branch tip read by another installation", async () => {
+    const source: GithubCredentialSource = { host: "github.com", appId: 1, installationId: 2 };
+    let rotate = true;
+    const f = fakeFetch(({ url }) => ({
+      status: 200,
+      body: url.includes("/git/ref/")
+        ? { object: { type: "commit", sha: "b".repeat(40) } }
+        : { ...row, state: "open", head: { ...row.head, repo: { id: 11, full_name: "acme/api" } } },
+    }));
+    let n = 0;
+    const gh = new RestGithubApi({
+      fetch: f.fetch,
+      token: async () => ({
+        token: "read",
+        expiresAtMs: null,
+        source: { ...source, installationId: rotate && ++n % 2 === 0 ? 3 : 2 },
+      }),
+    });
+    expect(await gh.getPullRequest("acme/api", 7)).toMatchObject({ head: { sha: "a".repeat(40) }, source });
+    rotate = false;
+    expect(await gh.getPullRequest("acme/api", 7)).toMatchObject({ head: { sha: "b".repeat(40) }, source });
+  });
+
+  it("refuses malformed supplied credential identity before reading source data", async () => {
+    const source: GithubCredentialSource = { host: "github.com", appId: 1, installationId: 2 };
+    const f = fakeFetch(() => ({ status: 200, body: row }));
+    let installationId = 0;
+    const gh = new RestGithubApi({
+      fetch: f.fetch,
+      token: async () => ({ token: "read", expiresAtMs: null, source: { ...source, installationId } }),
+    });
+    await expect(gh.getPullRequest("acme/api", 7)).rejects.toMatchObject({ status: 502 });
+    expect(f.calls).toEqual([]);
+    installationId = 2;
+    expect(await gh.getPullRequest("acme/api", 7)).toMatchObject({ id: 101, source });
+    const memory = new InMemoryGithubApi({ "acme/api": { source: { ...source, installationId: 0 } } });
+    await expect(memory.listRepos()).rejects.toMatchObject({ status: 502 });
+  });
+
+  it("retains the credential source of each repository page and the in-memory metadata", async () => {
+    const source: GithubCredentialSource = { host: "github.com", appId: 1, installationId: 2 };
+    let page = 0;
+    const f = fakeFetch(({ url }) => ({
+      status: 200,
+      body: {
+        repositories: url.endsWith("page=1")
+          ? Array.from({ length: 100 }, (_, i) => ({ id: i + 1, full_name: `acme/r${i}` }))
+          : [{ id: 101, full_name: "acme/last" }],
+      },
+    }));
+    const gh = new RestGithubApi({
+      fetch: f.fetch,
+      token: async () => ({
+        token: "read",
+        expiresAtMs: null,
+        source: { ...source, installationId: ++page === 1 ? 2 : 3 },
+      }),
+    });
+    const repos = await gh.listRepos();
+    expect([repos[0], repos[100]]).toMatchObject([
+      { id: 1, source: { host: "github.com", appId: 1, installationId: 2 } },
+      { id: 101, source: { host: "github.com", appId: 1, installationId: 3 } },
+    ]);
+    const pull = { ...(await api(() => ({ status: 200, body: row })).api.getPullRequest("acme/api", 7)), source };
+    const memory = new InMemoryGithubApi({ "acme/api": { id: 11, source, pulls: [pull] } });
+    expect(await memory.getPullRequest("acme/api", 7)).toEqual(pull);
+    expect(await memory.listRepos()).toMatchObject([{ id: 11, source }]);
+  });
 
   it("retains distinct PR and fork/base repository IDs through the existing read route", async () => {
     const { api: gh, calls } = api(() => ({ status: 200, body: row }));

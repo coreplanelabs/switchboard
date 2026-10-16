@@ -52,9 +52,9 @@ afterEach(() => {
 
 describe("resolveRepoContext: read-scoped PR lookup", () => {
   it("resolves the current PR with a read credential when a write credential is unavailable", async () => {
-    vi.spyOn(githubApp, "resolveGithubToken").mockImplementation(async (scope) => {
+    vi.spyOn(githubApp, "resolveGithubCredential").mockImplementation(async (scope) => {
       if (scope !== "read") throw new Error("write mint unavailable");
-      return "read-only-token";
+      return { token: "read-only-token", expiresAtMs: null };
     });
     vi.stubGlobal(
       "fetch",
@@ -173,7 +173,7 @@ describe("resolveRepoContext: read-scoped PR lookup", () => {
 
   it("records a credential resolver failure without exposing its message or using a public fallback", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    vi.spyOn(githubApp, "resolveGithubToken").mockRejectedValue(new Error("private-mint-url credential-bytes"));
+    vi.spyOn(githubApp, "resolveGithubCredential").mockRejectedValue(new Error("private-mint-url credential-bytes"));
     const { calls } = stubFetch({ body: { state: "open", head: { sha: "a".repeat(40) } } });
     expect(await resolveRepoContext(msg("https://github.com/acme/api/pull/7"))).toEqual({
       repo: "acme/api",
