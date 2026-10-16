@@ -131,3 +131,15 @@ A PR fact retains native PR identity, title/body, lifecycle state, draft/merge f
 | PR synchronization keeps fork head/base and before/after identities; malformed source or branch identity is held | `[unit]` `src/channels/githubActivity.test.ts::GitHub pull and commit activity normalization::keeps fork head…`; `::holds malformed branch…`; `::holds malformed PR lifecycle states…` |
 | PR lifecycle and same-head edits remain distinct from delivery identity; deleted forks and unknown actors retain explicit null values | `[unit]` `src/channels/githubActivity.test.ts::GitHub pull and commit activity normalization::retains the snapshot…`; `::distinguishes a same-head…`; `::retains a deleted fork…` |
 | Thread resolution uses the native thread ID and retains each state; commit comments keep their SHA without becoming PR requests | `[unit]` `src/channels/githubActivity.test.ts::GitHub pull and commit activity normalization::uses the native thread…`; `::retains commit comments…` |
+
+### Checks and commit statuses
+
+The inactive converter also accepts check-run `created`, `completed`, `rerequested` and `requested_action`, check-suite `requested`, `completed` and `rerequested`, and commit `status` events. A status event has no action field. These records are `source-fact`; a request to rerun a GitHub check does not authorize a Switchboard action.
+
+Each check keeps its native ID, checked commit, status, conclusion, producing App ID and PR associations. An association can be empty for a fork or name a later PR head. It does not select a PR or prove its current head. Commit statuses retain their native ID, context, state, description and optional external CI link. Full native snapshots remain available. No receiver or delivery caller uses this converter yet. The field contracts follow the [GitHub webhook reference](https://docs.github.com/en/webhooks/webhook-events-and-payloads) and [Octokit's webhook types](https://github.com/octokit/webhooks/blob/main/payload-types/schema.d.ts).
+
+| Criterion | Proof |
+| --- | --- |
+| Checks retain their exact commit separately from stale or empty PR associations, and preserve unknown actors without choosing a PR | `[unit]` `src/channels/githubActivity.test.ts::GitHub check and status normalization::keeps …`; `::keeps a fork check…` |
+| Status events need no action field and retain external or empty CI links; check transitions and action requests have distinct revisions independent of delivery identity | `[unit]` `src/channels/githubActivity.test.ts::GitHub check and status normalization::retains status…`; `::retains the checked commit…`; `::separates check transitions…` |
+| Malformed source, commit, state or PR association is held; unsupported check actions are ignored | `[unit]` `src/channels/githubActivity.test.ts::GitHub check and status normalization::holds…` |
