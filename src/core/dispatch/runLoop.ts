@@ -39,6 +39,7 @@ import { answerOutcomeOf, captureAnswerOutcome, type AnswerOutcome } from "../an
 import type { RunSetup } from "../runSetup.js";
 import {
   audienceCheckAttrs,
+  type AudienceCheck,
   audienceRefusalText,
   noteAudienceRefusal,
   type AudienceRefusalCode,
@@ -2321,20 +2322,57 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     return true;
   };
   if (privateRun || isPrivateConversation(msg) || initialMedia) {
-    deps.runBearers?.bindSourceGuard(run.id, async () => {
-      if (!registry.isActive(run.id, run.control)) return false;
-      if (!(await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)).ok) return false;
-      if (!(await prepareSourceMedia())) return false;
-      if (!(await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)).ok) return false;
-      const destination = privateDestinationOf(msg);
-      if (destination) {
-        if (!(await verifyPrivateDestination(io, destination)).ok) return false;
-      } else if (isPrivateConversation(msg)) {
-        if (!io.authoritativePrivateHistory) return false;
-        await io.authoritativePrivateHistory(msg);
-      }
-      return registry.isActive(run.id, run.control) && !privateAudienceLatch.revoked;
-    });
+    deps.runBearers?.bindSourceGuard(run.id, () =>
+      root.span("run.model_source_check", async (span) => {
+        let stage: "owner" | "audience" | "media" | "destination" | "history" = "owner";
+        const refused = (outcome: string) => {
+          span.setAttrs({ outcome });
+          return false;
+        };
+        const audienceAllowed = (checked: AudienceCheck) => {
+          if (!checked.ok) span.setAttrs({ ...audienceCheckAttrs(checked), errorCode: `${stage}_refused` });
+          return checked.ok;
+        };
+        try {
+          if (!registry.isActive(run.id, run.control)) return refused("owner_inactive");
+          stage = "audience";
+          if (!audienceAllowed(await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)))
+            return false;
+          stage = "media";
+          if (!(await prepareSourceMedia())) return refused("media_unavailable");
+          stage = "audience";
+          if (!audienceAllowed(await privateRunAudienceDecision(msg, io, privateAudienceLatch, slackContext)))
+            return false;
+          const destination = privateDestinationOf(msg);
+          if (destination) {
+            stage = "destination";
+            if (!audienceAllowed(await verifyPrivateDestination(io, destination))) return false;
+          } else if (isPrivateConversation(msg)) {
+            stage = "history";
+            if (!io.authoritativePrivateHistory) return refused("history_unavailable");
+            await io.authoritativePrivateHistory(msg);
+          }
+          if (!registry.isActive(run.id, run.control)) return refused("owner_inactive");
+          if (privateAudienceLatch.revoked) return refused("audience_revoked");
+          span.setAttrs({ outcome: "allowed" });
+          return true;
+        } catch (error) {
+          // Messages and arbitrary error names can contain private source bytes.
+          const errorCode =
+            error instanceof TypeError
+              ? "TypeError"
+              : error instanceof RangeError
+                ? "RangeError"
+                : error instanceof SyntaxError
+                  ? "SyntaxError"
+                  : error instanceof Error
+                    ? "Error"
+                    : typeof error;
+          span.setAttrs({ errorCode });
+          return refused(`${stage}_exception`);
+        }
+      }),
+    );
   }
   const requesterSourceCurrent = (quote: string, source: MainSource) =>
     operatorModeOf(deps.config.config) === "on" &&

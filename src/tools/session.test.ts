@@ -435,6 +435,10 @@ describe("sessionCapabilityFor — the capability the dispatcher builds for a ru
     expect(await cap.readTurn(0)).toEqual(say("retained current input"));
     expect(await cap.readNotepad()).toBeNull();
     expect(await cap.writeNotepad("derived private note")).toEqual({ ok: false, reason: "fenced" });
+    expect(await notesTool.run({ text: "derived private note" }, ctxWith(cap))).toBe(
+      "Stored notes are unavailable in this source view.",
+    );
+    expect(await notesTool.run({}, ctxWith(cap))).toBe("Stored notes are unavailable in this source view.");
     expect(await cap.assets!()).toEqual([]);
     const captured = await cap.captureHandoff!({
       runId: "run-1",
