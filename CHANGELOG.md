@@ -1,5 +1,103 @@
 # Changelog
 
+## [1.298.0](https://github.com/coreplanelabs/switchboard/compare/v1.297.3...v1.298.0) (2026-10-16)
+
+
+### Features
+
+* **core:** add task relevance policy for source evidence ([#3174](https://github.com/coreplanelabs/switchboard/issues/3174)) ([ae68374](https://github.com/coreplanelabs/switchboard/commit/ae683740143428cf7460031100d7fb540db6d9fc))
+* **core:** collect human feedback on native PR reviews ([#3095](https://github.com/coreplanelabs/switchboard/issues/3095)) ([5930d51](https://github.com/coreplanelabs/switchboard/commit/5930d518c2fb926271097974ba0b53f4a8f85d4f))
+* **core:** fence source job retries to their current claim ([#3151](https://github.com/coreplanelabs/switchboard/issues/3151)) ([a07c624](https://github.com/coreplanelabs/switchboard/commit/a07c6244b150cb8b7b80e3988aaf70e022562fa9))
+* **core:** inspect human review feedback through MCP ([#3109](https://github.com/coreplanelabs/switchboard/issues/3109)) ([98997a5](https://github.com/coreplanelabs/switchboard/commit/98997a53a3c76546d7727acc3de63e52389d55cd))
+* **core:** let orchestrators delegate read tasks ([#3160](https://github.com/coreplanelabs/switchboard/issues/3160)) ([bcaf8db](https://github.com/coreplanelabs/switchboard/commit/bcaf8db8d7e5bbf31c332efadb6577850c80ae0e))
+* **core:** make review findings clear enough to act on ([#3090](https://github.com/coreplanelabs/switchboard/issues/3090)) ([5dacd7d](https://github.com/coreplanelabs/switchboard/commit/5dacd7df57700eeb45fccfc5e8bea4c74ca261c2))
+* **core:** record decisions before worker controls act ([#3139](https://github.com/coreplanelabs/switchboard/issues/3139)) ([8cedaab](https://github.com/coreplanelabs/switchboard/commit/8cedaab37928bcf71b28b3cb33f6d1ad97e3fdf7))
+* **core:** record orchestrator decisions before commands run ([#3134](https://github.com/coreplanelabs/switchboard/issues/3134)) ([efe6934](https://github.com/coreplanelabs/switchboard/commit/efe6934c3bf0c2b0d4d092adff83b8513af52051))
+* **core:** retain orchestrator ownership across worker handoffs ([#3142](https://github.com/coreplanelabs/switchboard/issues/3142)) ([aaa3712](https://github.com/coreplanelabs/switchboard/commit/aaa371256b24932cccda403252d136683de44d34))
+* **core:** run registry commands in orchestrator conversations ([#3157](https://github.com/coreplanelabs/switchboard/issues/3157)) ([552bcd7](https://github.com/coreplanelabs/switchboard/commit/552bcd7091e2a42e55d6a6768bdefc0afb126b12))
+* **core:** save requester decisions before child steers ([#3166](https://github.com/coreplanelabs/switchboard/issues/3166)) ([26b0e16](https://github.com/coreplanelabs/switchboard/commit/26b0e16dc0e2d0df95fd9136dd018d4c4095f77f))
+* **core:** save source events and recovery wakes atomically ([#3149](https://github.com/coreplanelabs/switchboard/issues/3149)) ([0f23e5b](https://github.com/coreplanelabs/switchboard/commit/0f23e5b87e831a52ede11897a75e466bf3e11041))
+* **deploy:** bootstrap staging with maintenance held ([#3136](https://github.com/coreplanelabs/switchboard/issues/3136)) ([0127f8d](https://github.com/coreplanelabs/switchboard/commit/0127f8d5d6cd0a895404091184eb089ed595811d))
+* **deploy:** preserve history across staging recovery operations ([#3138](https://github.com/coreplanelabs/switchboard/issues/3138)) ([0ad1fba](https://github.com/coreplanelabs/switchboard/commit/0ad1fba78b666ba46bf4a1d2a053c30a09a1cb1e))
+* **http:** normalize GitHub checks and commit statuses ([#3171](https://github.com/coreplanelabs/switchboard/issues/3171)) ([507c68e](https://github.com/coreplanelabs/switchboard/commit/507c68e82164d61d1ef4d809e5c9b47331edb77e))
+* **http:** normalize GitHub PR comments as source evidence ([#3163](https://github.com/coreplanelabs/switchboard/issues/3163)) ([b769c3a](https://github.com/coreplanelabs/switchboard/commit/b769c3a88ec37069587b8b7693f49fe6138d6f14))
+* **http:** normalize PR state and commit comment events ([#3168](https://github.com/coreplanelabs/switchboard/issues/3168)) ([3f8a9ec](https://github.com/coreplanelabs/switchboard/commit/3f8a9ec707ef1cbeb4c32b812e898d57a5d8c32f))
+* **memory:** link inbox delivery receipts to stored rows ([#3175](https://github.com/coreplanelabs/switchboard/issues/3175)) ([1b81dd9](https://github.com/coreplanelabs/switchboard/commit/1b81dd92d72e19c94e404fad8ef5ef38c81dba7c))
+* **memory:** retain keyed inbox delivery receipts ([#3169](https://github.com/coreplanelabs/switchboard/issues/3169)) ([0029ba8](https://github.com/coreplanelabs/switchboard/commit/0029ba812709f11b245cc06b7881cb2791f4cfee))
+* **resident:** inspect the records behind workload limits ([#3119](https://github.com/coreplanelabs/switchboard/issues/3119)) ([6989331](https://github.com/coreplanelabs/switchboard/commit/698933158064a8ef648e494f15dca0db10b761c3))
+* **resident:** inspect workload on any warm resident ([#3124](https://github.com/coreplanelabs/switchboard/issues/3124)) ([6a23a87](https://github.com/coreplanelabs/switchboard/commit/6a23a87a09a65c8d3a939032386abd705446d473))
+* **resident:** retain replica addresses across run recovery ([#3112](https://github.com/coreplanelabs/switchboard/issues/3112)) ([9801103](https://github.com/coreplanelabs/switchboard/commit/98011039f2e46d4dba7ccea6a4f8686a0e160725))
+* **resident:** retain thread placement before workspace attach ([#3111](https://github.com/coreplanelabs/switchboard/issues/3111)) ([7565757](https://github.com/coreplanelabs/switchboard/commit/7565757367f1314080cb843af68b2ab51055fe02))
+* **resident:** spread new threads across fixed warm pools ([#3120](https://github.com/coreplanelabs/switchboard/issues/3120)) ([ad79048](https://github.com/coreplanelabs/switchboard/commit/ad79048c65c67144af94d6f26ed80e0be15949ab))
+* **runs:** inspect and settle original recorded operations ([#3110](https://github.com/coreplanelabs/switchboard/issues/3110)) ([8a7763c](https://github.com/coreplanelabs/switchboard/commit/8a7763c32bfc6358cbff7b2d745ce2b5e5f2cf26))
+* **tools:** include inline comments in PR review history ([#3152](https://github.com/coreplanelabs/switchboard/issues/3152)) ([58f5eec](https://github.com/coreplanelabs/switchboard/commit/58f5eec6d4eec6a3762dbc03e2a567b615540ae7))
+* **web:** see human review usefulness on the metrics page ([#3105](https://github.com/coreplanelabs/switchboard/issues/3105)) ([262db46](https://github.com/coreplanelabs/switchboard/commit/262db4625837da714b61ac7bc2f03c427a74f532))
+
+
+### Bug fixes
+
+* **agents:** explain PR changes in clear product terms ([#3154](https://github.com/coreplanelabs/switchboard/issues/3154)) ([802ea1a](https://github.com/coreplanelabs/switchboard/commit/802ea1a9ce7712f811190dd4e85cbab496df6acb))
+* **commands:** resolve merge attribution to the linked person ([#3094](https://github.com/coreplanelabs/switchboard/issues/3094)) ([6b79331](https://github.com/coreplanelabs/switchboard/commit/6b7933125526ed3e5d3aac6688bfe1b90da4e04b))
+* **core:** explain GitHub CLI failures in run traces ([#3115](https://github.com/coreplanelabs/switchboard/issues/3115)) ([2f96b64](https://github.com/coreplanelabs/switchboard/commit/2f96b64df000e5b30ee3f4552db790aef937fb16))
+* **core:** honor explicit orchestrator choices without rerouting ([#3145](https://github.com/coreplanelabs/switchboard/issues/3145)) ([27270f6](https://github.com/coreplanelabs/switchboard/commit/27270f608861f793616ab58608a9c4aa7d22eb64))
+* **core:** keep inbox failures from starting fresh work ([#3140](https://github.com/coreplanelabs/switchboard/issues/3140)) ([16b6fb6](https://github.com/coreplanelabs/switchboard/commit/16b6fb66a9cf88c6b845e511a5481383f20157b6))
+* **core:** keep unit replies with their owner on save failure ([#3141](https://github.com/coreplanelabs/switchboard/issues/3141)) ([0b6a744](https://github.com/coreplanelabs/switchboard/commit/0b6a744f05ad8635006dd0b101b963098513d9f2))
+* **core:** let requesters stop their own reviews ([#3097](https://github.com/coreplanelabs/switchboard/issues/3097)) ([a267c49](https://github.com/coreplanelabs/switchboard/commit/a267c4919d188e2d59357878e5c7f2e33948a425))
+* **core:** pin standalone reviews before startup ([#3092](https://github.com/coreplanelabs/switchboard/issues/3092)) ([8cbf1c1](https://github.com/coreplanelabs/switchboard/commit/8cbf1c183751e4da2a6f423a89a273819727302d))
+* **core:** post reviews that cite public source repositories ([#3147](https://github.com/coreplanelabs/switchboard/issues/3147)) ([09d8a1e](https://github.com/coreplanelabs/switchboard/commit/09d8a1e7751fc97a513a33718a4239d41efbdfb3))
+* **core:** preserve unit updates during Workflow status checks ([#3144](https://github.com/coreplanelabs/switchboard/issues/3144)) ([37209db](https://github.com/coreplanelabs/switchboard/commit/37209dbd707b00d38d28030c2f49cddaf375ea15))
+* **core:** read legacy history and report GitHub tool failures ([#3083](https://github.com/coreplanelabs/switchboard/issues/3083)) ([62032bb](https://github.com/coreplanelabs/switchboard/commit/62032bbc178486d316d726dc37d6c0f142b48415))
+* **core:** recheck parents before launching child runs ([#3158](https://github.com/coreplanelabs/switchboard/issues/3158)) ([ea891ef](https://github.com/coreplanelabs/switchboard/commit/ea891eff5731eb27570b5a98a91e2fa43a384b98))
+* **core:** recover saved check results without repeating commands ([#3103](https://github.com/coreplanelabs/switchboard/issues/3103)) ([a7cb1ae](https://github.com/coreplanelabs/switchboard/commit/a7cb1ae85a992c0eb8276886f1a950dcd8d4d9b4))
+* **core:** retain check failures before harness shutdown ([#3089](https://github.com/coreplanelabs/switchboard/issues/3089)) ([3b0d52d](https://github.com/coreplanelabs/switchboard/commit/3b0d52d93b8694f88b9aac19f634877d6f3979b5))
+* **core:** retain Pi failure details and recover incomplete streams ([#3116](https://github.com/coreplanelabs/switchboard/issues/3116)) ([a48b0a2](https://github.com/coreplanelabs/switchboard/commit/a48b0a20adf5c6932a891b490236bf0b061d5137))
+* **core:** retain safe diagnostics for config request failures ([#3143](https://github.com/coreplanelabs/switchboard/issues/3143)) ([54d0573](https://github.com/coreplanelabs/switchboard/commit/54d057324cac9541c2d2e05f5a0e01cfb0d9128a))
+* **core:** select named work through settled PR history ([#3131](https://github.com/coreplanelabs/switchboard/issues/3131)) ([4619aa8](https://github.com/coreplanelabs/switchboard/commit/4619aa800d0e0bfdab9d67159ea2bdfd5e398309))
+* **core:** stop extra verdict requests after a second head move ([#3084](https://github.com/coreplanelabs/switchboard/issues/3084)) ([b7afc69](https://github.com/coreplanelabs/switchboard/commit/b7afc69c6ce46d4982a32e26b227b3fce0157f13))
+* **core:** stop verdict recovery when review heads disagree ([#3093](https://github.com/coreplanelabs/switchboard/issues/3093)) ([412dbdf](https://github.com/coreplanelabs/switchboard/commit/412dbdf6cd042e88f82897d6544ec327571ceb11))
+* **core:** verify retained bytes before using public source access ([#3148](https://github.com/coreplanelabs/switchboard/issues/3148)) ([dcc760a](https://github.com/coreplanelabs/switchboard/commit/dcc760a0701a98bb66c8eec24b156ab884fcdc83))
+* **deploy:** accept Cloudflare domain references when recreating staging ([#3165](https://github.com/coreplanelabs/switchboard/issues/3165)) ([9a676c1](https://github.com/coreplanelabs/switchboard/commit/9a676c1126b315fef71d390818efcdf4465f0ab7))
+* **deploy:** identify Resident admission holds in refusal logs ([#3086](https://github.com/coreplanelabs/switchboard/issues/3086)) ([7a85fa5](https://github.com/coreplanelabs/switchboard/commit/7a85fa5ec0cceda42ac59b1fc398cf0f526bff4a))
+* **deploy:** keep staging recovery under explicit control ([#3126](https://github.com/coreplanelabs/switchboard/issues/3126)) ([5920f97](https://github.com/coreplanelabs/switchboard/commit/5920f97b18457ff6b4bac81c57f54c4bc421cfaf))
+* **deploy:** protect request records during manual recovery ([#3114](https://github.com/coreplanelabs/switchboard/issues/3114)) ([c67f880](https://github.com/coreplanelabs/switchboard/commit/c67f88002a283768794f77bb6bc8ddd3d507625c))
+* **deploy:** recover Resident permit acknowledgements without replay ([#3106](https://github.com/coreplanelabs/switchboard/issues/3106)) ([4d7c9af](https://github.com/coreplanelabs/switchboard/commit/4d7c9afea9417dcf944abc09365f737800bdf369))
+* **deploy:** restore ordinary staging with a reviewed reset ([#3159](https://github.com/coreplanelabs/switchboard/issues/3159)) ([100eac3](https://github.com/coreplanelabs/switchboard/commit/100eac33b24f7fd6a164d94cbd0b6c043235c6f4))
+* **deploy:** resume a verified partial staging installation ([#3173](https://github.com/coreplanelabs/switchboard/issues/3173)) ([4dbc53c](https://github.com/coreplanelabs/switchboard/commit/4dbc53c067f25dd5e0b3d28cb96ea3455bb3754e))
+* **deploy:** run staging recovery through CI ([#3129](https://github.com/coreplanelabs/switchboard/issues/3129)) ([924c343](https://github.com/coreplanelabs/switchboard/commit/924c3432c93786dff97ebf0b5baf63dfaa3a108a))
+* **deploy:** show which dependency field blocks a staging reset ([#3164](https://github.com/coreplanelabs/switchboard/issues/3164)) ([cd347cc](https://github.com/coreplanelabs/switchboard/commit/cd347cc2ed9461a4ed8986fbdf84844a8e2726cb))
+* **dispatcher:** explain routing attempts and deadline failures ([#3104](https://github.com/coreplanelabs/switchboard/issues/3104)) ([aac96f9](https://github.com/coreplanelabs/switchboard/commit/aac96f9e6294e0240d7aea53918434dbcedcaa05))
+* **dispatcher:** keep managed children on their parent PR ([#3125](https://github.com/coreplanelabs/switchboard/issues/3125)) ([6df3cd7](https://github.com/coreplanelabs/switchboard/commit/6df3cd77b632701f371993d700de4bf16d2d336a))
+* **memory:** save the next wake before state alarm work starts ([#3146](https://github.com/coreplanelabs/switchboard/issues/3146)) ([4b07ac1](https://github.com/coreplanelabs/switchboard/commit/4b07ac1bcb9231c79a094daf203d5a472abca4bb))
+* **resident:** contain run descendants for surgical hard stop ([#3132](https://github.com/coreplanelabs/switchboard/issues/3132)) ([f0b83b9](https://github.com/coreplanelabs/switchboard/commit/f0b83b9f2c3736426ca37b1e77c5b6e95349ceed))
+* **resident:** expose the saved reason a hard stop is blocked ([#3081](https://github.com/coreplanelabs/switchboard/issues/3081)) ([22531c8](https://github.com/coreplanelabs/switchboard/commit/22531c857e65677e4a9995366b83027b709017b3))
+* **resident:** preserve harness state across native calls ([#3137](https://github.com/coreplanelabs/switchboard/issues/3137)) ([78b9384](https://github.com/coreplanelabs/switchboard/commit/78b9384d50f52a8bbc7ecafd6744ff88665786d8))
+* **resident:** reconcile hard stops without blocking on retired work ([#3085](https://github.com/coreplanelabs/switchboard/issues/3085)) ([2e8dfe9](https://github.com/coreplanelabs/switchboard/commit/2e8dfe900e5e3e0abd147513471f1023a5b9fbc1))
+* **resident:** separate source and image identities ([#3135](https://github.com/coreplanelabs/switchboard/issues/3135)) ([99a7a79](https://github.com/coreplanelabs/switchboard/commit/99a7a794cb0e5749aac3a06260ef4c1d192292b4))
+* **review:** keep approval on the commit that was reviewed ([#3170](https://github.com/coreplanelabs/switchboard/issues/3170)) ([6ea4ff2](https://github.com/coreplanelabs/switchboard/commit/6ea4ff2b5ac44e688376654d01cfb76ff734142f))
+* **review:** retain full coverage during incremental inspection ([#3100](https://github.com/coreplanelabs/switchboard/issues/3100)) ([e749d6e](https://github.com/coreplanelabs/switchboard/commit/e749d6e25d3f03b8025dd0436043fa58d01bfd38))
+* **review:** retain uncertain managed publication ownership ([#3127](https://github.com/coreplanelabs/switchboard/issues/3127)) ([294679e](https://github.com/coreplanelabs/switchboard/commit/294679e2f27cea915500998c2ef8fe9042383b05))
+* **runs:** recover source validation after brief storage failures ([#3150](https://github.com/coreplanelabs/switchboard/issues/3150)) ([1b935c6](https://github.com/coreplanelabs/switchboard/commit/1b935c6b301b7f0176b5124b918e4eb7e654d1ee))
+* **runs:** report recovery holds when saving follow-ups ([#3156](https://github.com/coreplanelabs/switchboard/issues/3156)) ([4cd67dd](https://github.com/coreplanelabs/switchboard/commit/4cd67ddb6ba22c292a66d67fa2a4dd6132276471))
+* **runs:** retain concurrent source reads before delivery ([#3101](https://github.com/coreplanelabs/switchboard/issues/3101)) ([5949e10](https://github.com/coreplanelabs/switchboard/commit/5949e105ff7bea2299f5b656a922117ab8d7795f))
+* **runs:** retain large review artifacts while runs are active ([#3098](https://github.com/coreplanelabs/switchboard/issues/3098)) ([f5aa403](https://github.com/coreplanelabs/switchboard/commit/f5aa4035cf530e1332fb43d1908e2aca9c2c6ba6))
+* **runs:** retain reasons for rejected event appends ([#3091](https://github.com/coreplanelabs/switchboard/issues/3091)) ([2a03d3e](https://github.com/coreplanelabs/switchboard/commit/2a03d3ed223d4f12f04ca7a7efe192e54c1cb961))
+* **runs:** retain workspace setup failure evidence ([#3122](https://github.com/coreplanelabs/switchboard/issues/3122)) ([7c347a0](https://github.com/coreplanelabs/switchboard/commit/7c347a0ba8468969d30b7a1c8ecf5130b9ebe789))
+* **runs:** trace storage timeouts across Worker RPCs ([#3118](https://github.com/coreplanelabs/switchboard/issues/3118)) ([ea443b5](https://github.com/coreplanelabs/switchboard/commit/ea443b5ffcb65522fcd09e28465ad9f717eac1dc))
+* **ship:** retain the cause of refused admission ([#3123](https://github.com/coreplanelabs/switchboard/issues/3123)) ([a9cf04d](https://github.com/coreplanelabs/switchboard/commit/a9cf04de33fcbbdb6af9e30d2f7a1f57a2d1f4e7))
+* **tools:** read complete pinned review sources in byte pages ([#3099](https://github.com/coreplanelabs/switchboard/issues/3099)) ([e2483a0](https://github.com/coreplanelabs/switchboard/commit/e2483a0d333e45d1fc9fdf2c407c1f6c4a4acc0a))
+
+
+### Documentation
+
+* **core:** align OpenCode spec with current binary proofs ([#3108](https://github.com/coreplanelabs/switchboard/issues/3108)) ([07b6520](https://github.com/coreplanelabs/switchboard/commit/07b65208bc6712765947eb518460d79404b0d8d8))
+* **core:** require native MCP and Switchboard PR reviews ([#3087](https://github.com/coreplanelabs/switchboard/issues/3087)) ([6748869](https://github.com/coreplanelabs/switchboard/commit/67488697c0b15de6a7853a61cc501d0fcff44a2e))
+* **deploy:** explain the staging recovery sequence ([#3133](https://github.com/coreplanelabs/switchboard/issues/3133)) ([e4221b7](https://github.com/coreplanelabs/switchboard/commit/e4221b7bcd15219ede64dec959daaa9e470ae487))
+
+
+### Refactoring
+
+* **core:** prepare action context without a model call ([#3130](https://github.com/coreplanelabs/switchboard/issues/3130)) ([27a3131](https://github.com/coreplanelabs/switchboard/commit/27a3131c1cee89be29c721b2e01028a0ffa458ae))
+
 ## [1.297.3](https://github.com/coreplanelabs/switchboard/compare/v1.297.2...v1.297.3) (2026-10-14)
 
 
