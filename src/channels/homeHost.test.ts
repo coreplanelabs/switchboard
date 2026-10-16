@@ -1,3 +1,4 @@
+import { classificationOf } from "../core/trace/classify.js";
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { ALL_GRANTS } from "../core/authz/grants.js";
@@ -556,7 +557,8 @@ describe("Home authenticated host", () => {
     await s.execute();
     expect(await s.host.privateHistory(s.requests[0]!)).toEqual([]);
     s.removePrivateSource();
-    await expect(s.host.privateHistory(s.requests[0]!)).rejects.toThrow("unavailable");
+    const failure = await s.host.privateHistory(s.requests[0]!).catch((error: unknown) => error);
+    expect(classificationOf(failure)).toEqual({ kind: "refused", code: "history_conversation_unavailable" });
     await expect(s.requests[0]!.io.reply("Private result")).rejects.toThrow("unavailable");
   });
   it("binds its private worker audience to the captured source policy before model input or delivery", async () => {
@@ -583,7 +585,8 @@ describe("Home authenticated host", () => {
       ok: false,
       code: "direct-audience-unavailable",
     });
-    await expect(s.host.privateHistory(request)).rejects.toThrow("unavailable");
+    const failure = await s.host.privateHistory(request).catch((error: unknown) => error);
+    expect(classificationOf(failure)).toEqual({ kind: "refused", code: "history_epoch_unavailable" });
     await expect(request.io.reply("Old checkpoint output")).rejects.toThrow("unavailable");
   });
   it("refuses delayed source delivery after organization read permission is removed", async () => {

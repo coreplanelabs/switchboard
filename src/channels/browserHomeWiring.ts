@@ -140,6 +140,7 @@ export interface BrowserHomeWiringOptions {
   mergeLogin?: Parameters<typeof createBrowserHomeInstallation>[0]["mergeLogin"];
   mergeFacts?: Parameters<typeof createBrowserHomeInstallation>[0]["mergeFacts"];
   materializeNativeMedia?: BrowserHomeInstallationOptions["materializeNativeMedia"];
+  reportOwnerFailure?: BrowserHomeInstallationOptions["reportOwnerFailure"];
   launch(task: () => Promise<void>): void;
   nativeIo?(request: Omit<OrganizationExecutionRequest, "io">): ChannelIO | undefined;
   legacySlackIo?(audience: SlackDirectAudience): ChannelIO | undefined;
@@ -607,6 +608,7 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
         createHash("sha256")
           .update(JSON.stringify([options.config.config.grants ?? {}, options.config.config.restrict ?? {}]))
           .digest("hex"),
+      reportOwnerFailure: options.reportOwnerFailure,
       launch: options.launch,
       sourceIo: (request) => {
         if (request.envelope.source !== "browser") {

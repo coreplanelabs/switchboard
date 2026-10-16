@@ -1,3 +1,4 @@
+import { logOwnerFailure } from "./core/organization/ownerFailure.js";
 import { storageFailureNote } from "./core/storageFailureDiagnostic.js";
 import { createRunStop } from "./execution/runStop.js";
 import { createRunCheck } from "./execution/runCheck.js";
@@ -1343,6 +1344,9 @@ export async function runBot(): Promise<void> {
       const mergedAt = Date.parse(facts.mergedAt);
       if (!Number.isSafeInteger(mergedAt)) return;
       return { headSha: facts.headSha, mergeCommitSha: facts.mergeCommitSha, mergedAt };
+    },
+    reportOwnerFailure: (failure) => {
+      logOwnerFailure({ config, spanLog, buildCommit: build.commit }, failure);
     },
     launch: (task) => {
       if (draining) throw new Error("This process is draining.");

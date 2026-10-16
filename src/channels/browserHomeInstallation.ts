@@ -1,3 +1,4 @@
+import { historyFailure } from "../core/organization/ownerFailure.js";
 import { contextAccessForMessage } from "../core/dispatch/contextAccess.js";
 import { COMMAND_RUN_AGENT } from "../core/runOwner.js";
 import { isContextDependencies } from "../core/references/contextDependencies.js";
@@ -95,6 +96,7 @@ export interface BrowserHomeInstallationOptions {
   batchSize: number;
   contentTtlMs: number;
   sourceSnapshotTtlMs?: number;
+  reportOwnerFailure?: import("../core/organization/runtime.js").OrganizationRuntimeOptions["reportOwnerFailure"];
   launch(task: () => Promise<void>): void;
   now(): number;
   policyEpoch(): string;
@@ -1396,6 +1398,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     sourceSnapshotTtlMs: options.sourceSnapshotTtlMs,
     now: options.now,
     resolveActor: resolveOriginalInput,
+    reportOwnerFailure: options.reportOwnerFailure,
     launch: options.launch,
     readOriginalRun,
     sink,
@@ -1491,9 +1494,11 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     organization,
     historyContext: async (receiptId, reader, request, role) => {
       const resolved = await organization.resolve(reader.authentication);
-      if (!resolved) throw new Error("The history source could not be verified.");
+      if (!resolved)
+        throw historyFailure("history_provenance_unavailable", "The history source could not be verified.");
       const provenance = await options.store.execute({ action: "provenance", ...resolved, receiptId });
-      if (provenance.status !== "provenance") throw new Error("The history source could not be verified.");
+      if (provenance.status !== "provenance")
+        throw historyFailure("history_provenance_unavailable", "The history source could not be verified.");
       const ref = provenance.provenance.sourceReference;
       if (!ref?.messageId) return;
       const key = provenance.provenance.source === "slack" ? `${ref.channelId}:${ref.messageId}` : ref.messageId;
@@ -1512,7 +1517,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       const marked =
         original.envelope.nativeMediaDigest !== undefined || original.envelope.continuation?.kind === "confirm";
       if (role === "assistant" && !live && !stored)
-        throw new Error("The retained history producer could not be verified.");
+        throw historyFailure("history_producer_unavailable", "The retained history producer could not be verified.");
       const modelProducer = (live?.meta.agent ?? stored?.agent) !== COMMAND_RUN_AGENT;
       if (
         marked &&
@@ -1520,7 +1525,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
         modelProducer &&
         (!isContextDependencies(context) || !context.nativeMediaSources?.length)
       )
-        throw new Error("The retained history source could not be verified.");
+        throw historyFailure("history_context_unavailable", "The retained history source could not be verified.");
       const pointer = live?.meta.request?.originalOrganizationInput as
         import("../core/dispatch/originalOrganizationInput.js").OriginalOrganizationDispatch | undefined;
       if (
@@ -1529,16 +1534,16 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
         ("nativeMediaSources" in context || "savedNativeMediaSources" in context) &&
         !isContextDependencies(context)
       )
-        throw new Error("The saved history source could not be verified.");
+        throw historyFailure("history_context_unavailable", "The saved history source could not be verified.");
       if (pointer?.savedNativeMediaSource && (!isContextDependencies(context) || !context.nativeMediaSources?.length))
-        throw new Error("The saved history source could not be verified.");
+        throw historyFailure("history_context_unavailable", "The saved history source could not be verified.");
       if (!isContextDependencies(context) || !context.nativeMediaSources?.length) return;
       const consumer = withOriginalOrganizationDispatch(withChatActor(request.msg, reader.actor), {
         ingressRunId: request.runId,
         organizationSequence: request.receipt.revision,
       });
       if (!(await contextAccessForMessage(core, { msg: consumer, io: sink(request) }).validateDependencies(context)).ok)
-        throw new Error("The saved history source could not be verified.");
+        throw historyFailure("history_context_unavailable", "The saved history source could not be verified.");
       // Carry the same canonical envelope so the later execution keeps and
       // rechecks this provenance through compaction, tools and publication.
       return context;

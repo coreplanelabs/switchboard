@@ -19,9 +19,9 @@ import type { SpanLog } from "./trace/spanLog.js";
 // Object until `bindRun` points it at a registry run), the card sink (a Null
 // Object until `bindCard`), and a collector that keeps every record so far,
 // so a card closed before any run existed can still print the request's shape.
-// `startProcessRoot` is the other constructor: a root for the bot's own work
-// outside any request (item 20) — the reconnect catch-up pass, the drain, a
-// deploy step — with the leading sinks only, since nothing streams or paints.
+// `startProcessRoot` records lifecycle work and owner failure diagnostics
+// outside the agent's request trace (item 20). It uses the leading sinks
+// only, since nothing streams or paints.
 
 export interface RequestTrace {
   /** The request's root span; `dispatch()` ends it in its outermost finally. */
@@ -137,21 +137,25 @@ export function startRequestRoot(deps: RequestTraceDeps, opts: RequestRootOption
   };
 }
 
-/** The roots the bot starts for its own work, outside any request: the
+/** Process roots outside agent request traces: the
  *  reconnect catch-up pass, the drain, a deploy step, the fleet watcher's
  *  background read of the resident listing, and a residents dashboard page
  *  (a browser GET that causes a resident Worker call, so the call has a trace
- *  to adopt). */
+ *  to adopt), and owner failures that may precede dispatch. */
 export type ProcessRootName =
-  "slack.catch_up" | "drain" | `deploy.step.${string}` | "resident.fleet_refresh" | "dashboard.residents";
+  | "slack.catch_up"
+  | "drain"
+  | `deploy.step.${string}`
+  | "resident.fleet_refresh"
+  | "dashboard.residents"
+  | "organization.owner_failure";
 
 export interface ProcessRootOptions {
   attrs?: SpanAttrs;
   startedAt?: number;
 }
 
-/** A root for work no request caused (docs/reference/specs/tracing.md item 20): the
- *  reconnect catch-up pass, the drain, one deploy step. Leading sinks only —
+/** A process root for lifecycle or diagnostic work (tracing item 20). Leading sinks only —
  *  it streams to no run and paints no card — so under `tracing.log: roots` it
  *  is one JSON line when it ends, its facts in `attrs`. The caller ends it. */
 export function startProcessRoot(deps: RequestTraceDeps, name: ProcessRootName, opts: ProcessRootOptions = {}): Span {

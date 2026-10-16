@@ -1,3 +1,4 @@
+import type { ErrorKind } from "../trace/types.js";
 import { z } from "zod";
 import { identitySchema } from "../identity/contract.js";
 import { nativeMediaSchema, nativeMediaDigestSchema } from "../nativeMedia.js";
@@ -443,4 +444,42 @@ export type OrganizationResult = z.infer<typeof resultSchema>;
 /** Authenticated internal seam. Adapters cannot submit commands directly. */
 export interface OrganizationStore {
   execute(command: OrganizationCommand): Promise<OrganizationResult>;
+}
+
+/** Closed owner-task diagnostics carry no source content or execution authority. */
+export const ORGANIZATION_HISTORY_FAILURE_CODES = [
+  "history_conversation_unavailable",
+  "history_epoch_unavailable",
+  "history_tail_unavailable",
+  "history_after_tail_unavailable",
+  "history_after_context_unavailable",
+  "history_provenance_unavailable",
+  "history_producer_unavailable",
+  "history_context_unavailable",
+] as const;
+export type OrganizationHistoryFailureCode = (typeof ORGANIZATION_HISTORY_FAILURE_CODES)[number];
+
+export type OrganizationOwnerStage =
+  | "actor"
+  | "authorization"
+  | "execution-fence"
+  | "source-snapshot"
+  | "request"
+  | "sink"
+  | "execute"
+  | "settlement"
+  | "uncertain-settlement"
+  | "schedule";
+interface OwnerFailure {
+  stage: OrganizationOwnerStage;
+  kind: ErrorKind;
+  code?: OrganizationHistoryFailureCode;
+}
+export interface OrganizationOwnerFailure {
+  runId: string;
+  receiptId: string;
+  requestDigest: string;
+  branch: "dispatch" | "answer" | "confirm";
+  failure: OwnerFailure;
+  firstFailure?: OwnerFailure;
 }
