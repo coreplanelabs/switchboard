@@ -2075,13 +2075,20 @@ describe("browser installation", () => {
     s.installation.queueMergeObservations(s.context, rows);
     s.installation.queueMergeObservations(s.context, rows);
     expect(s.tasks).toEqual([]);
+    expect(await s.installation.observeMerge(s.context, "fixture:task-3")).toBe("held");
+    expect(blocked.map((row) => row.pr)).toEqual([1, 2]);
     blocked.forEach((row) => row.release());
     await Promise.all(first);
     expect((await home.history(reader)).units.map((row) => row.unit.id)).toEqual(["task-1", "task-2"]);
+    const foreground = s.installation.observeMerge(s.context, "fixture:task-3");
+    await vi.waitFor(() => expect(blocked.map((row) => row.pr)).toEqual([1, 2, 3]));
+    expect(await s.installation.observeMerge(s.context, "fixture:task-3")).toBe("held");
     s.installation.queueMergeObservations(s.context, rows);
     const second = s.tasks.splice(0).map((task) => task());
+    expect(second).toHaveLength(1);
     await vi.waitFor(() => expect(blocked.map((row) => row.pr)).toEqual([1, 2, 3, 4]));
     blocked.slice(2).forEach((row) => row.release());
+    expect(await foreground).toBe("observed");
     await Promise.all(second);
     expect((await home.history(reader)).units.map((row) => row.unit.id)).toEqual([
       "task-1",

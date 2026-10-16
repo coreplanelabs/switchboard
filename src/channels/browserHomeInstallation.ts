@@ -1499,7 +1499,10 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     const fresh = await current(context).catch(() => undefined);
     return fresh?.actor.id === actual.actor.id && epoch === (await host.currentEpoch(context)) ? result : {};
   }
-  async function observeMerge(context: HomeRuntimeContext, key: string): Promise<"observed" | "held" | "unchanged"> {
+  async function readMergeObservation(
+    context: HomeRuntimeContext,
+    key: string,
+  ): Promise<"observed" | "held" | "unchanged"> {
     if (
       !options.mergeFacts ||
       context.actor.viewingAs ||
@@ -1571,6 +1574,15 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     return replaced.ok ? "observed" : "held";
   }
   const observing = new Set<string>();
+  async function observeMerge(context: HomeRuntimeContext, key: string): Promise<"observed" | "held" | "unchanged"> {
+    if (observing.has(key) || observing.size >= options.batchSize) return "held";
+    observing.add(key);
+    try {
+      return await readMergeObservation(context, key);
+    } finally {
+      observing.delete(key);
+    }
+  }
   let observationOffset = 0;
   function queueMergeObservations(context: HomeRuntimeContext, rows: readonly HomeUnit[]) {
     if (!options.mergeFacts || !rows.length || context.actor.viewingAs || observing.size >= options.batchSize) return;
@@ -1585,7 +1597,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       try {
         options.launch(async () => {
           try {
-            await observeMerge(context, key);
+            await readMergeObservation(context, key);
           } finally {
             observing.delete(key);
           }

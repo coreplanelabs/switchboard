@@ -73,6 +73,8 @@ export interface HomeUnit {
   unit: UnitFacts;
   instance: InstanceFacts;
   conditions: HomeCondition[];
+  /** Current reader is the saved merge recipient or original work creator. */
+  mergeCompletionForReader?: boolean;
   nextAction: { kind: "recorded"; text: string } | { kind: "unknown" };
 }
 export interface HomePipeline {
@@ -288,6 +290,12 @@ export function createHomeService(deps: HomeServiceDeps): {
       unit: facts,
       instance: visibleInstance(instance, unit),
       conditions,
+      ...(facts.mergeCompletion
+        ? {
+            mergeCompletionForReader:
+              assignedToReader(input, unit.mergeAttention!.assignedTo) || assignedToReader(input, instance.userId),
+          }
+        : {}),
       nextAction: nextCondition?.nextAction
         ? { kind: "recorded", text: nextCondition.nextAction }
         : { kind: "unknown" },
