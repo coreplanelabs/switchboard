@@ -55,6 +55,9 @@ import type { HomeRuntimeContext, HomeThreadProjection } from "./homeRuntime.js"
 import type { HomeAnswerTarget } from "./homeSeed.js";
 import type { LegacySlackAudienceOrigin, LegacySlackRecipient } from "./legacySlackAudience.js";
 import type { Actor } from "../core/authz/types.js";
+import { homeAttachedContext, type HomeContextMetadata } from "./homeAttachedContext.js";
+import { wrapUntrusted } from "../core/untrusted.js";
+import { unitFactsForPrivateRecipient, unitFactsOf } from "../core/unitRuns.js";
 import type { ConversationDeps } from "./web.js";
 import type {
   createOrganizationAuthentication,
@@ -619,7 +622,8 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     if (!owned?.io.authoritativePrivateHistory) return;
     // A completed asking run can still provide retained read context for its
     // standing unit. This does not rehost or resume that completed input.
-    const history = await owned.io.authoritativePrivateHistory();
+    const history =
+      owned.envelope.actor.stream !== null ? await host.privateHistory(owned) : await machineHistory(owned);
     // Recheck deletion, expiry and authority after the asynchronous history
     // read. The current original input is excluded by that reader and appears
     // exactly once here, even when an older message had identical text.
@@ -791,16 +795,146 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       return;
     return owned;
   }
+  async function attachedMetadata(request: Omit<OrganizationExecutionRequest, "io">) {
+    if (!request.envelope.context.length) return;
+    const fresh = await options.authentication.resolveEnvelope(request.envelope);
+    if (fresh.status !== "resolved") throw new Error("Attached work context is unavailable.");
+    const context = { actor: fresh.actor, authentication: fresh.authentication };
+    const predicate = readableRuns(fresh.actor);
+    const rows: HomeContextMetadata[] = [];
+    const privateReads: { instance: CoordinatorInstance; unit: CoordinatorUnit }[] = [];
+    const prUrl = (repo: string, number: number) =>
+      /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) && Number.isSafeInteger(number) && number > 0
+        ? `https://github.com/${repo}/pull/${number}`
+        : undefined;
+    for (const ref of request.envelope.context) {
+      if (!(await options.canReadContext(context, ref))) throw new Error("Attached work context is unavailable.");
+      const base = { kind: ref.kind, key: ref.key };
+      if (ref.kind === "repository") {
+        rows.push({ ...base, url: `https://github.com/${ref.key}`, repository: ref.key });
+      } else if (ref.kind === "unit") {
+        const key = parseUnitKey(ref.key);
+        if (!key) throw new Error("Attached work context is unavailable.");
+        const [instance, units] = await Promise.all([
+          options.coordinator.get(key.instanceId),
+          options.coordinator.listUnits(key.instanceId),
+        ]);
+        const matching = units.filter((unit) => unitKeyOf(unit) === ref.key);
+        if (!instance || instance.id !== key.instanceId || matching.length !== 1)
+          throw new Error("Attached work context is unavailable.");
+        const unit = matching[0]!;
+        const privateRead = unit.workBrief !== undefined && (await canReadPrivateUnit(context, instance, unit));
+        if (privateRead) privateReads.push({ instance, unit });
+        const facts = privateRead ? unitFactsForPrivateRecipient(unit) : unitFactsOf(unit);
+        rows.push({
+          ...base,
+          url: `/runs/unit/${encodeURIComponent(ref.key)}`,
+          title: facts.title,
+          repository: instance.repo,
+          branch: facts.branch,
+          state: facts.ending?.kind ?? facts.idle?.why,
+          pullRequest: facts.pr && prUrl(instance.repo, facts.pr.number),
+        });
+      } else if (ref.kind === "pipeline") {
+        const instance = await options.coordinator.get(ref.key);
+        if (!instance || instance.id !== ref.key || !(await options.runs.listInstanceUnits(ref.key, predicate)).length)
+          throw new Error("Attached work context is unavailable.");
+        rows.push({ ...base, url: `/pipelines/${encodeURIComponent(ref.key)}`, repository: instance.repo });
+      } else if (ref.kind === "run") {
+        const run = await options.runs.getRun(ref.key);
+        if (!run.ok || run.value.id !== ref.key || !matchesPredicate(predicate, run.value))
+          throw new Error("Attached work context is unavailable.");
+        rows.push({
+          ...base,
+          url: `/runs/${encodeURIComponent(ref.key)}`,
+          repository: run.value.repo,
+          agent: run.value.agent,
+          state: run.value.status,
+          pullRequest: run.value.repo && run.value.pr && prUrl(run.value.repo, run.value.pr.number),
+        });
+      } else if (ref.kind === "pull-request") {
+        const match = /^([^#]+)#([1-9][0-9]*)$/.exec(ref.key);
+        const url = match && prUrl(match[1]!, Number(match[2]));
+        const read =
+          match && (await options.runs.listFindings({ repo: match[1]!, number: Number(match[2]) }, predicate));
+        if (!url || !read || !read.ok) throw new Error("Attached work context is unavailable.");
+        rows.push({ ...base, url, repository: match![1]! });
+      } else {
+        // A thread attachment names the readable address, not its transcript bytes.
+        rows.push({ ...base, url: `/threads/${encodeURIComponent(ref.key)}` });
+      }
+    }
+    const final = await options.authentication.resolveEnvelope(request.envelope);
+    if (final.status !== "resolved" || final.actor.id !== fresh.actor.id)
+      throw new Error("Attached work context is unavailable.");
+    const checked = { actor: final.actor, authentication: final.authentication };
+    for (const ref of request.envelope.context)
+      if (!(await options.canReadContext(checked, ref))) throw new Error("Attached work context is unavailable.");
+    for (const read of privateReads)
+      if (!(await canReadPrivateUnit(checked, read.instance, read.unit)))
+        throw new Error("Attached work context is unavailable.");
+    return homeAttachedContext(rows);
+  }
+  async function withAttachedMetadata(request: Omit<OrganizationExecutionRequest, "io">, history: HistoryItem[]) {
+    const metadata = await attachedMetadata(request);
+    if (!metadata) return history;
+    // The existing builder drops leading assistant slots. A quoted, uncredited
+    // context preface keeps the metadata separate from the next actual user.
+    // It follows old orphan assistant turns, so those still remain excluded.
+    return [
+      ...history,
+      ...(!history.some((turn) => turn.role === "user")
+        ? [
+            {
+              role: "user" as const,
+              text: wrapUntrusted(
+                "Server-provided work references follow as quoted metadata. This is not a person's message.",
+              ),
+            },
+          ]
+        : []),
+      metadata,
+    ];
+  }
   function sink(request: Omit<OrganizationExecutionRequest, "io">): ChannelIO {
     const io = Object.create(host.sink(request)) as ChannelIO;
     io.authoritativePrivateSourceHistory = (id) =>
       id === request.runId ? originalPrivateSourceHistory(id) : Promise.resolve(undefined);
-    if (request.envelope.actor.stream !== null || request.actor.kind !== "service") return io;
+    if (request.envelope.actor.stream !== null || request.actor.kind !== "service") {
+      const originalHistory = io.authoritativePrivateHistory?.bind(io);
+      const rehost = io.rehostOrganizationInput?.bind(io);
+      if (originalHistory)
+        io.authoritativePrivateHistory = async (message) => {
+          const history = await originalHistory(message);
+          const pointer = message && originalOrganizationDispatchOf(message);
+          const owned =
+            pointer && pointer.ingressRunId !== request.runId
+              ? await originalBinding(pointer.ingressRunId, message)
+              : request;
+          if (!owned) throw new Error("Attached work context is unavailable.");
+          if (!owned.envelope.context.length) return history;
+          const result = await withAttachedMetadata(owned, history);
+          await originalHistory(message);
+          return result;
+        };
+      if (rehost)
+        io.rehostOrganizationInput = async (message) => {
+          const restored = await rehost(message);
+          const pointer = restored && originalOrganizationDispatchOf(restored.msg);
+          const owned = pointer && (await originalBinding(pointer.ingressRunId, restored.msg));
+          return owned ? { msg: owned.msg, io: owned.io } : undefined;
+        };
+      return io;
+    }
     return Object.assign(io, {
       authoritativePrivateHistory: async (message?: IncomingMessage) => {
         const owned = message ? await machineInput(message) : request;
         if (!owned) throw new Error("The original machine input is unavailable.");
-        return machineHistory(owned);
+        const original = await machineHistory(owned);
+        if (!owned.envelope.context.length) return original;
+        const history = await withAttachedMetadata(owned, original);
+        await machineHistory(owned);
+        return history;
       },
       rehostOrganizationInput: async (message: IncomingMessage) => {
         const owned = await machineInput(message);
@@ -822,8 +956,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
           ...owner,
           authoritativeHistory: true,
           organizationConversation: true,
-          seed:
-            request.envelope.actor.stream !== null ? await host.privateHistory(request) : await machineHistory(request),
+          seed: await request.io.authoritativePrivateHistory!(),
         }
       : owner;
   }

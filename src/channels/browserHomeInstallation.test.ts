@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { handleIngressRequest } from "./http.js";
 import { InMemoryPersonalTokenStore, digestBearer } from "../mcp/personalTokens.js";
 import type { Provider } from "../core/provider.js";
@@ -48,6 +48,8 @@ import { InMemoryConfirmationStore } from "../core/confirmations.js";
 import { InMemoryCoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "../core/coordinator/contract.js";
 import { seedCoordinatorInstance, seedCoordinatorUnit } from "../core/testing/coordinatorInstance.js";
+import { readableRuns } from "./liveView/viewer.js";
+import { matchesPredicate } from "../core/authz/predicate.js";
 import { dispatch, dispatchClick, type CoreDeps } from "../core/dispatcher.js";
 import { withOriginalOrganizationDispatch } from "../core/dispatch/privateDestination.js";
 import { NullMemoryStore } from "../core/memory/stores.js";
@@ -291,6 +293,7 @@ async function fixture(
   let available = true,
     writable = true;
   let browserGrants: Grants = ALL_GRANTS;
+  let contextReadable = true;
   const authentication = createOrganizationAuthentication({
     organization: "fixture",
     mappings,
@@ -381,7 +384,22 @@ async function fixture(
       history: async () => [{ role: "user", text: "Untrusted raw source history" }],
       status: async () => ({ update() {}, done: async () => {} }),
     }),
-    canReadContext: async (ctx, ref) => ref.kind === "repository" && (await repoChoices.authorize(ctx.actor, ref.key)),
+    canReadContext: async (ctx, ref) => {
+      if (!contextReadable) return false;
+      if (ref.kind === "repository") return repoChoices.authorize(ctx.actor, ref.key);
+      const predicate = readableRuns(ctx.actor);
+      if (ref.kind === "unit") return (await runs.listUnitRuns(ref.key, predicate)).ok;
+      if (ref.kind === "pipeline") return (await runs.listInstanceUnits(ref.key, predicate)).length > 0;
+      if (ref.kind === "run") {
+        const read = await runs.getRun(ref.key);
+        return read.ok && matchesPredicate(predicate, read.value);
+      }
+      if (ref.kind === "pull-request") {
+        const match = /^([^#]+)#([1-9][0-9]*)$/.exec(ref.key);
+        return !!match && (await runs.listFindings({ repo: match[1]!, number: Number(match[2]) }, predicate)).ok;
+      }
+      return false;
+    },
     repositories: (ctx) => repoChoices.read(ctx.actor),
     sourceRepository: (ctx, input) => {
       if (ctx.authentication.source !== "browser") return Promise.resolve("sample/api");
@@ -454,7 +472,7 @@ async function fixture(
     if (!task) throw new Error("No original owner task");
     await task();
   }
-  async function seedQuestion() {
+  async function seedQuestion(recordFacts: Partial<RunRecord> = {}) {
     seedCoordinatorInstance(
       coordinator,
       linkedSlack ? { ...instance, userId: "slack:UALICE", channelId: "slack:D1", threadKey: targetThread } : instance,
@@ -486,6 +504,7 @@ async function fixture(
       truncated: false,
       diagnosis: analyzeRunFriction([]),
       events: [{ type: "input", text: "Original task", messageId: "original", seq: 1 }],
+      ...recordFacts,
     };
     expect((await runStore.put(record)).stored).toBe(true);
   }
@@ -493,6 +512,10 @@ async function fixture(
   return {
     installation,
     authentication,
+    runs,
+    denyContext: () => {
+      contextReadable = false;
+    },
     core,
     path,
     created,
@@ -551,6 +574,268 @@ async function fixture(
   };
 }
 describe("browser installation", () => {
+  it("gives real Core current quoted attached work metadata without changing the authored request or broad receiver", async () => {
+    const completions: import("../core/provider.js").CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fixture",
+      complete: async (request) => {
+        completions.push(structuredClone(request));
+        return {
+          content: [{ type: "text", text: "The recorded unit remains on its original branch." }],
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const s = await fixture(false, false, provider);
+    await s.seedQuestion({ repo: "sample/api", pr: { number: 42, url: "https://github.com/sample/api/pull/42" } });
+    seedCoordinatorUnit(s.coordinator, { ...unit, pr: { number: 42, url: "https://github.com/sample/api/pull/42" } });
+    const home = (await s.request("GET", "/home/session")).body;
+    const input = {
+      key: home.submissionKey,
+      revision: home.destination.revision,
+      destination: { kind: "broad" as const },
+      text: "Explain this unit",
+      context: [
+        { kind: "unit" as const, key: "fixture:original" },
+        { kind: "run" as const, key: "original-child" },
+        { kind: "pull-request" as const, key: "sample/api#42" },
+        { kind: "pipeline" as const, key: "fixture" },
+      ],
+    };
+    expect((await s.request("POST", "/home/send", input)).status).toBe(200);
+    await s.execute();
+    expect(completions).toHaveLength(1);
+    const metadata = completions[0]!.messages.find(
+      (message) =>
+        message.role === "assistant" &&
+        message.content.some((part) => part.type === "text" && part.text.includes("Attached work metadata")),
+    );
+    const text = metadata?.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n") ?? "";
+    expect(text).toContain("UNTRUSTED CONTENT");
+    expect(text).toContain('"title":"Original unit"');
+    expect(text).toContain('"branch":"codex/original"');
+    expect(text).toContain('"url":"/runs/unit/fixture%3Aoriginal"');
+    expect(text).toContain('"url":"/runs/original-child"');
+    expect(text).toContain('"url":"https://github.com/sample/api/pull/42"');
+    expect(text).toContain('"url":"/pipelines/fixture"');
+    expect(completions[0]!.messages.at(-1)).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "Explain this unit" }],
+    });
+    const replay = await s.installation.organization.replay(s.context.authentication, {
+      key: input.key,
+      revision: input.revision,
+      content: input.text,
+      context: input.context,
+      destination: input.destination,
+    });
+    expect(replay).toMatchObject({ status: "receipt", receipt: { status: "accepted" }, duplicate: true });
+    if (replay?.status !== "receipt" || !replay.receipt.ownerRunId) throw new Error("No original owner");
+    expect(await s.installation.originalPrivateSourceHistory(replay.receipt.ownerRunId)).toEqual([
+      { role: "user", text: "Explain this unit", user: "access:alice" },
+    ]);
+    const row = await s.ledger.readIngressByRun(replay.receipt.ownerRunId);
+    expect(row).toMatchObject({
+      status: "record",
+      record: {
+        origin: {
+          destination: { kind: "broad" },
+          sourceReference: { actorId: "access:alice", userId: "access:alice", threadKey: "web:alice:organization" },
+        },
+      },
+    });
+    expect(s.created).toEqual([]);
+    const stream = await s.installation.organization.streamTail(s.context.authentication);
+    expect(stream).toMatchObject({ status: "stream_tail" });
+    if (stream.status !== "stream_tail") throw new Error("No private stream");
+    expect(stream.entries.map((entry) => entry.content)).toEqual([
+      "Explain this unit",
+      "The recorded unit remains on its original branch.",
+    ]);
+  });
+
+  it("quotes only current owned private-unit facts through real Core without reading its work brief", async () => {
+    let read = false,
+      turns = 0;
+    const requests: import("../core/provider.js").CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fixture",
+      complete: async (request) => {
+        requests.push(structuredClone(request));
+        if (!read && ++turns <= 2)
+          return {
+            content: [
+              {
+                type: "tool_use",
+                id: `start-context-${turns}`,
+                name: "work_start",
+                input: {
+                  repo: "sample/api",
+                  question: "Own private task",
+                  schemaVersion: 1,
+                  cause: { kind: "unknown", reason: "Private implementation details outside metadata" },
+                  evidence: { availability: "unavailable", reason: "Code-only change" },
+                  requirements: { analysis: "not_required", evidence: "may_be_unavailable" },
+                  acceptance: "A reviewed change",
+                  findings: [],
+                  requestedChange: "Own private task",
+                  sourceMessage: "Start own task",
+                },
+              },
+            ],
+            stopReason: "tool_use",
+          };
+        return {
+          content: [{ type: "text", text: read ? "The unit remains on its recorded branch." : "Owned work started." }],
+          stopReason: "end_turn",
+        };
+      },
+    };
+    const s = await fixture(false, false, provider, true, true);
+    const first = (await s.request("GET", "/home/session")).body;
+    expect(
+      (
+        await s.request("POST", "/home/send", {
+          key: first.submissionKey,
+          revision: first.destination.revision,
+          destination: { kind: "broad" },
+          text: "Start own task",
+          context: [{ kind: "repository", key: "sample/api" }],
+        })
+      ).status,
+    ).toBe(200);
+    await s.execute();
+    expect(s.created).toHaveLength(1);
+    const units = await s.coordinator.listUnits(s.created[0]!);
+    expect(units).toHaveLength(1);
+    expect(units[0]!.workBrief?.cause).toEqual({
+      kind: "unknown",
+      reason: "Private implementation details outside metadata",
+    });
+    read = true;
+    const last = (await s.request("GET", "/home/session")).body;
+    const key = `${s.created[0]}:${units[0]!.unit}`;
+    expect(
+      (
+        await s.request("POST", "/home/send", {
+          key: last.submissionKey,
+          revision: last.destination.revision,
+          destination: { kind: "broad" },
+          text: "Explain this unit",
+          context: [{ kind: "unit", key }],
+        })
+      ).status,
+    ).toBe(200);
+    await s.execute();
+    const context = requests
+      .at(-1)!
+      .messages.filter((message) => message.role === "assistant")
+      .flatMap((message) => message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])))
+      .find((text) => text.includes("Attached work metadata"));
+    expect(context).toContain('"title":"Own private task"');
+    expect(context).toContain('"repository":"sample/api"');
+    expect(context).not.toContain("Private implementation details outside metadata");
+    expect(context).not.toContain("workBrief");
+    expect(s.created).toHaveLength(1);
+  });
+
+  it("reads queued input B's exact attachments through its guarded IO without inheriting input A metadata", async () => {
+    const s = await fixture();
+    await s.seedQuestion();
+    const admit = async (
+      text: string,
+      context: import("../core/organization/service.js").OrganizationAdmissionInput["context"],
+    ) => {
+      const home = (await s.request("GET", "/home/session")).body;
+      expect(
+        (
+          await s.request("POST", "/home/send", {
+            key: home.submissionKey,
+            revision: home.destination.revision,
+            destination: { kind: "broad" },
+            text,
+            context,
+          })
+        ).status,
+      ).toBe(200);
+      const resolved = await s.installation.organization.resolve(s.context.authentication);
+      if (!resolved) throw new Error("No own source");
+      const saved = await s.store.execute({
+        action: "submission",
+        ...resolved,
+        source: "browser",
+        key: home.submissionKey,
+      });
+      if (saved.status !== "submission" || !saved.receipt.ownerRunId) throw new Error("No retained owner");
+      const owned = await s.installation.originalBinding(saved.receipt.ownerRunId);
+      if (!owned) throw new Error("No protected original input");
+      return owned;
+    };
+    const a = await admit("Explain the attached unit", [{ kind: "unit", key: "fixture:original" }]);
+    const b = await admit("Explain the attached run", [{ kind: "run", key: "original-child" }]);
+    const message = withOriginalOrganizationDispatch(b.msg, {
+      ingressRunId: b.runId,
+      organizationSequence: b.receipt.revision,
+    });
+    const history = await a.io.authoritativePrivateHistory!(message);
+    const metadata = history.find((turn) => turn.text.includes("Attached work metadata"));
+    expect(metadata?.text).toContain('"kind":"run","key":"original-child"');
+    expect(metadata?.text).not.toContain('"title":"Original unit"');
+    expect(metadata?.user).toBeUndefined();
+    const rehosted = await a.io.rehostOrganizationInput!(message);
+    expect(rehosted?.msg).toMatchObject({
+      text: "Explain the attached run",
+      userId: "access:alice",
+      threadKey: "web:alice:organization",
+    });
+    expect(await rehosted!.io.authoritativePrivateHistory!(rehosted!.msg)).toEqual(history);
+    expect(await s.installation.originalPrivateSourceHistory(b.runId)).toEqual([
+      { role: "user", text: "Explain the attached unit", user: "access:alice" },
+      { role: "user", text: "Explain the attached run", user: "access:alice" },
+    ]);
+    expect(s.created).toEqual([]);
+  });
+  it("holds the accepted original request if an attached entity loses read permission during metadata loading", async () => {
+    const completions: import("../core/provider.js").CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fixture",
+      complete: async (request) => {
+        completions.push(request);
+        return { content: [{ type: "text", text: "Must not read revoked metadata" }], stopReason: "end_turn" };
+      },
+    };
+    const s = await fixture(false, false, provider);
+    await s.seedQuestion();
+    const home = (await s.request("GET", "/home/session")).body;
+    const input = {
+      key: home.submissionKey,
+      revision: home.destination.revision,
+      destination: { kind: "broad" as const },
+      text: "Explain this run",
+      context: [{ kind: "run" as const, key: "original-child" }],
+    };
+    const posted = await s.request("POST", "/home/send", input);
+    expect(posted.status).toBe(200);
+    const read = s.runs.getRun.bind(s.runs);
+    vi.spyOn(s.runs, "getRun").mockImplementation(async (id, opts) => {
+      const result = await read(id, opts);
+      if (id === "original-child") s.denyContext();
+      return result;
+    });
+    await s.execute();
+    expect(completions).toEqual([]);
+    const resolved = await s.installation.organization.resolve(s.context.authentication);
+    if (!resolved) throw new Error("No own source");
+    const saved = await s.store.execute({ action: "submission", ...resolved, source: "browser", key: input.key });
+    expect(saved).toMatchObject({ status: "submission", receipt: { status: "accepted" } });
+    if (saved.status !== "submission" || !saved.receipt.ownerRunId) throw new Error("No retained original owner");
+    expect(await s.ledger.readIngressByRun(saved.receipt.ownerRunId)).toMatchObject({
+      status: "record",
+      record: { receiptId: saved.receipt.id, status: "uncertain" },
+    });
+    expect(s.created).toEqual([]);
+  });
+
   it("approves an own unmarked personal registry offer through current native proof without lending a foreign viewer consent", async () => {
     const s = await fixture(false, false, undefined, false, false, true);
     const live = s.registry.create("Own typed stop target", {
