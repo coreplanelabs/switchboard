@@ -1057,6 +1057,7 @@ describe("HTTP organization admission", () => {
       status: 202,
       body: {
         admission: { status: "accepted", receiptId, duplicate: true, runId: "original-owner" },
+        diagnostic: { traceId: expect.stringMatching(/^[0-9a-f]{32}$/), stage: "host", receiptObserved: true },
         runId: "original-owner",
         runUrl: "https://switchboard.test/runs/original-owner",
         threadKey: "http:default:original",
@@ -1064,7 +1065,10 @@ describe("HTTP organization admission", () => {
     });
     expect(await send({ ...body, text: "Different work" })).toEqual({
       status: 409,
-      body: { admission: { status: "conflict" } },
+      body: {
+        admission: { status: "conflict" },
+        diagnostic: { traceId: expect.stringMatching(/^[0-9a-f]{32}$/), stage: "host", receiptObserved: false },
+      },
     });
     expect(
       native.map(({ msg }) => ({ userId: msg.userId, messageId: msg.messageId, threadKey: msg.threadKey })),
@@ -1129,7 +1133,10 @@ describe("HTTP organization admission", () => {
     deny();
     expect(await send({ text: "Hello", idempotencyKey: "allowed" })).toEqual({
       status: 403,
-      body: { admission: { status: "not_found" } },
+      body: {
+        admission: { status: "not_found" },
+        diagnostic: { traceId: expect.stringMatching(/^[0-9a-f]{32}$/), stage: "host", receiptObserved: false },
+      },
     });
   });
 
@@ -1159,7 +1166,10 @@ describe("HTTP organization admission", () => {
     ).toMatchObject({ status: "receipt", receipt: { status: "rejected" } });
     expect(await send(body)).toEqual({
       status: 409,
-      body: { admission: { status: "rejected", receiptId, duplicate: true, reason: "The original owner refused." } },
+      body: {
+        admission: { status: "rejected", receiptId, duplicate: true, reason: "The original owner refused." },
+        diagnostic: { traceId: expect.stringMatching(/^[0-9a-f]{32}$/), stage: "host", receiptObserved: true },
+      },
     });
   });
 
@@ -1182,7 +1192,18 @@ describe("HTTP organization admission", () => {
           deps,
           options,
         ),
-      ).toEqual({ status: code, body: { admission: { status } } });
+      ).toEqual({
+        status: code,
+        body: {
+          admission: { status },
+          diagnostic: {
+            traceId: expect.stringMatching(/^[0-9a-f]{32}$/),
+            stage: "host",
+            receiptObserved: false,
+            ...(code >= 500 ? { reason: "unavailable" } : {}),
+          },
+        },
+      });
     }
   });
 });

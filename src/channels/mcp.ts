@@ -1,3 +1,4 @@
+import { finishAdmission, failedAdmission } from "../core/organization/admissionTrace.js";
 import { personalTokenApprovalMatchesPin, type PersonalTokenApprovalPin } from "../core/personalToken.js";
 import type { OrganizationNativeEvidence } from "./organizationAuthentication.js";
 import type { OrganizationAdmissionInput } from "../core/organization/service.js";
@@ -22,7 +23,7 @@ import type { McpToolInfo } from "../mcp/types.js";
 import { dispatch as realDispatch, type CoreDeps } from "../core/dispatcher.js";
 import { startRequestRoot } from "../core/requestTrace.js";
 import { systemClock } from "../core/trace/clock.js";
-import type { IncomingMessage, ConfirmationOffer, ChannelIO } from "../core/types.js";
+import type { IncomingMessage, ConfirmationOffer } from "../core/types.js";
 import { withCommandConfirmation } from "../core/commandConfirmations.js";
 import {
   approvalUrl,
@@ -64,6 +65,7 @@ import {
   readBody,
   type DispatchFn,
   admissionResponse,
+  type OrganizationIngress,
   nativeMessageId,
   idempotencyKeyError,
   type IngressConfig,
@@ -145,12 +147,7 @@ export interface McpOptions {
   /** Defaults to the real core dispatch(); overridden in tests. */
   dispatch?: DispatchFn;
   /** Host-only original-owner admission for a protected saved choice. */
-  admit?: (
-    msg: IncomingMessage,
-    io: ChannelIO,
-    evidence: OrganizationNativeEvidence,
-    choice?: OrganizationAdmissionInput["continuation"],
-  ) => Promise<OrganizationResult>;
+  admit?: OrganizationIngress;
   replayChoice?: (
     msg: IncomingMessage,
     evidence: OrganizationNativeEvidence,
@@ -494,7 +491,11 @@ async function route(
       const keyError = ingressThreadKeyError(incoming.threadKey);
       if (keyError) return err(id, INVALID_PARAMS, keyError);
       // The request's root (docs/reference/specs/tracing.md), once the caller is known.
-      const trace = startRequestRoot(deps, { channel: "mcp", receivedAt });
+      const trace = startRequestRoot(deps, {
+        channel: "mcp",
+        receivedAt,
+        ...(options.admit ? { attrs: { admissionStage: "host" as const, receiptObserved: false } } : {}),
+      });
       // One bounded identity per admitted call, retained by the in-flight async
       // dispatch. Neither mutable text/thread nor a reusable JSON-RPC id names it.
       const msg: IncomingMessage = {
@@ -522,8 +523,17 @@ async function route(
       );
       if (options.admit) {
         try {
-          const result = await options.admit(msg, io, nativeEvidence(identity, connectionId, options));
+          let result: OrganizationResult;
+          try {
+            result = await options.admit(msg, io, nativeEvidence(identity, connectionId, options), undefined, {
+              span: trace.root,
+            });
+          } catch (error) {
+            failedAdmission(trace.root, error);
+            result = { status: "unavailable" };
+          }
           const admitted = admissionResponse(result);
+          const diagnostic = finishAdmission(trace.root, result, admitted.status);
           const admission = (admitted.body as { admission: { status: string } }).admission;
           return ok(id, {
             content: [
@@ -531,12 +541,15 @@ async function route(
                 type: "text",
                 text:
                   admission.status === "accepted" || admission.status === "pending"
-                    ? "Request admitted. Its receipt identifies the original owner; completion is recorded separately."
-                    : `Request not admitted: ${admission.status}.`,
+                    ? "Request admitted. Execution and completion are recorded separately."
+                    : admission.status === "unavailable"
+                      ? "Admission could not be confirmed."
+                      : `Request not admitted: ${admission.status}.`,
               },
             ],
             structuredContent: {
               ...(admitted.body as Record<string, unknown>),
+              diagnostic,
               ...(result.status === "receipt" && result.receipt.ownerRunId
                 ? { runId: result.receipt.ownerRunId, threadKey: msg.threadKey }
                 : {}),
@@ -545,7 +558,7 @@ async function route(
             ...(admitted.status >= 400 ? { isError: true } : {}),
           });
         } finally {
-          trace.root.end("ok");
+          trace.root.end();
         }
       }
       const dispatchFn = options.dispatch ?? realDispatch;

@@ -1,3 +1,8 @@
+import { authorize } from "../core/authz/authorize.js";
+import { createSpanLog } from "../core/trace/spanLog.js";
+import { handleAdminTraceLog, TRACE_LOG_PATH } from "./adminTraceLog.js";
+import { Secret } from "../secrets.js";
+import { NO_GRANTS } from "../core/authz/types.js";
 import type { OrganizationOwnerFailure } from "../core/organization/ownerFailure.js";
 import { runAgentSmoke, type SmokeScenario } from "../deploy/agentSmoke.js";
 import { handleModelProxyRequest, ANTHROPIC_MESSAGES_PATH } from "./modelProxy.js";
@@ -78,6 +83,7 @@ import { analyzeRunFriction } from "../core/runFriction.js";
 import type { HomeSession } from "./homeSeed.js";
 import type { HomeRuntimeContext } from "./homeRuntime.js";
 import { createOrganizationAuthentication } from "./organizationAuthentication.js";
+import { classifyError } from "../core/trace/classify.js";
 import { createBrowserHomeInstallation, type BrowserHomeInstallationOptions } from "./browserHomeInstallation.js";
 // The SDK's legacy latest-version export differs from its modern form handler.
 const FORM_PROTOCOL_VERSION = ["2026", "07", "28"].join("-");
@@ -343,13 +349,15 @@ async function fixture(
   let slackReadHook: (() => void | Promise<void>) | undefined;
   let browserGrants: Grants = ALL_GRANTS;
   let contextReadable = true;
+  let currentMcpVerifier = nativeMcp?.currentMcp;
   const authentication = createOrganizationAuthentication({
     organization: "fixture",
     mappings,
     grantsFor: (id) => (id === "access:alice" ? browserGrants : ALL_GRANTS),
     auth: () => ({ tokens }),
     personalTokens,
-    currentMcp: nativeMcp?.currentMcp,
+    currentMcp: (...args) =>
+      currentMcpVerifier ? currentMcpVerifier(...args) : Promise.resolve({ status: "unavailable" as const }),
     ...(personalApproved ? { personalApproval: { issuer: identity.issuer, audience: "access-app" } } : {}),
     directory: store.directory,
     store,
@@ -590,6 +598,12 @@ async function fixture(
   cleanups.push(() => installation.handler.dispose());
   return {
     installation,
+    setSourceGrants: (next: Grants) => {
+      browserGrants = next;
+    },
+    replaceMcpVerifier: (next: NonNullable<typeof currentMcpVerifier>) => {
+      currentMcpVerifier = next;
+    },
     ownerFailures,
     setMergeRead: (read: NonNullable<BrowserHomeInstallationOptions["mergeFacts"]>) => {
       mergeRead = read;
@@ -3654,7 +3668,7 @@ describe("browser installation", () => {
       approvalsEnabled: true,
       publicBaseUrl: "https://fixture.test",
       replayChoice: s.installation.replayNativeChoice,
-      admit: (msg, _io, evidence, choice) => s.installation.admitNative(msg, evidence, choice),
+      admit: (msg, _io, evidence, choice, trace) => s.installation.admitNative(msg, evidence, choice, trace),
     };
     const headers: Record<string, string> =
       mode === "access" || mode === "oauth"
@@ -3724,6 +3738,15 @@ describe("browser installation", () => {
       native,
       nativeOptions,
       credentials: [assertion, bearer, "oauth:opaque"],
+      rotatedHeaders: () => {
+        const [header, payload] = unsigned.split(".");
+        const updated = { ...JSON.parse(Buffer.from(payload!, "base64url").toString()), exp: 302 };
+        const value = header + "." + Buffer.from(JSON.stringify(updated)).toString("base64url");
+        return {
+          "cf-access-jwt-assertion":
+            value + "." + sign("RSA-SHA256", Buffer.from(value), privateKey).toString("base64url"),
+        };
+      },
       options,
       send,
       expireSession: () => {
@@ -3793,6 +3816,446 @@ describe("browser installation", () => {
       expect(s.effects).toEqual(["access:alice"]);
     },
   );
+  describe("native admission recovery", () => {
+    it.each([
+      ["different-credential", "unavailable"],
+      ["foreign-subject", "denied"],
+      ["foreign-issuer", "denied"],
+      ["foreign-tenant", "denied"],
+      ["foreign-credential-binding", "denied"],
+      ["foreign-actor", "denied"],
+      ["foreign-connection", "denied"],
+      ["expired", "denied"],
+      ["revoked", "denied"],
+    ] as const)("keeps %s fenced after verifier lookup", async (change, status) => {
+      const s = await ssoInstallation("access");
+      const first = await s.send({ text: "memory forget", idempotencyKey: "negative-original" });
+      const id = first.wire.result.structuredContent.admission.runId;
+      const original = await s.ledger.readIngressByRun(id);
+      if (original.status !== "record" || !original.record.origin?.sourceReference) throw new Error("No original");
+      const origin = original.record.origin;
+      const reference = structuredClone(origin.sourceReference!);
+      const sourceIdentity = structuredClone(origin.actor.identity);
+      if (change === "different-credential") {
+        reference.credentialDigest = "a".repeat(64);
+        reference.approvalConnection!.id = reference.credentialDigest;
+      }
+      if (change === "foreign-subject") sourceIdentity.subject = "foreign";
+      if (change === "foreign-issuer") sourceIdentity.issuer = "https://foreign.test";
+      if (change === "foreign-tenant") sourceIdentity.tenant = "foreign";
+      if (change === "foreign-credential-binding") reference.approvalConnection!.credentialId = "access:foreign";
+      if (change === "foreign-actor") reference.actorId = "access:foreign";
+      if (change === "foreign-connection") reference.approvalConnection!.id = "b".repeat(64);
+      if (change === "expired") s.expireSession();
+      if (change === "revoked")
+        vi.spyOn(s.options.sso!, "verify").mockResolvedValue({ ok: false, status: 403, body: "revoked fixture" });
+      expect(await s.authentication.evaluateSourceIdentity(sourceIdentity, reference)).toEqual({ status });
+      expect(await s.ledger.readIngressByRun(id)).toMatchObject({
+        status: "record",
+        record: { runId: id, status: "dispatching", outcome: null },
+      });
+      expect(s.effects).toEqual([]);
+    });
+    it.each(["fenced", "conflict"] as const)("does not replace an explicit final %s with a receipt", async (status) => {
+      const s = await ssoInstallation("access");
+      const execute = s.store.execute.bind(s.store);
+      let admitted = false;
+      vi.spyOn(s.store, "execute").mockImplementation(async (command) => {
+        const result = await execute(command);
+        if (command.action === "admit" && result.status === "receipt") admitted = true;
+        if (admitted && command.action === "submission") return { status };
+        return result;
+      });
+      const result = await s.send({ text: "memory forget", idempotencyKey: "explicit-final" });
+      expect(result.wire.result).toMatchObject({ isError: true, structuredContent: { admission: { status } } });
+      expect(result.wire.result.structuredContent.admission.receiptId).toBeUndefined();
+      expect(s.tasks).toHaveLength(1);
+      expect(s.effects).toEqual([]);
+    });
+    it("retains an explicit final denial after the credential is revoked during admission", async () => {
+      const s = await ssoInstallation("access");
+      const execute = s.store.execute.bind(s.store);
+      let receiptObserved = false;
+      vi.spyOn(s.store, "execute").mockImplementation(async (command) => {
+        const result = await execute(command);
+        if (command.action === "admit" && result.status === "receipt") {
+          receiptObserved = true;
+          vi.spyOn(s.options.sso!, "verify").mockResolvedValue({ ok: false, status: 403, body: "revoked fixture" });
+        }
+        return result;
+      });
+      const result = await s.send({ text: "memory forget", idempotencyKey: "revoked-after-admit" });
+      expect(receiptObserved).toBe(true);
+      expect(result.wire.result).toMatchObject({
+        isError: true,
+        structuredContent: {
+          admission: { status: "not_found" },
+          diagnostic: { receiptObserved: true },
+        },
+      });
+      expect(result.wire.result.structuredContent.admission.receiptId).toBeUndefined();
+      expect(s.tasks).toEqual([]);
+      expect(s.effects).toEqual([]);
+    });
+    it("rebuilds current grants for the immutable original context after cached verification", async () => {
+      const s = await ssoInstallation("access");
+      const first = await s.send({
+        text: "memory forget",
+        thread: "original-context",
+        idempotencyKey: "grant-original",
+      });
+      const id = first.wire.result.structuredContent.admission.runId;
+      const original = await s.ledger.readIngressByRun(id);
+      if (original.status !== "record" || !original.record.origin?.sourceReference) throw new Error("No original");
+      const before = await s.authentication.resolveEnvelope(original.record.origin);
+      if (before.status !== "resolved") throw new Error("No verified source");
+      const repo = { type: "repo" as const, owner: "sample", name: "api" };
+      expect(authorize(before.actor, "repo:use", repo).allow).toBe(true);
+      s.setSourceGrants(NO_GRANTS);
+      const current = await s.authentication.resolveEnvelope(original.record.origin);
+      if (current.status !== "resolved") throw new Error("No current native proof");
+      expect(current.actor.origin).toEqual({
+        channelId: original.record.origin.sourceReference.channelId,
+        threadKey: original.record.origin.sourceReference.threadKey,
+      });
+      expect(current.actor.grants).toEqual(NO_GRANTS);
+      expect(authorize(current.actor, "repo:use", repo)).toMatchObject({ allow: false });
+      expect(await s.ledger.readIngressByRun(id)).toMatchObject({
+        status: "record",
+        record: { origin: original.record.origin, status: "dispatching" },
+      });
+      expect(s.effects).toEqual([]);
+    });
+    it("keeps different-credential history held and returns its real unavailable trace", async () => {
+      const s = await ssoInstallation("access");
+      const log = createSpanLog();
+      s.core.spanLog = log;
+      const first = await s.send({ text: "memory forget", idempotencyKey: "rotation-original" });
+      const id = first.wire.result.structuredContent.admission.runId;
+      const original = await s.ledger.readIngressByRun(id);
+      if (original.status !== "record" || !original.record.origin?.sourceReference) throw new Error("No original");
+      const native = createOrganizationNativeSources(s.nativeOptions);
+      let verified = false;
+      s.replaceMcpVerifier(async (...args) => {
+        const proof = await native.currentMcp(...args);
+        if (args[1] && proof.status === "verified") verified = true;
+        return proof;
+      });
+      let current: import("../core/types.js").IncomingMessage | undefined;
+      const admit = s.options.admit!;
+      const result = await s.send(
+        { text: "private trace input", idempotencyKey: "rotation-fresh" },
+        s.rotatedHeaders(),
+        "dispatch",
+        {
+          ...s.options,
+          admit: async (message, ...args) => {
+            current = message;
+            return admit(message, ...args);
+          },
+        },
+      );
+      expect(verified).toBe(true);
+      expect(current!.approvalConnection!.id).not.toBe(original.record.origin.sourceReference.credentialDigest);
+      expect(result.wire.result).toMatchObject({
+        isError: true,
+        structuredContent: { admission: { status: "unavailable" } },
+      });
+      const latest = log.read().lines.at(-1)!;
+      expect.soft(result.wire.result.structuredContent).toMatchObject({
+        diagnostic: {
+          traceId: latest.traceId,
+          stage: "private-epoch",
+          receiptObserved: false,
+          reason: "native-source-unavailable",
+          source: "mcp",
+          credentialRelation: "different",
+        },
+      });
+      expect.soft(latest).toMatchObject({
+        span: "request",
+        status: "error",
+        attrs: { outcome: "unavailable", admissionStage: "private-epoch", receiptObserved: false },
+      });
+      let responseStatus = 0,
+        body = "";
+      handleAdminTraceLog(
+        {
+          method: "GET",
+          url: `${TRACE_LOG_PATH}?traceId=${latest.traceId}`,
+          headers: { authorization: "Bearer fixture-reader" },
+        } as IncomingMessage,
+        {
+          writeHead: (status: number) => {
+            responseStatus = status;
+          },
+          end: (value: string) => {
+            body = value;
+          },
+        } as unknown as ServerResponse,
+        {
+          spanLog: log,
+          tokens: new Secret(JSON.stringify({ "fixture-reader": { subject: "reader" } }), "SWITCHBOARD_INGRESS_TOKENS"),
+          grantsFor: () => ({ actions: new Set(["trace:read"]), channels: new Set(), repos: new Set() }),
+        },
+      );
+      expect(responseStatus).toBe(200);
+      expect.soft(JSON.parse(body)).toMatchObject({
+        ok: true,
+        lines: [{ span: "request", status: "error", attrs: { admissionStage: "private-epoch" } }],
+      });
+      expect(body).not.toContain("private trace input");
+      for (const credential of s.credentials) expect(body).not.toContain(credential);
+      expect(await s.ledger.readIngressByRun(id)).toMatchObject({
+        status: "record",
+        record: { runId: id, status: "dispatching" },
+      });
+      expect(s.effects).toEqual([]);
+    });
+    it.each(["plain", "transport"] as const)("returns the actual trace for a %s admission exception", async (kind) => {
+      const s = await ssoInstallation("access");
+      const log = createSpanLog();
+      s.core.spanLog = log;
+      const result = await s.send({ text: "private input", idempotencyKey: "exception" }, {}, "dispatch", {
+        ...s.options,
+        admit: async () => {
+          const error = new Error("private exception TOKEN=private-credential");
+          throw kind === "transport" ? classifyError(error, { kind: "transport" }) : error;
+        },
+      });
+      const line = log.read().lines.at(-1)!;
+      expect(result.wire.result).toMatchObject({
+        isError: true,
+        structuredContent: {
+          admission: { status: "unavailable" },
+          diagnostic: { traceId: line.traceId, reason: "exception", receiptObserved: false },
+        },
+      });
+      expect(line).toMatchObject({
+        span: "request",
+        status: "error",
+        attrs: {
+          outcome: "exception",
+          admissionExceptionKind: kind === "transport" ? "transport" : "unclassified-exception",
+        },
+      });
+      expect(JSON.stringify(result.wire)).not.toContain("private exception");
+      expect(JSON.stringify(log.read())).not.toContain("private-credential");
+      expect(s.tasks).toEqual([]);
+    });
+    it("keeps concurrent unavailable traces on their own requests", async () => {
+      const s = await ssoInstallation("access");
+      const log = createSpanLog();
+      s.core.spanLog = log;
+      let release: () => void = () => {},
+        entered = 0;
+      const together = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const options: McpOptions = {
+        ...s.options,
+        admit: async (message, _io, _evidence, _choice, trace) => {
+          trace?.span?.setAttrs({ admissionStage: message.text === "private one" ? "native-proof" : "source-lookup" });
+          if (++entered === 2) release();
+          await together;
+          return { status: "unavailable" };
+        },
+      };
+      const [a, b] = await Promise.all([
+        s.send({ text: "private one", idempotencyKey: "one" }, {}, "dispatch", options),
+        s.send({ text: "private two", idempotencyKey: "two" }, {}, "dispatch", options),
+      ]);
+      expect
+        .soft(a.wire.result.structuredContent)
+        .toMatchObject({ diagnostic: { stage: "native-proof", receiptObserved: false } });
+      expect
+        .soft(b.wire.result.structuredContent)
+        .toMatchObject({ diagnostic: { stage: "source-lookup", receiptObserved: false } });
+      expect
+        .soft(a.wire.result.structuredContent.diagnostic?.traceId)
+        .not.toBe(b.wire.result.structuredContent.diagnostic?.traceId);
+      expect(a.wire.result).toMatchObject({ isError: true, content: [{ text: "Admission could not be confirmed." }] });
+      expect(JSON.stringify(log.read())).not.toContain("private one");
+      expect(JSON.stringify(log.read())).not.toContain("private two");
+    });
+    it.each(["sync", "async", "mutation"] as const)(
+      "a %s trace observer failure cannot change admission or execution",
+      async (mode) => {
+        const s = await ssoInstallation("access");
+        const admit = s.options.admit!;
+        const result = await s.send({ text: "memory forget", idempotencyKey: "report-failure" }, {}, "dispatch", {
+          ...s.options,
+          admit: async (message, io, evidence, choice, trace) => {
+            if (!trace?.span) return admit(message, io, evidence, choice, trace);
+            const set = trace.span.setAttrs.bind(trace.span);
+            trace.span.setAttrs = (attrs) => {
+              if (mode === "mutation") {
+                Reflect.set(attrs, "organizationReceiptId", "wrong-receipt");
+                return set(attrs);
+              }
+              if (mode === "sync") throw new Error("private observer failure");
+              return Promise.reject(new Error("private observer failure"));
+            };
+            return admit(message, io, evidence, choice, trace);
+          },
+        });
+        expect(result.wire.result).toMatchObject({ structuredContent: { admission: { status: "accepted" } } });
+        expect(s.tasks).toHaveLength(1);
+        await s.execute();
+        expect(s.effects).toEqual(["access:alice"]);
+      },
+    );
+
+    it.each(["store", "native-proof", "store-exception", "classified-store"] as const)(
+      "retains an observed receipt when only the final refresh is unavailable: %s",
+      async (failure) => {
+        const s = await ssoInstallation("access");
+        const log = createSpanLog();
+        s.core.spanLog = log;
+        let first: import("../core/organization/contract.js").OrganizationReceipt | undefined;
+        let final: import("../core/organization/contract.js").OrganizationReceipt | undefined;
+        let lost = false;
+        const execute = s.store.execute.bind(s.store);
+        vi.spyOn(s.store, "execute").mockImplementation(async (command) => {
+          const result = await execute(command);
+          if (command.action === "admit" && result.status === "receipt") first = structuredClone(result.receipt);
+          if (command.action === "submission" && first && !lost && result.status === "submission") {
+            lost = true;
+            final = structuredClone(result.receipt);
+            if (failure === "store") return { status: "unavailable" };
+            if (failure === "store-exception") throw new Error("private store failure details");
+            if (failure === "classified-store")
+              throw classifyError(new Error("private store failure details"), { kind: "transport" });
+            s.fault(true);
+          }
+          return result;
+        });
+        const sent = await s.send({ text: "memory forget", thread: "receipt-red", idempotencyKey: "receipt-red" });
+        expect(first).toMatchObject({ status: "pending" });
+        expect(final).toMatchObject({ id: first!.id, status: "accepted", ownerRunId: expect.any(String) });
+        expect.soft(sent.wire).toMatchObject({
+          result: {
+            structuredContent: {
+              admission: {
+                status: "pending",
+                receiptId: first!.id,
+                duplicate: false,
+              },
+            },
+          },
+        });
+        expect(s.tasks).toHaveLength(1);
+        expect(log.read().lines.at(-1)).toMatchObject({
+          span: "request",
+          attrs: {
+            admissionStage: "refresh",
+            admissionReason: "refresh-unavailable",
+            receiptObserved: true,
+            organizationReceiptId: first!.id,
+            admissionRefreshFailure:
+              failure === "store"
+                ? "unavailable-result"
+                : failure === "classified-store"
+                  ? "transport"
+                  : "unclassified-exception",
+          },
+        });
+        expect(JSON.stringify(log.read())).not.toContain("private store failure details");
+        expect(s.effects).toEqual([]);
+        s.fault(false);
+        await s.execute();
+        expect(s.effects).toEqual(["access:alice"]);
+        expect(s.nativeReplies).toEqual(["Read-only command completed."]);
+        expect(s.tasks).toEqual([]);
+      },
+    );
+    it.each(["same-thread", "new-thread"] as const)(
+      "fresh exact-credential SSO admission survives retained authority after restart: %s",
+      async (context) => {
+        const s = await ssoInstallation("access");
+        const first = await s.send({
+          text: "memory forget",
+          thread: "restart-red",
+          idempotencyKey: "restart-red-original",
+        });
+        const ownerId = first.wire.result.structuredContent.admission.runId;
+        const original = await s.ledger.readIngressByRun(ownerId);
+        if (original.status !== "record" || !original.record.origin?.sourceReference)
+          throw new Error("No original fixture owner");
+        const origin = original.record.origin;
+        const reference = origin.sourceReference!;
+        const native = createOrganizationNativeSources(s.nativeOptions);
+        let freshSignedProof = false;
+        s.replaceMcpVerifier(async (...args) => {
+          const result = await native.currentMcp(...args);
+          if (args[1] && result.status === "verified") freshSignedProof = true;
+          return result;
+        });
+        expect(await s.authentication.resolveEnvelope(origin)).toEqual({ status: "unavailable" });
+        let currentMessage: import("../core/types.js").IncomingMessage | undefined;
+        const admit = s.options.admit!;
+        const fresh = await s.send(
+          {
+            text: "memory forget",
+            thread: context === "same-thread" ? "restart-red" : "restart-red-new",
+            idempotencyKey: "restart-red-fresh",
+          },
+          {},
+          "dispatch",
+          {
+            ...s.options,
+            admit: async (message, ...args) => {
+              currentMessage = message;
+              return admit(message, ...args);
+            },
+          },
+        );
+        expect(freshSignedProof).toBe(true);
+        expect(currentMessage?.approvalConnection?.id).toBe(reference.credentialDigest);
+        expect(currentMessage?.approvalConnection?.requestHash).not.toBe(reference.approvalConnection?.requestHash);
+        expect(await native.currentMcp(origin.actor.identity, undefined, reference)).toMatchObject({
+          status: "verified",
+          actorId: "access:alice",
+        });
+        expect(
+          await native.currentMcp(origin.actor.identity, undefined, {
+            ...reference,
+            channelId: currentMessage!.channelId,
+            threadKey: currentMessage!.threadKey,
+            approvalConnection: currentMessage!.approvalConnection,
+          }),
+        ).toMatchObject({ status: "verified", actorId: "access:alice" });
+        const machine = await handleIngressRequest(
+          {
+            method: "POST",
+            headers: { authorization: "Bearer native-token" },
+            body: JSON.stringify({
+              text: "memory forget",
+              channel: "ops",
+              thread: "machine-red",
+              async: true,
+              idempotencyKey: "machine-red",
+            }),
+          },
+          s.core,
+          { auth: { tokens: s.tokens }, admit: s.options.admit },
+        );
+        expect(machine.status).toBe(202);
+        expect(machine.body).toMatchObject({ admission: { status: "accepted", runId: expect.any(String) } });
+        expect(await s.ledger.readIngressByRun(ownerId)).toMatchObject({
+          status: "record",
+          record: {
+            runId: ownerId,
+            status: "dispatching",
+            outcome: null,
+            origin,
+          },
+        });
+        expect(s.effects).toEqual([]);
+        expect.soft(fresh.wire).toMatchObject({ result: { structuredContent: { admission: { status: "accepted" } } } });
+      },
+    );
+  });
   it("holds the original SSO owner on current proof outage and refuses expired proof without another actor", async () => {
     const s = await ssoInstallation("access");
     const { wire } = await s.send({ text: "memory forget", idempotencyKey: "sso-held" });
@@ -4259,7 +4722,13 @@ describe("browser installation", () => {
       s.core,
       { auth: { tokens: s.tokens }, admit },
     );
-    expect(conflict).toEqual({ status: 409, body: { admission: { status: "conflict" } } });
+    expect(conflict).toEqual({
+      status: 409,
+      body: {
+        admission: { status: "conflict" },
+        diagnostic: { traceId: expect.stringMatching(/^[0-9a-f]{32}$/), stage: "host", receiptObserved: false },
+      },
+    });
     const mcp = await handleMcpRequest(
       {
         method: "POST",

@@ -1,3 +1,4 @@
+import { observeAdmission } from "../core/organization/admissionTrace.js";
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { conversationRetentionFor } from "../config.js";
@@ -777,8 +778,10 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
       ? { actor: source.actor, io: new SingleShotIO([], row.message.threadKey) }
       : undefined;
   }
-  const admit: OrganizationIngress = async (msg, _io, evidence, continuation) =>
-    installation ? installation.admitNative(msg, evidence, continuation) : { status: "unavailable" };
+  const admit: OrganizationIngress = async (msg, _io, evidence, continuation, trace) => {
+    observeAdmission(trace, { stage: "installation" });
+    return installation ? installation.admitNative(msg, evidence, continuation, trace) : { status: "unavailable" };
+  };
   const dispatchSlack: typeof dispatch = async (core, msg, io, opts) => {
     if (!msg.channelId.startsWith("slack:D")) return dispatch(core, msg, io, opts);
     if (!installation || !native || !msg.directAudience || msg.postedBy || msg.authenticatedAs) {

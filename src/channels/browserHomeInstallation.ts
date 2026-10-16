@@ -1,3 +1,5 @@
+import { observeAdmission, admissionExceptionKindOf } from "../core/organization/admissionTrace.js";
+import type { TraceOptions } from "../core/trace/types.js";
 import { historyFailure } from "../core/organization/ownerFailure.js";
 import { contextAccessForMessage } from "../core/dispatch/contextAccess.js";
 import { COMMAND_RUN_AGENT } from "../core/runOwner.js";
@@ -1597,7 +1599,9 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     msg: IncomingMessage,
     evidence: OrganizationNativeEvidence,
     continuation?: OrganizationAdmissionInput["continuation"],
+    trace?: TraceOptions,
   ) {
+    observeAdmission(trace, { stage: "native-input" });
     const hasMedia = !!(msg.images?.length || msg.documents?.length || msg.staged?.length);
     const media = msg.nativeMedia && nativeMediaSchema.safeParse(msg.nativeMedia);
     if (
@@ -1611,6 +1615,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
           !(await matchesNativeMedia(media.data, msg))))
     )
       return { status: "unavailable" as const };
+    observeAdmission(trace, { stage: "native-proof" });
     const current = await options.authentication.resolveNative(msg, evidence);
     if (current.status !== "resolved") return { status: current.status };
     const context = { actor: current.actor, authentication: current.authentication };
@@ -1626,6 +1631,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       ...(continuation ? { continuation } : {}),
       context: [],
     };
+    observeAdmission(trace, { stage: "source-lookup" });
     const source = await organization.resolve(current.authentication);
     if (!source) return { status: "not_found" as const };
     const original = await options.store.execute({
@@ -1662,8 +1668,10 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       )
         input.destination = { kind: "thread", thread: msg.threadKey };
     }
+    observeAdmission(trace, { stage: "replay" });
     const replay = await organization.replay(current.authentication, input);
     if (replay) return replay;
+    observeAdmission(trace, { stage: "source-context" });
     const choice = continuation ? await core.confirmations?.get?.(continuation.id) : undefined;
     if (
       continuation &&
@@ -1686,17 +1694,30 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     const addressed = await organization.resolve(authentication);
     if (!addressed) return { status: "not_found" as const };
     if (current.privateSource && addressed.actor.stream !== null && authentication.sourceReference) {
-      const epoch = await host.currentEpoch(context);
+      observeAdmission(trace, { stage: "private-epoch" });
+      const epoch = await host.currentEpoch(context, trace);
       if (!epoch) return { status: "unavailable" as const };
       authentication = {
         ...authentication,
         sourceReference: { ...authentication.sourceReference, privateSource: true, capturedPrivateEpoch: epoch },
       };
     }
+    observeAdmission(trace, { stage: "admit-store" });
     const result = await organization.admit(authentication, input);
     if (result.status !== "receipt") return result;
+    observeAdmission(trace, { stage: "reconcile", receipt: result.receipt });
     await runtime.reconcile(options.organizationId);
-    const settled = await organization.replay(authentication, input);
+    observeAdmission(trace, { stage: "refresh" });
+    // A failed refresh cannot erase the admission receipt already observed.
+    let refreshFailure: import("../core/organization/admissionTrace.js").AdmissionRefreshFailure = "unavailable-result";
+    const settled = await organization.replay(authentication, input).catch((error: unknown) => {
+      refreshFailure = admissionExceptionKindOf(error);
+      return { status: "unavailable" as const };
+    });
+    if (settled?.status === "unavailable") {
+      observeAdmission(trace, { reason: "refresh-unavailable", refreshFailure });
+      return result;
+    }
     return settled?.status === "receipt" ? { ...settled, duplicate: result.duplicate } : (settled ?? result);
   }
   async function answers(context: HomeRuntimeContext, rows: readonly HomeUnit[]) {

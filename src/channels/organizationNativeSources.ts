@@ -112,14 +112,15 @@ export function createOrganizationNativeSources(options: OrganizationNativeSourc
       reference.approvalConnection.credentialId !== actorId
     )
       return { status: "fenced" };
+    // Cache the verifier for this exact credential, not a request or thread.
+    // The resolver still authorizes each original source context on every use.
     const key = JSON.stringify([
       identity,
       reference.credentialDigest,
       actorId,
       reference.userId,
-      reference.channelId,
-      reference.threadKey,
-      reference.approvalConnection,
+      reference.approvalConnection.id,
+      reference.approvalConnection.credentialId,
     ]);
     const supplied =
       attestation && typeof attestation === "object"
