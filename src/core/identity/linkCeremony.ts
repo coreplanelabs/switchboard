@@ -25,14 +25,14 @@ export interface LinkCallback {
   session: LinkBrowserSession;
   evidence: AccessEvidence;
   method: string;
-  /** Exact endpoint without query, supplied by the future trusted HTTP adapter. */
+  /** Exact endpoint without query, supplied by the trusted HTTP adapter. */
   callbackUri: string;
   query: URLSearchParams;
 }
 const secret = () => randomBytes(32).toString("base64url");
 
-/** Offline orchestration: no production registration, authorization consumer,
- * event/log sink, or credential persistence. The staged browser adapter protects
+/** Two-account consent: no authorization consumer, event/log sink, or credential persistence.
+ * The registered browser adapter protects
  * POSTs and transports the session in a secure HttpOnly cookie; body/query
  * session secrets must never substitute for that trusted transport. */
 export class LinkCeremony {

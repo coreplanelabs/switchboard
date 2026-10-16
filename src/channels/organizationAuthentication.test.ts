@@ -1,0 +1,478 @@
+import { describe, expect, it } from "vitest";
+import {
+  createOrganizationAuthentication,
+  type NativeOrganizationProof,
+  type OrganizationQuestionOwner,
+} from "./organizationAuthentication.js";
+import { InMemoryOrganizationStore } from "../core/organization/memory.js";
+import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
+import { ALL_GRANTS } from "../core/authz/grants.js";
+import { NO_GRANTS } from "../core/authz/types.js";
+import { authorize } from "../core/authz/authorize.js";
+import { digestBearer, InMemoryPersonalTokenStore } from "../mcp/personalTokens.js";
+import type { IngressConfig } from "./http.js";
+import type { IncomingMessage } from "../core/types.js";
+const organization = "Acme Team";
+const accessIdentity = { issuer: "https://access.test", tenant: "app-aud", subject: "alice" };
+const slackIdentity = { issuer: "https://slack.com", tenant: "workspace", subject: "UALICE" };
+const grants = {
+  actions: new Set(["organization:read", "organization:send", "agent:run:general"]),
+  channels: new Set<string>(),
+  repos: new Set<string>(),
+  organizations: new Set([organization]),
+};
+function setup() {
+  const store = new InMemoryOrganizationStore(() => 1),
+    ledger = new InMemoryRunLedger(() => 1),
+    tokens = new InMemoryPersonalTokenStore();
+  let browser: NativeOrganizationProof = {
+    status: "verified",
+    identity: accessIdentity,
+    actorId: "access:alice",
+    kind: "human",
+    organizationMember: true,
+    privateSource: true,
+    epoch: "access-live-1",
+    access: { sub: "alice", email: "not-an-identity-proof@example.test" },
+  };
+  let slack: NativeOrganizationProof = {
+    status: "verified",
+    identity: slackIdentity,
+    actorId: "slack:UALICE",
+    kind: "human",
+    organizationMember: true,
+    privateSource: true,
+    epoch: "slack-live-1",
+  };
+  const lookup = new Map([
+    ["http:alice", grants],
+    ["mcp:alice", grants],
+    ["mcp:personal:alice", grants],
+    ["access:alice", NO_GRANTS],
+    ["slack:UALICE", NO_GRANTS],
+  ]);
+  const options = {
+    organization,
+    store,
+    directory: store.directory,
+    ledger,
+    personalTokens: tokens,
+    mappings: [
+      { source: "browser" as const, issuer: accessIdentity.issuer, tenant: accessIdentity.tenant, organization },
+      { source: "slack" as const, issuer: slackIdentity.issuer, tenant: slackIdentity.tenant, organization },
+      { source: "http" as const, issuer: "installation:http", tenant: null, organization },
+      { source: "mcp" as const, issuer: "installation:mcp", tenant: null, organization },
+      { source: "cli" as const, issuer: "installation:cli", tenant: null, organization },
+    ],
+    grantsFor: (id: string) => lookup.get(id) ?? NO_GRANTS,
+    auth: (): IngressConfig => ({ tokens: { "first-key": { subject: "alice" }, "second-key": { subject: "alice" } } }),
+    questionOwner: async (_unitKey: string): Promise<OrganizationQuestionOwner> => ({ status: "unavailable" }),
+    currentBrowser: async () => browser,
+    currentSlack: async () => slack,
+    currentCli: async (identity: typeof accessIdentity) => ({
+      status: "verified" as const,
+      identity,
+      actorId: "cli:local",
+      kind: "service" as const,
+      organizationMember: false,
+      privateSource: true,
+      epoch: "local-process-1",
+    }),
+    channelsOf: async () => new Set(["slack:DALICE"]),
+  };
+  const resolver = createOrganizationAuthentication(options);
+  const msg = (userId: string): IncomingMessage => ({
+    userId,
+    channelId: "http:home",
+    threadKey: "http:home:alice",
+    messageId: "event-1",
+    text: "fixture instruction",
+  });
+  return {
+    store,
+    ledger,
+    tokens,
+    resolver,
+    lookup,
+    options,
+    msg,
+    setBrowser: (proof: NativeOrganizationProof) => {
+      browser = proof;
+    },
+    setSlack: (proof: NativeOrganizationProof) => {
+      slack = proof;
+    },
+  };
+}
+describe("current organization authentication", () => {
+  it("uses verified browser issuer membership and never turns email into an ownership alias", async () => {
+    const s = setup();
+    const result = await s.resolver.resolveBrowser(accessIdentity, s.msg("access:alice"));
+    expect(result.status).toBe("resolved");
+    if (result.status !== "resolved") throw new Error("not resolved");
+    expect(result.actor.id).toBe("access:alice");
+    expect(result.actor.self).toEqual(["access:alice"]);
+    expect(authorize(result.actor, "organization:send", { type: "organization", id: organization })).toEqual({
+      allow: true,
+    });
+    expect(
+      authorize(result.actor, "runs:read", {
+        type: "run",
+        id: "private",
+        channelId: "slack:DOTHER",
+        userId: "slack:UALICE",
+        channelVisibility: "dm",
+      }).allow,
+    ).toBe(false);
+    s.setBrowser({ status: "unavailable" });
+    expect(await s.resolver.resolveBrowser(accessIdentity, s.msg("access:alice"))).toEqual({ status: "unavailable" });
+  });
+  it("keeps exact HTTP credentials separate even when subjects match", async () => {
+    const s = setup();
+    const evidence = {
+      source: "http" as const,
+      identity: { subject: "alice" },
+      credentialDigest: digestBearer("first-key"),
+    };
+    const result = await s.resolver.resolveNative(s.msg("http:alice"), evidence);
+    expect(result.status).toBe("resolved");
+    if (result.status !== "resolved") throw new Error("not resolved");
+    expect(result.authentication.sourceReference?.credentialDigest).toBe(digestBearer("first-key"));
+    s.options.auth = () => ({ tokens: { "second-key": { subject: "alice" } } });
+    expect(await s.resolver.resolveNative(s.msg("http:alice"), evidence)).toEqual({ status: "fenced" });
+    expect(
+      (
+        await s.resolver.resolveNative(s.msg("http:alice"), {
+          ...evidence,
+          credentialDigest: digestBearer("second-key"),
+        })
+      ).status,
+    ).toBe("resolved");
+  });
+  it("revalidates the exact personal MCP metadata without lending another key authority", async () => {
+    const s = setup();
+    const first = digestBearer("personal-one"),
+      second = digestBearer("personal-two");
+    await s.tokens.put({
+      digest: first,
+      subject: "personal:alice",
+      email: "ignored@example.test",
+      userId: "access:alice",
+      createdAt: 1,
+    });
+    await s.tokens.put({
+      digest: second,
+      subject: "personal:alice",
+      email: "ignored@example.test",
+      userId: "access:alice",
+      createdAt: 1,
+    });
+    const msg = {
+      ...s.msg("access:alice"),
+      authenticatedAs: "mcp:personal:alice",
+      approvalConnection: { id: first, credentialId: "mcp:personal:alice", requestHash: "a".repeat(64) },
+    };
+    const evidence = { source: "mcp" as const, identity: { subject: "personal:alice" }, credentialDigest: first };
+    const result = await s.resolver.resolveNative(msg, evidence);
+    expect(result.status).toBe("resolved");
+    if (result.status !== "resolved") throw new Error("not resolved");
+    expect(result.actor.id).toBe("mcp:personal:alice");
+    expect(result.actor.onBehalfOf?.id).toBe("access:alice");
+    expect(authorize(result.actor, "organization:send", { type: "organization", id: organization })).toEqual({
+      allow: true,
+    });
+    await s.tokens.delete(first, "personal:alice");
+    expect(await s.resolver.resolveNative(msg, evidence)).toEqual({ status: "fenced" });
+  });
+  it("requires current native Slack facts and preserves the channel origin", async () => {
+    const s = setup();
+    const msg = { ...s.msg("slack:UALICE"), channelId: "slack:DALICE", threadKey: "slack:DALICE:1" };
+    const result = await s.resolver.resolveNative(msg, { source: "slack", identity: slackIdentity });
+    expect(result.status).toBe("resolved");
+    if (result.status !== "resolved") throw new Error("not resolved");
+    expect(result.actor.origin).toEqual({ channelId: "slack:DALICE", threadKey: "slack:DALICE:1" });
+    expect(result.actor.memberOf).toEqual(new Set(["slack:DALICE"]));
+    s.setSlack({ status: "fenced" });
+    expect(await s.resolver.resolveNative(msg, { source: "slack", identity: slackIdentity })).toEqual({
+      status: "fenced",
+    });
+  });
+  it("keeps local CLI authority explicit and rejects client-forged actor facts", async () => {
+    const s = setup();
+    const result = await s.resolver.resolveNative(s.msg("cli:local"), {
+      source: "cli",
+      identity: { issuer: "installation:cli", tenant: null, subject: "local" },
+    });
+    expect(result.status).toBe("resolved");
+    if (result.status !== "resolved") throw new Error("not resolved");
+    expect(result.actor.grants).toEqual(ALL_GRANTS);
+    expect(result.actor.standingConsent).toBe("all");
+    expect(
+      await s.resolver.resolveNative(
+        { ...s.msg("http:admin"), authenticatedAs: "cli:local" },
+        { source: "http", identity: { subject: "alice" }, credentialDigest: digestBearer("first-key") },
+      ),
+    ).toEqual({ status: "fenced" });
+    expect(
+      await s.resolver.resolveNative(s.msg("github:1"), {
+        source: "github",
+        identity: { issuer: "github", tenant: "app", subject: "1" },
+      }),
+    ).toEqual({ status: "fenced" });
+  });
+  it("fences original-run recovery when current source proof or durable provenance is unavailable", async () => {
+    const s = setup();
+    expect(await s.resolver.restoreOriginalRun("absent", false)).toEqual({ status: "legacy" });
+    expect(await s.resolver.restoreOriginalRun("absent", true)).toEqual({ status: "fenced" });
+  });
+  it("filters retained sources with exact current provenance and never substitutes a matching subject key", async () => {
+    const s = setup();
+    const resolved = await s.resolver.resolveNative(s.msg("http:alice"), {
+      source: "http",
+      identity: { subject: "alice" },
+      credentialDigest: digestBearer("first-key"),
+    });
+    if (resolved.status !== "resolved") throw new Error("not resolved");
+    const identity = resolved.authentication.identity;
+    expect(await s.resolver.evaluateSourceIdentity(identity)).toEqual({ status: "unavailable" });
+    expect(await s.resolver.evaluateSourceIdentity(identity, resolved.authentication.sourceReference)).toMatchObject({
+      status: "allowed",
+    });
+    s.options.auth = () => ({ tokens: { "second-key": { subject: "alice" } } });
+    expect(await s.resolver.evaluateSourceIdentity(identity, resolved.authentication.sourceReference)).toEqual({
+      status: "denied",
+    });
+    expect(await s.resolver.evaluateSourceIdentity(accessIdentity)).toEqual({ status: "unavailable" });
+  });
+  it("limits linked ownership to the proved unit and retains that scope after the question resolves", async () => {
+    const s = setup();
+    const person = await s.store.directory.createPerson();
+    if (person.status !== "created") throw new Error("not created");
+    for (const identity of [accessIdentity, slackIdentity])
+      expect(
+        (
+          await s.store.directory.change({
+            action: "link",
+            identity,
+            personId: person.person.id,
+            expectedRevision: 0,
+            actor: accessIdentity,
+            proof: { method: "dual-authentication", version: 1 },
+          })
+        ).status,
+      ).toBe("changed");
+    for (const id of ["access:alice", "slack:UALICE"])
+      s.lookup.set(id, { ...grants, actions: new Set(["steer:write"]), repos: new Set(["acme/app"]) });
+    const digest = "a".repeat(64);
+    let open = true;
+    s.options.questionOwner = async (unitKey) =>
+      unitKey === "pipeline:U101"
+        ? {
+            status: "proved",
+            requester: slackIdentity,
+            repo: "acme/app",
+            sourceReference: {
+              actorId: "slack:UALICE",
+              userId: "slack:UALICE",
+              channelId: "slack:DALICE",
+              threadKey: "slack:DALICE:1",
+            },
+            ...(open ? { questionDigest: digest } : {}),
+          }
+        : { status: "fenced" };
+    const current = await s.resolver.resolveBrowser(accessIdentity, s.msg("access:alice"));
+    if (current.status !== "resolved") throw new Error("not resolved");
+    const scoped = await s.resolver.resolveQuestion(current, "pipeline:U101", digest);
+    expect(scoped.status).toBe("resolved");
+    if (scoped.status !== "resolved") throw new Error("not scoped");
+    expect(scoped.actor.id).toBe("access:alice");
+    expect(scoped.actor.self).toEqual(["access:alice"]);
+    expect(scoped.actor.onBehalfOf).toBeUndefined();
+    expect(scoped.msg.userId).toBe("slack:UALICE");
+    expect(scoped.msg.authenticatedAs).toBe("access:alice");
+    expect(scoped.authentication.sourceReference?.questionOwnership).toEqual({
+      unitKey: "pipeline:U101",
+      questionDigest: digest,
+      requester: slackIdentity,
+    });
+    expect(await s.resolver.resolveQuestion(current, "pipeline:U102", digest)).toEqual({ status: "fenced" });
+    expect(await s.resolver.resolveQuestion(current, "pipeline:U101", "b".repeat(64))).toEqual({ status: "fenced" });
+    open = false;
+    const replay = await s.resolver.resolveAuthorization({
+      action: "send",
+      organization,
+      actor: {
+        identity: accessIdentity,
+        kind: "human",
+        principal: person.person.id,
+        bindingRevision: 1,
+        stream: person.person.id,
+        onBehalfOf: null,
+      },
+      source: "browser",
+      sourceReference: scoped.authentication.sourceReference,
+      destination: { kind: "thread", thread: "pipeline:U101" },
+      context: [],
+      target: null,
+    });
+    expect(replay.status).toBe("resolved");
+    s.lookup.set("access:alice", { ...grants, actions: new Set(["steer:write"]), repos: new Set() });
+    expect(
+      await s.resolver.resolveAuthorization({
+        action: "send",
+        organization,
+        actor: {
+          identity: accessIdentity,
+          kind: "human",
+          principal: person.person.id,
+          bindingRevision: 1,
+          stream: person.person.id,
+          onBehalfOf: null,
+        },
+        source: "browser",
+        sourceReference: scoped.authentication.sourceReference,
+        destination: { kind: "thread", thread: "pipeline:U101" },
+        context: [],
+        target: null,
+      }),
+    ).toEqual({ status: "fenced" });
+    s.lookup.set("access:alice", { ...grants, actions: new Set(["steer:write"]), repos: new Set(["acme/app"]) });
+    expect(await s.resolver.resolveQuestion(current, "pipeline:U101", digest)).toEqual({ status: "fenced" });
+    s.setSlack({ status: "unavailable" });
+    expect(await s.resolver.resolveQuestion(current, "pipeline:U101", digest)).toEqual({ status: "fenced" });
+    s.options.questionOwner = async () => ({
+      status: "proved",
+      requester: slackIdentity,
+      repo: "acme/app",
+      questionDigest: digest,
+      sourceReference: {
+        actorId: "slack:UALICE",
+        userId: "slack:UALICE",
+        channelId: "slack:DALICE",
+        threadKey: "slack:DALICE:1",
+      },
+    });
+    expect(await s.resolver.resolveQuestion(current, "pipeline:U101", digest)).toEqual({ status: "unavailable" });
+    s.setSlack({
+      status: "verified",
+      identity: slackIdentity,
+      actorId: "slack:UALICE",
+      kind: "human",
+      organizationMember: true,
+      privateSource: true,
+      epoch: "slack-live-2",
+    });
+    s.lookup.set("slack:UALICE", NO_GRANTS);
+    expect(await s.resolver.resolveQuestion(current, "pipeline:U101", digest)).toEqual({ status: "fenced" });
+    s.lookup.set("slack:UALICE", { ...grants, actions: new Set(["steer:write"]), repos: new Set(["acme/app"]) });
+    expect(
+      (
+        await s.store.directory.change({
+          action: "revoke",
+          identity: slackIdentity,
+          personId: person.person.id,
+          expectedRevision: 1,
+          actor: accessIdentity,
+          proof: { method: "dual-authentication", version: 1 },
+        })
+      ).status,
+    ).toBe("changed");
+    expect(await s.resolver.resolveQuestion(current, "pipeline:U101", digest)).toEqual({ status: "fenced" });
+  });
+  it("restores the original owner from bodyless provenance with current policy and exact credential", async () => {
+    const s = setup();
+    const native = await s.resolver.resolveNative(s.msg("http:alice"), {
+      source: "http",
+      identity: { subject: "alice" },
+      credentialDigest: digestBearer("first-key"),
+    });
+    if (native.status !== "resolved") throw new Error("not resolved");
+    const origin = {
+      version: 1 as const,
+      organization,
+      source: "http" as const,
+      sourceEvent: "source-event",
+      actor: {
+        identity: native.authentication.identity,
+        kind: "service" as const,
+        principal: "http:alice",
+        stream: null,
+        bindingRevision: 0,
+        onBehalfOf: null,
+      },
+      key: "submission",
+      digest: "a".repeat(64),
+      destination: { kind: "broad" as const },
+      workload: "message" as const,
+      target: null,
+      content: "",
+      context: [],
+      sourceReference: native.authentication.sourceReference,
+    };
+    const claim = await s.ledger.consumeIngress({
+      effectKey: "effect",
+      digest: origin.digest,
+      requester: "http:alice",
+      threadKey: "http:home:alice",
+      request: { text: "original" },
+      contentExpiresAt: 90,
+      origin,
+      originExpiresAt: 365,
+      receiptId: "receipt",
+    });
+    if (claim.status !== "claimed") throw new Error("not claimed");
+    await s.ledger.clearIngressContent("effect");
+    const restored = await s.resolver.restoreOriginalRun(claim.record.runId);
+    expect(restored.status).toBe("resolved");
+    if (restored.status !== "resolved") throw new Error("not restored");
+    expect(restored.msg.text).toBe("");
+    expect(restored.actor.id).toBe("http:alice");
+    s.lookup.set("http:alice", NO_GRANTS);
+    const narrowed = await s.resolver.restoreOriginalRun(claim.record.runId);
+    expect(narrowed.status).toBe("resolved");
+    if (narrowed.status !== "resolved") throw new Error("not restored");
+    expect(authorize(narrowed.actor, "organization:send", { type: "organization", id: organization }).allow).toBe(
+      false,
+    );
+    s.options.auth = () => ({ tokens: { "second-key": { subject: "alice" } } });
+    expect(await s.resolver.restoreOriginalRun(claim.record.runId)).toEqual({ status: "fenced" });
+  });
+  it("allows an unlinked person's exact native original question without inventing a cross-source link", async () => {
+    const s = setup();
+    s.lookup.set("access:alice", { ...grants, actions: new Set(["steer:write"]), repos: new Set(["acme/app"]) });
+    const digest = "a".repeat(64);
+    s.options.questionOwner = async () => ({
+      status: "proved",
+      requester: accessIdentity,
+      repo: "acme/app",
+      questionDigest: digest,
+      sourceReference: {
+        actorId: "access:alice",
+        userId: "access:alice",
+        channelId: "http:home",
+        threadKey: "http:home:alice",
+      },
+    });
+    const current = await s.resolver.resolveBrowser(accessIdentity, s.msg("access:alice"));
+    if (current.status !== "resolved") throw new Error("not resolved");
+    expect(await s.store.directory.resolve(accessIdentity)).toEqual({ status: "unknown" });
+    const answer = await s.resolver.resolveQuestion(current, "pipeline:U101", digest);
+    expect(answer.status).toBe("resolved");
+    if (answer.status !== "resolved") throw new Error("not resolved");
+    expect(answer.actor.self).toEqual(["access:alice"]);
+    expect(answer.msg.userId).toBe("access:alice");
+    s.options.questionOwner = async () => ({
+      status: "proved",
+      requester: slackIdentity,
+      repo: "acme/app",
+      questionDigest: digest,
+      sourceReference: {
+        actorId: "slack:UALICE",
+        userId: "slack:UALICE",
+        channelId: "slack:DALICE",
+        threadKey: "slack:DALICE:1",
+      },
+    });
+    expect(await s.resolver.resolveQuestion(current, "pipeline:U101", digest)).toEqual({ status: "fenced" });
+  });
+});

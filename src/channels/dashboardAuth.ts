@@ -83,8 +83,12 @@ export function accessVerifier(config: AccessConfig, deps: VerifyDeps): Dashboar
       // Node lowercases header keys; Cloudflare injects `Cf-Access-Jwt-Assertion`.
       const token = header(req.headers, "cf-access-jwt-assertion");
       if (!token) return FORBIDDEN;
-      const identity = await verifyAccessJwt(token, config, deps);
-      return identity ? { ok: true, identity } : FORBIDDEN;
+      try {
+        const identity = await verifyAccessJwt(token, config, { ...deps, throwOnUnavailable: true });
+        return identity ? { ok: true, identity } : FORBIDDEN;
+      } catch {
+        return { ok: false, status: 503, body: "authentication unavailable" };
+      }
     },
   };
 }

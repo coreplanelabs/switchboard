@@ -723,6 +723,12 @@ workspaceDir: ./workspaces
 #   token:
 #     env: DASHBOARD_TOKEN   # env var holding the bearer (default)
 #     actor: access:ops      # the actor the bearer resolves to — key its grants entry by this id
+#   # Optional account proof using this Access application and Sign in with Slack.
+#   # The separate handler uses /settings/identities/callback when registered.
+#   identityLink:
+#     slackClientId: "123.456"
+#     slackTeamId: TEXAMPLE001
+#     slackClientSecretEnv: SLACK_IDENTITY_SECRET
 
 # Slack adapter — reconnect catch-up (docs/decisions/0012-reconnect-catch-up-as-recovery.md). Socket Mode drops every mention
 # posted while the websocket is down (each bot deploy = drain + cold start).

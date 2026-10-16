@@ -39,6 +39,23 @@ describe("tokenSubjectOf — the actor id a bearer resolves to", () => {
 });
 
 describe("validateDashboardConfig — the `dashboard` block is checked at load, naming the key", () => {
+  it("accepts explicit identity proof configuration and refuses incomplete or incompatible flows", () => {
+    const identityLink = {
+      slackClientId: "123.456",
+      slackTeamId: "TEXAMPLE001",
+      slackClientSecretEnv: "SLACK_IDENTITY_SECRET",
+    };
+    expect(() => validateDashboardConfig({ auth: "access", identityLink })).not.toThrow();
+    expect(() => validateDashboardConfig({ identityLink })).not.toThrow();
+    expect(() => validateDashboardConfig({ auth: "none", identityLink })).toThrow(/identityLink requires Access/);
+    expect(() => validateDashboardConfig({ identityLink: { ...identityLink, slackTeamId: "" } })).toThrow(
+      /identityLink.slackTeamId/,
+    );
+    expect(() => validateDashboardConfig({ identityLink: { ...identityLink, secret: "forbidden" } })).toThrow(
+      /identityLink.secret is not a known key/,
+    );
+  });
+
   it("accepts an absent block, an empty mapping, each mode, and a token block with or without its env", () => {
     expect(DEFAULT_DASHBOARD_TOKEN_ENV).toBe("DASHBOARD_TOKEN");
     for (const raw of [
