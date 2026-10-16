@@ -1,3 +1,4 @@
+import { prepareInboxDelivery, inboxDeliveryResultOf, type InboxDeliveryResult } from "./runLedger/inboxDelivery.js";
 import { EXECUTION_PROTOCOL_HEADER } from "./runLedger/types.js";
 import type { InboxPushResult } from "./runLedger/inboxMessage.js";
 import {
@@ -1277,6 +1278,32 @@ export class WorkerRunLedger implements RunLedger {
   async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {
     this.checkIds(runId, gen);
     return this.fenceResult(await this.post("/runs/state", { storeKey: this.opts.storeKey, runId, gen, state }));
+  }
+
+  async deliverInbox(runId: string, delivery: unknown): Promise<InboxDeliveryResult> {
+    this.checkIds(runId);
+    const input = await prepareInboxDelivery(delivery);
+    if (!input) return { kind: "refused", reason: "invalid-delivery" };
+    const response = await this.post("/runs/inbox/deliver", {
+      storeKey: this.opts.storeKey,
+      runId,
+      delivery: { version: 1, key: input.key, message: input.message },
+    });
+    const result = inboxDeliveryResultOf(response.data);
+    if (
+      response.status === 200 &&
+      result &&
+      (result.kind === "refused" ||
+        (result.receipt.runId === runId &&
+          result.receipt.key === input.key &&
+          result.receipt.bodyHash === input.bodyHash))
+    )
+      return result;
+    throw this.unknownAcknowledgement(
+      "run ledger: keyed inbox delivery acknowledgement is unreadable",
+      response.request,
+      response.status,
+    );
   }
 
   async pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult> {
