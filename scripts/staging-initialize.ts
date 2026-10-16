@@ -27,7 +27,7 @@ import {
 import {
   memoryResourcesHash,
   memoryReceiptSelection,
-  memoryDomainId,
+  workerDomainId,
   parseMemoryCreationReceipt,
   validateMemoryReceipt,
   type MemoryCreationReceipt,
@@ -326,7 +326,7 @@ export async function initializeOnHost(
             uploadVersion: memoryUploadVersion,
             activeVersion,
             deploymentId: history.deployments?.[0]?.id ?? "",
-            domainId: memoryDomainId(memorySelection, domains),
+            domainId: workerDomainId(memorySelection, domains),
             authorId: upload.metadata?.author_id ?? "",
             resourcesHash: memoryResourcesHash(upload.resources),
           };
@@ -436,7 +436,7 @@ export async function initializeOnHost(
         if (kind === "memory" && fullMemory) {
           if (
             !memoryReceipt ||
-            memoryDomainId(memorySelection, await inventory("workers/domains")) !== memoryReceipt.domainId
+            workerDomainId(memorySelection, await inventory("workers/domains")) !== memoryReceipt.domainId
           )
             throw new Error("final Memory hostname ownership changed");
           const canonical = await client.readBase(key);
