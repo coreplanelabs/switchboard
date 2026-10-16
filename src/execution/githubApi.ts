@@ -64,6 +64,8 @@ export interface CodeSearchHit {
 }
 
 export interface InstallationRepo {
+  /** Native identity when supplied; older metadata remains unknown. */
+  id?: number;
   fullName: string;
   private: boolean;
   defaultBranch: string;
@@ -137,6 +139,8 @@ export interface PullFeedback {
 
 /** PR metadata for a relayed read. This is context, not publication authority. */
 export interface PullSummary {
+  /** GitHub object ID, separate from the repository-local PR number. */
+  id?: number;
   number: number;
   title: string;
   body: string;
@@ -147,8 +151,8 @@ export interface PullSummary {
   url: string;
   author: string;
   updatedAt: string;
-  head: { repo: string; ref: string; sha: string };
-  base: { repo: string; ref: string };
+  head: { repo: string; repositoryId?: number | null; ref: string; sha: string };
+  base: { repo: string; repositoryId?: number; ref: string };
   /** Validated PR-object facts; counts apply only when its SHA is the selected head. */
   headFacts?: {
     merged: boolean;
@@ -299,6 +303,14 @@ export class GithubApiError extends Error {
   }
 }
 
+/** Missing IDs stay unknown. Never coerce malformed source identity. */
+function nativeIdOf(value: unknown): number | undefined {
+  if (value === undefined) return;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)
+    throw new GithubApiError(502, "Invalid GitHub native identity");
+  return value;
+}
+
 export interface RestGithubApiOptions {
   /** Injectable for tests; defaults to global fetch. */
   fetch?: typeof fetch;
@@ -374,7 +386,9 @@ export class RestGithubApi implements GithubApi {
         total_count?: number;
       };
       for (const r of body.repositories ?? []) {
+        const id = nativeIdOf(r.id);
         out.push({
+          ...(id !== undefined ? { id } : {}),
           fullName: String(r.full_name),
           // A missing visibility field is unknown, never evidence that a repo is public.
           private: r.private !== false,
@@ -554,6 +568,9 @@ export class RestGithubApi implements GithubApi {
     const headRepo = (head.repo ?? {}) as Record<string, unknown>;
     const baseRepo = (base.repo ?? {}) as Record<string, unknown>;
     const user = (row.user ?? {}) as Record<string, unknown>;
+    const id = nativeIdOf(row.id);
+    const headRepositoryId = head.repo === null ? null : nativeIdOf(headRepo.id);
+    const baseRepositoryId = nativeIdOf(baseRepo.id);
     let sha = String(head.sha ?? "");
     const ref = typeof head.ref === "string" ? validRef(head.ref) : undefined;
     // Match dispatch's ordinary PR-head policy: a positively read same-repo
@@ -589,6 +606,7 @@ export class RestGithubApi implements GithubApi {
     const size = sha === head.sha ? prSizeOf(row) : undefined;
     const requestId = githubRequestId(res);
     return {
+      ...(id !== undefined ? { id } : {}),
       number: Number(row.number),
       title: String(row.title ?? ""),
       body: String(row.body ?? ""),
@@ -599,11 +617,13 @@ export class RestGithubApi implements GithubApi {
       author: String(user.login ?? ""),
       updatedAt: String(row.updated_at ?? ""),
       head: {
+        ...(headRepositoryId !== undefined ? { repositoryId: headRepositoryId } : {}),
         repo: typeof headRepo.full_name === "string" ? headRepo.full_name : "",
         ref: typeof head.ref === "string" ? head.ref : "",
         sha,
       },
       base: {
+        ...(baseRepositoryId !== undefined ? { repositoryId: baseRepositoryId } : {}),
         repo: typeof baseRepo.full_name === "string" ? baseRepo.full_name : "",
         ref: typeof base.ref === "string" ? base.ref : "",
       },
@@ -1164,6 +1184,7 @@ function toIssue(row: Record<string, unknown>): IssueSummary {
 // ---- in-memory implementation ---------------------------------------------------
 
 export interface InMemoryRepo {
+  id?: number;
   files?: Record<string, string>;
   issues?: IssueSummary[];
   pulls?: PullSummary[];
@@ -1224,12 +1245,16 @@ export class InMemoryGithubApi implements GithubApi {
   }
 
   async listRepos(): Promise<InstallationRepo[]> {
-    return [...this.repos.entries()].map(([fullName, r]) => ({
-      fullName,
-      private: r.private ?? true,
-      defaultBranch: r.defaultBranch ?? "main",
-      description: r.description ?? null,
-    }));
+    return [...this.repos.entries()].map(([fullName, r]) => {
+      const id = nativeIdOf(r.id);
+      return {
+        ...(id !== undefined ? { id } : {}),
+        fullName,
+        private: r.private ?? true,
+        defaultBranch: r.defaultBranch ?? "main",
+        description: r.description ?? null,
+      };
+    });
   }
 
   async isPublicRepo(repo: string): Promise<boolean> {
@@ -1322,6 +1347,9 @@ export class InMemoryGithubApi implements GithubApi {
   async getPullRequest(repo: string, number: number): Promise<PullSummary> {
     const pull = this.repo(repo).pulls?.find((p) => p.number === number);
     if (!pull) throw new GithubApiError(404, `GitHub GET /repos/${repo}/pulls/${number} failed: HTTP 404 Not Found`);
+    nativeIdOf(pull.id);
+    if (pull.head.repositoryId !== null) nativeIdOf(pull.head.repositoryId);
+    nativeIdOf(pull.base.repositoryId);
     return pull;
   }
 
