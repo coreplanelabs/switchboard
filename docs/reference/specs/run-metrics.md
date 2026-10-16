@@ -166,3 +166,12 @@ The review handler is additive to the retained generic trend adapter. It reads o
 | UTC date validation reuses the registry helper, includes the final day, and refuses invalid/duplicate/backward/over-90-day input before reading. | `[unit]` `src/channels/metricsView.test.ts::protected review metrics HTTP::keeps UTC ranges exact and refuses invalid dates before any reader call` |
 | Final native proof/view loss withholds the completed report; off and provider failures produce unavailable responses with no provider details or global fallback. | `[unit]` `src/channels/metricsView.test.ts::protected review metrics HTTP::withholds finished reports after scope loss or native proof failure and hides provider details` |
 | Display names include returned requester IDs only, and the JSON twin remains the exact report object. | `[unit]` `src/channels/metricsView.test.ts::protected review metrics HTTP::adds names only for returned requesters while the JSON twin remains the exact report` |
+
+## Production review dashboard wiring
+
+The browser entry point serves Usage, System health and JSON through the same scoped review service. Each protected read refreshes the original credential through the existing browser context and organization read guard. Names are looked up for returned ids only. The generic trend command remains separate.
+
+| Criterion | Proof |
+|---|---|
+| Usage and System health retain desktop and phone captures in both themes | `[unit]` `src/docs/screenshotManifest.test.ts::expectedFiles::is one PNG per surface per theme, named <surface>-<theme>.png`, `src/docs/screenshotManifest.test.ts::capture profiles::preserves all existing desktop outputs and themes` |
+| Actual server wiring serves both tabs and JSON for the current native account, with current proof before and after the reader | `[agent]` On the final staging candidate, use an authenticated account to open both tabs and JSON, preserve the date range, verify current-user scope and then authorized selected-person/Everyone scopes. Confirm a lost or unavailable native proof returns no report. Local handler proofs do not establish this live callback. |

@@ -53,9 +53,57 @@
         "animations": "disabled",
         "caret": "hide"
       }
+    },
+    {
+      "profile": "phone",
+      "suffix": "-phone",
+      "theme": "light",
+      "file": "metrics-phone-light.png",
+      "context": {
+        "viewport": {
+          "width": 320,
+          "height": 900
+        },
+        "deviceScaleFactor": 2,
+        "colorScheme": "light",
+        "reducedMotion": "reduce",
+        "timezoneId": "UTC",
+        "locale": "en-US"
+      },
+      "screenshot": {
+        "type": "png",
+        "fullPage": false,
+        "scale": "device",
+        "animations": "disabled",
+        "caret": "hide"
+      }
+    },
+    {
+      "profile": "phone",
+      "suffix": "-phone",
+      "theme": "dark",
+      "file": "metrics-phone-dark.png",
+      "context": {
+        "viewport": {
+          "width": 320,
+          "height": 900
+        },
+        "deviceScaleFactor": 2,
+        "colorScheme": "dark",
+        "reducedMotion": "reduce",
+        "timezoneId": "UTC",
+        "locale": "en-US"
+      },
+      "screenshot": {
+        "type": "png",
+        "fullPage": false,
+        "scale": "device",
+        "animations": "disabled",
+        "caret": "hide"
+      }
     }
   ],
-  "configHash": "f1cf3eca2ead073320f7472d7d0ba119ed1006245d9203b83cdd0c03d3cccb84",
+  "configHash": "6f17816cb28c758783e12c8d1e93771b24e8f558b9ffd931f2ded756646eaa0c",
   "inputs": {
     "package-lock.json": "144819202fa80cccabeb98bd9b0bba0f719df193339f1a9bcb30ad2b84c6cc0f",
     "package.json": "9497d3f3b7a7a2e14f2b99f3eacc085a4c9e965673b877569c5e6328f82c12d3",

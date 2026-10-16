@@ -245,7 +245,22 @@ export const SURFACES = [
     path: "/metrics",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },
     page: "web/green/pages/Metrics.vue",
-    what: "the run metrics page: the trend tiles, the three day charts and the by-agent table",
+    what: "the review Usage tab: recorded counts, successful duration populations, surfaces and verdicts",
+    captures: [
+      { name: "desktop", suffix: "", viewport: { width: 1440, height: 900, deviceScaleFactor: 2 } },
+      { name: "phone", suffix: "-phone", viewport: { width: 320, height: 900, deviceScaleFactor: 2 } },
+    ],
+  },
+  {
+    name: "metrics-health",
+    path: "/metrics/health",
+    fixture: { server: "scripts/web-preview.ts", inputs: [] },
+    page: "web/green/pages/SystemHealth.vue",
+    what: "the review System health tab: recorded ratios, workspaces, setup losses and unknown diagnostics",
+    captures: [
+      { name: "desktop", suffix: "", viewport: { width: 1440, height: 900, deviceScaleFactor: 2 } },
+      { name: "phone", suffix: "-phone", viewport: { width: 320, height: 900, deviceScaleFactor: 2 } },
+    ],
   },
   {
     name: "costs-models",
