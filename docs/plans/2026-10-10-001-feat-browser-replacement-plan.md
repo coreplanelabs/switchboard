@@ -2,7 +2,8 @@
 title: Replace the browser interface and add organization orchestration
 type: feat
 date: 2026-10-10
-status: proposed
+status: superseded
+superseded_by: 2026-10-11-001-feat-frontend-review-and-release-plan.md
 ---
 
 # Replace the browser interface and add organization orchestration
