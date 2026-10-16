@@ -15,6 +15,7 @@ import { StreamableHttpMcpClient } from "../mcp/client.js";
 import { assertSmokeOriginMatchesPlan } from "./ingressSmoke.js";
 import { systemClock } from "../core/trace/clock.js";
 import { parseModelRef } from "../core/provider.js";
+import { RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
 
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
 const component = z
@@ -243,6 +244,7 @@ interface ScenarioReceipt {
 
 interface SmokeObservationError {
   code: string;
+  rpcCode?: number;
   fields?: Array<{ path: string; code: string }>;
   http?: { status: number; authChallenge: boolean };
 }
@@ -892,10 +894,85 @@ export function agentSmokeTransport(input: {
                     : error instanceof McpError && error.code === "protocol"
                       ? "mcp_protocol_mismatch"
                       : "mcp_transport_failed";
-      throw new SmokeReaderError({ code, ...(observedHttp ? { http: observedHttp } : {}) });
+      throw new SmokeReaderError({
+        code,
+        ...(error instanceof McpError && typeof error.code === "number" && Number.isSafeInteger(error.code)
+          ? { rpcCode: error.code }
+          : {}),
+        ...(observedHttp ? { http: observedHttp } : {}),
+      });
     }
   };
   const deadlines = new Map<string, number>();
+  const httpOwners = new Map<string, string>();
+  const waitForHttpOwner = async (id: string, threadKey: string, deadline: number) => {
+    // Native admission can precede the readable Core row. Observe authorized
+    // metadata before the first point read; masked missing/denied reads are never retried.
+    while (systemClock() < deadline) {
+      const result = await readerCall(
+        "runs_list",
+        {
+          status: "all",
+          channel: `http:${config.channel}`,
+          thread: threadKey,
+          limit: RUN_LIST_MAX_LIMIT,
+          readUser: `http:${config.subject}`,
+          readRepo: config.repo,
+        },
+        AbortSignal.timeout(deadline - systemClock()),
+      );
+      if (result.isError) throw new SmokeReaderError({ code: "mcp_read_refused", ...(http ? { http } : {}) });
+      try {
+        const block = result.content[0];
+        const prefix = "runs.list: ok\n";
+        if (
+          result.content.length !== 1 ||
+          block?.type !== "text" ||
+          typeof block.text !== "string" ||
+          !block.text.startsWith(prefix)
+        )
+          throw new Error("invalid reader result");
+        const page = z
+          .object({
+            storeUnavailable: z.boolean().optional(),
+            ledgerUnavailable: z.boolean().optional(),
+            readScope: z.object({
+              channelId: z.literal(`http:${config.channel}`),
+              userId: z.literal(`http:${config.subject}`),
+              repo: z.literal(config.repo),
+              allowed: z.boolean(),
+            }),
+            runs: z
+              .array(
+                z.object({
+                  id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+                  channelId: z.literal(`http:${config.channel}`),
+                  userId: z.literal(`http:${config.subject}`),
+                  threadKey: z.literal(threadKey),
+                }),
+              )
+              .max(RUN_LIST_MAX_LIMIT),
+            nextBefore: z.object({ finishedAt: z.number().int().nonnegative(), id: z.string().min(1) }).nullish(),
+          })
+          .parse(JSON.parse(block.text.slice(prefix.length)));
+        if (page.storeUnavailable || page.ledgerUnavailable)
+          throw new SmokeReaderError({ code: "mcp_reader_unavailable", ...(http ? { http } : {}) });
+        if (!page.readScope.allowed)
+          throw new SmokeReaderError({ code: "mcp_read_scope_denied", ...(http ? { http } : {}) });
+        if (page.runs.some((run) => run.id === id)) return;
+        // A partial page is not evidence of absence. Stop rather than declare
+        // readiness or restart an unbounded scan of an unexpectedly busy thread.
+        if (page.nextBefore)
+          throw new SmokeReaderError({ code: "mcp_run_listing_incomplete", ...(http ? { http } : {}) });
+      } catch (error) {
+        if (error instanceof SmokeReaderError) throw error;
+        throw new SmokeReaderError({ code: "mcp_protocol_mismatch", ...(http ? { http } : {}) });
+      }
+      const left = deadline - systemClock();
+      if (left > 0) await new Promise((resolve) => setTimeout(resolve, Math.min(AGENT_SMOKE_POLL_MS, left)));
+    }
+    throw new Error("run_deadline_exceeded");
+  };
   return {
     async health() {
       const response = await boundedFetch(input.healthUrl, { signal: AbortSignal.timeout(minutesToMs(0.5)) });
@@ -1036,6 +1113,16 @@ export function agentSmokeTransport(input: {
         return response;
       }
       deadlines.set(assigned.data, deadline);
+      const accepted = admissionReceiptSchema.safeParse(response.admission);
+      const expectedThread = `http:${config.channel}:${thread}`;
+      if (
+        source === "http" &&
+        accepted.success &&
+        accepted.data.status === "accepted" &&
+        accepted.data.runId === assigned.data &&
+        response.threadKey === expectedThread
+      )
+        httpOwners.set(assigned.data, expectedThread);
       return {
         ...(response.admission === undefined ? {} : { admission: response.admission }),
         run: { id: assigned.data, status: "started" },
@@ -1046,6 +1133,11 @@ export function agentSmokeTransport(input: {
     async readRun(id, onRecord) {
       const deadline = deadlines.get(id);
       if (deadline === undefined) throw new Error("admission_unproven");
+      const threadKey = httpOwners.get(id);
+      if (threadKey) {
+        await waitForHttpOwner(id, threadKey, deadline);
+        httpOwners.delete(id);
+      }
       while (systemClock() < deadline) {
         const signal = AbortSignal.timeout(deadline - systemClock());
         const result = await readerCall("runs_get", { id, include: "messages" }, signal);
