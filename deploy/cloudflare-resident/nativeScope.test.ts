@@ -278,7 +278,7 @@ describe("native scope transport deadlines", () => {
 });
 
 describe("native timeout closure validation", () => {
-  it.each(["refused", "foreign", "populated"])(
+  it.each(["refused", "foreign", "populated", "launcher-refused"])(
     "keeps a %s attempt kill unknown even if collection then returns",
     async (fault) => {
       vi.useFakeTimers();
@@ -299,7 +299,7 @@ describe("native timeout closure validation", () => {
           const request = JSON.parse(await new Response(options.stdin).text());
           if (request.mode === "launch")
             return { stdout: new Response("original output").body, stderr: new Response("").body, exitCode: exited };
-          finish(0);
+          finish(fault === "launcher-refused" ? 125 : 0);
           return {
             stdout: new Response(
               JSON.stringify({

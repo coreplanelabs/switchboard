@@ -11,6 +11,7 @@ import {
   nativeScopeRetirementKey,
   NATIVE_SCOPE_CONTROL_MS,
   type NativeScopeRef,
+  type NativeTimeoutEnding,
 } from "./nativeScope.js";
 import {
   checkSelectorSchema,
@@ -3852,9 +3853,28 @@ export class ResidentDO extends Sandbox<Env> {
         },
         timeout,
       );
+      if (result.timedOut && (result.exitCode !== 124 || !result.nativeEnding)) {
+        try {
+          console.warn(
+            `[native-timeout-ending] ${JSON.stringify({
+              phase: "unconfirmed",
+              ...nativeAttempt.scope.owner,
+              boot: nativeAttempt.scope.boot,
+              attempt: nativeAttempt.id,
+              exitCode: result.exitCode,
+            })}`,
+          );
+        } catch {
+          /* A failed diagnostic cannot change the original refusal or hold. */
+        }
+        throw new Error("native timeout ending is unconfirmed");
+      }
+      if (result.nativeEnding && (!result.timedOut || result.exitCode !== 124))
+        throw new Error("native timeout result changed");
       if (Number.isSafeInteger(result.exitCode) && result.exitCode >= 0 && result.exitCode !== 125)
-        await nativeAttempt.settle();
-      return result;
+        await nativeAttempt.settle(result.nativeEnding);
+      const { nativeEnding: _ending, ...output } = result;
+      return output;
     }
     if (opts.nativeUser)
       argv = ["/usr/bin/su", "-s", "/bin/sh", opts.nativeUser, "-c", `exec ${argv.map(shellQuote).join(" ")}`];
@@ -10346,11 +10366,11 @@ export class ResidentDO extends Sandbox<Env> {
         // uncertainty cannot be mistaken for an unavailable status read.
         await journal.launched(scope.key, id, status);
       },
-      settle: async () => {
+      settle: async (nativeEnding?: NativeTimeoutEnding) => {
         if (settled) return;
         settled = true;
         if (scope && id) {
-          await journal.settle(scope.key, id);
+          await journal.settle(scope.key, id, nativeEnding);
         }
       },
     };

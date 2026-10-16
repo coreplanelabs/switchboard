@@ -7,13 +7,14 @@ import {
 import { isWorkspaceOwner, workspaceOwnerKey } from "../../src/core/workspaceSettlement.js";
 import { selectedResidentMember } from "../../src/execution/residentMembers";
 import ts from "typescript";
+import { createHash } from "node:crypto";
 import { runInNewContext } from "node:vm";
 import { readSource } from "./testing/sourceScan.js";
 import { sanitizeResidentBody } from "../../src/execution/residentText.js";
 import { validNativeOperationKey } from "./nativeOperation.js";
 import { describe, expect, it } from "vitest";
 import { NativeOperationJournal, type NativeOperationStorage, type NativeOperationRows } from "./nativeOperation.js";
-import { NativeRunScopes, type NativeScopeTransport } from "./nativeScope.js";
+import { NativeRunScopes, type NativeScopeTransport, type NativeTimeoutEnding } from "./nativeScope.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
 import { RUN_ID_PATTERN } from "../../src/core/runIdentity.js";
 
@@ -113,6 +114,251 @@ describe("stored original native endings", () => {
     });
     expect([...h.rows]).toEqual(before);
     expect(await h.journal.readEnding("native-operation:op:foreign")).toEqual({ kind: "missing" });
+  });
+});
+
+describe("retained native timeout ending", () => {
+  async function pending() {
+    const h = fixture();
+    const owner = { runId: "run-timeout", ownerGen: "gen-timeout", ownerFence: 7 };
+    const threadKey = "slack:C1:timeout-proof";
+    const key = `native-operation:${threadKey}:${owner.runId}:original`;
+    const ref = {
+      version: 1 as const,
+      id: "22222222-2222-4222-8222-222222222222",
+      boot: "11111111-1111-4111-8111-111111111111",
+      threadKey,
+      owner,
+    };
+    await h.journal.open(key, owner, threadKey);
+    await h.journal.bindScope(key, ref);
+    const attempt = await h.journal.begin(key, "process");
+    const ending: NativeTimeoutEnding = {
+      version: 1,
+      ref,
+      attempt,
+      closed: false,
+      populated: false,
+      launcherExitCode: 137,
+    };
+    h.rows.set("private-bytes", "uncommitted work");
+    h.rows.set("native-operation:op:neighbor", {
+      opOwner: "op:neighbor",
+      native: { version: 1, closed: false, pending: { other: { kind: "opaque" } } },
+    });
+    return {
+      ...h,
+      key,
+      owner,
+      threadKey,
+      ending,
+      attempt,
+      receiptKey: `native-operation-receipt:${key}`,
+      original: structuredClone(h.rows.get(key)),
+    };
+  }
+
+  it.each(["write", "before-commit"])("keeps the original admission after receipt %s failure", async (fault) => {
+    const h = await pending();
+    const before = structuredClone([...h.rows]);
+    const transaction = h.storage.transaction.bind(h.storage);
+    h.storage.transaction = (action) =>
+      transaction(async (rows) => {
+        let wrote = false;
+        const result = await action({
+          ...rows,
+          put: async (key, value) => {
+            if (key === h.receiptKey) {
+              if (fault === "write") throw new Error("receipt write failed");
+              wrote = true;
+            }
+            await rows.put(key, value);
+          },
+        });
+        if (wrote) throw new Error("receipt commit failed");
+        return result;
+      });
+    await expect(h.journal.settle(h.key, h.attempt, h.ending)).rejects.toThrow();
+    expect([...h.rows]).toEqual(before);
+    expect(await h.journal.readEnding(h.key)).toEqual({ kind: "missing" });
+  });
+
+  it.each(["readable", "unreadable"])(
+    "uses only original %s readback after a lost receipt commit acknowledgment",
+    async (fault) => {
+      const h = await pending();
+      const transaction = h.storage.transaction.bind(h.storage);
+      const get = h.storage.get.bind(h.storage);
+      let lost = false;
+      h.storage.transaction = async (action) => {
+        const result = await transaction(action);
+        if (!lost && h.rows.has(h.receiptKey)) {
+          lost = true;
+          throw new Error("receipt commit acknowledgment lost");
+        }
+        return result;
+      };
+      h.storage.get = async (key) => {
+        if (lost && fault === "unreadable") throw new Error("readback unavailable");
+        return get(key);
+      };
+      const settling = h.journal.settle(h.key, h.attempt, h.ending);
+      if (fault === "readable") await settling;
+      else await expect(settling).rejects.toThrow("acknowledgment lost");
+      expect(h.rows.get(h.key)).toMatchObject({ native: { closed: false, pending: {} } });
+      expect(h.rows.get(h.receiptKey)).toMatchObject({
+        original: h.original,
+        receipt: { outcome: "native-ended", originalOperationOutcome: "unknown", nativeEnding: h.ending },
+      });
+      expect(h.rows.get("private-bytes")).toBe("uncommitted work");
+      expect(h.rows.get("native-operation:op:neighbor")).toMatchObject({
+        native: { pending: { other: { kind: "opaque" } } },
+      });
+    },
+  );
+
+  it.each(["boot", "attempt", "owner", "launcher"])(
+    "refuses changed %s proof before removing admission",
+    async (fault) => {
+      const h = await pending();
+      const proof = structuredClone(h.ending);
+      if (fault === "boot") proof.ref.boot = "33333333-3333-4333-8333-333333333333";
+      if (fault === "attempt") proof.attempt = "33333333-3333-4333-8333-333333333333";
+      if (fault === "owner") proof.ref.owner.ownerFence++;
+      if (fault === "launcher") proof.launcherExitCode = 125;
+      const before = structuredClone([...h.rows]);
+      await expect(h.journal.settle(h.key, h.attempt, proof)).rejects.toThrow();
+      expect([...h.rows]).toEqual(before);
+    },
+  );
+
+  it("does not replace original timeout evidence with empty-journal recovery", async () => {
+    const h = await pending();
+    await h.journal.settle(h.key, h.attempt, h.ending);
+    const before = structuredClone([...h.rows]);
+    const currentHash = createHash("sha256")
+      .update(JSON.stringify(h.rows.get(h.key)))
+      .digest("hex");
+    let nativeReads = 0;
+    expect(
+      await h.journal.recover(
+        h.key,
+        currentHash,
+        async () => {
+          nativeReads++;
+          return terminal;
+        },
+        matches,
+      ),
+    ).toEqual({ error: "native-operation-recovery-refused: native-ending-receipt-exists", status: 409 });
+    expect(nativeReads).toBe(0);
+    expect([...h.rows]).toEqual(before);
+    await h.journal.close(h.key);
+    expect(await h.journal.readEnding(h.key)).toMatchObject({
+      kind: "ended",
+      receipt: { nativeEnding: h.ending, originalOperationOutcome: "unknown" },
+    });
+  });
+
+  it("keeps partial admissions and a second timeout held without overwriting the original receipt", async () => {
+    const partial = await pending();
+    const other = await partial.journal.begin(partial.key, "opaque");
+    await expect(partial.journal.settle(partial.key, partial.attempt, partial.ending)).rejects.toThrow(
+      "admission changed",
+    );
+    expect((await partial.journal.list()).operations.find((op) => op.key === partial.key)?.journal?.pending).toEqual({
+      [partial.attempt]: { kind: "process" },
+      [other]: { kind: "opaque" },
+    });
+    const h = await pending();
+    await h.journal.settle(h.key, h.attempt, h.ending);
+    const originalReceipt = structuredClone(h.rows.get(h.receiptKey));
+    const second = await h.journal.begin(h.key, "process");
+    await expect(h.journal.settle(h.key, second, { ...h.ending, attempt: second })).rejects.toThrow(
+      "receipt already exists",
+    );
+    expect(h.rows.get(h.key)).toMatchObject({ native: { pending: { [second]: { kind: "process" } } } });
+    expect(h.rows.get(h.receiptKey)).toEqual(originalReceipt);
+  });
+
+  it("preserves an exact receipt across close-before-settle, late callbacks and reopen", async () => {
+    const h = await pending();
+    await h.journal.close(h.key);
+    await h.journal.settle(h.key, h.attempt, h.ending);
+    expect(h.rows.has(h.key)).toBe(false);
+    const before = structuredClone([...h.rows]);
+    await h.journal.settle(h.key, h.attempt, h.ending);
+    await expect(h.journal.open(h.key, h.owner, h.threadKey)).rejects.toThrow("identity already used");
+    expect([...h.rows]).toEqual(before);
+    expect(await h.journal.readEnding(h.key)).toMatchObject({
+      kind: "ended",
+      receipt: { outcome: "native-ended", nativeEnding: h.ending },
+    });
+  });
+
+  it("reports whole-operation ending only after subsequent salvage settles and the journal closes", async () => {
+    const h = await pending();
+    await h.journal.settle(h.key, h.attempt, h.ending);
+    expect(await h.journal.readEnding(h.key)).toEqual({ kind: "unavailable" });
+    const salvage = await h.journal.begin(h.key, "opaque");
+    await h.journal.close(h.key);
+    expect(await h.journal.readEnding(h.key)).toEqual({ kind: "unavailable" });
+    await h.journal.settle(h.key, salvage);
+    expect(await h.journal.readEnding(h.key)).toMatchObject({
+      kind: "ended",
+      receipt: { originalOperationOutcome: "unknown" },
+    });
+    expect(h.rows.get("private-bytes")).toBe("uncommitted work");
+  });
+
+  it.each(["hash", "boot", "attempt", "key"])("rejects a saved receipt with changed %s", async (fault) => {
+    const h = await pending();
+    await h.journal.settle(h.key, h.attempt, h.ending);
+    await h.journal.close(h.key);
+    expect(await h.journal.readEnding(h.key)).toMatchObject({ kind: "ended" });
+    const archive = structuredClone(h.rows.get(h.receiptKey)) as any;
+    if (fault === "hash") archive.receipt.recordHash = "f".repeat(64);
+    if (fault === "boot") archive.receipt.nativeEnding.ref.boot = "33333333-3333-4333-8333-333333333333";
+    if (fault === "attempt") archive.receipt.nativeEnding.attempt = "33333333-3333-4333-8333-333333333333";
+    if (fault === "key") archive.receipt.key += "-foreign";
+    h.rows.set(h.receiptKey, archive);
+    expect(await h.journal.readEnding(h.key)).toEqual({ kind: "unavailable" });
+  });
+
+  it("refuses oversized receipt authority before changing the original admission", async () => {
+    const h = await pending();
+    const oversized = structuredClone(h.rows.get(h.key)) as any;
+    oversized.native.scope.owner.retainedMetadata = "x".repeat(70_000);
+    h.rows.set(h.key, oversized);
+    const before = structuredClone([...h.rows]);
+    await expect(h.journal.settle(h.key, h.attempt, h.ending)).rejects.toThrow("too large");
+    expect([...h.rows]).toEqual(before);
+  });
+
+  it("validates a cached timeout receipt before reporting recovery completed", async () => {
+    const h = await pending();
+    await h.journal.settle(h.key, h.attempt, h.ending);
+    await h.journal.close(h.key);
+    const archive = structuredClone(h.rows.get(h.receiptKey)) as any;
+    expect(await h.journal.recover(h.key, archive.receipt.recordHash, async () => terminal, matches)).toEqual(
+      archive.receipt,
+    );
+    archive.receipt.nativeEnding.ref.boot = "33333333-3333-4333-8333-333333333333";
+    h.rows.set(h.receiptKey, archive);
+    let reads = 0;
+    expect(
+      await h.journal.recover(
+        h.key,
+        archive.receipt.recordHash,
+        async () => {
+          reads++;
+          return terminal;
+        },
+        matches,
+      ),
+    ).toEqual({ error: "native-operation-recovery-refused: record-missing-or-changed", status: 409 });
+    expect(reads).toBe(0);
+    expect(h.rows.get(h.receiptKey)).toEqual(archive);
   });
 });
 

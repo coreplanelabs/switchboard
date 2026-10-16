@@ -8,6 +8,22 @@ import { nativeScopeRefSchema, type NativeScopeRef } from "../../src/execution/n
 export { nativeScopeRefSchema, type NativeScopeRef } from "../../src/execution/nativeScope.js";
 
 const ownerSchema = nativeScopeRefSchema.shape.owner;
+export const nativeTimeoutEndingSchema = z
+  .object({
+    version: z.literal(1),
+    ref: nativeScopeRefSchema,
+    attempt: z.string().uuid(),
+    closed: z.literal(false),
+    populated: z.literal(false),
+    launcherExitCode: z
+      .number()
+      .int()
+      .min(0)
+      .max(255)
+      .refine((code) => code !== 125),
+  })
+  .strict();
+export type NativeTimeoutEnding = z.infer<typeof nativeTimeoutEndingSchema>;
 const rowSchema = z
   .object({
     id: z.string().uuid(),
@@ -34,6 +50,8 @@ export interface NativeScopeOutput {
   exitCode: number;
   timedOut: boolean;
   truncated?: boolean;
+  /** Original attempt closure, retained separately from interrupted command output. */
+  nativeEnding?: NativeTimeoutEnding;
 }
 export interface NativeScopeTransport {
   request(value: Record<string, unknown>, timeoutMs: number): Promise<NativeScopeOutput>;
@@ -381,7 +399,15 @@ export class CloudflareNativeScopeTransport implements NativeScopeTransport {
               timer = setTimeout(() => resolve(null), NATIVE_SCOPE_CONTROL_MS);
             }),
           ]);
-          if (killed) return { stdout: killed[0], stderr: killed[1], exitCode: 124, timedOut: true, truncated };
+          if (killed)
+            return {
+              stdout: killed[0],
+              stderr: killed[1],
+              exitCode: 124,
+              timedOut: true,
+              truncated,
+              nativeEnding: nativeTimeoutEndingSchema.parse({ version: 1, ...closure, launcherExitCode: killed[2] }),
+            };
         }
         throw new Error("native-scope outcome is unknown");
       }

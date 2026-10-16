@@ -676,7 +676,8 @@ The original-owner journal adds a supported exact-result recovery action; [recor
 
 | Criterion | Proof |
 |---|---|
-| Stored native ending proof validates exact original key, record hash and process ending tuples without lookup, signal or mutation. | `[unit]` `deploy/cloudflare-resident/nativeOperation.test.ts::stored original native endings::*` |
+| Stored native ending proof validates exact original key/hash and either original process tuples or a qualified same-attempt native timeout receipt, without lookup, signal or mutation. | `[unit]` `deploy/cloudflare-resident/nativeOperation.test.ts::stored original native endings::*`; `::retained native timeout ending::*` |
+| A native timeout retains its exact scope/boot/attempt empty-group acknowledgment and original launcher completion before removing the sole pending admission. Interrupted output stays unknown; failed writes, uncertain readback, foreign/partial proof, other pending work and later timeouts cannot authorize removal or overwrite the receipt. Missing-proof refusal emits an identity-only diagnostic; a failed log sink preserves the original refusal and hold. | `[unit]` `deploy/cloudflare-resident/runRegistration.test.ts::native timeout ending custody::*`; `deploy/cloudflare-resident/nativeOperation.test.ts::retained native timeout ending::*`; `deploy/cloudflare-resident/nativeScope.test.ts::native timeout closure validation::*` |
 | Canonical result fallback, unique alias/owner/key/hash checks, physical-retirement refusal, read-only inspection, exact tombstone retirement and lost-ACK readback preserve original evidence and no-repeat behavior. | `[unit]` `deploy/cloudflare-resident/checkOperation.test.ts::original recorded check inspection::*` |
 | Selector-only authenticated routes derive routing from canonical source and bind responses to the final source read before Gateway displays them. | `[unit]` `deploy/cloudflare-resident/checkOperation.test.ts::recorded check receiver::*` |
 
