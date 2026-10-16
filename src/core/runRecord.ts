@@ -1017,6 +1017,9 @@ export const CHANNEL_VISIBILITIES: readonly ChannelVisibility[] = ["public", "pr
 /** A `Predicate` as the store receives it (sets → sorted arrays, so equal predicates serialize equally). */
 export function toVisibilityFilter(predicate: Predicate): RunVisibilityFilter {
   switch (predicate.kind) {
+    case "organizations-in":
+      // Run records carry no organization identity; this relation cannot admit a run.
+      return { kind: "none" };
     case "none":
     case "all":
       return { kind: predicate.kind };

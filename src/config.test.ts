@@ -559,7 +559,7 @@ describe("grantsFor — the grants the policy table decides on", () => {
 
   it("admins hold every action, channel, and repo; a plain user holds the open chat commands (runs:read is an operator command — admins only)", async () => {
     const s = store();
-    expect(s.grantsFor("slack:UADMIN")).toEqual(ALL_GRANTS);
+    expect(s.grantsFor("slack:UADMIN")).toEqual({ actions: "all", channels: "all", repos: "all" });
     for (const id of ["slack:UDEV", "slack:URANDOM"]) {
       expect(holds(s, id, "runs:read"), id).toBe(false);
       expect(holds(s, id, "help:read"), id).toBe(true);
@@ -658,7 +658,7 @@ describe("grantsFor — the grants the policy table decides on", () => {
     const s = storeWith(withGrants(`  "access:*": { actions: all, channels: all, repos: all }\n`), {
       commandGroups: ["runs", "friction"],
     });
-    expect(s.grantsFor("access:anyone@example.com")).toEqual(ALL_GRANTS);
+    expect(s.grantsFor("access:anyone@example.com")).toEqual({ actions: "all", channels: "all", repos: "all" });
     expect(s.grantsFor("access:svc:anyone")).toBe(NO_GRANTS);
     expect(holds(s, "slack:URANDOM", "runs:read")).toBe(false);
   });

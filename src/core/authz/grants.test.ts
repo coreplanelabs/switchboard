@@ -81,12 +81,12 @@ describe("parseGrantsConfig — the native `grants` block", () => {
     expect(parseGrantsConfig({ "slack:UALICE": { actions: [""] } })).toMatchObject({ ok: false });
   });
 
-  it("a whole-surface key — slack:*, http:*, mcp:*, access:* — parses like any entry, three axes, absent = empty", () => {
+  it("a whole-surface key — slack:*, http:*, mcp:*, access:* — parses like any entry, all axes, absent = empty", () => {
     const p = parseGrantsConfig({
       "slack:*": { actions: ["runs:read"] },
       "http:*": { actions: ["dispatch"] },
       "mcp:*": { actions: ["dispatch"], channels: ["mcp:ops"] },
-      "access:*": { actions: "all", channels: "all", repos: "all" },
+      "access:*": { actions: "all", channels: "all", repos: "all", organizations: "all" },
     });
     expect(p.ok).toBe(true);
     if (!p.ok) return;
@@ -230,7 +230,7 @@ describe("grantsTable / grantsIn / grantsFor — the lookup", () => {
 
   it("`all` on an axis absorbs the baseline; an admin entry resolves to ALL_GRANTS", () => {
     const source = {
-      grants: parsed({ "slack:UADMIN": { actions: "all", channels: "all", repos: "all" } }),
+      grants: parsed({ "slack:UADMIN": { actions: "all", channels: "all", repos: "all", organizations: "all" } }),
       agentNames: AGENTS,
     };
     expect(grantsFor("slack:UADMIN", source)).toEqual(ALL_GRANTS);
@@ -295,7 +295,7 @@ describe("surface entries — what every actor authenticated on a surface holds"
         "slack:UMORE": { actions: ["config:write"], channels: ["slack:C2"] },
         "slack:ULESS": { actions: ["runs:read"] },
         "slack:UADMIN": { actions: "all" },
-        "access:*": { actions: "all", channels: "all", repos: "all" },
+        "access:*": { actions: "all", channels: "all", repos: "all", organizations: "all" },
         "access:svc:ops": { actions: ["runs:read"] },
       }),
       agentNames: ["general"],
@@ -398,5 +398,53 @@ describe("identity:write is never a baseline (record 0062)", () => {
     });
     expect(grantsIn(table, "slack:UADMIN").actions).toBe("all");
     expect((grantsIn(table, "http:idp").actions as Set<string>).has("identity:write")).toBe(true);
+  });
+});
+
+describe("organization grants", () => {
+  it("requires both explicit organization scope and action for a service", () => {
+    const source = {
+      grants: parsed({
+        "http:reader": { actions: ["organization:read"], organizations: ["acme"] },
+        "http:unscoped": { actions: "all", channels: "all", repos: "all" },
+        "http:scope-only": { organizations: ["acme"] },
+      }),
+    };
+    const resource = { type: "organization", id: "acme" } as const;
+    const caller = (id: string) => ({ kind: "service", id, grants: grantsFor(id, source) }) as const;
+    expect(authorize(caller("http:reader"), "organization:read", resource)).toEqual({ allow: true });
+    expect(authorize(caller("http:reader"), "organization:send", resource).allow).toBe(false);
+    expect(authorize(caller("http:reader"), "organization:read", { ...resource, id: "other" }).allow).toBe(false);
+    expect(authorize(caller("http:unscoped"), "organization:read", resource).allow).toBe(false);
+    expect(authorize(caller("http:scope-only"), "organization:read", resource).allow).toBe(false);
+    expect(authorize({ kind: "service", id: "cli:local", grants: ALL_GRANTS }, "organization:send", resource)).toEqual({
+      allow: true,
+    });
+  });
+  it("preserves a configured organization label as a literal scope", () => {
+    const source = {
+      grants: parsed({ "http:label": { actions: ["organization:read"], organizations: ["Acme Team"] } }),
+    };
+    const caller = { kind: "service", id: "http:label", grants: grantsFor("http:label", source) } as const;
+    expect(authorize(caller, "organization:read", { type: "organization", id: "Acme Team" })).toEqual({ allow: true });
+    expect(authorize(caller, "organization:read", { type: "organization", id: "Acme" }).allow).toBe(false);
+    expect(parseGrantsConfig({ "http:label": { organizations: ["Acme\nTeam"] } })).toMatchObject({ ok: false });
+  });
+
+  it("unions exact organization scopes and refuses malformed configuration", () => {
+    const source = {
+      grants: parsed({
+        "mcp:*": { actions: ["organization:read"], organizations: ["acme"] },
+        "mcp:reader": { organizations: ["other"] },
+      }),
+    };
+    expect(grantsFor("mcp:reader", source).organizations).toEqual(set("acme", "other"));
+    expect(grantsFor("mcp:new", source).organizations).toEqual(set("acme"));
+    expect(parseGrantsConfig({ "http:x": { organizations: "*" } })).toMatchObject({ ok: false });
+    expect(parseGrantsConfig({ "http:x": { organizations: [""] } })).toMatchObject({ ok: false });
+    expect(parseGrantsConfig({ "http:x": { organizations: ["\u0085"] } })).toMatchObject({ ok: false });
+    expect(parseGrantsConfig({ "http:x": { organizations: ["acme\nother"] } })).toMatchObject({ ok: false });
+    const all = parsed({ "http:x": { organizations: "all" } });
+    expect(grantsFor("http:x", { grants: all }).organizations).toBe("all");
   });
 });

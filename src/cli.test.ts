@@ -92,7 +92,7 @@ describe("CLI_CALLER — the local operator", () => {
       actor: {
         kind: "user",
         id: "cli:local",
-        grants: { actions: "all", channels: "all", repos: "all" },
+        grants: { actions: "all", channels: "all", repos: "all", organizations: "all" },
         standingConsent: "all",
       },
     });

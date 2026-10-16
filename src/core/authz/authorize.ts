@@ -12,7 +12,7 @@
 
 import { ACTOR_KINDS, POLICY, resolveGrant, ruleTarget } from "./policy.js";
 import { attributesOf, targetOfResource, type ResourceAttributes } from "./resource.js";
-import type { Action, Actor, Condition, Decision, Grants, Resource, Rule } from "./types.js";
+import type { Action, Actor, Condition, Decision, Grants, Resource, ResourceType, Rule } from "./types.js";
 
 import {
   hasAction,
@@ -36,6 +36,11 @@ export function intersectGrants(a: Grants, b: Grants): Grants {
       actions: intersectSets(a.actions, b.actions, hasAction),
       channels: intersectSets(a.channels, b.channels, holds),
       repos: intersectSets(normalizedRepos(a.repos), normalizedRepos(b.repos), holds),
+      ...(a.organizations === undefined && b.organizations === undefined
+        ? {}
+        : {
+            organizations: intersectSets(a.organizations ?? EMPTY_SET, b.organizations ?? EMPTY_SET, holds),
+          }),
     },
     intersectRepoAccess(repoAccessOf(a), repoAccessOf(b)),
   );
@@ -97,9 +102,17 @@ export type DenyReason =
   | "not-person"
   | "not-owner"
   | "repo-access"
-  | "not-all-channels";
+  | "not-all-channels"
+  | "not-organization-member"
+  | "not-organization-granted"
+  | "not-actor"
+  | "view-as";
 
 const FAILURE_REASON: Readonly<Record<Condition["kind"], DenyReason>> = {
+  "organization-member": "not-organization-member",
+  "organization-grant": "not-organization-granted",
+  "is-actor": "not-actor",
+  "not-viewing-as": "view-as",
   "has-grant": "missing-grant",
   "acts-as-person": "not-person",
   "member-of": "not-member",
@@ -123,8 +136,21 @@ export function evaluateCondition(
   selfIds: readonly string[],
   attributes: ResourceAttributes,
   memberOf: ReadonlySet<string> = EMPTY_SET,
+  actor?: Actor,
 ): boolean {
   switch (condition.kind) {
+    case "organization-member":
+      return (
+        attributes.organizationId !== undefined && actor?.memberOfOrganizations?.has(attributes.organizationId) === true
+      );
+    case "organization-grant":
+      return (
+        attributes.organizationId !== undefined && holds(grants.organizations ?? EMPTY_SET, attributes.organizationId)
+      );
+    case "is-actor":
+      return actor !== undefined && !actor.viewingAs && !actor.onBehalfOf && attributes.userId === actor.id;
+    case "not-viewing-as":
+      return actor !== undefined && !actor.viewingAs;
     case "has-grant": {
       const grant = resolveGrant(condition.grant, attributes);
       return grant !== undefined && hasAction(grants.actions, grant);
@@ -165,22 +191,27 @@ export function evaluateRule(rule: Rule, actor: Actor, resource: Resource): bool
   const grants = effectiveGrants(actor);
   const selfIds = selfIdsOf(actor);
   const memberOf = memberChannelsOf(actor);
-  return rule.when.every((condition) => evaluateCondition(condition, grants, selfIds, attributes, memberOf));
+  return rule.when.every((condition) => evaluateCondition(condition, grants, selfIds, attributes, memberOf, actor));
 }
 
 /** A verified credential acts within both its own policy and the person's policy.
- * Grant intersection alone cannot represent native user-only conditional rights. */
-export function credentialPolicyActor(actor: Actor): Actor | undefined {
-  if (actor.kind !== "service" || actor.onBehalfOf?.kind !== "user") return undefined;
+ * Grant intersection alone cannot represent native user-only conditional rights.
+ * Organization access checks every delegation hop against its own scope. */
+export function credentialPolicyActor(actor: Actor, resourceType?: ResourceType): Actor | undefined {
+  if (
+    !actor.onBehalfOf ||
+    (resourceType !== "organization" && (actor.kind !== "service" || actor.onBehalfOf.kind !== "user"))
+  )
+    return undefined;
   const { onBehalfOf: _principal, ...credential } = actor;
-  return { ...credential, self: selfIdsOf(actor) };
+  return resourceType === "organization" ? credential : { ...credential, self: selfIdsOf(actor) };
 }
 
 /** `authorize` over an explicit (validated) table. Tests use it to drive
  *  alternative tables; production code calls `authorize`. */
 export function authorizeWith(rules: readonly Rule[], actor: Actor, action: Action, resource: Resource): Decision {
   if (!isKnownActorKind(actor.kind)) return deny("unknown-actor-kind");
-  const credential = credentialPolicyActor(actor);
+  const credential = credentialPolicyActor(actor, resource.type);
   if (credential) {
     const delegated = authorizeWith(rules, credential, action, resource);
     return delegated.allow ? authorizeWith(rules, actor.onBehalfOf!, action, resource) : delegated;
@@ -200,7 +231,9 @@ export function authorizeWith(rules: readonly Rule[], actor: Actor, action: Acti
   const memberOf = memberChannelsOf(actor);
   let reason: DenyReason | undefined;
   for (const rule of forOrigin) {
-    const failed = rule.when.find((condition) => !evaluateCondition(condition, grants, selfIds, attributes, memberOf));
+    const failed = rule.when.find(
+      (condition) => !evaluateCondition(condition, grants, selfIds, attributes, memberOf, actor),
+    );
     if (!failed) return ALLOW;
     reason ??= FAILURE_REASON[failed.kind];
   }

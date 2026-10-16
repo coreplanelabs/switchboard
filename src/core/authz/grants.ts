@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isOrganizationId } from "./resource.js";
 import { unionSet, normalizedRepos, repoAccessOf, unionRepoAccess, withRepoAccess } from "./grantSets.js";
 import { NO_GRANTS, type Grants, type GrantSet } from "./types.js";
 
@@ -11,7 +12,12 @@ import { NO_GRANTS, type Grants, type GrantSet } from "./types.js";
 // action is allowed; that is `authorize`.
 
 /** Every grant, on every axis. What admins and the local CLI hold. */
-export const ALL_GRANTS: Grants = Object.freeze({ actions: "all", channels: "all", repos: "all" });
+export const ALL_GRANTS: Grants = Object.freeze({
+  actions: "all",
+  channels: "all",
+  repos: "all",
+  organizations: "all",
+});
 
 /** The plane's system actor (record 0064; record 0057 as amended): the run
  *  ledger object steers write-preset runs itself — the checkpoint steer and the
@@ -101,11 +107,13 @@ export function browserActions(commandGroups: readonly string[]): Set<string> {
 /** One axis as config spells it: a list of names, or the explicit word "all". */
 export type GrantListConfig = readonly string[] | "all";
 
-/** One actor's entry. Absent actions/channels/repos are empty; codeRepos inherits repos. */
+/** One actor's entry. Absent action/channel/repo/organization scopes are empty; codeRepos inherits repos. */
 export interface GrantsEntryConfig {
   actions?: GrantListConfig;
   channels?: GrantListConfig;
   repos?: GrantListConfig;
+  /** Explicit organization access; omitted is empty. */
+  organizations?: GrantListConfig;
   /** Code access independent of repo memory ownership; omitted inherits repos. */
   codeRepos?: GrantListConfig;
 }
@@ -119,6 +127,7 @@ const grantsEntrySchema = z
     actions: grantList.optional(),
     channels: grantList.optional(),
     repos: grantList.optional(),
+    organizations: z.union([z.literal("all"), z.array(z.string().refine(isOrganizationId))]).optional(),
     codeRepos: grantList.optional(),
   })
   .strict();
@@ -143,7 +152,10 @@ function hasKnownPrefix(actorId: string): boolean {
  *  `access:svc:*`, `agent:*`, `cli:*` name namespaces no surface entry covers. */
 export function parseGrantsConfig(raw: unknown): ParsedGrantsConfig {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw))
-    return { ok: false, errors: ["grants must be a mapping of actor id → { actions, channels, repos, codeRepos }"] };
+    return {
+      ok: false,
+      errors: ["grants must be a mapping of actor id → { actions, channels, repos, organizations, codeRepos }"],
+    };
   const errors: string[] = [];
   const grants = new Map<string, Grants>();
   for (const [actorId, entry] of Object.entries(raw as Record<string, unknown>)) {
@@ -166,7 +178,7 @@ export function parseGrantsConfig(raw: unknown): ParsedGrantsConfig {
         const axis = issue.path.length > 0 ? `.${issue.path.map(String).join(".")}` : "";
         errors.push(
           issue.code === "unrecognized_keys"
-            ? `${where}: unknown field ${issue.keys.join(", ")} (expected actions, channels, repos, codeRepos)`
+            ? `${where}: unknown field ${issue.keys.join(", ")} (expected actions, channels, repos, organizations, codeRepos)`
             : `${where}${axis}: expected "all" or a list of non-empty names`,
         );
       }
@@ -183,6 +195,7 @@ export function parseGrantsConfig(raw: unknown): ParsedGrantsConfig {
       actions: toSet(parsed.data.actions),
       channels: toSet(parsed.data.channels),
       repos: normalizedRepos(toSet(parsed.data.repos)),
+      ...(parsed.data.organizations === undefined ? {} : { organizations: toSet(parsed.data.organizations) }),
     };
     grants.set(
       actorId,
@@ -362,12 +375,17 @@ export function grantsFor(actorId: string, source: GrantsSource): Grants {
   return grantsIn(grantsTable(source), actorId);
 }
 
+const EMPTY_ORGANIZATIONS: ReadonlySet<string> = new Set();
+
 function unionGrants(a: Grants, b: Grants): Grants {
   return withRepoAccess(
     {
       actions: unionSet(a.actions, b.actions),
       channels: unionSet(a.channels, b.channels),
       repos: unionSet(normalizedRepos(a.repos), normalizedRepos(b.repos)),
+      ...(a.organizations === undefined && b.organizations === undefined
+        ? {}
+        : { organizations: unionSet(a.organizations ?? EMPTY_ORGANIZATIONS, b.organizations ?? EMPTY_ORGANIZATIONS) }),
     },
     unionRepoAccess(repoAccessOf(a), repoAccessOf(b)),
   );
@@ -381,6 +399,7 @@ function isEmpty(g: Grants): boolean {
     g.channels.size === 0 &&
     g.repos !== "all" &&
     g.repos.size === 0 &&
-    g.repoAccess === undefined
+    g.repoAccess === undefined &&
+    (g.organizations === undefined || (g.organizations !== "all" && g.organizations.size === 0))
   );
 }
