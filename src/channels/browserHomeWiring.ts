@@ -20,6 +20,10 @@ import type { PersonalTokenStore } from "../mcp/personalTokens.js";
 import type { AccessConfig, AccessIdentity } from "./accessAuth.js";
 import type { DashboardVerifier } from "./dashboardAuth.js";
 import type { HomeRuntimeContext } from "./homeRuntime.js";
+import { withChatActor } from "../core/authz/actor.js";
+import { withOriginalOrganizationDispatch } from "../core/dispatch/originalOrganizationInput.js";
+import type { ResumableRun } from "../core/boot.js";
+import type { IncomingMessage as CoreMessage } from "../core/types.js";
 import type { ChannelIO, SlackDirectAudience } from "../core/types.js";
 import { createLegacySlackAudience } from "./legacySlackAudience.js";
 import { identityKey } from "../core/identity/engine.js";
@@ -50,6 +54,34 @@ import { DAY_MS, ORG_RECONCILE_BATCH_MAX } from "../core/budgets.js";
 import { LEASE_MS } from "../core/runLedger/types.js";
 import { parseUnitKey } from "../core/coordinator/contract.js";
 import type { UnitEventKey } from "../core/coordinator/instanceStore.js";
+
+type OriginalBinding = NonNullable<Awaited<ReturnType<ReturnType<typeof createBrowserHomeWiring>["originalBinding"]>>>;
+
+/** Completed intake does not mean a canonical hosted pipeline has finished. */
+export function canRestoreOrganizationRun(run: ResumableRun, source: OriginalBinding | undefined): boolean {
+  return (
+    run.row.meta.organizationIngressRunId === run.row.runId &&
+    !!source?.io.authoritativePrivateHistory &&
+    source.runId === run.row.runId &&
+    (source.originalStatus !== "completed" || run.kind === "rehost")
+  );
+}
+
+/** A hosted card has no new request, but still uses its freshly guarded sink. */
+export function organizationResumeIo(source: OriginalBinding, request?: CoreMessage): ChannelIO | undefined {
+  if (request)
+    Object.assign(
+      request,
+      withOriginalOrganizationDispatch(withChatActor(request, source.actor), {
+        ingressRunId: source.runId,
+        organizationSequence: source.receipt.revision,
+        ...(source.envelope.sourceReference?.sourceRepository
+          ? { organizationRepo: source.envelope.sourceReference.sourceRepository }
+          : {}),
+      }),
+    );
+  return source.io;
+}
 
 export interface BrowserHomeWiringOptions {
   config: ConfigStore;

@@ -7,11 +7,22 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { OPERATOR_ROOT } from "./deploy/host.js";
 import { installationPath } from "./deploy/operatorRoot.js";
-import { openConfigStore } from "./config.js";
+import { conversationRetentionFor, openConfigStore } from "./config.js";
 import { bindLoadedBaseConfigReceipt, parseConfigLocation } from "./configDocument.js";
 import { configRefusalReason, createConfigRefusalServer } from "./configBoot.js";
 import { intakeCompletion, intakeDecisionDeps, probeReply } from "./intakeModel.js";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
+import {
+  createBrowserHomeWiring,
+  canRestoreOrganizationRun,
+  organizationResumeIo,
+} from "./channels/browserHomeWiring.js";
+import type { HomeRuntimeContext } from "./channels/homeRuntime.js";
+import { workViewScopeOf } from "./channels/workViewScope.js";
+import { isIdentityPath } from "./channels/identityRuntime.js";
+import { originalOrganizationDispatchOf } from "./core/dispatch/privateDestination.js";
+import { DAY_MS } from "./core/budgets.js";
+import type { PageSender } from "./channels/webShell.js";
 import { handleAdminReplyProbe, REPLY_PROBE_PATH } from "./channels/adminReplyProbe.js";
 import { providerModelsReader } from "./core/dispatch/providerModels.js";
 import { configuredModelRefs } from "./core/commands/providers.js";
@@ -24,12 +35,18 @@ import { createSlackReadAccess } from "./channels/slack/readAccess.js";
 import { createIngressHandler, parseIngressTokens } from "./channels/http.js";
 import { createMcpHandler } from "./channels/mcp.js";
 import { FilePersonalTokenStore, WorkerPersonalTokenStore } from "./mcp/personalTokens.js";
+import { parseMcpSettings, DEFAULT_MCP_KEY_ENV } from "./mcp/config.js";
 import { createMcpApprovalView } from "./channels/mcpApprovalView.js";
 import { createPersonalMcpSetupHandler } from "./channels/personalMcpSetup.js";
 import { FAVICON_ICO_SVG, createLiveViewHandler } from "./channels/liveView.js";
 import { loadWebAssets, webDistDir } from "./channels/webAssets.js";
 import { PACKAGE_ROOT, packageVersion } from "./packageRoot.js";
-import { makePageSender } from "./channels/webShell.js";
+import { makePageSender, GREEN_PAGE_CSP } from "./channels/webShell.js";
+import { createHomeViewHandler } from "./channels/homeView.js";
+import { createHomeService } from "./core/home/service.js";
+import { createHomeConditionReader } from "./core/home/conditions.js";
+import { deriveHomeHistoryKey } from "./core/home/historyKey.js";
+import { matchesPredicate } from "./core/authz/predicate.js";
 import { createResidentsViewHandler } from "./channels/residentsView.js";
 import { createWebChatHandler, orchestratorChatSeed, resumeWebIO } from "./channels/web.js";
 import { createCostsViewHandler } from "./channels/costsView.js";
@@ -153,7 +170,7 @@ import { configureInternalHosts, internalHostsOf } from "./core/trace/internalHo
 import { getCatchUpStatus } from "./channels/slackCatchUpStatus.js";
 import { getSocketStatus } from "./channels/slackSocketStatus.js";
 import { PROJECT_DOCS_URL, docsRedirectTarget } from "./core/docsLink.js";
-import { activeRunCount, dispatch, type CoreDeps } from "./core/dispatcher.js";
+import { activeRunCount, dispatch, dispatchClick, type CoreDeps } from "./core/dispatcher.js";
 import {
   createAdminCoordinatorHandler,
   reconcileCoordinatorReport,
@@ -166,7 +183,12 @@ import {
 import { resolveGrant, resolveShipCaps } from "./core/shipPipeline.js";
 import { createMainTaskStarter } from "./core/coordinator/mainStart.js";
 import { createGithubWebhookHandler, GITHUB_WEBHOOK_PATH } from "./channels/githubWebhook.js";
-import { createMergeWaitRegistry } from "./core/coordinator/checksIntake.js";
+import {
+  createMergeWaitRegistry,
+  findGithubCommentReplay,
+  verifyGithubQuestionAnswer,
+  type GithubQuestionAnswerInput,
+} from "./core/coordinator/checksIntake.js";
 import { sendPullMerged } from "./core/coordinator/contract.js";
 import { createMergeReadyBook, createMergeWatch } from "./core/mergeWatch.js";
 import type { SweepOrigin, PullsCommandDeps } from "./core/commands/pulls.js";
@@ -239,10 +261,9 @@ import { SCHEDULES } from "./core/schedules.js";
 import { inspectLiveCredentials } from "./core/credentialInspection.js";
 import { buildCoreCommands, deliveryFromConfig } from "./core/commandCatalogue.js";
 import {
-  callerFor,
   createCommandHttpHandler,
+  accessActor,
   isCommandPath,
-  resolveAccessActor,
   serviceTokenAllowed,
   type PersonLookup,
 } from "./channels/commandHttp.js";
@@ -1035,7 +1056,20 @@ export async function runBot(): Promise<void> {
       `[intake] gate not wired (${err instanceof Error ? err.message : String(err)}) — thread replies run as always`,
     );
   }
-  const { app, receiver, statusClient } = createSlackApp(deps, slackIntake);
+  let browserWiring: ReturnType<typeof createBrowserHomeWiring> | undefined;
+  const organizationTasks = new Set<Promise<void>>();
+  const { app, receiver, statusClient } = createSlackApp(
+    deps,
+    slackIntake,
+    async (core, msg, io, opts) => {
+      if (browserWiring) return browserWiring.dispatchSlack(core, msg, io, opts);
+      if (!msg.channelId.startsWith("slack:D")) return dispatch(core, msg, io, opts);
+      await io.reply("Organization readiness is unavailable. No work started.");
+      return { status: "refused", cause: "system", refusal: "Organization readiness is unavailable." };
+    },
+    (core, click, opts) =>
+      browserWiring ? browserWiring.confirmSlack(core, click, opts) : dispatchClick(core, click, opts),
+  );
   // A thread's channel handle rebuilt from a stored row's parts, with no
   // triggering event (run-history item 38): what a resumed run replies through
   // and what a coordinator's child is dispatched into. Slack from the key's
@@ -1056,7 +1090,8 @@ export async function runBot(): Promise<void> {
             clock: systemClock,
             ...(request?.messageId !== undefined ? { currentInputId: request.messageId } : {}),
             instances: coordinatorInstances,
-            ioFor: (origin) => threadIoFor(origin),
+            ioFor: (origin) =>
+              origin.sourceRunId ? browserWiring?.originalIO(origin.sourceRunId, origin) : threadIoFor(origin),
           });
     const [platform, channel, threadTs] = thread.threadKey.split(":");
     if (platform === "slack" && channel && threadTs) {
@@ -1164,7 +1199,7 @@ export async function runBot(): Promise<void> {
   // a run that vanishes at eviction). Read by the graceful drain below and
   // reported on /healthz for the deploy preflight (deploy/cloudflare/preflight.mjs).
   const pendingHistoryWrites = () => runHistoryWriter.pending();
-  const inFlight = () => activeRunCount() + pendingReflectionCount() + pendingHistoryWrites();
+  const inFlight = () => activeRunCount() + pendingReflectionCount() + pendingHistoryWrites() + organizationTasks.size;
   let draining = false;
   const coordinatorChildAdmission = createCoordinatorChildAdmission(() => draining);
   // The runs the drain's handoff marked for the next generation — they stop
@@ -1192,21 +1227,150 @@ export async function runBot(): Promise<void> {
   // SSO and browser-approved personal credentials work on MCP. Both land in dispatch().
   // HTTP ingress: POST /ingress; MCP ingress: POST /mcp (JSON-RPC 2.0).
   // Without an authorized credential, each remains fail-closed.
+  // Native organization intake has the same lifetime as the bot, including
+  // Slack-only local sessions. Source readiness never blocks the HTTP listener.
+  const accessConfig = parseAccessConfig(publicEnv());
+  const publicBaseUrl = process.env.PUBLIC_BASE_URL;
+  let nativePage: PageSender | undefined;
+  let nativePeople: () => readonly import("./channels/webSeed.js").ViewablePerson[] = () => [];
+  const personalTokenWorker = config.config.runtimeOverrides?.worker;
+  const personalTokenEnv = personalTokenWorker?.tokenEnv ?? "MEMORY_TOKEN";
+  const personalTokenSecret = personalTokenWorker ? processSecrets.named(personalTokenEnv) : undefined;
+  if (personalTokenWorker && !personalTokenSecret)
+    throw new Error(`runtimeOverrides.worker is configured but ${personalTokenEnv} is not set`);
+  const personalTokenStore = personalTokenWorker
+    ? new WorkerPersonalTokenStore({
+        baseUrl: personalTokenWorker.baseUrl,
+        token: personalTokenSecret!.reveal(),
+      })
+    : new FilePersonalTokenStore(join(DATA_DIR, "personal-mcp-tokens.json"));
+  const accessVerify: VerifyDeps = { fetchJwks: httpJwksFetcher, now: () => systemClock(), cache: new JwksCache() };
+  // The dashboard auth strategy (docs/reference/specs/access-gate.md, plan D5): ONE
+  // verifier, asked once per request below, for everything the dashboard
+  // serves. `dashboard.auth` picks it — `access` (the Cloudflare Access JWT,
+  // re-verified here, fail-closed), `token` (a bearer → one configured actor)
+  // or `none` (loopback callers on a localhost deployment only); absent →
+  // access when ACCESS_* are set, else none. A strategy missing its inputs is
+  // a startup error, never a silently open or silently closed dashboard.
+  const dashboardAuth = buildDashboardVerifier({
+    dashboard: config.config.dashboard,
+    access: accessConfig,
+    secrets: processSecrets,
+    verify: accessVerify,
+    publicBaseUrl,
+  });
+  browserWiring = createBrowserHomeWiring({
+    config,
+    dashboard: dashboardAuth,
+    access: accessConfig,
+    slack: app.client,
+    team: async () => (await (statusClient ?? app.client).auth.test()).team_id,
+    ledger: ledgerClient,
+    nativeIo: (request) => threadIoFor({ threadKey: request.msg.threadKey, userId: request.msg.userId }, request.msg),
+    legacySlackIo: (audience) => threadIoFor(audience),
+    deliverIdentityNotice: async (notice) => {
+      const opened = await app.client.conversations.open({ users: notice.identity.subject });
+      if (!opened.ok || !opened.channel?.id) return false;
+      const operation =
+        notice.operation?.kind === "unlink"
+          ? "unlinked"
+          : notice.operation?.kind === "recover"
+            ? "recovered"
+            : "linked";
+      const payload = {
+        channel: opened.channel.id,
+        client_msg_id: notice.auditId.slice("link:".length),
+        text: `Your Slack account was ${operation}. ${publicBaseUrl ? `Review your accounts: ${publicBaseUrl}/settings/identities` : "Review your accounts in Settings → Identities."}`,
+      };
+      const sent = await app.client.chat.postMessage(payload);
+      return sent.ok === true && typeof sent.ts === "string";
+    },
+    core: deps,
+    runs: runsService,
+    commands,
+    auth: () => auth,
+    personalTokens: personalTokenStore,
+    readSecret: (name) => processSecrets.named(name)?.reveal(),
+    emojiDirectory: installationPath(
+      OPERATOR_ROOT,
+      `data/emoji/${createHash("sha256").update(config.config.organization).digest("hex")}`,
+    ),
+    page: (...args) => {
+      if (!nativePage) throw new Error("HTTP pages are unavailable.");
+      nativePage(...args);
+    },
+    people: () => nativePeople(),
+    channelsOf,
+    now: systemClock,
+    owner: generation,
+    limits: {
+      pendingPerActor: 10,
+      pendingPerSource: 100,
+      pendingPerOrganization: 1000,
+      reservedReconciliation: 1,
+      contentTtlMs: conversationRetentionFor(config.config).privateContentDays * DAY_MS,
+      receiptTtlMs: conversationRetentionFor(config.config).receiptDays * DAY_MS,
+    },
+    privateWorkerLog,
+    launch: (task) => {
+      if (draining) throw new Error("This process is draining.");
+      const pending = task();
+      organizationTasks.add(pending);
+      void pending.catch(() => {}).finally(() => organizationTasks.delete(pending));
+    },
+    publicBaseUrl,
+  });
+  deps.guardOrganizationConfirmation = (row, chooser) => browserWiring!.guardOrganizationConfirmation(row, chooser);
+  let initializing = false;
+  const reconcileOrganization = async () => {
+    if (draining || initializing) return;
+    initializing = true;
+    try {
+      if (!browserWiring?.current()) await browserWiring?.initialize();
+      await browserWiring?.refreshNativeSources();
+      await browserWiring?.current()?.runtime.reconcile(config.config.organization);
+      await browserWiring?.identity()?.retryNotices();
+    } catch {
+      console.warn("[home] current durable source readiness is unavailable");
+    } finally {
+      initializing = false;
+    }
+  };
+  void reconcileOrganization();
+  const organizationRefresh = setInterval(() => void reconcileOrganization(), LEASE_MS);
+  organizationRefresh.unref();
+
   if (process.env.PORT) {
-    const personalTokenWorker = config.config.runtimeOverrides?.worker;
-    const personalTokenEnv = personalTokenWorker?.tokenEnv ?? "MEMORY_TOKEN";
-    const personalTokenSecret = personalTokenWorker ? processSecrets.named(personalTokenEnv) : undefined;
-    if (personalTokenWorker && !personalTokenSecret)
-      throw new Error(`runtimeOverrides.worker is configured but ${personalTokenEnv} is not set`);
-    const personalTokenStore = personalTokenWorker
-      ? new WorkerPersonalTokenStore({
-          baseUrl: personalTokenWorker.baseUrl,
-          token: personalTokenSecret!.reveal(),
-        })
-      : new FilePersonalTokenStore(join(DATA_DIR, "personal-mcp-tokens.json"));
-    // A token entry's `email` binds it to a person (authorization.md item 15):
-    // the same cached reverse lookup the dashboard link uses.
-    const ingress = createIngressHandler(deps, { auth, publicBaseUrl: process.env.PUBLIC_BASE_URL, personByEmail });
+    // Native credentials retain their exact source identity. A configured
+    // email is never evidence of a person binding.
+    const nativeAdmission: import("./channels/http.js").OrganizationIngress = (msg, io, evidence, continuation) =>
+      browserWiring ? browserWiring.admit(msg, io, evidence, continuation) : Promise.resolve({ status: "unavailable" });
+    const ingress = createIngressHandler(deps, {
+      auth,
+      publicBaseUrl: process.env.PUBLIC_BASE_URL,
+      admit: nativeAdmission,
+    });
+    const mcp = createMcpHandler(deps, {
+      auth,
+      sso: dashboardAuth,
+      personalTokens: personalTokenStore,
+      personalApprovalPin: () =>
+        accessConfig && capabilities.dashboardAuth === "access"
+          ? {
+              issuer: `https://${accessConfig.teamDomain}`,
+              audience: accessConfig.aud,
+              organization: config.config.organization,
+            }
+          : undefined,
+      approvalsEnabled: capabilities.dashboardAuth === "access",
+      commands,
+      grantsFor: (id) => config.grantsFor(id),
+      personByEmail,
+      channelsOf,
+      admit: nativeAdmission,
+      replayChoice: (msg, evidence, choice) => browserWiring!.replayNativeChoice(msg, evidence, choice),
+      publicBaseUrl: process.env.PUBLIC_BASE_URL,
+    });
     // The model proxy (docs/reference/specs/model-proxy.md): a run's bearer buys
     // model calls through this process — pinned to its preset's model and caps,
     // metered as its own `model.turn` spans, forwarded to the real provider with
@@ -1327,6 +1491,22 @@ export async function runBot(): Promise<void> {
         binding !== undefined && author.id === binding.id && author.login.toLowerCase() === binding.login.toLowerCase()
       );
     };
+    const verifyQuestionAnswer = async (input: GithubQuestionAnswerInput) => {
+      const installationId = Number(processSecrets.get("GITHUB_APP_INSTALLATION_ID")?.reveal());
+      if (!Number.isSafeInteger(installationId) || installationId < 1 || !browserWiring)
+        return { status: "unavailable" as const };
+      const binding = await bindingOf(input.requesterId, config);
+      const requester = await browserWiring.resolveQuestionRequester(
+        `${input.instance.id}:${input.unit.unit}`,
+        input.requesterId,
+      );
+      return verifyGithubQuestionAnswer(input, {
+        organization: config.config.organization,
+        installationId,
+        binding,
+        requester,
+      });
+    };
     const githubWebhook = createGithubWebhookHandler({
       secret: processSecrets.get("GITHUB_WEBHOOK_SECRET")?.reveal(),
       watch: mergeWatch,
@@ -1334,6 +1514,9 @@ export async function runBot(): Promise<void> {
       instances: coordinatorInstances,
       ...(artifacts !== undefined ? { artifacts } : {}),
       commenterAuthorized,
+      verifyQuestionAnswer,
+      replayOwnerOf: (repo, prNumber, eventId) =>
+        findGithubCommentReplay(coordinatorInstances, repo, prNumber, eventId),
       checksSettled: async (repo, headSha) => {
         const checks = await fetchCommitChecks(repo, headSha);
         return checks !== undefined && checks.total > 0 && checks.pending.length === 0;
@@ -1405,6 +1588,8 @@ export async function runBot(): Promise<void> {
         return outcome.kind === "steered";
       },
       ioFor: (thread) => threadIoFor(thread),
+      privateWorkerSourceIoFor: (origin) =>
+        origin.sourceRunId ? browserWiring?.originalIO(origin.sourceRunId, origin) : threadIoFor(origin),
       ...(privateWorkerLog !== undefined ? { privateWorkerLog } : {}),
       findOpenPrByHead,
       listAnyPrByHead,
@@ -1521,7 +1706,57 @@ export async function runBot(): Promise<void> {
     // build it; local dev runs `npm run build` in web/ once, or points
     // SWITCHBOARD_WEB_DIST elsewhere).
     const webAssets = loadWebAssets(webDistDir(publicEnv(), PACKAGE_ROOT));
-    const page = makePageSender(webAssets.entry, capabilities);
+    const bluePage = makePageSender(webAssets.entry, capabilities);
+    const greenAssets = loadWebAssets(webDistDir(publicEnv(), PACKAGE_ROOT), "green/main.ts");
+    const greenDocument = makePageSender(greenAssets.entry, capabilities, { csp: GREEN_PAGE_CSP });
+    nativePage = greenDocument;
+    void browserWiring!.emoji.refresh(app.client).catch(() => {});
+    const page: PageSender = (...args) => (browserWiring ? browserWiring.page(...args) : greenDocument(...args));
+    const greenPage = page;
+    // The blue document remains isolated while this candidate uses green.
+    void bluePage;
+    const verifiedPageActors = new WeakMap<AccessIdentity, Actor>();
+    const verifiedHomeContexts = new WeakMap<Actor, HomeRuntimeContext>();
+    const historyKeyName = parseMcpSettings(config.config.mcp)?.credentialKeyEnv ?? DEFAULT_MCP_KEY_ENV;
+    const homeService = createHomeService({
+      organizationId: config.config.organization,
+      instances: coordinatorInstances,
+      conditions: createHomeConditionReader(coordinatorInstances),
+      historyCursorKey: deriveHomeHistoryKey(
+        config.config.organization,
+        processSecrets.named(historyKeyName)?.reveal(),
+      ),
+      liveUnitKeys: async (visibleTo) =>
+        new Set(
+          defaultRunRegistry
+            .listActive()
+            .filter(
+              (run) =>
+                !run.finished &&
+                run.parentInstanceId &&
+                run.coordinatorUnit &&
+                matchesPredicate(visibleTo, {
+                  userId: run.userId ?? "",
+                  channelId: run.channelId ?? "",
+                  repo: run.repo,
+                  channelVisibility: run.channelVisibility ?? "unknown",
+                }),
+            )
+            .map((run) => `${run.parentInstanceId}:${run.coordinatorUnit}`),
+        ),
+    });
+    const homeView = createHomeViewHandler(homeService, greenPage, config.config.organization, {
+      thread: async (context, key) =>
+        context.home ? browserWiring?.current()?.readThread(context.home, key) : undefined,
+      privateUnit: async (context, instance, unit) =>
+        !!context.home && !!(await browserWiring?.current()?.canReadPrivateUnit(context.home, instance, unit)),
+      privateEpoch: async (context) =>
+        context.home ? browserWiring?.current()?.host.currentEpoch(context.home) : undefined,
+      answers: async (context, snapshot) =>
+        context.home && browserWiring?.current()
+          ? browserWiring.current()!.answers(context.home, snapshot.needsYou)
+          : {},
+    });
     // Residents dash: GET /residents (index) + /residents/:owner/:name (detail),
     // the browser twin of `repo list`. Reads the resident Worker's admin
     // /residents route live on every request with the same bearer the chat
@@ -1585,8 +1820,11 @@ export async function runBot(): Promise<void> {
       {
         commands,
         names,
-        callerFor: (identity) =>
-          callerFor(identity, { grantsFor: (id) => config.grantsFor(id), personByEmail, channelsOf, personName }),
+        callerFor: async (identity) => {
+          const actor = verifiedPageActors.get(identity);
+          if (!actor) throw new Error("Current dashboard authority is unavailable.");
+          return { kind: "access", id: actor.id, actor };
+        },
         installation: () => installationSettings(config.config, capabilities),
         vocabulary: {
           agents: Object.keys(AGENTS),
@@ -1639,7 +1877,6 @@ export async function runBot(): Promise<void> {
     // re-verify it here, fail-closed — even if the edge rule is ever
     // misconfigured or a client spoofs the header. ACCESS_* stay the env inputs
     // of that strategy; null means Access is not configured.
-    const accessConfig = parseAccessConfig(publicEnv());
     // ── live view on RunsService ─────────────────────────────────────────────
     // Live run view + run history: GET /runs (index; ?all=1
     // adds finished/persisted runs) + /runs/:id (page) + /runs/:id/events (SSE).
@@ -1649,13 +1886,8 @@ export async function runBot(): Promise<void> {
     // token in the URL); finished/persisted runs are served tokenless to the
     // Access-authenticated viewer, so — like the index — they must only be
     // exposed behind Access, and both are bound to that viewer's actor
-    // (docs/reference/specs/authorization.md items 5–7): the gate's identity is
-    // resolved with the SAME `resolveAccessActor` the /api adapter uses and handed to
-    // the handler as `ctx.actor` below, so the index lists and the run page
-    // reads exactly what `/api/runs.*` would for that identity — under the
-    // `token` strategy the configured actor, under `none` the local operator
-    // `access:loopback`, each granted like any other browser session.
-    const publicBaseUrl = process.env.PUBLIC_BASE_URL;
+    // (docs/reference/specs/authorization.md items 5–7): the current native
+    // credential and selected read scope supply `ctx.actor` on each request.
     // /docs* sends every caller to the project's published docs
     // (src/core/docsLink.ts): the site is the project's, not a feature an
     // installation deploys a copy of.
@@ -1668,10 +1900,25 @@ export async function runBot(): Promise<void> {
         (await runsService.listRuns({ status: "all", visibleTo: { kind: "all" }, limit: RUN_LIST_MAX_LIMIT })).runs,
       name: personName,
     });
+    nativePeople = () => viewAsPeople.current();
     void viewAsPeople.refresh();
     const liveView = createLiveViewHandler({
       page,
       service: runsService,
+      readPrivateUnit: async (actor, key) => {
+        const context = verifiedHomeContexts.get(actor);
+        const installed = browserWiring?.current();
+        if (!context || context.actor !== actor || !installed) return;
+        const [instance, units] = await Promise.all([
+          coordinatorInstances.get(key.instanceId),
+          coordinatorInstances.listUnits(key.instanceId),
+        ]);
+        const matches = units.filter((unit) => unit.instanceId === key.instanceId && unit.unit === key.unit);
+        if (!instance || instance.id !== key.instanceId || matches.length !== 1) return;
+        const unit = matches[0]!;
+        if (!(await installed.canReadPrivateUnit(context, instance, unit))) return;
+        return unit;
+      },
       index: defaultRunRegistry,
       // The view-as picker's people (record 0053): the cache `viewAsPeople` keeps.
       people: () => viewAsPeople.current(),
@@ -1695,32 +1942,6 @@ export async function runBot(): Promise<void> {
         : {}),
     });
     // ── end live view ────────────────────────────────────────────────────────
-    const accessVerify: VerifyDeps = { fetchJwks: httpJwksFetcher, now: () => systemClock(), cache: new JwksCache() };
-    // The dashboard auth strategy (docs/reference/specs/access-gate.md, plan D5): ONE
-    // verifier, asked once per request below, for everything the dashboard
-    // serves. `dashboard.auth` picks it — `access` (the Cloudflare Access JWT,
-    // re-verified here, fail-closed), `token` (a bearer → one configured actor)
-    // or `none` (loopback callers on a localhost deployment only); absent →
-    // access when ACCESS_* are set, else none. A strategy missing its inputs is
-    // a startup error, never a silently open or silently closed dashboard.
-    const dashboardAuth = buildDashboardVerifier({
-      dashboard: config.config.dashboard,
-      access: accessConfig,
-      secrets: processSecrets,
-      verify: accessVerify,
-      publicBaseUrl,
-    });
-    const mcp = createMcpHandler(deps, {
-      auth,
-      sso: dashboardAuth,
-      personalTokens: personalTokenStore,
-      approvalsEnabled: capabilities.dashboardAuth === "access",
-      commands,
-      grantsFor: (id) => config.grantsFor(id),
-      personByEmail,
-      channelsOf,
-      publicBaseUrl,
-    });
     if (process.env.ACCESS_DEV_BYPASS !== undefined) {
       console.warn(
         "[dashboard] ACCESS_DEV_BYPASS is no longer read: without ACCESS_* the dashboard auth is `none` (loopback callers on a localhost deployment) — unset it; a grants entry keyed access:dev-bypass belongs under access:loopback now",
@@ -1733,6 +1954,10 @@ export async function runBot(): Promise<void> {
     const commandHttp = createCommandHttpHandler(commands, {
       core: deps,
       browserApprovals: capabilities.dashboardAuth === "access",
+      resolveCaller: async (identity) => {
+        const actor = verifiedPageActors.get(identity);
+        return actor ? { kind: "access", id: actor.id, actor } : undefined;
+      },
       grantsFor: (id) => config.grantsFor(id),
       personByEmail,
       channelsOf,
@@ -1747,6 +1972,18 @@ export async function runBot(): Promise<void> {
       publicOrigin: publicBaseUrl ? new URL(publicBaseUrl).origin : undefined,
     });
     const mcpApproval = createMcpApprovalView(deps, {
+      personalApprovalPin: () =>
+        accessConfig && capabilities.dashboardAuth === "access"
+          ? {
+              issuer: `https://${accessConfig.teamDomain}`,
+              audience: accessConfig.aud,
+              organization: config.config.organization,
+            }
+          : undefined,
+      resolveApprovalSource: (identity, row) => {
+        const viewer = verifiedPageActors.get(identity);
+        return viewer ? browserWiring!.approvalSource(row, viewer) : Promise.resolve(undefined);
+      },
       auth,
       personalTokens: personalTokenStore,
       commands,
@@ -1757,6 +1994,9 @@ export async function runBot(): Promise<void> {
     });
     const personalMcpSetup = createPersonalMcpSetupHandler({
       store: personalTokenStore,
+      ...(accessConfig && capabilities.dashboardAuth === "access"
+        ? { approval: { access: accessConfig, organization: config.config.organization } }
+        : {}),
       grantsFor: (id) => config.grantsFor(id),
       personByEmail,
       publicOrigin: publicBaseUrl ? new URL(publicBaseUrl).origin : undefined,
@@ -1901,7 +2141,7 @@ export async function runBot(): Promise<void> {
       // GUARD: because this route is ungated, nothing beyond the built bundle
       // may land in web/dist — in particular, keep `build.sourcemap` OFF in
       // web/vite.config.ts, or the app's source would be world-readable here.
-      if (webAssets.serve(req, res)) return;
+      if (!path.startsWith("/assets/emoji/") && (greenAssets.serve(req, res) || webAssets.serve(req, res))) return;
       // The dashboard gate: identity FIRST (the configured strategy, fail-closed),
       // before the view dispatch. The gate is async (`access` may fetch the JWKS),
       // so we resolve the promise here; a rejection is a 403, never a 500 that
@@ -1911,6 +2151,10 @@ export async function runBot(): Promise<void> {
       // capability-token check — defense in depth). Non-/runs paths below are
       // unchanged and not gated.
       if (
+        path.startsWith("/assets/emoji/") ||
+        path === "/home" ||
+        path.startsWith("/home/") ||
+        path.startsWith("/pipelines/") ||
         isCommandPath(path) ||
         isConnectPath(path) ||
         path === "/runs" ||
@@ -1922,6 +2166,7 @@ export async function runBot(): Promise<void> {
         path.startsWith("/costs/") ||
         path === "/metrics" ||
         path === "/metrics.json" ||
+        path.startsWith("/metrics/") ||
         path === "/plane" ||
         path === "/plane.json" ||
         path === "/delivery" ||
@@ -1954,33 +2199,111 @@ export async function runBot(): Promise<void> {
             const viewAs = viewAsFromCookie(req.headers.cookie);
             const identity: AccessIdentity = viewAs !== undefined ? { ...gate.identity, viewAs } : gate.identity;
             // --- /api/*: the command handler owns everything under it. ---
-            if (isCommandPath(path)) return commandHttp(req, res, identity);
+            if (isCommandPath(path) && (dashboardAuth.mode === "token" || gate.identity.commonName)) {
+              const raw = accessActor(gate.identity, (id) => config.grantsFor(id));
+              const actor = dashboardAuth.mode === "token" ? { ...raw, kind: "service" as const, self: [raw.id] } : raw;
+              verifiedPageActors.set(identity, actor);
+              return commandHttp(req, res, identity);
+            }
             // --- end /api/* ---
-            // The pages' actor: the same resolution `/api` makes, linked to its
-            // person when the session's email names one (record 0042), or viewing
-            // as one when an admin's cookie says so (record 0053).
-            const actor = await resolveAccessActor(identity, {
-              grantsFor: (id) => config.grantsFor(id),
-              personByEmail,
-              channelsOf,
-              personName,
-            });
+            const home = await browserWiring?.context(req, gate.identity);
+            const installed = browserWiring?.current();
+            if (!home || !installed) {
+              res
+                .writeHead(503, { "content-type": "text/plain", "cache-control": "no-store" })
+                .end(browserWiring?.unavailable() ?? "Current source proof is unavailable.");
+              return;
+            }
+            const actor = home.actor;
+            const currentSource = await installed.organization.resolve(home.authentication);
+            if (
+              !currentSource ||
+              !(await installed.host.authorize({
+                ...currentSource,
+                source: home.authentication.source,
+                sourceReference: home.authentication.sourceReference,
+                action: "read",
+                destination: { kind: "broad" },
+                target: null,
+                context: [],
+              }))
+            ) {
+              res.writeHead(404).end();
+              return;
+            }
+            verifiedPageActors.set(identity, actor);
+            verifiedPageActors.set(gate.identity, actor);
+            verifiedHomeContexts.set(actor, home);
+            if (isCommandPath(path)) return commandHttp(req, res, identity);
+            if (path.startsWith("/assets/emoji/")) {
+              await browserWiring!.emoji.handle(req, res);
+              return;
+            }
+            if (isIdentityPath(path)) {
+              const identityHandler = browserWiring?.identity();
+              if (!identityHandler) {
+                res.writeHead(503).end("Account verification is unavailable.");
+                return;
+              }
+              identityHandler(req, res, {
+                actor,
+                evidence: {
+                  strategy: dashboardAuth.mode,
+                  token: req.headers["cf-access-jwt-assertion"],
+                  viewAs: actor.viewingAs,
+                },
+              });
+              return;
+            }
+            if (/^\/home\/(session|events|focus|key|send|messages)(?:\/|$)/.test(path)) {
+              const query = new URL(req.url ?? "/", "http://localhost").searchParams;
+              const scope = workViewScopeOf(actor);
+              if (
+                scope.mode === "person" &&
+                !(req.method === "GET" && query.has("thread") && query.get("observe") === "1")
+              ) {
+                res.writeHead(404).end();
+                return;
+              }
+              installed.handler(req, res, home);
+              return;
+            }
+            if (
+              homeView(req, res, {
+                actor,
+                organization: config.config.organization,
+                home,
+                attentionRecipients:
+                  workViewScopeOf(actor).mode === "everyone"
+                    ? await browserWiring!.attentionRecipients(home)
+                    : workViewScopeOf(actor).ownerIds,
+              })
+            )
+              return;
+            if (path === "/home/threads")
+              req.url = (req.url ?? "/home/threads").replace(/^\/home\/threads/, "/threads");
+            if (path === "/settings/runtime" || path.startsWith("/settings/runtime/"))
+              req.url = (req.url ?? "").replace(/^\/settings\/runtime/, "/residents");
+            if (req.method !== "GET" && /^\/threads(?:\/|$)/.test(path)) {
+              res.writeHead(404).end();
+              return;
+            }
             if (viewAsRoutes(req, res, { actor })) return;
             if (liveView(req, res, { actor })) return;
             // --- /threads*: the web chat, the actor's own runs and lane (record 0043). ---
             if (webChat(req, res, { actor, identity })) return;
             // --- /mcp/connect/<nonce>: the credential page, identity-bound. ---
-            if (mcpConnectView(req, res, gate.identity)) return;
-            if (personalMcpSetup(req, res, gate.identity)) return;
-            if (mcpApproval(req, res, gate.identity)) return;
+            if (mcpConnectView(req, res, gate.identity, actor)) return;
+            if (personalMcpSetup(req, res, gate.identity, actor)) return;
+            if (mcpApproval(req, res, gate.identity, actor)) return;
             if (residentsView(req, res, { actor })) return;
             if (costsView(req, res, { identity, actor })) return;
             if (metricsView(req, res, { actor })) return;
             if (planeView(req, res, { actor, identity })) return;
             if (deliveryView(req, res, { actor })) return;
             if (settingsView(req, res, { identity })) return;
-            res.writeHead(200, { "content-type": "text/plain" });
-            res.end("ok");
+            res.writeHead(404, { "content-type": "text/plain", "cache-control": "no-store" });
+            res.end("not found");
           })
           .catch((err) => {
             console.error(`[access] ${err instanceof Error ? err.message : String(err)}`);
@@ -1996,7 +2319,7 @@ export async function runBot(): Promise<void> {
       // gate. An EXACT-path match, so /healthz and everything else still fall
       // through to the probes below.
       if (path === "/") {
-        res.writeHead(302, { location: "/threads" });
+        res.writeHead(302, { location: "/home" });
         res.end();
         return;
       }
@@ -2123,7 +2446,23 @@ export async function runBot(): Promise<void> {
   };
   const launch = async (outcome: ReclaimOutcome): Promise<void> => {
     if (!ledgerReclaim || outcome.resumable.length === 0) return;
-    await launchResumes(deps, outcome.resumable, {
+    const verified = new Map<
+      string,
+      NonNullable<Awaited<ReturnType<ReturnType<typeof createBrowserHomeWiring>["originalBinding"]>>>
+    >();
+    const runnable: typeof outcome.resumable = [];
+    for (const run of outcome.resumable) {
+      const originalRunId = run.row.meta.organizationIngressRunId;
+      if (!originalRunId) {
+        runnable.push(run);
+        continue;
+      }
+      const source = await browserWiring?.originalBinding(originalRunId);
+      if (!source || !canRestoreOrganizationRun(run, source)) continue;
+      verified.set(run.row.runId, source);
+      runnable.push(run);
+    }
+    await launchResumes(deps, runnable, {
       agentFor: (name) => {
         try {
           return name ? getAgent(name) : undefined;
@@ -2133,7 +2472,28 @@ export async function runBot(): Promise<void> {
       },
       // The handle from the row's METADATA (record 0060): a hosted row's key
       // column carries the host suffix and names no thread of any channel.
-      ioFor: (row, request) => threadIoFor(resumeIoTarget(row), request),
+      ioFor: (row, request) => {
+        const binding = verified.get(row.runId);
+        if (binding) return organizationResumeIo(binding, request);
+        return threadIoFor(resumeIoTarget(row), request);
+      },
+      dispatchFn: async (core, msg, io, opts) => {
+        const original = originalOrganizationDispatchOf(msg);
+        if (!original) {
+          await dispatch(core, msg, io, opts);
+          return;
+        }
+        if (!io.authoritativePrivateHistory) throw new Error("The original private input is unavailable.");
+        await dispatch(core, msg, io, {
+          ...opts,
+          ingressRunId: original.ingressRunId,
+          authoritativeHistory: true,
+          organizationConversation: true,
+          organizationSequence: original.organizationSequence,
+          organizationRepo: original.organizationRepo,
+          seed: await io.authoritativePrivateHistory(msg),
+        });
+      },
       // A re-hosted parent's card is this generation's again, so the connect's
       // orphan sweep leaves it alone (slack-channel item 8).
       keepCardLive: adoptLiveCard,
@@ -2308,7 +2668,7 @@ export async function runBot(): Promise<void> {
     // which can read 0 while a registry row holds the drain.
     const runsHeld = () => heldRuns().length;
     const admissionsHeld = () => coordinatorChildAdmission.pending();
-    const drainHolds = () => runsHeld() + admissionsHeld();
+    const drainHolds = () => runsHeld() + admissionsHeld() + organizationTasks.size;
     if (runsHeld() > 0) console.log(drainHoldLine(heldRuns()));
     if (admissionsHeld() > 0)
       console.log(`[drain] waiting for ${admissionsHeld()} coordinator child admission(s) to register`);

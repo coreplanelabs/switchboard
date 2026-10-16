@@ -98,6 +98,7 @@ describe("browser approval current source", () => {
       supplied = options,
       sub = "alice",
       origin: string | undefined = "https://bot.example",
+      viewer?: Actor,
     ) =>
       new Promise<{ status: number; text: string }>((resolve) => {
         async function* chunks() {
@@ -120,7 +121,7 @@ describe("browser approval current source", () => {
           },
           end: (text: string) => resolve({ status, text }),
         };
-        createMcpApprovalView(core, supplied as McpOptions)(req as never, res as never, { sub });
+        createMcpApprovalView(core, supplied as McpOptions)(req as never, res as never, { sub }, viewer);
       });
     return {
       store,
@@ -146,6 +147,31 @@ describe("browser approval current source", () => {
       },
     };
   }
+
+  it("leaves saved consent unchanged in a trusted Person view before buffering its body", async () => {
+    const f = await fixture();
+    let read = false;
+    for (const action of ["approve", "cancel"]) {
+      const result = await f.page(
+        action,
+        () => {
+          read = true;
+        },
+        f.options,
+        "alice",
+        "https://bot.example",
+        {
+          kind: "user",
+          id: "access:alice",
+          grants: ALL_GRANTS,
+          viewingAs: { id: "access:bob" },
+        },
+      );
+      expect(result.status).toBe(403);
+      expect(read).toBe(false);
+      expect(await f.store.get(f.saved.id)).not.toHaveProperty("browserApproved");
+    }
+  });
 
   it("uses the exact signed-in subject and current delegated credential without email, recording consent but not consuming its owner", async () => {
     const f = await fixture();

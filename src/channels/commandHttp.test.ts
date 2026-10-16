@@ -599,6 +599,65 @@ describe("createCommandHttpHandler — caller resolution", () => {
   });
 
   // Feature: docs/decisions/0053 — a write from a session viewing as a person is refused in the one sentence, whatever the person's grants say.
+  it("uses trusted current callers and refuses missing proof before body buffering without email fallback", async () => {
+    let emailLookups = 0;
+    const absent = await fixture({
+      resolveCaller: async () => undefined,
+      personByEmail: async () => {
+        emailLookups++;
+        return { id: "slack:UA" };
+      },
+    });
+    const stop = stopPost(absent.live.id);
+    await absent.handler(stop.req, stop.res, operator);
+    expect(stop.status).toBe(403);
+    expect(stop.bodyRead).toBe(false);
+    expect(emailLookups).toBe(0);
+    expect(stopNotes(absent.reg, absent.live.id)).toEqual([]);
+    const viewedActor = { ...accessActor({ sub: "admin" }, () => ALL_GRANTS), viewingAs: { id: "access:offline" } };
+    const readonly = await fixture({
+      resolveCaller: async () => ({ kind: "access", id: "access:admin", actor: viewedActor }),
+    });
+    const declined = stopPost(readonly.live.id);
+    await readonly.handler(declined.req, declined.res, { sub: "admin" });
+    expect(declined.status).toBe(403);
+    expect(declined.bodyRead).toBe(false);
+    const read = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all" });
+    await readonly.handler(read.req, read.res, { sub: "admin" });
+    expect(read.status).toBe(200);
+    const wrong = await fixture({
+      resolveCaller: async () => ({ kind: "access", id: "access:admin", actor: viewedActor }),
+    });
+    const forged = stopPost(wrong.live.id);
+    await wrong.handler(forged.req, forged.res, operator);
+    expect(forged.status).toBe(403);
+    expect(forged.bodyRead).toBe(false);
+    const machine = await fixture({
+      resolveCaller: async () => ({
+        kind: "access",
+        id: "access:op-1",
+        actor: { kind: "service", id: "access:op-1", grants: ALL_GRANTS },
+      }),
+    });
+    const machineRead = fakeReqRes({ method: "GET", url: "/api/runs.list?status=all" });
+    await machine.handler(machineRead.req, machineRead.res, operator);
+    expect(machineRead.status).toBe(200);
+    const nativeService = stopPost(machine.live.id);
+    await machine.handler(nativeService.req, nativeService.res, { sub: "", commonName: "svc" });
+    expect(nativeService.status).toBe(403);
+    expect(nativeService.bodyRead).toBe(false);
+    const wrongKind = await fixture({
+      resolveCaller: async () => ({
+        kind: "access",
+        id: "access:svc:svc",
+        actor: { kind: "user", id: "access:svc:svc", grants: ALL_GRANTS },
+      }),
+    });
+    const promoted = stopPost(wrongKind.live.id);
+    await wrongKind.handler(promoted.req, promoted.res, { sub: "", commonName: "svc" });
+    expect(promoted.status).toBe(403);
+    expect(promoted.bodyRead).toBe(false);
+  });
   it("views a known offline Access requester through their current config ceiling without asserting native authentication", async () => {
     const ceiling = {
       actions: new Set(["runs:read"]),

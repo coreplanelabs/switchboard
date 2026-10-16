@@ -1,3 +1,4 @@
+import type { Actor } from "../core/authz/types.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { systemClock } from "../core/trace/clock.js";
 import { authorize } from "../core/authz/authorize.js";
@@ -22,7 +23,7 @@ export interface McpApprovalViewOptions extends McpOptions {
 
 /** The existing dashboard verifier proves the browser; the core owns every execution. */
 export function createMcpApprovalView(core: CoreDeps, options: McpApprovalViewOptions) {
-  return (req: IncomingMessage, res: ServerResponse, identity: AccessIdentity): boolean => {
+  return (req: IncomingMessage, res: ServerResponse, identity: AccessIdentity, viewer?: Actor): boolean => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== MCP_APPROVAL_PATH) return false;
     const page = (status: number, text: string, form = "") => {
@@ -35,6 +36,10 @@ export function createMcpApprovalView(core: CoreDeps, options: McpApprovalViewOp
         `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Approve action · Switchboard</title><body><h1>Approve action</h1><pre>${escapeHtml(text)}</pre>${form}</body></html>`,
       );
     };
+    if (viewer?.viewingAs && (req.method ?? "GET").toUpperCase() !== "GET") {
+      page(403, "Leave Person view before confirming an action.");
+      return true;
+    }
     void (async () => {
       const store = core.confirmations;
       const id = url.searchParams.get("id");

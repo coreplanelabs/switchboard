@@ -10,6 +10,8 @@ import { MCP_TOKEN_MAX_CHARS } from "../mcp/registry.js";
 import { importCredentialKey } from "../mcp/sealed.js";
 import { InMemoryMcpSecretStore } from "../mcp/secretStore.js";
 import { McpService, type McpActor } from "../mcp/service.js";
+import { NO_GRANTS } from "../core/authz/types.js";
+import type { Actor } from "../core/authz/types.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import { createMcpConnectViewHandler, isConnectPath, parseConnectRoute } from "./mcpConnectView.js";
 
@@ -58,6 +60,7 @@ function harness(opts: { rejectTokens?: string[]; email?: string; oauth?: FakeAu
 
 async function serve(
   handler: ReturnType<typeof createMcpConnectViewHandler>,
+  viewer?: Actor,
 ): Promise<{ server: Server; base: string }> {
   const server = createServer((req, res) => {
     // The identity index.ts would have verified: chosen by a test header.
@@ -65,7 +68,7 @@ async function serve(
       sub: String(req.headers["x-test-sub"] ?? "cf-ada"),
       email: String(req.headers["x-test-email"] ?? "ada@example.com"),
     };
-    if (!handler(req, res, identity)) {
+    if (!handler(req, res, identity, viewer)) {
       res.writeHead(404);
       res.end("fallthrough");
     }
@@ -99,6 +102,46 @@ describe("connect route parsing", () => {
     expect(parseConnectRoute("/mcp/connect/" + "n".repeat(24))).toEqual({ nonce: "n".repeat(24) });
     expect(parseConnectRoute("/mcp/connect/short")).toBeUndefined();
     expect(parseConnectRoute("/mcp/connect/../etc")).toBeUndefined();
+  });
+});
+
+describe("Person view connection writes", () => {
+  it("keeps bearer and OAuth tickets unchanged and refuses callbacks in a trusted Person view", async () => {
+    const h = harness({ email: "ada@example.com" });
+    await h.addVanta();
+    const viewer = {
+      kind: "user" as const,
+      id: "access:cf-ada",
+      grants: NO_GRANTS,
+      viewingAs: { id: "access:someone" },
+    };
+    const { server, base } = await serve(h.handler, viewer);
+    try {
+      expect((await post(base, NONCE1, "token=fixture", { origin: "https://switchboard.test" })).status).toBe(403);
+      expect(
+        (await h.service.openTicket("nonce-00000000000000000001", { sub: "cf-ada", email: "ada@example.com" })).decision
+          .ok,
+      ).toBe(true);
+      expect((await fetch(`${base}/mcp/oauth/callback?state=fixture&code=fixture`)).status).toBe(403);
+      const oauth = harness({ email: "ada@example.com" });
+      await oauth.addOAuth();
+      const opened = await serve(oauth.handler, viewer);
+      try {
+        expect((await post(opened.base, NONCE1, "action=start", { origin: "https://switchboard.test" })).status).toBe(
+          403,
+        );
+        expect(
+          (await oauth.service.openTicket("nonce-00000000000000000001", { sub: "cf-ada", email: "ada@example.com" }))
+            .decision.ok,
+        ).toBe(true);
+      } finally {
+        opened.server.close();
+      }
+
+      expect((await fetch(`${base}${NONCE1}`)).status).toBe(200);
+    } finally {
+      server.close();
+    }
   });
 });
 
