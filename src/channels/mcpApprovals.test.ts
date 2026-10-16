@@ -79,7 +79,7 @@ describe("MCP approval parity", () => {
     const grantsFor = (id: string) =>
       id === "mcp:device" || id === "mcp:other-device" || id === "mcp:personal:device"
         ? connectionGrants
-        : id === "slack:UALICE" || id === "access:alice"
+        : id === "slack:UALICE" || id === "access:alice" || id === "access:device"
           ? personGrants
           : NO_GRANTS;
     const dir = mkdtempSync(join(tmpdir(), "swb-mcp-approval-"));
@@ -554,7 +554,7 @@ describe("MCP approval parity", () => {
       digest: digestBearer(token),
       subject: "personal:device",
       email: "alice@example.com",
-      userId: "slack:UALICE",
+      userId: "access:device",
       createdAt: 1,
     };
     await store.put(row);
@@ -633,7 +633,7 @@ describe("MCP approval parity", () => {
         digest: digestBearer(token),
         subject: "personal:device",
         email: "alice@example.com",
-        userId: "slack:UALICE",
+        userId: "access:device",
         createdAt: 1,
       });
       f.options.personalTokens = store;
@@ -643,7 +643,7 @@ describe("MCP approval parity", () => {
       const requestState = (first.body as { result: { requestState: string } }).result.requestState;
       expect(await f.deps.confirmations!.get?.(requestState)).toMatchObject({
         message: {
-          userId: "slack:UALICE",
+          userId: "access:device",
           authenticatedAs: "mcp:personal:device",
           approvalConnection: { credentialId: "mcp:personal:device" },
         },

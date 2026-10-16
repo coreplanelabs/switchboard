@@ -1,8 +1,15 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { AccessIdentity } from "./accessAuth.js";
+import type { AccessIdentity, AccessConfig } from "./accessAuth.js";
 import { hasAction } from "../core/authz/authorize.js";
 import type { GrantsLookup } from "../core/authz/actor.js";
-import { PERSONAL_TOKEN_DIGEST, personalSubject } from "../core/personalToken.js";
+import {
+  PERSONAL_TOKEN_DIGEST,
+  personalSubject,
+  personalTokenForAuthentication,
+  isPersonalTokenApproval,
+  personalTokenApprovalMatches,
+  PersonalTokenBindingConflict,
+} from "../core/personalToken.js";
 import type { PersonLookup } from "./requester.js";
 import type { PersonalTokenStore } from "../mcp/personalTokens.js";
 import { readBody } from "./http.js";
@@ -12,12 +19,19 @@ import { systemClock } from "../core/trace/clock.js";
 export const PERSONAL_MCP_SETUP_PATH = "/settings/connect";
 const HEADERS = { ...WEB_HTML_HEADERS, "content-security-policy": FORM_PAGE_CSP, "referrer-policy": "no-referrer" };
 
-export function createPersonalMcpSetupHandler(deps: {
+interface PersonalMcpSetupOptions {
   store: PersonalTokenStore;
   grantsFor: GrantsLookup;
   publicOrigin?: string;
+  /** Server configuration, never request form fields. */
+  approval?: { access: AccessConfig; organization: string };
+  /** Retained host option only; email never selects a credential's person. */
   personByEmail?: PersonLookup;
-}): (req: IncomingMessage, res: ServerResponse, identity: AccessIdentity) => boolean {
+}
+
+export function createPersonalMcpSetupHandler(
+  deps: PersonalMcpSetupOptions,
+): (req: IncomingMessage, res: ServerResponse, identity: AccessIdentity) => boolean {
   return (req, res, identity) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== PERSONAL_MCP_SETUP_PATH) return false;
@@ -37,12 +51,21 @@ async function handle(
   req: IncomingMessage,
   res: ServerResponse,
   identity: AccessIdentity,
-  deps: { store: PersonalTokenStore; grantsFor: GrantsLookup; publicOrigin?: string; personByEmail?: PersonLookup },
+  deps: PersonalMcpSetupOptions,
   url: URL,
 ): Promise<void> {
-  if (!identity.sub || !identity.email)
+  if (!identity.sub || !identity.email || identity.commonName !== undefined)
     return page(res, 403, "Connection unavailable", "<p>Sign in with a named account to connect.</p>");
   const subject = personalSubject(identity.sub);
+  const approval = deps.approval
+    ? {
+        version: 1 as const,
+        issuer: `https://${deps.approval.access.teamDomain}`,
+        audience: deps.approval.access.aud,
+        organization: deps.approval.organization,
+        subject: identity.sub,
+      }
+    : undefined;
   const grants = deps.grantsFor(`mcp:${subject}`);
   if (!hasAction(grants.actions, "dispatch") || !hasAction(grants.actions, "runs:read"))
     return page(
@@ -62,7 +85,7 @@ async function handle(
         `<form method="post" action="${PERSONAL_MCP_SETUP_PATH}"><input type="hidden" name="action" value="approve"><input type="hidden" name="challenge" value="${challenge}"><button type="submit">Approve this device</button></form>`
       : "<p>Run <code>npx -y @coreplane/switchboard connect your-switchboard.example</code> on your computer. Sign in here and approve the matching code.</p>";
     const devices = tokens.length
-      ? `<h2>Connected devices</h2>${tokens.map((token) => `<form method="post" action="${PERSONAL_MCP_SETUP_PATH}"><input type="hidden" name="action" value="revoke"><input type="hidden" name="challenge" value="${token.digest}"><span>Connected ${new Date(token.createdAt).toLocaleString()} · ${token.digest.slice(0, 8)}</span> <button type="submit">Revoke</button></form>`).join("")}`
+      ? `<h2>Connected devices</h2>${tokens.map((token) => `<form method="post" action="${PERSONAL_MCP_SETUP_PATH}"><input type="hidden" name="action" value="revoke"><input type="hidden" name="challenge" value="${token.digest}"><span>Connected ${new Date(token.createdAt).toLocaleString()} · ${token.digest.slice(0, 8)}${personalTokenForAuthentication(token) && personalTokenApprovalMatches(token.approval, approval) ? "" : " · Reissue required: revoke this device and connect again."}</span> <button type="submit">Revoke</button></form>`).join("")}`
       : "";
     return page(res, 200, "Connect to Switchboard", pending + devices);
   }
@@ -91,11 +114,30 @@ async function handle(
   if (form.get("action") === "approve") {
     // A signed-in person approves a digest; the CLI alone has the random bearer.
     const prior = await deps.store.get(challenge);
-    if (prior && prior.subject !== subject)
+    const userId = `access:${identity.sub}`;
+    if (approval && !isPersonalTokenApproval(approval))
+      return page(res, 503, "Connection unavailable", "<p>The configured approval identity is unavailable.</p>");
+    if (
+      prior &&
+      (prior.subject !== subject || prior.userId !== userId || !personalTokenApprovalMatches(prior.approval, approval))
+    )
       return page(res, 409, "Connection already used", "<p>Start a new connection from your terminal.</p>");
-    const person = await deps.personByEmail?.(identity.email);
-    const userId = person?.id ?? `access:${identity.sub}`;
-    await deps.store.put({ digest: challenge, subject, email: identity.email, userId, createdAt: systemClock() });
+    // Only this authenticated account approved the device. An equal email
+    // cannot prove ownership of an account on another adapter.
+    try {
+      if (!prior)
+        await deps.store.put({
+          digest: challenge,
+          subject,
+          email: identity.email,
+          userId,
+          ...(approval ? { approval } : {}),
+          createdAt: systemClock(),
+        });
+    } catch (error) {
+      if (!(error instanceof PersonalTokenBindingConflict)) throw error;
+      return page(res, 409, "Connection already used", "<p>Revoke this device and connect again with a new code.</p>");
+    }
     return page(
       res,
       200,

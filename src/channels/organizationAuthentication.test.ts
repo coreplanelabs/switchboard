@@ -57,6 +57,7 @@ function setup() {
     directory: store.directory,
     ledger,
     personalTokens: tokens,
+    personalApproval: { issuer: accessIdentity.issuer, audience: "access-app" },
     mappings: [
       { source: "browser" as const, issuer: accessIdentity.issuer, tenant: accessIdentity.tenant, organization },
       { source: "slack" as const, issuer: slackIdentity.issuer, tenant: slackIdentity.tenant, organization },
@@ -105,6 +106,104 @@ function setup() {
   };
 }
 describe("current organization authentication", () => {
+  it("uses an active pinned personal delegation after browser proof expires and fences changed realms and revoked rights", async () => {
+    const s = setup();
+    const digest = digestBearer("pinned-device");
+    await s.tokens.put({
+      digest,
+      subject: "personal:alice",
+      userId: "access:alice",
+      email: "display@example.test",
+      createdAt: 1,
+      approval: { version: 1, issuer: accessIdentity.issuer, audience: "access-app", organization, subject: "alice" },
+    });
+    s.setBrowser({ status: "unavailable" });
+    s.lookup.set("access:alice", ALL_GRANTS);
+    const msg = { ...s.msg("access:alice"), authenticatedAs: "mcp:personal:alice" };
+    const evidence = { source: "mcp" as const, identity: { subject: "personal:alice" }, credentialDigest: digest };
+    const value = await s.resolver.resolveNative(msg, evidence);
+    expect(value.status).toBe("resolved");
+    if (value.status !== "resolved") throw new Error("No current device delegation");
+    expect(value.actor.id).toBe("mcp:personal:alice");
+    expect(value.actor.self).toEqual(["mcp:personal:alice"]);
+    expect(value.actor.onBehalfOf?.id).toBe("access:alice");
+    expect(value.authentication.onBehalfOf).toEqual(accessIdentity);
+    expect(authorize(value.actor, "repo:use", { type: "repo", owner: "sample", name: "api" }).allow).toBe(false);
+    s.options.personalApproval.audience = "changed-app";
+    expect(await s.resolver.resolveNative(msg, evidence)).toEqual({ status: "fenced" });
+    s.options.personalApproval.audience = "access-app";
+    s.options.personalApproval.issuer = "https://changed.test";
+    expect(await s.resolver.resolveNative(msg, evidence)).toEqual({ status: "fenced" });
+    s.options.personalApproval.issuer = accessIdentity.issuer;
+    const withoutPin = createOrganizationAuthentication({ ...s.options, personalApproval: undefined });
+    expect(await withoutPin.resolveNative(msg, evidence)).toEqual({ status: "fenced" });
+    s.lookup.set("access:alice", NO_GRANTS);
+    expect(await s.resolver.resolveNative(msg, evidence)).toEqual({ status: "fenced" });
+    s.lookup.set("access:alice", { ...grants, actions: new Set(["organization:read", "organization:send"]) });
+    const narrowed = await s.resolver.resolveNative(msg, evidence);
+    expect(narrowed.status).toBe("resolved");
+    if (narrowed.status !== "resolved") throw new Error("No current device delegation");
+    expect(authorize(narrowed.actor, "agent:run:general", { type: "agent", name: "general" }).allow).toBe(false);
+    s.lookup.set("mcp:personal:alice", NO_GRANTS);
+    const denied = await s.resolver.resolveNative(msg, evidence);
+    expect(denied.status).toBe("fenced");
+    s.lookup.set("mcp:personal:alice", grants);
+    await s.tokens.delete(digest, "personal:alice");
+    expect(await s.resolver.resolveNative(msg, evidence)).toEqual({ status: "fenced" });
+    expect(await s.resolver.resolveBrowser(accessIdentity, s.msg("access:alice"))).toEqual({ status: "unavailable" });
+  });
+  it("keeps the exact native user's own rights after unlink without lending its former peer's rights", async () => {
+    const s = setup();
+    const created = await s.store.directory.createPerson();
+    if (created.status !== "created") throw new Error("No person");
+    for (const identity of [accessIdentity, slackIdentity])
+      expect(
+        await s.store.directory.change({
+          action: "link",
+          identity,
+          personId: created.person.id,
+          expectedRevision: 0,
+          actor: accessIdentity,
+          proof: { method: "dual-authentication", version: 1 },
+        }),
+      ).toMatchObject({ status: "changed" });
+    expect(
+      await s.store.directory.change({
+        action: "revoke",
+        identity: accessIdentity,
+        personId: created.person.id,
+        expectedRevision: 1,
+        actor: accessIdentity,
+        proof: { method: "dual-authentication", version: 1 },
+      }),
+    ).toMatchObject({ status: "changed", binding: { state: "revoked", revision: 2 } });
+    const result = await s.resolver.resolveBrowser(accessIdentity, s.msg("access:alice"));
+    expect(result.status).toBe("resolved");
+    if (result.status !== "resolved") throw new Error("Lost independent source rights");
+    expect(result.actor.id).toBe("access:alice");
+    expect(result.actor.self).toEqual(["access:alice"]);
+    expect(authorize(result.actor, "organization:send", { type: "organization", id: organization }).allow).toBe(true);
+    expect(
+      authorize(result.actor, "runs:read", {
+        type: "run",
+        id: "own",
+        userId: "access:alice",
+        channelId: "http:home",
+        channelVisibility: "machine",
+      }).allow,
+    ).toBe(true);
+    expect(
+      authorize(result.actor, "runs:read", {
+        type: "run",
+        id: "peer",
+        userId: "slack:UALICE",
+        channelId: "slack:DOTHER",
+        channelVisibility: "dm",
+      }).allow,
+    ).toBe(false);
+    s.setBrowser({ status: "fenced" });
+    expect(await s.resolver.resolveBrowser(accessIdentity, s.msg("access:alice"))).toEqual({ status: "fenced" });
+  });
   it("uses verified browser issuer membership and never turns email into an ownership alias", async () => {
     const s = setup();
     const result = await s.resolver.resolveBrowser(accessIdentity, s.msg("access:alice"));

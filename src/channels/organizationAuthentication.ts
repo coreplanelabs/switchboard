@@ -8,6 +8,7 @@ import { accessActor } from "./commandHttp.js";
 import { connectionIdentity, mcpRequester, type McpIdentity } from "./mcpApproval.js";
 import { toCaller } from "./mcp.js";
 import { digestBearer } from "../mcp/personalTokens.js";
+import { personalTokenForAuthentication } from "../core/personalToken.js";
 import type { Actor, Grants } from "../core/authz/types.js";
 import type { ExternalIdentity, PersonDirectory } from "../core/identity/contract.js";
 import type {
@@ -74,6 +75,8 @@ export interface OrganizationAuthenticationOptions {
   grantsFor(id: string): Grants;
   auth(): IngressConfig;
   personalTokens?: PersonalTokenStore;
+  /** Fixed installation pin for protected standing device delegation. */
+  personalApproval?: { issuer: string; audience: string };
   directory: PersonDirectory;
   store: OrganizationStore;
   ledger?: Pick<RunLedger, "readIngressByRun">;
@@ -214,11 +217,48 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
         privateSource: boolean,
         nativeEpoch = "";
       let token: McpIdentity | IngressIdentity | undefined;
+      let approvedPrincipal: Actor | undefined;
       if (evidence.source === "http" || evidence.source === "mcp") {
         const digest = evidence.credentialDigest;
         if (!digest || !/^[0-9a-f]{64}$/.test(digest)) return denied();
         if (evidence.source === "mcp") {
           token = await connectionIdentity(digest, { auth: options.auth(), personalTokens: options.personalTokens });
+          const personal = token?.subject.startsWith("personal:")
+            ? personalTokenForAuthentication(await options.personalTokens?.get(digest))
+            : null;
+          if (
+            token?.subject.startsWith("personal:") &&
+            (!personal ||
+              personal.subject !== token.subject ||
+              personal.userId !== ("verifiedUserId" in token ? token.verifiedUserId : undefined))
+          )
+            return denied();
+          if (personal?.approval) {
+            const approval = personal.approval;
+            const pin = options.personalApproval;
+            const principalIdentity = personIdentity(personal.userId!);
+            if (
+              !pin ||
+              approval.issuer !== pin.issuer ||
+              approval.audience !== pin.audience ||
+              approval.organization !== options.organization ||
+              !principalIdentity ||
+              principalIdentity.issuer !== approval.issuer ||
+              principalIdentity.subject !== approval.subject ||
+              personal.subject !== token?.subject ||
+              personal.userId !== msg.userId ||
+              (evidence.onBehalfOf && identityKey(evidence.onBehalfOf) !== identityKey(principalIdentity))
+            )
+              return denied();
+            // A protected, revocable device approval establishes this delegation.
+            // It supplies no browser session or account-link authentication proof.
+            const current = resolveChatActor(
+              { userId: personal.userId!, channelId: msg.channelId, threadKey: msg.threadKey },
+              options.grantsFor,
+            );
+            approvedPrincipal = { ...current, self: [current.id] };
+            nativeEpoch = digestBearer(JSON.stringify([digest, approval]));
+          }
           if (
             msg.approvalConnection &&
             (msg.approvalConnection.id !== digest || msg.approvalConnection.credentialId !== reference.actorId)
@@ -286,12 +326,15 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
         nativeEpoch += `:${scope.fingerprint}`;
       } else if (msg.userId !== actor.id) {
         if (!principalIdentity || (verifiedUserId && verifiedUserId !== msg.userId)) return denied();
-        const principalProof = await human(principalIdentity, evidence.attestation, reference);
-        if (principalProof.status !== "verified") return denied(principalProof.status);
+        const principalProof = approvedPrincipal
+          ? undefined
+          : await human(principalIdentity, evidence.attestation, reference);
+        if (principalProof && principalProof.status !== "verified") return denied(principalProof.status);
         if (
-          principalProof.kind !== "human" ||
-          principalProof.actorId !== msg.userId ||
-          identityKey(principalProof.identity) !== identityKey(principalIdentity)
+          principalProof &&
+          (principalProof.kind !== "human" ||
+            principalProof.actorId !== msg.userId ||
+            identityKey(principalProof.identity) !== identityKey(principalIdentity))
         )
           return denied();
         if (
@@ -299,7 +342,9 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
           (await options.verifyDelegation?.(evidence.source, identity, principalIdentity)) !== true
         )
           return denied();
-        const person = await actorFor(principalProof, reference);
+        const person =
+          approvedPrincipal ??
+          (principalProof?.status === "verified" ? await actorFor(principalProof, reference) : undefined);
         if (!person) return denied("unavailable");
         if (evidence.source === "mcp") {
           const requester = verifiedUserId?.startsWith("access:")
@@ -314,7 +359,7 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
           asUser: { id: person.id },
           origin: { channelId: msg.channelId, threadKey: msg.threadKey },
         };
-        nativeEpoch += `:${principalProof.epoch}`;
+        nativeEpoch += principalProof?.status === "verified" ? `:${principalProof.epoch}` : "";
       } else if (principalIdentity || msg.postedBy || (msg.authenticatedAs && msg.authenticatedAs !== actor.id))
         return denied();
       const target = { type: "organization" as const, id: options.organization };
@@ -322,8 +367,9 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
         authorize(actor, "organization:read", target).allow || authorize(actor, "organization:send", target).allow
           ? [options.organization]
           : [];
+      if (approvedPrincipal && organizations.length === 0) return denied();
       const binding = await options.directory.resolve(principalIdentity ?? identity);
-      if (binding.status === "revoked" || binding.status === "conflict") return denied();
+      if (binding.status === "conflict") return denied();
       if (binding.status === "unavailable" || binding.status === "invalid") return denied("unavailable");
       const authentication: OrganizationAuthentication = {
         source: evidence.source,
@@ -331,9 +377,11 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
         kind,
         sourceReference: reference,
         ...(kind === "service" || ["http", "mcp", "cli"].includes(evidence.source) ? { organizations } : {}),
-        // Only an active directory relationship can project a service's
-        // explicit delegated conversation into a person's private stream.
-        ...(principalIdentity && binding.status === "bound" ? { onBehalfOf: principalIdentity } : {}),
+        // A verified delegation owns its native private source before linking.
+        // The directory alone may join that source to a person's other sources.
+        ...(principalIdentity && (binding.status === "bound" || approvedPrincipal)
+          ? { onBehalfOf: principalIdentity }
+          : {}),
       };
       const sets = (value: Actor["grants"]["actions"] | undefined) =>
         value === "all" ? "all" : [...(value ?? [])].sort();

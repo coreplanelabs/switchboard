@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { env, runInDurableObject } from "cloudflare:test";
-import type { ConfigDO } from "./worker.ts";
+import { ConfigDO } from "./worker.ts";
 import { baseConfigDocument, ConfigDocumentClient, type ConfigPublicationSnapshot } from "../../src/configDocument.ts";
 import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
@@ -451,6 +451,135 @@ describe("ConfigDO secrets + tickets (docs/reference/specs/mcp-tools.md items 15
 });
 
 describe("ConfigDO personal MCP tokens", () => {
+  it("adds approval identity storage to an old table without changing its approved account", async () => {
+    const subject = `personal:${key()}`,
+      digest = randomUUID().replaceAll("-", "").repeat(2);
+    const stub = env.CONFIG.get(env.CONFIG.idFromName(`legacy-${key()}`));
+    const actual = await runInDurableObject(stub, async (_instance: ConfigDO, state) => {
+      state.storage.sql.exec(`DROP TABLE personal_tokens`);
+      state.storage.sql.exec(
+        `CREATE TABLE personal_tokens (digest TEXT PRIMARY KEY, subject TEXT NOT NULL, email TEXT NOT NULL, created_at INTEGER NOT NULL)`,
+      );
+      state.storage.sql.exec(`INSERT INTO personal_tokens VALUES (?, ?, ?, ?)`, digest, subject, "one@example.com", 42);
+      const rehosted = new ConfigDO(state, env);
+      const before = await rehosted.getPersonalToken(digest);
+      const exact = await rehosted.putPersonalToken({
+        digest,
+        subject,
+        userId: `access:${subject.slice("personal:".length)}`,
+        email: "changed@example.com",
+        createdAt: 99,
+      });
+      const foreign = await rehosted.putPersonalToken({
+        digest,
+        subject: "personal:foreign",
+        userId: "access:foreign",
+        email: "foreign@example.com",
+        createdAt: 99,
+      });
+      return { before, after: await rehosted.getPersonalToken(digest), exact, foreign };
+    });
+    const token = { digest, subject, email: "one@example.com", createdAt: 42 };
+    expect(actual).toEqual({ before: token, after: token, exact: true, foreign: false });
+  });
+
+  it("atomically keeps one approved account under concurrent digest claims and preserves exact retry metadata", async () => {
+    const digest = randomUUID().replaceAll("-", "").repeat(2);
+    const subject = key(),
+      foreignSubject = key();
+    const one = {
+      digest,
+      subject: `personal:${subject}`,
+      userId: `access:${subject}`,
+      email: "one@example.com",
+      createdAt: 42,
+    };
+    const two = {
+      digest,
+      subject: `personal:${foreignSubject}`,
+      userId: `access:${foreignSubject}`,
+      email: "two@example.com",
+      createdAt: 99,
+    };
+    const results = await Promise.all([
+      post("/config/personal-tokens/put", { token: one }),
+      post("/config/personal-tokens/put", { token: two }),
+    ]);
+    expect(results.map((result) => result.status).sort()).toEqual([200, 409]);
+    const winner = results[0].status === 200 ? one : two;
+    expect((await post("/config/personal-tokens/get", { digest })).data).toEqual({ token: winner });
+    expect(
+      (
+        await post("/config/personal-tokens/put", {
+          token: { ...winner, createdAt: 999, email: "changed@example.com" },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await post("/config/personal-tokens/get", { digest })).data).toEqual({ token: winner });
+    expect((await post("/config/personal-tokens/list", { subject: winner.subject })).data).toEqual({
+      tokens: [winner],
+    });
+  });
+
+  it("persists pinned Access approval and refuses realm changes or legacy upgrades under the same digest", async () => {
+    const digest = randomUUID().replaceAll("-", "").repeat(2),
+      subject = key();
+    const token = {
+      digest,
+      subject: `personal:${subject}`,
+      userId: `access:${subject}`,
+      email: "one@example.com",
+      createdAt: 42,
+      approval: { version: 1, issuer: "https://team.example", audience: "app-one", organization: "org-one", subject },
+    };
+    expect((await post("/config/personal-tokens/put", { token })).status).toBe(200);
+    expect((await post("/config/personal-tokens/get", { digest })).data).toEqual({ token });
+    expect((await post("/config/personal-tokens/list", { subject: token.subject })).data).toEqual({ tokens: [token] });
+    for (const approval of [
+      undefined,
+      { ...token.approval, audience: "app-two" },
+      { ...token.approval, organization: "org-two" },
+    ]) {
+      expect((await post("/config/personal-tokens/put", { token: { ...token, approval } })).status).toBe(409);
+      expect((await post("/config/personal-tokens/get", { digest })).data).toEqual({ token });
+    }
+    expect(
+      (
+        await post("/config/personal-tokens/put", {
+          token: { ...token, digest: "9".repeat(64), approval: { ...token.approval, jwt: "not-a-proof" } },
+        })
+      ).status,
+    ).toBe(400);
+    const legacyDigest = randomUUID().replaceAll("-", "").repeat(2);
+    const legacy = { ...token, digest: legacyDigest, approval: undefined };
+    expect((await post("/config/personal-tokens/put", { token: legacy })).status).toBe(200);
+    expect((await post("/config/personal-tokens/put", { token: { ...legacy, approval: token.approval } })).status).toBe(
+      409,
+    );
+    expect(
+      (await post("/config/personal-tokens/delete", { digest: legacyDigest, subject: token.subject })).data,
+    ).toEqual({ ok: true, removed: true });
+  });
+
+  it("keeps a legacy email-linked device revocable without rebinding its digest to Access", async () => {
+    const digest = randomUUID().replaceAll("-", "").repeat(2),
+      subject = `personal:${key()}`;
+    const legacy = { digest, subject, userId: "slack:UALICE", email: "one@example.com", createdAt: 42 };
+    expect((await post("/config/personal-tokens/put", { token: legacy })).status).toBe(200);
+    expect(
+      (
+        await post("/config/personal-tokens/put", {
+          token: { ...legacy, userId: `access:${subject.slice("personal:".length)}` },
+        })
+      ).status,
+    ).toBe(409);
+    expect((await post("/config/personal-tokens/list", { subject })).data).toEqual({ tokens: [legacy] });
+    expect((await post("/config/personal-tokens/delete", { digest, subject })).data).toEqual({
+      ok: true,
+      removed: true,
+    });
+  });
+
   it("stores only a digest, lists by owner, and revokes only for that owner", async () => {
     const token = { digest: "a".repeat(64), subject: `personal:${key()}`, email: "one@example.com", createdAt: 42 };
     const other = { ...token, digest: "b".repeat(64), subject: `personal:${key()}` };
