@@ -316,7 +316,7 @@ describe("staged browser linking", () => {
         ).toBe(303);
         expect(await h.directory.resolve(accessIdentity)).toEqual({ status: "unknown" });
       });
-      it("offers a fresh start after failure and expiry but never replaces an active or committed session", async () => {
+      it("offers a fresh operation after a terminal result but never replaces an active session", async () => {
         const h = harness(kind);
         const pending = await h.begin();
         expect((await h.view()).stage).toBe("pending");
@@ -328,8 +328,12 @@ describe("staged browser linking", () => {
         await h.request(`${path}/commit`, { csrf: ready.csrf, revision: String(ready.revision), consent: "yes" });
         const committed = await h.view();
         expect(committed.stage).toBe("committed");
-        expect("restartCsrf" in committed).toBe(false);
-        expect((await h.request(`${path}/restart`, { csrf: restartToken })).status).toBe(409);
+        expect("restartCsrf" in committed).toBe(true);
+        const fresh = await h.request(`${path}/restart`, { csrf: restartToken });
+        expect(fresh.status).toBe(303);
+        h.acceptCookie(fresh);
+        expect((await h.view()).stage).toBe("start");
+        expect(await h.directory.resolve(accessIdentity)).toMatchObject({ status: "bound", binding: { revision: 1 } });
         const failed = harness(kind);
         const b = await failed.begin();
         vi.spyOn(failed.slack, "exchange").mockResolvedValueOnce(null);
@@ -399,7 +403,7 @@ describe("staged browser linking", () => {
         const closed = await h.view();
         expect(closed).toEqual({ stage: "result-expired" });
         const restartToken = createHmac("sha256", h.cookie.split("=")[1]).update("link-form:restart:").digest("hex");
-        expect((await h.request(`${path}/restart`, { csrf: restartToken })).status).toBe(409);
+        expect((await h.request(`${path}/restart`, { csrf: restartToken })).status).toBe(303);
         expect(
           await h
             .ceremony()

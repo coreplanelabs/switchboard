@@ -100,7 +100,7 @@
     "src/core/authz/grantSets.ts": "a1641e0f5f3e635d09b34c7498d6d320d6d8643289442bc4bf42ce6e22ea7d40",
     "src/core/authz/grants.ts": "aa53f4b33f797993825390122bb699f04608afb548d85b22e01d6fe06fc382b3",
     "src/core/authz/index.ts": "636f59be1d04e3e8bb31e4f8aa9543f4bd253edc012a7f0c727643aa59f93638",
-    "src/core/authz/policy.ts": "51c2f4b60a5ba80862f280815334ccb7c5801e911d805c82400e6d202e9034c4",
+    "src/core/authz/policy.ts": "790898e26a9fbadb267cb1475d66e68d403be52e2fb033ca5dfe48b091e92474",
     "src/core/authz/predicate.ts": "dc30f2aeead55e144cc5ef72dffb93f1353ca887466a3abebfe238c998ebfc20",
     "src/core/authz/resource.ts": "43715463c4aaf35402cf869660b6088a2a162834f784a82e047ce0f18c9bfad8",
     "src/core/authz/types.ts": "4cb87502110dccf8217db7e597476a76ac2ed804908be414285a47dfa4922f05",

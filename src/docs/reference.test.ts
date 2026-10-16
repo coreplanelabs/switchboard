@@ -254,6 +254,10 @@ describe("the real catalogue", () => {
     const out = renderCatalogue(real);
     for (const cmd of real) expect(out).toContain(`| \`${cmd.id}\` | `);
     expect(real.filter((c) => c.blastRadius === "exec").map((c) => c.id)).toEqual([
+      "identity.challenge",
+      "identity.link",
+      "identity.unlink",
+      "identity.recover",
       "credentials.inspect",
       "repo.test",
       "repo.build",

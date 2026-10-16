@@ -739,6 +739,13 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
   // range is a zero report, so every surface renders the same shape.
   const reviews = createReviewsService({ dataset: "fixture_runs" }, { query: async () => [] }, { now: () => NOW });
   return {
+    // The fixture adapter owns proof; command input cannot choose a subject.
+    identityOperations: {
+      execute: async (caller, operation) => {
+        const result = { status: "complete", operation, actorId: caller.actor.id };
+        return operation === "list" ? result : exec(`identity.${operation} ${caller.actor.id}`, result);
+      },
+    },
     delivery: { service: async () => delivery },
     costs: { service: async () => costs },
     metrics: { service: async () => metrics, reviews: async () => reviews },

@@ -111,6 +111,11 @@ Every registered command, rendered from the registry by `npm run docs:gen` and h
 
 | Command | Derived form | Action | Resource | Effect | Blast radius | Surfaces | Description |
 |---|---|---|---|---|---|---|---|
+| `identity.challenge` | `identity challenge` | `identity:exec` | `identity` | write | exec | http | Complete challenge through fresh two-sided account verification. |
+| `identity.list` | `identity list` | `identity:read` | `identity` | read | read | http | Read your verified identity operation. |
+| `identity.link` | `identity link` | `identity:exec` | `identity` | write | exec | http | Complete link through fresh two-sided account verification. |
+| `identity.unlink` | `identity unlink` | `identity:exec` | `identity` | write | exec | http | Complete unlink through fresh two-sided account verification. |
+| `identity.recover` | `identity recover` | `identity:exec` | `identity` | write | exec | http | Complete recover through fresh two-sided account verification. |
 | `help.show` | `help show` | `help:read` | `command` | read | read | chat, cli, http, mcp | How to talk to this bot — the agents, forcing one, changing a route in the thread — for a person asking about the bot itself, never for a task or a thing to show. |
 | `help.commands` | `help commands` | `help:read` | `command` | read | read | chat, cli, http, mcp | Every chat command by group, the grammar, and the per-request directives. |
 | `status.show` | `status show` | `status:read` | `command` | read | read | chat, cli, http, mcp | Which build this process runs and, when known, the base config loaded at startup. |

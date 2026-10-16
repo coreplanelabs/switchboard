@@ -1,3 +1,5 @@
+import { CommandRegistry, type Caller } from "../core/commandRegistry.js";
+import { registerIdentityCommands, type IdentityCommand, type IdentityCommandDeps } from "../core/commands/identity.js";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { ExternalIdentity } from "../core/identity/contract.js";
 import type { AccessEvidence } from "../core/identity/humanProof.js";
@@ -63,11 +65,16 @@ function setCookie(value: string): string {
 function csrf(value: string, action: string, revision = ""): string {
   return createHmac("sha256", value).update(`link-form:${action}:${revision}`).digest("hex");
 }
+export function identityNoticeCsrf(request: Request, noticeId: string): string | undefined {
+  const value = cookieValue(request);
+  return value ? csrf(value, "acknowledge", noticeId) : undefined;
+}
 function equalToken(actual: string | null, expected: string): boolean {
   return !!actual && /^[0-9a-f]{64}$/.test(actual) && timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
 }
 function terminal(result: LinkResult, value: string): LinkConsentView {
   return {
+    ...(result.status === "committed" && result.receipt.operation ? { operation: result.receipt.operation } : {}),
     stage:
       result.status === "committed" ||
       result.status === "cancelled" ||
@@ -75,7 +82,9 @@ function terminal(result: LinkResult, value: string): LinkConsentView {
       result.status === "unavailable"
         ? result.status
         : "failed",
-    ...(["cancelled", "expired", "failed"].includes(result.status) ? { restartCsrf: csrf(value, "restart") } : {}),
+    ...(["committed", "cancelled", "expired", "failed"].includes(result.status)
+      ? { restartCsrf: csrf(value, "restart") }
+      : {}),
   };
 }
 
@@ -105,9 +114,22 @@ export class LinkBrowser {
   private redirect(): Response {
     return this.response(303, null, { Location: `${this.deps.origin}${this.path}` });
   }
+  private start(value: string): LinkConsentView {
+    return {
+      stage: "start",
+      csrf: csrf(value, "begin"),
+      operations: ["unlink", "recover"].flatMap((kind) =>
+        ["access", "slack"].map((target) => ({
+          kind: kind as "unlink" | "recover",
+          target: target as "access" | "slack",
+          csrf: csrf(value, kind, target),
+        })),
+      ),
+    };
+  }
   private async view(value: string, evidence: AccessEvidence): Promise<Response> {
     const bound = session(value);
-    if (!bound) return this.response(200, { stage: "start", csrf: csrf(value, "begin") });
+    if (!bound) return this.response(200, this.start(value));
     let result = await this.deps.ceremony.inspect(bound, evidence);
     if (result.status === "already_claimed") {
       result = await this.deps.ceremony.read(bound, evidence);
@@ -122,6 +144,7 @@ export class LinkBrowser {
     const revision = String(i.revision);
     return this.response(200, {
       stage: i.state,
+      ...(i.operation ? { operation: i.operation } : {}),
       revision: i.revision,
       expiresAt: i.expiresAt,
       access: {
@@ -138,7 +161,27 @@ export class LinkBrowser {
       ...(i.state === "exchanging" ? { interruptCsrf: csrf(value, "interrupt", revision) } : {}),
     });
   }
-  async handle(request: Request, evidence: AccessEvidence): Promise<Response> {
+  async handle(
+    request: Request,
+    evidence: AccessEvidence,
+    authorizeRecovery?: (identity: ExternalIdentity) => Promise<boolean>,
+    caller?: Caller,
+  ): Promise<Response> {
+    const run = async <T>(command: IdentityCommand, operation: () => Promise<T>): Promise<T | undefined> => {
+      if (!caller) return operation();
+      let result: T | undefined;
+      const registry = new CommandRegistry<IdentityCommandDeps>({ audit: () => {}, logError: () => {} });
+      registerIdentityCommands(registry);
+      const response = await registry.invoke(`identity.${command}`, { options: {} }, caller, {
+        identityOperations: {
+          execute: async () => {
+            result = await operation();
+            return { status: "complete" };
+          },
+        },
+      });
+      return response.ok ? result : undefined;
+    };
     let callback = false;
     try {
       const origin = new URL(this.deps.origin);
@@ -171,14 +214,14 @@ export class LinkBrowser {
       }
       if (url.search || url.hash) return this.response(400);
       if (request.method === "GET" && url.pathname === this.path) {
-        if (value) return await this.view(value, evidence);
+        if (value) return (await run("list", () => this.view(value, evidence))) ?? this.response(403);
         const fresh = `seed:${randomBytes(32).toString("base64url")}`;
-        return this.response(200, { stage: "start", csrf: csrf(fresh, "begin") }, { "Set-Cookie": setCookie(fresh) });
+        return this.response(200, this.start(fresh), { "Set-Cookie": setCookie(fresh) });
       }
       const action = url.pathname.slice(this.path.length + 1);
       if (
         !url.pathname.startsWith(`${this.path}/`) ||
-        !["begin", "commit", "cancel", "interrupt", "restart"].includes(action)
+        !["begin", "unlink", "recover", "acknowledge", "commit", "cancel", "interrupt", "restart"].includes(action)
       )
         return this.response(404);
       if (request.method !== "POST") return this.response(405);
@@ -192,26 +235,47 @@ export class LinkBrowser {
       const text = await request.text();
       if (text.length > 1024) return this.response(400);
       const form = new URLSearchParams(text);
-      const revision = form.get("revision") ?? "";
+      const revision =
+        form.get("revision") ??
+        (action === "acknowledge"
+          ? (form.get("notice") ?? "")
+          : action === "unlink" || action === "recover"
+            ? (form.get("target") ?? "")
+            : "");
       if (!equalToken(form.get("csrf"), csrf(value, action, revision))) return this.response(403);
       const fields =
-        action === "begin" || action === "restart"
-          ? ["csrf"]
-          : action === "commit"
-            ? ["csrf", "revision", "consent"]
-            : ["csrf", "revision"];
+        action === "acknowledge"
+          ? ["csrf", "notice"]
+          : action === "unlink" || action === "recover"
+            ? ["csrf", "target"]
+            : action === "begin" || action === "restart"
+              ? ["csrf"]
+              : action === "commit"
+                ? ["csrf", "revision", "consent"]
+                : ["csrf", "revision"];
       if (
         [...form.keys()].length !== fields.length ||
         fields.some((f) => form.getAll(f).length !== 1) ||
         [...form.keys()].some((f) => !fields.includes(f))
       )
         return this.response(400);
-      if (action === "begin") {
+      if (action === "acknowledge") {
+        const acknowledged = await this.deps.ceremony.acknowledge(evidence, form.get("notice")!);
+        return acknowledged.status === "delivered" ? this.redirect() : this.response(403);
+      }
+      if (action === "begin" || action === "unlink" || action === "recover") {
         // An already-bound browser cannot silently replace its current intent.
         // Initiation rate/outstanding-intent limits remain a deployment gate.
         if (bound) return this.response(409);
-        const result = await this.deps.ceremony.begin(evidence);
-        return result.status === "started"
+        const target = form.get("target");
+        if (action !== "begin" && target !== "access" && target !== "slack") return this.response(400);
+        const result = await run("challenge", () =>
+          this.deps.ceremony.begin(evidence, {
+            kind: action === "begin" ? "link" : action,
+            target: target === "access" ? "access" : "slack",
+          }),
+        );
+        return result?.status === "started"
           ? this.response(303, null, {
               Location: result.authorizationUrl,
               "Set-Cookie": setCookie(`${result.session.id}.${result.session.browser}`),
@@ -220,9 +284,15 @@ export class LinkBrowser {
       }
       if (action === "restart") {
         if (!bound) return this.response(409);
-        const result = await this.deps.ceremony.inspect(bound, evidence);
+        let result = await this.deps.ceremony.inspect(bound, evidence);
+        if (result.status === "already_claimed") result = await this.deps.ceremony.read(bound, evidence);
         if (result.status === "not_found" || result.status === "invalid") return this.response(403);
-        if (result.status !== "cancelled" && result.status !== "expired" && result.status !== "failed")
+        if (
+          result.status !== "committed" &&
+          result.status !== "cancelled" &&
+          result.status !== "expired" &&
+          result.status !== "failed"
+        )
           return this.response(409);
         const fresh = `seed:${randomBytes(32).toString("base64url")}`;
         return this.response(303, null, {
@@ -232,12 +302,17 @@ export class LinkBrowser {
       }
       if (!bound || !/^[1-9]\d*$/.test(revision) || !Number.isSafeInteger(Number(revision))) return this.response(400);
       if (action === "commit" && form.get("consent") !== "yes") return this.response(400);
+      const context = action === "commit" ? await this.deps.ceremony.inspect(bound, evidence) : undefined;
+      const command = context?.status === "context" ? (context.intent.operation?.kind ?? "link") : "link";
       const result =
         action === "commit"
-          ? await this.deps.ceremony.commit(bound, evidence, Number(revision), true)
+          ? await run(command, () =>
+              this.deps.ceremony.commit(bound, evidence, Number(revision), true, authorizeRecovery),
+            )
           : action === "cancel"
             ? await this.deps.ceremony.cancel(bound, evidence, Number(revision))
             : await this.deps.ceremony.interrupt(bound, evidence);
+      if (!result) return this.response(403);
       if (
         result.status === "committed" ||
         (action === "cancel" && result.status === "cancelled") ||

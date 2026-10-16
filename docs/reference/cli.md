@@ -36,6 +36,16 @@ One table per group, in registration order. "Surfaces" is where that command can
 
 <!-- generated:cli-commands · npm run docs:gen — generated from the code, do not edit by hand -->
 
+### `identity`
+
+| Command | What it does | Surfaces |
+|---|---|---|
+| `identity challenge` | Complete challenge through fresh two-sided account verification. | HTTP only |
+| `identity list` | Read your verified identity operation. | HTTP only |
+| `identity link` | Complete link through fresh two-sided account verification. | HTTP only |
+| `identity unlink` | Complete unlink through fresh two-sided account verification. | HTTP only |
+| `identity recover` | Complete recover through fresh two-sided account verification. | HTTP only |
+
 ### `help`
 
 | Command | What it does | Surfaces |

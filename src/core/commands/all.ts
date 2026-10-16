@@ -1,3 +1,4 @@
+import { registerIdentityCommands, type IdentityCommandDeps } from "./identity.js";
 import { registerCredentialsCommands, type CredentialsCommandDeps } from "./credentials.js";
 import { CommandRegistry } from "../commandRegistry.js";
 import { registerArtifactsCommands, type ArtifactsCommandDeps } from "./artifacts.js";
@@ -32,7 +33,8 @@ import { registerStatusCommands, type StatusCommandDeps } from "./status.js";
 // only CLI. A new command group adds its deps slice here and its `register*`
 // call below; no adapter changes.
 
-export type CoreCommandDeps = HelpCommandDeps &
+export type CoreCommandDeps = IdentityCommandDeps &
+  HelpCommandDeps &
   ConfigCommandDeps &
   CredentialsCommandDeps &
   RunsCommandDeps &
@@ -58,6 +60,7 @@ export type CoreCommandDeps = HelpCommandDeps &
   SteerCommandDeps;
 
 export function registerCoreCommands(registry: CommandRegistry<CoreCommandDeps>): void {
+  registerIdentityCommands(registry);
   registerHelpCommands(registry);
   registerStatusCommands(registry);
   registerConfigCommands(registry);

@@ -13,9 +13,21 @@ const origin = "https://app.test",
   now = 1000;
 const accessIdentity = { issuer: "https://app.cloudflareaccess.com", tenant: null, subject: "alice" };
 const slackIdentity = { issuer: "https://slack.com" as const, tenant: "TDEMO", subject: "UDEMO" };
-const actorAlice = actor("user", "access:alice", { actions: "all", channels: "all", repos: "all" });
+const actorAlice = actor(
+  "user",
+  "access:alice",
+  { actions: "all", channels: "all", repos: "all" },
+  { memberOfOrganizations: new Set(["org:test"]) },
+);
 const context: IdentityRuntimeContext = { actor: actorAlice, evidence: { strategy: "access", token: "fixture-jwt" } };
-function fixture(options: { disabled?: boolean; missingSecret?: boolean; publicBaseUrl?: string } = {}) {
+function fixture(
+  options: {
+    disabled?: boolean;
+    missingSecret?: boolean;
+    publicBaseUrl?: string;
+    deliver?: (notice: import("../core/identity/linkContract.js").IdentityNotice) => Promise<boolean>;
+  } = {},
+) {
   const directory = new InMemoryPersonDirectory(() => now);
   const config = { slackClientId: "client-a", slackTeamId: "TDEMO", slackClientSecretEnv: "SLACK_LINK_SECRET" };
   const policy = { tenant: "TDEMO", audience: "client-a", callbackUri: `${origin}${IDENTITY_PATH}/callback` };
@@ -37,17 +49,20 @@ function fixture(options: { disabled?: boolean; missingSecret?: boolean; publicB
     callbackUri: policy.callbackUri,
     expiresAt: now + 600_000,
   });
-  const runtime = createIdentityRuntime({
+  const runtimeOptions = {
+    organization: "org:test",
     config: options.disabled ? undefined : config,
     directory,
     access: { teamDomain: "app.cloudflareaccess.com", aud: "access-app" },
     publicBaseUrl: options.publicBaseUrl ?? origin,
     now: () => now,
-    readSecret: () => (options.missingSecret ? undefined : "fixture-client-secret"),
-    authorize: () => true,
+    readSecret: (_name: string) => (options.missingSecret ? undefined : "fixture-client-secret"),
+    authorize: (_actor: import("../core/authz/types.js").Actor) => true,
     providers: { access, slack },
+    deliverNotice: options.deliver,
     page: makePageSender({ js: "/green.js", css: [] }, ALL_CAPABILITIES, { csp: GREEN_PAGE_CSP }),
-  });
+  };
+  let runtime = createIdentityRuntime(runtimeOptions);
   let cookie = "";
   async function request(
     path = IDENTITY_PATH,
@@ -95,10 +110,159 @@ function fixture(options: { disabled?: boolean; missingSecret?: boolean; publicB
     if (headers["set-cookie"]) cookie = headers["set-cookie"].split(";")[0];
     return { status, body, headers, seed: body && body.startsWith("{") ? (JSON.parse(body) as IdentitySeed) : null };
   }
-  return { runtime, directory, request };
+  return {
+    get runtime() {
+      return runtime;
+    },
+    replaceServer(change?: { missingSlack?: boolean }) {
+      runtime = createIdentityRuntime(change?.missingSlack ? { ...runtimeOptions, config: undefined } : runtimeOptions);
+    },
+    directory,
+    request,
+    slack,
+  };
 }
 
 describe("browser identity activation", () => {
+  it("keeps exact signed-in identity reads and notice acknowledgment available when Slack setup is removed, while binding changes stay unavailable", async () => {
+    const h = fixture();
+    const start = (await h.request()).seed!.view!;
+    if (start.stage !== "start") throw new Error("No fresh verification");
+    const initiated = await h.request(`${IDENTITY_PATH}/begin`, { csrf: start.csrf });
+    const authorization = new URL(initiated.headers.location);
+    await h.request(
+      `${IDENTITY_PATH}/callback?${new URLSearchParams({ state: authorization.searchParams.get("state")!, code: "fixture-code" })}`,
+    );
+    const consent = (await h.request()).seed!.view!;
+    if (consent.stage !== "awaiting-consent") throw new Error("No two-sided proof");
+    expect(
+      (await h.request(`${IDENTITY_PATH}/commit`, { csrf: consent.csrf, revision: "3", consent: "yes" })).status,
+    ).toBe(303);
+    h.replaceServer({ missingSlack: true });
+    const read = (await h.request()).seed!;
+    expect(read).toMatchObject({
+      view: null,
+      canWrite: false,
+      canAcknowledge: true,
+      accounts: [
+        { identity: accessIdentity, state: "active" },
+        { identity: slackIdentity, state: "active" },
+      ],
+      notices: [{ outcome: "created" }],
+      unavailable: "This installation has not configured account verification.",
+    });
+    const notice = read.notices![0];
+    expect((await h.request(`${IDENTITY_PATH}/acknowledge`, { csrf: notice.csrf, notice: notice.id })).status).toBe(
+      303,
+    );
+    expect((await h.request()).seed!.notices).toEqual([]);
+    expect((await h.request(`${IDENTITY_PATH}/begin`, { csrf: start.csrf })).status).toBe(403);
+    expect(
+      (await h.request(`${IDENTITY_PATH}/commit`, { csrf: consent.csrf, revision: "3", consent: "yes" })).status,
+    ).toBe(403);
+    const noOrg = { ...context, actor: actor("user", "access:alice", { actions: "all" }) };
+    const denied = await h.request(IDENTITY_PATH, undefined, noOrg);
+    expect(denied.status).toBe(403);
+    expect(denied.seed?.accounts).toBeUndefined();
+    expect(h.slack.exchanges).toBe(1);
+  });
+  it("retries the stable Slack notice after server replacement without borrowing an Access proof or acknowledging the browser notice", async () => {
+    let allowed = false;
+    const delivery = vi.fn(async (_notice: import("../core/identity/linkContract.js").IdentityNotice) => allowed);
+    const h = fixture({ deliver: delivery });
+    const initial = (await h.request()).seed!.view!;
+    if (initial.stage !== "start") throw new Error("No fresh verification");
+    const started = await h.request(`${IDENTITY_PATH}/begin`, { csrf: initial.csrf });
+    const authorization = new URL(started.headers.location);
+    await h.request(
+      `${IDENTITY_PATH}/callback?${new URLSearchParams({ state: authorization.searchParams.get("state")!, code: "fixture-code" })}`,
+    );
+    const verified = (await h.request()).seed!.view!;
+    if (verified.stage !== "awaiting-consent") throw new Error("No verified pair");
+    expect(
+      (await h.request(`${IDENTITY_PATH}/commit`, { csrf: verified.csrf, revision: "3", consent: "yes" })).status,
+    ).toBe(303);
+    expect(await h.runtime.retryNotices()).toEqual({ status: "ok", delivered: 0 });
+    const pending = await h.directory.pendingNotices("org:test", 20);
+    expect(pending).toMatchObject({ status: "notices", notices: [{ identity: slackIdentity }] });
+    h.replaceServer();
+    allowed = true;
+    expect(await h.runtime.retryNotices()).toEqual({ status: "ok", delivered: 1 });
+    h.replaceServer();
+    expect(await h.runtime.retryNotices()).toEqual({ status: "ok", delivered: 0 });
+    expect(delivery).toHaveBeenCalledTimes(2);
+    expect(delivery.mock.calls[0][0].id).toBe(delivery.mock.calls[1][0].id);
+    expect((await h.request()).seed!.notices).toMatchObject([{ outcome: "created" }]);
+    expect((await h.request()).seed!.pendingNotices).toBe(1);
+  });
+  it("verifies each unlink and recovery afresh, checks current administrator permission and acknowledges only delivered browser notices", async () => {
+    let deliver = false;
+    const delivery = vi.fn(async (_notice: import("../core/identity/linkContract.js").IdentityNotice) => deliver);
+    const h = fixture({ deliver: delivery });
+    async function operation(kind: "link" | "unlink" | "recover") {
+      let view = (await h.request()).seed!.view!;
+      if ("restartCsrf" in view && view.restartCsrf) {
+        expect((await h.request(`${IDENTITY_PATH}/restart`, { csrf: view.restartCsrf })).status).toBe(303);
+        view = (await h.request()).seed!.view!;
+      }
+      if (view.stage !== "start") throw new Error("No fresh verification");
+      const token = view.operations?.find((op) => op.kind === kind && op.target === "slack");
+      const begin = await h.request(
+        `${IDENTITY_PATH}/${kind === "link" ? "begin" : kind}`,
+        kind === "link" ? { csrf: view.csrf } : { csrf: token!.csrf, target: "slack" },
+      );
+      expect(begin.status).toBe(303);
+      const authorization = new URL(begin.headers.location);
+      await h.request(
+        `${IDENTITY_PATH}/callback?${new URLSearchParams({ state: authorization.searchParams.get("state")!, code: "fixture-code" })}`,
+      );
+      const consent = (await h.request()).seed!.view!;
+      if (consent.stage !== "awaiting-consent") throw new Error("Missing two-sided proof");
+      expect(consent.operation).toEqual({ kind, target: "slack" });
+      return { csrf: consent.csrf, revision: String(consent.revision), consent: "yes" };
+    }
+    expect((await h.request(`${IDENTITY_PATH}/commit`, await operation("link"))).status).toBe(303);
+    const first = (await h.request()).seed!;
+    expect(first.accounts).toMatchObject([{ state: "active" }, { state: "active" }]);
+    expect(first.pendingNotices).toBe(1);
+    expect(first.notices).toHaveLength(1);
+    const notice = first.notices![0];
+    expect((await h.request(`${IDENTITY_PATH}/acknowledge`, { notice: notice.id, csrf: "invalid" })).status).toBe(403);
+    expect((await h.request(`${IDENTITY_PATH}/acknowledge`, { notice: notice.id, csrf: notice.csrf })).status).toBe(
+      303,
+    );
+    expect((await h.request(`${IDENTITY_PATH}/acknowledge`, { notice: notice.id, csrf: notice.csrf })).status).toBe(
+      303,
+    );
+    const afterAck = (await h.request()).seed!;
+    expect(afterAck.notices).toEqual([]);
+    expect(afterAck.pendingNotices).toBe(0);
+    expect(await h.directory.pendingNotices("org:test", 20)).toMatchObject({
+      status: "notices",
+      notices: [{ identity: slackIdentity, deliveredAt: null }],
+    });
+    deliver = true;
+    expect((await h.request()).seed!.pendingNotices).toBe(0);
+    expect(delivery.mock.calls.length).toBeGreaterThan(1);
+    expect(new Set(delivery.mock.calls.map((call) => (call as unknown as [{ id: string }])[0].id)).size).toBe(1);
+    expect((await h.request(`${IDENTITY_PATH}/commit`, await operation("unlink"))).status).toBe(303);
+    expect(await h.directory.resolve(slackIdentity)).toEqual({ status: "revoked", revision: 2 });
+    const recovery = await operation("recover");
+    const nonAdmin = {
+      ...context,
+      actor: actor(
+        "user",
+        "access:alice",
+        { actions: new Set(), channels: "all" },
+        { memberOfOrganizations: new Set(["org:test"]) },
+      ),
+    };
+    expect((await h.request(`${IDENTITY_PATH}/commit`, recovery, nonAdmin)).status).toBe(403);
+    expect(await h.directory.resolve(slackIdentity)).toEqual({ status: "revoked", revision: 2 });
+    expect((await h.request(`${IDENTITY_PATH}/commit`, recovery)).status).toBe(303);
+    expect(await h.directory.resolve(slackIdentity)).toMatchObject({ status: "bound", binding: { revision: 3 } });
+    expect(h.slack.exchanges).toBe(3);
+  });
   it("protects every identity response while keeping local form submissions same-origin", async () => {
     const h = fixture();
     const outputs = [
@@ -243,7 +407,10 @@ describe("browser identity activation", () => {
     });
     expect((await h.request(`${IDENTITY_PATH}/commit`, fields)).status).toBe(303);
     expect(await h.directory.resolve(accessIdentity)).toEqual(binding);
-    expect((await h.request()).seed?.view).toEqual({ stage: "committed" });
+    expect((await h.request()).seed?.view).toMatchObject({
+      stage: "committed",
+      operation: { kind: "link", target: "slack" },
+    });
   });
   it("refuses service, view-as and cross-site mutation without creating an account binding", async () => {
     const h = fixture();
