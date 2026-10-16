@@ -41,6 +41,20 @@ import { NO_GRANTS } from "../core/authz/types.js";
 import { InMemoryGithubApi } from "../execution/githubApi.js";
 import { seedCoordinatorInstance, seedCoordinatorUnit } from "../core/testing/coordinatorInstance.js";
 import type { HomeSession } from "./homeSeed.js";
+import { handleIngressRequest, type HttpIO, type IngressConfig } from "./http.js";
+import { handleMcpRequest } from "./mcp.js";
+import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/runs.js";
+import { agentSmokeTransport, runAgentSmoke } from "../deploy/agentSmoke.js";
+import { nullChannelIO } from "../core/nullChannelIo.js";
+import { createLedgerWriteThrough } from "../core/runLedger/writeThrough.js";
+import { createRunHistoryWriter } from "../core/runHistoryWriter.js";
+import { HarnessRegistry } from "../core/harness/pi/relay.js";
+import { PiHarness } from "../core/harness/pi/piHarness.js";
+import { OpenCodeHarness } from "../core/harness/opencode/harness.js";
+import { FakeHarnessContainer } from "../core/harness/testing/fakeContainer.js";
+import { scriptPiFromProvider } from "../core/harness/pi/testing/providerPi.js";
+import { RunBearerStore } from "../core/modelProxy/runBearers.js";
+import { GitBindings } from "../core/modelProxy/gitBindings.js";
 const cleanup: (() => void)[] = [];
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -52,12 +66,13 @@ async function fixture(
   pendingRealm?: Promise<string | undefined>,
   merge?: Pick<Parameters<typeof createBrowserHomeWiring>[0], "mergeLogin" | "mergeFacts">,
   dashboard?: DashboardVerifier,
+  native = false,
 ) {
   const dir = mkdtempSync(join(tmpdir(), "home-wiring-"));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
   writeFileSync(
     join(dir, "config.yaml"),
-    `organization: fixture\nproviders:\n  anthropic: { type: anthropic, apiKeyEnv: UNSET_FIXTURE_PROVIDER }\ndefaults:\n  agent: general\n  models: { general: anthropic/general-model, coding: anthropic/coding-model }\ngrants:\n  "access:opaque": { actions: all, channels: all, repos: all, organizations: all }\n  "slack:UALICE": { actions: all, channels: all, repos: all, organizations: all }\nrouting: { operator: off }\nchannels:\n  "slack:D1": { repo: sample/api }\nrunHistory:\n  worker: { baseUrl: https://store.fixture.test, tokenEnv: MEMORY_TOKEN }\n  retentionDays: 30\nworkspaceDir: ${dir}/workspaces\n`,
+    `organization: fixture\nproviders:\n  anthropic: { type: anthropic, apiKeyEnv: UNSET_FIXTURE_PROVIDER }\ndefaults:\n  agent: general\n  models: { general: anthropic/general-model, coding: anthropic/coding-model }\ngrants:\n  "access:opaque": { actions: all, channels: all, repos: all, organizations: all }\n  "slack:UALICE": { actions: all, channels: all, repos: all, organizations: all }\n${native ? '  "http:bot": { actions: all, channels: all, repos: all, organizations: [fixture] }\n  "mcp:bot": { actions: [runs:read], channels: [http:default] }\n' : ""}routing: { operator: off }\nchannels:\n  "slack:D1": { repo: sample/api }\nrunHistory:\n  worker: { baseUrl: https://store.fixture.test, tokenEnv: MEMORY_TOKEN }\n  retentionDays: 30\nworkspaceDir: ${dir}/workspaces\n`,
   );
   const config = new ConfigStore(join(dir, "config.yaml"), join(dir, "overrides.json"), {
     commandGroups: ["runs", "memory"],
@@ -77,7 +92,16 @@ async function fixture(
   });
   const registry = new RunRegistry({ now: () => 1000 }),
     runStore = new InMemoryRunStore({ now: () => 1000 }),
-    coordinator = new InMemoryCoordinatorInstanceStore();
+    coordinator = new InMemoryCoordinatorInstanceStore(),
+    ledger = new InMemoryRunLedger(() => 1000);
+  const runs = createRunsService({ registry, store: runStore, units: coordinator });
+  if (native) {
+    const read = runStore.get.bind(runStore);
+    const summary = runStore.getSummary.bind(runStore);
+    runStore.get = async (id) => (ledger.finished.has(id) ? structuredClone(ledger.finished.get(id)!) : read(id));
+    runStore.getSummary = async (id) =>
+      ledger.finished.has(id) ? structuredClone(ledger.finished.get(id)!) : summary(id);
+  }
   const effects: string[] = [],
     replies: { thread: string; text: string }[] = [],
     tasks: (() => Promise<void>)[] = [];
@@ -142,11 +166,11 @@ async function fixture(
       emoji: { list: async () => ({ ok: true, emoji: {} }) },
     },
     team: async () => pendingRealm ?? (slackReady ? "fixture-team" : undefined),
-    ledger: new InMemoryRunLedger(() => 1000),
+    ledger,
     core,
-    runs: createRunsService({ registry, store: runStore, units: coordinator }),
+    runs,
     commands,
-    auth: () => ({ tokens: {} }),
+    auth: (): IngressConfig => ({ tokens: native ? { "native-token": { subject: "bot", channel: "default" } } : {} }),
     personalTokens: new InMemoryPersonalTokenStore(),
     readSecret: () => (secret ? "fixture-token" : undefined),
     emojiDirectory: join(dir, "emoji"),
@@ -166,19 +190,22 @@ async function fixture(
       receiptTtlMs: DAY_MS,
     },
     launch: (task) => tasks.push(task),
-    nativeIo: (request) => ({
-      reply: async (text) => {
-        replies.push({ thread: request.msg.threadKey, text });
-      },
-      history: async () => [{ role: "user", text: "Erased raw source history must not reappear" }],
-      status: async () => ({ update() {}, done: async () => {} }),
-      ...(request.msg.directAudience
-        ? {
-            directAudience: () => request.msg.directAudience,
-            verifyDirectAudience: async () => ({ ok: true as const }),
-          }
-        : {}),
-    }),
+    nativeIo: (request) =>
+      native
+        ? nullChannelIO(request.msg.threadKey, () => {})
+        : {
+            reply: async (text) => {
+              replies.push({ thread: request.msg.threadKey, text });
+            },
+            history: async () => [{ role: "user", text: "Erased raw source history must not reappear" }],
+            status: async () => ({ update() {}, done: async () => {} }),
+            ...(request.msg.directAudience
+              ? {
+                  directAudience: () => request.msg.directAudience,
+                  verifyDirectAudience: async () => ({ ok: true as const }),
+                }
+              : {}),
+          },
     publicBaseUrl: "https://dashboard.fixture.test",
   });
   const request = (cookie = "") =>
@@ -198,6 +225,10 @@ async function fixture(
     effects,
     replies,
     tasks,
+    runStore,
+    ledger,
+    registry,
+    runs,
     restoreSlack: () => {
       slackReady = true;
     },
@@ -207,6 +238,169 @@ async function fixture(
   };
 }
 describe("browser production wiring", () => {
+  it.each(["allowed", "revoked"] as const)(
+    "verifies native async output through authenticated original run readback without claiming null-channel delivery: %s",
+    async (access) => {
+      const s = await fixture(true, true, undefined, undefined, undefined, true);
+      const calls: unknown[] = [];
+      const provider = {
+        name: "fixture",
+        complete: async (request: import("../core/provider.js").CompletionRequest) => {
+          calls.push(structuredClone(request));
+          return {
+            content: [{ type: "text" as const, text: "4" }],
+            stopReason: "end_turn" as const,
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        },
+      };
+      vi.spyOn(s.core.completions, "get").mockReturnValue(provider);
+      s.core.clock = () => 1000;
+      s.core.build = { commit: "a".repeat(40), version: "fixture" };
+      const harnesses = new HarnessRegistry();
+      const bearers = new RunBearerStore({ clock: () => 1000 });
+      s.core.runBearers = bearers;
+      s.core.githubDoor = { baseUrl: "https://git.fixture.test" };
+      s.core.githubBindings = new GitBindings();
+      s.core.harness = {
+        harnesses: { pi: new PiHarness(), opencode: new OpenCodeHarness() },
+        registry: harnesses,
+        harnessUrl: "https://bot.fixture.test",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => {
+          const container = new FakeHarnessContainer();
+          scriptPiFromProvider(container, { provider, registry: harnesses, bearers });
+          return container;
+        },
+        pollMs: 1,
+        tickMs: 5,
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      };
+      s.core.runLedger = createLedgerWriteThrough({
+        ledger: s.ledger,
+        gen: "native-answer",
+        fallback: s.runStore,
+        warn: () => {},
+      });
+      s.core.runHistoryWriter = createRunHistoryWriter({
+        store: s.runStore,
+        onPersisted: (id) => s.registry.markPersisted(id),
+        warn: () => {},
+        sleep: async () => {},
+      });
+      await s.wiring.initialize();
+      const adapterIos: HttpIO[] = [];
+      const registry = new CommandRegistry<RunsCommandDeps>();
+      registerRunsCommands(registry);
+      const commands = bindCommands(registry, { runs: async () => s.runs });
+      const mcpReads: string[] = [];
+      const smokeConfig = {
+        model: "anthropic/claude-opus-4-6",
+        disposable: true,
+        channel: "default",
+        subject: "bot",
+        repo: "sample/api",
+        workspace: { path: "SMOKE.md", answer: "fixture" },
+        review: { number: 42, head: "b".repeat(40) },
+        maxObservedUsd: 1,
+      };
+      const transport = agentSmokeTransport({
+        origin: "https://bot.fixture.test",
+        healthUrl: "https://bot.fixture.test/healthz",
+        token: "native-token",
+        config: smokeConfig,
+        fetch: async (url, init) => {
+          if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: s.core.build });
+          const body = String(init?.body);
+          if (String(url).endsWith("/ingress")) {
+            if (JSON.parse(body).text.includes("agent:explore")) return Response.json({});
+            const result = await handleIngressRequest(
+              { method: "POST", headers: { authorization: "Bearer native-token" }, body },
+              s.core,
+              {
+                auth: { tokens: { "native-token": { subject: "bot", channel: "default" } } },
+                admit: (msg, io, evidence, continuation) => {
+                  adapterIos.push(io as HttpIO);
+                  return s.wiring.admit(msg, io, evidence, continuation);
+                },
+              },
+            );
+            expect(result.status).toBe(202);
+            expect(s.tasks).toHaveLength(1);
+            await s.tasks.shift()!();
+            await s.core.runHistoryWriter.settled();
+            return Response.json(result.body, { status: result.status });
+          }
+          const message = JSON.parse(body);
+          if (message.method === "tools/call") {
+            mcpReads.push(message.params.name);
+            if (access === "revoked" && message.params.name === "runs_get") {
+              const original = s.core.config.grantsFor.bind(s.core.config);
+              vi.spyOn(s.core.config, "grantsFor").mockImplementation((id) =>
+                id === "mcp:bot" ? NO_GRANTS : original(id),
+              );
+            }
+          }
+          const result = await handleMcpRequest(
+            { method: "POST", headers: { authorization: "Bearer native-token" }, body },
+            s.core,
+            { auth: { tokens: { "native-token": { subject: "bot", channel: "default" } } }, commands },
+          );
+          return Response.json(result.body, { status: result.status });
+        },
+      });
+      const receipt = await runAgentSmoke({
+        config: smokeConfig,
+        expectedCommit: "a".repeat(40),
+        thread: "native-answer",
+        transport,
+      });
+      const answer = receipt.scenarios[0]!;
+      if (access === "revoked") {
+        expect(answer).toMatchObject({
+          outcome: "incomplete",
+          reason: "run_record_unproven",
+          admissionStatus: "accepted",
+        });
+        expect(answer.runId).toBeTruthy();
+        expect(answer.outputReadback).toBeUndefined();
+        expect(calls).toHaveLength(1);
+        expect(adapterIos).toHaveLength(1);
+        return;
+      }
+      expect(answer).toMatchObject({
+        outcome: "passed",
+        reason: "accepted",
+        admissionStatus: "accepted",
+        outputReadback: {
+          kind: "native-persisted-run",
+          runId: answer.runId,
+          receiptId: answer.receiptId,
+          utf8Bytes: 1,
+        },
+      });
+      expect(mcpReads).toContain("runs_list");
+      expect(mcpReads).toContain("runs_get");
+      expect(calls).toHaveLength(1);
+      expect(adapterIos[0]!.collected()).toBe("");
+      expect(await s.runStore.get(answer.runId!)).toMatchObject({
+        id: answer.runId,
+        organizationIngressRunId: answer.runId,
+        userId: "http:bot",
+        channelId: "http:default",
+        status: "completed",
+        replyOk: false,
+        answerOutcome: { ending: "answered", output: "unknown" },
+      });
+      expect((answer.evidence!.record as { events: unknown[] }).events).toContainEqual(
+        expect.objectContaining({ type: "answer", text: expect.stringContaining("4") }),
+      );
+      expect(await s.ledger.readIngressByRun(answer.runId!)).toMatchObject({
+        status: "record",
+        record: { runId: answer.runId, receiptId: answer.receiptId, status: "completed" },
+      });
+    },
+  );
   it("keeps token private Home fenced and rechecks the original credential for later report reads", async () => {
     const dashboard = tokenVerifier({ token: "dashboard-fixture", env: "DASHBOARD_TOKEN", subject: "opaque" });
     const s = await fixture(true, false, undefined, undefined, dashboard);
