@@ -391,13 +391,88 @@ describe("the gate workflows run only the repository's own scripts", () => {
     }
   });
 
-  it("main pushes keep their running verification while stale PR checks cancel", () => {
-    const workflow = parse(read(".depot/workflows/ci.yml"));
-    expect(workflow.concurrency).toEqual({
-      group: "ci-${{ github.workflow }}-${{ github.ref }}",
-      "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
-    });
-  });
+  it.each([
+    [
+      "API empty ref, different commits",
+      "api",
+      [
+        { ref: "", sha: "sha-a" },
+        { ref: "", sha: "sha-b" },
+      ],
+      ["ci-ci-sha-a", "ci-ci-sha-b"],
+      false,
+    ],
+    [
+      "API empty ref, same commit",
+      "api",
+      [
+        { ref: "", sha: "sha-a" },
+        { ref: "", sha: "sha-a" },
+      ],
+      ["ci-ci-sha-a", "ci-ci-sha-a"],
+      false,
+    ],
+    [
+      "API absent ref, different commits",
+      "api",
+      [{ sha: "sha-a" }, { sha: "sha-b" }],
+      ["ci-ci-sha-a", "ci-ci-sha-b"],
+      false,
+    ],
+    ["API absent ref, same commit", "api", [{ sha: "sha-a" }, { sha: "sha-a" }], ["ci-ci-sha-a", "ci-ci-sha-a"], false],
+    [
+      "PR same ref, different commits",
+      "pull_request",
+      [
+        { ref: "refs/pull/17/merge", sha: "sha-a" },
+        { ref: "refs/pull/17/merge", sha: "sha-b" },
+      ],
+      ["ci-ci-refs/pull/17/merge", "ci-ci-refs/pull/17/merge"],
+      true,
+    ],
+    [
+      "PR different refs, same commit",
+      "pull_request",
+      [
+        { ref: "refs/pull/17/merge", sha: "sha-a" },
+        { ref: "refs/pull/18/merge", sha: "sha-a" },
+      ],
+      ["ci-ci-refs/pull/17/merge", "ci-ci-refs/pull/18/merge"],
+      true,
+    ],
+    [
+      "main keeps its group across commits",
+      "push",
+      [
+        { ref: "refs/heads/main", sha: "sha-a" },
+        { ref: "refs/heads/main", sha: "sha-b" },
+      ],
+      ["ci-ci-refs/heads/main", "ci-ci-refs/heads/main"],
+      false,
+    ],
+  ] as const)(
+    "CI concurrency uses API commit identity and preserves ref cancellation: %s",
+    (_name, eventName, sources, expectedGroups, expectedCancel) => {
+      const workflows = [".depot/workflows/ci.yml", ".github/workflows/ci.yml"].map((file) => parse(read(file)));
+      expect(workflows[1].concurrency).toEqual(workflows[0].concurrency);
+      for (const workflow of workflows) {
+        const observed = sources.map((source) => {
+          const github = { workflow: "ci", event_name: eventName, ...source };
+          const group = String(workflow.concurrency.group).replace(
+            /\$\{\{\s*(.*?)\s*\}\}/g,
+            (_match, expression: string) => String(runInNewContext(expression, { github }, { timeout: 100 })),
+          );
+          const cancel = runInNewContext(
+            String(workflow.concurrency["cancel-in-progress"]).replace(/^\$\{\{\s*|\s*\}\}$/g, ""),
+            { github },
+            { timeout: 100 },
+          );
+          return { group, cancel };
+        });
+        expect(observed).toEqual(expectedGroups.map((group) => ({ group, cancel: expectedCancel })));
+      }
+    },
+  );
 
   it("the plan feeds each costly job and uses the repository's own script", () => {
     expect(ci.jobs.plan.steps.map((step) => step.run).filter(Boolean)).toEqual(["npm run ci:plan"]);

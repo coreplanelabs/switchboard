@@ -37,7 +37,7 @@ env:
 
 # Rapid successive pushes to the same PR cancel the stale run.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 # A stalled job can hold this group while newer pending runs displace older
 # ones. Bound every job so a stall reaches its deadline, not the platform cap.
