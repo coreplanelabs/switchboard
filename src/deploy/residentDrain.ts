@@ -118,34 +118,84 @@ export function drainSkippedLine(step: string, tokenEnv: string, tag = "deploy:a
   return `[${tag}] ${step}: ${tokenEnv} is not set — waiting without a drain: new runs keep landing and the wait may never find a quiet minute (add the secret; release-and-deploy item 31)`;
 }
 
-/** Report only what the guarded lift acknowledged. A held or failed lift does not prove reopening. */
+export type DrainReopenOutcome = "open" | "held" | "post-upload-unproven" | "refused" | "unknown";
+
+/** A missing reply is not a refusal. Only the source-backed conflict can be reconsidered. */
+export function drainReopenOutcome(answer: PostAnswer): DrainReopenOutcome {
+  if ("error" in answer) return "unknown";
+  if (
+    answer.status === 409 &&
+    Object.keys(answer.body).length === 1 &&
+    answer.body.error === "deploy-fence: the pre-upload Worker cannot reopen the fleet"
+  )
+    return "post-upload-unproven";
+  if (
+    answer.status === 409 &&
+    !["staging maintenance requires explicit release", "deploy-fence: admitted work has not settled"].includes(
+      String(answer.body.error),
+    )
+  )
+    return "unknown";
+  if (answer.status >= 500) return "unknown";
+  if (Number.isSafeInteger(answer.status) && answer.status >= 400 && answer.status <= 599) return "refused";
+  if (answer.status !== 200 || answer.body.error !== undefined || typeof answer.body.cleared !== "boolean")
+    return "unknown";
+  const held = answer.body.held;
+  if (held !== undefined && (!Array.isArray(held) || held.some((v) => typeof v !== "string"))) return "unknown";
+  if (answer.body.draining === null && (!held || held.length === 0)) return "open";
+  return answer.body.cleared === false && Array.isArray(held) && held.length > 0 ? "held" : "unknown";
+}
+
+/** Window matching is only the first check; the caller retains and compares the whole fence. */
+export function sameDrainWindow(
+  value: unknown,
+  window: { since?: string; until: string | undefined },
+): value is Record<string, unknown> & { since: string; until: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof window.since === "string" &&
+    typeof window.until === "string" &&
+    Number.isFinite(Date.parse(window.since)) &&
+    Date.parse(window.until) > Date.parse(window.since) &&
+    row.since === window.since &&
+    row.until === window.until
+  );
+}
+
+/** Receiver version facts were not returned by this contract. Never infer them from a later read. */
+export function drainReopenDiagnostic(answer: PostAnswer, phase: "initial" | "retry", uploadVersion?: string): string {
+  const knownVersion =
+    typeof uploadVersion === "string" && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(uploadVersion);
+  return (
+    "[resident-reopen-diagnostic] " +
+    JSON.stringify({
+      schema: 1,
+      phase,
+      outcome: drainReopenOutcome(answer),
+      httpStatus: !("error" in answer) && Number.isSafeInteger(answer.status) ? answer.status : null,
+      uploadedVersion: knownVersion ? { state: "reported", id: uploadVersion } : { state: "unavailable" },
+      receiverVersion: { state: "unreported" },
+      nativeOutcome: "unverified",
+    })
+  );
+}
+
+/** Report acknowledgement or doubt without echoing bodies or promising a guarded lift will succeed. */
 export function drainLiftedLine(
   step: string,
   answer: PostAnswer,
-  drain: { drained: boolean; until: string | undefined },
+  _drain: { drained: boolean; until: string | undefined },
   tag = "deploy:all",
 ): string {
-  const ok = !("error" in answer) && answer.status >= 200 && answer.status < 300;
-  // The gated lift (issue 1931): the registry kept the drain because a
-  // container still reports the pre-deploy image — the fleet reopens by itself
-  // on the LAST container's new-image report, never on this call's return.
-  const held =
-    !("error" in answer) && answer.body.cleared === false && Array.isArray(answer.body.held)
-      ? (answer.body.held as unknown[]).filter((h): h is string => typeof h === "string")
-      : [];
-  if (ok && held.length > 0)
-    return `[${tag}] ${step}: fleet stays closed — ${held.join(", ")} still report${held.length === 1 ? "s" : ""} the pre-deploy image; it reopens on each container's new-image report (a cycle, a rebuild or a fresh provision), or within ${DRAIN.cycleBoundMinutes} min anyway with the stale container named in a warning${drain.until ? ` (backstop ${drain.until})` : ""}`;
-  if (drain.drained) {
-    if (ok) return `[${tag}] ${step}: fleet reopened`;
-    return `[${tag}] ${step}: fleet NOT reopened (${answerWords(answer)}) — it reopens by itself${drain.until ? ` at ${drain.until}` : " when the drain ends"}; \`POST /undrain\` with the drain or admin bearer reopens it now`;
-  }
-  if (ok) {
-    const cleared = "error" in answer ? false : answer.body.cleared === true;
-    return cleared
-      ? `[${tag}] ${step}: fleet reopened — the drain had landed although its answer was lost`
-      : `[${tag}] ${step}: no drain stood to lift — the fleet was never closed`;
-  }
-  return `[${tag}] ${step}: the lift answered ${answerWords(answer)} and no drain was confirmed — the fleet should be open; \`GET /residents\` says (\`draining\`), and \`POST /undrain\` with the drain or admin bearer reopens it if not`;
+  const outcome = drainReopenOutcome(answer);
+  if (outcome === "open") return `[${tag}] ${step}: fleet reopen acknowledged; registry readback is still required`;
+  if (outcome === "held")
+    return `[${tag}] ${step}: fleet stays closed with image-report holds; awaiting registry readback`;
+  if (outcome === "unknown")
+    return `[${tag}] ${step}: fleet reopen outcome is unknown; settling through registry reads only`;
+  const status = "error" in answer ? "unavailable" : answer.status;
+  return `[${tag}] ${step}: fleet NOT reopened (HTTP ${status}; ${outcome}); the guarded request was refused`;
 }
 
 /** One resident's word in a `/reconcile` answer, as the line prints it. */
