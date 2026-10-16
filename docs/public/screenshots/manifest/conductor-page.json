@@ -149,7 +149,7 @@
     "src/core/memory/provenance.ts": "ca423e4ab31390a42ef1dc0df58cef8fb9f79c21e197785d4ce9dfe306f6b18b",
     "src/core/memory/scorer.ts": "17e9384196a6ad5b62d21f5e3672b863da405bd65c972710eeaeb912d2d5640e",
     "src/core/mergeWatch.ts": "09fa7c422cd5f78c6eced30bdf99916995d6049ae70e36cb5b255941ca5e09d9",
-    "src/core/metrics.ts": "5bfc5598524e4100c47e78dd228b86722670d6205628af71cc0375b534b015fa",
+    "src/core/metrics.ts": "02886bf77fcb5d84541df818d5ed23b6824baead450622d82720bd5a7daa8bc9",
     "src/core/modelPricing.ts": "341bb29f20113ef579bbc54d2232018794804277fde2fae16a590381c1118192",
     "src/core/modelRegistry.ts": "400e04993da661ad09b111525ec4e5e986f1d3207ef9bbcd8e0a0465c95647b7",
     "src/core/names.ts": "85ac837cbf8b1e7eb4663c7f4c53f17501b5b5cca7aad70dcfcf33b6d4c8bd42",

@@ -1,3 +1,4 @@
+import type { Predicate } from "./authz/types.js";
 import { DAY_MS, REVIEW_FEEDBACK_RETAIN_MS } from "./budgets.js";
 import {
   buildMetricsReport,
@@ -30,7 +31,7 @@ export const METRICS_OFF_MESSAGE =
 
 export interface MetricsService {
   /** The trend report for the range: `days` (1..90; default from config) ending today, optionally one agent's runs. */
-  report(opts?: { days?: number; agent?: string }): Promise<MetricsReport>;
+  report(opts?: { days?: number; agent?: string; visibleTo?: Predicate }): Promise<MetricsReport>;
   feedback(opts?: FeedbackQuery): Promise<FeedbackQueryResult>;
 }
 
@@ -85,11 +86,16 @@ export function createMetricsService(
       const untilMs = utcDayStart(now()) + DAY_MS;
       const sinceMs = untilMs - days * DAY_MS;
       const range = { sinceMs, untilMs, ...(opts.agent !== undefined ? { agent: opts.agent } : {}) };
-      const queries = metricsQueries(range, cfg.dataset);
+      const queries = metricsQueries(
+        { ...range, ...(opts.visibleTo ? { visibleTo: opts.visibleTo } : {}) },
+        cfg.dataset,
+      );
       const feedbackRead = async (): Promise<ReviewFeedbackReport | undefined> => {
         if (!cfg.feedback?.enabled) return undefined;
         const asOf = now();
         if (opts.agent !== undefined && opts.agent !== "review") return { status: "not_applicable", asOf };
+        // Retained feedback has no requester facts to prove a narrower page scope.
+        if (opts.visibleTo && opts.visibleTo.kind !== "all") return { status: "unavailable", asOf };
         try {
           if (!deps.feedback) throw new Error("Feedback storage unavailable");
           const stored = await deps.feedback.list(sinceMs, untilMs);
@@ -100,9 +106,9 @@ export function createMetricsService(
         }
       };
       const [byDayStatus, byAgent, byDayAgentP50, feedback] = await Promise.all([
-        source.query(queries.byDayStatus),
-        source.query(queries.byAgent),
-        source.query(queries.byDayAgentP50),
+        source.query(queries.byDayStatus, opts.visibleTo),
+        source.query(queries.byAgent, opts.visibleTo),
+        source.query(queries.byDayAgentP50, opts.visibleTo),
         feedbackRead(),
       ]);
       return {

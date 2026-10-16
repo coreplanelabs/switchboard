@@ -1,3 +1,5 @@
+import type { Predicate } from "./authz/types.js";
+import { matchesPredicate } from "./authz/predicate.js";
 import { DAY_MS } from "./budgets.js";
 import type { ReviewFeedbackReport } from "./reviewFeedbackReport.js";
 import {
@@ -98,7 +100,7 @@ export type MetricsRow = Record<string, unknown>;
 /** Where the report's rows come from — the SQL API in production,
  *  `InMemoryMetricsSource` in tests, `NullMetricsSource` when the reader is off. */
 export interface MetricsSource {
-  query(sql: string): Promise<MetricsRow[]>;
+  query(sql: string, visibleTo?: Predicate): Promise<MetricsRow[]>;
 }
 
 /** A source read that failed: the HTTP status and the response's words, never the token. */
@@ -117,6 +119,7 @@ export interface MetricsRange {
   sinceMs: number;
   untilMs: number;
   agent?: string;
+  visibleTo?: Predicate;
 }
 
 /** The three report queries' texts, keyed by what each answers. */
@@ -140,6 +143,42 @@ const TURNS = doubleColumn("turns");
 
 const DAY = "toStartOfInterval(timestamp, INTERVAL '1' DAY) AS day";
 
+/** Translation of the common policy predicate to the stored metrics fields.
+ * Missing visibility facts stay unknown; this adds no authorization rules. */
+function metricsPredicate(predicate: Predicate): string {
+  const quote = (value: string): string => {
+    if (!value || value.length > 2048 || /\p{Cc}/u.test(value)) throw new Error("invalid metrics scope value");
+    return "'" + value.replaceAll("\\", "\\\\").replaceAll("'", "''") + "'";
+  };
+  const listed = (column: string, values: ReadonlySet<string>, excluding = false): string =>
+    values.size
+      ? `${column} ${excluding ? "NOT IN" : "IN"} (${[...values].sort().map(quote).join(", ")})`
+      : excluding
+        ? "1"
+        : "0";
+  switch (predicate.kind) {
+    case "all":
+      return "1";
+    case "none":
+    case "organizations-in":
+      return "0";
+    case "user-is":
+      return `${blobColumn("requester")} = ${quote(predicate.userId)}`;
+    case "channels-in":
+      return listed(blobColumn("channel"), predicate.channelIds);
+    case "repos-in":
+      return listed(blobColumn("repository"), predicate.repos);
+    case "repos-not-in":
+      return listed(blobColumn("repository"), predicate.repos, true);
+    case "visibility-in":
+      return predicate.visibilities.has("unknown") ? "1" : "0";
+    case "and":
+      return predicate.of.length ? "(" + predicate.of.map(metricsPredicate).join(" AND ") + ")" : "0";
+    case "or":
+      return predicate.of.length ? "(" + predicate.of.map(metricsPredicate).join(" OR ") + ")" : "0";
+  }
+}
+
 /** The three report queries over `dataset` for `range` — the ONLY place query
  *  text is built. The since/until interpolations are two integers (epoch
  *  seconds); the agent, when given, is validated against `METRICS_AGENT_NAME`
@@ -157,6 +196,7 @@ export function metricsQueries(range: MetricsRange, dataset: string): MetricsQue
       throw new Error("metrics agent filter must be an agent name: lowercase letters, digits, hyphens, underscores");
     where += ` AND ${AGENT} = '${range.agent}'`;
   }
+  if (range.visibleTo) where += ` AND ${metricsPredicate(range.visibleTo)}`;
   return {
     byDayStatus: `SELECT ${DAY}, ${STATUS} AS status, sum(_sample_interval) AS runs FROM ${dataset} WHERE ${where} GROUP BY day, status ORDER BY day ASC`,
     byAgent:
@@ -238,18 +278,31 @@ function dayOf(ms: number): string {
 export class InMemoryMetricsSource implements MetricsSource {
   constructor(private readonly points: readonly RunMetricsPoint[]) {}
 
-  query(sql: string): Promise<MetricsRow[]> {
+  async query(sql: string, visibleTo?: Predicate): Promise<MetricsRow[]> {
     const times = [...sql.matchAll(/toDateTime\((\d+)\)/g)].map((m) => Number(m[1]) * 1000);
     const sinceMs = times[0] ?? 0;
     const untilMs = times[1] ?? 0;
     const agent = new RegExp(`${AGENT} = '([^']*)'`).exec(sql)?.[1];
+    // The source has no SQL engine. Require the same canonical query and read
+    // predicate that production compiles, so omitted/mismatched scope fails closed.
+    const dataset = /\bFROM ([A-Za-z0-9_]+)\b/.exec(sql)?.[1];
+    const expected = dataset && metricsQueries({ sinceMs, untilMs, agent, visibleTo }, dataset);
+    if (!expected || !Object.values(expected).includes(sql)) throw new Error("metrics read scope is unavailable");
+
     const points = this.points.filter((p) => {
       const at = doubleOf(p, "finished at");
       return (
         blobOf(p, "schema") === POINT_SCHEMA &&
         at >= sinceMs &&
         at < untilMs &&
-        (agent === undefined || p.indexes[0] === agent)
+        (agent === undefined || p.indexes[0] === agent) &&
+        (!visibleTo ||
+          matchesPredicate(visibleTo, {
+            userId: blobOf(p, "requester"),
+            channelId: blobOf(p, "channel"),
+            repo: blobOf(p, "repository") || undefined,
+            channelVisibility: "unknown",
+          }))
       );
     });
     if (sql.includes("GROUP BY day, status")) {

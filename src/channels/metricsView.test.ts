@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { DAY_MS } from "../core/budgets.js";
+import { InMemoryMetricsSource } from "../core/metrics.js";
+import { createMetricsService } from "../core/metricsService.js";
+import { POINT_COLUMNS, POINT_SCHEMA, type RunMetricsPoint } from "../core/runMetrics.js";
+import { ALL_GRANTS } from "../core/authz/grants.js";
+import { NO_GRANTS, type Actor } from "../core/authz/types.js";
+import { accessActor } from "./commandHttp.js";
+import { resolveWorkViewScope, withWorkViewScope } from "./workViewScope.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import { buildMetricsReport, MetricsSourceError, type MetricsReport } from "../core/metrics.js";
 import { METRICS_OFF_MESSAGE, NullMetricsService, type MetricsService } from "../core/metricsService.js";
@@ -141,11 +148,11 @@ describe("createMetricsViewHandler", () => {
     const t = fakeReqRes("GET", "/metrics.json?days=7&agent=coding");
     expect(handler(t.req, t.res)).toBe(true);
     await tick();
-    expect(service.report).toHaveBeenCalledWith({ days: 7, agent: "coding" });
+    expect(service.report).toHaveBeenCalledWith({ days: 7, agent: "coding", visibleTo: { kind: "none" } });
     const bare = fakeReqRes("GET", "/metrics");
     handler(bare.req, bare.res);
     await tick();
-    expect(service.report).toHaveBeenLastCalledWith({});
+    expect(service.report).toHaveBeenLastCalledWith({ visibleTo: { kind: "none" } });
   });
 
   it("refuses a malformed ?days or ?agent with 400 before any read", async () => {
@@ -188,5 +195,83 @@ describe("createMetricsViewHandler", () => {
     expect(t.status).toBe(503);
     expect(t.body()).toBe("metrics by run unavailable: MetricsSourceError");
     expect(t.body()).not.toContain("secret-words");
+  });
+});
+
+describe("current work metrics projection", () => {
+  const now = 20_700 * DAY_MS + 1000;
+  const point = (userId: string, agent: string, usd: number, status = "completed"): RunMetricsPoint => {
+    const blobs = POINT_COLUMNS.blobs.map(() => "");
+    const doubles = POINT_COLUMNS.doubles.map(() => 0);
+    for (const [field, value] of [
+      ["schema", POINT_SCHEMA],
+      ["requester", userId],
+      ["agent", agent],
+      ["status", status],
+      ["channel", "access:shared"],
+      ["repository", "demo/repo"],
+    ] as const)
+      blobs[POINT_COLUMNS.blobs.indexOf(field)] = value;
+    doubles[POINT_COLUMNS.doubles.indexOf("dollars")] = usd;
+    doubles[POINT_COLUMNS.doubles.indexOf("finished at")] = now;
+    doubles[POINT_COLUMNS.doubles.indexOf("wall")] = 1000;
+    doubles[POINT_COLUMNS.doubles.indexOf("turns")] = 1;
+    return { indexes: [agent], blobs, doubles };
+  };
+  const points = [
+    point("access:alice", "coding", 2),
+    point("access:bob", "review", 3, "failed"),
+    point("access:bob", "coding", 4),
+    point("access:carol", "coding", 5),
+  ];
+  const readGrants = { ...ALL_GRANTS, actions: new Set(["runs:read", "metrics:read"]) };
+  const reader = accessActor({ sub: "alice" }, () => readGrants);
+  const admin = accessActor({ sub: "admin" }, () => ALL_GRANTS);
+  const person: Actor = {
+    ...admin,
+    onBehalfOf: accessActor({ sub: "bob" }, () => readGrants),
+    viewingAs: { id: "access:bob" },
+  };
+  withWorkViewScope(reader, resolveWorkViewScope(reader, { organization: "installation" }));
+  withWorkViewScope(admin, resolveWorkViewScope(admin, { organization: "installation", mode: "everyone" }));
+  withWorkViewScope(person, resolveWorkViewScope(person, { organization: "installation", originalActor: admin }));
+  const denied: Actor = { kind: "service", id: "access:svc:no-read", grants: NO_GRANTS };
+  withWorkViewScope(denied, resolveWorkViewScope(denied, { organization: "installation" }));
+
+  it("filters Mine, read-only Person and authorized Everyone before aggregation on the page and JSON twin", async () => {
+    const service = createMetricsService({ dataset: "fixture_runs", days: 7 }, new InMemoryMetricsSource(points), {
+      now: () => now,
+    });
+    const handler = createMetricsViewHandler(service, sendPage);
+    for (const [actor, expected] of [
+      [reader, { runs: 1, failed: 0, usd: 2 }],
+      [person, { runs: 2, failed: 1, usd: 7 }],
+      [admin, { runs: 4, failed: 1, usd: 14 }],
+      [denied, { runs: 0, failed: 0, usd: 0 }],
+    ] as const) {
+      for (const path of ["/metrics?all=1&person=access:carol", "/metrics.json?all=1&person=access:carol"]) {
+        const request = fakeReqRes("GET", path);
+        expect(handler(request.req, request.res, { actor })).toBe(true);
+        await tick();
+        expect(request.status).toBe(200);
+        const report = path.startsWith("/metrics.json") ? JSON.parse(request.body()) : seedOf(request.body()).report;
+        expect({ runs: report.tiles.runs, failed: report.tiles.failed, usd: report.tiles.usd }).toEqual(expected);
+      }
+    }
+  });
+
+  it("does not substitute global totals when scoped source reads are unavailable", async () => {
+    const source = {
+      query: async () => {
+        throw new MetricsSourceError(503, "private provider detail");
+      },
+    };
+    const service = createMetricsService({ dataset: "fixture_runs", days: 7 }, source, { now: () => now });
+    const handler = createMetricsViewHandler(service, sendPage);
+    const request = fakeReqRes("GET", "/metrics.json");
+    handler(request.req, request.res, { actor: reader });
+    await tick();
+    expect(request.status).toBe(503);
+    expect(request.body()).toBe("metrics by run unavailable: MetricsSourceError");
   });
 });
