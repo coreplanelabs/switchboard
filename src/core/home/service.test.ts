@@ -31,6 +31,86 @@ function inventory(rows: CoordinatorUnit[], instances = [instance]): HomeInvento
 }
 
 describe("Home durable fleet", () => {
+  it("classifies pipeline completion only after known conditions and readable private facts", async () => {
+    const home = createHomeService({
+      organizationId: "organization:example",
+      instances: inventory(
+        [
+          unit("merged", { ending: { kind: "merged", at: 2, report: "Done" } }),
+          unit("merge-ready", { ending: { kind: "merge_ready", at: 2, report: "Review ended" } }),
+          unit("still-asked", { ending: { kind: "merged", at: 2, report: "Done" } }),
+          unit("unknown", { ending: { kind: "merged", at: 2, report: "Done" } }),
+          unit("private", {
+            title: "Private title",
+            ending: { kind: "merged", at: 2, report: "Private report" },
+            workBrief: {
+              requesterId: instance.userId,
+              mainThreadKey: instance.threadKey,
+              actId: "private-act",
+              repo: instance.repo,
+              base: "main",
+              question: "Private source",
+              findings: [],
+              requestedChange: "Fix it",
+            },
+          }),
+        ],
+        [{ ...instance, plan: { id: "restricted-plan", path: "docs/private-plan.md" } }],
+      ),
+      conditions: {
+        list: async (key) => {
+          if (key.endsWith(":unknown")) throw new Error("Unavailable conditions");
+          return key.endsWith(":still-asked")
+            ? [
+                {
+                  id: "saved-question",
+                  unitKey: key,
+                  revision: 1,
+                  state: "open",
+                  owner: { kind: "person", id: "access:reader" },
+                  summary: "Choose the target",
+                  nextAction: "Answer the question",
+                },
+              ]
+            : [];
+        },
+      },
+    });
+    const read = await home.pipeline(viewer, instance.id);
+    if (read.status === "not_found" || read.status === "unavailable") throw new Error("No pipeline");
+    expect(read.pipeline.units.map((row) => [row.unit.id, row.completion])).toEqual([
+      ["merged", "complete"],
+      ["merge-ready", "active"],
+      ["still-asked", "active"],
+      ["unknown", "unknown"],
+      ["private", "unknown"],
+    ]);
+    expect(read.pipeline).toMatchObject({ unresolved: 4, needsYou: 1, waiting: 3 });
+    expect(read.pipeline.instance).not.toHaveProperty("plan");
+    expect(JSON.stringify(read)).not.toContain("private-plan.md");
+    expect(read.pipeline.units.find((row) => row.unit.id === "private")?.unit.title).toBeUndefined();
+    const proved = await home.pipeline({ ...viewer, readPrivateUnit: async () => true }, instance.id);
+    expect(proved).toMatchObject({
+      pipeline: {
+        units: [
+          { completion: "complete" },
+          { completion: "active" },
+          { completion: "active" },
+          { completion: "unknown" },
+          { completion: "complete" },
+        ],
+      },
+    });
+    expect(proved).toMatchObject({ pipeline: { units: [{}, {}, {}, {}, { unit: { title: "Private title" } }] } });
+    if (proved.status === "complete" || proved.status === "partial")
+      expect(proved.pipeline.instance).not.toHaveProperty("plan");
+    const snapshot = await home.snapshot(viewer);
+    expect(snapshot.needsYou[0]?.unit.unit).toBe("old-work:still-asked");
+    expect(snapshot.needsYou[0]).not.toHaveProperty("completion");
+    const history = await home.history(viewer);
+    expect(history.units[0]?.unit.unit).toBe("old-work:merged");
+    expect(history.units[0]).not.toHaveProperty("completion");
+  });
   it("keeps a readable assigned question in Mine without including its requester's other work", async () => {
     const home = createHomeService({
       organizationId: "organization:example",

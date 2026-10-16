@@ -287,7 +287,7 @@
     "web/src/lib/eventSource.ts": "56cee4056941a052433f8b19d2ce2f8eaf43ba483080d0e836afa19794900f9c",
     "web/src/lib/filePreview.ts": "5c88224bfdd06300f492a1ef07f5fbbed7d2cb39f51a027b5b12c3319627dc15",
     "web/src/lib/format.ts": "c606fee13ee47cd493bc70bc5c8d70fe697bc1903afa8434261b48c29e682759",
-    "web/src/lib/githubLinks.ts": "9b382f6de5837da30e9ec8895fae5f301907c50d63baca116f3b9eba0bbbbff9",
+    "web/src/lib/githubLinks.ts": "31cccab8a0ae5305eddc02a4ff58ab2cac61caccbc3760ea3100092383fcc603",
     "web/src/lib/homeModel.ts": "e60f5baa96c1be10fa018a716b8e47beaa46a29a3c6ddc234309ada5c9ca9044",
     "web/src/lib/indexRow.ts": "0abb02cca18b4ad5f9aa6febbe074d86e86f1cac6e7b0c566e982da9bac08666",
     "web/src/lib/metrics.ts": "8925761f13eb2bdb660b0b51b1fc2957730b54233e5f89431b848f57e7c5d98e",
