@@ -17,6 +17,9 @@ import { storedAttachmentRefs, type StoredRow } from "./transcript.js";
 
 export { isRunSession, SESSION_KEY_PATTERN, type RunSession } from "../runRecord.js";
 
+export const SEED_BUDGET_TOKENS = 60_000;
+export const SEED_BUDGET_BYTES = SEED_BUDGET_TOKENS * 4;
+
 /** The permitted model projection keeps raw session rows available for recall. */
 export const REFUSED_REQUEST_STAND_IN = "(a request the model refused under its usage policy was left out here)";
 export function projectSessionMessages(

@@ -12,6 +12,8 @@ The existing load command scores independently labelled task outcomes from local
 2. Receipts retain the fixture digest, source revision, run and model identities, actual wall time and reported usage. Missing usage or prices remain unknown. Synthetic recordings are labelled synthetic; scoring them establishes the evaluator's behavior, not live model quality.
 3. A comparison requires identical labelled fixtures, boundary, model and qualification. A different source revision is expected. Incomparable arms report reasons and no improvement deltas. Every JSON/Markdown receipt is written to a fresh path outside the source tree and contains metrics rather than private answer text. Receipts bind the evaluator revision and loaded source module hashes, including the actual load entry. Baselines require source provenance and their PASS/FAIL labels must agree with their own outcome fields.
 
+Managed compaction and restart trials append an isolated requesting turn after the fixture evidence, then supply its exact request index through a synthetic source-owner descriptor. Earlier evidence keeps its original recall indices and authors. The full simulated checkpoint carries its scope, and the provider receives recovered request context, notes and summary. These records remain synthetic and do not certify a production run.
+
 ## Validation criteria
 
 | Criterion | Evidence |

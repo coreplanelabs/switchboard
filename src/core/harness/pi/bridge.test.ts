@@ -1092,7 +1092,7 @@ describe("the notes — compaction, harness errors, dialogs, the unknown", () =>
       "pi asked a confirm dialog no one answers (Trust?); cancelled",
     ]);
     expect(events.every((e) => e.type === "run_note" && e.kind === "harness_error")).toBe(true);
-    // A notify is pi's own UI chatter: not a dialog, nothing to answer, nothing to note.
+    // An informational notification is UI chatter: no answer or retained note.
     expect(bridge.observe({ type: "extension_ui_request", id: "n", method: "notify", message: "hi" })).toMatchObject({
       replies: [],
     });

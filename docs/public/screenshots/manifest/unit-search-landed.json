@@ -189,10 +189,10 @@
     "src/core/runLedger/contextRetention.ts": "faed15938ed9de6c83e46265dd9598f2e9981190252ccebd29548852bbd71ad8",
     "src/core/runLedger/inboxMessage.ts": "e106aed8682ea9c75899670e0d64f3ce6970c7caa67532ad60f20c7040e17b7f",
     "src/core/runLedger/pausedStop.ts": "7655d5215036ec7db6c22a82fa012ee274ee5b6239c62a98196a4fe4b110cdf0",
-    "src/core/runLedger/sessionLog.ts": "d814005b118f87d064676f0fb46703c04a5d5fc7417d8c6ad6b371407be18916",
+    "src/core/runLedger/sessionLog.ts": "9e9c3237b687b64900c471f7a1c3ef945960a830b63c660922643551e66b9d7f",
     "src/core/runLedger/sourceEvents.ts": "64dfccadeebad0f9ffd69cf442873ebacd32c618d5f0d4a328e92ae66d6428a0",
-    "src/core/runLedger/transcript.ts": "1207a5191702b4eeb2c795aa4cef54d4882fc983f07bda59eae6fe400ea3c8dc",
-    "src/core/runLedger/types.ts": "7ce323d1016344c298e2287cef150e7005a7902e3b6fed697c26315133fa38ef",
+    "src/core/runLedger/transcript.ts": "1ddeecfc8d2f9ac4cd7801ac45774451e07ba87a5b04f04d458de82cd5d400af",
+    "src/core/runLedger/types.ts": "c930d86acb229f8aab9a1ed09a66b02f5292c221ff78eba19af10b217410cc7a",
     "src/core/runMetrics.ts": "90ba2ff8a339e9e183a3bd1b86a40fedb1579c6b28790528164e6c82440a11d2",
     "src/core/runOwner.ts": "6e8f655ed2c34d08e3c258fc661309804e77d5d1b0972b5f12867427502b37cd",
     "src/core/runPace.ts": "5bec2b2a007c7db8461b6414fe18d94775bf93763336268c60fcc83177874e97",
@@ -502,10 +502,10 @@
       "response:*/*:/assets/green.css": "910b7d4303c281ffc4a9abd83e0d5af751a49010657bf5fb94f94c3be4333bc7",
       "response:*/*:/runs/unit-c1/events": "12fca447f1d306555072a5b014639a85025052407e4a92042091bc88cafa1c7a",
       "response:*/*:/runs/unit/plan-acme-3:U13?session=coding&q=lockfile&open=unit-c1&turn=47": "3cfffa39457db215e1250d6e8bd12ba3470aca02e59756d22415fb51b2e246e2",
-      "response:application/json:/home/session": "7e6cb188bf5010a3a6fdbad3c8dbff04a8203a14c075d7575350db9c293f3e29",
-      "response:application/json:/home/session?thread=slack%3AC1%3A1700000200.000100": "e1653f289b335309bf18585f9e8290fc17548c1714bf01bb3a9e0cf4f8d93cfb",
-      "response:text/event-stream:/home/events": "5bbe1a4abc0e8d4784b2756cf0ef90a17ac3dfff398441d3caf88f244d4635b9",
-      "response:text/event-stream:/home/events?thread=slack%3AC1%3A1700000200.000100&observe=1": "1c813c752acfafc4d8b5700aeba7fa79fec9df6b3a21f8ff82180de9884cc61c"
+      "response:application/json:/home/session": "ea6fe917ad5ee5ce87d77326bb334b825241424d0c1d88561e4aff062189be7c",
+      "response:application/json:/home/session?thread=slack%3AC1%3A1700000200.000100": "26076b774b2a564fc4e2aa29ee041f6a78e24fc572b9c1d8946389e507286315",
+      "response:text/event-stream:/home/events": "cb4f0a34c48b8e58462f2cc9138f2b5cb52cf777cff3b48c74ff0797e2a71dd2",
+      "response:text/event-stream:/home/events?thread=slack%3AC1%3A1700000200.000100&observe=1": "6b13baa57495075d2d617fe2ec33855882d9b3a9be745cd3b59a023558ad2359"
     }
   }
 }

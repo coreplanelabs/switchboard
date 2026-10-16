@@ -386,9 +386,17 @@ export interface TranscriptAttachment {
  *  that entry — so a rebuilt session keeps what pi kept. */
 export interface CompactionEntry {
   summary: string;
+  /** A full working-view summary made for the next request. */
+  scope?: "continuation";
   tokensBefore?: number;
   firstKeptEntryId?: string;
   keptFrom?: number;
+}
+
+/** The newest retained compaction, independent of a bounded transcript read. */
+export interface SessionCheckpoint {
+  index: number;
+  entry: CompactionEntry;
 }
 
 /** The rows a step write carries, each at its log index: the previous step's

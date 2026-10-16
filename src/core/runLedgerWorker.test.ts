@@ -703,6 +703,7 @@ describe("WorkerRunLedger", () => {
   });
 
   it("the session routes: tail, owner with the configured byte budget, seed and step writes into the log at their indices, a range read re-based to the range, the tail read, release", async () => {
+    const checkpoint = { index: 2, entry: { summary: "Keep the existing API." } };
     const rows = [
       { idx: 3, part: 0, json: JSON.stringify({ role: "user", part: { type: "text", text: "go" } }) },
       { idx: 4, part: 0, json: JSON.stringify({ role: "assistant", part: { type: "text", text: "ok" } }) },
@@ -713,7 +714,7 @@ describe("WorkerRunLedger", () => {
         : path === "/runs/session/read"
           ? { status: 200, data: { rows, attachments: [] } }
           : path === "/runs/session/read-tail"
-            ? { status: 200, data: { rows, attachments: [], from: 3 } }
+            ? { status: 200, data: { rows, attachments: [], from: 3, checkpoint } }
             : path === "/runs/session/write"
               ? { status: 200, data: { ok: true, bytes: 120 } }
               : { status: 200, data: { ok: true } },
@@ -750,6 +751,7 @@ describe("WorkerRunLedger", () => {
     const tail = await w.ledger.readSessionTail(key, 240_000);
     expect(w.calls[6]).toMatchObject({ path: "/runs/session/read-tail", body: { key, maxBytes: 240_000 } });
     expect(tail.from).toBe(3);
+    expect(tail.checkpoint).toEqual(checkpoint);
     expect(tail.transcript.messages).toHaveLength(2);
     expect(await w.ledger.releaseSession(key, "r1", "g1")).toEqual({ ok: true });
     expect(w.calls[7]).toMatchObject({ path: "/runs/session/clear-owner", body: { key, runId: "r1", gen: "g1" } });

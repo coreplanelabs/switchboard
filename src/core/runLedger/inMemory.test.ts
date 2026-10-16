@@ -1768,6 +1768,28 @@ describe("InMemoryRunLedger", () => {
   // docs/reference/specs/session-log.md items 1–4: the session log in the plainest
   // form — the same owner fence and (idx, part) upsert as the transcript, kept
   // across finishes, read by range and by tail.
+  it("keeps the newest compaction checkpoint readable when it falls outside the tail", async () => {
+    const ledger = new InMemoryRunLedger(() => 10_000);
+    const key = "slack:C1:checkpoint:review";
+    await ledger.claim(claimReq("r1", "slack:C1:checkpoint"));
+    await ledger.claimSession(key, "r1", "g1");
+    await ledger.seed(
+      "r1",
+      "g1",
+      [
+        { idx: 0, compaction: { summary: "Older state" } },
+        { idx: 1, compaction: { summary: "Keep the API. Push outcome unknown.", keptFrom: 2 } },
+        { idx: 2, message: { role: "assistant", content: [{ type: "text", text: "Recent answer" }] } },
+      ],
+      key,
+    );
+    expect(await ledger.readSessionTail(key, 100)).toMatchObject({
+      from: 2,
+      transcript: { messages: [{ role: "assistant", content: [{ type: "text", text: "Recent answer" }] }] },
+      checkpoint: { index: 1, entry: { summary: "Keep the API. Push outcome unknown.", keptFrom: 2 } },
+    });
+  });
+
   it("session log: the tail of an empty log is 0; a write before the owner is unknown-run; the owner appends at log indices and another generation is fenced; a range read re-bases; the tail read cuts at a turn boundary; finish releases the owner and clears nothing", async () => {
     const ledger = new InMemoryRunLedger(() => 10_000);
     const key = "slack:C1:1.0:review";

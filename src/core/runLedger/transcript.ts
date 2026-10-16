@@ -17,6 +17,7 @@ import {
   TRANSCRIPT_PART_BYTES,
   TRANSCRIPT_READ_BYTES,
   type CompactionEntry,
+  type SessionCheckpoint,
   type TranscriptAttachment,
   type TranscriptRow,
 } from "./types.js";
@@ -56,6 +57,32 @@ function hasData(part: ContentPart): part is ContentPart & { data: string; media
 }
 
 const isCompaction = (v: ChatMessage | StoredCompaction): v is StoredCompaction => "compaction" in v;
+
+export function isSessionCheckpoint(value: unknown): value is SessionCheckpoint {
+  if (typeof value !== "object" || value === null) return false;
+  const checkpoint = value as Record<string, unknown>;
+  if (typeof checkpoint.index !== "number" || !Number.isSafeInteger(checkpoint.index) || checkpoint.index < 0)
+    return false;
+  if (typeof checkpoint.entry !== "object" || checkpoint.entry === null) return false;
+  const entry = checkpoint.entry as Record<string, unknown>;
+  return (
+    typeof entry.summary === "string" &&
+    (entry.scope === undefined || entry.scope === "continuation") &&
+    (entry.keptFrom === undefined ||
+      (typeof entry.keptFrom === "number" && Number.isSafeInteger(entry.keptFrom) && entry.keptFrom >= 0))
+  );
+}
+
+export function sessionCheckpointOf(
+  row: Pick<TranscriptRow, "idx" | "json"> | undefined,
+): SessionCheckpoint | undefined {
+  if (!row) return undefined;
+  const stored: unknown = parseStoredJson(row.json);
+  if (typeof stored !== "object" || stored === null || !("compaction" in stored)) return undefined;
+  const checkpoint = { index: row.idx, entry: stored.compaction };
+  if (!isSessionCheckpoint(checkpoint)) throw new RequiredTranscriptError("the session checkpoint is malformed");
+  return checkpoint;
+}
 
 /** One turn → its rows (and any externalized attachments). Refuses a part the
  *  row budget cannot hold: a transcript is never truncated. A compaction entry
@@ -105,6 +132,36 @@ export function turnRows(
     rows.push({ idx, part: i, json });
   });
   return { rows, attachments };
+}
+
+/** History budgets count text and structure. Media payloads retain their
+ * separate attachment limits, as they do on the durable transcript wire. */
+export function historyContextBytes(messages: readonly ChatMessage[]): number {
+  return messages.reduce(
+    (bytes, message) =>
+      bytes +
+      turnRows(
+        0,
+        {
+          ...message,
+          content: message.content.map((part) =>
+            part.type === "tool_result" && Array.isArray(part.content)
+              ? {
+                  ...part,
+                  content: part.content.map((item) =>
+                    item.type === "image" || item.type === "document" ? { ...item, data: "" } : item,
+                  ),
+                }
+              : part,
+          ),
+        },
+        {
+          partBytes: Infinity,
+          attachmentRefBytes: 0,
+        },
+      ).rows.reduce((total, row) => total + utf8ByteLength(row.json), 0),
+    0,
+  );
 }
 
 /** Pack rows into requests whose JSON stays under `maxBytes`, in order. A

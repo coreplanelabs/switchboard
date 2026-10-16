@@ -257,7 +257,10 @@ describe("local context task trials", () => {
     expect(requests).not.toContain("SECRET_GRADING_CANARY");
     expect(requests).not.toContain("hidden_grading_key");
     expect(requests).not.toContain("SECRET_NOTES_CANARY");
-    expect(managed.requests[0].messages).toEqual([{ role: "user", content: [{ type: "text", text: task.task }] }]);
+    expect(managed.requests[0].messages).toEqual([
+      { role: "user", content: [{ type: "text", text: task.task }] },
+      { role: "user", content: [{ type: "text", text: task.task }] },
+    ]);
     expect(raw.requests[0].messages[0]).toEqual({
       role: "user",
       content: [{ type: "text", text: "Investigate production." }],

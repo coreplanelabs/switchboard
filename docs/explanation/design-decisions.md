@@ -121,6 +121,7 @@ Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being bu
 | 0106 | [Terminal execution and replay fencing commit together](../decisions/0106-terminal-execution-and-replay-fencing-commit-together.md) | Durable journal and atomic completion barrier | proposed | 2026-10-12 |
 | 0107 | [Retain exact review feedback with the publication owner](../decisions/0107-retain-exact-review-feedback-with-the-publication-owner.md) | Transactional receipt and replaceable snapshot | accepted | 2026-10-14 |
 | 0108 | [Staging successors preserve consumed episodes](../decisions/0108-staging-successors-preserve-consumed-episodes.md) | Compare-and-swap episode pointer and immutable receipts | proposed | 2026-10-15 |
+| 0109 | [Follow-ups keep a continuation checkpoint](../decisions/0109-follow-ups-keep-a-continuation-checkpoint.md) | Snapshot and bounded log projection | proposed | 2026-10-16 |
 
 <!-- /generated:decision-records -->
 

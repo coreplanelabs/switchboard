@@ -272,8 +272,8 @@ import {
   contextThreadSessionKey,
 } from "./sessionLog.js";
 import { tokenize } from "../memory/scorer.js";
-import type { Notepad, SessionHit } from "./types.js";
-import { assembleTranscript, turnRows, type AssembledTranscript } from "./transcript.js";
+import type { Notepad, SessionHit, SessionCheckpoint } from "./types.js";
+import { assembleTranscript, sessionCheckpointOf, turnRows, type AssembledTranscript } from "./transcript.js";
 import type {
   AppendableEvent,
   ClaimRequest,
@@ -2805,10 +2805,18 @@ export class InMemoryRunLedger implements RunLedger {
   async readSessionTail(
     key: string,
     maxBytes: number,
-  ): Promise<{ from: number; transcript: AssembledTranscript; sources?: SessionSources; requiresFreshSources?: true }> {
+  ): Promise<{
+    from: number;
+    transcript: AssembledTranscript;
+    checkpoint?: SessionCheckpoint;
+    sources?: SessionSources;
+    requiresFreshSources?: true;
+  }> {
     const log = this.sessions.get(key);
     const sources = log?.pendingSourceOwner ? taintSessionSources(log.sources) : log?.sources;
     const rows = [...(this.sessions.get(key)?.rows ?? [])].sort((a, b) => b.idx - a.idx || b.part - a.part);
+    const checkpoint = sessionCheckpointOf(rows.find((row) => rowKind(row.json) === "compaction"));
+    const saved = checkpoint ? { checkpoint } : {};
     const from = tailCut(
       rows.map((r) => ({ idx: r.idx, bytes: utf8ByteLength(r.json) })),
       maxBytes,
@@ -2818,6 +2826,7 @@ export class InMemoryRunLedger implements RunLedger {
         throw new RequiredTranscriptError("tail exceeds current seed budget");
       const next = await this.sessionTail(key);
       return {
+        ...saved,
         from: next,
         transcript: assembleTranscript([], [], next),
         ...(sources ? { sources: structuredClone(sources) } : {}),
@@ -2825,6 +2834,7 @@ export class InMemoryRunLedger implements RunLedger {
       };
     }
     return {
+      ...saved,
       from,
       transcript: await this.readSession(key, from),
       ...(sources ? { sources: structuredClone(sources) } : {}),

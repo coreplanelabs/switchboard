@@ -223,7 +223,8 @@ function scriptedPi(
       turns(prompts++, c);
     }
     if (cmd.type === "steer") c.emit({ type: "response", command: "steer", success: true });
-    if (cmd.type === "abort") c.emit({ type: "response", command: "abort", success: true }, { type: "agent_settled" });
+    if (cmd.type === "abort")
+      c.emit({ id: cmd.id, type: "response", command: "abort", success: true }, { type: "agent_settled" });
   };
 }
 
@@ -848,6 +849,315 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     });
     expect(w.container.killed).toEqual([4242]);
     expect(w.container.removed).toEqual([paths.dir]);
+  });
+
+  it("compacts a long settled run through the native command and persists its full checkpoint before closing", async () => {
+    const w = world();
+    w.run.messages = [{ role: "user", content: [{ type: "text", text: "x".repeat(250_000) }] }];
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "Done."));
+    const normal = w.container.onStdin!;
+    w.container.onStdin = (line) => {
+      const command = JSON.parse(line);
+      if (command.type !== "compact") return normal(line, w.container);
+      w.container.emit(
+        {
+          type: "compaction_end",
+          reason: "manual",
+          aborted: false,
+          result: {
+            summary: "Keep the API. Push outcome unknown.",
+            firstKeptEntryId: null,
+            tokensBefore: 70_000,
+            details: { switchboardContinuation: true },
+          },
+        },
+        { type: "response", id: command.id, command: "compact", success: true },
+      );
+    };
+    expect(await w.start()).toBe("Done.");
+    expect(w.steps.at(-1)?.compaction).toEqual({
+      summary: "Keep the API. Push outcome unknown.",
+      tokensBefore: 70_000,
+      scope: "continuation",
+    });
+    expect(w.container.commands().filter((command) => command.type === "compact")).toHaveLength(1);
+    expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(1);
+  });
+
+  it.each(["initial", "follow-up"] as const)(
+    "keeps the completed %s answer when a reset leaves compact delivery unknown without replaying it",
+    async (stage) => {
+      const w: ReturnType<typeof world> = world({
+        sleep: () =>
+          new Promise<void>((resolve) =>
+            setImmediate(() => {
+              if (w.events.some((event) => event.type === "run_note" && event.kind === "resumed"))
+                w.clock.now =
+                  stage === "initial"
+                    ? w.events.find((event) => event.type === "lease")!.loopEndsAt
+                    : NOW + 5 * MINUTE_MS;
+              resolve();
+            }),
+          ),
+      });
+      if (stage === "initial")
+        w.run.messages = [{ role: "user", content: [{ type: "text", text: "x".repeat(250_000) }] }];
+      scriptedPi(w.container, (n, c) => {
+        echoPrompt(c);
+        finalTurn(c, n === 0 ? "Completed task." : "Completed post-turn.");
+      });
+      let attempts = 0;
+      const write = w.container.writeLine.bind(w.container);
+      w.container.writeLine = async (paths, line) => {
+        if (JSON.parse(line).type === "compact") {
+          attempts++;
+          throw new HarnessContainerControlResetError("send", "control reset");
+        }
+        return write(paths, line);
+      };
+      if (stage === "initial") expect(await w.start()).toBe("Completed task.");
+      else {
+        const session = await w.open();
+        try {
+          expect(
+            await session.followUp({
+              text: "x".repeat(250_000),
+              maxTurns: 4,
+              maxMinutes: 5,
+              toolContext: { executor },
+            }),
+          ).toBe("Completed post-turn.");
+        } finally {
+          await session.end();
+        }
+      }
+      expect(attempts).toBe(1);
+      expect(w.container.killed).toEqual([4242]);
+    },
+  );
+
+  it.each(["initial", "follow-up"] as const)(
+    "waits for native checkpoint cancellation after the %s task before the next post-turn",
+    async (stage) => {
+      const w = world();
+      if (stage === "initial")
+        w.run.messages = [{ role: "user", content: [{ type: "text", text: "x".repeat(250_000) }] }];
+      let compacting = false;
+      let compactId: unknown;
+      let compacts = 0;
+      scriptedPi(w.container, (n, c) => {
+        echoPrompt(c);
+        finalTurn(c, `Completed task ${n}.`);
+      });
+      const normal = w.container.onStdin!;
+      w.container.onStdin = (line, c) => {
+        const command = JSON.parse(line);
+        if (command.type === "compact") {
+          if (++compacts > 1) {
+            c.emit({
+              type: "response",
+              id: command.id,
+              command: "compact",
+              success: false,
+              error: "fixture skips another optional summary",
+            });
+            return;
+          }
+          compacting = true;
+          compactId = command.id;
+          w.clock.now =
+            stage === "initial" ? w.events.find((event) => event.type === "lease")!.loopEndsAt : NOW + 5 * MINUTE_MS;
+          return;
+        }
+        if (command.type === "abort" && compacting) {
+          setImmediate(() =>
+            setImmediate(() => {
+              compacting = false;
+              c.emit(
+                { type: "response", id: compactId, command: "compact", success: false, error: "cancelled" },
+                { type: "response", id: command.id, command: "abort", success: true },
+              );
+            }),
+          );
+          return;
+        }
+        if (command.type === "prompt" && compacting) {
+          c.emit({
+            type: "response",
+            id: command.id,
+            command: "prompt",
+            success: false,
+            error: "compaction still active",
+          });
+          return;
+        }
+        normal(line, c);
+      };
+      const session = await w.open();
+      try {
+        expect(session.answer).toBe("Completed task 0.");
+        if (stage === "follow-up")
+          expect(
+            await session.followUp({
+              text: "x".repeat(250_000),
+              maxTurns: 4,
+              maxMinutes: 5,
+              toolContext: { executor },
+            }),
+          ).toBe("Completed task 1.");
+        expect(
+          await session.followUp({ text: "Post the result.", maxTurns: 4, maxMinutes: 1, toolContext: { executor } }),
+        ).toBe(stage === "initial" ? "Completed task 1." : "Completed task 2.");
+      } finally {
+        await session.end();
+      }
+    },
+  );
+
+  it("refuses another post-turn when checkpoint cancellation reaches its existing deadline without native idle", async () => {
+    const w = world();
+    scriptedPi(w.container, (n, c) => {
+      echoPrompt(c);
+      finalTurn(c, n === 0 ? "Completed task." : "Completed post-turn.");
+    });
+    const normal = w.container.onStdin!;
+    w.container.onStdin = (line, c) => {
+      const command = JSON.parse(line);
+      if (command.type === "compact") w.clock.now = NOW + 5 * MINUTE_MS;
+      else if (command.type === "abort") w.clock.now += 60 * MINUTE_MS;
+      else normal(line, c);
+    };
+    const session = await w.open();
+    try {
+      expect(
+        await session.followUp({ text: "x".repeat(250_000), maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+      ).toBe("Completed post-turn.");
+      await expect(
+        session.followUp({ text: "Post the result.", maxTurns: 4, maxMinutes: 1, toolContext: { executor } }),
+      ).rejects.toThrow("The optional checkpoint did not confirm native idle; no follow-up prompt was sent.");
+      expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(2);
+    } finally {
+      await session.end();
+    }
+  });
+
+  it.each(
+    (["initial", "follow-up"] as const).flatMap((stage) =>
+      (["word-dead", "word-word", "unverified", "identity"] as const).map((failure) => [stage, failure] as const),
+    ),
+  )("retains checkpoint cleanup custody for the %s task after %s", async (stage, failure) => {
+    const w = world();
+    if (stage === "initial")
+      w.run.messages = [{ role: "user", content: [{ type: "text", text: "x".repeat(250_000) }] }];
+    scriptedPi(w.container, (n, c) => {
+      echoPrompt(c);
+      finalTurn(c, n === 0 ? "Completed task." : "Completed post-turn.");
+    });
+    const normal = w.container.onStdin!;
+    w.container.onStdin = (line, c) => {
+      if (JSON.parse(line).type !== "compact") return normal(line, c);
+      const word = new HarnessContainerRuntimeReplacedError("read", "the runtime was replaced");
+      c.failOnceDrained = failure.startsWith("word") ? word : new HarnessContainerError("read", NETWORK_LOST_TEXT);
+      if (failure === "unverified") c.identity = async () => undefined;
+      else c.vm = "vm-replacement";
+      if (failure === "word-word")
+        c.alive = async () => {
+          throw word;
+        };
+    };
+    const session = await w.open();
+    const cached = w.registry.calls("run-7")!;
+    cached.settle("cached-result", { content: [{ type: "text", text: "Retained tool answer." }], isError: false });
+    expect(cached.size).toBe(1);
+    try {
+      if (stage === "initial") expect(session.answer).toBe("Completed task.");
+      else
+        expect(
+          await session.followUp({ text: "x".repeat(250_000), maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+        ).toBe("Completed post-turn.");
+      await expect(
+        session.followUp({ text: "Post the result.", maxTurns: 4, maxMinutes: 1, toolContext: { executor } }),
+      ).rejects.toThrow("The optional checkpoint did not confirm native idle; no follow-up prompt was sent.");
+      if (failure === "unverified") await expect(session.end()).rejects.toBeInstanceOf(HarnessEndingUnconfirmedError);
+      else await session.end();
+      expect(w.container.killed).toEqual([]);
+      expect(w.container.removed).toEqual([]);
+      if (failure === "unverified") expect(w.registry.calls("run-7")).toBe(cached);
+      else {
+        expect(w.registry.get("run-7")).toBeUndefined();
+        expect(w.registry.calls("run-7")).toBeUndefined();
+        expect(cached.signal.aborted).toBe(true);
+      }
+    } finally {
+      await session.end().catch(() => {});
+    }
+  });
+
+  it.each(["initial", "follow-up"] as const)(
+    "keeps the completed %s answer when the optional compact FIFO is missing",
+    async (stage) => {
+      const w = world();
+      if (stage === "initial")
+        w.run.messages = [{ role: "user", content: [{ type: "text", text: "x".repeat(250_000) }] }];
+      scriptedPi(w.container, (n, c) => {
+        echoPrompt(c);
+        finalTurn(c, n === 0 ? "Completed task." : "Completed post-turn.");
+      });
+      w.container.failSendType = {
+        type: "compact",
+        error: new HarnessControlFileLostError("send", paths.fifo, paths.dir),
+      };
+      const session = await w.open();
+      try {
+        if (stage === "initial") expect(session.answer).toBe("Completed task.");
+        else
+          expect(
+            await session.followUp({
+              text: "x".repeat(250_000),
+              maxTurns: 4,
+              maxMinutes: 5,
+              toolContext: { executor },
+            }),
+          ).toBe("Completed post-turn.");
+        await expect(
+          session.followUp({ text: "Post the result.", maxTurns: 4, maxMinutes: 1, toolContext: { executor } }),
+        ).rejects.toThrow("The optional checkpoint did not confirm native idle; no follow-up prompt was sent.");
+        expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(
+          stage === "initial" ? 1 : 2,
+        );
+      } finally {
+        await session.end();
+      }
+      expect(w.container.killed).toEqual([4242]);
+      expect(w.container.removed).toEqual([paths.dir]);
+    },
+  );
+
+  it("keeps the answer on a failed checkpoint and honours hard stops and the existing deadline while compaction waits", async () => {
+    for (const outcome of ["failed", "deadline", "hard"] as const) {
+      const w = world();
+      w.run.messages = [{ role: "user", content: [{ type: "text", text: "x".repeat(250_000) }] }];
+      scriptedPi(w.container, (_n, c) => finalTurn(c, "Done."));
+      const normal = w.container.onStdin!;
+      w.container.onStdin = (line) => {
+        const command = JSON.parse(line);
+        if (command.type !== "compact") return normal(line, w.container);
+        if (outcome === "hard") w.control.requestStop("hard");
+        else if (outcome === "deadline") w.clock.now += 60 * 60_000;
+        else
+          w.container.emit({
+            type: "response",
+            id: command.id,
+            command: "compact",
+            success: false,
+            error: "summary failed",
+          });
+      };
+      expect(await w.start()).toBe(outcome === "hard" ? HARD_STOP_MESSAGE : "Done.");
+      expect(w.container.killed).toEqual([4242]);
+      expect(w.steps.filter((step) => step.compaction)).toEqual([]);
+      expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(1);
+    }
   });
 
   it("writes pi's files, starts it with the bearer in the env and no key, drives the protocol, bridges the events, mirrors the steps, answers, and ends pi", async () => {
