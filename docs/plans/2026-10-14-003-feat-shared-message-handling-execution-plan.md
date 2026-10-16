@@ -203,6 +203,12 @@ Prevent evidence from answering privileged questions, renewing or interrupting w
 
 **Done when `[gap]`:** external evidence cannot enter a worker without a recorded authorized decision. It remains evidence after delegation. Parent/child changes cannot double-deliver it. Exact row acknowledgment proves consumption.
 
+### Shared relevance policy, 2026-10-15
+
+The shared intake module now has a source-evidence policy beside Slack's addressed-to-bot policy. It reuses the existing structured call and failure handling. Relevant and unrelated results remain distinct; uncertainty and model failure return unclassified. The caller's original cancellation signal and one deadline bound every attempt. Missing or oversized input remains held. Slack's existing behavior is unchanged.
+
+This is an inactive recommendation function. No source producer calls it. The source processor must still save each result against the original source and task context before ignoring or offering the text. Source-job handling stages, typed inbox/unit delivery, both runtimes, exact consumption and relevance-quality evaluation remain pending. Step 3 is in progress, not complete.
+
 ## Step 4: connect GitHub as a thin adapter
 
 **Current source:** [webhook receiver](../../src/channels/githubWebhook.ts), [current GitHub handlers](../../src/core/coordinator/checksIntake.ts), [GitHub API](../../src/execution/githubApi.ts), and [history tools](../../src/tools/github.ts).
