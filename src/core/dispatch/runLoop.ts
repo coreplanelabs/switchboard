@@ -655,6 +655,9 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   // the checklist the card shows, the verdict/description already submitted,
   // the branch already pushed.
   const restored = resume?.row.state ?? {};
+  // Restored sources are revalidated before reentry. Only new reads owe a
+  // native result checkpoint in this harness; compacted history need not echo.
+  const sourceResultCalls = new Set<string>();
   let reviewSubmission: ReviewSubmission | undefined;
   const recovery = new ToolRecovery(restored.toolRecovery, async (state, tool) => {
     if (!ledgerTrackedAtEntry) return true;
@@ -3810,8 +3813,15 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                       ...(deps.runLedger
                         ? { execution: { gen: deps.runLedger.gen, owner: originalPublicationOwner } }
                         : {}),
-                      commit: async (receipt, context) =>
-                        (await ctx.admitSourceContext!(context)) && (await ledgerRun!.recordSourceResult(receipt)),
+                      commit: async (receipt, context) => {
+                        if (
+                          !(await ctx.admitSourceContext!(context)) ||
+                          !(await ledgerRun!.recordSourceResult(receipt))
+                        )
+                          return false;
+                        sourceResultCalls.add(receipt.callId);
+                        return true;
+                      },
                     })
                   : tool,
               ),
@@ -3878,6 +3888,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
             prepareFollowUps,
             ...(initialMedia ? { nativeMediaDigest: initialMedia } : {}),
             prepareSourceMedia,
+            sourceResultCallIds: () => [...sourceResultCalls],
             sourceContextRequired: () => {
               const current = ctx.currentNativeMediaContext?.();
               return !!(current?.version === 3 || current?.nativeMediaSources?.length);

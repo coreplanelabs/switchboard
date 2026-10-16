@@ -12,6 +12,13 @@ import { ALLOWANCES, bearerExpiresAt, loopClock, MINUTE_MS, PROVIDER_RETRY_BACKO
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Secret } from "../../../secrets.js";
+import { ToolRecovery } from "../toolRecovery.js";
+import { githubReadWithContext } from "../../dispatch/githubReadContext.js";
+import { recordedGithubRead } from "../../dispatch/executionGithubContext.js";
+import { withSourceResults, type SourceResultReceipt } from "../../references/sourceResultContext.js";
+import { githubFileTool } from "../../../tools/github.js";
+import { InMemoryGithubApi } from "../../../execution/githubApi.js";
+import type { LiveRunRow } from "../../runLedger/types.js";
 import { handlePlaneEffects } from "../../../channels/planeEffects.js";
 import type { AgentDef } from "../../../agents/registry.js";
 import { ExecInfraError, ExecSandboxRestartedError, type Executor } from "../../../execution/executor.js";
@@ -420,6 +427,167 @@ function tickingWorld(opts: Parameters<typeof world>[0] = {}) {
     },
   });
 }
+
+describe("native source result checkpoint", () => {
+  it.each(["saved", "write-failed", "parallel"] as const)(
+    "waits past the native tool ending for the canonical result: %s",
+    async (mode) => {
+      const w = world({ agent: { name: "review", identity: "read", toolset: "readonly" } });
+      const receipts: SourceResultReceipt[] = [];
+      const canonical: ChatMessage[] = [];
+      const api = new InMemoryGithubApi({ "acme/api": { private: true, files: { "README.md": "original source" } } });
+      const meta: LiveRunRow["meta"] = {
+        agent: "review",
+        readonly: true,
+        profile: { machine: "repo-resident", identity: "read", minutes: 15 },
+        userId: "http:operator",
+        channelId: "http:default",
+        threadKey: "http:default:source",
+        repo: "acme/api",
+        pr: 7,
+      };
+      const recovery = new ToolRecovery();
+      w.bearers.bindRecovery("run-7", recovery);
+      w.run.sourceResultCallIds = () => receipts.map((r) => r.callId);
+      w.run.toolContext = {
+        ...w.run.toolContext,
+        agentName: "review",
+        repo: "acme/api",
+        recovery,
+        github: { api, canWrite: () => false, readableRepos: async () => [] },
+      };
+      w.run.tools = [
+        updateStatus,
+        githubReadWithContext(githubFileTool, {
+          runId: "run-7",
+          execution: { gen: "gen", owner: async () => ({ runId: "run-7", ownerGen: "gen", meta }) as LiveRunRow },
+          commit: async (receipt) => {
+            receipts.push(receipt);
+            return true;
+          },
+        }),
+      ];
+      let writeStarted!: () => void, releaseWrite!: () => void;
+      const writing = new Promise<void>((resolve) => {
+        writeStarted = resolve;
+      });
+      const writeGate = new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+      w.run.onStep = async (report) => {
+        w.steps.push(report);
+        if (report.turns.some((m) => m.content.some((p) => p.type === "tool_result"))) {
+          writeStarted();
+          await writeGate;
+          if (mode === "write-failed") throw new Error("canonical result write refused");
+        }
+        for (const message of report.turns) canonical.push(await withSourceResults(message, receipts));
+      };
+      const args = { repo: "acme/api", path: "README.md" };
+      scriptedPi(w.container, () => {
+        authorizeToolCall(w.registry.get("run-7")!, { toolCallId: "read-1", tool: "github_file", input: args });
+        const call = assistant([
+          { type: "toolCall", id: "read-1", name: "github_file", arguments: args },
+          ...(mode === "parallel"
+            ? [{ type: "toolCall", id: "status-1", name: "update_status", arguments: { checklist: "Checking source" } }]
+            : []),
+        ]);
+        w.container.emit(
+          { type: "turn_start" },
+          { type: "message_end", message: call },
+          { type: "tool_execution_start", toolCallId: "read-1", toolName: "github_file", args },
+        );
+      });
+      const opening = w.open().then(
+        (session) => ({ session }),
+        (error) => ({ error }),
+      );
+      await vi.waitFor(() => expect(w.registry.get("run-7")?.runId).toBe("run-7"));
+      const answer = await runRelayedTool(w.registry.get("run-7")!, {
+        toolCallId: "read-1",
+        tool: "github_file",
+        input: args,
+      });
+      expect(answer.isError).toBe(false);
+      w.container.emit({
+        type: "tool_execution_end",
+        toolCallId: "read-1",
+        toolName: "github_file",
+        result: answer,
+        isError: false,
+      });
+      await vi.waitFor(() =>
+        expect(w.events.some((e) => e.type === "tool_result" && e.callId === "read-1")).toBe(true),
+      );
+      let drained = false;
+      const drain = recovery.settled().then(() => {
+        drained = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(drained).toBe(false);
+      w.container.emit({
+        type: "message_end",
+        message: {
+          role: "toolResult",
+          toolCallId: "read-1",
+          toolName: "github_file",
+          content: answer.content,
+          isError: false,
+        },
+      });
+      if (mode === "parallel") {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(drained).toBe(false);
+        const ordinary = { toolCallId: "status-1", tool: "update_status", input: { checklist: "Checking source" } };
+        authorizeToolCall(w.registry.get("run-7")!, ordinary);
+        w.container.emit({
+          type: "tool_execution_start",
+          toolCallId: "status-1",
+          toolName: "update_status",
+          args: ordinary.input,
+        });
+        const status = await runRelayedTool(w.registry.get("run-7")!, ordinary);
+        w.container.emit(
+          {
+            type: "tool_execution_end",
+            toolCallId: "status-1",
+            toolName: "update_status",
+            result: status,
+            isError: false,
+          },
+          {
+            type: "message_end",
+            message: {
+              role: "toolResult",
+              toolCallId: "status-1",
+              toolName: "update_status",
+              content: status.content,
+              isError: false,
+            },
+          },
+        );
+      }
+      await writing;
+      expect(drained).toBe(false);
+      releaseWrite();
+      if (mode !== "write-failed") {
+        await drain;
+        expect(recovery.snapshot().stopped).toBeUndefined();
+        expect(await recordedGithubRead(canonical, receipts[0]!)).toEqual({ repo: "acme/api", path: "README.md" });
+        finalTurn(w.container, "Source result saved.");
+        const outcome = await opening;
+        expect("session" in outcome && outcome.session.answer).toBe("Source result saved.");
+        if ("session" in outcome) await outcome.session.end();
+      } else {
+        const outcome = await opening;
+        expect("error" in outcome && outcome.error.message).toContain("canonical result write refused");
+        await drain;
+        expect(recovery.snapshot().stopped).toMatchObject({ reason: "outcome_unknown" });
+        expect(await recordedGithubRead(canonical, receipts[0]!)).toBeUndefined();
+      }
+    },
+  );
+});
 
 describe("runPiHarness — a run on pi from the first file to the answer", () => {
   // This local store projects the real runtime exports, including all
@@ -3777,6 +3945,48 @@ describe("runPiHarness — after a bot restart", () => {
         ],
       },
     ]);
+  });
+
+  it("reattaches after a saved source-result checkpoint without duplicating its user row", async () => {
+    const w = world();
+    await w.container.start({ paths, command: "pi", args: [], env: {} });
+    const call: ChatMessage = {
+      role: "assistant",
+      content: [
+        { type: "tool_use", id: "source-1", name: "github_file", input: { repo: "acme/api", path: "README.md" } },
+      ],
+    };
+    const result: ChatMessage = {
+      role: "user",
+      content: [{ type: "tool_result", toolUseId: "source-1", content: "saved source" }],
+      sourceResults: [],
+    };
+    w.container.emit({
+      type: "message_end",
+      message: {
+        role: "toolResult",
+        toolCallId: "source-1",
+        toolName: "github_file",
+        content: [{ type: "text", text: "saved source" }],
+      },
+    });
+    w.run.resume = {
+      ...resume({
+        pid: 4242,
+        logOffset: 0,
+        sessionFile: "s.jsonl",
+        root: paths.dir,
+        bearerHash: bearerHashOf(w.bearer),
+      }),
+      messages: [...w.run.messages, call, result],
+      settlements: [],
+    };
+    scriptedPi(w.container, (_n, c) => finalTurn(c, "Read proof retained."));
+    expect(await w.start()).toBe("Read proof retained.");
+    expect(w.steps.map((s) => ({ firstIdx: s.firstIdx, turns: s.turns }))).toEqual([
+      { firstIdx: 3, turns: [{ role: "assistant", content: [{ type: "text", text: "Read proof retained." }] }] },
+    ]);
+    expect(w.container.starts).toHaveLength(1);
   });
 
   // Reading from the last turn the ledger holds can start before the dead

@@ -19,6 +19,15 @@ import type { LiveRunRow } from "../runLedger/types.js";
 import { type ContextOrigin, type ContextDependencies } from "../references/contextDependencies.js";
 import { sourceHash } from "../references/receipts.js";
 import { executionAdmissionHash } from "./executionGithubContext.js";
+import { githubReadWithContext } from "./githubReadContext.js";
+import { githubFileTool } from "../../tools/github.js";
+import type { ToolContext } from "../../tools/runnableTool.js";
+import { PiMirror } from "../harness/pi/mirror.js";
+import { withSourceResults, type SourceResultReceipt } from "../references/sourceResultContext.js";
+import { RunBearerStore } from "../modelProxy/runBearers.js";
+import { createTracer } from "../trace/tracer.js";
+import { secretsFrom } from "../../secrets.js";
+import { handleModelProxyRequest, ANTHROPIC_MESSAGES_PATH } from "../../channels/modelProxy.js";
 import type { ChatMessage } from "../chatMessage.js";
 import {
   checkpointMembersOf,
@@ -528,6 +537,194 @@ describe("canonical saved operator decisions", () => {
 });
 
 describe("message-bound context access", () => {
+  it.each(["allowed", "foreign-owner", "github-revoked", "persistence-failed"] as const)(
+    "checks the next model call against a native GitHub result's canonical proof: %s",
+    async (failure) => {
+      const f = setup();
+      const request: IncomingMessage = {
+        userId: "http:operator",
+        channelId: "http:default",
+        threadKey: "http:default:review",
+        text: "Review the change",
+      };
+      const meta: LiveRunRow["meta"] = {
+        agent: "review",
+        readonly: true,
+        profile: { machine: "repo-resident", identity: "read", minutes: 15 },
+        userId: request.userId,
+        channelId: request.channelId,
+        threadKey: request.threadKey,
+        repo: "acme/api",
+        pr: 7,
+        session: { key: "native-review", seedFrom: 0, request: 0, range: { from: 0, to: 1 } },
+      };
+      const runId = "native-review";
+      const gen = "native-generation";
+      const admissionHash = (await executionAdmissionHash(meta))!;
+      const receipts: SourceResultReceipt[] = [];
+      let context: ContextDependencies = clean;
+      const messages: ChatMessage[] = [];
+      const row = { runId, ownerGen: gen, meta, state: { sourceResults: receipts } } as unknown as LiveRunRow;
+      f.live.push(row);
+      f.deps.runLedger.readSession = async () => ({
+        complete: true,
+        turns: messages.length,
+        messages,
+        compactions: [],
+      });
+      const github = new InMemoryGithubApi({ "acme/api": { private: false, files: { "README.md": "review source" } } });
+      f.deps.githubApi = github;
+      const mirror = new PiMirror({
+        seedLength: 0,
+        remainingMs: () => 60000,
+        onStep: async (report) => {
+          if (failure === "persistence-failed" && report.turns.some((message) => message.role === "user"))
+            throw new Error("canonical persistence unavailable");
+          for (const message of report.turns) messages.push(await withSourceResults(message, receipts));
+        },
+      });
+      const args = { repo: "acme/api", path: "README.md" };
+      await mirror.onMessage(
+        { role: "assistant", content: [{ type: "toolCall", id: "read-source", name: "github_file", arguments: args }] },
+        1,
+      );
+      const tool = githubReadWithContext(githubFileTool, {
+        runId,
+        execution: { gen, owner: async () => row },
+        commit: async (receipt, dependencies) => {
+          receipts.push(receipt);
+          context = dependencies;
+          return true;
+        },
+      });
+      const result = await tool.run(args, {
+        executor: {} as ToolContext["executor"],
+        callId: "read-source",
+        agentName: "review",
+        repo: "acme/api",
+        github: { api: github, canWrite: () => false, readableRepos: async () => [] },
+      });
+      expect(result).toContain("review source");
+      expect(context).toMatchObject({
+        version: 2,
+        status: "known",
+        executionGithub: [{ runId, callId: "read-source" }],
+      });
+      await mirror.onMessage(
+        {
+          role: "toolResult",
+          toolCallId: "read-source",
+          toolName: "github_file",
+          content: [{ type: "text", text: result }],
+        },
+        1,
+      );
+      if (failure === "foreign-owner") row.ownerGen = "different-generation";
+      if (failure === "github-revoked")
+        github.readFile = async () => {
+          throw new Error("read access revoked");
+        };
+      const access = contextAccessForExecution(f.deps, {
+        msg: request,
+        io: f.io,
+        executionConsumer: { runId, gen, admissionHash },
+      });
+      const bearers = new RunBearerStore({ clock: () => 1 });
+      const token = bearers.mint(
+        {
+          runId,
+          modelRef: "fixture/review-model",
+          providerName: "fixture",
+          providerWire: "anthropic-messages",
+          model: "review-model",
+          maxTokens: 64,
+          maxTurns: 2,
+          expiresAt: 60001,
+          span: createTracer({ clock: () => 1 }).start("request", { sinks: [] }),
+          publish: () => {},
+        },
+        { sourceGuardRequired: true },
+      );
+      let validation: Awaited<ReturnType<typeof access.validateDependencies>> | undefined;
+      bearers.bindSourceGuard(runId, async () => {
+        await mirror.checkpointToolResults(1);
+        return (
+          await revalidateAdmittedContext(
+            () => context,
+            async (snapshot) => {
+              validation = await access.validateDependencies(snapshot);
+              return validation;
+            },
+          )
+        ).ok;
+      });
+      const upstream: unknown[] = [];
+      const response = await handleModelProxyRequest(
+        {
+          method: "POST",
+          path: ANTHROPIC_MESSAGES_PATH,
+          headers: { authorization: `Bearer ${token}` },
+          body: (async function* () {
+            yield Buffer.from(
+              JSON.stringify({
+                model: "review-model",
+                max_tokens: 64,
+                stream: false,
+                messages: [{ role: "user", content: "Continue the review" }],
+              }),
+            );
+          })(),
+        },
+        {
+          bearers,
+          clock: () => 1,
+          providers: () => ({ fixture: { type: "anthropic", apiKeyEnv: "FIXTURE_KEY" } }),
+          secrets: secretsFrom({ FIXTURE_KEY: "local-fixture-only" }),
+          fetch: async (_url, init) => {
+            upstream.push(JSON.parse(String(init?.body)));
+            return Response.json({
+              id: "answer",
+              type: "message",
+              role: "assistant",
+              model: "review-model",
+              content: [{ type: "text", text: "Review continued" }],
+              stop_reason: "end_turn",
+              usage: { input_tokens: 1, output_tokens: 1 },
+            });
+          },
+        },
+      );
+      expect(response.status).toBe(failure === "allowed" ? 200 : 403);
+      if (failure === "allowed") {
+        expect(validation).toEqual({ ok: true });
+        expect(upstream).toEqual([
+          expect.objectContaining({
+            model: "review-model",
+            messages: [{ role: "user", content: "Continue the review" }],
+          }),
+        ]);
+        expect(JSON.parse(String(response.body))).toMatchObject({
+          content: [{ type: "text", text: "Review continued" }],
+        });
+      } else {
+        expect(JSON.parse(String(response.body))).toMatchObject({ error: { type: "source_unavailable" } });
+        expect(upstream).toEqual([]);
+        if (failure === "foreign-owner")
+          expect(validation).toMatchObject({ ok: false, check: "execution_generation_mismatch" });
+        if (failure === "github-revoked")
+          expect(validation).toMatchObject({ ok: false, check: "execution_github_access_unproved" });
+        if (failure === "persistence-failed") {
+          expect(validation).toBeUndefined();
+          expect(messages).toEqual([
+            {
+              role: "assistant",
+              content: [{ type: "tool_use", id: "read-source", name: "github_file", input: args }],
+            },
+          ]);
+        }
+      }
+    },
+  );
   it.each(["private", "public"])("checks source access, receipts, session and bytes (%s)", async (source) => {
     const f = setup();
     const meta: LiveRunRow["meta"] = {
