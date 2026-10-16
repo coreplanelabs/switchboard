@@ -2,12 +2,87 @@ import { describe, expect, it, vi } from "vitest";
 import { stream } from "@earendil-works/pi-ai/api/openai-responses";
 import type { Model } from "@earendil-works/pi-ai";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
+import { isContextOverflow } from "@earendil-works/pi-ai/compat";
 import { PiBridge } from "../core/harness/pi/bridge.js";
 import { ResponsesFailureBoundary } from "./modelProxyResponses.js";
 
 // Feature: docs/reference/specs/harness-pi.md item 6 — the real pi adapter
 // preserves signed structural diagnostics without copying provider payloads.
 describe("Responses unknown terminal diagnostics", () => {
+  it("preserves a verified context overflow for native compaction", async () => {
+    const model: Model<"openai-responses"> = {
+      id: "test",
+      name: "test",
+      api: "openai-responses",
+      provider: "openai",
+      baseUrl: "https://proxy.test/v1",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200000,
+      maxTokens: 1000,
+    };
+    const boundary = new ResponsesFailureBoundary({ model: "test" });
+    const error = {
+      type: "error",
+      error: { type: "invalid_request_error", code: "context_length_exceeded", message: "private provider prose" },
+    };
+    const message = await stream(model, normalizeContext({ messages: [] }), {
+      apiKey: "test",
+      maxRetries: 0,
+      fetch: (async () =>
+        new Response(new Response(`data: ${JSON.stringify(error)}\n\n`).body!.pipeThrough(boundary.transform()), {
+          headers: { "content-type": "text/event-stream" },
+        })) as typeof fetch,
+    }).result();
+    expect(isContextOverflow(message)).toBe(true);
+    expect(message.errorMessage).not.toContain("private provider prose");
+    const result = new PiBridge({ emit: () => {}, clock: () => 0 }).observe({ type: "message_end", message });
+    expect(result.terminalFailure).toMatchObject({ kind: "context_overflow" });
+    expect(boundary.failure?.cause).toBe("request-rejected");
+  });
+
+  it("keeps overflow prose and hosted failures outside compaction authority", async () => {
+    const model: Model<"openai-responses"> = {
+      id: "test",
+      name: "test",
+      api: "openai-responses",
+      provider: "openai",
+      baseUrl: "https://proxy.test/v1",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200000,
+      maxTokens: 1000,
+    };
+    for (const [request, code] of [
+      [{ model: "test" }, "unknown"],
+      [{ model: "test", tools: [{ type: "web_search" }] }, "context_length_exceeded"],
+    ] as const) {
+      const boundary = new ResponsesFailureBoundary(request);
+      const error = {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          code,
+          message: "Your input exceeds the context window. private provider prose",
+        },
+      };
+      const message = await stream(model, normalizeContext({ messages: [] }), {
+        apiKey: "test",
+        maxRetries: 0,
+        fetch: (async () =>
+          new Response(new Response(`data: ${JSON.stringify(error)}\n\n`).body!.pipeThrough(boundary.transform()), {
+            headers: { "content-type": "text/event-stream" },
+          })) as typeof fetch,
+      }).result();
+      expect(isContextOverflow(message)).toBe(false);
+      const result = new PiBridge({ emit: () => {}, clock: () => 0 }).observe({ type: "message_end", message });
+      expect(result.terminalFailure).toMatchObject({ kind: "unknown" });
+      expect(boundary.failure).toBeUndefined();
+    }
+  });
+
   it("carries structural reasons through the real pi adapter without provider prose or replay", async () => {
     const model: Model<"openai-responses"> = {
       id: "test",

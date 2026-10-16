@@ -2183,6 +2183,176 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(String(promptsSent[1]!.id)).toContain(":reissue");
   });
 
+  it("lets native compaction recover a verified overflow without a second harness prompt", async () => {
+    for (const followUp of [false, true]) {
+      const w = world();
+      scriptedPi(w.container, (n, c) => {
+        if (followUp && n === 0) return finalTurn(c, "first answer");
+        c.emit({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: JSON.stringify(
+              authenticateProxyProviderFailure({
+                type: "provider_failure",
+                cause: "request-rejected",
+                message: "The model input exceeds the context window.",
+                details: {
+                  diagnostic: {
+                    code: "context_length_exceeded",
+                    message: "The model input exceeds the context window.",
+                  },
+                },
+              }),
+            ),
+          },
+        });
+        c.emit({ type: "agent_end", messages: [], willRetry: true });
+        c.emit({
+          type: "compaction_end",
+          reason: "overflow",
+          aborted: false,
+          result: {
+            summary: "earlier source remains in recall",
+            firstKeptEntryId: "e9",
+            tokensBefore: 200000,
+            estimatedTokensAfter: 30000,
+          },
+        });
+        finalTurn(c, "review continued after compaction");
+      });
+      if (followUp) {
+        const session = await w.open();
+        try {
+          await expect(
+            session.followUp({ text: "continue", maxTurns: 4, maxMinutes: 5, toolContext: { executor } }),
+          ).resolves.toBe("review continued after compaction");
+        } finally {
+          await session.end();
+        }
+      } else await expect(w.start()).resolves.toBe("review continued after compaction");
+      expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(followUp ? 2 : 1);
+    }
+  });
+
+  it.each(["transient provider error", "local stream EOF"])(
+    "recovers a later %s after native overflow compaction",
+    async (laterFailure) => {
+      for (const followUp of [false, true]) {
+        const w = world();
+        scriptedPi(w.container, (n, c) => {
+          if (followUp && n === 0) return finalTurn(c, "first answer");
+          if (n > (followUp ? 1 : 0)) return finalTurn(c, "recovered after overflow and later failure");
+          c.emit({
+            type: "message_end",
+            message: {
+              role: "assistant",
+              content: [],
+              stopReason: "error",
+              errorMessage: JSON.stringify(
+                authenticateProxyProviderFailure({
+                  type: "provider_failure",
+                  cause: "request-rejected",
+                  message: "The model input exceeds the context window.",
+                  details: {
+                    diagnostic: {
+                      code: "context_length_exceeded",
+                      message: "The model input exceeds the context window.",
+                    },
+                  },
+                }),
+              ),
+            },
+          });
+          c.emit({
+            type: "compaction_end",
+            reason: "overflow",
+            aborted: false,
+            result: {
+              summary: "earlier source remains in recall",
+              firstKeptEntryId: "e9",
+              tokensBefore: 200000,
+              estimatedTokensAfter: 30000,
+            },
+          });
+          c.emit(
+            {
+              type: "message_end",
+              message: {
+                role: "assistant",
+                content: [],
+                stopReason: "error",
+                errorMessage:
+                  laterFailure === "transient provider error"
+                    ? proxyFailure("transient", "origin_bad_gateway", 502)
+                    : "OpenAI stream ended without finish_reason",
+              },
+            },
+            { type: "agent_settled" },
+          );
+        });
+        if (followUp) {
+          const session = await w.open();
+          try {
+            await expect(
+              session.followUp({ text: "continue", maxTurns: 5, maxMinutes: 5, toolContext: { executor } }),
+            ).resolves.toBe("recovered after overflow and later failure");
+          } finally {
+            await session.end();
+          }
+        } else await expect(w.start()).resolves.toBe("recovered after overflow and later failure");
+        expect(w.container.commands().filter((command) => command.type === "prompt")).toHaveLength(followUp ? 3 : 2);
+      }
+    },
+  );
+
+  it("keeps a verified overflow failed when compaction produces no later accepted turn", async () => {
+    const w = world();
+    scriptedPi(w.container, (_n, c) =>
+      c.emit(
+        {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [],
+            stopReason: "error",
+            errorMessage: JSON.stringify(
+              authenticateProxyProviderFailure({
+                type: "provider_failure",
+                cause: "request-rejected",
+                message: "The model input exceeds the context window.",
+                details: {
+                  diagnostic: {
+                    code: "context_length_exceeded",
+                    message: "The model input exceeds the context window.",
+                  },
+                },
+              }),
+            ),
+          },
+        },
+        {
+          type: "compaction_end",
+          reason: "overflow",
+          aborted: false,
+          result: {
+            summary: "earlier source remains in recall",
+            firstKeptEntryId: "e9",
+            tokensBefore: 200000,
+            estimatedTokensAfter: 30000,
+          },
+        },
+        { type: "agent_settled" },
+      ),
+    );
+    await expect(w.start()).rejects.toMatchObject({
+      cause: "request-rejected",
+      diagnostic: { code: "context_length_exceeded" },
+    });
+  });
+
   it("a 5xx then success: the transient failure is retried after the ladder's first backoff — pi is re-prompted and the retry's answer is the run's", async () => {
     const slept: number[] = [];
     const w = world({ sleep: async (ms) => void slept.push(ms) });
