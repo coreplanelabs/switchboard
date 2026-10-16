@@ -769,6 +769,14 @@ workspaceDir: ./workspaces
 #     baseUrl: https://switchboard-memory.example.com
 #     tokenEnv: MEMORY_TOKEN   # default
 
+# Private conversation data has separate content and source-snapshot periods.
+# Source snapshots expire from original admission, even if execution starts later.
+# Receipts retain bodyless replay and attribution facts. Defaults apply per field.
+# conversationRetention:
+#   privateContentDays: 90
+#   sourceSnapshotDays: 30
+#   receiptDays: 365
+
 # Persistent run history (docs/reference/specs/run-history.md). Every finished run's
 # record — identity, timing, terminal status, the redacted event stream, the
 # friction diagnosis — is kept for a retention window instead of evicted 60 s

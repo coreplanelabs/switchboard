@@ -339,6 +339,23 @@ export interface ReviewConfig {
   addressSeverity?: AddressSeverity;
 }
 
+export interface ConversationRetentionConfig {
+  privateContentDays?: number;
+  sourceSnapshotDays?: number;
+  receiptDays?: number;
+}
+/** Source snapshots are shorter-lived than private history. Replay receipts
+ * contain no content and remain independently available. */
+export function conversationRetentionFor(
+  config: Pick<AppConfig, "conversationRetention">,
+): Required<ConversationRetentionConfig> {
+  return {
+    privateContentDays: config.conversationRetention?.privateContentDays ?? 90,
+    sourceSnapshotDays: config.conversationRetention?.sourceSnapshotDays ?? 30,
+    receiptDays: config.conversationRetention?.receiptDays ?? 365,
+  };
+}
+
 export interface AppConfig extends AgentConfiguration {
   /**
    * The GitHub organization (or user) this installation serves — the account
@@ -347,6 +364,7 @@ export interface AppConfig extends AgentConfiguration {
    * model run carries (routing-and-config item 11). The code never assumes one.
    */
   organization: string;
+  conversationRetention?: ConversationRetentionConfig;
   providers: Record<string, ProviderConfig>;
   defaults: {
     agent: string;
