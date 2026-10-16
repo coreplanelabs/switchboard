@@ -2,7 +2,14 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import type { Predicate } from "../authz/types.js";
 import { matchesPredicate } from "../authz/predicate.js";
 import type { CoordinatorInstance, CoordinatorUnit } from "../coordinator/contract.js";
-import { instanceFactsOf, unitFactsOf, type InstanceFacts, type UnitFacts } from "../unitRuns.js";
+import {
+  instanceFactsOf,
+  unitFactsOf,
+  unitFactsForPrivateRecipient,
+  type InstanceFacts,
+  type UnitFacts,
+} from "../unitRuns.js";
+import type { HomeWeek } from "./week.js";
 
 export interface HomeInventory {
   get?(id: string): Promise<CoordinatorInstance | null>;
@@ -96,16 +103,27 @@ export interface HomeHistory {
   status: HomeReadStatus;
   units: HomeUnit[];
   cursor?: string;
+  week?: HomeWeek;
+  now?: number;
 }
 export interface HomeReader {
   actorId: string;
   visibleTo: Predicate;
+  /** Full current row permission, before the global selected-owner filter. */
+  readableTo?: Predicate;
+  attentionRecipients?: readonly string[];
+  /** Trusted global view identity; changing Mine/person/everyone invalidates continuation. */
+  scopeKey?: string;
+  /** The authenticated host rechecks this exact private source and recipient. */
+  readPrivateUnit?(instance: CoordinatorInstance, unit: CoordinatorUnit): Promise<boolean>;
 }
 export interface HomeServiceDeps {
   /** Fixed by the installation wiring; no browser-selected tenant enters here. */
   organizationId: string;
   instances: HomeInventory;
-  conditions?: { list(unitKey: string): Promise<HomeCondition[]> };
+  conditions?: {
+    list(unitKey: string, canonicalUnit?: CoordinatorUnit, privateRead?: boolean): Promise<HomeCondition[]>;
+  };
   liveUnitKeys?: (visibleTo: Predicate) => Promise<ReadonlySet<string>>;
   maxPages?: number;
   maxUnits?: number;
@@ -147,7 +165,7 @@ function visibleInstance(instance: CoordinatorInstance, unit: CoordinatorUnit): 
 export function createHomeService(deps: HomeServiceDeps): {
   snapshot(input: HomeReader): Promise<HomeSnapshot>;
   pipeline(input: HomeReader, id: string): Promise<HomePipelineRead>;
-  history(input: HomeReader, options?: { limit?: number; cursor?: string }): Promise<HomeHistory>;
+  history(input: HomeReader, options?: { limit?: number; cursor?: string; week?: HomeWeek }): Promise<HomeHistory>;
 } {
   if (!deps.organizationId.trim()) throw new Error("Home requires an installation organization");
   const maxPages = deps.maxPages ?? DEFAULT_MAX_PAGES;
@@ -156,7 +174,8 @@ export function createHomeService(deps: HomeServiceDeps): {
     throw new Error("Home read bounds must be positive integers");
   const historyKey = deps.historyCursorKey ? Buffer.from(deps.historyCursorKey) : undefined;
   if (historyKey && historyKey.length !== 32) throw new Error("Home history cursor key must contain 32 bytes");
-  const cursorContext = (input: HomeReader) => Buffer.from(JSON.stringify([deps.organizationId, input.actorId]));
+  const cursorContext = (input: HomeReader) =>
+    Buffer.from(JSON.stringify([deps.organizationId, input.actorId, input.scopeKey ?? null]));
   function encodeCursor(position: HistoryPosition, input: HomeReader): string | undefined {
     if (!historyKey) return undefined;
     const iv = randomBytes(12);
@@ -196,13 +215,23 @@ export function createHomeService(deps: HomeServiceDeps): {
   }
 
   async function project(instance: CoordinatorInstance, unit: CoordinatorUnit, input: HomeReader) {
-    const facts = unitFactsOf(unit);
-    let conditions: HomeCondition[] = [];
-    let conditionsComplete = true;
-    // Private worker text remains in its original thread, never in fleet conditions.
-    if (deps.conditions && unit.workBrief === undefined) {
+    let privateRead = false,
+      privateAvailable = true;
+    if (unit.workBrief && input.readPrivateUnit) {
       try {
-        const readConditions = await deps.conditions.list(facts.unit);
+        privateRead = await input.readPrivateUnit(instance, unit);
+      } catch {
+        privateAvailable = false;
+      }
+    }
+    const facts = privateRead ? unitFactsForPrivateRecipient(unit) : unitFactsOf(unit);
+    let conditions: HomeCondition[] = [];
+    let conditionsComplete = privateAvailable;
+    // The default fleet reader remains redacted. A source-proved recipient can
+    // read the original question without lending its authority to the browser.
+    if (deps.conditions && (unit.workBrief === undefined || privateRead)) {
+      try {
+        const readConditions = await deps.conditions.list(facts.unit, unit, privateRead);
         const counts = new Map<string, number>();
         for (const condition of readConditions) {
           if (!validCondition(condition, facts.unit)) {
@@ -218,8 +247,9 @@ export function createHomeService(deps: HomeServiceDeps): {
       }
     }
     const nextCondition =
-      conditions.find((condition) => condition.owner.kind === "person" && condition.owner.id === input.actorId) ??
-      conditions[0];
+      conditions.find(
+        (condition) => condition.owner.kind === "person" && assignedToReader(input, condition.owner.id),
+      ) ?? conditions[0];
     const row: HomeUnit = {
       unit: facts,
       instance: visibleInstance(instance, unit),
@@ -229,7 +259,24 @@ export function createHomeService(deps: HomeServiceDeps): {
     return { row, conditionsComplete, terminal: conditionsComplete && completed(instance, unit, conditions) };
   }
 
-  async function read(input: HomeReader) {
+  function assignedToReader(input: HomeReader, id: string) {
+    return (input.attentionRecipients ?? [input.actorId]).includes(id);
+  }
+  function readerOwns(input: HomeReader, instance: CoordinatorInstance) {
+    return matchesPredicate(input.visibleTo, {
+      userId: instance.userId,
+      channelId: instance.channelId,
+      repo: instance.repo,
+      channelVisibility: "unknown",
+    });
+  }
+  function inSelectedWork(input: HomeReader, instance: CoordinatorInstance, conditions: HomeCondition[]) {
+    return (
+      readerOwns(input, instance) ||
+      conditions.some((condition) => condition.owner.kind === "person" && assignedToReader(input, condition.owner.id))
+    );
+  }
+  async function read(input: HomeReader, includeLive = true) {
     const unresolved: HomeUnit[] = [];
     const ended: HomeUnit[] = [];
     let status: HomeReadStatus = "complete";
@@ -238,7 +285,7 @@ export function createHomeService(deps: HomeServiceDeps): {
       status = "partial";
     };
     if (input.visibleTo.kind === "none") return { unresolved, ended, live, status };
-    if (deps.liveUnitKeys) {
+    if (includeLive && deps.liveUnitKeys) {
       try {
         live = await deps.liveUnitKeys(input.visibleTo);
       } catch {
@@ -266,7 +313,7 @@ export function createHomeService(deps: HomeServiceDeps): {
         }
         seenInstances.add(instance.id);
         if (
-          !matchesPredicate(input.visibleTo, {
+          !matchesPredicate(input.readableTo ?? input.visibleTo, {
             userId: instance.userId,
             channelId: instance.channelId,
             repo: instance.repo,
@@ -299,6 +346,7 @@ export function createHomeService(deps: HomeServiceDeps): {
           seenUnits.add(facts.unit);
           const projected = await project(instance, unit, input);
           if (!projected.conditionsComplete) fail();
+          if (!inSelectedWork(input, instance, projected.row.conditions)) continue;
           (projected.terminal ? ended : unresolved).push(projected.row);
         }
       }
@@ -353,7 +401,7 @@ export function createHomeService(deps: HomeServiceDeps): {
       }
       if (!instance || instance.id !== id) return { status: "unavailable" };
       if (
-        !matchesPredicate(input.visibleTo, {
+        !matchesPredicate(input.readableTo ?? input.visibleTo, {
           userId: instance.userId,
           channelId: instance.channelId,
           repo: instance.repo,
@@ -411,6 +459,7 @@ export function createHomeService(deps: HomeServiceDeps): {
           continue;
         }
         seenUnits.add(key);
+        if (!inSelectedWork(input, instance, projected.row.conditions)) continue;
         // A private worker's provenance stays redacted throughout this entity projection.
         projected.row.instance = shownInstance;
         pipeline.units.push(projected.row);
@@ -419,7 +468,7 @@ export function createHomeService(deps: HomeServiceDeps): {
         pipeline.unresolved++;
         if (live.has(key)) movingUnitKeys.push(key);
         const group = projected.row.conditions.some(
-          (condition) => condition.owner.kind === "person" && condition.owner.id === input.actorId,
+          (condition) => condition.owner.kind === "person" && assignedToReader(input, condition.owner.id),
         )
           ? "needsYou"
           : live.has(key)
@@ -427,6 +476,7 @@ export function createHomeService(deps: HomeServiceDeps): {
             : "waiting";
         pipeline[group]++;
       }
+      if (!pipeline.units.length && !readerOwns(input, instance)) return { status: "not_found" };
       return { status, organizationId: deps.organizationId, pipeline, movingUnitKeys };
     },
     async snapshot(input) {
@@ -443,7 +493,7 @@ export function createHomeService(deps: HomeServiceDeps): {
       const pipelines = new Map<string, HomePipeline>();
       for (const row of rows.unresolved) {
         const group = row.conditions.some(
-          (condition) => condition.owner.kind === "person" && condition.owner.id === input.actorId,
+          (condition) => condition.owner.kind === "person" && assignedToReader(input, condition.owner.id),
         )
           ? "needsYou"
           : rows.live.has(row.unit.unit)
@@ -468,6 +518,80 @@ export function createHomeService(deps: HomeServiceDeps): {
       const limit = options.limit ?? PAGE_SIZE;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > PAGE_SIZE)
         throw new Error("Home history limit must be 1–100");
+      if (options.week) {
+        const week = options.week;
+        const aad = Buffer.concat([
+          cursorContext(input),
+          Buffer.from(JSON.stringify([week.startDate, week.timeZone, week.start, week.end])),
+        ]);
+        let after: { at: number; key: string } | undefined;
+        if (options.cursor !== undefined) {
+          try {
+            if (!historyKey || !/^homew1\.[A-Za-z0-9_-]{40,2048}$/.test(options.cursor)) throw new Error();
+            const bytes = Buffer.from(options.cursor.slice(7), "base64url");
+            const decipher = createDecipheriv("aes-256-gcm", historyKey, bytes.subarray(0, 12));
+            decipher.setAAD(aad);
+            decipher.setAuthTag(bytes.subarray(-16));
+            const position: unknown = JSON.parse(
+              Buffer.concat([decipher.update(bytes.subarray(12, -16)), decipher.final()]).toString("utf8"),
+            );
+            if (!position || typeof position !== "object" || Object.keys(position).sort().join(",") !== "at,key")
+              throw new Error();
+            const value = position as { at: unknown; key: unknown };
+            if (
+              !Number.isSafeInteger(value.at) ||
+              Number(value.at) < week.start ||
+              Number(value.at) >= week.end ||
+              typeof value.key !== "string" ||
+              value.key.length > 256
+            )
+              throw new Error();
+            after = value as { at: number; key: string };
+          } catch {
+            throw new Error("Home history cursor is invalid for this reader and week");
+          }
+        }
+        // Sort the full bounded census before paging. Inventory-key order says
+        // nothing about completion time; incomplete reads remain explicit.
+        const census = await read(input, false);
+        const rows = census.ended
+          .filter((row) => {
+            const at = row.unit.ending?.at;
+            return (
+              at !== undefined &&
+              Number.isSafeInteger(at) &&
+              at >= week.start &&
+              at < week.end &&
+              (!after || at < after.at || (at === after.at && row.unit.unit < after.key))
+            );
+          })
+          .sort(
+            (a, b) =>
+              b.unit.ending!.at - a.unit.ending!.at ||
+              (a.unit.unit < b.unit.unit ? 1 : a.unit.unit > b.unit.unit ? -1 : 0),
+          );
+        const result: HomeHistory = {
+          organizationId: deps.organizationId,
+          status: census.status,
+          units: rows.slice(0, limit),
+          week,
+        };
+        if (rows.length > limit) {
+          if (!historyKey) result.status = "partial";
+          else {
+            const last = result.units.at(-1)!;
+            const iv = randomBytes(12);
+            const cipher = createCipheriv("aes-256-gcm", historyKey, iv);
+            cipher.setAAD(aad);
+            const encoded = Buffer.concat([
+              cipher.update(JSON.stringify({ at: last.unit.ending!.at, key: last.unit.unit }), "utf8"),
+              cipher.final(),
+            ]);
+            result.cursor = `homew1.${Buffer.concat([iv, encoded, cipher.getAuthTag()]).toString("base64url")}`;
+          }
+        }
+        return result;
+      }
       const result: HomeHistory = { organizationId: deps.organizationId, status: "complete", units: [] };
       if (input.visibleTo.kind === "none") return result;
       const start = options.cursor === undefined ? undefined : decodeCursor(options.cursor, input);

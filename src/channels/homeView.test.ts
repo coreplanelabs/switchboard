@@ -5,6 +5,7 @@ import { createHomeService } from "../core/home/service.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import { makePageSender } from "./webShell.js";
 import { createHomeViewHandler } from "./homeView.js";
+import { resolveWorkViewScope, withWorkViewScope } from "./workViewScope.js";
 
 const viewer = actor("user", "access:alice", { actions: "all", channels: "all", repos: "all" });
 function response() {
@@ -44,6 +45,161 @@ const request = (url: string, method = "GET") =>
   ({ url, method, headers: { accept: "application/json" } }) as IncomingMessage;
 
 describe("authorized Home pages", () => {
+  it("includes server-proved own answers in All people while Person cannot acquire an answer", async () => {
+    const service = createHomeService({
+      organizationId: "installation-a",
+      instances: { listInstances: async () => ({ items: [] }), listUnits: async () => [] },
+    });
+    const read = createHomeViewHandler(
+      service,
+      makePageSender({ js: "/assets/green.js", css: [] }, ALL_CAPABILITIES),
+      "installation-a",
+      {
+        answers: async () => ({
+          "own:answer": { thread: "worker:own:answer", revision: 1, question: "Own recorded question" },
+        }),
+      },
+    );
+    const actual = actor(
+      "user",
+      "access:alice",
+      {},
+      { grants: { actions: "all", channels: "all", repos: "all", organizations: "all" } },
+    );
+    withWorkViewScope(actual, resolveWorkViewScope(actual, { organization: "installation-a", mode: "everyone" }));
+    expect(resolveWorkViewScope(actual, { organization: "installation-a", mode: "everyone" }).mode).toBe("everyone");
+    const all = response();
+    read(request("/home"), all.res, { actor: actual, organization: "installation-a" });
+    await all.ended;
+    expect(JSON.parse(all.value().body)).toMatchObject({
+      page: "fleetHome",
+      answers: { "own:answer": { thread: "worker:own:answer", revision: 1, question: "Own recorded question" } },
+    });
+    const person = { ...actual, viewingAs: { id: "access:bob" } };
+    withWorkViewScope(person, resolveWorkViewScope(person, { organization: "installation-a" }));
+    const viewed = response();
+    read(request("/home"), viewed.res, { actor: person, organization: "installation-a" });
+    await viewed.ended;
+    expect(JSON.parse(viewed.value().body).answers).toBeUndefined();
+  });
+  it("opens an authorized private unit thread without seeding private input and fences permission loss before emission", async () => {
+    const service = createHomeService({
+      organizationId: "installation-a",
+      instances: { listInstances: async () => ({ items: [] }), listUnits: async () => [] },
+    });
+    let readable = true,
+      revoke = false;
+    const read = createHomeViewHandler(
+      service,
+      makePageSender({ js: "/assets/green.js", css: [] }, ALL_CAPABILITIES),
+      "installation-a",
+      {
+        privateEpoch: async () => (readable ? "current-source" : undefined),
+        thread: async (_context, key) => {
+          if (!readable || key !== "worker:private-work:question") return;
+          if (revoke) readable = false;
+          return {
+            label: "Owned unit",
+            revision: 1,
+            canWrite: true,
+            entries: [{ id: "worker:1", role: "assistant", content: "Private recorded reply", isViewer: false }],
+            history: { cursor: 1, hasMore: false, status: "partial" },
+          };
+        },
+      },
+    );
+    const allowed = response();
+    expect(
+      read(request("/threads/worker%3Aprivate-work%3Aquestion"), allowed.res, {
+        actor: viewer,
+        organization: "installation-a",
+      }),
+    ).toBe(true);
+    await allowed.ended;
+    expect(allowed.value().status).toBe(200);
+    expect(JSON.parse(allowed.value().body)).toMatchObject({
+      page: "home",
+      conversation: "worker:private-work:question",
+      turns: [],
+      conversations: [],
+      suggestions: [],
+      sendUrl: "",
+    });
+    expect(allowed.value().body).not.toContain("Private recorded reply");
+    const unknown = response();
+    read(request("/threads/worker%3Aforeign%3Aquestion"), unknown.res, {
+      actor: viewer,
+      organization: "installation-a",
+    });
+    await unknown.ended;
+    expect(unknown.value()).toEqual({ status: 404, body: "not found" });
+    revoke = true;
+    const denied = response();
+    read(request("/threads/worker%3Aprivate-work%3Aquestion"), denied.res, {
+      actor: viewer,
+      organization: "installation-a",
+    });
+    await denied.ended;
+    expect(denied.value()).toEqual({ status: 404, body: "not found" });
+  });
+  it("fences private Home text when source permission changes during answer enrichment", async () => {
+    const service = createHomeService({
+      organizationId: "installation-a",
+      instances: {
+        listInstances: async () => ({
+          items: [
+            {
+              id: "private-work",
+              kind: "ship",
+              userId: "access:alice",
+              channelId: "web:alice",
+              threadKey: "web:alice:organization",
+              repo: "example/app",
+              branch: "work",
+              createdAt: 1,
+            },
+          ],
+        }),
+        listUnits: async () => [
+          {
+            instanceId: "private-work",
+            unit: "question",
+            slug: "question",
+            title: "Private source question",
+            branch: "work/question",
+            dependsOn: [],
+            rounds: [],
+            workBrief: {} as import("../core/coordinator/contract.js").CoordinatorUnit["workBrief"],
+          },
+        ],
+      },
+    });
+    let readable = true,
+      revoke = false;
+    const read = createHomeViewHandler(
+      service,
+      makePageSender({ js: "/assets/green.js", css: [] }, ALL_CAPABILITIES),
+      "installation-a",
+      {
+        privateUnit: async () => readable,
+        privateEpoch: async () => "unchanged-host-epoch",
+        answers: async () => {
+          if (revoke) readable = false;
+          return {};
+        },
+      },
+    );
+    const allowed = response();
+    read(request("/home"), allowed.res, { actor: viewer, organization: "installation-a" });
+    await allowed.ended;
+    expect(allowed.value().status).toBe(200);
+    expect(allowed.value().body).toContain("Private source question");
+    revoke = true;
+    const denied = response();
+    read(request("/home"), denied.res, { actor: viewer, organization: "installation-a" });
+    await denied.ended;
+    expect(denied.value()).toEqual({ status: 404, body: "not found" });
+  });
   it("uses the proved person for attention while retaining the credential's read authority", async () => {
     const service = createHomeService({
       organizationId: "installation-a",

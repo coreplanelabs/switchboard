@@ -1,15 +1,39 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Actor } from "../core/authz/types.js";
 import { predicateFor } from "../core/authz/predicate.js";
-import type { createHomeService } from "../core/home/service.js";
+import type { createHomeService, HomeReader } from "../core/home/service.js";
 import type { PageSender } from "./webShell.js";
+import { homeWeek } from "../core/home/week.js";
+import { systemClock } from "../core/trace/clock.js";
+import { workReadPredicate, workViewScopeOf } from "./workViewScope.js";
+import type { HomeFleetSeed, HomeAnswerTarget } from "./homeSeed.js";
+import type { HomeRuntimeContext, HomeThreadProjection } from "./homeRuntime.js";
+import { parsePrivateWorkerThreadKey } from "../core/privateWorkerLog.js";
 
 type HomeService = ReturnType<typeof createHomeService>;
-type Route = { kind: "home" | "snapshot" | "history" } | { kind: "pipeline"; id: string };
+type PrivateUnitReader = NonNullable<HomeReader["readPrivateUnit"]>;
+export interface HomeViewContext {
+  actor?: Actor;
+  organization?: string;
+  attentionRecipient?: string;
+  attentionRecipients?: readonly string[];
+  home?: HomeRuntimeContext;
+}
+type Route =
+  { kind: "home" | "snapshot" | "history" } | { kind: "pipeline"; id: string } | { kind: "thread"; key: string };
 function route(path: string): Route | undefined {
   if (path === "/home") return { kind: "home" };
   if (path === "/home/snapshot") return { kind: "snapshot" };
   if (path === "/home/history") return { kind: "history" };
+  const thread = /^\/threads\/([^/]+)$/.exec(path);
+  if (thread) {
+    try {
+      const key = decodeURIComponent(thread[1]);
+      if (parsePrivateWorkerThreadKey(key)) return { kind: "thread", key };
+    } catch {
+      /* A malformed key cannot name a private unit. */
+    }
+  }
   const match = /^\/pipelines\/([^/]+)$/.exec(path);
   if (!match) return;
   try {
@@ -26,12 +50,22 @@ const plain = (res: ServerResponse, status: number, value: string) => {
 
 /** The host supplies tenant and attention recipient after authenticated admission.
  * A proved person can receive attention without replacing the credential's authority. */
-export function createHomeViewHandler(service: HomeService, page: PageSender, organizationId: string) {
-  return (
-    req: IncomingMessage,
-    res: ServerResponse,
-    context: { actor?: Actor; organization?: string; attentionRecipient?: string } = {},
-  ): boolean => {
+export function createHomeViewHandler(
+  service: HomeService,
+  page: PageSender,
+  organizationId: string,
+  options: {
+    now?: () => number;
+    privateUnit?: (context: HomeViewContext, ...unit: Parameters<PrivateUnitReader>) => Promise<boolean>;
+    privateEpoch?: (context: HomeViewContext) => Promise<string | undefined>;
+    thread?: (context: HomeViewContext, key: string) => Promise<HomeThreadProjection | undefined>;
+    answers?: (
+      context: HomeViewContext,
+      snapshot: HomeFleetSeed["snapshot"],
+    ) => Promise<Record<string, HomeAnswerTarget>>;
+  } = {},
+) {
+  return (req: IncomingMessage, res: ServerResponse, context: HomeViewContext = {}): boolean => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const selected = route(url.pathname);
     if (!selected) return false;
@@ -45,20 +79,96 @@ export function createHomeViewHandler(service: HomeService, page: PageSender, or
       return true;
     }
     const actor = context.actor;
+    const scope = workViewScopeOf(actor);
+    const privateReads: Parameters<PrivateUnitReader>[] = [];
     const reader = {
-      actorId: context.attentionRecipient ?? actor.id,
-      visibleTo: predicateFor(actor, "runs:read", "run"),
+      actorId: context.attentionRecipient ?? actor.viewingAs?.id ?? actor.id,
+      scopeKey: JSON.stringify([scope.mode, scope.person?.id ?? null, [...scope.ownerIds].sort()]),
+      attentionRecipients: context.attentionRecipients ?? [
+        ...new Set([context.attentionRecipient ?? actor.viewingAs?.id ?? actor.id, ...scope.ownerIds]),
+      ],
+      readableTo: predicateFor(actor, "runs:read", "run"),
+      visibleTo: workReadPredicate(actor, predicateFor(actor, "runs:read", "run")),
+      ...(options.privateUnit
+        ? {
+            readPrivateUnit: async (...unit: Parameters<PrivateUnitReader>) => {
+              const readable = await options.privateUnit!(context, ...unit);
+              if (readable) privateReads.push(unit);
+              return readable;
+            },
+          }
+        : {}),
     };
     void (async () => {
+      const initialEpoch = await options.privateEpoch?.(context);
+      const canEmit = async () => {
+        // Legacy private sources need an exact current recipient proof even
+        // when they do not participate in the organization's access epoch.
+        for (const unit of privateReads) {
+          let readable = false;
+          try {
+            readable = await options.privateUnit!(context, ...unit);
+          } catch {
+            /* Unavailable proof cannot certify private output. */
+          }
+          if (!readable) {
+            plain(res, 404, "not found");
+            return false;
+          }
+        }
+        if (options.privateEpoch && (!initialEpoch || initialEpoch !== (await options.privateEpoch(context)))) {
+          plain(res, 404, "not found");
+          return false;
+        }
+        return true;
+      };
+      if (options.privateEpoch && !initialEpoch) {
+        plain(res, 404, "not found");
+        return;
+      }
+      if (selected.kind === "thread") {
+        const projection = await options.thread?.(context, selected.key);
+        if (!projection) {
+          plain(res, 404, "not found");
+          return;
+        }
+        if (!(await canEmit())) return;
+        // The page is only the route shell. Its observer reads current recorded
+        // messages; no private input or fabricated run is placed in the seed.
+        page(req, res, 200, actor, "Thread", {
+          page: "home",
+          conversation: selected.key,
+          turns: [],
+          conversations: [],
+          viewer: { name: actor.id },
+          lane: selected.key,
+          sendUrl: "",
+          now: (options.now ?? systemClock)(),
+          retentionDays: null,
+          suggestions: [],
+          commands: [],
+        });
+        return;
+      }
       if (selected.kind === "history") {
+        const now = (options.now ?? systemClock)();
+        let week;
+        try {
+          week = homeWeek(now, url.searchParams.get("week") ?? undefined, url.searchParams.get("tz") ?? "UTC");
+        } catch {
+          plain(res, 400, "Choose a current or past Sunday and a valid time zone.");
+          return;
+        }
         const history = await service.history(reader, {
+          week,
           ...(url.searchParams.has("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
         });
         if (history.organizationId !== organizationId) {
           plain(res, 404, "not found");
           return;
         }
-        page(req, res, 200, actor, "Completed work", { page: "fleetHistory", history });
+        if (await canEmit())
+          page(req, res, 200, actor, "Completed work", { page: "fleetHistory", history: { ...history, now } });
         return;
       }
       if (selected.kind === "pipeline") {
@@ -79,10 +189,12 @@ export function createHomeViewHandler(service: HomeService, page: PageSender, or
         const units = found.pipeline.units.map((row) =>
           moving.has(row.unit.unit) ? { ...row, activity: "moving" as const } : row,
         );
+        if (!(await canEmit())) return;
         page(req, res, 200, actor, "Pipeline", {
           page: "fleetPipeline",
           status: found.status,
           attentionRecipient: reader.actorId,
+          attentionRecipients: [...reader.attentionRecipients],
           pipeline: { ...found.pipeline, units },
         });
         return;
@@ -93,9 +205,29 @@ export function createHomeViewHandler(service: HomeService, page: PageSender, or
         return;
       }
       if (selected.kind === "snapshot") {
+        if (!(await canEmit())) return;
         res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
-        res.end(JSON.stringify({ ...snapshot, attentionRecipient: reader.actorId }));
-      } else page(req, res, 200, actor, "Home", { page: "fleetHome", snapshot, attentionRecipient: reader.actorId });
+        res.end(
+          JSON.stringify({
+            ...snapshot,
+            attentionRecipient: reader.actorId,
+            attentionRecipients: reader.attentionRecipients,
+          }),
+        );
+      } else {
+        const answers =
+          options.answers && !actor.viewingAs && scope.mode !== "person"
+            ? await options.answers(context, snapshot)
+            : undefined;
+        if (!(await canEmit())) return;
+        page(req, res, 200, actor, "Home", {
+          page: "fleetHome",
+          snapshot,
+          attentionRecipient: reader.actorId,
+          attentionRecipients: [...reader.attentionRecipients],
+          ...(answers ? { answers } : {}),
+        });
+      }
     })().catch(() => plain(res, 503, "Work is unavailable."));
     return true;
   };
