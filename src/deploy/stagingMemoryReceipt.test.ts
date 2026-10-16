@@ -88,7 +88,9 @@ describe("provisional Memory receipt", () => {
       },
       { ...active, resources: { ...resources, bindings: [...resources.bindings, { name: "BOT", type: "service" }] } },
     ])
-      expect(() => validateMemoryReceipt(receipt, selected, deployment, uploaded, changed, [domain])).toThrow(/Memory/);
+      expect(() => validateMemoryReceipt(receipt, selected, deployment, uploaded, changed, [domain])).toThrow(
+        /changed|provisioning scope|incomplete/,
+      );
     expect(() =>
       validateMemoryReceipt(
         receipt,
@@ -119,7 +121,9 @@ describe("provisional Memory receipt", () => {
       [{ ...domain, zone_name: "other.test" }],
       [{ ...domain, enabled: false }],
     ])
-      expect(() => validateMemoryReceipt(receipt, selected, deployment, uploaded, active, domains)).toThrow(/Memory/);
+      expect(() => validateMemoryReceipt(receipt, selected, deployment, uploaded, active, domains)).toThrow(
+        /changed|provisioning scope|incomplete/,
+      );
     expect(memoryResourcesHash(active.resources)).toBe(receipt.resourcesHash);
   });
 });

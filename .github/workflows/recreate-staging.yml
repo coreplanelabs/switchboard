@@ -4,19 +4,25 @@ on:
   workflow_dispatch:
     inputs:
       commit:
-        description: Exact current same-repository PR head
+        description: Exact installation source; current PR head for recreation
         required: true
         type: string
       pr:
         description: Pull request whose source checks must pass
         required: true
         type: string
+      candidate:
+        description: Exact current PR head to qualify for a continuation
+        type: string
+      continuation:
+        description: Explicit original initialization checkpoint JSON; empty selects recreation
+        type: string
       profile_ref:
         description: Exact selected immutable ordinary staging profile
         required: true
         type: string
       approved_plan:
-        description: Empty plans only; exact reviewed SHA256 deletes and recreates
+        description: Exact reviewed action SHA256; empty is recreation plan only
         type: string
         default: ""
 
@@ -43,12 +49,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           COMMIT: ${{ inputs.commit }}
           PR: ${{ inputs.pr }}
+          CANDIDATE: ${{ inputs.candidate }}
+          CONTINUATION: ${{ inputs.continuation }}
         run: |
           [ "$GITHUB_REF" = refs/heads/main ] || { echo '::error::Recreation requires the main controller'; exit 1; }
           [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] && [[ "$PR" =~ ^[1-9][0-9]*$ ]] || exit 1
           permission=$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$GITHUB_ACTOR/permission" --jq .permission)
           case "$permission" in admin|maintain|write) ;; *) exit 1 ;; esac
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" | jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$COMMIT" '.state == "open" and .head.repo.full_name == $repo and .head.sha == $sha' > /dev/null
+          qualified_candidate="$COMMIT"
+          if [ -n "$CONTINUATION" ]; then
+            [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]] || exit 1
+            qualified_candidate="$CANDIDATE"
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" | jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$qualified_candidate" '.state == "open" and .head.repo.full_name == $repo and .head.sha == $sha' > /dev/null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.workflow_sha }}
@@ -65,7 +78,7 @@ jobs:
         run: npm run staging:validate
         env:
           GH_TOKEN: ${{ github.token }}
-          STAGING_COMMIT: ${{ inputs.commit }}
+          STAGING_COMMIT: ${{ inputs.continuation != '' && inputs.candidate || inputs.commit }}
           STAGING_PR_NUMBER: ${{ inputs.pr }}
           STAGING_AUTOMATIC: "false"
           STAGING_ACTOR: ${{ github.actor }}
@@ -78,6 +91,17 @@ jobs:
         run: |
           [ "$ELIGIBLE" = true ] && [ -n "$PROFILE" ] && [ "$PROFILE" = "$EXPECTED_PROFILE" ] || exit 1
           [[ "$PROFILE" =~ ^github://[^@]+@[0-9a-f]{40}$ ]] || exit 1
+      - name: verify original continuation source before installation code
+        if: inputs.continuation != ''
+        working-directory: controller
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAGING_CONTINUATION: ${{ inputs.continuation }}
+          STAGING_INSTALLATION_COMMIT: ${{ inputs.commit }}
+          STAGING_CONTINUATION_CANDIDATE: ${{ inputs.candidate }}
+          STAGING_PR_NUMBER: ${{ inputs.pr }}
+          APPROVED_PLAN: ${{ inputs.approved_plan }}
+        run: npm run --silent staging:deploy -- --continue-initialize --check --receipt "$RUNNER_TEMP/staging-recreation.json.provenance.json"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.commit }}
@@ -109,12 +133,23 @@ jobs:
           STAGING_RUNTIME_SECRETS_JSON: ${{ secrets.STAGING_RUNTIME_SECRETS_JSON }}
           CONFIG_REPO_TOKEN: ${{ steps.config-token.outputs.token }}
           APPROVED_PLAN: ${{ inputs.approved_plan }}
+          STAGING_CONTINUATION: ${{ inputs.continuation }}
+          STAGING_INSTALLATION_COMMIT: ${{ inputs.commit }}
+          STAGING_CONTINUATION_CANDIDATE: ${{ inputs.candidate }}
+          STAGING_PR_NUMBER: ${{ inputs.pr }}
+          GH_TOKEN: ${{ github.token }}
           WRANGLER_SEND_METRICS: "false"
           CI: "1"
         run: |
-          args=(--receipt "$RUNNER_TEMP/staging-recreation.json")
-          if [ -n "$APPROVED_PLAN" ]; then args+=(--apply "$APPROVED_PLAN"); fi
-          npm run --silent staging:deploy -- --recreate "${args[@]}"
+          if [ -n "$STAGING_CONTINUATION" ]; then
+            installation_source="$PWD"
+            cd ../controller
+            npm run --silent staging:deploy -- --continue-initialize --source "$installation_source" --receipt "$RUNNER_TEMP/staging-recreation.json"
+          else
+            args=(--receipt "$RUNNER_TEMP/staging-recreation.json")
+            if [ -n "$APPROVED_PLAN" ]; then args+=(--apply "$APPROVED_PLAN"); fi
+            npm run --silent staging:deploy -- --recreate "${args[@]}"
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

@@ -50,7 +50,7 @@ export function parseMemoryCreationReceipt(value: unknown): MemoryCreationReceip
 }
 
 /** Health alone cannot prove which Worker owns a custom domain. */
-export function memoryDomainId(selected: { script: string; hostname: string; zone: string }, domains: unknown): string {
+export function workerDomainId(selected: { script: string; hostname: string; zone: string }, domains: unknown): string {
   if (!Array.isArray(domains)) throw new Error("Memory domain inventory unreadable");
   const matches = domains.filter((d) => d?.hostname === selected.hostname);
   const domain = matches[0];
@@ -63,36 +63,39 @@ export function memoryDomainId(selected: { script: string; hostname: string; zon
     domain.environment !== "production" ||
     domain.enabled !== true
   )
-    throw new Error("Memory hostname ownership changed or is incomplete");
+    throw new Error("Worker hostname ownership changed or is incomplete");
   return domain.id;
 }
 
-/** Native version resources, excluding only the one secret added by provisioning. */
-export function memoryResourcesHash(resources: unknown): string {
+/** Native version resources after known provisioning. Secret values never enter the hash. */
+export function provisionedResourcesHash(
+  resources: unknown,
+  secrets: readonly string[],
+  provisionalMemory = false,
+): string {
   if (!resources || typeof resources !== "object" || Array.isArray(resources))
-    throw new Error("Memory resources unreadable");
+    throw new Error("Worker resources unreadable");
   const value = structuredClone(resources) as Record<string, unknown>;
   const script = value.script as { etag?: unknown } | undefined;
-  if (!script || typeof script.etag !== "string" || !script.etag) throw new Error("Memory script identity unreadable");
-  if (!Array.isArray(value.bindings)) throw new Error("Memory bindings unreadable");
+  if (!script || typeof script.etag !== "string" || !script.etag) throw new Error("Worker script identity unreadable");
+  if (!Array.isArray(value.bindings)) throw new Error("Worker bindings unreadable");
   if (
     value.bindings.some((b) => typeof b?.name !== "string" || typeof b?.type !== "string") ||
     new Set(value.bindings.map((b) => b.name)).size !== value.bindings.length
   )
-    throw new Error("Memory binding identity is incomplete");
+    throw new Error("Worker binding identity is incomplete");
   if (
     value.bindings.some(
       (b) =>
         !b ||
         typeof b !== "object" ||
-        b.type === "service" ||
-        b.type === "workflow" ||
-        (b.type === "secret_text" && b.name !== "MEMORY_TOKEN") ||
-        (b.name === "MEMORY_TOKEN" && b.type !== "secret_text"),
+        (provisionalMemory && (b.type === "service" || b.type === "workflow")) ||
+        (b.type === "secret_text" && !secrets.includes(b.name)) ||
+        (secrets.includes(b.name) && b.type !== "secret_text"),
     )
   )
-    throw new Error("Memory is not the provisional installation");
-  value.bindings = value.bindings.filter((b) => b.name !== "MEMORY_TOKEN");
+    throw new Error("Worker bindings do not match the provisioning scope");
+  value.bindings = value.bindings.filter((b) => !secrets.includes(b.name));
   function canonical(v: unknown): unknown {
     if (Array.isArray(v)) return v.map(canonical);
     if (v && typeof v === "object")
@@ -106,6 +109,11 @@ export function memoryResourcesHash(resources: unknown): string {
   return createHash("sha256")
     .update(JSON.stringify(canonical(value)))
     .digest("hex");
+}
+
+/** Provisional Memory permits only its own bearer and no unavailable Bot bindings. */
+export function memoryResourcesHash(resources: unknown): string {
+  return provisionedResourcesHash(resources, ["MEMORY_TOKEN"], true);
 }
 
 export function validateMemoryReceipt(
@@ -132,7 +140,7 @@ export function validateMemoryReceipt(
   if (
     !d?.versions ||
     d.id !== receipt.deploymentId ||
-    memoryDomainId(selected, domains) !== receipt.domainId ||
+    workerDomainId(selected, domains) !== receipt.domainId ||
     d.versions.length !== 1 ||
     d.versions[0].percentage !== 100 ||
     d.versions[0].version_id !== receipt.activeVersion ||

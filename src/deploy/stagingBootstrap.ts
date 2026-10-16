@@ -3,7 +3,10 @@ import type { WorkerKind } from "./profile.js";
 
 /** Only the first installation uses this protocol. Updates keep the regular deploy runner. */
 export interface BootstrapIO {
-  resumeMemory?(): Promise<void>;
+  resume?: {
+    workers: readonly WorkerKind[];
+    verify(): Promise<void>;
+  };
   absent(workers: readonly WorkerKind[]): Promise<void>;
   upload(worker: WorkerKind, provisional?: boolean): Promise<void>;
   provision(worker: WorkerKind): Promise<void>;
@@ -16,9 +19,15 @@ export interface BootstrapIO {
 /** No failed read, old serving process, or partial installation authorizes creation. */
 export async function initializeStaging(commit: string, io: BootstrapIO) {
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("first installation requires a clean source commit");
-  if (io.resumeMemory) {
-    await io.absent(["bot", "resident", "sandbox"]);
-    await io.resumeMemory();
+  const completed = io.resume?.workers ?? [];
+  const prefix = ["memory", "resident", "sandbox"];
+  if (io.resume && (!completed.length || completed.some((worker, index) => worker !== prefix[index])))
+    throw new Error("initialization checkpoint is not a completed creation prefix");
+  if (io.resume) {
+    await io.absent(
+      (["memory", "resident", "sandbox", "bot"] as const).filter((worker) => !completed.includes(worker)),
+    );
+    await io.resume.verify();
   } else {
     await io.absent(["memory", "bot", "resident", "sandbox"]);
     await io.upload("memory", true);
@@ -26,9 +35,11 @@ export async function initializeStaging(commit: string, io: BootstrapIO) {
   }
   await io.verify("memory");
   for (const worker of ["resident", "sandbox"] as const) {
-    await io.absent([worker]);
-    await io.upload(worker);
-    await io.provision(worker);
+    if (!completed.includes(worker)) {
+      await io.absent([worker]);
+      await io.upload(worker);
+      await io.provision(worker);
+    }
     await io.verify(worker);
   }
   await io.admission("pending");
