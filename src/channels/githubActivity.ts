@@ -143,8 +143,9 @@ export async function normalizeGithubActivity(
     pullNumber?: number,
   ): Promise<GithubActivityResult> => {
     try {
+      const { body, state, ...metadata } = activity;
       const prepared = await prepareSourceEvent({
-        version: 1,
+        version: 2,
         sourceId: `github:${host}:app:${appId}:installation:${installationId}`,
         deliveryId: delivery,
         objectId:
@@ -153,12 +154,20 @@ export async function normalizeGithubActivity(
             : `github:${host}:repository:${repositoryId}:${surface}:${objectId}`,
         changeId: await sourceHash(revision),
         kind,
+        content:
+          kind === "source-fact"
+            ? { kind: "facts", facts: activity }
+            : {
+                kind: "text",
+                state: state === "dismissed" ? "withdrawn" : state,
+                text: body,
+                metadata,
+              },
         ...(author ? { authorId: `github:${host}:user:${author.id}` } : {}),
         payload: {
           version: 1,
           repository: { id: repositoryId, fullName },
           ...(pullNumber !== undefined ? { pullNumber } : {}),
-          activity,
           native,
         },
       });
@@ -443,6 +452,26 @@ export async function normalizeGithubActivity(
       reviewId,
       replyToId,
       ...(event === "commit_comment" ? { commitSha: item.commit_id } : {}),
+      ...(event === "pull_request_review"
+        ? { reviewState: item.state ?? null, commitSha: item.commit_id ?? null }
+        : {}),
+      ...(event === "pull_request_review_comment" || event === "commit_comment"
+        ? {
+            location: {
+              path: item.path ?? null,
+              commitSha: item.commit_id ?? null,
+              originalCommitSha: item.original_commit_id ?? null,
+              line: item.line ?? null,
+              originalLine: item.original_line ?? null,
+              startLine: item.start_line ?? null,
+              originalStartLine: item.original_start_line ?? null,
+              side: item.side ?? null,
+              startSide: item.start_side ?? null,
+              position: item.position ?? null,
+              subjectType: item.subject_type ?? null,
+            },
+          }
+        : {}),
     },
     { surface, state, item },
     pullNumber,

@@ -11,8 +11,7 @@ import {
 } from "../budgets.js";
 
 /** Source data has no worker destination or requester authority. */
-export interface SourceEvent {
-  version: 1;
+interface SourceEventFields {
   sourceId: string;
   deliveryId: string;
   objectId: string;
@@ -23,6 +22,16 @@ export interface SourceEvent {
   /** Opaque JSON data, validated and bounded before storage. */
   payload: unknown;
 }
+export type SourceEventContent =
+  | {
+      kind: "text";
+      state: "present" | "deleted" | "withdrawn";
+      text: string | null;
+      metadata?: Record<string, unknown>;
+    }
+  | { kind: "facts"; facts: Record<string, unknown> };
+export type SourceEvent = SourceEventFields &
+  ({ version: 1; content?: never } | { version: 2; content: SourceEventContent });
 export interface SourceEventReceipt {
   version: 1;
   key: string;
@@ -177,6 +186,28 @@ export function sourceSnapshot(value: unknown): unknown {
   return JSON.parse(sourceJson(value));
 }
 
+/** Common content is source data. It cannot carry requester credentials,
+ * destination claims or controls. The provider payload remains opaque. */
+function sourceContentOf(value: unknown, kind: SourceEventFields["kind"]): SourceEventContent | undefined {
+  if (!object(value)) return;
+  if (kind === "source-fact") {
+    if (value.kind === "facts" && closed(value, ["kind", "facts"]) && object(value.facts))
+      return { kind: "facts", facts: value.facts };
+  } else if (
+    value.kind === "text" &&
+    closed(value, ["kind", "state", "text", "metadata"]) &&
+    (value.state === "present" || value.state === "deleted" || value.state === "withdrawn") &&
+    (value.metadata === undefined || object(value.metadata)) &&
+    (typeof value.text === "string" || value.text === null)
+  )
+    return {
+      kind: "text",
+      state: value.state,
+      text: value.text,
+      ...(value.metadata !== undefined ? { metadata: value.metadata } : {}),
+    };
+}
+
 export async function prepareSourceEvent(value: unknown): Promise<
   | {
       event: SourceEvent;
@@ -200,7 +231,7 @@ export async function prepareSourceEvent(value: unknown): Promise<
   if (
     bytes > SOURCE_EVENT_MAX_BYTES ||
     !object(parsed) ||
-    parsed.version !== 1 ||
+    (parsed.version !== 1 && parsed.version !== 2) ||
     !closed(parsed, [
       "version",
       "sourceId",
@@ -211,6 +242,7 @@ export async function prepareSourceEvent(value: unknown): Promise<
       "authorId",
       "occurredAt",
       "payload",
+      "content",
     ])
   )
     return;
@@ -227,8 +259,10 @@ export async function prepareSourceEvent(value: unknown): Promise<
     !Object.hasOwn(parsed, "payload")
   )
     return;
+  const content = parsed.version === 2 ? sourceContentOf(parsed.content, kind) : undefined;
+  if (parsed.version === 1 ? Object.hasOwn(parsed, "content") : content === undefined) return;
   const event: SourceEvent = {
-    version: 1,
+    ...(parsed.version === 2 && content ? { version: 2 as const, content } : { version: 1 as const }),
     sourceId,
     deliveryId,
     objectId,

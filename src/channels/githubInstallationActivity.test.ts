@@ -23,10 +23,9 @@ describe("GitHub installation activity normalization", () => {
           sourceId: "github:github.com:app:1:installation:2",
           objectId: "github:github.com:installation:2",
           authorId: "github:github.com:user:4",
-          payload: {
-            version: 1,
-            installation: { id: 2, appId: 1 },
-            activity: {
+          content: {
+            kind: "facts",
+            facts: {
               surface: "installation-access",
               event: "installation",
               action,
@@ -38,20 +37,21 @@ describe("GitHub installation activity normalization", () => {
               permissions: installation.permissions,
               actorId: 4,
             },
+          },
+          payload: {
+            version: 1,
+            installation: { id: 2, appId: 1 },
+
             native: payload,
           },
         },
       });
       if (result.kind !== "normalized") throw new Error("expected source fact");
-      expect(Object.keys(result.event.payload as object).sort()).toEqual([
-        "activity",
-        "installation",
-        "native",
-        "version",
-      ]);
+      expect(Object.keys(result.event.payload as object).sort()).toEqual(["installation", "native", "version"]);
       expect(Object.keys(result.event).sort()).toEqual([
         "authorId",
         "changeId",
+        "content",
         "deliveryId",
         "kind",
         "objectId",
@@ -71,7 +71,7 @@ describe("GitHub installation activity normalization", () => {
       ),
     ).toMatchObject({
       kind: "normalized",
-      event: { payload: { activity: { repositoryIds: [], repositorySelection: "selected" } } },
+      event: { content: { kind: "facts", facts: { repositoryIds: [], repositorySelection: "selected" } } },
     });
     const payload = {
       ...native,
@@ -81,7 +81,7 @@ describe("GitHub installation activity normalization", () => {
     };
     expect(await normalizeGithubActivity(source, { event: "installation", delivery: "all" }, payload)).toMatchObject({
       kind: "normalized",
-      event: { payload: { activity: { repositoryIds: [3, 9], repositorySelection: "all" } } },
+      event: { content: { kind: "facts", facts: { repositoryIds: [3, 9], repositorySelection: "all" } } },
     });
   });
 
@@ -101,8 +101,9 @@ describe("GitHub installation activity normalization", () => {
         kind: "normalized",
         event: {
           objectId: "github:github.com:installation:2",
-          payload: {
-            activity: {
+          content: {
+            kind: "facts",
+            facts: {
               event: "installation_repositories",
               action,
               repositorySelection: "selected",
@@ -110,6 +111,8 @@ describe("GitHub installation activity normalization", () => {
               addedRepositoryIds: action === "added" ? [3] : [],
               removedRepositoryIds: action === "removed" ? [9] : [],
             },
+          },
+          payload: {
             native: payload,
           },
         },
@@ -122,7 +125,7 @@ describe("GitHub installation activity normalization", () => {
         ),
       ).toMatchObject({
         kind: "normalized",
-        event: { payload: { activity: { addedRepositoryIds: [], removedRepositoryIds: [] } } },
+        event: { content: { kind: "facts", facts: { addedRepositoryIds: [], removedRepositoryIds: [] } } },
       });
     },
   );
@@ -147,7 +150,7 @@ describe("GitHub installation activity normalization", () => {
     expect(first.event).toMatchObject({
       deliveryId: "one",
       sourceId: "github:github.com:app:1:installation:2",
-      payload: { activity: { action: "suspend" } },
+      content: { kind: "facts", facts: { action: "suspend" } },
     });
     expect(first.event.changeId).toMatch(/^[a-f0-9]{64}$/);
     expect(again.event.changeId).toBe(first.event.changeId);
@@ -162,7 +165,7 @@ describe("GitHub installation activity normalization", () => {
         { event: "installation", delivery: "unknown" },
         { ...native, sender: null },
       ),
-    ).toMatchObject({ kind: "normalized", event: { payload: { activity: { actorId: null } } } });
+    ).toMatchObject({ kind: "normalized", event: { content: { kind: "facts", facts: { actorId: null } } } });
     for (const payload of [
       { ...native, installation: { ...installation, id: 99 } },
       { ...native, installation: { ...installation, app_id: 99 } },

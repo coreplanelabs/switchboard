@@ -23,6 +23,30 @@ const payload = (event = "issue_comment", author = user) => ({
 });
 
 describe("GitHub comment normalization", () => {
+  it("supplies common text for human and bot comments across every PR comment surface", async () => {
+    const contents: unknown[] = [];
+    for (const event of ["issue_comment", "pull_request_review_comment", "pull_request_review"]) {
+      for (const type of ["User", "Bot"]) {
+        const normalized = await normalizeGithubActivity(
+          source,
+          { event, delivery: `${event}-${type}` },
+          payload(event, { ...user, type }),
+        );
+        expect(normalized.kind).toBe("normalized");
+        if (normalized.kind !== "normalized") throw new Error("Expected comment normalization");
+        expect(normalized.event.version).toBe(2);
+        const content = normalized.event.content;
+        if (!content || content.kind !== "text") throw new Error("Expected common text");
+        contents.push({ kind: content.kind, state: content.state, text: content.text });
+        expect(normalized.event.payload).not.toHaveProperty("activity");
+        expect(normalized.event.content).not.toHaveProperty("metadata.body");
+      }
+    }
+    expect(contents).toEqual(
+      Array.from({ length: 6 }, () => ({ kind: "text", state: "present", text: "This changes the retry limit." })),
+    );
+  });
+
   it("keeps the verified source and delivery snapshot across asynchronous hashing", async () => {
     const binding = { ...source };
     const headers = { event: "issue_comment", delivery: "original" };
@@ -63,7 +87,7 @@ describe("GitHub comment normalization", () => {
     if (changed.kind !== "normalized") throw new Error("expected changed source input");
     expect(await ledger.receiveSourceEvent(changed.event)).toEqual({ kind: "refused", reason: "delivery-conflict" });
     expect(await ledger.readSourceEvent(first.receipt.key)).toMatchObject({
-      event: { payload: { activity: { body: comment.body } } },
+      event: { content: { kind: "text", state: "present", text: comment.body } },
       job: { stage: "received", attempts: 0 },
     });
   });
@@ -99,16 +123,32 @@ describe("GitHub comment normalization", () => {
           kind: "source-evidence",
           sourceId: "github:github.com:app:1:installation:2",
           authorId: "github:github.com:user:4",
+          content: {
+            kind: "text",
+            state: "present",
+            text: comment.body,
+            metadata: {
+              author: user,
+            },
+          },
           payload: {
             repository: { id: 3, fullName: "acme/api" },
             pullNumber: 7,
-            activity: { body: comment.body, author: user },
           },
         },
       });
       expect(bot).toMatchObject({
         kind: "normalized",
-        event: { kind: "source-evidence", payload: { activity: { author: { ...user, type: "Bot" } } } },
+        event: {
+          kind: "source-evidence",
+          content: {
+            kind: "text",
+            state: "present",
+            metadata: {
+              author: { ...user, type: "Bot" },
+            },
+          },
+        },
       });
     },
   );
@@ -134,7 +174,22 @@ describe("GitHub comment normalization", () => {
       event: {
         objectId: "github:github.com:repository:3:inline:5",
         deliveryId: "one",
-        payload: { activity: { replyToId: 9, reviewId: 10 }, native },
+        content: {
+          kind: "text",
+          state: "present",
+          metadata: {
+            replyToId: 9,
+            reviewId: 10,
+            location: {
+              path: "src/retry.ts",
+              commitSha: "a".repeat(40),
+              originalCommitSha: "b".repeat(40),
+              line: null,
+              originalLine: 20,
+            },
+          },
+        },
+        payload: { native },
       },
     });
     if (a.kind !== "normalized" || b.kind !== "normalized") throw new Error("expected normalized evidence");
@@ -164,7 +219,14 @@ describe("GitHub comment normalization", () => {
     );
     expect(deleted).toMatchObject({
       kind: "normalized",
-      event: { kind: "source-evidence", payload: { activity: { state: "deleted", body: comment.body } } },
+      event: {
+        kind: "source-evidence",
+        content: {
+          kind: "text",
+          state: "deleted",
+          text: comment.body,
+        },
+      },
     });
     const dismissed = await normalizeGithubActivity(
       source,
@@ -173,12 +235,20 @@ describe("GitHub comment normalization", () => {
     );
     expect(dismissed).toMatchObject({
       kind: "normalized",
-      event: { kind: "source-evidence", payload: { activity: { state: "dismissed" } } },
+      event: {
+        kind: "source-evidence",
+        content: {
+          kind: "text",
+          state: "withdrawn",
+          text: comment.body,
+        },
+      },
     });
     if (deleted.kind !== "normalized") throw new Error("expected deleted evidence");
     expect(Object.keys(deleted.event).sort()).toEqual([
       "authorId",
       "changeId",
+      "content",
       "deliveryId",
       "kind",
       "objectId",
@@ -195,7 +265,35 @@ describe("GitHub comment normalization", () => {
     expect(result).toMatchObject({
       kind: "normalized",
       event: {
-        payload: { activity: { body: comment.body, author: null }, native: { comment: { body: comment.body } } },
+        content: {
+          kind: "text",
+          state: "present",
+          text: comment.body,
+          metadata: {
+            author: null,
+          },
+        },
+        payload: { native: { comment: { body: comment.body } } },
+      },
+    });
+  });
+
+  it("retains unavailable source text without inventing a body", async () => {
+    expect(
+      await normalizeGithubActivity(
+        source,
+        { event: "issue_comment", delivery: "unknown-body" },
+        {
+          ...payload(),
+          comment: { ...comment, body: null },
+        },
+      ),
+    ).toMatchObject({
+      kind: "normalized",
+      event: {
+        kind: "source-evidence",
+        content: { kind: "text", state: "present", text: null },
+        payload: { native: { comment: { body: null } } },
       },
     });
   });
@@ -267,8 +365,17 @@ describe("GitHub pull and commit activity normalization", () => {
       event: {
         kind: "source-evidence",
         objectId: "github:github.com:repository:3:commit:5",
+        content: {
+          kind: "text",
+          state: "present",
+          text: comment.body,
+          metadata: {
+            surface: "commit",
+            commitSha: "c".repeat(40),
+            author: user,
+          },
+        },
         payload: {
-          activity: { surface: "commit", commitSha: "c".repeat(40), body: comment.body, author: user },
           native,
         },
       },
@@ -293,9 +400,9 @@ describe("GitHub pull and commit activity normalization", () => {
       event: {
         kind: "source-fact",
         objectId: "github:github.com:repository:3:pull-request:70",
-        payload: {
-          pullNumber: 7,
-          activity: {
+        content: {
+          kind: "facts",
+          facts: {
             surface: "pull-request",
             action: "synchronize",
             state: "open",
@@ -304,6 +411,9 @@ describe("GitHub pull and commit activity normalization", () => {
             before: "d".repeat(40),
             after: pull.head.sha,
           },
+        },
+        payload: {
+          pullNumber: 7,
           native,
         },
       },
@@ -333,14 +443,17 @@ describe("GitHub pull and commit activity normalization", () => {
         kind: "normalized",
         event: {
           kind: "source-fact",
-          payload: {
-            activity: {
+          content: {
+            kind: "facts",
+            facts: {
               action,
               title: "Adjust retries",
               body: "Change the limit.",
               draft: action === "converted_to_draft",
               merged: false,
             },
+          },
+          payload: {
             native,
           },
         },
@@ -386,7 +499,8 @@ describe("GitHub pull and commit activity normalization", () => {
       event: {
         kind: "source-fact",
         objectId: "github:github.com:repository:3:thread:PRRT_example",
-        payload: { pullNumber: 7, activity: { surface: "thread", nodeId: "PRRT_example", state: "resolved" }, native },
+        content: { kind: "facts", facts: { surface: "thread", nodeId: "PRRT_example", state: "resolved" } },
+        payload: { pullNumber: 7, native },
       },
     });
     if (resolved.kind !== "normalized" || reopened.kind !== "normalized") throw new Error("expected thread facts");
@@ -431,8 +545,9 @@ describe("GitHub pull and commit activity normalization", () => {
     expect(result).toMatchObject({
       kind: "normalized",
       event: {
-        payload: {
-          activity: { actor: null, state: "closed", head: { repositoryId: null, ref: "fix", sha: "a".repeat(40) } },
+        content: {
+          kind: "facts",
+          facts: { actor: null, state: "closed", head: { repositoryId: null, ref: "fix", sha: "a".repeat(40) } },
         },
       },
     });
@@ -512,12 +627,13 @@ describe("GitHub repository activity normalization", () => {
     expect(result).toMatchObject({
       kind: "normalized",
       event: {
+        version: 2,
         kind: "source-fact",
         objectId: "github:github.com:repository:3",
         authorId: "github:github.com:user:4",
-        payload: {
-          repository: { id: 3, fullName: "acme/api" },
-          activity: {
+        content: {
+          kind: "facts",
+          facts: {
             surface: "repository",
             id: 3,
             action,
@@ -528,12 +644,15 @@ describe("GitHub repository activity normalization", () => {
             changes: native.changes,
             actor: user,
           },
+        },
+        payload: {
+          repository: { id: 3, fullName: "acme/api" },
           native: payload,
         },
       },
     });
     if (result.kind !== "normalized") throw new Error("expected repository fact");
-    expect(Object.keys(result.event.payload as object).sort()).toEqual(["activity", "native", "repository", "version"]);
+    expect(Object.keys(result.event.payload as object).sort()).toEqual(["native", "repository", "version"]);
   });
 
   it("keeps native identity through rename and transfer and rejects a name reused by another repository", async () => {
@@ -588,7 +707,8 @@ describe("GitHub repository activity normalization", () => {
       throw new Error("expected repository facts");
     expect(first.event).toMatchObject({
       deliveryId: "one",
-      payload: { repository: { fullName: "acme/api" }, activity: { defaultBranch: "main" } },
+      content: { kind: "facts", facts: { defaultBranch: "main" } },
+      payload: { repository: { fullName: "acme/api" } },
     });
     expect(first.event.changeId).toMatch(/^[a-f0-9]{64}$/);
     expect(again.event.changeId).toBe(first.event.changeId);
@@ -603,7 +723,7 @@ describe("GitHub repository activity normalization", () => {
     };
     expect(await normalizeGithubActivity(source, { event: "repository", delivery: "unknown" }, payload)).toMatchObject({
       kind: "normalized",
-      event: { payload: { activity: { defaultBranch: null, visibility: null, actor: null } } },
+      event: { content: { kind: "facts", facts: { defaultBranch: null, visibility: null, actor: null } } },
     });
     expect(
       await normalizeGithubActivity(
@@ -616,7 +736,7 @@ describe("GitHub repository activity normalization", () => {
       event: {
         kind: "source-fact",
         authorId: "github:github.com:user:4",
-        payload: { activity: { actor: { type: "Bot" } } },
+        content: { kind: "facts", facts: { actor: { type: "Bot" } } },
       },
     });
   });
@@ -659,8 +779,9 @@ describe("GitHub check and status normalization", () => {
         event: {
           kind: "source-fact",
           objectId: `github:github.com:repository:3:${surface}:90`,
-          payload: {
-            activity: {
+          content: {
+            kind: "facts",
+            facts: {
               surface,
               action: "completed",
               id: 90,
@@ -670,6 +791,8 @@ describe("GitHub check and status normalization", () => {
               appId: 91,
               pullRequests: [{ id: 70, number: 7, head: { sha: "a".repeat(40), repositoryId: 30 } }],
             },
+          },
+          payload: {
             native,
           },
         },
@@ -692,7 +815,7 @@ describe("GitHub check and status normalization", () => {
     );
     expect(result).toMatchObject({
       kind: "normalized",
-      event: { payload: { activity: { actor: null, status: null, conclusion: null, pullRequests: [] } } },
+      event: { content: { kind: "facts", facts: { actor: null, status: null, conclusion: null, pullRequests: [] } } },
     });
     if (result.kind !== "normalized") throw new Error("expected fork check fact");
     expect(result.event).not.toHaveProperty("authorId");
@@ -706,8 +829,9 @@ describe("GitHub check and status normalization", () => {
       event: {
         kind: "source-fact",
         objectId: "github:github.com:repository:3:status:92",
-        payload: {
-          activity: {
+        content: {
+          kind: "facts",
+          facts: {
             surface: "status",
             id: 92,
             commitSha: "c".repeat(40),
@@ -717,6 +841,8 @@ describe("GitHub check and status normalization", () => {
             targetUrl: "https://ci.example/build/92",
             actor: null,
           },
+        },
+        payload: {
           native,
         },
       },
@@ -729,8 +855,11 @@ describe("GitHub check and status normalization", () => {
       kind: "normalized",
       event: {
         kind: "source-fact",
+        content: {
+          kind: "facts",
+          facts: { commitSha: "c".repeat(40), context: "external/build", state: "failure", targetUrl: "" },
+        },
         payload: {
-          activity: { commitSha: "c".repeat(40), context: "external/build", state: "failure", targetUrl: "" },
           native,
         },
       },
@@ -756,7 +885,7 @@ describe("GitHub check and status normalization", () => {
     expect(again.event.changeId).toBe(first.event.changeId);
     expect(changed.event.changeId).not.toBe(first.event.changeId);
     expect(changed.event.objectId).toBe(first.event.objectId);
-    expect(changed.event.payload).toMatchObject({ activity: { action: "requested_action" } });
+    expect(changed.event.content).toMatchObject({ kind: "facts", facts: { action: "requested_action" } });
   });
 
   it.each([
@@ -818,8 +947,9 @@ describe("GitHub ref activity normalization", () => {
         kind: "source-fact",
         authorId: "github:github.com:user:4",
         objectId: "github:github.com:repository:3:ref:refs/heads/fix/retry",
-        payload: {
-          activity: {
+        content: {
+          kind: "facts",
+          facts: {
             surface: "ref",
             action: "push",
             ref: "refs/heads/fix/retry",
@@ -832,13 +962,15 @@ describe("GitHub ref activity normalization", () => {
             baseRef: null,
             actor: user,
           },
+        },
+        payload: {
           native,
         },
       },
     });
     const result = await normalizeGithubActivity(source, { event: "push", delivery: "one" }, native);
     if (result.kind !== "normalized") throw new Error("expected ref fact");
-    expect(Object.keys(result.event.payload as object).sort()).toEqual(["activity", "native", "repository", "version"]);
+    expect(Object.keys(result.event.payload as object).sort()).toEqual(["native", "repository", "version"]);
   });
 
   it("keeps creation and deletion zero-SHA sentinels without guessing a commit", async () => {
@@ -846,12 +978,13 @@ describe("GitHub ref activity normalization", () => {
     const deleted = { ...push, deleted: true, after: "0".repeat(40), commits: [], head_commit: null };
     expect(await normalizeGithubActivity(source, { event: "push", delivery: "created" }, created)).toMatchObject({
       kind: "normalized",
-      event: { payload: { activity: { created: true, before: "0".repeat(40), after: "b".repeat(40) } } },
+      event: { content: { kind: "facts", facts: { created: true, before: "0".repeat(40), after: "b".repeat(40) } } },
     });
     expect(await normalizeGithubActivity(source, { event: "push", delivery: "deleted" }, deleted)).toMatchObject({
       kind: "normalized",
       event: {
-        payload: { activity: { deleted: true, before: "a".repeat(40), after: "0".repeat(40) }, native: deleted },
+        content: { kind: "facts", facts: { deleted: true, before: "a".repeat(40), after: "0".repeat(40) } },
+        payload: { native: deleted },
       },
     });
   });
@@ -863,8 +996,9 @@ describe("GitHub ref activity normalization", () => {
       event: {
         kind: "source-fact",
         objectId: "github:github.com:repository:3:ref:refs/heads/fix/retry",
-        payload: {
-          activity: {
+        content: {
+          kind: "facts",
+          facts: {
             action: "delete",
             ref: "refs/heads/fix/retry",
             refType: "branch",
@@ -876,6 +1010,8 @@ describe("GitHub ref activity normalization", () => {
             baseRef: null,
             actor: user,
           },
+        },
+        payload: {
           native: deletion,
         },
       },
@@ -892,7 +1028,7 @@ describe("GitHub ref activity normalization", () => {
       kind: "normalized",
       event: {
         objectId: "github:github.com:repository:3:ref:refs/tags/fix/retry",
-        payload: { activity: { refType: "tag" } },
+        content: { kind: "facts", facts: { refType: "tag" } },
       },
     });
     const literal = await normalizeGithubActivity(
@@ -919,7 +1055,10 @@ describe("GitHub ref activity normalization", () => {
     );
     if (first.kind !== "normalized" || again.kind !== "normalized" || changed.kind !== "normalized")
       throw new Error("expected ref facts");
-    expect(first.event).toMatchObject({ deliveryId: "one", payload: { activity: { after: "b".repeat(40) } } });
+    expect(first.event).toMatchObject({
+      deliveryId: "one",
+      content: { kind: "facts", facts: { after: "b".repeat(40) } },
+    });
     expect(first.event.changeId).toMatch(/^[a-f0-9]{64}$/);
     expect(again.event.changeId).toBe(first.event.changeId);
     expect(changed.event.changeId).not.toBe(first.event.changeId);
@@ -929,7 +1068,10 @@ describe("GitHub ref activity normalization", () => {
   it("preserves unknown actors and treats bot actors as source data", async () => {
     expect(
       await normalizeGithubActivity(source, { event: "push", delivery: "unknown" }, { ...push, sender: null }),
-    ).toMatchObject({ kind: "normalized", event: { kind: "source-fact", payload: { activity: { actor: null } } } });
+    ).toMatchObject({
+      kind: "normalized",
+      event: { kind: "source-fact", content: { kind: "facts", facts: { actor: null } } },
+    });
     expect(
       await normalizeGithubActivity(
         source,
@@ -941,7 +1083,7 @@ describe("GitHub ref activity normalization", () => {
       event: {
         kind: "source-fact",
         authorId: "github:github.com:user:4",
-        payload: { activity: { actor: { type: "Bot" } } },
+        content: { kind: "facts", facts: { actor: { type: "Bot" } } },
       },
     });
   });

@@ -349,3 +349,10 @@ The existing spawn path is a prerequisite for source-bound delegation in Step 1.
 The existing PR resolver, run reservation and execution claim now retain a complete native source snapshot on the existing live run metadata. The snapshot keeps credential source, PR/base/fork IDs and observed refs/SHA. Reclaim and resume preserve the original snapshot without relabeling it as another PR. Partial source identity stays unknown. Private main metadata remains omitted under the existing privacy rule.
 
 This connects read identity to durable active task context. It does not make a task match or grant source access. The common handler still needs canonical context, original orchestrator ownership and current access checks. Private context persistence, legacy backfill, repository-only targets, finished-run retention and source-event routing remain pending. No source producer or internal delivery caller is enabled. Step 4 remains in progress.
+
+
+### Common source event content, 2026-10-16
+
+The existing saved source-event reader now accepts version 2 with common text or fact content. Its canonical body hash and size bound cover that projection. Existing delivery identity, duplicate handling and jobs stay shared. Version 1 remains readable with unknown common content; a downgrade cannot strip version 2 content into a legacy event.
+
+The inactive GitHub converters now map comments and reviews to common text, and PR/thread/check/ref/installation activity to common facts. Their native payload and source identity remain retained. This keeps provider parsing out of the common handler. It adds no processor, receiver importer or delivery call. Compatible-reader gates, context and access checks, saved decisions and native consumption remain pending. Event schema versions remain separate from queue job versions. Steps 2 and 3 remain in progress.
