@@ -238,6 +238,8 @@ jobs:
           SMOKE_INGRESS_CONFIG: ${{ vars.STAGING_SMOKE_CONFIG }}
           SMOKE_INGRESS_ORIGIN: ${{ vars.STAGING_SMOKE_ORIGIN }}
           SMOKE_INGRESS_TOKEN: ${{ secrets.STAGING_SMOKE_TOKEN }}
+          SMOKE_ACCESS_CLIENT_ID: ${{ secrets.STAGING_SMOKE_ACCESS_CLIENT_ID }}
+          SMOKE_ACCESS_CLIENT_SECRET: ${{ secrets.STAGING_SMOKE_ACCESS_CLIENT_SECRET }}
           SMOKE_EXPECTED_COMMIT: ${{ needs.authorize.outputs.commit }}
           SMOKE_MODEL: ${{ env.STAGING_ACCEPTANCE_MODEL }}
           SMOKE_REVIEW_TRANSPORT: ${{ env.STAGING_REVIEW_TRANSPORT }}
@@ -253,7 +255,7 @@ jobs:
           if [ -n "$SMOKE_REVIEW_TRANSPORT" ]; then smoke_args+=(--review-transport "$SMOKE_REVIEW_TRANSPORT"); fi
           if [ -n "$SMOKE_REVIEW_EFFORT" ]; then smoke_args+=(--review-effort "$SMOKE_REVIEW_EFFORT"); fi
           if [ "$STAGING_REQUIRE_VOUCHED_CONTROLS" = true ]; then smoke_args+=(--require-vouched-controls); fi
-          npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-setup.json" --check "${smoke_args[@]}"
+          npm run --silent smoke:ingress -- "$RUNNER_TEMP/staging-fleet.json" "$RUNNER_TEMP/staging-setup.json" --check --check-reader "${smoke_args[@]}"
       - name: deploy the captured commit to staging
         id: deploy
         if: steps.recheck.outputs.eligible == 'true' || (github.event_name == 'workflow_dispatch' && inputs.pr == '')
@@ -290,6 +292,8 @@ jobs:
           SMOKE_INGRESS_CONFIG: ${{ vars.STAGING_SMOKE_CONFIG }}
           SMOKE_INGRESS_ORIGIN: ${{ vars.STAGING_SMOKE_ORIGIN }}
           SMOKE_INGRESS_TOKEN: ${{ secrets.STAGING_SMOKE_TOKEN }}
+          SMOKE_ACCESS_CLIENT_ID: ${{ secrets.STAGING_SMOKE_ACCESS_CLIENT_ID }}
+          SMOKE_ACCESS_CLIENT_SECRET: ${{ secrets.STAGING_SMOKE_ACCESS_CLIENT_SECRET }}
           SMOKE_INGRESS_THREAD: staging-${{ github.run_id }}-${{ github.run_attempt }}
           SMOKE_EXPECTED_COMMIT: ${{ needs.authorize.outputs.commit }}
           SMOKE_REQUIRE_SLACK_CONNECTION: "true"

@@ -249,7 +249,7 @@ interface SmokeObservationError {
   http?: { status: number; authChallenge: boolean };
 }
 
-class SmokeReaderError extends Error {
+export class SmokeReaderError extends Error {
   constructor(readonly observation: SmokeObservationError) {
     super(observation.code);
   }
@@ -864,7 +864,7 @@ export function agentSmokeTransport(input: {
     },
     fetch: async (url, init) => {
       if (url !== mcpUrl) throw new Error("mcp_destination_refused");
-      const response = await boundedFetch(url, init);
+      const response = await fetch(url, { ...init, redirect: "manual" });
       // Only closed facts are retained. Bodies, challenge values and headers
       // can contain credentials or untrusted prose and never enter the receipt.
       http = { status: response.status, authChallenge: response.headers.has("www-authenticate") };
@@ -879,11 +879,12 @@ export function agentSmokeTransport(input: {
       // The asynchronous fetch callback updates this closure after the reset.
       const observedHttp = http as SmokeObservationError["http"];
       const code =
-        observedHttp?.status === 401
+        observedHttp?.status === 401 ||
+        (observedHttp && observedHttp.status >= 300 && observedHttp.status < 400 && observedHttp.authChallenge)
           ? "mcp_auth_required"
           : observedHttp?.status === 403
             ? "mcp_access_denied"
-            : observedHttp && observedHttp.status >= 400
+            : observedHttp && observedHttp.status >= 300
               ? "mcp_http_failed"
               : error instanceof McpError && error.code === -32001
                 ? "mcp_read_unauthorized"

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
@@ -187,6 +187,141 @@ describe("isolated staging deployment", () => {
 });
 
 describe("staging workflow isolation", () => {
+  it("passes only staging Access credentials to configuration and live acceptance", () => {
+    const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
+    const readers = workflow.jobs.deploy.steps.filter((step: { run?: string }) => step.run?.includes("smoke:ingress"));
+    expect(
+      readers.map((step: { name: string; env: Record<string, string> }) => ({
+        name: step.name,
+        clientId: step.env.SMOKE_ACCESS_CLIENT_ID,
+        clientSecret: step.env.SMOKE_ACCESS_CLIENT_SECRET,
+      })),
+    ).toEqual([
+      {
+        name: "validate acceptance configuration before upload",
+        clientId: "${{ secrets.STAGING_SMOKE_ACCESS_CLIENT_ID }}",
+        clientSecret: "${{ secrets.STAGING_SMOKE_ACCESS_CLIENT_SECRET }}",
+      },
+      {
+        name: "run live Review acceptance on the deployed stack",
+        clientId: "${{ secrets.STAGING_SMOKE_ACCESS_CLIENT_ID }}",
+        clientSecret: "${{ secrets.STAGING_SMOKE_ACCESS_CLIENT_SECRET }}",
+      },
+    ]);
+  });
+  it.each(["ready", "challenge", "configured", "unexpected"])(
+    "checks only the configured smoke reader before deployment: %s",
+    (mode) => {
+      const directory = mkdtempSync(join(tmpdir(), "smoke-reader-check-"));
+      try {
+        const plan = join(directory, "plan.json"),
+          receipt = join(directory, "receipt.json"),
+          calls = join(directory, "calls.jsonl");
+        const preload = join(directory, "fetch.mjs");
+        writeFileSync(
+          plan,
+          JSON.stringify({ steps: [{ name: "bot", healthUrl: "https://bot.example.test/healthz" }] }),
+        );
+        writeFileSync(
+          preload,
+          `import { appendFileSync } from "node:fs";
+if (process.env.SMOKE_TEST_MODE === "unexpected") AbortSignal.timeout = () => { throw new TypeError("private-runtime-detail"); };
+globalThis.fetch = async (url, init) => {
+  if (String(url) !== "https://bot.example.test/mcp") throw new Error("unexpected destination");
+  const request = JSON.parse(String(init.body));
+  const headers = new Headers(init.headers);
+  appendFileSync(process.env.SMOKE_TEST_CALLS, JSON.stringify({method: request.method, tool: request.params?.name, accessId: headers.get("cf-access-client-id"), accessSecret: headers.get("cf-access-client-secret")})+"\\n");
+  if (process.env.SMOKE_TEST_MODE === "challenge") return new Response("private-body", {status:302,headers:{location:"https://login.example.test/?secret=private-value","www-authenticate":"Cloudflare-Access private-value"}});
+  if (request.method === "initialize") return Response.json({jsonrpc:"2.0",id:request.id,result:{protocolVersion:request.params.protocolVersion}});
+  if (request.method === "notifications/initialized") return new Response(null,{status:202});
+  if (request.params?.name !== "runs_list") throw new Error("paid operation refused");
+  return Response.json({jsonrpc:"2.0",id:request.id,result:{content:[{type:"text",text:'runs.list: ok\\n'+JSON.stringify({runs:[],readScope:{channelId:"http:smoke",userId:"http:smoke",repo:"acme/smoke",allowed:true}})}]}});
+};`,
+        );
+        const result = spawnSync(
+          process.execPath,
+          [
+            "--import",
+            "tsx",
+            "--import",
+            preload,
+            "scripts/smoke-ingress.ts",
+            plan,
+            receipt,
+            "--check",
+            ...(mode === "configured" ? [] : ["--check-reader"]),
+          ],
+          {
+            encoding: "utf8",
+            timeout: 15_000,
+            env: {
+              ...process.env,
+              SMOKE_INGRESS_ORIGIN: "https://bot.example.test",
+              SMOKE_INGRESS_TOKEN: "fixture-only",
+              SMOKE_ACCESS_CLIENT_ID: "edge-id",
+              SMOKE_ACCESS_CLIENT_SECRET: "edge-secret",
+              SMOKE_SLACK_CONFIG: "",
+              SMOKE_INGRESS_CONFIG: JSON.stringify({
+                disposable: true,
+                channel: "smoke",
+                subject: "smoke",
+                repo: "acme/smoke",
+                workspace: { path: "SMOKE.md", answer: "fixture" },
+                review: { number: 7, head: "b".repeat(40) },
+                maxObservedUsd: 1,
+              }),
+              SMOKE_TEST_MODE: mode,
+              SMOKE_TEST_CALLS: calls,
+            },
+          },
+        );
+        expect(result.status, result.stderr).toBe(mode === "challenge" || mode === "unexpected" ? 1 : 0);
+        const saved = JSON.parse(readFileSync(receipt, "utf8"));
+        expect(saved).toMatchObject({
+          capabilityOutcome: "incomplete",
+          reason:
+            mode === "challenge" || mode === "unexpected"
+              ? "reader_unproven"
+              : mode === "ready"
+                ? "reader_verified"
+                : "configured_not_executed",
+        });
+        if (mode === "challenge") {
+          expect(saved.readerCheck.observationError).toEqual({
+            code: "mcp_auth_required",
+            http: { status: 302, authChallenge: true },
+          });
+          expect(result.stderr).toBe("Smoke reader not verified (mcp_auth_required, HTTP 302). No agent started.\n");
+        }
+        if (mode === "unexpected") {
+          expect(saved.readerCheck.observationError).toEqual({ code: "reader_check_failed" });
+          expect(result.stderr).toBe("Smoke reader not verified (reader_check_failed). No agent started.\n");
+        }
+        const observed = existsSync(calls)
+          ? readFileSync(calls, "utf8")
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line))
+          : [];
+        expect(observed.map((row) => row.tool ?? row.method)).toEqual(
+          mode === "ready"
+            ? ["initialize", "notifications/initialized", "runs_list"]
+            : mode === "challenge"
+              ? ["initialize"]
+              : [],
+        );
+        if (mode === "ready" || mode === "challenge") {
+          expect(observed[0]).toMatchObject({ accessId: "edge-id", accessSecret: "edge-secret" });
+          expect(saved.readerCheck.outcome).toBe(mode === "ready" ? "passed" : "incomplete");
+        }
+        expect(JSON.stringify(saved) + result.stdout + result.stderr).not.toMatch(
+          /edge-secret|private-body|private-value|private-runtime-detail|login\.example/,
+        );
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
   it.each([true, false, undefined])(
     "passes retained mode through planning, deployment and acceptance only when selected: %s",
     (retain) => {
@@ -297,6 +432,7 @@ describe("staging workflow isolation", () => {
         "/fixture/staging-fleet.json",
         "/fixture/staging-setup.json",
         "--check",
+        "--check-reader",
         "--model",
         "openai/gpt-6.1-sol",
         "--review-transport",
@@ -694,6 +830,7 @@ describe("staging workflow isolation", () => {
             join(directory, "staging-fleet.json"),
             join(directory, "staging-setup.json"),
             "--check",
+            "--check-reader",
             ...(expected ? ["--model", expected] : []),
           ],
           [

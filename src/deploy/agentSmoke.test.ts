@@ -1327,8 +1327,8 @@ describe("bounded agent smoke", () => {
       threadKey: "http:smoke:smoke-1",
     });
     expect(await transport.readRun("native-run")).toEqual({ id: "native-run", finished: true, persisted: true });
-    for (const [, init] of fetch.mock.calls) {
-      expect(init?.redirect).toBe("error");
+    for (const [url, init] of fetch.mock.calls) {
+      expect(init?.redirect).toBe(String(url).endsWith("/mcp") ? "manual" : "error");
       expect(init?.signal).toBeInstanceOf(AbortSignal);
     }
     const body = JSON.parse(String(fetch.mock.calls.find(([url]) => String(url).endsWith("/ingress"))?.[1]?.body));
@@ -1686,6 +1686,47 @@ describe("bounded agent smoke", () => {
 });
 
 describe("machine MCP reader authentication", () => {
+  it.each([
+    [true, "mcp_auth_required"],
+    [false, "mcp_http_failed"],
+  ])("records refused MCP redirects without forwarding credentials: challenge=%s", async (authChallenge, code) => {
+    const paths: string[] = [];
+    const transport = agentSmokeTransport({
+      origin: "https://bot.example.test",
+      healthUrl: "https://bot.example.test/healthz",
+      token: "fixture-only",
+      access: { clientId: "edge-id", clientSecret: "edge-secret" },
+      config,
+      fetch: async (url, init) => {
+        paths.push(String(url));
+        if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: { commit } });
+        expect(new Headers(init?.headers).get("cf-access-client-id")).toBe("edge-id");
+        expect(new Headers(init?.headers).get("cf-access-client-secret")).toBe("edge-secret");
+        return new Response("private redirect body", {
+          status: 302,
+          headers: {
+            location: "https://login.example.test/private?token=private-value",
+            ...(authChallenge ? { "www-authenticate": "Cloudflare-Access private-value" } : {}),
+          },
+        });
+      },
+    });
+    const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
+    expect(receipt).toMatchObject({
+      capabilityOutcome: "incomplete",
+      scenarios: [
+        {
+          outcome: "incomplete",
+          reason: "reader_unproven",
+          observationError: { code, http: { status: 302, authChallenge } },
+        },
+        { outcome: "skipped" },
+        { outcome: "skipped" },
+      ],
+    });
+    expect(paths).toEqual(["https://bot.example.test/healthz", "https://bot.example.test/mcp"]);
+    expect(JSON.stringify(receipt)).not.toMatch(/private-value|private redirect body|edge-secret|login\.example/);
+  });
   it.each([
     ["missing", undefined, "mcp_protocol_mismatch"],
     [
