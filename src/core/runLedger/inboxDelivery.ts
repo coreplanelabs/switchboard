@@ -1,6 +1,7 @@
 import { sourceHash } from "../references/receipts.js";
-import { DURABLE_INBOX_MAX_BYTES } from "./inboxMessage.js";
+import { DURABLE_INBOX_MAX_BYTES, inboxCustodyOf, type InboxTarget } from "./inboxMessage.js";
 import { sourceSnapshot } from "./sourceEvents.js";
+import type { InboxRowWitness } from "./types.js";
 
 export interface InboxDeliveryReceipt {
   version: 1;
@@ -87,4 +88,55 @@ export function replayInboxDelivery(
   if (!parsed || parsed.kind === "refused" || parsed.receipt.runId !== runId || parsed.receipt.key !== input.key)
     return { kind: "refused", reason: "unsupported-receipt" };
   return parsed.receipt.bodyHash === input.bodyHash ? parsed : { kind: "refused", reason: "delivery-conflict" };
+}
+
+/** Correlate a verified ledger delivery response with an observed stored row.
+ * This neither authenticates the delivery key nor proves native consumption,
+ * first-claim identity or current execution authority. */
+export async function inboxDeliveryWitness(
+  receipt: unknown,
+  item: unknown,
+  target: InboxTarget & { requester: string },
+): Promise<InboxRowWitness | undefined> {
+  try {
+    const parsed = inboxDeliveryResultOf({ kind: "duplicate", receipt: sourceSnapshot(receipt) });
+    if (!parsed || parsed.kind === "refused" || parsed.receipt.runId !== target.runId) return;
+    // Validate before copying; preserve property order because the row witness
+    // hashes stored JSON, while the delivery hash uses canonical input JSON.
+    sourceSnapshot(item);
+    const row: unknown = JSON.parse(JSON.stringify(item));
+    if (!object(row) || !closed(row, ["seq", "message", "witness"]) || !object(row.message)) return;
+    const witness = row.witness;
+    if (
+      !object(witness) ||
+      !closed(witness, ["version", "runId", "seq", "digest"]) ||
+      witness.version !== 1 ||
+      witness.runId !== target.runId ||
+      row.seq !== parsed.receipt.seq ||
+      witness.seq !== row.seq ||
+      typeof witness.digest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(witness.digest)
+    )
+      return;
+    const custody = inboxCustodyOf(row.message.target);
+    if (
+      !custody ||
+      !object(row.message.target) ||
+      !closed(row.message.target, ["version", "runId", "channelId", "threadKey", "requester", "producerGen"]) ||
+      custody.runId !== target.runId ||
+      custody.channelId !== target.channelId ||
+      custody.threadKey !== target.threadKey ||
+      custody.requester !== target.requester
+    )
+      return;
+    const { target: _custody, ...message } = row.message;
+    const [input, digest] = await Promise.all([
+      prepareInboxDelivery({ version: 1, key: parsed.receipt.key, message }),
+      sourceHash(row.message),
+    ]);
+    if (input?.bodyHash !== parsed.receipt.bodyHash || digest !== witness.digest) return;
+    return { version: 1, runId: parsed.receipt.runId, seq: parsed.receipt.seq, digest };
+  } catch {
+    return;
+  }
 }

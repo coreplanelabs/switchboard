@@ -4,6 +4,7 @@ import { cancellationRecordMatches } from "../../src/core/runLedger/cancellation
 import { isRunRecord } from "../../src/core/runRecord.ts";
 import { reclaimedRunRecord } from "../../src/core/dispatch/record.ts";
 import { sourceHash, mergeSessionSources } from "../../src/core/references/receipts.ts";
+import { inboxDeliveryWitness } from "../../src/core/runLedger/inboxDelivery.ts";
 import {
   pullOwnerQualificationSnapshot,
   qualifyPullOwnerSnapshot,
@@ -15050,4 +15051,36 @@ describe("keyed receipt decode diagnostics", () => {
       }
     },
   );
+});
+
+describe("keyed SQLite delivery row witness", () => {
+  it("links a delivered payload to its exact stamped row without advancing consumption", async () => {
+    const key = "keyed-row-witness",
+      threadKey = "slack:C1:delivery-link";
+    expect((await post("/runs/claim", claimBody(key, "r1", threadKey))).status).toBe(200);
+    const delivered = await post("/runs/inbox/deliver", {
+      storeKey: key,
+      runId: "r1",
+      delivery: { version: 1, key: "decision-one", message: { text: "Original input", userId: "slack:UALICE" } },
+    });
+    expect(delivered.data).toMatchObject({ kind: "delivered", receipt: { runId: "r1", seq: 1 } });
+    const observed = await post("/runs/inbox/read", { storeKey: key, runId: "r1", gen: "g1", peek: true });
+    expect(observed.status).toBe(200);
+    const peek = observed.data;
+    const witness = await inboxDeliveryWitness(delivered.data.receipt, peek.items[0], {
+      runId: "r1",
+      channelId: "slack:C1",
+      threadKey,
+      requester: "slack:UALICE",
+    });
+    expect(witness).toEqual({
+      version: 1,
+      runId: "r1",
+      seq: 1,
+      digest: "3ed493011602085386f145a8cbb88489ea0a86f7644985bc8a9adac3d1396577",
+    });
+    expect(delivered.data.receipt.bodyHash).toBe("b45bed885d30fa1aae0a18b7d80268529ce453f12643683ef6fdb7b4978eb299");
+    expect((await post("/runs/inbox/read", { storeKey: key, runId: "r1" })).data.items).toHaveLength(1);
+    expect(peek.boundary.lastStep).toBeNull();
+  });
 });

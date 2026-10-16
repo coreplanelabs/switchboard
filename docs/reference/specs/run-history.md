@@ -1,5 +1,7 @@
 # Run history
 
+- **Tests**: `src/core/runLedger/inboxDelivery.test.ts`
+
 
 Opted-in coding runs also obey the [first coding baseline](first-coding-test.md) admission and durable receipt contract.
 Every [run](../vocabulary.md#run) becomes a durable record — identity, timing, terminal status, the redacted event stream, and the friction diagnosis — kept for a retention window instead of evicted 60 s after finish; the record is tombstone-first (item 27), so even a run cut down before finish leaves an `interrupted` trace. The record is built the moment a run finishes and written after the reply, so persistence never delays the user; `/runs/:id` serves a finished run from the store through the same run page the live view uses (the web shell + a history seed, [live-view.md](live-view.md)), and the `runs.*` commands read every run — live or persisted — through one `RunsService`. This file covers the node-free record contract both the bot and the state Worker import (shape, validator, the one retention function both sides run, the byte budget), the `RunStore` seam with its three implementations (in-memory, host-disk file directory, and the `RunHistoryDO` on the state Worker), the `runHistory` config section, the dispatcher's write path, the `RunsService` read merge, and the friction ledger served from the store. The commands over this service are [command-registry.md](command-registry.md); the page is [live-view.md](live-view.md).
@@ -883,7 +885,7 @@ No source processor, producer or job completion path is enabled by this capabili
 
 The existing ledger has an inactive `deliverInbox` protocol for an internal caller that already has delivery authority. A request names a version, stable delivery key and frozen message. It does not grant permissions, select a task or start a fresh run. The caller must save its decision and exact message before it uses this protocol.
 
-One SQLite transaction writes the existing inbox row and a receipt with the run ID, delivery key, body hash and sequence number. A retry of the same run/key/body returns the original receipt, even if the target has ended. Changed input under the same key is refused. Receipt lookup precedes live-target and capacity checks. The original receipt is retained with run history; there is no expiry that silently allows another append.
+One SQLite transaction writes the existing inbox row and a receipt with the run ID, delivery key, body hash and sequence number. A retry of the same run/key/body returns the original receipt, even if the target has ended. Changed input under the same key is refused. Receipt lookup precedes live-target and capacity checks. Receipt rows survive run closure and history deletion; there is no expiry that silently allows another append. Their retirement still needs a separate lifetime and consumption contract before activation.
 
 Each run retains at most 256 keyed receipts. New keys at that limit are held; existing receipts can still be read by retry. Each message uses the existing 400 KiB inbox bound. The store captures canonical JSON before hashing, rejects supplied custody and stamps the existing destination custody on append. Unsupported receipt versions remain held. A failed receipt insert rolls back the inbox row in the same transaction.
 
@@ -899,3 +901,15 @@ The HTTP client accepts only a receipt for its exact run, key and body hash. Mis
 | Refused keyed delivery logs the run ID and reason without the private message or delivery key; successful and duplicate deliveries emit no refusal log | `[integration]` `deploy/cloudflare-memory/runLedger.test.ts::keyed inbox refusal diagnostics::*` |
 
 | Retained receipt decode diagnostics distinguish invalid JSON from an unsupported receipt schema; no stored bytes, message or delivery key enter the log | `[integration]` `deploy/cloudflare-memory/runLedger.test.ts::keyed receipt decode diagnostics::*` |
+
+### Link delivery to an observed row
+
+The delivery hash covers canonical message data before the store stamps destination custody. The inbox row witness hashes the complete stored message, including custody. The hashes therefore cover different data. `inboxDeliveryWitness` checks both hashes, run and sequence IDs, the known custody schema, and the expected channel, thread and requester. It removes only the store-owned `target` field when reconstructing the delivery hash. Captured row data keeps its JSON property order through asynchronous hashing.
+
+The caller must obtain the delivery receipt through the ledger's verified response. This helper correlates supplied data; it does not authenticate the delivery key, certify first-claim identity or grant current execution authority. An observed witness is still not native consumption. No delivery caller, consumption ACK, retirement path or source producer is enabled by this helper.
+
+| Criterion | Proof |
+| --- | --- |
+| A delivery receipt links to its exact custody-stamped row despite distinct hashes; reclaim preserves original custody and creates no consumption claim | `[unit]` `src/core/runLedger/inboxDelivery.test.ts::keyed delivery row witness::links distinct payload…`; `deploy/cloudflare-memory/runLedger.test.ts::keyed SQLite delivery row witness::*` |
+| Changed message bytes cannot qualify even with a recomputed row witness; foreign destination/row identities and unknown receipt, witness or custody schemas stay held | `[unit]` `src/core/runLedger/inboxDelivery.test.ts::keyed delivery row witness::refuses changed input…`; `::holds foreign destination…`; `::holds unknown receipt…` |
+| The check captures receipts and row bytes before hashing and refuses accessors without invoking them | `[unit]` `src/core/runLedger/inboxDelivery.test.ts::keyed delivery row witness::captures both receipts…`; `::holds unsafe row accessors…` |

@@ -189,6 +189,12 @@ The existing ledger now has an inactive keyed inbox protocol. It atomically save
 
 This is reader-first storage support. No dispatcher or source processor uses the protocol yet. A delivery receipt does not prove that a model consumed the row. Connecting saved orchestrator decisions, exact consumption proof, source-job settlement and unit-event delivery remains pending. Step 2 stays in progress.
 
+### Delivery-to-row observation, 2026-10-15
+
+The existing delivery codec now correlates a verified keyed delivery response with its exact stored inbox row. The payload hash and row witness cover different data because the store adds destination custody. The check verifies both hashes, row identity and expected destination coordinates. It preserves original custody through reclaim and rejects changed bytes or unknown schemas.
+
+This is observation only. It does not authenticate a delivery-key mapping, qualify first-claim or current-owner authority, acknowledge native consumption, retire input or activate a caller. Native receipt integration and source-job settlement remain pending. Step 2 is still in progress.
+
 ## Step 3: preserve evidence through internal handoffs
 
 **Current source:** [intake](../../src/core/intake.ts), [inbox schema](../../src/core/runLedger/inboxMessage.ts), [thread admission](../../src/core/threadAdmission.ts), [unit events](../../src/core/coordinator/instanceStore.ts), and both runtime implementations.
