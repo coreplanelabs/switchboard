@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { shellQuote } from "../../execution/shellQuote.js";
 import {
   ExecControlResetError,
@@ -14,6 +14,7 @@ import { CONTAINER_GONE_WORDING } from "../../execution/residentWake.js";
 import { STOPPED_CONTAINER_WORDING } from "../../execution/residentRefresh.js";
 import {
   ResidentLeaseSpentError,
+  ResidentExecutor,
   residentAnswerReason,
   residentWakeBudgetStrike,
   residentWakeStrike,
@@ -1033,6 +1034,219 @@ describe("ExecHarnessContainer — each operation is one command over the execut
     await expect(new ExecHarnessContainer(executor).start(piStart([]))).rejects.toThrow(
       /start failed — exit 1: mkfifo/,
     );
+  });
+});
+
+describe("ExecHarnessContainer — log observation recovery", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "info").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("keeps a first-try log read distinct from recovery", async () => {
+    const { executor, calls } = recordingExecutor([Buffer.from("original event\n").toString("base64")]);
+    expect(Buffer.from(await new ExecHarnessContainer(executor).readLog(paths.log, 17, 128)).toString()).toBe(
+      "original event\n",
+    );
+    expect(calls).toHaveLength(1);
+    expect(vi.mocked(console.warn).mock.calls).toEqual([]);
+    expect(vi.mocked(console.info).mock.calls).toEqual([]);
+  });
+  it.each([
+    { status: 401, body: { error: "unauthorized" } },
+    { status: 403, body: { error: "forbidden" } },
+    { status: 401, body: { error: "unauthorized", status: 500 } },
+    { status: 500, body: { error: "contradictory refusal", status: 401 } },
+    { status: 409, body: { error: "ownership refused", reason: "owner-fenced" } },
+    { status: 500, body: { error: "ownership refused", reason: "owner-fenced" } },
+    { status: 500, body: { error: "future named refusal", reason: "future-refusal" } },
+    { status: 500, body: { error: "state refusal", state: "down" } },
+    { status: 500, body: { error: "invalid state refusal", state: null } },
+    { status: 500, body: { error: "state reason refusal", stateReason: "unknown" } },
+    { status: 500, body: { error: "legacy refusal", needs: "manual-action" } },
+    { status: 500, body: { error: "coded refusal", code: "FUTURE_REFUSAL" } },
+    { status: 500, body: { error: "policy refusal", cause: "policy" } },
+    { status: 500, body: { error: "request refusal", cause: "request" } },
+    { status: 500, body: { error: "unknown refusal", cause: "future-cause" } },
+    { status: 500, body: { error: "future metadata refusal", futureCode: "not-admitted" } },
+  ])("does not repeat a Resident refusal: $status $body.error", async ({ status, body }) => {
+    const requests: unknown[] = [];
+    vi.stubGlobal("fetch", async (_url: unknown, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)));
+      return Response.json(body, { status });
+    });
+    try {
+      const container = new ExecHarnessContainer(
+        new ResidentExecutor({
+          baseUrl: "https://resident.example",
+          token: "test-token",
+          resource: "repo:owner/project",
+          threadKey: "original-thread",
+          runId: "original-run",
+          ownerGen: "original-generation",
+          ownerFence: 7,
+        }),
+      );
+      await expect(container.readLog(paths.log, 17, 128)).rejects.toThrow(body.error);
+      expect(requests).toHaveLength(1);
+      expect(vi.mocked(console.warn).mock.calls).toEqual([]);
+      expect(vi.mocked(console.info).mock.calls).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps the original registration and command on the allowed second Resident observation", async () => {
+    const requests: Record<string, unknown>[] = [];
+    let now = 0;
+    vi.stubGlobal("fetch", async (_url: unknown, init: RequestInit) => {
+      requests.push(JSON.parse(String(init.body)));
+      if (requests.length === 1) now = 1000;
+      return requests.length === 1
+        ? Response.json({
+            error: "internal error; reference = fixture",
+            status: 500,
+            transient: false,
+            cause: "system",
+          })
+        : Response.json({
+            stdout: Buffer.from("original event\n").toString("base64"),
+            stderr: "",
+            exitCode: 0,
+            truncated: false,
+          });
+    });
+    try {
+      const container = new ExecHarnessContainer(
+        new ResidentExecutor({
+          baseUrl: "https://resident.example",
+          token: "test-token",
+          resource: "repo:owner/project",
+          threadKey: "original-thread",
+          runId: "original-run",
+          ownerGen: "original-generation",
+          ownerFence: 7,
+        }),
+        { runId: "original-run", deadlineAt: 5000, clock: () => now },
+      );
+      expect(Buffer.from(await container.readLog(paths.log, 17, 128)).toString()).toBe("original event\n");
+      expect(requests).toHaveLength(2);
+      expect(requests.map((request) => request.timeoutMs)).toEqual([5000, 4000]);
+      expect(vi.mocked(console.warn).mock.calls).toEqual([
+        ["[harness] a log observation is re-read once after an answered resident failure"],
+        ["[harness-log-read]", { outcome: "retrying", runId: "original-run" }],
+      ]);
+      expect(vi.mocked(console.info).mock.calls).toEqual([
+        ["[harness-log-read]", { outcome: "recovered", runId: "original-run" }],
+      ]);
+      for (const request of requests)
+        expect(request).toMatchObject({
+          resource: "repo:owner/project",
+          threadKey: "original-thread",
+          runId: "original-run",
+          ownerGen: "original-generation",
+          ownerFence: 7,
+          command: `tail -c +18 '${paths.log}' | head -c 128 | base64 | tr -d '\\n'`,
+        });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("re-reads the same log bytes once after an answered infrastructure failure without sending input", async () => {
+    const { executor, calls } = recordingExecutor([
+      new ExecInfraError("resident /exec: internal error; reference = fixture", "answered", "resident"),
+      Buffer.from("original event\n").toString("base64"),
+    ]);
+    const container = new ExecHarnessContainer(executor);
+    expect(Buffer.from(await container.readLog(paths.log, 17, 128)).toString("utf8")).toBe("original event\n");
+    expect(calls.map((call) => call.command)).toEqual([
+      `tail -c +18 '${paths.log}' | head -c 128 | base64 | tr -d '\\n'`,
+      `tail -c +18 '${paths.log}' | head -c 128 | base64 | tr -d '\\n'`,
+    ]);
+  });
+
+  it("propagates a second failed log observation without a third attempt", async () => {
+    const second = new ExecInfraError("original observation still unavailable", "answered", "resident");
+    const { executor, calls } = recordingExecutor([
+      new ExecInfraError("first observation unavailable", "answered", "resident"),
+      second,
+    ]);
+    await expect(new ExecHarnessContainer(executor).readLog(paths.log, 17, 128)).rejects.toBe(second);
+    expect(calls).toHaveLength(2);
+    expect(vi.mocked(console.warn).mock.calls).toEqual([
+      ["[harness] a log observation is re-read once after an answered resident failure"],
+      ["[harness-log-read]", { outcome: "retrying", runId: "unknown" }],
+      ["[harness-log-read]", { outcome: "failed", runId: "unknown" }],
+    ]);
+    expect(vi.mocked(console.info).mock.calls).toEqual([]);
+  });
+
+  it.each([
+    { stdout: "unverified", stderr: "read failed", exitCode: 1, truncated: false },
+    { stdout: "truncated", stderr: "", exitCode: 0, truncated: true },
+  ])("records a failed observation when the second command result is invalid: %j", async (result) => {
+    const { executor } = recordingExecutor([new ExecInfraError("private failure", "answered", "resident"), result]);
+    await expect(new ExecHarnessContainer(executor).readLog(paths.log, 17, 128)).rejects.toMatchObject({
+      name: "HarnessCommandOutcomeError",
+      operation: "read",
+      result,
+    });
+    expect(vi.mocked(console.warn).mock.calls).toEqual([
+      ["[harness] a log observation is re-read once after an answered resident failure"],
+      ["[harness-log-read]", { outcome: "retrying", runId: "unknown" }],
+      ["[harness-log-read]", { outcome: "failed", runId: "unknown" }],
+    ]);
+    expect(vi.mocked(console.info).mock.calls).toEqual([]);
+  });
+
+  it.each(["aborted", "deadline-passed", "refused", "transport-lost", "worker-unavailable"] as const)(
+    "keeps a log observation's %s failure single-send",
+    async (reason) => {
+      const error = new ExecInfraError("original failure", reason, "resident");
+      const { executor, calls } = recordingExecutor([error]);
+      await expect(new ExecHarnessContainer(executor).readLog(paths.log, 17, 128)).rejects.toBe(error);
+      expect(calls).toHaveLength(1);
+    },
+  );
+
+  it.each(["cancelled", "deadline"] as const)("does not re-read after the original run is %s", async (ending) => {
+    const stop = new AbortController();
+    let now = 0;
+    const { executor, calls } = recordingExecutor();
+    executor.execResult = async (command, opts) => {
+      calls.push({ command, opts });
+      if (ending === "cancelled") stop.abort();
+      else now = 5000;
+      throw new ExecInfraError("answered observation failed", "answered", "resident");
+    };
+    const container = new ExecHarnessContainer(executor, {
+      runId: "original-run",
+      deadlineAt: 5000,
+      clock: () => now,
+      signal: stop.signal,
+    });
+    await expect(container.readLog(paths.log, 17, 128)).rejects.toMatchObject({
+      name: "HarnessOperationEndedError",
+      reason: ending,
+      runId: "original-run",
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it.each(["alive", "send", "start"] as const)("does not replay an answered %s operation", async (operation) => {
+    const error = new ExecInfraError("resident /exec: internal error; reference = fixture", "answered", "resident");
+    const { executor, calls } = recordingExecutor([error]);
+    const container = new ExecHarnessContainer(executor);
+    const pending =
+      operation === "alive"
+        ? container.alive(4242)
+        : operation === "send"
+          ? container.writeLine(paths, '{"type":"prompt","message":"original"}')
+          : container.start(piStart([]));
+    await expect(pending).rejects.toBe(error);
+    expect(calls).toHaveLength(1);
   });
 });
 

@@ -128,7 +128,11 @@ describe("ExecInfraError carries a typed reason, and the two remote executors na
       for (const call of calls) {
         const args = call.arguments ?? [];
         const text = call.getText().replace(/\s+/g, " ");
-        expect(args.length, `two arguments on: ${text.slice(0, 160)}`).toBe(2);
+        expect([2, 3], `message, reason and optional origin on: ${text.slice(0, 160)}`).toContain(args.length);
+        if (args.length === 3) {
+          expect(name).toBe("./resident.ts");
+          expect(ts.isStringLiteral(args[2]) && args[2].text).toBe("resident");
+        }
         expect(namesAReason(args[1]), `no typed reason on: ${text.slice(0, 160)}`).toBe(true);
       }
     },

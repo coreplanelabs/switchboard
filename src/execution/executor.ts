@@ -192,10 +192,13 @@ export interface ReleaseResult {
  *  `Error`, so `err.message`/`instanceof Error` callers are unaffected. */
 export class ExecInfraError extends Error {
   readonly infra = true as const;
+  declare executionContext?: ExecutionDiagnosticContext;
   constructor(
     message: string,
     /** Why, as a type the harness's one more command waits on (`EXEC_INFRA_WAITABLE`), never the prose. */
     readonly reason: ExecInfraReason,
+    /** Unnamed service-failure origin, never inferred from error text. */
+    readonly origin?: "resident",
   ) {
     super(message);
     this.name = "ExecInfraError";
@@ -330,18 +333,40 @@ export class ExecCapacityError extends Error {
  * exception, changing its stack or weakening any execution decision. */
 export function annotateExecutionDiagnostic(error: unknown, context: ExecutionDiagnosticContext): void {
   try {
+    const closedContext = executionDiagnosticContextFrom(context);
+    if (error instanceof ExecInfraError && closedContext && !Object.hasOwn(error, "executionContext"))
+      Object.defineProperty(error, "executionContext", { value: closedContext, enumerable: true });
     const original = typedExecutionDiagnosticFrom(
       error && typeof error === "object"
         ? Object.getOwnPropertyDescriptor(error, "executionDiagnostic")?.value
         : undefined,
     );
-    const closedContext = executionDiagnosticContextFrom(context);
     if (!(error instanceof ExecCapacityError) || original?.caller !== "executor" || !closedContext) return;
     const diagnostic = typedExecutionDiagnosticFrom({ ...original, ...closedContext });
     if (diagnostic) error.executionDiagnostic = diagnostic;
   } catch {
     /* A diagnostic never replaces the original failure. */
   }
+}
+
+/** Closed failure attribution only; it says nothing about command execution. */
+export function executionContextOf(error: unknown): ExecutionDiagnosticContext | undefined {
+  const seen = new Set<unknown>();
+  try {
+    for (let depth = 0; depth < 4 && error instanceof Error && !seen.has(error); depth++) {
+      seen.add(error);
+      if (error instanceof ExecInfraError) {
+        const context = executionDiagnosticContextFrom(
+          Object.getOwnPropertyDescriptor(error, "executionContext")?.value,
+        );
+        if (context) return context;
+      }
+      error = Object.getOwnPropertyDescriptor(error, "cause")?.value;
+    }
+  } catch {
+    /* Attribution must not replace the original failure. */
+  }
+  return undefined;
 }
 
 /** The container under a live run was replaced — the executor's one typed word

@@ -255,6 +255,17 @@ describe("ResidentExecutor.exec", () => {
     await expect(ex.exec("false")).resolves.toMatch(/^exit 2:\nboom/);
   });
 
+  it("keeps the executor origin on an answered exec failure without claiming no execution", async () => {
+    const { fn } = stubFetch({ body: { error: "internal error; reference = fixture", status: 500, transient: false } });
+    await expect(new ResidentExecutor(OPTS).execResult("original command")).rejects.toMatchObject({
+      name: "ExecInfraError",
+      reason: "answered",
+      origin: "resident",
+      message: "resident /exec: internal error; reference = fixture",
+    });
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps command facts separate from the human empty-output sentinel", async () => {
     stubFetch({ body: { stdout: "", stderr: "", exitCode: 0, truncated: false } });
     await expect(new ResidentExecutor(OPTS).execResult("git status --porcelain -uno")).resolves.toEqual({

@@ -2225,7 +2225,7 @@ export class ResidentExecutor implements Executor {
     if (opts?.checkOperation && answeredStatus(status, data) === 409 && data.reason === "check-capacity")
       throw new CheckCapacityError("recorded check capacity exhausted; command did not start");
     if (typeof data.error === "string" && data.error) {
-      // post-validation failure (exitCode 127 shape) — legible, never retried.
+      // This post-validation failure (exitCode 127 shape) is not retried here.
       // Infra (the exec transport failed), not a command exit: counts toward
       // fail-fast. Typed by the fields the resident put on the answer
       // (`residentAnswerReason`): /exec streams its failures over HTTP 200 with
@@ -2237,9 +2237,23 @@ export class ResidentExecutor implements Executor {
       // SDK's text forwarded, a named refusal — mean what they say, and the
       // harness's seam reads the container-down ones.
       const said = answeredStatus(status, data);
-      throw classifyError(new ExecInfraError(`resident /exec: ${data.error}`, residentAnswerReason(said, data)), {
-        kind: "infra",
-      });
+      const reason = residentAnswerReason(said, data);
+      const message = `resident /exec: ${data.error}`;
+      // Only an unnamed service failure may qualify a fixed log re-read.
+      // Authentication, ownership and lifecycle refusals keep one send, even
+      // when an older Worker reports their typed reason as "answered".
+      const observationFailure =
+        said >= 500 &&
+        said <= 599 &&
+        (data.status === undefined || data.status === said) &&
+        reason === "answered" &&
+        (data.cause === undefined || data.cause === "system") &&
+        (data.transient === undefined || data.transient === false) &&
+        Object.keys(data).every((key) => ["error", "status", "transient", "cause", "trace"].includes(key));
+      const failure = observationFailure
+        ? new ExecInfraError(message, reason, "resident")
+        : new ExecInfraError(message, reason);
+      throw classifyError(failure, { kind: "infra" });
     }
     if (status !== 200) {
       throw classifyError(new ExecInfraError(`resident /exec HTTP ${status}`, residentAnswerReason(status, data)), {
