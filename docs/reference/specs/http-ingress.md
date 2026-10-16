@@ -106,7 +106,7 @@ An asynchronous admission or synchronous response with a finished run includes t
 
 ## GitHub comment conversion
 
-The inactive `normalizeGithubComment` adapter converts top-level PR comments, inline comments and replies, and submitted reviews into the common `SourceEvent` format. It handles comment creation, edits and deletion, plus review submission, edits and dismissal. Human and bot authors use the same `source-evidence` kind. Native authors, bodies, URLs, repository IDs and original payloads remain source data. They do not become requester identity, task selection or worker authority.
+The inactive `normalizeGithubActivity` adapter converts top-level PR comments, inline comments and replies, and submitted reviews into the common `SourceEvent` format. It handles comment creation, edits and deletion, plus review submission, edits and dismissal. Human and bot authors use the same `source-evidence` kind. Native authors, bodies, URLs, repository IDs and original payloads remain source data. They do not become requester identity, task selection or worker authority.
 
 The caller must first verify the raw-body signature and configured host/App/installation/repository. The converter checks the supplied installation and repository IDs against the native payload and checks link hosts. Source, delivery, object and revision IDs stay separate. Canonical native-object snapshots distinguish same-time edits and deletions without treating JSON property order as a change. The existing source-event codec rejects unsafe or oversized data and returns a detached record.
 

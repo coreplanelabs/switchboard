@@ -9,7 +9,7 @@ export interface GithubActivitySource {
   repositoryId: number;
 }
 
-export type GithubCommentResult =
+export type GithubActivityResult =
   | { kind: "normalized"; event: SourceEvent }
   | { kind: "ignored"; reason: "event" | "action" | "not-pull-request" }
   | { kind: "refused"; reason: "invalid-source" | "source-mismatch" | "invalid-payload" | "invalid-event" };
@@ -43,14 +43,14 @@ function sourceUrl(value: unknown, host: string): value is string {
 
 /** Pure conversion after signature and configured-source checks. This does
  * not authenticate, select a task, write an inbox or acknowledge a delivery. */
-export async function normalizeGithubComment(
+export async function normalizeGithubActivity(
   source: GithubActivitySource,
   headers: { event?: string; delivery?: string },
   payload: unknown,
-): Promise<GithubCommentResult> {
+): Promise<GithubActivityResult> {
   const { host, appId, installationId, repositoryId } = source;
   const { event, delivery } = headers;
-  const refused = (reason: Extract<GithubCommentResult, { kind: "refused" }>["reason"]): GithubCommentResult => ({
+  const refused = (reason: Extract<GithubActivityResult, { kind: "refused" }>["reason"]): GithubActivityResult => ({
     kind: "refused",
     reason,
   });
