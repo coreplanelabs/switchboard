@@ -1,4 +1,9 @@
 import { describe, expect, it } from "vitest";
+import {
+  originalOrganizationDispatchOf,
+  withOriginalOrganizationDispatch,
+  organizationPrivateAudienceOf,
+} from "../dispatch/privateDestination.js";
 import { decide, emptyPlaneState } from "../plane/decide.js";
 import type { IncomingMessage, StagedFile } from "../types.js";
 import {
@@ -52,6 +57,30 @@ describe("durable inbox continuity", () => {
     expect(messageFromInbox({ ...row, mergedFollowUps: "true" }, 0)).toBeUndefined();
   });
 
+  it("preserves the original owned input pointer across JSON without restoring private proof or Actor grants", () => {
+    const original = withOriginalOrganizationDispatch(
+      { ...base, messageId: "browser:once" },
+      {
+        ingressRunId: "original-ingress",
+        organizationSequence: 7,
+        organizationRepo: "acme/api",
+      },
+    );
+    const stored = JSON.parse(JSON.stringify(durableInboxMessage(original, "Original private input", 2)));
+    const restored = messageFromInbox(stored, 2);
+    expect(originalOrganizationDispatchOf(restored!.msg)).toEqual({
+      ingressRunId: "original-ingress",
+      organizationSequence: 7,
+      organizationRepo: "acme/api",
+    });
+    expect(organizationPrivateAudienceOf(restored!.msg)).toBeUndefined();
+    expect(restored!.msg).not.toHaveProperty("grants");
+    const forged = { ...base, originalOrganizationInput: { ingressRunId: "forged", organizationSequence: 9 } };
+    expect(durableInboxMessage(forged, "Plain input", 2)).not.toHaveProperty("originalOrganizationInput");
+    expect(
+      messageFromInbox({ ...stored, originalOrganizationInput: { ingressRunId: 7, organizationSequence: 1 } }, 2),
+    ).toBeUndefined();
+  });
   it("binds the canonical destination independently of a named steer's source route", () => {
     const destination = {
       runId: "target-run",

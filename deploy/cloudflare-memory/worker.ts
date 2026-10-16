@@ -42,6 +42,23 @@ import {
   storageRequestIdOf,
 } from "../../src/core/storageFailureDiagnostic.ts";
 import { hasConfirmationConsent, type ConfirmationConsentSource } from "../../src/core/confirmationConsent.ts";
+import { holdUnreadIngress } from "../../src/core/runLedger/unreadIngress.ts";
+import { isHumanGatePending } from "../../src/core/coordinator/contract.js";
+import { admitQuestionAnswer, type QuestionAnswerGuard } from "../../src/core/coordinator/questionAnswer.js";
+import {
+  consumeIngress,
+  claimUnreadIngress,
+  unreadIngressProofSchema,
+  type UnreadIngressProof,
+  finishIngress,
+  retainedIngress,
+  ingressRequestSchema,
+  ingressSettlementSchema,
+  type IngressRecord,
+  type IngressRequest,
+  type IngressSettlement,
+  type IngressResult,
+} from "../../src/core/runLedger/ingress.ts";
 import {
   prepareCancellation,
   cancellationTargetMatches,
@@ -375,6 +392,7 @@ import {
 } from "../../src/core/runLedger/decisions.ts";
 import {
   closeInboxSegment,
+  closedInboxUnreadStep,
   encodeInboxSegment,
   inboxSegmentFloor,
   INBOX_SEGMENT_ARCHIVE_STEP,
@@ -481,6 +499,7 @@ import {
   compareSlackMessageId,
   isMainTaskAuthority,
   isRequesterTurnInput,
+  isRequesterKey,
   sameMainTaskAuthority,
   type MainTaskAuthority,
   type RequesterTurn,
@@ -2251,6 +2270,16 @@ export class RunHistoryDO extends DurableObject<Env> {
     // live one per row keyed (run_id, seq) so a 5000-event run is paged, never
     // loaded whole to answer a listing. `meta` holds the persisted policy.
     this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS ingress_deletions (effect_key TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS ingress_owners (
+        effect_key TEXT PRIMARY KEY,
+        content_expires_at INTEGER NOT NULL,
+        data TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS ingress_owners_expiry ON ingress_owners(content_expires_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS ingress_owner_runs ON ingress_owners(json_extract(data, '$.runId'));
+      CREATE INDEX IF NOT EXISTS ingress_owner_unread_scan ON ingress_owners(json_extract(data, '$.origin.organization'), json_extract(data, '$.unread.status'), json_extract(data, '$.runId'));
+      CREATE INDEX IF NOT EXISTS ingress_owner_refusals ON ingress_owners(json_extract(data, '$.origin.organization'), json_extract(data, '$.refusalPending'));
       CREATE TABLE IF NOT EXISTS runs (
         run_id TEXT PRIMARY KEY,
         label TEXT,
@@ -2944,6 +2973,217 @@ export class RunHistoryDO extends DurableObject<Env> {
     });
     this.pushPlaneEffects(effects);
     return { effects };
+  }
+
+  async ingressByRun(runId: string, now: number): Promise<IngressResult> {
+    const row = [
+      ...this.sql.exec<{ effect_key: string }>(
+        "SELECT effect_key FROM ingress_owners WHERE json_extract(data, '$.runId') = ?",
+        runId,
+      ),
+    ][0];
+    if (!row) return { status: "not_found" };
+    const result = await this.ingress({ action: "read", effectKey: row.effect_key }, now);
+    if (
+      result.status === "record" &&
+      (!result.record.origin || result.record.originExpiresAt === undefined || result.record.originExpiresAt <= now)
+    )
+      return { status: "fenced" };
+    return result;
+  }
+  ingressUnread(organization: string, limit: number, now: number): IngressResult {
+    return this.ctx.storage.transactionSync(() => {
+      const key = `ingress-unread-cursor:${organization}`;
+      const cursor = [...this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = ?", key)][0]?.value ?? "";
+      const rows = (op: string, remaining: number) => [
+        ...this.sql.exec<{ data: string }>(
+          `SELECT data FROM ingress_owners WHERE json_extract(data, '$.origin.organization') = ? AND
+        json_extract(data, '$.unread.status') = 'pending' AND json_extract(data, '$.status') = 'uncertain' AND
+        COALESCE(json_extract(data, '$.refusalPending'),0) != 1 AND json_extract(data, '$.request') IS NOT NULL AND
+        content_expires_at > ? AND json_extract(data, '$.originExpiresAt') > ? AND
+        json_extract(data, '$.runId') ${op} ? ORDER BY json_extract(data, '$.runId') LIMIT ?`,
+          organization,
+          now,
+          now,
+          cursor,
+          remaining,
+        ),
+      ];
+      const forward = rows(">", limit);
+      const selected = forward.length < limit ? [...forward, ...rows("<=", limit - forward.length)] : forward;
+      const records = selected.map((row) => retainedIngress(JSON.parse(row.data) as IngressRecord, now));
+      if (records.length)
+        this.sql.exec("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", key, records.at(-1)!.runId);
+      return { status: "unread", records };
+    });
+  }
+  unreadIngress(
+    command: { action: "hold"; proof: UnreadIngressProof } | { action: "claim"; runId: string },
+    now: number,
+  ): IngressResult {
+    return this.ctx.storage.transactionSync(() => {
+      const id = command.action === "hold" ? command.proof.ingressRunId : command.runId;
+      const row = [
+        ...this.sql.exec<{ effect_key: string; data: string }>(
+          "SELECT effect_key,data FROM ingress_owners WHERE json_extract(data, '$.runId') = ?",
+          id,
+        ),
+      ][0];
+      if (!row) return { status: "not_found" } as IngressResult;
+      const prior = retainedIngress(JSON.parse(row.data) as IngressRecord, now);
+      if (this.liveRow(id) || [...this.sql.exec("SELECT run_id FROM runs WHERE run_id = ?", id)].length)
+        return { status: "fenced" } as IngressResult;
+      let result: IngressResult;
+      if (command.action === "hold") {
+        const proof = command.proof,
+          receiver = this.liveRow(proof.receiverRunId);
+        const terminal = [
+          ...this.sql.exec<{ summary_json: string }>(
+            "SELECT summary_json FROM runs WHERE run_id = ?",
+            proof.receiverRunId,
+          ),
+        ][0];
+        const finished =
+          terminal && !JSON.parse(terminal.summary_json).restarting && !JSON.parse(terminal.summary_json).provisional;
+        if ((receiver && receiver.ownerGen !== proof.receiverGen) || (!receiver && !finished))
+          return { status: "fenced" } as IngressResult;
+        // Exact committed handbacks retain their pending/claimed disposition;
+        // only a first handback needs new archived unread evidence.
+        if (prior.unread) return holdUnreadIngress(prior, proof, undefined, null, now);
+        const inbox = [
+          ...this.sql.exec<{ json: string }>(
+            "SELECT json FROM run_inbox WHERE run_id = ? AND seq = ?",
+            proof.receiverRunId,
+            proof.inboxSeq,
+          ),
+        ][0];
+        const step = [
+          ...this.sql.exec<{ json: string }>(
+            "SELECT json FROM run_steps WHERE run_id = ? AND step >= 0 ORDER BY step DESC LIMIT 1",
+            proof.receiverRunId,
+          ),
+        ][0];
+        const summary = terminal ? (JSON.parse(terminal.summary_json) as RunRecord) : undefined;
+        const closed =
+          !receiver && summary
+            ? closedInboxUnreadStep(this.inboxSegmentArchive(proof.receiverRunId), {
+                runId: proof.receiverRunId,
+                gen: proof.receiverGen,
+                channelId: summary.channelId,
+                threadKey: summary.threadKey,
+                requester: summary.userId,
+                startedAt: summary.startedAt,
+                inboxSeq: proof.inboxSeq,
+              })
+            : undefined;
+        if (!receiver && !closed) return { status: "fenced" } as IngressResult;
+        result = holdUnreadIngress(
+          prior,
+          proof,
+          inbox ? { seq: proof.inboxSeq, message: JSON.parse(inbox.json) } : undefined,
+          receiver ? (step ? JSON.parse(step.json) : null) : closed!.lastStep,
+          now,
+        );
+        if (result.status === "record" && inbox)
+          this.sql.exec(
+            "UPDATE run_inbox SET json = json_set(json, '$.organizationUnreadReleased', json('true')) WHERE run_id = ? AND seq = ?",
+            proof.receiverRunId,
+            proof.inboxSeq,
+          );
+      } else {
+        const receiver = prior.unread?.receiverRunId;
+        const finished = receiver
+          ? [...this.sql.exec<{ summary_json: string }>("SELECT summary_json FROM runs WHERE run_id = ?", receiver)][0]
+          : undefined;
+        if (
+          !receiver ||
+          this.liveRow(receiver) ||
+          !finished ||
+          JSON.parse(finished.summary_json).restarting ||
+          JSON.parse(finished.summary_json).provisional
+        )
+          return { status: "fenced" } as IngressResult;
+        result = claimUnreadIngress(prior, now);
+      }
+      if (result.status === "record" || result.status === "claimed")
+        this.sql.exec(
+          "UPDATE ingress_owners SET data = ? WHERE effect_key = ?",
+          JSON.stringify(result.record),
+          row.effect_key,
+        );
+      return result;
+    });
+  }
+  ingressRefusals(organization: string, limit: number, now: number): IngressResult {
+    return {
+      status: "refusals",
+      records: [
+        ...this.sql.exec<{ data: string }>(
+          "SELECT data FROM ingress_owners WHERE json_extract(data, '$.origin.organization') = ? AND json_extract(data, '$.refusalPending') = 1 LIMIT ?",
+          organization,
+          limit,
+        ),
+      ].map((row) => retainedIngress(JSON.parse(row.data) as IngressRecord, now)),
+    };
+  }
+  async ingress(
+    command:
+      | { action: "consume"; request: IngressRequest }
+      | { action: "read"; effectKey: string }
+      | { action: "clear"; effectKey: string }
+      | { action: "finish"; request: IngressSettlement }
+      | { action: "ack"; request: Pick<IngressSettlement, "effectKey" | "digest" | "runId"> },
+    now: number,
+  ): Promise<IngressResult> {
+    const result = this.ctx.storage.transactionSync(() => {
+      // Erase expired content independently of a replay of that exact key.
+      this.sql.exec(
+        "UPDATE ingress_owners SET data = json_set(data, '$.request', NULL) WHERE content_expires_at <= ? AND json_extract(data, '$.request') IS NOT NULL",
+        now,
+      );
+      const key =
+        command.action === "read" || command.action === "clear" ? command.effectKey : command.request.effectKey;
+      const stored = [
+        ...this.sql.exec<{ data: string }>("SELECT data FROM ingress_owners WHERE effect_key = ?", key),
+      ][0];
+      const prior = stored ? (JSON.parse(stored.data) as IngressRecord) : null;
+      if (command.action === "clear")
+        this.sql.exec("INSERT OR IGNORE INTO ingress_deletions(effect_key) VALUES (?)", key);
+      if (
+        command.action === "consume" &&
+        !prior &&
+        [...this.sql.exec("SELECT effect_key FROM ingress_deletions WHERE effect_key = ?", key)].length
+      )
+        return { status: "fenced" } as IngressResult;
+      const result: IngressResult =
+        command.action === "consume"
+          ? consumeIngress(prior, command.request, now)
+          : command.action === "finish"
+            ? finishIngress(prior, command.request, now)
+            : prior
+              ? { status: "record", record: retainedIngress(prior, now) }
+              : { status: "not_found" };
+      if (command.action === "clear" && result.status === "record") result.record.request = null;
+      if (command.action === "ack" && result.status === "record") {
+        if (result.record.digest !== command.request.digest || result.record.runId !== command.request.runId)
+          return { status: "fenced" } as IngressResult;
+        result.record.refusalPending = false;
+      }
+      if (result.status === "claimed" || result.status === "duplicate" || result.status === "record")
+        this.sql.exec(
+          "INSERT INTO ingress_owners(effect_key, content_expires_at, data) VALUES (?, ?, ?) ON CONFLICT(effect_key) DO UPDATE SET data = excluded.data",
+          key,
+          result.record.contentExpiresAt,
+          JSON.stringify(result.record),
+        );
+      return result;
+    });
+    if (result.status === "claimed") {
+      const due = Math.min(result.record.contentExpiresAt, now + RUN_SWEEP_INTERVAL_MS);
+      const alarm = await this.ctx.storage.getAlarm();
+      if (alarm === null || alarm > due) await this.ctx.storage.setAlarm(due);
+    }
+    return result;
   }
 
   /** The admission ask (`POST /plane/admit`, record 0064 "The queue"): one
@@ -5387,12 +5627,17 @@ export class RunHistoryDO extends DurableObject<Env> {
     requireActive = false,
     binding?: MainTaskBinding,
     expectedRecovery?: { actionId: string; workflowId: string },
+    question?: QuestionAnswerGuard,
   ): Promise<{ ok: true; seq: number; event?: ThreadEvent } | { ok: false; reason: "ended" | "stale" }> {
+    const { questionDigest: _untrustedClaim, ...input } = event;
+    event = input;
     let seq = 1;
     let refusal: "ended" | "stale" | undefined;
     let storedEvent: ThreadEvent | undefined;
     this.ctx.storage.transactionSync(() => {
-      if (requireActive || binding !== undefined || expectedRecovery !== undefined) {
+      let questionDigest: string | undefined;
+      let humanHold = false;
+      if (requireActive || binding !== undefined || expectedRecovery !== undefined || question !== undefined) {
         const instanceText = this.sql
           .exec<{ json: string }>(`SELECT json FROM coordinator_instances WHERE instance_id = ?`, instanceId)
           .toArray()[0]?.json;
@@ -5405,6 +5650,28 @@ export class RunHistoryDO extends DurableObject<Env> {
           .toArray()[0]?.json;
         const instance = instanceText ? (parseStoredJson(instanceText) as CoordinatorInstance) : undefined;
         const row = unitText ? (parseStoredJson(unitText) as CoordinatorUnit) : undefined;
+        if (question !== undefined) {
+          const events = this.sql
+            .exec<{ json: string }>(
+              `SELECT json FROM coordinator_unit_events WHERE instance_id = ? AND unit = ? ORDER BY seq`,
+              instanceId,
+              unit,
+            )
+            .toArray()
+            .map((saved) => parseStoredJson(saved.json) as ThreadEvent);
+          const admission = admitQuestionAnswer(instance, row, event, question, events);
+          if (admission.kind === "refused") {
+            refusal = admission.reason;
+            return;
+          }
+          if (admission.kind === "replay") {
+            seq = admission.event.seq;
+            storedEvent = admission.event;
+            return;
+          }
+          humanHold = admission.humanHold;
+          questionDigest = admission.questionDigest;
+        }
         if (
           binding !== undefined &&
           (binding.instanceId !== instanceId ||
@@ -5431,7 +5698,14 @@ export class RunHistoryDO extends DurableObject<Env> {
             refusal = "ended";
             return;
           }
-        } else if (!instance || !row || instance.stop || row.ending || row.recovery || row.recoveryHold) {
+        } else if (
+          !instance ||
+          !row ||
+          instance.stop ||
+          (row.ending && !humanHold) ||
+          row.recovery ||
+          (row.recoveryHold && !humanHold)
+        ) {
           refusal = "ended";
           return;
         }
@@ -5457,7 +5731,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         }>(`SELECT MAX(seq) AS m FROM coordinator_unit_events WHERE instance_id = ? AND unit = ?`, instanceId, unit)
         .toArray()[0];
       seq = (max?.m ?? 0) + 1;
-      const capped = capThreadEvent({ ...event, seq });
+      const capped = capThreadEvent({ ...event, ...(questionDigest ? { questionDigest } : {}), seq });
       storedEvent = capped;
       this.sql.exec(
         `INSERT INTO coordinator_unit_events (instance_id, unit, seq, json) VALUES (?, ?, ?, ?)`,
@@ -7455,7 +7729,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         Math.max(afterSeq, floor),
       )
       .toArray()
-      .map((r) => ({ seq: r.seq, message: parseStoredJson(r.json) as Record<string, unknown> }));
+      .map((r) => ({ seq: r.seq, message: parseStoredJson(r.json) as Record<string, unknown> }))
+      .filter((item) => item.message.organizationUnreadReleased !== true);
   }
 
   async peekInbox(
@@ -9497,6 +9772,10 @@ export class RunHistoryDO extends DurableObject<Env> {
       // Save the next shared deadline before starting that work.
       await this.ensureNextAlarm(now);
       await this.discoverCoordinatorWorkflows(now);
+      this.sql.exec(
+        "UPDATE ingress_owners SET data = json_set(data, '$.request', NULL) WHERE content_expires_at <= ? AND json_extract(data, '$.request') IS NOT NULL",
+        now,
+      );
       let deleted = 0;
       if (this.env.RUN_HISTORY_MAINTENANCE === "enabled") {
         const { policy } = this.policyState();
@@ -12098,6 +12377,16 @@ const LEDGER_ROUTES = new Set([
   "/runs/source-events/claim",
   "/runs/source-events/release",
   "/runs/check-source",
+  "/runs/ingress/unread",
+  "/runs/ingress/unread-hold",
+  "/runs/ingress/unread-claim",
+  "/runs/ingress/consume",
+  "/runs/ingress/read",
+  "/runs/ingress/clear",
+  "/runs/ingress/by-run",
+  "/runs/ingress/refusals",
+  "/runs/ingress/refusal-ack",
+  "/runs/ingress/finish",
   "/runs/context-checkpoint",
   "/runs/session/checkpoint",
   "/runs/private-worker/append",
@@ -12930,6 +13219,71 @@ async function handleLedger(
   const key = parseStoreKey(b);
   if (!key.ok) return json({ error: key.error }, 400);
   const stub = env.RUNS.get(env.RUNS.idFromName(key.value));
+  const now = systemClock();
+  if (pathname === "/runs/ingress/consume") {
+    const request = ingressRequestSchema.safeParse(b.request);
+    if (!request.success) return json({ status: "invalid" }, 400);
+    return json(await stub.ingress({ action: "consume", request: request.data }, now));
+  }
+  if (pathname === "/runs/ingress/by-run") {
+    const runId = parseRunId(b.runId);
+    if (!runId.ok) return json({ status: "invalid" }, 400);
+    return json(await stub.ingressByRun(runId.value, now));
+  }
+  if (pathname === "/runs/ingress/refusals") {
+    if (
+      typeof b.organization !== "string" ||
+      !b.organization.length ||
+      b.organization.length > 2048 ||
+      !Number.isInteger(b.limit) ||
+      Number(b.limit) < 1 ||
+      Number(b.limit) > 100
+    )
+      return json({ status: "invalid" }, 400);
+    return json(await stub.ingressRefusals(b.organization, Number(b.limit), now));
+  }
+  if (pathname === "/runs/ingress/refusal-ack") {
+    const request = ingressSettlementSchema
+      .pick({ effectKey: true, digest: true, runId: true })
+      .strict()
+      .safeParse(b.request);
+    if (!request.success) return json({ status: "invalid" }, 400);
+    return json(await stub.ingress({ action: "ack", request: request.data }, now));
+  }
+  if (pathname === "/runs/ingress/unread-hold") {
+    const proof = unreadIngressProofSchema.safeParse(b.proof);
+    if (!proof.success) return json({ status: "invalid" }, 400);
+    return json(await stub.unreadIngress({ action: "hold", proof: proof.data }, now));
+  }
+  if (pathname === "/runs/ingress/unread-claim") {
+    if (typeof b.runId !== "string" || !b.runId.length || b.runId.length > 2048)
+      return json({ status: "invalid" }, 400);
+    return json(await stub.unreadIngress({ action: "claim", runId: b.runId }, now));
+  }
+  if (pathname === "/runs/ingress/unread") {
+    if (
+      typeof b.organization !== "string" ||
+      !b.organization.length ||
+      b.organization.length > 2048 ||
+      !Number.isInteger(b.limit) ||
+      Number(b.limit) < 1 ||
+      Number(b.limit) > 100
+    )
+      return json({ status: "invalid" }, 400);
+    return json(await stub.ingressUnread(b.organization, Number(b.limit), now));
+  }
+  if (pathname === "/runs/ingress/finish") {
+    const request = ingressSettlementSchema.safeParse(b.request);
+    if (!request.success) return json({ status: "invalid" }, 400);
+    return json(await stub.ingress({ action: "finish", request: request.data }, now));
+  }
+  if (pathname === "/runs/ingress/read" || pathname === "/runs/ingress/clear") {
+    if (typeof b.effectKey !== "string" || !b.effectKey.length || b.effectKey.length > 2048)
+      return json({ status: "invalid" }, 400);
+    return json(
+      await stub.ingress({ action: pathname.endsWith("clear") ? "clear" : "read", effectKey: b.effectKey }, now),
+    );
+  }
   if (pathname === "/runs/cancellation/read") {
     const cancellation = cancellationOf(b.cancellation);
     if (!cancellation) return json({ error: "invalid cancellation" }, 400);
@@ -12953,7 +13307,6 @@ async function handleLedger(
     const result = await stub.finishCancellation(cancellation, parsed.value.record, parsed.value.point);
     return json(result, result.ok ? 200 : 409);
   }
-  const now = systemClock();
   const stateWitness =
     pathname === "/runs/state" && originalBody !== undefined
       ? await storeRequestWitness(pathname, originalBody)
@@ -13240,20 +13593,13 @@ async function handleLedger(
     return json({ link: await stub.getMainTask(b.key) });
   }
   if (pathname === "/runs/coordinator/requester-turn/record") {
-    if (!isRequesterTurnInput(b.input)) return json({ error: "input must name one verified Slack turn" }, 400);
+    if (!isRequesterTurnInput(b.input)) return json({ error: "input must name one verified requester turn" }, 400);
     const r = await stub.recordRequesterTurn(b.input);
     return r.ok ? json(r) : json(r, 409);
   }
   if (pathname === "/runs/coordinator/requester-turn/latest") {
-    const key = b.key as { threadKey?: unknown; requesterId?: unknown } | undefined;
-    if (
-      !key ||
-      typeof key.threadKey !== "string" ||
-      !/^slack:[CDG][A-Za-z0-9]+:\d+(?:\.\d+)?$/.test(key.threadKey) ||
-      typeof key.requesterId !== "string" ||
-      !/^slack:[UW][A-Za-z0-9]+$/.test(key.requesterId)
-    )
-      return json({ error: "key must name one requester in a Slack DM" }, 400);
+    const key = b.key;
+    if (!isRequesterKey(key)) return json({ error: "key must name one verified requester turn" }, 400);
     return json({ turn: await stub.latestRequesterTurn({ threadKey: key.threadKey, requesterId: key.requesterId }) });
   }
   if (
@@ -13468,10 +13814,22 @@ async function handleLedger(
         )
           return json({ error: "expectedRecovery must name an active exact action and Workflow" }, 400);
       }
+      if (b.question !== undefined) {
+        const guard = b.question as QuestionAnswerGuard;
+        if (
+          !guard ||
+          typeof guard !== "object" ||
+          Array.isArray(guard) ||
+          Object.keys(guard).length !== 1 ||
+          !isHumanGatePending(guard.expectedQuestion) ||
+          b.requireActive !== true
+        )
+          return json({ error: "question must name the complete current question" }, 400);
+      }
       // The store assigns the sequence and the consumer: a caller's `seq` or
       // `consumedBy` is dropped, so no row is born consumed in its JSON while
       // its column still lists it unconsumed.
-      const { seq: _ignored, consumedBy: _fresh, ...event } = b.event as ThreadEvent;
+      const { seq: _ignored, consumedBy: _fresh, questionDigest: _untrustedClaim, ...event } = b.event as ThreadEvent;
       const r = await stub.appendUnitEvent(
         b.instanceId,
         b.unit,
@@ -13479,6 +13837,7 @@ async function handleLedger(
         b.requireActive === true,
         b.binding as MainTaskBinding | undefined,
         b.expectedRecovery as { actionId: string; workflowId: string } | undefined,
+        b.question as QuestionAnswerGuard | undefined,
       );
       if (!r.ok) return json(r, 409);
       console.log(`[runs/coordinator/events/append] ${key.value} ${b.instanceId}:${b.unit} seq ${r.seq}`);

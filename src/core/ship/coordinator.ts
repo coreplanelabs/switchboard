@@ -238,7 +238,7 @@ export function planInstanceId(planId: string, attempt = 1): string {
 // A compact sha-256 (FIPS 180-4) in plain TypeScript: this module is imported
 // by the shim Worker, whose runtime has no `node:crypto`, so the generated
 // plan id's hash cannot come from the Node API the preflight once used.
-function sha256Hex(text: string): string {
+export function sha256Hex(text: string): string {
   const K = new Uint32Array([
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98,
     0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
@@ -546,6 +546,9 @@ export interface PrRef {
  * findings and the pull request survive the wait; `reviewRunId` is absent when
  * an adopted attempt recovered the question from GitHub's verdict marker. */
 export interface HumanGatePending {
+  /** Explicit actor assigned by the original owner when this question is first persisted.
+   * Legacy questions without an assignment remain unknown. */
+  assignedTo?: string;
   pr: PrRef;
   round: number;
   findings: Finding[];

@@ -279,6 +279,16 @@ export interface ConfirmationOffer {
 }
 
 export interface ChannelIO {
+  /** Re-read current retained private history for this exact original owned input. Never a cached seed. */
+  /** Restore this exact consumed input's fresh Actor and receipt sink; absent proof holds it. */
+  rehostOrganizationInput?(request: IncomingMessage): Promise<{ msg: IncomingMessage; io: ChannelIO } | undefined>;
+  authoritativePrivateHistory?(request?: IncomingMessage): Promise<import("./dispatch/textTurns.js").TextTurn[]>;
+  /** Server-proved private browser destination; absent on shared or machine surfaces. */
+  organizationPrivateAudience?(): import("./dispatch/privateDestination.js").OrganizationPrivateAudience | undefined;
+  /** Re-proves the exact original source, current binding, grants and private reply address. */
+  verifyOrganizationPrivateAudience?(
+    audience: import("./dispatch/privateDestination.js").OrganizationPrivateAudience,
+  ): Promise<AudienceCheck>;
   /** Post a reply in the conversation. Adapter handles chunking/formatting. */
   reply(text: string): Promise<void>;
   /** A one-person destination proved by the adapter's own reply address.
@@ -290,6 +300,8 @@ export interface ChannelIO {
    * internal spawn identity against the original DM before reading its log.
    * Slack adapters never provide this internal capability. */
   verifyPrivateWorkerAudience?(request: IncomingMessage): Promise<AudienceCheck>;
+  /** Protected original requester address after validating the saved unit and spawn. */
+  privateWorkerDestination?(): Promise<import("./dispatch/privateDestination.js").PrivateDestination | undefined>;
   /**
    * Present when this channel has nowhere to deliver a reply (the resumed-run
    * null channel, docs/reference/specs/run-history.md item 38): the reason, e.g.

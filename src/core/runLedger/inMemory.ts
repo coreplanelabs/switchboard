@@ -6,6 +6,18 @@ import {
   type InboxDeliveryReceipt,
 } from "./inboxDelivery.js";
 import { parseStoredJson } from "../storedJson.js";
+import { holdUnreadIngress } from "./unreadIngress.js";
+import {
+  consumeIngress,
+  claimUnreadIngress,
+  type UnreadIngressProof,
+  finishIngress,
+  retainedIngress,
+  type IngressRecord,
+  type IngressRequest,
+  type IngressSettlement,
+  type IngressResult,
+} from "./ingress.js";
 import {
   captureCheckArchive,
   hasRecordedCheckEvidence,
@@ -62,7 +74,13 @@ import {
   type PromotionConfirmationResult,
 } from "./seedVerification.js";
 import { bindInboxCustody, type InboxPushResult } from "./inboxMessage.js";
-import { closeInboxSegment, encodeInboxSegment, inboxSegmentFloor, type StepHistory } from "./inboxSegment.js";
+import {
+  closedInboxUnreadStep,
+  closeInboxSegment,
+  encodeInboxSegment,
+  inboxSegmentFloor,
+  type StepHistory,
+} from "./inboxSegment.js";
 import {
   sourceSeedReferenceOf,
   sourceSeedReceiptOf,
@@ -307,6 +325,161 @@ const TRIM_MARKER_BYTES_ESTIMATE = 260;
 
 export class InMemoryRunLedger implements RunLedger {
   readonly reviewFeedback = new InMemoryReviewFeedbackStore(() => this.now());
+  private readonly ingress = new Map<string, IngressRecord>();
+  private readonly deletedIngress = new Set<string>();
+  private readonly unreadCursor = new Map<string, string>();
+  private readonly ingressRuns = new Map<string, string>();
+  async holdUnreadIngress(proof: UnreadIngressProof): Promise<IngressResult> {
+    const key = this.ingressRuns.get(proof.ingressRunId);
+    if (!key) return { status: "not_found" };
+    const receiver = this.live.get(proof.receiverRunId);
+    if (
+      (receiver && receiver.ownerGen !== proof.receiverGen) ||
+      (!receiver &&
+        (!this.finished.has(proof.receiverRunId) ||
+          this.finished.get(proof.receiverRunId)?.restarting ||
+          this.finished.get(proof.receiverRunId)?.provisional)) ||
+      this.live.has(proof.ingressRunId) ||
+      this.finished.has(proof.ingressRunId)
+    )
+      return { status: "fenced" };
+    const prior = this.ingress.get(key) ?? null;
+    // A committed handback already proved custody and unreadness. Its exact
+    // retry reads that retained disposition rather than proving a new handback.
+    if (prior?.unread) return structuredClone(holdUnreadIngress(prior, proof, undefined, null, this.now()));
+    const item = this.inbox.get(proof.receiverRunId)?.find((item) => item.seq === proof.inboxSeq);
+    const history = this.steps.get(proof.receiverRunId);
+    const terminal = this.finished.get(proof.receiverRunId);
+    const closed =
+      !receiver && terminal
+        ? closedInboxUnreadStep(history?.inboxSegmentArchive, {
+            runId: proof.receiverRunId,
+            gen: proof.receiverGen,
+            channelId: terminal.channelId,
+            threadKey: terminal.threadKey,
+            requester: terminal.userId,
+            startedAt: terminal.startedAt,
+            inboxSeq: proof.inboxSeq,
+          })
+        : undefined;
+    if (!receiver && !closed) return { status: "fenced" };
+    const result = holdUnreadIngress(
+      this.ingress.get(key) ?? null,
+      proof,
+      item,
+      receiver ? (history?.at(-1) ?? null) : closed!.lastStep,
+      this.now(),
+    );
+    if (result.status === "record") {
+      this.ingress.set(key, structuredClone(result.record));
+      if (item) item.message.organizationUnreadReleased = true;
+    }
+    return result;
+  }
+  async claimUnreadIngress(runId: string): Promise<IngressResult> {
+    const key = this.ingressRuns.get(runId);
+    if (!key) return { status: "not_found" };
+    const record = this.ingress.get(key)!;
+    const receiver = record.unread?.receiverRunId;
+    if (
+      !receiver ||
+      this.live.has(receiver) ||
+      !this.finished.has(receiver) ||
+      this.finished.get(receiver)?.restarting ||
+      this.finished.get(receiver)?.provisional ||
+      this.live.has(runId) ||
+      this.finished.has(runId)
+    )
+      return { status: "fenced" };
+    const result = claimUnreadIngress(record, this.now());
+    if (result.status === "claimed") this.ingress.set(key, structuredClone(result.record));
+    return result;
+  }
+  async pendingUnreadIngress(organization: string, limit: number): Promise<IngressResult> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) return { status: "invalid" };
+    const eligible = [...this.ingress.values()]
+      .filter(
+        (record) =>
+          record.origin?.organization === organization &&
+          record.unread?.status === "pending" &&
+          record.status === "uncertain" &&
+          !record.refusalPending &&
+          record.request !== null &&
+          record.contentExpiresAt > this.now() &&
+          record.originExpiresAt !== undefined &&
+          record.originExpiresAt > this.now(),
+      )
+      .sort((a, b) => (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
+    const cursor = this.unreadCursor.get(organization) ?? "";
+    const records = [
+      ...eligible.filter((record) => record.runId > cursor),
+      ...eligible.filter((record) => record.runId <= cursor),
+    ].slice(0, limit);
+    if (records.length) this.unreadCursor.set(organization, records.at(-1)!.runId);
+    return { status: "unread", records: records.map((record) => retainedIngress(record, this.now())) };
+  }
+
+  async consumeIngress(request: IngressRequest): Promise<IngressResult> {
+    if (this.deletedIngress.has(request.effectKey) && !this.ingress.has(request.effectKey)) return { status: "fenced" };
+    const result = consumeIngress(this.ingress.get(request.effectKey) ?? null, request, this.now());
+    if (result.status === "claimed" || result.status === "duplicate")
+      this.ingress.set(request.effectKey, structuredClone(result.record));
+    if (result.status === "claimed") this.ingressRuns.set(result.record.runId, request.effectKey);
+    return result;
+  }
+  async readIngress(effectKey: string): Promise<IngressResult> {
+    const prior = this.ingress.get(effectKey);
+    if (!prior) return { status: "not_found" };
+    const record = retainedIngress(prior, this.now());
+    this.ingress.set(effectKey, record);
+    return { status: "record", record: structuredClone(record) };
+  }
+  async readIngressByRun(runId: string): Promise<IngressResult> {
+    const key = this.ingressRuns.get(runId);
+    if (!key) return { status: "not_found" };
+    const original = await this.readIngress(key);
+    if (
+      original.status === "record" &&
+      (!original.record.origin ||
+        original.record.originExpiresAt === undefined ||
+        original.record.originExpiresAt <= this.now())
+    )
+      return { status: "fenced" };
+    return original;
+  }
+  async pendingIngressRefusals(organization: string, limit: number): Promise<IngressResult> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) return { status: "invalid" };
+    return {
+      status: "refusals",
+      records: [...this.ingress.values()]
+        .filter((record) => record.origin?.organization === organization && record.refusalPending === true)
+        .slice(0, limit)
+        .map((record) => retainedIngress(record, this.now())),
+    };
+  }
+  async ackIngressRefusal(input: Pick<IngressSettlement, "effectKey" | "digest" | "runId">): Promise<IngressResult> {
+    const prior = this.ingress.get(input.effectKey);
+    if (!prior) return { status: "not_found" };
+    if (prior.runId !== input.runId || prior.digest !== input.digest) return { status: "fenced" };
+    // No await between current read and field mutation: cleanup must not
+    // reinstall an older request, completion or continuation disposition.
+    const record = { ...retainedIngress(prior, this.now()), refusalPending: false };
+    this.ingress.set(input.effectKey, record);
+    return { status: "record", record: structuredClone(record) };
+  }
+  async clearIngressContent(effectKey: string): Promise<IngressResult> {
+    this.deletedIngress.add(effectKey);
+    const prior = this.ingress.get(effectKey);
+    if (!prior) return { status: "not_found" };
+    const record = { ...retainedIngress(prior, this.now()), request: null };
+    this.ingress.set(effectKey, record);
+    return { status: "record", record: structuredClone(record) };
+  }
+  async finishIngress(request: IngressSettlement): Promise<IngressResult> {
+    const result = finishIngress(this.ingress.get(request.effectKey) ?? null, request, this.now());
+    if (result.status === "record") this.ingress.set(request.effectKey, structuredClone(result.record));
+    return result;
+  }
   originalPromotionBody(request: ClaimRequest): string {
     return JSON.stringify({ storeKey: RUN_STORE_KEY, run: request });
   }
@@ -1965,7 +2138,9 @@ export class InMemoryRunLedger implements RunLedger {
   async readInbox(runId: string, afterSeq: number): Promise<InboxItem[]> {
     const row = this.live.get(runId);
     const floor = row ? inboxSegmentFloor(this.steps.get(runId)?.inboxSegmentArchive, row) : 0;
-    return (this.inbox.get(runId) ?? []).filter((i) => floor !== undefined && i.seq > Math.max(afterSeq, floor));
+    return (this.inbox.get(runId) ?? []).filter(
+      (i) => floor !== undefined && i.seq > Math.max(afterSeq, floor) && i.message.organizationUnreadReleased !== true,
+    );
   }
 
   private prepareInboxSegment(runId: string): StepHistory {

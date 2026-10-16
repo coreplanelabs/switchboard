@@ -518,6 +518,8 @@ export interface AdoptRunRequest {
 }
 
 export interface LedgerWriteThrough {
+  holdUnreadIngress(proof: import("./ingress.js").UnreadIngressProof): Promise<import("./ingress.js").IngressResult>;
+  claimUnreadIngress(runId: string): Promise<import("./ingress.js").IngressResult>;
   /** False only for the explicit no-ledger implementation, never for an outage. */
   readonly sessionPersistence: boolean;
   readonly gen: string;
@@ -635,6 +637,14 @@ export class NullLedgerWriteThrough implements LedgerWriteThrough {
     readonly gen: string,
     private readonly fallback: RecordSink,
   ) {}
+  async holdUnreadIngress(
+    _proof: import("./ingress.js").UnreadIngressProof,
+  ): Promise<import("./ingress.js").IngressResult> {
+    return { status: "fenced" };
+  }
+  async claimUnreadIngress(_runId: string): Promise<import("./ingress.js").IngressResult> {
+    return { status: "fenced" };
+  }
   async claimResident(_runId: string, _threadKey: string): Promise<number | undefined> {
     return undefined;
   }
@@ -2967,6 +2977,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       }
     },
 
+    holdUnreadIngress: (proof) => ledger.holdUnreadIngress(proof),
+    claimUnreadIngress: (runId) => ledger.claimUnreadIngress(runId),
     async readInbox(runId, afterSeq) {
       try {
         return await ledger.readInbox(runId, afterSeq);

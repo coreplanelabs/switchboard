@@ -24,7 +24,7 @@ import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test"
 import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it, vi } from "vitest";
 import type { RunRecord } from "../../src/core/runRecord.ts";
-import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
+import { FRICTION_CATEGORIES, analyzeRunFriction } from "../../src/core/runFriction.ts";
 import { LEASE_MS, type LiveRunRow, type AppendableEvent } from "../../src/core/runLedger/types.ts";
 import type { CoordinatorInstance, CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
 import {
@@ -79,6 +79,514 @@ import { githubFileTool } from "../../src/tools/github.ts";
 import type { ToolContext } from "../../src/tools/runnableTool.ts";
 import { InMemoryGithubApi } from "../../src/execution/githubApi.ts";
 import { mergeContextDependencies } from "../../src/core/references/contextDependencies.ts";
+
+const unreadOrigin = {
+  version: 1 as const,
+  organization: "org:test",
+  source: "http" as const,
+  sourceEvent: "original",
+  key: "once",
+  digest: "a".repeat(64),
+  actor: {
+    identity: { issuer: "http:test", tenant: null, subject: "alice" },
+    kind: "human" as const,
+    principal: "access:alice",
+    stream: "stream:alice",
+    bindingRevision: 0,
+    onBehalfOf: null,
+  },
+  destination: { kind: "broad" as const },
+  workload: "message" as const,
+  target: null,
+  content: "",
+  context: [],
+  sourceReference: {
+    actorId: "access:alice",
+    userId: "access:alice",
+    channelId: "http:home",
+    threadKey: "http:home:alice",
+    credentialDigest: "c".repeat(64),
+    messageId: "exact-original",
+  },
+};
+describe("original ingress SQLite owner", () => {
+  it("reconciles a lost unread handback acknowledgement after a step-free terminal closure", async () => {
+    const storeKey = crypto.randomUUID();
+    const client = () =>
+      new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "test-token",
+        storeKey,
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+    const ledger = client();
+    const startedAt = Date.now();
+    const owned = await ledger.consumeIngress({
+      effectKey: "lost-handback-ack",
+      digest: "a".repeat(64),
+      requester: "access:alice",
+      threadKey: "http:home:alice",
+      request: { text: "Original unread input" },
+      contentExpiresAt: startedAt + 90000,
+    });
+    if (owned.status !== "claimed") throw new Error("not claimed");
+    await ledger.claim({
+      runId: "receiver",
+      gen: "g",
+      threadKey: "http:home:alice",
+      leaseMs: 30000,
+      startedAt,
+      meta: { channelId: "http:home", userId: "access:alice", threadKey: "http:home:alice" },
+      system: "",
+      tools: [],
+      card: null,
+    });
+    const { withOriginalOrganizationDispatch } = await import("../../src/core/dispatch/originalOrganizationInput.ts");
+    const { durableInboxMessage } = await import("../../src/core/runLedger/inboxMessage.ts");
+    const msg = withOriginalOrganizationDispatch(
+      { channelId: "http:home", userId: "access:alice", threadKey: "http:home:alice", text: "Original unread input" },
+      { ingressRunId: owned.record.runId, organizationSequence: 7 },
+    );
+    await ledger.pushInbox("receiver", durableInboxMessage(msg, msg.text, startedAt));
+    const proof = { ingressRunId: owned.record.runId, receiverRunId: "receiver", receiverGen: "g", inboxSeq: 1 };
+    const held = await ledger.holdUnreadIngress(proof);
+    expect(held).toMatchObject({ status: "record", record: { unread: { status: "pending" } } });
+    expect(
+      await ledger.finish("receiver", "g", {
+        id: "receiver",
+        channelId: "http:home",
+        userId: "access:alice",
+        threadKey: "http:home:alice",
+        channelVisibility: "unknown",
+        startedAt,
+        finishedAt: Date.now(),
+        status: "completed",
+        eventCount: 0,
+        storedEventCount: 0,
+        truncated: false,
+        events: [],
+        diagnosis: analyzeRunFriction([]),
+      }),
+    ).toMatchObject({ ok: true });
+    const replacement = client();
+    expect(await replacement.holdUnreadIngress(proof)).toEqual(held);
+    const claimed = await replacement.claimUnreadIngress(owned.record.runId);
+    expect(claimed).toMatchObject({ status: "claimed", record: { unread: { status: "claimed" } } });
+    if (claimed.status !== "claimed") throw new Error("not claimed");
+    expect(await client().holdUnreadIngress(proof)).toEqual({ status: "record", record: claimed.record });
+    expect(await client().claimUnreadIngress(owned.record.runId)).toEqual({ status: "fenced" });
+    expect(await replacement.holdUnreadIngress({ ...proof, inboxSeq: 2 })).toEqual({ status: "fenced" });
+    expect(await replacement.holdUnreadIngress({ ...proof, receiverGen: "another" })).toEqual({ status: "fenced" });
+    await replacement.clearIngressContent("lost-handback-ack");
+    expect(await replacement.holdUnreadIngress(proof)).toEqual({ status: "fenced" });
+  });
+  it.each(["consumed", "missing", "malformed", "foreign generation", "deferred"])(
+    "validates archived terminal unread proof through SQLite and a replacement client: %s",
+    async (mode) => {
+      const storeKey = crypto.randomUUID();
+      const client = () =>
+        new WorkerRunLedger({
+          baseUrl: "https://memory.test",
+          token: "test-token",
+          storeKey,
+          fetch: (input, init) => fetchMemoryTest(String(input), init),
+        });
+      const ledger = client();
+      const owned = await ledger.consumeIngress({
+        effectKey: "terminal-proof",
+        digest: "a".repeat(64),
+        requester: "access:alice",
+        threadKey: "http:home:alice",
+        request: { text: "Original unread input" },
+        contentExpiresAt: Date.now() + 90000,
+      });
+      if (owned.status !== "claimed") throw new Error("not claimed");
+      const startedAt = Date.now();
+      await ledger.claim({
+        runId: "receiver",
+        gen: "g",
+        threadKey: "http:home:alice",
+        leaseMs: 30000,
+        startedAt,
+        meta: { channelId: "http:home", userId: "access:alice", threadKey: "http:home:alice" },
+        system: "",
+        tools: [],
+        card: null,
+      });
+      const { withOriginalOrganizationDispatch } = await import("../../src/core/dispatch/originalOrganizationInput.ts");
+      const { durableInboxMessage } = await import("../../src/core/runLedger/inboxMessage.ts");
+      const msg = withOriginalOrganizationDispatch(
+        { channelId: "http:home", userId: "access:alice", threadKey: "http:home:alice", text: "Original unread input" },
+        { ingressRunId: owned.record.runId, organizationSequence: 7 },
+      );
+      await ledger.pushInbox("receiver", durableInboxMessage(msg, msg.text, startedAt));
+      const stepped = await fetchMemoryTest("https://memory.test/runs/step", {
+        method: "POST",
+        headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+        body: JSON.stringify({
+          storeKey,
+          runId: "receiver",
+          gen: "g",
+          record: {
+            step: 0,
+            seq: 0,
+            turnIndex: 0,
+            inFlight: [],
+            inboxConsumedSeq: 1,
+            ...(mode === "deferred" ? { inboxDeferredSeqs: [1] } : {}),
+            remainingMs: 1,
+            turn: 0,
+            iteration: 0,
+          },
+        }),
+      });
+      expect(await stepped.json()).toMatchObject({ ok: true });
+      expect(
+        await ledger.finish("receiver", "g", {
+          id: "receiver",
+          channelId: "http:home",
+          userId: "access:alice",
+          threadKey: "http:home:alice",
+          channelVisibility: "unknown",
+          startedAt,
+          finishedAt: Date.now(),
+          status: "completed",
+          eventCount: 0,
+          storedEventCount: 0,
+          truncated: false,
+          events: [],
+          diagnosis: analyzeRunFriction([]),
+        }),
+      ).toMatchObject({ ok: true });
+      if (mode !== "consumed" && mode !== "deferred") {
+        const stub = env.RUNS.get(env.RUNS.idFromName(storeKey));
+        await runInDurableObject(stub, async (instance: RunHistoryDO) => {
+          if (mode === "missing") instance.sql.exec("DELETE FROM run_steps WHERE run_id = ? AND step = -1", "receiver");
+          else if (mode === "malformed")
+            instance.sql.exec(
+              "UPDATE run_steps SET json = ? WHERE run_id = ? AND step = -1",
+              JSON.stringify({ version: 1, kind: "closed-inbox-segment" }),
+              "receiver",
+            );
+          else
+            instance.sql.exec(
+              "UPDATE run_steps SET json = json_set(json, '$.latest.owner.gen', 'foreign') WHERE run_id = ? AND step = -1",
+              "receiver",
+            );
+        });
+      }
+      const result = await client().holdUnreadIngress({
+        ingressRunId: owned.record.runId,
+        receiverRunId: "receiver",
+        receiverGen: "g",
+        inboxSeq: 1,
+      });
+      expect(result).toMatchObject(
+        mode === "deferred" ? { status: "record", record: { unread: { status: "pending" } } } : { status: "fenced" },
+      );
+      expect(await client().readIngress("terminal-proof")).toMatchObject({
+        status: "record",
+        record: { request: { text: "Original unread input" } },
+      });
+    },
+  );
+  it("keeps completion and content deletion final through late settlement and concurrent cleanup", async () => {
+    const storeKey = crypto.randomUUID();
+    const client = () =>
+      new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "test-token",
+        storeKey,
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+    const ledger = client();
+    const owned = await ledger.consumeIngress({
+      effectKey: "completed-owner",
+      digest: "a".repeat(64),
+      requester: "access:alice",
+      threadKey: "http:home:alice",
+      request: { text: "Original request" },
+      contentExpiresAt: Date.now() + 90000,
+    });
+    if (owned.status !== "claimed") throw new Error("not claimed");
+    const identity = { effectKey: "completed-owner", digest: "a".repeat(64), runId: owned.record.runId };
+    await ledger.finishIngress({ ...identity, status: "completed", outcome: "Original effect completed." });
+    await client().finishIngress({
+      ...identity,
+      status: "uncertain",
+      outcome: "Late no-effect guess",
+      refusalPending: true,
+    });
+    await Promise.all([client().ackIngressRefusal(identity), client().clearIngressContent("completed-owner")]);
+    expect(await client().readIngress("completed-owner")).toMatchObject({
+      status: "record",
+      record: { request: null, status: "completed", outcome: "Original effect completed." },
+    });
+  });
+
+  it("returns an exact unread item durably and claims the same original input once across clients", async () => {
+    const storeKey = crypto.randomUUID();
+    const client = () =>
+      new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "test-token",
+        storeKey,
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+    const a = client();
+    const original = await a.consumeIngress({
+      effectKey: "unread-source",
+      digest: "a".repeat(64),
+      requester: "access:alice",
+      threadKey: "http:home:alice",
+      request: { text: "Unread original input" },
+      contentExpiresAt: Date.now() + 90000,
+      origin: unreadOrigin,
+      originExpiresAt: Date.now() + 365000,
+    });
+    if (original.status !== "claimed") throw new Error("not admitted");
+    await a.claim({
+      runId: "receiver",
+      gen: "old-owner",
+      threadKey: "http:home:alice",
+      leaseMs: 30000,
+      startedAt: Date.now(),
+      meta: { channelId: "http:home", userId: "access:alice", threadKey: "http:home:alice" },
+      system: "",
+      tools: [],
+      card: null,
+    });
+    const { withOriginalOrganizationDispatch } = await import("../../src/core/dispatch/originalOrganizationInput.ts");
+    const { durableInboxMessage } = await import("../../src/core/runLedger/inboxMessage.ts");
+    const msg = withOriginalOrganizationDispatch(
+      {
+        channelId: "http:home",
+        userId: "access:alice",
+        threadKey: "http:home:alice",
+        messageId: "exact-original",
+        text: "Unread original input",
+      },
+      { ingressRunId: original.record.runId, organizationSequence: 7 },
+    );
+    const item = await a.pushInbox("receiver", durableInboxMessage(msg, msg.text, 1));
+    const proof = {
+      ingressRunId: original.record.runId,
+      receiverRunId: "receiver",
+      receiverGen: "old-owner",
+      inboxSeq: item.seq!,
+    };
+    expect(await a.holdUnreadIngress({ ...proof, receiverGen: "different-owner" })).toEqual({ status: "fenced" });
+    expect(await a.holdUnreadIngress(proof)).toMatchObject({
+      status: "record",
+      record: { runId: original.record.runId, unread: { status: "pending" } },
+    });
+    expect(await client().readInbox("receiver", 0)).toEqual([]);
+    expect(await client().claimUnreadIngress(original.record.runId)).toEqual({ status: "fenced" });
+    await a.finish("receiver", "old-owner", {
+      id: "receiver",
+      channelId: "http:home",
+      userId: "access:alice",
+      threadKey: "http:home:alice",
+      channelVisibility: "unknown",
+      startedAt: Date.now(),
+      finishedAt: Date.now(),
+      status: "completed",
+      eventCount: 0,
+      storedEventCount: 0,
+      truncated: false,
+      events: [],
+      diagnosis: analyzeRunFriction([]),
+    });
+    const other = await client().consumeIngress({
+      effectKey: "other-unread-source",
+      digest: "a".repeat(64),
+      requester: "access:alice",
+      threadKey: "http:home:alice",
+      request: { text: "Second unread input" },
+      origin: { ...unreadOrigin, key: "other" },
+      originExpiresAt: Date.now() + 365000,
+      contentExpiresAt: Date.now() + 90000,
+    });
+    if (other.status !== "claimed") throw new Error("No second original owner");
+    await a.claim({
+      runId: "other-receiver",
+      gen: "old-owner",
+      threadKey: "http:home:alice",
+      leaseMs: 30000,
+      startedAt: Date.now(),
+      meta: { channelId: "http:home", userId: "access:alice", threadKey: "http:home:alice" },
+      system: "",
+      tools: [],
+      card: null,
+    });
+    const otherMsg = withOriginalOrganizationDispatch(
+      { ...msg, text: "Second unread input" },
+      { ingressRunId: other.record.runId, organizationSequence: 8 },
+    );
+    const otherItem = await a.pushInbox("other-receiver", durableInboxMessage(otherMsg, otherMsg.text, 1));
+    expect(
+      await a.holdUnreadIngress({
+        ingressRunId: other.record.runId,
+        receiverRunId: "other-receiver",
+        receiverGen: "old-owner",
+        inboxSeq: otherItem.seq!,
+      }),
+    ).toMatchObject({ status: "record", record: { unread: { status: "pending" } } });
+    const firstPage = await client().pendingUnreadIngress("org:test", 1),
+      secondPage = await client().pendingUnreadIngress("org:test", 1);
+    if (firstPage.status !== "unread" || secondPage.status !== "unread") throw new Error("No repair pages");
+    expect([...firstPage.records, ...secondPage.records].map((record) => record.effectKey).sort()).toEqual([
+      "other-unread-source",
+      "unread-source",
+    ]);
+    expect(await client().pendingUnreadIngress("org:test", 1)).toMatchObject({
+      status: "unread",
+      records: [{ runId: firstPage.records[0]!.runId }],
+    });
+    await a.finish("other-receiver", "old-owner", {
+      id: "other-receiver",
+      channelId: "http:home",
+      userId: "access:alice",
+      threadKey: "http:home:alice",
+      channelVisibility: "unknown",
+      startedAt: Date.now(),
+      finishedAt: Date.now(),
+      status: "completed",
+      eventCount: 0,
+      storedEventCount: 0,
+      truncated: false,
+      events: [],
+      diagnosis: analyzeRunFriction([]),
+    });
+    await a.finishIngress({
+      effectKey: "other-unread-source",
+      digest: "a".repeat(64),
+      runId: other.record.runId,
+      status: "completed",
+      outcome: "The original canonical owner completed without a physical model run.",
+    });
+    expect(await client().claimUnreadIngress(other.record.runId)).toEqual({ status: "fenced" });
+    expect(await client().claimUnreadIngress(original.record.runId)).toMatchObject({
+      status: "claimed",
+      record: {
+        runId: original.record.runId,
+        unread: { status: "claimed" },
+        request: { text: "Unread original input" },
+      },
+    });
+    expect(await client().claimUnreadIngress(original.record.runId)).toEqual({ status: "fenced" });
+    expect(await client().readIngress("unread-source")).toMatchObject({
+      status: "record",
+      record: { status: "uncertain", unread: { status: "claimed" } },
+    });
+  });
+
+  it("preserves original request and run identity across clients and refuses replay without a run", async () => {
+    const key = crypto.randomUUID();
+    const client = () =>
+      new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "test-token",
+        storeKey: key,
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+    const request = {
+      effectKey: "organization:original:1",
+      digest: "a".repeat(64),
+      requester: "access:alice",
+      threadKey: "http:home:alice",
+      request: { text: "Original request", authenticatedAs: "access:alice" },
+      contentExpiresAt: Date.now() + 90_000,
+      originExpiresAt: Date.now() + 365_000,
+      origin: {
+        version: 1 as const,
+        organization: "org:test",
+        source: "http" as const,
+        sourceEvent: "original",
+        key: "once",
+        digest: "a".repeat(64),
+        actor: {
+          identity: { issuer: "http:test", tenant: null, subject: "alice" },
+          kind: "human" as const,
+          principal: "access:alice",
+          stream: "access:alice",
+          bindingRevision: 0,
+          onBehalfOf: null,
+        },
+        destination: { kind: "broad" as const },
+        workload: "message" as const,
+        target: null,
+        content: "",
+        context: [],
+        sourceReference: {
+          actorId: "access:alice",
+          userId: "access:alice",
+          channelId: "http:home",
+          threadKey: "http:home:alice",
+          credentialDigest: "c".repeat(64),
+        },
+      },
+    };
+    const first = await client().consumeIngress(request);
+    expect(first).toMatchObject({
+      status: "claimed",
+      record: { status: "dispatching", request: { text: "Original request" } },
+    });
+    if (first.status !== "claimed") throw new Error("not claimed");
+    expect(await client().consumeIngress(request)).toEqual({ status: "duplicate", record: first.record });
+    expect(await client().consumeIngress({ ...request, threadKey: "http:other" })).toEqual({ status: "conflict" });
+    expect(
+      await client().finishIngress({
+        effectKey: request.effectKey,
+        digest: request.digest,
+        runId: "rival",
+        status: "completed",
+        outcome: "completed",
+      }),
+    ).toEqual({ status: "fenced" });
+    expect(
+      await client().finishIngress({
+        effectKey: request.effectKey,
+        digest: request.digest,
+        runId: first.record.runId,
+        status: "uncertain",
+        outcome: "Owner admission interrupted",
+      }),
+    ).toMatchObject({ status: "record", record: { status: "uncertain", runId: first.record.runId } });
+    expect(await client().readIngress(request.effectKey)).toMatchObject({
+      status: "record",
+      record: { status: "uncertain", request: { text: "Original request" }, runId: first.record.runId },
+    });
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await runInDurableObject(stub, async (instance) => {
+      expect(
+        await instance.ingress({ action: "read", effectKey: request.effectKey }, request.contentExpiresAt),
+      ).toMatchObject({ status: "record", record: { request: null, runId: first.record.runId } });
+    });
+    expect(await client().consumeIngress(request)).toMatchObject({
+      status: "duplicate",
+      record: { request: null, runId: first.record.runId },
+    });
+    expect(await client().readIngressByRun(first.record.runId)).toMatchObject({
+      status: "record",
+      record: {
+        request: null,
+        origin: { sourceReference: { credentialDigest: "c".repeat(64) }, content: "", context: [] },
+      },
+    });
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE ingress_owners SET data = json_set(data, '$.originExpiresAt', 1) WHERE effect_key = ?",
+        request.effectKey,
+      );
+    });
+    expect(await client().readIngressByRun(first.record.runId)).toEqual({ status: "fenced" });
+    expect(await client().clearIngressContent("deleted-before-admission")).toEqual({ status: "not_found" });
+    expect(await client().consumeIngress({ ...request, effectKey: "deleted-before-admission" })).toEqual({
+      status: "fenced",
+    });
+  });
+});
 
 // The check producer imports the unused LocalExecutor environment helper.
 // Workerd has no host secret manifest; no local execution uses this stub.
@@ -6049,6 +6557,25 @@ describe("run ledger — the coordinator instance record (item 49)", () => {
 // decision-record reservations survive bot-process restarts in the state Worker,
 // with already-persisted unit and run rows included in the claim set.
 describe("run ledger — main-agent task claims", () => {
+  it("orders opaque browser turns by original admission and reads the same current requester after client replacement", async () => {
+    const key = storeKey();
+    const identity = { threadKey: "http:home:alice", requesterId: "access:alice" };
+    const record = (messageId: string) =>
+      post("/runs/coordinator/requester-turn/record", { storeKey: key, input: { ...identity, messageId } });
+    expect((await record("browser:7:opaque-first")).data).toMatchObject({
+      ok: true,
+      turn: { revision: 1, messageId: "browser:7:opaque-first" },
+    });
+    expect(
+      (await post("/runs/coordinator/requester-turn/latest", { storeKey: key, key: identity })).data,
+    ).toMatchObject({ turn: { ...identity, revision: 1, messageId: "browser:7:opaque-first" } });
+    expect((await record("browser:9:opaque-second")).data).toMatchObject({ ok: true, turn: { revision: 2 } });
+    expect((await record("browser:7:opaque-first")).status).toBe(409);
+    expect((await record("browser:9:different-input")).status).toBe(409);
+    expect(
+      (await post("/runs/coordinator/requester-turn/latest", { storeKey: key, key: identity })).data,
+    ).toMatchObject({ turn: { revision: 2, messageId: "browser:9:opaque-second" } });
+  });
   it("commits a main task only at the latest private requester revision", async () => {
     const key = storeKey();
     const firstUnit = ["U", "1"].join("");
@@ -6882,6 +7409,323 @@ describe("run ledger — the coordinator's unit events (record 0051's reply-as-e
     mode: "steer",
     at: 5_000,
     ...over,
+  });
+
+  it("admits only the captured question and returns an exact saved answer after the question changes", async () => {
+    const key = storeKey();
+    const instance: CoordinatorInstance = {
+      id: INSTANCE_ID,
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:1.0",
+      repo: "acme/api",
+      branch: "work/question",
+      createdAt: 1000,
+    };
+    const question = {
+      pr: { number: 12, url: "https://github.com/acme/api/pull/12" },
+      round: 1,
+      askedAt: 2000,
+      verdict: "request_changes" as const,
+      assignedTo: "slack:UALICE",
+      findings: [
+        { id: "F1", severity: "minor" as const, file: "app.ts", title: "Choose behavior", humanGated: true as const },
+      ],
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: INSTANCE_ID,
+      unit: "U12",
+      slug: "question",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      idle: { why: "held", from: "coding", at: 2000, spendUsd: 0, renewalsLeft: 0, wakes: 0, humanGate: question },
+    };
+    const body = {
+      storeKey: key,
+      instanceId: INSTANCE_ID,
+      unit: unit.unit,
+      requireActive: true,
+      question: { expectedQuestion: question },
+    };
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [unit] })).status).toBe(200);
+    const first = event("Use the documented behavior", { id: "browser:original-key", mode: "wake" });
+    expect(await post("/runs/coordinator/events/append", { ...body, event: first })).toEqual({
+      status: 200,
+      data: { ok: true, seq: 1 },
+    });
+    expect(
+      (
+        await post("/runs/coordinator/units/put", {
+          storeKey: key,
+          units: [{ ...unit, idle: { ...unit.idle!, humanGate: { ...question, askedAt: 3000 } } }],
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      await post("/runs/coordinator/events/append", {
+        ...body,
+        event: event("An old answer", { id: "browser:later-key" }),
+      }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "stale" } });
+    expect(await post("/runs/coordinator/events/append", { ...body, event: first })).toEqual({
+      status: 200,
+      data: { ok: true, seq: 1 },
+    });
+    expect(
+      await post("/runs/coordinator/events/append", { ...body, event: { ...first, text: "Changed choice" } }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "stale" } });
+    expect((await post("/runs/coordinator/events/list", body)).data).toEqual({
+      events: [
+        { ...first, seq: 1, questionDigest: "a88d820113c78596ca3764ef2fa6dd01d23ba26283d3d48922674910e181c741" },
+      ],
+    });
+  });
+
+  it("refuses an unguarded legacy reply as a reserved question answer through the native store", async () => {
+    const key = storeKey();
+    const instance: CoordinatorInstance = {
+      id: INSTANCE_ID,
+      kind: "ship",
+      userId: "slack:UALICE",
+      channelId: "slack:C1",
+      threadKey: "slack:C1:1.0",
+      repo: "acme/api",
+      branch: "work/question",
+      createdAt: 1000,
+    };
+    const question = {
+      pr: { number: 12, url: "https://github.com/acme/api/pull/12" },
+      round: 1,
+      askedAt: 2000,
+      verdict: "request_changes" as const,
+      assignedTo: "slack:UALICE",
+      findings: [
+        { id: "F1", severity: "minor" as const, file: "app.ts", title: "Choose behavior", humanGated: true as const },
+      ],
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: INSTANCE_ID,
+      unit: "U12",
+      slug: "question",
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      idle: { why: "held", from: "coding", at: 2000, spendUsd: 0, renewalsLeft: 0, wakes: 0, humanGate: question },
+    };
+    const body = { storeKey: key, instanceId: INSTANCE_ID, unit: unit.unit, requireActive: true };
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [unit] })).status).toBe(200);
+    const legacy = event("Use the documented behavior", { id: "browser:legacy-key", mode: "wake" });
+    expect(await post("/runs/coordinator/events/append", { ...body, event: legacy })).toEqual({
+      status: 200,
+      data: { ok: true, seq: 1 },
+    });
+    expect(
+      await post("/runs/coordinator/events/append", {
+        ...body,
+        event: legacy,
+        question: { expectedQuestion: question },
+      }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "stale" } });
+    expect(
+      await post("/runs/coordinator/events/append", {
+        ...body,
+        event: legacy,
+        question: { expectedQuestion: { ...question, askedAt: 3000 } },
+      }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "stale" } });
+    const current = { ...legacy, id: "browser:guarded-key" };
+    expect(
+      await post("/runs/coordinator/events/append", {
+        ...body,
+        event: current,
+        question: { expectedQuestion: question },
+      }),
+    ).toEqual({ status: 200, data: { ok: true, seq: 2 } });
+    expect(
+      await post("/runs/coordinator/events/append", {
+        ...body,
+        event: { ...current, id: "github:losing-key" },
+        question: { expectedQuestion: question },
+      }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "stale" } });
+    expect((await post("/runs/coordinator/events/list", body)).data).toEqual({
+      events: [
+        { ...legacy, seq: 1 },
+        { ...current, seq: 2, questionDigest: "a88d820113c78596ca3764ef2fa6dd01d23ba26283d3d48922674910e181c741" },
+      ],
+    });
+  });
+
+  it("retains one canonical question winner across concurrent sources consumption and process replacement", async () => {
+    const { WorkerCoordinatorInstanceStore } = await import("../../src/core/coordinator/instanceStore.ts");
+    const key = storeKey();
+    const clients = () =>
+      new WorkerCoordinatorInstanceStore({
+        baseUrl: "https://memory.test",
+        token: "test-token",
+        storeKey: key,
+        fetch: fetchMemoryTest as typeof fetch,
+      });
+    const browser = clients(),
+      github = clients();
+    const instance: CoordinatorInstance = {
+      id: INSTANCE_ID,
+      kind: "ship",
+      userId: "slack:owner",
+      channelId: "slack:private",
+      threadKey: "slack:private:1",
+      repo: "example/app",
+      branch: "work",
+      createdAt: 1,
+    };
+    const question = {
+      pr: { number: 12, url: "https://github.com/example/app/pull/12" },
+      round: 1,
+      verdict: "request_changes" as const,
+      askedAt: 2,
+      assignedTo: "slack:owner",
+      findings: [
+        { id: "F1", severity: "minor" as const, file: "app.ts", title: "Choose behavior", humanGated: true as const },
+      ],
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "U12",
+      slug: "question",
+      branch: "work/question",
+      dependsOn: [],
+      rounds: [],
+      idle: { why: "held", from: "coding", at: 2, spendUsd: 0, renewalsLeft: 0, wakes: 0, humanGate: question },
+    };
+    const address = { instanceId: instance.id, unit: unit.unit },
+      guard = { expectedQuestion: question };
+    const inputs = [
+      {
+        id: "browser:first",
+        sender: "slack:owner",
+        authenticatedAs: "access:owner",
+        text: "First choice",
+        mode: "wake" as const,
+        at: 3,
+      },
+      {
+        id: "github:comment:13",
+        sender: "slack:owner",
+        authenticatedAs: "github:owner",
+        text: "Second choice",
+        mode: "wake" as const,
+        at: 3,
+      },
+    ];
+    expect(await browser.put(instance)).toEqual({ ok: true });
+    expect(await browser.putUnits([unit])).toEqual({ ok: true });
+    const raced = await Promise.all([
+      browser.appendEvent(address, inputs[0]!, true, undefined, undefined, guard),
+      github.appendEvent(address, inputs[1]!, true, undefined, undefined, guard),
+    ]);
+    expect(raced.filter((result) => result.ok)).toEqual([{ ok: true, seq: 1 }]);
+    expect(raced.filter((result) => !result.ok)).toEqual([{ ok: false, reason: "stale" }]);
+    const winner = raced[0]!.ok ? inputs[0]! : inputs[1]!;
+    const replacement = clients();
+    expect(await replacement.listEvents(address)).toEqual([
+      { ...winner, seq: 1, questionDigest: "b9257372a2332f7167a46c8cd6a3eb21a918e80af2da4c90f8d31f07d1c650a3" },
+    ]);
+    expect(await replacement.markConsumed(address, [1], "original-unit-run")).toEqual({ ok: true });
+    const { idle: _cleared, ...cleared } = unit;
+    expect(await replacement.putUnits([cleared])).toEqual({ ok: true });
+    expect(await replacement.listEvents(address, true)).toEqual([]);
+    expect(await replacement.putUnits([unit])).toEqual({ ok: true });
+    expect(
+      await replacement.appendEvent(address, { ...winner, id: "github:third" }, true, undefined, undefined, guard),
+    ).toEqual({ ok: false, reason: "stale" });
+    expect(
+      await replacement.putUnits([{ ...cleared, ending: { kind: "closed", at: 4, report: "Question ended" } }]),
+    ).toEqual({ ok: true });
+    expect(await replacement.appendEvent(address, winner, true, undefined, undefined, guard)).toEqual({
+      ok: true,
+      seq: 1,
+    });
+    const next = { ...question, askedAt: 5 };
+    expect(await replacement.putUnits([{ ...unit, idle: { ...unit.idle!, humanGate: next } }])).toEqual({ ok: true });
+    expect(
+      await replacement.appendEvent(address, { ...winner, id: "browser:new-question" }, true, undefined, undefined, {
+        expectedQuestion: next,
+      }),
+    ).toEqual({ ok: true, seq: 2 });
+    expect(await replacement.appendEvent(address, winner, true, undefined, undefined, guard)).toEqual({
+      ok: true,
+      seq: 1,
+    });
+    expect(
+      await replacement.appendEvent(address, winner, true, undefined, undefined, { expectedQuestion: next }),
+    ).toEqual({ ok: false, reason: "stale" });
+  });
+
+  it("ignores caller question claims and retains a capped guarded claim in SQLite", async () => {
+    const key = storeKey();
+    const question = {
+      pr: { number: 12, url: "https://github.com/example/app/pull/12" },
+      round: 1,
+      verdict: "request_changes" as const,
+      askedAt: 2,
+      assignedTo: "slack:owner",
+      findings: [
+        { id: "F1", severity: "minor" as const, file: "app.ts", title: "Choose behavior", humanGated: true as const },
+      ],
+    };
+    const instance: CoordinatorInstance = {
+      id: INSTANCE_ID,
+      kind: "ship",
+      userId: "slack:owner",
+      channelId: "slack:private",
+      threadKey: "slack:private:1",
+      repo: "example/app",
+      branch: "work",
+      createdAt: 1,
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "U12",
+      slug: "question",
+      branch: "work/question",
+      dependsOn: [],
+      rounds: [],
+      idle: { why: "held", from: "coding", at: 2, spendUsd: 0, renewalsLeft: 0, wakes: 0, humanGate: question },
+    };
+    const body = { storeKey: key, instanceId: instance.id, unit: unit.unit };
+    const digest = "b9257372a2332f7167a46c8cd6a3eb21a918e80af2da4c90f8d31f07d1c650a3";
+    expect((await post("/runs/coordinator/put", { storeKey: key, instance })).status).toBe(200);
+    expect((await post("/runs/coordinator/units/put", { storeKey: key, units: [unit] })).status).toBe(200);
+    const plain = { id: "unbound:input", sender: "slack:owner", text: "Unbound input", mode: "wake", at: 3 };
+    expect(
+      await post("/runs/coordinator/events/append", { ...body, event: { ...plain, questionDigest: digest } }),
+    ).toEqual({ status: 200, data: { ok: true, seq: 1 } });
+    expect((await post("/runs/coordinator/events/list", body)).data).toEqual({ events: [{ ...plain, seq: 1 }] });
+    const large = { ...plain, id: "browser:large", text: "x".repeat(500 * 1024), questionDigest: "f".repeat(64) };
+    const guarded = { ...body, requireActive: true, question: { expectedQuestion: question } };
+    expect(await post("/runs/coordinator/events/append", { ...guarded, event: large })).toEqual({
+      status: 200,
+      data: { ok: true, seq: 2 },
+    });
+    const saved = (
+      (await post("/runs/coordinator/events/list", body)).data as {
+        events: Array<{ questionDigest?: string; textDropped?: number }>;
+      }
+    ).events[1]!;
+    expect(saved.questionDigest).toBe(digest);
+    expect(saved.textDropped).toBeGreaterThan(0);
+    expect(new TextEncoder().encode(JSON.stringify(saved)).length).toBeLessThanOrEqual(400 * 1024);
+    expect(await post("/runs/coordinator/events/append", { ...guarded, event: large })).toEqual({
+      status: 200,
+      data: { ok: true, seq: 2 },
+    });
+    expect(
+      await post("/runs/coordinator/events/append", { ...guarded, event: { ...plain, id: "github:after-large" } }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "stale" } });
   });
 
   it("guards a main-task steer against a stop in the same append transaction", async () => {

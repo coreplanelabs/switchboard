@@ -1,3 +1,8 @@
+import {
+  originalOrganizationDispatchOf,
+  withOriginalOrganizationDispatch,
+  type OriginalOrganizationDispatch,
+} from "../dispatch/originalOrganizationInput.js";
 // The durable shape of a message on the run ledger (docs/reference/specs/run-history.md
 // items 40 and 42): a steered follow-up in `run_inbox`, and the request a run
 // was admitted for in its row's `meta.request`. One writer, one reader, so a
@@ -187,11 +192,13 @@ export function durableInboxMessage(
   from?: { runId: string },
 ): Record<string, unknown> {
   const directAudience = from === undefined ? directAudienceStampOf(msg) : undefined;
+  const originalOrganizationInput = from === undefined ? originalOrganizationDispatchOf(msg) : undefined;
   const base: Record<string, unknown> = {
     version: 1,
     kind: "message",
     ...(msg.approvalConnection !== undefined ? { approvalConnection: msg.approvalConnection } : {}),
     ...(msg.mergedFollowUps ? { mergedFollowUps: true } : {}),
+    ...(originalOrganizationInput ? { originalOrganizationInput } : {}),
     channelId: msg.channelId,
     userId: msg.userId,
     threadKey: msg.threadKey,
@@ -369,8 +376,18 @@ export function messageFromInbox(
     ...(documents ? { documents } : {}),
     ...(staged ? { staged } : {}),
   };
+  const original = m.originalOrganizationInput;
+  let restored = msg;
+  if (original !== undefined) {
+    if (!original || typeof original !== "object" || Array.isArray(original)) return;
+    try {
+      restored = withOriginalOrganizationDispatch(msg, original as OriginalOrganizationDispatch);
+    } catch {
+      return;
+    }
+  }
   return {
-    msg,
+    msg: restored,
     at,
     ...(fromRunId !== undefined ? { from: { runId: fromRunId } } : {}),
     ...(control ? { control } : {}),
