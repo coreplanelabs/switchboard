@@ -2245,6 +2245,7 @@ export class ResidentExecutor implements Executor {
       const observationFailure =
         said >= 500 &&
         said <= 599 &&
+        (data.status === undefined || data.status === said) &&
         reason === "answered" &&
         (data.cause === undefined || data.cause === "system") &&
         (data.transient === undefined || data.transient === false) &&

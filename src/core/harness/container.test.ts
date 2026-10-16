@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { shellQuote } from "../../execution/shellQuote.js";
 import {
   ExecControlResetError,
@@ -1038,9 +1038,26 @@ describe("ExecHarnessContainer — each operation is one command over the execut
 });
 
 describe("ExecHarnessContainer — log observation recovery", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "info").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("keeps a first-try log read distinct from recovery", async () => {
+    const { executor, calls } = recordingExecutor([Buffer.from("original event\n").toString("base64")]);
+    expect(Buffer.from(await new ExecHarnessContainer(executor).readLog(paths.log, 17, 128)).toString()).toBe(
+      "original event\n",
+    );
+    expect(calls).toHaveLength(1);
+    expect(vi.mocked(console.warn).mock.calls).toEqual([]);
+    expect(vi.mocked(console.info).mock.calls).toEqual([]);
+  });
   it.each([
     { status: 401, body: { error: "unauthorized" } },
     { status: 403, body: { error: "forbidden" } },
+    { status: 401, body: { error: "unauthorized", status: 500 } },
+    { status: 500, body: { error: "contradictory refusal", status: 401 } },
     { status: 409, body: { error: "ownership refused", reason: "owner-fenced" } },
     { status: 500, body: { error: "ownership refused", reason: "owner-fenced" } },
     { status: 500, body: { error: "future named refusal", reason: "future-refusal" } },
@@ -1073,6 +1090,8 @@ describe("ExecHarnessContainer — log observation recovery", () => {
       );
       await expect(container.readLog(paths.log, 17, 128)).rejects.toThrow(body.error);
       expect(requests).toHaveLength(1);
+      expect(vi.mocked(console.warn).mock.calls).toEqual([]);
+      expect(vi.mocked(console.info).mock.calls).toEqual([]);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1114,6 +1133,13 @@ describe("ExecHarnessContainer — log observation recovery", () => {
       expect(Buffer.from(await container.readLog(paths.log, 17, 128)).toString()).toBe("original event\n");
       expect(requests).toHaveLength(2);
       expect(requests.map((request) => request.timeoutMs)).toEqual([5000, 4000]);
+      expect(vi.mocked(console.warn).mock.calls).toEqual([
+        ["[harness] a log observation is re-read once after an answered resident failure"],
+        ["[harness-log-read]", { outcome: "retrying", runId: "original-run" }],
+      ]);
+      expect(vi.mocked(console.info).mock.calls).toEqual([
+        ["[harness-log-read]", { outcome: "recovered", runId: "original-run" }],
+      ]);
       for (const request of requests)
         expect(request).toMatchObject({
           resource: "repo:owner/project",
@@ -1149,6 +1175,30 @@ describe("ExecHarnessContainer — log observation recovery", () => {
     ]);
     await expect(new ExecHarnessContainer(executor).readLog(paths.log, 17, 128)).rejects.toBe(second);
     expect(calls).toHaveLength(2);
+    expect(vi.mocked(console.warn).mock.calls).toEqual([
+      ["[harness] a log observation is re-read once after an answered resident failure"],
+      ["[harness-log-read]", { outcome: "retrying", runId: "unknown" }],
+      ["[harness-log-read]", { outcome: "failed", runId: "unknown" }],
+    ]);
+    expect(vi.mocked(console.info).mock.calls).toEqual([]);
+  });
+
+  it.each([
+    { stdout: "unverified", stderr: "read failed", exitCode: 1, truncated: false },
+    { stdout: "truncated", stderr: "", exitCode: 0, truncated: true },
+  ])("records a failed observation when the second command result is invalid: %j", async (result) => {
+    const { executor } = recordingExecutor([new ExecInfraError("private failure", "answered", "resident"), result]);
+    await expect(new ExecHarnessContainer(executor).readLog(paths.log, 17, 128)).rejects.toMatchObject({
+      name: "HarnessCommandOutcomeError",
+      operation: "read",
+      result,
+    });
+    expect(vi.mocked(console.warn).mock.calls).toEqual([
+      ["[harness] a log observation is re-read once after an answered resident failure"],
+      ["[harness-log-read]", { outcome: "retrying", runId: "unknown" }],
+      ["[harness-log-read]", { outcome: "failed", runId: "unknown" }],
+    ]);
+    expect(vi.mocked(console.info).mock.calls).toEqual([]);
   });
 
   it.each(["aborted", "deadline-passed", "refused", "transport-lost", "worker-unavailable"] as const)(

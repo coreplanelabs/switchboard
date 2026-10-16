@@ -1257,9 +1257,17 @@ export class ExecHarnessContainer implements HarnessContainer {
       if (reread) console.warn("[harness] a log observation is re-read once after an answered resident failure");
       if (!(error instanceof ExecControlResetError) && !reread) throw error;
       if (!idempotent) throw new HarnessContainerControlResetError(input.kind, error.message);
+      const runId = redactAndCap(this.scope?.runId ?? "unknown", 80);
+      if (reread) console.warn("[harness-log-read]", { outcome: "retrying", runId });
       try {
-        return await send();
+        const result = await send();
+        if (reread) {
+          stdoutOf("read", result);
+          console.info("[harness-log-read]", { outcome: "recovered", runId });
+        }
+        return result;
       } catch (again) {
+        if (reread) console.warn("[harness-log-read]", { outcome: "failed", runId });
         annotateExecutionDiagnostic(again, {
           caller: "harness",
           operation: input.kind === "http" ? (input.observation ? "http_observation" : "http_control") : input.kind,
