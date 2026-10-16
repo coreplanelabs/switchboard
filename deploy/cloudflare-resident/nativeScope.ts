@@ -4,22 +4,10 @@ import { z } from "zod";
 export const NATIVE_SCOPE_CONTROL_MS = 2_000;
 import type { WorkspaceOwner } from "../../src/core/workspaceSettlement.js";
 import type { NativeOperationStorage } from "./nativeOperation.js";
+import { nativeScopeRefSchema, type NativeScopeRef } from "../../src/execution/nativeScope.js";
+export { nativeScopeRefSchema, type NativeScopeRef } from "../../src/execution/nativeScope.js";
 
-const ownerSchema = z.object({
-  runId: z.string().min(1),
-  ownerGen: z.string().min(1),
-  ownerFence: z.number().int().positive(),
-});
-export const nativeScopeRefSchema = z
-  .object({
-    version: z.literal(1),
-    id: z.string().uuid(),
-    boot: z.string().uuid(),
-    threadKey: z.string().min(1),
-    owner: ownerSchema,
-  })
-  .strict();
-export type NativeScopeRef = z.infer<typeof nativeScopeRefSchema>;
+const ownerSchema = nativeScopeRefSchema.shape.owner;
 const rowSchema = z
   .object({
     id: z.string().uuid(),
@@ -51,6 +39,11 @@ export interface NativeScopeTransport {
   request(value: Record<string, unknown>, timeoutMs: number): Promise<NativeScopeOutput>;
 }
 const PREFIX = "native-scope:";
+export function nativeScopeMatches(value: unknown, ref: NativeScopeRef): boolean {
+  const parsed = rowSchema.safeParse(value);
+  return parsed.success && parsed.data.boot !== null && JSON.stringify(refOf(parsed.data)) === JSON.stringify(ref);
+}
+
 export function nativeScopeClosed(value: unknown, ref: NativeScopeRef): boolean {
   const parsed = rowSchema.safeParse(value);
   return (
@@ -245,12 +238,17 @@ export class NativeRunScopes {
     }
   }
 
-  async close(threadKey: string, owner: WorkspaceOwner): Promise<NativeScopeRef | "unstarted" | null> {
+  async close(
+    threadKey: string,
+    owner: WorkspaceOwner,
+    expected?: NativeScopeRef,
+  ): Promise<NativeScopeRef | "unstarted" | null> {
     const at = nativeScopeKey(threadKey, owner);
     const row = await this.storage.transaction(async (rows) => {
       const value = await rows.get<unknown>(at);
       if (value === undefined) return null;
       const row = ownedRow(value, threadKey, owner);
+      if (expected && JSON.stringify(refOf(row)) !== JSON.stringify(expected)) throw new Error("native-scope changed");
       await rows.put(at, { ...row, closing: true });
       return row;
     });

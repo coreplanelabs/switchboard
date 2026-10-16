@@ -1,3 +1,9 @@
+import {
+  nativeRetirementTargetSchema,
+  nativeRetirementPermitSchema,
+  nativeRetirementTargetKey,
+  type NativeRetirementTarget,
+} from "../../src/execution/nativeRetirement.js";
 import { RecordedCheckOperation, type CheckOperationContext } from "./checkOperation.js";
 import {
   NativeRunScopes,
@@ -13483,6 +13489,62 @@ export class ResidentDO extends Sandbox<Env> {
     });
   }
 
+  /** Retire one original ended scope without changing its history or workspace. */
+  async retireNativeOperation(target: NativeRetirementTarget) {
+    return this.runCancellations.run(target.scope.owner.runId, async () => {
+      const ownerMatches = async (rows: NativeOperationRows, selected: NativeRetirementTarget) => {
+        const { threadKey, owner } = selected.scope;
+        if ((await rows.get(RESOURCE_KEY)) !== selected.resource) return false;
+        const matches = (value: unknown) =>
+          value === undefined || (isWorkspaceOwner(value) && workspaceOwnerKey(value) === workspaceOwnerKey(owner));
+        const registration = await rows.get<RunRegistration>(runRegKey(threadKey));
+        const fence = await rows.get<WorkspaceOwner>(runFenceKey(threadKey));
+        const binding = await rows.get<ThreadBinding>(threadBindingKey(threadKey));
+        return (
+          matches(registration) &&
+          (!registration || registration.threadKey === threadKey) &&
+          matches(fence) &&
+          (!binding ||
+            (binding.threadKey === threadKey && binding.lastRunOwner !== undefined && matches(binding.lastRunOwner)))
+        );
+      };
+      const result = await new NativeOperationJournal(this.ctx.storage).retireScope(
+        target,
+        { request: (value, timeout) => this.nativeScopeTransport().request(value, timeout) },
+        ownerMatches,
+        async () => {
+          if (!this.env.STATE_WORKER_URL || !this.env.MEMORY_TOKEN) return;
+          const reply = await fetch(new URL("/runs/native-retirement/prepare", this.env.STATE_WORKER_URL), {
+            method: "POST",
+            headers: { authorization: `Bearer ${this.env.MEMORY_TOKEN}`, "content-type": "application/json" },
+            body: JSON.stringify({ storeKey: RUN_STORE_KEY, target }),
+            signal: AbortSignal.timeout(RUN_STORE_TIMEOUT_MS),
+          });
+          if (!reply.ok) return;
+          const body = (await reply.json()) as { kind?: unknown; permit?: unknown };
+          const permit = nativeRetirementPermitSchema.safeParse(body.permit);
+          if (
+            body.kind === "prepared" &&
+            permit.success &&
+            nativeRetirementTargetKey(permit.data.target) === nativeRetirementTargetKey(target)
+          )
+            return permit.data;
+        },
+      );
+      if ("error" in result)
+        console.warn(
+          JSON.stringify({
+            event: "native.scope.retirement",
+            runId: target.scope.owner.runId,
+            scopeId: target.scope.id,
+            phase: result.phase,
+            cause: result.cause,
+          }),
+        );
+      return result;
+    });
+  }
+
   async getResidentRecoveryProbe(): Promise<{ activeProcesses: number }> {
     if (!(await this.isRuntimeActive())) return { activeProcesses: 0 };
     const probe = await this.run(["ps", "-eo", "pid=,user="]);
@@ -15104,6 +15166,7 @@ const ROUTES: Record<string, { scope: Scope; method: string }> = {
   "/release-deploy-fence": { scope: "admin", method: "POST" },
   "/deploy-admissions": { scope: "admin", method: "GET" }, // targeted recovery inventory, never a drain-bearer route
   "/replica-recover-native-operation": { scope: "admin", method: "POST" },
+  "/retire-native-operation": { scope: "admin", method: "POST" },
   "/recover-native-operation": { scope: "admin", method: "POST" }, // exact journal plus original native receipt
   "/recover-admission": { scope: "admin", method: "POST" }, // legacy requests refuse without mutation
   "/recover-quoted-admission": { scope: "admin", method: "POST" }, // original record plus operator evidence
@@ -15302,6 +15365,8 @@ export default {
             return await handleReleaseDeployFence(env, body);
           case "/deploy-admissions":
             return await handleDeployAdmissions(env, url);
+          case "/retire-native-operation":
+            return await handleRetireNativeOperation(env, body);
           case "/replica-recover-native-operation":
           case "/recover-native-operation":
             return await handleRecoverNativeOperation(env, body);
@@ -16398,6 +16463,27 @@ async function handleRecoverAdmission(env: Env, body: Record<string, unknown>): 
   } finally {
     await registry.clearDeployFence(fence.since, fence.until, versionId);
   }
+}
+
+async function handleRetireNativeOperation(env: Env, body: Record<string, unknown>): Promise<Response> {
+  const { resident, ...requested } = body;
+  const target = nativeRetirementTargetSchema.safeParse(requested);
+  const resource = parseResource(body.resource);
+  if (
+    !target.success ||
+    "error" in resource ||
+    (resident !== undefined && (!Number.isSafeInteger(resident) || Number(resident) < 1))
+  )
+    return json({ error: "exact terminal native scope and original journal are required" }, 400);
+  const record = await registryStub(env).getRepository(resource.resource);
+  const member = record
+    ? selectedResidentMember(record, resident as number | undefined)
+    : resident === undefined
+      ? resource.resource
+      : undefined;
+  if (!member) return json({ error: "an active resident number is required for this repository" }, 409);
+  const result = await residentStub(env, member).retireNativeOperation(target.data);
+  return json(result, "error" in result ? result.status : 200);
 }
 
 async function handleRecoverNativeOperation(env: Env, body: Record<string, unknown>): Promise<Response> {

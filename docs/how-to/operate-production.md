@@ -362,3 +362,13 @@ If the original process is still running and you intend to stop that exact opera
 Deployment refusals include bounded operation metadata separately from run ownership. Use the returned record key and hash for precise recovery before choosing `repo rebuild --full`, which intentionally deletes all resident state.
 
 A receipt with `outcome: "native-ended"` proves the recorded native work ended, including a non-zero exit. It does not mean the user's task succeeded. Missing or running processes, changed identities/owners/records, lost launch acknowledgements, opaque writes or publication effects and old records remain unresolved. Refresh the metadata after a changed-record refusal; do not replay uncertain work or clear records manually. Deployment still applies its normal fence and readiness checks.
+
+### Clean up native work after a run ends
+
+For an ended run with an unresolved native operation, the existing Read `native-operations` report supplies the original key, `recordHash` and `journal.scope`. An administrator can send those exact values, plus `resource` and the selected resident number when needed, to `POST /retire-native-operation`. Use the complete original scope object. This route requires updated Memory and Resident workers; an older worker refuses it.
+
+Memory prepares terminal authority only after the run has a canonical sealed outcome and no live or restart state. That authority also prevents the same run ID from starting again. Resident checks the original scope and current owner, freezes its journal, and closes only that scope. It keeps the workspace, saved run and original unknown command outcomes. Other runs on the same container remain separate. The request accepts at most 64 original journal rows and a 64 KiB preparation; it refuses a larger or incomplete inventory before control.
+
+A successful response has `state: "closed"` and `originalOperationOutcome: "unknown"`. A refusal includes the failed `phase` and a bounded `cause`; it does not authorize another target or a command replay. An identical request can read a stored completion or continue that original scope's prepared closure. It never repeats the original command. A changed selector remains held. This control does not release a deployment fence or change deployment readiness checks.
+
+After a terminal permit is created, retain the Memory code that enforces its run-ID fence during rollback. Disable the terminal cleanup route if needed; do not remove permits or roll Memory back past that fence. An older Resident can leave the original work held, but cannot safely replace the qualified receiver.

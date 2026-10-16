@@ -63,6 +63,17 @@ const allowed = async () => {};
 const output = (value: unknown) => ({ stdout: JSON.stringify(value), stderr: "", exitCode: 0, timedOut: false });
 
 describe("native run scope reservations", () => {
+  it("refuses a changed expected scope before native control or closing the original", async () => {
+    const h = fixture();
+    const ref = await ensure(h, "thread-a", owner, allowed);
+    const changed = { ...ref, id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa" };
+    await expect(h.scopes.close("thread-a", owner, changed)).rejects.toThrow("native-scope changed");
+    expect(scopeRows(h)).toMatchObject([{ id: ref.id, closing: false, closed: false }]);
+    expect(h.calls.map((call) => call.mode)).toEqual(["inspect", "bootstrap"]);
+    expect(await h.scopes.close("thread-a", owner, ref)).toEqual(ref);
+    expect(scopeRows(h)).toMatchObject([{ closing: true, closed: true }]);
+  });
+
   it("reserves one original identity before bootstrap and reuses the ready scope", async () => {
     const h = fixture();
     const first = await ensure(h, "thread-a", owner, allowed);

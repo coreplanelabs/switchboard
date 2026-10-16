@@ -6,6 +6,8 @@ A record is written once and never edited in place; after acceptance it may only
 
 Statuses: **proposed** (written, not yet agreed), **accepted** (agreed, being built), **implemented** (in the code the record describes), **superseded** (replaced by the record it names).
 
+[Retire native work after a run ends](../plans/2026-10-16-001-terminal-native-retirement-design.md) extends the existing isolation controls to close leftover work after a run ends and preserve unknown outcomes.
+
 <!-- generated:decision-records · npm run docs:gen — generated from the code, do not edit by hand -->
 
 | # | Decision | Pattern | Status | Date |

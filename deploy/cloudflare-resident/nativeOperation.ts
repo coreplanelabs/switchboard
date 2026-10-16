@@ -1,6 +1,15 @@
-import { z } from "zod";
-import { isWorkspaceOwner, type WorkspaceOwner } from "../../src/core/workspaceSettlement.js";
 import {
+  nativeRetirementPermitSchema,
+  nativeRetirementTargetKey,
+  type NativeRetirementPermit,
+  type NativeRetirementTarget,
+} from "../../src/execution/nativeRetirement.js";
+import { z } from "zod";
+import { isWorkspaceOwner, workspaceOwnerKey, type WorkspaceOwner } from "../../src/core/workspaceSettlement.js";
+import {
+  NativeRunScopes,
+  nativeScopeMatches,
+  type NativeScopeTransport,
   nativeScopeRefSchema,
   nativeScopeClosed,
   nativeScopeKey,
@@ -14,6 +23,8 @@ const RETIREMENT_PREFIX = "native-retirement:";
 const CONTROL_PREFIX = "native-operation-control:";
 const PAGE_SIZE = 25;
 const ATTEMPT_LIMIT = 64;
+const TERMINAL_SCOPE_RECORD_LIMIT = 64;
+const TERMINAL_SCOPE_PREPARATION_BYTES = 64 * 1024;
 const processIdentity = z.object({
   id: z.string().min(1).max(256),
   pid: z.number().int().positive(),
@@ -71,9 +82,9 @@ export interface NativeOperationRows {
   get<T>(key: string): Promise<T | undefined>;
   put<T>(key: string, value: T): Promise<void>;
   delete(key: string): Promise<boolean>;
+  list<T>(options: { prefix: string; limit: number; startAfter?: string }): Promise<Map<string, T>>;
 }
 export interface NativeOperationStorage extends NativeOperationRows {
-  list<T>(options: { prefix: string; limit: number; startAfter?: string }): Promise<Map<string, T>>;
   transaction<T>(action: (rows: NativeOperationRows) => Promise<T>): Promise<T>;
 }
 export type NativeOperationReceipt = {
@@ -87,12 +98,49 @@ export type NativeEndingRead =
   | { kind: "unavailable" }
   | { kind: "ended"; original: NativeOperationRecord; receipt: NativeOperationReceipt };
 
+const terminalRetirementSchema = z
+  .object({
+    purpose: z.literal("terminal-native-scope"),
+    permit: nativeRetirementPermitSchema,
+    state: z.enum(["prepared", "closed"]),
+    records: z
+      .record(z.string(), z.string().regex(/^[a-f0-9]{64}$/))
+      .refine((v) => Object.keys(v).length > 0 && Object.keys(v).length <= TERMINAL_SCOPE_RECORD_LIMIT),
+    originalOperationOutcome: z.literal("unknown"),
+  })
+  .strict();
+export type TerminalNativeRetirement = z.infer<typeof terminalRetirementSchema>;
+
 type Refusal = {
   error: string;
   status: 409 | 503;
   details?: { class: string; code?: string };
   controls?: z.infer<typeof controlSchema>[];
 };
+
+const TERMINAL_REFUSAL_CAUSES = [
+  "original-owner-changed",
+  "scope-changed",
+  "journal-changed",
+  "conflicting-terminal-control",
+  "terminal-fence-changed",
+  "scope-closure-unconfirmed",
+  "closure-unconfirmed",
+  "preparation-too-large",
+  "invalid-terminal-permit",
+  "unconfirmed",
+] as const;
+type TerminalRetirementPhase = "authority" | "prepare" | "scope-close" | "retirement-commit";
+interface TerminalRetirementRefusal extends Refusal {
+  purpose: "terminal-native-scope";
+  phase: TerminalRetirementPhase;
+  cause: (typeof TERMINAL_REFUSAL_CAUSES)[number];
+}
+function terminalRefusal(phase: TerminalRetirementPhase, error: unknown, reason: string): TerminalRetirementRefusal {
+  const message = error && typeof error === "object" ? (error as { message?: unknown }).message : undefined;
+  const cause = TERMINAL_REFUSAL_CAUSES.find((value) => value === message) ?? "unconfirmed";
+  return { ...refuse(reason), purpose: "terminal-native-scope", phase, cause };
+}
 
 function errorDetails(error: unknown): { class: string; code?: string } {
   const value = error && typeof error === "object" ? (error as { name?: unknown; code?: unknown }) : {};
@@ -166,7 +214,156 @@ export class NativeOperationJournal {
   constructor(private readonly storage: NativeOperationStorage) {}
 
   /** A cancelled epoch releases physical activity, not historical effect certainty. */
+  private async frozen(
+    key: string,
+    value: unknown,
+    rows: Pick<NativeOperationRows, "get"> = this.storage,
+  ): Promise<TerminalNativeRetirement | undefined> {
+    const record = recordSchema.safeParse(value);
+    if (!record.success || !isWorkspaceOwner(record.data)) return;
+    const thread = record.data.native.threadKey!;
+    const raw = await rows.get<unknown>(nativeScopeRetirementKey(thread, record.data));
+    if (!raw || typeof raw !== "object" || (raw as { purpose?: unknown }).purpose !== "terminal-native-scope") return;
+    const saved = terminalRetirementSchema.parse(raw);
+    const scope = saved.permit.target.scope;
+    const fence = await rows.get<{ terminalRetirement?: unknown }>(`cancelled:${thread}:${record.data.runId}`);
+    if (
+      fence?.terminalRetirement !== saved.permit.id ||
+      saved.records[key] !== (await recordHash(value)) ||
+      JSON.stringify(record.data.native.scope) !== JSON.stringify(scope)
+    )
+      throw new Error("terminal retirement evidence changed");
+    return saved;
+  }
+
+  async retireScope(
+    target: NativeRetirementTarget,
+    native: NativeScopeTransport,
+    ownerMatches: (rows: NativeOperationRows, target: NativeRetirementTarget) => Promise<boolean>,
+    prepare: () => Promise<NativeRetirementPermit | undefined>,
+  ): Promise<TerminalNativeRetirement | TerminalRetirementRefusal> {
+    let permit: NativeRetirementPermit | undefined;
+    try {
+      permit = await this.storage.transaction(async (rows) => {
+        const at = nativeScopeRetirementKey(target.scope.threadKey, target.scope.owner);
+        const old = await rows.get<unknown>(at);
+        if (old !== undefined) {
+          const saved = terminalRetirementSchema.parse(old);
+          if (nativeRetirementTargetKey(saved.permit.target) !== nativeRetirementTargetKey(target))
+            throw new Error("conflicting-terminal-control");
+          return saved.permit;
+        }
+        if (!(await ownerMatches(rows, target))) throw new Error("original-owner-changed");
+        if (
+          !nativeScopeMatches(await rows.get(nativeScopeKey(target.scope.threadKey, target.scope.owner)), target.scope)
+        )
+          throw new Error("scope-changed");
+        const original = await rows.get(target.key);
+        const record = recordSchema.parse(original);
+        if (
+          (await recordHash(original)) !== target.recordHash ||
+          JSON.stringify(record.native.scope) !== JSON.stringify(target.scope)
+        )
+          throw new Error("journal-changed");
+        return undefined;
+      });
+      permit ??= await prepare();
+    } catch (error) {
+      return terminalRefusal("authority", error, "terminal-authority-unconfirmed");
+    }
+    const parsed = nativeRetirementPermitSchema.safeParse(permit);
+    if (!parsed.success || nativeRetirementTargetKey(parsed.data.target) !== nativeRetirementTargetKey(target))
+      return terminalRefusal("authority", new Error("invalid-terminal-permit"), "invalid-terminal-permit");
+    permit = parsed.data;
+    const { scope, key, recordHash: expectedHash } = permit.target;
+    const at = nativeScopeRetirementKey(scope.threadKey, scope.owner);
+    const gate = `cancelled:${scope.threadKey}:${scope.owner.runId}`;
+    const prefix = `native-operation:${scope.threadKey}:${scope.owner.runId}:`;
+    let phase: TerminalRetirementPhase = "prepare";
+    try {
+      const prepared = await this.storage.transaction(async (rows) => {
+        const previous = await rows.get<unknown>(at);
+        if (previous !== undefined) {
+          const saved = terminalRetirementSchema.safeParse(previous);
+          if (!saved.success || JSON.stringify(saved.data.permit) !== JSON.stringify(permit))
+            throw new Error("conflicting-terminal-control");
+          const fence = await rows.get<{ terminalRetirement?: unknown }>(gate);
+          if (fence?.terminalRetirement !== permit.id) throw new Error("terminal-fence-changed");
+          if (JSON.stringify(await this.fingerprints(prefix, rows)) !== JSON.stringify(saved.data.records))
+            throw new Error("journal-changed");
+          if (saved.data.state === "closed") {
+            if (!nativeScopeClosed(await rows.get(nativeScopeKey(scope.threadKey, scope.owner)), scope))
+              throw new Error("scope-closure-unconfirmed");
+            return saved.data;
+          }
+          if (!(await ownerMatches(rows, target))) throw new Error("original-owner-changed");
+          return saved.data;
+        }
+        if (await rows.get(gate)) throw new Error("conflicting-terminal-control");
+        if (!(await ownerMatches(rows, target))) throw new Error("original-owner-changed");
+        if (!nativeScopeMatches(await rows.get(nativeScopeKey(scope.threadKey, scope.owner)), scope))
+          throw new Error("scope-changed");
+        const records = await this.fingerprints(prefix, rows);
+        if (records[key] !== expectedHash || Object.keys(records).length > TERMINAL_SCOPE_RECORD_LIMIT)
+          throw new Error("journal-changed");
+        for (const operationKey of Object.keys(records)) {
+          const record = recordSchema.parse(await rows.get(operationKey));
+          if ((await rows.list({ prefix: `${CONTROL_PREFIX}${operationKey}:`, limit: 1 })).size)
+            throw new Error("conflicting-terminal-control");
+          if (
+            !isWorkspaceOwner(record) ||
+            workspaceOwnerKey(record) !== workspaceOwnerKey(scope.owner) ||
+            record.native.threadKey !== scope.threadKey ||
+            JSON.stringify(record.native.scope) !== JSON.stringify(scope)
+          )
+            throw new Error("scope-changed");
+        }
+        const saved = terminalRetirementSchema.parse({
+          purpose: "terminal-native-scope",
+          permit,
+          state: "prepared",
+          records,
+          originalOperationOutcome: "unknown",
+        });
+        if (new TextEncoder().encode(JSON.stringify(saved)).byteLength > TERMINAL_SCOPE_PREPARATION_BYTES)
+          throw new Error("preparation-too-large");
+        await rows.put(at, saved);
+        await rows.put(gate, { terminalRetirement: permit.id });
+        return saved;
+      });
+      if (prepared.state === "closed") return prepared;
+      phase = "scope-close";
+      await new NativeRunScopes(this.storage, native).close(scope.threadKey, scope.owner, scope);
+      phase = "retirement-commit";
+      return await this.storage.transaction(async (rows) => {
+        const current = terminalRetirementSchema.parse(await rows.get(at));
+        if (
+          JSON.stringify(current) !== JSON.stringify(prepared) ||
+          !nativeScopeClosed(await rows.get(nativeScopeKey(scope.threadKey, scope.owner)), scope) ||
+          JSON.stringify(await this.fingerprints(prefix, rows)) !== JSON.stringify(prepared.records)
+        )
+          throw new Error("closure-unconfirmed");
+        const fence = await rows.get<{ terminalRetirement?: unknown }>(gate);
+        if (fence?.terminalRetirement !== permit.id) throw new Error("terminal-fence-changed");
+        const closed: TerminalNativeRetirement = { ...current, state: "closed" };
+        await rows.put(at, closed);
+        return closed;
+      });
+    } catch (error) {
+      return terminalRefusal(phase, error, "terminal-scope-retirement-unconfirmed");
+    }
+  }
+
   private async retirement(key: string, value: unknown, rows: Pick<NativeOperationRows, "get"> = this.storage) {
+    const terminal = await this.frozen(key, value, rows);
+    if (
+      terminal?.state === "closed" &&
+      nativeScopeClosed(
+        await rows.get(nativeScopeKey(terminal.permit.target.scope.threadKey, terminal.permit.target.scope.owner)),
+        terminal.permit.target.scope,
+      )
+    )
+      return terminal;
     const owner = ownerOf(value);
     if (!owner || !isWorkspaceOwner(owner)) return;
     const split = key.lastIndexOf(`:${owner.runId}:`);
@@ -313,7 +510,9 @@ export class NativeOperationJournal {
 
   async bindScope(key: string, scope: NativeScopeRef): Promise<void> {
     await this.storage.transaction(async (rows) => {
-      const record = recordSchema.parse(await rows.get(key));
+      const original = await rows.get(key);
+      const record = recordSchema.parse(original);
+      if (await this.frozen(key, original, rows)) throw new Error("terminal retirement is prepared");
       if (
         !isWorkspaceOwner(record) ||
         record.runId !== scope.owner.runId ||
@@ -339,6 +538,7 @@ export class NativeOperationJournal {
         const value = await rows.get(key);
         if (await this.retirement(key, value, rows)) throw new Error("original native runtime retired");
         const record = recordSchema.parse(value);
+        if (await this.frozen(key, value, rows)) throw new Error("terminal retirement is prepared");
         if (record.native.closed) throw new Error("native operation already closed");
         if (Object.keys(record.native.pending).length >= ATTEMPT_LIMIT)
           throw new Error("too many pending native attempts");
@@ -364,6 +564,7 @@ export class NativeOperationJournal {
         const value = await rows.get(key);
         if (await this.retirement(key, value, rows)) throw new Error("original native runtime retired");
         const record = recordSchema.parse(value);
+        if (await this.frozen(key, value, rows)) throw new Error("terminal retirement is prepared");
         const attempt = record.native.pending[id];
         if (!attempt || attempt.kind !== "process" || attempt.process)
           throw new Error("native launch identity changed");
@@ -395,6 +596,7 @@ export class NativeOperationJournal {
       if (value === undefined && (await rows.get(RECEIPT_PREFIX + key)) !== undefined) return;
       if (await this.retirement(key, value, rows)) return;
       const record = recordSchema.parse(value);
+      if (await this.frozen(key, value, rows)) return;
       delete record.native.pending[id];
       if (record.native.closed && Object.keys(record.native.pending).length === 0) await rows.delete(key);
       else await rows.put(key, record);
@@ -407,6 +609,7 @@ export class NativeOperationJournal {
       if (value === undefined) return;
       if (await this.retirement(key, value, rows)) return;
       const record = recordSchema.parse(value);
+      if (await this.frozen(key, value, rows)) return;
       record.native.closed = true;
       if (Object.keys(record.native.pending).length === 0) await rows.delete(key);
       else await rows.put(key, record);
@@ -503,6 +706,7 @@ export class NativeOperationJournal {
       return { ...refuse("record-missing-or-changed"), ...(controls.length ? { controls } : {}) };
     }
     if ((await recordHash(value)) !== expectedHash) return refuse("record-changed");
+    if ((await this.frozen(key, value))?.state === "prepared") return refuse("terminal-retirement-prepared");
     if (await this.retirement(key, value)) return refuse("original-runtime-retired; historical effects unknown");
     const parsed = recordSchema.safeParse(value);
     if (!parsed.success || !recoverable(parsed.data)) return refuse("original-native-evidence-unavailable");
@@ -523,6 +727,8 @@ export class NativeOperationJournal {
           const controlKey = `${CONTROL_PREFIX}${key}:${identity.id}`;
           const admitted = await this.storage.transaction(async (rows) => {
             const current = await rows.get(key);
+            if ((await this.frozen(key, current, rows))?.state === "prepared")
+              return refuse("terminal-retirement-prepared");
             if (await this.retirement(key, current, rows))
               return refuse("original-runtime-retired; historical effects unknown");
             if (
@@ -540,6 +746,8 @@ export class NativeOperationJournal {
           const saveControl = async (control: z.infer<typeof controlSchema>) =>
             this.storage.transaction(async (rows) => {
               const current = await rows.get(key);
+              if ((await this.frozen(key, current, rows))?.state === "prepared")
+                return refuse("terminal-retirement-prepared");
               if (await this.retirement(key, current, rows))
                 return refuse("original-runtime-retired; historical effects unknown");
               if (
@@ -592,6 +800,7 @@ export class NativeOperationJournal {
     }
     return this.storage.transaction(async (rows) => {
       const current = await rows.get<unknown>(key);
+      if ((await this.frozen(key, current, rows))?.state === "prepared") return refuse("terminal-retirement-prepared");
       if (await this.retirement(key, current, rows))
         return refuse("original-runtime-retired; historical effects unknown");
       if (

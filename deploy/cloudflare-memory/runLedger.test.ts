@@ -18065,3 +18065,164 @@ describe("claim observation authorization before SQL paging", () => {
     }
   });
 });
+
+describe("terminal native retirement authority", () => {
+  const target = (runId: string, threadKey: string) => ({
+    resource: "repo:acme/api",
+    key: `native-operation:${threadKey}:${runId}:original`,
+    recordHash: "a".repeat(64),
+    scope: {
+      version: 1,
+      id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+      boot: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      threadKey,
+      owner: { runId, ownerGen: "g1", ownerFence: 7 },
+    },
+  });
+  it("prepares exact sealed terminal authority and fences late same-ID claims without changing history", async () => {
+    const key = storeKey(),
+      id = "terminal-native-original",
+      thread = "slack:C1:terminal-native";
+    const original = { ...record(id, thread), repo: "acme/api", sealedAt: Date.now() };
+    expect((await post("/runs/put", { storeKey: key, record: original })).status).toBe(200);
+    const body = { storeKey: key, target: target(id, thread) };
+    const prepared = await post("/runs/native-retirement/prepare", body);
+    expect(prepared.status).toBe(200);
+    expect(prepared.data).toMatchObject({
+      kind: "prepared",
+      permit: {
+        purpose: "terminal-native-scope",
+        target: body.target,
+        source: { id, threadKey: thread, repo: "acme/api", status: "completed", sealedAt: original.sealedAt },
+      },
+    });
+    expect((await post("/runs/native-retirement/prepare", body)).data).toEqual(prepared.data);
+    expect((await post("/runs/claim", claimBody(key, id, thread))).status).toBe(409);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner) => {
+      expect(await owner.get(id)).toMatchObject(original);
+      expect(await owner.listLive()).toEqual([]);
+      expect(await owner.delete(id)).toBe(true);
+    });
+    expect((await post("/runs/claim", claimBody(key, id, thread))).status).toBe(409);
+    expect((await post("/runs/native-retirement/prepare", body)).data).toEqual(prepared.data);
+  });
+  it("does not revive a retired queued run through a delayed observation, level rise and reclaim", async () => {
+    const sk = storeKey(),
+      thread = "slack:C1:retired-queue";
+    const level = (side: string) =>
+      post("/plane/level", { storeKey: sk, resident: "acme/api", name: "seat", side, generation: "g1" });
+    const ask = (threadKey: string) =>
+      post("/plane/admit", {
+        storeKey: sk,
+        threadKey,
+        requester: "slack:UALICE",
+        request: { text: "review" },
+        stage: "resident",
+        resident: "acme/api",
+      });
+    await level("above");
+    const queued = await ask(thread);
+    const id = queued.data.id as string;
+    expect((await level("below")).data).toEqual({ admitted: 1 });
+    const original = { ...record(id, thread), repo: "acme/api", sealedAt: Date.now() };
+    expect((await post("/runs/finish", { storeKey: sk, runId: id, gen: "plane", record: original })).status).toBe(200);
+    expect(
+      (await post("/runs/native-retirement/prepare", { storeKey: sk, target: target(id, thread) })).data.kind,
+    ).toBe("prepared");
+    await post("/plane/ack", { storeKey: sk, id: `admit:${id}`, outcome: "done" });
+    expect(
+      (
+        await post("/plane/observe", {
+          storeKey: sk,
+          runId: id,
+          resident: "acme/api",
+          refusal: "user-pool-exhausted: no free worker user",
+        })
+      ).data,
+    ).toEqual({ reentered: false });
+    await level("above");
+    const neighbor = (await ask("slack:C1:neighbor-queue")).data.id as string;
+    expect((await level("below")).data).toEqual({ admitted: 1 });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), async (owner) => {
+      expect((await owner.listLive()).map((r) => r.runId)).toEqual([neighbor]);
+      expect((await owner.reclaim("fresh", Date.now() + LEASE_MS * 2, LEASE_MS)).map((r) => r.row.runId)).toEqual([
+        neighbor,
+      ]);
+      expect(await owner.get(id)).toMatchObject(original);
+    });
+  });
+  it("orders a claim already awaiting its commit against terminal preparation", async () => {
+    const sk = storeKey(),
+      id = "terminal-native-racing-claim",
+      thread = "slack:C1:racing-claim";
+    const original = { ...record(id, thread), repo: "acme/api", sealedAt: Date.now() };
+    expect((await post("/runs/put", { storeKey: sk, record: original })).status).toBe(200);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), async (owner) => {
+      let release!: () => void, entered!: () => void;
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const previous = Reflect.get(owner, "withRangePins");
+      Reflect.set(owner, "withRangePins", async (...args: unknown[]) => {
+        entered();
+        await gate;
+        return previous.apply(owner, args);
+      });
+      const claim = owner.claim(claimBody(sk, id, thread).run as ClaimRequest, Date.now());
+      try {
+        await started;
+        expect(await owner.prepareNativeRetirement(target(id, thread))).toMatchObject({ kind: "prepared" });
+      } finally {
+        release();
+        Reflect.set(owner, "withRangePins", previous);
+      }
+      await expect(claim).rejects.toThrow("terminal native retirement is prepared");
+      expect(await owner.listLive()).toEqual([]);
+      expect(await owner.get(id)).toMatchObject(original);
+    });
+  });
+  it("refuses raw restart markers even when summary normalization would remove them", async () => {
+    const sk = storeKey(),
+      id = "terminal-native-raw-restart",
+      thread = "slack:C1:raw-restart";
+    const original = { ...record(id, thread), repo: "acme/api", sealedAt: Date.now() };
+    expect((await post("/runs/put", { storeKey: sk, record: original })).status).toBe(200);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), async (_owner, state) => {
+      const row = state.storage.sql
+        .exec<{ summary_json: string }>("SELECT summary_json FROM runs WHERE run_id = ?", id)
+        .one();
+      state.storage.sql.exec(
+        "UPDATE runs SET summary_json = ? WHERE run_id = ?",
+        JSON.stringify({ ...JSON.parse(row.summary_json), restarting: true, restartUntil: 1e30 }),
+        id,
+      );
+    });
+    expect((await post("/runs/native-retirement/prepare", { storeKey: sk, target: target(id, thread) })).data).toEqual({
+      kind: "held",
+      reason: "terminal-source-unavailable",
+    });
+  });
+  it("refuses live, unsealed, provisional, restarting and foreign terminal sources", async () => {
+    for (const fault of ["live", "unsealed", "provisional", "restarting", "foreign"] as const) {
+      const key = storeKey(),
+        id = `terminal-native-${fault}`,
+        thread = "slack:C1:terminal-native";
+      const saved: RunRecord = { ...record(id, thread), repo: "acme/api", sealedAt: Date.now() };
+      if (fault === "unsealed") delete saved.sealedAt;
+      if (fault === "provisional") saved.provisional = true;
+      if (fault === "restarting") saved.restarting = true;
+      if (fault === "foreign") saved.repo = "acme/foreign";
+      expect((await post("/runs/put", { storeKey: key, record: saved })).status).toBe(200);
+      if (fault === "live") expect((await post("/runs/claim", claimBody(key, id, thread))).status).toBe(200);
+      const reply = await post("/runs/native-retirement/prepare", { storeKey: key, target: target(id, thread) });
+      expect(reply.status).toBe(200);
+      expect(reply.data).toEqual({
+        kind: "held",
+        reason: fault === "live" ? "owner-live" : "terminal-source-unavailable",
+      });
+    }
+  });
+});
