@@ -1,26 +1,35 @@
+import type { Predicate } from "./authz/types.js";
 import { DAY_MS, REVIEWS_CACHE_OPEN_MS } from "./budgets.js";
 import type { MetricsConfig, MetricsSource } from "./metrics.js";
 import { METRICS_OFF_MESSAGE } from "./metricsService.js";
 import { buildReviewsReport, reviewsQueries, type ReviewsRange, type ReviewsReport } from "./reviewsReport.js";
+import type { ReviewFeedbackStore } from "./reviewFeedback.js";
+import { buildReviewFeedbackReport, type ReviewFeedbackReport } from "./reviewFeedbackReport.js";
 import { systemClock } from "./trace/clock.js";
 
 // The review dashboard's service (record 0097, "The reader and the page"):
 // what `metrics reviews`, the review tabs and their JSON twin talk to. One
 // report per range: the eight queries in parallel against the run-metrics
-// source, the pure builder over their rows. Each answer is cached, five
-// minutes while its range is still filling and a day once it ended before
-// today, so a page someone keeps open costs a handful of reads an hour.
+// source, the pure builder over their rows. SQL answers are cached for five
+// minutes while the range is still filling and a day once it ended. Mutable
+// human feedback is read separately on each request.
 
 /** How long an answer for a range that ended before today is reused. */
 export const REVIEWS_CACHE_CLOSED_MS = DAY_MS;
 /** How many distinct ranges the cache holds; the oldest answer goes first. */
 export const REVIEWS_CACHE_SIZE = 32;
 
-export type ReviewsReportWithDataset = ReviewsReport & { dataset: string };
+export type ReviewsReportWithDataset = ReviewsReport & { dataset: string; feedback?: ReviewFeedbackReport };
+
+/** Caller and current read predicate are host facts, never request parameters. */
+export interface ReviewsReadScope {
+  subject: string;
+  visibleTo: Predicate;
+}
 
 export interface ReviewsService {
   /** The review report for `[fromMs, toMs)`, at most 90 days. */
-  reviews(range: ReviewsRange): Promise<ReviewsReportWithDataset>;
+  reviews(range: ReviewsRange, scope?: ReviewsReadScope): Promise<ReviewsReportWithDataset>;
 }
 
 export class NullReviewsService implements ReviewsService {
@@ -30,20 +39,40 @@ export class NullReviewsService implements ReviewsService {
 }
 
 export function createReviewsService(
-  cfg: Pick<MetricsConfig, "dataset">,
+  cfg: Pick<MetricsConfig, "dataset" | "feedback">,
   source: MetricsSource,
-  deps: { now?: () => number } = {},
+  deps: { now?: () => number; feedback?: ReviewFeedbackStore } = {},
 ): ReviewsService {
   const now = deps.now ?? systemClock;
   const cache = new Map<string, { until: number; report: Promise<ReviewsReportWithDataset> }>();
   return {
-    reviews(range) {
+    reviews(range, scope) {
+      if (scope && (!scope.subject || scope.subject.length > 2048 || /\p{Cc}/u.test(scope.subject)))
+        throw new Error("invalid reviews read subject");
       // The texts are built first, so a bad range is refused before any read.
-      const queries = reviewsQueries(range, cfg.dataset);
+      if (scope && !scope.visibleTo) throw new Error("invalid reviews read scope");
+      const queries = reviewsQueries(range, cfg.dataset, scope?.visibleTo);
       const at = now();
-      const key = `${range.fromMs}:${range.toMs}`;
+      const key = JSON.stringify([scope?.subject ?? null, cfg.dataset, range.fromMs, range.toMs, queries]);
+      // Feedback is mutable after the report range closes. Reuse the SQL rows,
+      // but read current retained votes on each page or JSON request.
+      const currentFeedback = async (): Promise<ReviewFeedbackReport | undefined> => {
+        if (!cfg.feedback?.enabled) return undefined;
+        if (scope && scope.visibleTo.kind !== "all") return { status: "unavailable", asOf: now() };
+        try {
+          if (!deps.feedback) throw new Error("Feedback storage unavailable");
+          const stored = await deps.feedback.list(range.fromMs, range.toMs);
+          return buildReviewFeedbackReport(stored, { sinceMs: range.fromMs, untilMs: range.toMs }, now(), cfg.feedback);
+        } catch {
+          return { status: "unavailable", asOf: now() };
+        }
+      };
+      const withFeedback = async (report: Promise<ReviewsReportWithDataset>) => {
+        const [rows, feedback] = await Promise.all([report, currentFeedback()]);
+        return feedback ? { ...rows, feedback } : rows;
+      };
       const hit = cache.get(key);
-      if (hit !== undefined && hit.until > at) return hit.report;
+      if (hit !== undefined && hit.until > at) return withFeedback(hit.report);
       const todayStart = at - (at % DAY_MS);
       const report = (async () => {
         const [
@@ -56,14 +85,14 @@ export function createReviewsService(
           setup,
           byWorkspace,
         ] = await Promise.all([
-          source.query(queries.runs),
-          source.query(queries.durationByRequester),
-          source.query(queries.durationBySurface),
-          source.query(queries.durationOverall),
-          source.query(queries.durationHistogram),
-          source.query(queries.reviews),
-          source.query(queries.setup),
-          source.query(queries.byWorkspace),
+          source.query(queries.runs, scope?.visibleTo),
+          source.query(queries.durationByRequester, scope?.visibleTo),
+          source.query(queries.durationBySurface, scope?.visibleTo),
+          source.query(queries.durationOverall, scope?.visibleTo),
+          source.query(queries.durationHistogram, scope?.visibleTo),
+          source.query(queries.reviews, scope?.visibleTo),
+          source.query(queries.setup, scope?.visibleTo),
+          source.query(queries.byWorkspace, scope?.visibleTo),
         ]);
         return {
           dataset: cfg.dataset,
@@ -92,7 +121,7 @@ export function createReviewsService(
         if (cache.get(key)?.report === report) cache.delete(key);
       });
       while (cache.size > REVIEWS_CACHE_SIZE) cache.delete(cache.keys().next().value!);
-      return report;
+      return withFeedback(report);
     },
   };
 }
