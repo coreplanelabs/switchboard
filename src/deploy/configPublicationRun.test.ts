@@ -826,7 +826,7 @@ describe("runDeployPlan config publication", () => {
         notAttempted: ["bot"],
       });
       expect(phases).toEqual(["pending", "landed"]);
-      expect(h.logs.some((line) => line.includes("fleet reopened"))).toBe(cleanup === "ack");
+      expect(h.logs.some((line) => line.includes("fleet reopen acknowledged"))).toBe(cleanup === "ack");
       expect(processes.calls).toHaveLength(1);
       expect(store.state.document).toEqual(prior);
       expect(store.slotState.document?.yaml).toBe(candidateText);

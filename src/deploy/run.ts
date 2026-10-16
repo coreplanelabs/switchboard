@@ -8,6 +8,7 @@ import {
   type ConfigConsumerIdentity,
 } from "../configConsumer.js";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { createRequire } from "node:module";
 import {
   createPagingObserver,
@@ -27,6 +28,8 @@ import {
   drainConflictLine,
   drainFailureReason,
   drainLiftedLine,
+  drainReopenDiagnostic,
+  drainReopenOutcome,
   drainSet,
   drainSkippedLine,
   drainUntil,
@@ -34,6 +37,7 @@ import {
   postJson,
   reconcileLine,
   reconcileUrl,
+  sameDrainWindow,
   RESIDENT_DRAINED_WAIT_MAX_MS,
   undrainUrl,
   type PostAnswer,
@@ -1991,11 +1995,20 @@ async function deployStepTraced(
     : (step.waitMaxMs ?? plan.waitMaxMs);
   const deadline = started + waitMaxMs;
   let result: StepOutcome;
+  let uploadedVersion: string | undefined;
   let readyDeadline = 0;
   let resources: string[] = [];
   let imageTarget: ResidentImageTarget | undefined;
+  let requireImageTarget = false;
   let residentNoChange = false;
   let retryImageReconcile = true;
+  let reopenAnswer: PostAnswer | undefined;
+  let reopenTarget:
+    | {
+        application: ResidentImageTarget;
+        fence: Record<string, unknown> & { since: string; until: string };
+      }
+    | undefined;
   // Once the resident command starts, its upload may have landed even if the
   // command or health read fails. Only a proved pre-upload refusal or an
   // authenticated post-upload image decision makes an explicit lift safe.
@@ -2035,6 +2048,7 @@ async function deployStepTraced(
           : false;
       },
     );
+    uploadedVersion = result.versionId;
     // An informational wake cannot undo a completed non-Resident step.
     // Resident upload still owes its separate reconciliation/readiness below.
     if (deps.signal?.aborted && !(result.ok && step.name !== "resident"))
@@ -2058,7 +2072,7 @@ async function deployStepTraced(
           return residentNotReady(result, "printed Resident image disagrees with the selected plan image");
         const intendedImage = step.residentImage ?? residentPrintedTarget?.image;
         let residentAfter = step.residentContainerApp
-          ? await deps.readAppState(step.dir, step.residentContainerApp, undefined, deps.signal)
+          ? await readResidentAppWithinDeadline(step, step.residentContainerApp, readyDeadline, deps)
           : undefined;
         let lastTargetWaitLog = -Infinity;
         while (
@@ -2084,7 +2098,7 @@ async function deployStepTraced(
               result,
               "selected container application target did not register within the readiness deadline",
             );
-          residentAfter = await deps.readAppState(step.dir, step.residentContainerApp, undefined, deps.signal);
+          residentAfter = await readResidentAppWithinDeadline(step, step.residentContainerApp, readyDeadline, deps);
         }
         if (deps.signal?.aborted)
           return { ok: false, live: "upload outcome uncertain", reason: "deployment cancelled" };
@@ -2147,6 +2161,9 @@ async function deployStepTraced(
             ).map(residentAddress);
             retryImageReconcile = false;
             safeToLift = true;
+            const fence = "body" in registry ? registry.body?.draining : undefined;
+            if (imageTarget && sameDrainWindow(fence, drain))
+              reopenTarget = { application: imageTarget, fence: structuredClone(fence) };
             io.log(
               `[deploy:all] resident: unchanged container application ${step.residentContainerApp} at version ${application.version} and image ${shortImage(application.image)}; image reconcile skipped`,
             );
@@ -2167,6 +2184,7 @@ async function deployStepTraced(
             );
           else {
             resources = reconciled;
+            requireImageTarget = true;
             safeToLift = true;
           }
         }
@@ -2174,13 +2192,110 @@ async function deployStepTraced(
     }
   } finally {
     if (step.maintenance) io.log("[deploy:all] resident: staging maintenance stays held for explicit release");
-    else if (drain.attempted && safeToLift) await endDrain(step, drain, io, deps);
-    else if (drain.attempted)
+    else if (drain.attempted && safeToLift) {
+      reopenAnswer = await endDrain(step, drain, io, deps);
+      if (reopenAnswer) {
+        try {
+          io.log(drainReopenDiagnostic(reopenAnswer, "initial", uploadedVersion));
+        } catch {
+          /* Observation is not control authority. */
+        }
+      }
+    } else if (drain.attempted)
       io.log(
         `[deploy:all] resident: ${drain.drained ? "fleet stays closed" : "any drain that landed stays closed"} — the uploaded image is not reconciled; verify the image and lift with the drain bearer, or wait for the drain backstop${drain.until ? ` at ${drain.until}` : ""}`,
       );
   }
   if (result.ok && step.name === "resident") {
+    if (deps.signal?.aborted) return residentNotReady(result, "deployment cancelled");
+    if (!step.maintenance && reopenAnswer) {
+      let outcome = drainReopenOutcome(reopenAnswer);
+      if (outcome === "post-upload-unproven") {
+        if (
+          retryImageReconcile ||
+          !step.drain ||
+          !reopenTarget ||
+          result.noUpload ||
+          !result.versionId ||
+          !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(result.versionId) ||
+          reopenTarget.fence.swapFence !== true ||
+          typeof reopenTarget.fence.swapVersion !== "string" ||
+          !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(reopenTarget.fence.swapVersion) ||
+          typeof reopenTarget.fence.swapAt !== "string" ||
+          !Number.isFinite(Date.parse(reopenTarget.fence.swapAt)) ||
+          reopenTarget.fence.swapVersion === result.versionId ||
+          deps.signal?.aborted ||
+          readyDeadline - deps.now() <= 2 * LIVE_GATE_POLL_MS
+        )
+          return residentNotReady(
+            result,
+            "guarded reopen refused; the unchanged upload and original drain are not qualified for a retry",
+          );
+        const base = step.drain.url;
+        const bearer = RESIDENT_BEARER_ENVS.map((name) => deps.env[name]).find((value) => value?.trim());
+        if (!bearer) return residentNotReady(result, "guarded reopen refused; registry evidence is unavailable");
+        const [health, registry, currentApp] = await Promise.all([
+          deps.readHealth(new URL("/healthz", base).toString(), undefined, LIVE_GATE_POLL_MS, deps.signal),
+          deps.readHealth(new URL("/residents", base).toString(), bearer, LIVE_GATE_POLL_MS, deps.signal),
+          readResidentAppWithinDeadline(
+            step,
+            reopenTarget.application.application,
+            readyDeadline - LIVE_GATE_POLL_MS,
+            deps,
+          ),
+        ]);
+        const body = "body" in registry && registry.status === 200 ? registry.body : undefined;
+        if (
+          deps.signal?.aborted ||
+          readyDeadline - deps.now() <= LIVE_GATE_POLL_MS ||
+          Date.parse(reopenTarget.fence.until) - deps.now() <= LIVE_GATE_POLL_MS ||
+          residentWorkerProblem(health, expectedCommit) ||
+          residentImageReportsProblem(registry, resources) ||
+          "error" in currentApp ||
+          !sameResidentImageTarget(
+            { application: reopenTarget.application.application, ...currentApp.value },
+            reopenTarget.application,
+          ) ||
+          !body ||
+          !("stagingMaintenance" in body) ||
+          body.stagingMaintenance !== null ||
+          !("pendingReplicas" in body) ||
+          body.pendingReplicas !== 0 ||
+          !("count" in body) ||
+          body.count !== resources.length
+        )
+          return residentNotReady(
+            result,
+            "guarded reopen refused; fresh upload, application or fleet proof changed or is unavailable",
+          );
+        if (
+          "residents" in body &&
+          Array.isArray(body.residents) &&
+          body.residents.some(
+            (row) =>
+              row.live.imageTarget != null && !sameResidentImageTarget(row.live.imageTarget, reopenTarget.application),
+          )
+        )
+          return residentNotReady(result, "guarded reopen refused; a resident image target changed");
+        if (body.draining !== null) {
+          if (!isDeepStrictEqual(body.draining, reopenTarget.fence))
+            return residentNotReady(result, "guarded reopen refused; the retained drain changed");
+          reopenAnswer = await endDrain(step, drain, io, deps);
+          if (!reopenAnswer) return residentNotReady(result, "guarded reopen retry is unavailable");
+          try {
+            io.log(drainReopenDiagnostic(reopenAnswer, "retry", result.versionId));
+          } catch {
+            /* Observation is not control authority. */
+          }
+          outcome = drainReopenOutcome(reopenAnswer);
+          if (outcome === "post-upload-unproven")
+            return residentNotReady(result, "guarded reopen was refused again; no further request was sent");
+        } else outcome = "open";
+      }
+      if (outcome === "refused")
+        return residentNotReady(result, "guarded reopen was refused; no further request was sent");
+      if (outcome === "unknown") retryImageReconcile = false;
+    }
     const problem = await waitForResident(
       step,
       expectedCommit,
@@ -2189,9 +2304,22 @@ async function deployStepTraced(
       deps,
       resources,
       retryImageReconcile,
-      retryImageReconcile ? imageTarget : undefined,
+      requireImageTarget ? imageTarget : undefined,
     );
     if (problem) return residentNotReady(result, problem);
+    if (!step.maintenance && !requireImageTarget && imageTarget) {
+      const currentApp = await readResidentAppWithinDeadline(step, imageTarget.application, readyDeadline, deps);
+      if (
+        deps.signal?.aborted ||
+        deps.now() > readyDeadline ||
+        "error" in currentApp ||
+        !sameResidentImageTarget({ application: imageTarget.application, ...currentApp.value }, imageTarget)
+      )
+        return residentNotReady(
+          result,
+          "Resident application target changed or could not be verified after registry settlement",
+        );
+    }
     if (step.maintenance) {
       if (!step.forcedBy) {
         const bearer = step.drain ? deps.env[step.drain.tokenEnv] : undefined;
@@ -2266,6 +2394,26 @@ function residentNotReady(result: StepOutcome, problem: string): StepOutcome {
   };
 }
 
+/** Native reads spend the existing readiness window, including owned process cancellation. */
+async function readResidentAppWithinDeadline(
+  step: Pick<DeployStep, "dir">,
+  application: string,
+  deadline: number,
+  deps: SandboxGateDeps,
+): Promise<Read<AppState>> {
+  const remaining = deadline - deps.now();
+  if (remaining <= 0 || deps.signal?.aborted) return { error: "native application read budget exhausted" };
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(), remaining);
+  const signal = deps.signal ? AbortSignal.any([deps.signal, timeout.signal]) : timeout.signal;
+  try {
+    const answer = await deps.readAppState(step.dir, application, undefined, signal);
+    return signal.aborted ? { error: "native application read interrupted" } : answer;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function uncertainResidentUpload(problem: string): StepOutcome {
   return {
     ok: false,
@@ -2316,7 +2464,7 @@ async function waitForResident(
       if (targetProblem) problems.push(targetProblem);
     }
     if (problems.length === 0 && imageTarget) {
-      const actual = await deps.readAppState(step.dir, imageTarget.application, undefined, deps.signal);
+      const actual = await readResidentAppWithinDeadline(step, imageTarget.application, deadline, deps);
       if (deps.signal?.aborted) return "deployment cancelled";
       if (
         "error" in actual ||
@@ -2362,7 +2510,7 @@ async function beginDrain(
   expectedCommit: string,
   io: DeployRunnerIO,
   deps: SandboxGateDeps,
-): Promise<{ attempted: boolean; drained: boolean; until: string | undefined; problem?: string }> {
+): Promise<{ attempted: boolean; drained: boolean; since?: string; until: string | undefined; problem?: string }> {
   if (deps.signal?.aborted || !step.drain) return { attempted: false, drained: false, until: undefined };
   const bearer = deps.env[step.drain.tokenEnv];
   if (!bearer || !deps.postJson) {
@@ -2400,6 +2548,13 @@ async function beginDrain(
   return {
     attempted: true,
     drained,
+    ...(!("error" in answer) &&
+    typeof answer.body.draining === "object" &&
+    answer.body.draining !== null &&
+    "since" in answer.body.draining &&
+    typeof answer.body.draining.since === "string"
+      ? { since: answer.body.draining.since }
+      : {}),
     until: drainUntil(answer),
     ...(!drained ? { problem: `${step.name} ${drainFailureReason(answer)}` } : {}),
   };
@@ -2442,11 +2597,12 @@ async function endDrain(
   drain: { drained: boolean; until: string | undefined },
   io: DeployRunnerIO,
   deps: SandboxGateDeps,
-): Promise<void> {
+): Promise<PostAnswer | undefined> {
   const bearer = step.drain ? deps.env[step.drain.tokenEnv] : undefined;
   if (!step.drain || !bearer || !deps.postJson) return;
   const answer = await deps.postJson(undrainUrl(step.drain.url), bearer, {});
   io.log(drainLiftedLine(step.name, answer, drain));
+  return answer;
 }
 
 async function deployStepLoop(

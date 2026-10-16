@@ -1,5 +1,4 @@
-import { describe, expect, it } from "vitest";
-import { DRAIN } from "../core/budgets.js";
+import { describe, expect, it, vi } from "vitest";
 import {
   DRAINED_GAVE_UP_SUFFIX,
   drainBeganLine,
@@ -16,6 +15,7 @@ import {
 import { RESIDENT_WAIT_MAX_MS, type DeployStep } from "./plan.js";
 import { deployStep, type SandboxGateDeps, type StepExec } from "./run.js";
 import { TEST_MAINTENANCE } from "./testing/profile.js";
+import { RESIDENT_READY_WAIT_MS } from "./residentReadiness.js";
 
 // Feature: docs/reference/specs/release-and-deploy.md item 31 — the resident
 // step drains the fleet before upload and lifts only after it can prove no
@@ -138,6 +138,297 @@ const exec =
     h.markUploaded();
     return { code: 0, output: DEPLOYED };
   };
+
+async function expectBoundedNativeRead(
+  h: ReturnType<typeof harness>,
+  step: DeployStep,
+  blockRead: () => boolean,
+  cancel = false,
+) {
+  vi.useFakeTimers();
+  vi.setSystemTime(0);
+  h.deps.now = () => Date.now();
+  const control = new AbortController();
+  h.deps.signal = control.signal;
+  const original = h.deps.readAppState;
+  let readSignal: AbortSignal | undefined;
+  let releaseRead: (() => void) | undefined;
+  let enteredRead!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    enteredRead = resolve;
+  });
+  h.deps.readAppState = async (...args) => {
+    if (!blockRead()) return original(...args);
+    readSignal = args[3];
+    return new Promise((resolve) => {
+      releaseRead = () => resolve({ error: "native read interrupted" });
+      readSignal?.addEventListener("abort", releaseRead, { once: true });
+      enteredRead();
+    });
+  };
+  const pending = deployStep(step, plan, HEAD, h.io, h.deps, exec(h, 0));
+  try {
+    await entered;
+    if (cancel) control.abort();
+    else await vi.advanceTimersByTimeAsync(RESIDENT_READY_WAIT_MS);
+    expect(readSignal?.aborted).toBe(true);
+    const outcome = await pending;
+    expect(outcome.ok).toBe(false);
+    expect(outcome.live).toMatch(/^deployed, not live:/);
+  } finally {
+    releaseRead?.();
+    await pending;
+    vi.useRealTimers();
+  }
+}
+
+describe("Worker-only reopen after a definite refusal", () => {
+  const refused: PostAnswer = {
+    status: 409,
+    body: { error: "deploy-fence: the pre-upload Worker cannot reopen the fleet" },
+  };
+  function setup(first: PostAnswer = refused, second: PostAnswer = lifted, change = "") {
+    const window = {
+      since: "1970-01-01T00:00:00.000Z",
+      until: UNTIL,
+      by: "deploy all",
+      reason: `deploy ${HEAD.slice(0, 7)}`,
+    };
+    const fence = {
+      ...window,
+      swapFence: true,
+      swapVersion: "11111111-1111-4111-8111-111111111111",
+      swapAt: "1970-01-01T00:00:01.000Z",
+      swapAcquisitionId: "22222222-2222-4222-8222-222222222222",
+    };
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" });
+    const control = new AbortController();
+    h.deps.signal = control.signal;
+    let undrains = 0;
+    let open = false;
+    const reads: string[] = [];
+    h.deps.postJson = async (...args) => {
+      h.calls.push({ dep: "postJson", args });
+      if (args[0].endsWith("/drain")) return { status: 200, body: { draining: window } };
+      if (!args[0].endsWith("/undrain")) return { error: "Unexpected control request" };
+      undrains++;
+      const response = undrains === 1 ? first : second;
+      if (undrains === 1 && change === "cancel") control.abort();
+      if (undrains === 1 && change === "deadline") await h.deps.sleep(RESIDENT_READY_WAIT_MS);
+      if (
+        change === "settled unknown" ||
+        ("body" in response &&
+          response.status === 200 &&
+          response.body.error === undefined &&
+          response.body.cleared === true)
+      )
+        open = true;
+      return response;
+    };
+    h.deps.readAppState = async () =>
+      (undrains > 0 && change === "application") || (undrains >= 2 && change === "application after retry")
+        ? { value: { ...app.value, version: 18 } }
+        : app;
+    h.deps.readHealth = async (url) => {
+      reads.push(url);
+      if (undrains === 1 && change === "cancel read") control.abort();
+      if (undrains === 1 && change === "deadline read") await h.deps.sleep(RESIDENT_READY_WAIT_MS);
+      if (!url.endsWith("/residents"))
+        return {
+          status: 200,
+          body: { ok: true, build: { commit: undrains && change === "source" ? "f".repeat(40) : HEAD } },
+        };
+      return {
+        status: 200,
+        body: {
+          ...currentRegistry,
+          count: undrains && change === "fleet" ? 2 : 1,
+          draining: open
+            ? null
+            : {
+                ...fence,
+                ...(undrains && change === "window" ? { until: "2026-09-19T06:10:00.000Z" } : {}),
+                ...(undrains && change === "acquisition"
+                  ? { swapAcquisitionId: "33333333-3333-4333-8333-333333333333" }
+                  : {}),
+              },
+          stagingMaintenance: undrains && change === "maintenance" ? { state: "held" } : null,
+          pendingReplicas: 0,
+          residents: [
+            {
+              resource: "repo:acme/api",
+              live: {
+                imageReport: undrains && change === "image" ? "pending" : "current",
+                imageTarget:
+                  undrains && change === "image target"
+                    ? {
+                        application: residentStep.residentContainerApp,
+                        version: 99,
+                        image: "registry.example.test/foreign",
+                      }
+                    : null,
+              },
+            },
+            ...(undrains && change === "fleet"
+              ? [{ resource: "repo:acme/extra", live: { imageReport: "current", imageTarget: null } }]
+              : []),
+          ],
+        },
+      };
+    };
+    return { ...h, reads, undrains: () => undrains };
+  }
+
+  it("reopens once after fresh unchanged-target proof and completes only after registry readback", async () => {
+    const h = setup();
+    expect(await deployStep(workerOnlyStep, plan, HEAD, h.io, h.deps, exec(h, 0))).toMatchObject({
+      ok: true,
+      live: "live",
+    });
+    expect(h.calls.filter((call) => call.dep === "exec")).toHaveLength(1);
+    expect(h.calls.filter((call) => call.dep === "postJson").map((call) => call.args)).toEqual([
+      ["https://switchboard-resident.example.test/drain", "drn", expect.any(Object)],
+      ["https://switchboard-resident.example.test/undrain", "drn", {}],
+      ["https://switchboard-resident.example.test/undrain", "drn", {}],
+    ]);
+    expect(h.reads.at(-1)).toBe("https://switchboard-resident.example.test/residents");
+    expect(h.deps.now()).toBeLessThan(RESIDENT_READY_WAIT_MS);
+    const diagnostics = h
+      .plain()
+      .filter((line) => line.startsWith("[resident-reopen-diagnostic] "))
+      .map((line) => JSON.parse(line.slice("[resident-reopen-diagnostic] ".length)));
+    expect(diagnostics).toEqual([
+      {
+        schema: 1,
+        phase: "initial",
+        outcome: "post-upload-unproven",
+        httpStatus: 409,
+        uploadedVersion: { state: "reported", id: "0c48b341-f216-4262-81c0-bc62ecb5669a" },
+        receiverVersion: { state: "unreported" },
+        nativeOutcome: "unverified",
+      },
+      {
+        schema: 1,
+        phase: "retry",
+        outcome: "open",
+        httpStatus: 200,
+        uploadedVersion: { state: "reported", id: "0c48b341-f216-4262-81c0-bc62ecb5669a" },
+        receiverVersion: { state: "unreported" },
+        nativeOutcome: "unverified",
+      },
+    ]);
+  });
+
+  it.each([
+    ["lost", { error: "private transport error" }],
+    ["malformed", { status: 200, body: {} }],
+    [
+      "contradictory acknowledgement",
+      { status: 200, body: { error: "private failure", cleared: true, draining: null } },
+    ],
+    ["server failure", { status: 503, body: { error: "private server detail" } }],
+    [
+      "contradictory conflict",
+      { status: 409, body: { error: "deploy-fence: the pre-upload Worker cannot reopen the fleet", cleared: true } },
+    ],
+    ["policy", { status: 403, body: { error: "private policy detail" } }],
+    ["maintenance", { status: 409, body: { error: "staging maintenance requires explicit release" } }],
+    ["obligation", { status: 409, body: { error: "deploy-fence: admitted work has not settled" } }],
+  ] satisfies Array<[string, PostAnswer]>)("does not repeat a %s reopen", async (_name, first) => {
+    const h = setup(first);
+    expect(await deployStep(workerOnlyStep, plan, HEAD, h.io, h.deps, exec(h, 0))).toMatchObject({ ok: false });
+    expect(h.undrains()).toBe(1);
+    expect(h.calls.filter((call) => call.dep === "exec")).toHaveLength(1);
+    expect(h.calls.some((call) => String(call.args[0]).endsWith("/reconcile"))).toBe(false);
+    expect(h.plain().join("\n")).not.toContain("reopens it now");
+  });
+
+  it("settles a lost reopen by reads alone when the registry proves it opened", async () => {
+    const h = setup({ error: "private transport detail" }, lifted, "settled unknown");
+    expect(await deployStep(workerOnlyStep, plan, HEAD, h.io, h.deps, exec(h, 0))).toMatchObject({
+      ok: true,
+      live: "live",
+    });
+    expect(h.undrains()).toBe(1);
+    expect(h.plain().join("\n")).not.toContain("private transport detail");
+  });
+
+  it("stops after the one retry is refused instead of waiting for the drain backstop", async () => {
+    const h = setup(refused, refused);
+    expect(await deployStep(workerOnlyStep, plan, HEAD, h.io, h.deps, exec(h, 0))).toMatchObject({ ok: false });
+    expect(h.undrains()).toBe(2);
+    expect(h.deps.now()).toBeLessThan(RESIDENT_READY_WAIT_MS);
+  });
+
+  it.each([{ error: "private retry detail" }, { status: 200, body: {} }] satisfies PostAnswer[])(
+    "settles an unproven second reply with no third request: %j",
+    async (second) => {
+      const h = setup(refused, second);
+      expect(await deployStep(workerOnlyStep, plan, HEAD, h.io, h.deps, exec(h, 0))).toMatchObject({ ok: false });
+      expect(h.undrains()).toBe(2);
+      expect(h.plain().join("\n")).not.toContain("private retry detail");
+    },
+  );
+
+  it.each([
+    "window",
+    "acquisition",
+    "application",
+    "source",
+    "image",
+    "image target",
+    "fleet",
+    "maintenance",
+    "cancel",
+    "cancel read",
+    "deadline",
+    "deadline read",
+  ])("keeps the fleet closed without a retry when %s proof changes", async (change) => {
+    const h = setup(refused, lifted, change);
+    expect(await deployStep(workerOnlyStep, plan, HEAD, h.io, h.deps, exec(h, 0))).toMatchObject({ ok: false });
+    expect(h.undrains()).toBe(1);
+    expect(h.calls.filter((call) => call.dep === "exec")).toHaveLength(1);
+    expect(h.calls.some((call) => String(call.args[0]).endsWith("/reconcile"))).toBe(false);
+  });
+
+  it("keeps a changed application unready after a successful retry acknowledgement", async () => {
+    const h = setup(refused, lifted, "application after retry");
+    expect(await deployStep(workerOnlyStep, plan, HEAD, h.io, h.deps, exec(h, 0))).toMatchObject({ ok: false });
+    expect(h.undrains()).toBe(2);
+    expect(h.calls.filter((call) => call.dep === "exec")).toHaveLength(1);
+  });
+
+  it.each([
+    ["retry qualification", refused, 1],
+    ["acknowledged registry settlement", lifted, 1],
+    ["held registry settlement", held, 1],
+    ["unknown registry settlement", { error: "reply lost" }, 1],
+    ["registry settlement after the retry", refused, 2],
+  ] satisfies Array<[string, PostAnswer, number]>)(
+    "bounds a pending native read during %s by the original readiness deadline",
+    async (_phase, first, blockAt) => {
+      const h = setup(first);
+      if (first !== refused) {
+        const readHealth = h.deps.readHealth;
+        h.deps.readHealth = async (...args) => {
+          const answer = await readHealth(...args);
+          return h.undrains() > 0 && args[0].endsWith("/residents") && "body" in answer
+            ? { ...answer, body: { ...answer.body, draining: null } }
+            : answer;
+        };
+      }
+      await expectBoundedNativeRead(h, workerOnlyStep, () => h.undrains() >= blockAt);
+      expect(h.undrains()).toBe(blockAt);
+      expect(h.calls.filter((call) => call.dep === "exec")).toHaveLength(1);
+    },
+  );
+
+  it("cancels a pending native qualification read without another reopen request", async () => {
+    const h = setup();
+    await expectBoundedNativeRead(h, workerOnlyStep, () => h.undrains() > 0, true);
+    expect(h.undrains()).toBe(1);
+  });
+});
 
 describe("retained staging deployment", () => {
   const maintenance = {
@@ -312,7 +603,7 @@ describe("the pure pieces", () => {
     expect(drainSet({ error: "POST … failed: fetch failed" })).toBe(false);
   });
 
-  it("the lines: drained (with the end), refused (with the words), skipped (naming the env var), reopened, not reopened (with the self-end)", () => {
+  it("the lines report drain setup, held reopening and unknown replies without recovery promises", () => {
     expect(drainBeganLine("resident", drained)).toBe(
       `[deploy:all] resident: fleet drained — /attach refuses new runs until ${UNTIL}; the runs in flight finish, new ones wait at their attach`,
     );
@@ -323,19 +614,15 @@ describe("the pure pieces", () => {
       "RESIDENT_DRAIN_TOKEN is not set — waiting without a drain",
     );
     const stood = { drained: true, until: UNTIL };
-    expect(drainLiftedLine("resident", lifted, stood)).toBe("[deploy:all] resident: fleet reopened");
-    // The gated lift (issue 1931; issue 2044): the reopen does not fire while a
-    // container still reports the pre-deploy image — the registry holds the
-    // drain — and the line names every way it reopens: the container's own
-    // report (a cycle, a rebuild, a fresh provision), the cycle bound past
-    // which the fleet reopens anyway with the stale container named, and the
-    // record's `until` as the last resort. A 90-minute silence on a report
-    // nothing sends was the incident this line must foreclose.
+    expect(drainLiftedLine("resident", lifted, stood)).toBe(
+      "[deploy:all] resident: fleet reopen acknowledged; registry readback is still required",
+    );
+    // A hold is not an acknowledgement that the fleet reopened.
     expect(drainLiftedLine("resident", { status: 200, body: { cleared: false, held: ["repo:acme/api"] } }, stood)).toBe(
-      `[deploy:all] resident: fleet stays closed — repo:acme/api still reports the pre-deploy image; it reopens on each container's new-image report (a cycle, a rebuild or a fresh provision), or within ${DRAIN.cycleBoundMinutes} min anyway with the stale container named in a warning (backstop ${UNTIL})`,
+      "[deploy:all] resident: fleet stays closed with image-report holds; awaiting registry readback",
     );
     expect(drainLiftedLine("resident", { error: "POST x failed: fetch failed" }, stood)).toBe(
-      `[deploy:all] resident: fleet NOT reopened (POST x failed: fetch failed) — it reopens by itself at ${UNTIL}; \`POST /undrain\` with the drain or admin bearer reopens it now`,
+      "[deploy:all] resident: fleet reopen outcome is unknown; settling through registry reads only",
     );
   });
 
@@ -367,16 +654,16 @@ describe("the pure pieces", () => {
     );
   });
 
-  it("the lift line after a drain the runner never saw land tells the truth: cleared → it had landed; not cleared → nothing stood; a failed lift names the doubt, never a drain that ends", () => {
+  it("an unconfirmed drain does not turn a lift reply into historical proof", () => {
     const unconfirmed = { drained: false, until: undefined };
     expect(drainLiftedLine("resident", lifted, unconfirmed)).toBe(
-      "[deploy:all] resident: fleet reopened — the drain had landed although its answer was lost",
+      "[deploy:all] resident: fleet reopen acknowledged; registry readback is still required",
     );
     expect(drainLiftedLine("resident", { status: 200, body: { draining: null, cleared: false } }, unconfirmed)).toBe(
-      "[deploy:all] resident: no drain stood to lift — the fleet was never closed",
+      "[deploy:all] resident: fleet reopen acknowledged; registry readback is still required",
     );
     expect(drainLiftedLine("resident", { status: 401, body: { error: "unauthorized" } }, unconfirmed)).toBe(
-      "[deploy:all] resident: the lift answered HTTP 401: unauthorized and no drain was confirmed — the fleet should be open; `GET /residents` says (`draining`), and `POST /undrain` with the drain or admin bearer reopens it if not",
+      "[deploy:all] resident: fleet NOT reopened (HTTP 401; refused); the guarded request was refused",
     );
   });
 });
@@ -400,7 +687,9 @@ describe("deployStep (resident) drains the fleet", () => {
       noUpload: true,
     });
     expect(h.calls.filter((c) => c.dep === "exec")).toEqual([]);
-    expect(h.plain()).toContain("[deploy:all] resident: fleet reopened");
+    expect(h.plain()).toContain(
+      "[deploy:all] resident: fleet reopen acknowledged; registry readback is still required",
+    );
   });
 
   it.each([403, 409, "lost", "held"])("cancel cleanup %s grants no reopened credit", async (ending) => {
@@ -461,7 +750,9 @@ describe("deployStep (resident) drains the fleet", () => {
       "https://switchboard-resident.example.test/drain",
       "https://switchboard-resident.example.test/undrain",
     ]);
-    expect(h.plain()).toContain("[deploy:all] resident: fleet reopened");
+    expect(h.plain()).toContain(
+      "[deploy:all] resident: fleet reopen acknowledged; registry readback is still required",
+    );
   });
 
   it("with the admin bearer: /drain is posted BEFORE the first attempt, the refusals are waited out, the deploy lands, /reconcile is posted INSIDE the drain window, /undrain after it", async () => {
@@ -487,12 +778,12 @@ describe("deployStep (resident) drains the fleet", () => {
       },
     ]);
     expect(h.calls[5].args).toEqual(["https://switchboard-resident.example.test/undrain", "drn", {}]);
-    const lines = h.plain();
+    const lines = h.plain().filter((line) => line.startsWith("[deploy:all]"));
     expect(lines[0]).toBe(drainBeganLine("resident", drained));
     expect(lines.at(-3)).toBe(
       "[deploy:all] resident: fleet reconciled and every container verified on the new image (repo:acme/api restarted)",
     );
-    expect(lines.at(-2)).toBe("[deploy:all] resident: fleet reopened");
+    expect(lines.at(-2)).toBe("[deploy:all] resident: fleet reopen acknowledged; registry readback is still required");
     // The drained wait is the longer budget: the heartbeat counts against 60 min, not 30.
     expect(lines.some((l) => l.includes("(60 min left)"))).toBe(true);
   });
@@ -604,7 +895,12 @@ describe("deployStep (resident) drains the fleet", () => {
     expect(r.reason).toContain("preflight still refusing after 60 min (in flight: repo:acme/api (2 in flight))");
     expect(r.reason).toContain(DRAINED_GAVE_UP_SUFFIX);
     expect(h.calls.at(-1)?.args[0]).toBe("https://switchboard-resident.example.test/undrain");
-    expect(h.plain().at(-1)).toBe("[deploy:all] resident: fleet reopened");
+    expect(
+      h
+        .plain()
+        .filter((line) => line.startsWith("[deploy:all]"))
+        .at(-1),
+    ).toBe("[deploy:all] resident: fleet reopen acknowledged; registry readback is still required");
     expect(h.calls.filter((c) => c.dep === "exec")).toHaveLength(RESIDENT_DRAINED_WAIT_MAX_MS / plan.pollMs + 1);
   });
 
@@ -1014,7 +1310,11 @@ describe("resident application target", () => {
 
     const result = await deployStep(workerOnlyStep, plan, HEAD, h.io, h.deps, exec(h, 0));
     expect(result).toMatchObject({ ok: true, live: "live" });
-    expect(reads).toEqual([residentStep.residentContainerApp, residentStep.residentContainerApp]);
+    expect(reads).toEqual([
+      residentStep.residentContainerApp,
+      residentStep.residentContainerApp,
+      residentStep.residentContainerApp,
+    ]);
     expect(h.calls.map((c) => c.args[0])).toEqual([
       "https://switchboard-resident.example.test/drain",
       undefined,
@@ -1032,6 +1332,71 @@ describe("resident application target", () => {
     const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
     expect(result).toMatchObject({ ok: true, live: "live" });
     expect(h.calls.some((c) => c.args[0] === "https://switchboard-resident.example.test/reconcile")).toBe(true);
+  });
+
+  it.each([
+    ["lost", { error: "reply lost" }],
+    ["malformed", { status: 200, body: {} }],
+    ["server failure", { status: 503, body: { error: "unavailable" } }],
+  ] satisfies Array<[string, PostAnswer]>)(
+    "keeps exact image target proof after a %s changed-image reopen reply",
+    async (_name, reply) => {
+      for (const imageTarget of [null, { ...currentRegistry.residents[0].live.imageTarget, version: 99 }]) {
+        const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [drained, reconciled, reply]);
+        const original = h.deps.readHealth;
+        h.deps.readHealth = async (url, ...args) =>
+          url.endsWith("/residents")
+            ? {
+                status: 200,
+                body: {
+                  ...currentRegistry,
+                  residents: [{ resource: "repo:acme/api", live: { imageReport: "current", imageTarget } }],
+                },
+              }
+            : original(url, ...args);
+        const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+        expect(result.ok).toBe(false);
+        expect(result.reason).toContain("selected image target is unverified");
+        expect(h.calls.filter((call) => call.dep === "postJson").map((call) => call.args[0])).toEqual([
+          "https://switchboard-resident.example.test/drain",
+          "https://switchboard-resident.example.test/reconcile",
+          "https://switchboard-resident.example.test/undrain",
+        ]);
+      }
+    },
+  );
+
+  it("settles a lost changed-image reopen by reads with the original exact target", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [
+      drained,
+      reconciled,
+      { error: "reply lost" },
+    ]);
+    expect(await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0))).toMatchObject({
+      ok: true,
+      live: "live",
+    });
+    expect(h.calls.filter((call) => call.dep === "postJson").map((call) => call.args[0])).toEqual([
+      "https://switchboard-resident.example.test/drain",
+      "https://switchboard-resident.example.test/reconcile",
+      "https://switchboard-resident.example.test/undrain",
+    ]);
+  });
+
+  it("bounds a pending final native read after a lost changed-image reopen", async () => {
+    const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [
+      drained,
+      reconciled,
+      { error: "reply lost" },
+    ]);
+    await expectBoundedNativeRead(h, residentStep, () =>
+      h.calls.some((call) => String(call.args[0]).endsWith("/undrain")),
+    );
+    expect(h.calls.filter((call) => call.dep === "postJson").map((call) => call.args[0])).toEqual([
+      "https://switchboard-resident.example.test/drain",
+      "https://switchboard-resident.example.test/reconcile",
+      "https://switchboard-resident.example.test/undrain",
+    ]);
   });
 
   it("refuses a missing or different image target acknowledgement without lifting the drain", async () => {
