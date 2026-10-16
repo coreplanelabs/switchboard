@@ -189,14 +189,77 @@ describe("recorded provisional Memory continuation", () => {
     const f = fixture();
     f.state.workers.push("memory-provisional");
     let checked = false;
-    const io = {
+    const io: BootstrapIO = {
       ...f.io,
-      resumeMemory: async () => {
-        checked = true;
+      resume: {
+        workers: ["memory"],
+        verify: async () => {
+          checked = true;
+        },
       },
     };
     expect(await initializeStaging(commit, io)).toEqual({ status: "installed", commit });
     expect(checked).toBe(true);
     expect(f.state.workers).toEqual(["memory-provisional", "resident", "sandbox", "bot", "memory"]);
+  });
+});
+
+describe("recorded executor continuation", () => {
+  it("finishes an inspected partial installation without recreating or reprovisioning its executors", async () => {
+    const f = fixture();
+    f.state.workers.push("memory-provisional", "resident", "sandbox");
+    let inspected = false;
+    const io: BootstrapIO = {
+      ...f.io,
+      resume: {
+        workers: ["memory", "resident", "sandbox"],
+        verify: async () => {
+          inspected = true;
+        },
+      },
+      provision: async (worker) => {
+        if (worker !== "bot") throw new Error("completed provisioning repeated");
+      },
+    };
+    expect(await initializeStaging(commit, io)).toEqual({ status: "installed", commit });
+    expect({ inspected, ...f.state }).toEqual({
+      inspected: true,
+      workers: ["memory-provisional", "resident", "sandbox", "bot", "memory"],
+      publication: true,
+      ready: ["memory", "resident", "sandbox", "bot", "memory"],
+    });
+  });
+
+  it("keeps the partial installation unchanged when executor ownership cannot be verified", async () => {
+    const f = fixture();
+    f.state.workers.push("memory-provisional", "resident", "sandbox");
+    const io: BootstrapIO = {
+      ...f.io,
+      resume: {
+        workers: ["memory", "resident", "sandbox"],
+        verify: async () => {
+          throw new Error("executor receipt changed");
+        },
+      },
+    };
+    await expect(initializeStaging(commit, io)).rejects.toThrow("executor receipt changed");
+    expect(f.state).toEqual({ workers: ["memory-provisional", "resident", "sandbox"], publication: false, ready: [] });
+  });
+});
+
+describe("initialization checkpoint order", () => {
+  it("refuses a missing, skipped or post-publication checkpoint before any mutation", async () => {
+    for (const workers of [
+      [],
+      ["resident"],
+      ["memory", "sandbox"],
+      ["memory", "resident", "sandbox", "bot"],
+    ] as const) {
+      const f = fixture();
+      await expect(initializeStaging(commit, { ...f.io, resume: { workers, verify: async () => {} } })).rejects.toThrow(
+        "initialization checkpoint is not a completed creation prefix",
+      );
+      expect(f.state).toEqual({ workers: [], publication: false, ready: [] });
+    }
   });
 });

@@ -16,7 +16,6 @@ import { renderWorkerConfigs } from "../src/deploy/wranglerTemplate.js";
 import { parseManifest, planSecretPuts } from "../src/deploy/secrets.js";
 import {
   defaultSandboxGateDeps,
-  publishedImagesOnHost,
   prepareConfigPublication,
   publishConfigPublication,
   confirmConsumerConfigPublication,
@@ -33,6 +32,9 @@ import {
   type MemoryCreationReceipt,
 } from "../src/deploy/stagingMemoryReceipt.js";
 import { MINUTE_MS } from "../src/core/budgets.js";
+import { validateExecutorContinuation, type StagingContinuation } from "../src/deploy/stagingContinuation.js";
+import { publishedImagesFrom } from "../src/deploy/images.js";
+import { executionImageInputTags } from "../src/deploy/imageInputs.js";
 import { RUN_STORE_KEY } from "../src/core/runStoreConstants.js";
 import { LIVE_GATE_POLL_MS, LIVE_GATE_DEADLINE_MS, servedCommit } from "../src/deploy/liveGate.js";
 
@@ -40,7 +42,12 @@ import { LIVE_GATE_POLL_MS, LIVE_GATE_DEADLINE_MS, servedCommit } from "../src/d
 export async function initializeOnHost(
   profile: DeploymentProfile,
   read: Extract<ConfigRead, { ok: true }>,
-  options: { receiptPath?: string; resumeMemory?: string; checkOnly?: boolean } = {},
+  options: {
+    receiptPath?: string;
+    resumeMemory?: string;
+    continuation?: StagingContinuation;
+    checkOnly?: boolean;
+  } = {},
 ) {
   const run = (cmd: string, args: string[], cwd = process.cwd(), env = process.env, capture = false) => {
     const result = spawnSync(cmd, args, {
@@ -116,6 +123,11 @@ export async function initializeOnHost(
     }
   } else if (existsSync(receiptPath))
     throw new Error("initialization receipt already exists; inspect it before further action");
+  if (
+    options.continuation &&
+    (!memoryReceipt || options.continuation.installationCommit !== commit || memoryReceipt.commit !== commit)
+  )
+    throw new Error("continuation requires the original installation checkout and Memory receipt");
   let memoryUploadVersion: string | undefined;
   const memoryToken = process.env.MEMORY_TOKEN!;
   const ingress = JSON.parse(values.SWITCHBOARD_INGRESS_TOKENS) as Record<string, { subject?: string }>;
@@ -124,9 +136,16 @@ export async function initializeOnHost(
     throw new Error("first installation requires one bearer for the profile's restart deployer");
   const restartToken = deployers[0][0];
   run("docker", ["info", "--format", "{{.ServerVersion}}"]);
-  const published = await publishedImagesOnHost();
+  // A recovery controller can differ from the original clean installation checkout.
+  // Derive every build input from that installation, including optional image files.
+  const readSource = (path: string) => readFileSync(path, "utf8");
+  const published = publishedImagesFrom(readSource("project.json"), JSON.parse(readSource("package.json")).version);
   if (!published.ok) throw new Error(published.problem);
-  const rendered = renderWorkerConfigs(profile, (path) => readFileSync(path, "utf8"), published.images);
+  const images = {
+    ...published.images,
+    inputTags: await executionImageInputTags(async (path) => (existsSync(path) ? readSource(path) : undefined)),
+  };
+  const rendered = renderWorkerConfigs(profile, readSource, images);
   if (!rendered.ok) throw new Error(rendered.problems.join("\n"));
   if (options.checkOnly) return;
   const directory = mkdtempSync(join(tmpdir(), "switchboard-initialize-"));
@@ -218,13 +237,55 @@ export async function initializeOnHost(
     const result = await initializeStaging(commit, {
       ...(options.resumeMemory
         ? {
-            resumeMemory: async () => {
-              if (!memoryReceipt) throw new Error("Memory receipt unavailable");
-              await checkMemory(memoryReceipt);
-              await waitBuild("memory", memoryReceipt.commit);
-              const [legacy, target] = await Promise.all([client.readBase("base"), client.readBase(key)]);
-              if (!legacy.ok || !target.ok || legacy.version !== 0 || target.version !== 0)
-                throw new Error("Memory continuation requires empty legacy and candidate config slots");
+            resume: {
+              workers: options.continuation ? (["memory", "resident", "sandbox"] as const) : (["memory"] as const),
+              verify: async () => {
+                if (!memoryReceipt) throw new Error("Memory receipt unavailable");
+                await checkMemory(memoryReceipt);
+                await waitBuild("memory", memoryReceipt.commit);
+                const [legacy, target] = await Promise.all([client.readBase("base"), client.readBase(key)]);
+                if (!legacy.ok || !target.ok || legacy.version !== 0 || target.version !== 0)
+                  throw new Error("Memory continuation requires empty legacy and candidate config slots");
+                if (options.continuation) {
+                  const [applications, namespaces, domains, workflows] = await Promise.all([
+                    inventory("containers/applications"),
+                    inventory("workers/durable_objects/namespaces"),
+                    inventory("workers/domains"),
+                    inventory("workflows"),
+                  ]);
+                  const refresh = workflows.filter((w) => w.name === `${profile.workers.resident!.script}-refresh`);
+                  if (
+                    refresh.length !== 1 ||
+                    refresh[0].script_name !== profile.workers.resident!.script ||
+                    refresh[0].class_name !== "ResidentRefresh"
+                  )
+                    throw new Error("continuation Resident Workflow ownership changed");
+                  for (const kind of ["resident", "sandbox"] as const) {
+                    const expected = options.continuation.executors[kind];
+                    const path = `workers/scripts/${profile.workers[kind]!.script}`;
+                    const history = await nativeResult(`${path}/deployments`);
+                    const deployment = history.deployments?.[0];
+                    const activeVersion = deployment?.versions?.[0]?.version_id;
+                    if (!activeVersion) throw new Error("continuation active deployment is unreadable");
+                    const [upload, active] = await Promise.all([
+                      nativeResult(`${path}/versions/${expected.uploadVersion}`),
+                      nativeResult(`${path}/versions/${activeVersion}`),
+                    ]);
+                    const names = manifest.manifest.secrets
+                      .filter((s) => s.workers.includes(kind) && values[s.name])
+                      .map((s) => s.name);
+                    const proof = validateExecutorContinuation(kind, expected, profile, memoryReceipt.authorId, names, {
+                      applications,
+                      namespaces,
+                      domains,
+                      deployment,
+                      upload,
+                      active,
+                    });
+                    console.log(`Completed ${kind} checkpoint verified: ${JSON.stringify(proof)}`);
+                  }
+                }
+              },
             },
           }
         : {}),
@@ -420,6 +481,7 @@ export async function initializeOnHost(
           )
             throw new Error("initial Bot did not install the exact canonical configuration");
         } else if (kind === "sandbox" && worker.liveGate?.kind === "sandbox") {
+          await waitBuild("sandbox", commit);
           const ready = await waitUntilSandboxLive(
             { name: "sandbox", dir: worker.dir },
             worker.liveGate,

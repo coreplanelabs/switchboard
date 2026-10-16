@@ -7,7 +7,7 @@ import {
   STAGING_RESTORATION_KEYS,
 } from "./stagingRecreate.js";
 import { TEST_PROFILE } from "./testing/profile.js";
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, mkdirSync, realpathSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -350,6 +350,124 @@ describe("staging recreation workflow", () => {
     );
     expect(candidateInstall).toBeGreaterThan(recheck);
   });
+  it("qualifies the current PR head while preserving the original continuation source", () => {
+    const directory = mkdtempSync(join(tmpdir(), "staging-continuation-qualification-"));
+    try {
+      writeFileSync(
+        join(directory, "gh"),
+        `#!${process.execPath}\nif(process.argv[3].endsWith('/permission'))process.stdout.write('write');else process.stdout.write(JSON.stringify({state:'open',head:{repo:{full_name:'acme/bot'},sha:'${"b".repeat(40)}'}}));\n`,
+        { mode: 0o700 },
+      );
+      const step = workflow.jobs.recreate.steps[0];
+      const env = {
+        PATH: `${directory}:${process.env.PATH}`,
+        GITHUB_REF: "refs/heads/main",
+        GITHUB_REPOSITORY: "acme/bot",
+        GITHUB_ACTOR: "operator",
+        PR: "1",
+        COMMIT: "a".repeat(40),
+        CANDIDATE: "b".repeat(40),
+        CONTINUATION: "approved-checkpoint",
+      };
+      const accepted = spawnSync("bash", ["-e", "-c", step.run], { env, encoding: "utf8" });
+      expect({ status: accepted.status, stderr: accepted.stderr }).toEqual({ status: 0, stderr: "" });
+      const wrongHead = spawnSync("bash", ["-e", "-c", step.run], {
+        env: { ...env, CANDIDATE: "c".repeat(40) },
+        encoding: "utf8",
+      });
+      expect(wrongHead.status).toBe(1);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("runs the reviewed continuation controller against the original installation checkout", () => {
+    const directory = realpathSync(mkdtempSync(join(tmpdir(), "staging-continuation-workflow-")));
+    const source = join(directory, "candidate");
+    const controller = join(directory, "controller");
+    const receipt = join(directory, "argv.json");
+    mkdirSync(source);
+    mkdirSync(controller);
+    try {
+      writeFileSync(
+        join(directory, "npm"),
+        `#!${process.execPath}\nrequire('node:fs').writeFileSync(process.env.ARGV_RECEIPT,JSON.stringify({cwd:process.cwd(),args:process.argv.slice(2)}));\n`,
+        { mode: 0o700 },
+      );
+      const step = workflow.jobs.recreate.steps.find(
+        (s: { name?: string }) => s.name === "plan or recreate the selected staging installation once",
+      );
+      const result = spawnSync("bash", ["-e", "-c", step.run], {
+        cwd: source,
+        encoding: "utf8",
+        env: {
+          PATH: `${directory}:${process.env.PATH}`,
+          RUNNER_TEMP: directory,
+          ARGV_RECEIPT: receipt,
+          STAGING_CONTINUATION: "approved-checkpoint",
+        },
+      });
+      expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: "" });
+      expect(JSON.parse(readFileSync(receipt, "utf8"))).toEqual({
+        cwd: controller,
+        args: [
+          "run",
+          "--silent",
+          "staging:deploy",
+          "--",
+          "--continue-initialize",
+          "--source",
+          source,
+          "--receipt",
+          join(directory, "staging-recreation.json"),
+        ],
+      });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses failed provenance before any original-source installation hook can run", () => {
+    const directory = realpathSync(mkdtempSync(join(tmpdir(), "staging-provenance-order-")));
+    const controller = join(directory, "controller");
+    const candidate = join(directory, "candidate");
+    const effect = join(directory, "installation-hook-ran");
+    mkdirSync(controller);
+    mkdirSync(candidate);
+    try {
+      writeFileSync(
+        join(directory, "npm"),
+        `#!${process.execPath}\nif(process.cwd()===process.env.CANDIDATE_PATH){require('node:fs').writeFileSync(process.env.EFFECT_FILE,'unsafe hook ran');}else if(process.argv.includes('--check')){process.stderr.write('original source provenance refused');process.exit(1);}\n`,
+        { mode: 0o700 },
+      );
+      let status: number | null = 0;
+      for (const step of workflow.jobs.recreate.steps) {
+        if (
+          step.run &&
+          (step["working-directory"] === "candidate" ||
+            step.name === "verify original continuation source before installation code")
+        ) {
+          const result = spawnSync("bash", ["-e", "-c", step.run], {
+            cwd: step["working-directory"] === "candidate" ? candidate : controller,
+            encoding: "utf8",
+            env: {
+              PATH: `${directory}:${process.env.PATH}`,
+              RUNNER_TEMP: directory,
+              CANDIDATE_PATH: candidate,
+              EFFECT_FILE: effect,
+              STAGING_CONTINUATION: "approved-checkpoint",
+            },
+          });
+          status = result.status;
+          if (status !== 0) break;
+        }
+      }
+      expect({ status, installationHookRan: existsSync(effect) }).toEqual({ status: 1, installationHookRan: false });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("keeps recreation behind the original staging lock without publishing acceptance", () => {
     expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);
     expect(workflow.jobs.recreate.concurrency).toEqual({
