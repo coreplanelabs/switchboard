@@ -3,7 +3,7 @@
 The browser slice of [the proposed linking design](../../decisions/0081-account-linking-proves-both-identities-and-revocation-fences-their-use.md) composes the [offline proof adapters and atomic directory](person-directory.md). The record remains proposed. The optional host handler now accepts explicit Access and Slack proof configuration; this slice does not register a production route, authorization consumer, history migration or email-bridge cutover. The existing local fixture remains separate.
 
 - **Code**: `src/core/commands/identity.ts`, `src/core/commands/all.ts`, `src/channels/identityRuntime.ts`, `src/channels/identitySeed.ts`, `src/channels/webSeed.ts`, `src/channels/webShell.ts`, `src/channels/linkBrowser.ts`, `src/core/identity/linkCeremony.ts`, `web/src/modules/account-linking/LinkConsent.vue`, `web/src/modules/account-linking/fixtures.ts`, `web/src/modules/account-linking/preview.ts`, `web/link-consent-preview.html`.
-- **Tests**: `src/core/commandConformance.test.ts`, `src/channels/identityRuntime.test.ts`, `src/channels/linkBrowser.test.ts`, `web/src/modules/account-linking/LinkConsent.test.ts`.
+- **Tests**: `web/green/pages/identities.test.ts`, `src/core/commandConformance.test.ts`, `src/channels/identityRuntime.test.ts`, `src/channels/linkBrowser.test.ts`, `web/src/modules/account-linking/LinkConsent.test.ts`.
 
 ## Behavior
 
@@ -49,3 +49,9 @@ The browser slice of [the proposed linking design](../../decisions/0081-account-
 | Signed-in account reads and notice acknowledgment remain available after Slack setup is removed; all binding mutations stay unavailable. | `[unit]` `src/channels/identityRuntime.test.ts::browser identity activation::keeps exact signed-in identity reads and notice acknowledgment available when Slack setup is removed, while binding changes stay unavailable` |
 | A stable Slack notice retries after server replacement without borrowing a browser proof or acknowledging its browser notice. | `[unit]` `src/channels/identityRuntime.test.ts::browser identity activation::retries the stable Slack notice after server replacement without borrowing an Access proof or acknowledging the browser notice` |
 | Unlink and recovery require fresh two-sided proof and current administrator permission; browser notices are acknowledged only through bound anti-forgery tokens. | `[unit]` `src/channels/identityRuntime.test.ts::browser identity activation::verifies each unlink and recovery afresh, checks current administrator permission and acknowledges only delivered browser notices` |
+
+|---|---|
+
+| Native identity settings renders closed-field consent, fresh operation choices and protected acknowledgment, while readonly and missing flow remain truthful | `[unit]` `web/green/pages/identities.test.ts::live identity settings::*` |
+
+| The shared module retains fixture-only protected defaults without a live route | `[unit]` `web/src/modules/account-linking/LinkConsent.test.ts::link consent fixture::*` |
