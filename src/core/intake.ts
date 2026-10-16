@@ -288,43 +288,49 @@ async function askModel(
     );
     return { ...seam.value, attempts: seam.attempts };
   } catch (err) {
-    const timedOut =
-      typedProviderFailureOf(err) === undefined &&
-      err instanceof Error &&
-      (err.name === "TimeoutError" || err.name === "AbortError");
-    const attempts = attemptsOfThrow(err);
-    if (timedOut) {
-      return {
-        verdict: "silent",
-        reason: "The request timed out before it could start.",
-        source: "timeout",
-        ...(attempts ? { attempts } : {}),
-      };
-    }
-    const outputCapError =
-      err instanceof OutputCapError
-        ? err
-        : err instanceof StructuredAskError && err.cause instanceof OutputCapError
-          ? err.cause
-          : undefined;
-    if (outputCapError) {
-      return {
-        verdict: "silent",
-        reason: tidyReason(outputCapError.message),
-        source: "error",
-        ...(attempts ? { attempts } : {}),
-      };
-    }
-    const failure = providerFailureOf(err);
+    return { verdict: "silent", ...intakeModelFailure(err) };
+  }
+}
+
+type IntakeModelFailure = Pick<IntakeDecision, "reason" | "providerFailure" | "providerFailureDetails" | "attempts"> & {
+  source: "error" | "timeout";
+};
+
+/** Shared failure facts; each intake policy supplies its own fallback verdict. */
+function intakeModelFailure(err: unknown): IntakeModelFailure {
+  const timedOut =
+    typedProviderFailureOf(err) === undefined &&
+    err instanceof Error &&
+    (err.name === "TimeoutError" || err.name === "AbortError");
+  const attempts = attemptsOfThrow(err);
+  if (timedOut) {
     return {
-      verdict: "silent",
-      reason: renderProviderFailure(failure.cause, "ended"),
-      source: "error",
-      providerFailure: failure.cause,
-      providerFailureDetails: { ...failure },
+      reason: "The request timed out before it could start.",
+      source: "timeout",
       ...(attempts ? { attempts } : {}),
     };
   }
+  const outputCapError =
+    err instanceof OutputCapError
+      ? err
+      : err instanceof StructuredAskError && err.cause instanceof OutputCapError
+        ? err.cause
+        : undefined;
+  if (outputCapError) {
+    return {
+      reason: tidyReason(outputCapError.message),
+      source: "error",
+      ...(attempts ? { attempts } : {}),
+    };
+  }
+  const failure = providerFailureOf(err);
+  return {
+    reason: renderProviderFailure(failure.cause, "ended"),
+    source: "error",
+    providerFailure: failure.cause,
+    providerFailureDetails: { ...failure },
+    ...(attempts ? { attempts } : {}),
+  };
 }
 
 /** The seam's answer as a verdict: the forced call's input, or a text answer
