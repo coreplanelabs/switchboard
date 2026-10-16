@@ -11,7 +11,7 @@ import type { RunLedger } from "../core/runLedger/ledger.js";
 import type { RunsService } from "../core/runsService.js";
 import type { OrganizationExecutionRequest } from "../core/organization/runtime.js";
 import type { OrganizationAdmissionInput, OrganizationMapping } from "../core/organization/service.js";
-import type { OrganizationLimits } from "../core/organization/contract.js";
+import type { OrganizationLimits, OrganizationResult, SourceDeletionAddress } from "../core/organization/contract.js";
 import type { IngressConfig, OrganizationIngress } from "./http.js";
 import { connectionIdentity } from "./mcpApproval.js";
 import { SingleShotIO } from "./singleShotDispatch.js";
@@ -702,6 +702,25 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
   return {
     initialize,
     refreshNativeSources,
+    deleteSlackSource: async (address: SourceDeletionAddress): Promise<OrganizationResult> => {
+      if (address.source !== "slack" || address.issuer !== "https://slack.com") return { status: "fenced" };
+      if (!installation) await initialize();
+      if (!installation) return { status: "unavailable" };
+      await refreshNativeSources();
+      let currentTeam;
+      try {
+        currentTeam = await options.team();
+      } catch {
+        return { status: "unavailable" };
+      }
+      if (!currentTeam || !slackTeam) return { status: "unavailable" };
+      if (address.tenant !== currentTeam || address.tenant !== slackTeam) return { status: "fenced" };
+      return installation.runtime.deleteSource(
+        org,
+        address,
+        Math.max(options.limits.contentTtlMs, options.limits.receiptTtlMs),
+      );
+    },
     admit,
     replayNativeChoice: (
       msg: Parameters<typeof admit>[0],

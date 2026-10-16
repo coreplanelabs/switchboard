@@ -42,6 +42,249 @@ function organizationContract(
   _name: string,
 ) {
   describe("organization store contract", () => {
+    it("keeps source deletion bounded and durable across joined partitions without exposing unprocessed copies", async () => {
+      const store = factory(() => 1);
+      const address = {
+        source: "slack" as const,
+        issuer: "https://slack.com" as const,
+        tenant: "TLOCAL",
+        channelId: "slack:DLOCAL",
+        messageId: "1.000001",
+      };
+      const value: OrganizationEnvelope = {
+        ...envelope(),
+        source: "slack",
+        actor: {
+          identity: { issuer: address.issuer, tenant: address.tenant, subject: "UALICE" },
+          kind: "human",
+          principal: "slack:UALICE",
+          stream: "slack:UALICE",
+          bindingRevision: 0,
+          onBehalfOf: null,
+        },
+        sourceReference: {
+          actorId: "slack:UALICE",
+          userId: "slack:UALICE",
+          channelId: address.channelId,
+          threadKey: "slack:DLOCAL:1.000000",
+          messageId: address.messageId,
+        },
+        content: "Copied native words",
+      };
+      const increased = { ...limits, pendingPerActor: 200, pendingPerSource: 200, pendingPerOrganization: 300 };
+      expect(
+        await store.execute({ action: "admit", envelope: { ...value, key: "source-only" }, limits: increased }),
+      ).toMatchObject({ status: "receipt", receipt: { status: "pending" } });
+      const created = await store.directory.createPerson();
+      if (created.status !== "created") throw new Error("person unavailable");
+      expect(
+        await store.directory.change({
+          action: "link",
+          identity: value.actor.identity,
+          personId: created.person.id,
+          expectedRevision: 0,
+          actor: value.actor.identity,
+          proof: { method: "dual-authentication", version: 1 },
+        }),
+      ).toMatchObject({ status: "changed" });
+      const joined = { ...value.actor, stream: created.person.id, bindingRevision: 1 };
+      for (let i = 0; i < 101; i++)
+        expect(
+          await store.execute({
+            action: "admit",
+            envelope: { ...value, actor: joined, key: `copy-${i}` },
+            limits: increased,
+          }),
+        ).toMatchObject({ status: "receipt", receipt: { status: "pending" } });
+      const command = { action: "delete-source" as const, organization: value.organization, address, ttlMs: 365 };
+      expect(await store.execute(command)).toEqual({ status: "busy" });
+      expect(
+        await store.execute({
+          action: "stream",
+          organization: value.organization,
+          actor: joined,
+          stream: joined.stream,
+          identities: [joined.identity],
+          after: 0,
+          limit: 200,
+        }),
+      ).toMatchObject({ status: "stream", entries: [] });
+      expect(await store.execute({ action: "source-deletes", organization: value.organization, limit: 1 })).toEqual({
+        status: "source-deletes",
+        addresses: [address],
+      });
+      expect(await store.execute(command)).toMatchObject({ status: "ok" });
+      expect(await store.execute({ action: "source-deletes", organization: value.organization, limit: 1 })).toEqual({
+        status: "source-deletes",
+        addresses: [],
+      });
+      expect(await store.execute({ action: "source-deletes", organization: value.organization, limit: 101 })).toEqual({
+        status: "invalid",
+      });
+      expect(await store.execute(command)).toEqual({ status: "ok", removed: 0 });
+    });
+    it("erases only a verified native source message and keeps its original receipt and owner", async () => {
+      const store = factory(() => 1);
+      const source = {
+        source: "slack" as const,
+        issuer: "https://slack.com" as const,
+        tenant: "TLOCAL",
+        channelId: "slack:DLOCAL",
+        messageId: "1.000001",
+      };
+      const value: OrganizationEnvelope = {
+        ...envelope("slack-original"),
+        source: "slack",
+        actor: {
+          identity: { issuer: source.issuer, tenant: source.tenant, subject: "UALICE" },
+          kind: "human",
+          principal: "slack:UALICE",
+          stream: "slack:UALICE",
+          bindingRevision: 0,
+          onBehalfOf: null,
+        },
+        sourceReference: {
+          actorId: "slack:UALICE",
+          userId: "slack:UALICE",
+          channelId: source.channelId,
+          threadKey: "slack:DLOCAL:1.000000",
+          messageId: source.messageId,
+        },
+        content: "Deleted source words",
+      };
+      const admitted = await store.execute({ action: "admit", envelope: value, limits });
+      if (admitted.status !== "receipt") throw new Error("not admitted");
+      const claimed = await store.execute({
+        action: "claim",
+        organization: value.organization,
+        owner: "original",
+        leaseMs: 30,
+      });
+      if (claimed.status !== "state" || !claimed.state.lease) throw new Error("not claimed");
+      expect(
+        await store.execute({
+          action: "settle",
+          organization: value.organization,
+          owner: "original",
+          generation: claimed.state.lease.generation,
+          receiptId: admitted.receipt.id,
+          status: "accepted",
+          ownerRunId: "original-run",
+          reason: null,
+          reply: "Derived reply words",
+          contentTtlMs: 90,
+        }),
+      ).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+      const other = {
+        ...value,
+        key: "other-message",
+        sourceEvent: "other-message",
+        content: "Retained neighbor words",
+        sourceReference: { ...value.sourceReference!, messageId: "1.000002" },
+      };
+      expect(await store.execute({ action: "admit", envelope: other, limits })).toMatchObject({
+        status: "receipt",
+        receipt: { status: "pending" },
+      });
+      expect(
+        await store.execute({
+          action: "stream",
+          organization: value.organization,
+          actor: value.actor,
+          stream: value.actor.stream!,
+          identities: [value.actor.identity],
+          after: 0,
+          limit: 100,
+        }),
+      ).toMatchObject({
+        status: "stream",
+        entries: [
+          { content: "Deleted source words" },
+          { content: "Derived reply words" },
+          { content: "Retained neighbor words" },
+        ],
+      });
+      const command = {
+        action: "delete-source" as const,
+        organization: value.organization,
+        address: source,
+        ttlMs: 365,
+      };
+      expect(await store.execute({ ...command, address: { ...source, tenant: "TFOREIGN" } })).toEqual({
+        status: "ok",
+        removed: 0,
+      });
+      expect(await store.execute(command)).toEqual({ status: "ok", removed: 2 });
+      expect(await store.execute(command)).toEqual({ status: "ok", removed: 0 });
+      expect(
+        await store.execute({
+          action: "delete",
+          organization: value.organization,
+          actor: value.actor,
+          stream: value.actor.stream!,
+          receiptId: admitted.receipt.id,
+        }),
+      ).toEqual({ status: "ok", removed: 0 });
+      expect(
+        await store.execute({
+          action: "stream",
+          organization: value.organization,
+          actor: value.actor,
+          stream: value.actor.stream!,
+          identities: [value.actor.identity],
+          after: 0,
+          limit: 100,
+        }),
+      ).toMatchObject({ status: "stream", entries: [{ content: "Retained neighbor words" }] });
+      expect(await store.execute({ action: "admit", envelope: value, limits })).toMatchObject({
+        status: "receipt",
+        duplicate: true,
+        receipt: { id: admitted.receipt.id, status: "accepted", ownerRunId: "original-run", digest: value.digest },
+      });
+      expect(
+        await store.execute({
+          action: "reply",
+          organization: value.organization,
+          receiptId: admitted.receipt.id,
+          actor: value.actor,
+          ownerRunId: "original-run",
+          replyKey: "late",
+          digest: "c".repeat(64),
+          content: "Late deleted words",
+          contentTtlMs: 90,
+        }),
+      ).toEqual({ status: "not_found" });
+      expect(await store.execute({ action: "owner-clears", organization: value.organization, limit: 10 })).toEqual({
+        status: "owner-clears",
+        items: [{ receiptId: admitted.receipt.id, effectKey: admitted.receipt.effectKey }],
+      });
+      expect(
+        await store.execute({
+          action: "owner-clears",
+          organization: value.organization,
+          sourceMessage: { ...source, messageId: "1.000002" },
+          limit: 1,
+        }),
+      ).toEqual({ status: "owner-clears", items: [] });
+      expect(
+        await store.execute({
+          action: "owner-clears",
+          organization: value.organization,
+          sourceMessage: source,
+          limit: 1,
+        }),
+      ).toEqual({
+        status: "owner-clears",
+        items: [{ receiptId: admitted.receipt.id, effectKey: admitted.receipt.effectKey }],
+      });
+      expect(
+        await store.execute({
+          action: "admit",
+          envelope: { ...value, key: "late-event", sourceEvent: "late-event" },
+          limits,
+        }),
+      ).toMatchObject({ status: "receipt", receipt: { status: "rejected", reason: "Source message deleted." } });
+    });
     it("retains protected MCP form-connection metadata and refuses an unknown consent mode atomically", async () => {
       const store = factory(() => 1);
       const value: OrganizationEnvelope = {

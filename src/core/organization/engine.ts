@@ -1,4 +1,5 @@
 import { sourceAuthority, sourcePolicySchema } from "./accessCatalogue.js";
+import { ORG_RECONCILE_BATCH_MAX } from "../budgets.js";
 import { redactSecrets } from "../redact.js";
 import { identityKey } from "../identity/engine.js";
 import type { BindingResolution, ExternalIdentity } from "../identity/contract.js";
@@ -12,6 +13,10 @@ import {
   replyKeySchema,
   bindingCutoffSchema,
   sourceProvenanceSchema,
+  sourceDeletionSchema,
+  sourceDeletionKey,
+  sourceDeletionAddressOf,
+  type SourceDeletionAddress,
   type OrganizationActor,
   type OrganizationCommand,
   type OrganizationEnvelope,
@@ -48,6 +53,7 @@ export interface OrganizationRows {
       receiptId?: string;
       afterKey?: string;
       keyOrder?: boolean;
+      sourceMessage?: SourceDeletionAddress;
     },
   ): unknown[];
   binding(identity: ExternalIdentity): BindingResolution;
@@ -102,6 +108,54 @@ function releaseReservation(rows: OrganizationRows, org: string, envelope: Organ
     { receiptId: string; revision: number } | undefined;
   if (reservation?.receiptId === receiptId) rows.remove("reservation", org, envelope.target.key);
 }
+function deletedSource(
+  rows: OrganizationRows,
+  org: string,
+  value: Parameters<typeof sourceDeletionAddressOf>[0],
+  now: number,
+): boolean {
+  const address = sourceDeletionAddressOf(value);
+  if (!address) return false;
+  const raw = rows.get("source-delete", org, sourceDeletionKey(address));
+  if (raw === undefined) return false;
+  const deleted = sourceDeletionSchema.parse(raw);
+  return !deleted.complete || deleted.expiresAt > now;
+}
+/** Erase copied content without replacing a canonical or already accepted owner. */
+function clearReceiptContent(
+  rows: OrganizationRows,
+  org: string,
+  id: string,
+  now: number,
+  limit: number,
+  address: SourceDeletionAddress,
+): { removed: number; complete: boolean } {
+  const scope = rows.get("receipt-key", org, id);
+  if (typeof scope === "string") {
+    const receipt = receiptSchema.parse(rows.get("receipt", org, scope));
+    if (receipt.effectKey) rows.put("owner-clear", org, id, { receiptId: id, effectKey: receipt.effectKey, address });
+  }
+  rows.remove("reply-address", org, id);
+  const entries = rows
+    .list("stream", org, { receiptId: id, limit: limit + 1 })
+    .map((value) => streamEntrySchema.parse(value));
+  const selected = entries.slice(0, limit);
+  for (const entry of selected) rows.remove("stream", org, String(entry.sequence));
+  const raw = rows.get("pending", org, id);
+  if (raw !== undefined) {
+    const pending = envelopeSchema.parse(raw);
+    rows.remove("pending", org, id);
+    releaseReservation(rows, org, pending, id);
+    if (typeof scope === "string") {
+      const receipt = receiptSchema.parse(rows.get("receipt", org, scope));
+      receipt.status = "rejected";
+      receipt.reason = "Message deleted.";
+      receipt.settledAt = now;
+      rows.put("receipt", org, scope, receiptSchema.parse(receipt), id, 0, receipt.expiresAt);
+    }
+  }
+  return { removed: selected.length, complete: entries.length <= limit };
+}
 function rejectPending(
   rows: OrganizationRows,
   org: string,
@@ -129,6 +183,11 @@ function eligiblePending(
     .list("pending", org)
     .map((value) => envelopeSchema.parse(value))
     .filter((envelope) => {
+      if (deletedSource(rows, org, envelope, now)) {
+        rejectPending(rows, org, envelope, now, "Source message deleted.");
+        changed();
+        return false;
+      }
       if (envelope.contentExpiresAt === undefined || envelope.contentExpiresAt <= now) {
         rejectPending(rows, org, envelope, now, "Message expired.");
         changed();
@@ -324,6 +383,72 @@ export function executeOrganization(
   }
   if (command.action === "identities") return { status: "identities", identities: rows.identities(command.personId) };
   if (command.action === "get") return { status: "state", state: s };
+  if (command.action === "source-deletes")
+    return {
+      status: "source-deletes",
+      addresses: rows
+        .list("source-delete", org, { partition: "pending", limit: command.limit })
+        .map((value) => sourceDeletionSchema.parse(value))
+        .filter((row) => !row.complete)
+        .map((row) => row.address),
+    };
+  if (command.action === "delete-source") {
+    const key = sourceDeletionKey(command.address);
+    const raw = rows.get("source-delete", org, key);
+    const prior = raw === undefined ? undefined : sourceDeletionSchema.parse(raw);
+    const retained = prior !== undefined && (!prior.complete || prior.expiresAt > now);
+    if (retained && prior.complete) return { status: "ok", removed: 0 };
+    const tombstone = sourceDeletionSchema.parse(
+      retained ? prior : { address: command.address, deletedAt: now, expiresAt: now + command.ttlMs, complete: false },
+    );
+    const found = rows
+      .list("source-provenance", org, {
+        sourceMessage: command.address,
+        keyOrder: true,
+        ...(tombstone.after ? { afterKey: tombstone.after } : {}),
+        limit: ORG_RECONCILE_BATCH_MAX + 1,
+      })
+      .map((value) => sourceProvenanceSchema.parse(value));
+    const selected = found.slice(0, ORG_RECONCILE_BATCH_MAX);
+    let removed = 0;
+    let allCleared = true;
+    for (const value of selected) {
+      if (sourceDeletionKey(sourceDeletionAddressOf(value)!) !== key)
+        throw new Error("Source deletion address changed.");
+      tombstone.expiresAt = Math.max(tombstone.expiresAt, value.retentionDeadline ?? 0);
+      const cleared = clearReceiptContent(
+        rows,
+        org,
+        value.receiptId,
+        now,
+        ORG_RECONCILE_BATCH_MAX - removed,
+        command.address,
+      );
+      removed += cleared.removed;
+      if (!cleared.complete) {
+        allCleared = false;
+        break;
+      }
+      tombstone.after = value.receiptId;
+    }
+    tombstone.complete = allCleared && found.length <= ORG_RECONCILE_BATCH_MAX;
+    rows.put(
+      "source-delete",
+      org,
+      key,
+      sourceDeletionSchema.parse(tombstone),
+      tombstone.complete ? "complete" : "pending",
+      0,
+      tombstone.complete ? tombstone.expiresAt : Number.MAX_SAFE_INTEGER,
+    );
+    s.revision++;
+    if (!retained && found.length) {
+      s.accessRevision++;
+      s.sourcePolicyRevision++;
+    }
+    save();
+    return tombstone.complete ? { status: "ok", removed } : { status: "busy" };
+  }
   if (command.action === "submission") {
     if (!validActor(rows, org, command.actor)) return { status: "fenced" };
     const scope = JSON.stringify([command.source, identityKey(command.actor.identity), command.key]);
@@ -503,7 +628,12 @@ export function executeOrganization(
   if (command.action === "owner-clears")
     return {
       status: "owner-clears",
-      items: rows.list("owner-clear", org, { limit: command.limit }) as { receiptId: string; effectKey: string }[],
+      items: (
+        rows.list("owner-clear", org, {
+          limit: command.limit,
+          ...(command.sourceMessage ? { sourceMessage: command.sourceMessage } : {}),
+        }) as { receiptId: string; effectKey: string }[]
+      ).map(({ receiptId, effectKey }) => ({ receiptId, effectKey })),
     };
   if (command.action === "owner-cleared") {
     const pending = rows.get("owner-clear", org, command.receiptId) as { effectKey: string } | undefined;
@@ -608,7 +738,8 @@ export function executeOrganization(
     const stale = !!e.target && (current === undefined || current !== e.target.revision || reservation !== undefined);
     s.revision++;
     const id = `${s.orchestrator}:${s.revision}`;
-    const status = stale ? "stale" : overloaded ? "throttled" : "pending";
+    const sourceDeleted = deletedSource(rows, org, e, now);
+    const status = sourceDeleted ? "rejected" : stale ? "stale" : overloaded ? "throttled" : "pending";
     const receipt: OrganizationReceipt = {
       version: 1,
       id,
@@ -619,11 +750,13 @@ export function executeOrganization(
       key: e.key,
       digest: e.digest,
       status,
-      reason: stale
-        ? "The work changed. Reload its current state."
-        : overloaded
-          ? "Too many pending requests in this lane."
-          : null,
+      reason: sourceDeleted
+        ? "Source message deleted."
+        : stale
+          ? "The work changed. Reload its current state."
+          : overloaded
+            ? "Too many pending requests in this lane."
+            : null,
       revision: s.revision,
       target: e.target?.key ?? null,
       currentRevision: typeof current === "number" ? current : null,
@@ -716,6 +849,7 @@ export function executeOrganization(
     if (
       envelope.contentExpiresAt === undefined ||
       envelope.contentExpiresAt <= now ||
+      deletedSource(rows, org, envelope, now) ||
       (envelope.target && rows.get("target", org, envelope.target.key) !== envelope.target.revision)
     ) {
       rejectPending(rows, org, envelope, now, "The work or retention changed.");
@@ -736,6 +870,7 @@ export function executeOrganization(
     if (
       envelope.contentExpiresAt === undefined ||
       envelope.contentExpiresAt <= now ||
+      deletedSource(rows, org, envelope, now) ||
       !validActor(rows, org, envelope.actor)
     ) {
       rejectPending(rows, org, envelope, now, "Access or retention changed.");
@@ -803,6 +938,8 @@ export function executeOrganization(
       .slice(0, command.limit + 1);
     const scanned = candidates.slice(0, command.limit);
     const eligible = scanned.filter((entry) => {
+      const source = rows.get("source-provenance", org, entry.receiptId);
+      if (source !== undefined && deletedSource(rows, org, sourceProvenanceSchema.parse(source), now)) return false;
       if (rows.get("revoked-source", org, identityKey(entry.identity)) === true) return false;
       if (entry.stream !== command.stream && identityKey(entry.identity) !== identityKey(command.actor.identity))
         return false;
@@ -843,6 +980,9 @@ export function executeOrganization(
     const address = rows.get("reply-address", org, command.receiptId);
     if (!address) return { status: "not_found" };
     const raw = replyAddressSchema.parse(address);
+    const source = rows.get("source-provenance", org, command.receiptId);
+    if (source !== undefined && deletedSource(rows, org, sourceProvenanceSchema.parse(source), now))
+      return { status: "not_found" };
     if (raw.expiresAt <= now) return { status: "not_found" };
     if (raw.ownerRunId !== command.ownerRunId || JSON.stringify(raw.envelope.actor) !== JSON.stringify(command.actor))
       return { status: "fenced" };
@@ -910,8 +1050,16 @@ export function executeOrganization(
       )
         return { status: "not_found" };
       partition = receipt.actor.stream!;
-      if (receipt.effectKey)
-        rows.put("owner-clear", org, receipt.id, { receiptId: receipt.id, effectKey: receipt.effectKey });
+      if (receipt.effectKey) {
+        const prior = rows.get("owner-clear", org, receipt.id) as
+          { effectKey: string; address?: SourceDeletionAddress } | undefined;
+        if (prior && prior.effectKey !== receipt.effectKey) throw new Error("Original cleanup owner changed.");
+        rows.put("owner-clear", org, receipt.id, {
+          receiptId: receipt.id,
+          effectKey: receipt.effectKey,
+          ...(prior?.address ? { address: prior.address } : {}),
+        });
+      }
     }
     let removed = 0;
     const address = rows.get("reply-address", org, command.receiptId);
@@ -999,5 +1147,7 @@ export function executeOrganization(
   }
   for (const value of rows.list("source-provenance", org, { expiresBefore: now, limit: 1000 }))
     rows.remove("source-provenance", org, sourceProvenanceSchema.parse(value).receiptId);
+  for (const value of rows.list("source-delete", org, { partition: "complete", expiresBefore: now, limit: 1000 }))
+    rows.remove("source-delete", org, sourceDeletionKey(sourceDeletionSchema.parse(value).address));
   return { status: "ok", removed };
 }

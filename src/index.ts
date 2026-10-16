@@ -1069,6 +1069,10 @@ export async function runBot(): Promise<void> {
     },
     (core, click, opts) =>
       browserWiring ? browserWiring.confirmSlack(core, click, opts) : dispatchClick(core, click, opts),
+    {
+      sourceDeleted: (address) =>
+        browserWiring ? browserWiring.deleteSlackSource(address) : Promise.resolve({ status: "unavailable" }),
+    },
   );
   // A thread's channel handle rebuilt from a stored row's parts, with no
   // triggering event (run-history item 38): what a resumed run replies through

@@ -6,6 +6,7 @@ import {
   webApi,
   type BlockAction,
   type ButtonAction,
+  type ReceiverEvent,
   type SlackActionMiddlewareArgs,
   type types as slackTypes,
 } from "@slack/bolt";
@@ -82,6 +83,11 @@ import {
 } from "./slack/statusCard.js";
 import { ACK_EMOJI, catchUpMissedMentions, tsMs, type MissedMessage } from "./slackCatchUp.js";
 import { processSecrets, type Secret } from "../secrets.js";
+import {
+  sourceDeletionAddressSchema,
+  type SourceDeletionAddress,
+  type OrganizationResult,
+} from "../core/organization/contract.js";
 import { ARTIFACT_DEFAULTS } from "../artifacts/config.js";
 import { missingBotScopes, recordCatchUpOutcome, recordMissingScopes } from "./slackCatchUpStatus.js";
 import { recordSocketConnected, recordSocketDisconnected } from "./slackSocketStatus.js";
@@ -190,11 +196,66 @@ const LOADING_PHRASES = [
  *  bounded by the threads a process ever spoke in. */
 const shimmerOwners = new Map<string, string>();
 
+/** Socket Mode authenticated this envelope before Bolt sees it. Deletion must
+ * commit before Bolt's automatic Events API acknowledgement. No user claim in
+ * previous_message grants deletion authority; only the native address is used. */
+export async function receiveSlackSourceDeletion(
+  event: Pick<ReceiverEvent, "body" | "ack">,
+  client: { auth: { test(): Promise<{ team_id?: string }> } },
+  erase: (address: SourceDeletionAddress) => Promise<OrganizationResult>,
+): Promise<boolean> {
+  const body = event.body;
+  const message = body.event;
+  if (body.type !== "event_callback" || message?.type !== "message" || message.subtype !== "message_deleted")
+    return false;
+  if (
+    typeof message.channel !== "string" ||
+    !/^[CDG][A-Z0-9]+$/.test(message.channel) ||
+    typeof message.deleted_ts !== "string" ||
+    !/^\d{1,20}\.\d{1,6}$/.test(message.deleted_ts)
+  ) {
+    await event.ack();
+    return true;
+  }
+  const address = sourceDeletionAddressSchema.safeParse({
+    source: "slack",
+    issuer: "https://slack.com",
+    tenant: body.team_id,
+    channelId: typeof message.channel === "string" ? `slack:${message.channel}` : undefined,
+    messageId: message.deleted_ts,
+  });
+  if (!address.success) {
+    await event.ack();
+    return true;
+  }
+  let team: string | undefined;
+  try {
+    team = (await client.auth.test()).team_id;
+  } catch {
+    throw new Error("Slack source deletion proof is unavailable.");
+  }
+  if (!team) throw new Error("Slack source deletion proof is unavailable.");
+  if (team !== address.data.tenant) {
+    await event.ack();
+    return true;
+  }
+  let result: OrganizationResult;
+  try {
+    result = await erase(address.data);
+  } catch {
+    throw new Error("Slack source deletion remains held.");
+  }
+  if (result.status !== "ok") throw new Error("Slack source deletion remains held.");
+  await event.ack();
+  return true;
+}
+
 export function createSlackApp(
   deps: CoreDeps,
   intake?: SlackIntakeGate,
   dispatchMessage: typeof dispatch = dispatch,
   confirmChoice: typeof dispatchClick = dispatchClick,
+  lifecycle?: { sourceDeleted(address: SourceDeletionAddress): Promise<OrganizationResult> },
 ) {
   const clock = deps.clock ?? systemClock;
   // The receiver is built explicitly (rather than `socketMode: true`) so the
@@ -206,6 +267,12 @@ export function createSlackApp(
   const botToken = processSecrets.get("SLACK_BOT_TOKEN");
   const receiver = new SocketModeReceiver({ appToken: appToken?.reveal() ?? "" });
   const app = new App({ token: botToken?.reveal(), receiver });
+  if (lifecycle) {
+    const original = app.processEvent.bind(app);
+    app.processEvent = async (event) => {
+      if (!(await receiveSlackSourceDeletion(event, app.client, lifecycle.sourceDeleted))) await original(event);
+    };
+  }
   const statusClient = createStatusClient(botToken);
 
   let botUserId: string | undefined;

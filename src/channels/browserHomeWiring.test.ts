@@ -29,6 +29,7 @@ import type { PageSeed, WebSeed } from "./webSeed.js";
 import type { AccessIdentity } from "./accessAuth.js";
 import { DAY_MS } from "../core/budgets.js";
 import { createBrowserHomeWiring } from "./browserHomeWiring.js";
+import { receiveSlackSourceDeletion } from "./slack.js";
 import { workViewScopeOf } from "./workViewScope.js";
 import { createHomeService } from "../core/home/service.js";
 import { createHomeConditionReader } from "../core/home/conditions.js";
@@ -199,6 +200,89 @@ async function fixture(
   };
 }
 describe("browser production wiring", () => {
+  it("erases the verified native Slack source through the production callback without rehosting its copied input", async () => {
+    const s = await fixture();
+    await s.wiring.initialize();
+    const msg = {
+      channelId: "slack:D1",
+      userId: "slack:UALICE",
+      threadKey: "slack:D1:1",
+      messageId: "1000.1",
+      text: "memory forget",
+      directAudience: {
+        kind: "slack-unshared-im" as const,
+        channelId: "slack:D1",
+        userId: "slack:UALICE",
+        threadKey: "slack:D1:1",
+      },
+    };
+    const io = {
+      reply: async () => {},
+      history: async () => [],
+      status: async () => ({ update() {}, done: async () => {} }),
+    };
+    expect(await s.wiring.dispatchSlack(s.core, msg, io)).toMatchObject({
+      status: "completed",
+      inputQueued: { runId: expect.any(String) },
+    });
+    const native = await s.wiring.authentication()!.resolveNative(msg, {
+      source: "slack",
+      identity: { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" },
+    });
+    if (native.status !== "resolved") throw new Error("native source unavailable");
+    const installation = s.wiring.current()!;
+    expect(await installation.organization.streamTail(native.authentication, undefined, 100)).toMatchObject({
+      status: "stream_tail",
+      entries: [{ content: "memory forget" }],
+    });
+    const address = {
+      source: "slack" as const,
+      issuer: "https://slack.com",
+      tenant: "fixture-team",
+      channelId: msg.channelId,
+      messageId: msg.messageId,
+    };
+    expect(await s.wiring.deleteSlackSource({ ...address, tenant: "foreign-team" })).toEqual({ status: "fenced" });
+    let acknowledgments = 0;
+    expect(
+      await receiveSlackSourceDeletion(
+        {
+          body: {
+            type: "event_callback",
+            team_id: "fixture-team",
+            event: { type: "message", subtype: "message_deleted", channel: "D1", deleted_ts: "1000.1" },
+          },
+          ack: async () => {
+            acknowledgments++;
+          },
+        },
+        { auth: { test: async () => ({ team_id: "fixture-team" }) } },
+        s.wiring.deleteSlackSource,
+      ),
+    ).toBe(true);
+    expect(acknowledgments).toBe(1);
+    expect(await installation.organization.streamTail(native.authentication, undefined, 100)).toMatchObject({
+      status: "stream_tail",
+      entries: [],
+    });
+    const current = await installation.organization.resolve(native.authentication);
+    if (!current) throw new Error("native source unavailable");
+    const receipt = await s.backing.execute({
+      action: "submission",
+      ...current,
+      source: "slack",
+      key: "slack:D1:1000.1",
+    });
+    expect(receipt).toMatchObject({
+      status: "submission",
+      receipt: { status: "accepted", ownerRunId: expect.any(String) },
+    });
+    if (receipt.status !== "submission" || !receipt.receipt.ownerRunId) throw new Error("receipt unavailable");
+    expect(await s.wiring.originalBinding(receipt.receipt.ownerRunId)).toBeUndefined();
+    await s.tasks.shift()!();
+    expect(s.effects).toEqual([]);
+    expect(s.replies).toEqual([]);
+  });
   it("offers an owned reviewed-head merge and observes native completion through installation callbacks without a model", async () => {
     const callers: string[] = [],
       reads: { repo: string; unit: string; number?: number }[] = [];

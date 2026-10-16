@@ -8,6 +8,9 @@ import {
   type OrganizationStore,
   stateSchema,
   bindingCutoffSchema,
+  sourceDeletionAddressOf,
+  sourceDeletionKey,
+  sourceDeletionAddressSchema,
 } from "./contract.js";
 import { executeOrganization, type OrganizationRows } from "./engine.js";
 
@@ -172,6 +175,21 @@ export class InMemoryOrganizationStore implements OrganizationStore {
               return (
                 tuple[0] === kind &&
                 tuple[1] === org &&
+                (options.sourceMessage === undefined ||
+                  (() => {
+                    const stored =
+                      kind === "owner-clear"
+                        ? sourceDeletionAddressSchema.safeParse((row.value as { address?: unknown }).address)
+                        : undefined;
+                    const address = stored
+                      ? stored.success
+                        ? stored.data
+                        : undefined
+                      : sourceDeletionAddressOf(row.value as Parameters<typeof sourceDeletionAddressOf>[0]);
+                    return (
+                      address !== undefined && sourceDeletionKey(address) === sourceDeletionKey(options.sourceMessage)
+                    );
+                  })()) &&
                 (options.sourceIdentity === undefined ||
                   identityKey(
                     kind === "stream"

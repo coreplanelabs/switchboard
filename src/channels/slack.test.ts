@@ -9,6 +9,7 @@ import {
   createStatusClient,
   handleConfirmClick,
   receiveSlackMessage,
+  receiveSlackSourceDeletion,
   resumeSlackIO,
   SlackIO,
   stripMention,
@@ -34,6 +35,11 @@ import {
 } from "../core/dispatch/confirm.js";
 import { NO_GRANTS } from "../core/authz/index.js";
 import { guardOutbound, installOutboundGuard } from "./testing/outboundGuard.js";
+import { InMemoryOrganizationStore } from "../core/organization/memory.js";
+import { OrganizationService } from "../core/organization/service.js";
+import { createOrganizationRuntime, type OrganizationExecutionRequest } from "../core/organization/runtime.js";
+import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
+import { ALL_GRANTS } from "../core/authz/grants.js";
 
 installOutboundGuard();
 
@@ -50,6 +56,236 @@ vi.mock("../core/dispatcher.js", async (importOriginal) => {
 const dispatchClickMock = vi.mocked(dispatchClick);
 
 const BOT = "U0BOT";
+
+describe("Slack source deletion", () => {
+  it("erases the verified native copy and queued snapshot before acknowledging, without replacing its original owner", async () => {
+    const store = new InMemoryOrganizationStore(() => 1);
+    const ledger = new InMemoryRunLedger(() => 1);
+    const reference = {
+      actorId: "slack:UALICE",
+      userId: "slack:UALICE",
+      channelId: "slack:DLOCAL",
+      threadKey: "slack:DLOCAL:1.000000",
+      messageId: "1.000001",
+    };
+    const actor = { id: reference.actorId, kind: "user" as const, grants: ALL_GRANTS, self: [reference.actorId] };
+    const service = new OrganizationService({
+      store,
+      directory: store.directory,
+      mappings: [{ source: "slack", issuer: "https://slack.com", tenant: "TLOCAL", organization: "org:test" }],
+      authorize: async () => true,
+      currentIdentityRead: async () => "allowed",
+      limits: {
+        pendingPerActor: 10,
+        pendingPerSource: 20,
+        pendingPerOrganization: 30,
+        reservedReconciliation: 1,
+        contentTtlMs: 90,
+        receiptTtlMs: 365,
+      },
+    });
+    const authentication = {
+      source: "slack" as const,
+      identity: { issuer: "https://slack.com", tenant: "TLOCAL", subject: "UALICE" },
+      kind: "human" as const,
+      sourceReference: reference,
+    };
+    const tasks: (() => Promise<void>)[] = [];
+    const modelInput: string[] = [];
+    const options = {
+      store,
+      service,
+      ledger,
+      owner: "original",
+      leaseMs: 30,
+      batchSize: 1,
+      contentTtlMs: 90,
+      resolveActor: async (envelope: import("../core/organization/contract.js").OrganizationEnvelope) => ({
+        actor,
+        msg: { ...envelope.sourceReference!, userId: "slack:UALICE", text: "" },
+      }),
+      sink: () => ({
+        reply: async () => {},
+        history: async () => [],
+        status: async () => ({ update() {}, done: async () => {} }),
+      }),
+      launch: (task: () => Promise<void>) => tasks.push(task),
+      dispatchOwned: async (request: OrganizationExecutionRequest) => {
+        modelInput.push(request.msg.text);
+        return { status: "completed" as const };
+      },
+    };
+    const runtime = createOrganizationRuntime(options);
+    const older = await service.admit(
+      { ...authentication, sourceReference: { ...reference, messageId: "1.000003" } },
+      {
+        sourceEvent: "older-other",
+        key: "older-other",
+        content: "Older deleted words",
+        context: [],
+        destination: { kind: "broad" },
+        target: null,
+        workload: "message",
+      },
+    );
+    if (older.status !== "receipt") throw new Error("not admitted");
+    await runtime.reconcile("org:test");
+    const admitted = await service.admit(authentication, {
+      sourceEvent: "native-original",
+      key: "native-original",
+      content: "Deleted native source words",
+      context: [],
+      destination: { kind: "broad" },
+      target: null,
+      workload: "message",
+    });
+    if (admitted.status !== "receipt" || !admitted.receipt.effectKey) throw new Error("not admitted");
+    expect(await runtime.reconcile("org:test")).toMatchObject({ status: "state", state: { reconciledSequence: 2 } });
+    const original = await ledger.readIngress(admitted.receipt.effectKey);
+    expect(original).toMatchObject({
+      status: "record",
+      record: { status: "dispatching", request: { envelope: { content: "Deleted native source words" } } },
+    });
+    if (original.status !== "record") throw new Error("not owned");
+    const originalRunId = original.record.runId;
+    const current = await service.resolve(authentication);
+    if (!current?.actor.stream) throw new Error("not resolved");
+    expect(
+      await store.execute({ action: "delete", ...current, stream: current.actor.stream, receiptId: older.receipt.id }),
+    ).toEqual({ status: "ok", removed: 1 });
+    expect(await service.streamTail(authentication, undefined, 100)).toMatchObject({
+      status: "stream_tail",
+      entries: [{ content: "Deleted native source words" }],
+    });
+    const neighborAuth = { ...authentication, sourceReference: { ...reference, messageId: "1.000002" } };
+    expect(
+      await service.admit(neighborAuth, {
+        sourceEvent: "native-neighbor",
+        key: "native-neighbor",
+        content: "Retained neighbor words",
+        context: [],
+        destination: { kind: "broad" },
+        target: null,
+        workload: "message",
+      }),
+    ).toMatchObject({ status: "receipt", receipt: { status: "pending" } });
+    let acked = 0;
+    const event = {
+      body: {
+        type: "event_callback",
+        team_id: "TLOCAL",
+        event: {
+          type: "message",
+          subtype: "message_deleted",
+          channel: "DLOCAL",
+          deleted_ts: "1.000001",
+          previous_message: { user: "UFOREIGN", text: "Never authority" },
+        },
+      },
+      ack: async () => {
+        acked++;
+        expect(await ledger.readIngress(admitted.receipt.effectKey!)).toMatchObject({
+          status: "record",
+          record: { request: null, runId: originalRunId },
+        });
+      },
+    };
+    const client = { auth: { test: async () => ({ team_id: "TLOCAL" }) } };
+    const before = await store.execute({ action: "get", organization: "org:test" });
+    let foreignAck = 0;
+    expect(
+      await receiveSlackSourceDeletion(
+        {
+          ...event,
+          body: { ...event.body, team_id: "TFOREIGN" },
+          ack: async () => {
+            foreignAck++;
+          },
+        },
+        client,
+        (address) => runtime.deleteSource("org:test", address, 365),
+      ),
+    ).toBe(true);
+    expect(foreignAck).toBe(1);
+    expect(await store.execute({ action: "get", organization: "org:test" })).toEqual(before);
+    await expect(
+      receiveSlackSourceDeletion(
+        event,
+        {
+          auth: {
+            test: async () => {
+              throw new Error("provider unavailable");
+            },
+          },
+        },
+        (address) => runtime.deleteSource("org:test", address, 365),
+      ),
+    ).rejects.toThrow("proof is unavailable");
+    expect(acked).toBe(0);
+    expect(await service.streamTail(authentication, undefined, 100)).toMatchObject({
+      status: "stream_tail",
+      entries: [{ content: "Deleted native source words" }, { content: "Retained neighbor words" }],
+    });
+    expect(
+      await receiveSlackSourceDeletion(
+        {
+          ...event,
+          body: { ...event.body, event: { type: "message", channel: "DLOCAL", ts: "1.000001", text: "ordinary" } },
+        },
+        client,
+        (address) => runtime.deleteSource("org:test", address, 365),
+      ),
+    ).toBe(false);
+    expect(acked).toBe(0);
+    const failing = createOrganizationRuntime({
+      ...options,
+      ledger: {
+        ...ledger,
+        readIngress: ledger.readIngress.bind(ledger),
+        consumeIngress: ledger.consumeIngress.bind(ledger),
+        finishIngress: ledger.finishIngress.bind(ledger),
+        pendingUnreadIngress: ledger.pendingUnreadIngress.bind(ledger),
+        claimUnreadIngress: ledger.claimUnreadIngress.bind(ledger),
+        pendingIngressRefusals: ledger.pendingIngressRefusals.bind(ledger),
+        ackIngressRefusal: ledger.ackIngressRefusal.bind(ledger),
+        clearIngressContent: async () => {
+          throw new Error("unavailable copied-input store");
+        },
+      },
+    });
+    await expect(
+      receiveSlackSourceDeletion(event, client, (address) => failing.deleteSource("org:test", address, 365)),
+    ).rejects.toThrow("remains held");
+    expect(acked).toBe(0);
+    expect(await service.streamTail(authentication, undefined, 100)).toMatchObject({
+      status: "stream_tail",
+      entries: [{ content: "Retained neighbor words" }],
+    });
+    const replacement = createOrganizationRuntime({ ...options, owner: "replacement" });
+    expect(
+      await receiveSlackSourceDeletion(event, client, (address) => replacement.deleteSource("org:test", address, 365)),
+    ).toBe(true);
+    expect(
+      await receiveSlackSourceDeletion(event, client, (address) => replacement.deleteSource("org:test", address, 365)),
+    ).toBe(true);
+    expect(acked).toBe(2);
+    expect(
+      await service.replay(authentication, {
+        key: "native-original",
+        content: "Deleted native source words",
+        context: [],
+        destination: { kind: "broad" },
+      }),
+    ).toMatchObject({
+      status: "receipt",
+      duplicate: true,
+      receipt: { id: admitted.receipt.id, ownerRunId: originalRunId, status: "accepted" },
+    });
+    await replacement.reconcile("org:test");
+    for (const task of tasks) await task();
+    expect(modelInput).toEqual(["Retained neighbor words"]);
+  });
+});
 
 describe("SlackIO.reply — model link normalization", () => {
   async function payload(text: string): Promise<string> {
