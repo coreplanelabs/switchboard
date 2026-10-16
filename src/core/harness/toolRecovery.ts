@@ -41,7 +41,7 @@ export function toolRecoveryStateOf(value: unknown): ToolRecoveryState | undefin
     state.settled.some((id) => !hash(id)) ||
     new Set(state.settled).size !== state.settled.length ||
     !Array.isArray(state.failures) ||
-    state.failures.length > TOOL_RECOVERY.totalFailures
+    state.failures.length > TOOL_RECOVERY.receipts
   )
     return;
   if (
@@ -54,7 +54,7 @@ export function toolRecoveryStateOf(value: unknown): ToolRecoveryState | undefin
         !hash(f.error) ||
         !Number.isSafeInteger(f.count) ||
         f.count < 1 ||
-        f.count > TOOL_RECOVERY.totalFailures,
+        f.count > TOOL_RECOVERY.receipts,
     )
   )
     return;
@@ -65,7 +65,9 @@ export function toolRecoveryStateOf(value: unknown): ToolRecoveryState | undefin
       !toolName(state.stopped.tool) ||
       !Number.isSafeInteger(state.stopped.attempts) ||
       state.stopped.attempts < 1 ||
-      state.stopped.attempts > TOOL_RECOVERY.totalFailures ||
+      state.stopped.attempts > TOOL_RECOVERY.receipts ||
+      // The retired varied-failure bound describes historical terminal records only.
+      (state.stopped.reason === "recovery_limit" && state.stopped.attempts > TOOL_RECOVERY.totalFailures) ||
       Object.keys(state.stopped).some((key) => !["tool", "attempts", "reason"].includes(key)) ||
       !["repeated_failure", "recovery_limit", "unavailable", "outcome_unknown", "checkpoint_unavailable"].includes(
         state.stopped.reason,
@@ -74,9 +76,8 @@ export function toolRecoveryStateOf(value: unknown): ToolRecoveryState | undefin
     return;
   const attempts = state.failures.reduce((n, f) => n + f.count, 0);
   if (
-    attempts > TOOL_RECOVERY.totalFailures ||
-    (!state.stopped &&
-      (attempts >= TOOL_RECOVERY.totalFailures || state.failures.some((f) => f.count >= TOOL_RECOVERY.sameFailure)))
+    attempts > TOOL_RECOVERY.receipts ||
+    (!state.stopped && state.failures.some((f) => f.count >= TOOL_RECOVERY.sameFailure))
   )
     return;
   return structuredClone(state);
@@ -170,18 +171,21 @@ export class ToolRecovery {
     if (this.state.settled.includes(id) || this.state.stopped) return this.pending;
     if (!toolName(tool)) tool = "tool";
     const inputHash = digest(canonicalSeedJson(input));
+    const unresolved = this.state.failures.filter((f) => f.tool !== tool || (!resolved && f.input !== inputHash));
+    if (!failure && unresolved.length === this.state.failures.length) return this.pending;
+    // Keep the retained proof bounded without counting varied task failures
+    // as repeated requests. A full checkpoint cannot admit another receipt.
+    if (this.state.settled.length >= TOOL_RECOVERY.receipts) {
+      this.state.stopped = { tool, attempts: 1, reason: "unavailable" };
+      return this.persist(tool);
+    }
     if (!failure) {
-      const unresolved = this.state.failures.filter((f) => f.tool !== tool || (!resolved && f.input !== inputHash));
-      if (unresolved.length === this.state.failures.length) return this.pending;
       this.state.failures = unresolved;
     } else {
       const errorHash = digest(failure.detail?.code ?? redactAndCap(failure.text.split("\n")[0] ?? "", 300));
-      const prior = this.state.failures.find(
-        (f) => f.tool === tool && (f.input === inputHash || f.error === errorHash),
-      );
+      const prior = this.state.failures.find((f) => f.tool === tool && f.input === inputHash);
       if (prior) prior.count++;
       else this.state.failures.push({ tool, input: inputHash, error: errorHash, count: 1 });
-      const attempts = this.state.failures.reduce((n, f) => n + f.count, 0);
       const reason =
         failure.detail?.recovery === "stop"
           ? failure.detail.code === "outcome_unknown"
@@ -189,14 +193,14 @@ export class ToolRecovery {
             : "unavailable"
           : prior && prior.count >= TOOL_RECOVERY.sameFailure
             ? "repeated_failure"
-            : attempts >= TOOL_RECOVERY.totalFailures
-              ? "recovery_limit"
-              : undefined;
-      if (reason) this.state.stopped = { tool, attempts, reason };
+            : undefined;
+      if (reason) this.state.stopped = { tool, attempts: prior?.count ?? 1, reason };
     }
-    if (this.state.settled.length >= TOOL_RECOVERY.receipts)
-      this.state.stopped ??= { tool, attempts: 1, reason: "unavailable" };
-    else this.state.settled.push(id);
+    this.state.settled.push(id);
+    return this.persist(tool);
+  }
+
+  private persist(tool: string): Promise<void> {
     const snapshot = this.snapshot();
     this.pending = this.pending
       .then(async () => {

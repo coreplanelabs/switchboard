@@ -37,7 +37,7 @@ import { constants } from "node:fs";
 import { mkdir, mkdtemp, open, realpath, stat as fileStat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createReadToolDefinition, getPackageDir } from "@earendil-works/pi-coding-agent";
+import { createReadToolDefinition, createFindToolDefinition, createLsToolDefinition, getPackageDir } from "@earendil-works/pi-coding-agent";
 
 // Parse data, not an object literal: schema keys such as __proto__ stay own properties.
 const TOOL_DEFINITIONS = JSON.parse(${JSON.stringify(JSON.stringify(tools))});
@@ -332,6 +332,33 @@ async function outputReadTool() {
   };
 }
 
+/** Missing search roots are probe results, so the model can choose the actual
+ * layout rather than spend tool recovery on a directory that was never there. */
+async function directoryTools() {
+  const { resolveToCwd } = await import(pathToFileURL(resolve(getPackageDir(), "dist/core/tools/path-utils.js")).href);
+  return [createFindToolDefinition(process.cwd()), createLsToolDefinition(process.cwd())].map((tool) => ({
+    ...tool,
+    async execute(id, args, signal, update, ctx) {
+      signal?.throwIfAborted();
+      const path = resolveToCwd(args.path || ".", ctx?.cwd || process.cwd());
+      let directory;
+      try {
+        directory = (await fileStat(path)).isDirectory();
+      } catch (error) {
+        if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+        directory = false;
+      }
+      signal?.throwIfAborted();
+      if (!directory) return {
+        content: [{ type: "text", text: "No directory at " + (args.path || ".") +
+          ". List its parent or the repository root before choosing another path. Dependencies can be in the root node_modules." }],
+        details: undefined,
+      };
+      return tool.execute(id, args, signal, update, ctx);
+    },
+  }));
+}
+
 export default async function switchboardHarness(pi) {
   let initialized = false;
   let failure = "harness initialization has not completed";
@@ -349,6 +376,7 @@ export default async function switchboardHarness(pi) {
     stage = "tool registration";
     if (read) pi.registerTool(read);
     for (const def of TOOL_DEFINITIONS) pi.registerTool(relayTool(def));
+    for (const tool of await directoryTools()) pi.registerTool(tool);
     // The pinned Anthropic adapter drops root schema unions in non-strict mode.
     // Restore only this declared constraint on a tool still offered by the request.
     const check = TOOL_DEFINITIONS.find((def) => def.name === "run_check");

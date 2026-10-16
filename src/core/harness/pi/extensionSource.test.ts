@@ -165,6 +165,46 @@ describe("the harness extension", () => {
     await expect(read.execute("r", { path: outside }, undefined, undefined, { cwd: checkout })).rejects.toThrow();
   });
 
+  it.each(["find", "ls"] as const)(
+    "keeps a missing %s directory recoverable and lists the corrected location",
+    async (name) => {
+      const checkout = join(dir, "checkout");
+      mkdirSync(join(checkout, "node_modules", "package"), { recursive: true });
+      writeFileSync(join(checkout, "node_modules", "package", "index.js"), "export default 1;");
+      fakeBot({});
+      const pi = fakePi();
+      await (
+        await load([])
+      )(pi.api);
+      const tool = pi.tools.find((tool) => tool.name === name)!;
+      const params = { path: "apps/console/node_modules/package", pattern: "*.js" };
+      expect(await tool.execute("missing", params, undefined, undefined, { cwd: checkout })).toEqual({
+        content: [
+          {
+            type: "text",
+            text: "No directory at apps/console/node_modules/package. List its parent or the repository root before choosing another path. Dependencies can be in the root node_modules.",
+          },
+        ],
+        details: undefined,
+      });
+      const listed = pi.tools.find((tool) => tool.name === "ls")!;
+      expect(
+        await listed.execute("present", { path: "node_modules/package" }, undefined, undefined, { cwd: checkout }),
+      ).toMatchObject({
+        content: [{ type: "text", text: "index.js" }],
+      });
+      symlinkSync("loop", join(checkout, "loop"));
+      await expect(
+        tool.execute("filesystem-error", { path: "loop", pattern: "*" }, undefined, undefined, { cwd: checkout }),
+      ).rejects.toMatchObject({ code: "ELOOP" });
+      const abort = new AbortController();
+      abort.abort();
+      await expect(tool.execute("cancelled", params, abort.signal, undefined, { cwd: checkout })).rejects.toMatchObject(
+        { name: "AbortError" },
+      );
+    },
+  );
+
   it("directs an oversized review source to the available byte reader instead of bash", async () => {
     const checkout = join(dir, "checkout");
     mkdirSync(checkout);
@@ -288,7 +328,13 @@ describe("the harness extension", () => {
     };
     const loaded = await loader.loadExtensions([join(dir, "extension.mjs")], dir);
     expect(loaded.errors).toEqual([]);
-    expect([...loaded.extensions[0].tools.keys()]).toEqual(["read", "update_status", "submit_pr_description"]);
+    expect([...loaded.extensions[0].tools.keys()]).toEqual([
+      "read",
+      "update_status",
+      "submit_pr_description",
+      "find",
+      "ls",
+    ]);
     if (process.platform === "linux") expect(process.env.TMPDIR?.startsWith(`${dir}/output/process-`)).toBe(true);
     else expect(process.env.TMPDIR).toBe(originalTmpdir);
   });
@@ -464,7 +510,7 @@ describe("the harness extension", () => {
       'import { mkdir, mkdtemp, open, realpath, stat as fileStat } from "node:fs/promises"',
       'import { isAbsolute, relative, resolve } from "node:path"',
       'import { pathToFileURL } from "node:url"',
-      'import { createReadToolDefinition, getPackageDir } from "@earendil-works/pi-coding-agent"',
+      'import { createReadToolDefinition, createFindToolDefinition, createLsToolDefinition, getPackageDir } from "@earendil-works/pi-coding-agent"',
     ]);
     expect(PI_EXTENSION_SOURCE).not.toContain("require(");
     delete process.env[RUN_BEARER_ENV];
@@ -483,7 +529,7 @@ describe("the harness extension", () => {
     await (
       await load()
     )(pi.api);
-    expect(pi.tools.map((t) => t.name)).toEqual(["update_status", "submit_pr_description"]);
+    expect(pi.tools.map((t) => t.name)).toEqual(["update_status", "submit_pr_description", "find", "ls"]);
     expect(pi.tools[0].parameters).toEqual({ type: "object", properties: { checklist: { type: "string" } } });
     expect(pi.tools[0].description).toBe("the card");
     expect(bot.calls).toEqual([]);
@@ -791,7 +837,7 @@ describe("hosted Review extension relay", () => {
     await (
       await load([{ name: "run_check", description: "Recorded command", inputSchema: { type: "object" } }])
     )(pi.api);
-    expect(pi.tools.map((tool) => tool.name)).toEqual(["run_check"]);
+    expect(pi.tools.map((tool) => tool.name)).toEqual(["run_check", "find", "ls"]);
     const input = { command: "git status --short", purpose: "verification", timeoutMs: 10000 };
     expect(await pi.tools[0].execute("original-review-call", input)).toMatchObject({
       content: [{ type: "text", text: "completed with exit 1" }],
