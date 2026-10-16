@@ -1,3 +1,5 @@
+import { createHomeService } from "../core/home/service.js";
+import { createHomeConditionReader } from "../core/home/conditions.js";
 import { seedCoordinatorInstance, seedCoordinatorUnit } from "../core/testing/coordinatorInstance.js";
 import { booleanAudienceVerifier } from "../core/testing/audienceVerifier.js";
 import { describe, expect, it, vi } from "vitest";
@@ -1268,6 +1270,44 @@ async function fixtureStep(h: ReturnType<typeof harness>, route: string, input: 
   }
   return handleCoordinatorRequest(post(`${COORDINATOR_ADMIN_PREFIX}${route}`, body), h.deps);
 }
+
+describe("recorded unit progress reaches Home", () => {
+  it("records an original checks wait, replays it once, clears it and refuses old or foreign progress", async () => {
+    const h = harness();
+    await seedSpawnUnit(h);
+    const input = {
+      parentInstanceId: INSTANCE.id,
+      unit: "u12",
+      executionWorkflowId: INSTANCE.id,
+      progress: { expectedRevision: 0, step: "u12/merge/wait/1", waiting: { kind: "checks", headSha: "a".repeat(40) } },
+    };
+    const first = await fixtureStep(h, "unit-progress", input);
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ ok: true, revision: 1 });
+    const home = createHomeService({
+      organizationId: "example",
+      instances: h.instances,
+      conditions: createHomeConditionReader(h.instances),
+    });
+    const viewer = { actorId: INSTANCE.userId, visibleTo: { kind: "all" as const } };
+    const waiting = await home.snapshot(viewer);
+    expect(waiting.needsYou).toEqual([]);
+    expect(waiting.waiting[0]?.conditions[0]?.owner).toEqual({ kind: "external", label: "GitHub checks" });
+    expect(waiting.waiting[0]?.nextAction).toEqual({
+      kind: "recorded",
+      text: "Wait for checks at the recorded head, then verify the result.",
+    });
+    expect((await fixtureStep(h, "unit-progress", input)).body).toEqual(first.body);
+    expect((await fixtureStep(h, "unit-progress", { ...input, executionWorkflowId: "foreign-workflow" })).status).toBe(
+      409,
+    );
+    const clear = { ...input, progress: { expectedRevision: 1, step: "u12/merge/wait/1", clear: true } };
+    expect((await fixtureStep(h, "unit-progress", clear)).status).toBe(200);
+    expect((await home.snapshot(viewer)).waiting[0]?.nextAction).toEqual({ kind: "unknown" });
+    expect((await fixtureStep(h, "unit-progress", input)).status).toBe(409);
+    expect((await fixtureStep(h, "unit-progress", clear)).status).toBe(200);
+  });
+});
 
 describe("the coordinator routes — the bearer (item 9)", () => {
   it("names its paths", () => {

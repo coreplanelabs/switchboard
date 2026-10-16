@@ -35,7 +35,7 @@ export interface HomeCondition {
   state: "open" | "resolved";
   owner: HomeConditionOwner;
   summary: string;
-  nextAction: string;
+  nextAction?: string;
 }
 
 function validCondition(value: HomeCondition, unitKey: string): boolean {
@@ -49,7 +49,7 @@ function validCondition(value: HomeCondition, unitKey: string): boolean {
     value.revision < 1 ||
     (value.state !== "open" && value.state !== "resolved") ||
     !text(value.summary) ||
-    !text(value.nextAction) ||
+    (value.nextAction !== undefined && !text(value.nextAction)) ||
     !value.owner
   )
     return false;
@@ -254,7 +254,9 @@ export function createHomeService(deps: HomeServiceDeps): {
       unit: facts,
       instance: visibleInstance(instance, unit),
       conditions,
-      nextAction: nextCondition ? { kind: "recorded", text: nextCondition.nextAction } : { kind: "unknown" },
+      nextAction: nextCondition?.nextAction
+        ? { kind: "recorded", text: nextCondition.nextAction }
+        : { kind: "unknown" },
     };
     return { row, conditionsComplete, terminal: conditionsComplete && completed(instance, unit, conditions) };
   }

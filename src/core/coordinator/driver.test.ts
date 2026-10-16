@@ -1325,7 +1325,13 @@ function steps(waits: Record<string, "event" | "timeout"> = {}) {
   // asserted by their own tests below and elided here so the machine's own
   // step order stays legible.
   const names = () =>
-    taken.filter((t) => !/\/(wait|busy)\/\d+\/(interrupted|resumed)(\/\d+)?$/.test(t.name)).map((t) => t.name);
+    taken
+      .filter(
+        (t) =>
+          !/\/(wait|busy)\/\d+\/(interrupted|resumed)(\/\d+)?$/.test(t.name) &&
+          !/\/progress\/(wait|clear)$/.test(t.name),
+      )
+      .map((t) => t.name);
   return { runner: workflowSteps(runner, (message) => new PermanentStepError(message)), taken, attempts, names };
 }
 
@@ -1342,6 +1348,10 @@ function bot(script: Partial<Record<CoordinatorStepRoute, Scripted[]>>) {
     async step(route, body) {
       calls.push({ route, body });
       const next = queues[route]?.shift();
+      if (next === undefined && route === "unit-progress") {
+        const progress = body.progress as { expectedRevision: number };
+        return ok({ ok: true, revision: progress.expectedRevision + 1 });
+      }
       // The round's checks step (record 0055) answers green unless a test
       // scripts it: most scripts here are about the loop around it, and a
       // green head adds no wait — the red, pending and flake paths are the
@@ -1552,6 +1562,67 @@ describe("the plan runner's driver — the Workflow body over the step runner (i
       ]);
     },
   );
+
+  it("records and clears each actual worker wait before and after the original wait, while progress outages do not fail work", async () => {
+    for (const unavailable of [false, true]) {
+      const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
+      const b = bot({
+        plan: [planAnswer([row("U10")])],
+        "unit-start": [started("U10")],
+        branch: [branched("U10")],
+        spawn: [spawned("run-c0"), spawned("run-r1", T0 + 10 * MIN)],
+        "read-record": [codingDone("run-c0", T0 + 10 * MIN), reviewApproved("run-r1", T0 + 20 * MIN)],
+        "pr-check": [prNone(), prOpen(T0 + 10 * MIN)],
+        round: [acked(), acked(), acked(), acked()],
+        merge: [ok({ ok: true, outcome: "merged", sha: MERGED }, T0 + 21 * MIN)],
+        "unit-end": [acked()],
+        finish: [acked()],
+      });
+      let observed = 0;
+      const visibleBeforeWait: unknown[] = [];
+      const transport: CoordinatorBot = {
+        step: async (route, body) => {
+          if (route === "unit-progress" && unavailable) throw new Error("projection unavailable");
+          return b.client.step(route, body);
+        },
+      };
+      const wait = s.runner.waitForEvent.bind(s.runner);
+      s.runner.waitForEvent = async (name, options) => {
+        if (options.type.startsWith(RUN_FINISHED_EVENT_PREFIX)) {
+          observed++;
+          visibleBeforeWait.push(b.of("unit-progress").at(-1)?.progress);
+        }
+        return wait(name, options);
+      };
+      expect(await runPlan(s.runner, transport, INSTANCE)).toMatchObject({
+        outcome: "completed",
+        units: { U10: "merged" },
+      });
+      expect(observed).toBe(2);
+      expect(visibleBeforeWait).toEqual(
+        unavailable
+          ? [undefined, undefined]
+          : [
+              { expectedRevision: 0, step: "U10/0/coding/wait/1", waiting: { kind: "child", runId: "run-c0" } },
+              { expectedRevision: 2, step: "U10/1/review/wait/1", waiting: { kind: "child", runId: "run-r1" } },
+            ],
+      );
+      if (!unavailable) {
+        expect(b.of("unit-progress").map((body) => body.progress)).toEqual([
+          { expectedRevision: 0, step: "U10/0/coding/wait/1", waiting: { kind: "child", runId: "run-c0" } },
+          { expectedRevision: 1, step: "U10/0/coding/wait/1", clear: true },
+          { expectedRevision: 2, step: "U10/1/review/wait/1", waiting: { kind: "child", runId: "run-r1" } },
+          { expectedRevision: 3, step: "U10/1/review/wait/1", clear: true },
+        ]);
+        expect(b.wireOf("unit-progress").map((body) => body.executionWorkflowId)).toEqual([
+          INSTANCE,
+          INSTANCE,
+          INSTANCE,
+          INSTANCE,
+        ]);
+      }
+    }
+  });
 
   it("a one-unit plan runs coding, then review to approve, then the runner's merge at the approved head, and ends merged: the steps in order under the machine's names, every spawn typed by its brief and clipped budget, every wait typed `run-finished-<runId>` for one chunk and followed by a read-record, the round boundaries and the ending told to the bot, the finish completed", async () => {
     const s = steps({ "U10/0/coding/wait/1": "event", "U10/1/review/wait/1": "event" });
