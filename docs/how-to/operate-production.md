@@ -347,6 +347,8 @@ The Worker reads resident owner, lifecycle and process evidence while the fence 
 
 If the response is lost or reports an unverified outcome, do not repeat the mutation. Read `/deploy-fence-recovery?released=<original-record-hash>` with the same admin bearer to inspect its receipt. Then read `/residents` to check the current drain. A newer lock remains independent of the original receipt.
 
+Recovery reads and release results emit structured deployment events with the valid selected record hash, actual Worker version, HTTP status and closed refusal class. Release events also carry the two explicit operator-attestation flags. An uncertain mutation emits `phase: fence-release-commit`, `commit: unverified` and `failure: storage-or-rpc` before reading the original audit. A later release event can confirm success from that audit. Request bodies, receipt URLs and exception text are not logged. Telemetry does not replace the durable release receipt.
+
 The fleet stays drained after lock release. An operator can use the existing guarded `POST /undrain` when reopening is intended, or let the next normal deployment establish its own drain. A new deployment still runs its normal work, image and readiness checks.
 
 ### Recover an unresolved native operation

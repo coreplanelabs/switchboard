@@ -16066,13 +16066,36 @@ async function handleDeployFence(env: Env, attempt?: unknown): Promise<Response>
 async function handleDeployFenceRecovery(env: Env, url: URL): Promise<Response> {
   const registry = registryStub(env);
   const released = url.searchParams.get("released");
+  const respond = (
+    status: number,
+    output: Record<string, unknown>,
+    recordSha256?: string,
+    refusalClass: "invalid-record-hash" | "receipt-unavailable" | "quote-unavailable" | null = null,
+  ) => {
+    emitDeployAdmission({
+      phase: "fence-recovery-read",
+      observedAt: systemClock(),
+      workerVersion: workerVersionId(env),
+      operation: released === null ? "quote" : "receipt",
+      recordSha256,
+      outcome: status === 200 ? "read" : "refused",
+      httpStatus: status,
+      refusalClass,
+    });
+    return json(output, status);
+  };
   if (released !== null) {
-    if (!/^[a-f0-9]{64}$/.test(released)) return json({ error: "an exact released fence hash is required" }, 400);
+    if (!/^[a-f0-9]{64}$/.test(released))
+      return respond(400, { error: "an exact released fence hash is required" }, undefined, "invalid-record-hash");
     const receipt = await registry.readDeployFenceReleaseReceipt(released);
-    return receipt ? json({ receipt }) : json({ error: "fence release receipt is unavailable" }, 409);
+    return receipt
+      ? respond(200, { receipt }, released)
+      : respond(409, { error: "fence release receipt is unavailable" }, released, "receipt-unavailable");
   }
   const quote = await registry.getDeployFenceRecoveryQuote(workerVersionId(env));
-  return quote ? json({ quote }) : json({ error: "a current pre-upload fence cannot be quoted" }, 409);
+  return quote
+    ? respond(200, { quote }, quote.recordSha256)
+    : respond(409, { error: "a current pre-upload fence cannot be quoted" }, undefined, "quote-unavailable");
 }
 
 /** The administrator verifies the stopped controller and native target outside the Worker.
@@ -16080,6 +16103,30 @@ async function handleDeployFenceRecovery(env: Env, url: URL): Promise<Response> 
 async function handleReleaseDeployFence(env: Env, body: Record<string, unknown>): Promise<Response> {
   const expected = body.expectedRecordSha256;
   const evidence = recoveryEvidenceUrl(body.evidence);
+  const respond = (
+    status: number,
+    output: Record<string, unknown>,
+    refusalClass:
+      | "invalid-request"
+      | "fence-or-version-changed"
+      | "resident-not-idle"
+      | "state-changed"
+      | "commit-unverified"
+      | null = null,
+  ) => {
+    emitDeployAdmission({
+      phase: "fence-release",
+      observedAt: systemClock(),
+      workerVersion: workerVersionId(env),
+      recordSha256: typeof expected === "string" && /^[a-f0-9]{64}$/.test(expected) ? expected : undefined,
+      controllerStoppedAttested: body.controllerStopped === true,
+      nativeTargetUnchangedAttested: body.nativeTargetUnchanged === true,
+      outcome: status === 200 ? "released" : status === 503 ? "unverified" : "refused",
+      httpStatus: status,
+      refusalClass,
+    });
+    return json(output, status);
+  };
   if (
     typeof expected !== "string" ||
     !/^[a-f0-9]{64}$/.test(expected) ||
@@ -16087,17 +16134,22 @@ async function handleReleaseDeployFence(env: Env, body: Record<string, unknown>)
     body.controllerStopped !== true ||
     body.nativeTargetUnchanged !== true
   )
-    return json(
+    return respond(
+      400,
       {
         error: "an exact fence hash and independent stopped-controller and unchanged-target attestations are required",
       },
-      400,
+      "invalid-request",
     );
   const registry = registryStub(env);
   const versionId = workerVersionId(env);
   const quote = await registry.getDeployFenceRecoveryQuote(versionId);
   if (!versionId || !quote || quote.recordSha256 !== expected)
-    return json({ error: "fence or actual Worker version changed; nothing released" }, 409);
+    return respond(
+      409,
+      { error: "fence or actual Worker version changed; nothing released" },
+      "fence-or-version-changed",
+    );
   const members = await registry.list();
   const views = await Promise.allSettled(
     members.map(async (member) => ({
@@ -16106,12 +16158,26 @@ async function handleReleaseDeployFence(env: Env, body: Record<string, unknown>)
     })),
   );
   if (!recoveryViewsAreIdle(views.map((result) => (result.status === "fulfilled" ? result.value : null))))
-    return json({ error: "fence release requires idle owner, lifecycle and process evidence" }, 409);
+    return respond(
+      409,
+      { error: "fence release requires idle owner, lifecycle and process evidence" },
+      "resident-not-idle",
+    );
   const evidenceSha256 = await stagingEvidenceSha256(evidence);
   let released: boolean;
   try {
     released = await registry.releaseDeployFence(expected, versionId, evidenceSha256, quote.registrySha256);
   } catch {
+    emitDeployAdmission({
+      phase: "fence-release-commit",
+      observedAt: systemClock(),
+      workerVersion: versionId,
+      recordSha256: expected,
+      controllerStoppedAttested: true,
+      nativeTargetUnchangedAttested: true,
+      commit: "unverified",
+      failure: "storage-or-rpc",
+    });
     const receipt = await registry.readDeployFenceReleaseReceipt(expected).catch(() => null);
     if (
       receipt?.schema !== 1 ||
@@ -16122,14 +16188,15 @@ async function handleReleaseDeployFence(env: Env, body: Record<string, unknown>)
       receipt.requestEnd !== "operator-attested" ||
       receipt.nativeOutcome !== "operator-attested-unchanged"
     )
-      return json(
-        { error: "fence release outcome is unverified; inspect the original receipt without another mutation" },
+      return respond(
         503,
+        { error: "fence release outcome is unverified; inspect the original receipt without another mutation" },
+        "commit-unverified",
       );
     released = true;
   }
   return released
-    ? json({
+    ? respond(200, {
         released: true,
         originalRecordSha256: expected,
         evidenceSha256,
@@ -16137,7 +16204,7 @@ async function handleReleaseDeployFence(env: Env, body: Record<string, unknown>)
         nativeOutcome: "operator-attested-unchanged",
         drainRetained: true,
       })
-    : json({ error: "fence, work or maintenance changed; nothing released" }, 409);
+    : respond(409, { error: "fence, work or maintenance changed; nothing released" }, "state-changed");
 }
 
 /** The existing Admin inventory retains its compact legacy shape. Deployment
