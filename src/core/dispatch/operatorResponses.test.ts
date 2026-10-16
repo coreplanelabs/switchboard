@@ -228,6 +228,7 @@ describe("the direct operator on the Responses wire", () => {
       tools.map((tool) => tool.name),
     );
     expect(lookaroundPatterns(calls[0].body.tools)).toHaveLength(0);
+    expect((calls[0].body.tools as Array<{ strict?: boolean }>).every((tool) => tool.strict === false)).toBe(true);
     expect(calls[0].body.max_output_tokens).toBe(operatorMaxOutputTokens({ capField: "max_output_tokens" }));
     expect(calls[0].body.reasoning).toMatchObject({ effort: "high" });
     expect(JSON.stringify(tools)).toBe(canonical);

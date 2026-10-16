@@ -970,8 +970,7 @@ describe("pinning and pass-through — the OpenAI shape", () => {
   });
 });
 
-/** A Responses-shaped request as a coding preset on pi would send it: the flat
- *  tool table, `reasoning.effort`, everything the proxy must carry untouched. */
+/** A Responses request with explicit sampling choices for pass-through checks. */
 const responsesRequest = (over: Record<string, unknown> = {}) => ({
   model: "gpt-4o", // the run's preset says otherwise; the proxy pins it
   max_output_tokens: 5,
@@ -979,8 +978,8 @@ const responsesRequest = (over: Record<string, unknown> = {}) => ({
   instructions: "You are terse.",
   input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
   tools: [
-    { type: "function", name: "bash", description: "run", parameters: { type: "object" } },
-    { type: "function", name: "read", description: "read", parameters: { type: "object" } },
+    { type: "function", name: "bash", description: "run", strict: false, parameters: { type: "object" } },
+    { type: "function", name: "read", description: "read", strict: false, parameters: { type: "object" } },
   ],
   tool_choice: "auto",
   reasoning: { effort: "high" },
@@ -1062,6 +1061,41 @@ describe("pinning and pass-through — the Responses shape", () => {
 });
 
 describe("tool-schema conformance on each wire", () => {
+  it("keeps omitted strict sampling off for Responses functions and preserves explicit choices", async () => {
+    const h = harness();
+    const token = h.bearers.mint(h.responsesGrant("run-responses"));
+    const body = responsesRequest({
+      tools: [
+        {
+          type: "function",
+          name: "optional",
+          parameters: { type: "object", properties: { path: { type: "string" } } },
+        },
+        { type: "function", name: "strict", strict: true, parameters: { type: "object", properties: {} } },
+        { type: "function", name: "loose", strict: false, parameters: { type: "object", properties: {} } },
+        { type: "custom", name: "grammar", format: { type: "grammar", syntax: "regex", definition: ".*" } },
+      ],
+    });
+    const before = JSON.stringify(body);
+    const res = await handleModelProxyRequest(
+      request({ path: OPENAI_RESPONSES_PATH, headers: bearer(token), json: body }).req,
+      h.deps,
+    );
+    expect(res.status).toBe(200);
+    expect(h.calls[0].body.tools).toEqual([
+      {
+        type: "function",
+        name: "optional",
+        strict: false,
+        parameters: { type: "object", properties: { path: { type: "string" } } },
+      },
+      { type: "function", name: "strict", strict: true, parameters: { type: "object", properties: {} } },
+      { type: "function", name: "loose", strict: false, parameters: { type: "object", properties: {} } },
+      { type: "custom", name: "grammar", format: { type: "grammar", syntax: "regex", definition: ".*" } },
+    ]);
+    expect(JSON.stringify(body)).toBe(before);
+  });
+
   const rejectsLookaround = (pattern: string): boolean => /\(\?(?:[=!]|<[=!])/.test(pattern);
   const lookaroundPatterns = (value: unknown, into: string[] = []): string[] => {
     if (Array.isArray(value)) {
@@ -1236,6 +1270,7 @@ describe("tool-schema conformance on each wire", () => {
         {
           type: "function",
           name: "native",
+          strict: false,
           parameters: {
             type: "object",
             properties: {

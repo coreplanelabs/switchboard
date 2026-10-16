@@ -73,9 +73,8 @@ function shapeResponsesSchema(
   return { value: changed ? out : value, changed };
 }
 
-/** Per-wire schema shaping. Other dialects retain their schemas byte for byte;
- * Responses loses only constructs its validator cannot parse, with one typed
- * degradation per tool and keyword for the run record. */
+/** Other wires keep their schemas. Responses keeps optional fields optional
+ * and removes unsupported patterns with a recorded degradation. */
 export function shapeToolSchemasForWire(
   shape: Wire,
   body: Record<string, unknown>,
@@ -88,9 +87,16 @@ export function shapeToolSchemasForWire(
     if (!tool) return item;
     const name = typeof tool.name === "string" ? tool.name : "unnamed";
     const shaped = shapeResponsesSchema(tool.parameters, name, degradations);
-    if (!shaped.changed) return item;
+    // Responses may make optional fields required when strict is omitted.
+    // Preserve explicit sampling choices; default functions to their declared schema.
+    const defaultNonStrict = tool.type === "function" && tool.strict === undefined;
+    if (!shaped.changed && !defaultNonStrict) return item;
     changed = true;
-    return { ...tool, parameters: shaped.value };
+    return {
+      ...tool,
+      ...(defaultNonStrict ? { strict: false } : {}),
+      ...(shaped.changed ? { parameters: shaped.value } : {}),
+    };
   });
   const unique = degradations.filter(
     (candidate, index, all) =>
