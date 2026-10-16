@@ -71,11 +71,46 @@ function answerWords(answer: PostAnswer): string {
   return `HTTP ${answer.status}${typeof err === "string" && err ? `: ${err}` : ""}`;
 }
 
+/** Closed failure classes keep credentials and arbitrary response bodies out of deploy output. */
+export function drainFailureReason(answer: PostAnswer): string {
+  if ("error" in answer) return "fleet drain response unavailable; drain state is unknown";
+  if (answer.status === 409) return "fleet drain refused: deployment fence or staging maintenance conflict (HTTP 409)";
+  return `fleet drain was not acknowledged (HTTP ${answer.status})`;
+}
+
+/** Readback explains an existing fence; it never authorizes clearing or replacing it. */
+export function drainConflictLine(step: string, body: unknown): string {
+  const drain =
+    body && typeof body === "object" && "draining" in body && body.draining && typeof body.draining === "object"
+      ? body.draining
+      : undefined;
+  const validTime = (value: unknown): value is string =>
+    typeof value === "string" &&
+    value.length <= 32 &&
+    /^\d{4}-\d\d-\d\dT[\d:.]+Z$/.test(value) &&
+    Number.isFinite(Date.parse(value));
+  const commit =
+    drain && "reason" in drain && typeof drain.reason === "string"
+      ? /^deploy ([a-f0-9]{7,40})$/.exec(drain.reason)?.[1]
+      : undefined;
+  return drain &&
+    "swapFence" in drain &&
+    drain.swapFence === true &&
+    commit &&
+    "since" in drain &&
+    "until" in drain &&
+    validTime(drain.since) &&
+    validTime(drain.until) &&
+    Date.parse(drain.until) > Date.parse(drain.since)
+    ? `[deploy:all] ${step}: existing deployment fence — commit ${commit}; since ${drain.since}; expires ${drain.until}; upload outcome remains unverified`
+    : `[deploy:all] ${step}: existing deployment fence details unavailable; no recovery attempted`;
+}
+
 /** The step's first line when the fleet was drained, or when the drain was asked for and refused. */
 export function drainBeganLine(step: string, answer: PostAnswer, tag = "deploy:all"): string {
   return drainSet(answer)
     ? `[${tag}] ${step}: fleet drained — /attach refuses new runs until ${drainUntil(answer)}; the runs in flight finish, new ones wait at their attach`
-    : `[${tag}] ${step}: the fleet could NOT be drained (${answerWords(answer)}) — waiting without a drain: new runs keep landing and the wait may never find a quiet minute`;
+    : `[${tag}] ${step}: ${drainFailureReason(answer)}; deployment stopped; any existing drain remains in place`;
 }
 
 /** The step's first line when no admin bearer is in the env: the wait is today's, and says so. */
@@ -83,12 +118,7 @@ export function drainSkippedLine(step: string, tokenEnv: string, tag = "deploy:a
   return `[${tag}] ${step}: ${tokenEnv} is not set — waiting without a drain: new runs keep landing and the wait may never find a quiet minute (add the secret; release-and-deploy item 31)`;
 }
 
-/** The step's last line, true to what stood. A drain the runner saw land
- *  (`drained`): reopened, or NOT reopened and reopening by itself at its end.
- *  A drain the runner never saw land — the `/drain` answer refused or lost —
- *  is lifted anyway (it may have landed), and the line says so: `cleared`
- *  answers whether anything stood; a failed lift after no confirmed drain
- *  names the doubt and where to look, never a drain that "ends". */
+/** Report only what the guarded lift acknowledged. A held or failed lift does not prove reopening. */
 export function drainLiftedLine(
   step: string,
   answer: PostAnswer,

@@ -24,6 +24,8 @@ import {
   DRAINED_GAVE_UP_SUFFIX,
   drainBeganLine,
   drainBody,
+  drainConflictLine,
+  drainFailureReason,
   drainLiftedLine,
   drainSet,
   drainSkippedLine,
@@ -1981,6 +1983,7 @@ async function deployStepTraced(
   const drain = await beginDrain(step, expectedCommit, io, deps);
   if (step.maintenance && !drain.drained)
     return { ok: false, live: "not deployed", reason: "selected staging drain was not acknowledged" };
+  if (drain.problem) return { ok: false, live: "not deployed", reason: drain.problem };
   let residentBefore: Read<AppState> | undefined;
   let residentPrintedTarget: RolloutTarget | null | undefined;
   const waitMaxMs = drain.drained
@@ -2359,7 +2362,7 @@ async function beginDrain(
   expectedCommit: string,
   io: DeployRunnerIO,
   deps: SandboxGateDeps,
-): Promise<{ attempted: boolean; drained: boolean; until: string | undefined }> {
+): Promise<{ attempted: boolean; drained: boolean; until: string | undefined; problem?: string }> {
   if (deps.signal?.aborted || !step.drain) return { attempted: false, drained: false, until: undefined };
   const bearer = deps.env[step.drain.tokenEnv];
   if (!bearer || !deps.postJson) {
@@ -2378,8 +2381,28 @@ async function beginDrain(
         }
       : {}),
   });
+  const drained = drainSet(answer);
   io.log(drainBeganLine(step.name, answer));
-  return { attempted: true, drained: drainSet(answer), until: drainUntil(answer) };
+  if (!drained && !("error" in answer) && answer.status === 409 && !deps.signal?.aborted) {
+    const bearer = RESIDENT_BEARER_ENVS.map((name) => deps.env[name]).find((value) => value?.trim());
+    const readback = bearer
+      ? await deps
+          .readHealth(new URL("/residents", step.drain.url).toString(), bearer, LIVE_GATE_POLL_MS, deps.signal)
+          .catch(() => undefined)
+      : undefined;
+    io.log(
+      drainConflictLine(
+        step.name,
+        readback && "body" in readback && readback.status === 200 ? readback.body : undefined,
+      ),
+    );
+  }
+  return {
+    attempted: true,
+    drained,
+    until: drainUntil(answer),
+    ...(!drained ? { problem: `${step.name} ${drainFailureReason(answer)}` } : {}),
+  };
 }
 
 /** The reconcile inside the drain window: `POST /reconcile` walks every
