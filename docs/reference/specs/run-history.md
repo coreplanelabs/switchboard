@@ -1,5 +1,8 @@
 # Run history
 
+- **Code**: `src/core/runLedger/sourceEvidence.ts`
+- **Tests**: `src/core/runLedger/sourceEvidence.test.ts`
+
 - **Tests**: `src/core/runLedger/inboxDelivery.test.ts`
 
 
@@ -944,3 +947,21 @@ Legacy live and finished run context is backfilled once through a fixed run-ID s
 | Accepted claim, state, finish and thread-session writers maintain exact native A/B pins after census completion | `[worker]` `deploy/cloudflare-memory/runLedger.test.ts::original ingress SQLite owner::keeps native source pins on accepted live state finish and session writers after the census` |
 
 The additive clear-protection fields require compatible Memory handling for bounded retirement. Older Memory still protects deletion, but cannot prove the new metadata expiry or native leaf accounting. Compatible Memory must precede native v3 writer activation; Memory rollback below that floor is unsafe once those leaves exist. Existing bot context readers must retain v3 support. Legacy session context cannot be reconstructed from the run-store metadata table. Publication, deployment and this minimum-reader qualification remain separate owner-controlled gates.
+
+## Typed source evidence message
+
+The shared inbox codec has a versioned `source-evidence` message. It retains source, delivery, object and change IDs; a nullable native author; the original source receipt and timestamps; source text; and an orchestrator run/decision reference. It has no requester, credential, private-audience, approval or control fields. Even evidence authored by the requester remains evidence. Empty text and unknown authors remain explicit source data.
+
+The decoder checks the known schema, source receipt key and decision-ID shape. A stored row also needs the expected run, channel, thread and requester custody. Its producer generation remains original through reclaim. Wire messages cannot supply custody. The message uses the existing 400 KiB inbox bound and is never truncated. Unknown schemas and unsafe JSON remain held.
+
+This validates data consistency. It does not authenticate the source receipt or decision. A consumer must read their canonical records, verify source metadata and content, and check current destination authority before delivery. Current runtimes hold this kind instead of interpreting it as a requester message. A present non-message tag also remains held when its version is missing; it cannot use the legacy requester decoder.
+
+No producer or runtime reader is enabled. Canonical decision admission, source-job handling stages, typed delivery through both runtimes and unit events, exact native consumption and reader migration remain `[gap]`. Original source records and inbox bytes stay retained.
+
+| Criterion | Proof |
+| --- | --- |
+| Human, bot and unknown authors remain evidence without requester identity; empty text stays intact | `[unit]` `src/core/runLedger/sourceEvidence.test.ts::typed source evidence message::preserves author…`; `::keeps empty source text…` |
+| Source metadata and a decision reference survive delivery/reclaim through both stores, and the ordinary requester decoder refuses them | `[unit]` `src/core/runLedger/sourceEvidence.test.ts::typed source evidence message::keeps a source receipt…`; `deploy/cloudflare-memory/runLedger.test.ts::typed SQLite source evidence::*` |
+| Requester/control fields, inconsistent references, foreign custody, unknown schemas, unsafe accessors and oversized input remain held | `[unit]` `src/core/runLedger/sourceEvidence.test.ts::typed source evidence message::rejects requester…`; `::holds mismatched source receipts…`; `::requires matching stored custody…`; `::holds unsafe or oversized input…` |
+| The message captures source and decision data before hashing; a missing-version evidence tag cannot adopt shadow requester fields, while valid legacy messages still decode | `[unit]` `src/core/runLedger/sourceEvidence.test.ts::typed source evidence message::captures source and decision data…`; `src/core/runLedger/inboxMessage.test.ts::durable inbox continuity::holds an evidence tag…` |
+| A tagged hold reports its closed reason and the caller's expected run ID when available; logs contain no source text or raw kind/version values and never coerce a raw tag to text | `[unit]` `src/core/runLedger/inboxMessage.test.ts::durable inbox continuity::reports tagged holds…` |
