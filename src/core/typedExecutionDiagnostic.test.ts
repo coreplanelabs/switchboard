@@ -1,7 +1,12 @@
 // Feature: docs/reference/specs/execution.md — closed typed refusal observations.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CloudflareSandboxExecutor } from "../execution/cloudflareSandbox.js";
-import { ExecCapacityError, annotateExecutionDiagnostic } from "../execution/executor.js";
+import {
+  ExecCapacityError,
+  ExecInfraError,
+  annotateExecutionDiagnostic,
+  executionContextOf,
+} from "../execution/executor.js";
 import {
   typedExecutionDiagnosticFrom,
   typedExecutionDiagnosticOf,
@@ -305,6 +310,21 @@ describe("closed typed execution refusal observations", () => {
       expect(parseRunEventLines(JSON.stringify({ ...note, executionDiagnostic: value })).events).toEqual([
         { type: note.type, kind: note.kind, summary: note.summary },
       ]);
+  });
+
+  it("retains closed operation attribution without changing an infrastructure failure or accepting extra payload fields", () => {
+    const error = new ExecInfraError("original failure", "answered", "resident");
+    const stack = error.stack;
+    annotateExecutionDiagnostic(error, { caller: "harness", operation: "log" });
+    annotateExecutionDiagnostic(error, { caller: "harness", operation: "alive" });
+    expect(error.message).toBe("original failure");
+    expect(error.stack).toBe(stack);
+    expect(executionContextOf(new Error("wrapper", { cause: error }))).toEqual({ caller: "harness", operation: "log" });
+    const malformed = new ExecInfraError("original failure", "answered", "resident");
+    Object.defineProperty(malformed, "executionContext", {
+      value: { caller: "harness", operation: "log", command: "private" },
+    });
+    expect(executionContextOf(malformed)).toBeUndefined();
   });
   it.each(["metadata", "command"] as const)(
     "exposes only closed %s observations through the actual run_check output",

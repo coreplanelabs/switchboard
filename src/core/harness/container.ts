@@ -1250,7 +1250,11 @@ export class ExecHarnessContainer implements HarnessContainer {
         caller: "harness",
         operation: input.kind === "http" ? (input.observation ? "http_observation" : "http_control") : input.kind,
       });
-      if (!(error instanceof ExecControlResetError)) throw error;
+      // A log read only observes the original path and byte range. Re-read it
+      // once after an answered infrastructure failure; no input is resent.
+      const reread =
+        logObservation && error instanceof ExecInfraError && error.origin === "resident" && error.reason === "answered";
+      if (!(error instanceof ExecControlResetError) && !reread) throw error;
       if (!idempotent) throw new HarnessContainerControlResetError(input.kind, error.message);
       try {
         return await send();

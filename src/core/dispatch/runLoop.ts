@@ -67,6 +67,7 @@ import {
 } from "../publicationSettlement.js";
 import { createCheckExecution } from "../checkExecution.js";
 import { typedExecutionDiagnosticOf } from "../../execution/typedExecutionDiagnostic.js";
+import { executionContextOf } from "../../execution/executor.js";
 import { ensureFirstTest, firstTestContext, FirstTestHeld, type FirstTestReceipt } from "../firstTest.js";
 import { MINUTE_MS, GIT_PUBLICATION_SETTLE_TIMEOUT_MS } from "../budgets.js";
 import { operatorModeOf, type ResolvedRequest } from "../../config.js";
@@ -4985,15 +4986,19 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         boundary?.runId === run.id && boundary.gen === deps.runLedger.gen
           ? writeBoundaryDiagnosticSummary(boundary)
           : undefined;
+      const executionContext = executionContextOf(err);
+      const operation = executionContext
+        ? `; execution operation: ${executionContext.caller}/${executionContext.operation}`
+        : "";
       const cause = redactAndCap(
         err instanceof Error ? err.message : String(err),
-        ENDING_NOTE_MAX - (diagnosis ? diagnosis.length + 2 : 0),
+        ENDING_NOTE_MAX - (diagnosis ? diagnosis.length + 2 : 0) - operation.length,
       );
       const executionDiagnostic = typedExecutionDiagnosticOf(err);
       events.publish({
         type: "run_note",
         kind: "run_failed",
-        summary: diagnosis ? `${cause}; ${diagnosis}` : cause,
+        summary: (diagnosis ? `${cause}; ${diagnosis}` : cause) + operation,
         ...(executionDiagnostic ? { executionDiagnostic } : {}),
       });
     }

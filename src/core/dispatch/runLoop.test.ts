@@ -47,7 +47,13 @@ import { contextAccessForExecution, contextAccessForMessage } from "./contextAcc
 import { executionAdmissionHash } from "./executionGithubContext.js";
 import { TEST_GITHUB_CREDENTIALS } from "../../execution/testing/githubCredentials.js";
 import type { Provider } from "../provider.js";
-import { ExecSandboxRestartedError, LocalExecutor, type Executor } from "../../execution/executor.js";
+import {
+  ExecSandboxRestartedError,
+  ExecInfraError,
+  annotateExecutionDiagnostic,
+  LocalExecutor,
+  type Executor,
+} from "../../execution/executor.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { createRunHistoryWriter } from "../runHistoryWriter.js";
@@ -4665,6 +4671,32 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(rec.status).toBe("failed");
     expect(rec.events.filter((e) => e.type === "run_note" && e.kind === "run_failed")).toEqual([
       expect.objectContaining({ summary: expect.stringContaining(UNKNOWN_MODEL_TERMINAL_MESSAGE) }),
+    ]);
+  });
+
+  it("saves the failed harness operation without claiming that its command did not run", async () => {
+    const error = new ExecInfraError("resident /exec: internal error; reference = fixture", "answered", "resident");
+    annotateExecutionDiagnostic(error, { caller: "harness", operation: "log" });
+    const observed = watched(piHarness);
+    observed.harness.open = async () => {
+      throw error;
+    };
+    const s = setup("unused", {
+      harness: {
+        harnesses: roster(observed.harness),
+        registry: new HarnessRegistry(),
+        loopbackUrl: "http://127.0.0.1:8080",
+      },
+    });
+    await expect(runLoop(s.deps, s.ctx)).rejects.toThrow(error.message);
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    const record = (await s.store.get(s.run.id))!;
+    expect(record.status).toBe("failed");
+    expect(record.events.filter((event) => event.type === "run_note" && event.kind === "run_failed")).toEqual([
+      expect.objectContaining({
+        summary: "resident /exec: internal error; reference = fixture; execution operation: harness/log",
+      }),
     ]);
   });
 
