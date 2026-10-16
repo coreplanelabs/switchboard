@@ -1672,6 +1672,185 @@ describe("deliverAnswer — the answer reaches the thread", () => {
     s.ctx.ending.drain(undefined);
     expect(s.sealed).toEqual([]);
   });
+
+  it("a confirmed user stop posts its terminal notice after cancellation sealed the record", async () => {
+    const s = finishedRun(async () => "fenced");
+    s.ctx.run.control.requestStop("hard");
+    s.ctx.run.control.confirmCancellation();
+    expect(await deliverAnswer({ ...s.ctx, stopped: "hard" })).toEqual({ kind: "delivered" });
+    expect(s.replies).toEqual(["⏹ Stopped by user."]);
+    expect(s.releases).toEqual([1]);
+  });
+
+  it.each(["card", "publication", "current-work", "refusal"] as const)(
+    "Kill suppresses a reply after the pending %s wait",
+    async (boundary) => {
+      const s = finishedRun();
+      const kill = async () => {
+        s.ctx.run.control.requestKill();
+      };
+      const ctx = {
+        ...s.ctx,
+        ...(boundary === "card" ? { card: { ...s.ctx.card, done: kill } } : {}),
+        ...(boundary === "publication"
+          ? {
+              publicationCheck: async () => {
+                await kill();
+                return { ok: true as const };
+              },
+            }
+          : {}),
+        ...(boundary === "current-work"
+          ? {
+              currentWorkCheck: async () => {
+                await kill();
+                return "new work";
+              },
+            }
+          : {}),
+        ...(boundary === "refusal"
+          ? {
+              publicationCheck: async () => ({ ok: false as const, code: "saved-context-unproved" as const }),
+              ledgerRun: {
+                finishing: async () => "ok",
+                setState: () => {},
+                commitState: async () => {
+                  await kill();
+                  return "ok";
+                },
+              } as unknown as LedgerRun,
+            }
+          : {}),
+      };
+      const delivery = await deliverAnswer(ctx);
+      expect({ delivery, replies: s.replies, releases: s.releases }).toEqual({
+        delivery: { kind: "fenced" },
+        replies: [],
+        releases: [1],
+      });
+    },
+  );
+
+  it("Kill suppresses a confirmed Stop notice pending card close", async () => {
+    const s = finishedRun(async () => "fenced");
+    s.ctx.run.control.requestStop("hard");
+    s.ctx.run.control.confirmCancellation();
+    await deliverAnswer({
+      ...s.ctx,
+      stopped: "hard",
+      card: {
+        ...s.ctx.card,
+        done: async () => {
+          s.ctx.run.control.requestKill();
+        },
+      },
+    });
+    expect({ replies: s.replies, releases: s.releases }).toEqual({ replies: [], releases: [1] });
+  });
+
+  it.each([true, false])(
+    "Stop waits for the cancellation result before its notice: confirmed=%s",
+    async (confirmed) => {
+      const s = finishedRun(async () => "fenced");
+      s.ctx.run.control.requestStop("hard");
+      s.ctx.run.control.beginCancellation();
+      const delivering = deliverAnswer({ ...s.ctx, stopped: "hard" });
+      // Let delivery reach the pending cancellation before its result arrives.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (confirmed) s.ctx.run.control.confirmCancellation();
+      else s.ctx.run.control.endCancellation();
+      await delivering;
+      expect({ replies: s.replies, releases: s.releases }).toEqual({
+        replies: confirmed ? ["⏹ Stopped by user."] : [],
+        releases: [1],
+      });
+    },
+  );
+
+  it("Stop waits for the remaining cancellation attempt after another returns unknown", async () => {
+    const s = finishedRun(async () => "fenced");
+    s.ctx.run.control.requestStop("hard");
+    s.ctx.run.control.beginCancellation();
+    s.ctx.run.control.beginCancellation();
+    const delivering = deliverAnswer({ ...s.ctx, stopped: "hard" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    s.ctx.run.control.endCancellation();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    s.ctx.run.control.confirmCancellation();
+    s.ctx.run.control.endCancellation();
+    await delivering;
+    expect({ replies: s.replies, releases: s.releases }).toEqual({ replies: ["⏹ Stopped by user."], releases: [1] });
+  });
+
+  it.each(["card", "publication", "current-work"] as const)(
+    "a late Stop replaces the pending %s answer with its terminal notice",
+    async (boundary) => {
+      const s = finishedRun();
+      const stop = async () => {
+        s.ctx.run.control.beginCancellation();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        s.ctx.run.control.confirmCancellation();
+        s.ctx.run.control.endCancellation();
+      };
+      let firstClose = true;
+      const card = {
+        ...s.ctx.card,
+        done: async () => {
+          if (boundary === "card" && firstClose) {
+            firstClose = false;
+            await stop();
+          }
+        },
+      };
+      const delivery = await deliverAnswer({
+        ...s.ctx,
+        card,
+        ...(boundary === "publication"
+          ? {
+              publicationCheck: async () => {
+                await stop();
+                return { ok: true as const };
+              },
+            }
+          : {}),
+        ...(boundary === "current-work"
+          ? {
+              currentWorkCheck: async () => {
+                await stop();
+                return "pending work";
+              },
+            }
+          : {}),
+      });
+      expect({ delivery, replies: s.replies, releases: s.releases }).toEqual({
+        delivery: { kind: "fenced" },
+        replies: ["⏹ Stopped by user."],
+        releases: [1],
+      });
+    },
+  );
+
+  it("an unconfirmed late Stop suppresses the pending answer", async () => {
+    const s = finishedRun();
+    await deliverAnswer({
+      ...s.ctx,
+      publicationCheck: async () => {
+        s.ctx.run.control.beginCancellation();
+        s.ctx.run.control.endCancellation();
+        return { ok: true as const };
+      },
+    });
+    expect({ replies: s.replies, releases: s.releases }).toEqual({ replies: [], releases: [1] });
+  });
+
+  it("kill sends no final answer and still releases the workspace", async () => {
+    const s = finishedRun();
+    s.ctx.run.control.requestKill();
+    expect(await deliverAnswer({ ...s.ctx, stopped: "hard" })).toEqual({ kind: "fenced" });
+    expect(s.releases).toEqual([1]);
+    expect(s.replies).toEqual([]);
+    expect(s.closes).toEqual([]);
+  });
 });
 
 describe("afterReply — the reflection pass", () => {

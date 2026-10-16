@@ -51,6 +51,23 @@ const seed = (rows: ScheduledRow[] | null, firingsUnavailable?: string): Schedul
 });
 
 describe("ScheduledPage", () => {
+  it.each([
+    ["misconfigured", "misconfigured — nothing ran"],
+    ["no-run", "no run created"],
+    ["failed", "failed"],
+    ["ingress-error", "ingress error"],
+  ] as const)("shows the surviving %s outcome in plain English", (outcome, label) => {
+    const w = mountApp(ScheduledPage, { seed: seed([{ ...RUN_ROW, last: { ...RUN_ROW.last!, outcome } }]) });
+    expect(w.text()).toContain(label);
+    expect(w.text()).toContain("self-improvement");
+  });
+
+  it.each(["stopped_soft", "stopped_hard"] as const)("shows a normal stopped result for %s", (outcome) => {
+    const w = mountApp(ScheduledPage, { seed: seed([{ ...RUN_ROW, last: { ...RUN_ROW.last!, outcome } }]) });
+    expect(w.text()).toContain("stopped by user");
+    expect(w.find('a[href="/runs/0a1b2c3d4e5f6789?t=tok-live"]').text()).toContain("Run details");
+  });
+
   it("marks Scheduled work in the global navigation with Run details one click away", async () => {
     const wrapper = mountApp(Shell, {
       seed: { page: "scheduled", now: NOW, rows: [] },

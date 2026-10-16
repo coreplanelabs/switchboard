@@ -22,6 +22,7 @@ import {
   isAfterCursor,
   isRunListItem,
   isRunRecord,
+  confirmRuntimeShutdownRecord,
   matchesVisibility,
   matchesRecoveryEvidence,
   namesPullRequest,
@@ -81,6 +82,8 @@ export interface RunStore {
   /** `trace.span`: the caller's span, under which a Worker store's request is an
    *  `http.client` span (docs/reference/specs/tracing.md item 24); the local stores ignore it. */
   put(record: RunRecord, trace?: TraceOptions): Promise<PutResult>;
+  /** Update only the matching terminal segment; no full-record replay. */
+  confirmRuntimeShutdown?(original: RunRecord, trace?: TraceOptions): Promise<boolean>;
   /** The history writer's sink contract (`RecordSink`, docs/reference/specs/run-history.md
    *  item 54): the caller's final word that a record will not be put again. A
    *  store keeps nothing in flight per record, so every store answers no-op —
@@ -102,7 +105,9 @@ export interface RunStore {
    *  events past `afterSeq` is `{ events: [] }`, never null. */
   events(id: string, opts: RunEventsOptions): Promise<RunEventsPage | null>;
   /** Remove a run and its events (the incident lever for a redaction miss). Unknown id is a no-op. */
-  delete(id: string): Promise<void>;
+  delete(id: string, opts?: { destructive: true }): Promise<void>;
+  /** IDs permanently removed by Kill, including records held by another process. */
+  deleted(ids: readonly string[]): Promise<string[]>;
   /** What the runs that finished in the range cost, as the cells every cost
    *  dimension reads (docs/reference/specs/costs.md items 10–10a): per requester,
    *  thread, channel, agent and UTC day, a child billed to its parent's
@@ -158,8 +163,14 @@ export class NullRunStore implements RunStore {
   abandoned(): void {
     // a store keeps nothing in flight per record (run-history item 54): nothing to settle
   }
+  async deleted(): Promise<string[]> {
+    return [];
+  }
   async put(_record: RunRecord, _trace?: TraceOptions): Promise<PutResult> {
     return { ok: true, retained: 0, stored: false, rewritten: false };
+  }
+  async confirmRuntimeShutdown(_original: RunRecord): Promise<boolean> {
+    return false;
   }
   async get(_id: string): Promise<RunRecord | null> {
     return null;
@@ -262,6 +273,7 @@ export interface LocalStoreOptions {
 /** In-process store for tests and dev. Not durable — never the production
  *  choice on its own (AGENTS.md invariant 6). */
 export class InMemoryRunStore implements RunStore {
+  private readonly killed = new Set<string>();
   private readonly records = new Map<string, { record: RunRecord; bytes: number }>();
   private readonly policy: RetentionPolicy;
   private readonly now: () => number;
@@ -288,6 +300,7 @@ export class InMemoryRunStore implements RunStore {
   }
   async put(record: RunRecord): Promise<PutResult> {
     if (!isRunRecord(record)) return { ok: true, retained: this.records.size, stored: false, rewritten: false };
+    if (this.killed.has(record.id)) return { ok: true, retained: this.records.size, stored: false, rewritten: false };
     const bytes = utf8ByteLength(JSON.stringify(record));
     const prev = this.records.get(record.id);
     const rewritten =
@@ -303,6 +316,13 @@ export class InMemoryRunStore implements RunStore {
     const entry = this.records.get(id);
     if (!entry || !this.retained().some((r) => r.id === id)) return null;
     return normalizeStored(clone(entry.record));
+  }
+
+  async confirmRuntimeShutdown(original: RunRecord): Promise<boolean> {
+    if (!isRunRecord(original)) return false;
+    if (this.killed.has(original.id) || !this.retained().some((row) => row.id === original.id)) return false;
+    const updated = confirmRuntimeShutdownRecord(this.records.get(original.id)?.record ?? null, original);
+    return updated ? (await this.put(updated)).stored : false;
   }
 
   async getSummary(id: string): Promise<RunListItem | null> {
@@ -321,11 +341,16 @@ export class InMemoryRunStore implements RunStore {
     return record ? pageEvents(record.events, opts) : null;
   }
 
-  async delete(id: string): Promise<void> {
+  async deleted(ids: readonly string[]): Promise<string[]> {
+    return ids.filter((id) => this.killed.has(id));
+  }
+
+  async delete(id: string, opts?: { destructive: true }): Promise<void> {
     if (!isValidRunId(id)) return;
     const record = this.records.get(id)?.record;
-    if (record && terminalPublicationRetentionRequired(record))
+    if (!opts?.destructive && record && terminalPublicationRetentionRequired(record))
       throw new Error("unresolved publication prevents history deletion");
+    if (opts?.destructive) this.killed.add(id);
     this.records.delete(id);
   }
 
@@ -447,7 +472,9 @@ export class FileRunStore implements RunStore {
 
   /** The retained index rows, newest first, only those whose file is intact. */
   private retainedIntact(): RunListItem[] {
-    return this.retained(this.readIndex()).filter((r) => this.fileIntact(r));
+    return this.retained(this.readIndex()).filter(
+      (r) => !existsSync(join(this.dir, `${r.id}.killed`)) && this.fileIntact(r),
+    );
   }
 
   /** Unlink unprotected files outside policy and rewrite the retained index. */
@@ -467,6 +494,8 @@ export class FileRunStore implements RunStore {
   }
   async put(record: RunRecord): Promise<PutResult> {
     if (!isRunRecord(record)) return { ok: true, retained: this.readIndex().length, stored: false, rewritten: false };
+    if (existsSync(join(this.dir, `${record.id}.killed`)))
+      return { ok: true, retained: this.readIndex().length, stored: false, rewritten: false };
     this.ensureDir();
     const content = JSON.stringify(record);
     const bytes = utf8ByteLength(content);
@@ -481,11 +510,22 @@ export class FileRunStore implements RunStore {
 
   /** Read the full record only when ordinary policy or protected evidence retains it. */
   async get(id: string): Promise<RunRecord | null> {
-    if (!isValidRunId(id)) return null;
+    if (!isValidRunId(id) || existsSync(join(this.dir, `${id}.killed`))) return null;
     const index = this.readIndex();
     const ordinary = applyRetention(index, this.policy, this.now());
     if (!ordinary.some((item) => item.id === id) && !this.retained(index).some((item) => item.id === id)) return null;
     return this.readRecord(id);
+  }
+
+  async confirmRuntimeShutdown(original: RunRecord): Promise<boolean> {
+    if (!isRunRecord(original)) return false;
+    if (
+      existsSync(join(this.dir, `${original.id}.killed`)) ||
+      !this.retainedIntact().some((row) => row.id === original.id)
+    )
+      return false;
+    const updated = confirmRuntimeShutdownRecord(this.readRecord(original.id), original);
+    return updated ? (await this.put(updated)).stored : false;
   }
 
   private readRecord(id: string): RunRecord | null {
@@ -501,7 +541,7 @@ export class FileRunStore implements RunStore {
    *  Hidden like `list` for a file whose size differs from the indexed
    *  `bytes` (torn) — so `getSummary` and `list` always agree row for row. */
   async getSummary(id: string): Promise<RunListItem | null> {
-    if (!isValidRunId(id)) return null;
+    if (!isValidRunId(id) || existsSync(join(this.dir, `${id}.killed`))) return null;
     const index = this.readIndex();
     const ordinary = applyRetention(index, this.policy, this.now()).find((item) => item.id === id);
     const row = ordinary ?? this.retained(index).find((item) => item.id === id);
@@ -539,9 +579,20 @@ export class FileRunStore implements RunStore {
     return { ...report, ...(earliest !== undefined ? { earliestFinishedAt: earliest } : {}) };
   }
 
-  async delete(id: string): Promise<void> {
+  async deleted(ids: readonly string[]): Promise<string[]> {
+    return ids.filter((id) => isValidRunId(id) && existsSync(join(this.dir, `${id}.killed`)));
+  }
+
+  async delete(id: string, opts?: { destructive: true }): Promise<void> {
     if (!isValidRunId(id)) return;
     const index = this.readIndex();
+    if (opts?.destructive) {
+      this.ensureDir();
+      this.writeAtomic(join(this.dir, `${id}.killed`), "");
+      rmSync(this.recordPath(id), { force: true });
+      this.compact(index.filter((r) => r.id !== id));
+      return;
+    }
     if (!index.some((r) => r.id === id) && !existsSync(this.recordPath(id))) return;
     if (!existsSync(this.recordPath(id))) throw new Error("unreadable publication evidence prevents history deletion");
     if (existsSync(this.recordPath(id))) {

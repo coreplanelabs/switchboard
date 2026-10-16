@@ -963,6 +963,7 @@ describe("handleMcpRequest — registry commands as tools", () => {
       "runs_check",
       "runs_settlecheck",
       "runs_stop",
+      "runs_kill",
       "runs_unit",
       "runs_children",
       "runs_findings",
@@ -1107,7 +1108,7 @@ describe("handleMcpRequest — registry commands as tools", () => {
     const { commands, live, reg } = await commandFixture();
     for (const [name, args] of [
       ["runs_list", { status: "all" }],
-      ["runs_stop", { id: live.id, mode: "soft" }],
+      ["runs_stop", { id: live.id }],
     ] as const) {
       const res = await handleMcpRequest(rpc("tools/call", { name, arguments: args }), deps, { auth: good, commands });
       const body = res.body as RpcError & { error: { data?: { code: string } } };
@@ -1118,11 +1119,10 @@ describe("handleMcpRequest — registry commands as tools", () => {
 
   it("a destructive stop from a credential without a consent surface is refused without changing the run", async () => {
     const { commands, live, reg } = await commandFixture();
-    const result = await handleMcpRequest(
-      rpc("tools/call", { name: "runs_stop", arguments: { id: live.id, mode: "soft" } }),
-      deps,
-      { auth: scoped(["runs:write"]), commands },
-    );
+    const result = await handleMcpRequest(rpc("tools/call", { name: "runs_stop", arguments: { id: live.id } }), deps, {
+      auth: scoped(["runs:write"]),
+      commands,
+    });
     expect(result.body).toMatchObject({ error: { code: -32004, data: { code: "unavailable" } } });
     expect(reg.getById(live.id)).toMatchObject({ id: live.id, finished: false });
     expect(reg.getById(live.id)?.stop).toBeUndefined();

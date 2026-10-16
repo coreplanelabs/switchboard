@@ -1547,6 +1547,11 @@ describe("InMemoryRunLedger", () => {
     t = 100_000;
     expect(await ledger.requestStop("r1", "hard")).toEqual({ ok: true, ownerLive: false });
     expect(await ledger.requestStop("nope", "hard")).toEqual({ ok: false });
+    expect(await ledger.requestStop("r1", "hard", { destructive: true })).toMatchObject({ ok: true });
+    expect(await ledger.setState("r1", "g1", { notes: "owner snapshot" })).toEqual({ ok: true });
+    expect(await ledger.setState("r1", "g1", { killRequested: false })).toEqual({ ok: false, reason: "fenced" });
+    await ledger.requestStop("r1", "soft");
+    expect(await ledger.heartbeat("r1", "g1", LEASE_MS)).toMatchObject({ ok: true, stop: "hard", destructive: true });
   });
 
   it("a run reserved `attaching` at admission (item 42) holds the thread with its request and no prompt; the owner's claim with the prompt promotes it to live in place (card, prompt, tools, state land; identity and start stay); another run on the thread is refused meanwhile; a reclaim of an expired attaching row keeps the phase and hands the request back", async () => {

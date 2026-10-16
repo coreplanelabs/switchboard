@@ -35,6 +35,7 @@ export { RUN_STORE_KEY, RUN_STORE_TIMEOUT_MS } from "./runStoreConstants.js";
 // the one difference between this client and those three, and the only one
 // whose fetches failed from the production container):
 //   POST /runs/put    {storeKey, record, policy?, policyUpdatedAt?, point?} → {ok, retained, stored, rewritten}
+//   POST /runs/shutdown {storeKey, record}                           → {ok, confirmed}
 //   POST /runs/get    {storeKey, id}                                → {record: RunRecord | null}
 //   POST /runs/summary {storeKey, id}                               → {summary: RunListItem | null}
 //   POST /runs/list   {storeKey, limit?, before?, beforeId?, sinceMs?, agent?, channel?, threadKey?, parentRunId?, pr?}
@@ -105,7 +106,15 @@ export interface WorkerRunStoreOptions {
 
 /** The Worker's routes, as a span names them. */
 type RunStoreRoute =
-  "/runs/put" | "/runs/get" | "/runs/summary" | "/runs/list" | "/runs/events" | "/runs/delete" | "/runs/usage";
+  | "/runs/put"
+  | "/runs/shutdown"
+  | "/runs/get"
+  | "/runs/summary"
+  | "/runs/list"
+  | "/runs/events"
+  | "/runs/delete"
+  | "/runs/deleted"
+  | "/runs/usage";
 
 export class WorkerRunStore implements RunStore {
   private readonly baseUrl: string;
@@ -153,6 +162,17 @@ export class WorkerRunStore implements RunStore {
       throw new PermanentStoreError("run store /runs/put returned a malformed result");
     }
     return { ok: true, retained: data.retained, stored: data.stored, rewritten: data.rewritten };
+  }
+
+  async confirmRuntimeShutdown(original: RunRecord, trace?: TraceOptions): Promise<boolean> {
+    const result = await this.post(
+      "/runs/shutdown",
+      { storeKey: this.opts.storeKey, record: original },
+      trace?.span,
+      "write",
+      (value) => value.ok === true && typeof value.confirmed === "boolean",
+    );
+    return result.confirmed === true;
   }
 
   async get(id: string): Promise<RunRecord | null> {
@@ -205,9 +225,23 @@ export class WorkerRunStore implements RunStore {
     return out;
   }
 
-  async delete(id: string): Promise<void> {
+  async deleted(ids: readonly string[]): Promise<string[]> {
+    if (ids.length === 0) return [];
+    const data = await this.read("/runs/deleted", { storeKey: this.opts.storeKey, ids });
+    if (!Array.isArray(data.ids) || data.ids.some((id) => typeof id !== "string" || !ids.includes(id)))
+      throw new PermanentStoreError("run store /runs/deleted returned a malformed result");
+    return data.ids as string[];
+  }
+
+  async delete(id: string, opts?: { destructive: true }): Promise<void> {
     if (!RUN_ID_PATTERN.test(id)) return;
-    await this.post("/runs/delete", { storeKey: this.opts.storeKey, id });
+    const result = await this.post("/runs/delete", {
+      storeKey: this.opts.storeKey,
+      id,
+      ...(opts?.destructive ? { destructive: true } : {}),
+    });
+    if (opts?.destructive && result.destructive !== true)
+      throw new PermanentStoreError("The history service did not confirm the Kill deletion fence.");
   }
 
   /** One row per run from the Worker, folded into the cells here: the arithmetic

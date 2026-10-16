@@ -64,6 +64,27 @@ interface Harness {
 
 function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION_POLICY>) => Harness) {
   describe(`${name} — RunStore contract`, () => {
+    it("acknowledges only the original terminal segment and never restores deleted history", async () => {
+      const { store } = make();
+      const original = record("shutdown", NOW, { failure: { kind: "runtime_shutdown_unconfirmed" } });
+      await store.put({ ...original, label: "newer metadata" });
+      expect(await store.confirmRuntimeShutdown!(original)).toBe(true);
+      expect(await store.get(original.id)).toMatchObject({
+        id: "shutdown",
+        label: "newer metadata",
+        runtimeShutdownConfirmed: true,
+      });
+      expect((await store.get(original.id))?.failure).toBeUndefined();
+      const newer = record(original.id, NOW + 1, { status: "failed" });
+      await store.put(newer);
+      expect(await store.confirmRuntimeShutdown!(original)).toBe(false);
+      expect(await store.get(original.id)).toMatchObject({ id: "shutdown", finishedAt: NOW + 1, status: "failed" });
+      expect((await store.get(original.id))?.runtimeShutdownConfirmed).toBeUndefined();
+      await store.delete(original.id, { destructive: true });
+      expect(await store.confirmRuntimeShutdown!(newer)).toBe(false);
+      expect(await store.get(original.id)).toBeNull();
+    });
+
     it("retains branch identity fingerprints privately across store reloads", async () => {
       const { store } = make();
       const base = record("baseline", NOW);
@@ -670,6 +691,18 @@ function contract(name: string, make: (policy?: Partial<typeof DEFAULT_RETENTION
       expect(await store.get("a")).toBeNull();
       expect(await store.list({})).toEqual([]);
       expect(await store.events("a", {})).toBeNull();
+    });
+
+    it("kill deletes the run and prevents a delayed put from restoring it", async () => {
+      const { store } = make();
+      const saved = record("killed", NOW);
+      await store.put(saved);
+      await store.delete("killed", { destructive: true });
+      expect(await store.deleted(["killed", "other"])).toEqual(["killed"]);
+      expect(await store.put(saved)).toMatchObject({ stored: false });
+      expect(await store.get("killed")).toBeNull();
+      expect(await store.getSummary("killed")).toBeNull();
+      expect(await store.list({ limit: 10 })).toEqual([]);
     });
   });
 }

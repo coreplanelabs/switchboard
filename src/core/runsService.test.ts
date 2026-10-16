@@ -95,6 +95,88 @@ function expectNoToken(value: unknown): void {
 }
 
 describe("RunsService.getRun", () => {
+  it("refuses cached reads when shared deletion state is unavailable", async () => {
+    const { reg, store } = setup();
+    const warnings: string[] = [];
+    const svc = createRunsService({ registry: reg, store, warn: (line) => warnings.push(line) });
+    const run = reg.create("cached run");
+    const deleted = store!.deleted.bind(store);
+    let unavailable = true;
+    vi.spyOn(store!, "deleted").mockImplementation(async (ids) => {
+      if (unavailable) throw new Error("deletion read unavailable");
+      return deleted(ids);
+    });
+    await expect(svc.getRun(run.id)).rejects.toThrow("deletion read unavailable");
+    await expect(svc.getRunFriction(run.id)).rejects.toThrow("deletion read unavailable");
+    await expect(svc.listRuns({ status: "active", visibleTo: ALL })).rejects.toThrow("deletion read unavailable");
+    expect(warnings).toEqual(["[runs] shared deletion check unavailable; cached reads are withheld"]);
+    unavailable = false;
+    expect(await svc.getRun(run.id)).toMatchObject({ ok: true, value: { id: run.id, finished: false } });
+    unavailable = true;
+    await expect(svc.getRun(run.id)).rejects.toThrow("deletion read unavailable");
+    expect(warnings).toEqual([
+      "[runs] shared deletion check unavailable; cached reads are withheld",
+      "[runs] shared deletion check unavailable; cached reads are withheld",
+    ]);
+  });
+
+  it("shared Kill fences cached foreign ledger reads and listings", async () => {
+    const { reg, store } = setup();
+    const ledger = new InMemoryRunLedger(() => NOW);
+    const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+    const threadKey = "slack:C1:foreign";
+    await ledger.claim({
+      runId: id,
+      threadKey,
+      gen: "other",
+      leaseMs: 30_000,
+      startedAt: NOW,
+      meta: { agent: "review", channelId: "slack:C1", userId: "slack:UALICE", threadKey },
+      card: null,
+      system: "",
+      tools: [],
+      state: {},
+    });
+    const svc = createRunsService({ registry: reg, store, ledger, clock: () => NOW });
+    expect(await svc.getRun(id, { include: "messages" })).toMatchObject({ ok: true, value: { id, finished: false } });
+    expect((await svc.liveElsewhere(ALL)).map((row) => row.id)).toEqual([id]);
+    await store!.delete(id, { destructive: true });
+    expect(await svc.getRun(id, { include: "messages" })).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getRunEvents(id, {})).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getRunFriction(id)).toEqual({ ok: false, error: "not_found" });
+    expect((await svc.listRuns({ status: "active", visibleTo: ALL })).runs).toEqual([]);
+    expect((await svc.listRuns({ status: "all", visibleTo: ALL })).runs).toEqual([]);
+    expect(await svc.liveElsewhere(ALL)).toEqual([]);
+  });
+
+  it("Kill in another generation removes registry-backed reads and listings", async () => {
+    const { reg, svc, store } = setup();
+    const run = reg.create(
+      "old generation",
+      {
+        agent: "review",
+        channelId: "slack:C1",
+        userId: "slack:UALICE",
+        threadKey: "slack:C1:shared",
+      },
+      { id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa" },
+    );
+    reg.publish(run.id, { type: "answer", text: "old answer" });
+    reg.finish(run.id, "completed");
+    reg.seal(run.id);
+    await store!.put(record(run.id, NOW, { runtimeShutdownConfirmed: true }));
+    reg.markPersisted(run.id);
+    const other = createRunsService({ registry: testRegistry().reg, store });
+    expect(await other.stopRun(run.id, "hard", actor, { destructive: true })).toMatchObject({
+      ok: true,
+      value: { state: "deleted" },
+    });
+    expect(await svc.getRun(run.id, { include: "messages" })).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getRunEvents(run.id, {})).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.getRunFriction(run.id)).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.listRuns({ status: "all", visibleTo: ALL })).toEqual({ runs: [] });
+  });
+
   it("keeps research text out of metadata and applies private body gates to explicit research reads", async () => {
     const { store, svc } = setup();
     const researchBrief = {
@@ -624,6 +706,7 @@ describe("RunsService.getRun", () => {
       getSummary: vi.fn((id: string) => inner.getSummary(id)),
       list: (o) => inner.list(o),
       events: (id, o) => inner.events(id, o),
+      deleted: async () => [],
       delete: (id) => inner.delete(id),
       usage: (q) => inner.usage(q),
     };
@@ -704,6 +787,7 @@ describe("RunsService.getRun", () => {
       getSummary: vi.fn((id: string) => inner.getSummary(id)),
       list: (o) => inner.list(o),
       events: (id, o) => inner.events(id, o),
+      deleted: async () => [],
       delete: (id) => inner.delete(id),
       usage: (q) => inner.usage(q),
     };
@@ -1175,6 +1259,7 @@ describe("RunsService.listRuns — read merge", () => {
       getSummary: vi.fn(async () => null),
       list: vi.fn(async (opts) => rows.slice(0, Math.min(200, opts.limit ?? 50))),
       events: vi.fn(async () => ({ events: [] })),
+      deleted: async () => [],
       delete: vi.fn(),
       usage: vi.fn(async () => ({ rows: [], pending: 0, retentionDays: 0 })),
     };
@@ -1203,6 +1288,7 @@ describe("RunsService.listRuns — read merge", () => {
       events: vi.fn(async () => {
         throw new Error("boom");
       }),
+      deleted: async () => [],
       delete: vi.fn(),
       usage: vi.fn(async () => ({ rows: [], pending: 0, retentionDays: 0 })),
     };
@@ -1808,6 +1894,7 @@ describe("RunsService with the run ledger — one registry across generations (r
     expect(res.runs).toHaveLength(1);
     expect(warnings).toEqual([expect.stringContaining("HTTP 503")]);
     expect(await svc.getRun("far-1")).toEqual({ ok: false, error: "not_found" });
+    await expect(svc.liveElsewhere(ALL)).rejects.toThrow("The current run list could not be verified");
   });
 
   it.each(["all", "active", "finished", "cursor"] as const)(
@@ -1886,6 +1973,7 @@ describe("RunsService — summary-only persisted reads", () => {
       getSummary: vi.fn((id: string) => inner.getSummary(id)),
       list: (o) => inner.list(o),
       events: (id, o) => inner.events(id, o),
+      deleted: async () => [],
       delete: (id) => inner.delete(id),
       usage: (q) => inner.usage(q),
     };
@@ -2018,6 +2106,277 @@ describe("RunsService.getRunFriction", () => {
 });
 
 describe("RunsService.stopRun", () => {
+  it("an old local shutdown cannot qualify newer saved history", async () => {
+    const { reg, svc, store } = setup();
+    const { id, control } = reg.create();
+    reg.finish(id, "completed");
+    reg.seal(id);
+    control.confirmRuntimeShutdown();
+    await store!.put(record(id, NOW + 1, { status: "failed" }));
+    expect(await svc.stopRun(id, "hard", actor, { destructive: true })).toEqual({ ok: false, error: "unavailable" });
+    expect(await svc.getRun(id)).toMatchObject({ ok: true, value: { id } });
+  });
+  it.each(["completed", "failed", "stopped_hard", "interrupted"] as const)(
+    "Kill retains saved %s history without original shutdown proof",
+    async (status) => {
+      const { svc, store } = setup();
+      const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+      await store!.put(record(id, NOW, { status }));
+      expect(await svc.stopRun(id, "hard", actor, { destructive: true })).toEqual({
+        ok: false,
+        error: "unavailable",
+      });
+      expect(await svc.getRunEvents(id, {})).toMatchObject({
+        ok: true,
+        value: {
+          events: [
+            { type: "input", text: "do the thing" },
+            expect.anything(),
+            expect.anything(),
+            { type: "answer", text: "done" },
+          ],
+        },
+      });
+    },
+  );
+
+  it("Kill accepts saved original shutdown proof after the local control is gone", async () => {
+    const { svc, store } = setup();
+    const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+    await store!.put(record(id, NOW, { runtimeShutdownConfirmed: true }));
+    expect(await svc.stopRun(id, "hard", actor, { destructive: true })).toEqual({
+      ok: true,
+      value: { id, mode: "hard", state: "deleted" },
+    });
+    expect(await svc.getRun(id)).toEqual({ ok: false, error: "not_found" });
+  });
+
+  it("Kill waits for the terminal record as well as original shutdown", async () => {
+    const { reg, svc, store } = setup();
+    const { id, control } = reg.create(undefined, undefined, { id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa" });
+    reg.finish(id, "completed");
+    reg.seal(id);
+    control.confirmRuntimeShutdown();
+    expect(await svc.stopRun(id, "hard", actor, { destructive: true })).toEqual({ ok: false, error: "unavailable" });
+    await store!.put(record(id, NOW));
+    expect(await store!.confirmRuntimeShutdown!((await store!.get(id))!)).toBe(true);
+    expect(await svc.stopRun(id, "hard", actor, { destructive: true })).toEqual({
+      ok: true,
+      value: { id, mode: "hard", state: "deleted" },
+    });
+    expect(await svc.getRun(id)).toEqual({ ok: false, error: "not_found" });
+  });
+
+  it("Kill can retry after the original cleanup confirms a previously unknown ending", async () => {
+    const { reg, svc, store } = setup();
+    const { id, control } = reg.create();
+    control.trackRuntimeShutdown();
+    reg.finish(id, "completed");
+    reg.seal(id);
+    await store!.put(record(id, NOW, { failure: { kind: "runtime_shutdown_unconfirmed" } }));
+    expect(await svc.stopRun(id, "hard", actor, { destructive: true })).toEqual({ ok: false, error: "unavailable" });
+    control.confirmRuntimeShutdown();
+    expect(await store!.confirmRuntimeShutdown!((await store!.get(id))!)).toBe(true);
+    expect(await svc.stopRun(id, "hard", actor, { destructive: true })).toEqual({
+      ok: true,
+      value: { id, mode: "hard", state: "deleted" },
+    });
+    expect(await svc.getRun(id)).toEqual({ ok: false, error: "not_found" });
+  });
+
+  it("Kill fences a finished run whose final reply has not been sealed", async () => {
+    const { reg, svc, store } = setup();
+    const { id, control } = reg.create();
+    reg.finish(id, "completed");
+    await store!.put(record(id, NOW));
+    const killing = svc.stopRun(id, "hard", actor, { destructive: true });
+    await vi.waitFor(() => expect(control.destructive).toBe(true));
+    reg.seal(id);
+    control.confirmRuntimeShutdown();
+    expect(await store!.confirmRuntimeShutdown!((await store!.get(id))!)).toBe(true);
+    reg.markPersisted(id);
+    expect(await killing).toEqual({ ok: true, value: { id, mode: "hard", state: "deleted" } });
+    expect(await svc.getRun(id)).toEqual({ ok: false, error: "not_found" });
+  });
+
+  it("Kill keeps a sealed row until the original producer and cleanup acknowledge shutdown", async () => {
+    const { reg, svc, store } = setup();
+    const { id, control } = reg.create();
+    control.confirmRuntimeShutdown();
+    control.trackRuntimeShutdown();
+    await store!.put(record(id, NOW));
+    const killing = svc.stopRun(id, "hard", actor, { destructive: true });
+    await vi.waitFor(() => expect(control.destructive).toBe(true));
+    reg.finish(id, "stopped_hard");
+    reg.seal(id);
+    reg.markPersisted(id);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await svc.getRun(id)).toMatchObject({ ok: true, value: { id, finished: true } });
+    control.confirmRuntimeShutdown();
+    expect(await store!.confirmRuntimeShutdown!((await store!.get(id))!)).toBe(true);
+    reg.markPersisted(id);
+    expect(await killing).toEqual({ ok: true, value: { id, mode: "hard", state: "deleted" } });
+    expect(await svc.getRun(id)).toEqual({ ok: false, error: "not_found" });
+  });
+
+  it("Kill retains a terminal record with an unconfirmed producer ending", async () => {
+    const { svc, store } = setup();
+    const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+    await store!.put(record(id, NOW, { failure: { kind: "harness_ending_unconfirmed" } }));
+    expect(await svc.stopRun(id, "hard", actor, { destructive: true })).toEqual({ ok: false, error: "unavailable" });
+    expect(await svc.getRun(id)).toMatchObject({ ok: true, value: { id, finished: true } });
+  });
+
+  it("Kill retains a legacy no-workspace record without a producer exit receipt", async () => {
+    const { svc, store } = setup();
+    const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+    const cancellation = {
+      version: 1 as const,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      runId: id,
+      ownerGen: "old",
+      threadKey: `slack:C1:${id}`,
+      startedAt: NOW - 10_000,
+      actor,
+    };
+    await store!.put(
+      record(id, NOW, {
+        status: "stopped_hard",
+        cancellation: { version: 1, actor, cancellation, disposition: "no-workspace" },
+      }),
+    );
+    expect(await svc.stopRun(id, "hard", actor, { destructive: true })).toEqual({ ok: false, error: "unavailable" });
+    expect(await svc.getRun(id)).toMatchObject({ ok: true, value: { id, finished: true, status: "stopped_hard" } });
+  });
+
+  it("Kill latches a cancellation-sealed control before deleting it", async () => {
+    const { reg, svc, store } = setup();
+    const { id, control } = reg.create();
+    control.confirmCancellation();
+    control.confirmRuntimeShutdown();
+    reg.finish(id, "stopped_hard");
+    reg.seal(id);
+    await store!.put(record(id, NOW, { status: "stopped_hard", runtimeShutdownConfirmed: true }));
+    expect(await svc.stopRun(id, "hard", actor, { destructive: true })).toEqual({
+      ok: true,
+      value: { id, mode: "hard", state: "deleted" },
+    });
+    expect(control.destructive).toBe(true);
+    expect(await svc.getRun(id)).toEqual({ ok: false, error: "not_found" });
+  });
+
+  it.each([false, true])(
+    "live control attempts a turn interrupt only for Stop: destructive=%s",
+    async (destructive) => {
+      const { reg, store } = setup();
+      const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+      const threadKey = "slack:C1:control";
+      const meta = { agent: "review", channelId: "slack:C1", userId: "slack:UALICE", threadKey };
+      const ledger = new InMemoryRunLedger(() => NOW);
+      const finishCancellation = ledger.finishCancellation.bind(ledger);
+      ledger.finishCancellation = async (cancellation, saved) => {
+        const result = await finishCancellation(cancellation, saved);
+        if (result.ok && result.stored) await store!.put(saved);
+        return result;
+      };
+      await ledger.claim({
+        runId: id,
+        threadKey,
+        gen: "g1",
+        leaseMs: 30_000,
+        startedAt: NOW,
+        meta: { ...meta, profile: { machine: "none", identity: "none", minutes: 5 } },
+        card: null,
+        system: "",
+        tools: [],
+        state: {},
+      });
+      const control = reg.create("review", meta, { id }).control;
+      const steps: string[] = [];
+      control.setTurnStop(() => steps.push("interrupt"));
+      const svc = createRunsService({
+        registry: reg,
+        store,
+        ledger,
+        clock: () => NOW,
+        stopRuntime: async () => {
+          steps.push("cleanup");
+          return { stopped: true, disposition: "workspace-discarded" };
+        },
+      });
+      expect(await svc.stopRun(id, "hard", actor, destructive ? { destructive: true } : undefined)).toEqual({
+        ok: true,
+        value: { id, mode: "hard", state: destructive ? "deleted" : "stopped" },
+      });
+      expect(steps).toEqual(destructive ? ["cleanup"] : ["interrupt", "cleanup"]);
+      if (destructive) expect(await svc.getRun(id)).toEqual({ ok: false, error: "not_found" });
+      else {
+        expect(await svc.getRun(id)).toMatchObject({ ok: true, value: { id, finished: true, status: "stopped_hard" } });
+        expect(ledger.finished.get(id)?.events.at(-1)).toMatchObject({ type: "answer", text: "⏹ Stopped by user." });
+      }
+    },
+  );
+
+  it("kill removes a finished run and prevents a delayed record from restoring it", async () => {
+    const { reg, svc, store } = setup();
+    const { id, control } = reg.create();
+    control.confirmRuntimeShutdown();
+    const saved = record(id, NOW, { runtimeShutdownConfirmed: true });
+    reg.finish(id, "completed");
+    reg.seal(id);
+    await store!.put(saved);
+    expect(await svc.stopRun(id, "hard", actor, { destructive: true })).toEqual({
+      ok: true,
+      value: { id, mode: "hard", state: "deleted" },
+    });
+    await store!.put(saved);
+    expect(await svc.getRun(id)).toEqual({ ok: false, error: "not_found" });
+    expect(await svc.listRuns({ status: "all", visibleTo: ALL })).toEqual({ runs: [] });
+  });
+
+  it("kill retains the row when runtime shutdown is unconfirmed", async () => {
+    for (const noWorkspace of [false, true]) {
+      const { reg, store } = setup();
+      const ledger = new InMemoryRunLedger(() => NOW);
+      const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+      const threadKey = "slack:C1:kill";
+      await ledger.claim({
+        runId: id,
+        threadKey,
+        gen: "g1",
+        leaseMs: 30_000,
+        startedAt: NOW,
+        meta: {
+          agent: "review",
+          channelId: "slack:C1",
+          userId: "slack:UALICE",
+          threadKey,
+          profile: { machine: "none", identity: "none", minutes: 5 },
+        },
+        card: null,
+        system: "",
+        tools: [],
+        state: {},
+      });
+      const svc = createRunsService({
+        registry: reg,
+        store,
+        ledger,
+        clock: () => NOW,
+        stopRuntime: async () =>
+          noWorkspace
+            ? { stopped: true, disposition: "no-workspace" }
+            : { stopped: false, refusal: { phase: "prepare", cause: "runtime-unconfirmed" } },
+      });
+      expect(await svc.stopRun(id, "hard", actor, { destructive: true })).toMatchObject({
+        ok: false,
+        error: "unavailable",
+      });
+      expect(await svc.getRun(id)).toMatchObject({ ok: true, value: { id, finished: false } });
+      expect(ledger.finished.has(id)).toBe(false);
+    }
+  });
+
   it("live: drives the control and publishes stop_requested with the structured actor", async () => {
     const { reg, svc } = setup();
     const { id, token, control } = reg.create();
@@ -3213,6 +3572,13 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
   async function hostedWorld(regOver: Parameters<typeof testRegistry>[0] = {}, waitingForInput = false) {
     const { reg } = testRegistry(regOver);
     const ledger = new InMemoryRunLedger(() => NOW);
+    const store = new InMemoryRunStore({ now: () => NOW });
+    const finish = ledger.finish.bind(ledger);
+    ledger.finish = async (id, gen, saved) => {
+      const result = await finish(id, gen, saved);
+      if (result.ok && result.stored) await store.put(saved);
+      return result;
+    };
     const units = new InMemoryCoordinatorInstanceStore(ledger);
     await units.put({
       id: "plan-p-1",
@@ -3252,7 +3618,7 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
     });
     const svc = createRunsService({
       registry: reg,
-      store: new InMemoryRunStore({ now: () => NOW }),
+      store,
       ledger,
       writer,
       units,
@@ -3284,6 +3650,17 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
     if (opened.kind !== "tracked") throw new Error("hosted writer absent");
     return { reg, ledger, svc, id, token, units, writer, tracked: opened.run };
   }
+
+  it("Kill deletes a hosted parent after its original writer confirms closure", async () => {
+    const w = await hostedWorld();
+    expect(await w.svc.stopRun(w.id, "hard", actor, { destructive: true })).toEqual({
+      ok: true,
+      value: { id: w.id, mode: "hard", state: "deleted" },
+    });
+    expect(await w.svc.getRun(w.id)).toEqual({ ok: false, error: "not_found" });
+    expect(await w.ledger.listLive()).toEqual([]);
+    await w.tracked.close();
+  });
 
   it.each([true, false])(
     "HERE hosted stop retains an actual unknown writer before canonical closure: committed=%s",
@@ -3435,16 +3812,16 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
     expect(ledger.live.has(id)).toBe(true);
   });
 
-  it("a hard stop seals the parent `failed` with the units' state as its answer, releases the host key through the ledger, and a later ship claim on the thread succeeds", async () => {
+  it("a hard stop seals the parent `stopped_hard` with the units' state as its answer, releases the host key through the ledger, and a later ship claim on the thread succeeds", async () => {
     const { reg, ledger, svc, id } = await hostedWorld();
     expect(await svc.stopRun(id, "hard", actor)).toEqual({
       ok: true,
-      value: { id, mode: "hard", state: "stopping" },
+      value: { id, mode: "hard", state: "stopped" },
     });
     // The registry row is finished `failed` and sealed: nothing lists it live.
     const row = reg.getById(id)!;
     expect(row.finished).toBe(true);
-    expect(row.status).toBe("failed");
+    expect(row.status).toBe("stopped_hard");
     expect(row.sealedAt).toBe(NOW);
     // The answer is the units' state, published before the finish so the record carries it.
     const events = reg.snapshotById(id)!.events;
@@ -3460,7 +3837,7 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
     });
     // The one-transaction ledger finish: the record replaces the live row, releasing the host key.
     expect(ledger.live.has(id)).toBe(false);
-    expect(ledger.finished.get(id)).toMatchObject({ id, status: "failed", threadKey: "web:s:c9" });
+    expect(ledger.finished.get(id)).toMatchObject({ id, status: "stopped_hard", threadKey: "web:s:c9" });
     const claim = await ledger.claim({
       runId: "next-ship",
       threadKey: "web:s:c9#host",
@@ -3501,7 +3878,7 @@ describe("RunsService.stopRun — a hosted parent: soft refused, hard seals (rec
     expect(await svc.stopRun(id, "hard", actor)).toMatchObject({ ok: true });
     expect((await units.get("plan-p-1"))!.stop).toEqual({ at: NOW });
     expect(await svc.stopRun(child, "hard", actor)).toMatchObject({ ok: true });
-    expect(ledger.finished.get(id)?.status).toBe("failed");
+    expect(ledger.finished.get(id)?.status).toBe("stopped_hard");
     expect(ledger.finished.get(child)?.status).toBe("stopped_hard");
     expect((await ledger.reclaim("g-NEXT", NOW + 31_000, 30_000)).some((r) => r.row.runId === child)).toBe(false);
   });

@@ -10,14 +10,14 @@ import { formatDuration, formatLocalIso } from "./format";
 
 export type IndexRow = RunIndexRowSeed;
 
-/** Display words, not the enum: succeeded / failed / killed / stopped early. */
+/** Display words, not the enum: succeeded / failed / stopped by user. */
 export function statusLabel(status: string): string {
   return status === "completed"
     ? "succeeded"
     : status === "stopped_soft"
-      ? "stopped early"
+      ? "stopped by user"
       : status === "stopped_hard"
-        ? "killed"
+        ? "stopped by user"
         : status;
 }
 
@@ -27,10 +27,10 @@ export function statusLabel(status: string): string {
 import { PROVISIONAL_LABEL } from "@core/core/runRecord.js";
 export { PROVISIONAL_LABEL };
 
-/** The stop badge: "stopping (soft)" while in flight; once stopped, the same
- *  word the outcome badge would use (killed / stopped early). */
+/** The stop badge: "stopping" while in flight; once stopped, the same
+ *  word the outcome badge uses (stopped by user). */
 export function stopLabel(stop: { state: string; mode: string }): string {
-  return stop.state === "stopped" ? statusLabel(`stopped_${stop.mode}`) : `${stop.state} (${stop.mode})`;
+  return stop.state === "stopped" ? "stopped by user" : "stopping";
 }
 
 export function statusWord(run: IndexRow): string {
@@ -61,8 +61,8 @@ export function statusDot(run: IndexRow): DotTone {
   // `interrupted`: the run was cut down before finish (container
   // replaced or crashed) — as red as a failure. The word itself passes through
   // `statusLabel` unchanged.
-  if (run.status === "failed" || run.status === "stopped_hard" || run.status === "interrupted") return "red";
-  if (run.status === "stopped_soft") return "amber";
+  if (run.status === "failed" || run.status === "interrupted") return "red";
+  if (run.status === "stopped_soft" || run.status === "stopped_hard") return "grey";
   return "grey";
 }
 
@@ -344,13 +344,14 @@ export function safeSourceUrl(run: IndexRow): string {
 export type FeedAction = { op: "upsert"; run: IndexRow } | { op: "remove"; id: string } | { op: "keep" };
 
 export function feedAction(
-  ev: { type?: string; run?: IndexRow; id?: string },
+  ev: { type?: string; run?: IndexRow; id?: string; deleted?: boolean },
   showAll: boolean,
   persisted: boolean,
 ): FeedAction {
   if (ev.type === "upsert" && ev.run)
     return !showAll && ev.run.finished ? { op: "remove", id: ev.run.id } : { op: "upsert", run: ev.run };
-  if (ev.type === "removed" && ev.id) return showAll && persisted ? { op: "keep" } : { op: "remove", id: ev.id };
+  if (ev.type === "removed" && ev.id)
+    return showAll && persisted && !ev.deleted ? { op: "keep" } : { op: "remove", id: ev.id };
   return { op: "keep" };
 }
 

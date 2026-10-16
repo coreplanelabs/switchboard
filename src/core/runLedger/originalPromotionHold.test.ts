@@ -296,7 +296,7 @@ describe("original promotion hold diagnosis", () => {
       clock: () => 20_000,
       stopRuntime: async () => {
         registry.finish(w.req.runId, "failed");
-        return { stopped: true, disposition: "no-workspace" };
+        return { stopped: true, disposition: "processes-stopped" };
       },
     });
     expect(await service.stopRun(w.req.runId, "hard", { kind: "chat", id: "slack:operator" })).toEqual({
@@ -306,7 +306,7 @@ describe("original promotion hold diagnosis", () => {
     expect(w.store.finished.get(w.req.runId)).toMatchObject({
       id: w.req.runId,
       status: "stopped_hard",
-      cancellation: { version: 1, actor: { kind: "chat", id: "slack:operator" }, disposition: "no-workspace" },
+      cancellation: { version: 1, actor: { kind: "chat", id: "slack:operator" }, disposition: "processes-stopped" },
     });
     expect((await service.listRuns({ visibleTo: { kind: "all" }, status: "active" })).runs).toEqual([]);
     expect(registry.getById(w.req.runId)).toMatchObject({ finished: true, status: "stopped_hard", persisted: true });
@@ -358,7 +358,7 @@ describe("original promotion hold diagnosis", () => {
       generation: "g2",
       stopRuntime: async (_row, cancellation) => {
         ids.push(cancellation.id);
-        return stopped ? { stopped: true, disposition: "no-workspace" } : { stopped: false };
+        return stopped ? { stopped: true, disposition: "processes-stopped" } : { stopped: false };
       },
     });
     expect(await service.stopRun(w.req.runId, "hard", { kind: "chat", id: "slack:operator" })).toEqual({

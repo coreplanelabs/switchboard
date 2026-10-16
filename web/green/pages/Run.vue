@@ -128,19 +128,14 @@ const endChip = computed(() => {
     // rendered as "unfinished — no finish recorded", amber (not red), because the
     // run may still be live in a registry the store-only reader cannot see.
     if (seed.provisional) return { ok: false, cls: "amber", word: PROVISIONAL_LABEL };
-    const cls =
-      seed.status === "failed" || seed.status === "stopped_hard" || seed.status === "interrupted"
-        ? "red"
-        : seed.status === "stopped_soft"
-          ? "amber"
-          : "grey";
+    const cls = seed.status === "failed" || seed.status === "interrupted" ? "red" : "grey";
     return { ok: false, cls, word: seed.status ? statusLabel(seed.status) : "ended" };
   }
   const mode = state.stopMode;
   return {
     ok: false,
-    cls: mode === "hard" ? "red" : mode === "soft" ? "amber" : "grey",
-    word: mode === "hard" ? "killed" : mode === "soft" ? "stopped early" : "ended",
+    cls: "grey",
+    word: mode ? "stopped by user" : "ended",
   };
 });
 const endMs = computed(() => (isHistory && seed?.mode === "history" ? seed.durationMs : frozenMs.value));
@@ -180,7 +175,7 @@ const headerText = computed(() => {
   if (stopError.value) return stopError.value;
   if (phase.value === "connecting") return "connecting…";
   if (phase.value === "disconnected") return "disconnected";
-  if (phase.value === "stopping") return `stopping (${state.stopMode ?? "soft"})`;
+  if (phase.value === "stopping") return "stopping";
   // The agent stopped: the total is frozen at the finish stamp; the reply is in flight.
   if (phase.value === "finished")
     return frozenMs.value === undefined ? "delivering…" : `delivering… · ${formatDuration(frozenMs.value, "clock")}`;
@@ -267,9 +262,9 @@ function reveal(anchor: string): void {
 const actionsHidden = ref(!!useViewingAs() || isHistory || seed?.mode !== "live" || seed.stopUrl === undefined);
 const stopDisabled = ref(false);
 
-function requestStop(mode: "soft" | "hard"): void {
+function requestStop(mode: "stop" | "kill"): void {
   if (stopDisabled.value || seed?.mode !== "live" || seed.stopUrl === undefined) return;
-  if (mode === "hard" && !browser.confirm("Hard stop: abort the run now with no summary and free its sandbox?")) return;
+  if (mode === "kill" && !browser.confirm("Kill this run and delete its row? This action is destructive.")) return;
   stopDisabled.value = true;
   stopError.value = "";
   fetch(`${seed.stopUrl}${seed.stopUrl.includes("?") ? "&" : "?"}mode=${encodeURIComponent(mode)}`, {
@@ -283,7 +278,11 @@ function requestStop(mode: "soft" | "hard"): void {
         const parsed = (await r.json?.().catch(() => null)) as { message?: unknown } | null;
         throw new Error(typeof parsed?.message === "string" ? parsed.message : `HTTP ${r.status}`);
       }
-      markStopping(mode);
+      if (mode === "kill") {
+        browser.leave("/runs");
+        return;
+      }
+      markStopping("hard");
     })
     .catch((err: unknown) => {
       stopError.value = `stop failed: ${err instanceof Error ? err.message : "error"}`;
@@ -300,7 +299,7 @@ function markStopping(mode: "soft" | "hard"): void {
 
 if (seed?.mode === "live" && seed.stop) markStopping(seed.stop.mode);
 
-// A stop can arrive from the stream too (a viewer who didn't click sees it).
+// A stop can arrive from the stream too.
 watch(
   () => state.stopMode,
   (mode) => {
@@ -576,7 +575,7 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
       <span v-if="!actionsHidden" id="actions" class="actions flex gap-1.5">
         <UTooltip
           v-if="!state.stopMode && phase !== 'disconnected'"
-          text="Soft stop: no new steps, the agent writes up what it has"
+          text="End the current turn, clean up resources, and keep the stopped run"
         >
           <UButton
             size="xs"
@@ -584,17 +583,17 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
             variant="outline"
             label="Stop"
             :disabled="stopDisabled"
-            @click="requestStop('soft')"
+            @click="requestStop('stop')"
           />
         </UTooltip>
-        <UTooltip text="Hard stop: abort now, no summary, free the sandbox">
+        <UTooltip text="Kill immediately and delete the run row">
           <UButton
             size="xs"
             color="error"
             variant="outline"
             label="Kill"
             :disabled="stopDisabled"
-            @click="requestStop('hard')"
+            @click="requestStop('kill')"
           />
         </UTooltip>
       </span>

@@ -186,7 +186,7 @@ describe("UnitPage — the unit is the reading unit (item 28)", () => {
     ]);
     expect(rows.map((li) => li.find(".agent").text())).toEqual(["coding", "review", "coding", "review"]);
     // A stopped review reads its outcome; a completed run wears none.
-    expect(rows[1].find(".outcome").text()).toBe("stopped early");
+    expect(rows[1].find(".outcome").text()).toBe("stopped by user");
     expect(rows[0].find(".outcome").exists()).toBe(false);
     // Every finished row links its page tokenless.
     expect(rows.map((li) => li.find("a.open").attributes("href"))).toEqual([

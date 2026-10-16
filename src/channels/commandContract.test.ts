@@ -494,18 +494,18 @@ describe("derived naming across surfaces", () => {
       minRuns: "--min-runs",
       dryRun: "--dry-run",
       limit: "--limit",
-      mode: "--mode",
     });
   });
 
-  it("the migrated forms read as specified: runs get <id> [--include], runs events <id> [--after-seq] [--limit], runs stop <id> --mode, friction propose [--dry-run] …", async () => {
+  it("the migrated forms read as specified: runs get <id> [--include], runs events <id> [--after-seq] [--limit], runs stop <id>, friction propose [--dry-run] …", async () => {
     const f = await fixture();
     const { usageLine } = await import("../core/commandSurface.js");
     const byId = Object.fromEntries(f.commands.list().map((c) => [c.id, usageLine(c)]));
     expect(byId["runs.get"]).toBe("runs get <id> [--include <messages|audience>]");
     expect(byId["runs.events"]).toBe("runs events <id> [--after-seq <integer>] [--limit <integer>]");
     expect(byId["runs.friction"]).toBe("runs friction <id>");
-    expect(byId["runs.stop"]).toBe("runs stop <id> --mode <soft|hard>");
+    expect(byId["runs.stop"]).toBe("runs stop <id> [--mode <soft|hard>]");
+    expect(byId["runs.kill"]).toBe("runs kill <id>");
     expect(byId["runs.list"]).toBe(
       "runs list [--status <active|finished|all>] [--agent <string>] [--channel <string>] [--thread <string>] [--parent <string>] [--since-ms <integer>] [--limit <integer>] [--before <integer>] [--before-id <string>] [--mine] [--read-user <string>] [--read-repo <string>]",
     );

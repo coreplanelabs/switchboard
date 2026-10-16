@@ -101,6 +101,33 @@ export interface RecordDeps {
   runHistoryWriter: RunHistoryWriter;
 }
 
+/** Save shutdown proof only after the original terminal write and cleanup both acknowledge.
+ * The initial record remains diagnostic history while either result is unknown. */
+function writeShutdownRecord(
+  deps: RecordDeps,
+  control: RunHandle["control"] | undefined,
+  record: RunRecord,
+  opts: Parameters<RunHistoryWriter["write"]>[1],
+  ledgerRun: LedgerRun | undefined,
+): void {
+  deps.runHistoryWriter.write(record, {
+    ...opts,
+    ...(control
+      ? {
+          onStored: () => {
+            const terminal = ledgerRun ? ledgerRun.waitForFinish() : Promise.resolve({ kind: "landed" as const });
+            void terminal.then(async (outcome) => {
+              if (outcome.kind !== "landed" && outcome.kind !== "off") return;
+              await control.waitForRuntimeShutdown();
+              if (control.runtimeShutdownConfirmed)
+                deps.runHistoryWriter.write(record, { span: opts?.span, confirmRuntimeShutdown: true });
+            });
+          },
+        }
+      : {}),
+  });
+}
+
 /** The longest a reply waits on the channel directory. The Slack directory
  *  answers from its cache after the first message per channel per TTL; a cold
  *  `conversations.info` is one round trip, and a Slack outage must cost the
@@ -805,6 +832,7 @@ export function finishSetupRun(
   ending.finished(runId);
   const snap = registry.snapshotById(runId);
   const label = registry.getById(runId)?.label;
+  const control = registry.controlById(runId);
   const privateMain =
     ctx.agent.name === "orchestrator" &&
     (directAudienceStampOf(ctx.msg) !== undefined || organizationPrivateAudienceOf(ctx.msg) !== undefined);
@@ -812,7 +840,9 @@ export function finishSetupRun(
     runId,
     flipOnPostFinishFailure: false,
     write: (seal) =>
-      deps.runHistoryWriter.write(
+      writeShutdownRecord(
+        deps,
+        control,
         assembleRunRecord({
           audienceRefusal: ctx.audience?.refusal,
           ...(ctx.setup !== undefined ? { setup: ctx.setup } : {}),
@@ -830,11 +860,16 @@ export function finishSetupRun(
           seed: ctx.seed,
           finishedAt,
           status,
-          ...(ctx.failure !== undefined ? { failure: ctx.failure } : {}),
+          ...(control?.destructive && !control.runtimeShutdownConfirmed
+            ? { failure: { kind: "runtime_shutdown_unconfirmed" as const } }
+            : ctx.failure !== undefined
+              ? { failure: ctx.failure }
+              : {}),
           seal,
           diagnosis: analyzeRunFriction(snap?.events ?? [], { finished: true, truncated: snap?.truncated ?? false }),
         }),
         { ...(ctx.ledgerRun ? { via: ctx.ledgerRun.sink } : {}), span: ctx.root },
+        ctx.ledgerRun,
       ),
   });
 }
@@ -944,7 +979,9 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     runId: run.id,
     flipOnPostFinishFailure: true,
     write: (seal, failedAfterFinish) =>
-      deps.runHistoryWriter.write(
+      writeShutdownRecord(
+        deps,
+        run.control,
         assembleRunRecord({
           audienceRefusal: ctx.audience?.refusal,
           answerOutcome: ctx.answerOutcome,
@@ -981,9 +1018,14 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
           ...(parentRunId !== undefined ? { parentRunId } : {}),
           ...(coordinator !== undefined ? { coordinator } : {}),
           ...(seed !== undefined ? { seed } : {}),
-          ...(failure !== undefined ? { failure } : {}),
+          ...(run.control.destructive && !run.control.runtimeShutdownConfirmed
+            ? { failure: { kind: "runtime_shutdown_unconfirmed" as const } }
+            : failure !== undefined
+              ? { failure }
+              : {}),
         }),
         { span: root, ...(ledgerRun ? { via: ledgerRun.sink } : {}) },
+        ledgerRun,
       ),
   });
 }

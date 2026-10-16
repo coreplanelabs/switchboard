@@ -54,8 +54,8 @@ describe("status vocabulary", () => {
   it("shows display words, not the enum: succeeded / failed / killed / stopped early", () => {
     expect(statusLabel("completed")).toBe("succeeded");
     expect(statusLabel("failed")).toBe("failed");
-    expect(statusLabel("stopped_hard")).toBe("killed");
-    expect(statusLabel("stopped_soft")).toBe("stopped early");
+    expect(statusLabel("stopped_hard")).toBe("stopped by user");
+    expect(statusLabel("stopped_soft")).toBe("stopped by user");
     expect(statusLabel("interrupted")).toBe("interrupted"); // already a display word, passes through
   });
 
@@ -97,9 +97,9 @@ describe("status vocabulary", () => {
   it("dot tone: green live, red failed/killed/interrupted, amber stopped early, grey succeeded", () => {
     expect(statusDot(row())).toBe("green");
     expect(statusDot(finished("failed"))).toBe("red");
-    expect(statusDot(finished("stopped_hard"))).toBe("red");
+    expect(statusDot(finished("stopped_hard"))).toBe("grey");
     expect(statusDot(finished("interrupted"))).toBe("red"); // cut down before finish
-    expect(statusDot(finished("stopped_soft"))).toBe("amber");
+    expect(statusDot(finished("stopped_soft"))).toBe("grey");
     expect(statusDot(finished("completed"))).toBe("grey");
   });
 
@@ -116,9 +116,9 @@ describe("status vocabulary", () => {
   });
 
   it("stop badge: stopping (mode) in flight, the outcome word once stopped", () => {
-    expect(stopLabel({ state: "stopping", mode: "soft" })).toBe("stopping (soft)");
-    expect(stopLabel({ state: "stopped", mode: "hard" })).toBe("killed");
-    expect(stopLabel({ state: "stopped", mode: "soft" })).toBe("stopped early");
+    expect(stopLabel({ state: "stopping", mode: "soft" })).toBe("stopping");
+    expect(stopLabel({ state: "stopped", mode: "hard" })).toBe("stopped by user");
+    expect(stopLabel({ state: "stopped", mode: "soft" })).toBe("stopped by user");
   });
 });
 
@@ -131,7 +131,7 @@ describe("hrefs", () => {
 
   it("percent-encodes ids and tokens", () => {
     expect(runHref(row({ id: "a/b?x", token: "t&1" }))).toBe("/runs/a%2Fb%3Fx?t=t%261");
-    expect(stopHref(row({ token: "t&1" }), "soft")).toBe("/runs/run-1/stop?t=t%261&mode=soft");
+    expect(stopHref(row({ token: "t&1" }), "stop")).toBe("/runs/run-1/stop?t=t%261&mode=stop");
   });
 });
 
@@ -169,7 +169,7 @@ describe("tooltips", () => {
     expect(dotTip(finished("failed", { activity: "⚠️ resident not onboarded: acme/web" }))).toBe(
       "failed in 1m 03s\n⚠️ resident not onboarded: acme/web",
     );
-    expect(dotTip(finished("stopped_hard", { activity: "$ npm test" }))).toBe("killed in 1m 03s\n$ npm test");
+    expect(dotTip(finished("stopped_hard", { activity: "$ npm test" }))).toBe("stopped by user in 1m 03s\n$ npm test");
     expect(dotTip(finished("completed", { activity: "done" }))).toBe("succeeded in 1m 03s");
   });
 

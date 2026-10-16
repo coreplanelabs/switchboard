@@ -5,7 +5,7 @@ Find a live run on the dashboard, read its timeline, stop it, and read it back a
 **You need:**
 
 - A dashboard sign-in: whichever credential the installation's `dashboard.auth` strategy checks.
-- The `runs:write` grant, to stop a run.
+- The `stop:write` grant for the run.
 - A `runHistory` block, to read back finished runs.
 
 ## Find the run
@@ -37,11 +37,11 @@ The header:
 Use the page's stop control, or chat (the CLI takes the same words):
 
 ```
-@switchboard runs stop <id> --mode soft      # let it write up where it got to
-@switchboard runs stop <id> --mode hard      # abort mid-tool-call
+@switchboard runs stop <id>      # end the turn and keep the stopped result
+@switchboard runs kill <id>      # kill the runtime and delete the run row
 ```
 
-`soft` is almost always right. A follow-up to a stopped run is not run; the thread is told so.
+Stop ends the current turn, cleans up its resources, and keeps the final "Stopped by user" result. Kill skips the turn interrupt and deletes the run row and saved events. Kill is destructive. Both controls discard unread follow-ups. Existing `runs stop --mode soft|hard` calls and HTTP `mode=soft|hard` remain supported for compatibility and keep their non-destructive behavior. Omit the mode for the new Stop behavior; use Kill explicitly to delete a row.
 
 ## Look back at finished runs
 

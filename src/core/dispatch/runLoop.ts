@@ -521,6 +521,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     coordinator,
     seed,
   } = ctx;
+  run.control.trackRuntimeShutdown();
   const pinnedHead = reviewHeadOf(ctx.requestText);
   if (pinnedHead !== undefined) root.setAttrs({ reviewPinnedHead: pinnedHead });
 
@@ -1534,12 +1535,12 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  and what the record read deciding the workspace's release goes by. */
   const statusNow = (): RunStatus => {
     const stopped = run.control.requested;
-    return interrupted
-      ? "interrupted"
-      : runFailed
-        ? "failed"
-        : stopped === "hard"
-          ? "stopped_hard"
+    return stopped === "hard"
+      ? "stopped_hard"
+      : interrupted
+        ? "interrupted"
+        : runFailed
+          ? "failed"
           : stopped === "soft"
             ? "stopped_soft"
             : agent.name === "review" && reviewSubmissionFailure(reviewSubmission) !== undefined
@@ -1562,6 +1563,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
    *  an open call as in flight, and the card, the finish and the restart must
    *  say one thing. */
   let harnessEndState: "pending" | "ending" | "settled" | "unconfirmed" = "pending";
+  const endingUnconfirmed = () => harnessEndState === "unconfirmed";
   const endHarness = async (openingFailure?: unknown): Promise<void> => {
     if (openingFailure instanceof HarnessEndingUnconfirmedError) {
       harnessEndState = "unconfirmed";
@@ -1766,6 +1768,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     };
   };
   const preserveCodingChildWork = async (cue: "budget" | "ending" | "completion"): Promise<void> => {
+    if (run.control.destructive) return;
     if (workSalvageAttempted || !isCodingPrRun || coordinator === undefined || commandInFlight || gateBypassed) return;
     await events.drain();
     retainPublicationReceipts();
@@ -2059,6 +2062,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           ...(pushed.length > 0 ? { pushed } : {}),
         })
         .catch(() => undefined);
+      if (
+        harnessEndState === "settled" &&
+        (result?.released || (!round.selection.executor.release && !commandInFlight && !gateBypassed))
+      )
+        run.control.confirmRuntimeShutdown();
       // Legacy false responses include transport failures, so they cannot
       // prove the checkout was retained. Only our skipped detach is kept.
       if (publicationSettlement)
@@ -5344,7 +5352,11 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         ...(parentRunId !== undefined ? { parentRunId } : {}),
         ...(coordinator !== undefined ? { coordinator } : {}),
         ...(seed !== undefined ? { seed } : {}),
-        ...(failure !== undefined ? { failure } : {}),
+        ...(endingUnconfirmed()
+          ? { failure: { kind: "harness_ending_unconfirmed" as const } }
+          : failure !== undefined
+            ? { failure }
+            : {}),
       });
       // The diagnosis rides the run record (above): the friction ledger the
       // cross-run proposer reads is run history, so nothing is written twice.

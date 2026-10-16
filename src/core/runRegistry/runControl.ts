@@ -14,6 +14,18 @@ import type { StopMode } from "../runEvents.js";
  */
 export class RunControl {
   private mode: StopMode | undefined;
+  private killed = false;
+  private stopConfirmed = false;
+  private cancellationAttempts = 0;
+  private cancellationStarted = false;
+  private cancellationPending: Promise<void> | undefined;
+  private settleCancellation: (() => void) | undefined;
+  private turnStop: (() => void) | undefined;
+  private stopNoticeSent = false;
+  private runtimeTracked = false;
+  private runtimeStopped = false;
+  private shutdownConfirmation: Promise<void> | undefined;
+  private acknowledgeShutdown: (() => void) | undefined;
   private readonly hard = new AbortController();
   private lease: (() => number) | undefined;
 
@@ -25,6 +37,99 @@ export class RunControl {
   /** Aborted iff a HARD stop has been requested. Pass to anything cancellable. */
   get hardSignal(): AbortSignal {
     return this.hard.signal;
+  }
+
+  /** Kill skips the turn's interrupt and removes the run after runtime shutdown. */
+  get destructive(): boolean {
+    return this.killed;
+  }
+
+  get runtimeShutdownPending(): boolean {
+    return this.runtimeTracked && !this.runtimeStopped;
+  }
+
+  get runtimeShutdownConfirmed(): boolean {
+    return this.runtimeStopped;
+  }
+
+  trackRuntimeShutdown(): void {
+    this.runtimeTracked = true;
+    if (this.runtimeStopped) {
+      this.runtimeStopped = false;
+      this.shutdownConfirmation = undefined;
+      this.acknowledgeShutdown = undefined;
+    }
+  }
+
+  waitForRuntimeShutdown(): Promise<void> {
+    if (this.runtimeStopped) return Promise.resolve();
+    return (this.shutdownConfirmation ??= new Promise((resolve) => {
+      this.acknowledgeShutdown = resolve;
+    }));
+  }
+
+  /** Only the original producer's ending and required cleanup can acknowledge this. */
+  confirmRuntimeShutdown(): void {
+    this.runtimeStopped = true;
+    this.acknowledgeShutdown?.();
+  }
+
+  requestKill(): void {
+    this.killed = true;
+    this.requestStop("hard");
+  }
+
+  get cancellationConfirmed(): boolean {
+    return this.stopConfirmed;
+  }
+
+  get cancellationRequested(): boolean {
+    return this.cancellationStarted;
+  }
+
+  beginCancellation(): void {
+    this.cancellationStarted = true;
+    this.cancellationAttempts++;
+    if (!this.cancellationPending)
+      this.cancellationPending = new Promise((resolve) => {
+        this.settleCancellation = resolve;
+      });
+  }
+
+  endCancellation(): void {
+    this.cancellationAttempts = Math.max(0, this.cancellationAttempts - 1);
+    if (this.cancellationAttempts > 0 && !this.stopConfirmed) return;
+    this.settleCancellation?.();
+    this.settleCancellation = undefined;
+    this.cancellationPending = undefined;
+  }
+
+  waitForCancellation(): Promise<void> | undefined {
+    return this.cancellationPending;
+  }
+
+  confirmCancellation(): void {
+    this.stopConfirmed = true;
+    this.settleCancellation?.();
+  }
+
+  claimStopNotice(): boolean {
+    if (this.stopNoticeSent) return false;
+    this.stopNoticeSent = true;
+    return true;
+  }
+
+  setTurnStop(stop: (() => void) | undefined): void {
+    this.turnStop = stop;
+  }
+
+  interruptTurn(): void {
+    if (this.killed) return;
+    try {
+      this.turnStop?.();
+    } catch {
+      /* Runtime cleanup must still run if the interrupt fails. */
+    }
   }
 
   /** The run's remaining wall clock, on the runner's clock, once its lease has

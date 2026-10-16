@@ -9,8 +9,7 @@ import { publicationSettlementSummary, type PublicationSettlement } from "../pub
 
 /** The one-line outcome of a hard stop: no write-up was run, so this IS the
  *  answer the thread gets. */
-export const HARD_STOP_MESSAGE =
-  "⛔ Run aborted by an operator (hard stop). No summary was written; partial work may exist in the workspace.";
+export const HARD_STOP_MESSAGE = "⏹ Stopped by user.";
 
 /** The prompt a resumed process continues on after the bot restarted mid-run
  *  (harness-pi.md item 8): the same words for a process re-attached to and for
@@ -82,7 +81,7 @@ export const commandPastLoopEndRefusal = (askedSecs: number, leftSecs: number): 
 export const turnGuardNote = (pace: string): string =>
   `turn guard fired: ${pace}, a pace that looks like a loop — writing up findings so far`;
 export const softStopNote = (): string => "soft stop — no further steps, writing up findings so far";
-export const hardStopNote = (): string => "hard stop — the run was aborted, no summary written";
+export const hardStopNote = (): string => "Stopped by user";
 /** A model call that failed once the run was winding down — the finale bound's
  *  own abort of a call in flight included — is a note on the record, never the
  *  ending: the write-up's answer stands, and this says what failed under it. */

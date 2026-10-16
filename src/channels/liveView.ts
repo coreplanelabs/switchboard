@@ -16,7 +16,7 @@ import {
   type Predicate,
   type Resource,
 } from "../core/authz/index.js";
-import { readableRuns, visibleIndexFeed } from "./liveView/viewer.js";
+import { deletionAwareIndexFeed, readableRuns, visibleIndexFeed } from "./liveView/viewer.js";
 export { readableRuns, visibleIndexFeed } from "./liveView/viewer.js";
 import type { RunEvent, StopMode } from "../core/runEvents.js";
 import { analyzeRunFriction } from "../core/runFriction.js";
@@ -216,10 +216,10 @@ export async function pipeToResponse(body: ReadableStream<Uint8Array>, res: Byte
   }
 }
 
-/** Parse the `?mode=` of a stop request; anything but the two modes is null
- *  (→ 400). Never trust the query to name the mode for us. */
+/** Parse current controls and the retained non-destructive legacy modes.
+ * Missing or unknown values return null (→ 400). */
 export function parseStopMode(raw: string | null): StopMode | null {
-  return raw === "soft" || raw === "hard" ? raw : null;
+  return raw === "soft" ? "soft" : raw === "hard" || raw === "stop" || raw === "kill" ? "hard" : null;
 }
 
 /** The tokenless routes that read a finished run. */
@@ -345,7 +345,7 @@ const NOT_FOUND = "no run found";
  *  capability stops nothing on it), the tokenless route for soft (the escape
  *  is `mode=hard`, which seals the run failed and releases its thread). */
 const HOSTED_STOP =
-  "this run is a pipeline; its units run in their own threads, so a stop here ends nothing; an operator's hard stop seals it failed and releases the thread";
+  "this run is a pipeline; its units run in their own threads, so an operator must stop its runner before the parent run can end";
 const TEXT = { "content-type": "text/plain; charset=utf-8" };
 const JSON_NO_STORE = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" };
 
@@ -362,8 +362,8 @@ const JSON_NO_STORE = { "content-type": "application/json; charset=utf-8", "cach
  *   GET  /runs/:id/friction[?t=…] → the friction diagnosis JSON (live diagnosis-so-far, or the stored one)
  *   POST /runs/:id/stop?t=…&mode=soft|hard → ask the run to stop: 200 JSON, 400 bad
  *        mode, 404 bad/missing token on a live run or unknown run, 409 finished/persisted
- * The live routes are token-gated via the registry (`authorizeLive`, synchronous
- * — never a store read) and ignore the viewer's actor: the token IS the capability
+ * The live routes use the registry’s synchronous capability check (`authorizeLive`)
+ * and validate shared deletion state before serving cached content. They ignore the viewer's actor: the token IS the capability
  * (docs/decisions/0013-capability-tokens-for-live-run-pages.md). The
  * tokenless history routes and the index are Access-gated at the edge (index.ts
  * gates every method under /runs*) AND bound to the viewer's actor (`ctx.actor`):
@@ -542,6 +542,16 @@ export function createLiveViewHandler(
       retentionDays: deps.retention ? deps.retention.retentionDays : null,
     });
   };
+  const activeRows = async (visibleTo: Predicate) => {
+    await service.deletedRuns(index.listActive().map((row) => row.id));
+    return [
+      ...index
+        .listActive()
+        .filter((row) => !row.finished && !privateWorkerRun(row) && matchesPredicate(visibleTo, row)),
+      ...(await service.liveElsewhere(visibleTo)),
+    ];
+  };
+
   /** `?all=1`: one full page of the service's live ∪ finished ∪ persisted rows
    *  the viewer may see (the service's cap, never its 50-row default), with the
    *  live rows' capability tokens re-attached for their hrefs (finished rows
@@ -595,9 +605,8 @@ export function createLiveViewHandler(
     // the runs the viewer's actor may read: the default live rows, the `?all=1`
     // page and the `?stream=1` feed all go through the ONE predicate, so a
     // capability link for a run the viewer may not read never reaches the page.
-    // The default view is the live registry only (never a store read);
-    // `?all=1` merges the service's finished + persisted rows in, keeping the
-    // live rows' token hrefs.
+    // Both views validate shared deletion state. Completed history also merges
+    // saved rows; only authorized live rows retain capability links.
     if (route.kind === "index") {
       const all = url.searchParams.get("all") === "1";
       // An attached global view narrows rows and their feed together. Legacy
@@ -607,11 +616,30 @@ export function createLiveViewHandler(
       const readable = readableRuns(ctx.actor);
       const visibleTo = !scoped && mine ? allOf([readable, ownedBy(ctx.actor)]) : readable;
       if (url.searchParams.get("stream") === "1") {
-        serveIndexEvents(
-          visibleIndexFeed((onEvent) => index.subscribeIndex(onEvent), visibleTo),
-          nodeSseSink(req, res),
-          () => startSseHeartbeat(req, res),
-        );
+        const openFeed = (initial: readonly RunView[], complete = true) =>
+          serveIndexEvents(
+            visibleIndexFeed(
+              deletionAwareIndexFeed(
+                (onEvent) => index.subscribeIndex(onEvent),
+                async (ids) => service.deletedRuns(ids),
+                initial,
+              ),
+              visibleTo,
+            ),
+            nodeSseSink(req, res),
+            () => startSseHeartbeat(req, res),
+            complete ? initial.map((row) => row.id) : undefined,
+          );
+        run(res, async () => {
+          if (!all) return openFeed(await activeRows(visibleTo));
+          const initial = await service.listRuns({
+            status: "all",
+            visibleTo,
+            limit: pageSize,
+            ...(parseIndexCursor(url.searchParams) ?? {}),
+          });
+          openFeed(initial.runs, !initial.storeUnavailable && !initial.ledgerUnavailable);
+        });
         return true;
       }
       const live = index.listActive().filter((s) => !privateWorkerRun(s) && matchesPredicate(visibleTo, s));
@@ -641,12 +669,8 @@ export function createLiveViewHandler(
         deps.page(req, res, 200, ctx.actor, title, seed);
       };
       if (!all) {
-        // The default view is the registry plus the ledger's rows live under
-        // other generations (run-history item 41) — tokenless, static (the index
-        // feed is the registry's). Still never a store read.
-        run(res, async () =>
-          render({ rows: [...live.filter((s) => !s.finished), ...(await service.liveElsewhere(visibleTo))] }),
-        );
+        // The same shared deletion check gates both the page and its feed.
+        run(res, async () => render({ rows: await activeRows(visibleTo) }));
         return true;
       }
       run(res, async () => render(await mergedRows(live, visibleTo, parseIndexCursor(url.searchParams), { mine })));
@@ -777,155 +801,174 @@ export function createLiveViewHandler(
     const token = url.searchParams.get("t") ?? "";
     const access = service.authorizeLive(route.id, token);
 
-    // ── Live path: the token checked out. Synchronous — the registry answers
-    // from memory, never the store.
+    // ── Live path: the token checked out. Validate shared deletion state
+    // before serving the registry projection.
     if (access) {
-      if (route.kind === "stop" && ctx.actor.viewingAs) return refuseWhileViewing(res, ctx.actor.viewingAs);
-      if (hasWorkViewScope(ctx.actor)) {
-        const summary = index.listActive().find((row) => row.id === route.id);
-        if (!summary || !matchesPredicate(workReadPredicate(ctx.actor, { kind: "all" }), summary)) {
-          text(res, 404, NOT_FOUND);
-          return true;
+      const serveLive = () => {
+        if (route.kind === "stop" && ctx.actor.viewingAs) return refuseWhileViewing(res, ctx.actor.viewingAs);
+        if (hasWorkViewScope(ctx.actor)) {
+          const summary = index.listActive().find((row) => row.id === route.id);
+          if (!summary || !matchesPredicate(workReadPredicate(ctx.actor, { kind: "all" }), summary)) {
+            text(res, 404, NOT_FOUND);
+            return true;
+          }
         }
-      }
-      if (route.kind === "page") {
-        const snap = access.snapshot();
-        const summary = index.listActive().find((s) => s.id === route.id);
-        // A live conductor's children (item 28) from the registry alone — the
-        // live path never reads the store — in start order, live rows with
-        // their tokens: the token that opened the parent's page opens no child,
-        // so each child's row carries its own.
-        const active = index
-          .listActive()
-          .filter(
-            (s) =>
-              !privateWorkerRun(s) && (!hasWorkViewScope(ctx.actor) || matchesPredicate(readableRuns(ctx.actor), s)),
-          );
-        // The way up (item 33), from the registry alone: the spawning run, or
-        // the hosted parent whose instance this run is a child of. A LIVE
-        // parent's link carries its token — a hosted parent is live for the
-        // pipeline's whole life (record 0060), so a tokenless link could only
-        // 404 — mirroring how this parent's own page hands each live child its
-        // token; a finished parent never carries one.
-        const parentRow =
-          summary?.parentRunId !== undefined
-            ? active.find((s) => s.id === summary.parentRunId)
-            : summary?.parentInstanceId !== undefined
-              ? active.find((s) => s.instanceId === summary.parentInstanceId && s.id !== route.id)
-              : undefined;
-        const parentId = summary?.parentRunId ?? parentRow?.id;
-        const children: UnitRunRowSeed[] = active
-          .filter((s) => s.parentRunId === route.id)
-          .sort((a, b) => a.startedAt - b.startedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-          .map((s): UnitRunRowSeed => {
-            const { token: own, ...row } = s;
-            return s.finished ? row : { ...row, token: own };
-          });
-        deps.page(req, res, 200, ctx.actor, "Live run", {
-          page: "run",
-          mode: "live",
-          id: route.id,
-          ...(summary?.threadKey !== undefined ? { threadKey: summary.threadKey } : {}),
-          ...(children.length > 0 ? { children } : {}),
-          ...(parentId !== undefined
-            ? {
-                lineage: {
-                  parent: {
-                    id: parentId,
-                    ...(parentRow !== undefined && !parentRow.finished ? { token: parentRow.token } : {}),
+        if (route.kind === "page") {
+          const snap = access.snapshot();
+          const summary = index.listActive().find((s) => s.id === route.id);
+          // A live conductor's children (item 28) from the registry alone — the
+          // live path never reads the store — in start order, live rows with
+          // their tokens: the token that opened the parent's page opens no child,
+          // so each child's row carries its own.
+          const active = index
+            .listActive()
+            .filter(
+              (s) =>
+                !privateWorkerRun(s) && (!hasWorkViewScope(ctx.actor) || matchesPredicate(readableRuns(ctx.actor), s)),
+            );
+          // The way up (item 33), from the registry alone: the spawning run, or
+          // the hosted parent whose instance this run is a child of. A LIVE
+          // parent's link carries its token — a hosted parent is live for the
+          // pipeline's whole life (record 0060), so a tokenless link could only
+          // 404 — mirroring how this parent's own page hands each live child its
+          // token; a finished parent never carries one.
+          const parentRow =
+            summary?.parentRunId !== undefined
+              ? active.find((s) => s.id === summary.parentRunId)
+              : summary?.parentInstanceId !== undefined
+                ? active.find((s) => s.instanceId === summary.parentInstanceId && s.id !== route.id)
+                : undefined;
+          const parentId = summary?.parentRunId ?? parentRow?.id;
+          const children: UnitRunRowSeed[] = active
+            .filter((s) => s.parentRunId === route.id)
+            .sort((a, b) => a.startedAt - b.startedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+            .map((s): UnitRunRowSeed => {
+              const { token: own, ...row } = s;
+              return s.finished ? row : { ...row, token: own };
+            });
+          deps.page(req, res, 200, ctx.actor, "Live run", {
+            page: "run",
+            mode: "live",
+            id: route.id,
+            ...(summary?.threadKey !== undefined ? { threadKey: summary.threadKey } : {}),
+            ...(children.length > 0 ? { children } : {}),
+            ...(parentId !== undefined
+              ? {
+                  lineage: {
+                    parent: {
+                      id: parentId,
+                      ...(parentRow !== undefined && !parentRow.finished ? { token: parentRow.token } : {}),
+                    },
                   },
-                },
-              }
-            : {}),
-          // Stop control: same token, POST-only; `&mode=` is appended client-side.
-          // A hosted parent (record 0060) gets none: the token stops nothing on
-          // it, so the page draws no control that could only fail.
-          eventsUrl: `/runs/${encodeURIComponent(route.id)}/events?t=${encodeURIComponent(token)}`,
-          ...(summary?.hosted
-            ? {}
-            : { stopUrl: `/runs/${encodeURIComponent(route.id)}/stop?t=${encodeURIComponent(token)}` }),
-          // The files' URL base with the same token (item 26): the page appends each key.
-          ...artifactsSeed(route.id, token),
-          // The stamps the header's one duration reads (docs/reference/specs/tracing.md).
-          serverNow: now(),
-          startedAt: snap?.startedAt ?? now(),
-          ...(snap?.receivedAt !== undefined ? { receivedAt: snap.receivedAt } : {}),
-          ...(snap?.finishedAt !== undefined ? { finishedAt: snap.finishedAt } : {}),
-        });
-        return true;
-      }
-      // One of the run's files (item 26): the token that opens the page opens
-      // its files; the key must be named by that run's attachment or checkpoint receipt.
-      if (route.kind === "artifact") {
-        const snap = access.snapshot();
-        if (!snap) {
-          text(res, 404, NOT_FOUND);
+                }
+              : {}),
+            // Stop control: same token, POST-only; `&mode=` is appended client-side.
+            // A hosted parent (record 0060) gets none: the token stops nothing on
+            // it, so the page draws no control that could only fail.
+            eventsUrl: `/runs/${encodeURIComponent(route.id)}/events?t=${encodeURIComponent(token)}`,
+            ...(summary?.hosted
+              ? {}
+              : { stopUrl: `/runs/${encodeURIComponent(route.id)}/stop?t=${encodeURIComponent(token)}` }),
+            // The files' URL base with the same token (item 26): the page appends each key.
+            ...artifactsSeed(route.id, token),
+            // The stamps the header's one duration reads (docs/reference/specs/tracing.md).
+            serverNow: now(),
+            startedAt: snap?.startedAt ?? now(),
+            ...(snap?.receivedAt !== undefined ? { receivedAt: snap.receivedAt } : {}),
+            ...(snap?.finishedAt !== undefined ? { finishedAt: snap.finishedAt } : {}),
+          });
           return true;
         }
-        run(res, () =>
-          serveArtifact(
-            res,
-            artifactNamed(
-              snap.events,
-              route.key,
-              index.listActive().find((row) => row.id === route.id),
+        // One of the run's files (item 26): the token that opens the page opens
+        // its files; the key must be named by that run's attachment or checkpoint receipt.
+        if (route.kind === "artifact") {
+          const snap = access.snapshot();
+          if (!snap) {
+            text(res, 404, NOT_FOUND);
+            return true;
+          }
+          run(res, () =>
+            serveArtifact(
+              res,
+              artifactNamed(
+                snap.events,
+                route.key,
+                index.listActive().find((row) => row.id === route.id),
+              ),
+              rangeOf(req),
             ),
-            rangeOf(req),
-          ),
+          );
+          return true;
+        }
+        // Read-only friction diagnosis of the run's retained backlog: works
+        // mid-run (a diagnosis so far) and for a finished run still within the TTL.
+        if (route.kind === "friction") {
+          const snap = access.snapshot();
+          if (!snap) {
+            text(res, 404, NOT_FOUND);
+            return true;
+          }
+          // The window is the run's own stamps, to now while live (docs/reference/specs/tracing.md):
+          // a finished run's diagnosis here equals its record's shape.
+          const diagnosis = analyzeRunFriction(snap.events, {
+            finished: snap.finished,
+            window: { start: snap.receivedAt ?? snap.startedAt, end: snap.finishedAt ?? now() },
+          });
+          res.writeHead(200, JSON_NO_STORE);
+          res.end(JSON.stringify({ id: route.id, finished: snap.finished, diagnosis }));
+          return true;
+        }
+        // Run control: the only write. Mode is validated BEFORE anything
+        // else so a malformed request is a plain 400; the registry's token-gated
+        // stop answers 404 for a vanished run and 409 for a finished one. The
+        // token gates access; the service then records the stop durably before
+        // the response, including when the run is entering retry pause.
+        if (route.kind === "stop") {
+          if (ctx.actor.viewingAs) return refuseWhileViewing(res, ctx.actor.viewingAs);
+          const mode = parseStopMode(url.searchParams.get("mode"));
+          if (!mode) {
+            text(res, 400, "mode must be stop or kill (legacy soft and hard are supported)");
+            return true;
+          }
+          run(res, async () => {
+            const result = await access.requestStop(
+              mode,
+              { kind: "access", id: ctx.actor.id },
+              url.searchParams.get("mode") === "kill" ? { destructive: true } : undefined,
+            );
+            if (!result.ok) {
+              if (result.reason === "finished") text(res, 409, "the run already finished");
+              else if (result.reason === "hosted") text(res, 409, HOSTED_STOP);
+              else if (result.reason === "unavailable") text(res, 503, cancellationFailureMessage());
+              else text(res, 404, NOT_FOUND);
+              return;
+            }
+            res.writeHead(200, JSON_NO_STORE);
+            res.end(
+              JSON.stringify({
+                id: route.id,
+                mode: url.searchParams.get("mode"),
+                state: url.searchParams.get("mode") === "kill" ? "deleted" : "stopping",
+              }),
+            );
+          });
+          return true;
+        }
+        // route.kind === "events"
+        const afterSeq = parseLastEventId(req.headers["last-event-id"]);
+        serveEvents(
+          (onEvent, onFinished, onSealed) => access.subscribe({ onEvent, onFinished, onSealed, afterSeq }),
+          nodeSseSink(req, res),
+          () => startSseHeartbeat(req, res),
         );
         return true;
-      }
-      // Read-only friction diagnosis of the run's retained backlog: works
-      // mid-run (a diagnosis so far) and for a finished run still within the TTL.
-      if (route.kind === "friction") {
-        const snap = access.snapshot();
-        if (!snap) {
-          text(res, 404, NOT_FOUND);
-          return true;
-        }
-        // The window is the run's own stamps, to now while live (docs/reference/specs/tracing.md):
-        // a finished run's diagnosis here equals its record's shape.
-        const diagnosis = analyzeRunFriction(snap.events, {
-          finished: snap.finished,
-          window: { start: snap.receivedAt ?? snap.startedAt, end: snap.finishedAt ?? now() },
-        });
-        res.writeHead(200, JSON_NO_STORE);
-        res.end(JSON.stringify({ id: route.id, finished: snap.finished, diagnosis }));
-        return true;
-      }
-      // Run control: the only write. Mode is validated BEFORE anything
-      // else so a malformed request is a plain 400; the registry's token-gated
-      // stop answers 404 for a vanished run and 409 for a finished one. The
-      // token gates access; the service then records the stop durably before
-      // the response, including when the run is entering retry pause.
-      if (route.kind === "stop") {
-        if (ctx.actor.viewingAs) return refuseWhileViewing(res, ctx.actor.viewingAs);
-        const mode = parseStopMode(url.searchParams.get("mode"));
-        if (!mode) {
-          text(res, 400, "mode must be soft or hard");
-          return true;
-        }
-        run(res, async () => {
-          const result = await access.requestStop(mode, { kind: "access", id: ctx.actor.id });
-          if (!result.ok) {
-            if (result.reason === "finished") text(res, 409, "the run already finished");
-            else if (result.reason === "hosted") text(res, 409, HOSTED_STOP);
-            else if (result.reason === "unavailable") text(res, 503, cancellationFailureMessage());
-            else text(res, 404, NOT_FOUND);
-            return;
-          }
-          res.writeHead(200, JSON_NO_STORE);
-          res.end(JSON.stringify({ id: route.id, mode: result.mode, state: "stopping" }));
-        });
-        return true;
-      }
-      // route.kind === "events"
-      const afterSeq = parseLastEventId(req.headers["last-event-id"]);
-      serveEvents(
-        (onEvent, onFinished, onSealed) => access.subscribe({ onEvent, onFinished, onSealed, afterSeq }),
-        nodeSseSink(req, res),
-        () => startSseHeartbeat(req, res),
-      );
+      };
+      const deletion = service.deletedRuns([route.id]);
+      if (Array.isArray(deletion)) return serveLive();
+      run(res, async () => {
+        if ((await deletion).includes(route.id)) text(res, 404, NOT_FOUND);
+        else serveLive();
+      });
       return true;
     }
 
@@ -955,7 +998,7 @@ export function createLiveViewHandler(
       if (ctx.actor.viewingAs) return refuseWhileViewing(res, ctx.actor.viewingAs);
       const mode = parseStopMode(url.searchParams.get("mode"));
       if (!mode) {
-        text(res, 400, "mode must be soft or hard");
+        text(res, 400, "mode must be stop or kill (legacy soft and hard are supported)");
         return true;
       }
       run(res, async () => {
@@ -971,7 +1014,12 @@ export function createLiveViewHandler(
           text(res, 409, "the run already finished");
           return;
         }
-        const stopped = await service.stopRun(route.id, mode, { kind: "access", id: actor.id });
+        const stopped = await service.stopRun(
+          route.id,
+          mode,
+          { kind: "access", id: actor.id },
+          url.searchParams.get("mode") === "kill" ? { destructive: true } : undefined,
+        );
         if (!stopped.ok) {
           if (stopped.error === "hosted") text(res, 409, HOSTED_STOP);
           else if (stopped.error === "conflict") text(res, 409, "the run already finished");
@@ -980,7 +1028,7 @@ export function createLiveViewHandler(
           return;
         }
         res.writeHead(200, JSON_NO_STORE);
-        res.end(JSON.stringify(stopped.value));
+        res.end(JSON.stringify({ ...stopped.value, mode: url.searchParams.get("mode") }));
       });
       return true;
     }

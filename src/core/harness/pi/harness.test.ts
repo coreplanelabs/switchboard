@@ -1481,6 +1481,15 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(w.events.find((e) => e.type === "run_note" && e.kind === "stopped")).toMatchObject({ mode: "soft" });
   });
 
+  it("kill ends pi without a graceful abort or a summary turn", async () => {
+    const w = world({ withSpans: true });
+    scriptedPi(w.container, () => w.control.requestKill());
+    expect(await w.start()).toBe("⏹ Stopped by user.");
+    expect(w.container.killed).toEqual([4242]);
+    expect(w.container.commands().filter((c) => c.type === "abort" || c.type === "steer")).toEqual([]);
+    expect(w.sink.ended("run.agent")?.status).toBe("ok");
+  });
+
   it("a hard stop aborts pi, ends it, closes the open tool span and answers the abort line with no write-up", async () => {
     const w = world({ withSpans: true });
     scriptedPi(w.container, (n, c) => {

@@ -265,7 +265,7 @@ export interface OpenRunRequest {
   };
   /** A stop another generation requested (`/runs/stop` on a different
    *  container), relayed by the heartbeat — once per mode. */
-  onStop?: (mode: StopMode) => void;
+  onStop?: (mode: StopMode, destructive?: boolean) => void;
   /** Another generation owns this run now (a write was `fenced`, plan D9): the
    *  caller must stop the run at once — it must not reply, and its next tool
    *  call would act on a run someone else is driving. Once per run. */
@@ -293,7 +293,7 @@ export interface ReserveRunRequest {
   /** With `request` set: the message in the durable inbox row's shape. */
   meta: LiveRunMeta;
   card?: CardHandle | null;
-  onStop?: (mode: StopMode) => void;
+  onStop?: (mode: StopMode, destructive?: boolean) => void;
   onFenced?: () => void;
 }
 
@@ -529,7 +529,7 @@ export interface AdoptRunRequest {
    *  appends at its indices and its record closes the range. Absent for a row
    *  claimed before the log existed, which keeps writing its own object. */
   session?: RunSession;
-  onStop?: (mode: StopMode) => void;
+  onStop?: (mode: StopMode, destructive?: boolean) => void;
   onFenced?: () => void;
 }
 
@@ -1283,7 +1283,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     }
     readonly runId: string;
     private readonly threadKey: string;
-    private readonly onStop?: (mode: StopMode) => void;
+    private readonly onStop?: (mode: StopMode, destructive?: boolean) => void;
     private readonly onFenced?: () => void;
     private fencedTold = false;
     /** Detached BY A FENCE (another generation took the row), as opposed to a
@@ -1446,6 +1446,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     private stateVersion = 0;
     private acknowledgedStateVersion = 0;
     private stopRelayed: StopMode | undefined;
+    private killRelayed = false;
     private heartbeat: { unref?(): void } | undefined;
     private readonly flusher = createAppendFlusher<AppendableEvent>({
       flushMs: opts.flushMs ?? APPEND_FLUSH_MS,
@@ -2481,9 +2482,14 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           this.detach(`heartbeat refused (${result.reason})`, result.reason === "fenced");
           return;
         }
-        if (result.stop && this.stopRelayed !== result.stop && this.onStop) {
+        if (
+          result.stop &&
+          (this.stopRelayed !== result.stop || (result.destructive === true && !this.killRelayed)) &&
+          this.onStop
+        ) {
           this.stopRelayed = result.stop;
-          this.onStop(result.stop);
+          this.killRelayed ||= result.destructive === true;
+          this.onStop(result.stop, result.destructive);
         }
         // The plane's effects (orchestration-plane; record 0064; orchestration-plane item 7):
         // an `admit` runs through the restart-from-request path and a `steer`

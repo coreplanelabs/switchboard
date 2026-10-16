@@ -228,7 +228,7 @@ describe("MCP approval parity", () => {
       threadKey: "slack:D2:2",
       channelVisibility: "dm",
     });
-    const args = { id: own.id, mode: "hard" };
+    const args = { id: own.id };
     const requestState = await f.offeredId("runs_stop", args);
     expect(own.control.hardSignal.aborted).toBe(false);
     const consent = {
@@ -262,7 +262,7 @@ describe("MCP approval parity", () => {
       threadKey: "slack:D1:1",
       channelVisibility: "dm",
     });
-    const args = { id: target.id, mode: "hard" };
+    const args = { id: target.id };
     f.setConnectionGrants({ ...NO_GRANTS, actions: new Set(["runs:read"]) });
     expect((await f.call("runs_stop", args, "tok", { _meta: FORM_META })).body).toMatchObject({
       error: { code: -32001 },
@@ -297,7 +297,7 @@ describe("MCP approval parity", () => {
       threadKey: "slack:D1:1",
       channelVisibility: "dm",
     });
-    const args = { id: target.id, mode: "hard" };
+    const args = { id: target.id };
     expect((await f.call("runs_stop", args)).body).toMatchObject({ error: { code: -32004 } });
     expect(target.control.hardSignal.aborted).toBe(false);
     const declined = await f.offeredId("runs_stop", args);
@@ -311,8 +311,8 @@ describe("MCP approval parity", () => {
       ).body,
     ).toMatchObject({ result: { content: [{ text: "Cancelled; nothing ran" }] } });
     expect(target.control.hardSignal.aborted).toBe(false);
-    for (const mode of ["hard", "soft"]) {
-      const input = { ...args, mode };
+    for (const _repeat of [0, 1]) {
+      const input = args;
       const requestState = await f.offeredId("runs_stop", input);
       const result = await f.call("runs_stop", input, "tok", {
         _meta: FORM_META,
@@ -1457,7 +1457,7 @@ describe("MCP approval parity", () => {
       threadKey: "mcp:default:other",
       channelVisibility: "machine",
     });
-    const args = { id: own.id, mode: "hard" };
+    const args = { id: own.id };
     expect(
       (await f.call("runs_stop", { ...args, userId: "access:device" }, "forged", { _meta: FORM_META })).body,
     ).toMatchObject({ error: { code: -32001 } });
@@ -1474,7 +1474,7 @@ describe("MCP approval parity", () => {
       result: { content: [{ text: expect.stringContaining("state: stopping") }] },
     });
     expect(own.control.hardSignal.aborted).toBe(true);
-    const input = { id: foreign.id, mode: "hard" };
+    const input = { id: foreign.id };
     const foreignOffer = await f.call("runs_stop", input, token, { _meta: FORM_META });
     const foreignState = (foreignOffer.body as { result: { requestState: string } }).result.requestState;
     expect((await f.call("runs_stop", input, token, { ...approve, requestState: foreignState })).body).toMatchObject({
@@ -1531,7 +1531,7 @@ describe("MCP approval parity", () => {
       audit() {},
     });
     f.deps.commands = f.options.commands;
-    const offered = await f.call("runs_stop", { id: live.id, mode: "hard" }, "tok", { _meta: FORM_META });
+    const offered = await f.call("runs_stop", { id: live.id }, "tok", { _meta: FORM_META });
     const id = (offered.body as { result: { requestState: string } }).result.requestState;
     expect(
       registry

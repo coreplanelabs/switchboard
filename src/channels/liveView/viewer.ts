@@ -1,3 +1,5 @@
+import { RUN_VIEW_POLL_MS } from "../../core/budgets.js";
+import type { IndexRunIdentity } from "../../core/runRegistry/indexFeed.js";
 import { hasWorkViewScope, workReadPredicate } from "../workViewScope.js";
 import {
   authorize,
@@ -32,6 +34,55 @@ export function readableRuns(actor: Actor): Predicate {
   return hasWorkViewScope(actor) ? workReadPredicate(actor, readable) : readable;
 }
 
+/** Follow shared deletion fences for rows this connection has already seen.
+ * Keep saved identities after ordinary registry eviction so a later Kill still
+ * removes the browser's retained row. Visibility is applied by the outer feed. */
+export function deletionAwareIndexFeed(
+  subscribe: (onEvent: IndexSubscriber) => Unsubscribe,
+  readDeleted: (ids: readonly string[]) => Promise<string[]>,
+  initial: readonly (IndexRunIdentity & { id: string })[],
+): (onEvent: IndexSubscriber) => Unsubscribe {
+  return (onEvent) => {
+    const known = new Map(initial.map((row) => [row.id, row]));
+    let closed = false;
+    let pollUnavailable = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = subscribe((event) => {
+      if (event.type === "upsert") known.set(event.run.id, event.run);
+      else if (event.deleted) known.delete(event.id);
+      onEvent(event);
+    });
+    const poll = async () => {
+      try {
+        const deleted = await readDeleted([...known.keys()]);
+        pollUnavailable = false;
+        for (const id of deleted) {
+          const identity = known.get(id);
+          if (!closed && identity) {
+            known.delete(id);
+            onEvent({ type: "removed", id, deleted: true, identity });
+          }
+        }
+      } catch {
+        if (!closed && !pollUnavailable) {
+          pollUnavailable = true;
+          console.warn("[runs] deletion poll unavailable; row removals are unverified");
+        }
+      }
+      if (!closed) {
+        timer = setTimeout(() => void poll(), RUN_VIEW_POLL_MS);
+        timer.unref?.();
+      }
+    };
+    void poll();
+    return () => {
+      closed = true;
+      clearTimeout(timer);
+      unsubscribe();
+    };
+  };
+}
+
 /**
  * The runs-index feed as ONE viewer may see it: an `upsert` for a run outside
  * the predicate is dropped, and so is that run's later `removed` — the page
@@ -49,6 +100,11 @@ export function visibleIndexFeed(
       if (ev.type === "upsert") {
         if (privateWorkerRun(ev.run) || !matchesPredicate(visibleTo, ev.run)) return;
         shown.add(ev.run.id);
+      } else if (ev.deleted && ev.identity) {
+        if (privateWorkerRun(ev.identity) || !matchesPredicate(visibleTo, ev.identity)) return;
+        shown.delete(ev.id);
+        onEvent({ type: "removed", id: ev.id, deleted: true });
+        return;
       } else if (!shown.delete(ev.id)) return;
       onEvent(ev);
     });

@@ -107,6 +107,7 @@ export function preserveCheckpointState(
 ): RunState | undefined {
   const next = preserveHarnessPolicy(prior, incoming);
   if (!next) return undefined;
+  if (prior.killRequested === true) next.killRequested = true;
   const baseline = prior.branchIdentityBaseline;
   const replacement = incoming.branchIdentityBaseline;
   if (baseline !== undefined) {

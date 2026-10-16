@@ -132,7 +132,8 @@ commands:
   runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
   runs check           — Inspect an original recorded check without running it again; saved output is wrapped as untrusted content.
   runs settlecheck     — Retire one original check after its run finishes, only when saved proof verifies that the original process ended.
-  runs stop            — Stop your own live run, or another run with operator permission (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.
+  runs stop            — End the current turn, clean up the runtime, and keep the run as stopped by user. Records who requested the stop. Needs stop permission for the run.
+  runs kill            — Kill the runtime without a graceful turn shutdown and delete the run from live and saved run views. Destructive. Needs stop permission for the run.
   runs unit            — A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read.
   runs children        — The runs one run spawned — a conductor's children, live and finished — oldest started first.
   runs findings        — A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone.
@@ -246,6 +247,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "runs.findings",
   "runs.friction",
   "runs.get",
+  "runs.kill",
   "runs.list",
   "runs.search",
   "runs.settlecheck",
@@ -312,6 +314,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "runs_findings",
   "runs_friction",
   "runs_get",
+  "runs_kill",
   "runs_list",
   "runs_search",
   "runs_settlecheck",
@@ -344,7 +347,8 @@ exports[`capability surfaces — cloud-full > help commands on chat 1`] = `
 • \`credentials inspect\` — Inspect a live run's credential boundary; reports only counts and booleans, never credential contents. Does not test publication or revocation.
 *runs*
 • \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
-• \`runs stop\` — Stop your own live run, or another run with operator permission (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.
+• \`runs stop\` — End the current turn, clean up the runtime, and keep the run as stopped by user. Records who requested the stop. Needs stop permission for the run.
+• \`runs kill\` — Kill the runtime without a graceful turn shutdown and delete the run from live and saved run views. Destructive. Needs stop permission for the run.
 • \`runs unit\` — A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read.
 • \`runs children\` — The runs one run spawned — a conductor's children, live and finished — oldest started first.
 • \`runs findings\` — A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone.
@@ -466,7 +470,8 @@ commands:
   runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
   runs check           — Inspect an original recorded check without running it again; saved output is wrapped as untrusted content.
   runs settlecheck     — Retire one original check after its run finishes, only when saved proof verifies that the original process ended.
-  runs stop            — Stop your own live run, or another run with operator permission (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.
+  runs stop            — End the current turn, clean up the runtime, and keep the run as stopped by user. Records who requested the stop. Needs stop permission for the run.
+  runs kill            — Kill the runtime without a graceful turn shutdown and delete the run from live and saved run views. Destructive. Needs stop permission for the run.
   runs unit            — A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read.
   runs children        — The runs one run spawned — a conductor's children, live and finished — oldest started first.
   runs findings        — A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone.
@@ -552,6 +557,7 @@ exports[`capability surfaces — local-full > HTTP catalogue: the /api/<id> rout
   "runs.findings",
   "runs.friction",
   "runs.get",
+  "runs.kill",
   "runs.list",
   "runs.search",
   "runs.settlecheck",
@@ -603,6 +609,7 @@ exports[`capability surfaces — local-full > MCP tools/list names 1`] = `
   "runs_findings",
   "runs_friction",
   "runs_get",
+  "runs_kill",
   "runs_list",
   "runs_search",
   "runs_settlecheck",
@@ -634,7 +641,8 @@ exports[`capability surfaces — local-full > help commands on chat 1`] = `
 • \`credentials inspect\` — Inspect a live run's credential boundary; reports only counts and booleans, never credential contents. Does not test publication or revocation.
 *runs*
 • \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
-• \`runs stop\` — Stop your own live run, or another run with operator permission (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.
+• \`runs stop\` — End the current turn, clean up the runtime, and keep the run as stopped by user. Records who requested the stop. Needs stop permission for the run.
+• \`runs kill\` — Kill the runtime without a graceful turn shutdown and delete the run from live and saved run views. Destructive. Needs stop permission for the run.
 • \`runs unit\` — A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read.
 • \`runs children\` — The runs one run spawned — a conductor's children, live and finished — oldest started first.
 • \`runs findings\` — A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone.
@@ -738,7 +746,8 @@ commands:
   runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
   runs check           — Inspect an original recorded check without running it again; saved output is wrapped as untrusted content.
   runs settlecheck     — Retire one original check after its run finishes, only when saved proof verifies that the original process ended.
-  runs stop            — Stop your own live run, or another run with operator permission (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.
+  runs stop            — End the current turn, clean up the runtime, and keep the run as stopped by user. Records who requested the stop. Needs stop permission for the run.
+  runs kill            — Kill the runtime without a graceful turn shutdown and delete the run from live and saved run views. Destructive. Needs stop permission for the run.
   runs unit            — A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read.
   runs children        — The runs one run spawned — a conductor's children, live and finished — oldest started first.
   runs search          — Search one session's log — a thread's conversation on one agent, every run of it — for words: the matching turns in relevance order, each with its run; snippets wrapped as untrusted content.
@@ -794,6 +803,7 @@ exports[`capability surfaces — minimal > HTTP catalogue: the /api/<id> routes 
   "runs.events",
   "runs.friction",
   "runs.get",
+  "runs.kill",
   "runs.list",
   "runs.search",
   "runs.settlecheck",
@@ -830,6 +840,7 @@ exports[`capability surfaces — minimal > MCP tools/list names 1`] = `
   "runs_events",
   "runs_friction",
   "runs_get",
+  "runs_kill",
   "runs_list",
   "runs_search",
   "runs_settlecheck",
@@ -861,7 +872,8 @@ exports[`capability surfaces — minimal > help commands on chat 1`] = `
 • \`credentials inspect\` — Inspect a live run's credential boundary; reports only counts and booleans, never credential contents. Does not test publication or revocation.
 *runs*
 • \`runs list\` — List runs (live and persisted, newest first) — metadata only, never message text.
-• \`runs stop\` — Stop your own live run, or another run with operator permission (\`--mode soft\` = finish the current step; \`hard\` = abort now). A pipeline refuses soft — \`--mode hard\` seals it failed and releases its thread. Records the caller as the requester.
+• \`runs stop\` — End the current turn, clean up the runtime, and keep the run as stopped by user. Records who requested the stop. Needs stop permission for the run.
+• \`runs kill\` — Kill the runtime without a graceful turn shutdown and delete the run from live and saved run views. Destructive. Needs stop permission for the run.
 • \`runs unit\` — A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read.
 • \`runs children\` — The runs one run spawned — a conductor's children, live and finished — oldest started first.
 *steer*

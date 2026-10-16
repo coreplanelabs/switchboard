@@ -762,6 +762,11 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
     releaseWorkspace,
     root,
   } = ctx;
+  if (run.control.destructive) {
+    await releaseWorkspace();
+    ending.drain(undefined);
+    return { kind: "fenced" };
+  }
   const budgetEnded = answerOutcome?.ending === "time_budget";
   const checklist = checklistAsLeft();
   const openChecklist = /^[ \t]*[○✱](?=\s)/m.test(checklist ?? "");
@@ -769,7 +774,7 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
   const incompleteEnd = answerOutcome !== undefined && answerOutcome.ending !== "answered";
   const closeIcon =
     stopped === "hard"
-      ? "⛔"
+      ? "⏹"
       : stopped === "soft"
         ? "⏹"
         : budgetEnded || incompleteEnd || openChecklist || incompleteToolEffects
@@ -788,6 +793,20 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
   const privateCheck = async (): Promise<AudienceCheck> =>
     privateRun ? traceCheck(() => privateRunAudienceDecision(msg, io, latch, ctx.slackContext)) : { ok: true };
   const fenced = new Error("reply ownership changed");
+  const reply = async (text?: string): Promise<boolean> => {
+    await run.control.waitForCancellation();
+    if (run.control.destructive) return false;
+    if (run.control.cancellationConfirmed) {
+      ending.drop(run.id);
+      await card.done(shell.close({ kind: "done", icon: "⏹" }));
+      text = "⏹ Stopped by user.";
+    } else if (run.control.cancellationRequested) return false;
+    if (run.control.destructive || text === undefined) return false;
+    if ((stopped === "hard" || run.control.cancellationConfirmed) && !run.control.claimStopNotice()) return false;
+    await io.reply(text);
+    return true;
+  };
+
   const commitRefusal = async (check: Extract<AudienceCheck, { ok: false }>) => {
     const receipt = noteAudienceRefusal(audience, check.code, "reply", "reply", check.check, check.githubAccess);
     if (ledgerRun && (await ledgerRun.commitState({ audienceRefusal: receipt })) === "fenced") {
@@ -798,7 +817,7 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
   };
   const refusal = async (check: Extract<AudienceCheck, { ok: false }>): Promise<void> => {
     const receipt = await commitRefusal(check);
-    await io.reply(audienceRefusalText(receipt.code));
+    await reply(audienceRefusalText(receipt.code));
   };
   // The coding PR post-step ran INSIDE the try above (before the stream
   // finished — its outcome is the `pr_opened` event); `prNote` carries what
@@ -838,7 +857,9 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
       // outer finally still seals the stream here.
       console.log(`[run] ${msg.threadKey} run ${run.id}: another generation owns this run — not replying`);
       ending.drop(run.id);
-      return { kind: "fenced" };
+      // A confirmed user stop owns its generic final notice after the runtime
+      // cancellation sealed the record. It publishes no model output.
+      return { kind: (await reply()) ? "delivered" : "fenced" };
     }
     // A review's reply is rendered from its typed verdict (agent-review.md
     // item 5b): the verdict line, the findings, where it was posted and the run
@@ -911,6 +932,7 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
         ),
       () =>
         root.span("post.reply", async () => {
+          if (run.control.destructive) return;
           if (!addressCheck.ok) return refusal(addressCheck);
           const publication = ctx.publicationCheck ? await traceCheck(() => ctx.publicationCheck!()) : undefined;
           const privateDecision = await privateCheck();
@@ -918,19 +940,19 @@ export async function deliverAnswer(ctx: DeliveryContext): Promise<Delivery> {
           if (publication && !publication.ok) return refusal(publication);
           if (audience.refusal?.withheldAt) return refusal({ ok: false, code: audience.refusal.code });
           const currentWork = await ctx.currentWorkCheck?.();
-          return io.reply(currentWork ?? (prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer));
+          await reply(currentWork ?? (prNote ? `${channelAnswer}\n\n${prNote}` : channelAnswer));
         }),
       // A null channel's reply resolves but reaches nobody: the seal says
       // `replyOk: false` with the reason (run-history.md item 38).
       io.undeliverable !== undefined ? { undelivered: io.undeliverable } : undefined,
     );
   } catch (err) {
-    if (err === fenced) return { kind: "fenced" };
+    if (err === fenced) return { kind: (await reply()) ? "delivered" : "fenced" };
     throw err;
   } finally {
     await root.span("post.workspace_release", (span) => releaseWorkspace(span));
   }
-  return { kind: "delivered" };
+  return { kind: run.control.destructive || run.control.cancellationRequested ? "fenced" : "delivered" };
 }
 
 /** What `afterReply` reads off the dispatch. */

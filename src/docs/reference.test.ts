@@ -284,6 +284,7 @@ describe("the real catalogue", () => {
       "pulls.rebase",
       "repo.offboard",
       "repo.rebuild",
+      "runs.kill",
       "runs.stop",
     ]);
     expect(real.filter((c) => c.effect === "read").every((c) => c.blastRadius === "read")).toBe(true);

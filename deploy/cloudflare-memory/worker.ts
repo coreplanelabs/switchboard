@@ -343,6 +343,7 @@ import {
   applyRetention,
   clampRetentionPolicy,
   isRunRecord,
+  confirmRuntimeShutdownRecord,
   branchPushReceiptsOf,
   workEvidenceBelongsToRun,
   isRunWorkOwner,
@@ -2302,7 +2303,12 @@ function rowToLive(r: LiveRow): LiveRunRow {
   };
 }
 
-type HeartbeatAnswer = FenceResult & { stop?: StopMode | null; phase?: LivePhase; effects?: PlaneEffect[] };
+type HeartbeatAnswer = FenceResult & {
+  stop?: StopMode | null;
+  destructive?: boolean;
+  phase?: LivePhase;
+  effects?: PlaneEffect[];
+};
 type PromotionHold = { kind: "held"; reason: "promotion_pending" | "promotion_corrupt"; runId: string };
 
 /** Whether the bot's outcome and the decider's word agree (orchestration-plane item 8): `proceeded`
@@ -2322,6 +2328,12 @@ const COORDINATOR_SCAN_LIMIT = 16;
 /** An expected canonical archive refusal must leave the shared object alive.
  * Throwing it inside blockConcurrencyWhile resets unrelated run requests. */
 class CanonicalArchiveRefusal extends Error {}
+class RunDeletedError extends Error {
+  override readonly name = "RunDeletedError";
+  constructor() {
+    super("The run was deleted by Kill.");
+  }
+}
 
 // Bump when terminal candidate projection or decoder semantics change.
 const TERMINAL_PULL_OWNER_INDEX_VERSION = "2";
@@ -2433,6 +2445,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         repo TEXT, json TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS ingress_deletions (effect_key TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS run_deletions (run_id TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS ingress_owners (
         effect_key TEXT PRIMARY KEY,
         content_expires_at INTEGER NOT NULL,
@@ -7551,6 +7564,8 @@ export class RunHistoryDO extends DurableObject<Env> {
     reviewStopClient = false,
   ): Promise<ClaimResult> {
     if (this.nativeRetirementFenced(req.runId)) throw new Error("terminal native retirement is prepared");
+    if (this.sql.exec("SELECT run_id FROM run_deletions WHERE run_id=?", req.runId).toArray().length > 0)
+      throw new RunDeletedError();
     if (
       this.liveRow(req.runId)?.state.cancellation !== undefined ||
       workspaceDurabilityArchiveOf(this.allocationArchive(req.runId))?.cancellation
@@ -7587,11 +7602,16 @@ export class RunHistoryDO extends DurableObject<Env> {
         const allocationAck = allocationAckFromCanonical(this.allocationArchive(req.runId), this.liveRow(req.runId));
         if (!allocationAck) throw new PromotionPendingError(req.runId, "corrupt");
         if (this.nativeRetirementFenced(req.runId)) throw new Error("terminal native retirement is prepared");
+        if (this.sql.exec("SELECT run_id FROM run_deletions WHERE run_id=?", req.runId).toArray().length > 0)
+          throw new RunDeletedError();
         return { ok: true, allocationAck, promotionCommit: structuredClone(archive.promotionCommit) };
       }
     }
     if (Object.hasOwn(req.meta, "workspaceDisposition")) throw new Error("workspace disposition is store-derived");
-    if ((req.state && Object.hasOwn(req.state, "cancellation")) || workspaceAuthorityFieldsPresent(req.state))
+    if (
+      (req.state && (Object.hasOwn(req.state, "cancellation") || Object.hasOwn(req.state, "killRequested"))) ||
+      workspaceAuthorityFieldsPresent(req.state)
+    )
       throw new Error("workspace allocation cannot be written as mutable state");
     const checkCustody = this.liveRow(req.runId);
     if (
@@ -7606,6 +7626,8 @@ export class RunHistoryDO extends DurableObject<Env> {
       let duplicateCommit = false;
       this.ctx.storage.transactionSync(() => {
         if (this.nativeRetirementFenced(req.runId)) throw new Error("terminal native retirement is prepared");
+        if (this.sql.exec("SELECT run_id FROM run_deletions WHERE run_id=?", req.runId).toArray().length > 0)
+          throw new RunDeletedError();
         if (this.promotionHeld(req.runId, req.gen)) {
           const archive = workspaceDurabilityArchiveOf(this.allocationArchive(req.runId));
           if (
@@ -7839,7 +7861,13 @@ export class RunHistoryDO extends DurableObject<Env> {
       // The plane's open effects ride every owner's heartbeat answer (record
       // 0064; orchestration-plane item 7) — empty until a unit writes them, but always present, so the
       // client's ack loop needs no version probe.
-      out = { ok: true, stop: row.stop, phase: row.phase, effects: this.openPlaneEffects() };
+      out = {
+        ok: true,
+        stop: row.stop,
+        ...(row.state.killRequested === true ? { destructive: true } : {}),
+        phase: row.phase,
+        effects: this.openPlaneEffects(),
+      };
     });
     // The owner's heartbeat refreshes the lease, so the plane's alarm moves
     // with it (record 0064): re-armed only when the earliest due changed.
@@ -7919,7 +7947,9 @@ export class RunHistoryDO extends DurableObject<Env> {
     if (workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.promotion)
       await this.requirePromotionRelease(runId, gen);
     if (
-      (assignment.statePatch && Object.hasOwn(assignment.statePatch, "cancellation")) ||
+      (assignment.statePatch &&
+        (Object.hasOwn(assignment.statePatch, "cancellation") ||
+          Object.hasOwn(assignment.statePatch, "killRequested"))) ||
       workspaceAuthorityFieldsPresent(assignment.statePatch)
     )
       return { ok: false, reason: "fenced" };
@@ -8029,7 +8059,11 @@ export class RunHistoryDO extends DurableObject<Env> {
       if (hold) return hold;
       if (before !== canonicalSeedJson(this.allocationArchive(runId))) return pending();
     }
-    if (Object.hasOwn(state, "cancellation") || workspaceAuthorityFieldsPresent(state))
+    if (
+      Object.hasOwn(state, "cancellation") ||
+      Object.hasOwn(state, "killRequested") ||
+      workspaceAuthorityFieldsPresent(state)
+    )
       return { ok: false, reason: "fenced" };
     if (this.promotionHeld(runId, gen)) return pending();
     return this.ctx.blockConcurrencyWhile(async (): Promise<FenceResult | PromotionHold> => {
@@ -8300,13 +8334,23 @@ export class RunHistoryDO extends DurableObject<Env> {
     }
   }
 
-  async requestStop(runId: string, mode: StopMode, now: number): Promise<{ ok: boolean; ownerLive?: boolean }> {
-    let out: { ok: boolean; ownerLive?: boolean } = { ok: false };
+  async requestStop(
+    runId: string,
+    mode: StopMode,
+    now: number,
+    destructive = false,
+  ): Promise<{ ok: boolean; ownerLive?: boolean; destructive?: true }> {
+    let out: { ok: boolean; ownerLive?: boolean; destructive?: true } = { ok: false };
     this.ctx.storage.transactionSync(() => {
       const row = this.liveRow(runId);
       if (!row) return;
-      this.sql.exec(`UPDATE live_runs SET stop = ? WHERE run_id = ?`, mode, runId);
-      out = { ok: true, ownerLive: row.leaseUntil > now };
+      this.sql.exec(
+        `UPDATE live_runs SET stop = ?, state_json = ? WHERE run_id = ?`,
+        row.stop === "hard" ? "hard" : mode,
+        JSON.stringify({ ...row.state, ...(destructive ? { killRequested: true } : {}) }),
+        runId,
+      );
+      out = { ok: true, ownerLive: row.leaseUntil > now, ...(destructive ? { destructive: true as const } : {}) };
     });
     return out;
   }
@@ -9843,6 +9887,14 @@ export class RunHistoryDO extends DurableObject<Env> {
     emits: boolean;
     reviewPoint?: RunMetricsPoint;
   }> {
+    if (this.sql.exec("SELECT run_id FROM run_deletions WHERE run_id=?", record.id).toArray().length > 0)
+      return {
+        ok: true,
+        retained: this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM runs").one().n,
+        stored: false,
+        rewritten: false,
+        emits: false,
+      };
     if (this.promotionHeld(record.id)) throw new PromotionPendingError(record.id);
     record = await this.archiveCheckpoint(record);
     return this.withRangePins([{ id: record.id, handoff: record.childHandoff }], async () => {
@@ -9900,6 +9952,14 @@ export class RunHistoryDO extends DurableObject<Env> {
     /** The committed record's review row when this write emits (record 0097). */
     reviewPoint?: RunMetricsPoint;
   } {
+    if (this.sql.exec("SELECT run_id FROM run_deletions WHERE run_id=?", record.id).toArray().length > 0)
+      return {
+        ok: true,
+        retained: this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM runs").one().n,
+        stored: false,
+        rewritten: false,
+        emits: false,
+      };
     if (Object.hasOwn(record, "checkArchive") || Object.hasOwn(record, "checkExecutions"))
       throw new Error("check archive cannot be submitted through a run record");
     if (workspaceAuthorityFieldsPresent(record))
@@ -10356,25 +10416,47 @@ export class RunHistoryDO extends DurableObject<Env> {
     return { failedWrites };
   }
 
+  async deleted(ids: string[]): Promise<string[]> {
+    return this.sql
+      .exec<{ run_id: string }>(
+        "SELECT run_id FROM run_deletions WHERE run_id IN (SELECT value FROM json_each(?))",
+        JSON.stringify(ids),
+      )
+      .toArray()
+      .map((row) => row.run_id);
+  }
+
   /** Remove a run and its events. Returns whether a run row existed. */
-  async delete(id: string): Promise<boolean | { ok: false; reason: "publication_pending" }> {
+  async delete(
+    id: string,
+    destructive = false,
+  ): Promise<boolean | { ok: false; reason: "publication_pending" | "live" }> {
     const result = await this.ctx.blockConcurrencyWhile(async () => {
       let deleted = false;
       let refused = false;
       this.ctx.storage.transactionSync(() => {
         // A live owner may also have a provisional terminal record. Neither
         // that record nor its events and context pins can be erased here.
-        if (this.liveRow(id)) return;
+        if (this.liveRow(id)) {
+          if (destructive) refused = true;
+          return;
+        }
         deleted = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM runs WHERE run_id = ?`, id).one().n === 1;
         // Retention may have removed the record while its checkpoint alias
         // survives. Explicit deletion still revokes the alias.
-        if (this.publicationRetains(id)) {
+        if (!destructive && this.publicationRetains(id)) {
           refused = true;
           return;
         }
+        if (destructive) {
+          this.sql.exec("INSERT OR IGNORE INTO run_deletions(run_id) VALUES(?)", id);
+          this.sql.exec("DELETE FROM plane_queue WHERE run_id=?", id);
+          this.sql.exec("DELETE FROM plane_reservations WHERE run_id=?", id);
+        }
         this.deleteRuns([id], true);
       });
-      if (refused) return { ok: false as const, reason: "publication_pending" as const };
+      if (refused)
+        return { ok: false as const, reason: this.liveRow(id) ? ("live" as const) : ("publication_pending" as const) };
       return deleted;
     });
     if (typeof result === "boolean") await this.syncRangePins();
@@ -10565,6 +10647,39 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  unknown or outside policy — one not-found shape. A corrupt event row is skipped. */
   async get(id: string): Promise<RunRecord | null> {
     return this.canonicalRun(id);
+  }
+
+  async confirmRuntimeShutdown(original: RunRecord): Promise<boolean> {
+    let confirmed = false;
+    this.ctx.storage.transactionSync(() => {
+      if (
+        this.liveRow(original.id) ||
+        this.promotionHeld(original.id) ||
+        this.sql.exec("SELECT run_id FROM run_deletions WHERE run_id=?", original.id).toArray().length > 0
+      )
+        return;
+      const current = this.canonicalRun(original.id);
+      if (!confirmRuntimeShutdownRecord(current, original)) return;
+      const row = this.sql
+        .exec<{ summary_json: string; bytes: number }>(
+          "SELECT summary_json, bytes FROM runs WHERE run_id=?",
+          original.id,
+        )
+        .toArray()[0];
+      if (!row) return;
+      const summary = parseStoredJson(row.summary_json);
+      const { failure, ...rest } = summary;
+      const next = JSON.stringify({
+        ...rest,
+        ...(failure && failure.kind !== "runtime_shutdown_unconfirmed" ? { failure } : {}),
+        runtimeShutdownConfirmed: true,
+      });
+      const delta = utf8ByteLength(next) - utf8ByteLength(row.summary_json);
+      if (row.bytes + delta > MAX_RECORD_BYTES) return;
+      this.sql.exec("UPDATE runs SET summary_json=?, bytes=bytes+? WHERE run_id=?", next, delta, original.id);
+      confirmed = true;
+    });
+    return confirmed;
   }
 
   private canonicalRun(id: string, privatePublication = false): RunRecord | null {
@@ -13521,6 +13636,7 @@ async function handlePlane(pathname: string, body: unknown, env: Env): Promise<R
 /** Routes whose bodies may carry a record, a transcript chunk, or an event batch. */
 const WIDE_BODY_ROUTES = new Set([
   "/runs/put",
+  "/runs/shutdown",
   "/runs/finish",
   "/runs/append",
   "/runs/transcript/write",
@@ -14870,7 +14986,7 @@ async function handleLedger(
   }
   if (pathname === "/runs/stop") {
     if (b.mode !== "soft" && b.mode !== "hard") return json({ error: "mode must be soft or hard" }, 400);
-    return json(await stub.requestStop(runId.value, b.mode, now));
+    return json(await stub.requestStop(runId.value, b.mode, now, b.destructive === true));
   }
 
   const g = gen(b.gen);
@@ -15114,11 +15230,23 @@ async function handleRuns(
     );
     return json(result);
   }
+  if (pathname === "/runs/shutdown") {
+    const parsed = parseRunPut(body);
+    if (!parsed.ok) return json({ error: parsed.error }, 400);
+    return json({ ok: true, confirmed: await stub(parsed.value.storeKey).confirmRuntimeShutdown(parsed.value.record) });
+  }
   if (pathname === "/runs/metrics-health") {
     const key = parseStoreKey(body as Record<string, unknown>);
     if (!key.ok) return json({ error: key.error }, 400);
     const target = stub(key.value) as unknown as Pick<RunHistoryDO, "metricsHealth">;
     return json(await target.metricsHealth());
+  }
+  if (pathname === "/runs/deleted") {
+    const b = body as Record<string, unknown>;
+    const key = parseStoreKey(b);
+    if (!key.ok || !Array.isArray(b.ids) || b.ids.some((id) => typeof id !== "string" || !RUN_ID_PATTERN.test(id)))
+      return json({ error: "invalid deletion query" }, 400);
+    return json({ ids: await stub(key.value).deleted(b.ids as string[]) });
   }
   if (pathname === "/runs/get") {
     const parsed = parseRunTarget(body);
@@ -15167,10 +15295,22 @@ async function handleRuns(
   // /runs/delete
   const parsed = parseRunTarget(body);
   if (!parsed.ok) return json({ error: parsed.error }, 400);
-  const deleted = await stub(parsed.value.storeKey).delete(parsed.value.id);
-  if (typeof deleted !== "boolean") return json(deleted, 409);
+  if (typeof body === "object" && body !== null && "destructive" in body && typeof body.destructive !== "boolean")
+    return json({ error: "destructive must be a boolean" }, 400);
+  const deleted = await stub(parsed.value.storeKey).delete(
+    parsed.value.id,
+    (body as { destructive?: boolean }).destructive === true,
+  );
+  if (typeof deleted !== "boolean") {
+    console.log(`[runs/delete] ${parsed.value.storeKey} ${parsed.value.id} -> refused=${deleted.reason}`);
+    return json(deleted, 409);
+  }
   console.log(`[runs/delete] ${parsed.value.storeKey} ${parsed.value.id} -> deleted=${deleted}`);
-  return json({ ok: true, deleted });
+  return json({
+    ok: true,
+    deleted,
+    ...((body as { destructive?: boolean }).destructive === true ? { destructive: true } : {}),
+  });
 }
 
 const ROUTES = new Set([
@@ -15193,6 +15333,8 @@ const ROUTES = new Set([
   "/runs/events",
   "/runs/usage",
   "/runs/delete",
+  "/runs/deleted",
+  "/runs/shutdown",
   "/runs/metrics-health",
   "/runs/review-feedback/list",
   "/runs/review-feedback/claim",
@@ -15292,6 +15434,7 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
             request.headers.get(NATIVE_REVIEW_STOP_HEADER) === "1",
           ));
     } catch (error) {
+      if (error instanceof Error && error.name === "RunDeletedError") throw error;
       if (error instanceof PromotionPendingError) throw error;
       const request = await storeRequestWitness(url.pathname, originalBody);
       const diagnostic =
@@ -15401,6 +15544,11 @@ export default {
       root.end(res.status >= 500 ? "error" : "ok", { httpStatus: res.status });
       return res;
     } catch (err) {
+      if (err instanceof Error && err.name === "RunDeletedError") {
+        console.log(`[runs] rejected a write for a run deleted by Kill at ${url.pathname}`);
+        root.end("ok", { httpStatus: 409 });
+        return json({ error: "run_deleted" }, 409);
+      }
       if (err instanceof StateWriteBoundaryError) {
         root.fail(err.cause);
         root.end("error", {

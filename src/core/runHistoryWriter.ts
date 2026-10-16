@@ -56,7 +56,18 @@ export interface RunHistoryWriter {
    *  request is an `http.client` child of it (docs/reference/specs/tracing.md item 24);
    *  the record is written after the reply, so that child is usually late —
    *  recorded with its true times, log-only. */
-  write(record: RunRecord, opts?: { provisional?: boolean; via?: RecordSink; span?: Span }): void;
+  /** `onStored` runs only after the primary sink acknowledges a retained write.
+   * An uncertain result or a fallback does not run it. */
+  write(
+    record: RunRecord,
+    opts?: {
+      provisional?: boolean;
+      via?: RecordSink;
+      span?: Span;
+      onStored?: () => void;
+      confirmRuntimeShutdown?: true;
+    },
+  ): void;
   /** Writes in flight, retry backoff included — awaited by the shutdown drain. */
   pending(): number;
   /** Records lost for good (retries exhausted, 4xx, or a missing route). */
@@ -74,7 +85,16 @@ export interface RunHistoryWriter {
  *  pending, failed or degraded, and `onPersisted` is never called — the
  *  index's persisted flag means "durably stored", which nothing here is. */
 export class NullRunHistoryWriter implements RunHistoryWriter {
-  write(_record: RunRecord, _opts?: { provisional?: boolean; via?: RecordSink; span?: Span }): void {
+  write(
+    _record: RunRecord,
+    _opts?: {
+      provisional?: boolean;
+      via?: RecordSink;
+      span?: Span;
+      onStored?: () => void;
+      confirmRuntimeShutdown?: true;
+    },
+  ): void {
     // history is off: nothing to write
   }
   pending(): number {
@@ -107,6 +127,7 @@ export class NullRunHistoryWriter implements RunHistoryWriter {
  *  for it — a store keeps nothing in flight per record and answers no-op. */
 export interface RecordSink {
   put(record: RunRecord, trace?: TraceOptions): Promise<unknown>;
+  confirmRuntimeShutdown?(original: RunRecord, trace?: TraceOptions): Promise<boolean>;
   abandoned(record: RunRecord, why: string): void;
   uncertain?(record: RunRecord, request: StoreRequestWitness): void;
 }
@@ -191,6 +212,7 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
     flag: ProvisionalFlag | undefined,
     sink: RecordSink,
     span: Span | undefined,
+    onStored: (() => void) | undefined,
   ): Promise<void> => {
     const attempts = RUN_HISTORY_RETRY_DELAYS_MS.length + 1;
     // The writer's final word to the sink (run-history item 54): this record is
@@ -239,8 +261,13 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
       // retry waking from backoff can never clobber the final record.
       if (flag?.superseded) return;
       try {
-        await sink.put(record, span ? { span } : undefined);
+        const result = await sink.put(record, span ? { span } : undefined);
         if (!flag) persisted(record.id);
+        try {
+          if (!(result && typeof result === "object" && "stored" in result && result.stored === false)) onStored?.();
+        } catch (err) {
+          opts.warn(`[run-history] stored hook failed for ${record.id}: ${describe(err)}`);
+        }
         return;
       } catch (err) {
         if (err instanceof UncertainStoreError) {
@@ -274,6 +301,28 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
   return {
     write(record, writeOpts) {
       record = structuredClone(record);
+      if (writeOpts?.confirmRuntimeShutdown) {
+        if (!opts.store.confirmRuntimeShutdown) {
+          return;
+        }
+        const confirming = opts.store
+          .confirmRuntimeShutdown(record, writeOpts.span ? { span: writeOpts.span } : undefined)
+          .then((confirmed) => {
+            if (confirmed) persisted(record.id);
+          })
+          .catch((error: unknown) => {
+            if (error instanceof UncertainStoreError) retainUnknown(record, opts.store, error.request);
+            else {
+              failures++;
+              opts.warn(`[run-history] ${record.id} shutdown confirmation failed: ${describe(error)}`);
+            }
+          })
+          .finally(() => {
+            inFlight.delete(confirming);
+          });
+        inFlight.add(confirming);
+        return;
+      }
       let flag: ProvisionalFlag | undefined;
       if (writeOpts?.provisional === true) {
         if (finals.has(record.id)) return; // the final record already exists (or is on its way) — drop, don't clobber
@@ -289,7 +338,7 @@ export function createRunHistoryWriter(opts: RunHistoryWriterOptions): RunHistor
       // injected sleep, a hook), the sink must not keep this record's finish
       // named as in flight for a caller that is done.
       const sink = writeOpts?.via ?? opts.store;
-      const p: Promise<void> = attemptAll(record, flag, sink, writeOpts?.span)
+      const p: Promise<void> = attemptAll(record, flag, sink, writeOpts?.span, writeOpts?.onStored)
         .catch((err: unknown) => {
           failures++;
           opts.warn(`[run-history] ${record.id} writer failed unexpectedly: ${describe(err)}`);

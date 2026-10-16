@@ -99,17 +99,17 @@ describe("RunRow", () => {
 
   it("shows the outcome badge for a finished run that did not succeed — failed/killed red, stopped early amber; none when it succeeded", () => {
     expect(mountRow(finished("failed")).find(".outcome").text()).toBe("failed");
-    expect(mountRow(finished("stopped_hard")).find(".outcome").text()).toBe("killed");
-    expect(mountRow(finished("stopped_hard")).find(".outcome").classes().join(" ")).toContain("bad");
+    expect(mountRow(finished("stopped_hard")).find(".outcome").text()).toBe("stopped by user");
+    expect(mountRow(finished("stopped_hard")).find(".outcome").classes().join(" ")).toContain("muted");
     const soft = mountRow(finished("stopped_soft")).find(".outcome");
-    expect(soft.text()).toBe("stopped early");
-    expect(soft.classes().join(" ")).toContain("warn");
+    expect(soft.text()).toBe("stopped by user");
+    expect(soft.classes().join(" ")).toContain("muted");
     expect(mountRow(finished("completed")).find(".outcome").exists()).toBe(false);
   });
 
   it("dot tone agrees: killed is red, stopped early amber, succeeded grey, live green", () => {
-    expect(mountRow(finished("stopped_hard")).find('[data-tone="red"]').exists()).toBe(true);
-    expect(mountRow(finished("stopped_soft")).find('[data-tone="amber"]').exists()).toBe(true);
+    expect(mountRow(finished("stopped_hard")).find('[data-tone="grey"]').exists()).toBe(true);
+    expect(mountRow(finished("stopped_soft")).find('[data-tone="grey"]').exists()).toBe(true);
     expect(mountRow(finished("completed")).find('[data-tone="grey"]').exists()).toBe(true);
     expect(mountRow(row()).find('[data-tone="green"]').exists()).toBe(true);
   });
@@ -119,12 +119,12 @@ describe("RunRow", () => {
       mountRow(row({ stop: { mode: "soft", state: "stopping" } }))
         .find(".stopbadge")
         .text(),
-    ).toBe("stopping (soft)");
+    ).toBe("stopping");
     expect(
       mountRow(row({ finished: true, stop: { mode: "hard", state: "stopped" } }))
         .find(".stopbadge")
         .text(),
-    ).toBe("killed");
+    ).toBe("stopped by user");
     expect(
       mountRow(finished("stopped_hard", { stop: { mode: "hard", state: "stopped" } }))
         .find(".stopbadge")
@@ -244,14 +244,14 @@ describe("RunRow", () => {
     expect(live.find('.actions button[aria-label="Run actions"]').exists()).toBe(true);
     expect(live.find('.actions button[aria-label="Run actions"]').classes()).not.toContain("sm:hidden");
     expect(live.findAll(".actions button")).toHaveLength(1);
-    expect(menuItems(live).map((i) => i.label)).toEqual(["Open thread", "Stop (soft)", "Kill (hard)"]);
+    expect(menuItems(live).map((i) => i.label)).toEqual(["Open thread", "Stop", "Kill"]);
     // Every run's thread is a page here (web-chat.md item 4): the menu leads with it.
     expect(item(live, "Open thread")?.to).toBe("/threads/slack%3AC1%3A1.0");
     const done = mountRow(finished("completed"));
     expect(done.find(".actions").exists()).toBe(true);
     expect(menuItems(done).map((i) => i.label)).toEqual(["Open thread"]);
     const stopping = mountRow(row({ stop: { mode: "soft", state: "stopping" } }));
-    expect(menuItems(stopping).map((i) => i.label)).toEqual(["Open thread", "Kill (hard)"]);
+    expect(menuItems(stopping).map((i) => i.label)).toEqual(["Open thread", "Kill"]);
     // A row with no thread key and no source has no menu at all.
     const bare = mountRow(finished("completed", { threadKey: undefined }));
     expect(menu(bare).exists()).toBe(false);
@@ -265,16 +265,16 @@ describe("RunRow", () => {
     async (mode) => {
       vi.spyOn(browser, "confirm").mockReturnValue(true);
       const w = mountRow(row({ token: "tok-1", stop: { mode, state: "stopping" } }));
-      expect(menuItems(w).map((i) => i.label)).toEqual(["Open thread", "Kill (hard)"]);
-      item(w, "Kill (hard)")!.onSelect!();
-      item(w, "Kill (hard)")!.onSelect!();
+      expect(menuItems(w).map((i) => i.label)).toEqual(["Open thread", "Kill"]);
+      item(w, "Kill")!.onSelect!();
+      item(w, "Kill")!.onSelect!();
       await w.vm.$nextTick();
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(fetchMock).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
+      expect(fetchMock).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=kill", {
         method: "POST",
         credentials: "same-origin",
       });
-      await vi.waitFor(() => expect(item(w, "Kill (hard)")?.disabled).toBe(false));
+      await vi.waitFor(() => expect(item(w, "Kill")?.disabled).toBe(false));
       expect(fetchMock).toHaveBeenCalledTimes(1);
     },
   );
@@ -288,43 +288,43 @@ describe("RunRow", () => {
     );
     vi.spyOn(browser, "confirm").mockReturnValue(true);
     const w = mountRow(row({ token: "tok-1" }));
-    expect(item(w, "Stop (soft)")?.disabled).toBe(false);
-    item(w, "Stop (soft)")!.onSelect!();
-    item(w, "Kill (hard)")!.onSelect!();
+    expect(item(w, "Stop")?.disabled).toBe(false);
+    item(w, "Stop")!.onSelect!();
+    item(w, "Kill")!.onSelect!();
     await w.vm.$nextTick();
-    expect(fetchMock).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=soft", {
+    expect(fetchMock).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=stop", {
       method: "POST",
       credentials: "same-origin",
     });
-    expect(item(w, "Stop (soft)")?.disabled).toBe(true);
-    expect(item(w, "Kill (hard)")?.disabled).toBe(true);
+    expect(item(w, "Stop")?.disabled).toBe(true);
+    expect(item(w, "Kill")?.disabled).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     settle({ ok: true });
-    await vi.waitFor(() => expect(menuItems(w).map((i) => i.label)).toEqual(["Open thread", "Kill (hard)"]));
-    expect(item(w, "Kill (hard)")?.disabled).toBe(false);
-    item(w, "Kill (hard)")!.onSelect!();
+    await vi.waitFor(() => expect(menuItems(w).map((i) => i.label)).toEqual(["Open thread", "Kill"]));
+    expect(item(w, "Kill")?.disabled).toBe(false);
+    item(w, "Kill")!.onSelect!();
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(fetchMock).toHaveBeenLastCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
+    expect(fetchMock).toHaveBeenLastCalledWith("/runs/run-1/stop?t=tok-1&mode=kill", {
       method: "POST",
       credentials: "same-origin",
     });
   });
 
-  it("Kill confirms first (destructive), POSTs mode=hard on yes, does nothing on no; a failed POST re-enables the item", async () => {
+  it("Kill confirms first (destructive), POSTs mode=kill on yes, does nothing on no; a failed POST re-enables the item", async () => {
     const confirmSpy = vi.spyOn(browser, "confirm").mockReturnValue(false);
     const w = mountRow(row({ token: "tok-1" }));
-    item(w, "Kill (hard)")!.onSelect!();
+    item(w, "Kill")!.onSelect!();
     expect(fetchMock).not.toHaveBeenCalled();
     confirmSpy.mockReturnValue(true);
     fetchMock.mockResolvedValueOnce({ ok: false, status: 500 });
-    item(w, "Kill (hard)")!.onSelect!();
+    item(w, "Kill")!.onSelect!();
     await w.vm.$nextTick();
-    expect(fetchMock).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
+    expect(fetchMock).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=kill", {
       method: "POST",
       credentials: "same-origin",
     });
-    expect(item(w, "Kill (hard)")?.disabled).toBe(true);
-    await vi.waitFor(() => expect(item(w, "Kill (hard)")?.disabled).toBe(false));
+    expect(item(w, "Kill")?.disabled).toBe(true);
+    await vi.waitFor(() => expect(item(w, "Kill")?.disabled).toBe(false));
   });
 
   it("a click on a tooltip cell (not a link or button) goes where the row goes", async () => {

@@ -702,9 +702,9 @@ describe("RunPage — history mode", () => {
     expect(failed.find(".conn .chip").text()).toBe("failed");
     expect(failed.find(".conn .chip").classes().join(" ")).toContain("bad");
     const soft = mountApp(RunPage, { seed: historySeed([], { status: "stopped_soft" }) });
-    expect(soft.find(".conn .chip").text()).toBe("stopped early");
+    expect(soft.find(".conn .chip").text()).toBe("stopped by user");
     const hard = mountApp(RunPage, { seed: historySeed([], { status: "stopped_hard", durationMs: 41_000 }) });
-    expect(hard.find(".conn .chip").text()).toBe("killed");
+    expect(hard.find(".conn .chip").text()).toBe("stopped by user");
     const unknown = mountApp(RunPage, { seed: historySeed([]) });
     expect(unknown.find(".conn .chip").text()).toBe("ended");
     // run-history item 27: a provisional tombstone is the third state — amber,
@@ -1233,7 +1233,7 @@ describe("RunPage — live mode", () => {
       vi.spyOn(browser, "confirm").mockReturnValue(true);
       await wrapper.find("#actions button").trigger("click");
       await flushPromises();
-      expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
+      expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=kill", {
         method: "POST",
         credentials: "same-origin",
       });
@@ -1268,13 +1268,13 @@ describe("RunPage — live mode", () => {
       expect(wrapper.find("#timeline .lede .shape").text()).toBe("1m 00s — in tools");
       await wrapper.find("#actions button").trigger("click");
       await flushPromises();
-      expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?mode=soft", { method: "POST", credentials: "same-origin" });
-      expect(wrapper.find(".conn").text()).toContain("stopping (soft)");
+      expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?mode=stop", { method: "POST", credentials: "same-origin" });
+      expect(wrapper.find(".conn").text()).toContain("stopping");
       es.emitNamed("finished", '{"finishedAt":61000}');
       es.emitNamed("end", '{"sealedAt":62000,"replyOk":true}');
       vi.advanceTimersByTime(10_000);
       await wrapper.vm.$nextTick();
-      expect(wrapper.find(".conn").text()).toContain("stopped early");
+      expect(wrapper.find(".conn").text()).toContain("stopped by user");
       expect(wrapper.find(".conn .dur").text()).toBe("1m 00s");
       expect(es.closed).toBe(true);
     } finally {
@@ -1717,7 +1717,7 @@ describe("RunPage — live mode", () => {
       (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: false, status: 503 });
       await wrapper.find("#actions button").trigger("click");
       await flushPromises();
-      expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
+      expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=kill", {
         method: "POST",
         credentials: "same-origin",
       });
@@ -1750,18 +1750,18 @@ describe("RunPage — live mode", () => {
     await wrapper.get("#actions button").trigger("click");
     await flushPromises();
     expect(fetch).toHaveBeenCalledTimes(2);
-    expect(fetch).toHaveBeenLastCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
+    expect(fetch).toHaveBeenLastCalledWith("/runs/run-1/stop?t=tok-1&mode=kill", {
       method: "POST",
       credentials: "same-origin",
     });
   });
 
-  it("Stop POSTs mode=soft on the run's stop URL and reads `stopping (soft)`; the end then says stopped early", async () => {
+  it("Stop POSTs mode=stop on the run's stop URL and reads `stopping`; the end then says stopped by user", async () => {
     const { wrapper, es } = mountLive();
     es().emitOpen();
     const buttons = wrapper.findAll("#actions button");
     await buttons[0].trigger("click");
-    expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=soft", {
+    expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=stop", {
       method: "POST",
       credentials: "same-origin",
     });
@@ -1770,10 +1770,10 @@ describe("RunPage — live mode", () => {
     // time-bounded wait flaked on saturated CI shards.
     await flushPromises();
     expect(wrapper.findAll("#actions button").map((b) => b.text())).toEqual(["Kill"]);
-    expect(wrapper.find("#state").text()).toBe("stopping (soft)");
+    expect(wrapper.find("#state").text()).toBe("stopping");
     es().emitNamed("end");
     await wrapper.vm.$nextTick();
-    expect(wrapper.find(".conn .chip").text()).toBe("stopped early");
+    expect(wrapper.find(".conn .chip").text()).toBe("stopped by user");
   });
 
   // Feature: record 0060 (live-view items 10 and 16) — a hosted ship parent's
@@ -1789,7 +1789,8 @@ describe("RunPage — live mode", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("Kill confirms first and marks killed at end; a refused confirm does nothing", async () => {
+  it("Kill confirms first and returns to the run list; a refused confirm does nothing", async () => {
+    const leave = vi.spyOn(browser, "leave").mockImplementation(() => {});
     const confirmSpy = vi.spyOn(browser, "confirm").mockReturnValue(false);
     const { wrapper, es } = mountLive();
     es().emitOpen();
@@ -1797,16 +1798,12 @@ describe("RunPage — live mode", () => {
     expect(fetch).not.toHaveBeenCalled();
     confirmSpy.mockReturnValue(true);
     await wrapper.findAll("#actions button")[1].trigger("click");
-    expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
+    expect(fetch).toHaveBeenCalledWith("/runs/run-1/stop?t=tok-1&mode=kill", {
       method: "POST",
       credentials: "same-origin",
     });
     await flushPromises();
-    expect(wrapper.findAll("#actions button").map((b) => b.text())).toEqual(["Kill"]);
-    expect((wrapper.find("#actions button").element as HTMLButtonElement).disabled).toBe(false);
-    es().emitNamed("end");
-    await wrapper.vm.$nextTick();
-    expect(wrapper.find(".conn .chip").text()).toBe("killed");
+    expect(leave).toHaveBeenCalledWith("/runs");
   });
 
   it("a failed stop re-enables the buttons and says so", async () => {
@@ -1848,7 +1845,7 @@ describe("RunPage — live mode", () => {
       "1",
     );
     await wrapper.vm.$nextTick();
-    expect(wrapper.find("#state").text()).toBe("stopping (soft)");
+    expect(wrapper.find("#state").text()).toBe("stopping");
     expect(wrapper.findAll("#actions button").map((b) => b.text())).toEqual(["Kill"]);
   });
 });
