@@ -1,4 +1,5 @@
 import { cancellationFailureMessage } from "../runLedger/cancellation.js";
+import { claimObservationCursor } from "../runLedger/claimObservation.js";
 import { checkSelectorSchema, type CheckSelector } from "../checkInspection.js";
 import { z } from "zod";
 import { authorize } from "../authz/authorize.js";
@@ -25,7 +26,8 @@ import type { ProviderFailureDetails } from "../provider.js";
 import type { RunEvent } from "../runEvents.js";
 import { SEARCH_MAX_HITS } from "../runLedger/sessionLog.js";
 import { PROVISIONAL_LABEL, RUN_ID_PATTERN, RUN_LIST_MAX_LIMIT, SESSION_KEY_PATTERN } from "../runRecord.js";
-import { TransientStoreError } from "../runStoreWorker.js";
+import { PermanentStoreError, RouteMissingError, TransientStoreError } from "../runStoreWorker.js";
+import { originalStorageFailure } from "../storageFailureDiagnostic.js";
 import {
   MAX_EVENTS_PAGE,
   runResource,
@@ -331,6 +333,50 @@ export const runsList = defineCommand({
       visibleTo,
     });
     return asJson({ ...page, runs: page.runs.map(wrapRunView), ...(scopeProof ? { readScope: scopeProof } : {}) });
+  },
+});
+
+export const runsClaims = defineCommand({
+  id: "runs.claims",
+  surfaces: { chat: false },
+  enabledWhen: (caps) => caps.runLedger,
+  options: z.object({
+    after: claimObservationCursor.optional().describe("page cursor from the preceding observation page"),
+    limit: positiveInt.max(RUN_LIST_MAX_LIMIT).optional().describe("observations per page, at most 200"),
+  }),
+  action: "runs:read",
+  effect: "read",
+  describe:
+    "List persisted unknown native claim observations. These are not current holds or commit receipts; missing observations do not prove absence.",
+  handler: async ({ options, caller, deps }) => {
+    try {
+      return asJson(
+        await (
+          await deps.runs()
+        ).listClaimObservations({ ...options, visibleTo: predicateFor(caller.actor, "runs:read", "run") }),
+      );
+    } catch (error) {
+      const diagnostic = originalStorageFailure(error);
+      try {
+        console.error(
+          JSON.stringify({
+            audit: "runs.claims",
+            failure:
+              diagnostic?.phase ??
+              (error instanceof RouteMissingError
+                ? "unsupported"
+                : error instanceof PermanentStoreError
+                  ? "refused-or-invalid"
+                  : "unclassified"),
+            ...(diagnostic?.httpStatus === undefined ? {} : { httpStatus: diagnostic.httpStatus }),
+            ...(diagnostic?.timing ? { deadlineExceeded: diagnostic.timing.deadlineExceeded } : {}),
+          }),
+        );
+      } catch {
+        // Logging cannot change the unavailable result or establish a claim outcome.
+      }
+      throw new CommandError("unavailable", "Claim observations could not be read; no claim outcome was established.");
+    }
   },
 });
 
@@ -738,6 +784,7 @@ export const runsSearch = defineCommand({
 
 export const runsCommands: readonly CommandDef<RunsCommandDeps>[] = [
   runsList,
+  runsClaims,
   runsGet,
   runsEvents,
   runsFriction,

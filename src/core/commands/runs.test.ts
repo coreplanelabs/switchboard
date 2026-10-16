@@ -21,7 +21,8 @@ import { parseRunEventLines } from "../runEventLines.js";
 import type { RunRecord } from "../runRecord.js";
 import { RunRegistry } from "../runRegistry.js";
 import { InMemoryRunStore } from "../runStore.js";
-import { TransientStoreError } from "../runStoreWorker.js";
+import { PermanentStoreError, TransientStoreError } from "../runStoreWorker.js";
+import { rememberStorageFailure } from "../storageFailureDiagnostic.js";
 import { createRunsService } from "../runsService.js";
 import {
   HOSTED_STOP_REFUSAL,
@@ -132,6 +133,109 @@ const dispatchOnly: Caller = {
   id: "mcp:agent",
   actor: actor("service", "mcp:agent", set("dispatch"), set()),
 };
+
+describe("runs claim observations", () => {
+  it.each(["http", "transport", "invalid"] as const)("logs only closed read failure facts: %s", async (kind) => {
+    const { registry } = await setup();
+    const error =
+      kind === "invalid"
+        ? new PermanentStoreError("PRIVATE_ROW_AND_EXCEPTION")
+        : new TransientStoreError("PRIVATE_TRANSPORT_AND_REQUEST");
+    if (kind !== "invalid")
+      rememberStorageFailure(error, {
+        version: 1,
+        operation: "/runs/claim-observations/list",
+        requestDigest: "a".repeat(64),
+        kind: "read",
+        phase: kind,
+        ...(kind === "http" ? { httpStatus: 500 } : {}),
+        timing: { elapsedMs: 2, timeoutMs: 10, deadlineExceeded: false },
+      });
+    const audit = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await registry.invoke("runs.claims", {}, reader, {
+        runs: async () => {
+          throw error;
+        },
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        error: "unavailable",
+        message: "Claim observations could not be read; no claim outcome was established.",
+      });
+      expect(audit.mock.calls).toEqual([
+        [
+          JSON.stringify({
+            audit: "runs.claims",
+            failure: kind === "invalid" ? "refused-or-invalid" : kind,
+            ...(kind === "http" ? { httpStatus: 500 } : {}),
+            ...(kind !== "invalid" ? { deadlineExceeded: false } : {}),
+          }),
+        ],
+      ]);
+    } finally {
+      audit.mockRestore();
+    }
+  });
+  it("lists only authorized unknown observations and never claims complete coverage", async () => {
+    const { reg, store, registry } = await setup();
+    const ledger = new InMemoryRunLedger();
+    for (const channelId of ["mcp:X", "mcp:Y"]) {
+      await ledger.recordClaimObservation({
+        version: 1,
+        runId: channelId === "mcp:X" ? "held-x" : "held-y",
+        gen: "original",
+        userId: "slack:UALICE",
+        channelId,
+        threadKey: `${channelId}:original`,
+        channelVisibility: "machine",
+        startedAt: 1,
+        observedAt: 2,
+        outcome: "unknown",
+        attempts: 1,
+      });
+    }
+    await ledger.recordClaimObservation({
+      version: 1,
+      runId: "internal-worker",
+      gen: "original",
+      userId: "slack:UALICE",
+      channelId: "mcp:X",
+      threadKey: "worker:private:U12",
+      channelVisibility: "machine",
+      startedAt: 1,
+      observedAt: 2,
+      outcome: "unknown",
+      attempts: 1,
+    });
+    const deps = { runs: async () => createRunsService({ registry: reg, store, ledger }) };
+    const own = value<{ coverage: string; observations: { runId: string; outcome: string }[] }>(
+      await registry.invoke("runs.claims", {}, pinnedX, deps),
+    );
+    expect(own).toMatchObject({ coverage: "recorded-only", observations: [{ runId: "held-x", outcome: "unknown" }] });
+    expect(own.observations).toHaveLength(1);
+    expect(value(await registry.invoke("runs.claims", {}, unpinned, deps))).toEqual({
+      coverage: "recorded-only",
+      observations: [],
+    });
+    expect(await registry.invoke("runs.claims", {}, dispatchOnly, deps)).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
+    expect(await registry.invoke("runs.claims", { options: { after: "not a cursor" } }, reader, deps)).toMatchObject({
+      ok: false,
+      error: "invalid_input",
+    });
+    expect(
+      value<{ observations: unknown[] }>(await registry.invoke("runs.claims", {}, reader, deps)).observations,
+    ).toHaveLength(2);
+    expect(
+      await registry.invoke("runs.claims", {}, reader, {
+        runs: async () => createRunsService({ registry: reg, store }),
+      }),
+    ).toMatchObject({ ok: false, error: "unavailable" });
+  });
+});
 /** A Slack admin: every grant. */
 const chatOperator: Caller = {
   kind: "chat",
@@ -285,6 +389,7 @@ describe("runs.* registrations", () => {
     expect(Object.keys(byId).sort()).toEqual([
       "runs.check",
       "runs.children",
+      "runs.claims",
       "runs.events",
       "runs.findings",
       "runs.friction",
@@ -297,6 +402,7 @@ describe("runs.* registrations", () => {
     ]);
     for (const id of [
       "runs.list",
+      "runs.claims",
       "runs.get",
       "runs.events",
       "runs.friction",
@@ -313,12 +419,13 @@ describe("runs.* registrations", () => {
     expect(byId["runs.settlecheck"]).toMatchObject({ action: "runs:write", effect: "write" });
     // The findings ledger reads finished records: it needs run history and says so; every other read is always on.
     expect(byId["runs.findings"].enabledWhen).toBeDefined();
-    for (const id of Object.keys(byId).filter((id) => id !== "runs.findings"))
+    expect(byId["runs.claims"].enabledWhen).toBeDefined();
+    for (const id of Object.keys(byId).filter((id) => !["runs.findings", "runs.claims"].includes(id)))
       expect(byId[id].enabledWhen, id).toBeUndefined();
     // The listings of run metadata are chat-shaped; what carries stored free text is not.
     for (const id of ["runs.list", "runs.unit", "runs.children", "runs.findings"])
       expect(byId[id].surfaces?.chat).toBeUndefined();
-    for (const id of ["runs.get", "runs.events", "runs.friction", "runs.search"])
+    for (const id of ["runs.get", "runs.events", "runs.friction", "runs.search", "runs.claims"])
       expect(byId[id].surfaces?.chat).toBe(false);
   });
 

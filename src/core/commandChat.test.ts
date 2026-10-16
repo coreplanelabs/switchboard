@@ -10,6 +10,7 @@ import {
   handleChatCommand,
   HELP_COMMAND_ID,
   invokeChatCommand,
+  chatCallerFor,
   parseChatCommand,
   type ChatCommands,
 } from "./commandChat.js";
@@ -19,6 +20,8 @@ import { RunRegistry } from "./runRegistry.js";
 import { InMemoryRunStore } from "./runStore.js";
 import { createRunsService } from "./runsService.js";
 import { registerRunsCommands, type RunsCommandDeps } from "./commands/runs.js";
+import { InMemoryRunLedger } from "./runLedger/inMemory.js";
+import { routableCommands } from "./dispatch/route.js";
 
 // Feature: docs/reference/specs/command-registry.md — the chat adapter:
 // `<group> <verb> <args…> [--kebab-flag value…]` recognized for
@@ -528,6 +531,51 @@ describe("handleChatCommand", () => {
 });
 
 describe("runs list on chat", () => {
+  it("keeps private claim observation metadata off a shared chat audience", async () => {
+    const registry = new CommandRegistry<RunsCommandDeps>({ audit: () => {} });
+    registerRunsCommands(registry);
+    const ledger = new InMemoryRunLedger();
+    await ledger.recordClaimObservation({
+      version: 1,
+      runId: "private-original",
+      gen: "original",
+      channelId: "slack:D0PRIVATE",
+      threadKey: "slack:D0PRIVATE:original",
+      userId: "slack:UOWNER",
+      channelVisibility: "dm",
+      repo: "private/repo",
+      startedAt: 1,
+      observedAt: 2,
+      outcome: "unknown",
+      attempts: 1,
+    });
+    const commands = bindCommands(registry, {
+      runs: async () => createRunsService({ registry: new RunRegistry(), store: new InMemoryRunStore(), ledger }),
+    });
+    const config = configStore(ADMIN_YAML),
+      message = msg("runs claims", "slack:UADMIN");
+    const reader = chatCallerFor(message, config);
+    expect(await commands.invoke("runs.claims", {}, { ...reader, kind: "mcp" })).toMatchObject({
+      ok: true,
+      value: {
+        coverage: "recorded-only",
+        observations: [
+          { runId: "private-original", channelId: "slack:D0PRIVATE", userId: "slack:UOWNER", repo: "private/repo" },
+        ],
+      },
+    });
+    const shared = await invokeChatCommand({
+      commands,
+      parsed: { kind: "invoke", id: "runs.claims", input: {} },
+      msg: message,
+      config,
+    });
+    expect(shared).toMatchObject({ ok: false, text: "⚠️ `runs claims`: unknown command: runs.claims" });
+    expect(parseChatCommand("runs claims", commands)).toBeNull();
+    const menu = routableCommands(commands).map((command) => command.id);
+    expect(menu).toContain("runs.list");
+    expect(menu).not.toContain("runs.claims");
+  });
   function record(id: string, finishedAt: number, over: Partial<RunRecord> = {}): RunRecord {
     const events = [
       { type: "input" as const, messageId: "m1", text: "please do the thing", seq: 1 },

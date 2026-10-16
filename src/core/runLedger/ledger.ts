@@ -137,6 +137,12 @@ export function mergeRequesterTarget(prior: RequesterTarget | null, next: Reques
 }
 
 export interface RunLedger {
+  recordClaimObservation?(
+    observation: import("./claimObservation.js").NativeClaimObservation,
+  ): Promise<{ stored: boolean }>;
+  listClaimObservations?(
+    query: import("./claimObservation.js").ClaimObservationQuery,
+  ): Promise<import("./claimObservation.js").ClaimObservationPage>;
   /** Canonical live or sealed terminal check source. Never accepts source facts from a caller. */
   readCheckSource?(
     selector: import("../checkInspection.js").CheckSelector,

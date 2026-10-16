@@ -1,4 +1,5 @@
 import type { CancellationRefusal, CancellationObservation } from "./runLedger/cancellation.js";
+import type { ClaimObservationPage } from "./runLedger/claimObservation.js";
 import {
   checkSourceReadOf,
   checkSourceIdentityHash,
@@ -460,6 +461,7 @@ export interface LiveRunAccess {
 }
 
 export interface RunsService {
+  listClaimObservations(query: { visibleTo: Predicate; after?: string; limit?: number }): Promise<ClaimObservationPage>;
   /** Match private canonical evidence to the ordinary run before the command authorizes it. */
   getCheckSource(selector: CheckSelector): Promise<Result<{ run: RunRecordView; source: CheckSourceRead }>>;
   inspectCheck(source: CheckSourceRead): Promise<CheckInspection>;
@@ -575,7 +577,9 @@ export interface RunsServiceDeps {
    *  Null or absent when the ledger is off. */
   ledger?:
     | (Pick<RunLedger, "listLive" | "readEvents" | "requestStop" | "finish" | "planeWithdraw" | "planeQueued"> &
-        Partial<Pick<RunLedger, "prepareCancellation" | "finishCancellation" | "readCheckSource">>)
+        Partial<
+          Pick<RunLedger, "prepareCancellation" | "finishCancellation" | "readCheckSource" | "listClaimObservations">
+        >)
     | null;
   /** Only the bot that owns this generation may close its paused rows.
    *  A CLI or another reader has no generation and only signals a stop. */
@@ -1180,6 +1184,10 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
   };
 
   const service: RunsService = {
+    async listClaimObservations({ visibleTo, ...query }) {
+      if (!ledger?.listClaimObservations) throw new Error("Claim observations are unavailable");
+      return ledger.listClaimObservations({ ...query, ordinaryOnly: true, visibleTo: toVisibilityFilter(visibleTo) });
+    },
     async listRuns(opts) {
       const limit = clampListLimit(opts.limit);
       // `none` is decided here, once: no live row qualifies and the store is not asked.

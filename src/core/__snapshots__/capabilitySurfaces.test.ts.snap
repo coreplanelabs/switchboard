@@ -93,6 +93,9 @@ exports[`capability axis — a capability turning on changes exactly the command
     "runHistory",
     "readingDiffAbridge",
   ],
+  "runs.claims": [
+    "runLedger",
+  ],
   "runs.findings": [
     "runHistory",
   ],
@@ -123,6 +126,7 @@ commands:
   config instructions  — Custom instructions for a channel (gated) or for yourself — advisory prompt content that never changes agent, model, or permissions.
   credentials inspect  — Inspect a live run's credential boundary; reports only counts and booleans, never credential contents. Does not test publication or revocation.
   runs list            — List runs (live and persisted, newest first) — metadata only, never message text.
+  runs claims          — List persisted unknown native claim observations. These are not current holds or commit receipts; missing observations do not prove absence.
   runs get             — One run's record and cost in dollars per model (or unpriced); \`--include messages\` adds events with free text wrapped as untrusted content; \`--include audience\` adds a structural refusal diagnostic when recorded.
   runs events          — A page of one run's events after \`--after-seq\` (server-capped); free text wrapped as untrusted content.
   runs friction        — One run's friction diagnosis (live: computed now; persisted: as stored).
@@ -237,6 +241,7 @@ exports[`capability surfaces — cloud-full > HTTP catalogue: the /api/<id> rout
   "review.status",
   "runs.check",
   "runs.children",
+  "runs.claims",
   "runs.events",
   "runs.findings",
   "runs.friction",
@@ -302,6 +307,7 @@ exports[`capability surfaces — cloud-full > MCP tools/list names 1`] = `
   "review_status",
   "runs_check",
   "runs_children",
+  "runs_claims",
   "runs_events",
   "runs_findings",
   "runs_friction",

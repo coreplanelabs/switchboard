@@ -1,4 +1,6 @@
 import { INBOX_DELIVERY_RECEIPTS_MAX } from "../budgets.js";
+import { nativeClaimObservationOf, claimObservationKey, claimObservationQueryOf } from "./claimObservation.js";
+import { matchesVisibility } from "../runRecord.js";
 import {
   prepareInboxDelivery,
   replayInboxDelivery,
@@ -334,6 +336,39 @@ export interface SessionLog {
 const TRIM_MARKER_BYTES_ESTIMATE = 260;
 
 export class InMemoryRunLedger implements RunLedger {
+  private readonly claimObservations = new Map<string, import("./claimObservation.js").NativeClaimObservation>();
+  async recordClaimObservation(
+    input: import("./claimObservation.js").NativeClaimObservation,
+  ): Promise<{ stored: boolean }> {
+    const value = nativeClaimObservationOf(input);
+    if (!value) throw new Error("invalid claim observation");
+    const key = claimObservationKey(value),
+      previous = this.claimObservations.get(key);
+    if (previous) return { stored: JSON.stringify(previous) === JSON.stringify(value) };
+    this.claimObservations.set(key, value);
+    return { stored: true };
+  }
+  async listClaimObservations(
+    input: import("./claimObservation.js").ClaimObservationQuery,
+  ): Promise<import("./claimObservation.js").ClaimObservationPage> {
+    const query = claimObservationQueryOf(input);
+    if (!query) throw new Error("invalid claim observation query");
+    const limit = query.limit ?? 50;
+    const rows = [...this.claimObservations]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .filter(
+        ([key, row]) =>
+          (query.after === undefined || key > query.after) &&
+          matchesVisibility(query.visibleTo, row) &&
+          (!query.ordinaryOnly || !row.threadKey.startsWith("worker:")),
+      )
+      .slice(0, limit + 1);
+    return {
+      coverage: "recorded-only",
+      observations: structuredClone(rows.slice(0, limit).map(([, row]) => row)),
+      ...(rows.length > limit ? { nextAfter: rows[limit - 1][0] } : {}),
+    };
+  }
   readonly reviewFeedback = new InMemoryReviewFeedbackStore(() => this.now());
   private readonly ingress = new Map<string, IngressRecord>();
   private readonly deletedIngress = new Map<string, number>();

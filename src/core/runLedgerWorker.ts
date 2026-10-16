@@ -1,5 +1,14 @@
 import { prepareInboxDelivery, inboxDeliveryResultOf, type InboxDeliveryResult } from "./runLedger/inboxDelivery.js";
 import { EXECUTION_PROTOCOL_HEADER } from "./runLedger/types.js";
+import {
+  nativeClaimObservationOf,
+  claimObservationKey,
+  claimObservationQueryOf,
+  type NativeClaimObservation,
+  type ClaimObservationQuery,
+  type ClaimObservationPage,
+} from "./runLedger/claimObservation.js";
+import { matchesVisibility } from "./runRecord.js";
 import type { InboxPushResult } from "./runLedger/inboxMessage.js";
 import {
   sourceRelevanceRequestOf,
@@ -213,6 +222,7 @@ import {
   STORAGE_REQUEST_ID_HEADER,
   storageFailureNotice,
   emitStorageFailure,
+  rememberStorageFailure,
   isStorageDiagnosticAppend,
   type StorageFailureDiagnostic,
   type StorageFailureNotice,
@@ -438,6 +448,7 @@ export class WorkerRunLedger implements RunLedger {
           }
         : undefined;
       const notice = storageFailureNotice(request, kind, phase, error, response, server, observation);
+      rememberStorageFailure(error, notice.diagnostic);
       emitStorageFailure(notice, isStorageDiagnosticAppend(request) ? undefined : this.opts.onFailure);
     } catch {
       // Telemetry must never replace the original exception or change retries.
@@ -1607,6 +1618,42 @@ export class WorkerRunLedger implements RunLedger {
       else await this.post("/runs/transcript/owner", { runId: run.row.runId, gen });
     }
     return runs;
+  }
+
+  async recordClaimObservation(input: NativeClaimObservation): Promise<{ stored: boolean }> {
+    const observation = nativeClaimObservationOf(input);
+    if (!observation) throw new PermanentStoreError("invalid claim observation");
+    const result = await this.post("/runs/claim-observations/record", { storeKey: this.opts.storeKey, observation });
+    if (typeof result.data.stored !== "boolean" || Object.keys(result.data).some((key) => key !== "stored"))
+      throw this.unknownAcknowledgement("invalid claim observation acknowledgement", result.request, result.status);
+    return { stored: result.data.stored };
+  }
+
+  async listClaimObservations(input: ClaimObservationQuery): Promise<ClaimObservationPage> {
+    const query = claimObservationQueryOf(input);
+    if (!query) throw new PermanentStoreError("invalid claim observation query");
+    const result = await this.read("/runs/claim-observations/list", { storeKey: this.opts.storeKey, query });
+    const rows = result.data.observations;
+    if (result.data.coverage !== "recorded-only" || !Array.isArray(rows) || rows.length > (query.limit ?? 50))
+      throw new PermanentStoreError("unreadable claim observations");
+    const observations: NativeClaimObservation[] = [];
+    let previous = query.after ?? "";
+    for (const raw of rows) {
+      const row = nativeClaimObservationOf(raw);
+      if (
+        !row ||
+        !matchesVisibility(query.visibleTo, row) ||
+        (query.ordinaryOnly && row.threadKey.startsWith("worker:")) ||
+        claimObservationKey(row) <= previous
+      )
+        throw new PermanentStoreError("unreadable claim observations");
+      observations.push(row);
+      previous = claimObservationKey(row);
+    }
+    const cursor = result.data.nextAfter;
+    if (cursor !== undefined && (typeof cursor !== "string" || observations.length === 0 || cursor !== previous))
+      throw new PermanentStoreError("unreadable claim observation cursor");
+    return { coverage: "recorded-only", observations, ...(typeof cursor === "string" ? { nextAfter: cursor } : {}) };
   }
 
   async listLive(): Promise<LiveRunRow[]> {

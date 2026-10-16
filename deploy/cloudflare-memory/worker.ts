@@ -383,6 +383,15 @@ import {
   contextThreadSessionKey,
 } from "../../src/core/runLedger/sessionLog.ts";
 import { mergeRequesterTarget, type RequesterTarget } from "../../src/core/runLedger/ledger.ts";
+import {
+  nativeClaimObservationOf,
+  claimObservationCursor,
+  claimObservationKey,
+  claimObservationQueryOf,
+  type NativeClaimObservation,
+  type ClaimObservationQuery,
+  type ClaimObservationPage,
+} from "../../src/core/runLedger/claimObservation.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
 import {
   prepareHistoricalNativeAudit,
@@ -2336,6 +2345,69 @@ export class RunHistoryDO extends DurableObject<Env> {
    *  selected once at construction, the `SHIP_COORDINATOR?` shape. */
   private readonly metrics: RunMetricsSink;
 
+  recordClaimObservation(input: NativeClaimObservation): { stored: boolean } {
+    const value = nativeClaimObservationOf(input);
+    if (!value) throw new Error("invalid claim observation");
+    const key = claimObservationKey(value),
+      bytes = JSON.stringify(value);
+    this.sql.exec(
+      "INSERT OR IGNORE INTO claim_observations (observation_key, channel_id, user_id, channel_visibility, repo, json) VALUES (?, ?, ?, ?, ?, ?)",
+      key,
+      value.channelId,
+      value.userId,
+      value.channelVisibility,
+      value.repo ?? null,
+      bytes,
+    );
+    return {
+      stored:
+        this.sql.exec<{ json: string }>("SELECT json FROM claim_observations WHERE observation_key = ?", key).one()
+          .json === bytes,
+    };
+  }
+
+  listClaimObservations(input: ClaimObservationQuery): ClaimObservationPage {
+    const query = claimObservationQueryOf(input);
+    if (!query) throw new Error("invalid claim observation query");
+    const parameters: (string | number)[] = [query.after ?? ""];
+    const visibility = visibilitySql(query.visibleTo, parameters),
+      limit = query.limit ?? 50;
+    // Only a known worker prefix is excluded here; corrupt rows must reach the guarded decoder.
+    const rows = this.sql
+      .exec<{ observation_key: string; json: string }>(
+        `SELECT observation_key, json FROM claim_observations WHERE observation_key > ? AND ${visibility}${query.ordinaryOnly ? " AND CASE WHEN json_valid(json) THEN coalesce(substr(json_extract(json, '$.threadKey'), 1, 7) != 'worker:', 1) ELSE 1 END" : ""} ORDER BY observation_key LIMIT ?`,
+        ...parameters,
+        limit + 1,
+      )
+      .toArray();
+    const observations = rows.slice(0, limit).map((row) => {
+      let value: NativeClaimObservation | undefined;
+      try {
+        value = nativeClaimObservationOf(parseStoredJson(row.json));
+      } catch {
+        // Stored JSON can be unreadable; its private bytes do not belong in this diagnostic.
+      }
+      if (!value || claimObservationKey(value) !== row.observation_key) {
+        try {
+          console.warn("[runs/claim-observations/list] unreadable", {
+            observationKey: claimObservationCursor.safeParse(row.observation_key).success
+              ? row.observation_key
+              : "invalid-key",
+          });
+        } catch {
+          // Preserve the read failure if the diagnostic sink fails.
+        }
+        throw new Error("unreadable claim observation");
+      }
+      return value;
+    });
+    return {
+      coverage: "recorded-only",
+      observations,
+      ...(rows.length > limit ? { nextAfter: rows[limit - 1].observation_key } : {}),
+    };
+  }
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
@@ -2346,6 +2418,11 @@ export class RunHistoryDO extends DurableObject<Env> {
     // live one per row keyed (run_id, seq) so a 5000-event run is paged, never
     // loaded whole to answer a listing. `meta` holds the persisted policy.
     this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS claim_observations (
+        observation_key TEXT PRIMARY KEY,
+        channel_id TEXT NOT NULL, user_id TEXT NOT NULL, channel_visibility TEXT NOT NULL,
+        repo TEXT, json TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS ingress_deletions (effect_key TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS ingress_owners (
         effect_key TEXT PRIMARY KEY,
@@ -13010,6 +13087,8 @@ const LEDGER_ROUTES = new Set([
   "/runs/coordinator/wake",
   "/runs/decision-record/reserve",
   "/runs/claim",
+  "/runs/claim-observations/record",
+  "/runs/claim-observations/list",
   "/runs/cancellation/prepare",
   "/runs/cancellation/read",
   "/runs/cancellation/finish",
@@ -14050,6 +14129,17 @@ async function handleLedger(
     }
   }
 
+  if (pathname === "/runs/claim-observations/record") {
+    const observation = nativeClaimObservationOf(b.observation);
+    if (!observation) return json({ error: "invalid claim observation" }, 400);
+    return json(await stub.recordClaimObservation(observation));
+  }
+  if (pathname === "/runs/claim-observations/list") {
+    const query = claimObservationQueryOf(b.query);
+    if (!query || boundParameters(query.visibleTo) > DO_MAX_BOUND_PARAMETERS - 2)
+      return json({ error: "invalid claim observation query" }, 400);
+    return json(await stub.listClaimObservations(query));
+  }
   if (pathname === "/runs/promotion/prepare") {
     const parsed = parseClaim(b);
     if (!parsed.ok || originalBody === undefined) return json({ error: "invalid original promotion body" }, 400);

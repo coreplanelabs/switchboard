@@ -531,6 +531,10 @@ export const COMMAND_FIXTURES: Readonly<
     baseline: { channel: "http:smoke", readUser: "http:smoke", readRepo: "acme/smoke" },
     why: "the optional HTTP permission preview requires its channel and paired requester/repository identifiers on every surface",
   },
+  "runs.claims": {
+    hints: { after: "original-run|original" },
+    why: "the cursor binds an original run and generation rather than arbitrary text",
+  },
   "metrics.reviews": {
     // Two whole UTC days a week apart, `--from` first: the generic string sample is no day.
     hints: {
