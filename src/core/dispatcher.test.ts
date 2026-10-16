@@ -16938,6 +16938,86 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
   );
 
   it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ] as const)(
+    "holds an unknown native claim through setup and follow-up: committed=%s coordinator=%s",
+    async (committed, coordinator) => {
+      const provider = capturingProvider("must not run"),
+        h = wired(provider);
+      const admission = new ThreadAdmission<DispatchFollowUp>();
+      h.deps.admission = admission;
+      const claim = h.ledger.claim.bind(h.ledger);
+      const bodies: string[] = [];
+      const earlier = ioWithCard();
+      const heldLog = vi.spyOn(console, "warn");
+      const transport = new WorkerRunLedger({
+        baseUrl: "https://claim-receiver.invalid",
+        token: "fixture",
+        storeKey: "runs:fixture",
+        fetch: async (_input, init) => {
+          const body = String(init?.body);
+          bodies.push(body);
+          if (committed) await claim(JSON.parse(body).run);
+          await dispatch(h.deps, msg("agent:general early follow-up"), earlier.io);
+          return new Response("claim reply unavailable", { status: 500 });
+        },
+      });
+      h.ledger.claim = transport.claim.bind(transport);
+      const { io, replies } = ioWithCard();
+      const ended = await dispatch(
+        h.deps,
+        msg("agent:general original request"),
+        io,
+        coordinator
+          ? {
+              coordinator: {
+                parentInstanceId: "claim-owner",
+                idempotencyKey: "claim-owner:U12/0/general",
+                unit: "U12",
+              },
+            }
+          : {},
+      );
+      expect(ended).toEqual({ status: "failed", unknownClaim: { runId: "run-l" }, cause: "system" });
+      expect(replies.join("\n")).toContain("The original task remains on hold");
+      expect(replies.join("\n")).toContain("original run run-l");
+      expect(earlier.replies.at(-1)).toBe(
+        "The original task remains on hold because its start could not be confirmed. This message was not saved or queued. No replacement work started. Original run: run-l.",
+      );
+      expect(heldLog).toHaveBeenCalledWith(
+        "[dispatch] slack:CX:1.0 native run run-l is held: the initial claim outcome is unknown",
+      );
+      expect(admission.get("slack:CX:1.0")).toMatchObject({ agent: "general" });
+      for (const verbosity of ["quiet", "verbose", "debug"] as const) {
+        await h.deps.config.setChannelOverride("slack:CX", { verbosity });
+        const follower = ioWithCard();
+        const outcome = await dispatch(h.deps, msg("agent:general follow-up request"), follower.io);
+        expect(outcome).toEqual({ status: "failed", unknownClaim: { runId: "run-l" }, cause: "system" });
+        expect(follower.replies).toEqual([
+          "The original task remains on hold because its start could not be confirmed. This message was not saved or queued. No replacement work started. Original run: run-l.",
+        ]);
+      }
+      expect(admission.get("slack:CX:1.0")?.inbox.size).toBe(0);
+      await h.writer.settled();
+      expect(bodies).toHaveLength(1);
+      expect(JSON.parse(bodies[0]).run).toMatchObject({
+        runId: "run-l",
+        phase: "attaching",
+        meta: { residentExecution: "native-v1", request: { text: "agent:general original request" } },
+      });
+      expect(h.ledger.live.has("run-l")).toBe(committed);
+      expect(h.ledger.finished.size).toBe(0);
+      expect(h.fallbackPuts).toEqual([]);
+      expect(await h.store.get("run-l")).toBeNull();
+      expect(provider.requests).toEqual([]);
+      expect(makeExecutor).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
     ["reserve", false],
     ["reserve", true],
     ["open", false],
@@ -18821,6 +18901,42 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
       };
       return { ...h, provider, repoCtx, instance, admin, call, spawnBody, io, replies, started, finished, dispatched };
     }
+
+    it.each([false, true])(
+      "keeps an unknown initial claim uncertain at the actual spawn endpoint: committed=%s",
+      async (committed) => {
+        const h = await setup("coding");
+        const claim = h.ledger.claim.bind(h.ledger);
+        const bodies: string[] = [];
+        const transport = new WorkerRunLedger({
+          baseUrl: "https://claim-receiver.invalid",
+          token: "fixture",
+          storeKey: "runs:fixture",
+          fetch: async (_input, init) => {
+            const body = String(init?.body);
+            bodies.push(body);
+            if (committed) await claim(JSON.parse(body).run);
+            return new Response("claim reply unavailable", { status: 500 });
+          },
+        });
+        h.ledger.claim = transport.claim.bind(transport);
+        expect(await h.call("spawn", h.spawnBody)).toMatchObject({ status: 503 });
+        expect((await h.admin.instances.listUnits(h.instance.id))[0].currentEffect).toMatchObject({
+          phase: "active",
+          calls: [{ operation: "spawn", state: "uncertain" }],
+        });
+        expect(await h.call("spawn", h.spawnBody)).toMatchObject({ status: 503 });
+        expect(
+          await h.call("spawn", { ...h.spawnBody, step: "U12/1/coding", effectId: "U12/1/coding", effectOrdinal: 2 }),
+        ).toMatchObject({ status: 409, body: { error: "effect_execution_mismatch" } });
+        expect(h.dispatched).toHaveLength(1);
+        expect(bodies).toHaveLength(1);
+        expect(h.ledger.live.has("run-l")).toBe(committed);
+        expect(h.started).not.toHaveBeenCalled();
+        expect(h.provider.requests).toEqual([]);
+        expect(h.ledger.finished.size).toBe(0);
+      },
+    );
 
     it("a parent target without its original publication tag refuses before repository resolution", async () => {
       const h = await setup("review");

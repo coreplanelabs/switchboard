@@ -1825,7 +1825,7 @@ async function spawn(body: Record<string, unknown>, deps: AdminCoordinatorDeps):
     log(`[coordinator] ${instance.id} ${req.step}: spawned ${req.preset} run ${runId} in ${threadKey}`);
     return json(200, { ok: true, runId, threadKey, effectOrdinal, at });
   }
-  if (first.kind === "threw") {
+  if (first.kind === "threw" || first.outcome.unknownClaim !== undefined) {
     await finishEffect({ state: "uncertain" }).catch(() => false);
     return unavailable();
   }

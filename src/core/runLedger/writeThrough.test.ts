@@ -34,6 +34,7 @@ import {
 } from "./sessionLog.js";
 import {
   createLedgerWriteThrough,
+  NativeClaimUnknownError,
   deliverPlaneSteer,
   LANDED_MAX,
   mintGeneration,
@@ -155,6 +156,77 @@ const openReq = (over: Partial<OpenRunRequest> = {}): OpenRunRequest => ({
   tools: [{ name: "bash", description: "run", inputSchema: { type: "object" } }],
   seed: { messages: [user("earlier"), assistant("sure"), user("go")], budgetMs: 600_000 },
   ...over,
+});
+
+describe("unknown native initial claim", () => {
+  it.each([false, true])("holds the original HTTP 500 claim without replay: committed=%s", async (committed) => {
+    const inner = new InMemoryRunLedger(() => 10_000);
+    const bodies: string[] = [];
+    const transport = new WorkerRunLedger({
+      baseUrl: "https://claim-receiver.invalid",
+      token: "fixture",
+      storeKey: "runs:fixture",
+      fetch: async (_input, init) => {
+        const body = String(init?.body);
+        bodies.push(body);
+        if (committed) await inner.claim(JSON.parse(body).run);
+        return new Response("claim reply unavailable", { status: 500 });
+      },
+    });
+    const { wt, t, fallbackPuts, sleeps } = harness({ ledger: transport });
+    const request = openReq({ seed: undefined });
+    request.meta.residentExecution = "native-v1";
+    request.meta.request = { text: "review the original change" };
+    const error = await wt.reserve(request).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ name: "NativeClaimUnknownError", outcome: "unknown" });
+    if (!(error instanceof NativeClaimUnknownError) || !(error.cause instanceof UncertainStoreError))
+      throw new Error("the original transport witness was not retained");
+    expect(error.cause.request.payload).toBe(bodies[0]);
+    expect(error.cause.diagnosis).toEqual({ kind: "http", status: 500 });
+    request.meta.request.text = "caller changed the request";
+    expect(error.claim).toMatchObject({
+      runId: "r1",
+      gen: "gen-A",
+      phase: "attaching",
+      meta: { request: { text: "review the original change" } },
+    });
+    const copied = error.claim;
+    copied.meta.request!.text = "a reader changed its copy";
+    expect(error.claim.meta.request).toEqual({ text: "review the original change" });
+    expect(Object.keys(error)).not.toContain("claim");
+    await expect(wt.reserve(request)).rejects.toBe(error);
+    expect(bodies).toHaveLength(1);
+    expect(sleeps).toEqual([]);
+    expect(t.heartbeats()).toBe(0);
+    expect(fallbackPuts).toEqual([]);
+    expect(inner.live.has("r1")).toBe(committed);
+  });
+
+  it("preserves known missing-route and legacy unknown fallbacks", async () => {
+    const original = openReq({ seed: undefined });
+    const missing = harness({
+      ledger: overriding(new InMemoryRunLedger(), {
+        claim: async () => {
+          throw new RouteMissingError("not deployed");
+        },
+      }),
+    });
+    expect(
+      await missing.wt.reserve({ ...original, meta: { ...original.meta, residentExecution: "native-v1" } }),
+    ).toEqual({ kind: "untracked", why: "the state Worker has no run-ledger routes" });
+    const witness = await storeRequestWitness("/runs/claim", "original legacy bytes");
+    const legacy = harness({
+      ledger: overriding(new InMemoryRunLedger(), {
+        claim: async () => {
+          throw new UncertainStoreError("legacy uncertain claim", witness);
+        },
+      }),
+    });
+    expect(await legacy.wt.reserve(original)).toEqual({
+      kind: "untracked",
+      why: "the claim failed after 1 attempt(s): legacy uncertain claim",
+    });
+  });
 });
 
 describe("original reservation promotion custody", () => {

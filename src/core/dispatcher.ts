@@ -62,7 +62,7 @@ import { isRunProfile } from "../config/profile.js";
 import { MINUTE_MS, minutesToMs } from "./budgets.js";
 import type { LedgerRun } from "./runLedger/writeThrough.js";
 import { settleRetryPause } from "./runLedger/threadsElsewhere.js";
-import { TerminalCommitmentUnknownError } from "./runLedger/writeThrough.js";
+import { NativeClaimUnknownError, TerminalCommitmentUnknownError } from "./runLedger/writeThrough.js";
 import { UnknownAllocationClaimError } from "./runLedger/allocationAck.js";
 import { PromotionPendingError, PromotionIdentityRefusal } from "./runLedger/promotion.js";
 import { systemClock } from "./trace/index.js";
@@ -300,6 +300,7 @@ import {
   type CoordinatorUnit,
 } from "./coordinator/contract.js";
 import type { DispatchOutcome } from "./dispatch/outcome.js";
+import { heldFollowUpReply } from "./threadAdmission.js";
 import type { IssueTracker } from "../execution/githubIssues.js";
 import { defaultRunRegistry, type RunHandle } from "./runRegistry.js";
 import type { CardShell } from "./statusCardFrame.js";
@@ -994,6 +995,7 @@ export async function dispatch(
   let setupFailure: RunFailure | undefined;
   let setupFinished = false;
   let setupCustodyHeld = false;
+  let nativeClaimHeld = false;
   let setupUntrackedWhy: string | undefined;
   const audienceTrace: AudienceTrace = { refusal: audienceRefusalOf(resume?.row.state.audienceRefusal) };
   const recordRefusalOnce = async (refusal: Refusal) => {
@@ -2566,6 +2568,13 @@ export async function dispatch(
       },
     };
     const outcome = await admit(deps, admissionCtx);
+    if (outcome.kind === "held") {
+      caught = true;
+      ended.unknownClaim = { runId: outcome.runId };
+      ended.cause = "system";
+      root.setAttrs({ cause: "system" });
+      return ended;
+    }
     // A redispatch (the boot-gap steer that found its row gone) is a request
     // of its own — its own root, no resume or restart — but the same message:
     // a child stays its parent's child, starts from the same seed, a
@@ -5460,17 +5469,30 @@ export async function dispatch(
     caught = true;
     if (
       err instanceof TerminalCommitmentUnknownError ||
+      err instanceof NativeClaimUnknownError ||
       err instanceof UnknownAllocationClaimError ||
       err instanceof PromotionPendingError ||
       err instanceof PromotionIdentityRefusal
     ) {
       setupCustodyHeld = true;
       resumeRowRetained = true;
-      ended.refusal = "setup_failed";
+      if (!(err instanceof NativeClaimUnknownError)) ended.refusal = "setup_failed";
       ended.cause = "system";
       root.setAttrs({ refusal: "setup_failed", cause: "system" });
       let text: string;
-      if (err instanceof TerminalCommitmentUnknownError) {
+      if (err instanceof NativeClaimUnknownError) {
+        nativeClaimHeld = true;
+        ended.unknownClaim = { runId: err.claim.runId };
+        if (admitted) {
+          admitted.unknownClaim = { ...ended.unknownClaim };
+          for (const pending of admitted.inbox.drain())
+            await pending.io?.reply(heldFollowUpReply(err.claim.runId)).catch(() => {});
+        }
+        console.warn(
+          `[dispatch] ${msg.threadKey} native run ${err.claim.runId} is held: the initial claim outcome is unknown`,
+        );
+        text = `I could not confirm whether the original task was saved. The original task remains on hold. This setup did not start the model. A Switchboard operator must check original run ${err.claim.runId} before it can continue.`;
+      } else if (err instanceof TerminalCommitmentUnknownError) {
         const original = registry.getById(err.hold.runId);
         if (original && err.hold.threadKey === msg.threadKey)
           deps.threadsElsewhere.remember(msg.threadKey, {
@@ -5704,7 +5726,9 @@ export async function dispatch(
     }
     const settled = settleThread(deps, {
       msg,
-      admitted: fencedWhileAttaching ? undefined : admitted,
+      // An unknown native claim has no confirmed row for queued work. Keep
+      // its local slot so settlement cannot start a replacement request.
+      admitted: fencedWhileAttaching || nativeClaimHeld ? undefined : admitted,
       // A stop that ended the attach counts as the loop's stop would: the
       // request ends `stopped`, and a follow-up queued during the wait is told.
       stopCounts: !fencedWhileAttaching && (runLoopStarted || stoppedWhileAttaching !== undefined),

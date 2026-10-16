@@ -1,5 +1,5 @@
 import { privateDestinationOf, organizationPrivateAudienceOf, copyPrivateSourceFacts } from "./privateDestination.js";
-import { TerminalCommitmentUnknownError } from "../runLedger/writeThrough.js";
+import { NativeClaimUnknownError, TerminalCommitmentUnknownError } from "../runLedger/writeThrough.js";
 import { originalColdAllocation, sameWorkspaceAllocation } from "../runLedger/workspaceDurability.js";
 import { residentRouteOf } from "../../execution/residentRoute.js";
 import { resourceLifetimeSchema } from "../../agents/resourceLifetime.js";
@@ -973,7 +973,12 @@ export async function reserveRun(deps: ProvisionDeps, ctx: ReserveContext): Prom
         }),
       )
       .catch((err: unknown) => {
-        if (!coordinator || err instanceof TerminalCommitmentUnknownError || err instanceof UnknownAllocationClaimError)
+        if (
+          !coordinator ||
+          err instanceof TerminalCommitmentUnknownError ||
+          err instanceof UnknownAllocationClaimError ||
+          err instanceof NativeClaimUnknownError
+        )
           throw err;
         throw new RefusalError(refusalOf("child_reservation_failed", "The child could not be durably reserved."));
       });

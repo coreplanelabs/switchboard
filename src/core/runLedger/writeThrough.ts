@@ -90,6 +90,7 @@ import {
   LEASE_MS,
   type AppendableEvent,
   type CardHandle,
+  type ClaimRequest,
   type IntakeReceipt,
   type IntakeWriteResult,
   type LiveRunMeta,
@@ -326,6 +327,19 @@ export class TerminalCommitmentUnknownError extends UncertainStoreError {
   constructor(hold: TerminalCommitmentHold, request: StoreRequestWitness) {
     super("the original terminal commitment remains unknown", request);
     this.hold = Object.freeze({ ...hold });
+  }
+}
+
+/** Retain the original native claim without granting attach or replay. The
+ * transport cause keeps its actual private wire witness when available. */
+export class NativeClaimUnknownError extends Error {
+  readonly outcome = "unknown";
+  declare readonly claim: ClaimRequest;
+  constructor(claim: ClaimRequest, cause: unknown) {
+    super("The native run claim outcome is unknown.", { cause });
+    this.name = "NativeClaimUnknownError";
+    const original = structuredClone(claim);
+    Object.defineProperty(this, "claim", { get: () => structuredClone(original), enumerable: false });
   }
 }
 
@@ -912,6 +926,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
    *  reach the ledger — the claim abandons it again and claims once more
    *  (item 54), so no dispatch ordering in the finally has to be right. */
   const unpromoted = new Set<string>();
+  /** An unknown original cannot be evicted into permission to claim again. */
+  const nativeClaimHolds = new Map<string, NativeClaimUnknownError>();
   const landingFor = (runId: string): Landing => {
     let entry = landing.get(runId);
     if (entry === undefined) {
@@ -978,6 +994,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
       originalAck?: WorkspaceAllocationAck;
     } = {},
   ): Promise<Claimed> {
+    const held = nativeClaimHolds.get(req.runId);
+    if (held) throw held;
     const allocationBearing = req.meta.workspaceAllocation !== undefined || opts.originalAck !== undefined;
     req = { ...req, meta: structuredClone(req.meta) };
     // The one re-claim made after a `thread-live` naming a run this process
@@ -999,8 +1017,8 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
     if (priorFinish !== undefined) awaited = { runId: req.runId, outcome: await priorFinish.settled };
     if (awaited?.outcome.kind === "unknown") return heldLanding(landing.get(awaited.runId)!);
     for (let attempt = 1; ; attempt++) {
-      let claimEntered = false,
-        claimAccepted = false;
+      let claimAccepted = false;
+      let originalClaim: ClaimRequest | undefined;
       try {
         let session: RunSession | undefined;
         if (opts.seed) {
@@ -1039,7 +1057,7 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           ...(opts.phase ? { phase: opts.phase } : {}),
         };
         const expected = structuredClone(request);
-        claimEntered = true;
+        originalClaim = expected;
         const result = await ledger.claim(request);
         if (result.ok) {
           claimAccepted = true;
@@ -1114,13 +1132,17 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
         return { outcome: "untracked", why, refused: "thread-live" };
       } catch (err) {
         if (
-          allocationBearing &&
+          (allocationBearing || req.meta.residentExecution === "native-v1") &&
+          originalClaim !== undefined &&
           (claimAccepted ||
-            (claimEntered &&
-              (err instanceof UncertainStoreError || !(err instanceof PermanentStoreError)) &&
+            ((err instanceof UncertainStoreError || !(err instanceof PermanentStoreError)) &&
               !(err instanceof RouteMissingError)))
-        )
-          throw new UnknownAllocationClaimError(err);
+        ) {
+          if (allocationBearing) throw new UnknownAllocationClaimError(err);
+          const error = new NativeClaimUnknownError(originalClaim, err);
+          nativeClaimHolds.set(req.runId, error);
+          throw error;
+        }
         if (err instanceof RouteMissingError) {
           routeMissing();
           return { outcome: "untracked", why: "the state Worker has no run-ledger routes" };
