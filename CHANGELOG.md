@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.300.1](https://github.com/coreplanelabs/switchboard/compare/v1.300.0...v1.300.1) (2026-10-16)
+
+
+### Bug fixes
+
+* **core:** require complete request control assessments ([#3210](https://github.com/coreplanelabs/switchboard/issues/3210)) ([a953118](https://github.com/coreplanelabs/switchboard/commit/a953118c00bef497831a282afca6aedb2883d2fb))
+
 ## [1.300.0](https://github.com/coreplanelabs/switchboard/compare/v1.298.0...v1.300.0) (2026-10-16)
 
 
