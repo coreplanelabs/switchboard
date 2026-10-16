@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.302.0](https://github.com/coreplanelabs/switchboard/compare/v1.301.0...v1.302.0) (2026-10-16)
+
+
+### Features
+
+* **core:** normalize external updates for shared intake ([#3209](https://github.com/coreplanelabs/switchboard/issues/3209)) ([4eca707](https://github.com/coreplanelabs/switchboard/commit/4eca7074675f7c86f9635d450540749df26e5793))
+* **http:** normalize GitHub repository lifecycle facts ([#3186](https://github.com/coreplanelabs/switchboard/issues/3186)) ([1b0c960](https://github.com/coreplanelabs/switchboard/commit/1b0c960905fae3c8a10876460c1b340bf3b82246))
+
+
+### Bug fixes
+
+* **deploy:** preserve resident preflight refusal evidence ([#3217](https://github.com/coreplanelabs/switchboard/issues/3217)) ([0c501db](https://github.com/coreplanelabs/switchboard/commit/0c501dba65bd1784188d95379879bb1ef706de9b))
+* **runs:** clean up native work after a run ends ([#3218](https://github.com/coreplanelabs/switchboard/issues/3218)) ([169fed8](https://github.com/coreplanelabs/switchboard/commit/169fed8fc2f9bc7d5faeb2e2dfa16c008f2a9b75))
+* **runs:** log terminal cleanup preparation outcomes ([#3219](https://github.com/coreplanelabs/switchboard/issues/3219)) ([a7a60a9](https://github.com/coreplanelabs/switchboard/commit/a7a60a92d5dfa2c66597878220ba82f479a7f98c))
+* **runs:** stop native reviews before workspace selection ([#3202](https://github.com/coreplanelabs/switchboard/issues/3202)) ([d6aa5b3](https://github.com/coreplanelabs/switchboard/commit/d6aa5b393f39ed372ecc1ed1fee97f1a022bf851))
+* **web:** restore run history and permitted work views ([#3213](https://github.com/coreplanelabs/switchboard/issues/3213)) ([781e1df](https://github.com/coreplanelabs/switchboard/commit/781e1df47d77fe8097ab048c66c7841224a21623))
+* **web:** show run recovery notices as information ([#3214](https://github.com/coreplanelabs/switchboard/issues/3214)) ([bddc955](https://github.com/coreplanelabs/switchboard/commit/bddc955f0e2fc84fa90accbed14106806b652303))
+
 ## [1.301.0](https://github.com/coreplanelabs/switchboard/compare/v1.300.1...v1.301.0) (2026-10-16)
 
 
