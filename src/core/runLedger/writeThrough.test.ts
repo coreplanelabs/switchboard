@@ -166,7 +166,8 @@ describe("unknown native initial claim", () => {
       baseUrl: "https://claim-receiver.invalid",
       token: "fixture",
       storeKey: "runs:fixture",
-      fetch: async (_input, init) => {
+      fetch: async (input, init) => {
+        if (String(input).endsWith("/runs/claim-observations/record")) return Response.json({ stored: true });
         const body = String(init?.body);
         bodies.push(body);
         if (committed) await inner.claim(JSON.parse(body).run);

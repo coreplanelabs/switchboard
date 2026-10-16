@@ -1,4 +1,6 @@
 import { buildExpectedSeedManifest } from "./seedManifest.js";
+import { claimTransportDiagnostic, nativeClaimObservationOf } from "./claimObservation.js";
+import { originalStorageFailure } from "../storageFailureDiagnostic.js";
 import { STORE_RETRY_BACKOFFS_MS } from "../budgets.js";
 import { PromotionPendingError, PromotionIdentityRefusal } from "./promotion.js";
 import { sourceSeedReferenceMatches, type SourceSeedReference } from "./seedVerification.js";
@@ -1141,6 +1143,52 @@ export function createLedgerWriteThrough(opts: LedgerWriteThroughOptions): Ledge
           if (allocationBearing) throw new UnknownAllocationClaimError(err);
           const error = new NativeClaimUnknownError(originalClaim, err);
           nativeClaimHolds.set(req.runId, error);
+          let recorded = false;
+          let observationFailure = "failure=not-confirmed";
+          try {
+            const diagnostic = claimTransportDiagnostic(originalStorageFailure(err));
+            const observation = nativeClaimObservationOf({
+              version: 1,
+              runId: originalClaim.runId,
+              gen: originalClaim.gen,
+              channelId: originalClaim.meta.channelId,
+              threadKey: originalClaim.threadKey,
+              userId: originalClaim.meta.userId,
+              channelVisibility: originalClaim.meta.channelVisibility ?? "unknown",
+              ...(originalClaim.meta.repo ? { repo: originalClaim.meta.repo } : {}),
+              startedAt: originalClaim.startedAt,
+              observedAt: now(),
+              outcome: "unknown",
+              attempts: 1,
+              ...(diagnostic ? { diagnostic } : {}),
+            });
+            if (!observation) observationFailure = "failure=invalid-observation";
+            else if (!ledger.recordClaimObservation) observationFailure = "failure=unsupported";
+            else {
+              recorded = (await ledger.recordClaimObservation(observation)).stored;
+              if (!recorded) observationFailure = "failure=conflict";
+            }
+          } catch (observationError) {
+            const diagnostic = originalStorageFailure(observationError);
+            observationFailure = diagnostic
+              ? `failure=${diagnostic.phase}${diagnostic.httpStatus === undefined ? "" : ` status=${diagnostic.httpStatus}`}${diagnostic.timing ? ` deadlineExceeded=${diagnostic.timing.deadlineExceeded}` : ""}`
+              : observationError instanceof UncertainStoreError
+                ? uncertainStoreSummary(observationError)
+                : observationError instanceof RouteMissingError
+                  ? "failure=unsupported"
+                  : observationError instanceof PermanentStoreError
+                    ? "failure=refused-or-invalid"
+                    : "failure=unclassified";
+          }
+          if (!recorded) {
+            try {
+              warn(
+                `[ledger] native run ${req.runId}: the unknown claim observation was not confirmed saved; the original claim remains unknown; ${observationFailure}`,
+              );
+            } catch {
+              /* Preserve the original even when logging fails. */
+            }
+          }
           throw error;
         }
         if (err instanceof RouteMissingError) {

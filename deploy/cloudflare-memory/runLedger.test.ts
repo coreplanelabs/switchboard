@@ -56,6 +56,7 @@ import type { WorkspaceAllocation } from "../../src/core/runLedger/workspaceDura
 import type { ClaimRequest } from "../../src/core/runLedger/types.ts";
 import type { RunEvent } from "../../src/core/runEvents.ts";
 import { WorkerRunLedger } from "../../src/core/runLedgerWorker.ts";
+import { nativeClaimObservationOf } from "../../src/core/runLedger/claimObservation.ts";
 import { createCheckExecution } from "../../src/core/checkExecution.ts";
 import type { StoredWorkspaceCustody } from "../../src/core/runLedger/workspaceDurability.ts";
 import { appendRunReport } from "../../src/core/runLedger/threadSession.ts";
@@ -17641,4 +17642,385 @@ describe("source relevance stored-job diagnostics", () => {
       });
     },
   );
+});
+
+describe("durable unknown native claim observations", () => {
+  it.each([false, true])(
+    "keeps only an unknown observation after a fresh object: claim committed=%s",
+    async (committed) => {
+      const storeKey = `claim-observation-${crypto.randomUUID()}`;
+      const id = crypto.randomUUID();
+      let claims = 0;
+      const wire = new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "test-token",
+        storeKey,
+        fetch: async (input, init) => {
+          if (String(input).endsWith("/runs/claim")) {
+            claims++;
+            if (committed) await fetchMemoryTest(String(input), init, (response) => response.json());
+            return new Response("PRIVATE_RESPONSE", { status: 500 });
+          }
+          return fetchMemoryTest(String(input), init);
+        },
+      });
+      const writer = createLedgerWriteThrough({
+        ledger: wire,
+        gen: "original",
+        now: () => 1000,
+        fallback: { put: async () => {}, abandoned() {} },
+        warn() {},
+      });
+      const original = {
+        runId: id,
+        threadKey: "mcp:X:original",
+        startedAt: 500,
+        card: null,
+        meta: {
+          residentExecution: "native-v1" as const,
+          channelId: "mcp:X",
+          userId: "slack:UALICE",
+          threadKey: "mcp:X:original",
+          channelVisibility: "machine" as const,
+          request: { text: "PRIVATE_REQUEST" },
+        },
+      };
+      const held = await writer.reserve(original).catch((error) => error);
+      expect(held).toMatchObject({ name: "NativeClaimUnknownError", outcome: "unknown" });
+      const saved = await runInDurableObject(
+        env.RUNS.get(env.RUNS.idFromName(storeKey)),
+        async (_instance: RunHistoryDO, state) => {
+          const fresh = new RunHistoryDO(state, env);
+          const page = fresh.listClaimObservations({ visibleTo: { kind: "all" } });
+          return { page, live: (await fresh.listLive()).map((row) => row.runId) };
+        },
+      );
+      expect(saved.page).toMatchObject({
+        coverage: "recorded-only",
+        observations: [
+          {
+            runId: id,
+            gen: "original",
+            outcome: "unknown",
+            attempts: 1,
+            observedAt: 1000,
+            diagnostic: {
+              phase: "http",
+              httpStatus: 500,
+              operation: "/runs/claim",
+              timing: { deadlineExceeded: false },
+            },
+          },
+        ],
+      });
+      expect(saved.page.observations).toHaveLength(1);
+      expect(JSON.stringify(saved)).not.toContain("PRIVATE_");
+      expect(saved.live).toEqual(committed ? [id] : []);
+      const reader = new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "test-token",
+        storeKey,
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+      expect(await reader.listClaimObservations({ visibleTo: { kind: "channels-in", channelIds: ["mcp:X"] } })).toEqual(
+        saved.page,
+      );
+      expect(await reader.listClaimObservations({ visibleTo: { kind: "channels-in", channelIds: ["mcp:Y"] } })).toEqual(
+        { coverage: "recorded-only", observations: [] },
+      );
+      await expect(writer.reserve(original)).rejects.toBe(held);
+      expect(claims).toBe(1);
+    },
+  );
+
+  it.each([
+    [false, "lost"],
+    [true, "lost"],
+    [false, 400],
+    [false, 500],
+  ] as const)(
+    "keeps the original error when observation persistence fails: committed=%s response=%s",
+    async (committed, responseStatus) => {
+      const storeKey = `observation-failure-${crypto.randomUUID()}`,
+        id = crypto.randomUUID();
+      let claims = 0,
+        observations = 0;
+      const wire = new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "test-token",
+        storeKey,
+        fetch: async (input, init) => {
+          if (String(input).endsWith("/runs/claim")) {
+            claims++;
+            return new Response("PRIVATE_CLAIM", { status: 500 });
+          }
+          observations++;
+          if (committed) await fetchMemoryTest(String(input), init, (response) => response.json());
+          if (typeof responseStatus === "number")
+            return Response.json({ error: "PRIVATE_OBSERVATION_FAILURE" }, { status: responseStatus });
+          throw new Error("PRIVATE_OBSERVATION_FAILURE");
+        },
+      });
+      const warnings: string[] = [];
+      const writer = createLedgerWriteThrough({
+        ledger: wire,
+        gen: "original",
+        fallback: { put: async () => {}, abandoned() {} },
+        warn: (line) => warnings.push(line),
+      });
+      const request = {
+        runId: id,
+        threadKey: "mcp:X:original",
+        startedAt: 500,
+        card: null,
+        meta: {
+          residentExecution: "native-v1" as const,
+          channelId: "mcp:X",
+          userId: "slack:UALICE",
+          threadKey: "mcp:X:original",
+        },
+      };
+      const failure = await writer.reserve(request).catch((error) => error);
+      expect(failure).toMatchObject({
+        name: "NativeClaimUnknownError",
+        cause: { request: { operation: "/runs/claim" }, diagnosis: { kind: "http", status: 500 } },
+      });
+      await expect(writer.reserve(request)).rejects.toBe(failure);
+      const reader = new WorkerRunLedger({
+        baseUrl: "https://memory.test",
+        token: "test-token",
+        storeKey,
+        fetch: (input, init) => fetchMemoryTest(String(input), init),
+      });
+      const page = await reader.listClaimObservations({ visibleTo: { kind: "all" } });
+      expect(page.coverage).toBe("recorded-only");
+      expect(page.observations.map((row) => row.runId)).toEqual(committed ? [id] : []);
+      expect({ claims, observations }).toEqual({ claims: 1, observations: 1 });
+      expect(warnings).toEqual([
+        `[ledger] native run ${id}: the unknown claim observation was not confirmed saved; the original claim remains unknown; failure=${responseStatus === "lost" ? "transport" : `http status=${responseStatus}`} deadlineExceeded=false`,
+      ]);
+    },
+  );
+
+  it("rejects private fields and malformed filters before persistence or enumeration", async () => {
+    const storeKey = `observation-validation-${crypto.randomUUID()}`;
+    const observation = {
+      version: 1,
+      runId: crypto.randomUUID(),
+      gen: "original",
+      channelId: "mcp:X",
+      userId: "slack:UALICE",
+      threadKey: "mcp:X:original",
+      channelVisibility: "machine",
+      startedAt: 1,
+      observedAt: 2,
+      outcome: "unknown",
+      attempts: 1,
+      diagnostic: {
+        version: 1,
+        operation: "/runs/claim",
+        kind: "write",
+        requestDigest: "a".repeat(64),
+        phase: "http",
+        httpStatus: 500,
+      },
+    };
+    for (const invalid of [
+      { ...observation, payload: "PRIVATE_BYTES" },
+      {
+        ...observation,
+        diagnostic: { ...observation.diagnostic, exception: { name: "Error", message: "PRIVATE_CAUSE" } },
+      },
+      { ...observation, outcome: "committed" },
+    ]) {
+      expect(nativeClaimObservationOf(invalid)).toBeUndefined();
+      expect(
+        await fetchMemoryTest(
+          "https://memory.test/runs/claim-observations/record",
+          {
+            method: "POST",
+            headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+            body: JSON.stringify({ storeKey, observation: invalid }),
+          },
+          (response) =>
+            response.status === 400 ? response.json().then(() => 400) : response.json().then(() => response.status),
+        ),
+      ).toBe(400);
+    }
+    expect(
+      await fetchMemoryTest(
+        "https://memory.test/runs/claim-observations/list",
+        {
+          method: "POST",
+          headers: { authorization: "Bearer test-token", "content-type": "application/json" },
+          body: JSON.stringify({ storeKey, query: { visibleTo: { kind: "invented" } } }),
+        },
+        (response) => response.json().then(() => response.status),
+      ),
+    ).toBe(400);
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "test-token",
+      storeKey,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect(await wire.recordClaimObservation(observation as Parameters<typeof wire.recordClaimObservation>[0])).toEqual(
+      { stored: true },
+    );
+    expect((await wire.listClaimObservations({ visibleTo: { kind: "all" } })).observations).toEqual([observation]);
+    expect(await wire.listLive()).toEqual([]);
+  });
+});
+
+describe("claim observation authorization before SQL paging", () => {
+  it.each(
+    [false, true].flatMap(
+      (ordinaryOnly) =>
+        [
+          [ordinaryOnly, "held-corrupt|original", '{"PRIVATE_ROW":', "held-corrupt|original", false],
+          [ordinaryOnly, "PRIVATE_RAW_KEY\n", '{"PRIVATE_ROW":"private"}', "invalid-key", false],
+          [
+            ordinaryOnly,
+            "held-null|original",
+            '{"threadKey":null,"PRIVATE_ROW":"private"}',
+            "held-null|original",
+            false,
+          ],
+          [
+            ordinaryOnly,
+            "held-schema|original",
+            '{"threadKey":"mcp:X:original","PRIVATE_ROW":"private"}',
+            "held-schema|original",
+            false,
+          ],
+          [
+            ordinaryOnly,
+            "different|original",
+            JSON.stringify({
+              version: 1,
+              runId: "actual",
+              gen: "original",
+              channelId: "mcp:X",
+              userId: "slack:UALICE",
+              threadKey: "mcp:X:original",
+              channelVisibility: "machine",
+              startedAt: 1,
+              observedAt: 2,
+              outcome: "unknown",
+              attempts: 1,
+            }),
+            "different|original",
+            false,
+          ],
+          [ordinaryOnly, "held-sink|original", '{"PRIVATE_ROW":', "held-sink|original", true],
+        ] as const,
+    ),
+  )(
+    "identifies an unreadable observation with a bounded key: ordinary=%s key=%s",
+    async (ordinaryOnly, key, stored, loggedKey, warningThrows) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {
+        if (warningThrows) throw new Error("PRIVATE_SINK_FAILURE");
+      });
+      try {
+        await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(storeKey())), async (owner: RunHistoryDO, state) => {
+          state.storage.sql.exec(
+            "INSERT INTO claim_observations (observation_key, channel_id, user_id, channel_visibility, json) VALUES (?, ?, ?, ?, ?)",
+            key,
+            "mcp:X",
+            "private-user",
+            "machine",
+            stored,
+          );
+          expect(() =>
+            owner.listClaimObservations({
+              visibleTo: { kind: "all" },
+              ...(ordinaryOnly ? { ordinaryOnly: true } : {}),
+            }),
+          ).toThrow("unreadable claim observation");
+          expect(warn.mock.calls).toEqual([
+            ["[runs/claim-observations/list] unreadable", { observationKey: loggedKey }],
+          ]);
+          expect(
+            state.storage.sql.exec("SELECT json FROM claim_observations WHERE observation_key = ?", key).one(),
+          ).toEqual({ json: stored });
+        });
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
+  it("keeps the first record and excludes private or unauthorized rows before the page limit", async () => {
+    const storeKey = `observation-page-${crypto.randomUUID()}`;
+    const wire = new WorkerRunLedger({
+      baseUrl: "https://memory.test",
+      token: "test-token",
+      storeKey,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    const base = {
+      version: 1 as const,
+      gen: "original",
+      userId: "slack:UALICE",
+      channelVisibility: "machine" as const,
+      startedAt: 1,
+      observedAt: 2,
+      outcome: "unknown" as const,
+      attempts: 1 as const,
+    };
+    for (const [runId, channelId, threadKey] of [
+      ["a-visible", "mcp:X", "mcp:X:original"],
+      ["b-hidden", "mcp:Y", "mcp:Y:original"],
+      ["b-worker", "mcp:X", "worker:private:U12"],
+      ["c-visible", "mcp:X", "mcp:X:later"],
+    ])
+      expect(await wire.recordClaimObservation({ ...base, runId, channelId, threadKey })).toEqual({ stored: true });
+    const query = {
+      visibleTo: { kind: "channels-in" as const, channelIds: ["mcp:X"] },
+      ordinaryOnly: true as const,
+      limit: 1,
+    };
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(storeKey)), async (_owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO claim_observations (observation_key, channel_id, user_id, channel_visibility, json) VALUES (?, ?, ?, ?, ?)",
+        "0-outside|original",
+        "mcp:Y",
+        "private-user",
+        "machine",
+        '{"PRIVATE_ROW":',
+      );
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const first = await wire.listClaimObservations(query);
+      expect(first.observations.map((row) => row.runId)).toEqual(["a-visible"]);
+      expect(first.nextAfter).toBe("a-visible|original");
+      const second = await wire.listClaimObservations({ ...query, after: first.nextAfter });
+      expect(second.observations.map((row) => row.runId)).toEqual(["c-visible"]);
+      expect(second.nextAfter).toBeUndefined();
+      expect(await wire.recordClaimObservation({ ...first.observations[0], userId: "slack:UREPLACEMENT" })).toEqual({
+        stored: false,
+      });
+      expect((await wire.listClaimObservations(query)).observations).toEqual(first.observations);
+      expect(await wire.listClaimObservations({ visibleTo: { kind: "none" }, ordinaryOnly: true })).toEqual({
+        coverage: "recorded-only",
+        observations: [],
+      });
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(storeKey)), async (_owner: RunHistoryDO, state) => {
+        state.storage.sql.exec(
+          "INSERT INTO claim_observations (observation_key, channel_id, user_id, channel_visibility, json) VALUES (?, ?, ?, ?, ?)",
+          "0-before|original",
+          "mcp:X",
+          "private-user",
+          "machine",
+          '{"PRIVATE_ROW":',
+        );
+      });
+      expect(
+        (await wire.listClaimObservations({ ...query, after: first.nextAfter })).observations.map((row) => row.runId),
+      ).toEqual(["c-visible"]);
+      expect(warn.mock.calls).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });

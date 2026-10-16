@@ -1866,6 +1866,30 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
   },
   {
     "action": "runs:read",
+    "args": [],
+    "effect": "read",
+    "id": "runs.claims",
+    "options": [
+      {
+        "name": "after",
+        "required": false,
+        "type": "string",
+      },
+      {
+        "name": "limit",
+        "required": false,
+        "type": "integer",
+      },
+    ],
+    "resource": "command",
+    "surfaces": [
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
+    "action": "runs:read",
     "args": [
       {
         "name": "id",

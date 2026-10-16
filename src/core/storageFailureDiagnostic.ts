@@ -95,6 +95,21 @@ export interface StorageFailureNotice {
   diagnostic: StorageFailureDiagnostic;
 }
 
+const originalTransportDiagnostics = new WeakMap<object, StorageFailureDiagnostic>();
+
+/** Preserve closed observations on the original error without retaining exception prose. */
+export function rememberStorageFailure(error: unknown, diagnostic: StorageFailureDiagnostic): void {
+  if (!error || typeof error !== "object") return;
+  const { exception: _exception, server: _server, ...closed } = diagnostic;
+  const parsed = storageFailureDiagnosticOf(closed);
+  if (parsed) originalTransportDiagnostics.set(error, structuredClone(parsed));
+}
+
+export function originalStorageFailure(error: unknown): StorageFailureDiagnostic | undefined {
+  const value = error && typeof error === "object" ? originalTransportDiagnostics.get(error) : undefined;
+  return value && structuredClone(value);
+}
+
 export interface StorageFailureCapture {
   operation: string;
   payload: string;

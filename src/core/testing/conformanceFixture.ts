@@ -82,6 +82,7 @@ import type { ResidentAdminClient } from "../residentAdmin.js";
 import type { RunEvent } from "../runEvents.js";
 import { analyzeRunFriction } from "../runFriction.js";
 import type { RunRecord } from "../runRecord.js";
+import { toVisibilityFilter } from "../runRecord.js";
 import { RunRegistry } from "../runRegistry.js";
 import { InMemoryRunStore } from "../runStore.js";
 import { createRunsService } from "../runsService.js";
@@ -604,8 +605,14 @@ export function fakeDeps(s: Stubs): CoreCommandDeps {
         output: `> ${op}\n\nok`,
       }),
   };
-  const runs = async () =>
-    createRunsService({ registry: s.reg, store: s.store, clock: () => NOW, units: s.units, sessions: s.ledger });
+  const runs = async () => ({
+    ...createRunsService({ registry: s.reg, store: s.store, clock: () => NOW, units: s.units, sessions: s.ledger }),
+    listClaimObservations: ({
+      visibleTo,
+      ...query
+    }: Parameters<ReturnType<typeof createRunsService>["listClaimObservations"]>[0]) =>
+      s.ledger.listClaimObservations({ ...query, ordinaryOnly: true, visibleTo: toVisibilityFilter(visibleTo) }),
+  });
   // `costs snapshot`: the real service over an in-memory snapshotter whose
   // sources answer at once — a take lands and the stamp comes back. `costs by`:
   // the store already holds a snapshot with one run's usage cell, so the
