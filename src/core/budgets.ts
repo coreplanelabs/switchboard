@@ -225,6 +225,8 @@ export const SOURCE_JOB_LEASE_MS = MINUTE_MS;
 export const SOURCE_JOB_MAX_ATTEMPTS = 8;
 export const SOURCE_JOB_MAX_CLAIMS = 16;
 export const SOURCE_JOB_SCAN_LIMIT = 64;
+export const SOURCE_RELEVANCE_MAX_CONTEXTS = 16;
+export const SOURCE_RELEVANCE_RESULT_MAX_BYTES = 4 * 1024;
 export const SOURCE_JOB_RETRY_MS = [5, 15, 30, 60, 120, 300, 600].map((seconds) => seconds * SECOND_MS);
 
 /** The presets that run the tool loop, and the one pipeline preset. */

@@ -7,6 +7,8 @@ import {
 } from "../../src/core/runLedger/inboxDelivery.ts";
 import { EXECUTION_PROTOCOL_HEADER } from "../../src/core/runLedger/types.js";
 import {
+  sourceRelevanceRequestOf,
+  type SourceRelevanceSaveResult,
   isSourceEventKey,
   prepareSourceEvent,
   sourceEventReceiptOf,
@@ -22,7 +24,11 @@ import {
   type SourceEventReceiveResult,
   type SourceEventRecord,
 } from "../../src/core/runLedger/sourceEvents.js";
-import { planSourceJobClaim, planSourceJobRelease } from "../../src/core/runLedger/sourceEventJobs.js";
+import {
+  planSourceJobClaim,
+  planSourceJobRelease,
+  planSourceRelevanceSave,
+} from "../../src/core/runLedger/sourceEventJobs.js";
 import {
   captureCheckArchive,
   hasRecordedCheckEvidence,
@@ -9285,11 +9291,17 @@ export class RunHistoryDO extends DurableObject<Env> {
           receivedAt: row.received_at,
           bodyHash: row.body_hash,
         });
-        if (!job || !receipt || job.eventKey !== row.key) {
+        if (!job || !receipt || job.eventKey !== row.key || (job.version === 3 && request.readerVersion < 3)) {
           held++;
           heldJobs.push({
             eventKey: row.key,
-            reason: !job ? "unreadable-job" : !receipt ? "invalid-receipt" : "job-key-mismatch",
+            reason: !job
+              ? "unreadable-job"
+              : !receipt
+                ? "invalid-receipt"
+                : job.eventKey !== row.key
+                  ? "job-key-mismatch"
+                  : "unsupported-reader",
           });
           continue;
         }
@@ -9311,6 +9323,46 @@ export class RunHistoryDO extends DurableObject<Env> {
       return { kind: "claimed", claims, held, failed };
     });
     for (const job of heldJobs) console.warn("[source-events/claim] held", job);
+    return result;
+  }
+
+  async saveSourceRelevance(value: unknown, now = systemClock()): Promise<SourceRelevanceSaveResult> {
+    const request = sourceRelevanceRequestOf(value);
+    if (!request) return { kind: "refused", reason: "invalid-request" };
+    if (!Number.isSafeInteger(now) || now < 0) throw new Error("Invalid source relevance time");
+    let heldJob: { eventKey: string; reason: "invalid-json" | "invalid-schema" | "job-key-mismatch" } | undefined;
+    const result = await this.ctx.storage.transaction<SourceRelevanceSaveResult>(async () => {
+      const row = this.sourceEventRow(request.receipt.key);
+      if (!row) return { kind: "refused", reason: "missing" };
+      if (
+        row.seq !== request.receipt.sequence ||
+        row.received_at !== request.receipt.receivedAt ||
+        row.body_hash !== request.receipt.bodyHash
+      )
+        return { kind: "refused", reason: "source-mismatch" };
+      let parsed: unknown;
+      try {
+        parsed = parseStoredJson(row.job_json);
+      } catch {
+        heldJob = { eventKey: request.receipt.key, reason: "invalid-json" };
+        return { kind: "refused", reason: "unsupported-job" };
+      }
+      const job = sourceEventJobOf(parsed);
+      if (!job || job.eventKey !== request.receipt.key) {
+        heldJob = { eventKey: request.receipt.key, reason: job ? "job-key-mismatch" : "invalid-schema" };
+        return { kind: "refused", reason: "unsupported-job" };
+      }
+      const change = planSourceRelevanceSave(job, request, now);
+      if (change.kind === "refused") return change;
+      if (change.kind === "changed")
+        this.sql.exec(
+          `UPDATE source_events SET job_json = ? WHERE key = ?`,
+          JSON.stringify(change.job),
+          request.receipt.key,
+        );
+      return { kind: "saved", receipt: request.receipt, record: change.record };
+    });
+    if (heldJob) console.warn("[source-events/relevance] held", heldJob);
     return result;
   }
 
@@ -12913,6 +12965,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/source-events/read",
   "/runs/source-events/claim",
   "/runs/source-events/release",
+  "/runs/source-events/relevance",
   "/runs/check-source",
   "/runs/ingress/unread",
   "/runs/ingress/unread-hold",
@@ -14450,6 +14503,24 @@ async function handleLedger(
         failed: result.failed.map((receipt) => receipt.key),
       });
     else console.warn("[source-events/claim] refused", { storeKey: key.value, reason: result.reason });
+    return json(result);
+  }
+  if (pathname === "/runs/source-events/relevance") {
+    const result = await stub.saveSourceRelevance(b.request, now);
+    if (result.kind === "saved")
+      console.log("[source-events/relevance] completed", {
+        storeKey: key.value,
+        eventKey: result.receipt.key,
+        verdict: result.record.verdict,
+        source: result.record.source,
+        at: result.record.at,
+      });
+    else
+      console.warn("[source-events/relevance] refused", {
+        storeKey: key.value,
+        eventKey: sourceRelevanceRequestOf(b.request)?.receipt.key,
+        reason: result.reason,
+      });
     return json(result);
   }
   if (pathname === "/runs/source-events/release") {

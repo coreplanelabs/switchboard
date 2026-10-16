@@ -2,6 +2,9 @@ import { prepareInboxDelivery, inboxDeliveryResultOf, type InboxDeliveryResult }
 import { EXECUTION_PROTOCOL_HEADER } from "./runLedger/types.js";
 import type { InboxPushResult } from "./runLedger/inboxMessage.js";
 import {
+  sourceRelevanceRequestOf,
+  sourceRelevanceSaveResultOf,
+  type SourceRelevanceSaveResult,
   isSourceEventKey,
   prepareSourceEvent,
   sourceEventRecordOf,
@@ -1702,6 +1705,27 @@ export class WorkerRunLedger implements RunLedger {
       return result;
     throw this.unknownAcknowledgement(
       "run ledger: source claim acknowledgement is unreadable",
+      response.request,
+      response.status,
+    );
+  }
+
+  async saveSourceRelevance(value: unknown): Promise<SourceRelevanceSaveResult> {
+    const request = sourceRelevanceRequestOf(value);
+    if (!request) return { kind: "refused", reason: "invalid-request" };
+    const response = await this.post("/runs/source-events/relevance", { storeKey: this.opts.storeKey, request });
+    const result = sourceRelevanceSaveResultOf(response.data);
+    if (response.status === 200 && result) {
+      if (result.kind === "refused") return result;
+      const { at: _at, ...saved } = result.record;
+      if (
+        JSON.stringify(result.receipt) === JSON.stringify(request.receipt) &&
+        JSON.stringify(saved) === JSON.stringify(request.result)
+      )
+        return result;
+    }
+    throw this.unknownAcknowledgement(
+      "run ledger: source relevance acknowledgement is unreadable",
       response.request,
       response.status,
     );

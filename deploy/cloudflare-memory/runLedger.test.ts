@@ -17275,3 +17275,370 @@ describe("typed SQLite source evidence", () => {
     expect(observed.data.boundary.lastStep).toBeNull();
   });
 });
+
+describe("source relevance in SQLite", () => {
+  const event = {
+    version: 1,
+    sourceId: "fixture:repo:1",
+    deliveryId: "relevance-one",
+    objectId: "comment:7",
+    changeId: "revision:1",
+    kind: "source-evidence",
+    payload: { text: "missing check" },
+  };
+  const result = {
+    version: 1,
+    context: {
+      runId: "root",
+      requester: "fixture:user:1",
+      channelId: "fixture:channel:1",
+      threadKey: "fixture:thread:1",
+      hash: "a".repeat(64),
+    },
+    inputHash: "b".repeat(64),
+    verdict: "unrelated",
+    source: "model",
+    reason: "About another change.",
+  };
+
+  it("saves through the private HTTP route and holds incompatible readers", async () => {
+    const key = storeKey();
+    const received = await post("/runs/source-events/receive", { storeKey: key, event });
+    const batch = await post("/runs/source-events/claim", {
+      storeKey: key,
+      request: { owner: "g1", readerVersion: 3, limit: 1 },
+    });
+    expect(batch.data.kind).toBe("claimed");
+    const receipt = received.data.receipt as { key: string };
+    const claims = batch.data.claims as Array<{ lease: { token: string } }>;
+    const request = { receipt, owner: "g1", token: claims[0]!.lease.token, result };
+    expect((await post("/runs/source-events/relevance", { storeKey: key, request }, {})).status).toBe(401);
+    const saved = await post("/runs/source-events/relevance", { storeKey: key, request });
+    expect(saved.status).toBe(200);
+    expect(saved.data).toMatchObject({ kind: "saved", receipt, record: result });
+    const at = (saved.data.record as { at: number }).at;
+    expect(Number.isSafeInteger(at)).toBe(true);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      expect(await owner.listLive()).toEqual([]);
+      expect(await owner.claimSourceEvents({ owner: "old", readerVersion: 2, limit: 1 }, at + 60_000)).toEqual({
+        kind: "claimed",
+        claims: [],
+        failed: [],
+        held: 1,
+      });
+      const next = await owner.claimSourceEvents({ owner: "g2", readerVersion: 3, limit: 1 }, at + 60_000);
+      expect(next).toMatchObject({ kind: "claimed", claims: [{ attempts: 2, lease: { owner: "g2" } }] });
+      expect(await owner.saveSourceRelevance(request, at + 60_000)).toEqual(saved.data);
+      expect((await owner.readSourceEvent(receipt.key))?.job).toMatchObject({
+        version: 3,
+        attempts: 2,
+        relevance: [{ ...result, at }],
+        lease: { owner: "g2" },
+      });
+      expect(
+        await owner.saveSourceRelevance(
+          { ...request, result: { ...result, reason: "a different result" } },
+          at + 60_000,
+        ),
+      ).toEqual({ kind: "refused", reason: "result-conflict" });
+      expect(
+        await owner.saveSourceRelevance(
+          { ...request, result: { ...result, context: { ...result.context, hash: "c".repeat(64) } } },
+          at + 60_000,
+        ),
+      ).toEqual({ kind: "refused", reason: "fenced" });
+      await state.storage.deleteAlarm();
+    });
+  });
+
+  it("rolls back a failed save and keeps the original queue lease and alarm", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const now = Date.now();
+      const received = await owner.receiveSourceEvent(event, now);
+      if (received.kind === "refused") throw new Error("expected reception");
+      const batch = await owner.claimSourceEvents({ owner: "g1", readerVersion: 3, limit: 1 }, now);
+      if (batch.kind !== "claimed" || !batch.claims[0]) throw new Error("expected claim");
+      const request = { receipt: received.receipt, owner: "g1", token: batch.claims[0].lease.token, result };
+      const before = await owner.readSourceEvent(received.receipt.key),
+        alarm = await state.storage.getAlarm();
+      const exec = state.storage.sql.exec.bind(state.storage.sql);
+      const fail = vi.spyOn(state.storage.sql, "exec").mockImplementation((query, ...bindings) => {
+        const answer = exec(query, ...bindings);
+        if (query.startsWith("UPDATE source_events SET job_json = ? WHERE"))
+          throw new Error("save acknowledgment failed");
+        return answer;
+      });
+      await expect(owner.saveSourceRelevance(request, now)).rejects.toThrow("save acknowledgment failed");
+      fail.mockRestore();
+      expect(await owner.readSourceEvent(received.receipt.key)).toEqual(before);
+      expect(await state.storage.getAlarm()).toBe(alarm);
+      const saved = await owner.saveSourceRelevance(request, now);
+      expect(saved).toEqual({ kind: "saved", receipt: received.receipt, record: { ...result, at: now } });
+      const retry = await owner.releaseSourceEvent(
+        {
+          key: received.receipt.key,
+          owner: "g1",
+          token: request.token,
+          disposition: "retry",
+          reason: "source-unavailable",
+        },
+        now,
+      );
+      expect(retry).toMatchObject({ kind: "released", receipt: { state: "ready" } });
+      const next = await owner.claimSourceEvents({ owner: "g2", readerVersion: 3, limit: 1 }, now + 5_000);
+      expect(next).toMatchObject({ kind: "claimed", claims: [{ attempts: 2 }] });
+      expect((await owner.readSourceEvent(received.receipt.key))?.job).toMatchObject({
+        version: 3,
+        relevance: [{ ...result, at: now }],
+      });
+      await state.storage.deleteAlarm();
+    });
+  });
+});
+
+describe("source relevance diagnostics in SQLite", () => {
+  it("reports saves and refusals with source identity without private text or claim tokens", async () => {
+    const key = storeKey();
+    const event = {
+      version: 1,
+      sourceId: "fixture:repo:1",
+      deliveryId: "relevance-log",
+      objectId: "comment:7",
+      changeId: "revision:1",
+      kind: "source-evidence",
+      payload: { text: "PRIVATE source text" },
+    };
+    const received = await post("/runs/source-events/receive", { storeKey: key, event });
+    const batch = await post("/runs/source-events/claim", {
+      storeKey: key,
+      request: { owner: "g1", readerVersion: 3, limit: 1 },
+    });
+    expect(batch.data.kind).toBe("claimed");
+    const claims = batch.data.claims as Array<{ lease: { token: string } }>;
+    const request = {
+      receipt: received.data.receipt,
+      owner: "g1",
+      token: claims[0]!.lease.token,
+      result: {
+        version: 1,
+        context: {
+          runId: "PRIVATE root",
+          requester: "PRIVATE requester",
+          channelId: "PRIVATE channel",
+          threadKey: "PRIVATE thread",
+          hash: "a".repeat(64),
+        },
+        inputHash: "b".repeat(64),
+        verdict: "unrelated",
+        source: "model",
+        reason: "PRIVATE model reason",
+      },
+    };
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const saved = await post("/runs/source-events/relevance", { storeKey: key, request });
+      expect(saved.data).toMatchObject({ kind: "saved", record: { verdict: "unrelated", source: "model" } });
+      const at = (saved.data.record as { at: number }).at;
+      const diagnostic = [
+        "[source-events/relevance] completed",
+        {
+          storeKey: key,
+          eventKey: (received.data.receipt as { key: string }).key,
+          verdict: "unrelated",
+          source: "model",
+          at,
+        },
+      ];
+      expect(log.mock.calls.filter((call) => call[0] === "[source-events/relevance] completed")).toEqual([diagnostic]);
+      const replay = await post("/runs/source-events/relevance", { storeKey: key, request });
+      expect(replay.data).toEqual(saved.data);
+      expect(log.mock.calls.filter((call) => call[0] === "[source-events/relevance] completed")).toEqual([
+        diagnostic,
+        diagnostic,
+      ]);
+      const refused = await post("/runs/source-events/relevance", {
+        storeKey: key,
+        request: { ...request, result: { ...request.result, inputHash: "c".repeat(64) } },
+      });
+      expect(refused.data).toEqual({ kind: "refused", reason: "result-conflict" });
+      const invalid = await post("/runs/source-events/relevance", {
+        storeKey: key,
+        request: { ...request, receipt: { ...(request.receipt as object), key: "PRIVATE invalid key" } },
+      });
+      expect(invalid.data).toEqual({ kind: "refused", reason: "invalid-request" });
+      expect(warn.mock.calls.filter((call) => call[0] === "[source-events/relevance] refused")).toEqual([
+        [
+          "[source-events/relevance] refused",
+          { storeKey: key, eventKey: (request.receipt as { key: string }).key, reason: "result-conflict" },
+        ],
+        ["[source-events/relevance] refused", { storeKey: key, eventKey: undefined, reason: "invalid-request" }],
+      ]);
+      const logged = JSON.stringify([...log.mock.calls, ...warn.mock.calls]);
+      expect(logged).not.toContain("PRIVATE");
+      expect(logged).not.toContain(request.token);
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
+    }
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (_owner: RunHistoryDO, state) => {
+      await state.storage.deleteAlarm();
+    });
+  });
+});
+
+describe("source relevance races in SQLite", () => {
+  const event = {
+    version: 1,
+    sourceId: "fixture:repo:1",
+    deliveryId: "relevance-race",
+    objectId: "comment:7",
+    changeId: "revision:1",
+    kind: "source-evidence",
+    payload: { text: "missing check" },
+  };
+  const result = {
+    version: 1,
+    context: {
+      runId: "root",
+      requester: "fixture:user:1",
+      channelId: "fixture:channel:1",
+      threadKey: "fixture:thread:1",
+      hash: "a".repeat(64),
+    },
+    inputHash: "b".repeat(64),
+    verdict: "unrelated",
+    source: "model",
+    reason: "About another change.",
+  };
+
+  it("keeps one result when concurrent saves disagree", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const now = Date.now();
+      const received = await owner.receiveSourceEvent(event, now);
+      if (received.kind === "refused") throw new Error("expected reception");
+      const batch = await owner.claimSourceEvents({ owner: "g1", readerVersion: 3, limit: 1 }, now);
+      if (batch.kind !== "claimed" || !batch.claims[0]) throw new Error("expected claim");
+      const request = { receipt: received.receipt, owner: "g1", token: batch.claims[0].lease.token, result };
+      expect(
+        await Promise.all([
+          owner.saveSourceRelevance(request, now),
+          owner.saveSourceRelevance({ ...request, result: { ...result, verdict: "relevant" } }, now),
+        ]),
+      ).toEqual([
+        { kind: "saved", receipt: received.receipt, record: { ...result, at: now } },
+        { kind: "refused", reason: "result-conflict" },
+      ]);
+      expect((await owner.readSourceEvent(received.receipt.key))?.job).toMatchObject({
+        relevance: [{ ...result, at: now }],
+      });
+      await state.storage.deleteAlarm();
+    });
+  });
+
+  it("holds an unreadable saved result without rewriting or claiming it", async () => {
+    const key = storeKey();
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const now = Date.now();
+      const received = await owner.receiveSourceEvent(event, now);
+      if (received.kind === "refused") throw new Error("expected reception");
+      const batch = await owner.claimSourceEvents({ owner: "g1", readerVersion: 3, limit: 1 }, now);
+      if (batch.kind !== "claimed" || !batch.claims[0]) throw new Error("expected claim");
+      const request = { receipt: received.receipt, owner: "g1", token: batch.claims[0].lease.token, result };
+      expect((await owner.saveSourceRelevance(request, now)).kind).toBe("saved");
+      const row = state.storage.sql
+        .exec<{ job_json: string }>("SELECT job_json FROM source_events WHERE key = ?", received.receipt.key)
+        .toArray()[0]!;
+      const job = JSON.parse(row.job_json);
+      job.relevance[0].future = "unknown";
+      const stored = JSON.stringify(job);
+      state.storage.sql.exec("UPDATE source_events SET job_json = ? WHERE key = ?", stored, received.receipt.key);
+      expect(await owner.claimSourceEvents({ owner: "g2", readerVersion: 3, limit: 1 }, now + 60_000)).toEqual({
+        kind: "claimed",
+        claims: [],
+        held: 1,
+        failed: [],
+      });
+      expect(await owner.saveSourceRelevance(request, now + 60_000)).toEqual({
+        kind: "refused",
+        reason: "unsupported-job",
+      });
+      await expect(owner.readSourceEvent(received.receipt.key)).rejects.toThrow("Stored source event is unreadable");
+      expect(
+        state.storage.sql
+          .exec<{ job_json: string }>("SELECT job_json FROM source_events WHERE key = ?", received.receipt.key)
+          .toArray()[0]!.job_json,
+      ).toBe(stored);
+      await state.storage.deleteAlarm();
+    });
+  });
+});
+
+describe("source relevance stored-job diagnostics", () => {
+  it.each(["invalid-json", "invalid-schema"])(
+    "identifies %s without logging retained bytes or exceptions",
+    async (reason) => {
+      const key = storeKey();
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+        const now = Date.now();
+        const received = await owner.receiveSourceEvent(
+          {
+            version: 1,
+            sourceId: "fixture:repo:1",
+            deliveryId: "decode-log",
+            objectId: "comment:7",
+            changeId: "revision:1",
+            kind: "source-evidence",
+            payload: { text: "PRIVATE_SOURCE" },
+          },
+          now,
+        );
+        if (received.kind === "refused") throw new Error("expected reception");
+        const batch = await owner.claimSourceEvents({ owner: "g1", readerVersion: 3, limit: 1 }, now);
+        if (batch.kind !== "claimed" || !batch.claims[0]) throw new Error("expected claim");
+        const request = {
+          receipt: received.receipt,
+          owner: "g1",
+          token: batch.claims[0].lease.token,
+          result: {
+            version: 1,
+            context: {
+              runId: "root",
+              requester: "fixture:user:1",
+              channelId: "fixture:channel:1",
+              threadKey: "fixture:thread:1",
+              hash: "a".repeat(64),
+            },
+            inputHash: "b".repeat(64),
+            verdict: "unclassified",
+            source: "error",
+            reason: "PRIVATE_REASON",
+          },
+        };
+        expect((await owner.saveSourceRelevance(request, now)).kind).toBe("saved");
+        const bytes =
+          reason === "invalid-json" ? "PRIVATE_STORED_BYTES{" : '{"version":99,"text":"PRIVATE_STORED_BYTES"}';
+        state.storage.sql.exec("UPDATE source_events SET job_json = ? WHERE key = ?", bytes, received.receipt.key);
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        try {
+          expect(await owner.saveSourceRelevance(request, now)).toEqual({ kind: "refused", reason: "unsupported-job" });
+          expect(warn.mock.calls).toEqual([
+            ["[source-events/relevance] held", { eventKey: received.receipt.key, reason }],
+          ]);
+          expect(JSON.stringify(warn.mock.calls)).not.toContain("PRIVATE");
+          expect(JSON.stringify(warn.mock.calls)).not.toContain(request.token);
+          expect(
+            state.storage.sql
+              .exec<{ job_json: string }>("SELECT job_json FROM source_events WHERE key = ?", received.receipt.key)
+              .toArray()[0]!.job_json,
+          ).toBe(bytes);
+        } finally {
+          warn.mockRestore();
+        }
+        await state.storage.deleteAlarm();
+      });
+    },
+  );
+});

@@ -10,6 +10,7 @@ import type { SessionSources } from "../references/receipts.js";
 import type { InboxPushResult } from "./inboxMessage.js";
 import type {
   SourceEventRecord,
+  SourceRelevanceSaveResult,
   SourceEventReceiveResult,
   SourceJobClaimResult,
   SourceJobReleaseResult,
@@ -321,6 +322,7 @@ export interface RunLedger {
   readSourceEvent?(key: string): Promise<SourceEventRecord | undefined>;
   /** Bounded queue leases grant no task execution or source permissions. */
   claimSourceEvents?(request: unknown): Promise<SourceJobClaimResult>;
+  saveSourceRelevance?(request: unknown): Promise<SourceRelevanceSaveResult>;
   releaseSourceEvent?(request: unknown): Promise<SourceJobReleaseResult>;
   /** The stored receipt, or none — the read the gate and the catch-up make
    *  before deciding (item 59). */
