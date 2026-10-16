@@ -33017,75 +33017,82 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     },
   );
 
-  it("on: confirmed and joined review pins survive durable setup and refuse attachment adoption", async () => {
-    vi.stubEnv("SANDBOX_TOKEN", "tok");
-    vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
-    vi.stubEnv("GITHUB_APP_ID", "");
-    const head = "a".repeat(40),
-      moved = "b".repeat(40),
-      url = "https://github.com/acme/api/pull/42";
-    for (const answer of ["yes", url])
-      for (const attached of [moved, head]) {
-        const { deps, provider } = operatorDeps(RESIDENT_YAML_FIXTURE.replace("operator: off", "operator: on"));
-        const ledger = wireChildLedger(deps);
-        const original = `agent:review review-head:${head} review`;
-        const pending = [
-          {
-            id: "prev",
-            startedAt: 0,
-            finished: true,
-            eventCount: 2,
-            operator: {
-              mode: "on",
-              outcome: "question",
-              reason: "target",
-              request: original,
-              question: "Which PR?",
-              ...(answer === "yes"
-                ? { proposal: `agent:review review-head:${head} ${url}`, proposalSettings: {}, confirmablePreset: true }
-                : {}),
-            },
+  it.each([
+    ["yes", "moved"],
+    ["yes", "pinned"],
+    ["url", "moved"],
+    ["url", "pinned"],
+  ] as const)(
+    "on: confirmed and joined review pins survive durable setup and refuse attachment adoption (%s, %s)",
+    async (answerMode, attachment) => {
+      vi.stubEnv("SANDBOX_TOKEN", "tok");
+      vi.stubEnv("RESIDENT_OPERATOR_TOKEN", "rtok");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const head = "a".repeat(40),
+        moved = "b".repeat(40),
+        url = "https://github.com/acme/api/pull/42";
+      const answer = answerMode === "yes" ? "yes" : url;
+      const attached = attachment === "moved" ? moved : head;
+      const { deps, provider } = operatorDeps(RESIDENT_YAML_FIXTURE.replace("operator: off", "operator: on"));
+      const ledger = wireChildLedger(deps);
+      const original = `agent:review review-head:${head} review`;
+      const pending = [
+        {
+          id: "prev",
+          startedAt: 0,
+          finished: true,
+          eventCount: 2,
+          operator: {
+            mode: "on",
+            outcome: "question",
+            reason: "target",
+            request: original,
+            question: "Which PR?",
+            ...(answer === "yes"
+              ? { proposal: `agent:review review-head:${head} ${url}`, proposalSettings: {}, confirmablePreset: true }
+              : {}),
           },
-        ] as RunView[];
-        await savePendingQuestion(deps, pending);
-        const saved = (await deps.runStore.get("prev"))!;
-        await deps.runStore.put({ ...saved, operator: pending[0]!.operator });
-        deps.operatorModel = async () => ({
-          tool: "bind_preset",
-          input: {
-            preset: "review",
-            repo: "acme/api",
-            prTarget: { number: 42, source: "request", quote: url },
-            reason: "review",
-          },
-        });
-        deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 42, ref: "patch-1", baseRef: "main", headSha: head });
-        deps.fetchPrHead = async () => attached;
-        deps.fetchPrFacts = async () => ({ state: "open", headSha: head, headBranchExists: true, sameRepoHead: true });
-        deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
-        let restored: IncomingMessage | undefined;
-        residentFetchStub({
-          attach: () => {
-            const row = [...ledger.live.values()].find((row) => row.meta.agent === "review");
-            restored = row?.meta.request ? messageFromInbox(row.meta.request, Date.now())?.msg : undefined;
-            return Response.json({
-              workspace: "/workspace/threads/t/patch-1",
-              ref: "patch-1",
-              sha: attached,
-              user: "worker3",
-            });
-          },
-        });
-        const { io, replies } = fakeIO();
-        await dispatch(deps, msg(answer, "slack:UADMIN"), io, { thread: pending });
-        expect(restored?.text).toContain(`review-head:${head}`);
-        expect(restored?.text).toMatch(/^agent:review /);
-        if (attached === moved) {
-          expect(replies).toContain("The attached review head changed from its saved commit.");
-          expect(provider.requests).toEqual([]);
-        } else expect(provider.requests[0]?.system).toContain(`Head commit: ${head}`);
-      }
-  });
+        },
+      ] as RunView[];
+      await savePendingQuestion(deps, pending);
+      const saved = (await deps.runStore.get("prev"))!;
+      await deps.runStore.put({ ...saved, operator: pending[0]!.operator });
+      deps.operatorModel = async () => ({
+        tool: "bind_preset",
+        input: {
+          preset: "review",
+          repo: "acme/api",
+          prTarget: { number: 42, source: "request", quote: url },
+          reason: "review",
+        },
+      });
+      deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 42, ref: "patch-1", baseRef: "main", headSha: head });
+      deps.fetchPrHead = async () => attached;
+      deps.fetchPrFacts = async () => ({ state: "open", headSha: head, headBranchExists: true, sameRepoHead: true });
+      deps.postReviewComment = vi.fn(async () => ({ state: "accepted" as const }));
+      let restored: IncomingMessage | undefined;
+      residentFetchStub({
+        attach: () => {
+          const row = [...ledger.live.values()].find((row) => row.meta.agent === "review");
+          restored = row?.meta.request ? messageFromInbox(row.meta.request, Date.now())?.msg : undefined;
+          return Response.json({
+            workspace: "/workspace/threads/t/patch-1",
+            ref: "patch-1",
+            sha: attached,
+            user: "worker3",
+          });
+        },
+      });
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg(answer, "slack:UADMIN"), io, { thread: pending });
+      expect(restored?.text).toContain(`review-head:${head}`);
+      expect(restored?.text).toMatch(/^agent:review /);
+      if (attached === moved) {
+        expect(replies).toContain("The attached review head changed from its saved commit.");
+        expect(provider.requests).toEqual([]);
+      } else expect(provider.requests[0]?.system).toContain(`Head commit: ${head}`);
+    },
+  );
 
   it("on: yes to a pending question whose proposal is a preset line routes the proposal's tail as the request, not the word yes", async () => {
     const pendingThread = [
