@@ -1384,7 +1384,18 @@ describe("reserveRun — the ledger reservation before the attach", () => {
       agent: r.agent,
       profile: r.profile,
       resolved: r.resolved,
-      repoCtx: { baseRef: "private/release" },
+      repoCtx: {
+        baseRef: "private/release",
+        githubSource: {
+          version: 1,
+          source: { host: "github.com", appId: 1, installationId: 2 },
+          repositoryId: 11,
+          pullRequestId: 101,
+          number: 41,
+          head: { repositoryId: 22, ref: "fix/retry", sha: "a".repeat(40) },
+          baseRef: "private/release",
+        },
+      },
       operationTarget: { repo: "acme/api", ref: "unit/repair" },
       channelVisibility: "dm",
       runId: "run-private",
@@ -1404,6 +1415,7 @@ describe("reserveRun — the ledger reservation before the attach", () => {
     expect(d.ledger.reserved[0].meta.operationTarget).toBeUndefined();
     expect(d.ledger.reserved[0].meta.ref).toBeUndefined();
     expect(d.ledger.reserved[0].meta.baseRef).toBeUndefined();
+    expect(d.ledger.reserved[0].meta.githubSource).toBeUndefined();
     expect(d.ledger.reserved[0].meta.headSha).toBeUndefined();
     expect(d.ledger.reserved[0].meta.pr).toBeUndefined();
     expect(d.ledger.reserved[0].meta.route).toBeUndefined();
@@ -1418,7 +1430,22 @@ describe("reserveRun — the ledger reservation before the attach", () => {
       agent: r.agent,
       profile: r.profile,
       resolved: r.resolved,
-      repoCtx: { repo: "acme/api", ref: "main", baseRef: "release/stable", headSha: "a".repeat(40), pr: 41 },
+      repoCtx: {
+        repo: "acme/api",
+        ref: "main",
+        baseRef: "release/stable",
+        headSha: "a".repeat(40),
+        pr: 41,
+        githubSource: {
+          version: 1,
+          source: { host: "github.com", appId: 1, installationId: 2 },
+          repositoryId: 11,
+          pullRequestId: 101,
+          number: 41,
+          head: { repositoryId: 22, ref: "fix/retry", sha: "a".repeat(40) },
+          baseRef: "release/stable",
+        },
+      },
       channelVisibility: "public",
       runId: "run-public",
       startedAt: NOW,
@@ -1437,6 +1464,15 @@ describe("reserveRun — the ledger reservation before the attach", () => {
       baseRef: "release/stable",
       headSha: "a".repeat(40),
       pr: 41,
+      githubSource: {
+        version: 1,
+        source: { host: "github.com", appId: 1, installationId: 2 },
+        repositoryId: 11,
+        pullRequestId: 101,
+        number: 41,
+        head: { repositoryId: 22, ref: "fix/retry", sha: "a".repeat(40) },
+        baseRef: "release/stable",
+      },
       route,
     });
   });

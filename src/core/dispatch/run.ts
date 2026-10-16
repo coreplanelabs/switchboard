@@ -43,6 +43,7 @@ import { reallocatedSetup } from "../runSetup.js";
 import type { ChatMessage } from "../chatMessage.js";
 import type { McpToolsForRun } from "../../mcp/source.js";
 import type { OperationTarget, RepoContext } from "../repoContext.js";
+import { githubSourceContextForTask } from "../../execution/githubReadSource.js";
 import type { PrCommitList } from "../headMoved.js";
 import { REPLAY_EVERYTHING, type RunHandle, type RunRegistry } from "../runRegistry.js";
 import type { RunSeed } from "../runRecord.js";
@@ -518,6 +519,14 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
       ctx.admitted ? privateProgressSourceTrusted(msg.userId, ctx.admitted.inbox) : undefined,
     );
     const ledger = deps.runLedger;
+    const savedGithubSource = carried?.meta.githubSource;
+    const githubSource =
+      privateMain || repoCtx.repo === undefined
+        ? undefined
+        : githubSourceContextForTask(
+            savedGithubSource === undefined ? repoCtx.githubSource : savedGithubSource,
+            repoCtx.pr,
+          );
     const meta: LiveRunMeta = {
       ...(privateMain ? { privateConversation: true as const } : {}),
       ...(ctx.ingressRunId ? { organizationIngressRunId: ctx.ingressRunId } : {}),
@@ -531,6 +540,7 @@ export async function claimRun(deps: RunDeps, ctx: ClaimContext): Promise<Ledger
       ...(directAudience ? { directAudience } : {}),
       channelVisibility,
       ...(repoCtx.repo !== undefined && !privateMain ? { repo: repoCtx.repo } : {}),
+      ...(githubSource ? { githubSource } : {}),
       ...(operationTarget !== undefined && !privateMain ? { operationTarget } : {}),
       ...(msg.sourceUrl !== undefined ? { sourceUrl: msg.sourceUrl } : {}),
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),

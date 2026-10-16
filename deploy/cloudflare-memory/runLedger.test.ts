@@ -6441,6 +6441,47 @@ function timeSealedRunStages(
 }
 
 describe("run ledger — claim and admission (item 29)", () => {
+  it("retains the native GitHub source snapshot through the existing SQLite claim and live read", async () => {
+    const key = storeKey(),
+      threadKey = "slack:C1:native-source";
+    const githubSource = {
+      version: 1,
+      source: { host: "github.com", appId: 1, installationId: 2 },
+      repositoryId: 11,
+      pullRequestId: 101,
+      number: 7,
+      head: { repositoryId: 22, ref: "fix/retry", sha: "a".repeat(40) },
+      baseRef: "main",
+    };
+    const req = claimBody(key, "source-run", threadKey);
+    const meta = { ...req.run.meta, repo: "acme/api", pr: 7, githubSource };
+    expect(await post("/runs/claim", { ...req, run: { ...req.run, meta } })).toMatchObject({
+      status: 200,
+      data: { ok: true },
+    });
+    expect(await post("/runs/live", { storeKey: key })).toMatchObject({
+      status: 200,
+      data: {
+        runs: [
+          {
+            runId: "source-run",
+            meta: {
+              githubSource: {
+                version: 1,
+                source: { host: "github.com", appId: 1, installationId: 2 },
+                repositoryId: 11,
+                pullRequestId: 101,
+                number: 7,
+                head: { repositoryId: 22, ref: "fix/retry", sha: "a".repeat(40) },
+                baseRef: "main",
+              },
+            },
+          },
+        ],
+      },
+    });
+  });
+
   it("mints resident fences only for the live owner, in ledger order", async () => {
     const key = storeKey();
     const threadKey = "slack:C1:resident-fence";

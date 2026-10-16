@@ -338,3 +338,10 @@ Optional deployment/security/linked-issue sources, another broker, cross-partiti
 ## Progress: shared child launch checks
 
 The existing spawn path is a prerequisite for source-bound delegation in Step 1. It must retain the original parent's launch budget through queued work, context reads and thread creation. It must also check the parent's stop control and local run state before opening a thread and dispatching a child. This cut adds those checks to the existing capability. It preserves the independent lease for an admitted exact-PR Ship unit. It does not expose spawn tools to the orchestrator or complete external intake.
+
+
+### Saved GitHub task source context, 2026-10-16
+
+The existing PR resolver, run reservation and execution claim now retain a complete native source snapshot on the existing live run metadata. The snapshot keeps credential source, PR/base/fork IDs and observed refs/SHA. Reclaim and resume preserve the original snapshot without relabeling it as another PR. Partial source identity stays unknown. Private main metadata remains omitted under the existing privacy rule.
+
+This connects read identity to durable active task context. It does not make a task match or grant source access. The common handler still needs canonical context, original orchestrator ownership and current access checks. Private context persistence, legacy backfill, repository-only targets, finished-run retention and source-event routing remain pending. No source producer or internal delivery caller is enabled. Step 4 remains in progress.

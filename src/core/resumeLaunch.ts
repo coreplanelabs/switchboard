@@ -13,6 +13,7 @@ import type { ChannelIO, IncomingMessage } from "./types.js";
 import type { CoreDeps, DispatchOptions } from "./dispatcher.js";
 import type { ResumeContext } from "./dispatch/admission.js";
 import type { RepoContext } from "./repoContext.js";
+import { githubPullSourceContextOf } from "../execution/githubReadSource.js";
 import type { RehostRun, ResumableRun } from "./boot.js";
 import { directAudienceStampOf, messageFromInbox } from "./runLedger/inboxMessage.js";
 import { planResume, type KnownTool } from "./runLedger/resume.js";
@@ -147,12 +148,15 @@ export function repoContextOf(row: LiveRunRow, events: readonly RunEvent[] = [])
   const m = row.meta;
   const tag = events.find((e) => e.type === "coordinator_tag");
   const baseRef = m.baseRef ?? (tag?.type === "coordinator_tag" ? (tag.publication?.baseRef ?? tag.base) : undefined);
+  const source = githubPullSourceContextOf(m.githubSource);
+  const githubSource = source?.number === m.pr ? source : undefined;
   return {
     ...(m.repo !== undefined ? { repo: m.repo } : {}),
     ...(m.ref !== undefined ? { ref: m.ref } : {}),
     ...(m.pr !== undefined ? { pr: m.pr } : {}),
     ...(m.headSha !== undefined ? { headSha: m.headSha } : {}),
     ...(baseRef !== undefined ? { baseRef } : {}),
+    ...(githubSource ? { githubSource } : {}),
   };
 }
 

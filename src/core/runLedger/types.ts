@@ -79,6 +79,8 @@ export interface LiveRunMeta {
   directAudience?: import("./inboxMessage.js").DirectAudienceStamp;
   channelVisibility?: ChannelVisibility;
   repo?: string;
+  /** Native read snapshot for source matching; no cached access or routing grant. */
+  githubSource?: import("../../execution/githubReadSource.js").GithubPullSourceContext;
   /** Accepted execution target, distinct from resolved citation and channel facts. */
   operationTarget?: { repo: string; ref?: string };
   sourceUrl?: string;
