@@ -267,9 +267,10 @@ const actionsHidden = ref(!!useViewingAs() || isHistory || seed?.mode !== "live"
 const stopDisabled = ref(false);
 
 function requestStop(mode: "soft" | "hard"): void {
-  if (seed?.mode !== "live" || seed.stopUrl === undefined) return;
+  if (stopDisabled.value || seed?.mode !== "live" || seed.stopUrl === undefined) return;
   if (mode === "hard" && !browser.confirm("Hard stop: abort the run now with no summary and free its sandbox?")) return;
   stopDisabled.value = true;
+  stopError.value = "";
   fetch(`${seed.stopUrl}${seed.stopUrl.includes("?") ? "&" : "?"}mode=${encodeURIComponent(mode)}`, {
     method: "POST",
     credentials: "same-origin",
@@ -284,14 +285,15 @@ function requestStop(mode: "soft" | "hard"): void {
       markStopping(mode);
     })
     .catch((err: unknown) => {
-      stopDisabled.value = false;
       stopError.value = `stop failed: ${err instanceof Error ? err.message : "error"}`;
+    })
+    .finally(() => {
+      stopDisabled.value = false;
     });
 }
 
 function markStopping(mode: "soft" | "hard"): void {
   model.markStopping(mode);
-  actionsHidden.value = true; // one request is enough; the stream shows the outcome
   if (phase.value === "connecting" || phase.value === "running") phase.value = "stopping";
 }
 
@@ -432,7 +434,6 @@ onMounted(() => {
       liveStamps.value = { ...liveStamps.value, finishedAt: frame.finishedAt };
     },
     onDisconnected: () => {
-      actionsHidden.value = true;
       frozenMs.value ??= runClock?.elapsedMs(nowWall.value);
     },
     onEnd: (frame) => {
@@ -559,7 +560,10 @@ function fmtTimeTitle(at: number | undefined): string | undefined {
     </div>
     <div class="green-evidence-toolbar">
       <span v-if="!actionsHidden" id="actions" class="actions flex gap-1.5">
-        <UTooltip text="Soft stop: no new steps, the agent writes up what it has">
+        <UTooltip
+          v-if="!state.stopMode && phase !== 'disconnected'"
+          text="Soft stop: no new steps, the agent writes up what it has"
+        >
           <UButton
             size="xs"
             color="neutral"

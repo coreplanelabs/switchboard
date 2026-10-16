@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import RunsIndexPage from "./RunsIndexPage.vue";
-import ViewAsPicker from "../components/runs/ViewAsPicker.vue";
+import RunsIndexPage from "../../green/pages/Runs.vue";
 import { mountApp } from "../testing/mount";
 import { browser } from "../lib/browser";
 import { fakeEventSourceFactory } from "../testing/fakeEventSource";
@@ -59,48 +58,40 @@ function mountIndex(s: RunsIndexSeed) {
   return { wrapper, created, es: () => created[0] };
 }
 
-describe("RunsIndexPage — the toggles are remembered (item 29)", () => {
-  it("a toggle is written as a preference; a URL that names neither opens the remembered view once; a URL that names one wins; mine is remembered for an unlinked session too", async () => {
+const checkbox = (wrapper: ReturnType<typeof mountApp>, label: string) =>
+  wrapper
+    .findAll("label")
+    .find((l) => l.text() === label)!
+    .find('input[type="checkbox"]');
+const empty = (wrapper: ReturnType<typeof mountApp>) => wrapper.find(".green-empty h3");
+
+describe("RunsIndexPage — the completed preference", () => {
+  it("remembers completed visibility, honors an explicit URL, and offers no local owner selector", async () => {
     const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
-    const ann = { id: "slack:UA", name: "ann" };
-    // Nothing remembered: the bare view stays.
     vi.spyOn(browser, "search").mockReturnValue("");
-    mountIndex(seed([], { asUser: ann }));
-    expect(nav).not.toHaveBeenCalled();
-    // A change writes the preference and navigates.
-    const w = mountIndex(seed([], { asUser: ann }));
-    const done = w.wrapper.find("#showdone");
-    (done.element as HTMLInputElement).checked = true;
-    await done.trigger("change");
+    const { wrapper } = mountIndex(seed([]));
+    await checkbox(wrapper, "Include completed").setValue(true);
     expect(localStorage.getItem("sb.runs.all")).toBe("1");
-    const mine = w.wrapper.find("#showmine");
-    (mine.element as HTMLInputElement).checked = true;
-    await mine.trigger("change");
-    expect(localStorage.getItem("sb.runs.mine")).toBe("1");
+    expect(nav).toHaveBeenLastCalledWith("/runs?all=1");
     nav.mockClear();
-    // A bare URL opens the remembered view, both toggles at once.
-    mountIndex(seed([], { asUser: ann }));
-    expect(nav).toHaveBeenCalledWith("/runs?all=1&mine=1");
-    nav.mockClear();
-    // A URL that names a toggle wins: what it says is what shows, no navigation.
-    vi.spyOn(browser, "search").mockReturnValue("?all=1");
-    mountIndex(seed([], { all: true, asUser: ann }));
-    expect(nav).not.toHaveBeenCalled();
-    // An unlinked session has runs of its own (record 0043): a remembered `mine` holds for it too.
-    vi.spyOn(browser, "search").mockReturnValue("");
-    localStorage.setItem("sb.runs.all", "0");
     mountIndex(seed([]));
-    expect(nav).toHaveBeenCalledWith("/runs?mine=1");
+    expect(nav).toHaveBeenCalledWith("/runs?all=1");
+    nav.mockClear();
+    vi.spyOn(browser, "search").mockReturnValue("?all=0");
+    mountIndex(seed([]));
+    expect(nav).not.toHaveBeenCalled();
+    expect(wrapper.findAll('input[type="checkbox"]')).toHaveLength(2);
+    expect(wrapper.text()).not.toContain("Only mine");
   });
 });
 
 describe("RunsIndexPage — toolbar, states, pager", () => {
   it("counts the live rows, seeds the list newest-first, and opens the right feed", () => {
     const { wrapper, es } = mountIndex(seed([live("a", { startedAt: 5 }), live("b", { startedAt: 9 }), ...[]]));
-    expect(wrapper.find("#livecount").text()).toBe("2 running");
+    expect(wrapper.find(".green-toolbar > span").text()).toBe("2 running");
     expect(wrapper.findAll("li.run").map((li) => li.attributes("data-run-id"))).toEqual(["b", "a"]);
     expect(es().url).toBe("/runs?stream=1");
-    expect(wrapper.find("h1 .title").text()).toBe("Live runs");
+    expect(wrapper.find("h1").text()).toBe("Run details");
   });
 
   it("hides command and door rows by default; the named toggle reveals the bookkeeping runs", async () => {
@@ -112,12 +103,10 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
       ]),
     );
     expect(wrapper.findAll("li.run").map((li) => li.attributes("data-run-id"))).toEqual(["ordinary"]);
-    expect(wrapper.find("#livecount").text()).toBe("1 running");
+    expect(wrapper.find(".green-toolbar > span").text()).toBe("1 running");
 
-    const toggle = wrapper.find("#showbookkeeping");
-    expect(toggle.attributes("aria-label")).toBe("Show bookkeeping runs");
-    expect(toggle.attributes("aria-controls")).toBe("runs");
-    expect(toggle.element.parentElement?.textContent?.trim()).toBe("Show bookkeeping runs");
+    const toggle = checkbox(wrapper, "Include system runs");
+    expect(toggle.element.parentElement?.textContent?.trim()).toBe("Include system runs");
     await toggle.setValue(true);
 
     expect(wrapper.findAll("li.run").map((li) => li.attributes("data-run-id"))).toEqual([
@@ -125,7 +114,7 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
       "command-row",
       "door-row",
     ]);
-    expect(wrapper.find("#livecount").text()).toBe("3 running");
+    expect(wrapper.find(".green-toolbar > span").text()).toBe("3 running");
   });
 
   // Feature: docs/reference/specs/live-view.md item 32 — stalled
@@ -194,142 +183,43 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
 
   it("?all=1 titles the page All runs and opens the all feed", () => {
     const { wrapper, es } = mountIndex(seed([done("c")], { all: true }));
-    expect(wrapper.find("h1 .title").text()).toBe("All runs");
+    expect(wrapper.find("h2").text()).toBe("Live and completed");
     expect(es().url).toBe("/runs?stream=1&all=1");
-  });
-
-  // Feature: docs/decisions/0053 — the picker is drawn for a viewer the seed says may view as a person.
-  it("the view-as picker is drawn only when the seed offers viewAs: the page's people by name with the id beside; a pick posts the person and navigates to the index; a typed id is offered as an item and posts too", async () => {
-    const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
-    const plain = mountIndex(seed([]));
-    expect(plain.wrapper.findComponent(ViewAsPicker).exists()).toBe(false);
-    const people = [{ id: "slack:UBOB", name: "bob" }, { id: "slack:UANON" }];
-    const { wrapper } = mountIndex(seed([], { viewAs: { people } }));
-    const picker = wrapper.findComponent(ViewAsPicker);
-    expect(picker.exists()).toBe(true);
-    const menu = picker.findComponent({ name: "InputMenu" });
-    expect(menu.exists()).toBe(true);
-    expect(menu.props("items")).toEqual([
-      { label: "bob", value: "slack:UBOB", suffix: "slack:UBOB" },
-      { label: "slack:UANON", value: "slack:UANON" },
-    ]);
-    expect(menu.props("createItem")).toBe(true);
-    menu.vm.$emit("update:modelValue", "slack:UBOB");
-    await vi.waitFor(() => expect(nav).toHaveBeenCalledWith("/runs"));
-    expect(fetch).toHaveBeenCalledWith("/runs/view-as", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ person: "slack:UBOB" }),
-    });
-    menu.vm.$emit("create", " slack:UNEW ");
-    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
-    expect((fetch as ReturnType<typeof vi.fn>).mock.calls[1][1].body).toBe(JSON.stringify({ person: "slack:UNEW" }));
-    // An empty pick (the menu clearing) posts nothing.
-    menu.vm.$emit("update:modelValue", "");
-    await wrapper.vm.$nextTick();
-    expect(fetch).toHaveBeenCalledTimes(2);
-  });
-
-  it("a refused pick shows the server's sentence beside the picker and navigates nowhere", async () => {
-    const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
-    (fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      ok: false,
-      status: 400,
-      json: async () => ({ error: "invalid_input", message: "person must be a Slack person id" }),
-    });
-    const { wrapper } = mountIndex(seed([], { viewAs: { people: [] } }));
-    wrapper.findComponent(ViewAsPicker).findComponent({ name: "InputMenu" }).vm.$emit("create", "nope");
-    await vi.waitFor(() =>
-      expect(wrapper.find(".view-as-picker .text-bad").text()).toBe("person must be a Slack person id"),
-    );
-    expect(nav).not.toHaveBeenCalled();
   });
 
   it("the Show completed checkbox reflects the view and navigates on change (a server mode, not a client filter)", async () => {
     const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
     const { wrapper } = mountIndex(seed([]));
-    const box = wrapper.find("#showdone");
+    const box = checkbox(wrapper, "Include completed");
     expect((box.element as HTMLInputElement).checked).toBe(false);
     (box.element as HTMLInputElement).checked = true;
     await box.trigger("change");
     expect(nav).toHaveBeenCalledWith("/runs?all=1");
     const all = mountIndex(seed([], { all: true }));
-    expect((all.wrapper.find("#showdone").element as HTMLInputElement).checked).toBe(true);
-  });
-
-  it("Show only mine (record 0042): checked on ?mine=1, a change navigates keeping the other toggle, the feed and the pager stay in the view; a linked session's hint names its person, an unlinked session's names the Threads chat", async () => {
-    const nav = vi.spyOn(browser, "navigate").mockImplementation(() => {});
-    const ann = { id: "slack:UA", name: "ann" };
-    const linked = mountIndex(seed([], { asUser: ann }));
-    const box = linked.wrapper.find("#showmine");
-    expect(linked.wrapper.find('label[for="showmine"], #showmine').exists()).toBe(true);
-    expect(linked.wrapper.find("#showmine").element.parentElement?.textContent?.trim()).toBe("Show only mine");
-    expect((box.element as HTMLInputElement).checked).toBe(false);
-    expect((box.element as HTMLInputElement).disabled).toBe(false);
-    expect(linked.wrapper.find("#minehint").text()).toBe("Only the runs ann requested");
-    (box.element as HTMLInputElement).checked = true;
-    await box.trigger("change");
-    expect(nav).toHaveBeenLastCalledWith("/runs?mine=1");
-    // Both on: each toggle keeps the other; off again returns to the bare view.
-    const both = mountIndex(seed([], { all: true, mine: true, asUser: ann, olderThan: 1_000_000 }));
-    expect((both.wrapper.find("#showmine").element as HTMLInputElement).checked).toBe(true);
-    expect(both.es().url).toBe("/runs?stream=1&all=1&mine=1");
-    expect(both.wrapper.find("#empty").text()).toBe("No runs of yours.");
-    expect(both.wrapper.find("nav.pager a").attributes("href")).toBe("/runs?all=1&mine=1");
-    const done = both.wrapper.find("#showdone");
-    (done.element as HTMLInputElement).checked = false;
-    await done.trigger("change");
-    expect(nav).toHaveBeenLastCalledWith("/runs?mine=1");
-    const mineBox = both.wrapper.find("#showmine");
-    (mineBox.element as HTMLInputElement).checked = false;
-    await mineBox.trigger("change");
-    expect(nav).toHaveBeenLastCalledWith("/runs?all=1");
-    expect(
-      mountIndex(seed([], { mine: true, asUser: ann }))
-        .wrapper.find("#empty")
-        .text(),
-    ).toBe("No active runs of yours.");
-    // Unlinked: the box is enabled — the session's own runs are the ones it asked for
-    // from Threads (record 0043) — and the hint says which runs those are.
-    const unlinked = mountIndex(seed([]));
-    expect((unlinked.wrapper.find("#showmine").element as HTMLInputElement).disabled).toBe(false);
-    expect(unlinked.wrapper.find("#minehint").text()).toBe(
-      "Only the runs this session requested from Threads. Sign in with the email of your Slack account to see your Slack runs too.",
-    );
-    expect(unlinked.es().url).toBe("/runs?stream=1");
-    const unlinkedMine = mountIndex(seed([], { mine: true }));
-    expect((unlinkedMine.wrapper.find("#showmine").element as HTMLInputElement).checked).toBe(true);
-    expect(unlinkedMine.es().url).toBe("/runs?stream=1&mine=1");
+    expect((checkbox(all.wrapper, "Include completed").element as HTMLInputElement).checked).toBe(true);
   });
 
   it("shows the empty sentinel per view, and the store-degraded banner when the seed carries one", () => {
-    expect(mountIndex(seed([])).wrapper.find("#empty").text()).toBe("No active runs.");
-    expect(
-      mountIndex(seed([], { all: true }))
-        .wrapper.find("#empty")
-        .text(),
-    ).toBe("No runs.");
-    expect(
-      mountIndex(seed([live("a")]))
-        .wrapper.find("#empty")
-        .exists(),
-    ).toBe(false);
+    expect(empty(mountIndex(seed([])).wrapper).text()).toBe("No runs are live");
+    expect(empty(mountIndex(seed([], { all: true })).wrapper).text()).toBe("No retained runs in this view");
+    expect(empty(mountIndex(seed([live("a")])).wrapper).exists()).toBe(false);
     const banner = mountIndex(
       seed([], { all: true, storeUnavailable: "run history is unavailable right now — showing live runs only" }),
     );
-    expect(banner.wrapper.find(".banner").text()).toContain("live runs only");
-    expect(mountIndex(seed([])).wrapper.find(".banner").exists()).toBe(false);
+    expect(banner.wrapper.find('[role="status"]').text()).toContain("live runs only");
+    expect(mountIndex(seed([])).wrapper.find(".green-warning").exists()).toBe(false);
   });
 
   it("pager: Older runs when the page was full; ← Newest runs + what the page holds on a cursor page; nothing on the default view", () => {
     const first = mountIndex(seed([live("a")], { all: true, olderHref: "/runs?all=1&before=5&beforeId=x" })).wrapper;
-    expect(first.find("nav.pager a.older").attributes("href")).toBe("/runs?all=1&before=5&beforeId=x");
-    expect(first.find(".range").exists()).toBe(false);
+    expect(first.find('a[href="/runs?all=1&before=5&beforeId=x"]').attributes("href")).toBe(
+      "/runs?all=1&before=5&beforeId=x",
+    );
+    expect(first.find(".green-page-heading + .green-toolbar + p").exists()).toBe(false);
     const at = Date.UTC(2026, 7, 29, 14, 5);
     const later = mountIndex(seed([live("a")], { all: true, olderThan: at, now: at + 1000 })).wrapper;
-    expect(later.find(".range").text()).toMatch(/runs finished before Aug 29, \d{1,2}:\d{2} [AP]M/);
-    expect(later.find('a[href="/runs?all=1"]').text()).toBe("← Newest runs");
+    expect(later.text()).toMatch(/Finished before Aug 29, \d{1,2}:\d{2} [AP]M/);
+    expect(later.find('a[href="/runs?all=1"]').text()).toBe("Newest runs");
     expect(
       mountIndex(seed([live("a")]))
         .wrapper.find("nav.pager")
@@ -353,16 +243,16 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
 describe("RunsIndexPage — the live feed", () => {
   it("connection indicator: connecting → connected on open, disconnected when the stream closes, connecting on a soft error", async () => {
     const { wrapper, es } = mountIndex(seed([]));
-    expect(wrapper.find("#state").text()).toBe("connecting…");
+    expect(wrapper.find(".green-heading-actions .green-badge").text()).toBe("connecting…");
     es().emitOpen();
     await wrapper.vm.$nextTick();
-    expect(wrapper.find("#state").text()).toBe("connected");
+    expect(wrapper.find(".green-heading-actions .green-badge").text()).toBe("connected");
     es().emitError(false);
     await wrapper.vm.$nextTick();
-    expect(wrapper.find("#state").text()).toBe("connecting…");
+    expect(wrapper.find(".green-heading-actions .green-badge").text()).toBe("connecting…");
     es().emitError(true);
     await wrapper.vm.$nextTick();
-    expect(wrapper.find("#state").text()).toBe("disconnected");
+    expect(wrapper.find(".green-heading-actions .green-badge").text()).toBe("disconnected");
   });
 
   it("a RE-connect reloads for a fresh snapshot (the backend may have restarted and rows would drift)", async () => {
@@ -392,7 +282,7 @@ describe("RunsIndexPage — the live feed", () => {
     es().emitMessage({ type: "upsert", run: done("a") });
     await wrapper.vm.$nextTick();
     expect(wrapper.findAll("li.run")).toHaveLength(0);
-    expect(wrapper.find("#empty").exists()).toBe(true);
+    expect(empty(wrapper).exists()).toBe(true);
   });
 
   it("?all=1: finished upserts stay; a repaint never wipes the record's finishedAt/status (merge under the summary)", async () => {
@@ -454,11 +344,11 @@ describe("RunsIndexPage — expiry divider (item 20)", () => {
     });
     const { wrapper } = mountIndex(s);
     const ids = wrapper.findAll("#runs > li").map((li) => li.attributes("id") ?? li.attributes("data-run-id"));
-    expect(ids).toEqual(["l", "fresh", "leaving", "soon", "gone"]);
-    expect(wrapper.find("#leaving").text()).toContain("Leaving within a day");
+    expect(ids).toEqual(["l", "fresh", undefined, "soon", "gone"]);
+    expect(wrapper.find("#runs > li.text-warn").text()).toContain("The following retained runs expire within one day.");
     // no retention → no divider, no expiry stamps
     const off = mountIndex(seed([fin("soon", 29.5)], { all: true, retentionDays: null, now: nowMs }));
-    expect(off.wrapper.find("#leaving").exists()).toBe(false);
+    expect(off.wrapper.find("#runs > li.text-warn").exists()).toBe(false);
     expect(off.wrapper.find("[data-expires-at]").exists()).toBe(false);
   });
 
@@ -468,11 +358,11 @@ describe("RunsIndexPage — expiry divider (item 20)", () => {
     try {
       const s = seed([fin("almost", 28.999)], { all: true, retentionDays: 30, now: nowMs });
       const { wrapper } = mountIndex(s);
-      expect(wrapper.find("#leaving").exists()).toBe(false);
+      expect(wrapper.find("#runs > li.text-warn").exists()).toBe(false);
       vi.setSystemTime(nowMs + 0.01 * DAY);
       await vi.advanceTimersByTimeAsync(1000);
       await wrapper.vm.$nextTick();
-      expect(wrapper.find("#leaving").exists()).toBe(true);
+      expect(wrapper.find("#runs > li.text-warn").exists()).toBe(true);
     } finally {
       vi.useRealTimers();
     }

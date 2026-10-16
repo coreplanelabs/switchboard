@@ -1,5 +1,6 @@
 <script setup lang="ts">
 defineOptions({ name: "GreenScheduledPage" });
+import { formatLocalIso } from "../../src/lib/format";
 import { useSeed } from "../../src/lib/seed";
 import { formatRelative, OUTCOME_LABEL, ACTION_LABEL } from "@core/channels/scheduledPanel.js";
 import PageHeading from "../components/PageHeading.vue";
@@ -22,7 +23,14 @@ const seed = useSeed("scheduled");
           <dt class="text-muted">Schedule</dt>
           <dd class="font-mono">{{ row.cron }} UTC</dd>
           <dt class="text-muted">Next</dt>
-          <dd>{{ row.nextFireAt === undefined ? "No next firing" : formatRelative(row.nextFireAt, seed.now) }}</dd>
+          <dd>
+            <time
+              v-if="row.nextFireAt !== undefined"
+              :datetime="new Date(row.nextFireAt).toISOString()"
+              :title="formatLocalIso(row.nextFireAt)"
+              >{{ formatRelative(row.nextFireAt, seed.now) }}</time
+            ><span v-else>No next firing</span>
+          </dd>
           <dt class="text-muted">Action</dt>
           <dd>
             {{
@@ -34,10 +42,14 @@ const seed = useSeed("scheduled");
           <template v-if="row.last"
             ><dt class="text-muted">Last result</dt>
             <dd>
-              {{ OUTCOME_LABEL[row.last.outcome] }} · {{ formatRelative(row.last.firedAt, seed.now)
-              }}<RouterLink v-if="row.last.runHref" class="text-primary ml-2" :to="row.last.runHref"
+              {{ OUTCOME_LABEL[row.last.outcome] }} ·
+              <time :datetime="new Date(row.last.firedAt).toISOString()" :title="formatLocalIso(row.last.firedAt)">{{
+                formatRelative(row.last.firedAt, seed.now)
+              }}</time
+              ><RouterLink v-if="row.last.runHref" class="text-primary ml-2" :to="row.last.runHref"
                 >Run details →</RouterLink
               >
+              <span v-else-if="row.last.runId" class="block font-mono break-all">Run {{ row.last.runId }}</span>
               <p v-if="row.last.detail" class="mt-1 whitespace-pre-wrap">{{ row.last.detail }}</p>
               <span v-if="row.last.traceId" class="block font-mono mt-1 text-muted">Trace {{ row.last.traceId }}</span>
             </dd></template

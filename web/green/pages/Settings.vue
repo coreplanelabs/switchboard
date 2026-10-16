@@ -13,7 +13,7 @@ const route = useRoute();
 const tab = computed(() => seed?.tab ?? String(route.params.tab ?? "channels"));
 const tabs = computed(() => [
   { id: "channels", label: "Channels" },
-  ...(seed?.capabilities.mcp ? [{ id: "mcps", label: "MCP servers" }] : []),
+  ...(seed?.capabilities.mcp || tab.value === "mcps" ? [{ id: "mcps", label: "MCP servers" }] : []),
   { id: "identities", label: "Identities" },
   ...(seed?.capabilities.residents ? [{ id: "runtime", label: "Runtime" }] : []),
   { id: "installation", label: "Installation" },

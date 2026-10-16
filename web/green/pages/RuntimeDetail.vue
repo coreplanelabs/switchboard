@@ -13,6 +13,7 @@ import {
   residentImageReport,
   residentLive,
   residentSlug,
+  residentLabel,
   residentStateTone,
   residentThreads,
   str,
@@ -116,7 +117,7 @@ const diskParts = computed(() => {
 <template>
   <template v-if="seed">
     <PageHeading
-      :title="slug || 'Repository environment'"
+      :title="residentSlug(record) ? residentLabel(record) : slug || 'Repository environment'"
       description="Lifecycle, retained work, and the facts used for admission."
       eyebrow="SETTINGS / RUNTIME"
       ><RouterLink to="/settings/runtime" class="green-button"
@@ -143,10 +144,19 @@ const diskParts = computed(() => {
           </dd>
           <dt>UID pool</dt>
           <dd><ResidentUidGauge :record="record" /></dd>
+          <dt>Provisioned</dt>
+          <dd>{{ str(live.provisionedAt) || "Not recorded" }}</dd>
+          <dt>Last refresh</dt>
+          <dd>{{ str(live.lastRefreshAt) || "Not recorded" }}</dd>
           <dt>Last refresh error</dt>
           <dd>{{ str(live.lastRefreshError) || "No error recorded" }}</dd>
           <dt>Idle since</dt>
-          <dd>{{ str(live.idleSince) || "Awake" }}</dd>
+          <dd>
+            {{ str(live.idleSince) || "Awake"
+            }}<span v-if="str(live.idleSince)" class="block text-xs text-muted"
+              >Refresh is parked; the container may sleep.</span
+            >
+          </dd>
           <dt>Last restore</dt>
           <dd>{{ lastRestore || "No restore recorded" }}</dd>
         </dl>
@@ -214,6 +224,8 @@ const diskParts = computed(() => {
               <th>Branch</th>
               <th>Commit</th>
               <th>State</th>
+              <th>User</th>
+              <th>Dependencies</th>
               <th>Disk</th>
               <th>Attached</th>
             </tr>
@@ -230,7 +242,15 @@ const diskParts = computed(() => {
                 <a v-if="thread.commitHref" :href="thread.commitHref" class="text-primary">{{ thread.sha }}</a
                 ><span v-else>{{ thread.sha || "Unknown" }}</span>
               </td>
-              <td>{{ thread.evicted ? "Evicted" : "Retained" }}</td>
+              <td>
+                {{ thread.evicted ? "Evicted" : "Retained" }}
+                <span v-if="thread.evicted" class="block text-xs text-muted"
+                  >evicted {{ thread.evictedAt || "at an unknown time" }} ·
+                  {{ thread.evictedWhy || "No reason recorded" }}</span
+                >
+              </td>
+              <td>{{ thread.user || "Unknown" }}</td>
+              <td>{{ thread.deps || "Unknown" }}</td>
               <td>
                 {{
                   disk?.parts.threads[thread.threadKey] === undefined

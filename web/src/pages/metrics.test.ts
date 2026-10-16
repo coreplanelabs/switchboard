@@ -4,7 +4,7 @@ import { buildMetricsReport, type MetricsReport } from "@core/core/metrics.js";
 import { buildReviewFeedbackReport } from "@core/core/reviewFeedbackReport.js";
 import type { ReviewFeedbackEntry } from "@core/core/reviewFeedback.js";
 import type { MetricsSeed } from "@core/channels/webSeed.js";
-import MetricsPage from "./MetricsPage.vue";
+import MetricsPage from "../../green/pages/Metrics.vue";
 import { footerSentencesOf } from "../lib/metrics";
 import { mountApp } from "../testing/mount";
 
@@ -125,60 +125,53 @@ describe("MetricsPage", () => {
   it("renders the eight tiles, the three charts and the by-agent table from the seed, and asks the network for nothing", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
     const wrapper = mountApp(MetricsPage, { seed: seed() });
-    const tiles = wrapper.findAll("[data-metrics-tiles] > div");
+    const tiles = wrapper.findAll(".green-stat");
     expect(tiles).toHaveLength(8);
-    expect(tiles.map((t) => t.find(".text-2xl").text())).toEqual([
-      "25",
-      "2",
-      "8%",
-      "54.8s",
-      "4m",
-      "$14.50",
-      "3",
-      "450",
-    ]);
-    expect(wrapper.find('svg[aria-label="Runs per day, stacked by status"]').exists()).toBe(true);
-    expect(wrapper.find('svg[aria-label="Failure rate per day"]').exists()).toBe(true);
-    expect(wrapper.find('svg[aria-label="Median wall-clock per day per agent"]').exists()).toBe(true);
-    const rows = wrapper.findAll("[data-metrics-agents] tbody tr");
+    expect(tiles.map((t) => t.find("dd").text())).toEqual(["25", "2", "8%", "54.8s", "4m", "$14.50", "3", "450"]);
+    expect(wrapper.find('svg[aria-label="Finished runs per day, stacked by outcome"]').exists()).toBe(true);
+    expect(wrapper.find('svg[aria-label="Daily failure rate"]').exists()).toBe(true);
+    expect(wrapper.find('svg[aria-label="Median wall duration by agent per day"]').exists()).toBe(true);
+    const rows = wrapper.findAll("table tbody tr");
     expect(rows).toHaveLength(2);
     expect(rows[0].text()).toContain("coding");
     expect(rows[0].text()).toContain("10%");
     expect(rows[1].text()).toContain("review");
-    expect(wrapper.text()).toContain("dataset switchboard_runs");
-    expect(wrapper.text()).toContain("GET /metrics.json");
+    expect(wrapper.text()).toContain("Dataset: switchboard_runs");
+    expect(wrapper.find('a[href="/metrics.json?days=7"]').exists()).toBe(true);
     expect(fetchSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
   });
 
   it("a 90-day seed renders ninety x-axis buckets in the runs chart", () => {
     const wrapper = mountApp(MetricsPage, { seed: seed(report(90)) });
-    const chart = wrapper.find('svg[aria-label="Runs per day, stacked by status"]');
+    const chart = wrapper.find('svg[aria-label="Finished runs per day, stacked by outcome"]');
     expect(chart.findAll("rect.day")).toHaveLength(90);
   });
 
   it("the footer is exactly the report's four provenance sentences: bucket, pricing, completeness, retention", () => {
     const r = report();
     const wrapper = mountApp(MetricsPage, { seed: seed(r) });
-    const sentences = wrapper.findAll("[data-metrics-footer] p").map((p) => p.text());
+    const sentences = wrapper
+      .findAll("details > p")
+      .slice(0, 4)
+      .map((p) => p.text());
     expect(sentences).toEqual(footerSentencesOf(r.range));
   });
 
   it("the range pills keep the agent filter and the agent pills keep the range; the filtered agent reads solid", () => {
     const filtered = { ...report(), range: { ...report().range, agent: "coding" } };
     const wrapper = mountApp(MetricsPage, { seed: seed(filtered) });
-    const rangeLinks = wrapper.findAll('nav[aria-label="Range"] a');
+    const rangeLinks = wrapper.findAll('nav[aria-label="Metrics range"] a:not([aria-current])');
     expect(rangeLinks.map((a) => a.attributes("href"))).toEqual([
       "/metrics?days=30&agent=coding",
       "/metrics?days=90&agent=coding",
     ]);
-    const current = wrapper.find('nav[aria-label="Agent"] [aria-current="page"]');
-    expect(current.text()).toBe("coding");
-    expect(wrapper.find('nav[aria-label="Agent"] a').attributes("href")).toBe("/metrics?days=7");
+    expect((wrapper.find("select").element as HTMLSelectElement).value).toBe("coding");
+    expect(wrapper.findAll("select option").map((option) => option.text())).toEqual(["All agents", "coding", "review"]);
   });
 
   it("without a seed says so instead of crashing — the off state never reaches this page", () => {
     const wrapper = mountApp(MetricsPage, { seed: null });
-    expect(wrapper.text()).toContain("Nothing to show");
+    expect(wrapper.text()).toContain("Metrics could not be loaded");
   });
 });

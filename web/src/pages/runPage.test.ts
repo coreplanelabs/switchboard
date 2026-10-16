@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import RunPage from "./RunPage.vue";
+import RunPage from "../../green/pages/Run.vue";
 import { flushPromises } from "@vue/test-utils";
 import { ALL_ON, mountApp, type MountAppOptions } from "../testing/mount";
 import { loadDiffs } from "../modules/pr-review/diffsLibrary";
@@ -456,7 +456,7 @@ describe("RunPage — history mode", () => {
     expect(w.find("#reply .caption").text()).toBe("answer"); // no meta: the general word
     expect(w.find("#answer").exists()).toBe(false); // the section is called what the product calls it
     expect(w.find("#actions").exists()).toBe(false);
-    expect(w.find("h1 .title").text()).toBe("Run");
+    expect(w.find("h1").text()).toBe("Run details");
     // the way back to the token-less, Access-gated index — never with a token
     expect(w.find("a.back").attributes("href")).toBe("/runs");
   });
@@ -1234,7 +1234,7 @@ describe("RunPage — live mode", () => {
     expect(wrapper.find("#log").text()).toContain("step one");
     expect(wrapper.find("details.call").attributes("data-status")).toBe("running");
     expect(wrapper.find("#state").text()).toMatch(/^running · /);
-    expect(wrapper.find("h1 .title").text()).toBe("Live run");
+    expect(wrapper.find("h1").text()).toBe("Run details");
   });
 
   it("the tab's dot speaks run state: green while the run is going, gray once it ends (a history page never repaints)", async () => {
@@ -1663,6 +1663,33 @@ describe("RunPage — live mode", () => {
       expect(wrapper.find("#actions").exists()).toBe(false);
     },
   );
+
+  it("sends one stop while pending and permits hard stop after the soft request settles", async () => {
+    let settle!: (response: { ok: boolean }) => void;
+    (fetch as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
+    vi.spyOn(browser, "confirm").mockReturnValue(true);
+    const { wrapper, es } = mountLive();
+    es().emitOpen();
+    const buttons = wrapper.findAll("#actions button");
+    await buttons[0].trigger("click");
+    await buttons[1].trigger("click");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(buttons.map((button) => (button.element as HTMLButtonElement).disabled)).toEqual([true, true]);
+    settle({ ok: true });
+    await flushPromises();
+    expect(wrapper.findAll("#actions button").map((button) => button.text())).toEqual(["Kill"]);
+    await wrapper.get("#actions button").trigger("click");
+    await flushPromises();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenLastCalledWith("/runs/run-1/stop?t=tok-1&mode=hard", {
+      method: "POST",
+      credentials: "same-origin",
+    });
+  });
 
   it("Stop POSTs mode=soft on the run's stop URL and reads `stopping (soft)`; the end then says stopped early", async () => {
     const { wrapper, es } = mountLive();

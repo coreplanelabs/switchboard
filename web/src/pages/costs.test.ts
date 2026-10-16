@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import CostsPage from "./CostsPage.vue";
+import CostsByDimension from "../components/costs/CostsByDimension.vue";
+import CostsPage from "../../green/pages/Costs.vue";
 import { fakeEventSourceFactory } from "../testing/fakeEventSource";
 import { mountApp } from "../testing/mount";
 import type { CostReport } from "@core/core/costs.js";
@@ -169,35 +170,39 @@ describe("CostsPage", () => {
       },
     });
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed(r) });
-    expect(w.find("[data-ship-spend]").text()).toContain("Ship run cost over time");
-    expect(w.find("[data-ship-spend]").text()).toContain("earlier runs are not included");
-    expect(w.find("[data-ship-spend]").text()).toContain("retention may have removed runs within the range");
-    expect(w.find("[data-ship-spend]").text()).toContain("retained-run total");
-    expect(w.find("[data-ship-spend]").text()).toContain("Ship runs are shared across cost groups");
+    expect(w.find(`section[aria-label="Unit spend"]`).text()).toContain("Retained-range spend by unit");
+    expect(w.find(`section[aria-label="Unit spend"]`).text()).toContain(
+      "Earlier runs and runs removed by retention are excluded",
+    );
+    expect(w.find(`section[aria-label="Unit spend"]`).text()).toContain("this chart does not show remaining budget");
+    expect(w.find(`section[aria-label="Unit spend"]`).text()).toContain("Retained-range total");
+    expect(w.find(`section[aria-label="Unit spend"]`).text()).toContain("Unit spend is shared across cost groups");
     expect(w.find("[data-ship-cap-line]").exists()).toBe(true);
-    expect(w.find("[data-ship-spend]").text()).toContain("unit cap $50.00");
-    expect((w.find("[data-ship-spend] select").element as HTMLSelectElement).value).toBe("plan-example-1:U12");
-    expect(w.findAll("[data-ship-runs] tbody tr")).toHaveLength(2);
-    expect(w.find("[data-ship-runs]").text()).toContain("$17.00");
-    expect(w.find("[data-ship-runs]").text()).toContain("$29.00");
+    expect(w.find(`section[aria-label="Unit spend"]`).text()).toContain("Original cap $50.00");
+    expect((w.find(`section[aria-label="Unit spend"] select`).element as HTMLSelectElement).value).toBe(
+      "plan-example-1:U12",
+    );
+    expect(w.findAll(`table[aria-label="Unit run costs"] tbody tr`)).toHaveLength(2);
+    expect(w.find(`table[aria-label="Unit run costs"]`).text()).toContain("$17.00");
+    expect(w.find(`table[aria-label="Unit run costs"]`).text()).toContain("$29.00");
     expect(w.find('a[href="/runs/run-second"]').exists()).toBe(true);
   });
   it("renders a hostile label as text, never as markup", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
-    expect(w.find("h1 .title").text()).toContain("Switchboard <b> spend");
+    expect(w.text()).toContain("Switchboard <b>");
     expect(w.find("h1 b").exists()).toBe(false);
   });
 
-  it("leads with the summary tiles: yesterday (last FULL day), 7-day average, projected month, LLM spend in dollars", () => {
+  it("leads with the summary tiles: yesterday (last FULL day), 7-day average, projected month, model spend in dollars", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const t = w.text();
     expect(t).toContain("Yesterday");
     expect(t).toContain("$14.10"); // 2026-08-28: 1.3 + 0.3 + 12.5 — not the partial day
     expect(t).toContain("2026-08-28 · last full day");
-    expect(t).toContain("Projected month");
+    expect(t).toContain("Monthly projection");
     // LLM spend will dwarf the Cloudflare spend, so a share of the total says
     // nothing: the tile is the dollars, with yesterday and the open day beneath.
-    expect(t).toContain("LLM spend");
+    expect(t).toContain("Model usage");
     expect(t).toContain("$19.50");
     expect(t).toContain("yesterday $12.50 · today $3.00 (estimate)");
     expect(t).not.toContain("LLM share");
@@ -209,7 +214,7 @@ describe("CostsPage", () => {
     // Cloud: the two full days average (0.6 + 1.6) / 2 = $1.10 a day. LLM: the
     // two closed days with LLM data average (4 + 12.5) / 2 = $8.25 a day.
     // (1.10 + 8.25) × 30.4 = $284.
-    expect(t).toContain("Projected month");
+    expect(t).toContain("Monthly projection");
     expect(t).toContain("$284");
     expect(t).toContain("cloud $1.10/day + LLM $8.25/day");
     expect(t).toContain("LLM from 2 closed days");
@@ -225,7 +230,7 @@ describe("CostsPage", () => {
     const t = w.text();
     // Today: $3 of LLM at 12:00Z → $6.00 a day. Cloud stays the full-day average $1.10.
     // (1.10 + 6.00) × 30.4 = $216.
-    expect(t).toContain("$216");
+    expect(t).toContain("$215.84");
     expect(t).toContain("cloud $1.10/day + LLM $6.00/day");
     expect(t).toContain("LLM from today so far");
   });
@@ -284,20 +289,20 @@ describe("CostsPage", () => {
 
   it("lists the daily table newest first, the open day on top", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
-    const dates = w.findAll("table.data tbody td[title]").map((td) => td.attributes("title"));
+    const dates = w.findAll(`table[aria-label="Daily costs"] tbody td[title]`).map((td) => td.attributes("title"));
     expect(dates).toEqual([...report().days].reverse().map((d) => d.date));
   });
 
   it("says which day's LLM figure is an estimate from the usage report", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
-    expect(w.find("table.data").text()).toContain("LLM estimated");
+    expect(w.find(`table[aria-label="Daily costs"]`).text()).toContain("Models estimated");
     expect(w.text()).toContain("usage report");
   });
 
   it("says what share of the account's whole Cloudflare spend this group is, and what was attributed to it", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
     const t = w.text();
-    expect(t).toContain("Share of account");
+    expect(t).toContain("Cloud account share");
     expect(t).toContain("25%"); // the group is a quarter of the account
     expect(t).toContain("$3.40 of $13.60 on acme-infra");
     expect(t).toContain("switchboard, switchboard-resident");
@@ -307,7 +312,7 @@ describe("CostsPage", () => {
 
   it("stacks the small platform meters (Workers, SQLite rows and storage, R2) as one series and lists each in the split", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
-    expect(w.find(".legend").text()).toContain("Workers · storage · R2");
+    expect(w.find('[aria-label="Cost components"]').text()).toContain("Workers · storage · R2");
     const fullDay = report().days[1].date;
     const dayTitle = w
       .findAll("rect.day")
@@ -406,22 +411,17 @@ describe("CostsPage", () => {
 
   it("includes a legend and a table view so identity is never color-alone; dates read human with the ISO on hover", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
-    expect(w.find(".legend").text()).toContain("LLM (Anthropic)");
-    expect(w.find("table.data").exists()).toBe(true);
-    expect(w.find("table.data").text()).toContain("Aug 27");
-    expect(w.find('table.data td[title="2026-08-27"]').exists()).toBe(true);
+    expect(w.find('[aria-label="Cost components"]').text()).toContain("LLM (Anthropic)");
+    expect(w.find(`table[aria-label="Daily costs"]`).exists()).toBe(true);
+    expect(w.find(`table[aria-label="Daily costs"]`).text()).toContain("Aug 27");
+    expect(w.find('table[aria-label="Daily costs"] td[title="2026-08-27"]').exists()).toBe(true);
   });
 
   it("marks the partial day and states the method", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
-    expect(w.text()).toContain("partial day");
+    expect(w.text()).toContain("Partial day");
     expect(w.text()).toMatch(/vCPU[^<]*active use/i);
     expect(w.text()).toContain("containersUsageAdaptiveGroups");
-  });
-
-  it("carries the shared site nav with Costs current", () => {
-    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
-    expect(w.find('nav.site a[aria-current="page"]').attributes("href")).toBe("/costs");
   });
 
   it("offers the range switch with the current range as text, the others as links", () => {
@@ -431,12 +431,12 @@ describe("CostsPage", () => {
     expect(hrefs).toContain("/costs/switchboard?days=7");
     expect(hrefs).toContain("/costs/switchboard?days=30");
     expect(hrefs).not.toContain("/costs/switchboard?days=90"); // Cloudflare answers no range wider than 32 days
-    expect(hrefs).not.toContain("/costs/switchboard?days=3");
+    expect(w.find('nav[aria-label="Cost range"] [aria-current="page"]').exists()).toBe(false); // no preset matches this 3-day snapshot
     // A visible switcher beside the group pills, not header small print; the
     // short preset is today (UTC), never a rolling window the sources lack.
-    expect(w.find('nav[aria-label="Range"]').exists()).toBe(true);
-    expect(w.find('nav[aria-label="Range"]').text()).toContain("today");
-    expect(w.find('nav[aria-label="Range"]').text()).not.toContain("24h");
+    expect(w.find('nav[aria-label="Cost range"]').exists()).toBe(true);
+    expect(w.find('nav[aria-label="Cost range"]').text()).toContain("today");
+    expect(w.find('nav[aria-label="Cost range"]').text()).not.toContain("24h");
   });
 
   it("links sibling groups when more than one is configured", () => {
@@ -453,12 +453,12 @@ describe("CostsPage", () => {
   it("says LLM spend is not configured instead of showing $0 when there is no source", () => {
     const r = report({ llmAvailable: false, totals: { ...report().totals, llmUsd: 0 } });
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed(r, ["switchboard"]) });
-    expect(w.text()).toContain("LLM spend not configured");
+    expect(w.text()).toContain("Model spend not configured");
   });
 
   it("names the JSON twin", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
-    expect(w.text()).toContain("GET /costs/switchboard.json");
+    expect(w.find('a[href^="/costs/switchboard.json"]').exists()).toBe(true);
   });
 
   // costs.md item 6: every figure is as of the snapshot — the page says which,
@@ -485,7 +485,7 @@ describe("CostsPage", () => {
     expect(line).toContain("Taking a snapshot now");
     expect(line).toContain("by casey");
     expect(line).toContain("showing the one from Aug 29, 21:00 UTC meanwhile");
-    expect(w.find("table.data").exists()).toBe(true);
+    expect(w.find(`table[aria-label="Daily costs"]`).exists()).toBe(true);
   });
 
   // costs.md item 8b: the status feed and the button.
@@ -602,7 +602,7 @@ describe("CostsPage", () => {
   it("offers Snapshot now only to a costs:write holder; a click posts /api/costs.snapshot, a refusal is shown beside it, and the button reads Taking… while a take is in flight", async () => {
     const { factory } = fakeEventSourceFactory();
     const viewer = mountApp(CostsPage, { seed: seed(), eventSource: factory });
-    expect(viewer.find("[data-snapshot-now]").exists()).toBe(false);
+    expect(viewer.find(".green-heading-actions button").exists()).toBe(false);
 
     const posted: Array<{ url: string; init?: RequestInit }> = [];
     vi.stubGlobal(
@@ -617,13 +617,13 @@ describe("CostsPage", () => {
       }),
     );
     const admin = mountApp(CostsPage, { seed: seed(report(), ["switchboard"], STATUS, true), eventSource: factory });
-    const button = admin.find("[data-snapshot-now]");
+    const button = admin.find(".green-heading-actions button");
     expect(button.text()).toBe("Snapshot now");
     await button.trigger("click");
     await vi.waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0].url).toBe("/api/costs.snapshot");
     expect(posted[0].init?.method).toBe("POST");
-    await vi.waitFor(() => expect(admin.find("[data-snapshot-error]").text()).toContain("costs snapshot not taken"));
+    await vi.waitFor(() => expect(admin.find('[role="alert"]').text()).toContain("costs snapshot not taken"));
 
     const busy = mountApp(CostsPage, {
       seed: seed(
@@ -634,8 +634,8 @@ describe("CostsPage", () => {
       ),
       eventSource: factory,
     });
-    expect(busy.find("[data-snapshot-now]").text()).toBe("Taking…");
-    expect(busy.find("[data-snapshot-now]").attributes("disabled")).toBeDefined();
+    expect(busy.find(".green-heading-actions button").text()).toBe("Taking snapshot…");
+    expect(busy.find(".green-heading-actions button").attributes("disabled")).toBeDefined();
     vi.unstubAllGlobals();
   });
 
@@ -651,28 +651,27 @@ describe("CostsPage", () => {
       eventSource: fakeEventSourceFactory().factory,
       seed: seed(null, ["switchboard", "other"], none),
     });
-    expect(w.text()).toContain("Nothing to show yet");
+    expect(w.text()).toContain("No billing snapshot yet");
     expect(w.find("[data-snapshot-status]").text()).toContain("No snapshot yet");
-    expect(w.text()).toContain("costs snapshot");
-    expect(w.findAll("a").map((a) => a.attributes("href"))).toContain("/costs/other");
-    expect(w.find("table.data").exists()).toBe(false);
+    expect(w.text()).toContain("Totals appear when the first snapshot completes");
+    expect(w.findAll("a").map((a) => a.attributes("href"))).toContain("/costs/other?days=7");
+    expect(w.find(`table[aria-label="Daily costs"]`).exists()).toBe(false);
     expect(w.find("rect.day").exists()).toBe(false);
-    expect(w.find('nav.site a[aria-current="page"]').attributes("href")).toBe("/costs");
   });
 
   it("offers Daily and the five dimensions as tabs above the tables; the daily tab shows the daily tables and no dimension table", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: seed() });
-    const tabs = w.find('nav[aria-label="View"]');
+    const tabs = w.find('nav[aria-label="Cost breakdown"]');
     expect(tabs.exists()).toBe(true);
     expect(tabs.find('[aria-current="page"]').text()).toBe("Daily");
-    expect(tabs.findAll("a").map((a) => [a.text(), a.attributes("href")])).toEqual([
+    expect(tabs.findAll("a:not([aria-current])").map((a) => [a.text(), a.attributes("href")])).toEqual([
       ["By user", "/costs/switchboard?days=3&view=users"],
       ["By thread", "/costs/switchboard?days=3&view=threads"],
       ["By channel", "/costs/switchboard?days=3&view=channels"],
       ["By agent", "/costs/switchboard?days=3&view=agents"],
       ["By model", "/costs/switchboard?days=3&view=models"],
     ]);
-    expect(w.find("table.data").exists()).toBe(true);
+    expect(w.find(`table[aria-label="Daily costs"]`).exists()).toBe(true);
     expect(w.find("table.by").exists()).toBe(false);
   });
 });
@@ -680,9 +679,9 @@ describe("CostsPage", () => {
 describe("CostsPage · By user", () => {
   it("lists one row per user largest first — name, runs, LLM, allocated cloud, total, share of what was attributed — and marks the viewer's row", () => {
     const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: usersSeed() });
-    expect(w.find('nav[aria-label="View"] [aria-current="page"]').text()).toBe("By user");
+    expect(w.find('nav[aria-label="Cost breakdown"] [aria-current="page"]').text()).toBe("By user");
     // The daily tables step aside; the tiles and the chart stay as the group's context.
-    expect(w.find("table.data").exists()).toBe(false);
+    expect(w.find(`table[aria-label="Daily costs"]`).exists()).toBe(false);
     expect(w.find("rect.day").exists()).toBe(true);
     const rows = w.findAll("table.by tbody tr.by-row");
     expect(rows.length).toBe(2);
@@ -703,7 +702,7 @@ describe("CostsPage · By user", () => {
   });
 
   it("filters by name or id, and the me toggle keeps only the signed-in viewer's rows; the shown subtotal appears when rows are hidden", async () => {
-    const w = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: usersSeed() });
+    const w = mountApp(CostsByDimension, { props: { report: byReport() } });
     await w.find("input.key-filter").setValue("ali");
     let rows = w.findAll("table.by tbody tr.by-row");
     expect(rows.map((r) => r.find("td").text())).toEqual([expect.stringContaining("alice")]);
@@ -725,9 +724,8 @@ describe("CostsPage · By user", () => {
   });
 
   it("disables the me toggle, and says why in visible text the input describes, when the viewer matched no run user", () => {
-    const w = mountApp(CostsPage, {
-      eventSource: fakeEventSourceFactory().factory,
-      seed: usersSeed(byReport({ viewer: { userIds: [], matchedByEmail: false } })),
+    const w = mountApp(CostsByDimension, {
+      props: { report: byReport({ viewer: { userIds: [], matchedByEmail: false } }) },
     });
     const input = w.find(".me-toggle input");
     expect(input.attributes("disabled")).toBeDefined();
@@ -738,7 +736,7 @@ describe("CostsPage · By user", () => {
     expect(w.find(".me-toggle").attributes("title")).toBeUndefined();
     expect(w.findAll("tr.is-me").length).toBe(0);
     // With a match the hint is gone and the toggle is live.
-    const on = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: usersSeed() });
+    const on = mountApp(CostsByDimension, { props: { report: byReport() } });
     expect(on.find(".me-toggle .me-hint").exists()).toBe(false);
     expect(on.find(".me-toggle input").attributes("aria-describedby")).toBeUndefined();
   });
@@ -858,9 +856,9 @@ describe("CostsPage · By user", () => {
     expect(hrefs).toContain("/costs/switchboard?days=7&view=users");
     expect(hrefs).toContain("/costs/other?days=3&view=users");
     expect(hrefs).toContain("/costs/switchboard?days=3"); // the Daily tab
-    expect(w.text()).toContain("GET /costs/switchboard/users.json");
+    expect(w.find('a[href^="/costs/switchboard/users.json"]').exists()).toBe(true);
     const missing = mountApp(CostsPage, { eventSource: fakeEventSourceFactory().factory, seed: usersSeed(null) });
-    expect(missing.text()).toContain("by user report did not load");
+    expect(missing.text()).toContain("This breakdown is unavailable");
     expect(missing.find("table.by").exists()).toBe(false);
   });
 });
@@ -891,7 +889,7 @@ describe("CostsPage · the other dimensions", () => {
       eventSource: fakeEventSourceFactory().factory,
       seed: dimensionSeed(models, "models"),
     });
-    expect(w.find('nav[aria-label="View"] [aria-current="page"]').text()).toBe("By model");
+    expect(w.find('nav[aria-label="Cost breakdown"] [aria-current="page"]').text()).toBe("By model");
     expect(w.text()).toContain("Cost by model");
     const heads = w.findAll("table.by thead th").map((th) => th.text().replace(/\s+/g, " ").trim());
     expect(heads).toEqual(["Model", "Turns", "LLM", "Total", "Share"]);
@@ -907,7 +905,7 @@ describe("CostsPage · the other dimensions", () => {
     expect(line).toContain("LLM attributed $15.75 of $19.50");
     expect(line).not.toContain("cloud allocated");
     expect(w.text()).toContain("cloud is not split by model");
-    expect(w.text()).toContain("GET /costs/switchboard/models.json");
+    expect(w.find('a[href^="/costs/switchboard/models.json"]').exists()).toBe(true);
     // The filter narrows by the ref.
     await w.find("input.key-filter").setValue("gpt");
     expect(w.findAll("table.by tbody tr.by-row").length).toBe(1);
@@ -926,7 +924,7 @@ describe("CostsPage · the other dimensions", () => {
       eventSource: fakeEventSourceFactory().factory,
       seed: dimensionSeed(threads, "threads"),
     });
-    expect(w.find('nav[aria-label="View"] [aria-current="page"]').text()).toBe("By thread");
+    expect(w.find('nav[aria-label="Cost breakdown"] [aria-current="page"]').text()).toBe("By thread");
     const heads = w.findAll("table.by thead th").map((th) => th.text().replace(/\s+/g, " ").trim());
     expect(heads).toEqual(["Thread", "Runs", "LLM", "Cloud allocated", "Total", "Share"]);
     const rows = w.findAll("table.by tbody tr.by-row");
@@ -939,7 +937,7 @@ describe("CostsPage · the other dimensions", () => {
     expect(w.find("input.key-filter").attributes("placeholder")).toBe("thread");
     await w.find("input.key-filter").setValue("nothing-here");
     expect(w.find("table.by td.empty").text()).toBe("no thread matches");
-    expect(w.text()).toContain("GET /costs/switchboard/threads.json");
+    expect(w.find('a[href^="/costs/switchboard/threads.json"]').exists()).toBe(true);
     const hrefs = w.findAll("a").map((a) => a.attributes("href"));
     expect(hrefs).toContain("/costs/switchboard?days=7&view=threads"); // the range pill keeps the tab
   });

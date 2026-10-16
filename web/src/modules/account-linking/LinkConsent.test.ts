@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mountApp } from "../../testing/mount";
-import { routes } from "../../routes";
+import { routes } from "../../../green/routes";
 import LinkConsent from "./LinkConsent.vue";
 import { linkConsentFixtures } from "./fixtures";
 

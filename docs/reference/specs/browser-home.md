@@ -199,7 +199,7 @@ The original-source proof permits owned metadata only. Thread and private worker
 
 ## Production composition seams
 
-These factories compose the current execution owners and authenticated source proofs. They do not register the final production HTTP routes. Private-unit metadata permission is distinct from private transcript and execution permission; a read projection cannot create an actor alias or lend a source grant.
+These factories compose the current execution owners and authenticated source proofs. The installation composes them at its production HTTP routes. Private-unit metadata permission is distinct from private transcript and execution permission; a read projection cannot create an actor alias or lend a source grant.
 
 | Criterion | Proof |
 |---|---|
@@ -245,3 +245,10 @@ Broad messages materialize their retained work references from current authorize
 | A metadata refresh preserves the completed producer’s recorded merge attention alongside canonical research pointers | `[unit]` `src/core/coordinator/instanceStore.test.ts::durable reconciliation store seam::keeps recorded merge attention through an unfenced metadata refresh` |
 | Production browser composition forwards the actual viewer’s GitHub binding and canonical native merge facts; completion preserves the original ending and starts no model | `[unit]` `src/channels/browserHomeWiring.test.ts::browser production wiring::offers an owned reviewed-head merge and observes native completion through installation callbacks without a model` |
 | Home schedules bounded merge observation after its page or snapshot response has been sent | `[unit]` `src/channels/homeView.test.ts::authorized Home pages::schedules merge observation only after sending the current Home response` |
+
+### Retained report facts
+
+| Criterion | Evidence |
+|---|---|
+| Recorded schedule ID and exact firing times remain visible even without a run link | `[unit]` `web/green/pages/reportStates.test.ts::Green report states::retains the recorded schedule run without a live link and exposes exact next and last times` |
+| Costs uses the global selected owner scope without a second me checkbox | `[unit]` `web/green/pages/reportStates.test.ts::Green report states::keeps the global owner selection on a user cost breakdown without a second me filter` |

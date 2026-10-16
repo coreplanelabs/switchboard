@@ -181,8 +181,8 @@ describe("staged browser linking", () => {
         !["linkBrowser.ts", "identityRuntime.ts", "identitySeed.ts"].some((name) => f.endsWith(name)),
     ))
       expect(readFileSync(file, "utf8"), file).not.toMatch(/from ["'].*\/linkBrowser\.js["']/);
-    expect(readFileSync("web/src/routes.ts", "utf8")).not.toContain("account-link");
-    expect(readFileSync("web/src/main.ts", "utf8")).not.toContain("account-link");
+    expect(readFileSync("web/green/routes.ts", "utf8")).not.toContain("account-link");
+    expect(readFileSync("web/green/main.ts", "utf8")).not.toContain("account-link");
   });
   it("contains asynchronous rendering failures instead of leaking them to a host logger", async () => {
     const h = harness();

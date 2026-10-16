@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
-import ResidentsIndexPage from "./ResidentsIndexPage.vue";
-import ResidentDetailPage from "./ResidentDetailPage.vue";
+import { createMemoryHistory, createRouter } from "vue-router";
+import { routes } from "../../green/routes";
+import ResidentsIndexPage from "../../green/pages/Runtime.vue";
+import ResidentDetailPage from "../../green/pages/RuntimeDetail.vue";
 import { mountApp } from "../testing/mount";
 import { browser } from "../lib/browser";
 import { fakeEventSourceFactory } from "../testing/fakeEventSource";
@@ -158,9 +160,43 @@ afterEach(() => {
 });
 
 describe("ResidentsIndexPage", () => {
+  it("keeps each live run on its recorded replica and retains the selected member through the Runtime alias", async () => {
+    const primary = {
+      ...WARM,
+      residentId: "member-primary",
+      replicaOrdinal: 0,
+      live: { ...WARM.live, threads: [WARM.live.threads[0]] },
+    };
+    const secondary = {
+      ...WARM,
+      residentId: "member-secondary",
+      replicaOrdinal: 1,
+      live: { ...WARM.live, threads: [WARM.live.threads[1]] },
+    };
+    const { wrapper: w } = mountIndex(
+      indexSeed([primary, secondary], 5, 2, [
+        run("primary-run"),
+        run("secondary-run", { threadKey: WARM.live.threads[1].threadKey }),
+      ]),
+    );
+    const members = w.findAll("li.resident");
+    expect(members.map((row) => row.text().match(/resident [12]/)?.[0])).toEqual(["resident 1", "resident 2"]);
+    expect(members[0].findAll('a[href^="/runs/"]').map((a) => a.attributes("href"))).toEqual([
+      "/runs/primary-run?t=tok-primary-run",
+    ]);
+    expect(members[1].findAll('a[href^="/runs/"]').map((a) => a.attributes("href"))).toEqual([
+      "/runs/secondary-run?t=tok-secondary-run",
+    ]);
+    const router = createRouter({ history: createMemoryHistory(), routes });
+    await router.push("/residents/jshttp/vary?resident=member-secondary");
+    expect(router.currentRoute.value.fullPath).toBe("/settings/runtime/jshttp/vary?resident=member-secondary");
+    const detail = mountApp(ResidentDetailPage, { seed: detailSeed(secondary) });
+    expect(detail.get("h1").text()).toBe("jshttp/vary · resident 2");
+  });
   it("shows reserved slots before replicas activate and updates active and pending counts from the feed", async () => {
     const { wrapper: w, es } = mountIndex({ ...indexSeed([WARM], 5, 1), pendingReplicas: 4, reservedCount: 5 });
     expect(w.text()).toContain("5/5 resident slots reserved · 1 active · 4 pending");
+    expect(w.text()).toContain("Environment slots5 / 5");
     expect(w.findAll("li.resident")).toHaveLength(1);
 
     es().emitMessage({ type: "residents", cap: 5, count: 1, pendingReplicas: 2, residents: [WARM] });
@@ -197,7 +233,7 @@ describe("ResidentsIndexPage", () => {
     expect(w.find('[data-slug="acme/infra"] .uid-count').exists()).toBe(false);
     expect(w.find('[data-slug="acme/infra"] .disk').exists()).toBe(false);
     expect(w.find('[data-slug="jshttp/vary"]').classes()).toContain("bg-ok/5");
-    expect(w.text()).toContain("1 cold");
+    expect(w.text()).toContain("Cold repositories1");
     es().emitMessage({ type: "residents", count: 1, cap: 5, residents: [WARM], repositories: [] });
     await nextTick();
     expect(w.find('[data-slug="acme/infra"]').exists()).toBe(false);
@@ -210,7 +246,7 @@ describe("ResidentsIndexPage", () => {
     const { wrapper: w } = mountIndex(seed);
     expect(w.text()).toContain("0/5 resident slots reserved · 0 active · 0 pending · 1 cold");
     expect(w.text()).toContain("acme/infra");
-    expect(w.text()).not.toContain("No repos onboarded");
+    expect(w.text()).not.toContain("No repositories onboarded");
   });
   it("reports dynamic identities without a budget or exhaustion warning", async () => {
     const { wrapper: w, es } = mountIndex(
@@ -258,8 +294,8 @@ describe("ResidentsIndexPage", () => {
 
   it("shows a deploy drain even when the resident listing is empty", () => {
     const { wrapper: w } = mountIndex({ ...indexSeed([]), draining: { reason: "deploy abc1234" } });
-    expect(w.find(".drain-status").text()).toContain("deploy abc1234");
-    expect(w.text()).toContain("No repos onboarded");
+    expect(w.find('[role="status"]').text()).toContain("deploy abc1234");
+    expect(w.text()).toContain("No repositories onboarded");
   });
 
   it("shows the fleet drain and image reports beside warm state", async () => {
@@ -268,8 +304,8 @@ describe("ResidentsIndexPage", () => {
       ...indexSeed([pending]),
       draining: { reason: "deploy deb60c5", holds: ["repo:jshttp/vary"], until: "2026-09-29T06:40:00Z" },
     });
-    expect(w.find(".drain-status").text()).toContain("jshttp/vary");
-    expect(w.find(".drain-status").text()).toContain("deploy deb60c5");
+    expect(w.find('[role="status"]').text()).toContain("jshttp/vary");
+    expect(w.find('[role="status"]').text()).toContain("deploy deb60c5");
     expect(w.find("li.resident summary").text()).toContain("warm");
     expect(w.find("li.resident summary").text()).toContain("image pending");
     expect(setFavicon).toHaveBeenLastCalledWith(FAVICON_BY_TONE.amber);
@@ -282,7 +318,7 @@ describe("ResidentsIndexPage", () => {
       residents: [{ ...WARM, live: { ...WARM.live, imageReport: "current" } }],
     });
     await nextTick();
-    expect(w.find(".drain-status").exists()).toBe(false);
+    expect(w.find('[role="status"]').exists()).toBe(false);
     expect(w.find("li.resident summary").text()).toContain("image current");
     expect(setFavicon).toHaveBeenLastCalledWith(FAVICON_BY_TONE.green);
   });
@@ -294,8 +330,8 @@ describe("ResidentsIndexPage", () => {
       "/residents/jshttp/vary",
       "/residents/acme/api",
     ]);
-    expect(w.text()).toContain("2/5 resident slots in use");
-    expect(w.find("#running").text()).toBe("0 running");
+    expect(w.text()).toContain("Environment slots2 / 5");
+    expect(w.findAll(".green-stat")[1].text()).toBe("Active runs0");
     expect(w.text()).toContain("warm");
     expect(w.text()).toContain("01234567");
     expect(w.text()).toContain("ref master");
@@ -307,10 +343,10 @@ describe("ResidentsIndexPage", () => {
     expect(w.find("li.resident details").attributes("open")).toBeUndefined();
   });
 
-  it("shows an empty state naming the onboard command when nothing is onboarded", () => {
+  it("shows an empty onboarding state when nothing is onboarded", () => {
     const { wrapper: w } = mountIndex(indexSeed([], 5, 0));
-    expect(w.text()).toContain("No repos onboarded");
-    expect(w.text()).toContain("repo onboard");
+    expect(w.text()).toContain("No repositories onboarded");
+    expect(w.text()).toContain("Onboard a repository");
     expect(w.find("li.resident").exists()).toBe(false);
   });
 
@@ -327,9 +363,11 @@ describe("ResidentsIndexPage", () => {
     expect(w.find("a.detail").exists()).toBe(false);
   });
 
-  it("marks Residents current in the shared nav", () => {
+  it("marks Runtime current in the settings sections", () => {
     const { wrapper: w } = mountIndex(indexSeed([WARM]));
-    expect(w.find('nav.site a[aria-current="page"]').attributes("href")).toBe("/residents");
+    expect(w.find('nav[aria-label="Settings sections"] a[aria-current="page"]').attributes("href")).toBe(
+      "/settings/runtime",
+    );
   });
 
   it("item 55: a measured resident's row carries the disk gauge (used/total, pct) with the sample time on hover; an unmeasured one shows no disk", () => {
@@ -350,7 +388,7 @@ describe("ResidentsIndexPage — the fold (item 42: what is on this resident)", 
     const { wrapper: w } = mountIndex(
       indexSeed([MEASURED, DOWN], 5, 2, [run("r1"), run("other", { repo: "acme/web", threadKey: "slack:C9:1" })]),
     );
-    expect(w.find("#running").text()).toBe("1 running"); // the acme/web run is on no listed resident
+    expect(w.findAll(".green-stat")[1].text()).toBe("Active runs1"); // the acme/web run is on no listed resident
     const vary = w.find('li.resident[data-slug="jshttp/vary"]');
     expect(vary.attributes("data-running")).toBe("1");
     expect(vary.find("summary .running").text()).toBe("1 running");
@@ -472,13 +510,13 @@ describe("ResidentsIndexPage — the fold (item 42: what is on this resident)", 
 describe("ResidentsIndexPage — live over the feed", () => {
   it("shows the connection state: connecting, then live on open, disconnected on a closed error", async () => {
     const { wrapper: w, es } = mountIndex(indexSeed([WARM]));
-    expect(w.find("#state").text()).toBe("connecting…");
+    expect(w.find(".green-heading-actions .green-badge").text()).toBe("connecting…");
     es().emitOpen();
     await nextTick();
-    expect(w.find("#state").text()).toBe("live");
+    expect(w.find(".green-heading-actions .green-badge").text()).toBe("live");
     es().emitError(true);
     await nextTick();
-    expect(w.find("#state").text()).toBe("disconnected");
+    expect(w.find(".green-heading-actions .green-badge").text()).toBe("disconnected");
   });
 
   it("an upsert adds a run to its resident's fold and its stopwatch ticks; a finished upsert and a removed take it out", async () => {
@@ -486,19 +524,19 @@ describe("ResidentsIndexPage — live over the feed", () => {
     es().emitOpen();
     es().emitMessage({ type: "upsert", run: run("r1") });
     await nextTick();
-    expect(w.find("#running").text()).toBe("1 running");
+    expect(w.findAll(".green-stat")[1].text()).toBe("Active runs1");
     expect(w.find('li.run[data-run-id="r1"] .elapsed').text()).toBe("4m 12s");
     es().emitMessage({ type: "upsert", run: run("r1", { finished: true, finishedAt: NOW }) });
     await nextTick();
     expect(w.find('li.run[data-run-id="r1"]').exists()).toBe(false);
-    expect(w.find("#running").text()).toBe("0 running");
+    expect(w.findAll(".green-stat")[1].text()).toBe("Active runs0");
     es().emitMessage({ type: "upsert", run: run("r3") });
     es().emitMessage({ type: "removed", id: "r3" });
     await nextTick();
     expect(w.find('li.run[data-run-id="r3"]').exists()).toBe(false);
     es().emitMessage("not json");
     await nextTick();
-    expect(w.find("#running").text()).toBe("0 running");
+    expect(w.findAll(".green-stat")[1].text()).toBe("Active runs0");
   });
 
   it("a residents frame replaces the listing — state, bindings, disk, count — and the tab's title and favicon follow the runs and the fleet tone", async () => {
@@ -513,7 +551,7 @@ describe("ResidentsIndexPage — live over the feed", () => {
       residents: [{ ...MEASURED, live: { ...MEASURED.live, state: "refreshing" } }, DOWN],
     });
     await nextTick();
-    expect(w.text()).toContain("2/6 resident slots in use");
+    expect(w.text()).toContain("Environment slots2 / 6");
     expect(w.findAll("li.resident")).toHaveLength(2);
     expect(w.find('li.resident[data-slug="jshttp/vary"] summary').text()).toContain("refreshing");
     expect(w.find('li.run[data-run-id="r1"] .size').text()).toBe("0.52 GiB");
@@ -550,8 +588,10 @@ describe("ResidentDetailPage", () => {
   it("shows the container image report separately from lifecycle", () => {
     const record = { ...WARM, live: { ...WARM.live, imageReport: "pending" } };
     const w = mountApp(ResidentDetailPage, { seed: detailSeed(record) });
-    expect(w.findAll("tr")[0].text()).toContain("warm");
-    expect(w.find(".image-report").text()).toContain("pending");
+    expect(w.find(".green-section-heading .green-badge").text()).toBe("warm");
+    expect(
+      w.findAll("dt").find((d) => d.text() === "Container image")!.element.nextElementSibling!.textContent,
+    ).toContain("pending");
   });
 
   it("shows the interesting facts: state, ref, sha, lockfile hash, provisioned/refreshed, snapshot stamp, schedules, command table", () => {
@@ -571,7 +611,7 @@ describe("ResidentDetailPage", () => {
   });
 
   it("shows idle mode when the resident parked its refresh, 'awake' otherwise", () => {
-    expect(mountApp(ResidentDetailPage, { seed: detailSeed(WARM) }).text()).toContain("awake");
+    expect(mountApp(ResidentDetailPage, { seed: detailSeed(WARM) }).text()).toContain("Awake");
     const idle = { ...WARM, live: { ...WARM.live, idleSince: "2026-08-29T03:00:00.000Z" } };
     const w = mountApp(ResidentDetailPage, { seed: detailSeed(idle) });
     expect(w.text()).toContain("2026-08-29T03:00:00.000Z");
@@ -583,7 +623,7 @@ describe("ResidentDetailPage", () => {
     const hrefs = w.findAll("a").map((a) => a.attributes("href"));
     expect(hrefs).toContain("https://github.com/jshttp/vary");
     expect(hrefs).toContain("https://github.com/jshttp/vary/commit/0123456789abcdef0123456789abcdef01234567");
-    expect(hrefs).toContain("/residents");
+    expect(hrefs).toContain("/settings/runtime");
   });
 
   it("names the failure reason and last refresh error for a down resident and omits a commit link without a sha", () => {
@@ -597,7 +637,7 @@ describe("ResidentDetailPage", () => {
         .map((a) => a.attributes("href"))
         .join(" "),
     ).not.toContain("/commit/");
-    expect(w.text()).toContain("no snapshot");
+    expect(w.text()).toContain("No snapshot recorded");
   });
 
   it("renders hostile field values as text, never elements", () => {
@@ -620,12 +660,12 @@ describe("ResidentDetailPage", () => {
     expect(t).toContain("worker3");
     expect(t).toContain("2026-08-28T21:45:00.000Z");
     expect(t).toContain("evicted 2026-08-27T10:00:00.000Z · branch merged <b>");
-    expect(t).toContain("1 live · 1 evicted");
+    expect(t).toContain("1 retained · 1 evicted");
   });
 
   it("says so when a resident has no thread worktrees, and never links a non-hex sha", () => {
     expect(mountApp(ResidentDetailPage, { seed: detailSeed(DOWN, "acme/api") }).text()).toContain(
-      "no thread worktrees",
+      "No worktrees recorded",
     );
     const hostile = {
       ...WARM,
@@ -677,21 +717,19 @@ describe("ResidentDetailPage", () => {
     const capped = mountApp(ResidentDetailPage, { seed: detailSeed({ ...MEASURED, diskBudgetMb: 8 * 1024 }) }).text();
     // cap 8 GiB − used 4.06 GiB = 3.94 GiB free under the cap
     expect(capped).toContain("3.94 GiB under the 8.00 GiB diskBudgetMb cap");
-    expect(mountApp(ResidentDetailPage, { seed: detailSeed(WARM) }).text()).toContain("not measured yet");
+    expect(mountApp(ResidentDetailPage, { seed: detailSeed(WARM) }).text()).toContain("Disk has not been measured");
     const broken = {
       ...WARM,
       live: { ...WARM.live, disk: { totalKiB: "lots", usedKiB: -1, freeKiB: null, parts: "<b>x</b>" } },
     };
     const bw = mountApp(ResidentDetailPage, { seed: detailSeed(broken) });
-    expect(bw.text()).toContain("not measured yet");
+    expect(bw.text()).toContain("Disk has not been measured");
     expect(bw.text()).not.toContain("NaN");
     expect(bw.find("table b").exists()).toBe(false);
   });
 
-  it("marks Residents current in the shared nav and offers the way back", () => {
+  it("offers the way back to Runtime", () => {
     const w = mountApp(ResidentDetailPage, { seed: detailSeed(WARM) });
-    expect(w.find('nav.site a[aria-current="page"]').attributes("href")).toBe("/residents");
-    expect(w.find("a.back").attributes("href")).toBe("/residents");
-    expect(w.text()).toContain("repo rebuild jshttp/vary");
+    expect(w.find('a[href="/settings/runtime"]').text()).toBe("Runtime");
   });
 });

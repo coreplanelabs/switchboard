@@ -123,7 +123,9 @@ watch(
           <RouterLink to="/runs" :class="{ active: route.path === '/runs' }"
             ><UIcon name="i-lucide-list-tree" />Run details</RouterLink
           >
-          <RouterLink to="/runs/scheduled"><UIcon name="i-lucide-calendar-clock" />Scheduled work</RouterLink>
+          <RouterLink v-if="seed?.capabilities?.schedules || route.path === '/runs/scheduled'" to="/runs/scheduled"
+            ><UIcon name="i-lucide-calendar-clock" />Scheduled work</RouterLink
+          >
           <RouterLink to="/settings" :class="{ active: route.path.startsWith('/settings') }"
             ><UIcon name="i-lucide-settings-2" />Settings</RouterLink
           >
@@ -136,7 +138,7 @@ watch(
             <option value="dark">Dark</option>
           </select></label
         >
-        <a class="green-help" href="https://switchboard.space" target="_blank" rel="noopener noreferrer"
+        <a class="green-help" href="/docs" target="_blank" rel="noopener noreferrer"
           >Documentation <UIcon name="i-lucide-arrow-up-right"
         /></a>
       </div>
