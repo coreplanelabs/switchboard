@@ -51,6 +51,7 @@ import "./loadEnv.js";
 import { createServer } from "node:http";
 import { createInterface } from "node:readline";
 import { Console } from "node:console";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { buildArtifactStore } from "./artifacts/buildStore.js";
 import { tmpdir } from "node:os";
@@ -63,6 +64,7 @@ import {
   readHostedProfile,
 } from "./setup/hostedClient.js";
 import { HOSTED_MCP_CALL_TIMEOUT_MS } from "./core/budgets.js";
+import { idempotencyKeyError } from "./channels/http.js";
 import { OPERATOR_ROOT } from "./deploy/host.js";
 import { installationPath } from "./deploy/operatorRoot.js";
 import { loadAppConfig, openConfigStore, type AppConfig, type ConfigStore } from "./config.js";
@@ -174,7 +176,7 @@ const PROGRAM = programName(process.argv[1]);
 export const USAGE = [
   `usage: ${PROGRAM} <group> <verb> [args…] [--option value…] [--json]`,
   `       ${PROGRAM} <group> <verb> --help`,
-  `       ${PROGRAM} ask [--thread <key>] "[agent:name] [model:provider/model] your request"`,
+  `       ${PROGRAM} ask [--thread <key>] [--idempotency-key <key>] "[agent:name] [model:provider/model] your request"`,
   `       ${PROGRAM} start                            (the bot: Slack from the installation's .env and config/)`,
   `       ${PROGRAM} init [--option value…]          (= setup init: the installer)`,
   `       ${PROGRAM} connect <host>                  (use an existing deployment)`,
@@ -221,7 +223,7 @@ export type CliInvocation =
   /** `help` / `--help` / no arguments: the catalogue. */
   | { kind: "catalogue" }
   /** The built-in harness: dispatch `text` on `threadKey`. */
-  | { kind: "ask"; threadKey: string; text: string }
+  | { kind: "ask"; threadKey: string; text: string; idempotencyKey?: string }
   /** The built-in process: run the bot from this directory (src/index.ts `runBot`). */
   | { kind: "start" }
   /** `start --help`: what the process is and what it reads. */
@@ -287,24 +289,35 @@ export function parseCliArgv(
   }
 }
 
-/** `ask [--thread <key> | --thread=<key>] <words…>`: the text is the remaining
- *  words joined; the thread key defaults to an ephemeral `cli:<now>`. A stable
- *  key lets repeated invocations act as ONE thread (workspace reuse, resident
- *  re-attach / binding persistence). */
+/** Without a thread or retry key, local asks use an ephemeral thread. A retry
+ *  key alone also pins the hosted address, so repeating the flag cannot move
+ *  an admitted request into a new conversation. */
 function parseAsk(argv: readonly string[], now: () => number): CliInvocation {
   const words: string[] = [];
   let thread: string | undefined;
+  let idempotencyKey: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--thread") {
       thread = argv[++i];
       if (thread === undefined) return { kind: "usage", error: `${USAGE}\n  --thread needs a value` };
     } else if (a.startsWith("--thread=")) thread = a.slice("--thread=".length);
+    else if (a === "--idempotency-key") {
+      idempotencyKey = argv[++i];
+      if (idempotencyKey === undefined) return { kind: "usage", error: `${USAGE}\n  --idempotency-key needs a value` };
+    } else if (a.startsWith("--idempotency-key=")) idempotencyKey = a.slice("--idempotency-key=".length);
     else words.push(a);
   }
+  const keyError = idempotencyKeyError(idempotencyKey);
+  if (keyError) return { kind: "usage", error: `${USAGE}\n  ${keyError}` };
   const text = words.join(" ").trim();
   if (!text) return { kind: "usage", error: `${USAGE}\n  ask needs a request` };
-  return { kind: "ask", threadKey: thread || `cli:${now()}`, text };
+  return {
+    kind: "ask",
+    threadKey: thread || `cli:${idempotencyKey ? createHash("sha256").update(idempotencyKey).digest("hex") : now()}`,
+    text,
+    ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+  };
 }
 
 /** `start` takes nothing: what the process reads is decided by the directory and the environment, never by a flag. */
@@ -760,18 +773,51 @@ async function main(): Promise<void> {
 
   if (hosted) {
     const thread = parsed.threadKey.replace(/^cli:/, "");
+    const idempotencyKey = parsed.idempotencyKey ?? randomUUID();
+    // The terminal must retain the retry address even when the server admits
+    // work but its acknowledgement never arrives. No automatic resend.
+    console.error(`Request key: ${JSON.stringify(idempotencyKey)}\nThread: ${JSON.stringify(thread)}`);
+    console.error("Retry the same text with these --idempotency-key and --thread values.");
     const reply = await hostedMcpCall(
       hosted,
       "tools/call",
-      { name: "dispatch", arguments: { text: parsed.text, thread } },
+      { name: "dispatch", arguments: { text: parsed.text, thread, idempotencyKey } },
       HOSTED_MCP_CALL_TIMEOUT_MS,
     );
     if (reply.error) throw new Error(`hosted request failed: ${JSON.stringify(reply.error)}`);
-    const result = reply.result as { content?: { text?: string }[] } | undefined;
-    console.log(result?.content?.map((item) => item.text ?? "").join("\n") ?? "");
+    const result = reply.result as
+      | {
+          content?: { text?: string }[];
+          isError?: boolean;
+          structuredContent?: {
+            admission?: { status?: string; receiptId?: string; runId?: string; duplicate?: boolean };
+          };
+        }
+      | undefined;
+    const admission = result?.structuredContent?.admission;
+    if (admission && typeof admission.status === "string") {
+      console.log(
+        [
+          `Admission: ${admission.status}`,
+          ...(typeof admission.receiptId === "string" ? [`Receipt: ${admission.receiptId}`] : []),
+          ...(typeof admission.runId === "string" ? [`Run: ${admission.runId}`] : []),
+          ...(typeof admission.duplicate === "boolean"
+            ? [`Already received: ${admission.duplicate ? "yes" : "no"}`]
+            : []),
+        ].join("\n"),
+      );
+      if (admission.status !== "accepted" && admission.status !== "pending") process.exitCode = 1;
+    } else console.log(result?.content?.map((item) => item.text ?? "").join("\n") ?? "");
+    if (result?.isError) process.exitCode = 1;
     return;
   }
 
+  if (parsed.idempotencyKey !== undefined) {
+    console.error("--idempotency-key requires a connected host; local asks have no durable admission receipt.");
+    process.exitCode = 2;
+    return;
+  }
+  console.error("Local request: this process has no durable admission receipt.");
   const { bot, mcpWiring } = wiring();
   // The core writes its process log — `[run] …`, `[event] …`, `[done] …` — with
   // `console.log`: in the bot that IS the container's log. Here stdout is the
