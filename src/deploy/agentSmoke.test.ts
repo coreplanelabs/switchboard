@@ -235,7 +235,7 @@ describe("bounded agent smoke", () => {
           method: "POST",
           path: "/ingress",
           body: {
-            text: "What is 2 + 2? Answer only with the number. budget:4",
+            text: "agent:general What is 2 + 2? Answer only with the number. budget:4",
             channel: "smoke",
             thread: "release-1-answer",
             async: true,
@@ -729,7 +729,7 @@ describe("bounded agent smoke", () => {
       Array(3).fill(["openai/gpt-6.1-sol", "openai/gpt-6.1-sol"]),
     );
     expect((transport.request as ReturnType<typeof vi.fn>).mock.calls.map(([scenario]) => scenario.text)).toEqual([
-      "What is 2 + 2? Answer only with the number. budget:4 model:openai/gpt-6.1-sol",
+      "agent:general What is 2 + 2? Answer only with the number. budget:4 model:openai/gpt-6.1-sol",
       "agent:explore budget:15 Read SMOKE.md in acme/smoke using the workspace. Reply only with its contents. Do not change files. model:openai/gpt-6.1-sol",
       `agent:review budget:15 Review https://github.com/acme/smoke/pull/7 at head ${head}. Publish the review; do not change files or merge. model:openai/gpt-6.1-sol`,
     ]);

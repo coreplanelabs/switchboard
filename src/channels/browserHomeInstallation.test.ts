@@ -1,3 +1,4 @@
+import { runAgentSmoke, type SmokeScenario } from "../deploy/agentSmoke.js";
 import { handleModelProxyRequest, ANTHROPIC_MESSAGES_PATH } from "./modelProxy.js";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { createOrganizationNativeSources } from "./organizationNativeSources.js";
@@ -4006,6 +4007,200 @@ describe("browser installation", () => {
       },
     });
     expect(s.effects).toEqual(["access:alice", "access:alice"]);
+  });
+  it.each([
+    "retained",
+    "body",
+    "context",
+    "other active owner",
+    "completed",
+    "expired",
+    "revoked",
+    "replacement owner",
+    "sequence",
+  ] as const)("keeps fresh machine history bound to its original source: %s", async (state) => {
+    const s = await fixture();
+    const send = (key: string) =>
+      handleIngressRequest(
+        {
+          method: "POST",
+          headers: { authorization: "Bearer native-token" },
+          body: JSON.stringify({ text: "memory forget", idempotencyKey: key }),
+        },
+        s.core,
+        { auth: { tokens: s.tokens }, admit: (msg, _io, evidence) => s.installation.admitNative(msg, evidence) },
+      );
+    expect((await send("prior-history")).status).toBe(202);
+    await s.execute();
+    const next = await send("fresh-history");
+    expect(next.status).toBe(202);
+    const id = (next.body as { runId: string }).runId;
+    const binding = await s.installation.originalBinding(id);
+    if (!binding) throw new Error("No fresh machine binding");
+    expect(binding.originalStatus).toBe("dispatching");
+    let message = binding.msg;
+    if (state === "body") message = { ...message, text: "different original bytes" };
+    if (state === "sequence")
+      message = withOriginalOrganizationDispatch(message, {
+        ingressRunId: id,
+        organizationSequence: binding.receipt.revision + 1,
+      });
+    if (state === "other active owner") {
+      const other = await send("different-owner");
+      const owned = await s.installation.originalBinding((other.body as { runId: string }).runId);
+      if (!owned) throw new Error("No distinct active owner");
+      expect(owned.originalStatus).toBe("dispatching");
+      expect(owned.actor.id).toBe(binding.actor.id);
+      expect(owned.runId).not.toBe(id);
+      message = owned.msg;
+    }
+    if (state === "completed") await s.execute();
+    if (state === "expired") s.expire();
+    if (state === "revoked") delete (s.tokens as Record<string, unknown>)["native-token"];
+    if (state === "context") {
+      const read = s.ledger.readIngressByRun.bind(s.ledger);
+      vi.spyOn(s.ledger, "readIngressByRun").mockImplementation(async (runId) => {
+        const result = await read(runId);
+        if (runId !== id || result.status !== "record" || !result.record.request) return result;
+        return {
+          ...result,
+          record: {
+            ...result.record,
+            request: {
+              ...result.record.request,
+              envelope: {
+                ...(result.record.request.envelope as object),
+                context: [{ kind: "run", key: "foreign-context" }],
+              },
+            },
+          },
+        };
+      });
+    }
+    if (state === "replacement owner") {
+      const execute = s.store.execute.bind(s.store);
+      vi.spyOn(s.store, "execute").mockImplementation(async (command) => {
+        const result = await execute(command);
+        return command.action === "submission" &&
+          result.status === "submission" &&
+          result.receipt.id === binding.receipt.id
+          ? { ...result, receipt: { ...result.receipt, ownerRunId: "replaced-owner" } }
+          : result;
+      });
+    }
+    const history = binding.io.authoritativePrivateHistory!(message);
+    if (state === "retained")
+      expect(await history).toMatchObject([
+        { role: "user", text: "memory forget" },
+        { role: "assistant", text: "Read-only command completed." },
+      ]);
+    else await expect(history).rejects.toThrow("original machine input");
+  });
+  it("routes the exported smoke answer through native HTTP to its original General owner", async () => {
+    const modelRequests: import("../core/provider.js").CompletionRequest[] = [];
+    const s = await fixture(false, false, {
+      name: "fixture",
+      complete: async (request) => {
+        modelRequests.push(structuredClone(request));
+        return { content: [{ type: "text", text: "4" }], stopReason: "end_turn" };
+      },
+    });
+    s.core.config.config.defaults.efforts = { general: "high" };
+    let first: { scenario: SmokeScenario; thread: string } | undefined;
+    // Capture the exported smoke's authored request, without inventing a producer record.
+    await runAgentSmoke({
+      config: {
+        disposable: true,
+        channel: "ops",
+        subject: "bot",
+        repo: "sample/api",
+        model: "anthropic/general-model",
+        workspace: { path: "SMOKE.md", answer: "fixture" },
+        review: { number: 42, head: "a".repeat(40) },
+        maxObservedUsd: 1,
+      },
+      thread: "smoke-routing",
+      transport: {
+        health: async () => ({ commit: "b".repeat(40) }),
+        request: async (scenario, thread) => {
+          first = { scenario, thread };
+          return {};
+        },
+        readRun: async () => {
+          throw new Error("No admission during prompt capture");
+        },
+      },
+    });
+    if (!first) throw new Error("No authored smoke answer");
+    const { scenario, thread: key } = first;
+    const body = JSON.stringify({ text: scenario.text, channel: "ops", thread: key, async: true, idempotencyKey: key });
+    const options = {
+      auth: { tokens: s.tokens },
+      admit: (
+        msg: import("../core/types.js").IncomingMessage,
+        _io: import("../core/types.js").ChannelIO,
+        evidence: import("./organizationAuthentication.js").OrganizationNativeEvidence,
+      ) => s.installation.admitNative(msg, evidence),
+    };
+    const post = () =>
+      handleIngressRequest(
+        { method: "POST", headers: { authorization: "Bearer native-token" }, body },
+        s.core,
+        options,
+      );
+    const accepted = await post();
+    expect(accepted.status).toBe(202);
+    const receipt = (accepted.body as { admission: { status: string; receiptId: string; runId: string } }).admission;
+    expect(receipt.status).toBe("accepted");
+    expect(await s.ledger.readIngressByRun(receipt.runId)).toMatchObject({
+      status: "record",
+      record: { status: "dispatching" },
+    });
+    const binding = await s.installation.originalBinding(receipt.runId);
+    expect(binding).toMatchObject({
+      originalStatus: "dispatching",
+      actor: { id: "http:bot", kind: "service" },
+      envelope: { actor: { stream: null } },
+    });
+    if (!binding) throw new Error("No original service binding");
+    expect(await binding.io.authoritativePrivateHistory!(binding.msg)).toEqual([]);
+    expect(await binding.io.rehostOrganizationInput!(binding.msg)).toBeUndefined();
+    await s.execute();
+    const original = await s.ledger.readIngressByRun(receipt.runId);
+    expect(original).toMatchObject({
+      status: "record",
+      record: {
+        runId: receipt.runId,
+        receiptId: receipt.receiptId,
+        status: "completed",
+        requester: "http:bot",
+        threadKey: "http:ops:smoke-routing-answer",
+        request: { envelope: { content: scenario.text } },
+      },
+    });
+    const record = await s.runStore.get(receipt.runId);
+    expect(record).toMatchObject({
+      id: receipt.runId,
+      organizationIngressRunId: receipt.runId,
+      userId: "http:bot",
+      channelId: "http:ops",
+      threadKey: "http:ops:smoke-routing-answer",
+      agent: "general",
+      model: "anthropic/general-model",
+      status: "completed",
+      profile: { minutes: 4 },
+    });
+    expect(record?.events.find((event) => event.type === "run_meta")).toMatchObject({ effort: "high" });
+    expect(modelRequests).toHaveLength(1);
+    expect(s.nativeReplies).toEqual(["4"]);
+    const replay = await post();
+    expect(replay.status).toBe(202);
+    expect(replay.body).toMatchObject({
+      admission: { status: "accepted", duplicate: true, receiptId: receipt.receiptId, runId: receipt.runId },
+    });
+    expect(modelRequests).toHaveLength(1);
+    expect(s.tasks).toEqual([]);
+    await expect(binding.io.authoritativePrivateHistory!(binding.msg)).rejects.toThrow("original machine input");
   });
   it("admits authenticated HTTP and MCP calls under their own durable owners without email stream joins", async () => {
     const s = await fixture();
