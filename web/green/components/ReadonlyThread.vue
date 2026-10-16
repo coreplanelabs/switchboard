@@ -63,8 +63,8 @@ async function reply() {
         title="Conversation is unavailable"
         description="The thread is unknown or cannot be read with your current access."
       />
-      <ol v-else-if="seed?.turns.length" class="list-none m-0 p-0 grid gap-6">
-        <li v-for="(turn, index) in seed.turns" :key="index">
+      <ol v-else-if="seed?.turns.length" class="list-none m-0 p-0 grid grid-cols-1 gap-6">
+        <li v-for="(turn, index) in seed.turns" :key="index" class="min-w-0">
           <template v-if="'kind' in turn"
             ><SilentTurn
               v-if="turn.kind === 'receipt'"
