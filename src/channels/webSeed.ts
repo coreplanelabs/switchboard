@@ -592,6 +592,8 @@ export type WebSeed = PageSeed & {
   dataView?: { mode: "mine" | "person" | "everyone"; canViewEveryone?: boolean };
   asUser?: ViewablePerson;
   viewAs?: { people: ViewablePerson[] };
+  /** Catalog paths are served by this host; upstream image URLs never enter the browser. */
+  emoji?: Record<string, { path: string }>;
 };
 
 /** The id of the `<script type="application/json">` seed island. */

@@ -7,9 +7,14 @@ import type { LinkResult } from "../core/identity/linkContract.js";
 /** Safe rendering contract, deliberately separate from intent/audit schemas.
  * Exact verified identifiers are labels, never client-selected person targets. */
 export type LinkConsentView =
-  | { stage: "start"; csrf: string }
+  | {
+      stage: "start";
+      csrf: string;
+      operations?: { kind: "unlink" | "recover"; target: "access" | "slack"; csrf: string }[];
+    }
   | {
       stage: "pending" | "exchanging" | "awaiting-consent";
+      operation?: { kind: "link" | "unlink" | "recover"; target: "access" | "slack" };
       revision: number;
       expiresAt: number;
       access: ExternalIdentity & { audience: string };
@@ -20,6 +25,7 @@ export type LinkConsentView =
     }
   | {
       stage: "committed" | "cancelled" | "expired" | "failed" | "unavailable" | "result-expired";
+      operation?: { kind: "link" | "unlink" | "recover"; target: "access" | "slack" };
       restartCsrf?: string;
     };
 
