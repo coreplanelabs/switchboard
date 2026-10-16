@@ -283,6 +283,18 @@ const HIST_EVENTS = [
   },
   { type: "context", text: "earlier: we agreed the sender should never retry a 4xx", at: NOW - 2_400_000, seq: 2 },
   {
+    type: "run_note",
+    kind: "resumed",
+    summary: "resumed after a restart: pi still runs in the container; continuing its session",
+    at: NOW - 2_399_500,
+  },
+  {
+    type: "run_note",
+    kind: "model_retry",
+    summary: "pi's model stream ended early; the turn is held and retry 1 waits 5s inside this run's lease",
+    at: NOW - 2_399_250,
+  },
+  {
     type: "run_meta",
     agent: "coding",
     model: "anthropic/claude-fable-5",

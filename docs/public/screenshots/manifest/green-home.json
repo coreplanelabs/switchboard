@@ -112,7 +112,7 @@
     "scripts/web-green-fixtures.ts": "9d21cc4d7a8a3874c428e142b6d2a2a443bae04ac6ea390ea2e59bae0348d7c6",
     "scripts/web-green-preview.ts": "f80582d8e3ed624294ca034f6d90fe4de801e3be866cef477634db314d763953",
     "scripts/web-preview-reading-diff.ts": "24dea75cb4b61c011fa75878b138dde75e8a260d3c5b06c05c1e6fe2f2a58649",
-    "scripts/web-preview.ts": "75c53f544d16325ade169da0dbb1e7b4b31138b1586db9fcea04effd7aa1ce40",
+    "scripts/web-preview.ts": "b16e15c92b6b1a56b1df70bcb924ec5974c080305610745bb047cd1f47bb3be9",
     "scripts/web-review-fixture.ts": "ca73c51b9c8d8345fc0304e1d550026bc7e7f5df52df669e7cb9f689e643bf37",
     "src/agents/defaults.json": "f6fbe3d390a8aca3edf622d7494658145dca9590642183294d36e004c64760d8",
     "src/agents/registry.ts": "dbf74ae200eaf6903728f9536c144b04eb4c779abb1131d147cada8f85cb34fa",
@@ -231,7 +231,7 @@
     "src/core/reviewsReport.ts": "3287728bad1fffd698d86bdb486d7fdcec9500c7ae4c0cff21e2b90e4af0b59d",
     "src/core/routingTelemetry.ts": "3cd464f370100f463d74841eaf499ec891fcd434d4f93fec13a660efa3c51c80",
     "src/core/runDuration.ts": "dca2a672930febee9fae33e917c5129d6271fd1f9781a7dbcb4cb2217dbe2dae",
-    "src/core/runEvents.ts": "85c1668f54801c302db6925eee63d77d7fb4eb0e0d551b437f00984902baf29e",
+    "src/core/runEvents.ts": "1d6b06475dd8948fb8d0ae010c68c7a7fc01255e228d8ef6db921f9558f1f2fc",
     "src/core/runFriction.ts": "382355c5da03ad9556aceeed0eb92bfb6b946afc7d98497c947fafb52b0ae321",
     "src/core/runIdentity.ts": "de4ec56068e42c38d84ba40b63c373426d4ebd6aad20f55b6d15bcd2e372e95a",
     "src/core/runLedger/cancellation.ts": "479739ab16421d4c9f32795e15f80801f645c3cdaa7fce4b779578987f7085bc",
@@ -506,8 +506,8 @@
       "response:*/*:/assets/f08257fe1b44dd1d.js": "ef54f98d355fe93892195457f776a585ed7a0e6250e24c2fee930e48bfbe9b0c",
       "response:*/*:/assets/green.css": "910b7d4303c281ffc4a9abd83e0d5af751a49010657bf5fb94f94c3be4333bc7",
       "response:*/*:/home": "3b1aca99fd193db1c3f980be6d25524038977a608e7d0bec87b3d36c7d0ebe2e",
-      "response:application/json:/home/session": "a7389eb583cc3b241847898089bbafc4ffd8c5a8a67934b431da73fa54f55a6c",
-      "response:text/event-stream:/home/events": "b6c6e15691551c5f8eee52d10605b674a0340acc5f3e387952e3f0b5719bba7f"
+      "response:application/json:/home/session": "2523883e1ae09cf31cc2fb0fa4bd666ee90116c5ce4dcca59c891a426a36f24d",
+      "response:text/event-stream:/home/events": "65fc0cd42dc70be9bf95fe1c7bb635745aed3e18a3b94d5fa02e8b3e290f6d67"
     }
   }
 }

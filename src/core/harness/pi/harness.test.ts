@@ -2636,7 +2636,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
       expect(w.events).toContainEqual(
         expect.objectContaining({
           type: "run_note",
-          kind: "harness_error",
+          kind: "model_retry",
           summary: expect.stringContaining("stream ended early; the turn is held and retry 1 waits 5s"),
         }),
       );
@@ -2734,7 +2734,7 @@ describe("runPiHarness — a run on pi from the first file to the answer", () =>
     expect(w.events).toContainEqual(
       expect.objectContaining({
         type: "run_note",
-        kind: "harness_error",
+        kind: "model_retry",
         summary: "pi cancelled the model call locally; the turn is held and retry 1 waits 5s inside this run's lease",
       }),
     );

@@ -2370,7 +2370,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
               : terminal.kind === "local_stream"
                 ? `pi's model stream ended early; the turn is held and retry ${providerRetries + 1} waits ${backoff / 1000}s inside this run's lease`
                 : `the model provider did not complete the call; the turn is held and retry ${providerRetries + 1} waits ${backoff / 1000}s inside this run's lease`;
-          if (local) note("harness_error", progress);
+          if (local) note("model_retry", progress);
           else run.onProgress?.(progress);
         } else if (writeUp || finaleAborted) {
           // The run is already winding down (a budget, the turn guard, a soft
@@ -2911,7 +2911,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
                   : terminal.kind === "local_stream"
                     ? `pi's follow-up model stream ended early; the turn is held and retry ${turnRetries + 1} waits ${backoff / 1000}s inside this run's lease`
                     : `the model provider did not complete the follow-up call; the turn is held and retry ${turnRetries + 1} waits ${backoff / 1000}s inside this run's lease`;
-              if (local) note("harness_error", progress);
+              if (local) note("model_retry", progress);
               else run.onProgress?.(progress);
             } else {
               turnFailure = terminal;
