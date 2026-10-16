@@ -253,6 +253,10 @@ The next read-only cut extends `getPullRequestFeedback` and `github_pull_get(inc
 
 This is a missing source reader. It adds no listener, polling loop, event producer or direct worker delivery. It does not report thread resolution, deleted comments or an atomic source snapshot. The final-page freshness boundary remains until the shared intake path is connected. Front-door context lookup and decision ownership remain in progress.
 
+### Repository lifecycle conversion, 2026-10-15
+
+The next independent cut retains repository lifecycle, rename/transfer, privacy/archive and metadata facts in the same converter. Native repository ID remains the object identity across name and owner changes. These records grant no access or execution authority. No receiver, producer, context matcher, API repair or delivery caller is enabled. The ref and installation conversion PRs remain separate pending changes. Canonical source/context handling and live integration still remain pending; Step 4 is in progress.
+
 ### Shared comment conversion, 2026-10-15
 
 The inactive GitHub converter maps top-level comments, inline comments/replies and submitted reviews to the existing source-event codec. Human and bot authors retain the same evidence kind. The record keeps stable native object identity, canonical revision identity, the separate delivery ID and the complete native payload. Existing source storage supplies duplicate receipts, changed-delivery refusal and size limits.
