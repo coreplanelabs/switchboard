@@ -13,7 +13,18 @@ import { commit, config, fixture, head } from "./testing/agentSmoke.js";
 
 /** Existing intake fixtures also serve the bounded read-only reader handshake. */
 function withReaderProbe(fetch: typeof globalThis.fetch): typeof globalThis.fetch {
+  const owners: Array<{ id: string; channelId: string; userId: string; threadKey: string }> = [];
   return async (url, init) => {
+    if (String(url) === "https://bot.example.test/ingress") {
+      const response = await fetch(url, init);
+      const body = await response
+        .clone()
+        .json()
+        .catch(() => null);
+      if (body?.admission?.status === "accepted" && body.runId && typeof body.threadKey === "string")
+        owners.push({ id: body.runId, channelId: "http:smoke", userId: "http:smoke", threadKey: body.threadKey });
+      return response;
+    }
     if (String(url) === "https://bot.example.test/mcp") {
       const request = JSON.parse(String(init?.body));
       if (request.method === "initialize")
@@ -21,7 +32,7 @@ function withReaderProbe(fetch: typeof globalThis.fetch): typeof globalThis.fetc
       if (request.method === "notifications/initialized") return new Response(null, { status: 202 });
       if (request.method === "tools/call" && request.params.name === "runs_list") {
         const args = request.params.arguments;
-        if (args.channel !== "http:smoke" || args.limit !== 1 || args.status !== "all")
+        if (args.channel !== "http:smoke" || args.limit !== (args.thread ? 200 : 1) || args.status !== "all")
           return Response.json({
             jsonrpc: "2.0",
             id: request.id,
@@ -34,7 +45,7 @@ function withReaderProbe(fetch: typeof globalThis.fetch): typeof globalThis.fetc
             content: [
               {
                 type: "text",
-                text: 'runs.list: ok\n{"runs":[],"readScope":{"channelId":"http:smoke","userId":"http:smoke","repo":"acme/smoke","allowed":true}}',
+                text: `runs.list: ok\n${JSON.stringify({ runs: args.thread ? owners.filter((row) => row.threadKey === args.thread) : [], readScope: { channelId: "http:smoke", userId: "http:smoke", repo: "acme/smoke", allowed: true } })}`,
               },
             ],
           },
@@ -2003,7 +2014,7 @@ describe("machine MCP reader authentication", () => {
         scenarios: [
           {
             reason: "reader_unproven",
-            observationError: { code: expected, http: { status: 200, authChallenge: false } },
+            observationError: { code: expected, rpcCode: code, http: { status: 200, authChallenge: false } },
           },
           { outcome: "skipped" },
           { outcome: "skipped" },
@@ -2125,5 +2136,189 @@ describe("machine MCP reader authentication", () => {
       expect(paths).toEqual(["/healthz", "/mcp", "/mcp", "/mcp"]);
       expect(JSON.stringify(receipt)).not.toContain("foreign-private-content");
     }
+  });
+});
+
+describe("native HTTP run readiness", () => {
+  const owner = {
+    id: "native-run",
+    userId: "http:smoke",
+    channelId: "http:smoke",
+    threadKey: "http:smoke:readiness-answer",
+  };
+  const scope = { channelId: "http:smoke", userId: "http:smoke", repo: "acme/smoke", allowed: true };
+  function setup(page: (read: number) => unknown, getError?: number) {
+    const operations: string[] = [];
+    let lists = 0;
+    const transport = agentSmokeTransport({
+      origin: "https://bot.example.test",
+      healthUrl: "https://bot.example.test/healthz",
+      token: "fixture-only",
+      config,
+      fetch: async (url, init) => {
+        if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: { commit } });
+        const message = JSON.parse(String(init?.body));
+        if (String(url).endsWith("/ingress")) {
+          operations.push("admit");
+          return Response.json(
+            {
+              runId: owner.id,
+              admission: { status: "accepted", receiptId: "original-receipt", runId: owner.id },
+              threadKey: owner.threadKey,
+              build: { commit },
+            },
+            { status: 202 },
+          );
+        }
+        if (message.method === "initialize")
+          return Response.json({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: MCP_PROTOCOL_VERSION } });
+        if (message.method === "notifications/initialized") return new Response(null, { status: 202 });
+        const { name, arguments: args } = message.params;
+        operations.push(name);
+        if (name === "runs_list") {
+          if (!args.thread)
+            return Response.json({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                content: [{ type: "text", text: `runs.list: ok\n${JSON.stringify({ runs: [], readScope: scope })}` }],
+              },
+            });
+          expect(args).toEqual({
+            status: "all",
+            channel: "http:smoke",
+            thread: owner.threadKey,
+            limit: 200,
+            readUser: "http:smoke",
+            readRepo: "acme/smoke",
+          });
+          const result = page(++lists);
+          if (result && typeof result === "object" && "rpcCode" in result)
+            return Response.json({
+              jsonrpc: "2.0",
+              id: message.id,
+              error: { code: result.rpcCode, message: "private remote error", data: { credential: "private-data" } },
+            });
+          return Response.json({
+            jsonrpc: "2.0",
+            id: message.id,
+            result: { content: [{ type: "text", text: `runs.list: ok\n${JSON.stringify(result)}` }] },
+          });
+        }
+        expect(args).toEqual({ id: owner.id, include: "messages" });
+        if (getError)
+          return Response.json({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: { code: getError, message: "private remote error" },
+          });
+        return Response.json({
+          jsonrpc: "2.0",
+          id: message.id,
+          result: {
+            content: [{ type: "text", text: 'runs.get: ok\n{"id":"native-run","finished":true,"persisted":true}' }],
+          },
+        });
+      },
+    });
+    return { transport, operations };
+  }
+  it("waits on a complete authorized empty page for only the original owner", async () => {
+    vi.useFakeTimers();
+    try {
+      const s = setup((n) => ({
+        runs: n === 1 ? [{ ...owner, id: "sibling" }] : [owner],
+        readScope: scope,
+        ...(n === 2 ? { nextBefore: { finishedAt: 1, id: "older" } } : {}),
+      }));
+      await s.transport.request({ id: "answer", agent: "general", text: "question", minutes: 4 }, "readiness-answer");
+      const pending = s.transport.readRun(owner.id);
+      await vi.runAllTimersAsync();
+      expect(await pending).toEqual({ id: "native-run", finished: true, persisted: true });
+      expect(s.operations).toEqual(["admit", "runs_list", "runs_list", "runs_get"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it.each([
+    ["missing scope", { runs: [owner] }, "mcp_protocol_mismatch"],
+    ["denied scope", { runs: [owner], readScope: { ...scope, allowed: false } }, "mcp_read_scope_denied"],
+    ["foreign scope", { runs: [owner], readScope: { ...scope, repo: "other/repo" } }, "mcp_protocol_mismatch"],
+    ["store unavailable", { runs: [owner], readScope: scope, storeUnavailable: true }, "mcp_reader_unavailable"],
+    ["ledger unavailable", { runs: [owner], readScope: scope, ledgerUnavailable: true }, "mcp_reader_unavailable"],
+    ["foreign owner", { runs: [{ ...owner, userId: "http:other" }], readScope: scope }, "mcp_protocol_mismatch"],
+    ["foreign channel", { runs: [{ ...owner, channelId: "http:other" }], readScope: scope }, "mcp_protocol_mismatch"],
+    [
+      "foreign thread",
+      { runs: [{ ...owner, threadKey: "http:smoke:other" }], readScope: scope },
+      "mcp_protocol_mismatch",
+    ],
+    [
+      "incomplete page",
+      { runs: [], readScope: scope, nextBefore: { finishedAt: 1, id: "older" } },
+      "mcp_run_listing_incomplete",
+    ],
+    ["masked RPC refusal", { rpcCode: -32002 }, "mcp_rpc_failed"],
+    ["unauthorized RPC", { rpcCode: -32001 }, "mcp_read_unauthorized"],
+  ])("retains the accepted owner and stops on %s", async (_label, page, code) => {
+    const s = setup(() => page);
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "readiness",
+      transport: s.transport,
+    });
+    expect(receipt.scenarios[0]).toMatchObject({
+      runId: owner.id,
+      receiptId: "original-receipt",
+      admissionStatus: "accepted",
+      outcome: "incomplete",
+      reason: "run_record_unproven",
+      observationError: { code },
+    });
+    expect(receipt.scenarios.slice(1).map((r) => r.reason)).toEqual([
+      "prior_scenario_unproven",
+      "prior_scenario_unproven",
+    ]);
+    expect(s.operations).toEqual(["runs_list", "admit", "runs_list"]);
+    expect(JSON.stringify(receipt)).not.toContain("private remote");
+    expect(JSON.stringify(receipt)).not.toContain("private-data");
+  });
+  it("keeps the original deadline when the owner never becomes visible", async () => {
+    vi.useFakeTimers();
+    try {
+      const s = setup(() => ({ runs: [], readScope: scope }));
+      const pending = runAgentSmoke({ config, expectedCommit: commit, thread: "readiness", transport: s.transport });
+      await vi.runAllTimersAsync();
+      const receipt = await pending;
+      expect(receipt.scenarios[0]).toMatchObject({
+        runId: owner.id,
+        receiptId: "original-receipt",
+        admissionStatus: "accepted",
+        outcome: "incomplete",
+        observationError: { code: "run_deadline_exceeded" },
+      });
+      expect(s.operations.filter((op) => op === "admit")).toEqual(["admit"]);
+      expect(s.operations).not.toContain("runs_get");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("does not retry a masked point-read refusal after positive visibility", async () => {
+    const s = setup(() => ({ runs: [owner], readScope: scope }), -32002);
+    const receipt = await runAgentSmoke({
+      config,
+      expectedCommit: commit,
+      thread: "readiness",
+      transport: s.transport,
+    });
+    expect(receipt.scenarios[0]).toMatchObject({
+      runId: owner.id,
+      receiptId: "original-receipt",
+      outcome: "incomplete",
+      observationError: { code: "mcp_rpc_failed", rpcCode: -32002 },
+    });
+    expect(s.operations).toEqual(["runs_list", "admit", "runs_list", "runs_get"]);
+    expect(JSON.stringify(receipt)).not.toContain("private remote");
   });
 });

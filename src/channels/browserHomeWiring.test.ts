@@ -238,7 +238,7 @@ async function fixture(
   };
 }
 describe("browser production wiring", () => {
-  it.each(["allowed", "revoked"] as const)(
+  it.each(["allowed", "revoked", "queued"] as const)(
     "verifies native async output through authenticated original run readback without claiming null-channel delivery: %s",
     async (access) => {
       const s = await fixture(true, true, undefined, undefined, undefined, true);
@@ -294,6 +294,10 @@ describe("browser production wiring", () => {
       registerRunsCommands(registry);
       const commands = bindCommands(registry, { runs: async () => s.runs });
       const mcpReads: string[] = [];
+      let queuedReady!: () => void;
+      const queuedPage = new Promise<void>((resolve) => {
+        queuedReady = resolve;
+      });
       const smokeConfig = {
         model: "anthropic/claude-opus-4-6",
         disposable: true,
@@ -327,8 +331,10 @@ describe("browser production wiring", () => {
             );
             expect(result.status).toBe(202);
             expect(s.tasks).toHaveLength(1);
-            await s.tasks.shift()!();
-            await s.core.runHistoryWriter.settled();
+            if (access !== "queued") {
+              await s.tasks.shift()!();
+              await s.core.runHistoryWriter.settled();
+            }
             return Response.json(result.body, { status: result.status });
           }
           const message = JSON.parse(body);
@@ -346,15 +352,42 @@ describe("browser production wiring", () => {
             s.core,
             { auth: { tokens: { "native-token": { subject: "bot", channel: "default" } } }, commands },
           );
+          if (
+            access === "queued" &&
+            message.method === "tools/call" &&
+            message.params.name === "runs_list" &&
+            message.params.arguments.thread &&
+            s.tasks.length
+          ) {
+            // Keep the first authorized page empty, then materialize the original owner.
+            await s.tasks.shift()!();
+            await s.core.runHistoryWriter.settled();
+            vi.useFakeTimers();
+            queuedReady();
+          }
           return Response.json(result.body, { status: result.status });
         },
       });
-      const receipt = await runAgentSmoke({
-        config: smokeConfig,
-        expectedCommit: "a".repeat(40),
-        thread: "native-answer",
-        transport,
-      });
+      const smoke = () =>
+        runAgentSmoke({
+          config: smokeConfig,
+          expectedCommit: "a".repeat(40),
+          thread: "native-answer",
+          transport,
+        });
+      const receipt =
+        access === "queued"
+          ? await (async () => {
+              try {
+                const pending = smoke();
+                await queuedPage;
+                await vi.runAllTimersAsync();
+                return await pending;
+              } finally {
+                vi.useRealTimers();
+              }
+            })()
+          : await smoke();
       const answer = receipt.scenarios[0]!;
       if (access === "revoked") {
         expect(answer).toMatchObject({
