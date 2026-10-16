@@ -139,6 +139,8 @@ To test a workflow change before merge, dispatch its branch with `pr=<number>` a
 
 Use the [release and deploy contract](../reference/specs/release-and-deploy.md) to separate readiness from acceptance. Retain receipts outside this repository with the run ID, actor, exact PR/head, selected Worker commits, output/artifact and outcome. Start with Slack question, review and Ship; then private Fix it, both executors, restart and busy deploy. A successful health response does not establish these outcomes.
 
+Native asynchronous HTTP and MCP requests return a run handle. Their acceptance artifact must include authenticated readback of that original run's sealed, persisted and complete output, with the expected scenario result. Its `outputReadback` records the original receipt and run, seal time, event count and output byte count. This does not claim a channel reply was delivered: the saved `replyOk` remains unchanged. Workspace execution, posted Review, model, budget, cost and Slack connection checks still apply.
+
 Keep capability smoke until these staged paths are repeatable. Ship can be tested here while production Review remains pinned to its current release. They still share one bot artifact; independent agent releases need a separate architecture change.
 
 ## Slack acceptance

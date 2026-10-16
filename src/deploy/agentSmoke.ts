@@ -96,6 +96,11 @@ const runSchema = z.object({
   status: z.string().optional(),
   provisional: z.boolean().optional(),
   restarting: z.boolean().optional(),
+  finishedAt: z.number().finite().optional(),
+  sealedAt: z.number().finite().optional(),
+  eventCount: z.number().int().nonnegative().optional(),
+  storedEventCount: z.number().int().nonnegative().optional(),
+  truncated: z.boolean().optional(),
   replyOk: z.boolean().optional(),
   answerOutcome: z.unknown(),
   usage: z.object({ turns: z.number().int().nonnegative() }).optional(),
@@ -222,6 +227,14 @@ interface ScenarioReceipt {
   actualModel?: string;
   modelControls?: { effort: string; capField: string; window: number; cache: string };
   artifact?: { repo: string; number: number; head: string; verdict?: "approve" | "request_changes" };
+  outputReadback?: {
+    kind: "native-persisted-run";
+    receiptId: string;
+    runId: string;
+    sealedAt: number;
+    eventCount: number;
+    utf8Bytes: number;
+  };
   evidence?: { identityVerified: boolean; record: unknown; unverifiedObservation?: unknown };
   failedChecks?: string[];
   observationError?: SmokeObservationError;
@@ -666,10 +679,26 @@ export async function runAgentSmoke(input: {
       }
       const answer = answerOutcomeOf(run.answerOutcome);
       const output = run.events.filter((e) => e.type === "answer").at(-1)?.text;
+      // Native async calls return an admitted run handle. Their result is the
+      // authenticated saved run, separate from physical channel reply delivery.
+      const nativeAsync = Object.hasOwn(object, "admission");
       const outputChecks = {
         "answerOutcome.ending": answer?.ending === "answered",
         "answerOutcome.output": answer?.output !== "absent",
-        replyOk: run.replyOk === true,
+        ...(nativeAsync
+          ? {
+              "admission.accepted": known.success && known.data.status === "accepted",
+              "admission.started": response.run.status === "started",
+              "run.sealedAt":
+                run.sealedAt !== undefined && run.finishedAt !== undefined && run.sealedAt >= run.finishedAt,
+              "events.complete":
+                run.eventCount !== undefined &&
+                run.eventCount > 0 &&
+                run.events.length === run.eventCount &&
+                (run.storedEventCount === undefined || run.storedEventCount === run.eventCount) &&
+                !run.truncated,
+            }
+          : { replyOk: run.replyOk === true }),
         "usage.turns": Boolean(run.usage?.turns),
         "events.answer.text": Boolean(output?.trim()),
       };
@@ -755,6 +784,16 @@ export async function runAgentSmoke(input: {
       if (after.commit !== build.commit || after.version !== build.version) {
         row.reason = "build_changed";
         break;
+      }
+      if (nativeAsync && known.success && run.sealedAt !== undefined && run.eventCount !== undefined) {
+        row.outputReadback = {
+          kind: "native-persisted-run",
+          receiptId: known.data.receiptId,
+          runId: run.id,
+          sealedAt: run.sealedAt,
+          eventCount: run.eventCount,
+          utf8Bytes: new TextEncoder().encode(text).byteLength,
+        };
       }
       row.outcome = "passed";
       row.reason = "accepted";

@@ -143,6 +143,8 @@ For protected organization offers, maintained client form consent is recorded be
 
 When organization admission is configured, `dispatch` returns a durable admission receipt. It does not report model completion. An explicit `idempotencyKey` and the unchanged input replay the original receipt and owner; a changed input conflicts. Without a key, each call remains distinct. Authenticated source facts come from the current credential, never from email or argument fields. The unactivated adapter retains its existing reply behavior.
 
+An asynchronous caller reads its result from that exact original run through authenticated `runs_get`. The saved output and physical reply delivery are separate facts. Release acceptance records a bounded native-output readback only after the receipt, source identity, candidate, profile, seal, persistence, complete events and scenario output pass. Legacy channel responses still require their reply-delivery receipt.
+
 | Criterion | Proof |
 |---|---|
 | An exact keyed retry returns the original admitted owner; changed text conflicts and email cannot become sender proof | `[unit]` `src/channels/mcpAdmission.test.ts::MCP organization admission::retries one exact input under its original receipt and owner without borrowing an email identity` |

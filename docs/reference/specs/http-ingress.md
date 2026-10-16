@@ -111,6 +111,8 @@ When the installation supplies `IngressOptions.admit`, HTTP admits work through 
 
 A pending or accepted receipt returns 202, throttling returns 429, and rejected or stale receipts return 409. Receipt and original owner are reported when known; admission does not prove completion or delivery. Invalid admission returns 400, a missing or fenced authorization returns 403, and unavailable or busy admission returns 503. Without `admit`, the existing single-shot reply and async lifecycle remain available.
 
+The result of an admitted asynchronous request is the original run's saved output, read through the caller-authorized run service. This is separate from physical channel delivery: a channel-less job can retain `replyOk: false` while its result is available. Release acceptance requires an accepted original receipt, matching owner, candidate and profile, a sealed persisted run with complete retained events, and the expected output bytes. A receipt or reply-key digest alone does not prove output.
+
 | Criterion | Proof |
 | --- | --- |
 | Exact HTTP retry retains one durable receipt and original owner; changed text conflicts. | `[unit]` `src/channels/http.test.ts::HTTP organization admission::returns the original durable receipt and owner on exact retry, and conflicts on changed text` |

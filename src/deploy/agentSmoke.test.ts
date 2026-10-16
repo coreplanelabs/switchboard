@@ -46,6 +46,150 @@ function withReaderProbe(fetch: typeof globalThis.fetch): typeof globalThis.fetc
 }
 
 describe("bounded agent smoke", () => {
+  it.each(["workspace", "review"] as const)(
+    "keeps native saved output behind the original %s evidence gate",
+    async (target) => {
+      const original = fixture();
+      const request = original.transport.request;
+      original.transport.request = vi.fn(async (scenario, thread, onIntake) => {
+        const response = (await request(scenario, thread, onIntake)) as {
+          run: { id: string; status: string };
+          build: unknown;
+        };
+        const record = original.records.get(response.run.id) as Record<string, unknown>;
+        record.replyOk = false;
+        if (scenario.id === target) {
+          if (target === "workspace") {
+            record.events = (record.events as Array<{ type: string }>).filter(
+              (e) => !["tool_call", "tool_result"].includes(e.type),
+            );
+            record.eventCount = (record.events as unknown[]).length;
+            if (record.storedEventCount !== undefined) record.storedEventCount = record.eventCount;
+          } else record.reviewPost = { ...(record.reviewPost as object), posted: false };
+        }
+        return {
+          ...response,
+          threadKey: `${scenario.transport ?? "http"}:smoke:${thread}`,
+          run: { id: response.run.id, status: "started" },
+          admission: { status: "accepted", receiptId: `receipt-${scenario.id}`, runId: response.run.id },
+        };
+      });
+      const receipt = await runAgentSmoke({
+        config,
+        expectedCommit: commit,
+        thread: "native-gates",
+        transport: original.transport,
+      });
+      expect(receipt.scenarios.find((row) => row.id === target)).toMatchObject({
+        outcome: "failed",
+        reason: target === "workspace" ? "workspace_execution_unproven" : "review_publication_unproven",
+      });
+      expect(receipt.scenarios.find((row) => row.id === target)!.outputReadback).toBeUndefined();
+      expect(original.transport.request).toHaveBeenCalledTimes(target === "workspace" ? 2 : 3);
+    },
+  );
+  it.each([
+    "none",
+    "mcp",
+    "completed-native",
+    "malformed-native",
+    "legacy",
+    "pending",
+    "unsealed",
+    "partial",
+    "truncated",
+    "missing",
+    "wrong",
+    "foreign",
+    "unpersisted",
+    "refused",
+  ] as const)("requires exact saved native output instead of channel delivery: %s", async (fault) => {
+    const original = fixture();
+    const request = original.transport.request;
+    original.transport.request = vi.fn(async (scenario, thread, onIntake) => {
+      const response = (await request(scenario, thread, onIntake)) as {
+        run: { id: string; status: string };
+        build: unknown;
+      };
+      const record = original.records.get(response.run.id) as Record<string, unknown>;
+      record.replyOk = false;
+      if (scenario.id === "answer") {
+        if (["completed-native", "malformed-native"].includes(fault)) record.replyOk = true;
+        if (fault === "unsealed") delete record.sealedAt;
+        if (fault === "partial") record.eventCount = Number(record.eventCount) + 1;
+        if (fault === "truncated") record.truncated = true;
+        if (fault === "unpersisted") record.persisted = false;
+        if (fault === "foreign") record.userId = "http:another-reader";
+        if (fault === "wrong")
+          (record.events as Array<{ type: string; text?: string }>).find((e) => e.type === "answer")!.text = "5";
+        if (fault === "missing") {
+          record.events = (record.events as Array<{ type: string }>).filter((e) => e.type !== "answer");
+          record.eventCount = (record.events as unknown[]).length;
+          if (record.storedEventCount !== undefined) record.storedEventCount = record.eventCount;
+        }
+      }
+      if (scenario.id === "answer" && fault === "legacy") return response;
+      return {
+        ...response,
+        threadKey: `${scenario.transport ?? "http"}:smoke:${thread}`,
+        run: {
+          id: response.run.id,
+          status: scenario.id === "answer" && fault === "completed-native" ? "completed" : "started",
+        },
+        admission: {
+          status:
+            scenario.id === "answer" && ["pending", "completed-native"].includes(fault)
+              ? "pending"
+              : scenario.id === "answer" && fault === "refused"
+                ? "rejected"
+                : scenario.id === "answer" && fault === "malformed-native"
+                  ? "unknown"
+                  : "accepted",
+          receiptId: `receipt-${scenario.id}`,
+          runId: response.run.id,
+        },
+      };
+    });
+    const receipt = await runAgentSmoke({
+      config:
+        fault === "mcp"
+          ? { ...config, model: "openai/gpt-6.1-sol", review: { ...config.review, transport: "mcp", effort: "high" } }
+          : config,
+      expectedCommit: commit,
+      thread: "release-native",
+      transport: original.transport,
+    });
+    if (["none", "mcp"].includes(fault)) {
+      expect(receipt).toMatchObject({
+        version: 1,
+        scope: "deployment-capability-smoke",
+        capabilityOutcome: "passed",
+        productAcceptance: { outcome: "incomplete", reason: "private-question-fix-draft-pr-unproven" },
+      });
+      expect(receipt.scenarios.map((s) => s.outputReadback?.kind)).toEqual([
+        "native-persisted-run",
+        "native-persisted-run",
+        "native-persisted-run",
+      ]);
+      expect(receipt.scenarios[0]!.evidence).toMatchObject({ identityVerified: true, record: { replyOk: false } });
+    } else {
+      const expected =
+        fault === "wrong"
+          ? "wrong_answer"
+          : fault === "foreign"
+            ? "run_identity_mismatch"
+            : fault === "unpersisted"
+              ? "run_record_unproven"
+              : fault === "refused"
+                ? "admission_refused"
+                : "execution_output_unproven";
+      expect(receipt.scenarios[0]!.reason).toBe(expected);
+      expect(receipt.capabilityOutcome).not.toBe("passed");
+      expect(receipt.scenarios[0]!.outputReadback).toBeUndefined();
+      expect(original.transport.request).toHaveBeenCalledTimes(1);
+      expect(receipt.scenarios[1]!.outcome).toBe("skipped");
+    }
+  });
   it("sanitizes prefixed and encoded JSON fragments before retaining runless replies", async () => {
     for (const reply of [
       'response={"api_token":"opaque-private-value"} after',
