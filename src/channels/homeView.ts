@@ -238,8 +238,8 @@ export function createHomeViewHandler(
           ...(answers ? { answers } : {}),
           ...(actions ? { actions } : {}),
         });
-        options.observe?.(context, snapshot);
       }
+      options.observe?.(context, snapshot);
     })().catch(() => plain(res, 503, "Work is unavailable."));
     return true;
   };

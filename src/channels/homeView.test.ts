@@ -45,6 +45,35 @@ const request = (url: string, method = "GET") =>
   ({ url, method, headers: { accept: "application/json" } }) as IncomingMessage;
 
 describe("authorized Home pages", () => {
+  it("schedules merge observation only after sending the current Home response", async () => {
+    const service = createHomeService({
+      organizationId: "installation-a",
+      instances: { listInstances: async () => ({ items: [] }), listUnits: async () => [] },
+    });
+    const events: string[] = [];
+    const read = createHomeViewHandler(
+      service,
+      makePageSender({ js: "/assets/green.js", css: [] }, ALL_CAPABILITIES),
+      "installation-a",
+      {
+        observe: () => {
+          events.push("observe");
+        },
+      },
+    );
+    for (const path of ["/home", "/home/snapshot"]) {
+      const out = response();
+      const end = out.res.end.bind(out.res);
+      out.res.end = ((body: string) => {
+        events.push("response");
+        return end(body);
+      }) as ServerResponse["end"];
+      read(request(path), out.res, { actor: viewer, organization: "installation-a" });
+      await out.ended;
+      expect(out.value().status).toBe(200);
+    }
+    expect(events).toEqual(["response", "observe", "response", "observe"]);
+  });
   it("includes server-proved own answers in All people while Person cannot acquire an answer", async () => {
     const service = createHomeService({
       organizationId: "installation-a",

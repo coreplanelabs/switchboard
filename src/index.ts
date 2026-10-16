@@ -1312,6 +1312,18 @@ export async function runBot(): Promise<void> {
       receiptTtlMs: conversationRetentionFor(config.config).receiptDays * DAY_MS,
     },
     privateWorkerLog,
+    mergeLogin: async (actorId) => {
+      const binding = config.userGithubBinding(actorId);
+      return binding === undefined ? undefined : typeof binding === "string" ? binding : binding.login;
+    },
+    mergeFacts: async (_context, instance, unit) => {
+      if (!unit.pr) return;
+      const facts = await fetchPullRequestFacts({ repo: instance.repo, number: unit.pr.number });
+      if (!facts?.headSha || !facts.mergeCommitSha || !facts.mergedAt) return;
+      const mergedAt = Date.parse(facts.mergedAt);
+      if (!Number.isSafeInteger(mergedAt)) return;
+      return { headSha: facts.headSha, mergeCommitSha: facts.mergeCommitSha, mergedAt };
+    },
     launch: (task) => {
       if (draining) throw new Error("This process is draining.");
       const pending = task();
@@ -1756,6 +1768,13 @@ export async function runBot(): Promise<void> {
         context.home && browserWiring?.current()
           ? browserWiring.current()!.answers(context.home, snapshot.needsYou)
           : {},
+      actions: async (context, snapshot) =>
+        context.home && browserWiring?.current()
+          ? browserWiring.current()!.mergeActions(context.home, snapshot.needsYou)
+          : {},
+      observe: (context, snapshot) => {
+        if (context.home) browserWiring?.current()?.queueMergeObservations(context.home, snapshot.needsYou);
+      },
     });
     // Residents dash: GET /residents (index) + /residents/:owner/:name (detail),
     // the browser twin of `repo list`. Reads the resident Worker's admin
