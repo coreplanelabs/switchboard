@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
 import { parse, stringify } from "yaml";
 import { describe, expect, it } from "vitest";
 import type { AppConfig } from "../config.js";
@@ -323,6 +324,49 @@ describe("staging workflow isolation", () => {
       queue: "max",
       "cancel-in-progress": false,
     });
+  });
+
+  it("refuses cancelled deploys while preserving eligible skipped-validation paths and always-run receipts", () => {
+    const workflow = parse(readFileSync(".github/workflows/deploy-staging.yml", "utf8"));
+    const permitted = new Set([
+      "false:success:true:skipped:false",
+      "false:success:true:skipped:true",
+      "false:success:true:success:true",
+    ]);
+    for (const cancelled of [false, true]) {
+      for (const authorize of ["success", "failure", "cancelled"]) {
+        for (const requested of ["true", "false"]) {
+          for (const validate of ["skipped", "success", "failure", "cancelled"]) {
+            for (const eligible of ["true", "false"]) {
+              const scenario = `${cancelled}:${authorize}:${requested}:${validate}:${eligible}`;
+              const allowed = runInNewContext(
+                workflow.jobs.deploy.if,
+                {
+                  always: () => true,
+                  cancelled: () => cancelled,
+                  needs: {
+                    authorize: { result: authorize, outputs: { requested } },
+                    validate: { result: validate, outputs: { eligible } },
+                  },
+                },
+                { timeout: 100 },
+              );
+              expect(allowed, scenario).toBe(permitted.has(scenario));
+            }
+          }
+        }
+      }
+    }
+    expect(workflow.jobs.deploy.concurrency).toEqual({
+      group: "deploy-staging",
+      queue: "max",
+      "cancel-in-progress": false,
+    });
+    const steps = workflow.jobs.deploy.steps;
+    expect(steps.find((step: { name?: string }) => step.name === "staging deployment receipt").if).toBe("always()");
+    expect(steps.find((step: { uses?: string }) => step.uses?.startsWith("actions/upload-artifact@")).if).toBe(
+      "always()",
+    );
   });
 
   it("executes source gates: captures an origin head and refuses forks, unauthorized manual actors and stale heads", () => {
