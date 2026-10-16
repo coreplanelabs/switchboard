@@ -50,8 +50,10 @@ import {
   SOURCE_EVENT_WAKE_MS,
   SOURCE_JOB_SCAN_LIMIT,
 } from "../budgets.js";
-import { planSourceJobClaim, planSourceJobRelease } from "./sourceEventJobs.js";
+import { planSourceJobClaim, planSourceJobRelease, planSourceRelevanceSave } from "./sourceEventJobs.js";
 import {
+  sourceRelevanceRequestOf,
+  type SourceRelevanceSaveResult,
   isSourceEventKey,
   prepareSourceEvent,
   sourceEventReceiptOf,
@@ -2956,7 +2958,7 @@ export class InMemoryRunLedger implements RunLedger {
       this.sourceJobCursor = row.receipt.sequence;
       const job = sourceEventJobOf(row.job),
         receipt = sourceEventReceiptOf(row.receipt);
-      if (!job || !receipt || job.eventKey !== receipt.key) {
+      if (!job || !receipt || job.eventKey !== receipt.key || (job.version === 3 && request.readerVersion < 3)) {
         held++;
         continue;
       }
@@ -2972,6 +2974,21 @@ export class InMemoryRunLedger implements RunLedger {
     }
     this.refreshSourceJobWake(now);
     return structuredClone({ kind: "claimed", claims, held, failed });
+  }
+
+  async saveSourceRelevance(value: unknown): Promise<SourceRelevanceSaveResult> {
+    const request = sourceRelevanceRequestOf(value);
+    if (!request) return { kind: "refused", reason: "invalid-request" };
+    const row = this.sourceEvents.get(request.receipt.key);
+    if (!row) return { kind: "refused", reason: "missing" };
+    if (JSON.stringify(row.receipt) !== JSON.stringify(request.receipt))
+      return { kind: "refused", reason: "source-mismatch" };
+    const job = sourceEventJobOf(row.job);
+    if (!job || job.eventKey !== request.receipt.key) return { kind: "refused", reason: "unsupported-job" };
+    const change = planSourceRelevanceSave(job, request, this.now());
+    if (change.kind === "refused") return change;
+    if (change.kind === "changed") row.job = change.job;
+    return structuredClone({ kind: "saved", receipt: request.receipt, record: change.record });
   }
 
   async releaseSourceEvent(value: unknown): Promise<SourceJobReleaseResult> {

@@ -6,6 +6,8 @@ import {
   SOURCE_JOB_LEASE_MS,
   SOURCE_JOB_RETRY_MS,
   SOURCE_JOB_SCAN_LIMIT,
+  SOURCE_RELEVANCE_MAX_CONTEXTS,
+  SOURCE_RELEVANCE_RESULT_MAX_BYTES,
 } from "../budgets.js";
 
 /** Source data has no worker destination or requester authority. */
@@ -54,13 +56,41 @@ export type SourceJobReleaseReceipt = SourceJobReleaseRequest & {
   nextAttemptAt: number | null;
 };
 interface SourceJobStateBase {
-  version: 2;
   eventKey: string;
   stage: "received";
   attempts: number;
   releases: SourceJobReleaseReceipt[];
 }
-export type SourceEventJobV2 = SourceJobStateBase &
+export interface SourceRelevanceResult {
+  version: 1;
+  context: { runId: string; requester: string; channelId: string; threadKey: string; hash: string };
+  inputHash: string;
+  verdict: "relevant" | "unrelated" | "unclassified";
+  source: "model" | "error" | "timeout";
+  reason: string;
+}
+export type SourceRelevanceRecord = SourceRelevanceResult & { at: number };
+export interface SourceRelevanceRequest {
+  receipt: SourceEventReceipt;
+  owner: string;
+  token: string;
+  result: SourceRelevanceResult;
+}
+export type SourceRelevanceSaveResult =
+  | { kind: "saved"; receipt: SourceEventReceipt; record: SourceRelevanceRecord }
+  | {
+      kind: "refused";
+      reason:
+        | "invalid-request"
+        | "missing"
+        | "source-mismatch"
+        | "unsupported-job"
+        | "fenced"
+        | "result-conflict"
+        | "capacity";
+    };
+export type ClaimedSourceEventJob = SourceJobStateBase &
+  ({ version: 2; relevance?: never } | { version: 3; relevance: SourceRelevanceRecord[] }) &
   (
     | { state: "ready"; nextAttemptAt: number; lease?: never; failure?: never }
     | { state: "leased"; nextAttemptAt: number; lease: SourceJobLease; failure?: never }
@@ -71,10 +101,10 @@ export type SourceEventJobV2 = SourceJobStateBase &
         failure: { reason: SourceJobHoldReason | "attempts-exhausted"; at: number };
       }
   );
-export type SourceEventJob = ReceivedSourceEventJob | SourceEventJobV2;
+export type SourceEventJob = ReceivedSourceEventJob | ClaimedSourceEventJob;
 export interface SourceJobClaimRequest {
   owner: string;
-  readerVersion: 2;
+  readerVersion: 2 | 3;
   limit: number;
 }
 export interface SourceJobClaim {
@@ -263,19 +293,20 @@ export function sourceJobClaimRequestOf(v: unknown): SourceJobClaimRequest | und
   if (
     !object(v) ||
     !closed(v, ["owner", "readerVersion", "limit"]) ||
-    v.readerVersion !== 2 ||
+    (v.readerVersion !== 2 && v.readerVersion !== 3) ||
     !identity(v.owner) ||
     !Number.isSafeInteger(v.limit) ||
     Number(v.limit) < 1 ||
     Number(v.limit) > SOURCE_JOB_MAX_CLAIMS
   )
     return;
-  return { owner: v.owner, readerVersion: 2, limit: Number(v.limit) };
+  return { owner: v.owner, readerVersion: v.readerVersion, limit: Number(v.limit) };
 }
 export function prepareSourceJobClaim(
   v: unknown,
 ): { request: SourceJobClaimRequest } | { refusal: Extract<SourceJobClaimResult, { kind: "refused" }> } {
-  if (!object(v) || v.readerVersion !== 2) return { refusal: { kind: "refused", reason: "unsupported-reader" } };
+  if (!object(v) || (v.readerVersion !== 2 && v.readerVersion !== 3))
+    return { refusal: { kind: "refused", reason: "unsupported-reader" } };
   const request = sourceJobClaimRequestOf(v);
   return request ? { request } : { refusal: { kind: "refused", reason: "invalid-request" } };
 }
@@ -334,7 +365,7 @@ export function sourceEventJobOf(v: unknown): SourceEventJob | undefined {
   )
     return { version: 1, eventKey: v.eventKey, stage: "received", attempts: 0, nextAttemptAt: v.nextAttemptAt };
   if (
-    v.version !== 2 ||
+    (v.version !== 2 && v.version !== 3) ||
     !closed(v, [
       "version",
       "eventKey",
@@ -345,6 +376,7 @@ export function sourceEventJobOf(v: unknown): SourceEventJob | undefined {
       "lease",
       "failure",
       "releases",
+      ...(v.version === 3 ? ["relevance"] : []),
     ]) ||
     v.attempts < 1 ||
     v.attempts > SOURCE_JOB_MAX_ATTEMPTS ||
@@ -370,10 +402,26 @@ export function sourceEventJobOf(v: unknown): SourceEventJob | undefined {
     tokens.add(receipt.token);
     priorAttempt = receipt.attempts;
   }
-  const base: SourceJobStateBase = {
-    version: 2,
+  let saved: { version: 2; relevance?: never } | { version: 3; relevance: SourceRelevanceRecord[] };
+  if (v.version === 3) {
+    if (!Array.isArray(v.relevance) || v.relevance.length < 1 || v.relevance.length > SOURCE_RELEVANCE_MAX_CONTEXTS)
+      return;
+    const relevance: SourceRelevanceRecord[] = [];
+    const contexts = new Set<string>();
+    for (const raw of v.relevance) {
+      const record = sourceRelevanceRecordOf(raw);
+      if (!record) return;
+      const key = JSON.stringify(record.context);
+      if (contexts.has(key)) return;
+      contexts.add(key);
+      relevance.push(record);
+    }
+    saved = { version: 3, relevance };
+  } else saved = { version: 2 };
+  const base = {
+    ...saved,
     eventKey: v.eventKey,
-    stage: "received",
+    stage: "received" as const,
     attempts: v.attempts,
     releases,
   };
@@ -513,5 +561,83 @@ export function sourceJobReleaseResultOf(value: unknown): SourceJobReleaseResult
     return { kind: "refused", reason };
   const receipt = sourceJobReleaseReceiptOf(value.receipt);
   if (value.kind === "released" && closed(value, ["kind", "receipt"]) && receipt) return { kind: "released", receipt };
+  return;
+}
+
+const hash = (v: unknown): v is string => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
+/** A saved recommendation is data, never source access or delivery authority. */
+function sourceRelevanceResultOf(v: unknown): SourceRelevanceResult | undefined {
+  if (
+    !object(v) ||
+    !closed(v, ["version", "context", "inputHash", "verdict", "source", "reason"]) ||
+    v.version !== 1 ||
+    !object(v.context) ||
+    !closed(v.context, ["runId", "requester", "channelId", "threadKey", "hash"]) ||
+    !identity(v.context.runId) ||
+    !identity(v.context.requester) ||
+    !identity(v.context.channelId) ||
+    !identity(v.context.threadKey) ||
+    !hash(v.context.hash) ||
+    !hash(v.inputHash) ||
+    (v.verdict !== "relevant" && v.verdict !== "unrelated" && v.verdict !== "unclassified") ||
+    (v.source !== "model" && v.source !== "error" && v.source !== "timeout") ||
+    (v.source !== "model" && v.verdict !== "unclassified") ||
+    typeof v.reason !== "string" ||
+    v.reason.trim().length === 0 ||
+    new TextEncoder().encode(v.reason).byteLength > 1024 ||
+    new TextEncoder().encode(JSON.stringify(v)).byteLength > SOURCE_RELEVANCE_RESULT_MAX_BYTES
+  )
+    return;
+  return {
+    version: 1,
+    context: {
+      runId: v.context.runId,
+      requester: v.context.requester,
+      channelId: v.context.channelId,
+      threadKey: v.context.threadKey,
+      hash: v.context.hash,
+    },
+    inputHash: v.inputHash,
+    verdict: v.verdict,
+    source: v.source,
+    reason: v.reason,
+  };
+}
+export function sourceRelevanceRecordOf(v: unknown): SourceRelevanceRecord | undefined {
+  if (!object(v) || !time(v.at)) return;
+  const { at, ...body } = v;
+  const result = sourceRelevanceResultOf(body);
+  return result ? { ...result, at } : undefined;
+}
+export function sourceRelevanceRequestOf(value: unknown): SourceRelevanceRequest | undefined {
+  try {
+    const v = sourceSnapshot(value);
+    if (!object(v) || !closed(v, ["receipt", "owner", "token", "result"]) || !identity(v.owner) || !identity(v.token))
+      return;
+    const receipt = sourceEventReceiptOf(v.receipt),
+      result = sourceRelevanceResultOf(v.result);
+    return receipt && result ? { receipt, owner: v.owner, token: v.token, result } : undefined;
+  } catch {
+    return;
+  }
+}
+export function sourceRelevanceSaveResultOf(v: unknown): SourceRelevanceSaveResult | undefined {
+  if (!object(v)) return;
+  if (
+    v.kind === "refused" &&
+    closed(v, ["kind", "reason"]) &&
+    (v.reason === "invalid-request" ||
+      v.reason === "missing" ||
+      v.reason === "source-mismatch" ||
+      v.reason === "unsupported-job" ||
+      v.reason === "fenced" ||
+      v.reason === "result-conflict" ||
+      v.reason === "capacity")
+  )
+    return { kind: "refused", reason: v.reason };
+  const record = sourceRelevanceRecordOf(v.record),
+    receipt = sourceEventReceiptOf(v.receipt);
+  if (v.kind === "saved" && closed(v, ["kind", "receipt", "record"]) && receipt && record)
+    return { kind: "saved", receipt, record };
   return;
 }

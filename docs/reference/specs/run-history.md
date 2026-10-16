@@ -3,7 +3,7 @@
 - **Code**: `src/core/runLedger/sourceEvidence.ts`
 - **Tests**: `src/core/runLedger/sourceEvidence.test.ts`
 
-- **Tests**: `src/core/runLedger/inboxDelivery.test.ts`
+- **Tests**: `src/core/runLedger/inboxDelivery.test.ts`, `src/core/runLedger/sourceRelevance.test.ts`
 
 
 Opted-in coding runs also obey the [first coding baseline](first-coding-test.md) admission and durable receipt contract.
@@ -866,7 +866,7 @@ Reception permits at most 400 KiB of canonical event JSON, 1,024 retained events
 
 A compatible consumer can claim at most 16 saved source jobs in one request. A claim grants a 60-second queue lease with a server-generated token. It grants no task, tool, source-read or publication authority and cannot renew an agent's execution budget. A stopped claimant leaves the input saved; after expiry another process can claim it with a new token and attempt number.
 
-Each claim request scans at most 64 eligible records. The saved scan position advances past unsupported records without changing them, so those records cannot permanently hide later work. An incompatible reader cannot claim or change a job. The version 2 job reader also accepts original version 1 received jobs; a version 1 reader holds newer job states.
+Each claim request scans at most 64 eligible records. The saved scan position advances past unsupported records without changing them, so those records cannot permanently hide later work. An incompatible reader cannot claim or change a job. The version 2 job reader also accepts original version 1 received jobs. Reader version 3 also understands saved relevance records. Version 2 callers hold version 3 jobs without consuming attempts; no reader downgrades retained records.
 
 Retry and hold are separate outcomes. Temporary source, storage, provider or context unavailability can request a bounded retry delay. A permanent permission refusal, unsupported schema or invalid source can only hold the job as failed. Eight attempts exhaust automatic recovery. Failure retains the original source and a closed failure reason; it proves neither delivery nor absence of an external effect.
 
@@ -966,3 +966,25 @@ No producer or runtime reader is enabled. Canonical decision admission, source-j
 | Requester/control fields, inconsistent references, foreign custody, unknown schemas, unsafe accessors and oversized input remain held | `[unit]` `src/core/runLedger/sourceEvidence.test.ts::typed source evidence message::rejects requester…`; `::holds mismatched source receipts…`; `::requires matching stored custody…`; `::holds unsafe or oversized input…` |
 | The message captures source and decision data before hashing; a missing-version evidence tag cannot adopt shadow requester fields, while valid legacy messages still decode | `[unit]` `src/core/runLedger/sourceEvidence.test.ts::typed source evidence message::captures source and decision data…`; `src/core/runLedger/inboxMessage.test.ts::durable inbox continuity::holds an evidence tag…` |
 | A tagged hold reports its closed reason and the caller's expected run ID when available; logs contain no source text or raw kind/version values and never coerce a raw tag to text | `[unit]` `src/core/runLedger/inboxMessage.test.ts::durable inbox continuity::reports tagged holds…` |
+
+
+## Saved source relevance
+
+The existing source job can retain a relevance recommendation for an orchestrator conversation and task-context hash. The record carries the original conversation coordinates, exact classifier-input hash, result source, verdict, reason and store-assigned time. The source receipt binds the save to the original event. A context hash must cover the complete task snapshot; the input hash must cover the actual classifier input and policy. These are caller-supplied references, not a proof of source access, current context or an authorized decision.
+
+Only a current queue owner can save a new result. A repeated result for the same context returns the original record before checking the current lease or capacity. Changed input or result under that context is refused. Different task snapshots and conversations have separate records. Each event holds at most 16 records; reasons have a 1,024-byte UTF-8 limit and each identity has a 512-character limit. Each result also has a 4-KiB JSON byte limit. These provisional limits bound inactive storage; enablement still requires measured capacity and retention.
+
+Saving a result upgrades the existing job to version 3. Claim, retry, expiry and permanent failure preserve every saved result. Incompatible readers hold the job. The save does not change its queue deadline, alarm, execution lease or completion state. A failed transaction restores the prior job. An unknown acknowledgment remains uncertain; it cannot justify another model call or a routing fallback.
+
+No source processor calls this operation. Recovery must read and match the saved source, context and input before reusing a result. A result cannot select a specialist, ignore evidence by itself, grant permission, prove internal delivery, settle a job or retire input. Those integration steps remain pending.
+
+| Criterion | Proof |
+| --- | --- |
+| An exact save survives reclaim; incapable readers hold the new schema, and stale or conflicting results cannot change newer work. | `[unit]` `src/core/runLedger/sourceRelevance.test.ts::saved source relevance::retains a context-bound result and replays it after expiry without changing the job`; `::fences an unsaved late result and keeps the saved result through retry and failure`; `[worker]` `deploy/cloudflare-memory/runLedger.test.ts::source relevance in SQLite::saves through the private HTTP route and holds incompatible readers` |
+| Different contexts remain separate. Changed classifier input conflicts; malformed, contradictory or foreign-source saves are refused. Known records remain readable at capacity. | `[unit]` `src/core/runLedger/sourceRelevance.test.ts::saved source relevance::separates task contexts and refuses changed inputs under the same context`; `::binds reception and rejects unsafe or contradictory results without losing valid work`; `::bounds retained contexts and returns known results at capacity`; `::captures immutable input and bounds UTF-8 metadata without evaluating accessors` |
+| Concurrent saves retain one result. Unknown saved result schemas remain held without rewriting. | `[worker]` `deploy/cloudflare-memory/runLedger.test.ts::source relevance races in SQLite::*` |
+| A failed SQLite write rolls back the saved recommendation without changing the original queue lease or alarm. Retry and reclaim preserve a successful save. | `[worker]` `deploy/cloudflare-memory/runLedger.test.ts::source relevance in SQLite::rolls back a failed save and keeps the original queue lease and alarm` |
+| Unreadable saved jobs log their event key and a fixed invalid-json/invalid-schema cause. Stored bytes and exceptions stay out of logs; refusal retains the original job. | `[worker]` `deploy/cloudflare-memory/runLedger.test.ts::source relevance stored-job diagnostics::*` |
+| Successful HTTP saves and exact replays log the event key, fixed verdict/source and original save time. Refusals log the validated request's event key and fixed reason; malformed requests expose no raw key. Logs exclude private text, context coordinates and claim tokens. | `[worker]` `deploy/cloudflare-memory/runLedger.test.ts::source relevance diagnostics in SQLite::*` |
+| HTTP acknowledgments bind the exact source receipt and frozen result. Refusals stay explicit; missing or malformed responses remain unknown with no fallback operation. | `[unit]` `src/core/runLedgerWorker.test.ts::source relevance client::*` |
+| The source processor reuses a matching saved result and checks current context/access before an authorized route or fold. | `[gap]` No processor or source producer is enabled. This is storage support only. |

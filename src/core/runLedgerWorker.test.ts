@@ -1457,3 +1457,65 @@ describe("keyed inbox protocol compatibility", () => {
     expect(w.calls.map((call) => call.path)).toEqual(["/runs/inbox/deliver"]);
   });
 });
+
+describe("source relevance client", () => {
+  const receipt = {
+    version: 1,
+    key: `source:${"a".repeat(64)}`,
+    sequence: 1,
+    receivedAt: 1_000,
+    bodyHash: "b".repeat(64),
+  };
+  const result = {
+    version: 1,
+    context: {
+      runId: "root",
+      requester: "fixture:user:1",
+      channelId: "fixture:channel:1",
+      threadKey: "fixture:thread:1",
+      hash: "c".repeat(64),
+    },
+    inputHash: "d".repeat(64),
+    verdict: "unrelated",
+    source: "model",
+    reason: "About another change.",
+  };
+  const request = { receipt, owner: "g1", token: "claim-token", result };
+  const answer = { kind: "saved", receipt, record: { ...result, at: 2_000 } };
+
+  it("binds the saved result to the exact reception and frozen request", async () => {
+    const { ledger, calls } = stubWorker(() => ({ status: 200, data: answer }));
+    const input = structuredClone(request);
+    const pending = ledger.saveSourceRelevance(input);
+    input.result.reason = "changed during transport";
+    expect(await pending).toEqual(answer);
+    expect(calls.map(({ path, body }) => ({ path, body }))).toEqual([
+      { path: "/runs/source-events/relevance", body: { storeKey: "runs:default", request } },
+    ]);
+    for (const data of [
+      { ...answer, receipt: { ...receipt, sequence: 2 } },
+      { ...answer, record: { ...answer.record, verdict: "relevant" } },
+      { ...answer, record: { ...answer.record, source: "timeout" } },
+      { ...answer, future: true },
+    ]) {
+      const bad = stubWorker(() => ({ status: 200, data })).ledger;
+      await expect(bad.saveSourceRelevance(request)).rejects.toMatchObject({
+        request: { operation: "/runs/source-events/relevance" },
+      });
+    }
+  });
+
+  it("keeps refusal explicit and treats a missing route or malformed acknowledgment as unknown", async () => {
+    const refused = stubWorker(() => ({ status: 200, data: { kind: "refused", reason: "fenced" } })).ledger;
+    expect(await refused.saveSourceRelevance(request)).toEqual({ kind: "refused", reason: "fenced" });
+    for (const status of [200, 404, 503]) {
+      const { ledger, calls } = stubWorker(() => ({ status, data: { ok: true } }));
+      await expect(ledger.saveSourceRelevance(request)).rejects.toThrow();
+      expect(calls.every((call) => call.path === "/runs/source-events/relevance")).toBe(true);
+    }
+    expect(await refused.saveSourceRelevance({ ...request, result: { ...result, source: "error" } })).toEqual({
+      kind: "refused",
+      reason: "invalid-request",
+    });
+  });
+});

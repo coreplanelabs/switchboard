@@ -195,6 +195,12 @@ The existing delivery codec now correlates a verified keyed delivery response wi
 
 This is observation only. It does not authenticate a delivery-key mapping, qualify first-claim or current-owner authority, acknowledge native consumption, retire input or activate a caller. Native receipt integration and source-job settlement remain pending. Step 2 is still in progress.
 
+### Saved relevance checkpoint, 2026-10-15
+
+The next cut retains a relevance result inside the existing source job, bound to its source receipt, original orchestrator conversation, task-context hash and classifier-input hash. A current queue lease permits a new save. Exact replay returns the first result; changed input or result for the same context is refused. Distinct contexts stay separate under a finite count limit. Claims, retries and failure preserve saved results, and older readers hold the new job schema.
+
+This adds storage support, not a processor. No source producer, model caller, worker delivery or completion path is enabled. Canonical context/access checks, recorded route/fold decisions, internal delivery, exact consumption and retention still remain. Step 2 is in progress.
+
 ## Step 3: preserve evidence through internal handoffs
 
 **Current source:** [intake](../../src/core/intake.ts), [inbox schema](../../src/core/runLedger/inboxMessage.ts), [thread admission](../../src/core/threadAdmission.ts), [unit events](../../src/core/coordinator/instanceStore.ts), and both runtime implementations.
