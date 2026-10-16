@@ -1042,13 +1042,15 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     turns.sort((a, b) => a.startedAt - b.startedAt);
     return historyOf(turns);
   }
-  async function machineInput(message: IncomingMessage) {
+  // The captured sink may read its own first input; rehosting still requires uncertain custody.
+  async function machineInput(message: IncomingMessage, historyOwner?: string) {
     const pointer = originalOrganizationDispatchOf(message);
     if (!pointer) return;
     const owned = await originalBinding(pointer.ingressRunId, message);
     if (
       !owned ||
-      owned.originalStatus !== "uncertain" ||
+      (owned.originalStatus !== "uncertain" &&
+        !(owned.originalStatus === "dispatching" && pointer.ingressRunId === historyOwner)) ||
       owned.envelope.actor.stream !== null ||
       owned.actor.kind !== "service" ||
       owned.receipt.revision !== pointer.organizationSequence ||
@@ -1275,7 +1277,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     }
     return Object.assign(io, {
       authoritativePrivateHistory: async (message?: IncomingMessage) => {
-        const owned = message ? await machineInput(message) : request;
+        const owned = message ? await machineInput(message, request.runId) : request;
         if (!owned) throw new Error("The original machine input is unavailable.");
         const original = await machineHistory(owned);
         if (!owned.envelope.context.length) return original;

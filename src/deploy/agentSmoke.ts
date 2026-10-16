@@ -376,7 +376,7 @@ function scenarios(config: SmokeConfig): SmokeScenario[] {
       id: "answer",
       agent: "general",
       minutes: general,
-      text: `What is 2 + 2? Answer only with the number. budget:${general}`,
+      text: `agent:general What is 2 + 2? Answer only with the number. budget:${general}`,
     },
     {
       id: "workspace",
