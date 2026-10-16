@@ -9,7 +9,7 @@ import { isMainTaskKey, type StoredWorkBriefDraft, type WorkBriefIssue } from ".
 import { isMainTaskAuthority, type MainTaskAuthority } from "./requesterAuthority.js";
 import type { MainSourceFailureCode } from "../dispatch/mainSource.js";
 import { isUnitContext, type UnitContext } from "../dispatch/unitContext.js";
-import { privateDestinationOf, requesterMessageId } from "../dispatch/privateDestination.js";
+import { privateDestinationOf, requesterMessageId, type PrivateDestination } from "../dispatch/privateDestination.js";
 
 /** Trusted dispatch context supplies the actor, message, gates and runner seams.
  * The model supplies only a repository and bounded evidence for one change. */
@@ -56,6 +56,33 @@ export type MainStartResult =
 
 const refuse = (reply: string): MainStartResult => ({ kind: "refused", reply });
 
+/** A delegated device keeps its actual sender and the proved human requester.
+ * The private destination is a server capability, not a message-body assertion. */
+export function isDelegatedMainRequester(
+  actor: Actor,
+  msg: IncomingMessage,
+  audience: PrivateDestination | undefined = privateDestinationOf(msg),
+): boolean {
+  return (
+    actor.kind === "service" &&
+    actor.id.startsWith("mcp:") &&
+    msg.channelId.startsWith("mcp:") &&
+    !actor.viewingAs &&
+    actor.onBehalfOf?.kind === "user" &&
+    !actor.onBehalfOf.viewingAs &&
+    !actor.onBehalfOf.onBehalfOf &&
+    actor.onBehalfOf.id === msg.userId &&
+    msg.authenticatedAs === actor.id &&
+    msg.postedBy === undefined &&
+    msg.relayedBy === undefined &&
+    audience?.kind === "organization-private" &&
+    audience.actorId === actor.id &&
+    audience.userId === msg.userId &&
+    audience.channelId === msg.channelId &&
+    audience.threadKey === msg.threadKey
+  );
+}
+
 export function createMainTaskStarter(deps: MainStartDeps) {
   return async (input: MainStartInput): Promise<MainStartResult> => {
     const { actor, msg, brief } = input;
@@ -86,7 +113,7 @@ export function createMainTaskStarter(deps: MainStartDeps) {
       audience.threadKey !== msg.threadKey ||
       (audience.kind === "organization-private" && audience.actorId !== actor.id) ||
       actor.viewingAs ||
-      (actor.kind !== "user" && actor.kind !== "agent") ||
+      (actor.kind !== "user" && actor.kind !== "agent" && !isDelegatedMainRequester(actor, msg)) ||
       actor.origin?.channelId !== msg.channelId ||
       actor.origin.threadKey !== msg.threadKey ||
       !selfIdsOf(actor).includes(msg.userId) ||

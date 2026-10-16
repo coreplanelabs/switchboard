@@ -1,6 +1,8 @@
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
 import { ALL_GRANTS } from "../authz/grants.js";
+import { NO_GRANTS } from "../authz/types.js";
+import { authorize } from "../authz/authorize.js";
 import type { Actor } from "../authz/types.js";
 import type { IncomingMessage } from "../types.js";
 import { InMemoryPrivateWorkerLog } from "../privateWorkerLog.js";
@@ -98,6 +100,75 @@ function harness(over: Partial<MainStartDeps> = {}) {
 }
 
 describe("main-agent private worker start", () => {
+  it("keeps the personal device and human permission ceilings while creating one credited unit", async () => {
+    const plain: IncomingMessage = {
+      channelId: "mcp:default",
+      threadKey: "mcp:default:1",
+      userId: "access:alice",
+      authenticatedAs: "mcp:personal:alice",
+      messageId: "mcp:once",
+      text: "fix it",
+    };
+    const sourceActor: Actor = {
+      kind: "service",
+      id: "mcp:personal:alice",
+      self: ["mcp:personal:alice"],
+      grants: ALL_GRANTS,
+      origin: { channelId: plain.channelId, threadKey: plain.threadKey },
+      onBehalfOf: { kind: "user", id: "access:alice", self: ["access:alice"], grants: ALL_GRANTS },
+    };
+    const message = withOrganizationPrivateAudience(
+      plain,
+      {
+        kind: "organization-private",
+        organization: "acme",
+        stream: "mcp:personal:alice",
+        actorId: sourceActor.id,
+        userId: plain.userId,
+        channelId: plain.channelId,
+        threadKey: plain.threadKey,
+      },
+      1,
+    );
+    const h = harness({
+      canUseRepo: (current) => authorize(current, "repo:use", { type: "repo", owner: "acme", name: "api" }).allow,
+    });
+    const turn = await h.instances.recordRequesterTurn({
+      threadKey: plain.threadKey,
+      requesterId: plain.userId,
+      messageId: requesterMessageId(message)!,
+    });
+    if (!turn.ok) throw new Error("No requester turn");
+    const value: MainStartInput = {
+      ...h.input,
+      actor: sourceActor,
+      msg: message,
+      authority: {
+        ...h.input.authority,
+        requesterId: plain.userId,
+        sourceMessageId: requesterMessageId(message)!,
+        revision: turn.turn.revision,
+      },
+    };
+    const started = await h.start(value);
+    expect(started.kind).toBe("accepted");
+    if (started.kind !== "accepted") throw new Error("No personal unit");
+    expect(await h.instances.get(started.instanceId)).toMatchObject({
+      userId: "access:alice",
+      authenticatedAs: "mcp:personal:alice",
+    });
+    expect(sourceActor.self).toEqual(["mcp:personal:alice"]);
+    for (const current of [
+      { ...sourceActor, grants: NO_GRANTS },
+      { ...sourceActor, onBehalfOf: { ...sourceActor.onBehalfOf!, grants: NO_GRANTS } },
+    ])
+      expect(await h.start({ ...value, actor: current })).toMatchObject({
+        kind: "refused",
+        reply: "I can't start work in that repository with your access.",
+      });
+    expect(h.created).toEqual([started.instanceId]);
+  });
+
   it("keeps a proved browser request on one original private unit across retry", async () => {
     const h = harness();
     const plain: IncomingMessage = {

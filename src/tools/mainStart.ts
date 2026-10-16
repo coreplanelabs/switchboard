@@ -1,7 +1,7 @@
 import type { AudienceCheck } from "../core/audienceDecision.js";
 import type { Actor, ChannelVisibility } from "../core/authz/types.js";
 import { validateWorkBriefDraft } from "../core/coordinator/contract.js";
-import type { MainStartInput, MainStartResult } from "../core/coordinator/mainStart.js";
+import { isDelegatedMainRequester, type MainStartInput, type MainStartResult } from "../core/coordinator/mainStart.js";
 import type { MainTaskAuthority } from "../core/coordinator/requesterAuthority.js";
 import { isUnitContext, type UnitContext } from "../core/dispatch/unitContext.js";
 import type { MainSourceRefusal, MainSourceResolution } from "../core/dispatch/mainSource.js";
@@ -33,6 +33,7 @@ export function canOfferMainStart(
   hasStarter: boolean,
 ): boolean {
   const destination = privateDestinationOf(msg);
+  const delegated = isDelegatedMainRequester(actor, msg);
   const privateAddress =
     destination?.kind === "organization-private"
       ? destination.actorId === actor.id && visibility !== "public" && requesterMessageId(msg) !== undefined
@@ -51,9 +52,8 @@ export function canOfferMainStart(
     msg.relayedBy === undefined &&
     !actor.viewingAs &&
     msg.postedBy === undefined &&
-    msg.authenticatedAs === undefined &&
-    actor.kind === "user" &&
-    actor.id === msg.userId &&
+    (msg.authenticatedAs === undefined || delegated) &&
+    ((actor.kind === "user" && actor.id === msg.userId) || delegated) &&
     actor.origin?.channelId === msg.channelId &&
     actor.origin.threadKey === msg.threadKey
   );

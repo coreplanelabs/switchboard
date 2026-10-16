@@ -376,6 +376,8 @@ An accepted non-review operator bind carries its repository separately from the 
 | Protected organization offers retain a server-minted original source pointer through memory, file and Worker serialization; body pointers and malformed metadata cannot mint proof | `[unit]` `src/core/confirmations.test.ts::*::persists only the server-minted original organization source pointer and never trusts a body pointer`; `src/core/confirmations.test.ts::saved organization confirmation provenance::rejects malformed source pointers while preserving a valid pointer without recreating authority` |
 | The offer labels Merge only for the recorded canonical merge command; other actions and unknown proposals use Confirm without reading prose as authority | `[unit]` `src/core/confirmations.test.ts::saved organization confirmation provenance::labels Merge only from the saved canonical action and keeps unknown proposals as Confirm` |
 
+| A saved source guard proves source A only. A distinct admitted choice B keeps its current actor rights and native message identity; saved-source grants cannot widen B. | `[unit]` `src/core/dispatch/confirm.test.ts::consumeAndRun — the stored input runs once, as the requester, through the typed path (record 0044)::keeps choice B current rights instead of borrowing saved source A grants` |
+
 
 ## Source evidence relevance
 

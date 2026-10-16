@@ -3,7 +3,11 @@ import {
   isOrganizationPrivateAudience,
   verifyPrivateDestination,
 } from "./privateDestination.js";
-import { withOriginalOrganizationDispatch, withoutOriginalOrganizationDispatch } from "./originalOrganizationInput.js";
+import {
+  withOriginalOrganizationDispatch,
+  withoutOriginalOrganizationDispatch,
+  originalOrganizationDispatchOf,
+} from "./originalOrganizationInput.js";
 import { withConsumedCommand } from "../commandConfirmations.js";
 // The click on a confirmation (docs/decisions/0044-a-routed-write-is-confirmed-in-proportion-to-its-blast-radius.md;
 // docs/reference/specs/routing-and-config.md item 25): the pure pieces
@@ -206,7 +210,7 @@ export async function consumeAndRun(
   trace: RequestTrace,
   redispatch: (row: RedispatchConfirmation) => Promise<DispatchOutcome>,
   validateContext?: (context: ContextDependencies, message: IncomingMessage) => Promise<AudienceCheck>,
-  trusted?: { actor: Actor; ingressRunId?: string; authoritativeHistory?: boolean },
+  trusted?: { actor: Actor; ingressRunId?: string; authoritativeHistory?: boolean; message?: IncomingMessage },
 ): Promise<ClickResult> {
   const claimed = await claimConfirmation(
     deps.confirmations,
@@ -216,12 +220,25 @@ export async function consumeAndRun(
   if (claimed.kind === "refused") return claimed;
   const row = claimed.row;
   const chooser = click.actor ?? trusted?.actor;
-  const sourceCurrent = async () => currentConfirmationSource(row, chooser, deps.guardOrganizationConfirmation);
+  // Preserve the original saved source before stamping the distinct choice's
+  // native address. Publication rechecks A; execution and outputs belong to B.
+  const sourceRow = parseConfirmation(structuredClone(row))!;
+  const sourceCurrent = async () => currentConfirmationSource(sourceRow, chooser, deps.guardOrganizationConfirmation);
   const current = await sourceCurrent();
   if (current === false) return { ...UNREADABLE, text: OFFER_CONTEXT_LINE };
   if (current) {
-    io = current.io;
-    row.message = withChatActor(row.message, current.actor);
+    if (!trusted?.ingressRunId) io = current.io;
+    row.message = withChatActor(
+      trusted?.message
+        ? {
+            ...trusted.message,
+            text: row.message.text,
+            ...(row.message.images ? { images: row.message.images } : {}),
+            ...(row.message.documents ? { documents: row.message.documents } : {}),
+          }
+        : row.message,
+      trusted?.ingressRunId ? trusted.actor : current.actor,
+    );
     const audience = current.io.organizationPrivateAudience?.();
     if (audience !== undefined) {
       if (
@@ -236,7 +253,8 @@ export async function consumeAndRun(
       row.message = withOrganizationPrivateAudience(
         row.message,
         audience,
-        row.originalOrganization!.organizationSequence,
+        (trusted?.message && originalOrganizationDispatchOf(trusted.message)?.organizationSequence) ??
+          row.originalOrganization!.organizationSequence,
       );
       row.message = markPrivateConversation(row.message);
     } else if (trusted?.authoritativeHistory) row.message = markPrivateConversation(row.message);
@@ -245,7 +263,9 @@ export async function consumeAndRun(
     row.message =
       row.kind === "redispatch"
         ? withoutOriginalOrganizationDispatch(row.message)
-        : withOriginalOrganizationDispatch(row.message, row.originalOrganization!);
+        : trusted?.ingressRunId && trusted.message
+          ? row.message
+          : withOriginalOrganizationDispatch(row.message, row.originalOrganization!);
   }
   if (trusted && !current) {
     row.message = withChatActor(row.message, trusted.actor);
