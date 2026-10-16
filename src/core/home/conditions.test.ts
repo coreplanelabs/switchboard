@@ -3,6 +3,7 @@ import { InMemoryCoordinatorInstanceStore } from "../coordinator/instanceStore.j
 import type { CoordinatorInstance, CoordinatorUnit } from "../coordinator/contract.js";
 import { createHomeService } from "./service.js";
 import { createHomeConditionReader } from "./conditions.js";
+import { seedCoordinatorUnit } from "../testing/coordinatorInstance.js";
 const instance: CoordinatorInstance = {
   id: "question-work",
   kind: "ship",
@@ -40,6 +41,44 @@ const row = (unit: string, assignedTo?: string): CoordinatorUnit => ({
   },
 });
 describe("Home recorded condition projection", () => {
+  it("moves a verified external merge to completion at its real merge time without changing the review ending", async () => {
+    const instances = new InMemoryCoordinatorInstanceStore();
+    await instances.put(instance);
+    const ready: CoordinatorUnit = {
+      ...row("U10"),
+      idle: undefined,
+      pr: gate.pr,
+      lastPush: "a".repeat(40),
+      ending: { kind: "merge_ready", report: "Original reviewed-head report.", at: 10 },
+      mergeAttention: { assignedTo: "access:reader", pr: gate.pr, headSha: "a".repeat(40), at: 10 },
+    };
+    seedCoordinatorUnit(instances, ready);
+    const home = createHomeService({
+      organizationId: "example",
+      instances,
+      conditions: createHomeConditionReader(instances),
+    });
+    const reader = { actorId: "access:reader", visibleTo: { kind: "all" as const } };
+    expect((await home.snapshot(reader)).needsYou.map((row) => row.unit.unit)).toEqual(["question-work:U10"]);
+    expect(
+      await instances.compareAndReplaceUnit(ready, {
+        ...ready,
+        mergeAttention: {
+          ...ready.mergeAttention!,
+          resolved: { at: 20, sha: "b".repeat(40) },
+        },
+      }),
+    ).toEqual({ ok: true });
+    expect((await home.snapshot(reader)).needsYou).toEqual([]);
+    const history = await home.history(reader);
+    expect(history.units).toHaveLength(1);
+    expect(history.units[0]?.unit).toMatchObject({
+      mergeCompletion: { at: 20, sha: "b".repeat(40) },
+      ending: { kind: "merge_ready", report: "Original reviewed-head report.", at: 10 },
+    });
+    expect(await instances.putUnits([ready])).toEqual({ ok: true });
+    expect((await home.history(reader)).units[0]?.unit.mergeCompletion).toEqual({ at: 20, sha: "b".repeat(40) });
+  });
   it("shows a recorded runtime failure with its work and keeps the next act unknown when no inspection thread exists", async () => {
     const instances = new InMemoryCoordinatorInstanceStore();
     await instances.put(instance);

@@ -67,6 +67,8 @@ export function createHomeViewHandler(
       context: HomeViewContext,
       snapshot: HomeFleetSeed["snapshot"],
     ) => Promise<Record<string, HomeMergeAction>>;
+    /** Schedules a bounded supervised read after the initial attention frame. */
+    observe?: (context: HomeViewContext, snapshot: HomeFleetSeed["snapshot"]) => void;
   } = {},
 ) {
   return (req: IncomingMessage, res: ServerResponse, context: HomeViewContext = {}): boolean => {
@@ -236,6 +238,7 @@ export function createHomeViewHandler(
           ...(answers ? { answers } : {}),
           ...(actions ? { actions } : {}),
         });
+        options.observe?.(context, snapshot);
       }
     })().catch(() => plain(res, 503, "Work is unavailable."));
     return true;

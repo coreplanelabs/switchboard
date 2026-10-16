@@ -94,6 +94,7 @@ const parentHref = computed(() =>
  *  round in flight (a live run) or the last round that ran; else not started. */
 const standing = computed(() => {
   if (!view) return { cls: "grey", text: "" };
+  if (view.mergeCompletion) return { cls: "ok", text: "Merged", at: view.mergeCompletion.at };
   if (view.ending) {
     const ok = view.ending.kind === "merged" || view.ending.kind === "merge_ready" || view.ending.kind === "done";
     // The header prints the user's word for the ending (record 0066), never the internal kind.

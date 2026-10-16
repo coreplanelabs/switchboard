@@ -1023,6 +1023,8 @@ export interface CoordinatorUnit {
     pr: { number: number; url: string };
     headSha: string;
     at: number;
+    /** A verified external merge; original review and run outcomes stay intact. */
+    resolved?: { sha: string; at: number };
   };
   /** Monotonic pointer into separately stored immutable recovery receipts. */
   history?: { version: 1; receiptId: string };
@@ -1753,6 +1755,15 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
       typeof a.headSha !== "string" ||
       !/^[0-9a-f]{40}$/i.test(a.headSha) ||
       !isFinite(a.at)
+    )
+      return false;
+    if (
+      a.resolved !== undefined &&
+      (!isObject(a.resolved) ||
+        typeof a.resolved.sha !== "string" ||
+        !/^[0-9a-f]{40}$/i.test(a.resolved.sha) ||
+        !isFinite(a.resolved.at) ||
+        a.resolved.at < 0)
     )
       return false;
   }

@@ -102,6 +102,19 @@ export interface BrowserHomeInstallationOptions {
   originalUnitRecipient?(key: UnitEventKey): Promise<OriginalUnitRecipient | undefined>;
   /** Existing explicit GitHub binding for the actual credential; never the unit's requester. */
   mergeLogin?(actorId: string): Promise<string | undefined>;
+  /** Existing authenticated GitHub read; no model or browser fields select its PR. */
+  mergeFacts?(
+    context: HomeRuntimeContext,
+    instance: CoordinatorInstance,
+    unit: CoordinatorUnit,
+  ): Promise<
+    | {
+        headSha: string;
+        mergeCommitSha: string;
+        mergedAt: number;
+      }
+    | undefined
+  >;
   refreshProjection?: Parameters<typeof createHomeHost>[0]["refreshProjection"];
   publicBaseUrl?: string;
 }
@@ -1258,6 +1271,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       if (
         !saved ||
         !a ||
+        a.resolved ||
         !recipients.has(a.assignedTo) ||
         saved.unit.ending?.kind !== "merge_ready" ||
         saved.unit.pr?.number !== a.pr.number ||
@@ -1284,6 +1298,102 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     const fresh = await current(context).catch(() => undefined);
     return fresh?.actor.id === actual.actor.id && epoch === (await host.currentEpoch(context)) ? result : {};
   }
+  async function observeMerge(context: HomeRuntimeContext, key: string): Promise<"observed" | "held" | "unchanged"> {
+    if (
+      !options.mergeFacts ||
+      context.actor.viewingAs ||
+      ((await options.viewScope?.(context)) ?? workViewScopeOf(context.actor).mode) === "person"
+    )
+      return "held";
+    const saved = await question(key),
+      a = saved?.unit.mergeAttention;
+    if (
+      !saved ||
+      !a ||
+      a.resolved ||
+      saved.unit.ending?.kind !== "merge_ready" ||
+      saved.unit.pr?.number !== a.pr.number ||
+      saved.unit.pr.url !== a.pr.url ||
+      saved.unit.lastPush !== a.headSha
+    )
+      return "unchanged";
+    const actual = await current(context).catch(() => undefined);
+    const recipients = new Set([actual?.actor.id, ...((await options.provedActorIds?.(context)) ?? [])]);
+    const [owner, name] = saved.instance.repo.split("/");
+    if (
+      !actual ||
+      actual.actor.kind !== "user" ||
+      !owner ||
+      !name ||
+      !authorize(actual.actor, "repo:use", { type: "repo", owner, name }).allow ||
+      !recipients.has(a.assignedTo) ||
+      !matchesPredicate(readableRuns(actual.actor), {
+        userId: saved.instance.userId,
+        channelId: saved.instance.channelId,
+        repo: saved.instance.repo,
+        channelVisibility: "unknown",
+      }) ||
+      (saved.unit.workBrief && !(await canReadPrivateUnit(context, saved.instance, saved.unit)))
+    )
+      return "held";
+    const epoch = await host.currentEpoch(context);
+    if (!epoch) return "held";
+    const facts = await options.mergeFacts(context, saved.instance, saved.unit).catch(() => undefined);
+    if (
+      !facts ||
+      facts.headSha.toLowerCase() !== a.headSha.toLowerCase() ||
+      !/^[0-9a-f]{40}$/i.test(facts.mergeCommitSha) ||
+      !Number.isSafeInteger(facts.mergedAt) ||
+      facts.mergedAt < 0 ||
+      facts.mergedAt > options.now()
+    )
+      return "held";
+    const fresh = await current(context).catch(() => undefined);
+    if (
+      !fresh ||
+      fresh.actor.id !== actual.actor.id ||
+      !authorize(fresh.actor, "repo:use", { type: "repo", owner, name }).allow ||
+      epoch !== (await host.currentEpoch(context)) ||
+      !matchesPredicate(readableRuns(fresh.actor), {
+        userId: saved.instance.userId,
+        channelId: saved.instance.channelId,
+        repo: saved.instance.repo,
+        channelVisibility: "unknown",
+      }) ||
+      (saved.unit.workBrief && !(await canReadPrivateUnit(context, saved.instance, saved.unit)))
+    )
+      return "held";
+    const replaced = await options.coordinator.compareAndReplaceUnit(saved.unit, {
+      ...saved.unit,
+      mergeAttention: { ...a, resolved: { sha: facts.mergeCommitSha, at: facts.mergedAt } },
+    });
+    return replaced.ok ? "observed" : "held";
+  }
+  const observing = new Set<string>();
+  let observationOffset = 0;
+  function queueMergeObservations(context: HomeRuntimeContext, rows: readonly HomeUnit[]) {
+    if (!options.mergeFacts || !rows.length || context.actor.viewingAs || observing.size >= options.batchSize) return;
+    const offset = observationOffset % rows.length;
+    const count = Math.min(rows.length, options.batchSize);
+    for (let i = 0; i < count; i++) {
+      if (observing.size >= options.batchSize) break;
+      const key = rows[(offset + i) % rows.length]!.unit.unit;
+      observationOffset = (offset + i + 1) % rows.length;
+      if (observing.has(key)) continue;
+      observing.add(key);
+      try {
+        options.launch(async () => {
+          try {
+            await observeMerge(context, key);
+          } finally {
+            observing.delete(key);
+          }
+        });
+      } catch {
+        observing.delete(key);
+      }
+    }
+  }
   return {
     host,
     handler: host.handler,
@@ -1292,6 +1402,8 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     readThread,
     answers,
     mergeActions,
+    observeMerge,
+    queueMergeObservations,
     canReadPrivateUnit,
     questionOwner,
     readOriginalRun,
