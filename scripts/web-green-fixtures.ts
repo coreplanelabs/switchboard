@@ -19,6 +19,7 @@ type PreviewPage = {
   viewer?: Actor;
 };
 export function createGreenPreview(options: { now: number; unit: UnitSeed["view"]; thread: HomeSeed }) {
+  const reviewReport = reviewReportFixture(options.now - (options.now % DAY_MS) - 6 * DAY_MS);
   let revision = 1;
   let sequence = 0;
   const transcripts = new Map<string, HomeConversationEntry[]>();
@@ -282,7 +283,7 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
         title: url.pathname === "/metrics" ? "Review usage preview" : "System health preview",
         seed: {
           page: "reviewsMetrics",
-          report: reviewReportFixture(options.now - (options.now % DAY_MS) - 6 * DAY_MS),
+          report: reviewReport,
           requesterNames: { [ACTOR]: "Your account" },
         },
       });
@@ -324,6 +325,11 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
       response.end();
       return true;
     }
+    if (url.pathname === "/metrics.json") {
+      if ((request.method ?? "GET").toUpperCase() !== "GET") json(response, 405, { status: "invalid", preview: true });
+      else json(response, 200, reviewReport);
+      return true;
+    }
     if (url.pathname === "/home/session") {
       json(response, 200, session(null));
       return true;
@@ -344,6 +350,10 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
       }
       response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-store" });
       response.write(`data: ${JSON.stringify(session(thread))}\n\n`);
+      if (request.headers?.["x-switchboard-preview-snapshot"] === "1") {
+        response.end();
+        return true;
+      }
       subscribers.set(response, thread);
       const heartbeat = setInterval(() => response.write(": preview heartbeat\n\n"), 15_000);
       response.on("close", () => {

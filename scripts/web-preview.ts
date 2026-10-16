@@ -2860,9 +2860,15 @@ createServer((req, res) => {
     greenPreview &&
     (url.pathname === "/" ||
       url.pathname === "/plane" ||
-      ["/home/session", "/home/key", "/home/snapshot", "/home/events", "/home/focus", "/home/send"].includes(
-        url.pathname,
-      ))
+      [
+        "/metrics.json",
+        "/home/session",
+        "/home/key",
+        "/home/snapshot",
+        "/home/events",
+        "/home/focus",
+        "/home/send",
+      ].includes(url.pathname))
   ) {
     void greenPreview.handle(req, res, url).catch(() => {
       res.writeHead(500);
