@@ -328,7 +328,7 @@ describe("Green report states", () => {
     const empty = mountApp(ThreadBrowserPage, { seed });
     expect(empty.find(".green-empty h3").text()).toBe("No threads in the loaded browser list");
     expect(empty.find('[role="status"]').text()).toBe(
-      "This list contains conversations from recent authorized runs. Coverage is unknown; the full retained history cannot be confirmed.",
+      "Coverage is unknown; the full retained history cannot be confirmed.",
     );
     const loaded = mountApp(ThreadBrowserPage, {
       seed: {

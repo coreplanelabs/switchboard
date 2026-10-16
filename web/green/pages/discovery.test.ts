@@ -3,6 +3,7 @@ import { enableAutoUnmount } from "@vue/test-utils";
 import { afterEach, describe, expect, it } from "vitest";
 import { mountApp } from "../../src/testing/mount";
 import Runs from "./Runs.vue";
+import ThreadBrowser from "./ThreadBrowser.vue";
 import RuntimeDetail from "./RuntimeDetail.vue";
 import { fakeEventSourceFactory } from "../../src/testing/fakeEventSource";
 import type { RunIndexRowSeed } from "@core/channels/webSeed.js";
@@ -90,5 +91,55 @@ describe("Run discovery availability", () => {
     expect(page.text()).toContain("Run data is unavailable");
     expect(page.text()).not.toContain("No runs are live");
     expect(stream.created).toHaveLength(0);
+  });
+});
+
+describe("Thread discovery availability", () => {
+  it("distinguishes healthy empty, unavailable and partial authorized thread windows", () => {
+    const seed = {
+      page: "home" as const,
+      conversation: "fresh",
+      turns: [],
+      conversations: [],
+      viewer: { name: "Alice" },
+      sendUrl: "/threads/fresh/send",
+      lane: "web:alice",
+      now: 1,
+      retentionDays: 30,
+      suggestions: [],
+      commands: [],
+    };
+    const empty = mountApp(ThreadBrowser, {
+      seed: { ...seed, discovery: { status: "available", coverage: "recent", filtered: true } },
+    });
+    expect(empty.text()).toContain("No threads in the loaded browser list");
+    expect(empty.text()).toContain("Recent authorized conversations are available");
+    expect(empty.text()).toContain("Only conversations allowed by your current access are listed");
+    const unavailable = mountApp(ThreadBrowser, {
+      seed: { ...seed, discovery: { status: "unavailable", coverage: "recent", filtered: true } },
+    });
+    expect(unavailable.text()).toContain("Thread discovery is unavailable");
+    expect(unavailable.text()).not.toContain("No threads in the loaded browser list");
+    const partial = mountApp(ThreadBrowser, {
+      seed: {
+        ...seed,
+        discovery: { status: "partial", coverage: "recent", filtered: true },
+        conversations: [
+          {
+            id: "known",
+            title: "Owned retained conversation",
+            excerpt: "Known",
+            lastAt: 1,
+            runs: 1,
+            live: false,
+            surface: "web",
+          },
+        ],
+      },
+    });
+    expect(partial.text()).toContain("Thread discovery is incomplete");
+    expect(partial.get('a[href="/threads/known"]').text()).toContain("Owned retained conversation");
+    const legacy = mountApp(ThreadBrowser, { seed });
+    expect(legacy.text()).toContain("Coverage is unknown");
   });
 });
