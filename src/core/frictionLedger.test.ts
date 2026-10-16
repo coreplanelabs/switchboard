@@ -190,6 +190,7 @@ describe("RunStoreFrictionLedger", () => {
         throw new Error("store down");
       },
       events: async () => null,
+      deleted: async () => [],
       delete: async () => {},
       usage: async () => ({ rows: [], pending: 0, retentionDays: 0 }),
     };
@@ -234,6 +235,7 @@ describe("RunStoreFrictionLedger", () => {
         return inner.list(opts);
       },
       events: (id, o) => inner.events(id, o),
+      deleted: async () => [],
       delete: (id) => inner.delete(id),
       usage: (q) => inner.usage(q),
     };

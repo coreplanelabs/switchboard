@@ -1556,7 +1556,10 @@ export class InMemoryRunLedger implements RunLedger {
       }
     }
     if (Object.hasOwn(req.meta, "workspaceDisposition")) throw new Error("workspace disposition is store-derived");
-    if ((req.state && Object.hasOwn(req.state, "cancellation")) || workspaceAuthorityFieldsPresent(req.state))
+    if (
+      (req.state && (Object.hasOwn(req.state, "cancellation") || Object.hasOwn(req.state, "killRequested"))) ||
+      workspaceAuthorityFieldsPresent(req.state)
+    )
       throw new Error("workspace allocation cannot be written as mutable state");
     const checkCustody = this.live.get(req.runId);
     if (
@@ -2003,7 +2006,13 @@ export class InMemoryRunLedger implements RunLedger {
     row.leaseUntil = this.now() + leaseMs;
     // The in-memory ledger offers no plane effects; the field is present like
     // the Worker's answer (orchestration-plane; record 0064; orchestration-plane item 7).
-    return { ok: true, stop: row.stop, phase: row.phase, effects: [] };
+    return {
+      ok: true,
+      stop: row.stop,
+      ...(row.state.killRequested === true ? { destructive: true } : {}),
+      phase: row.phase,
+      effects: [],
+    };
   }
 
   /** The shadow posts and the acks, kept for assertions (orchestration-plane items 7 and 8). */
@@ -2133,7 +2142,9 @@ export class InMemoryRunLedger implements RunLedger {
     assignment: LiveStateAssignRequest,
   ): Promise<LiveStateAssignResult> {
     if (
-      (assignment.statePatch && Object.hasOwn(assignment.statePatch, "cancellation")) ||
+      (assignment.statePatch &&
+        (Object.hasOwn(assignment.statePatch, "cancellation") ||
+          Object.hasOwn(assignment.statePatch, "killRequested"))) ||
       workspaceAuthorityFieldsPresent(assignment.statePatch)
     )
       return { ok: false, reason: "fenced" };
@@ -2186,7 +2197,11 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async setState(runId: string, gen: string, state: RunState): Promise<FenceResult> {
-    if (Object.hasOwn(state, "cancellation") || workspaceAuthorityFieldsPresent(state))
+    if (
+      Object.hasOwn(state, "cancellation") ||
+      Object.hasOwn(state, "killRequested") ||
+      workspaceAuthorityFieldsPresent(state)
+    )
       return { ok: false, reason: "fenced" };
     if (this.promotionHeld(runId, gen)) throw new PromotionPendingError(runId);
     const row = this.live.get(runId);
@@ -2430,10 +2445,15 @@ export class InMemoryRunLedger implements RunLedger {
     return { ok: true as const, stored: true };
   }
 
-  async requestStop(runId: string, mode: StopMode): Promise<{ ok: boolean; ownerLive?: boolean }> {
+  async requestStop(
+    runId: string,
+    mode: StopMode,
+    opts?: { destructive: true },
+  ): Promise<{ ok: boolean; ownerLive?: boolean }> {
     const row = this.live.get(runId);
     if (!row) return { ok: false };
-    row.stop = mode;
+    row.stop = row.stop === "hard" ? "hard" : mode;
+    if (opts?.destructive) row.state = { ...row.state, killRequested: true };
     return { ok: true, ownerLive: row.leaseUntil > this.now() };
   }
 

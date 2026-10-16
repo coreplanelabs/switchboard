@@ -1097,7 +1097,7 @@ export async function fixture(
   reg.publish(live.id, { type: "input", messageId: "1700000000.000300", text: `live request ${PLANTED_TEXT}` });
   reg.publish(live.id, { type: "tool_call", tool: "bash", summary: "$ pwd" });
   const store = new InMemoryRunStore({ now: () => NOW });
-  await store.put(record(FIXTURE.persistedRun, NOW - 1000));
+  await store.put({ ...record(FIXTURE.persistedRun, NOW - 1000), runtimeShutdownConfirmed: true });
   await store.put(record("fin-2", NOW - 2000));
   await store.put(reviewRecord(FIXTURE.reviewRun, NOW - 3000));
   // The unit is the reading unit: one ship instance whose task unit ran a

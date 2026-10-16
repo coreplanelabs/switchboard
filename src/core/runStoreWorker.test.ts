@@ -46,6 +46,15 @@ function record(id: string, evs: RunEvent[] = events(3)): RunRecord {
   };
 }
 
+it("reads shared deletion fences and rejects a marker for an unrequested id", async () => {
+  let ids = ["killed"];
+  const { fetch } = fakeFetch(() => ({ status: 200, body: { ids } }));
+  const store = new WorkerRunStore({ ...OPTS, fetch });
+  expect(await store.deleted(["killed", "retained"])).toEqual(["killed"]);
+  ids = ["foreign"];
+  await expect(store.deleted(["killed"])).rejects.toThrow("malformed result");
+});
+
 describe("durable store acknowledgement continuity", () => {
   const aborted = () =>
     new Response(

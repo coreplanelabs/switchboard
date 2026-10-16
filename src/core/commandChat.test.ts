@@ -644,15 +644,15 @@ describe("runs list on chat", () => {
     );
   });
 
-  it("`runs get/events/friction <id>` are not chat commands (opt-out); `runs stop <id> --mode soft` is", async () => {
+  it("`runs get/events/friction <id>` are not chat commands (opt-out); `runs stop <id>` is", async () => {
     const { commands } = await setup();
     expect(parseChatCommand("runs get fin00001", commands)).toBeNull();
     expect(parseChatCommand("runs events fin00001", commands)).toBeNull();
     expect(parseChatCommand("runs friction fin00001", commands)).toBeNull();
-    expect(parseChatCommand("runs stop live0001 --mode soft", commands)).toEqual({
+    expect(parseChatCommand("runs stop live0001", commands)).toEqual({
       kind: "invoke",
       id: "runs.stop",
-      input: { args: ["live0001"], options: { mode: "soft" } },
+      input: { args: ["live0001"], options: {} },
     });
   });
 });

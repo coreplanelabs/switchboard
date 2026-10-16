@@ -113,11 +113,13 @@ export const ROUTE_COMMAND_FIXTURES: readonly RouteCommandFixture[] = [
   }),
   f("c09h", "happy", "how many runs today", "runs.list"),
   f("c09p", "paraphrase", "show the latest runs", "runs.list"),
-  f("c10h", "happy", "stop run r-123, soft", "runs.stop", { args: ["r-123"], options: { mode: "soft" } }),
-  f("c10p", "paraphrase", "abort run r-9 right now, hard stop", "runs.stop", {
+  f("c10h", "happy", "stop run r-123", "runs.stop", { args: ["r-123"], options: {} }),
+  f("c10p", "paraphrase", "end run r-9 and keep the stopped result", "runs.stop", {
     args: ["r-9"],
-    options: { mode: "hard" },
+    options: {},
   }),
+  f("c45h", "happy", "kill run r-123 and delete its saved row", "runs.kill", { args: ["r-123"], options: {} }),
+  f("c45p", "paraphrase", "remove run r-9 now without a wrap-up", "runs.kill", { args: ["r-9"], options: {} }),
   f("c11h", "happy", "show the runs of unit ship-acme-1:U16", "runs.unit", { args: ["ship-acme-1:U16"], options: {} }),
   f("c11p", "paraphrase", "which runs belong to unit ship-acme-1:U17?", "runs.unit", {
     args: ["ship-acme-1:U17"],
@@ -323,6 +325,7 @@ export const ROUTE_COMMAND_DECOYS: readonly RouteCommandDecoy[] = [
   d("c07d", "did anyone change the settings here recently?", "config.clear"),
   d("c08d", "are my instructions actually being followed?", "config.instructions", ["config.instructions"]),
   d("c09d", "why did the last run fail", "runs.list"),
+  d("c45d", "should I kill the run that is taking forever?", "runs.kill"),
   d("c10d", "should I stop the run that is taking forever?", "runs.stop"),
   d("c11d", "how is the plan's second unit going overall?", "runs.unit"),
   d("c12d", "did the conductor's children do a good job?", "runs.children"),

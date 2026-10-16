@@ -137,6 +137,8 @@ export function branchPushReceiptsOf(value: unknown): BranchPushReceipt[] | unde
 }
 
 export interface RunRecord {
+  /** The original producer and required cleanup acknowledged shutdown. Absent means unknown. */
+  runtimeShutdownConfirmed?: true;
   /** A negative execution outcome; supplies no promotion or source-release authority. */
   cancellation?: {
     version: 1;
@@ -793,6 +795,8 @@ function isRunPullRequestShape(v: unknown): v is RunPullRequest {
  *  head within the original unit's lease. A failure without
  *  a name here leaves the record without the field. */
 export const RUN_FAILURE_KINDS = [
+  "harness_ending_unconfirmed",
+  "runtime_shutdown_unconfirmed",
   "tool_recovery_exhausted",
   "policy_refusal",
   "provider_transient",
@@ -863,6 +867,28 @@ export type RunProfileRecord = RunProfile & { preset: string };
 /** Structural check on a stored profile (item 3's rule for the field). */
 function isRunProfileRecord(v: unknown): v is RunProfileRecord {
   return isRunProfile(v) && typeof (v as unknown as Record<string, unknown>).preset === "string";
+}
+
+/** A late cleanup can acknowledge only its original terminal segment. */
+export function confirmRuntimeShutdownRecord(current: RunRecord | null, original: RunRecord): RunRecord | null {
+  if (!current || current.failure?.kind === "harness_ending_unconfirmed") return null;
+  const segment = (record: RunRecord) => [
+    record.id,
+    record.channelId,
+    record.userId,
+    record.threadKey,
+    record.startedAt,
+    record.finishedAt,
+    record.status,
+    record.events,
+  ];
+  if (JSON.stringify(segment(current)) !== JSON.stringify(segment(original))) return null;
+  const { failure, ...rest } = current;
+  return {
+    ...rest,
+    ...(failure && failure.kind !== "runtime_shutdown_unconfirmed" ? { failure } : {}),
+    runtimeShutdownConfirmed: true,
+  };
 }
 
 /** A run as a listing shows it: the record minus its events. `diagnosis` stays —
@@ -1308,6 +1334,7 @@ export function isRunRecord(v: unknown): v is RunRecord {
     return false;
   if (!isRunWorkOwner(v)) return false;
   const r = v as RunWorkOwner & Record<string, unknown>;
+  if (r.runtimeShutdownConfirmed !== undefined && r.runtimeShutdownConfirmed !== true) return false;
   if (r.cancellation !== undefined) {
     const receipt = r.cancellation as RunRecord["cancellation"];
     const cancellation = cancellationOf(receipt?.cancellation);
@@ -1828,6 +1855,8 @@ export function capEvent(event: RunEvent, maxBytes: number): { event: RunEvent; 
  * Never mutates `record`.
  */
 export function fitRecordToBudget(record: RunRecord, maxBytes: number = MAX_RECORD_BYTES): RunRecord {
+  // Leave room for the later acknowledgement without replacing saved events.
+  if (record.runtimeShutdownConfirmed !== true) maxBytes -= ',"runtimeShutdownConfirmed":true'.length;
   const cappedAll = record.events.map((e) => capEvent(e, MAX_EVENT_BYTES));
   const measure = (evs: RunEvent[]): number =>
     utf8ByteLength(JSON.stringify({ ...record, events: evs, storedEventCount: evs.length, truncated: true }));

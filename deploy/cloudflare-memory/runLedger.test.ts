@@ -6870,6 +6870,19 @@ describe("run ledger — the fence (item 28)", () => {
       status: 200,
       data: { ok: false },
     });
+    expect(
+      (await post("/runs/stop", { storeKey: key, runId: "r1", mode: "hard", destructive: true })).data,
+    ).toMatchObject({ ok: true, destructive: true });
+    expect(
+      await post("/runs/state", { storeKey: key, runId: "r1", gen: "g1", state: { notes: "owner snapshot" } }),
+    ).toEqual({ status: 200, data: { ok: true } });
+    expect(
+      await post("/runs/state", { storeKey: key, runId: "r1", gen: "g1", state: { killRequested: false } }),
+    ).toEqual({ status: 409, data: { ok: false, reason: "fenced" } });
+    await post("/runs/stop", { storeKey: key, runId: "r1", mode: "soft" });
+    expect(
+      (await post("/runs/heartbeat", { storeKey: key, runId: "r1", gen: "g1", leaseMs: LEASE_MS })).data,
+    ).toMatchObject({ ok: true, stop: "hard", destructive: true });
   });
 });
 

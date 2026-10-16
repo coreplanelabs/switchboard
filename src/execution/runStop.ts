@@ -35,7 +35,8 @@ export function createRunStop(
     const binding = workspaceBindingOf(row.state.binding);
     if (!cancellationRuntimeSupported(row) || (binding?.backend === "resident" && !row.meta.repo))
       return { phase: "prepare", cause: "custody-unverified" };
-    if (row.state.binding === undefined && row.meta.profile?.machine === "none") return;
+    if (row.state.binding === undefined && row.meta.profile?.machine === "none")
+      return { phase: "prepare", cause: "custody-unverified" };
     if (unboundNativeReview(row)) {
       for (const resident of [true, false]) {
         const { url, token } = target(resident);
@@ -115,7 +116,6 @@ export function createRunStop(
     const refusal = unavailable(row);
     if (refusal) return { stopped: false, refusal };
     const binding = workspaceBindingOf(row.state.binding);
-    if (!binding && row.meta.profile?.machine === "none") return { stopped: true, disposition: "no-workspace" };
     if (!binding && cancellation.targets) {
       const [resident, sandbox] = await Promise.all([
         stopTarget(row, cancellation, true, undefined),

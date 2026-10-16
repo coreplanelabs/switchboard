@@ -57,7 +57,7 @@ import { unwrapUntrusted } from "../untrusted.js";
 // `runs.settlecheck` retires an original check only from recorded ending proof.
 // Surface forms (derived): `runs get <id> [--include messages]`,
 // `runs events <id> [--after-seq n] [--limit n]`, `runs friction <id>`,
-// `runs stop <id> --mode soft|hard`, `runs list [--status …] [--agent …] …`,
+// `runs stop <id>` / `runs kill <id>`, `runs list [--status …] [--agent …] …`,
 // `runs unit <instance:unit>`, `runs children <id>`, `runs findings <owner/repo#N>`,
 // `runs search <session> <words…> [--limit n]`.
 //
@@ -97,7 +97,7 @@ const idArg = { name: "id", schema: runId, describe: "id of the run" } as const;
  *  16), a 409 pointing at the units and the escape — the same sentence the
  *  tokenless stop route writes. */
 export const HOSTED_STOP_REFUSAL =
-  "this run is a pipeline; its units run in their own threads, so a soft stop ends nothing; `--mode hard` is the escape: it seals the run failed and releases the thread";
+  "this run is a pipeline; its units run in their own threads, so an operator must stop its runner before the parent run can end";
 
 function unwrap<T>(res: Result<T>, what: "run" | "unit" = "run"): T {
   if (res.ok) return res.value;
@@ -568,18 +568,39 @@ export const runsStop = defineCommand({
   options: z.object({
     mode: z
       .enum(["soft", "hard"])
-      .describe("soft = finish the current step; hard = abort now (and the escape that seals a pipeline)"),
+      .optional()
+      .describe("Deprecated compatibility input. Omit for Stop; use runs kill for destructive removal."),
   }),
   action: "stop:write",
   effect: "write",
   // Ends someone's live run; nothing restarts it.
-  annotations: { destructive: true, risk: () => "stops a live run; hard aborts it now" },
+  annotations: { destructive: true, risk: () => "ends the current turn and cleans up its runtime" },
   describe:
-    "Stop your own live run, or another run with operator permission (`--mode soft` = finish the current step; `hard` = abort now). A pipeline refuses soft — `--mode hard` seals it failed and releases its thread. Records the caller as the requester.",
+    "End the current turn, clean up the runtime, and keep the run as stopped by user. Records who requested the stop. Needs stop permission for the run.",
   handler: async ({ args, options, caller, deps }) => {
     const runs = await deps.runs();
     await getVisibleRun(runs, args.id, caller, "stop:write", deps, "runs.stop");
-    return asJson(unwrap(await runs.stopRun(args.id, options.mode, { kind: caller.kind, id: caller.id })));
+    const result = unwrap(await runs.stopRun(args.id, options.mode ?? "hard", { kind: caller.kind, id: caller.id }));
+    return asJson({ ...result, mode: options.mode ?? "stop" });
+  },
+});
+
+export const runsKill = defineCommand({
+  id: "runs.kill",
+  args: [idArg],
+  options: z.object({}),
+  action: "stop:write",
+  effect: "write",
+  annotations: { destructive: true, risk: () => "kills the runtime and deletes the run row" },
+  describe:
+    "Kill the runtime without a graceful turn shutdown and delete the run from live and saved run views. Destructive. Needs stop permission for the run.",
+  handler: async ({ args, caller, deps }) => {
+    const runs = await deps.runs();
+    await getVisibleRun(runs, args.id, caller, "stop:write", deps, "runs.kill");
+    const result = unwrap(
+      await runs.stopRun(args.id, "hard", { kind: caller.kind, id: caller.id }, { destructive: true }),
+    );
+    return asJson({ ...result, mode: "kill" });
   },
 });
 
@@ -791,6 +812,7 @@ export const runsCommands: readonly CommandDef<RunsCommandDeps>[] = [
   runsCheck,
   runsSettleCheck,
   runsStop,
+  runsKill,
   runsUnit,
   runsChildren,
   runsFindings,

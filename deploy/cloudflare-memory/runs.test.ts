@@ -1,7 +1,8 @@
 import { env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it } from "vitest";
-import type { RunRecord } from "../../src/core/runRecord.ts";
+import { MAX_RECORD_BYTES, fitRecordToBudget, utf8ByteLength, type RunRecord } from "../../src/core/runRecord.ts";
+import type { RunEvent } from "../../src/core/runEvents.ts";
 import type { CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
 import { FRICTION_CATEGORIES } from "../../src/core/runFriction.ts";
 import { LEASE_MS } from "../../src/core/runLedger/types.ts";
@@ -114,6 +115,152 @@ const putDirectMany = (key: string, records: RunRecord[]) =>
   });
 
 describe("unit context retention work", () => {
+  it("a near-limit terminal record saves shutdown proof without replacing its events", async () => {
+    const key = storeKey();
+    const events: RunEvent[] = [
+      ...Array.from({ length: 31 }, (_, i) => ({ type: "context" as const, text: "x".repeat(50_000), seq: i + 1 })),
+      { type: "answer", text: "x".repeat(1024), seq: 32 },
+    ];
+    const finishedAt = Date.now();
+    const make = () =>
+      fitRecordToBudget({
+        ...record("full-shutdown-proof", finishedAt),
+        events,
+        eventCount: events.length,
+        storedEventCount: events.length,
+      });
+    const padding = MAX_RECORD_BYTES - utf8ByteLength(JSON.stringify(make()));
+    expect(padding).toBeGreaterThan(0);
+    expect(padding).toBeLessThan(64 * 1024);
+    events[31] = { type: "answer", text: "x".repeat(1024 + padding), seq: 32 };
+    const original = make();
+    expect((await post("/runs/put", { storeKey: key, record: original })).data).toMatchObject({ stored: true });
+    expect(await post("/runs/shutdown", { storeKey: key, record: original })).toEqual({
+      status: 200,
+      data: { ok: true, confirmed: true },
+    });
+    const saved = (await post("/runs/get", { storeKey: key, id: original.id })).data.record as RunRecord;
+    expect(saved).toMatchObject({ id: "full-shutdown-proof", runtimeShutdownConfirmed: true });
+    expect(saved.events).toEqual(original.events);
+    expect(utf8ByteLength(JSON.stringify(saved))).toBeLessThanOrEqual(MAX_RECORD_BYTES);
+    expect(
+      ((await post("/runs/summary", { storeKey: key, id: original.id })).data.summary as { bytes: number }).bytes,
+    ).toBeLessThanOrEqual(MAX_RECORD_BYTES);
+  });
+
+  it("shutdown acknowledgement preserves newer records and the deletion fence", async () => {
+    const key = storeKey();
+    const original = {
+      ...record("shutdown-proof", Date.now()),
+      failure: { kind: "runtime_shutdown_unconfirmed" as const },
+      events: Array.from({ length: 5 }, (_, i) => ({ type: "context" as const, text: "x".repeat(40_000), seq: i + 1 })),
+      eventCount: 5,
+      storedEventCount: 5,
+    };
+    await post("/runs/put", { storeKey: key, record: { ...original, label: "newer metadata" } });
+    expect(await post("/runs/shutdown", { storeKey: key, record: original })).toEqual({
+      status: 200,
+      data: { ok: true, confirmed: true },
+    });
+    expect((await post("/runs/get", { storeKey: key, id: original.id })).data.record).toMatchObject({
+      label: "newer metadata",
+      runtimeShutdownConfirmed: true,
+    });
+    expect((await post("/runs/get", { storeKey: key, id: original.id })).data.record).not.toHaveProperty("failure");
+    const newer = { ...original, finishedAt: original.finishedAt + 1, status: "failed" as const };
+    await post("/runs/put", { storeKey: key, record: newer });
+    expect(await post("/runs/shutdown", { storeKey: key, record: original })).toEqual({
+      status: 200,
+      data: { ok: true, confirmed: false },
+    });
+    expect((await post("/runs/get", { storeKey: key, id: original.id })).data.record).toMatchObject({
+      finishedAt: newer.finishedAt,
+      status: "failed",
+    });
+    expect((await post("/runs/get", { storeKey: key, id: original.id })).data.record).not.toHaveProperty(
+      "runtimeShutdownConfirmed",
+    );
+    await post("/runs/delete", { storeKey: key, id: original.id, destructive: true });
+    expect(await post("/runs/shutdown", { storeKey: key, record: newer })).toEqual({
+      status: 200,
+      data: { ok: true, confirmed: false },
+    });
+    expect(await rowCount(key, "runs")).toBe(0);
+  });
+
+  it("shutdown acknowledgement refuses a run with a current live owner", async () => {
+    const key = storeKey();
+    const original = record("live-shutdown-proof", Date.now());
+    expect(
+      (
+        await post("/runs/claim", {
+          storeKey: key,
+          run: {
+            runId: original.id,
+            threadKey: original.threadKey,
+            gen: "g-original",
+            leaseMs: LEASE_MS,
+            startedAt: original.startedAt,
+            meta: { channelId: original.channelId, userId: original.userId, threadKey: original.threadKey },
+            card: null,
+            system: "",
+            tools: [],
+            state: {},
+          },
+        })
+      ).data,
+    ).toMatchObject({ ok: true });
+    await post("/runs/put", { storeKey: key, record: original });
+    expect(await post("/runs/shutdown", { storeKey: key, record: original })).toEqual({
+      status: 200,
+      data: { ok: true, confirmed: false },
+    });
+    expect((await post("/runs/get", { storeKey: key, id: original.id })).data.record).toMatchObject({
+      id: original.id,
+      status: "completed",
+    });
+    expect((await post("/runs/get", { storeKey: key, id: original.id })).data.record).not.toHaveProperty(
+      "runtimeShutdownConfirmed",
+    );
+  });
+
+  it("kill deletes run history and rejects a delayed record write", async () => {
+    const key = storeKey();
+    const saved = record("kill-target", Date.now());
+    expect((await post("/runs/put", { storeKey: key, record: saved })).data).toMatchObject({ stored: true });
+    expect((await post("/runs/delete", { storeKey: key, id: saved.id, destructive: true })).data).toEqual({
+      ok: true,
+      deleted: true,
+      destructive: true,
+    });
+    expect((await post("/runs/put", { storeKey: key, record: saved })).data).toMatchObject({ stored: false });
+    expect((await post("/runs/get", { storeKey: key, id: saved.id })).data.record).toBeNull();
+    expect(await rowCount(key, "runs")).toBe(0);
+    expect(await rowCount(key, "run_events")).toBe(0);
+    expect(await rowCount(key, "run_deletions")).toBe(1);
+    expect(await post("/runs/deleted", { storeKey: key, ids: [saved.id, "other"] })).toEqual({
+      status: 200,
+      data: { ids: [saved.id] },
+    });
+    const claimed = await post("/runs/claim", {
+      storeKey: key,
+      run: {
+        runId: saved.id,
+        threadKey: saved.threadKey,
+        gen: "g-late",
+        leaseMs: LEASE_MS,
+        startedAt: saved.startedAt,
+        meta: { channelId: saved.channelId, userId: saved.userId, threadKey: saved.threadKey },
+        card: null,
+        system: "",
+        tools: [],
+        state: {},
+      },
+    });
+    expect(claimed).toEqual({ status: 409, data: { error: "run_deleted" } });
+    expect(await rowCount(key, "live_runs")).toBe(0);
+  });
+
   const unit = (name: string, context = false): CoordinatorUnit => ({
     instanceId: "retention",
     unit: name,

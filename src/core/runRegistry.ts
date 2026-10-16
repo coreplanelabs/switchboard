@@ -31,7 +31,7 @@ import {
   type RunSummary,
   type SealResult,
 } from "./runRegistry/projections.js";
-import { IndexFeed, type IndexSubscriber } from "./runRegistry/indexFeed.js";
+import { IndexFeed, type IndexSubscriber, type IndexRunIdentity } from "./runRegistry/indexFeed.js";
 import { PACE_WINDOW_MS } from "./runPace.js";
 import { foldRunLiveState, type RunLiveStateMaterialized } from "./runLiveState.js";
 import type { LiveStateAssignResult } from "./runLedger/types.js";
@@ -308,25 +308,27 @@ export class RunRegistry {
    * `actor` (sanitized: `ACTOR_ID_PATTERN` charset, ≤ 128 chars) so the stream
    * records who asked. Never throws.
    */
-  requestStopById(id: string, mode: StopMode, actor: RunActor): StopRequestResult {
+  requestStopById(id: string, mode: StopMode, actor: RunActor, destructive = false): StopRequestResult {
     this.sweep();
     const run = this.runs.get(id);
     if (!run) return { ok: false, reason: "not-found" };
     // A hosted parent refuses the soft stop that would stop nothing (record
     // 0060); the hard escape is `RunsService.stopRun`'s seal, never this control.
     if (!run.finished && run.meta?.hosted && mode === "soft") return { ok: false, reason: "hosted" };
+    if (destructive) run.control.requestKill();
     return this.stopRun(run, mode, sanitizeActor(actor));
   }
 
   private stopRun(run: RunState, mode: StopMode, actor?: RunActor): StopRequestResult {
     if (run.finished) return { ok: false, reason: "finished" };
     const effective = run.control.requestStop(mode);
+    if (effective === "hard") run.control.interruptTurn();
     this.publish(run.id, {
       type: "run_note",
       kind: "stop_requested",
       mode: effective,
       ...(actor ? { actor } : {}),
-      summary: effective === "hard" ? "hard stop requested — aborting now" : "soft stop requested — wrapping up",
+      summary: run.control.destructive ? "Kill requested by user" : "Stop requested by user",
       at: this.now(),
     });
     return { ok: true, mode: effective };
@@ -453,10 +455,16 @@ export class RunRegistry {
    * (nothing more will come, nothing to reply about), the index feed gets the
    * removal, and the id is unknown afterwards. A no-op for an unknown run and
    * for a finished one — a finished run has a record, the sweep evicts it.
+   * Destructive removal also drops finished rows and broadcasts saved-row
+   * removal using the identity whose stop permission the caller checked.
    */
-  discard(id: string): void {
+  discard(id: string, destructive = false, identity?: IndexRunIdentity): void {
     const run = this.runs.get(id);
-    if (!run || run.finished) return;
+    if (!run) {
+      if (destructive && identity) this.index.notify({ type: "removed", id, deleted: true, identity });
+      return;
+    }
+    if (run.finished && !destructive) return;
     this.runs.delete(id);
     const subs = [...run.subscribers];
     run.subscribers.clear();
@@ -468,7 +476,7 @@ export class RunRegistry {
         // A dead sink must not break the discard for the remaining subscribers.
       }
     }
-    this.index.notify({ type: "removed", id });
+    this.index.notify({ type: "removed", id, ...(destructive ? { deleted: true as const, identity } : {}) });
   }
 
   /**
@@ -556,6 +564,8 @@ export class RunRegistry {
       run.meta?.channelId !== record.channelId
     )
       return;
+    run.control.confirmCancellation();
+    if (record.cancellation.disposition !== "no-workspace") run.control.confirmRuntimeShutdown();
     this.finish(record.id, "stopped_hard");
     run.status = "stopped_hard";
     run.finishedAt = record.finishedAt;
@@ -648,6 +658,11 @@ export class RunRegistry {
     this.sweep();
     const run = this.runs.get(id);
     return run ? summaryOf(run, this.now()) : null;
+  }
+
+  /** Original control, including finished runs whose reply is still pending. */
+  controlById(id: string): RunControl | undefined {
+    return this.runs.get(id)?.control;
   }
 
   /** The original in-process runner still owns an active row. A resumed row

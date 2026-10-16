@@ -16,6 +16,7 @@ import { matchesPredicate } from "./authz/predicate.js";
 import type { ChannelVisibility, Predicate, Resource } from "./authz/types.js";
 import { sanitizeActor, type RunActor, type RunEvent, type StopMode } from "./runEvents.js";
 import { systemClock } from "./trace/clock.js";
+import { RUN_KILL_SETTLE_MS } from "./budgets.js";
 import { SPAN_SCHEMA } from "./normalizeSpans.js";
 import { analyzeRunFriction, type FrictionOptions, type FrictionDiagnosis } from "./runFriction.js";
 import {
@@ -398,7 +399,7 @@ export interface StopRunView {
   mode: StopMode;
   /** `withdrawn` is a queued ask's stop (record 0064, "The queue"): the plane's
    *  waiting row is closed — nothing was running, so nothing is "stopping". */
-  state: "stopping" | "withdrawn" | "stopped";
+  state: "stopping" | "withdrawn" | "stopped" | "deleted";
 }
 
 /** One hit of a session search (session-log item 11): the log turn, whose it
@@ -457,7 +458,11 @@ export interface LiveRunAccess {
    *  result. */
   subscribe(opts: SubscribeOptions): Subscribed | null;
   snapshot(): RunSnapshot | null;
-  requestStop(mode: StopMode, actor: RunActor): Promise<StopRequestResult | { ok: false; reason: "unavailable" }>;
+  requestStop(
+    mode: StopMode,
+    actor: RunActor,
+    opts?: { destructive: true },
+  ): Promise<StopRequestResult | { ok: false; reason: "unavailable" }>;
 }
 
 export interface RunsService {
@@ -467,10 +472,11 @@ export interface RunsService {
   inspectCheck(source: CheckSourceRead): Promise<CheckInspection>;
   settleCheck(source: CheckSourceRead): Promise<CheckInspection>;
   listRuns(opts: ListRunsOptions): Promise<ListRunsResult>;
+  deletedRuns(ids: readonly string[]): string[] | Promise<string[]>;
   /** The ledger's live rows this process does not hold, under the viewer's
    *  predicate (run-history item 41) — what the default index adds to the
-   *  registry's rows. Empty without a ledger; a ledger that cannot be read is a
-   *  warning and empty. */
+   *  registry's rows. Empty without a ledger; an unreadable ledger refuses the
+   *  snapshot so a browser cannot mistake missing rows for removal. */
   liveElsewhere(visibleTo: Predicate): Promise<RunView[]>;
   getRun(
     id: string,
@@ -485,7 +491,7 @@ export interface RunsService {
     opts: { afterSeq?: number; limit?: number; privateWorkerAccess?: typeof PRIVATE_WORKER_INTERNAL_READ },
   ): Promise<Result<RunEventsPageView>>;
   getRunFriction(id: string): Promise<Result<RunFrictionView>>;
-  stopRun(id: string, mode: StopMode, actor: RunActor): Promise<Result<StopRunView>>;
+  stopRun(id: string, mode: StopMode, actor: RunActor, opts?: { destructive: true }): Promise<Result<StopRunView>>;
   /** A ship unit's runs in round order (agent-ship item 17): the coding
    *  thread's and the review thread's runs, live and finished, cut at the round
    *  boundaries the unit's row records, under `visibleTo`. `not_found` for a
@@ -789,7 +795,7 @@ function hostedSealAnswer(units: readonly CoordinatorUnit[], runnerStopped: bool
     return `${u.unit} — ${how}${u.pr ? ` — ${u.pr.url}` : ""}`;
   });
   return [
-    "⏹ Hard stop: the pipeline's parent run was sealed `failed` and its host key released. The units stood at:",
+    "⏹ Stopped by user. The pipeline starts no further work. Its units stood at:",
     ...(lines.length > 0 ? lines : ["(no unit rows recorded)"]),
     // The runner's stop (issue 1924): the mark on the instance row, honoured
     // before every unit start and every child spawn.
@@ -893,7 +899,8 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       warn(`[runs] run ledger list failed — showing this process's runs only: ${describe(err)}`);
       return { runs: [], ledgerUnavailable: true };
     }
-    const foreign = rows.filter((row) => !registry.getById(row.runId)); // ours: the registry row is the truth
+    const deleted = new Set(await deletedRuns(rows.map((row) => row.runId)));
+    const foreign = rows.filter((row) => !deleted.has(row.runId) && !registry.getById(row.runId));
     const runs = await Promise.all(
       foreign.map(async (row) => {
         let events: RunEvent[] = [];
@@ -976,6 +983,9 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     if (!store || !RUN_ID_PATTERN.test(id)) return null;
     return store.getSummary(id);
   };
+  const savedShutdownConfirmed = (record: RunListItem | null): boolean =>
+    record?.runtimeShutdownConfirmed === true ||
+    (record?.cancellation !== undefined && record.cancellation.disposition !== "no-workspace");
   /** The typed fields of a finished run's record (run-history items 2 and 47a)
    *  as the store's summary row carries them, for a FINISHED row the registry
    *  still holds: the finish record lands in the store before the finish event
@@ -989,6 +999,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     Pick<
       RunView,
       | "answerOutcome"
+      | "failure"
       | "profile"
       | "headSha"
       | "verdict"
@@ -1017,6 +1028,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     if (!row) return {};
     return {
       ...(row.answerOutcome !== undefined ? { answerOutcome: row.answerOutcome } : {}),
+      ...(row.failure !== undefined ? { failure: row.failure } : {}),
       ...(row.profile !== undefined ? { profile: row.profile } : {}),
       ...(row.headSha !== undefined ? { headSha: row.headSha } : {}),
       ...(row.verdict !== undefined ? { verdict: row.verdict } : {}),
@@ -1047,7 +1059,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
   /** The hard stop's seal for a hosted parent this process hosts (record 0060;
    *  live-view items 10 and 16): who asked enters the stream, the units' state
    *  becomes the answer (the instance is the LAST `run_meta` carrying one), the
-   *  run finishes `failed` and seals, and the record replaces the ledger's live
+   *  run finishes `stopped_hard` and seals, and the record replaces the ledger's live
    *  row in one transaction — releasing the host key, so a later ship request
    *  on the thread claims it. Pipeline admission must be stopped first, and
    *  the original writer must land the terminal record before sealing. */
@@ -1058,7 +1070,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       kind: "stop_requested",
       mode: "hard",
       actor: sanitizeActor(actor),
-      summary: "hard stop requested",
+      summary: "Stop requested by user",
       at,
     });
     const instanceId = (registry.snapshotById(id)?.events ?? []).reduce<string | undefined>(
@@ -1162,7 +1174,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
             // is the trimmed backlog, which may have dropped a ship event.
             ...(summary?.pipeline !== undefined ? { pipeline: summary.pipeline } : {}),
             finishedAt,
-            status: "failed",
+            status: "stopped_hard",
             diagnosis: analyze(snap?.events ?? [], {
               finished: true,
               truncated: snap?.truncated ?? false,
@@ -1172,18 +1184,49 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
           await tracked!.sink.put(record);
           const outcome = await tracked!.waitForFinish();
           if (outcome.kind !== "landed") return { ok: false, error: "unavailable" };
+          try {
+            await store?.confirmRuntimeShutdown?.(record);
+          } catch (err) {
+            warn(`[runs] hosted shutdown confirmation remains unknown for ${id}: ${describe(err)}`);
+          }
         }
       } catch (err) {
         warn(`[runs] run ledger finish failed for ${id}: ${describe(err)}`);
         return { ok: false, error: "unavailable" };
       }
     }
-    registry.finish(id, "failed");
+    registry.finish(id, "stopped_hard");
     registry.seal(id);
-    return { ok: true, value: { id, mode: "hard", state: "stopping" } };
+    if (tracked) registry.markPersisted(id);
+    registry.controlById(id)?.confirmRuntimeShutdown();
+    return { ok: true, value: { id, mode: "hard", state: "stopped" } };
+  };
+
+  let deletionCheckUnavailable = false;
+  const deletedRuns = (ids: readonly string[]): string[] | Promise<string[]> => {
+    if (!store || ids.length === 0) return [];
+    return store.deleted(ids).then(
+      (deleted) => {
+        deletionCheckUnavailable = false;
+        for (const id of deleted) {
+          const row = registry.getById(id);
+          registry.controlById(id)?.requestKill();
+          registry.discard(id, true, row ?? undefined);
+        }
+        return deleted;
+      },
+      (error: unknown) => {
+        if (!deletionCheckUnavailable) {
+          deletionCheckUnavailable = true;
+          warn("[runs] shared deletion check unavailable; cached reads are withheld");
+        }
+        throw error;
+      },
+    );
   };
 
   const service: RunsService = {
+    deletedRuns,
     async listClaimObservations({ visibleTo, ...query }) {
       if (!ledger?.listClaimObservations) throw new Error("Claim observations are unavailable");
       return ledger.listClaimObservations({ ...query, ordinaryOnly: true, visibleTo: toVisibilityFilter(visibleTo) });
@@ -1192,6 +1235,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       const limit = clampListLimit(opts.limit);
       // `none` is decided here, once: no live row qualifies and the store is not asked.
       if (opts.visibleTo.kind === "none") return { runs: [] };
+      await deletedRuns(registry.listActive().map((row) => row.id));
       if (opts.recoveryEvidence !== undefined) {
         const scope = opts.recoveryEvidence;
         // Recovery must not accidentally narrow the audit with a UI predicate or
@@ -1391,10 +1435,13 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
 
     async liveElsewhere(visibleTo) {
       if (visibleTo.kind === "none") return [];
-      return (await ledgerLive()).runs.filter((r) => !privateWorkerRun(r) && matchesPredicate(visibleTo, r));
+      const { runs, ledgerUnavailable } = await ledgerLive();
+      if (ledgerUnavailable) throw new Error("The current run list could not be verified");
+      return runs.filter((r) => !privateWorkerRun(r) && matchesPredicate(visibleTo, r));
     },
 
     async getRun(id, opts = {}) {
+      if ((await deletedRuns([id])).includes(id)) return notFound;
       const diagnostic = async (view: RunRecordView): Promise<RunRecordView> => {
         if (opts.include !== "audience") return view;
         let receipt: AudienceRefusalReceipt | undefined;
@@ -1552,6 +1599,7 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
     },
 
     async getRunFriction(id) {
+      if ((await deletedRuns([id])).includes(id)) return notFound;
       const snap = registry.snapshotById(id);
       if (snap) {
         if (privateWorkerRun(registry.getById(id) ?? {})) return notFound;
@@ -1583,7 +1631,121 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       return { ok: true, value: { id, finished: true, diagnosis: summary.diagnosis } };
     },
 
-    async stopRun(id, mode, actor) {
+    async stopRun(id, mode, actor, opts) {
+      if (opts?.destructive) {
+        const found = await service.getRun(id);
+        if (!found.ok) return found;
+        const local = registry.getById(id);
+        const control = registry.controlById(id);
+        if (
+          found.value.failure?.kind === "harness_ending_unconfirmed" ||
+          (found.value.failure?.kind === "runtime_shutdown_unconfirmed" && !control?.runtimeShutdownConfirmed)
+        )
+          return { ok: false, error: "unavailable" };
+        if (found.value.finished) {
+          try {
+            if ((await storeSummary(id))?.cancellation?.disposition === "no-workspace")
+              return { ok: false, error: "unavailable" };
+          } catch {
+            return { ok: false, error: "unavailable" };
+          }
+        }
+        let liveOwner: boolean;
+        try {
+          liveOwner = ledger ? (await ledger.listLive()).some((row) => row.runId === id) : false;
+        } catch {
+          return { ok: false, error: "unavailable" };
+        }
+        if (
+          !found.value.finished ||
+          (local && local.sealedAt === undefined) ||
+          control?.runtimeShutdownPending ||
+          liveOwner
+        ) {
+          try {
+            if (liveOwner && ledger && !(await ledger.requestStop(id, "hard", { destructive: true })).ok)
+              return { ok: false, error: "unavailable" };
+          } catch (err) {
+            warn(`[runs] kill request unconfirmed for ${id}: ${describe(err)}`);
+            return { ok: false, error: "unavailable" };
+          }
+          registry.requestStopById(id, "hard", actor, true);
+          const stopped = await service.stopRun(id, "hard", actor);
+          if (!stopped.ok && !(stopped.error === "conflict" && registry.getById(id)?.finished)) return stopped;
+          // Keep the row until the original runtime is confirmed down.
+          if (!stopped.ok || stopped.value.state === "stopping") {
+            if (!control) return { ok: false, error: "unavailable" };
+            const settled = await new Promise<boolean>((resolve) => {
+              let detach: (() => void) | undefined;
+              let done = false;
+              const finish = (ok: boolean) => {
+                done = true;
+                clearTimeout(timer);
+                detach?.();
+                resolve(ok);
+              };
+              const timer = setTimeout(() => finish(false), RUN_KILL_SETTLE_MS);
+              const check = async () => {
+                if (done || !control.runtimeShutdownConfirmed || (ledger && !registry.getById(id)?.persisted)) return;
+                try {
+                  const confirmed = !store || savedShutdownConfirmed(await storeSummary(id));
+                  if (!done && confirmed) finish(true);
+                } catch {
+                  /* Keep the original row while its saved outcome is unavailable. */
+                }
+              };
+              detach = registry.subscribeIndex((event) => {
+                if (
+                  event.type === "upsert" &&
+                  event.run.id === id &&
+                  event.run.finished &&
+                  control.runtimeShutdownConfirmed
+                )
+                  void check();
+              });
+              void control.waitForRuntimeShutdown().then(() => {
+                void check();
+              });
+              if (done) detach();
+            });
+            if (!settled) return { ok: false, error: "unavailable" };
+          }
+          try {
+            if (ledger && (await ledger.listLive()).some((row) => row.runId === id))
+              return { ok: false, error: "unavailable" };
+          } catch {
+            return { ok: false, error: "unavailable" };
+          }
+        }
+        // A saved terminal row can outlive its local control. Only retained positive
+        // original shutdown evidence can authorize deletion after that eviction.
+        let saved: RunListItem | null;
+        try {
+          saved = await storeSummary(id);
+        } catch {
+          return { ok: false, error: "unavailable" };
+        }
+        if (store ? !savedShutdownConfirmed(saved) : !control?.runtimeShutdownConfirmed)
+          return { ok: false, error: "unavailable" };
+        registry.requestStopById(id, "hard", actor, true);
+        try {
+          await store?.delete(id, { destructive: true });
+        } catch (err) {
+          warn(`[runs] kill deletion unconfirmed for ${id}: ${describe(err)}`);
+          return { ok: false, error: "unavailable" };
+        }
+        const removed = found.value;
+        registry.discard(id, true, {
+          channelId: removed.channelId,
+          userId: removed.userId,
+          threadKey: removed.threadKey,
+          repo: removed.repo,
+          channelVisibility: removed.channelVisibility,
+        });
+        // A deletion must not be served from a cached ledger listing.
+        listing = undefined;
+        return { ok: true, value: { id, mode: "hard", state: "deleted" } };
+      }
       const here = registry.getById(id);
       let cancellationCandidate: LiveRunRow | undefined;
       if (mode === "hard" && ledger && (!here || deps.stopRuntime)) {
@@ -1602,6 +1764,8 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         (cancellationCandidate.state.cancellation !== undefined ||
           deps.stopRuntime.supports?.(cancellationCandidate) !== false)
       ) {
+        const control = registry.controlById(id);
+        control?.beginCancellation();
         try {
           const stopped = await ledger.requestStop(id, "hard");
           if (stopped.ok) {
@@ -1616,7 +1780,20 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
                   ...(runtime.refusal ? { refusal: runtime.refusal } : {}),
                   ...(runtime.observation ? { observation: runtime.observation } : {}),
                 };
+              if (runtime.disposition === "no-workspace")
+                return { ok: false, error: "unavailable", refusal: { phase: "prepare", cause: "runtime-unconfirmed" } };
               const events = await ledger.readEvents(id);
+              const lastSeq = events.at(-1)?.seq ?? 0;
+              events.push({
+                type: "run_note",
+                kind: "stopped",
+                mode: "hard",
+                actor: sanitizeActor(actor),
+                summary: "Stopped by user",
+                at: clock(),
+                seq: lastSeq + 1,
+              });
+              events.push({ type: "answer", text: "⏹ Stopped by user.", at: clock(), seq: lastSeq + 2 });
               const record = reclaimedRunRecord({
                 row: prepared.row,
                 events,
@@ -1632,7 +1809,10 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
               const sealed = await ledger.finishCancellation(prepared.cancellation, record);
               if (!sealed.ok || !sealed.stored) return { ok: false, error: "unavailable" };
               registry.confirmCancellation(record);
-              return { ok: true, value: { id, mode, state: "stopped" } };
+              return {
+                ok: true,
+                value: { id, mode, state: "stopped" },
+              };
             }
             if (prepared.reason !== "unsupported") return { ok: false, error: "unavailable" };
             if (!here)
@@ -1645,6 +1825,8 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
         } catch (err) {
           warn(`[runs] hard stop cancellation unconfirmed for ${id}: ${describe(err)}`);
           return { ok: false, error: "unavailable" };
+        } finally {
+          control?.endCancellation();
         }
       }
 
@@ -1762,12 +1944,12 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
       return {
         subscribe: (opts) => registry.subscribe(id, token, opts),
         snapshot: () => registry.snapshot(id, token),
-        requestStop: async (mode, actor) => {
+        requestStop: async (mode, actor, opts) => {
           // The token is the authority. Once it checks out, use the same
           // durable stop path as an operator; the registry-only token path
           // could lose a stop while a child was entering retry pause.
           if (summary.hosted && !summary.finished) return { ok: false, reason: "hosted" };
-          const stopped = await this.stopRun(id, mode, actor);
+          const stopped = await this.stopRun(id, mode, actor, opts);
           if (stopped.ok) return { ok: true, mode: stopped.value.mode };
           return {
             ok: false,

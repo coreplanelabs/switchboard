@@ -107,6 +107,7 @@ export interface HeartbeatResult {
   reason?: "fenced" | "unknown-run";
   /** What another generation asked for since the last heartbeat. */
   stop?: StopMode | null;
+  destructive?: boolean;
   phase?: LivePhase;
   /** The plane's open effects (docs/reference/specs/orchestration-plane.md,
    *  record 0064; orchestration-plane item 7), riding every owner's heartbeat answer, at most 32;
@@ -297,7 +298,11 @@ export interface RunLedger {
   readInbox(runId: string, afterSeq: number): Promise<InboxItem[]>;
   peekInbox(runId: string, gen: string, afterSeq: number): Promise<import("./types.js").InboxPeek>;
   /** Any generation; `ownerLive` says whether the owner's lease is current. */
-  requestStop(runId: string, mode: StopMode): Promise<{ ok: boolean; ownerLive?: boolean }>;
+  requestStop(
+    runId: string,
+    mode: StopMode,
+    opts?: { destructive: true },
+  ): Promise<{ ok: boolean; ownerLive?: boolean }>;
   /** Mark this generation's runs for the next one. A paused retry has no
    *  local runner left; unlike a SIGTERM handoff it can be sealed here. */
   handoff(gen: string, runIds: string[], opts?: { pausedForRetry: true }): Promise<{ marked: string[] }>;

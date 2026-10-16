@@ -114,9 +114,9 @@ describe("parseCliArgv", () => {
       input: { args: ["abc"], options: { include: "messages" } },
       json: false,
     });
-    expect(parseCliArgv(["runs", "stop", "abc", "--mode=soft"], commands)).toMatchObject({
+    expect(parseCliArgv(["runs", "stop", "abc"], commands)).toMatchObject({
       kind: "command",
-      input: { args: ["abc"], options: { mode: "soft" } },
+      input: { args: ["abc"], options: {} },
     });
   });
 
@@ -176,7 +176,7 @@ describe("parseCliArgv", () => {
     });
     const out = await runCli(commands, { kind: "command-help", id: "runs.stop", spelled: "runs stop" }, CLI_CALLER);
     expect(out.exitCode).toBe(0);
-    expect(out.stdout.split("\n")[1]).toBe("usage: runs stop <id> --mode <soft|hard>");
+    expect(out.stdout.split("\n")[1]).toBe("usage: runs stop <id> [--mode <soft|hard>]");
     const cat = await runCli(commands, { kind: "catalogue" }, CLI_CALLER);
     expect(cat.stdout).toContain("runs list");
     expect(cat.stdout).toContain("ask [--thread <key>]");
@@ -456,13 +456,9 @@ describe("runCommand", () => {
     });
   });
 
-  it("runs stop <id> --mode soft from the CLI records the cli:local actor", async () => {
+  it("runs stop <id> from the CLI records the cli:local actor", async () => {
     const { commands, live, reg } = await fixture();
-    const out = await runCommand(
-      commands,
-      command(["runs", "stop", live.id, "--mode", "soft", "--json"], commands),
-      CLI_CALLER,
-    );
+    const out = await runCommand(commands, command(["runs", "stop", live.id, "--json"], commands), CLI_CALLER);
     expect(out.exitCode).toBe(0);
     const note = reg
       .snapshotById(live.id)!

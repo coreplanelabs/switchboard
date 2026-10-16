@@ -99,7 +99,11 @@ let es: EventSourceLike | null = null;
 
 onMounted(() => {
   if (!seed) return;
-  es = makeEventSource(`/runs?stream=1${showAll ? "&all=1" : ""}`);
+  const cursor = new URLSearchParams("stream=1");
+  for (const [key, value] of new URLSearchParams(browser.search()))
+    if (key !== "stream" && key !== "all") cursor.set(key, value);
+  if (showAll) cursor.set("all", "1");
+  es = makeEventSource(`/runs?${cursor}`);
   // A RE-connect means the backend may have restarted: rows this page holds
   // may no longer exist there, and nothing will ever send their `removed`
   // events. Reload for a fresh server snapshot instead of drifting.
@@ -113,10 +117,15 @@ onMounted(() => {
     conn.value = { tone: "green", text: "connected" };
   };
   es.onmessage = (m) => {
-    let ev: { type?: string; run?: IndexRow; id?: string };
+    let ev: { type?: string; run?: IndexRow; id?: string; deleted?: boolean; ids?: string[] };
     try {
       ev = JSON.parse(m.data) as typeof ev;
     } catch {
+      return;
+    }
+    if (ev.type === "snapshot" && Array.isArray(ev.ids)) {
+      const current = new Set(ev.ids);
+      for (const id of rows.keys()) if (!current.has(id)) rows.delete(id);
       return;
     }
     const id = ev.type === "removed" ? ev.id : ev.run?.id;

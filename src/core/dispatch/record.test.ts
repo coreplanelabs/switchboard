@@ -1,5 +1,11 @@
 import type { AudienceTrace } from "../audienceDecision.js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { createRunHistoryWriter, type RunHistoryWriter } from "../runHistoryWriter.js";
+import { InMemoryRunStore } from "../runStore.js";
+import { UncertainStoreError } from "../storeFailure.js";
+import { storeRequestWitness } from "../storeResponse.js";
+import { createRunsService } from "../runsService.js";
+import type { LedgerRun } from "../runLedger/writeThrough.js";
 import { RunRegistry } from "../runRegistry.js";
 import { fitRecordToBudget, isRunRecord, type RunRecord } from "../runRecord.js";
 import {
@@ -1243,6 +1249,8 @@ describe("registerFinishRecord — the finish record, written by the drain after
     runMsg: IncomingMessage = msg,
     route?: { preset: string; reason: string; model: string },
     audience?: AudienceTrace,
+    historyWriter?: RunHistoryWriter,
+    ledgerRun?: LedgerRun,
   ) {
     const registry = new RunRegistry({ genId: () => "run-f", genToken: () => "tok" });
     const run = registry.create(runAgent.name, {
@@ -1258,9 +1266,11 @@ describe("registerFinishRecord — the finish record, written by the drain after
     ending.finished(run.id);
     const writes: Array<{ record: RunRecord; opts: unknown }> = [];
     const deps: RecordDeps = {
-      runHistoryWriter: {
-        write: (record: RunRecord, opts?: { provisional?: boolean }) => void writes.push({ record, opts }),
-      } as never,
+      runHistoryWriter:
+        historyWriter ??
+        ({
+          write: (record: RunRecord, opts?: { provisional?: boolean }) => void writes.push({ record, opts }),
+        } as never),
     };
     const trace = startRequestRoot({ clock: () => 5 }, { channel: channelOf("slack:CX"), receivedAt: 1 });
     registerFinishRecord(deps, {
@@ -1279,12 +1289,131 @@ describe("registerFinishRecord — the finish record, written by the drain after
       status: "completed",
       diagnosis: analyzeRunFriction(snap.events, { finished: true, truncated: false }),
       root: trace.root,
-      ledgerRun: undefined,
+      ledgerRun,
       handoff: { deviations: [], followUps: [{ what: "split the file", where: "src/x.ts" }], unproven: [] },
       ...(route !== undefined ? { route } : {}),
     });
-    return { ending, writes };
+    return { ending, writes, run };
   }
+
+  it("retains unknown cleanup, then saves the original positive shutdown acknowledgement", async () => {
+    const store = new InMemoryRunStore({ now: () => 5 });
+    const writer = createRunHistoryWriter({ store, warn: () => {} });
+    const { ending, run } = finished(agent, msg, undefined, undefined, writer);
+    run.control.trackRuntimeShutdown();
+    ending.drain(true);
+    await writer.settled();
+    expect(await store.get(run.id)).toMatchObject({
+      id: "run-f",
+      status: "completed",
+      events: [{ type: "answer", text: "done" }],
+    });
+    expect((await store.get(run.id))?.runtimeShutdownConfirmed).toBeUndefined();
+    const service = createRunsService({ registry: new RunRegistry(), store });
+    expect(await service.stopRun(run.id, "hard", { kind: "cli", id: "cli:local" }, { destructive: true })).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+    run.control.confirmRuntimeShutdown();
+    await vi.waitFor(async () =>
+      expect(await store.get(run.id)).toMatchObject({
+        id: "run-f",
+        status: "completed",
+        runtimeShutdownConfirmed: true,
+      }),
+    );
+    expect(await service.stopRun(run.id, "hard", { kind: "cli", id: "cli:local" }, { destructive: true })).toEqual({
+      ok: true,
+      value: { id: "run-f", mode: "hard", state: "deleted" },
+    });
+    expect(await service.getRun(run.id)).toEqual({ ok: false, error: "not_found" });
+  });
+
+  it("keeps an uncertain original terminal write unknown after cleanup confirms", async () => {
+    const store = new InMemoryRunStore({ now: () => 5 });
+    const writer = createRunHistoryWriter({
+      store: {
+        put: async (record) => {
+          await store.put(record);
+          throw new UncertainStoreError(
+            "original reply lost",
+            await storeRequestWitness("/runs/put", JSON.stringify({ record })),
+          );
+        },
+        abandoned: () => {},
+      },
+      warn: () => {},
+    });
+    const { ending, run } = finished(agent, msg, undefined, undefined, writer);
+    run.control.trackRuntimeShutdown();
+    ending.drain(true);
+    await writer.settled();
+    run.control.confirmRuntimeShutdown();
+    await writer.settled();
+    expect(writer.uncertain()).toBe(1);
+    expect(await store.get(run.id)).toMatchObject({
+      id: "run-f",
+      status: "completed",
+      events: [{ type: "answer", text: "done" }],
+    });
+    expect((await store.get(run.id))?.runtimeShutdownConfirmed).toBeUndefined();
+  });
+
+  it("old cleanup cannot replace a newer terminal record for the same run", async () => {
+    const store = new InMemoryRunStore({ now: () => 5 });
+    const writer = createRunHistoryWriter({ store, warn: () => {} });
+    const { ending, run } = finished(agent, msg, undefined, undefined, writer);
+    run.control.trackRuntimeShutdown();
+    ending.drain(true);
+    await writer.settled();
+    const original = (await store.get(run.id))!;
+    await store.put({
+      ...original,
+      finishedAt: 6,
+      status: "failed",
+      events: [{ type: "answer", text: "newer ending", seq: 1 }],
+    });
+    run.control.confirmRuntimeShutdown();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await writer.settled();
+    expect(await store.get(run.id)).toMatchObject({
+      id: "run-f",
+      finishedAt: 6,
+      status: "failed",
+      events: [{ type: "answer", text: "newer ending" }],
+    });
+    const service = createRunsService({ registry: new RunRegistry(), store });
+    expect(await service.stopRun(run.id, "hard", { kind: "cli", id: "cli:local" }, { destructive: true })).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+
+  it.each([false, true])(
+    "a refused original ledger finish cannot qualify its saved fallback as shutdown proof: tracked=%s",
+    async (tracked) => {
+      const store = new InMemoryRunStore({ now: () => 5 });
+      const writer = createRunHistoryWriter({ store, warn: () => {} });
+      const ledgerRun = {
+        tracked: () => tracked,
+        sink: store,
+        waitForFinish: async () => ({ kind: "refused" }),
+      } as unknown as LedgerRun;
+      const { ending, run } = finished(agent, msg, undefined, undefined, writer, ledgerRun);
+      run.control.trackRuntimeShutdown();
+      ending.drain(true);
+      await writer.settled();
+      run.control.confirmRuntimeShutdown();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await writer.settled();
+      expect(await store.get(run.id)).toMatchObject({ id: "run-f", status: "completed" });
+      const service = createRunsService({ registry: new RunRegistry(), store });
+      expect(await service.stopRun(run.id, "hard", { kind: "cli", id: "cli:local" }, { destructive: true })).toEqual({
+        ok: false,
+        error: "unavailable",
+      });
+    },
+  );
 
   it("reads a late audience refusal at seal without replacing completed work facts", () => {
     const audience: AudienceTrace = {};

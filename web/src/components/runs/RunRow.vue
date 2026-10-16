@@ -135,30 +135,29 @@ const actionItems = computed(() => [
   ...(stoppable.value
     ? [
         {
-          label: "Stop (soft)",
+          label: "Stop",
           icon: "i-lucide-octagon-pause",
           disabled: pending.value,
-          onSelect: () => requestStop("soft"),
+          onSelect: () => requestStop("stop"),
         },
       ]
     : []),
   ...(killable.value
     ? [
         {
-          label: "Kill (hard)",
+          label: "Kill",
           icon: "i-lucide-octagon-x",
           color: "error" as const,
           disabled: pending.value,
-          onSelect: () => requestStop("hard"),
+          onSelect: () => requestStop("kill"),
         },
       ]
     : []),
 ]);
 
-function requestStop(mode: "soft" | "hard"): void {
+function requestStop(mode: "stop" | "kill"): void {
   if (pending.value) return;
-  if (mode === "hard" && !browser.confirm("Hard stop: abort this run now with no summary and free its sandbox?"))
-    return;
+  if (mode === "kill" && !browser.confirm("Kill this run and delete its row? This action is destructive.")) return;
   pending.value = true;
   fetch(stopHref(props.run, mode), { method: "POST", credentials: "same-origin" })
     .then((r) => {
@@ -276,7 +275,13 @@ function onRowClick(ev: MouseEvent): void {
       <span
         v-if="outcome"
         class="outcome shrink-0 rounded border px-1.5 font-mono text-[0.7rem] max-sm:order-10"
-        :class="tone === 'red' ? 'border-bad/30 text-bad' : 'border-warn/30 text-warn'"
+        :class="
+          tone === 'red'
+            ? 'border-bad/30 text-bad'
+            : tone === 'amber'
+              ? 'border-warn/30 text-warn'
+              : 'border-accented text-muted'
+        "
         >{{ outcome }}</span
       >
       <span

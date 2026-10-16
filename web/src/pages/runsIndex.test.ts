@@ -241,6 +241,16 @@ describe("RunsIndexPage — toolbar, states, pager", () => {
 });
 
 describe("RunsIndexPage — the live feed", () => {
+  it("reconciles the actual seeded rows when Kill falls before feed attachment", async () => {
+    const { wrapper, es } = mountIndex(
+      seed([live("keep"), live("deleted", { finished: true, persisted: true })], { all: true }),
+    );
+    expect(wrapper.findAll("li.run").map((row) => row.attributes("data-run-id"))).toEqual(["keep", "deleted"]);
+    es().emitMessage({ type: "snapshot", ids: ["keep"] });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findAll("li.run").map((row) => row.attributes("data-run-id"))).toEqual(["keep"]);
+  });
+
   it("connection indicator: connecting → connected on open, disconnected when the stream closes, connecting on a soft error", async () => {
     const { wrapper, es } = mountIndex(seed([]));
     expect(wrapper.find(".green-heading-actions .green-badge").text()).toBe("connecting…");
@@ -305,6 +315,14 @@ describe("RunsIndexPage — the live feed", () => {
     es().emitOpen();
     es().emitMessage({ type: "removed", id: "keep" });
     es().emitMessage({ type: "removed", id: "evict" });
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findAll("li.run").map((li) => li.attributes("data-run-id"))).toEqual(["keep"]);
+  });
+
+  it("Kill removes a saved row even with completed runs included", async () => {
+    const { wrapper, es } = mountIndex(seed([done("target", { persisted: true }), done("keep")], { all: true }));
+    es().emitOpen();
+    es().emitMessage({ type: "removed", id: "target", deleted: true });
     await wrapper.vm.$nextTick();
     expect(wrapper.findAll("li.run").map((li) => li.attributes("data-run-id"))).toEqual(["keep"]);
   });

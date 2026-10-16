@@ -335,7 +335,7 @@ describe("command conformance — catalogue fences", () => {
       "repo.test",
       "repo.build",
     ]);
-    expect(fenced.filter((c) => !c.action.endsWith(":exec"))).toHaveLength(22);
+    expect(fenced.filter((c) => !c.action.endsWith(":exec"))).toHaveLength(23);
   });
 
   it("blast radius: a write missing `destructive` or `risk`, or whose risk line is empty, is named with the field; an exec-class write, a read and a chat-hidden write are exempt", () => {
@@ -427,7 +427,7 @@ describe("command conformance — catalogue fences", () => {
       ).toBe("destructive");
     }
     // The audit's unconditional booleans: destructive at every input.
-    for (const id of ["memory.forget", "mcp.remove", "mcp.promote", "runs.stop"]) {
+    for (const id of ["memory.forget", "mcp.remove", "mcp.promote", "runs.stop", "runs.kill"]) {
       expect(byId.get(id)!.annotations?.destructive, id).toBe(true);
     }
   });
@@ -956,7 +956,7 @@ describe.each(CATALOGUE.map((cmd) => ({ id: cmd.id, cmd })))("command conformanc
       if ("error" in input) throw new Error(input.error);
       const admitted = authorize(nobody.actor, cmd.action, resourceOf(cmd, input, nobody)).allow;
       const out = await runOn(chat, f, cmd, happy.named, "nobody");
-      if (cmd.id === "runs.stop") {
+      if (cmd.id === "runs.stop" || cmd.id === "runs.kill") {
         // A person passes the stop door, but this fixture's run is somebody else's.
         expect(admitted).toBe(true);
         expect(out).toMatchObject({ ok: false, code: "not_found" });

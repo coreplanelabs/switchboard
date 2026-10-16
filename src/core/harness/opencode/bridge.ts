@@ -2747,24 +2747,18 @@ export async function driveOpenCode(
       };
     });
   };
-  /** The budgets, the stops, the finale and the silence bound — on every event and every tick. */
+  const stopTurn = () => {
+    if (ended !== undefined) return;
+    ended = "hard";
+    note("stopped", hardStopNote(), "hard");
+    if (!run.control?.destructive) void interrupt({ ending: "a user stop" });
+  };
+  run.control?.setTurnStop(stopTurn);
+  /** The budgets, the stops, the finale and the silence bound. */
   const check = () => {
     const requested = run.control?.requested;
     if (requested === "hard") {
-      // The hard stop on the record (the record clause): a `stopped` note in
-      // mode `hard`, said once — after a soft stop's own, when one came first —
-      // then the interrupt that ends the session. Read before the drainer's
-      // failure by name, so a stop landing in the same tick as the failure
-      // ends the loop as the stop — its note written, the hard stop's answer
-      // returned, the harness yielding the drainer's failure to it
-      // (`OpenCodeHarness.open`) — and the run ends stopped, the failure a note
-      // on the record; no check runs once the loop has ended, so a stop
-      // landing after the failure's ending is the settlement's alone.
-      if (ended === undefined) {
-        ended = "hard";
-        note("stopped", hardStopNote(), "hard");
-        void interrupt({ ending: "an operator's hard stop" });
-      }
+      stopTurn();
       return;
     }
     if (run.toolContext.recovery?.stopped) {
@@ -3535,7 +3529,10 @@ export async function driveOpenCode(
   }
   const remaining = () => deadline - now();
   // What the next turn on this session inherits: the store as this loop knew it.
-  const handOver = () => ({ storeIds: bridge.storeIds(), record: () => bridge.record(recordBase, deadline) });
+  const handOver = () => {
+    run.control?.setTurnStop(undefined);
+    return { storeIds: bridge.storeIds(), record: () => bridge.record(recordBase, deadline) };
+  };
   if (ended === "failed" && conn.failure.error !== undefined) throw conn.failure.error;
   if (ended === "failed" && windDownFailed !== undefined) throw windDownFailed;
   if (ended === "hard") return { answer: HARD_STOP_MESSAGE, remainingMs: remaining, hardStopped: true, ...handOver() };

@@ -178,7 +178,7 @@ const operator: AccessIdentity = { sub: "op-1" };
 const readerBot: AccessIdentity = { sub: "", commonName: "reader-bot" };
 const unknownBot: AccessIdentity = { sub: "", commonName: "nobody" };
 
-const stopPost = (id: string, headers: IncomingHttpHeaders = {}, body = JSON.stringify({ id, mode: "soft" })) =>
+const stopPost = (id: string, headers: IncomingHttpHeaders = {}, body = JSON.stringify({ id })) =>
   fakeReqRes({
     method: "POST",
     url: "/api/runs.stop",
@@ -322,7 +322,7 @@ describe("createCommandHttpHandler — read commands", () => {
 describe("createCommandHttpHandler — write safety", () => {
   it("GET /api/runs.stop → 405 with allow: POST and no stop_requested note", async () => {
     const { handler, reg, live } = await fixture();
-    const t = fakeReqRes({ method: "GET", url: `/api/runs.stop?id=${live.id}&mode=soft` });
+    const t = fakeReqRes({ method: "GET", url: `/api/runs.stop?id=${live.id}` });
     await handler(t.req, t.res, operator);
     expect(t.status).toBe(405);
     expect(t.headers.allow).toBe("POST");
@@ -378,7 +378,7 @@ describe("createCommandHttpHandler — write safety", () => {
     const t = fakeReqRes({
       method: "POST",
       url: "/api/runs.stop",
-      body: JSON.stringify({ id: live.id, mode: "soft" }),
+      body: JSON.stringify({ id: live.id }),
     });
     await handler(t.req, t.res, operator);
     expect(t.status).toBe(415);
@@ -467,7 +467,7 @@ describe("createCommandHttpHandler — hard stop after restart", () => {
         ),
       },
     );
-    const request = stopPost(id, {}, JSON.stringify({ id, mode: "hard" }));
+    const request = stopPost(id, {}, JSON.stringify({ id }));
     await handler(request.req, request.res, operator);
 
     expect({ status: request.status, body: request.json() }).toEqual({
@@ -513,11 +513,11 @@ describe("createCommandHttpHandler — hard stop after restart", () => {
         ),
       },
     );
-    const request = stopPost(id, {}, JSON.stringify({ id, mode: "hard" }));
+    const request = stopPost(id, {}, JSON.stringify({ id }));
     await handler(request.req, request.res, operator);
 
     expect(request.status).toBe(200);
-    expect(request.json()).toEqual({ id, mode: "hard", state: "stopped" });
+    expect(request.json()).toEqual({ id, mode: "stop", state: "stopped" });
     expect(ledger.finished.get(id)).toMatchObject({
       id,
       status: "stopped_hard",
@@ -546,23 +546,23 @@ describe("createCommandHttpHandler — hard stop after restart", () => {
         ),
       },
     );
-    const request = stopPost(id, {}, JSON.stringify({ id, mode: "hard" }));
+    const request = stopPost(id, {}, JSON.stringify({ id }));
     await handler(request.req, request.res, operator);
 
     expect({ status: request.status, body: request.json() }).toEqual({
       status: 200,
-      body: { id, mode: "hard", state: "stopping" },
+      body: { id, mode: "stop", state: "stopping" },
     });
     expect(ledger.live.get(id)).toMatchObject({ runId: id, ownerGen: "g-original", stop: "hard" });
   });
 
   it("still aborts a genuine local run control through the public hard-stop command", async () => {
     const { handler, live } = await fixture();
-    const request = stopPost(live.id, {}, JSON.stringify({ id: live.id, mode: "hard" }));
+    const request = stopPost(live.id, {}, JSON.stringify({ id: live.id }));
     await handler(request.req, request.res, operator);
 
     expect(request.status).toBe(200);
-    expect(request.json()).toEqual({ id: live.id, mode: "hard", state: "stopping" });
+    expect(request.json()).toEqual({ id: live.id, mode: "stop", state: "stopping" });
     expect(live.control.requested).toBe("hard");
     expect(live.control.hardSignal.aborted).toBe(true);
   });
@@ -593,8 +593,8 @@ describe("createCommandHttpHandler — caller resolution", () => {
     const allowed = stopPost(own.id);
     await handler(allowed.req, allowed.res, browser);
     expect(allowed.status).toBe(200);
-    expect(allowed.json()).toEqual({ id: own.id, mode: "soft", state: "stopping" });
-    expect(own.control.requested).toBe("soft");
+    expect(allowed.json()).toEqual({ id: own.id, mode: "stop", state: "stopping" });
+    expect(own.control.requested).toBe("hard");
     expect(live.control.requested).toBeUndefined();
   });
 

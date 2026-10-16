@@ -62,6 +62,18 @@ describe("run runtime stop", () => {
     expect(await stop(saved, cancellation)).toEqual({ stopped: true, disposition: "workspace-discarded" });
     expect(String(fetch.mock.calls[0]![0])).toBe("https://sandbox.example/cancel-run");
   });
+  it("does not treat machine=none as a receipt that the bot-host producer exited", async () => {
+    const target = row();
+    delete target.state.binding;
+    target.meta.profile = { machine: "none", identity: "none", minutes: 5 };
+    const stop = createRunStop({ type: "cloudflare", url: "https://sandbox.example" }, secretsFrom({}));
+    expect(stop!.supports(target)).toBe(false);
+    expect(await stop!(target, cancellation)).toEqual({
+      stopped: false,
+      refusal: { phase: "prepare", cause: "custody-unverified" },
+    });
+  });
+
   it("asks the recorded Resident backend to resolve an incomplete original target without attaching", async () => {
     const target = row();
     target.phase = "attaching";
@@ -254,7 +266,10 @@ describe("run runtime stop", () => {
       refusal: { phase: "prepare", cause: "custody-unverified" },
     });
     legacy.meta.profile = { machine: "none", identity: "read", minutes: 25 };
-    expect(await stop!(legacy, cancellation)).toEqual({ stopped: true, disposition: "no-workspace" });
+    expect(await stop!(legacy, cancellation)).toEqual({
+      stopped: false,
+      refusal: { phase: "prepare", cause: "custody-unverified" },
+    });
     legacy.state.binding = { backend: "unknown", workspace: "/private" };
     expect(await stop!(legacy, cancellation)).toEqual({
       stopped: false,

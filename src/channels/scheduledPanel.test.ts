@@ -170,19 +170,6 @@ describe("firingDetailSummary", () => {
   });
 });
 
-describe("outcome vocabulary (shared with the web page)", () => {
-  it("labels every outcome in plain English with its tone class", async () => {
-    const { OUTCOME_CLASS, OUTCOME_LABEL } = await import("./scheduledPanel.js");
-    expect(OUTCOME_LABEL.completed).toBe("succeeded");
-    expect(OUTCOME_LABEL.misconfigured).toBe("misconfigured — nothing ran");
-    expect(OUTCOME_LABEL.stopped_hard).toBe("killed");
-    expect(OUTCOME_CLASS.completed).toBe("ok");
-    expect(OUTCOME_CLASS.failed).toBe("bad");
-    expect(OUTCOME_CLASS.stopped_soft).toBe("warn");
-    expect(OUTCOME_CLASS["ingress-error"]).toBe("bad");
-  });
-});
-
 describe("time helpers", () => {
   it("formatRelative", () => {
     expect(formatRelative(NOW + 30_000, NOW)).toBe("in <1m");

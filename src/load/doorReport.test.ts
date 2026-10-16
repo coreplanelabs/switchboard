@@ -258,6 +258,7 @@ describe("doorReport — hand-backs per day and per command", () => {
         throw new Error("store down");
       },
       events: (id, opts) => store.events(id, opts),
+      deleted: async () => [],
       delete: (id) => store.delete(id),
       usage: (query) => store.usage(query),
     };

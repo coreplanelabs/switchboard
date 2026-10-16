@@ -446,6 +446,7 @@ function ledgerBackedStore(ledger: InMemoryRunLedger, store: RunStore): RunStore
       await drained(id);
       return store.events(id, opts);
     },
+    deleted: async () => [],
     delete: (id) => store.delete(id),
     usage: (query) => store.usage(query),
   };
@@ -4772,9 +4773,9 @@ describe("executor provisioning by agent resources", () => {
     expect(release).toHaveBeenCalledWith("always", {
       span: expect.objectContaining({ name: "post.workspace_release" }),
     }); // coding run, but hard stop → tear down
-    expect(replies.some((r) => r.includes("aborted"))).toBe(true);
+    expect(replies).toContain("⏹ Stopped by user.");
     expect(replies.some((r) => r.includes("late"))).toBe(false);
-    expect(statuses.at(-1)?.title).toContain("⛔");
+    expect(statuses.at(-1)?.title).toContain("⏹");
     expect(registry.listActive()[0].stop).toEqual({ mode: "hard", state: "stopped" });
   });
 
@@ -4823,10 +4824,10 @@ describe("executor provisioning by agent resources", () => {
     const ended = await run;
     expect(ended.status).toBe("stopped");
     const last = JSON.stringify(statuses.at(-1));
-    expect(last).toContain("⛔");
+    expect(last).toContain("⏹");
     expect(last).toContain("stopped before the run started");
     expect(last).not.toContain("setup failed");
-    expect(replies).toEqual([]);
+    expect(replies).toEqual(["⏹ Stopped by user."]);
     expect(registry.getById("r1")).toMatchObject({ status: "stopped_hard", finished: true });
   });
 
@@ -4866,8 +4867,8 @@ describe("executor provisioning by agent resources", () => {
     while (!checkoutSignal) await new Promise((resolve) => setTimeout(resolve, 5));
     expect(registry.requestStop("r1", "t1", "hard")).toEqual({ ok: true, mode: "hard" });
     expect((await run).status).toBe("stopped");
-    expect(statuses.at(-1)?.title).toContain("⛔");
-    expect(replies).toEqual([]);
+    expect(statuses.at(-1)?.title).toContain("⏹");
+    expect(replies).toEqual(["⏹ Stopped by user."]);
     expect(release).toHaveBeenCalled();
     expect(registry.getById("r1")).toMatchObject({ status: "stopped_hard", finished: true });
   });
@@ -4918,7 +4919,7 @@ describe("executor provisioning by agent resources", () => {
     expect(ended.status).toBe("stopped");
     expect(second.replies).toHaveLength(2);
     expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read your follow-up/);
-    expect(first.replies).toEqual([]);
+    expect(first.replies).toEqual(["⏹ Stopped by user."]);
     expect(registry.getById("r1")).toMatchObject({ status: "stopped_hard", finished: true });
   });
 
@@ -5298,6 +5299,47 @@ describe("executor provisioning by agent resources", () => {
     ]);
     // Grafted before the parent ended: they precede it on the sink.
     expect(log.ends.indexOf(grafts[0]!)).toBeLessThan(log.ends.indexOf(attach!));
+  });
+
+  it.each(["failure", "refusal"] as const)("Kill suppresses a setup %s reply pending card close", async (kind) => {
+    vi.useFakeTimers();
+    try {
+      vi.stubEnv("SANDBOX_TOKEN", "tok");
+      vi.stubEnv("GITHUB_APP_ID", "");
+      const deps = makeDeps(REMOTE_YAML_FIXTURE, capturingProvider());
+      const reg = new RunRegistry({ genId: () => "setup-kill", genToken: () => "token" });
+      const store = new InMemoryRunStore();
+      deps.runRegistry = reg;
+      deps.runStore = store;
+      deps.runHistoryWriter = createRunHistoryWriter({ store, warn: () => {}, sleep: async () => {} });
+      const runs = createRunsService({ registry: reg, store });
+      const { io, replies } = fakeIO();
+      let killing: ReturnType<typeof runs.stopRun> | undefined;
+      io.status = async () => ({
+        update: () => {},
+        done: async () => {
+          if (killing) return;
+          const control = reg.controlById("setup-kill");
+          if (!control) throw new Error("setup has no registered control");
+          killing = runs.stopRun("setup-kill", "hard", { kind: "cli", id: "cli:local" }, { destructive: true });
+          await vi.waitFor(() => expect(control.destructive).toBe(true));
+        },
+      });
+      vi.mocked(makeExecutor).mockRejectedValueOnce(
+        kind === "failure" ? new Error("setup failed") : new ResidentNeedsRefError("repo:acme/api"),
+      );
+      await dispatch(deps, msg("agent:coding fix it in acme/api", "slack:UADMIN"), io);
+      // No original runtime/cleanup receipt was returned by this failed attach.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(await killing).toEqual({ ok: false, error: "unavailable" });
+      expect(replies).toEqual([]);
+      expect(await runs.getRun("setup-kill")).toMatchObject({
+        ok: true,
+        value: { id: "setup-kill", finished: true, failure: { kind: "runtime_shutdown_unconfirmed" } },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("closes the ack card with a reason when setup stops before the run (ask-once for a branch)", async () => {
@@ -7650,6 +7692,7 @@ describe("review post-step", () => {
         getSummary: (id) => inner.getSummary(id),
         list: (o) => inner.list(o),
         events: (id, o) => inner.events(id, o),
+        deleted: async () => [],
         delete: (id) => inner.delete(id),
         usage: (q) => inner.usage(q),
       };
@@ -11916,7 +11959,7 @@ describe("cross-session memory WRITE path", () => {
     expect(registry.requestStop("r1", "t1", "hard")).toEqual({ ok: true, mode: "hard" });
     await run;
     await drainReflections();
-    expect(replies.some((r) => r.includes("aborted"))).toBe(true);
+    expect(replies).toContain("⏹ Stopped by user.");
     expect(requests.filter((r) => r.system === REFLECTION_SYSTEM)).toHaveLength(0);
     expect(await store.retrieve({ scopeKey: "org:acme", query: "deploy command", limit: 10 })).toEqual([]);
   });
@@ -16451,7 +16494,7 @@ describe("thread admission (docs/reference/specs/thread-admission.md)", () => {
     await dispatch(deps, threadMsg("and also the numbers", "slack:UY"), second.io);
     expect(registry.requestStop("r1", "t", "hard")).toEqual({ ok: true, mode: "hard" });
     await run;
-    expect(first.replies.some((r) => r.includes("aborted"))).toBe(true);
+    expect(first.replies).toContain("⏹ Stopped by user.");
     expect(second.replies).toHaveLength(2);
     expect(second.replies[1]).toMatch(/^⛔ .*stopped before it read your follow-up/);
     expect(requests).toHaveLength(1);
@@ -17927,7 +17970,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     const outcome = await dispatch(deps, restored.msg, io, { restart: { row: reclaimed.row, events: [], inbox: [] } });
     await writer.settled();
     expect(outcome.status).toBe("stopped");
-    expect(replies).toEqual([]);
+    expect(replies).toEqual(["⏹ Stopped by user."]);
     expect(provider.requests).toEqual([]);
     expect(registry.listActive()).toEqual([]);
     expect(ledger.live.size).toBe(0);
@@ -17990,7 +18033,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
         expect(stoppedSignal?.aborted).toBe(true);
         expect((await running).status).toBe("stopped");
         await writer.settled();
-        expect(replies).toEqual([]);
+        expect(replies).toEqual(["⏹ Stopped by user."]);
         expect(provider.requests).toEqual([]);
         expect(JSON.stringify(statuses.at(-1))).toContain("stopped before the run started");
         expect(registry.getById("run-l")).toMatchObject({ status: "stopped_hard", finished: true });
@@ -22778,7 +22821,7 @@ describe("run ledger write-through (docs/reference/specs/run-history.md item 35)
     ]);
     expect(notes.some((n) => n.kind === "resumed")).toBe(false);
     expect(replies.some((r) => r.startsWith("❌"))).toBe(false);
-    expect(replies.at(-1)).toContain("aborted by an operator");
+    expect(replies.at(-1)).toBe("⏹ Stopped by user.");
     // No pi in the replacement: the first container's alone, and no second run.
     expect(containers).toHaveLength(1);
     expect(provider.requests).toHaveLength(0);
@@ -33635,15 +33678,15 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     });
     deps.operatorModel = decides({
       reason: "typed stop",
-      binds: [{ line: `runs stop ${runaway.id} --mode hard`, reason: "typed stop" }],
+      binds: [{ line: `runs stop ${runaway.id}`, reason: "typed stop" }],
     });
     const { io } = fakeIO();
-    await dispatch(deps, msg(`runs stop ${runaway.id} --mode hard`, "slack:UADMIN"), io);
+    await dispatch(deps, msg(`runs stop ${runaway.id}`, "slack:UADMIN"), io);
     expect(deps.operatorModel).toHaveBeenCalledTimes(2);
     expect(deps.invoked).toEqual(["runs.stop"]);
     expect(registry.snapshotById("r2")?.events.find((e) => e.type === "operator")).toMatchObject({
       outcome: "binds",
-      binds: [{ line: `runs stop ${runaway.id} --mode hard` }],
+      binds: [{ line: `runs stop ${runaway.id}` }],
     });
   });
 
@@ -33652,10 +33695,10 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
     wireCommands(deps);
     deps.operatorModel = decides({
       reason: "correct the flag",
-      question: { text: "Did you mean the mode flag?", proposal: "runs stop r9 --mode hard" },
+      question: { text: "Did you mean the status flag?", proposal: "runs list --status all" },
     });
     const { io, replies } = fakeIO();
-    await dispatch(deps, msg("runs stop r9 --modee hard", "slack:UADMIN"), io);
+    await dispatch(deps, msg("runs list --statuz all", "slack:UADMIN"), io);
     expect(deps.operatorModel).toHaveBeenCalledTimes(1);
     expect(deps.invoked).toEqual([]);
     expect(replies.some((r) => r.includes("Did you mean"))).toBe(true);

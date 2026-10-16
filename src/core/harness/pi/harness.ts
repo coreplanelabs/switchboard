@@ -966,6 +966,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
   const end = async (): Promise<void> => {
     if (sessionEnded) return;
     sessionEnded = true;
+    run.control?.setTurnStop(undefined);
     transport?.close();
     // The session's end (item 14): a call still open after an abort, or on a
     // turn pi never settled, is cut, not settled — pi is gone but its tree
@@ -1488,8 +1489,10 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     const hardStop = (): void => {
       if (hardStopped) return;
       hardStopped = true;
-      abortPi();
+      if (!run.control?.destructive) abortPi();
     };
+    // Stop asks pi to end its turn before runtime cleanup. Kill skips this write.
+    run.control?.setTurnStop(hardStop);
     const startWriteUp = (kind: WriteUp, instruction: string) => {
       writeUp = kind;
       // The finale's clock starts when pi is handed the wrap-up — the gate may
@@ -2544,7 +2547,7 @@ export async function runPiHarnessOpen(deps: PiHarnessDeps, run: HarnessRun): Pr
     }
     // The loop is over: its `run.agent` ends here, as the native loop's does,
     // before any follow-up turn — each of those opens a `run.agent` of its own.
-    agentSpan?.end(hardStopped ? "error" : "ok");
+    agentSpan?.end("ok");
     // What a follow-up turn drives: the root the loop settled on, and the live
     // transport — `transport` itself, never a copy, so a turn that re-attaches
     // in place (`recoverInPlace`) goes on writing to the fresh one.

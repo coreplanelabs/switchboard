@@ -1122,12 +1122,30 @@ export async function dispatch(
   // return value, so a run that THREW after a stop was requested still counts
   // as stopped.
   let registered: RunHandle | undefined;
+  // Final setup errors and refusals can outlive the run's card close. Fence
+  // their actual publication too, including a confirmation minted while Kill lands.
+  io = new Proxy(io, {
+    get(target, key) {
+      if (key === "reply")
+        return async (text: string) => {
+          if (!registered?.control.destructive) await target.reply(text);
+        };
+      if (key === "offer" && target.offer)
+        return async (offer: Parameters<NonNullable<ChannelIO["offer"]>>[0]) => {
+          if (!registered?.control.destructive) return target.offer!(offer);
+        };
+      const value: unknown = Reflect.get(target, key);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
   // The setup finalizer owns an advertised run until the model loop takes it.
   let runLoopStarted = false;
   // A successful attach belongs to this setup until the run loop takes it.
   // A failed setup releases an ordinary tree; a resumed pilot retains its
   // original checkout and row for recovery.
   let setupRound: RoundWorkspace | undefined;
+  let setupMachineNone = false;
   /** The run's setup result (record 0097): the attach's, the resumed row's,
    *  or the lost word a failed attach named — on the record whichever way
    *  the run ends. */
@@ -1190,9 +1208,12 @@ export async function dispatch(
       }
     | undefined;
   let pendingStop: StopMode | undefined;
-  const relayStop = (mode: StopMode) => {
+  let pendingKill = false;
+  const relayStop = (mode: StopMode, destructive = false) => {
+    pendingKill ||= destructive;
     if (registered) {
-      registered.control.requestStop(mode);
+      if (pendingKill) registered.control.requestKill();
+      else registered.control.requestStop(mode);
       return;
     }
     // A carried row starts its heartbeat before registerRun creates a control.
@@ -2488,6 +2509,7 @@ export async function dispatch(
     });
     if (profileGate.kind === "refused") return ended;
     let { profile } = profileGate;
+    setupMachineNone = profile.machine === "none";
     assertOriginalActionBudget();
 
     // A review resolves its repository state before admission. A pull request
@@ -3669,7 +3691,8 @@ export async function dispatch(
     registered = run;
     if (isolateExecutionSession) runSessionKey = `${sessionIdentity.key}:run:${runId}`;
     if (pendingStop) {
-      run.control.requestStop(pendingStop);
+      if (pendingKill) run.control.requestKill();
+      else run.control.requestStop(pendingStop);
       pendingStop = undefined;
     }
     // What the session seed could not do (session-log item 9), on the record
@@ -4188,13 +4211,15 @@ export async function dispatch(
             card.done(
               shell.close({
                 kind: "not_started",
-                icon: "⛔",
+                icon: "⏹",
                 reason: "stopped before the run started",
                 ...closeLines(clock(), false),
               }),
             ),
           { attrs: { outcome: "stopped_while_attaching" } },
         );
+        if (registered && !registered.control.destructive && registered.control.claimStopNotice())
+          await io.reply("⏹ Stopped by user.");
       }
       return ended;
     }
@@ -4435,13 +4460,14 @@ export async function dispatch(
           card.done(
             shell.close({
               kind: "not_started",
-              icon: "⛔",
+              icon: "⏹",
               reason: "stopped before the run started",
               ...closeLines(clock(), false),
             }),
           ),
         { attrs: { outcome: "stopped_during_head_check" } },
       );
+      if (!run.control.destructive && run.control.claimStopNotice()) await io.reply("⏹ Stopped by user.");
       return ended;
     }
     if (headGate.kind === "refused") return ended;
@@ -5463,6 +5489,11 @@ export async function dispatch(
       });
     return ended;
   } catch (err) {
+    if (registered?.control.destructive) return ended;
+    if (registered?.control.cancellationConfirmed) {
+      if (registered.control.claimStopNotice()) await io.reply("⏹ Stopped by user.").catch(() => {});
+      return { status: "stopped" };
+    }
     // Promotion can discover a fence after the attach's ownership check. The
     // new generation owns the same child: no model, reply or finish from here.
     if (fencedWhileAttaching) return ended;
@@ -5638,8 +5669,19 @@ export async function dispatch(
     // The backstop: a finished run no reply attempt reached (a fenced run, a
     // branch that returned early) is sealed with no `replyOk`, and any record
     // still registered is written.
-    if (!setupCustodyHeld) ending.drain(undefined);
-    if (setupRound && !resumeRowRetained) await setupRound.release({ hardStopped: true });
+    if (!setupCustodyHeld && !registered?.control.destructive) ending.drain(undefined);
+    const setupRelease = setupRound && !resumeRowRetained ? await setupRound.release({ hardStopped: true }) : undefined;
+    if (
+      registered &&
+      !runLoopStarted &&
+      !setupCustodyHeld &&
+      !fencedWhileAttaching &&
+      !resume &&
+      !restart &&
+      (setupRelease?.released || (!setupRound && setupMachineNone))
+    )
+      registered.control.confirmRuntimeShutdown();
+    if (!setupCustodyHeld && registered?.control.destructive) ending.drain(undefined);
     // …and a bearer minted for a run that never reached its loop (a head gate
     // after the attach, a throw in the prompt) is revoked here — the ending's
     // hook ran only for a run the loop finished.
@@ -5731,7 +5773,10 @@ export async function dispatch(
       admitted: fencedWhileAttaching || nativeClaimHeld ? undefined : admitted,
       // A stop that ended the attach counts as the loop's stop would: the
       // request ends `stopped`, and a follow-up queued during the wait is told.
-      stopCounts: !fencedWhileAttaching && (runLoopStarted || stoppedWhileAttaching !== undefined),
+      stopCounts:
+        registered?.control.destructive === true ||
+        registered?.control.cancellationConfirmed === true ||
+        (!fencedWhileAttaching && (runLoopStarted || stoppedWhileAttaching !== undefined)),
       control: registered?.control,
     });
     if (settled.kind === "dropped") await tellDropped(root, settled.pending);

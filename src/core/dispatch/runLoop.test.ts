@@ -4200,6 +4200,7 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       expect(s.releases).toEqual([]);
       s.ending.drain(undefined);
       await s.writer.settled();
+      expect((await s.store.get("run-l"))?.failure).toEqual({ kind: "harness_ending_unconfirmed" });
     },
   );
   it("a failed ending record drain retains the original workspace", async () => {
@@ -4240,6 +4241,27 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       await s.writer.settled();
     },
   );
+
+  it.each([true, false])("Kill records the original cleanup acknowledgment: released=%s", async (released) => {
+    const s = endingIn(async () => sessionAnswering("done"));
+    const out = answered(await runLoop(s.deps, s.ctx));
+    s.ctx.run.control.requestKill();
+    // This boundary returns the original executor's receipt, including unknown cleanup.
+    const ctx: RunLoopContext = s.ctx;
+    ctx.round.selection.executor.release = async () => ({ released });
+    ctx.round.release = async () => ({ released });
+    expect(s.ctx.run.control.runtimeShutdownConfirmed).toBe(false);
+    await out.releaseWorkspace();
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    expect({
+      confirmed: s.ctx.run.control.runtimeShutdownConfirmed,
+      failure: (await s.store.get("run-l"))?.failure,
+    }).toEqual({
+      confirmed: released,
+      failure: released ? undefined : { kind: "runtime_shutdown_unconfirmed" },
+    });
+  });
 
   it("a settled original producer ending retains the existing release path", async () => {
     const s = endingIn(async () => sessionAnswering("done"));

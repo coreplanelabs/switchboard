@@ -301,6 +301,7 @@ export function serveIndexEvents(
   subscribeIndex: (onEvent: (ev: IndexEvent) => void) => Unsubscribe,
   sink: SseSink,
   onLive?: () => void,
+  initialIds?: readonly string[],
 ): void {
   const buffered: string[] = [];
   let live = false;
@@ -314,6 +315,7 @@ export function serveIndexEvents(
   sink.writeHead(200, SSE_HEADERS);
   live = true;
   sink.write(SSE_PRELUDE); // flush the head immediately so onopen fires even with no active runs
+  if (initialIds) sink.write(`data: ${JSON.stringify({ type: "snapshot", ids: initialIds })}\n\n`);
   for (const chunk of buffered) sink.write(chunk);
   buffered.length = 0;
   sink.onClose(unsubscribe);

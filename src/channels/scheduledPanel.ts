@@ -110,21 +110,11 @@ export const ACTION_LABEL: Record<Exclude<ScheduleAction["type"], "run">, string
 export const OUTCOME_LABEL: Record<FiringOutcome, string> = {
   completed: "succeeded",
   failed: "failed",
-  stopped_soft: "stopped early",
-  stopped_hard: "killed",
+  stopped_soft: "stopped by user",
+  stopped_hard: "stopped by user",
   "no-run": "no run created",
   "ingress-error": "ingress error",
   misconfigured: "misconfigured — nothing ran",
-};
-
-export const OUTCOME_CLASS: Record<FiringOutcome, "ok" | "bad" | "warn"> = {
-  completed: "ok",
-  failed: "bad",
-  stopped_soft: "warn",
-  stopped_hard: "warn",
-  "no-run": "warn",
-  "ingress-error": "bad",
-  misconfigured: "bad",
 };
 
 /** How much of a firing's detail the one-line cell shows before an ellipsis;

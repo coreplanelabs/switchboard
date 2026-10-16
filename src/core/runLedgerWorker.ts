@@ -1148,6 +1148,7 @@ export class WorkerRunLedger implements RunLedger {
     return {
       ok: true,
       stop: (r.data.stop as StopMode | null | undefined) ?? null,
+      ...(r.data.destructive === true ? { destructive: true } : {}),
       phase: r.data.phase as HeartbeatResult["phase"],
       // The plane's open effects (orchestration-plane; record 0064; orchestration-plane item 7) — an
       // older state Worker's answer has no field, read as none offered.
@@ -1554,9 +1555,20 @@ export class WorkerRunLedger implements RunLedger {
     }
   }
 
-  async requestStop(runId: string, mode: StopMode): Promise<{ ok: boolean; ownerLive?: boolean }> {
+  async requestStop(
+    runId: string,
+    mode: StopMode,
+    opts?: { destructive: true },
+  ): Promise<{ ok: boolean; ownerLive?: boolean }> {
     this.checkIds(runId);
-    const r = await this.post("/runs/stop", { storeKey: this.opts.storeKey, runId, mode });
+    const r = await this.post("/runs/stop", {
+      storeKey: this.opts.storeKey,
+      runId,
+      mode,
+      ...(opts?.destructive ? { destructive: true } : {}),
+    });
+    if (opts?.destructive && r.data.ok === true && r.data.destructive !== true)
+      throw new PermanentStoreError("The history service did not confirm the Kill request.");
     return {
       ok: r.data.ok === true,
       ...(typeof r.data.ownerLive === "boolean" ? { ownerLive: r.data.ownerLive } : {}),

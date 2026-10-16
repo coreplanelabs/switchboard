@@ -24,14 +24,7 @@ import { InMemoryRunStore } from "../runStore.js";
 import { PermanentStoreError, TransientStoreError } from "../runStoreWorker.js";
 import { rememberStorageFailure } from "../storageFailureDiagnostic.js";
 import { createRunsService } from "../runsService.js";
-import {
-  HOSTED_STOP_REFUSAL,
-  registerRunsCommands,
-  runsCommands,
-  type RunReadDenied,
-  type RunsCommandDeps,
-  wrapEvent,
-} from "./runs.js";
+import { registerRunsCommands, runsCommands, type RunReadDenied, type RunsCommandDeps, wrapEvent } from "./runs.js";
 
 // Feature: docs/reference/specs/command-registry.md — the `runs.*` registrations — and
 // docs/reference/specs/authorization.md items 5–7: what a caller
@@ -394,6 +387,7 @@ describe("runs.* registrations", () => {
       "runs.findings",
       "runs.friction",
       "runs.get",
+      "runs.kill",
       "runs.list",
       "runs.search",
       "runs.settlecheck",
@@ -442,9 +436,10 @@ describe("runs.* registrations", () => {
       ok: false,
       error: "unauthorized",
     });
-    expect(
-      await registry.invoke("runs.stop", { args: ["fin-x"], options: { mode: "soft" } }, dispatchOnly, deps),
-    ).toMatchObject({ ok: false, error: "unauthorized" });
+    expect(await registry.invoke("runs.stop", { args: ["fin-x"], options: {} }, dispatchOnly, deps)).toMatchObject({
+      ok: false,
+      error: "unauthorized",
+    });
   });
 
   it("chat callers can list but not get/events/friction (surface opt-out)", async () => {
@@ -767,7 +762,7 @@ describe("channel visibility (authorization.md items 5–7)", () => {
       threadKey: "mcp:Y:t",
       channelVisibility: "machine",
     });
-    expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, pinnedX, deps)).toMatchObject({
+    expect(await registry.invoke("runs.stop", { args: [id], options: {} }, pinnedX, deps)).toMatchObject({
       ok: false,
       error: "not_found",
     });
@@ -784,9 +779,10 @@ describe("channel visibility (authorization.md items 5–7)", () => {
           { ok: false, error: "not_found" },
         );
     }
-    expect(
-      await registry.invoke("runs.stop", { args: ["fin-x"], options: { mode: "soft" } }, unpinned, deps),
-    ).toMatchObject({ ok: false, error: "not_found" });
+    expect(await registry.invoke("runs.stop", { args: ["fin-x"], options: {} }, unpinned, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
     // The one thing everyone may read: a run stamped `public` (member-of's public half).
     expect(await registry.invoke("runs.get", { args: ["fin-pub"], options: {} }, unpinned, deps)).toMatchObject({
       ok: true,
@@ -1230,7 +1226,7 @@ describe("runs.get / runs.events / runs.friction", () => {
       ["runs.get", { args: ["fin-x"] }],
       ["runs.events", { args: ["fin-x"] }],
       ["runs.friction", { args: ["fin-x"] }],
-      ["runs.stop", { args: [live.id], options: { mode: "soft" } }],
+      ["runs.stop", { args: [live.id], options: {} }],
     ];
     for (const [id, input] of invocations) {
       resolved = 0;
@@ -1241,6 +1237,45 @@ describe("runs.get / runs.events / runs.friction", () => {
 });
 
 describe("runs.stop", () => {
+  it.each(["soft", "hard"] as const)("keeps legacy mode=%s calls non-destructive", async (mode) => {
+    const { reg, registry, deps } = await setup();
+    const { id, control } = reg.create("legacy caller", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:legacy",
+    });
+    expect(await registry.invoke("runs.stop", { args: [id], options: { mode } }, cli, deps)).toEqual({
+      ok: true,
+      value: { id, mode, state: "stopping" },
+    });
+    expect({
+      requested: control.requested,
+      aborted: control.hardSignal.aborted,
+      destructive: control.destructive,
+    }).toEqual({ requested: mode, aborted: mode === "hard", destructive: false });
+    expect(await (await deps.runs()).getRun(id)).toMatchObject({ ok: true, value: { id, finished: false } });
+  });
+
+  it("kill deletes a saved run through the authorized command", async () => {
+    const { registry, deps, store } = await setup();
+    expect(await registry.invoke("runs.kill", { args: ["fin-x"], options: {} }, cli, deps)).toMatchObject({
+      ok: false,
+      error: "unavailable",
+      status: 503,
+    });
+    const saved = (await store.get("fin-x"))!;
+    expect(saved.events.at(-1)).toEqual({ type: "answer", text: "all done", seq: 4 });
+    await store.put({ ...saved, runtimeShutdownConfirmed: true });
+    expect(await registry.invoke("runs.kill", { args: ["fin-x"], options: {} }, cli, deps)).toEqual({
+      ok: true,
+      value: { id: "fin-x", mode: "kill", state: "deleted" },
+    });
+    expect(await registry.invoke("runs.get", { args: ["fin-x"], options: {} }, cli, deps)).toMatchObject({
+      ok: false,
+      error: "not_found",
+    });
+  });
+
   it("reports the original machine identity refusal from a validated shutdown observation", async () => {
     const { reg, registry, deps } = await setup();
     const { id } = reg.create("live", {
@@ -1256,7 +1291,7 @@ describe("runs.stop", () => {
       refusal: { phase: "resident", cause: "kill-unconfirmed" },
       observation: { step: "initial-kill", phase: "exit", cause: "exit-unconfirmed", exitCode: 2 },
     });
-    expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "hard" } }, reader, deps)).toMatchObject({
+    expect(await registry.invoke("runs.stop", { args: [id], options: {} }, reader, deps)).toMatchObject({
       ok: false,
       error: "unavailable",
       status: 503,
@@ -1265,10 +1300,12 @@ describe("runs.stop", () => {
   });
   it("finished run → conflict; unknown → not_found", async () => {
     const { registry, deps } = await setup();
-    expect(await registry.invoke("runs.stop", { args: ["fin-x"], options: { mode: "soft" } }, cli, deps)).toMatchObject(
-      { ok: false, error: "conflict", status: 409 },
-    );
-    expect(await registry.invoke("runs.stop", { args: ["nope"], options: { mode: "soft" } }, cli, deps)).toMatchObject({
+    expect(await registry.invoke("runs.stop", { args: ["fin-x"], options: {} }, cli, deps)).toMatchObject({
+      ok: false,
+      error: "conflict",
+      status: 409,
+    });
+    expect(await registry.invoke("runs.stop", { args: ["nope"], options: {} }, cli, deps)).toMatchObject({
       ok: false,
       error: "not_found",
       status: 404,
@@ -1289,7 +1326,7 @@ describe("runs.stop", () => {
       error: "unavailable",
       refusal: { phase: "resident", cause: "native-outcome-unknown" },
     });
-    expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "hard" } }, reader, deps)).toMatchObject({
+    expect(await registry.invoke("runs.stop", { args: [id], options: {} }, reader, deps)).toMatchObject({
       ok: false,
       error: "unavailable",
       status: 503,
@@ -1305,8 +1342,8 @@ describe("runs.stop", () => {
       userId: "slack:UALICE",
       threadKey: "slack:C1:t",
     });
-    const res = await registry.invoke("runs.stop", { args: [id], options: { mode: "hard" } }, reader, deps);
-    expect(res).toEqual({ ok: true, value: { id, mode: "hard", state: "stopping" } });
+    const res = await registry.invoke("runs.stop", { args: [id], options: {} }, reader, deps);
+    expect(res).toEqual({ ok: true, value: { id, mode: "stop", state: "stopping" } });
     const snap = reg.snapshot(id, token)!;
     const note = snap.events.find((e) => e.type === "run_note" && e.kind === "stop_requested") as Extract<
       RunEvent,
@@ -1316,7 +1353,7 @@ describe("runs.stop", () => {
   });
 
   // Feature: docs/reference/specs/live-view.md items 10 and 16 (record 0060) — a
-  // hosted parent takes no soft stop; `--mode hard` is the maintainer's escape.
+  // hosted Stop requires confirmed runner shutdown before reporting a terminal result.
   it.each([true, false])(
     "a hosted parent refuses the soft stop and hard closure requires a confirmed pipeline stop: %s",
     async (confirmed) => {
@@ -1345,26 +1382,10 @@ describe("runs.stop", () => {
       reg.publish(id, { type: "run_meta", agent: "ship", instanceId: "plan-stop", at: NOW });
       const runs = createRunsService({ registry: reg, store, units: instances, clock: () => NOW });
       deps.runs = async () => runs;
-      const soft = await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, reader, deps);
-      expect(soft).toMatchObject({
-        ok: false,
-        error: "conflict",
-        status: 409,
-        message: expect.stringContaining("--mode hard"),
-      });
-      // Record 0066: the refusal speaks the pipeline noun — no "hosted" —
-      // with the `--mode hard` escape wording intact.
-      expect(soft.ok ? undefined : soft.message).toBe(HOSTED_STOP_REFUSAL);
-      expect(HOSTED_STOP_REFUSAL).toContain("this run is a pipeline");
-      expect(HOSTED_STOP_REFUSAL).toContain(
-        "`--mode hard` is the escape: it seals the run failed and releases the thread",
-      );
-      expect(HOSTED_STOP_REFUSAL).not.toMatch(/hosted/i);
-      expect(reg.getById(id)!.finished).toBe(false);
-      const hard = await registry.invoke("runs.stop", { args: [id], options: { mode: "hard" } }, reader, deps);
+      const hard = await registry.invoke("runs.stop", { args: [id], options: {} }, reader, deps);
       if (confirmed) {
-        expect(hard).toEqual({ ok: true, value: { id, mode: "hard", state: "stopping" } });
-        expect(reg.getById(id)!).toMatchObject({ finished: true, status: "failed" });
+        expect(hard).toEqual({ ok: true, value: { id, mode: "stop", state: "stopped" } });
+        expect(reg.getById(id)!).toMatchObject({ finished: true, status: "stopped_hard" });
         expect((await instances.get("plan-stop"))?.stop).toEqual({ at: NOW });
       } else {
         expect(hard).toMatchObject({ ok: false, error: "unavailable", status: 503 });
@@ -1382,7 +1403,7 @@ describe("runs.stop", () => {
       threadKey: "mcp:Y:t",
       channelVisibility: "machine",
     });
-    expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, pinnedX, deps)).toMatchObject({
+    expect(await registry.invoke("runs.stop", { args: [id], options: {} }, pinnedX, deps)).toMatchObject({
       ok: false,
       error: "not_found",
     });
@@ -1391,12 +1412,12 @@ describe("runs.stop", () => {
       id: "mcp:y-bot",
       actor: actor("service", "mcp:y-bot", set("runs:read", "runs:write"), set("mcp:Y")),
     };
-    expect(await registry.invoke("runs.stop", { args: [id], options: { mode: "soft" } }, writerY, deps)).toMatchObject({
+    expect(await registry.invoke("runs.stop", { args: [id], options: {} }, writerY, deps)).toMatchObject({
       ok: true,
     });
   });
 
-  it("mode is required and must be soft|hard", async () => {
+  it("an unknown legacy mode is refused", async () => {
     const { registry, deps } = await setup();
     const res = await registry.invoke("runs.stop", { args: ["fin-x"], options: { mode: "nuke" } }, cli, deps);
     expect(res).toMatchObject({ ok: false, error: "invalid_input" });

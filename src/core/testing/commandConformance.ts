@@ -616,6 +616,10 @@ export const COMMAND_FIXTURES: Readonly<
     hints: { id: FIXTURE.reviewRun },
     why: "the run must be a finished PR review that recorded a git reading diff — the generic `id` hint is a live coding run",
   },
+  "runs.kill": {
+    hints: { id: FIXTURE.persistedRun },
+    why: "the saved run has positive original shutdown proof, so removal does not pretend a live fixture producer has stopped",
+  },
   "runs.unit": {
     hints: { unit: FIXTURE.unitKey },
     why: "the argument is the coordinator store's unit key `<instance>:<unit>` — the generic `unit` hint is a plan's bare unit id for `contract render`",

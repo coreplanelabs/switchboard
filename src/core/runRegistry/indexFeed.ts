@@ -13,10 +13,13 @@ import type { Unsubscribe } from "./state.js";
  * `subscribeIndex` listeners. `upsert` carries the run's current summary — the
  * same shape `listActive()` returns — and covers create, per-event activity, and
  * finish (a finished run is an `upsert` with `finished: true`, not a removal).
- * `removed` fires exactly once, when a finished run is finally evicted by the TTL
- * sweep — the only removal signal (eviction stays lazy/timer-free).
+ * `removed` also covers discarded runs. `deleted` distinguishes permanent
+ * history removal from TTL eviction. Its identity is for server-side visibility
+ * checks and is removed before the event reaches the browser.
  */
-export type IndexEvent = { type: "upsert"; run: RunSummary } | { type: "removed"; id: string };
+export type IndexRunIdentity = Pick<RunSummary, "channelId" | "userId" | "threadKey" | "repo" | "channelVisibility">;
+export type IndexEvent =
+  { type: "upsert"; run: RunSummary } | { type: "removed"; id: string; deleted?: true; identity?: IndexRunIdentity };
 
 /** A live subscriber to the runs-index feed. */
 export type IndexSubscriber = (event: IndexEvent) => void;

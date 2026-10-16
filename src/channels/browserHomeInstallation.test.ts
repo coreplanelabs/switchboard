@@ -1452,7 +1452,7 @@ describe("browser installation", () => {
       );
     const offered = await rpc(
       "runs_stop",
-      { id: live.id, mode: "hard" },
+      { id: live.id },
       {
         _meta: {
           [PROTOCOL_VERSION_META_KEY]: FORM_PROTOCOL_VERSION,
@@ -1526,7 +1526,7 @@ describe("browser installation", () => {
     });
     const held = await rpc(
       "runs_stop",
-      { id: second.id, mode: "hard" },
+      { id: second.id },
       {
         _meta: {
           [PROTOCOL_VERSION_META_KEY]: FORM_PROTOCOL_VERSION,

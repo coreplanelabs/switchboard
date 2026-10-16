@@ -1987,6 +1987,26 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     ],
   },
   {
+    "action": "stop:write",
+    "args": [
+      {
+        "name": "id",
+        "required": true,
+        "type": "string",
+      },
+    ],
+    "effect": "write",
+    "id": "runs.kill",
+    "options": [],
+    "resource": "command",
+    "surfaces": [
+      "chat",
+      "cli",
+      "http",
+      "mcp",
+    ],
+  },
+  {
     "action": "runs:read",
     "args": [],
     "effect": "read",
@@ -2145,7 +2165,7 @@ exports[`command conformance — catalogue fences > catalogue snapshot: id, argu
     "options": [
       {
         "name": "mode",
-        "required": true,
+        "required": false,
         "type": "enum",
         "values": [
           "soft",

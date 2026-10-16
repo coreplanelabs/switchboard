@@ -44,6 +44,7 @@ import { InMemoryRunStore } from "../core/runStore.js";
 import { InMemoryRunLedger } from "../core/runLedger/inMemory.js";
 import { createRunsService } from "../core/runsService.js";
 import type { IndexEvent } from "../core/runRegistry/indexFeed.js";
+import { deletionAwareIndexFeed, visibleIndexFeed } from "./liveView/viewer.js";
 import type { RunSummary } from "../core/runRegistry/projections.js";
 import { FIXTURE_SCHEDULES } from "./scheduledPanel.test.js";
 import { InMemoryScheduleStore, type ScheduleStore } from "../core/scheduleStore.js";
@@ -63,6 +64,156 @@ const result = (ok: boolean, summary: string): RunEvent => ({ type: "tool_result
 /** Every SSE response writes this prelude first, to flush the 200 head so the
  *  browser's EventSource fires `onopen` even before any data. */
 const PRELUDE = "retry: 3000\n\n";
+
+it("Kill removal reaches authorized history viewers without exposing other runs", () => {
+  const reg = new RunRegistry();
+  const seen: IndexEvent[] = [];
+  const visible: Predicate = { kind: "all" };
+  visibleIndexFeed((listener) => reg.subscribeIndex(listener), visible)((event) => seen.push(event));
+  const identity = { channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1" };
+  reg.discard("saved-run", true, identity);
+  reg.discard("private-worker", true, { ...identity, threadKey: "worker:instance:unit" });
+  expect(seen).toEqual([{ type: "removed", id: "saved-run", deleted: true }]);
+});
+
+it("shared Kill removes saved feed rows after registry eviction without exposing private rows", async () => {
+  vi.useFakeTimers();
+  const reg = fixedRegistry();
+  const store = new InMemoryRunStore();
+  const saved = { id: "saved-run", channelId: "slack:C1", userId: "slack:UALICE", threadKey: "slack:C1:1" };
+  const hidden = { ...saved, id: "private-run", threadKey: "worker:instance:unit" };
+  const seen: IndexEvent[] = [];
+  const warnings: string[] = [];
+  const warn = vi.spyOn(console, "warn").mockImplementation((line) => void warnings.push(String(line)));
+  let unavailable = true;
+  const close = visibleIndexFeed(
+    deletionAwareIndexFeed(
+      (listener) => reg.subscribeIndex(listener),
+      async (ids) => {
+        if (unavailable) throw new Error("deletion poll unavailable");
+        return store.deleted(ids);
+      },
+      [saved, hidden],
+    ),
+    { kind: "all" },
+  )((event) => seen.push(event));
+  try {
+    await store.delete(saved.id, { destructive: true });
+    await store.delete(hidden.id, { destructive: true });
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(warnings).toEqual(["[runs] deletion poll unavailable; row removals are unverified"]);
+    expect(seen).toEqual([]);
+    unavailable = false;
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(seen).toEqual([{ type: "removed", id: "saved-run", deleted: true }]);
+  } finally {
+    close();
+    warn.mockRestore();
+    vi.useRealTimers();
+  }
+});
+
+it("shared Kill removes a foreign row seeded by the active index", async () => {
+  vi.useFakeTimers();
+  const reg = fixedRegistry();
+  const store = new InMemoryRunStore();
+  const ledger = new InMemoryRunLedger(() => 1000);
+  const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+  const threadKey = "slack:C1:foreign";
+  await ledger.claim({
+    runId: id,
+    threadKey,
+    gen: "other",
+    startedAt: 1000,
+    leaseMs: 30_000,
+    meta: { agent: "review", channelId: "slack:C1", userId: "slack:UALICE", threadKey },
+    card: null,
+    system: "",
+    tools: [],
+    state: {},
+  });
+  const handler = liveOnlyHandler(reg, {
+    service: createRunsService({ registry: reg, store, ledger, clock: () => 1000 }),
+  });
+  const page = fakeReqRes("GET", "/runs");
+  handler(page.req, page.res);
+  await page.finished;
+  expect(indexSeedOf(page.body()).rows.map((row) => row.id)).toEqual([id]);
+  const feed = fakeReqRes("GET", "/runs?stream=1");
+  try {
+    handler(feed.req, feed.res);
+    await vi.waitFor(() => expect(feed.status).toBe(200));
+    await store.delete(id, { destructive: true });
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(feed.body()).toContain(JSON.stringify({ type: "removed", id, deleted: true }));
+  } finally {
+    feed.fireClose();
+    vi.useRealTimers();
+  }
+});
+
+it("an incomplete history read does not remove the browser's seeded rows", async () => {
+  const reg = fixedRegistry();
+  const store = new InMemoryRunStore();
+  const run = reg.create("visible live row");
+  vi.spyOn(store, "list").mockRejectedValue(new Error("history unavailable"));
+  const handler = liveOnlyHandler(reg, { service: createRunsService({ registry: reg, store, warn: () => {} }) });
+  const feed = fakeReqRes("GET", "/runs?stream=1&all=1");
+  try {
+    handler(feed.req, feed.res);
+    await vi.waitFor(() => expect(feed.status).toBe(200));
+    expect(feed.body()).toContain(`"id":"${run.id}"`);
+    expect(feed.body()).toContain('"label":"visible live row"');
+    expect(feed.body()).not.toContain('"type":"snapshot"');
+  } finally {
+    feed.fireClose();
+  }
+});
+
+it("an index feed reconciles a row killed between the page and the feed request", async () => {
+  const reg = fixedRegistry();
+  const store = new InMemoryRunStore();
+  const run = reg.create("previous page", {
+    channelId: "slack:C1",
+    userId: "slack:UALICE",
+    threadKey: "slack:C1:seed",
+  });
+  const handler = liveOnlyHandler(reg, { service: createRunsService({ registry: reg, store }) });
+  const page = fakeReqRes("GET", "/runs?all=1");
+  handler(page.req, page.res);
+  await page.finished;
+  expect(indexSeedOf(page.body()).rows.map((row) => row.id)).toEqual([run.id]);
+  await store.delete(run.id, { destructive: true });
+  reg.discard(run.id);
+  const feed = fakeReqRes("GET", "/runs?stream=1&all=1");
+  try {
+    handler(feed.req, feed.res);
+    await vi.waitFor(() => expect(feed.status).toBe(200));
+    expect(feed.body()).toContain(JSON.stringify({ type: "snapshot", ids: [] }));
+    expect(feed.body()).not.toContain(run.id);
+  } finally {
+    feed.fireClose();
+  }
+});
+
+it.each(["", "/events", "/friction"])("shared Kill hides a cached run from capability route %s", async (suffix) => {
+  const reg = fixedRegistry();
+  const store = new InMemoryRunStore();
+  const { id, token } = reg.create("old generation", {
+    channelId: "slack:C1",
+    userId: "slack:UALICE",
+    threadKey: "slack:C1:1",
+  });
+  reg.publish(id, { type: "answer", text: "removed answer" });
+  reg.finish(id, "completed");
+  reg.seal(id);
+  await store.delete(id, { destructive: true });
+  const handler = liveOnlyHandler(reg, { service: createRunsService({ registry: reg, store }) });
+  const response = fakeReqRes("GET", `/runs/${id}${suffix}?t=${token}`);
+  handler(response.req, response.res);
+  await response.finished;
+  expect({ status: response.status, body: response.body() }).toEqual({ status: 404, body: "no run found" });
+});
 
 /** Fixed assets so shell output is deterministic. */
 const page: PageSender = makePageSender(
@@ -1004,7 +1155,7 @@ describe("createLiveViewHandler (node:http)", () => {
     await invalidStored.finished;
     expect(invalidStored.status).toBe(404);
     expect((seedOf(invalidStored.body()) as RunNotFoundSeed).page).toBe("runNotFound");
-    const stop = fakeReqRes("POST", `/runs/${restored.id}/stop?t=&mode=hard`);
+    const stop = fakeReqRes("POST", `/runs/${restored.id}/stop?t=&mode=stop`);
     handler(stop.req, stop.res);
     await stop.finished;
     expect(stop.status).toBe(404);
@@ -1238,15 +1389,17 @@ describe("createLiveViewHandler (node:http)", () => {
 
     const sseReq = fakeReqRes("GET", "/runs?stream=1");
     handler(sseReq.req, sseReq.res);
+    await vi.waitFor(() => expect(sseReq.status).toBe(200));
     expect(sseReq.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
   });
 
-  it("streams the index SSE feed at /runs?stream=1: replays active runs, forwards new ones, unsubscribes on close", () => {
+  it("streams the index SSE feed at /runs?stream=1: replays active runs, forwards new ones, unsubscribes on close", async () => {
     const reg = fixedRegistry();
     reg.create("coding · owner/repo");
     const handler = liveOnlyHandler(reg);
     const t = fakeReqRes("GET", "/runs?stream=1");
     expect(handler(t.req, t.res)).toBe(true);
+    await vi.waitFor(() => expect(t.status).toBe(200));
     expect(t.status).toBe(200);
     expect(t.headers["content-type"]).toBe("text/event-stream; charset=utf-8");
     expect(t.body()).toContain('"label":"coding · owner/repo"');
@@ -1267,13 +1420,14 @@ describe("createLiveViewHandler (node:http)", () => {
     expect(t.status).toBe(405);
   });
 
-  it("SSE heartbeat: writes a keepalive comment on an idle live stream, then stops on client close", () => {
+  it("SSE heartbeat: writes a keepalive comment on an idle live stream, then stops on client close", async () => {
     vi.useFakeTimers();
     try {
       const reg = fixedRegistry();
       const handler = liveOnlyHandler(reg);
       const t = fakeReqRes("GET", "/runs?stream=1");
       expect(handler(t.req, t.res)).toBe(true);
+      await vi.waitFor(() => expect(t.status).toBe(200));
       expect(t.status).toBe(200);
       expect(t.body()).not.toContain(": hb");
 
@@ -1359,8 +1513,26 @@ describe("GET /runs/:id/friction — read-only friction diagnosis", () => {
 });
 
 // Feature: docs/reference/specs/live-view.md item 10 — run control from /runs:
-// `POST /runs/:id/stop?t=…&mode=soft|hard` behind the same token gate.
+// `POST /runs/:id/stop?t=…&mode=stop|hard` behind the same token gate.
 describe("run control: POST /runs/:id/stop", () => {
+  it.each(["soft", "hard"] as const)("accepts legacy HTTP mode=%s without deleting the run", async (mode) => {
+    const reg = fixedRegistry();
+    const { id, token, control } = reg.create();
+    const response = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=${mode}`);
+    liveOnlyHandler(reg)(response.req, response.res);
+    await response.finished;
+    expect({ status: response.status, body: JSON.parse(response.body()) }).toEqual({
+      status: 200,
+      body: { id, mode, state: "stopping" },
+    });
+    expect({
+      requested: control.requested,
+      aborted: control.hardSignal.aborted,
+      destructive: control.destructive,
+    }).toEqual({ requested: mode, aborted: mode === "hard", destructive: false });
+    expect(reg.getById(id)).toMatchObject({ id, finished: false });
+  });
+
   it("parseRunRoute matches the stop route", () => {
     expect(parseRunRoute("/runs/abc/stop")).toEqual({ id: "abc", kind: "stop" });
     expect(parseRunRoute("/runs/abc/stop/")).toEqual({ id: "abc", kind: "stop" });
@@ -1369,22 +1541,22 @@ describe("run control: POST /runs/:id/stop", () => {
   it("soft: drives the run's control, answers JSON {stopping, mode}", async () => {
     const reg = fixedRegistry();
     const { id, token, control } = reg.create();
-    const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=soft`);
+    const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=stop`);
     expect(liveOnlyHandler(reg)(t.req, t.res)).toBe(true);
     await t.finished;
     expect(t.status).toBe(200);
     expect(t.headers["content-type"]).toContain("application/json");
     expect(t.headers["cache-control"]).toBe("no-store");
-    expect(JSON.parse(t.body())).toEqual({ id, mode: "soft", state: "stopping" });
-    expect(control.requested).toBe("soft");
-    expect(control.hardSignal.aborted).toBe(false);
+    expect(JSON.parse(t.body())).toEqual({ id, mode: "stop", state: "stopping" });
+    expect(control.requested).toBe("hard");
+    expect(control.hardSignal.aborted).toBe(true);
   });
 
   // Feature: docs/decisions/0053 — a stop is a write: refused while viewing, control untouched.
   it("a viewer viewing as a person is refused the token-path stop with 403 and the one sentence, and the run's control is never touched", () => {
     const reg = fixedRegistry();
     const { id, token, control } = reg.create();
-    const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=hard`);
+    const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=stop`);
     expect(liveOnlyHandler(reg)(t.req, t.res, VIEWING_AS_IVY)).toBe(true);
     expect(t.status).toBe(403);
     expect(t.headers["content-type"]).toContain("application/json");
@@ -1399,11 +1571,11 @@ describe("run control: POST /runs/:id/stop", () => {
   it("hard: aborts the run's hard signal immediately", async () => {
     const reg = fixedRegistry();
     const { id, token, control } = reg.create();
-    const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=hard`);
+    const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=stop`);
     liveOnlyHandler(reg)(t.req, t.res);
     await t.finished;
     expect(t.status).toBe(200);
-    expect(JSON.parse(t.body()).mode).toBe("hard");
+    expect(JSON.parse(t.body()).mode).toBe("stop");
     expect(control.hardSignal.aborted).toBe(true);
   });
 
@@ -1436,7 +1608,7 @@ describe("run control: POST /runs/:id/stop", () => {
         })
       ).ok,
     ).toBe(true);
-    const first = fakeReqRes("POST", `/runs/${before.id}/stop?t=${before.token}&mode=hard`);
+    const first = fakeReqRes("POST", `/runs/${before.id}/stop?t=${before.token}&mode=stop`);
     handler(first.req, first.res);
     await first.finished;
     expect(first.status).toBe(200);
@@ -1459,7 +1631,7 @@ describe("run control: POST /runs/:id/stop", () => {
       ).ok,
     ).toBe(true);
     await ledger.handoff("g-SAME", [during.id], { pausedForRetry: true });
-    const second = fakeReqRes("POST", `/runs/${during.id}/stop?t=${during.token}&mode=hard`);
+    const second = fakeReqRes("POST", `/runs/${during.id}/stop?t=${during.token}&mode=stop`);
     handler(second.req, second.res);
     await second.finished;
     expect(second.status).toBe(200);
@@ -1491,7 +1663,7 @@ describe("run control: POST /runs/:id/stop", () => {
       tools: [],
     });
     vi.spyOn(ledger, "requestStop").mockRejectedValueOnce(new Error("unavailable"));
-    const response = fakeReqRes("POST", `/runs/${run.id}/stop?t=${run.token}&mode=hard`);
+    const response = fakeReqRes("POST", `/runs/${run.id}/stop?t=${run.token}&mode=stop`);
     handler(response.req, response.res);
     await response.finished;
     expect(response.status).toBe(503);
@@ -1517,10 +1689,10 @@ describe("run control: POST /runs/:id/stop", () => {
     const { id, control } = reg.create();
     const handler = liveOnlyHandler(reg);
     for (const url of [
-      `/runs/${id}/stop?t=wrong&mode=hard`,
-      `/runs/${id}/stop?t=&mode=hard`,
-      `/runs/${id}/stop?mode=hard`,
-      `/runs/nope/stop?t=tok-1&mode=hard`,
+      `/runs/${id}/stop?t=wrong&mode=stop`,
+      `/runs/${id}/stop?t=&mode=stop`,
+      `/runs/${id}/stop?mode=stop`,
+      `/runs/nope/stop?t=tok-1&mode=stop`,
     ]) {
       const t = fakeReqRes("POST", url);
       handler(t.req, t.res);
@@ -1535,7 +1707,7 @@ describe("run control: POST /runs/:id/stop", () => {
     const reg = fixedRegistry();
     const { id, token } = reg.create();
     reg.finish(id);
-    const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=soft`);
+    const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=stop`);
     liveOnlyHandler(reg)(t.req, t.res);
     await t.finished;
     expect(t.status).toBe(409);
@@ -1553,7 +1725,7 @@ describe("run control: POST /runs/:id/stop", () => {
       hosted: true,
     });
     const handler = liveOnlyHandler(reg);
-    for (const mode of ["soft", "hard"]) {
+    for (const mode of ["stop", "kill"]) {
       const t = fakeReqRes("POST", `/runs/${id}/stop?t=${token}&mode=${mode}`);
       handler(t.req, t.res);
       await t.finished;
@@ -1591,19 +1763,13 @@ describe("run control: POST /runs/:id/stop", () => {
     const handler = liveOnlyHandler(reg, {
       service: createRunsService({ registry: reg, store: null, units: instances }),
     });
-    const soft = fakeReqRes("POST", `/runs/${id}/stop?mode=soft`);
-    handler(soft.req, soft.res);
-    await soft.finished;
-    expect(soft.status).toBe(409);
-    expect(soft.body()).toContain("is a pipeline; its units run in their own threads");
-    expect(reg.getById(id)!.finished).toBe(false);
-    const hard = fakeReqRes("POST", `/runs/${id}/stop?mode=hard`);
+    const hard = fakeReqRes("POST", `/runs/${id}/stop?mode=stop`);
     handler(hard.req, hard.res);
     await hard.finished;
     expect(hard.status).toBe(confirmed ? 200 : 503);
     if (confirmed) {
-      expect(JSON.parse(hard.body())).toEqual({ id, mode: "hard", state: "stopping" });
-      expect(reg.getById(id)!).toMatchObject({ finished: true, status: "failed" });
+      expect(JSON.parse(hard.body())).toEqual({ id, mode: "stop", state: "stopped" });
+      expect(reg.getById(id)!).toMatchObject({ finished: true, status: "stopped_hard" });
       expect((await instances.get("plan-stop"))?.stop).toMatchObject({ at: expect.any(Number) });
     } else {
       expect(reg.getById(id)!).toMatchObject({ finished: false });
@@ -1635,7 +1801,7 @@ describe("run control: POST /runs/:id/stop", () => {
   it("is POST-only: GET on the stop route is 405 with allow: POST, and never stops the run", () => {
     const reg = fixedRegistry();
     const { id, token, control } = reg.create();
-    const t = fakeReqRes("GET", `/runs/${id}/stop?t=${token}&mode=hard`);
+    const t = fakeReqRes("GET", `/runs/${id}/stop?t=${token}&mode=stop`);
     liveOnlyHandler(reg)(t.req, t.res);
     expect(t.status).toBe(405);
     expect(t.headers.allow).toBe("POST");
@@ -2120,12 +2286,12 @@ describe("live view on RunsService: history pages + index toggle", () => {
     it("`POST /runs/:id/stop` tokenless → 409 for a persisted run, 404 for a live unfinished run (control untouched)", async () => {
       const h = harness();
       await h.store!.put(record("r1"));
-      const persisted = fakeReqRes("POST", "/runs/r1/stop?mode=soft");
+      const persisted = fakeReqRes("POST", "/runs/r1/stop?mode=stop");
       h.handler(persisted.req, persisted.res);
       await done(persisted);
       expect(persisted.status).toBe(409);
       const run = h.registry.create();
-      const live = fakeReqRes("POST", `/runs/${run.id}/stop?mode=hard`);
+      const live = fakeReqRes("POST", `/runs/${run.id}/stop?mode=stop`);
       h.handler(live.req, live.res);
       await done(live);
       expect(live.status).toBe(404);
@@ -2137,7 +2303,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
       const h = harness();
       await h.store!.put(record("r1"));
       const run = h.registry.create();
-      for (const url of ["/runs/r1/stop?mode=soft", `/runs/${run.id}/stop?mode=hard`, "/runs/nope/stop?mode=soft"]) {
+      for (const url of ["/runs/r1/stop?mode=stop", `/runs/${run.id}/stop?mode=stop`, "/runs/nope/stop?mode=stop"]) {
         const t = fakeReqRes("POST", url);
         h.handler(t.req, t.res, VIEWING_AS_IVY);
         await done(t);
@@ -2150,13 +2316,13 @@ describe("live view on RunsService: history pages + index toggle", () => {
     it("a valid token still stops a live run (200) and 409s a finished one — the token path is unchanged", async () => {
       const h = harness();
       const run = h.registry.create();
-      const ok = fakeReqRes("POST", `/runs/${run.id}/stop?t=${run.token}&mode=soft`);
+      const ok = fakeReqRes("POST", `/runs/${run.id}/stop?t=${run.token}&mode=stop`);
       h.handler(ok.req, ok.res);
       await done(ok);
       expect(ok.status).toBe(200);
-      expect(JSON.parse(ok.body())).toEqual({ id: run.id, mode: "soft", state: "stopping" });
+      expect(JSON.parse(ok.body())).toEqual({ id: run.id, mode: "stop", state: "stopping" });
       h.registry.finish(run.id);
-      const fin = fakeReqRes("POST", `/runs/${run.id}/stop?t=${run.token}&mode=soft`);
+      const fin = fakeReqRes("POST", `/runs/${run.id}/stop?t=${run.token}&mode=stop`);
       h.handler(fin.req, fin.res);
       await done(fin);
       expect(fin.status).toBe(409);
@@ -2282,12 +2448,12 @@ describe("live view on RunsService: history pages + index toggle", () => {
       await done(friction);
       expect(friction.status).toBe(200);
       expect(JSON.parse(friction.body())).toMatchObject({ id: "far-1", finished: false });
-      const stop = fakeReqRes("POST", "/runs/far-1/stop?mode=soft");
+      const stop = fakeReqRes("POST", "/runs/far-1/stop?mode=stop");
       h.handler(stop.req, stop.res);
       await done(stop);
       expect(stop.status).toBe(200);
-      expect(JSON.parse(stop.body())).toEqual({ id: "far-1", mode: "soft", state: "stopping" });
-      expect(ledger.live.get("far-1")!.stop).toBe("soft");
+      expect(JSON.parse(stop.body())).toEqual({ id: "far-1", mode: "stop", state: "stopping" });
+      expect(ledger.live.get("far-1")!.stop).toBe("hard");
     });
 
     it("a provisional replay ends for work folds and its reconnecting follow stops as unavailable", async () => {
@@ -2605,12 +2771,13 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect((await index(h, "/runs?mine=0", scoped)).ids).toEqual([own.id]);
       const feed = fakeReqRes("GET", "/runs?stream=1&mine=0");
       h.handler(feed.req, feed.res, scoped);
+      await vi.waitFor(() => expect(feed.status).toBe(200));
       expect(feed.body()).toContain(`"id":"${own.id}"`);
       expect(feed.body()).not.toContain(`"id":"${peer.id}"`);
       feed.fireClose();
       for (const suffix of ["", "/friction", "/events"])
         expect((await request(h, `/runs/${peer.id}${suffix}?t=${peer.token}`, scoped)).status).toBe(404);
-      expect((await request(h, `/runs/${peer.id}/stop?t=${peer.token}&mode=soft`, scoped, "POST")).status).toBe(404);
+      expect((await request(h, `/runs/${peer.id}/stop?t=${peer.token}&mode=stop`, scoped, "POST")).status).toBe(404);
       expect(peer.control.requested).toBeUndefined();
     });
 
@@ -2635,13 +2802,13 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect((await index(h, "/runs?all=1&mine=1", all)).ids).toEqual(["assigned", "peer"]);
       const run = h.registry.create("Assigned run", { ...PUBLIC, userId: "slack:UA", threadKey: "assigned" });
       expect((await request(h, `/runs/${run.id}?t=${run.token}`, viewed)).status).toBe(200);
-      for (const query of [`?t=${run.token}&mode=soft`, "?mode=soft"])
+      for (const query of [`?t=${run.token}&mode=stop`, "?mode=stop"])
         expect((await request(h, `/runs/${run.id}/stop${query}`, viewed, "POST")).status).toBe(403);
       expect(run.control.requested).toBeUndefined();
-      const stopped = await request(h, `/runs/${run.id}/stop?t=${run.token}&mode=soft`, all, "POST");
+      const stopped = await request(h, `/runs/${run.id}/stop?t=${run.token}&mode=stop`, all, "POST");
       expect(stopped.status).toBe(200);
-      expect(JSON.parse(stopped.body())).toEqual({ id: run.id, mode: "soft", state: "stopping" });
-      expect(run.control.requested).toBe("soft");
+      expect(JSON.parse(stopped.body())).toEqual({ id: run.id, mode: "stop", state: "stopping" });
+      expect(run.control.requested).toBe("hard");
       expect(all.actor.id).toBe("access:admin");
     });
 
@@ -2671,6 +2838,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
 
       const feed = fakeReqRes("GET", "/runs?stream=1");
       h.handler(feed.req, feed.res, alice);
+      await vi.waitFor(() => expect(feed.status).toBe(200));
       expect(feed.status).toBe(200);
       expect(feed.body()).toContain(`"id":"${pub.id}"`);
       expect(feed.body()).not.toContain(`"id":"${priv.id}"`); // the replay on connect is filtered too
@@ -2700,6 +2868,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect((await index(h, "/runs?all=1", admin)).ids).toEqual([]);
       const feed = fakeReqRes("GET", "/runs?stream=1");
       h.handler(feed.req, feed.res, admin);
+      await vi.waitFor(() => expect(feed.status).toBe(200));
       expect(feed.body()).not.toContain(worker.id);
       expect(feed.body()).not.toContain(worker.token);
       expect(feed.body()).not.toContain("private child prompt");
@@ -2728,7 +2897,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
         const t = await request(h, url, alice);
         expect([url, t.status, t.body()]).toEqual([url, 404, "no run found"]);
       }
-      const stop = await request(h, "/runs/priv/stop?mode=soft", alice, "POST");
+      const stop = await request(h, "/runs/priv/stop?mode=stop", alice, "POST");
       expect([stop.status, stop.body()]).toEqual([404, "no run found"]);
       // Who, which route, why — never the run id, never in the reply.
       // The read routes deny on the run's attributes (alice is not a member); the
@@ -2741,11 +2910,11 @@ describe("live view on RunsService: history pages + index toggle", () => {
       // A native member and the admin read it; the admin's tokenless stop is the 409 a finished run gives.
       expect((await request(h, "/runs/priv", bob)).status).toBe(200);
       expect((await request(h, "/runs/priv", admin)).status).toBe(200);
-      expect((await request(h, "/runs/priv/stop?mode=soft", admin, "POST")).status).toBe(409);
+      expect((await request(h, "/runs/priv/stop?mode=stop", admin, "POST")).status).toBe(409);
       // The tokenless stop is a WRITE (`runs.stop` on the command surface asks
       // `runs:write`): bob may read the run but not stop it — the same 404, with
       // the missing grant on the audit line.
-      expect((await request(h, "/runs/priv/stop?mode=soft", bob, "POST")).status).toBe(404);
+      expect((await request(h, "/runs/priv/stop?mode=stop", bob, "POST")).status).toBe(404);
       expect(audit.mock.calls.slice(4).map(([e]) => e)).toEqual([
         { route: "page", runId: "priv", identity: "access:bob" },
         { route: "page", runId: "priv", identity: "access:admin" },
@@ -2790,6 +2959,7 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect((await index(h, "/runs", linked)).ids).toEqual([other.id, own.id].sort());
       const feed = fakeReqRes("GET", "/runs?stream=1&mine=1");
       h.handler(feed.req, feed.res, linked);
+      await vi.waitFor(() => expect(feed.status).toBe(200));
       expect(feed.body()).toContain(`"id":"${own.id}"`);
       expect(feed.body()).not.toContain(`"id":"${other.id}"`);
       feed.fireClose();
@@ -2823,10 +2993,11 @@ describe("live view on RunsService: history pages + index toggle", () => {
       expect((await request(h, `/runs/${live.id}/friction?t=${live.token}`, nobody)).status).toBe(200);
       const stream = fakeReqRes("GET", `/runs/${live.id}/events?t=${live.token}`);
       h.handler(stream.req, stream.res, nobody);
+      await vi.waitFor(() => expect(stream.status).toBe(200));
       expect(stream.status).toBe(200);
       expect(stream.body()).toContain("$ npm test");
       stream.fireClose();
-      expect((await request(h, `/runs/${live.id}/stop?t=${live.token}&mode=soft`, nobody, "POST")).status).toBe(200);
+      expect((await request(h, `/runs/${live.id}/stop?t=${live.token}&mode=stop`, nobody, "POST")).status).toBe(200);
     });
   });
 });
@@ -3589,7 +3760,7 @@ describe("the unit page and what a run is the parent of (item 28)", () => {
       userId: instance.userId,
       threadKey: "slack:C1:control",
     });
-    const stop = fakeReqRes("POST", `/runs/${active.id}/stop?t=${active.token}&mode=soft`);
+    const stop = fakeReqRes("POST", `/runs/${active.id}/stop?t=${active.token}&mode=stop`);
     h.handler(stop.req, stop.res, person);
     await stop.finished;
     expect(stop.status).toBe(403);

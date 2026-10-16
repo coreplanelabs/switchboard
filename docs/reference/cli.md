@@ -87,7 +87,8 @@ One table per group, in registration order. "Surfaces" is where that command can
 | `runs friction <id>` | One run's friction diagnosis (live: computed now; persisted: as stored). | CLI · HTTP · MCP |
 | `runs check <id> <call> --phase <metadata\|command>` | Inspect an original recorded check without running it again; saved output is wrapped as untrusted content. | CLI · HTTP · MCP |
 | `runs settlecheck <id> <call> --phase <metadata\|command>` | Retire one original check after its run finishes, only when saved proof verifies that the original process ended. | CLI · HTTP · MCP |
-| `runs stop <id> --mode <soft\|hard>` | Stop your own live run, or another run with operator permission (`--mode soft` = finish the current step; `hard` = abort now). A pipeline refuses soft — `--mode hard` seals it failed and releases its thread. Records the caller as the requester. | every surface |
+| `runs stop <id> [--mode <soft\|hard>]` | End the current turn, clean up the runtime, and keep the run as stopped by user. Records who requested the stop. Needs stop permission for the run. | every surface |
+| `runs kill <id>` | Kill the runtime without a graceful turn shutdown and delete the run from live and saved run views. Destructive. Needs stop permission for the run. | every surface |
 | `runs unit <unit>` | A ship unit's runs in round order — its thread's, live and finished, each with its round — from one read. | every surface |
 | `runs children <id>` | The runs one run spawned — a conductor's children, live and finished — oldest started first. | every surface |
 | `runs findings <pr>` | A pull request's findings ledger — every review finding by id with its severity, where it was raised, what the coding run recorded against it and whether the next review agreed — read from the run records alone. | every surface |
