@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { agentSmokeTransport, parseSmokeConfig, runAgentSmoke } from "./agentSmoke.js";
+import { handleMcpRequest } from "../channels/mcp.js";
+import { ALL_GRANTS } from "../core/authz/grants.js";
+import { CommandRegistry, bindCommands } from "../core/commandRegistry.js";
+import { registerRunsCommands, type RunsCommandDeps } from "../core/commands/runs.js";
+import type { CoreDeps } from "../core/dispatcher.js";
+import { InMemoryOrganizationStore } from "../core/organization/memory.js";
+import { OrganizationService } from "../core/organization/service.js";
 import { MCP_PROTOCOL_VERSION } from "../mcp/client.js";
 
 import { commit, config, fixture, head } from "./testing/agentSmoke.js";
@@ -668,7 +675,12 @@ describe("bounded agent smoke", () => {
       transport.readRun = async (id) => ({
         ...((await read(id)) as object),
         model: "openrouter/openai/gpt-5.3-codex",
-        events: [...((await read(id)) as { events: unknown[] }).events, ...events],
+        events: [
+          ...((await read(id)) as { events: Array<{ type: string }> }).events.filter(
+            (event) => event.type !== "run_meta",
+          ),
+          ...events,
+        ],
       });
       return runAgentSmoke({
         config: { ...config, model: "openrouter/openai/gpt-5.3-codex", requireVouchedControls: true },
@@ -1165,8 +1177,357 @@ describe("bounded agent smoke", () => {
       expect(init?.signal).toBeInstanceOf(AbortSignal);
     }
     const body = JSON.parse(String(fetch.mock.calls.find(([url]) => String(url).endsWith("/ingress"))?.[1]?.body));
-    expect(body).toEqual({ text: "question", channel: "smoke", thread: "smoke-1", async: true });
+    expect(body).toEqual({
+      text: "question",
+      channel: "smoke",
+      thread: "smoke-1",
+      async: true,
+      idempotencyKey: "smoke-1",
+    });
   });
+
+  it.each(["allowed", "read-only"])(
+    "runs MCP Review through the maintained client and real public controller with no HTTP review admission: %s",
+    async (access) => {
+      const producer = fixture(),
+        store = new InMemoryOrganizationStore(() => 1);
+      const org = new OrganizationService({
+        store,
+        directory: store.directory,
+        mappings: [{ source: "mcp", issuer: "fixture:mcp", tenant: null, organization: "org:fixture" }],
+        limits: {
+          pendingPerActor: 5,
+          pendingPerSource: 10,
+          pendingPerOrganization: 20,
+          reservedReconciliation: 1,
+          contentTtlMs: 90,
+          receiptTtlMs: 365,
+        },
+        authorize: async () => true,
+      });
+      const commands = new CommandRegistry<RunsCommandDeps>();
+      registerRunsCommands(commands);
+      const deps = {
+        build: { commit, version: "1.0.0" },
+        config: {
+          grantsFor: () => (access === "allowed" ? ALL_GRANTS : { ...ALL_GRANTS, actions: new Set(["runs:read"]) }),
+          config: {},
+        },
+      } as unknown as CoreDeps;
+      const actual: Array<{ source: string; userId: string; threadKey: string }> = [];
+      const fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: deps.build });
+        const body = String(init?.body);
+        if (String(url).endsWith("/ingress")) {
+          const args = JSON.parse(body),
+            id = args.thread.split("-").at(-1);
+          const run = (await producer.transport.request(
+            { id, agent: id === "answer" ? "general" : "explore", minutes: id === "answer" ? 4 : 15, text: args.text },
+            args.thread,
+          )) as { run: { id: string } };
+          actual.push({ source: "http", userId: "http:smoke", threadKey: `http:smoke:${args.thread}` });
+          return Response.json(
+            { runId: run.run.id, threadKey: `http:smoke:${args.thread}`, build: deps.build },
+            { status: 202 },
+          );
+        }
+        const response = await handleMcpRequest(
+          { method: "POST", headers: { authorization: "Bearer fixture-only" }, body },
+          deps,
+          {
+            auth: { tokens: { "fixture-only": { subject: "smoke", channel: "smoke" } } },
+            commands: bindCommands(commands, { runs: async () => producer.service }),
+            admit: async (msg, _io, evidence) => {
+              actual.push({ source: evidence.source, userId: msg.userId, threadKey: msg.threadKey! });
+              const admitted = await org.admit(
+                {
+                  source: "mcp",
+                  kind: "service",
+                  organizations: ["org:fixture"],
+                  identity: { issuer: "fixture:mcp", tenant: null, subject: evidence.identity.subject },
+                },
+                {
+                  key: msg.messageId!,
+                  sourceEvent: msg.messageId!,
+                  content: msg.text,
+                  destination: { kind: "broad" },
+                  context: [],
+                  target: null,
+                  workload: "message",
+                },
+              );
+              if (admitted.status !== "receipt") return admitted;
+              const finished = (await producer.transport.request(
+                { id: "review", agent: "review", minutes: 15, text: msg.text, transport: "mcp" },
+                "release-1-review",
+              )) as { run: { id: string } };
+              const lease = await store.execute({
+                action: "claim",
+                organization: "org:fixture",
+                owner: "original",
+                leaseMs: 30,
+              });
+              if (lease.status !== "state" || !lease.state.lease) throw new Error("No original lease");
+              return store.execute({
+                action: "settle",
+                organization: "org:fixture",
+                owner: "original",
+                generation: lease.state.lease.generation,
+                receiptId: admitted.receipt.id,
+                status: "accepted",
+                ownerRunId: finished.run.id,
+                reason: null,
+                reply: null,
+                contentTtlMs: 90,
+              });
+            },
+          },
+        );
+        return response.body === undefined
+          ? new Response(null, { status: response.status })
+          : Response.json(response.body, { status: response.status });
+      }) as typeof globalThis.fetch;
+      const selected = {
+        ...config,
+        model: "openai/gpt-6.1-sol",
+        review: { ...config.review, transport: "mcp", effort: "high" },
+      };
+      const result = await runAgentSmoke({
+        config: selected,
+        expectedCommit: commit,
+        thread: "release-1",
+        transport: agentSmokeTransport({
+          origin: "https://bot.example.test",
+          healthUrl: "https://bot.example.test/healthz",
+          token: "fixture-only",
+          config: selected,
+          fetch,
+        }),
+      });
+      if (access === "read-only") {
+        expect(result).toMatchObject({
+          capabilityOutcome: "incomplete",
+          scenarios: [
+            { outcome: "passed" },
+            { outcome: "passed" },
+            { outcome: "incomplete", reason: "mcp_access_unproven", requestKey: "release-1-review" },
+          ],
+        });
+        expect(actual).toEqual([
+          { source: "http", userId: "http:smoke", threadKey: "http:smoke:release-1-answer" },
+          { source: "http", userId: "http:smoke", threadKey: "http:smoke:release-1-workspace" },
+        ]);
+        return;
+      }
+      expect(result.capabilityOutcome).toBe("passed");
+      expect(actual).toEqual([
+        { source: "http", userId: "http:smoke", threadKey: "http:smoke:release-1-answer" },
+        { source: "http", userId: "http:smoke", threadKey: "http:smoke:release-1-workspace" },
+        { source: "mcp", userId: "mcp:smoke", threadKey: "mcp:smoke:release-1-review" },
+      ]);
+      expect(result.scenarios[2]).toMatchObject({
+        transport: "mcp",
+        requestKey: "release-1-review",
+        runId: "run-review",
+        userId: "mcp:smoke",
+        actualEffort: "high",
+        actualModel: "openai/gpt-6.1-sol",
+        artifact: { repo: "acme/smoke", number: 7, head },
+      });
+    },
+  );
+
+  it("requires the explicit approved model and effort for MCP Review while retaining default HTTP", () => {
+    expect(parseSmokeConfig(config).review.transport).toBeUndefined();
+    expect(
+      parseSmokeConfig({
+        ...config,
+        model: "openai/gpt-6.1-sol",
+        review: { ...config.review, transport: "mcp", effort: "high" },
+      }).review,
+    ).toMatchObject({ transport: "mcp", effort: "high" });
+    for (const model of [undefined, "anthropic/claude-opus-5-5"])
+      expect(() =>
+        parseSmokeConfig({ ...config, model, review: { ...config.review, transport: "mcp", effort: "high" } }),
+      ).toThrow();
+    expect(() =>
+      parseSmokeConfig({ ...config, model: "openai/gpt-6.1-sol", review: { ...config.review, transport: "mcp" } }),
+    ).toThrow();
+  });
+
+  it.each([
+    ["matching", "passed", "accepted"],
+    ["build", "incomplete", "served_build_mismatch"],
+    ["owner", "incomplete", "original_owner_mismatch"],
+    ["source", "failed", "run_identity_mismatch"],
+    ["effort", "failed", "run_effort_mismatch"],
+    ["denied", "incomplete", "mcp_access_unproven"],
+    ["lost_ack", "incomplete", "request_ack_unknown"],
+  ])(
+    "uses genuine MCP Review with explicit Sol/high and proves its own source and recorded effort: %s",
+    async (fault, outcome, reason) => {
+      const original = fixture();
+      const selected = {
+        ...config,
+        model: "openai/gpt-6.1-sol",
+        review: { ...config.review, transport: "mcp", effort: "high" },
+      };
+      const admits: Array<{ source: string; thread: string; text: string; key: string }> = [];
+      const fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: { commit, version: "1.0.0" } });
+        const rpc = JSON.parse(String(init?.body));
+        if (rpc.method === "initialize")
+          return Response.json({ jsonrpc: "2.0", id: rpc.id, result: { protocolVersion: MCP_PROTOCOL_VERSION } });
+        if (rpc.method === "notifications/initialized") return new Response(null, { status: 202 });
+        if (String(url).endsWith("/ingress") || rpc.params.name === "dispatch") {
+          const source = String(url).endsWith("/ingress") ? "http" : "mcp";
+          const args = source === "http" ? rpc : rpc.params.arguments;
+          if (source === "mcp" && fault === "denied")
+            return Response.json({
+              jsonrpc: "2.0",
+              id: rpc.id,
+              error: { code: -32001, message: "Current MCP dispatch is not permitted" },
+            });
+          const id = args.thread.split("-").at(-1);
+          const result = (await original.transport.request(
+            {
+              id,
+              agent: id === "answer" ? "general" : id === "workspace" ? "explore" : "review",
+              minutes: id === "answer" ? 4 : 15,
+              text: args.text,
+              transport: source,
+            },
+            args.thread,
+          )) as { run: { id: string }; build: unknown };
+          admits.push({ source, thread: args.thread, text: args.text, key: args.idempotencyKey });
+          const body = {
+            admission: { status: "accepted", receiptId: `receipt-${id}`, runId: result.run.id, duplicate: false },
+            runId: result.run.id,
+            threadKey: `${source}:smoke:${args.thread}`,
+            build: result.build,
+          };
+          if (source === "mcp" && fault === "build") body.build = { commit: head };
+          if (source === "mcp" && fault === "owner") body.admission.runId = "foreign-original-owner";
+          if (source === "mcp" && fault === "lost_ack") throw new Error("lost admission acknowledgment");
+          return source === "http"
+            ? Response.json(body, { status: 202 })
+            : Response.json({
+                jsonrpc: "2.0",
+                id: rpc.id,
+                result: { content: [{ type: "text", text: "Request admitted" }], structuredContent: body },
+              });
+        }
+        const record = structuredClone(original.records.get(rpc.params.arguments.id)) as Record<string, unknown>;
+        if (rpc.params.arguments.id === "run-review" && fault === "source") record.userId = "http:smoke";
+        if (rpc.params.arguments.id === "run-review" && fault === "effort")
+          record.events = (record.events as Array<Record<string, unknown>>).map((event) =>
+            event.type === "run_meta" ? { ...event, effort: "medium" } : event,
+          );
+        return Response.json({
+          jsonrpc: "2.0",
+          id: rpc.id,
+          result: { content: [{ type: "text", text: `runs.get: ok\n${JSON.stringify(record)}` }] },
+        });
+      });
+      const transport = agentSmokeTransport({
+        origin: "https://bot.example.test",
+        healthUrl: "https://bot.example.test/healthz",
+        token: "fixture-only",
+        config: selected,
+        fetch: withReaderProbe(fetch),
+      });
+      const receipt = await runAgentSmoke({ config: selected, expectedCommit: commit, thread: "release-1", transport });
+      expect(receipt.scenarios.map((row) => [row.id, row.outcome, row.reason])).toEqual([
+        ["answer", "passed", "accepted"],
+        ["workspace", "passed", "accepted"],
+        ["review", outcome, reason],
+      ]);
+      expect(receipt.capabilityOutcome).toBe(outcome);
+      expect(admits.map((item) => [item.source, item.thread, item.key])).toEqual([
+        ["http", "release-1-answer", "release-1-answer"],
+        ["http", "release-1-workspace", "release-1-workspace"],
+        ...(fault === "denied" ? [] : [["mcp", "release-1-review", "release-1-review"]]),
+      ]);
+      if (fault === "denied" || fault === "lost_ack") {
+        expect(receipt.scenarios[2]).toMatchObject({
+          transport: "mcp",
+          requestKey: "release-1-review",
+          outcome: "incomplete",
+        });
+        expect(receipt.scenarios[2].receiptId).toBeUndefined();
+        return;
+      }
+      expect(admits[2].text).toContain("model:openai/gpt-6.1-sol effort:high");
+      expect(receipt.scenarios[2]).toMatchObject({
+        transport: "mcp",
+        requestKey: "release-1-review",
+        receiptId: "receipt-review",
+        runId: fault === "owner" ? "foreign-original-owner" : "run-review",
+        ...(fault === "matching"
+          ? {
+              userId: "mcp:smoke",
+              threadKey: "mcp:smoke:release-1-review",
+              actualEffort: "high",
+              evidence: {
+                identityVerified: true,
+                record: {
+                  id: "run-review",
+                  userId: "mcp:smoke",
+                  threadKey: "mcp:smoke:release-1-review",
+                  profile: { minutes: 15 },
+                },
+              },
+            }
+          : {}),
+      });
+    },
+  );
+
+  it.each(["injected", "HTTP202"] as const)(
+    "retains a known pending receipt with no owner and stops without replay or further admissions: %s",
+    async (source) => {
+      const admissions: unknown[] = [];
+      const pending = {
+        admission: { status: "pending", receiptId: "original-pending", duplicate: false },
+        build: { commit },
+      };
+      const transport =
+        source === "injected"
+          ? fixture().transport
+          : agentSmokeTransport({
+              origin: "https://bot.example.test",
+              healthUrl: "https://bot.example.test/healthz",
+              token: "fixture-only",
+              config,
+              fetch: withReaderProbe(async (url, init) => {
+                if (String(url).endsWith("/healthz")) return Response.json({ ok: true, build: { commit } });
+                const body = JSON.parse(String(init?.body));
+                admissions.push(body.thread);
+                return Response.json(pending, { status: 202 });
+              }),
+            });
+      if (source === "injected")
+        transport.request = async (_scenario, thread) => {
+          admissions.push(thread);
+          return pending;
+        };
+      const receipt = await runAgentSmoke({ config, expectedCommit: commit, thread: "release-1", transport });
+      expect(receipt).toMatchObject({
+        capabilityOutcome: "incomplete",
+        scenarios: [
+          {
+            outcome: "incomplete",
+            reason: "original_owner_pending",
+            receiptId: "original-pending",
+            requestKey: "release-1-answer",
+          },
+          { outcome: "skipped" },
+          { outcome: "skipped" },
+        ],
+      });
+      expect(admissions).toEqual(["release-1-answer"]);
+    },
+  );
 });
 
 describe("machine MCP reader authentication", () => {

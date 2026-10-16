@@ -5,7 +5,10 @@ import { InMemoryOrganizationStore } from "../core/organization/memory.js";
 import { OrganizationService } from "../core/organization/service.js";
 import { handleMcpRequest, type McpOptions } from "./mcp.js";
 
-const deps = { config: { grantsFor: () => ALL_GRANTS, config: {} } } as unknown as CoreDeps;
+const deps = {
+  build: { commit: "a".repeat(40), version: "fixture" },
+  config: { grantsFor: () => ALL_GRANTS, config: {} },
+} as unknown as CoreDeps;
 function setup() {
   const store = new InMemoryOrganizationStore(() => 1);
   let allowed = true;
@@ -86,6 +89,49 @@ function setup() {
 }
 
 describe("MCP organization admission", () => {
+  it("reports the actual serving build and native thread with the original owner, ignoring caller metadata", async () => {
+    const s = setup();
+    const args = {
+      text: "Review the approved head",
+      thread: "review-proof",
+      idempotencyKey: "review-proof",
+      build: { commit: "forged" },
+      threadKey: "http:borrowed:review-proof",
+    };
+    const first = await s.send(args);
+    const receiptId = (first.body as { result: { structuredContent: { admission: { receiptId: string } } } }).result
+      .structuredContent.admission.receiptId;
+    await s.store.execute({ action: "claim", organization: "org:test", owner: "worker", leaseMs: 100 });
+    expect(
+      await s.store.execute({
+        action: "settle",
+        organization: "org:test",
+        owner: "worker",
+        generation: 1,
+        receiptId,
+        status: "accepted",
+        ownerRunId: "original-review",
+        reason: null,
+        reply: null,
+        contentTtlMs: 90,
+      }),
+    ).toMatchObject({ status: "receipt", receipt: { ownerRunId: "original-review" } });
+    const repeated = await s.send(args);
+    expect(repeated).toMatchObject({
+      body: {
+        result: {
+          structuredContent: {
+            admission: { status: "accepted", receiptId, duplicate: true, runId: "original-review" },
+            build: { commit: "a".repeat(40), version: "fixture" },
+            runId: "original-review",
+            threadKey: "mcp:default:review-proof",
+          },
+        },
+      },
+    });
+    expect(s.sources.map((source) => source.userId)).toEqual(["mcp:service-client", "mcp:service-client"]);
+  });
+
   it("retries one exact input under its original receipt and owner without borrowing an email identity", async () => {
     const s = setup();
     const args = {

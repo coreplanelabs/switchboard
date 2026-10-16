@@ -10,12 +10,18 @@ import {
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
-  options: { check: { type: "boolean" }, model: { type: "string" }, "require-vouched-controls": { type: "boolean" } },
+  options: {
+    check: { type: "boolean" },
+    model: { type: "string" },
+    "review-transport": { type: "string" },
+    "review-effort": { type: "string" },
+    "require-vouched-controls": { type: "boolean" },
+  },
 });
 const [planPath, receiptPath] = positionals;
 if (!planPath || !receiptPath || positionals.length !== 2) {
   throw new Error(
-    "usage: smoke:ingress <deploy-plan.json> <receipt.json> [--check] [--model provider/model] [--require-vouched-controls]",
+    "usage: smoke:ingress <deploy-plan.json> <receipt.json> [--check] [--model provider/model] [--review-transport http|mcp] [--review-effort high] [--require-vouched-controls]",
   );
 }
 // Outside the tree, written atomically before admission and after each known phase.
@@ -36,10 +42,20 @@ try {
   const bot = steps?.find((step) => step.name === "bot");
   const healthUrl = bot?.healthUrl ?? bot?.liveGate?.healthUrl;
   if (!healthUrl) throw new Error("deploy plan has no bot health URL");
+  const supplied = JSON.parse(process.env.SMOKE_INGRESS_CONFIG ?? "null");
   const config = parseSmokeConfig({
-    ...JSON.parse(process.env.SMOKE_INGRESS_CONFIG ?? "null"),
+    ...supplied,
     ...(values.model === undefined ? {} : { model: values.model }),
     ...(values["require-vouched-controls"] ? { requireVouchedControls: true } : {}),
+    ...(values["review-transport"] === undefined && values["review-effort"] === undefined
+      ? {}
+      : {
+          review: {
+            ...supplied?.review,
+            ...(values["review-transport"] === undefined ? {} : { transport: values["review-transport"] }),
+            ...(values["review-effort"] === undefined ? {} : { effort: values["review-effort"] }),
+          },
+        }),
   });
   const transport = agentSmokeTransport({
     origin: process.env.SMOKE_INGRESS_ORIGIN ?? "",
@@ -65,6 +81,9 @@ try {
       productAcceptance: PRODUCT_ACCEPTANCE_GAP,
       reason: "configured_not_executed",
       ...(config.model ? { requestedModel: config.model } : {}),
+      reviewTransport: config.review.transport ?? "http",
+      ...(config.review.effort ? { requestedReviewEffort: config.review.effort } : {}),
+      ...(config.review.transport === "mcp" ? { mcpPermissions: "unverified" } : {}),
     });
     process.stdout.write("Smoke configured; acceptance not executed.\n");
   } else {

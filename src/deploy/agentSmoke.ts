@@ -10,8 +10,8 @@ import {
 import { answerOutcomeOf } from "../core/answerOutcome.js";
 import { redactSecrets, stripAnsi } from "../core/redact.js";
 import { unwrapUntrusted } from "../core/untrusted.js";
-import { StreamableHttpMcpClient } from "../mcp/client.js";
 import { McpError } from "../mcp/types.js";
+import { StreamableHttpMcpClient } from "../mcp/client.js";
 import { assertSmokeOriginMatchesPlan } from "./ingressSmoke.js";
 import { systemClock } from "../core/trace/clock.js";
 import { parseModelRef } from "../core/provider.js";
@@ -58,14 +58,26 @@ const configSchema = z
         number: z.number().int().positive(),
         head: sha,
         expectedVerdict: z.enum(["approve", "request_changes"]).optional(),
+        transport: z.enum(["http", "mcp"]).optional(),
+        effort: z.literal("high").optional(),
       })
       .strict(),
     maxObservedUsd: z.number().finite().positive().max(10),
   })
-  .strict();
+  .strict()
+  .refine(
+    (config) =>
+      config.review.transport !== "mcp" || (config.model === "openai/gpt-6.1-sol" && config.review.effort === "high"),
+    "MCP Review requires explicit openai/gpt-6.1-sol and high effort",
+  );
 type SmokeConfig = z.infer<typeof configSchema>;
 export const parseSmokeConfig = (value: unknown): SmokeConfig => configSchema.parse(value);
 const buildSchema = z.object({ commit: sha, version: z.string().min(1).max(80).optional() });
+const admissionReceiptSchema = z.object({
+  status: z.enum(["pending", "accepted", "rejected", "stale", "throttled"]),
+  receiptId: z.string().min(1).max(2048),
+  runId: z.string().optional(),
+});
 type SmokeBuild = z.infer<typeof buildSchema>;
 const runSchema = z.object({
   id: z.string(),
@@ -167,6 +179,7 @@ export interface SmokeScenario {
   agent: "general" | "explore" | "review";
   text: string;
   minutes: number;
+  transport?: "http" | "mcp";
 }
 export interface SmokeTransport {
   health(): Promise<unknown>;
@@ -184,8 +197,8 @@ interface SmokeCapture {
   truncated: boolean;
 }
 interface SmokeIntakeReceipt {
-  request: SmokeCapture & { method: "POST"; path: "/ingress" };
-  response?: SmokeCapture & { status: number; format: "json" | "non-json" };
+  request: SmokeCapture & { method: "POST"; path: "/ingress" | "/mcp" };
+  response?: SmokeCapture & { status?: number; format: "json" | "non-json" };
 }
 interface ScenarioReceipt {
   id: SmokeScenario["id"];
@@ -193,6 +206,12 @@ interface ScenarioReceipt {
   reason: string;
   thread: string;
   runId?: string;
+  transport?: "http" | "mcp";
+  requestKey?: string;
+  receiptId?: string;
+  admissionStatus?: string;
+  requestedEffort?: string;
+  actualEffort?: string;
   build?: SmokeBuild;
   userId?: string;
   threadKey?: string;
@@ -367,12 +386,16 @@ function scenarios(config: SmokeConfig): SmokeScenario[] {
     },
     {
       id: "review",
+      transport: config.review.transport ?? "http",
       agent: "review",
       minutes: review,
       text: `agent:review budget:${review} Review https://github.com/${config.repo}/pull/${config.review.number} at head ${config.review.head}. Publish the review; do not change files or merge.`,
     },
   ];
-  return config.model ? selected.map((s) => ({ ...s, text: `${s.text} model:${config.model}` })) : selected;
+  return selected.map((s) => ({
+    ...s,
+    text: `${s.text}${config.model ? ` model:${config.model}` : ""}${s.id === "review" && config.review.effort ? ` effort:${config.review.effort}` : ""}`,
+  }));
 }
 
 /** Unknown acknowledgements stop admissions. Observation never retries, cancels or rolls back work. */
@@ -408,6 +431,8 @@ export async function runAgentSmoke(input: {
       outcome: "skipped",
       reason: "prior_scenario_unproven",
       thread: `${input.thread}-${s.id}`,
+      transport: s.transport ?? "http",
+      ...(s.id === "review" && config.review.effort ? { requestedEffort: config.review.effort } : {}),
       ...(config.model ? { requestedModel: config.model } : {}),
     })),
     liveGaps: ["private-question-fix-draft-pr"],
@@ -452,32 +477,63 @@ export async function runAgentSmoke(input: {
       await save();
       await input.transport.readerReady?.();
       row.reason = "request_ack_unknown";
+      row.requestKey = row.thread;
+      await save();
+      const raw = await input.transport.request(scenario, row.thread, async (intake) => {
+        row.intake = intake;
+        await save();
+      });
+      const object = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+      const known = admissionReceiptSchema.safeParse(object.admission);
+      if (known.success) {
+        row.receiptId = known.data.receiptId;
+        row.admissionStatus = known.data.status;
+        const owner = z
+          .string()
+          .regex(/^[A-Za-z0-9_-]{1,64}$/)
+          .safeParse(known.data.runId);
+        if (owner.success) row.runId = owner.data;
+      }
+      const parsedRun = z
+        .object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), status: z.string() })
+        .safeParse(object.run);
+      if (parsedRun.success && row.runId === undefined) row.runId = parsedRun.data.id;
       await save();
       const response = z
         .object({
           build: z.unknown().optional(),
           threadKey: z.unknown().optional(),
+          accessError: z.string().optional(),
           run: z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), status: z.string() }).optional(),
         })
-        .parse(
-          await input.transport.request(scenario, row.thread, async (intake) => {
-            row.intake = intake;
-            await save();
-          }),
-        );
+        .parse(raw);
       // Save the original identity before monitoring; a missing read cannot erase an admitted effect.
-      row.runId = response.run?.id;
+      row.runId ??= response.run?.id;
       row.build = buildSchema.safeParse(response.build).data;
       row.reason = "run_record_unproven";
       await save();
-      if (!response.run) {
-        row.outcome = "failed";
-        row.reason = "no_agent_run";
+      if (known.success && !["pending", "accepted"].includes(known.data.status)) {
+        row.reason = "admission_refused";
         break;
       }
+      if (!response.run) {
+        if (known.success && ["pending", "accepted"].includes(known.data.status)) row.reason = "original_owner_pending";
+        else if (scenario.transport === "mcp" && (response.accessError || object.admission))
+          row.reason = "mcp_access_unproven";
+        else {
+          row.outcome = "failed";
+          row.reason = "no_agent_run";
+        }
+        break;
+      }
+      if (known.success && known.data.runId !== response.run.id) {
+        row.reason = "original_owner_mismatch";
+        break;
+      }
+      const source = scenario.transport ?? "http";
       if (
         (response.run.status === "started" || response.threadKey !== undefined) &&
-        response.threadKey !== `http:${config.channel}:${row.thread}`
+        response.threadKey !== `${source}:${config.channel}:${row.thread}`
       ) {
         row.reason = "run_identity_mismatch";
         break;
@@ -494,9 +550,9 @@ export async function runAgentSmoke(input: {
         const raw = value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
         const identityVerified =
           raw.id === row.runId &&
-          raw.userId === `http:${config.subject}` &&
-          raw.channelId === `http:${config.channel}` &&
-          raw.threadKey === `http:${config.channel}:${row.thread}` &&
+          raw.userId === `${source}:${config.subject}` &&
+          raw.channelId === `${source}:${config.channel}` &&
+          raw.threadKey === `${source}:${config.channel}:${row.thread}` &&
           raw.agent === scenario.agent &&
           (scenario.id === "answer" || raw.repo === config.repo);
         // An observation from another actor/thread is diagnostic, not authority to expose its content.
@@ -543,15 +599,26 @@ export async function runAgentSmoke(input: {
       }
       if (
         run.id !== row.runId ||
-        run.userId !== `http:${config.subject}` ||
-        run.channelId !== `http:${config.channel}` ||
-        run.threadKey !== `http:${config.channel}:${row.thread}` ||
+        run.userId !== `${source}:${config.subject}` ||
+        run.channelId !== `${source}:${config.channel}` ||
+        run.threadKey !== `${source}:${config.channel}:${row.thread}` ||
         run.agent !== scenario.agent ||
         (scenario.id !== "answer" && run.repo !== config.repo)
       ) {
         row.outcome = "failed";
         row.reason = "run_identity_mismatch";
         break;
+      }
+      if (scenario.id === "review" && config.review.effort) {
+        row.actualEffort = run.events
+          .slice()
+          .reverse()
+          .find((event) => event.type === "run_meta")?.effort;
+        if (row.actualEffort !== config.review.effort) {
+          row.outcome = "failed";
+          row.reason = "run_effort_mismatch";
+          break;
+        }
       }
       if (run.profile.minutes !== scenario.minutes) {
         row.outcome = "failed";
@@ -855,49 +922,86 @@ export function agentSmokeTransport(input: {
     },
     async request(scenario, thread, onIntake) {
       const deadline = systemClock() + minutesToMs(scenario.minutes + 1);
-      const requestBody = { text: scenario.text, channel: config.channel, thread, async: true };
+      const args = { text: scenario.text, channel: config.channel, thread, async: true, idempotencyKey: thread };
+      const signal = AbortSignal.timeout(minutesToMs(scenario.minutes + 1));
+      const source = scenario.transport ?? "http";
       const intake: SmokeIntakeReceipt = {
-        request: { method: "POST", path: "/ingress", ...captureIntake(requestBody, input.token) },
+        request: {
+          method: "POST",
+          path: source === "mcp" ? "/mcp" : "/ingress",
+          ...captureIntake(source === "mcp" ? { name: "dispatch", arguments: args } : args, input.token),
+        },
       };
       await onIntake?.(intake);
-      const response = await boundedFetch(new URL("/ingress", input.origin), {
-        method: "POST",
-        headers: { authorization: `Bearer ${input.token}`, "content-type": "application/json" },
-        body: JSON.stringify(requestBody),
-        signal: AbortSignal.timeout(minutesToMs(scenario.minutes + 1)),
-      });
       let body: unknown;
-      try {
-        body = await response.json();
-      } catch {
-        intake.response = { status: response.status, format: "non-json", truncated: false };
+      if (scenario.transport === "mcp") {
+        try {
+          const result = await mcp.callTool("dispatch", args, { signal });
+          body = result.structuredContent;
+          if (body !== undefined) {
+            intake.response = {
+              format: "json",
+              ...captureIntake(body, input.token, {
+                userId: `mcp:${config.subject}`,
+                threadKey: `mcp:${config.channel}:${thread}`,
+                repo: config.repo,
+              }),
+            };
+            await onIntake?.(intake);
+          }
+          if (result.isError && body === undefined) return { accessError: "mcp_access_unproven" };
+        } catch (error) {
+          if (error instanceof McpError && error.code === -32001) return { accessError: "mcp_access_unproven" };
+          throw error;
+        }
+      } else {
+        const response = await boundedFetch(new URL("/ingress", input.origin), {
+          method: "POST",
+          headers: { authorization: `Bearer ${input.token}`, "content-type": "application/json" },
+          body: JSON.stringify(args),
+          signal,
+        });
+        try {
+          body = await response.json();
+        } catch {
+          intake.response = { status: response.status, format: "non-json", truncated: false };
+          await onIntake?.(intake);
+          throw new Error("ingress_unavailable");
+        }
+        intake.response = {
+          status: response.status,
+          format: "json",
+          ...captureIntake(body, input.token, {
+            userId: `http:${config.subject}`,
+            threadKey: `http:${config.channel}:${thread}`,
+            repo: config.repo,
+          }),
+        };
         await onIntake?.(intake);
-        throw new Error("ingress_unavailable");
+        if (!response.ok && !(body && typeof body === "object" && "admission" in body))
+          throw new Error("ingress_unavailable");
+        if (response.status !== 202) return body;
       }
-      intake.response = {
-        status: response.status,
-        format: "json",
-        ...captureIntake(body, input.token, {
-          userId: `http:${config.subject}`,
-          threadKey: `http:${config.channel}:${thread}`,
-          repo: config.repo,
-        }),
-      };
-      await onIntake?.(intake);
-      if (!response.ok) throw new Error("ingress_unavailable");
-      if (response.status !== 202) return body;
-      const admission = z
-        .object({
-          runId: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
-          threadKey: z.unknown().optional(),
-          build: z.unknown().optional(),
-        })
-        .parse(body);
-      deadlines.set(admission.runId, deadline);
+      if (!body || typeof body !== "object" || Array.isArray(body)) return body;
+      const response = body as Record<string, unknown>;
+      const admission = z.object({ runId: z.unknown().optional() }).safeParse(response.admission);
+      const assigned = z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{1,64}$/)
+        .safeParse(response.runId ?? (admission.success ? admission.data.runId : undefined));
+      if (!assigned.success) {
+        // HTTP202 may already have admitted work. An unusable owner cannot
+        // prove no agent ran; retain its captured response and stop.
+        if (source === "http" && !admissionReceiptSchema.safeParse(response.admission).success)
+          throw new Error("admission_unproven");
+        return response;
+      }
+      deadlines.set(assigned.data, deadline);
       return {
-        run: { id: admission.runId, status: "started" },
-        build: admission.build,
-        threadKey: admission.threadKey,
+        ...(response.admission === undefined ? {} : { admission: response.admission }),
+        run: { id: assigned.data, status: "started" },
+        build: response.build,
+        threadKey: response.threadKey,
       };
     },
     async readRun(id, onRecord) {
