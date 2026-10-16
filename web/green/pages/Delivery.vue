@@ -1,6 +1,7 @@
 <script setup lang="ts">
 defineOptions({ name: "GreenDeliveryPage" });
 import { computed } from "vue";
+import { githubPrUrl, githubRepoUrl } from "../../src/lib/githubLinks";
 import { useRoute } from "vue-router";
 import { useSeed } from "../../src/lib/seed";
 import {
@@ -24,7 +25,24 @@ const seed = useSeed("delivery");
 const route = useRoute();
 const now = useWallClock(undefined, MINUTE_MS);
 const report = computed(() => seed?.report);
-const tiles = computed(() => (report.value ? tilesOf(report.value) : []));
+const incompleteWork = computed(
+  () => report.value?.workCoverage === "partial" || report.value?.workCoverage === "unavailable",
+);
+const measuredWork = computed(
+  () =>
+    report.value?.workCoverage !== "unavailable" &&
+    (!incompleteWork.value || (report.value?.totals.prsMerged ?? 0) > 0),
+);
+const tiles = computed(() =>
+  report.value && measuredWork.value
+    ? tilesOf(report.value).map((tile) =>
+        incompleteWork.value ? { ...tile, note: "Recorded selected work only; coverage is incomplete." } : tile,
+      )
+    : [],
+);
+const visibleWeeks = computed(() =>
+  (report.value?.weeks ?? []).filter((week) => !incompleteWork.value || week.prsMerged > 0),
+);
 const freshHref = computed(() => {
   const query = new URLSearchParams();
   for (const key of ["weeks", "since"]) {
@@ -34,7 +52,7 @@ const freshHref = computed(() => {
   query.set("fresh", "1");
   return `${route.path}?${query}`;
 });
-const coverage = computed(() => (report.value ? coverageNote(report.value) : undefined));
+const coverage = computed(() => (report.value && measuredWork.value ? coverageNote(report.value) : undefined));
 const downloadHref = computed(() => {
   if (!report.value) return undefined;
   const query = new URLSearchParams();
@@ -78,8 +96,15 @@ function href(repo: string, weeks: number) {
       </nav>
     </div>
     <p v-if="coverage" class="green-notice green-warning" role="status">{{ coverage }}</p>
-    <StatTiles :tiles="tiles" />
-    <section class="green-section">
+    <p v-if="incompleteWork" class="green-notice green-warning" role="status" data-work-coverage>
+      {{
+        report.workCoverage === "unavailable"
+          ? "Selected work coverage is unavailable. Delivery totals cannot be confirmed."
+          : "Selected work coverage is incomplete. Figures cover recorded publications only."
+      }}
+    </p>
+    <StatTiles v-if="measuredWork" :tiles="tiles" />
+    <section v-if="measuredWork" class="green-section">
       <div class="green-section-heading">
         <div>
           <h2>By week</h2>
@@ -102,7 +127,7 @@ function href(repo: string, weeks: number) {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="week in report.weeks" :key="week.week">
+            <tr v-for="week in visibleWeeks" :key="week.week">
               <td>
                 {{ monthDay(week.week) }} – {{ monthDay(week.until)
                 }}<span v-if="weekIncomplete(report, week.week)" class="block text-warn">Incomplete</span>
@@ -127,7 +152,13 @@ function href(repo: string, weeks: number) {
           <p>The issue starts the clock. Pull requests provide the merge evidence.</p>
         </div>
       </div>
-      <EmptyState v-if="!report.units.length" title="No merges in this range" />
+      <EmptyState
+        v-if="!measuredWork || !report.units.length"
+        :title="incompleteWork ? 'Selected delivery is not confirmed' : 'No merges in this range'"
+        :description="
+          incompleteWork ? 'Missing ownership or retained publication data prevents a complete count.' : undefined
+        "
+      />
       <div v-else class="green-table-scroll">
         <table class="green-table">
           <thead>
@@ -144,13 +175,20 @@ function href(repo: string, weeks: number) {
           <tbody>
             <tr v-for="unit in report.units" :key="unit.issue ?? 'none'">
               <td>
-                <a v-if="unit.issue" :href="`https://github.com/${report.repo}/issues/${unit.issue}`"
-                  >#{{ unit.issue }} · {{ unit.title }}</a
+                <a
+                  v-if="unit.issue && githubRepoUrl(report.repo)"
+                  :href="`${githubRepoUrl(report.repo)}/issues/${unit.issue}`"
+                  class="inline-flex items-center gap-1"
+                  ><UIcon name="i-lucide-circle-dot" />#{{ unit.issue }} · {{ unit.title }}</a
                 ><span v-else>{{ unit.title }}</span>
               </td>
               <td>
-                <a v-for="pr in unit.prs" :key="pr" class="mr-2" :href="`https://github.com/${report.repo}/pull/${pr}`"
-                  >#{{ pr }}</a
+                <a
+                  v-for="pr in unit.prs"
+                  :key="pr"
+                  class="mr-2 inline-flex items-center gap-1"
+                  :href="githubPrUrl(report.repo, pr)"
+                  ><UIcon name="i-lucide-git-pull-request" />#{{ pr }}</a
                 >
               </td>
               <td>{{ hours(unit.leadTimeHours.median) }}</td>

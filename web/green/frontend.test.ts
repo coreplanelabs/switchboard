@@ -8,6 +8,7 @@ import type { HomeSeed, UnitSeed } from "@core/channels/webSeed.js";
 import type { HomeSession } from "@core/channels/homeSeed.js";
 import PipelinePage from "./pages/Pipeline.vue";
 import UnitPage from "./pages/Unit.vue";
+import ReadonlyThread from "./components/ReadonlyThread.vue";
 import ThreadPage from "./pages/Thread.vue";
 import ConversationDock from "./components/ConversationDock.vue";
 import { createHomeSession, HomeSessionKey } from "./lib/homeSession";
@@ -25,7 +26,7 @@ function session(over: Partial<HomeSession> = {}): HomeSession {
     actor: "access:alice",
     stream: "person:alice",
     bindingRevision: 0,
-    accessEpoch: "fixture:current-source",
+    accessEpoch: "fixture:policy",
     revision: 4,
     entries: [],
     sendUrl: "/home/send",
@@ -54,6 +55,94 @@ const thread: HomeSeed = {
 };
 
 describe("Green browser frontend", () => {
+  it("renders recorded private worker and unit entries without fake run controls and clears them on revocation", async () => {
+    for (const component of [ThreadPage, ReadonlyThread]) {
+      const stream = fakeEventSourceFactory();
+      const home = createHomeSession(
+        (async (url: string) =>
+          json(
+            url.includes("?thread=")
+              ? session({
+                  destination: {
+                    kind: "thread",
+                    thread: "worker:private:U101",
+                    label: "Private original unit",
+                    revision: 4,
+                    canWrite: false,
+                  },
+                })
+              : session(),
+          )) as typeof fetch,
+        stream.factory,
+      );
+      await home.load();
+      const page = mountApp(component, {
+        seed: { ...thread, conversation: "worker:private:U101" },
+        props: component === ReadonlyThread ? { thread: "worker:private:U101" } : undefined,
+        eventSource: stream.factory,
+        provides: [[HomeSessionKey, home]],
+      });
+      const observer = stream.created.find((source) => source.url.includes("observe=1"))!;
+      observer.emitMessage(
+        session({
+          turns: [],
+          entries: [
+            {
+              id: "worker:1",
+              role: "assistant",
+              isViewer: false,
+              authorLabel: "Switchboard",
+              content: "Private **worker report**",
+              at: 2000,
+            },
+            {
+              id: "unit:2",
+              role: "user",
+              isViewer: true,
+              authorLabel: "You",
+              source: "browser",
+              content: "My saved answer",
+              at: 3000,
+            },
+            {
+              id: "question:original",
+              role: "receipt",
+              isViewer: false,
+              authorLabel: "Pending question",
+              content: "Choose the private behavior",
+              at: 4000,
+            },
+          ],
+          destination: {
+            kind: "thread",
+            thread: "worker:private:U101",
+            label: "Private original unit",
+            revision: 4,
+            canWrite: false,
+          },
+        }),
+      );
+      await flushPromises();
+      expect(page.text()).toContain("Private worker report");
+      expect(page.get("strong").text()).toBe("worker report");
+      expect(page.text()).toContain("My saved answer");
+      expect(page.text()).toContain("You · browser");
+      expect(page.get('time[datetime="1970-01-01T00:00:03.000Z"]').attributes("datetime")).toBe(
+        "1970-01-01T00:00:03.000Z",
+      );
+      expect(page.text().split("Choose the private behavior")).toHaveLength(2);
+      expect(page.text()).not.toContain("No messages in the loaded thread window");
+      expect(page.findAll('a[href^="/runs/"]')).toHaveLength(0);
+      expect(page.findAll("button").map((button) => button.text())).not.toContain("Stop");
+      observer.emitNamed("revoked");
+      await flushPromises();
+      expect(page.text()).not.toContain("Private worker report");
+      expect(page.text()).not.toContain("My saved answer");
+      expect(page.text()).toContain("Conversation is unavailable");
+      home.dispose();
+    }
+  });
+
   it("keeps missing or denied thread reads unavailable without local reply while preserving the authenticated broad dock", async () => {
     const stream = fakeEventSourceFactory();
     const home = createHomeSession(
@@ -225,7 +314,13 @@ describe("Green browser frontend", () => {
   });
   it("keeps view-as pages read-only even when the person's own broad session permits writes", async () => {
     const stream = fakeEventSourceFactory();
-    const home = createHomeSession((async () => json(session())) as typeof fetch, stream.factory);
+    const home = createHomeSession(
+      (async () =>
+        json(
+          session({ entries: [{ id: "admin", role: "user", isViewer: true, content: "Admin-only private words" }] }),
+        )) as typeof fetch,
+      stream.factory,
+    );
     await home.load();
     const host = defineComponent({ render: () => h("div", [h(ThreadPage), h(ConversationDock)]) });
     const wrapper = mountApp(host, {
@@ -234,6 +329,7 @@ describe("Green browser frontend", () => {
       provides: [[HomeSessionKey, home]],
     });
     expect(wrapper.text()).toContain("This view is read-only.");
+    expect(wrapper.text()).not.toContain("Admin-only private words");
     expect(wrapper.findAll("textarea").length).toBe(0);
     expect(wrapper.findAll("button").map((button) => button.text())).not.toContain("Reply in this thread");
     home.dispose();
@@ -324,7 +420,12 @@ describe("Green browser frontend", () => {
         },
       } as unknown as ServerResponse;
       await preview.handle(request, response, new URL(address, "http://preview.test"));
-      return new Response(payload, { status, headers: { "content-type": "application/json" } });
+      // This recording explicitly carries the action; the older shared preview
+      // supplies provenance only, and question prose is never an action label.
+      const recorded = JSON.parse(payload);
+      if (recorded.destination?.thread === "slack:C1:1")
+        recorded.destination.primaryAction = { label: "Merge", text: "yes" };
+      return new Response(JSON.stringify(recorded), { status, headers: { "content-type": "application/json" } });
     };
     const home = createHomeSession(fetcher as typeof fetch, stream.factory);
     home.routeChanged("/threads/slack%3AC1%3A1");
@@ -342,6 +443,12 @@ describe("Green browser frontend", () => {
       "slack",
       "http",
     ]);
+    expect(wrapper.findAll("textarea")).toHaveLength(0);
+    expect(wrapper.findAll("button").map((button) => button.text())).toContain("Merge");
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "Type a reply")!
+      .trigger("click");
     expect(wrapper.findAll("textarea")).toHaveLength(1);
     home.exitFocus();
     await nextTick();

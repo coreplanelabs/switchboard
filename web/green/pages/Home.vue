@@ -1,20 +1,62 @@
 <script setup lang="ts">
 defineOptions({ name: "GreenHomePage" });
 import { computed, inject } from "vue";
+import type { HomeUnit } from "@core/core/home/service.js";
 import type { HomeFleetSeed } from "@core/channels/homeSeed.js";
 import { SeedKey } from "../../src/lib/seed";
 import PageHeading from "../components/PageHeading.vue";
+import { useHomeSession } from "../lib/homeSession";
+import { useViewingAs } from "../../src/lib/seed";
+import InlineAnswer from "../components/InlineAnswer.vue";
 import EmptyState from "../components/EmptyState.vue";
 import UnitList from "../components/UnitList.vue";
-const seed = inject(SeedKey, null) as unknown as HomeFleetSeed | null;
+import { githubRepoUrl, githubPrUrl, githubTreeUrl } from "../../src/lib/githubLinks";
+const globalSeed = inject(SeedKey, null);
+const seed = globalSeed as unknown as HomeFleetSeed | null;
+const historyHref = (() => {
+  try {
+    return `/home/history?tz=${encodeURIComponent(new Intl.DateTimeFormat().resolvedOptions().timeZone)}`;
+  } catch {
+    return "/home/history";
+  }
+})();
+const home = useHomeSession();
+const viewingAs = useViewingAs();
+const savedReplyOutsideList = computed(
+  () =>
+    home?.inlineAnswer.value &&
+    (home.pendingSubmission.value || !!home.notice.value) &&
+    !viewingAs &&
+    (!globalSeed?.dataView || globalSeed.dataView.mode !== "person") &&
+    ![...(seed?.snapshot?.needsYou ?? []), ...(seed?.snapshot?.moving ?? []), ...(seed?.snapshot?.waiting ?? [])].some(
+      (row) => row.unit.unit === home.inlineAnswer.value?.unit,
+    ),
+);
 const snapshot = computed(() => seed?.snapshot ?? null);
 const count = computed(() =>
   snapshot.value ? snapshot.value.needsYou.length + snapshot.value.moving.length + snapshot.value.waiting.length : 0,
 );
+const pipelines = computed(() => {
+  const rows = new Map<string, HomeUnit[]>();
+  for (const row of [
+    ...(snapshot.value?.needsYou ?? []),
+    ...(snapshot.value?.moving ?? []),
+    ...(snapshot.value?.waiting ?? []),
+  ]) {
+    const group = rows.get(row.instance.id) ?? [];
+    group.push(row);
+    rows.set(row.instance.id, group);
+  }
+  return (snapshot.value?.pipelines ?? []).map((pipeline) => ({
+    ...pipeline,
+    rows: rows.get(pipeline.instance.id) ?? [],
+  }));
+});
+const replyThread = (row: HomeUnit) => seed?.answers?.[row.unit.unit]?.thread ?? row.unit.threads.coding;
 </script>
 <template>
   <PageHeading title="Home" description="What needs you, what is moving, and what happens next."
-    ><RouterLink class="green-button" to="/home/history"><UIcon name="i-lucide-history" />Completed work</RouterLink
+    ><RouterLink class="green-button" :to="historyHref"><UIcon name="i-lucide-history" />Completed work</RouterLink
     ><RouterLink class="green-button" to="/home/threads"
       ><UIcon name="i-lucide-search" />Find a thread</RouterLink
     ></PageHeading
@@ -32,16 +74,20 @@ const count = computed(() =>
     <template v-if="count"
       ><UnitList
         :rows="snapshot.needsYou"
+        :answers="seed?.answers"
         label="Needs you"
         urgent
-        :attention-recipient="seed?.attentionRecipient" /><UnitList
+        :attention-recipient="seed?.attentionRecipient"
+        :attention-recipients="seed?.attentionRecipients" /><UnitList
         :rows="snapshot.moving"
         label="Moving"
         :attention-recipient="seed?.attentionRecipient"
+        :attention-recipients="seed?.attentionRecipients"
         activity="moving" /><UnitList
         :rows="snapshot.waiting"
         label="Other waits"
         :attention-recipient="seed?.attentionRecipient"
+        :attention-recipients="seed?.attentionRecipients"
     /></template>
     <section v-else-if="snapshot.status === 'complete'" class="green-section">
       <EmptyState
@@ -54,40 +100,100 @@ const count = computed(() =>
         icon="i-lucide-circle-check"
       />
     </section>
+    <section v-if="savedReplyOutsideList && home?.inlineAnswer.value" class="green-section" aria-label="Saved reply">
+      <div class="green-section-heading">
+        <h2>Saved reply · {{ home.inlineAnswer.value.title }}</h2>
+        <RouterLink class="green-button" :to="`/threads/${encodeURIComponent(home.inlineAnswer.value.thread)}`"
+          >Original thread</RouterLink
+        >
+      </div>
+      <div class="p-4">
+        <InlineAnswer v-if="home.pendingSubmission.value" />
+        <template v-else
+          ><p role="status" class="text-sm">{{ home.notice.value }}</p>
+          <button type="button" class="green-button mt-3" @click="home.preserveInlineAnswer()">
+            Return to messages
+          </button></template
+        >
+      </div>
+    </section>
     <section v-if="snapshot.pipelines.length" class="green-section">
       <div class="green-section-heading">
         <div>
           <h2>Pipelines</h2>
-          <p>Pipelines group durable units. Each unit retains its branch and evidence.</p>
+          <p>Open a pipeline to see its work, next actions, threads, pull requests, and changes.</p>
         </div>
       </div>
-      <div class="green-table-scroll">
-        <table class="green-table">
-          <thead>
-            <tr>
-              <th>Pipeline</th>
-              <th>Repository</th>
-              <th>Needs you</th>
-              <th>Moving</th>
-              <th>Waiting</th>
-              <th>Unresolved</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="pipeline in snapshot.pipelines" :key="pipeline.instance.id">
-              <td>
-                <RouterLink :to="`/pipelines/${encodeURIComponent(pipeline.instance.id)}`">{{
-                  pipeline.instance.label ?? pipeline.instance.plan?.id ?? pipeline.instance.id
-                }}</RouterLink>
-              </td>
-              <td>{{ pipeline.instance.repo }}</td>
-              <td>{{ pipeline.needsYou }}</td>
-              <td>{{ pipeline.moving }}</td>
-              <td>{{ pipeline.waiting }}</td>
-              <td>{{ pipeline.unresolved }}</td>
-            </tr>
-          </tbody>
-        </table>
+      <div class="green-pipeline-cards">
+        <article v-for="pipeline in pipelines" :key="pipeline.instance.id" class="green-pipeline-card">
+          <RouterLink class="green-unit-title" :to="`/pipelines/${encodeURIComponent(pipeline.instance.id)}`">{{
+            pipeline.instance.label ?? pipeline.instance.plan?.id ?? pipeline.instance.id
+          }}</RouterLink>
+          <p class="text-xs text-muted mt-1">
+            <a
+              v-if="githubRepoUrl(pipeline.instance.repo)"
+              :href="githubRepoUrl(pipeline.instance.repo)!"
+              target="_blank"
+              rel="noopener noreferrer"
+              ><UIcon name="i-lucide-folder-git-2" class="mr-1" />{{ pipeline.instance.repo }}</a
+            ><span v-else>{{ pipeline.instance.repo }}</span>
+          </p>
+          <p class="text-xs mt-3">
+            {{ pipeline.needsYou }} needs you · {{ pipeline.moving }} moving · {{ pipeline.waiting }} waiting
+          </p>
+          <ul class="green-pipeline-work" aria-label="Pipeline work links">
+            <li v-for="row in pipeline.rows.slice(0, 3)" :key="row.unit.unit">
+              <RouterLink class="green-unit-title" :to="`/runs/unit/${encodeURIComponent(row.unit.unit)}`">{{
+                row.unit.title ?? `Unit ${row.unit.id}`
+              }}</RouterLink>
+              <p v-if="row.nextAction.kind === 'recorded'" class="text-xs text-muted mt-1">{{ row.nextAction.text }}</p>
+              <div class="green-pipeline-work-links">
+                <RouterLink
+                  v-if="replyThread(row)"
+                  :to="`/threads/${encodeURIComponent(replyThread(row)!)}`"
+                  aria-label="Original unit thread"
+                  title="Original unit thread"
+                >
+                  <UIcon name="i-lucide-messages-square" /><span>Thread</span>
+                </RouterLink>
+                <RouterLink
+                  v-if="row.unit.threads.review"
+                  :to="`/threads/${encodeURIComponent(row.unit.threads.review)}`"
+                  aria-label="Review thread"
+                  title="Review thread"
+                  ><UIcon name="i-lucide-message-square-check" /><span class="sr-only">Review thread</span></RouterLink
+                >
+                <a
+                  v-if="githubTreeUrl(row.instance.repo, row.unit.branch)"
+                  :href="githubTreeUrl(row.instance.repo, row.unit.branch)!"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  ><UIcon name="i-lucide-git-branch" />{{ row.unit.branch }}</a
+                >
+                <a
+                  v-if="row.unit.pr && githubPrUrl(row.instance.repo, row.unit.pr.number)"
+                  :href="githubPrUrl(row.instance.repo, row.unit.pr.number)!"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  ><UIcon name="i-lucide-git-pull-request" />#{{ row.unit.pr.number }}</a
+                >
+                <RouterLink
+                  v-if="row.unit.pr"
+                  :to="`/runs/unit/${encodeURIComponent(row.unit.unit)}#changes`"
+                  aria-label="Changes"
+                  title="Changes"
+                  ><UIcon name="i-lucide-git-compare" /><span>Changes</span></RouterLink
+                >
+              </div>
+            </li>
+          </ul>
+          <RouterLink
+            v-if="pipeline.rows.length > 3"
+            class="text-xs text-primary"
+            :to="`/pipelines/${encodeURIComponent(pipeline.instance.id)}`"
+            >View {{ pipeline.rows.length - 3 }} more</RouterLink
+          >
+        </article>
       </div>
     </section>
   </template>
@@ -97,3 +203,43 @@ const count = computed(() =>
     description="The page has no work projection. Attention and progress cannot be confirmed."
   />
 </template>
+
+<style scoped>
+.green-pipeline-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+  gap: 16px;
+  padding: 16px;
+}
+.green-pipeline-card {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+}
+.green-pipeline-work {
+  margin-top: 12px;
+}
+.green-pipeline-work li {
+  padding: 10px 0;
+  border-top: 1px solid var(--ui-border-muted);
+}
+.green-pipeline-work p {
+  overflow-wrap: anywhere;
+}
+.green-pipeline-work-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--ui-primary);
+  font-size: 11px;
+}
+.green-pipeline-work-links a {
+  min-height: 40px;
+  max-width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  overflow-wrap: anywhere;
+}
+</style>

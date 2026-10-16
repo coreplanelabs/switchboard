@@ -4,6 +4,7 @@ import type { HomeSession, HomeConversationEntry } from "../src/channels/homeSee
 import type { HomeSeed, PageSeed, UnitSeed } from "../src/channels/webSeed.js";
 import type { HomeSnapshot, HomeUnit } from "../src/core/home/service.js";
 import type { Actor } from "../src/core/authz/types.js";
+import { homeWeek } from "../src/core/home/week.js";
 
 /** Local fiction only. No dispatcher, credential, model or external request is used. */
 export const GREEN_PREVIEW_NOTICE = "Preview data · Fictional local fixtures. No agents or external actions run.";
@@ -86,8 +87,15 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
     entries: transcripts.get(streamKey(thread)) ?? [],
     history: { cursor: transcripts.get(streamKey(thread))?.length ?? 0, hasMore: false, status: "complete" },
     destination: thread
-      ? { kind: "thread", label: "Preview · Unit thread", thread, revision: 1, canWrite: true }
-      : { kind: "broad", label: "Preview · Your private messages", thread: null, revision: 1, canWrite: true },
+      ? {
+          kind: "thread",
+          label: thread === canonicalThread ? "Confirm the review before merging" : "Messages in this thread",
+          thread,
+          revision: 1,
+          canWrite: true,
+          ...(thread === canonicalThread ? { primaryAction: { label: "Merge", text: "merge" } } : {}),
+        }
+      : { kind: "broad", label: "Messages", thread: null, revision: 1, canWrite: true },
     sendUrl: "/home/send",
     eventsUrl: `/home/events${thread ? `?thread=${encodeURIComponent(thread)}` : ""}`,
     commands: options.thread.commands,
@@ -133,13 +141,13 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
                   id === 13
                     ? "Review is complete. Confirm whether to merge this change."
                     : "The pull request checks are still running.",
-                nextAction: id === 13 ? "Answer in the unit thread" : "Wait for the checks to finish",
+                nextAction: id === 13 ? "Answer here" : "Wait for the checks to finish",
               },
             ]
           : [],
       nextAction:
         id === 13
-          ? { kind: "recorded", text: "Answer in the unit thread" }
+          ? { kind: "recorded", text: "Answer here" }
           : id === 16
             ? { kind: "recorded", text: "Wait for the checks to finish" }
             : { kind: "unknown" },
@@ -179,15 +187,38 @@ export function createGreenPreview(options: { now: number; unit: UnitSeed["view"
         seed: {
           page: "fleetHome",
           attentionRecipient: ACTOR,
+          answers: {
+            [unit.unit]: {
+              thread: canonicalThread,
+              revision: 1,
+              question: "Review is complete. Confirm whether to merge this change.",
+              primaryAction: { label: "Merge", text: "merge" },
+            },
+          },
           snapshot: snapshot(url.searchParams.get("scale") === "1001"),
         },
       });
     if (url.pathname === "/home/history") {
+      let week;
+      try {
+        week = homeWeek(options.now, url.searchParams.get("week") ?? undefined, url.searchParams.get("tz") ?? "UTC");
+      } catch {
+        return marked({ title: "Week unavailable", status: 400, seed: { page: "runNotFound", retentionDays: 30 } });
+      }
       const row = homeUnit(12);
       row.unit.ending = { kind: "merged", at: options.now, report: "Preview: this fictional unit was merged." };
       return marked({
         title: "Completed work preview",
-        seed: { page: "fleetHistory", history: { organizationId: ORGANIZATION, status: "complete", units: [row] } },
+        seed: {
+          page: "fleetHistory",
+          history: {
+            organizationId: ORGANIZATION,
+            status: "complete",
+            now: options.now,
+            week,
+            units: row.unit.ending.at >= week.start && row.unit.ending.at < week.end ? [row] : [],
+          },
+        },
       });
     }
     if (url.pathname.startsWith("/pipelines/")) {
