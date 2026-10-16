@@ -4,6 +4,44 @@ import { JwksCache, type AccessJwk } from "./accessAuth.js";
 import { accessVerifier } from "./dashboardAuth.js";
 import { createOrganizationNativeSources } from "./organizationNativeSources.js";
 describe("organization native sources", () => {
+  it("keeps browser proof independent while Slack realm is unavailable and verifies Slack afresh after registration", async () => {
+    let team: string | undefined;
+    let installedTeam = "T_FIXTURE";
+    const adapter = createOrganizationNativeSources({
+      organization: "fixture",
+      access: { teamDomain: "fixture.cloudflareaccess.com", aud: "dashboard" },
+      dashboard: {
+        mode: "access",
+        describe: () => "fixture",
+        verify: async () => ({ ok: true, identity: { sub: "alice" } }),
+      },
+      slackTeamId: () => team,
+      slack: {
+        auth: { test: async () => ({ team_id: installedTeam }) },
+        users: { info: async () => ({ user: { team_id: installedTeam } }) },
+        conversations: { info: async () => ({}) },
+      },
+    });
+    const browser = adapter.browserIdentity({ sub: "alice" });
+    adapter.rememberBrowser({ headers: { "cf-access-jwt-assertion": "fixture-signed-ingress" } }, { sub: "alice" });
+    expect(await adapter.currentBrowser(browser)).toMatchObject({
+      status: "verified",
+      actorId: "access:alice",
+      identity: browser,
+    });
+    const slack = { issuer: "https://slack.com", tenant: "T_FIXTURE", subject: "U_ALICE" };
+    expect(await adapter.currentSlack(slack)).toEqual({ status: "unavailable" });
+    team = "T_FIXTURE";
+    expect(await adapter.currentSlack(slack)).toMatchObject({
+      status: "verified",
+      actorId: "slack:U_ALICE",
+      identity: slack,
+    });
+    installedTeam = "T_OTHER";
+    expect(await adapter.currentSlack(slack)).toEqual({ status: "fenced" });
+    expect(await adapter.currentBrowser(browser)).toMatchObject({ status: "verified", actorId: "access:alice" });
+  });
+
   it("keeps a valid signed browser session unavailable through a cert outage and revalidates after recovery", async () => {
     const config = { teamDomain: "fixture.cloudflareaccess.com", aud: "dashboard" };
     const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -72,6 +110,37 @@ describe("organization native sources", () => {
     expect(await native.currentBrowser(identity)).toEqual({ status: "fenced" });
   });
 
+  it.each([undefined, "T_OTHER"])(
+    "holds Slack proof when its live realm changes during native verification to %s",
+    async (next) => {
+      let team: string | undefined = "T_FIXTURE",
+        change = false;
+      const adapter = createOrganizationNativeSources({
+        organization: "fixture",
+        access: null,
+        dashboard: {
+          mode: "none",
+          describe: () => "fixture",
+          verify: async () => ({ ok: true, identity: { sub: "alice" } }),
+        },
+        slackTeamId: () => team,
+        slack: {
+          auth: { test: async () => ({ team_id: "T_FIXTURE" }) },
+          users: {
+            info: async () => {
+              if (change) team = next;
+              return { user: { team_id: "T_FIXTURE" } };
+            },
+          },
+          conversations: { info: async () => ({}) },
+        },
+      });
+      const identity = { issuer: "https://slack.com", tenant: "T_FIXTURE", subject: "U_ALICE" };
+      expect(await adapter.currentSlack(identity)).toMatchObject({ status: "verified", actorId: "slack:U_ALICE" });
+      change = true;
+      expect(await adapter.currentSlack(identity)).toEqual({ status: next ? "fenced" : "unavailable" });
+    },
+  );
   it("requires a fresh verified browser credential after restart and refuses the same saved subject after expiry", async () => {
     let valid = true;
     const options = {

@@ -74,3 +74,8 @@ Both `ACCESS_TEAM_DOMAIN` and `ACCESS_AUD` must be set and non-blank for Access 
 | Explicit identity proof configuration refuses incomplete or incompatible flows and names missing settings | `[unit]` `src/core/dashboardAuthConfig.test.ts::validateDashboardConfig…::accepts explicit identity proof configuration and refuses incomplete or incompatible flows` |
 
 > `src/index.ts` route wiring (the gate dispatch, the startup-log strategy line) has no unit harness in this repo — consistent with how `liveView`/`ingress`/`mcp` wiring is left to the handler unit tests. The gate's decision logic lives entirely in `buildDashboardVerifier` + the three verifiers + `resolveDashboardAuthMode` + `parseAccessConfig`, which are covered above.
+
+
+| Criterion | Proof |
+|---|---|
+| Browser proof remains available before a Slack realm is registered; Slack proof is unavailable until the current realm is known, verifies after registration, and fences a changed installation. A realm changing during verification cannot release the old proof. | `[unit]` `src/channels/organizationNativeSources.test.ts::organization native sources::keeps browser proof independent while Slack realm is unavailable and verifies Slack afresh after registration`, `src/channels/organizationNativeSources.test.ts::organization native sources::holds Slack proof when its live realm changes during native verification to %s` |
