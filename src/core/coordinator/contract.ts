@@ -1017,6 +1017,13 @@ export interface CoordinatorUnit {
   researchRunId?: string;
   /** Latest canonically admitted writer; its native push still requires independent proof. */
   researchProgressRunId?: string;
+  /** Recorded by the completed review producer. Attention is not merge authority. */
+  mergeAttention?: {
+    assignedTo: string;
+    pr: { number: number; url: string };
+    headSha: string;
+    at: number;
+  };
   /** Monotonic pointer into separately stored immutable recovery receipts. */
   history?: { version: 1; receiptId: string };
   instanceId: string;
@@ -1234,6 +1241,7 @@ export function prepareUnfencedUnitWrite(
     ...preserveWorkBrief(current, replacement),
     ...(current?.researchRunId ? { researchRunId: current.researchRunId } : {}),
     ...(current?.researchProgressRunId ? { researchProgressRunId: current.researchProgressRunId } : {}),
+    ...(current?.mergeAttention ? { mergeAttention: current.mergeAttention } : {}),
   };
   if (JSON.stringify(current?.reportDelivery) !== JSON.stringify(updated.reportDelivery))
     throw new CoordinatorUnitWriteConflict();
@@ -1732,6 +1740,22 @@ export function isCoordinatorUnit(v: unknown): v is CoordinatorUnit {
       !/^[A-Za-z0-9_-]{1,128}$/.test(r.researchProgressRunId))
   )
     return false;
+  if (r.mergeAttention !== undefined) {
+    const a = r.mergeAttention;
+    if (
+      !isObject(a) ||
+      !isText(a.assignedTo) ||
+      !/^[a-z][a-z0-9-]*:[^\s]+$/i.test(a.assignedTo) ||
+      !isObject(a.pr) ||
+      !Number.isSafeInteger(a.pr.number) ||
+      (a.pr.number as number) < 1 ||
+      !isText(a.pr.url) ||
+      typeof a.headSha !== "string" ||
+      !/^[0-9a-f]{40}$/i.test(a.headSha) ||
+      !isFinite(a.at)
+    )
+      return false;
+  }
   if (r.currentEffect !== undefined && !isUnitCurrentEffect(r.currentEffect)) return false;
   if (r.recordedProgress !== undefined && !isUnitProgress(r.recordedProgress)) return false;
   if (

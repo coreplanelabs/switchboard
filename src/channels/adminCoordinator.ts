@@ -8246,6 +8246,17 @@ async function unitEnd(
                 }),
         };
   updated = { ...updated, reportDelivery: sameReport ? row.reportDelivery : reportAdmission };
+  if (!sameReport && ending.kind === "merge_ready" && lastPush && updated.pr) {
+    updated = {
+      ...updated,
+      mergeAttention: {
+        assignedTo: instance.userId,
+        pr: updated.pr,
+        headSha: lastPush,
+        at,
+      },
+    };
+  }
   // Every caller participates, including an older driver's unprojected ending:
   // a stale legacy or idle write must not erase a newer typed settlement.
   const storeError = row.recovery !== undefined ? "recovery_store_unavailable" : "settlement_store_unavailable";

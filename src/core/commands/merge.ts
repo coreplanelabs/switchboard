@@ -152,6 +152,7 @@ async function fencedTarget(args: {
   /** Whether a check still running refuses (the merge waits for green; the
    *  queue exists to run them). */
   refusePending: boolean;
+  expectedHead?: string;
 }): Promise<FencedTarget | Extract<MergeDoorReport, { kind: "handed" }>> {
   const { door, repo, number } = args;
   const name = `${repo}#${number}`;
@@ -175,6 +176,8 @@ async function fencedTarget(args: {
   if (facts.state !== "open") throw new CommandError("conflict", `${name} is not open — nothing was done`);
   if (facts.headSha === undefined)
     throw new CommandError("unavailable", `${name} has no readable head — nothing was done`);
+  if (args.expectedHead && facts.headSha.toLowerCase() !== args.expectedHead.toLowerCase())
+    throw new CommandError("conflict", `${name} no longer has the recorded head — nothing was done`);
   const reviews = await door.reviews({ repo, number });
   const verdicts = reviewVerdictsAtHead(reviews ?? [], facts.headSha);
   if (!verdicts.includes("APPROVED"))
@@ -247,7 +250,13 @@ const doorOf = async (deps: MergeCommandDeps): Promise<MergeDoorService> => {
 export const pullsMerge = defineCommand({
   id: "pulls.merge",
   args: [PR_ARG] as const,
-  options: REPO_OPTIONS,
+  options: REPO_OPTIONS.extend({
+    head: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/i)
+      .optional()
+      .describe("the recorded reviewed head; a changed pull request refuses"),
+  }),
   action: "merge:write",
   effect: "write",
   enabledWhen: (caps) => caps.github,
@@ -267,7 +276,13 @@ export const pullsMerge = defineCommand({
     const target = await resolveTarget({ pr: args.pr, repo: options.repo, originRepo: () => caller.origin?.repo?.() });
     const person = principalOf(caller.actor);
     const userId = person.asUser?.id ?? person.id;
-    const fenced = await fencedTarget({ door, ...target, userId, refusePending: true });
+    const fenced = await fencedTarget({
+      door,
+      ...target,
+      userId,
+      refusePending: true,
+      expectedHead: options.head,
+    });
     if ("kind" in fenced) return fenced as unknown as JsonObject;
     const merged = await door.merge(
       { repo: fenced.repo, number: fenced.number },

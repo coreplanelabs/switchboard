@@ -85,6 +85,35 @@ function setup(
 const person = (grants: readonly string[] = ["merge:write"]) => callerWith("chat", "web:alice", grants);
 
 describe("pulls merge and pulls enqueue — the merge door as commands (record 0070)", () => {
+  it("merges the recorded head and refuses a later approved head for the same saved action", async () => {
+    const same = setup();
+    expect(
+      await same.registry.invoke(
+        "pulls.merge",
+        { args: ["acme/api#42"], options: { head: HEAD } },
+        person(),
+        same.deps,
+      ),
+    ).toMatchObject({ ok: true, value: { kind: "merged", by: { user: "web:alice", login: "ivy-dev" } } });
+    expect(same.mergedWith[0]?.opts.sha).toBe(HEAD);
+    const later = setup({
+      facts: { ...OPEN_FACTS, headSha: "b".repeat(40) },
+      reviews: [{ state: "APPROVED", commitId: "b".repeat(40) }],
+    });
+    expect(
+      await later.registry.invoke(
+        "pulls.merge",
+        { args: ["acme/api#42"], options: { head: HEAD } },
+        person(),
+        later.deps,
+      ),
+    ).toMatchObject({
+      ok: false,
+      error: "conflict",
+      message: "acme/api#42 no longer has the recorded head — nothing was done",
+    });
+    expect(later.mergedWith).toEqual([]);
+  });
   it("registers both under merge:write, effect write, destructive at every input with a risk line naming the pull request", () => {
     expect(mergeCommands.map((c) => c.id)).toEqual(["pulls.merge", "pulls.enqueue"]);
     for (const cmd of mergeCommands) {

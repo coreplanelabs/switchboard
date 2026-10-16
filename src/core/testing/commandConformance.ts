@@ -587,6 +587,10 @@ export const COMMAND_FIXTURES: Readonly<
     baseline: { repo: FIXTURE.repo },
     why: "a machine caller has no origin thread — without `--repo` (or a full pull request reference) there is no repository to sweep",
   },
+  "pulls.merge": {
+    hints: { head: "a".repeat(40) },
+    why: "the optional recorded head names the fixture's approved and green pull request",
+  },
   "repo.reconfigure": {
     baseline: { ref: "main" },
     variants: { "all-options-set": { omit: ["warmResidents"] } },

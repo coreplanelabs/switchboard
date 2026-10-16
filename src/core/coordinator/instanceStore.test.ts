@@ -239,6 +239,30 @@ const unitRow = (unit: string, over: Partial<CoordinatorUnit> = {}): Coordinator
 });
 
 describe("durable reconciliation store seam", () => {
+  it("keeps recorded merge attention through an unfenced metadata refresh", async () => {
+    const store = new InMemoryCoordinatorInstanceStore();
+    const row = unitRow("U12", {
+      mergeAttention: {
+        assignedTo: "slack:UALICE",
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        headSha: "a".repeat(40),
+        at: 1000,
+      },
+    });
+    await store.putUnits([row]);
+    const { mergeAttention: _omitted, ...stale } = row;
+    expect(await store.putUnits([{ ...stale, slug: "updated" }])).toEqual({ ok: true });
+    expect((await store.listUnits(instance.id)).find((saved) => saved.unit === "U12")).toMatchObject({
+      slug: "updated",
+      mergeAttention: {
+        assignedTo: "slack:UALICE",
+        pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+        headSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        at: 1000,
+      },
+    });
+  });
+
   it("requires the exact pending recovery journal and active guard before event deduplication", async () => {
     const store = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     const actionId = "r_" + "d".repeat(64),

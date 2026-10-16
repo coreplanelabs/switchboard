@@ -26,6 +26,19 @@ export function createHomeConditionReader(instances: {
       if (rows.length !== 1) throw new Error("The work question is unavailable.");
       const row = rows[0]!;
       if (row.workBrief !== undefined && !privateRead) return [];
+      const merge = row.ending?.kind === "merge_ready" ? row.mergeAttention : undefined;
+      if (merge && row.pr?.number === merge.pr.number && row.pr.url === merge.pr.url && row.lastPush === merge.headSha)
+        return [
+          {
+            id: `${unitKey}:merge`,
+            unitKey,
+            revision: Math.max(1, merge.at),
+            state: "open",
+            owner: { kind: "person", id: merge.assignedTo },
+            summary: "Review completed for this recorded head.",
+            nextAction: "Inspect current checks and merge the reviewed pull request when allowed.",
+          },
+        ];
       const gate = row.idle?.humanGate ?? (row.recoveryHold?.cause === "human" ? row.recoveryHold.gate : undefined);
       if (!gate) {
         const progress = currentUnitProgress(row);

@@ -425,6 +425,7 @@ async function fixture(
       : {}),
     canWriteThread: async () => writable,
     provedActorIds: async () => ["access:alice", ...(linkedSlack ? ["slack:UALICE"] : [])],
+    mergeLogin: async (id) => (id === "access:alice" ? "alice" : undefined),
   });
   core.guardOrganizationConfirmation = (row, chooser) => installation.guardOrganizationConfirmation(row, chooser);
   const tasks: (() => Promise<void>)[] = [];
@@ -1657,6 +1658,79 @@ describe("browser installation", () => {
     s.setPolicy();
     expect((await home.snapshot(reader)).needsYou).toEqual([]);
     expect(await s.installation.readThread(s.context, worker)).toBeUndefined();
+  });
+  it("projects a hundred owned merge actions from one current canonical pipeline read", async () => {
+    const s = await fixture();
+    await s.seedQuestion();
+    const { idle: _question, ...base } = unit;
+    for (let i = 1; i <= 100; i++) {
+      const pr = { number: i, url: `https://github.com/sample/api/pull/${i}` };
+      seedCoordinatorUnit(s.coordinator, {
+        ...base,
+        unit: `task-${i}`,
+        slug: `task-${i}`,
+        pr,
+        lastPush: "a".repeat(40),
+        ending: { kind: "merge_ready", report: "Review completed.", at: 900 },
+        mergeAttention: { assignedTo: "access:alice", pr, headSha: "a".repeat(40), at: 900 },
+      });
+    }
+    const home = createHomeService({
+      organizationId: "fixture",
+      instances: s.coordinator,
+      conditions: createHomeConditionReader(s.coordinator),
+    });
+    const snapshot = await home.snapshot({ actorId: "access:alice", visibleTo: { kind: "all" } });
+    const reads = vi.spyOn(s.coordinator, "listUnits");
+    const actions = await s.installation.mergeActions(s.context, snapshot.needsYou);
+    expect(Object.keys(actions)).toHaveLength(100);
+    expect(actions["fixture:task-1"]).toEqual({ kind: "merge", pr: "sample/api#1", head: "a".repeat(40) });
+    expect(actions["fixture:task-100"]).toEqual({ kind: "merge", pr: "sample/api#100", head: "a".repeat(40) });
+    expect(reads).toHaveBeenCalledTimes(1);
+  });
+  it("offers a merge command only to the current saved recipient with their own grants in Mine or All", async () => {
+    const s = await fixture();
+    await s.seedQuestion();
+    const { idle: _question, ...base } = unit;
+    const ready: CoordinatorUnit = {
+      ...base,
+      pr: unit.idle!.humanGate!.pr,
+      lastPush: "a".repeat(40),
+      ending: { kind: "merge_ready", report: "Ready.", at: 1000 },
+      mergeAttention: { assignedTo: "access:alice", pr: unit.idle!.humanGate!.pr, headSha: "a".repeat(40), at: 1000 },
+    };
+    seedCoordinatorUnit(s.coordinator, ready);
+    const home = createHomeService({
+      organizationId: "fixture",
+      instances: s.coordinator,
+      conditions: createHomeConditionReader(s.coordinator),
+    });
+    const snapshot = await home.snapshot({ actorId: "access:alice", visibleTo: { kind: "all" } });
+    expect(await s.installation.mergeActions(s.context, snapshot.needsYou)).toEqual({
+      "fixture:original": { kind: "merge", pr: "sample/api#42", head: "a".repeat(40) },
+    });
+    withWorkViewScope(
+      s.context.actor,
+      resolveWorkViewScope(s.context.actor, { organization: "fixture", mode: "everyone" }),
+    );
+    expect(await s.installation.mergeActions(s.context, snapshot.needsYou)).toHaveProperty("fixture:original");
+    expect(
+      await s.installation.mergeActions(
+        { ...s.context, actor: { ...s.context.actor, viewingAs: { id: "access:bob" } } },
+        snapshot.needsYou,
+      ),
+    ).toEqual({});
+    seedCoordinatorUnit(s.coordinator, {
+      ...ready,
+      mergeAttention: { ...ready.mergeAttention!, assignedTo: "access:bob" },
+    });
+    expect(await s.installation.mergeActions(s.context, snapshot.needsYou)).toEqual({});
+    seedCoordinatorUnit(s.coordinator, ready);
+    s.denyNativeReads();
+    expect(await s.installation.mergeActions(s.context, snapshot.needsYou)).toEqual({});
+    s.restoreSource();
+    s.revoke();
+    expect(await s.installation.mergeActions(s.context, snapshot.needsYou)).toEqual({});
   });
   it("projects only a recorded canonical question action and keeps generic approved questions labeled Confirm", async () => {
     const s = await fixture();

@@ -75,6 +75,7 @@ const replyThread = (row: HomeUnit) => seed?.answers?.[row.unit.unit]?.thread ??
       ><UnitList
         :rows="snapshot.needsYou"
         :answers="seed?.answers"
+        :actions="seed?.actions"
         label="Needs you"
         urgent
         :attention-recipient="seed?.attentionRecipient"
