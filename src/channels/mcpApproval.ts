@@ -100,7 +100,7 @@ export async function ownApproval(
   return row &&
     row.message.approvalConnection?.id === connectionId &&
     actorIdsOf(actor).includes(row.message.userId) &&
-    row.message.authenticatedAs === actor.id
+    (row.message.authenticatedAs ?? row.message.userId) === actor.id
     ? row
     : undefined;
 }

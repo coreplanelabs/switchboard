@@ -118,3 +118,16 @@ A trusted host may supply a current personal approval pin getter. When supplied,
 | Exact credential revalidation checks the latest pin after lookup; revoked and legacy records are held while an absent seam preserves the prior adapter | `[unit]` `src/channels/mcpRealm.test.ts::personal MCP current realm::rechecks the current pin after credential lookup and refuses revoked or legacy personal metadata` |
 | The node handler refuses a changed personal realm before body reads while preserving static ingress | `[unit]` `src/channels/mcp.test.ts::createMcpHandler (node:http wrapper)::fences a changed personal realm before reading the body while preserving static ingress` |
 | A personal client form rechecks realm after recording consent and preserves the exact unconsumed saved ID until current proof returns | `[unit]` `src/channels/mcpApprovals.test.ts::MCP approval parity::holds a personal form choice when its realm changes during consent recording and resumes the exact id after current proof` |
+
+
+## Organization saved choices
+
+For protected organization offers, maintained client form consent is recorded before a distinct native choice is admitted. The callback supplies original-owner handling; it does not execute the asking owner again. Cancellation uses the same callback with a separate cancel key. Consumed or lost-acknowledgement retries consult native replay before a used-row refusal. Exact credential, realm, requester and current command rights are rechecked before admission; this support slice registers no production callback. Ordinary unmarked confirmations retain their existing path.
+
+| Criterion | Proof |
+|---|---|
+| A native callback sees recorded form consent, exact requester and service provenance; a consumed choice returns its original receipt after restart | `[unit]` `src/channels/mcpApprovals.test.ts::MCP approval parity::records form consent before native choice admission and replays a lost acknowledgement after restart` |
+| Cancellation owns its distinct native choice; unsupported consent and current grant loss leave work unstarted and saved choices unconsumed | `[unit]` `src/channels/mcpApprovals.test.ts::MCP approval parity::routes native cancellation through its distinct choice and refuses unsupported fresh consent and current grant loss` |
+| Exact device realm loss after client consent leaves the saved id unconsumed and admits no native effect | `[unit]` `src/channels/mcpApprovals.test.ts::MCP approval parity::keeps a native saved id unconsumed when the exact device realm is lost after form consent` |
+
+| A service-only offer stays with its exact credential; an unstamped delegated human is not promoted into that credential | `[unit]` `src/channels/mcpApprovals.test.ts::MCP approval parity::resumes a preapproved service-only native offer with its exact credential and no human alias`; `::refuses an unstamped delegated human row instead of treating its requester as the service credential` |
