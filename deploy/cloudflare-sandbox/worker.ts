@@ -477,7 +477,11 @@ export class SwitchboardSandbox extends Sandbox<Env> {
       if (prior && !sameCancellation(prior, cancellation))
         return cancellationFailure(cancellation, "sandbox", "ticket-conflict");
       const record = await this.readLegacyPreservation();
-      if (record && (record.owner.run !== cancellation.runId || record.owner.container !== binding.container))
+      const discover = cancellation.targets?.sandboxKey === key && binding.container === undefined;
+      if (
+        record &&
+        (record.owner.run !== cancellation.runId || (!discover && record.owner.container !== binding.container))
+      )
         return cancellationFailure(cancellation, "sandbox", "target-mismatch");
       if (binding.container && !record) return cancellationFailure(cancellation, "sandbox", "custody-unverified");
       await this.ctx.storage.put("switchboard.cancellation", cancellation);

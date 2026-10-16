@@ -30,6 +30,7 @@ import { TransientStoreError } from "../runStoreWorker.js";
 import { UncertainStoreError } from "../storeFailure.js";
 import { storeRequestWitness } from "../storeResponse.js";
 import type { RunRecord } from "../runRecord.js";
+import { reclaimedRunRecord } from "./record.js";
 import { RESTART_CLAIM_GRACE_MS } from "../budgets.js";
 import type { PlaneAskAnswer, PlaneOutcomePost } from "../plane/decide.js";
 import type { PlaneAdmitPost } from "../runLedger/ledger.js";
@@ -195,6 +196,7 @@ function setup(
   const elsewhere = over.elsewhere ?? new ThreadsElsewhere();
   const deps: AdmissionDeps = {
     config: configStore(over.yaml ?? ""),
+    runStore: new InMemoryRunStore({ now: () => NOW }),
     runLedger: ledger,
     threadsElsewhere: elsewhere,
     clock: () => NOW,
@@ -347,6 +349,59 @@ describe("admit — the thread admission claim", () => {
     expect(outcome.admitted.agent).toBe("general");
     expect(outcome.admitted.inbox.size).toBe(0);
     expect(replies).toEqual([]);
+  });
+
+  it.each(["confirmed", "provisional", "foreign", "missing"] as const)(
+    "a new request releases an unknown claim only after exact durable cancellation: %s",
+    async (proof) => {
+      const s = setup("start a new task");
+      const id = "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa";
+      const held = s.admission.claim(THREAD, { agent: "general" }).live;
+      held.unknownClaim = { runId: id };
+      if (proof !== "missing") {
+        const row = await rowOf(id);
+        const record = reclaimedRunRecord({ row, events: [], status: "stopped_hard", finishedAt: NOW });
+        const threadKey = proof === "foreign" ? "slack:CX:other" : THREAD;
+        record.threadKey = threadKey;
+        record.cancellation = {
+          version: 1,
+          actor: { kind: "chat", id: "slack:UADMIN" },
+          disposition: "no-workspace",
+          cancellation: {
+            version: 1,
+            id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+            runId: id,
+            ownerGen: row.ownerGen,
+            startedAt: row.startedAt,
+            threadKey,
+            actor: { kind: "chat", id: "slack:UADMIN" },
+          },
+        };
+        if (proof === "provisional") {
+          record.provisional = true;
+          delete record.cancellation;
+        }
+        await s.deps.runStore.put(record);
+      }
+      const result = await admit(s.deps, s.ctx);
+      if (proof === "confirmed") {
+        expect(result).toMatchObject({ kind: "proceed", admitted: { agent: "general" } });
+        expect(s.admission.get(THREAD)).not.toBe(held);
+      } else {
+        expect(result).toEqual({ kind: "held", runId: id });
+        expect(s.admission.get(THREAD)).toBe(held);
+      }
+    },
+  );
+
+  it("holds an original isolated review instead of resuming it on another backend", async () => {
+    const resume = await resumeOf("original-review");
+    resume.row.meta.nativeReviewIsolation = true;
+    const s = setup("resume the review", { resume });
+    expect(await admit(s.deps, s.ctx)).toEqual({ kind: "held", runId: "original-review" });
+    expect(s.admission.size).toBe(0);
+    expect(s.replies).toEqual(["The original review requires its Cloudflare runtime. No work started."]);
+    expect(s.ledger.adopted).toEqual([]);
   });
 
   it("a follow-up on a thread with a run in flight is steered into it: the durable copy first (its seq rides the item), then the slot's inbox, then the ack — no second claim", async () => {

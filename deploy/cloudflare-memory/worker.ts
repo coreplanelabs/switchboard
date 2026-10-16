@@ -13,7 +13,7 @@ import {
   type InboxDeliveryResult,
   type InboxDeliveryReceipt,
 } from "../../src/core/runLedger/inboxDelivery.ts";
-import { EXECUTION_PROTOCOL_HEADER } from "../../src/core/runLedger/types.js";
+import { EXECUTION_PROTOCOL_HEADER, NATIVE_REVIEW_STOP_HEADER } from "../../src/core/runLedger/types.js";
 import {
   sourceRelevanceRequestOf,
   type SourceRelevanceSaveResult,
@@ -80,6 +80,7 @@ import {
 } from "../../src/core/runLedger/ingress.ts";
 import {
   prepareCancellation,
+  sameNativeReviewStopTargets,
   cancellationTargetMatches,
   cancellationOf,
   cancellationMatches,
@@ -6561,7 +6562,12 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
       const row = this.liveRow(runId);
       if (!row) return;
-      if (row.ownerGen !== gen || row.threadKey !== threadKey) {
+      if (
+        row.ownerGen !== gen ||
+        row.threadKey !== threadKey ||
+        row.stop === "hard" ||
+        row.state.cancellation !== undefined
+      ) {
         out = { ok: false, reason: "fenced" };
         return;
       }
@@ -7533,13 +7539,28 @@ export class RunHistoryDO extends DurableObject<Env> {
   nativeExecutionRequired(runId: string): boolean {
     return workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.residentExecution === "native-v1";
   }
+  nativeReviewStopsRequired(runId: string): boolean {
+    return workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.stopTargets !== undefined;
+  }
 
-  async claim(req: ClaimRequest, now: number, originalBodyJson?: string, nativeClient = false): Promise<ClaimResult> {
+  async claim(
+    req: ClaimRequest,
+    now: number,
+    originalBodyJson?: string,
+    nativeClient = false,
+    reviewStopClient = false,
+  ): Promise<ClaimResult> {
     if (this.nativeRetirementFenced(req.runId)) throw new Error("terminal native retirement is prepared");
-    if (this.liveRow(req.runId)?.state.cancellation !== undefined) throw new PromotionPendingError(req.runId);
+    if (
+      this.liveRow(req.runId)?.state.cancellation !== undefined ||
+      workspaceDurabilityArchiveOf(this.allocationArchive(req.runId))?.cancellation
+    )
+      throw new PromotionPendingError(req.runId);
     const originalExecution = workspaceDurabilityArchiveOf(this.allocationArchive(req.runId))?.residentExecution;
     if (!nativeClient && (originalExecution === "native-v1" || req.meta.residentExecution === "native-v1"))
       throw new Error("versioned execution client is required");
+    if (!reviewStopClient && (req.meta.nativeReviewIsolation || this.nativeReviewStopsRequired(req.runId)))
+      throw new Error("native review stop client is required");
     const restartArchiveBefore = canonicalSeedJson(this.allocationArchive(req.runId));
     const restartHeld =
       req.phase === "attaching" && req.meta.restartOf === req.runId
@@ -7641,7 +7662,13 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
         req = {
           ...req,
-          meta: { ...req.meta, ...(allocation?.allocation ? { workspaceAllocation: allocation.allocation } : {}) },
+          meta: {
+            ...req.meta,
+            ...(allocation?.allocation ? { workspaceAllocation: allocation.allocation } : {}),
+            ...(allocation?.stopTargets
+              ? { nativeReviewIsolation: true as const, residentExecution: "native-v1" as const }
+              : {}),
+          },
         };
         const retained = this.sql
           .exec<{ summary_json: string }>(`SELECT summary_json FROM runs WHERE run_id = ?`, req.runId)
@@ -8586,7 +8613,13 @@ export class RunHistoryDO extends DurableObject<Env> {
 
   /** A booting generation takes every expired or handed-off run (item 31),
    *  atomically, with what a resume needs. */
-  async reclaim(gen: string, now: number, leaseMs: number, nativeClient = false): Promise<ReclaimedRun[]> {
+  async reclaim(
+    gen: string,
+    now: number,
+    leaseMs: number,
+    nativeClient = false,
+    reviewStopClient = false,
+  ): Promise<ReclaimedRun[]> {
     const candidates = selectReclaim(
       this.sql.exec<LiveRow>("SELECT * FROM live_runs").toArray().map(rowToLive),
       now,
@@ -8615,6 +8648,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         if (this.nativeRetirementFenced(row.runId)) continue;
         const prior = workspaceDurabilityArchiveOf(this.allocationArchive(row.runId));
         if (prior?.residentExecution === "native-v1" && !nativeClient) continue;
+        if (prior?.stopTargets && !reviewStopClient) continue;
         if (row.meta.executionUnclaimed === true && this.allocationArchive(row.runId) === undefined) {
           if (
             row.phase !== "attaching" ||
@@ -8693,7 +8727,12 @@ export class RunHistoryDO extends DurableObject<Env> {
     this.ctx.storage.transactionSync(() => {
       const row = this.liveRow(runId);
       if (!row) return;
-      result = prepareCancellation(row, actor, crypto.randomUUID());
+      result = prepareCancellation(
+        row,
+        actor,
+        crypto.randomUUID(),
+        workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.stopTargets,
+      );
       if (result.ok)
         this.sql.exec("UPDATE live_runs SET state_json=? WHERE run_id=?", JSON.stringify(row.state), runId);
     });
@@ -8704,6 +8743,11 @@ export class RunHistoryDO extends DurableObject<Env> {
     return (
       !!row &&
       cancellationMatches(row, cancellation) &&
+      (cancellation.targets === undefined ||
+        sameNativeReviewStopTargets(
+          cancellation.targets,
+          workspaceDurabilityArchiveOf(this.allocationArchive(cancellation.runId))?.stopTargets,
+        )) &&
       (binding === undefined || cancellationTargetMatches(row, binding))
     );
   }
@@ -8715,7 +8759,15 @@ export class RunHistoryDO extends DurableObject<Env> {
         ? { ok: true as const, stored: true }
         : { ok: false as const, reason: "unknown-run" as const };
     }
-    if (!cancellationMatches(row, cancellation) || !cancellationRecordMatches(record, cancellation))
+    if (
+      !cancellationMatches(row, cancellation) ||
+      !cancellationRecordMatches(record, cancellation) ||
+      (cancellation.targets !== undefined &&
+        !sameNativeReviewStopTargets(
+          cancellation.targets,
+          workspaceDurabilityArchiveOf(this.allocationArchive(cancellation.runId))?.stopTargets,
+        ))
+    )
       return { ok: false as const, reason: "fenced" as const };
     if (row.meta.session?.key) {
       const source = this.env.SESSION_LOGS.get(this.env.SESSION_LOGS.idFromName(row.meta.session.key));
@@ -8731,7 +8783,16 @@ export class RunHistoryDO extends DurableObject<Env> {
     };
     this.ctx.storage.transactionSync(() => {
       const current = this.liveRow(cancellation.runId);
-      if (!current || !cancellationMatches(current, cancellation)) return;
+      if (
+        !current ||
+        !cancellationMatches(current, cancellation) ||
+        (cancellation.targets !== undefined &&
+          !sameNativeReviewStopTargets(
+            cancellation.targets,
+            workspaceDurabilityArchiveOf(this.allocationArchive(cancellation.runId))?.stopTargets,
+          ))
+      )
+        return;
       this.checkWorkspaceFinishCapacity(current, record);
       const put = this.upsertInTransaction(record, undefined, point, captureCheckArchive(current, true));
       if (!put.stored) return;
@@ -8746,6 +8807,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         );
       }
       // Retain original steps, inbox, jobs, source receipts and allocation bytes.
+      const archive = workspaceDurabilityArchiveOf(this.allocationArchive(current.runId));
+      if (archive) this.retainAllocation({ ...archive, cancellation: structuredClone(cancellation) });
       this.sql.exec("DELETE FROM live_runs WHERE run_id=?", current.runId);
       this.recordPlaneEnding(
         current.runId,
@@ -9107,7 +9170,9 @@ export class RunHistoryDO extends DurableObject<Env> {
       let workspaceThreadKey: string | undefined;
       try {
         workspaceThreadKey = terminalThreadKey({ threadKey: live.thread_key, meta: parseStoredJson(live.meta_json) });
-        binding = (parseStoredJson(live.state_json) as RunState).binding;
+        const state = parseStoredJson(live.state_json) as RunState;
+        if (cancellationOf(state.cancellation)?.targets) return { kind: "unknown" };
+        binding = state.binding;
       } catch {
         return { kind: "unknown" };
       }
@@ -13677,6 +13742,7 @@ async function handleLedger(
   expectedSeed?: ExpectedSeedManifest,
   requestId?: string,
   nativeClient = false,
+  reviewStopClient = false,
 ): Promise<Response> {
   if (typeof body !== "object" || body === null) return json({ error: "body must be a JSON object" }, 400);
   const b = body as Record<string, unknown>;
@@ -14256,12 +14322,19 @@ async function handleLedger(
       (req.value.meta.residentExecution === "native-v1" || (await stub.nativeExecutionRequired(req.value.runId)))
     )
       return json({ error: "versioned execution client is required" }, 409);
+    if (
+      !reviewStopClient &&
+      (req.value.meta.nativeReviewIsolation || (await stub.nativeReviewStopsRequired(req.value.runId)))
+    ) {
+      console.warn(`[runs/claim] ${key.value} ${req.value.runId} → native-review-stop-client-required`);
+      return json({ error: "native review stop client is required" }, 409);
+    }
     const pending = await stub.promotionHold(req.value.runId, req.value.gen);
     if (pending) {
       const saved = await stub.readPromotion({ runId: req.value.runId, gen: req.value.gen });
       if (saved.kind === "held" || saved.preparation.bodyJson !== originalBody) return json(pending, 423);
     }
-    const r = await stub.claim(req.value, now, originalBody, nativeClient);
+    const r = await stub.claim(req.value, now, originalBody, nativeClient, reviewStopClient);
     console.log(
       `[runs/claim] ${key.value} ${req.value.runId} on ${req.value.threadKey} → ${r.ok ? "claimed" : r.reason}`,
     );
@@ -14310,7 +14383,13 @@ async function handleLedger(
     // The RPC type mapping reads the row's open-ended JSON fields as
     // unserializable; the values are plain JSON, so the cast only restores the
     // declared shape.
-    const runs = (await stub.reclaim(g.value, at, lease.value, nativeClient)) as unknown as ReclaimedRun[];
+    const runs = (await stub.reclaim(
+      g.value,
+      at,
+      lease.value,
+      nativeClient,
+      reviewStopClient,
+    )) as unknown as ReclaimedRun[];
     console.log(`[runs/reclaim] ${key.value} ${g.value} took ${runs.length} run(s)`);
     // The reclaim sweep's answer carries the plane's open effects like every
     // heartbeat answer does (record 0064; orchestration-plane item 7) — empty until a unit writes them.
@@ -14970,10 +15049,16 @@ async function handleLedger(
 
 /** The `/runs/*` routes. Observability lines carry ids + counts only —
  *  never event text. A bad `id` is 400 before any DO call. */
-async function handleRuns(pathname: string, body: unknown, env: Env, nativeClient = false): Promise<Response> {
+async function handleRuns(
+  pathname: string,
+  body: unknown,
+  env: Env,
+  nativeClient = false,
+  reviewStopClient = false,
+): Promise<Response> {
   const stub = (key: string) => env.RUNS.get(env.RUNS.idFromName(key));
   if (LEDGER_ROUTES.has(pathname))
-    return handleLedger(pathname, body, env, undefined, undefined, undefined, nativeClient);
+    return handleLedger(pathname, body, env, undefined, undefined, undefined, nativeClient, reviewStopClient);
   if (pathname.startsWith("/runs/review-feedback/")) {
     if (!body || typeof body !== "object" || Array.isArray(body))
       return json({ error: "invalid review feedback request" }, 400);
@@ -15188,8 +15273,15 @@ async function handleRequest(request: Request, env: Env, admission: Admission): 
             expectedSeed,
             storageRequestIdOf(request.headers.get(STORAGE_REQUEST_ID_HEADER)),
             request.headers.get(EXECUTION_PROTOCOL_HEADER) === "native-v1",
+            request.headers.get(NATIVE_REVIEW_STOP_HEADER) === "1",
           )
-        : handleRuns(url.pathname, body, env, request.headers.get(EXECUTION_PROTOCOL_HEADER) === "native-v1"));
+        : handleRuns(
+            url.pathname,
+            body,
+            env,
+            request.headers.get(EXECUTION_PROTOCOL_HEADER) === "native-v1",
+            request.headers.get(NATIVE_REVIEW_STOP_HEADER) === "1",
+          ));
     } catch (error) {
       if (error instanceof PromotionPendingError) throw error;
       const request = await storeRequestWitness(url.pathname, originalBody);

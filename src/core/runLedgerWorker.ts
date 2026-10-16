@@ -1,5 +1,5 @@
 import { prepareInboxDelivery, inboxDeliveryResultOf, type InboxDeliveryResult } from "./runLedger/inboxDelivery.js";
-import { EXECUTION_PROTOCOL_HEADER } from "./runLedger/types.js";
+import { EXECUTION_PROTOCOL_HEADER, NATIVE_REVIEW_STOP_HEADER } from "./runLedger/types.js";
 import {
   nativeClaimObservationOf,
   claimObservationKey,
@@ -321,6 +321,7 @@ export class WorkerRunLedger implements RunLedger {
     const ordinaryHeaders = {
       "content-type": "application/json",
       [EXECUTION_PROTOCOL_HEADER]: "native-v1",
+      [NATIVE_REVIEW_STOP_HEADER]: "1",
       authorization: `Bearer ${this.opts.token}`,
       [STORAGE_REQUEST_ID_HEADER]: requestId,
     };

@@ -39,6 +39,7 @@ import {
 } from "../checkInspection.js";
 import {
   prepareCancellation,
+  sameNativeReviewStopTargets,
   cancellationMatches,
   cancellationRecordMatches,
   type CancellationActor,
@@ -1304,7 +1305,13 @@ export class InMemoryRunLedger implements RunLedger {
   ): Promise<{ ok: true; fence: number } | { ok: false; reason: "fenced" | "unknown-run" }> {
     const row = this.live.get(runId);
     if (!row) return { ok: false, reason: "unknown-run" };
-    if (row.ownerGen !== gen || row.threadKey !== threadKey) return { ok: false, reason: "fenced" };
+    if (
+      row.ownerGen !== gen ||
+      row.threadKey !== threadKey ||
+      row.stop === "hard" ||
+      row.state.cancellation !== undefined
+    )
+      return { ok: false, reason: "fenced" };
     return { ok: true, fence: ++this.residentClaimFence };
   }
   readonly live = new Map<string, LiveRunRow>();
@@ -1520,7 +1527,11 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async claim(req: ClaimRequest, originalBodyJson?: string): Promise<ClaimResult> {
-    if (this.live.get(req.runId)?.state.cancellation !== undefined) throw new PromotionPendingError(req.runId);
+    if (
+      this.live.get(req.runId)?.state.cancellation !== undefined ||
+      workspaceDurabilityArchiveOf(this.allocationArchive(req.runId))?.cancellation
+    )
+      throw new PromotionPendingError(req.runId);
     const seedBefore = workspaceDurabilityArchiveOf(this.allocationArchive(req.runId))?.promotion?.expectedSeed;
     const seedJsonBefore = canonicalSeedJson(seedBefore ?? null);
     const actualSeedSha256 = seedBefore ? await seedContentHash(seedBefore) : undefined;
@@ -1579,6 +1590,9 @@ export class InMemoryRunLedger implements RunLedger {
       meta: structuredClone({
         ...req.meta,
         ...(allocation?.allocation ? { workspaceAllocation: allocation.allocation } : {}),
+        ...(allocation?.stopTargets
+          ? { nativeReviewIsolation: true as const, residentExecution: "native-v1" as const }
+          : {}),
       }),
     };
     const original = this.live.get(req.runId)?.meta ?? this.finished.get(req.runId);
@@ -2339,7 +2353,12 @@ export class InMemoryRunLedger implements RunLedger {
   async prepareCancellation(runId: string, actor: CancellationActor) {
     const row = this.live.get(runId);
     if (!row) return { ok: false as const, reason: "unknown-run" as const };
-    return prepareCancellation(row, actor, crypto.randomUUID());
+    return prepareCancellation(
+      row,
+      actor,
+      crypto.randomUUID(),
+      workspaceDurabilityArchiveOf(this.allocationArchive(runId))?.stopTargets,
+    );
   }
 
   async finishCancellation(cancellation: RunCancellation, record: RunRecord) {
@@ -2348,7 +2367,15 @@ export class InMemoryRunLedger implements RunLedger {
       return this.finished.get(cancellation.runId)?.cancellation?.cancellation.id === cancellation.id
         ? { ok: true as const, stored: true }
         : { ok: false as const, reason: "unknown-run" as const };
-    if (!cancellationMatches(row, cancellation) || !cancellationRecordMatches(record, cancellation))
+    if (
+      !cancellationMatches(row, cancellation) ||
+      !cancellationRecordMatches(record, cancellation) ||
+      (cancellation.targets !== undefined &&
+        !sameNativeReviewStopTargets(
+          cancellation.targets,
+          workspaceDurabilityArchiveOf(this.allocationArchive(cancellation.runId))?.stopTargets,
+        ))
+    )
       return { ok: false as const, reason: "fenced" as const };
     if (Object.hasOwn(record, "checkArchive") || Object.hasOwn(record, "checkExecutions"))
       return { ok: false as const, reason: "fenced" as const };
@@ -2391,6 +2418,8 @@ export class InMemoryRunLedger implements RunLedger {
     }
     if (checkArchive !== undefined) this.finishedWorkEvidence.set(row.runId, checkEvidence);
     this.finished.set(row.runId, structuredClone(record));
+    const archive = workspaceDurabilityArchiveOf(this.allocationArchive(row.runId));
+    if (archive) this.retainAllocation({ ...archive, cancellation: structuredClone(cancellation) });
     this.live.delete(row.runId);
     this.planeEndings.set(row.runId, {
       kind: "stopped_hard",

@@ -5,6 +5,7 @@ import { UnknownAllocationClaimError } from "./allocationAck.js";
 import { TransientStoreError, UncertainStoreError } from "../storeFailure.js";
 import { storeRequestWitness } from "../storeResponse.js";
 import { RunRegistry } from "../runRegistry.js";
+import { WorkerRunLedger } from "../runLedgerWorker.js";
 import { createRunsService } from "../runsService.js";
 import { createRunStop } from "../../execution/runStop.js";
 import { secretsFrom } from "../../secrets.js";
@@ -60,6 +61,129 @@ async function world() {
 }
 
 describe("original promotion hold diagnosis", () => {
+  it.each(["none", "resident", "sandbox"] as const)(
+    "hard stop closes both original native review targets before backend selection: refusal=%s",
+    async (fault) => {
+      const store = new InMemoryRunLedger(() => 20_000);
+      const runId = "eeeeeeee-eeee-4eee-eeee-eeeeeeeeeeee";
+      const threadKey = "mcp:fixture:early-review";
+      const bodies: string[] = [];
+      const transport = new WorkerRunLedger({
+        baseUrl: "https://claim-receiver.invalid",
+        token: "fixture",
+        storeKey: "runs:fixture",
+        fetch: async (input, init) => {
+          const body = String(init?.body);
+          if (String(input).endsWith("/runs/claim-observations/record"))
+            return Response.json(await store.recordClaimObservation(JSON.parse(body).observation));
+          bodies.push(body);
+          await store.claim(JSON.parse(body).run);
+          return new Response("claim acknowledgment lost", { status: 500 });
+        },
+      });
+      const writer = createLedgerWriteThrough({
+        ledger: transport,
+        gen: "g1",
+        now: () => 20_000,
+        warn: () => {},
+        fallback: { put: async () => {}, abandoned: () => {} },
+      });
+      const held = await writer
+        .reserve({
+          runId,
+          threadKey,
+          startedAt: 1,
+          meta: {
+            agent: "review",
+            residentExecution: "native-v1",
+            nativeReviewIsolation: true,
+            channelId: "mcp:fixture",
+            userId: "slack:fixture",
+            threadKey,
+            repo: "fixture/repo",
+            readonly: true,
+            profile: { machine: "repo-resident", identity: "read", minutes: 25 },
+          },
+        })
+        .catch((error: unknown) => error);
+      expect(held).toMatchObject({ name: "NativeClaimUnknownError", outcome: "unknown" });
+      expect(bodies).toHaveLength(1);
+      const requests: { url: string; body: { cancellation: { id: string }; binding?: unknown }; key: string | null }[] =
+        [];
+      const service = createRunsService({
+        registry: new RunRegistry(),
+        store: null,
+        ledger: store,
+        generation: "g2",
+        clock: () => 20_000,
+        stopRuntime: createRunStop(
+          { type: "cloudflare", url: "https://sandbox.example", resident: { baseUrl: "https://resident.example" } },
+          secretsFrom({ SANDBOX_TOKEN: "sandbox", RESIDENT_OPERATOR_TOKEN: "resident" }),
+          async (url, init) => {
+            const body = JSON.parse(String(init?.body));
+            requests.push({ url: String(url), body, key: new Headers(init?.headers).get("x-thread-key") });
+            expect(await store.residentClaim(runId, "g1", threadKey)).toEqual({ ok: false, reason: "fenced" });
+            const phase = String(url).includes("resident") ? "resident" : "sandbox";
+            if (fault === phase)
+              return Response.json({
+                cancellationId: body.cancellation.id,
+                stopped: false,
+                refusal: { phase, cause: "runtime-unconfirmed" },
+              });
+            return Response.json({
+              cancellationId: body.cancellation.id,
+              stopped: true,
+              disposition: String(url).includes("resident") ? "no-workspace" : "workspace-discarded",
+            });
+          },
+        ),
+      });
+      const result = await service.stopRun(runId, "hard", { kind: "chat", id: "slack:operator" });
+      if (fault !== "none") {
+        expect(result).toEqual({
+          ok: false,
+          error: "unavailable",
+          refusal: { phase: fault, cause: "runtime-unconfirmed" },
+        });
+        expect(requests.map(({ url }) => url)).toEqual([
+          "https://resident.example/native/cancel-run",
+          "https://sandbox.example/cancel-run",
+        ]);
+        expect((await store.listLive())[0]).toMatchObject({
+          runId,
+          stop: "hard",
+          state: { cancellation: { id: requests[0]!.body.cancellation.id } },
+        });
+        expect(store.finished.get(runId)).toBeUndefined();
+        return;
+      }
+      expect(result).toEqual({
+        ok: true,
+        value: { id: runId, mode: "hard", state: "stopped" },
+      });
+      expect(requests.map(({ url, key }) => ({ url, key }))).toEqual([
+        { url: "https://resident.example/native/cancel-run", key: null },
+        { url: "https://sandbox.example/cancel-run", key: `review:${runId}` },
+      ]);
+      expect(requests[0]!.body.binding).toBeNull();
+      expect(requests[1]!.body.binding).toEqual({ backend: "sandbox", sandboxKey: `review:${runId}` });
+      expect(store.finished.get(runId)).toMatchObject({
+        status: "stopped_hard",
+        cancellation: {
+          disposition: "isolated-targets-stopped",
+          cancellation: {
+            targets: { version: 1, repo: "fixture/repo", threadKey, sandboxKey: `review:${runId}` },
+          },
+        },
+      });
+      expect(await store.residentClaim(runId, "g1", threadKey)).toEqual({ ok: false, reason: "unknown-run" });
+      expect(await store.listLive()).toEqual([]);
+      await expect(store.claim({ ...JSON.parse(bodies[0]!).run, gen: "late-owner" })).rejects.toMatchObject({
+        name: "PromotionPendingError",
+      });
+    },
+  );
+
   it("cancelled resident work retains exact terminal settlement ownership", async () => {
     const store = new InMemoryRunLedger(() => 20_000);
     const runId = "cccccccc-cccc-4ccc-cccc-cccccccccccc";

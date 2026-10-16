@@ -672,6 +672,35 @@ describe("canonical scratch custody disposition", () => {
 });
 
 describe("native execution first admission", () => {
+  it("retains original review stop targets without retrofitting an older admission", () => {
+    const meta = {
+      ...claim().meta,
+      agent: "review",
+      residentExecution: "native-v1" as const,
+      nativeReviewIsolation: true as const,
+    };
+    delete meta.workspaceAllocation;
+    const targets = { version: 1, repo: "fixture/repo", threadKey: allocation.threadKey, sandboxKey: `review:${id}` };
+    const native = prepareWorkspaceAllocation(id, meta, undefined, false, 1);
+    expect(native).toEqual({
+      version: 1,
+      runId: id,
+      startedAt: 1,
+      allocation: null,
+      residentExecution: "native-v1",
+      stopTargets: targets,
+    });
+    expect(workspaceDurabilityArchiveOf(native)).toEqual(native);
+    const older = { version: 1, runId: id, startedAt: 1, allocation: null, residentExecution: "native-v1" };
+    expect(prepareWorkspaceAllocation(id, meta, older, true, 1)).toEqual(older);
+    expect(prepareWorkspaceAllocation(id, { ...meta, repo: "other/repo" }, native, true, 1)?.stopTargets).toEqual(
+      targets,
+    );
+    expect(
+      workspaceDurabilityArchiveOf({ ...native, stopTargets: { ...targets, sandboxKey: "shared-thread" } }),
+    ).toBeUndefined();
+  });
+
   it("freezes the native contract at first admission and never upgrades a legacy archive", () => {
     const meta = claim().meta;
     delete meta.workspaceAllocation;

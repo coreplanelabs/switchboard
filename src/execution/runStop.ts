@@ -1,9 +1,10 @@
-import type { ExecutionConfig } from "./factory.js";
+import type { ExecutionConfig, WorkspaceBinding } from "./factory.js";
 import { workspaceBindingOf } from "./factory.js";
 import { processSecrets, type Secrets } from "../secrets.js";
 import type { LiveRunRow } from "../core/runLedger/types.js";
 import {
   cancellationRuntimeSupported,
+  unboundNativeReview,
   cancellationRefusalOf,
   cancellationObservationOf,
   type CancellationRefusal,
@@ -19,8 +20,7 @@ export function createRunStop(
   fetchImpl = fetch,
 ) {
   if (execution?.type !== "cloudflare" && !execution?.resident) return undefined;
-  const target = (binding: ReturnType<typeof workspaceBindingOf>, row: LiveRunRow) => {
-    const resident = binding?.backend === "resident" || (binding === undefined && row.meta.selection === "resident");
+  const target = (resident: boolean) => {
     return {
       url: resident ? execution?.resident?.baseUrl : execution?.url,
       token: secrets.named(
@@ -36,25 +36,36 @@ export function createRunStop(
     if (!cancellationRuntimeSupported(row) || (binding?.backend === "resident" && !row.meta.repo))
       return { phase: "prepare", cause: "custody-unverified" };
     if (row.state.binding === undefined && row.meta.profile?.machine === "none") return;
+    if (unboundNativeReview(row)) {
+      for (const resident of [true, false]) {
+        const { url, token } = target(resident);
+        if (!url || !token)
+          return {
+            phase: resident ? ("resident" as const) : ("sandbox" as const),
+            cause: "runtime-unavailable" as const,
+          };
+      }
+      return;
+    }
     if (
       (!binding && row.meta.selection !== "resident") ||
       (binding && binding.backend !== "resident" && binding.backend !== "sandbox")
     )
       return { phase: "prepare", cause: "custody-unverified" };
-    const { url, token } = target(binding, row);
+    const { url, token } = target(binding?.backend === "resident" || (!binding && row.meta.selection === "resident"));
     if (!url || !token)
       return {
         phase: binding?.backend === "resident" || row.meta.selection === "resident" ? "resident" : "sandbox",
         cause: "runtime-unavailable",
       };
   };
-  const stop = async (row: LiveRunRow, cancellation: RunCancellation): Promise<RuntimeStopResult> => {
-    const refusal = unavailable(row);
-    if (refusal) return { stopped: false, refusal };
-    const binding = workspaceBindingOf(row.state.binding);
-    if (!binding && row.meta.profile?.machine === "none") return { stopped: true, disposition: "no-workspace" };
-    const resident = binding?.backend === "resident" || (!binding && row.meta.selection === "resident");
-    const { url, token } = target(binding, row);
+  const stopTarget = async (
+    row: LiveRunRow,
+    cancellation: RunCancellation,
+    resident: boolean,
+    binding: WorkspaceBinding | undefined,
+  ): Promise<RuntimeStopResult> => {
+    const { url, token } = target(resident);
     if (!url || !token) return { stopped: false, refusal: { phase: "prepare", cause: "state-unconfigured" } };
     const phase = resident ? "resident" : "sandbox";
     const unconfirmed = (): RuntimeStopResult => ({
@@ -91,12 +102,35 @@ export function createRunStop(
       if (!result || result.cancellationId !== cancellation.id || result.stopped !== true) return unconfirmed();
       if (resident && (result.disposition === "processes-stopped" || result.disposition === "runtime-retired"))
         return { stopped: true, disposition: result.disposition };
+      if (resident && cancellation.targets && result.disposition === "no-workspace")
+        return { stopped: true, disposition: "no-workspace" };
       if (!resident && result.disposition === "workspace-discarded")
         return { stopped: true, disposition: "workspace-discarded" };
       return unconfirmed();
     } catch {
       return unconfirmed();
     }
+  };
+  const stop = async (row: LiveRunRow, cancellation: RunCancellation): Promise<RuntimeStopResult> => {
+    const refusal = unavailable(row);
+    if (refusal) return { stopped: false, refusal };
+    const binding = workspaceBindingOf(row.state.binding);
+    if (!binding && row.meta.profile?.machine === "none") return { stopped: true, disposition: "no-workspace" };
+    if (!binding && cancellation.targets) {
+      const [resident, sandbox] = await Promise.all([
+        stopTarget(row, cancellation, true, undefined),
+        stopTarget(row, cancellation, false, { backend: "sandbox", sandboxKey: cancellation.targets.sandboxKey }),
+      ]);
+      if (!resident.stopped) return resident;
+      if (!sandbox.stopped) return sandbox;
+      return { stopped: true, disposition: "isolated-targets-stopped" };
+    }
+    return stopTarget(
+      row,
+      cancellation,
+      binding?.backend === "resident" || (!binding && row.meta.selection === "resident"),
+      binding,
+    );
   };
   return Object.assign(stop, {
     supports: (row: LiveRunRow) => unavailable(row) === undefined,

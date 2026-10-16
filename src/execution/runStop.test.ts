@@ -47,6 +47,21 @@ function row(): LiveRunRow {
 }
 
 describe("run runtime stop", () => {
+  it("keeps a recorded sandbox target when the selection metadata is stale", async () => {
+    const saved = row();
+    saved.meta.selection = "resident";
+    const fetch = vi.fn(async (_input: URL | RequestInfo) =>
+      Response.json({ cancellationId: cancellation.id, stopped: true, disposition: "workspace-discarded" }),
+    );
+    const stop = createRunStop(
+      { type: "cloudflare", url: "https://sandbox.example" },
+      secretsFrom({ SANDBOX_TOKEN: "fixture" }),
+      fetch,
+    )!;
+    expect(stop.supports(saved)).toBe(true);
+    expect(await stop(saved, cancellation)).toEqual({ stopped: true, disposition: "workspace-discarded" });
+    expect(String(fetch.mock.calls[0]![0])).toBe("https://sandbox.example/cancel-run");
+  });
   it("asks the recorded Resident backend to resolve an incomplete original target without attaching", async () => {
     const target = row();
     target.phase = "attaching";

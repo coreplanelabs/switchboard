@@ -2851,6 +2851,136 @@ describe("owned credential native scope", () => {
 });
 
 describe("native startup cancellation", () => {
+  it("closes an unstarted attach journal before scope birth without settling unknown work", async () => {
+    const h = harness();
+    for (const key of [...h.rows.keys()])
+      if (
+        key.startsWith("native-scope") ||
+        key === `runReg:${threadKey}` ||
+        key === `runFence:${threadKey}` ||
+        key === `thread:${threadKey}`
+      )
+        h.rows.delete(key);
+    const journal = new NativeOperationJournal(h.instance.ctx.storage);
+    const key = `native-operation:${threadKey}:${owner.runId}:attach`;
+    await journal.open(key, owner, threadKey);
+    const original = structuredClone(h.rows.get(key));
+    h.rows.set(`runReg:${threadKey}`, { ...owner, threadKey });
+    const ticket = {
+      version: 1,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      ...owner,
+      threadKey,
+      startedAt: 1,
+      repo: "owner/name",
+      actor: { kind: "chat", id: "slack:operator" },
+      targets: { version: 1, repo: "owner/name", threadKey, sandboxKey: `review:${owner.runId}` },
+    };
+    expect(await h.instance.cancelRun(ticket, null)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "no-workspace",
+    });
+    expect(h.rows.get(`native-operation-no-start:${key}`)).toEqual(original);
+    expect(await journal.unresolved()).toEqual(new Map());
+    await expect(
+      new NativeRunScopes(h.instance.ctx.storage, h.instance.nativeScopeTransport()).birth(
+        threadKey,
+        owner,
+        true,
+        async () => {},
+      ),
+    ).rejects.toThrow("run cancelled");
+    expect(h.instance.ctx.container.exec).not.toHaveBeenCalled();
+  });
+
+  it.each(["legacy", "journal", "scoped journal", "registration"] as const)(
+    "retains contradictory pre-birth evidence: %s",
+    async (evidence) => {
+      const h = harness();
+      for (const key of [...h.rows.keys()])
+        if (
+          key.startsWith("native-scope") ||
+          key === `runReg:${threadKey}` ||
+          key === `runFence:${threadKey}` ||
+          key === `thread:${threadKey}`
+        )
+          h.rows.delete(key);
+      const original = { ...owner, retained: "original bytes" };
+      const key =
+        evidence === "legacy"
+          ? `native-scope-mode:${encodeURIComponent(threadKey)}:${owner.runId}`
+          : evidence.includes("journal")
+            ? `native-operation:${threadKey}:${owner.runId}:unknown`
+            : `runReg:${threadKey}`;
+      h.rows.set(key, evidence === "legacy" ? { threadKey, runId: owner.runId, protocol: "legacy" } : original);
+      if (evidence === "scoped journal") {
+        const journal = new NativeOperationJournal(h.instance.ctx.storage);
+        h.rows.delete(key);
+        await journal.open(key, owner, threadKey);
+        await journal.bindScope(key, {
+          version: 1,
+          id: "cccccccc-cccc-4ccc-cccc-cccccccccccc",
+          boot: "4b15c6de-2eb6-4ef1-9b6c-e36ebf389807",
+          owner,
+          threadKey,
+        });
+      }
+      const before = structuredClone(h.rows.get(key));
+      const ticket = {
+        version: 1,
+        id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+        ...owner,
+        threadKey,
+        startedAt: 1,
+        repo: "owner/name",
+        actor: { kind: "chat", id: "slack:operator" },
+        targets: { version: 1, repo: "owner/name", threadKey, sandboxKey: `review:${owner.runId}` },
+      };
+      expect(await h.instance.cancelRun(ticket, null)).toMatchObject({
+        stopped: false,
+        refusal: { phase: "resident", cause: "custody-unverified" },
+      });
+      expect(h.rows.get(key)).toEqual(before);
+      expect(h.instance.ctx.container.exec).not.toHaveBeenCalled();
+    },
+  );
+
+  it("closes the original native review admission before scope birth and rejects delayed birth", async () => {
+    const h = harness();
+    for (const key of [...h.rows.keys()])
+      if (
+        key.startsWith("native-scope") ||
+        key === `runReg:${threadKey}` ||
+        key === `runFence:${threadKey}` ||
+        key === `thread:${threadKey}`
+      )
+        h.rows.delete(key);
+    const native = vi.fn(() => {
+      throw new Error("cancellation must not wake the VM");
+    });
+    h.instance.nativeScopeTransport = () => ({ request: native });
+    const ticket = {
+      version: 1,
+      id: "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+      ...owner,
+      threadKey,
+      startedAt: 1,
+      repo: "owner/name",
+      actor: { kind: "chat", id: "slack:operator" },
+      targets: { version: 1, repo: "owner/name", threadKey, sandboxKey: `review:${owner.runId}` },
+    };
+    expect(await h.instance.cancelRun(ticket, null)).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "no-workspace",
+    });
+    const scopes = new NativeRunScopes(h.instance.ctx.storage, h.instance.nativeScopeTransport());
+    await expect(scopes.birth(threadKey, owner, true, async () => {})).rejects.toThrow("run cancelled");
+    expect(h.rows.get(`cancelled:${threadKey}:${owner.runId}`)).toMatchObject({ stopped: true, cancellation: ticket });
+    expect(native).not.toHaveBeenCalled();
+  });
+
   it("closes the reserved run while VM start is hung and refuses the released continuation", async () => {
     const h = harness();
     h.instance.run = Object.getPrototypeOf(h.instance).run;

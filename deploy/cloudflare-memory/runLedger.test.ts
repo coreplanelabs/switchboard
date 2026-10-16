@@ -28,7 +28,12 @@ import { fetchMemoryTest } from "./testFetch.ts";
 import { describe, expect, it, vi } from "vitest";
 import type { RunRecord } from "../../src/core/runRecord.ts";
 import { FRICTION_CATEGORIES, analyzeRunFriction } from "../../src/core/runFriction.ts";
-import { LEASE_MS, type LiveRunRow, type AppendableEvent } from "../../src/core/runLedger/types.ts";
+import {
+  EXECUTION_PROTOCOL_HEADER,
+  LEASE_MS,
+  type LiveRunRow,
+  type AppendableEvent,
+} from "../../src/core/runLedger/types.ts";
 import type { CoordinatorInstance, CoordinatorUnit } from "../../src/core/coordinator/contract.ts";
 import {
   checkpointKey,
@@ -2465,6 +2470,125 @@ describe("original workspace durability in real SQLite", () => {
       ok: false,
       reason: "unsupported",
     });
+  });
+
+  it("hard stop prepares the original native review targets before selection and fences late attachment", async () => {
+    const sk = storeKey();
+    const req = request(sk, null);
+    req.run.meta = {
+      ...req.run.meta,
+      agent: "review",
+      residentExecution: "native-v1",
+      nativeReviewIsolation: true,
+      readonly: true,
+      profile: { machine: "repo-resident", identity: "read", minutes: 25 },
+    };
+    delete req.run.meta.selection;
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: sk,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect(await client.claim(req.run)).toMatchObject({ ok: true });
+    const oldClient = { ...AUTH, [EXECUTION_PROTOCOL_HEADER]: "native-v1" };
+    expect((await post("/runs/claim", req, oldClient)).status).toBe(409);
+    expect(
+      (
+        await post(
+          "/runs/reclaim",
+          { storeKey: sk, gen: "old-client", now: Date.now() + LEASE_MS * 2, leaseMs: LEASE_MS },
+          oldClient,
+        )
+      ).data.runs,
+    ).toEqual([]);
+    expect(await client.requestStop(id, "hard")).toMatchObject({ ok: true });
+    const prepared = await client.prepareCancellation(id, { kind: "chat", id: "slack:operator" });
+    expect(prepared).toMatchObject({
+      ok: true,
+      cancellation: {
+        targets: {
+          version: 1,
+          repo: req.run.meta.repo,
+          threadKey: req.run.threadKey,
+          sandboxKey: `review:${id}`,
+        },
+      },
+    });
+    if (!prepared.ok) throw new Error("original cancellation missing");
+    expect(await client.residentClaim(id, req.run.gen, req.run.threadKey)).toEqual({ ok: false, reason: "fenced" });
+    const targets = prepared.cancellation.targets!;
+    for (const binding of [null, { backend: "sandbox", sandboxKey: targets.sandboxKey }]) {
+      expect(
+        (await post("/runs/cancellation/read", { storeKey: sk, cancellation: prepared.cancellation, binding })).data,
+      ).toEqual({ prepared: true, cancellationId: prepared.cancellation.id });
+    }
+    expect(
+      (
+        await post("/runs/cancellation/read", {
+          storeKey: sk,
+          cancellation: prepared.cancellation,
+          binding: { backend: "sandbox", sandboxKey: "review:foreign" },
+        })
+      ).data,
+    ).toEqual({ prepared: false, cancellationId: prepared.cancellation.id });
+    expect((await post("/runs/preservation-owner", { storeKey: sk, runId: id })).data).toEqual({ kind: "unknown" });
+    const record = reclaimedRunRecord({
+      row: prepared.row,
+      events: [],
+      status: "stopped_hard",
+      finishedAt: Date.now(),
+    });
+    record.cancellation = {
+      version: 1,
+      actor: prepared.cancellation.actor,
+      cancellation: prepared.cancellation,
+      disposition: "isolated-targets-stopped",
+    };
+    expect(await client.finishCancellation(prepared.cancellation, record)).toEqual({ ok: true, stored: true });
+    expect(await client.listLive()).toEqual([]);
+    await expect(client.claim({ ...req.run, gen: "late-owner" })).rejects.toThrow();
+    expect(await client.listLive()).toEqual([]);
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), async (owner) => {
+      expect((await owner.get(id))?.status).toBe("stopped_hard");
+      expect(await owner.delete(id)).toBe(true);
+      expect(await owner.get(id)).toBeNull();
+    });
+    await expect(client.claim({ ...req.run, gen: "after-history" })).rejects.toThrow();
+    expect(await client.listLive()).toEqual([]);
+  });
+
+  it("keeps an older native review without original stop targets held", async () => {
+    const sk = storeKey();
+    const req = request(sk, null);
+    req.run.meta.residentExecution = "native-v1";
+    req.run.meta.nativeReviewIsolation = true;
+    const client = new WorkerRunLedger({
+      baseUrl: BASE,
+      token: "test-token",
+      storeKey: sk,
+      fetch: (input, init) => fetchMemoryTest(String(input), init),
+    });
+    expect(await client.claim(req.run)).toMatchObject({ ok: true });
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(sk)), async (_owner, state) => {
+      const key = workspaceDurabilityKey(id);
+      const saved = state.storage.sql
+        .exec<{ allocation_json: string }>("SELECT allocation_json FROM workspace_settlements WHERE owner_key = ?", key)
+        .one();
+      const older = JSON.parse(saved.allocation_json);
+      delete older.stopTargets;
+      state.storage.sql.exec(
+        "UPDATE workspace_settlements SET allocation_json = ? WHERE owner_key = ?",
+        JSON.stringify(older),
+        key,
+      );
+    });
+    expect(await client.requestStop(id, "hard")).toMatchObject({ ok: true });
+    expect(await client.prepareCancellation(id, { kind: "chat", id: "slack:operator" })).toEqual({
+      ok: false,
+      reason: "unsupported",
+    });
+    expect((await client.listLive())[0]).toMatchObject({ runId: id, stop: "hard", state: {} });
   });
 
   async function originalSourceFixture(noWorkspace = false) {

@@ -141,6 +141,43 @@ function host(record: unknown, options: { seeded?: boolean; running?: boolean } 
 }
 
 describe("sandbox run cancellation", () => {
+  it("discovers only the original dedicated review slot before the caller received its binding", async () => {
+    const state = new Map<string, unknown>([[OWNER_KEY, legacy]]);
+    const f = host(legacy, { seeded: true }) as ReturnType<typeof host> & {
+      cancelRun: (ticket: unknown, binding: unknown) => Promise<unknown>;
+      cancellationState: () => Promise<unknown>;
+      destroy: () => Promise<void>;
+    };
+    const sandboxKey = `review:${legacy.owner.run}`;
+    f.ctx.id.name = sandboxKey;
+    Object.assign(f.ctx, { blockConcurrencyWhile: async (fn: () => Promise<unknown>) => fn() });
+    f.ctx.storage.get = vi.fn(async (key) => state.get(key));
+    f.ctx.storage.put = vi.fn(async (key: string, value: unknown) => {
+      state.set(key, value);
+    });
+    f.destroy = async () => {
+      f.ctx.container.running = false;
+    };
+    const ticket = {
+      version: 1,
+      id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+      runId: legacy.owner.run,
+      ownerGen: "g1",
+      threadKey: "mcp:fixture:thread",
+      startedAt: 1,
+      repo: "example/project",
+      actor: { kind: "chat", id: "slack:operator" },
+      targets: { version: 1, repo: "example/project", threadKey: "mcp:fixture:thread", sandboxKey },
+    };
+    expect(await f.cancelRun(ticket, { sandboxKey })).toEqual({
+      stopped: true,
+      cancellationId: ticket.id,
+      disposition: "workspace-discarded",
+    });
+    expect(await f.cancellationState()).toEqual(ticket);
+    expect(f.ctx.container.running).toBe(false);
+  });
+
   it("destroys only the exact dedicated run slot and fences it against restarting", async () => {
     const state = new Map<string, unknown>([[OWNER_KEY, legacy]]);
     const f = host(legacy, { seeded: true }) as ReturnType<typeof host> & {
