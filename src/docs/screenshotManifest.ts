@@ -263,6 +263,17 @@ export const SURFACES = [
     ],
   },
   {
+    name: "metrics-week",
+    path: "/metrics/week",
+    fixture: { server: "scripts/web-preview.ts", inputs: [] },
+    page: "web/green/pages/WeekOverWeek.vue",
+    what: "the review Week over week tab: the range beside the same range a week earlier, by measure, day and requester",
+    captures: [
+      { name: "desktop", suffix: "", viewport: { width: 1440, height: 900, deviceScaleFactor: 2 } },
+      { name: "phone", suffix: "-phone", viewport: { width: 320, height: 900, deviceScaleFactor: 2 } },
+    ],
+  },
+  {
     name: "costs-models",
     path: "/costs?view=models",
     fixture: { server: "scripts/web-preview.ts", inputs: [] },

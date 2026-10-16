@@ -277,6 +277,68 @@ describe("metrics.reviews", () => {
     );
   });
 
+  it("--compare adds the same range a week earlier, read through the same service, and one text line", async () => {
+    const asked: Array<{ fromMs: number; toMs: number }> = [];
+    const svc: ReviewsService = {
+      reviews: async (range) => {
+        asked.push(range);
+        return report;
+      },
+    };
+    const today = Date.now() - (Date.now() % DAY_MS);
+    const [from, to] = [today - 13 * DAY_MS, today - 7 * DAY_MS];
+    const out = (await reviewsInvoke(svc, { from: isoDay(from), to: isoDay(to), compare: true })) as Record<
+      string,
+      unknown
+    >;
+    expect(asked).toContainEqual({ fromMs: from - 7 * DAY_MS, toMs: from });
+    expect(out.usage).toEqual(report.usage);
+    expect(out.comparison).toMatchObject({
+      shiftDays: 7,
+      current: { usage: { runs: 10 } },
+      previous: { usage: { runs: 10 } },
+    });
+    expect(metricsReviews.render!(out as JsonValue).split("\n")).toContain(
+      "• week over week · vs 7d earlier · 10 vs 10 review runs (+0%) · run success 80% vs 80% · warm start 75% vs 75%",
+    );
+    // A range whose earlier window the dataset no longer keeps says so instead of reading it.
+    const old = (await reviewsInvoke(svc, {
+      from: isoDay(FROM),
+      to: isoDay(FROM + 6 * DAY_MS),
+      compare: true,
+    })) as JsonValue;
+    expect(metricsReviews.render!(old).split("\n")).toContain(
+      "• week over week · 7d earlier is before the 90 days the dataset keeps",
+    );
+  });
+
+  it("--compare says no data for a rate with no eligible runs on either side, and keeps a measured 0%", () => {
+    const tiles = (success: [number, number], warm: [number, number]) => ({
+      usage: { runs: success[1] },
+      system: {
+        tiles: {
+          runSuccessRate: { good: success[0], total: success[1], ratio: success[1] ? success[0] / success[1] : 0 },
+          warmStartShare: { good: warm[0], total: warm[1], ratio: warm[1] ? warm[0] / warm[1] : 0 },
+        },
+      },
+    });
+    const line = (current: object, previous: object) =>
+      metricsReviews.render!({ ...report, comparison: { shiftDays: 7, current, previous } } as unknown as JsonValue)
+        .split("\n")
+        .find((l) => l.startsWith("• week over week"));
+    // An empty earlier window, then an empty current one: the missing side is no data.
+    expect(line(tiles([8, 10], [6, 8]), tiles([0, 0], [0, 0]))).toBe(
+      "• week over week · vs 7d earlier · 10 vs 0 review runs (no earlier runs) · run success 80% vs no data · warm start 75% vs no data",
+    );
+    expect(line(tiles([0, 0], [0, 0]), tiles([8, 10], [6, 8]))).toBe(
+      "• week over week · vs 7d earlier · 0 vs 10 review runs (-100%) · run success no data vs 80% · warm start no data vs 75%",
+    );
+    // Runs but no eligible resident requests on one side; a measured zero stays 0%.
+    expect(line(tiles([0, 4], [0, 0]), tiles([0, 0], [0, 3]))).toBe(
+      "• week over week · vs 7d earlier · 4 vs 0 review runs (no earlier runs) · run success 0% vs no data · warm start no data vs 0%",
+    );
+  });
+
   it("renders the range, usage, the four tiles as good of total, and the top requesters, chat-safe", () => {
     const lines = metricsReviews.render!(report as unknown as JsonValue).split("\n");
     expect(lines[0]).toBe(

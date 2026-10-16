@@ -2,6 +2,7 @@ import { authorize } from "../core/authz/authorize.js";
 import { holdsAll } from "../core/authz/viewAs.js";
 import { hasWorkViewScope, workViewScopeOf } from "./workViewScope.js";
 import { reviewsRangeOf } from "../core/commands/metrics.js";
+import { reviewsComparisonOf } from "../core/reviewsComparison.js";
 import type { ReviewsReadScope, ReviewsService } from "../core/reviewsService.js";
 import { systemClock } from "../core/trace/clock.js";
 import { readableRuns } from "./liveView/viewer.js";
@@ -117,14 +118,19 @@ export function createMetricsViewHandler(
   };
 }
 
-/** The review tabs and their exact report twin, distinct from the generic trend adapter. */
-export type ReviewsMetricsRoute = { kind: "usage" | "health" | "json" };
+/** The review tabs and their exact report twins, distinct from the generic trend adapter.
+ *  The Week over week tab's twin adds the comparison the tab renders. */
+export type ReviewsMetricsRoute = { kind: "usage" | "health" | "week" | "json" | "weekJson" };
 export function parseReviewsMetricsRoute(pathname: string): ReviewsMetricsRoute | null {
   if (pathname === "/metrics" || pathname === "/metrics/") return { kind: "usage" };
   if (pathname === "/metrics/health" || pathname === "/metrics/health/") return { kind: "health" };
+  if (pathname === "/metrics/week" || pathname === "/metrics/week/") return { kind: "week" };
   if (pathname === "/metrics.json") return { kind: "json" };
+  if (pathname === "/metrics/week.json") return { kind: "weekJson" };
   return null;
 }
+
+const REVIEW_PAGE_TITLES = { usage: "Review usage", health: "Review system health", week: "Review week over week" };
 function reviewScope(actor: Actor | undefined): { read: ReviewsReadScope; stamp: string } | undefined {
   if (
     !actor ||
@@ -172,12 +178,13 @@ export function createReviewsMetricsViewHandler(
       return true;
     }
     let range: ReturnType<typeof reviewsRangeOf>;
+    const at = now();
     try {
       if (url.searchParams.getAll("from").length > 1 || url.searchParams.getAll("to").length > 1)
         throw new Error("duplicate review date");
       range = reviewsRangeOf(
         { from: url.searchParams.get("from") ?? undefined, to: url.searchParams.get("to") ?? undefined },
-        now(),
+        at,
       );
     } catch {
       plain(res, 400, "review dates must be real UTC days, from on or before to, at most 90 days");
@@ -192,10 +199,20 @@ export function createReviewsMetricsViewHandler(
         plain(res, 403, "review metrics not allowed");
         return;
       }
-      const report = await service.reviews(range, before.read);
-      const ids = report.usage.byRequester.map((row) => row.requester);
-      const resolvedNames =
-        route.kind !== "json" && options.requesterNames ? await options.requesterNames(actor, ids) : undefined;
+      const weekly = route.kind === "week" || route.kind === "weekJson";
+      const [report, comparison] = await Promise.all([
+        service.reviews(range, before.read),
+        weekly ? reviewsComparisonOf(service, range, at, before.read) : undefined,
+      ]);
+      const ids = [
+        ...new Set(
+          [report, comparison?.current, comparison && "previous" in comparison ? comparison.previous : undefined]
+            .flatMap((r) => r?.usage.byRequester ?? [])
+            .map((row) => row.requester),
+        ),
+      ];
+      const twin = route.kind === "json" || route.kind === "weekJson";
+      const resolvedNames = !twin && options.requesterNames ? await options.requesterNames(actor, ids) : undefined;
       const requesterNames = resolvedNames
         ? Object.fromEntries(
             ids.filter((id) => typeof resolvedNames[id] === "string").map((id) => [id, resolvedNames[id]]),
@@ -207,13 +224,14 @@ export function createReviewsMetricsViewHandler(
         plain(res, 403, "review metrics access changed");
         return;
       }
-      if (route.kind === "json") {
-        json(res, report);
+      if (route.kind === "json" || route.kind === "weekJson") {
+        json(res, comparison ? { ...report, comparison } : report);
         return;
       }
-      page(req, res, 200, fresh, route.kind === "health" ? "Review system health" : "Review usage", {
+      page(req, res, 200, fresh, REVIEW_PAGE_TITLES[route.kind], {
         page: "reviewsMetrics",
         report,
+        ...(comparison ? { comparison } : {}),
         ...(requesterNames ? { requesterNames } : {}),
       });
     })().catch((error: unknown) => {

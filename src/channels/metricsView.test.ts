@@ -363,12 +363,12 @@ describe("protected review metrics HTTP", () => {
   function reviewSeed(body: string): ReviewsMetricsSeed {
     return seedOf(body) as unknown as ReviewsMetricsSeed;
   }
-  it("routes the two tabs and JSON twin without claiming unrelated addresses", () => {
-    expect(["/metrics", "/metrics/health", "/metrics.json"].map(parseReviewsMetricsRoute)).toEqual([
-      { kind: "usage" },
-      { kind: "health" },
-      { kind: "json" },
-    ]);
+  it("routes the three tabs and their JSON twins without claiming unrelated addresses", () => {
+    expect(
+      ["/metrics", "/metrics/health", "/metrics/week", "/metrics.json", "/metrics/week.json"].map(
+        parseReviewsMetricsRoute,
+      ),
+    ).toEqual([{ kind: "usage" }, { kind: "health" }, { kind: "week" }, { kind: "json" }, { kind: "weekJson" }]);
     expect(parseReviewsMetricsRoute("/metrics/unknown")).toBeNull();
   });
   it("renders Mine, read-only Person and authorized Everyone with exact JSON parity and ignores forged owner knobs", async () => {
@@ -401,6 +401,39 @@ describe("protected review metrics HTTP", () => {
     expect(readonly.status).toBe(405);
     expect(readonly.headers.allow).toBe("GET");
   });
+  it("serves Week over week as the scoped report and a comparison a week earlier, with exact JSON parity", async () => {
+    const asked: Array<{ fromMs: number; toMs: number }> = [];
+    const inner = scopedReader();
+    const reader: ReviewsService = {
+      reviews: (range, scope) => {
+        asked.push(range);
+        return inner.reviews(range, scope);
+      },
+    };
+    const handler = createReviewsMetricsViewHandler(reader, sendPage, { now: () => now });
+    const actor = selected("alice");
+    const page = invoke(handler, "/metrics/week", actor);
+    await tick();
+    expect(page.status).toBe(200);
+    const seed = reviewSeed(page.body());
+    // The default range includes today, so both comparison windows are cut at the same five-minute mark.
+    const cut = now - (now % (5 * 60_000));
+    expect(asked).toContainEqual({ fromMs: seed.report.range.fromMs, toMs: cut });
+    expect(asked).toContainEqual({ fromMs: seed.report.range.fromMs - 7 * DAY_MS, toMs: cut - 7 * DAY_MS });
+    expect(seed.comparison).toMatchObject({
+      shiftDays: 7,
+      current: { usage: { runs: 2 } },
+      previous: { usage: { runs: 2 } },
+    });
+    const twin = invoke(handler, "/metrics/week.json", actor);
+    await tick();
+    expect(JSON.parse(twin.body())).toEqual({ ...seed.report, comparison: seed.comparison });
+    // The other tabs read the one report and carry no comparison.
+    const usage = invoke(handler, "/metrics", actor);
+    await tick();
+    expect(reviewSeed(usage.body())).not.toHaveProperty("comparison");
+  });
+
   it("refuses missing, unknown, unscoped, denied and unauthorized Everyone callers before reading", async () => {
     const actor = selected("alice");
     const wide = withWorkViewScope({ ...actor }, { mode: "everyone", ownerIds: [], canEveryone: false });

@@ -1,5 +1,6 @@
 // Feature: docs/reference/specs/run-metrics.md — report-only review display mapping.
 import { REVIEWS_HISTOGRAM_OPEN_MS, MINUTE_MS } from "@core/core/budgets.js";
+import type { ReviewsComparison } from "@core/core/reviewsComparison.js";
 import type { ReviewsReport, ReviewsTile } from "@core/core/reviewsReport.js";
 import { countText, pctText, runsChartModelOf, wallText } from "../../src/lib/metrics";
 
@@ -112,4 +113,121 @@ export function reviewMethod(report: ReviewsReport & { dataset?: string }): stri
     "Changes requested is a review verdict, not a failed run.",
     `Dataset: ${report.dataset ?? "Unavailable"}`,
   ];
+}
+
+// Week over week: the selected range beside the same range whole weeks earlier.
+/** `now` against `before` as a signed whole percent; nothing earlier is said, never divided. */
+export function changeText(now: number, before: number): string {
+  if (before <= 0) return now > 0 ? "New" : "No change";
+  const pct = Math.round(((now - before) / before) * 100);
+  return `${pct > 0 ? "+" : ""}${pct}%`;
+}
+/** Two ratios' difference in whole percentage points, or no data when either has no total. */
+export function pointsText(now: ReviewsTile, before: ReviewsTile): string {
+  if (now.total <= 0 || before.total <= 0) return "No data";
+  const pts = Math.round((now.ratio - before.ratio) * 100);
+  return `${pts > 0 ? "+" : ""}${pts} pts`;
+}
+/** Two durations' signed difference, or no data when either has no successful sample. */
+export function durationChangeText(now: number, nowRuns: number, before: number, beforeRuns: number): string {
+  if (nowRuns <= 0 || beforeRuns <= 0) return "No data";
+  return `${now >= before ? "+" : "-"}${wallText(Math.abs(now - before))}`;
+}
+/** What the previous window is called: one week earlier, or N weeks earlier. */
+export function shiftText(shiftDays: number): string {
+  const weeks = shiftDays / 7;
+  return weeks === 1 ? "one week earlier" : `${weeks} weeks earlier`;
+}
+/** The earlier window as a column heading. */
+export const shiftHeading = (shiftDays: number): string => {
+  const text = shiftText(shiftDays);
+  return text[0].toUpperCase() + text.slice(1);
+};
+const minuteOf = (ms: number): string => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+/** A window as its first and last instants, UTC to the minute. */
+export function windowText(report: ReviewsReport): string {
+  return `${minuteOf(report.range.fromMs)} – ${minuteOf(report.range.toMs)} UTC`;
+}
+type Row = { label: string; now: string; before: string; change: string };
+/** The side-by-side table: each measure now, before, and the change. */
+export function comparisonRows(c: Extract<ReviewsComparison, { previous: ReviewsReport }>): Row[] {
+  const [n, b] = [c.current, c.previous];
+  const count = (label: string, pick: (r: ReviewsReport) => number): Row => ({
+    label,
+    now: countText(pick(n)),
+    before: countText(pick(b)),
+    change: changeText(pick(n), pick(b)),
+  });
+  const ratio = (label: string, pick: (r: ReviewsReport) => ReviewsTile): Row => ({
+    label,
+    now: ratioText(pick(n)),
+    before: ratioText(pick(b)),
+    change: pointsText(pick(n), pick(b)),
+  });
+  const duration = (label: string, key: "p50Ms" | "p95Ms"): Row => ({
+    label,
+    now: durationText(n.usage.duration[key], n.usage.duration.runs),
+    before: durationText(b.usage.duration[key], b.usage.duration.runs),
+    change: durationChangeText(
+      n.usage.duration[key],
+      n.usage.duration.runs,
+      b.usage.duration[key],
+      b.usage.duration.runs,
+    ),
+  });
+  return [
+    count("Review runs", (r) => r.usage.runs),
+    count("Succeeded", (r) => r.usage.succeeded),
+    ratio("Run success rate", (r) => r.system.tiles.runSuccessRate),
+    ratio("Warm start share", (r) => r.system.tiles.warmStartShare),
+    ratio("Lost at setup", (r) => r.system.tiles.lostAtSetup),
+    ratio("Reviews with verdict", (r) => r.system.tiles.reviewsWithVerdict),
+    duration("p50 duration", "p50Ms"),
+    duration("p95 duration", "p95Ms"),
+    {
+      label: "Total run time",
+      now: wallText(n.usage.wallMs),
+      before: wallText(b.usage.wallMs),
+      change: changeText(n.usage.wallMs, b.usage.wallMs),
+    },
+    count("Observed pull requests", (r) => r.usage.pullRequests),
+    count("Findings", (r) => r.usage.findings.total),
+  ];
+}
+/** The headline tiles: the value now, and the earlier value with its change as the note. */
+export function comparisonTiles(c: Extract<ReviewsComparison, { previous: ReviewsReport }>) {
+  const earlier = shiftText(c.shiftDays);
+  const pick = new Set([
+    "Review runs",
+    "Run success rate",
+    "Warm start share",
+    "Lost at setup",
+    "p50 duration",
+    "Observed pull requests",
+  ]);
+  return comparisonRows(c)
+    .filter((row) => pick.has(row.label))
+    .map((row) => ({ label: row.label, value: row.now, note: `${row.before} ${earlier} · ${row.change}` }));
+}
+/** Runs per day, each day beside the day one shift earlier. */
+export function comparisonDays(c: Extract<ReviewsComparison, { previous: ReviewsReport }>) {
+  return c.current.usage.byDay.map((row, i) => {
+    const before = c.previous.usage.byDay[i];
+    return {
+      day: row.day,
+      runs: countText(row.runs),
+      earlierDay: before?.day ?? "",
+      earlierRuns: countText(before?.runs ?? 0),
+      change: changeText(row.runs, before?.runs ?? 0),
+    };
+  });
+}
+/** Runs per requester in either window, most runs now first. */
+export function comparisonRequesters(c: Extract<ReviewsComparison, { previous: ReviewsReport }>) {
+  const runs = (r: ReviewsReport) => new Map(r.usage.byRequester.map((row) => [row.requester, row]));
+  const [n, b] = [runs(c.current), runs(c.previous)];
+  return [...new Set([...n.keys(), ...b.keys()])]
+    .map((requester) => ({ requester, now: n.get(requester)?.runs ?? 0, before: b.get(requester)?.runs ?? 0 }))
+    .sort((x, y) => y.now - x.now || y.before - x.before)
+    .map((row) => ({ ...row, change: changeText(row.now, row.before) }));
 }

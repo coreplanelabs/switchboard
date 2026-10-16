@@ -158,7 +158,7 @@ Combine freely: `agent:ship model:<provider>/<model> effort:high in acme/api: fi
 | Command | What it does | Who can run it |
 |---|---|---|
 | `metrics trend [--days <integer>] [--agent <string>]` | The run trend from the metrics dataset: runs, failure rate, p50/p95 wall and dollars per day and per agent over the range, weighted for sampling as text or JSON; review dashboard tabs use metrics reviews; nothing written. | admins |
-| `metrics reviews [--from <string>] [--to <string>]` | The review dashboard's report from the metrics dataset: review runs by requester and surface, time spent, reviews per pull request, verdicts and findings, and the system tiles (run success, warm starts, setup losses), weighted for sampling; nothing written. | admins |
+| `metrics reviews [--from <string>] [--to <string>] [--compare]` | The review dashboard's report from the metrics dataset: review runs by requester and surface, time spent, reviews per pull request, verdicts and findings, and the system tiles (run success, warm starts, setup losses), weighted for sampling; with --compare, the same range whole weeks earlier; nothing written. | admins |
 | `metrics feedback [--days <integer>] [--repo <string>] [--pr <integer>] [--rating <positive\|negative\|mixed\|unrated>] [--state <complete\|missing_identity\|pending\|stale\|unavailable\|content_changed>] [--limit <integer>] [--after <string>] [--run <string>]` | Find human feedback on native PR reviews or retrieve an exact retained reaction snapshot by run ID. Returns PR/review links, reviewed head, snapshot status and stable reaction/actor IDs for investigation. Stored reads only; no review, model run or GitHub write is started. | admins |
 
 ### `providers`

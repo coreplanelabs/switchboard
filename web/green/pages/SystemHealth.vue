@@ -5,6 +5,7 @@ import { useSeed } from "../../src/lib/seed";
 import CostChart from "../../src/components/costs/CostChart.vue";
 import PageHeading from "../components/PageHeading.vue";
 import StatTiles from "../components/StatTiles.vue";
+import ReviewTabs from "../components/ReviewTabs.vue";
 import EmptyState from "../components/EmptyState.vue";
 import { SERIES_SWATCH } from "../../src/lib/costs";
 import {
@@ -33,10 +34,7 @@ const method = computed(() => (report.value ? reviewMethod(report.value) : []));
 </script>
 <template>
   <PageHeading title="Metrics" description="Recorded review usage and system outcomes." />
-  <nav class="green-tabs" aria-label="Metrics sections">
-    <RouterLink :to="reviewsHref('/metrics', report)">Usage</RouterLink
-    ><RouterLink :to="reviewsHref('/metrics/health', report)" aria-current="page">System health</RouterLink>
-  </nav>
+  <ReviewTabs current="health" :report="report" />
   <template v-if="report && days">
     <form class="green-toolbar flex-wrap" method="get" action="/metrics/health" aria-label="Review date range">
       <label class="text-xs"
