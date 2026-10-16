@@ -1,6 +1,5 @@
 import { authorize } from "../core/authz/authorize.js";
 import { allOf } from "../core/authz/predicate.js";
-import { holdsAll } from "../core/authz/viewAs.js";
 import type { Actor, Predicate } from "../core/authz/types.js";
 
 export const DATA_VIEW_COOKIE = "sb-data-view";
@@ -27,7 +26,8 @@ export function resolveWorkViewScope(
   const canEveryone =
     original.id === actor.id &&
     original.kind === "user" &&
-    holdsAll(original) &&
+    original.grants.actions === "all" &&
+    original.grants.channels === "all" &&
     authorize(original, "organization:read", { type: "organization", id: options.organization }).allow;
   const ownerIds = [...new Set(options.ownerIds ?? [actor.viewingAs?.id ?? actor.id])];
   if (actor.viewingAs) return { mode: "person", ownerIds, person: actor.viewingAs, canEveryone };

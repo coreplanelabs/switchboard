@@ -1273,6 +1273,9 @@ export async function runBot(): Promise<void> {
     }),
   });
   browserWiring = createBrowserHomeWiring({
+    onWorkViewResolved: (diagnostic) => console.info(JSON.stringify(diagnostic)),
+    personByEmail,
+    emailOf: (id) => (slackEmailLookup ? slackEmailLookup(id) : Promise.resolve(undefined)),
     materializeNativeMedia: (envelope) =>
       envelope.source === "slack" && envelope.nativeMedia
         ? nativeMedia.materialize(envelope.nativeMedia)

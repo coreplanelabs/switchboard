@@ -17,6 +17,7 @@ import { InMemoryRunStore } from "../core/runStore.js";
 import { NullRunHistoryWriter } from "../core/runHistoryWriter.js";
 import { RunRegistry } from "../core/runRegistry.js";
 import { createRunsService } from "../core/runsService.js";
+import { analyzeRunFriction } from "../core/runFriction.js";
 import { CommandRegistry, bindCommands } from "../core/commandRegistry.js";
 import { NullMemoryStore } from "../core/memory/stores.js";
 import { NullMcpToolSource } from "../mcp/source.js";
@@ -32,7 +33,7 @@ import { createBrowserHomeWiring } from "./browserHomeWiring.js";
 import { tokenVerifier, type DashboardVerifier } from "./dashboardAuth.js";
 import { createLiveViewHandler } from "./liveView.js";
 import { receiveSlackSourceDeletion } from "./slack.js";
-import { workViewScopeOf } from "./workViewScope.js";
+import { withWorkViewScope, workViewScopeOf } from "./workViewScope.js";
 import { createHomeService } from "../core/home/service.js";
 import { createHomeConditionReader } from "../core/home/conditions.js";
 import { readableRuns } from "./liveView/viewer.js";
@@ -67,6 +68,10 @@ async function fixture(
   merge?: Pick<Parameters<typeof createBrowserHomeWiring>[0], "mergeLogin" | "mergeFacts">,
   dashboard?: DashboardVerifier,
   native = false,
+  emailOwners: Pick<
+    Parameters<typeof createBrowserHomeWiring>[0],
+    "personByEmail" | "emailOf" | "onWorkViewResolved"
+  > & { now?: () => number } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), "home-wiring-"));
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -143,8 +148,12 @@ async function fixture(
   let sent: PageSeed | undefined;
   let shared = false;
   let slackReady = initialSlackReady;
+  const ingressTokens: IngressConfig["tokens"] = native
+    ? { "native-token": { subject: "bot", channel: "default" } }
+    : {};
   const wiring = createBrowserHomeWiring({
     ...(merge ?? {}),
+    ...emailOwners,
     config,
     dashboard: dashboard ?? {
       mode: "access",
@@ -170,7 +179,7 @@ async function fixture(
     core,
     runs,
     commands,
-    auth: (): IngressConfig => ({ tokens: native ? { "native-token": { subject: "bot", channel: "default" } } : {} }),
+    auth: (): IngressConfig => ({ tokens: ingressTokens }),
     personalTokens: new InMemoryPersonalTokenStore(),
     readSecret: () => (secret ? "fixture-token" : undefined),
     emojiDirectory: join(dir, "emoji"),
@@ -179,7 +188,7 @@ async function fixture(
     },
     people: () => people,
     channelsOf: async () => "unknown",
-    now: () => 1000,
+    now: emailOwners.now ?? (() => 1000),
     owner: "fixture-process",
     limits: {
       pendingPerActor: 10,
@@ -229,6 +238,7 @@ async function fixture(
     ledger,
     registry,
     runs,
+    ingressTokens,
     restoreSlack: () => {
       slackReady = true;
     },
@@ -238,6 +248,236 @@ async function fixture(
   };
 }
 describe("browser production wiring", () => {
+  it.each(["slack proof", "email lookup", "profile email"] as const)(
+    "returns independently proved owners within 1500 ms when optional %s stalls",
+    async (stalled) => {
+      const pending = new Promise<never>(() => {});
+      const diagnostics: { slackEmailLookup: string }[] = [];
+      const s = await fixture(true, true, undefined, undefined, undefined, false, {
+        personByEmail: () => (stalled === "email lookup" ? pending : Promise.resolve({ id: "slack:UALICE" })),
+        emailOf: () => (stalled === "profile email" ? pending : Promise.resolve("same-address@example.test")),
+        onWorkViewResolved: (diagnostic) => diagnostics.push(diagnostic),
+      });
+      await s.wiring.initialize();
+      if (stalled === "slack proof") vi.spyOn(s.wiring.native()!, "currentSlack").mockReturnValue(pending);
+      vi.useFakeTimers();
+      try {
+        let context: Awaited<ReturnType<typeof s.wiring.context>>;
+        const read = s.wiring
+          .context(s.request(stalled === "profile email" ? "sb-view-as=slack%3AUALICE" : ""), s.credential)
+          .then((value) => {
+            context = value;
+          });
+        await vi.advanceTimersByTimeAsync(1500);
+        expect(context && workViewScopeOf(context.actor).ownerIds).toEqual([
+          stalled === "profile email" ? "slack:UALICE" : "access:opaque",
+        ]);
+        expect(diagnostics.map((diagnostic) => diagnostic.slackEmailLookup)).toEqual(["timed_out"]);
+        await read;
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+  it("does not wait for optional Slack enrichment when All people is selected", async () => {
+    const pending = new Promise<never>(() => {});
+    const s = await fixture(true, true, undefined, undefined, undefined, false, { personByEmail: () => pending });
+    await s.wiring.initialize();
+    vi.useFakeTimers();
+    try {
+      let context: Awaited<ReturnType<typeof s.wiring.context>>;
+      const read = s.wiring.context(s.request("sb-data-view=everyone"), s.credential).then((value) => {
+        context = value;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(context && workViewScopeOf(context.actor)).toMatchObject({ mode: "everyone", canEveryone: true });
+      await read;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("shares optional Slack verification across refreshes without mutating timed-out scopes", async () => {
+    let now = 1000;
+    const s = await fixture(true, true, undefined, undefined, undefined, false, {
+      personByEmail: async () => ({ id: "slack:UALICE" }),
+      now: () => now,
+    });
+    await s.wiring.initialize();
+    const original = s.wiring.native()!.currentSlack;
+    const good = await original({ issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" });
+    let finish!: (value: typeof good) => void;
+    const pending = new Promise<typeof good>((resolve) => {
+      finish = resolve;
+    });
+    vi.spyOn(s.wiring.native()!, "currentSlack").mockReturnValueOnce(pending).mockResolvedValue({ status: "fenced" });
+    vi.useFakeTimers();
+    try {
+      const contexts: NonNullable<Awaited<ReturnType<typeof s.wiring.context>>>[] = [];
+      const reads = [s.wiring.context(s.request(), s.credential), s.wiring.context(s.request(), s.credential)].map(
+        (read) =>
+          read.then((context) => {
+            if (context) contexts.push(context);
+          }),
+      );
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(contexts.map((context) => workViewScopeOf(context.actor).ownerIds)).toEqual([
+        ["access:opaque"],
+        ["access:opaque"],
+      ]);
+      await Promise.all(reads);
+      finish(good);
+      await vi.advanceTimersByTimeAsync(0);
+      const refreshed = await s.wiring.current()!.host.refresh(contexts[0]);
+      expect(workViewScopeOf(refreshed!.actor).ownerIds).toEqual(["access:opaque", "slack:UALICE"]);
+      expect(contexts.map((context) => workViewScopeOf(context.actor).ownerIds)).toEqual([
+        ["access:opaque"],
+        ["access:opaque"],
+      ]);
+      expect(await s.wiring.owners(refreshed!)).toEqual(["access:opaque"]);
+      now += 30_001;
+      const expired = await s.wiring.context(s.request(), s.credential);
+      expect(workViewScopeOf(expired!.actor).ownerIds).toEqual(["access:opaque"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("includes retained runs across email-matched browser, Slack and ingress identities in Mine", async () => {
+    const diagnostics: unknown[] = [];
+    const s = await fixture(true, true, undefined, undefined, undefined, false, {
+      personByEmail: async (email) => (email === "same-address@example.test" ? { id: "slack:UALICE" } : undefined),
+      emailOf: async (id) => (id === "slack:UALICE" ? "Same-Address@Example.Test" : undefined),
+      onWorkViewResolved: (diagnostic) => diagnostics.push(diagnostic),
+    });
+    s.credential.email = " Same-Address@Example.Test ";
+    s.ingressTokens["alice-token"] = { subject: "alice-device", email: "same-address@example.test" };
+    s.ingressTokens["bob-token"] = { subject: "bob-device", email: "bob@example.test" };
+    s.ingressTokens["ambiguous-a"] = { subject: "shared-device", email: "same-address@example.test" };
+    s.ingressTokens["ambiguous-b"] = { subject: "shared-device", email: "bob@example.test" };
+    await s.wiring.initialize();
+    for (const [id, userId] of [
+      ["browser", "access:opaque"],
+      ["slack", "slack:UALICE"],
+      ["http", "http:alice-device"],
+      ["mcp", "mcp:alice-device"],
+      ["bob", "slack:UBOB"],
+      ["bob-device", "mcp:bob-device"],
+      ["shared", "http:shared-device"],
+    ]) {
+      await s.runStore.put({
+        id,
+        userId,
+        label: id,
+        channelId: "slack:C1",
+        threadKey: `slack:C1:${id}`,
+        channelVisibility: "public",
+        startedAt: 1,
+        finishedAt: 2,
+        status: "completed",
+        eventCount: 0,
+        storedEventCount: 0,
+        truncated: false,
+        events: [],
+        diagnosis: analyzeRunFriction([]),
+      });
+    }
+    const context = await s.wiring.context(s.request(), s.credential);
+    if (!context) throw new Error("No authenticated browser context");
+    const result = await s.runs.listRuns({ status: "all", visibleTo: readableRuns(context.actor) });
+    expect(result.runs.map((run) => run.id).sort()).toEqual(["browser", "http", "mcp", "slack"]);
+    expect(diagnostics[0]).toEqual({
+      event: "dashboard.work_view.resolved",
+      mode: "mine",
+      slackEmailLookup: "matched",
+      ownerCount: 4,
+      allActions: true,
+      allChannels: true,
+      allRepositories: true,
+      canViewEveryone: true,
+    });
+    let page: PageSeed | undefined;
+    const handler = createLiveViewHandler({
+      service: s.runs,
+      index: s.registry,
+      retention: null,
+      page: (_req, _res, _code, _actor, _title, seed) => {
+        page = seed;
+      },
+    });
+    expect(
+      handler(
+        { ...s.request(), method: "GET", url: "/runs?all=1" } as IncomingMessage,
+        { writeHead() {}, end() {} } as unknown as ServerResponse,
+        { actor: context.actor },
+      ),
+    ).toBe(true);
+    await vi.waitFor(() => expect(page?.page).toBe("runs"));
+    if (page?.page !== "runs") throw new Error("No run index seed");
+    expect(page.rows.map((run) => run.id).sort()).toEqual(["browser", "http", "mcp", "slack"]);
+    expect(context.actor.id).toBe("access:opaque");
+    expect(context.actor.self).toEqual(["access:opaque"]);
+    expect(await s.wiring.owners(context)).toEqual(["access:opaque"]);
+    expect(context.authentication.sourceReference).toMatchObject({ actorId: "access:opaque", userId: "access:opaque" });
+    const viewed = await s.wiring.context(s.request("sb-view-as=slack%3AUALICE"), s.credential);
+    expect(workViewScopeOf(viewed!.actor).ownerIds).toEqual(["slack:UALICE", "http:alice-device", "mcp:alice-device"]);
+    const refreshed = await s.wiring.current()!.host.refresh(context);
+    expect(
+      (await s.runs.listRuns({ status: "all", visibleTo: readableRuns(refreshed!.actor) })).runs
+        .map((run) => run.id)
+        .sort(),
+    ).toEqual(["browser", "http", "mcp", "slack"]);
+    s.credential.email = "other@example.test";
+    const changed = await s.wiring.context(s.request(), s.credential);
+    expect(workViewScopeOf(changed!.actor).ownerIds).toEqual(["access:opaque"]);
+  });
+
+  it("keeps unknown email matches unclaimed and never adds read permission or source authority", async () => {
+    const diagnostics: { slackEmailLookup: string }[] = [];
+    const lookup = vi.fn(async () => ({ id: "slack:UALICE" }));
+    const s = await fixture(true, true, undefined, undefined, undefined, false, {
+      personByEmail: lookup,
+      onWorkViewResolved: (diagnostic) => diagnostics.push(diagnostic),
+    });
+    await s.wiring.initialize();
+    const context = await s.wiring.context(s.request(), s.credential);
+    const actor = withWorkViewScope(
+      { ...context!.actor, grants: { ...NO_GRANTS, actions: new Set(["runs:read"]), repos: "all" } },
+      workViewScopeOf(context!.actor),
+    );
+    const predicate = readableRuns(actor);
+    expect(
+      matchesPredicate(predicate, { userId: "slack:UALICE", channelId: "slack:C1", channelVisibility: "public" }),
+    ).toBe(true);
+    expect(
+      matchesPredicate(predicate, {
+        userId: "slack:UALICE",
+        channelId: "slack:GPRIVATE",
+        channelVisibility: "private",
+      }),
+    ).toBe(false);
+    expect(workViewScopeOf(context!.actor).ownerIds).toEqual(["access:opaque", "slack:UALICE"]);
+    lookup.mockRejectedValueOnce(new Error("directory unavailable"));
+    const unavailable = await s.wiring.context(s.request(), s.credential);
+    expect(workViewScopeOf(unavailable!.actor).ownerIds).toEqual(["access:opaque"]);
+    delete s.credential.email;
+    const missing = await s.wiring.context(s.request(), s.credential);
+    expect(workViewScopeOf(missing!.actor).ownerIds).toEqual(["access:opaque"]);
+    expect(diagnostics.map((diagnostic) => diagnostic.slackEmailLookup)).toEqual([
+      "matched",
+      "no_match_or_unavailable",
+      "missing",
+    ]);
+  });
+  it("keeps matched history available when the work-view diagnostic sink throws", async () => {
+    const s = await fixture(true, true, undefined, undefined, undefined, false, {
+      personByEmail: async () => ({ id: "slack:UALICE" }),
+      onWorkViewResolved: () => {
+        throw new Error("Private sink failure must not enter the response");
+      },
+    });
+    await s.wiring.initialize();
+    const context = await s.wiring.context(s.request(), s.credential);
+    expect(workViewScopeOf(context!.actor).ownerIds).toEqual(["access:opaque", "slack:UALICE"]);
+  });
   it.each(["allowed", "revoked", "queued"] as const)(
     "verifies native async output through authenticated original run readback without claiming null-channel delivery: %s",
     async (access) => {
@@ -1145,5 +1385,41 @@ describe("browser production wiring", () => {
     expect(
       await s.wiring.originalIO("unknown-original", { threadKey: "web:opaque:original", userId: "access:opaque" }),
     ).toBeUndefined();
+  });
+  it("seeds All people for a repository-limited operator without offering person impersonation", async () => {
+    const diagnostics: unknown[] = [];
+    const s = await fixture(true, true, undefined, undefined, undefined, false, {
+      onWorkViewResolved: (diagnostic) => diagnostics.push(diagnostic),
+    });
+    const lookup = s.core.config.grantsFor.bind(s.core.config);
+    s.core.config.grantsFor = (id) =>
+      id === "access:opaque"
+        ? { ...lookup(id), repos: new Set(["sample/api"]), repoAccess: new Set(["sample/api"]) }
+        : lookup(id);
+    await s.wiring.initialize();
+    const context = await s.wiring.context(s.request("sb-data-view=everyone"), s.credential);
+    s.wiring.page(s.request(), {} as ServerResponse, 200, context!.actor, "Run details", {
+      page: "runs",
+      all: true,
+      mine: false,
+      rows: [],
+      now: 1000,
+      retentionDays: 30,
+    });
+    expect(s.sent().dataView).toEqual({ mode: "everyone", canViewEveryone: true });
+    expect(s.sent().viewAs).toBeUndefined();
+    expect(context!.actor.grants.repos).toEqual(new Set(["sample/api"]));
+    expect(diagnostics[0]).toEqual({
+      event: "dashboard.work_view.resolved",
+      mode: "everyone",
+      slackEmailLookup: "not_needed",
+      ownerCount: 1,
+      allActions: true,
+      allChannels: true,
+      allRepositories: false,
+      canViewEveryone: true,
+    });
+    const refreshed = await s.wiring.current()!.host.refresh(context!);
+    expect(workViewScopeOf(refreshed!.actor)).toMatchObject({ mode: "everyone", canEveryone: true });
   });
 });

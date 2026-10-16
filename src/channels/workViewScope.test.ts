@@ -36,7 +36,7 @@ describe("global work view scope", () => {
     expect(actor.grants).toBe(original);
     expect(actor.self).toBeUndefined();
   });
-  it("lets only the current original superuser select Everyone within its admitted organization", () => {
+  it("requires a current human operator with full action and channel scope in the admitted organization", () => {
     const full = admin();
     expect(resolveWorkViewScope(full, { organization: "installation", mode: "everyone" })).toEqual({
       mode: "everyone",
@@ -73,6 +73,19 @@ describe("global work view scope", () => {
     expect(matchesPredicate(workReadPredicate(viewed, { kind: "all" }), { userId: "slack:UBOB" })).toBe(true);
     expect(matchesPredicate(workReadPredicate(viewed, { kind: "all" }), { userId: "access:alice" })).toBe(false);
     expect(viewed.id).toBe("access:alice");
+  });
+  it("offers Everyone with full channel scope while preserving a finite repository limit", () => {
+    const actor: Actor = {
+      ...admin(),
+      grants: { ...ALL_GRANTS, repos: new Set(["sample/fixture"]), repoAccess: new Set(["sample/fixture"]) },
+    };
+    const scope = resolveWorkViewScope(actor, { organization: "installation", mode: "everyone" });
+    expect(scope).toEqual({ mode: "everyone", ownerIds: [], canEveryone: true });
+    withWorkViewScope(actor, scope);
+    const predicate = workReadPredicate(actor, { kind: "repos-in", repos: new Set(["sample/fixture"]) });
+    expect(matchesPredicate(predicate, { userId: "slack:UBOB", repo: "sample/fixture" })).toBe(true);
+    expect(matchesPredicate(predicate, { userId: "slack:UBOB", repo: "sample/production" })).toBe(false);
+    expect(actor.grants.repos).toEqual(new Set(["sample/fixture"]));
   });
   it("treats cookies as preferences and refuses unknown mode words", () => {
     expect(workViewModeFromCookie("sb-data-view=everyone")).toBe("everyone");

@@ -27,12 +27,13 @@ import type { IncomingMessage as CoreMessage } from "../core/types.js";
 import type { ChannelIO, SlackDirectAudience } from "../core/types.js";
 import { createLegacySlackAudience } from "./legacySlackAudience.js";
 import { identityKey } from "../core/identity/engine.js";
+import type { ExternalIdentity } from "../core/identity/contract.js";
 import type { IdentityNotice } from "../core/identity/linkContract.js";
 import { WorkerOrganizationStore } from "../core/organization/worker.js";
 import { createHomeRepositories } from "./homeRepositories.js";
 import { createOriginalUnitRecipient } from "./originalUnitRecipient.js";
 import { createBrowserHomeInstallation, type BrowserHomeInstallationOptions } from "./browserHomeInstallation.js";
-import { createOrganizationAuthentication } from "./organizationAuthentication.js";
+import { createOrganizationAuthentication, type NativeOrganizationProof } from "./organizationAuthentication.js";
 import { createOrganizationNativeSources, type OrganizationNativeSourcesOptions } from "./organizationNativeSources.js";
 import { createIdentityRuntime } from "./identityRuntime.js";
 import { FileEmojiStore, createSlackEmojiCache } from "./slackEmoji.js";
@@ -41,6 +42,7 @@ import type { PageSeed, ViewablePerson } from "./webSeed.js";
 import { readableRuns } from "./liveView/viewer.js";
 import { accessActor, resolveAccessActor } from "./commandHttp.js";
 import { isServiceToken } from "./accessAuth.js";
+import type { PersonLookup } from "./requester.js";
 import { holdsAll } from "../core/authz/viewAs.js";
 import {
   hasWorkViewScope,
@@ -52,7 +54,13 @@ import {
 import { viewAsFromCookie } from "./viewAs.js";
 import { WebIO, turnsOf, historyOf } from "./web.js";
 import { retentionPolicyOf } from "../core/runStore.js";
-import { DAY_MS, ORG_RECONCILE_BATCH_MAX } from "../core/budgets.js";
+import {
+  DAY_MS,
+  ORG_RECONCILE_BATCH_MAX,
+  WORK_VIEW_ENRICHMENT_TIMEOUT_MS,
+  WORK_VIEW_SLACK_PROOF_TTL_MS,
+  WORK_VIEW_SLACK_PROOF_CACHE_MAX,
+} from "../core/budgets.js";
 import { LEASE_MS } from "../core/runLedger/types.js";
 import { parseUnitKey } from "../core/coordinator/contract.js";
 import type { UnitEventKey } from "../core/coordinator/instanceStore.js";
@@ -85,6 +93,23 @@ export function organizationResumeIo(source: OriginalBinding, request?: CoreMess
   return source.io;
 }
 
+export interface WorkViewDiagnostic {
+  event: "dashboard.work_view.resolved";
+  mode: "mine" | "person" | "everyone";
+  slackEmailLookup:
+    | "source_unavailable"
+    | "missing"
+    | "not_configured"
+    | "no_match_or_unavailable"
+    | "matched"
+    | "timed_out"
+    | "not_needed";
+  ownerCount: number;
+  allActions: boolean;
+  allChannels: boolean;
+  allRepositories: boolean;
+  canViewEveryone: boolean;
+}
 export interface BrowserHomeWiringOptions {
   config: ConfigStore;
   dashboard: DashboardVerifier;
@@ -104,6 +129,10 @@ export interface BrowserHomeWiringOptions {
   page: PageSender;
   people(): readonly ViewablePerson[];
   channelsOf(actorId: string): Promise<ReadonlySet<string> | "unknown">;
+  /** Trusted provider email facts narrow personal discovery, without linking private streams. */
+  personByEmail?: PersonLookup;
+  emailOf?(actorId: string): Promise<string | undefined>;
+  onWorkViewResolved?(diagnostic: WorkViewDiagnostic): void;
   now(): number;
   owner: string;
   limits: OrganizationLimits;
@@ -157,6 +186,93 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
     }
   }
   const viewerLabels = new WeakMap<Actor, string>();
+  const discoverySlackProofs = new Map<string, { proof: Promise<NativeOrganizationProof>; expiresAt?: number }>();
+  function discoverySlackProof(identity: ExternalIdentity): Promise<NativeOrganizationProof> {
+    const key = identityKey(identity);
+    const cached = discoverySlackProofs.get(key);
+    if (cached && (cached.expiresAt === undefined || cached.expiresAt > options.now())) return cached.proof;
+    const entry: { proof: Promise<NativeOrganizationProof>; expiresAt?: number } = {
+      proof: native!.currentSlack(identity).catch(() => ({ status: "unavailable" })),
+    };
+    discoverySlackProofs.set(key, entry);
+    void entry.proof.then(() => {
+      if (discoverySlackProofs.get(key) === entry) entry.expiresAt = options.now() + WORK_VIEW_SLACK_PROOF_TTL_MS;
+    });
+    if (discoverySlackProofs.size > WORK_VIEW_SLACK_PROOF_CACHE_MAX)
+      discoverySlackProofs.delete(discoverySlackProofs.keys().next().value!);
+    return entry.proof;
+  }
+  async function discoveryOwners(
+    context: HomeRuntimeContext,
+    independentlyProvedOwners: readonly string[],
+  ): Promise<{
+    ownerIds: readonly string[];
+    slackEmailLookup: WorkViewDiagnostic["slackEmailLookup"];
+  }> {
+    const enrichment = (async () => {
+      const selected = context.actor.viewingAs?.id ?? context.actor.id;
+      const ids = [...independentlyProvedOwners];
+      let slackEmailLookup: WorkViewDiagnostic["slackEmailLookup"] = "source_unavailable";
+      if (!native || !installation) return { ownerIds: ids, slackEmailLookup };
+      const selectedIdentity = selected.startsWith("access:")
+        ? { issuer: native.browserIssuer, tenant: null, subject: selected.slice(7) }
+        : selected.startsWith("slack:")
+          ? { issuer: "https://slack.com", tenant: slackTeam, subject: selected.slice(6) }
+          : undefined;
+      if (!selectedIdentity) return { ownerIds: ids, slackEmailLookup };
+      const proof = selected.startsWith("access:")
+        ? await native.currentBrowser(selectedIdentity)
+        : await discoverySlackProof(selectedIdentity);
+      if (proof.status === "verified" && proof.kind === "human" && proof.organizationMember) {
+        slackEmailLookup = "missing";
+        const email = (proof.access?.email ?? (await options.emailOf?.(selected).catch(() => undefined)))
+          ?.trim()
+          .toLowerCase();
+        if (email?.includes("@")) {
+          // The provider's bounded lookup returns no value for both misses and failures.
+          slackEmailLookup = options.personByEmail ? "no_match_or_unavailable" : "not_configured";
+          const person = await options.personByEmail?.(email).catch(() => undefined);
+          if (person?.id.startsWith("slack:")) {
+            const peer = await discoverySlackProof({
+              issuer: "https://slack.com",
+              tenant: slackTeam,
+              subject: person.id.slice(6),
+            });
+            if (peer.status === "verified" && peer.kind === "human" && peer.organizationMember) {
+              ids.push(person.id);
+              slackEmailLookup = "matched";
+            }
+          }
+          const tokens = Object.values(options.auth().tokens);
+          for (const subject of new Set(tokens.map((token) => token.subject))) {
+            // A shared subject with conflicting or missing emails has no single owner.
+            if (
+              tokens
+                .filter((token) => token.subject === subject)
+                .every((token) => token.email?.trim().toLowerCase() === email)
+            )
+              ids.push(`http:${subject}`, `mcp:${subject}`);
+          }
+        }
+      }
+      return { ownerIds: [...new Set(ids)], slackEmailLookup };
+    })();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = { ownerIds: independentlyProvedOwners, slackEmailLookup: "timed_out" as const };
+    try {
+      return await Promise.race([
+        enrichment.catch(() => ({
+          ownerIds: independentlyProvedOwners,
+          slackEmailLookup: "source_unavailable" as const,
+        })),
+        new Promise<typeof timedOut>((resolve) => {
+          timer = setTimeout(() => resolve(timedOut), WORK_VIEW_ENRICHMENT_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
   async function owners(context: HomeRuntimeContext): Promise<readonly string[]> {
     const selected = context.actor.viewingAs?.id ?? context.actor.id;
     if (!native || !installation) return [selected];
@@ -239,11 +355,32 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
     mode: "mine" | "everyone" = "mine",
     originalActor = context.actor,
   ) {
-    const ownerIds = await owners(context);
-    withWorkViewScope(
-      context.actor,
-      resolveWorkViewScope(context.actor, { organization: org, ownerIds, mode, originalActor }),
-    );
+    const independentlyProvedOwners = await owners(context);
+    const scope = resolveWorkViewScope(context.actor, {
+      organization: org,
+      ownerIds: independentlyProvedOwners,
+      mode,
+      originalActor,
+    });
+    const { ownerIds, slackEmailLookup } =
+      scope.mode === "everyone"
+        ? { ownerIds: independentlyProvedOwners, slackEmailLookup: "not_needed" as const }
+        : await discoveryOwners(context, independentlyProvedOwners);
+    withWorkViewScope(context.actor, { ...scope, ownerIds: scope.mode === "everyone" ? [] : ownerIds });
+    try {
+      options.onWorkViewResolved?.({
+        event: "dashboard.work_view.resolved",
+        mode: scope.mode,
+        slackEmailLookup,
+        ownerCount: ownerIds.length,
+        allActions: originalActor.grants.actions === "all",
+        allChannels: originalActor.grants.channels === "all",
+        allRepositories: originalActor.grants.repos === "all",
+        canViewEveryone: scope.canEveryone,
+      });
+    } catch {
+      // An unavailable diagnostic sink cannot remove the viewer's history.
+    }
     return context;
   }
   async function canReadContext(
@@ -709,7 +846,7 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
               ...(actor!.asUser ?? { id: actor!.id }),
               ...(viewerLabels.get(actor!) ? { name: viewerLabels.get(actor!) } : {}),
             },
-            ...(scope.canEveryone ? { viewAs: { people: [...options.people()] } } : {}),
+            ...(scope.canEveryone && holdsAll(actor!) ? { viewAs: { people: [...options.people()] } } : {}),
           }
         : {}),
       emoji: emoji.catalog(),
