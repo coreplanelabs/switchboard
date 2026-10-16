@@ -14354,7 +14354,12 @@ async function handleLedger(
   if (pathname === "/runs/native-retirement/prepare") {
     const target = nativeRetirementTargetSchema.safeParse(b.target);
     if (!target.success) return json({ error: "exact terminal native target is required" }, 400);
-    return json(await stub.prepareNativeRetirement(target.data));
+    const prepared = await stub.prepareNativeRetirement(target.data);
+    console.log(
+      "[runs/native-retirement/prepare]",
+      prepared.kind === "held" ? { kind: prepared.kind, reason: prepared.reason } : { kind: prepared.kind },
+    );
+    return json(prepared);
   }
   if (pathname === "/runs/preservation-owner") {
     const runId = parseRunId(b.runId);

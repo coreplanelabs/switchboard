@@ -996,3 +996,4 @@ No source processor calls this operation. Recovery must read and match the saved
 | Criterion | Proof |
 | --- | --- |
 | Memory prepares a terminal-native-scope permit only from an exact canonical terminal record with a finite seal, no raw provisional/restart marker, and no live row. Its durable run-ID fence orders cleanup against direct claims, queued live-row creation and reclaim. History remains unchanged. | `[unit]` `deploy/cloudflare-memory/runLedger.test.ts::terminal native retirement authority::*` |
+| The terminal preparation route logs its prepared or held outcome and a closed reason when held. The log contains no target identity or original content, and the response retains the same status and body. | `[unit]` `deploy/cloudflare-memory/runLedger.test.ts::terminal native retirement authority::logs only the preparation outcome while preserving held and prepared responses` |
