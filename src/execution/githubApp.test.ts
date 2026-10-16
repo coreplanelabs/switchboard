@@ -384,6 +384,49 @@ describe("resolveGithubToken", () => {
 // Feature: docs/reference/specs/execution.md item 5 — the credential WITH its
 // expiry, for the sandbox executor's credential-file refresher (issue 1915).
 describe("resolveGithubCredential", () => {
+  it("keeps overlapping mint results together through the real API resolver and selects the current branch tip", async () => {
+    configureApp();
+    const releases: Array<() => void> = [];
+    let mints = 0;
+    vi.stubGlobal("fetch", (url: RequestInfo | URL) => {
+      if (String(url).endsWith("/access_tokens")) {
+        const token = `ghs_${++mints}`;
+        return new Promise<Response>((resolve) =>
+          releases.push(() =>
+            resolve(
+              Response.json({
+                token,
+                expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+              }),
+            ),
+          ),
+        );
+      }
+      if (String(url).includes("/git/ref/heads/"))
+        return Promise.resolve(Response.json({ object: { type: "commit", sha: "b".repeat(40) } }));
+      return Promise.resolve(
+        Response.json({
+          id: 101,
+          number: 7,
+          state: "open",
+          head: { ref: "fix/retry", sha: "a".repeat(40), repo: { id: 11, full_name: "acme/api" } },
+          base: { ref: "main", repo: { id: 11, full_name: "acme/api" } },
+        }),
+      );
+    });
+    await freshModule();
+    const { RestGithubApi } = await import("./githubApi.js");
+    const api = new RestGithubApi();
+    const pending = Promise.all([api.getPullRequest("acme/api", 7), api.getPullRequest("acme/api", 7)]);
+    expect(releases).toHaveLength(2);
+    releases.forEach((release) => release());
+    const rows = await pending;
+    expect(rows.map((row) => ({ id: row.id, source: row.source, sha: row.head.sha }))).toEqual([
+      { id: 101, source: { host: "github.com", appId: 12345, installationId: 67890 }, sha: "b".repeat(40) },
+      { id: 101, source: { host: "github.com", appId: 12345, installationId: 67890 }, sha: "b".repeat(40) },
+    ]);
+  });
+
   it("leaves a noncanonical configured App ID unknown instead of coercing source identity", async () => {
     configureApp();
     process.env.GITHUB_APP_ID = "1e4";

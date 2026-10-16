@@ -128,7 +128,7 @@ export async function resolveGithubToken(
   signal?: AbortSignal,
 ): Promise<string | null> {
   signal?.throwIfAborted();
-  if (githubAppConfigured()) return mintInstallationToken(scope, span, signal);
+  if (githubAppConfigured()) return (await mintInstallationToken(scope, span, signal)).token;
   // Revealed here for trusted callers only, never the model workspace.
   return processSecrets.get("GH_TOKEN")?.reveal() ?? null;
 }
@@ -177,13 +177,11 @@ export async function resolveGithubCredential(
   if (scope === undefined) return null;
   if (githubAppConfigured()) {
     if (opts?.fresh) cache.delete(scope);
-    const token = await mintInstallationToken(scope, opts?.span);
-    const entry = cache.get(scope);
-    const matched = entry?.token === token ? entry : undefined;
+    const entry = await mintInstallationToken(scope, opts?.span);
     return {
-      token,
-      expiresAtMs: matched?.expiresAtMs ?? null,
-      ...(matched?.source ? { source: { ...matched.source } } : {}),
+      token: entry.token,
+      expiresAtMs: entry.expiresAtMs,
+      ...(entry.source ? { source: { ...entry.source } } : {}),
     };
   }
   const staticToken = processSecrets.get("GH_TOKEN")?.reveal();
@@ -226,7 +224,7 @@ async function lookupIdentity(): Promise<GithubIdentity | undefined> {
     const login = `${app.slug}[bot]`;
     const user = (await githubJson(
       `https://api.github.com/users/${encodeURIComponent(login)}`,
-      await mintInstallationToken("read"),
+      (await mintInstallationToken("read")).token,
     )) as { login?: string; id?: number };
     if (typeof user.id !== "number") throw new Error(`GET /users/${login} answered without an id`);
     return { login: typeof user.login === "string" ? user.login : login, id: user.id };
@@ -257,19 +255,20 @@ async function githubJson(url: string, bearer: string): Promise<unknown> {
 
 /** The mint as the caller's `github.token_mint` child when it has a span
  *  (docs/reference/specs/tracing.md item 23): `scope`, whether the cache answered, and how
- *  long the token lives. Without a span the same work, unmeasured. */
-async function mintInstallationToken(scope: GithubTokenScope, span?: Span, signal?: AbortSignal): Promise<string> {
+ *  long the token lives. Return the token and its metadata together: another
+ *  mint may replace the cache before this caller resumes. */
+async function mintInstallationToken(scope: GithubTokenScope, span?: Span, signal?: AbortSignal): Promise<CachedToken> {
   if (!span) return mintCore(scope, undefined, signal);
   return span.span("github.token_mint", (s) => mintCore(scope, s, signal), { attrs: { scope } });
 }
 
-async function mintCore(scope: GithubTokenScope, span?: Span, signal?: AbortSignal): Promise<string> {
+async function mintCore(scope: GithubTokenScope, span?: Span, signal?: AbortSignal): Promise<CachedToken> {
   // Reuse only while the token outlives the longest possible command; the
   // executors call this per command, so no run is ever pinned to one token.
   const cached = cache.get(scope);
   if (cached && systemClock() < cached.expiresAtMs - TOKEN_REUSE_MARGIN_MS) {
     span?.setAttrs({ cached: true, expiresInMs: cached.expiresAtMs - systemClock() });
-    return cached.token;
+    return cached;
   }
 
   const credentials = appCredentials();
@@ -305,9 +304,10 @@ async function mintCore(scope: GithubTokenScope, span?: Span, signal?: AbortSign
   const installationId = nativeId(credentials.installationId.reveal());
   const source: GithubCredentialSource | undefined =
     appId !== undefined && installationId !== undefined ? { host: "github.com", appId, installationId } : undefined;
-  cache.set(scope, { token: data.token, expiresAtMs, ...(source ? { source } : {}) });
+  const entry: CachedToken = { token: data.token, expiresAtMs, ...(source ? { source } : {}) };
+  cache.set(scope, entry);
   span?.setAttrs({ cached: false, expiresInMs: expiresAtMs - systemClock() });
-  return data.token;
+  return entry;
 }
 
 /** Short-lived RS256 JWT proving we are the app (max 10 min per GitHub docs). The
