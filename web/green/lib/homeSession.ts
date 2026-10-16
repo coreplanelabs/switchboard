@@ -1,12 +1,31 @@
-import { computed, inject, ref, type InjectionKey } from "vue";
+import { computed, inject, ref, shallowReactive, watch, type InjectionKey } from "vue";
 import type { OrganizationEnvelope } from "@core/core/organization/contract.js";
 import { stripSlash } from "../../src/lib/slashCompleter";
-import type { EventSourceFactory, EventSourceLike } from "../../src/lib/eventSource";
+import { EVENT_SOURCE_CLOSED, type EventSourceFactory, type EventSourceLike } from "../../src/lib/eventSource";
 
 export type { HomeSession } from "@core/channels/homeSeed.js";
-import type { HomeSession, HomeConfirmationOffer, HomeConfirmationChoice } from "@core/channels/homeSeed.js";
+import type {
+  HomeSession,
+  HomeConfirmationOffer,
+  HomeConfirmationChoice,
+  HomeAnswerTarget,
+  HomePrimaryAction,
+} from "@core/channels/homeSeed.js";
 export type AttachedContext = OrganizationEnvelope["context"][number] & { label: string };
 export type HomeSessionStatus = "loading" | "ready" | "unavailable";
+function isPrimaryAction(value: unknown): value is HomePrimaryAction {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const action = value as Partial<HomePrimaryAction>;
+  return (
+    Object.keys(value).every((key) => key === "label" || key === "text") &&
+    typeof action.label === "string" &&
+    !!action.label.trim() &&
+    action.label.length <= 64 &&
+    typeof action.text === "string" &&
+    !!action.text.trim() &&
+    action.text.length <= 4096
+  );
+}
 function isOffer(value: unknown): value is HomeConfirmationOffer {
   if (!value || typeof value !== "object") return false;
   const offer = value as Partial<HomeConfirmationOffer>;
@@ -15,6 +34,8 @@ function isOffer(value: unknown): value is HomeConfirmationOffer {
     offer.id.length > 0 &&
     typeof offer.line === "string" &&
     offer.line.length > 0 &&
+    (offer.actionLabel === undefined ||
+      (typeof offer.actionLabel === "string" && !!offer.actionLabel.trim() && offer.actionLabel.length <= 64)) &&
     (offer.risk === undefined || typeof offer.risk === "string") &&
     (offer.question === undefined || typeof offer.question === "string") &&
     (offer.expiresAt === undefined || (typeof offer.expiresAt === "number" && Number.isSafeInteger(offer.expiresAt)))
@@ -26,12 +47,23 @@ export function isHomeSession(value: unknown): value is HomeSession {
   return (
     s.version === 1 &&
     (s.offer === undefined || isOffer(s.offer)) &&
+    (s.repositories === undefined ||
+      (!!s.repositories &&
+        ["complete", "unavailable"].includes(s.repositories.status) &&
+        Array.isArray(s.repositories.repositories) &&
+        s.repositories.repositories.length <= 1000 &&
+        s.repositories.repositories.every(
+          (row) => !!row && typeof row.repo === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(row.repo),
+        ) &&
+        (s.repositories.status !== "unavailable" || s.repositories.repositories.length === 0))) &&
     typeof s.organization === "string" &&
     typeof s.actor === "string" &&
     typeof s.stream === "string" &&
     typeof s.bindingRevision === "number" &&
     Number.isSafeInteger(s.bindingRevision) &&
     s.bindingRevision >= 0 &&
+    typeof s.accessEpoch === "string" &&
+    s.accessEpoch.length > 0 &&
     Number.isSafeInteger(s.revision) &&
     Array.isArray(s.entries) &&
     s.entries.every(
@@ -46,18 +78,24 @@ export function isHomeSession(value: unknown): value is HomeSession {
         (entry.authorLabel === undefined || typeof entry.authorLabel === "string") &&
         (entry.source === undefined || typeof entry.source === "string") &&
         (entry.sourceUrl === undefined || typeof entry.sourceUrl === "string") &&
+        (entry.deleteUrl === undefined ||
+          (typeof entry.deleteUrl === "string" && /^\/home\/messages\/[^/?#]+$/.test(entry.deleteUrl))) &&
         (entry.at === undefined || (typeof entry.at === "number" && Number.isSafeInteger(entry.at))),
     ) &&
     (s.history === undefined ||
       (!!s.history &&
         Number.isSafeInteger(s.history.cursor) &&
         typeof s.history.hasMore === "boolean" &&
-        ["complete", "partial", "unavailable"].includes(s.history.status))) &&
+        ["complete", "partial", "unavailable"].includes(s.history.status) &&
+        [s.history.previousUrl, s.history.latestUrl].every(
+          (url) => url === undefined || (typeof url === "string" && /^\/home\/session(?:\?[^#]*)?$/.test(url)),
+        ))) &&
     typeof s.sendUrl === "string" &&
     s.sendUrl.startsWith("/home/") &&
     typeof s.eventsUrl === "string" &&
     s.eventsUrl.startsWith("/home/") &&
     !!s.destination &&
+    (s.destination.primaryAction === undefined || isPrimaryAction(s.destination.primaryAction)) &&
     ["broad", "thread"].includes(s.destination.kind) &&
     typeof s.destination.label === "string" &&
     typeof s.destination.canWrite === "boolean" &&
@@ -75,14 +113,38 @@ export function isHomeSession(value: unknown): value is HomeSession {
 export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSourceFactory) {
   const session = ref<HomeSession | null>(null);
   const status = ref<HomeSessionStatus>("loading");
+  const scopeChanging = ref(false);
   const text = ref("");
   const scroll = ref(0);
   const context = ref<AttachedContext[]>([]);
   const sending = ref(false);
+  const historyLoading = ref(false);
+  const removing = ref<string | null>(null);
   const notice = ref("");
   const offer = ref<HomeConfirmationOffer | null>(null);
+  const inlineAnswer = ref<(HomeAnswerTarget & { unit: string; title: string }) | null>(null);
   const focused = computed(() => session.value?.destination.kind === "thread");
-  const drafts = new Map<string, { text: string; context: AttachedContext[]; scroll: number }>();
+  const observedRevision = ref<number | null>(null);
+  const draftStale = computed(
+    () =>
+      focused.value &&
+      observedRevision.value !== null &&
+      observedRevision.value !== session.value?.destination.revision,
+  );
+  let restoringDraft = false;
+  watch(
+    [text, context],
+    () => {
+      if (restoringDraft) return;
+      if (!text.value.trim() && !context.value.length) observedRevision.value = null;
+      else if (observedRevision.value === null) observedRevision.value = session.value?.destination.revision ?? null;
+    },
+    { flush: "sync", deep: true },
+  );
+  const drafts = new Map<
+    string,
+    { text: string; context: AttachedContext[]; scroll: number; revision: number | null }
+  >();
   let broad: HomeSession | null = null;
   let source: EventSourceLike | null = null;
   let generation = 0;
@@ -92,18 +154,38 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
   let disposed = false;
   let activePrivacy: string | null = null;
   let activeRoute = "";
-  const retries = new Map<string, { key: string; body: unknown; rawDraft?: string }>();
+  const retries = shallowReactive(
+    new Map<string, { key: string; body: unknown; rawDraft?: string; savedOffer?: HomeConfirmationOffer }>(),
+  );
   const attempted = new Set<string>();
-  const privacyKey = (s: HomeSession) => `${s.actor}\u0000${s.organization}\u0000${s.stream}\u0000${s.bindingRevision}`;
+  const privacyKey = (s: HomeSession) =>
+    `${s.actor}\u0000${s.organization}\u0000${s.stream}\u0000${s.bindingRevision}\u0000${s.accessEpoch}`;
   const destinationKey = (s: HomeSession) =>
     `${privacyKey(s)}\u0000${s.destination.kind}\u0000${s.destination.thread ?? ""}`;
+  const pendingChoice = computed(() =>
+    session.value
+      ? ((retries.get(destinationKey(session.value))?.body as { confirmation?: HomeConfirmationChoice } | undefined)
+          ?.confirmation ?? null)
+      : null,
+  );
+  const pendingSubmission = computed(() => !!session.value && retries.has(destinationKey(session.value)));
+  function offerFor(value: HomeSession) {
+    return retries.get(destinationKey(value))?.savedOffer ?? value.offer ?? null;
+  }
   function keepDraft() {
     if (session.value)
-      drafts.set(destinationKey(session.value), { text: text.value, context: context.value, scroll: scroll.value });
+      drafts.set(destinationKey(session.value), {
+        text: text.value,
+        context: context.value,
+        scroll: scroll.value,
+        revision: observedRevision.value,
+      });
   }
   function adopt(next: HomeSession) {
+    scopeChanging.value = false;
     offer.value = null;
     if (activePrivacy !== null && privacyKey(next) !== activePrivacy) {
+      inlineAnswer.value = null;
       drafts.clear();
       broad = null;
       retries.clear();
@@ -112,14 +194,25 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
       sending.value = false;
     }
     activePrivacy = privacyKey(next);
+    restoringDraft = true;
     session.value = next;
     const draft = drafts.get(destinationKey(next));
+    observedRevision.value = draft?.revision ?? null;
     text.value = draft?.text ?? "";
     context.value = draft?.context ?? [];
     scroll.value = draft?.scroll ?? 0;
+    restoringDraft = false;
     status.value = "ready";
+    offer.value = offerFor(next);
+  }
+  function resetPrivate(
+    message = "Dashboard scope changed. Personal messages are hidden until the new view is confirmed.",
+  ) {
+    scopeChanging.value = true;
+    unavailable(message);
   }
   function unavailable(message = "Conversation is unavailable with your current access.") {
+    inlineAnswer.value = null;
     offer.value = null;
     generation++;
     loadGeneration++;
@@ -136,15 +229,19 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
     attempted.clear();
     activePrivacy = null;
     sending.value = false;
+    historyLoading.value = false;
+    removing.value = null;
     status.value = "unavailable";
     notice.value = message;
   }
   function follow(next: HomeSession) {
     source?.close();
-    source = makeSource(next.eventsUrl);
+    const attached = makeSource(next.eventsUrl);
+    source = attached;
     const ownGeneration = generation;
-    source.onmessage = (event) => {
-      if (ownGeneration !== generation) return;
+    const active = () => ownGeneration === generation && source === attached;
+    attached.onmessage = (event) => {
+      if (!active()) return;
       let frame: unknown;
       try {
         frame = JSON.parse(event.data);
@@ -162,29 +259,34 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
         unavailable();
         return;
       }
-      if (session.value && incoming.revision < session.value.revision) return;
+      if (session.value && incoming.destination.kind === "broad" && incoming.revision < session.value.revision) return;
       session.value = incoming;
-      offer.value = incoming.offer ?? null;
+      offer.value = offerFor(incoming);
       if (incoming.destination.kind === "broad") broad = incoming;
     };
-    source.addEventListener("revoked", () => {
-      if (ownGeneration === generation) unavailable();
+    attached.addEventListener("revoked", () => {
+      if (active()) unavailable();
     });
-    source.addEventListener("unavailable", () => {
-      if (ownGeneration === generation) unavailable();
+    attached.addEventListener("unavailable", () => {
+      if (active()) unavailable();
     });
-    source.onerror = () => {
-      if (ownGeneration !== generation) return;
+    attached.onerror = () => {
+      if (!active()) return;
+      if (attached.readyState === EVENT_SOURCE_CLOSED) {
+        unavailable();
+        return;
+      }
       notice.value = "Connection lost. The last confirmed conversation is shown.";
     };
-    source.onopen = () => {
-      if (ownGeneration !== generation) return;
-      notice.value = "";
+    attached.onopen = () => {
+      if (!active()) return;
+      if (notice.value === "Connection lost. The last confirmed conversation is shown.") notice.value = "";
     };
   }
   async function load() {
-    if (disposed) return;
+    if (disposed || scopeChanging.value) return;
     const requestGeneration = ++loadGeneration;
+    inlineAnswer.value = null;
     generation++;
     const destinationGeneration = generation;
     offer.value = null;
@@ -206,10 +308,29 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
       keepDraft();
       adopt(value);
       broad = value;
-      if (destinationGeneration === generation) offer.value = value.offer ?? null;
+      if (destinationGeneration === generation) offer.value = offerFor(value);
       follow(value);
     } catch {
       if (requestGeneration === loadGeneration && !disposed) unavailable("Conversation could not be loaded.");
+    }
+  }
+  /** Read a current target capability without changing the composer or its draft. */
+  async function peek(thread: string): Promise<HomeSession | null> {
+    try {
+      const response = await fetchFn(`/home/session?thread=${encodeURIComponent(thread)}`, {
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      const value: unknown = await response.json();
+      return !disposed &&
+        response.ok &&
+        isHomeSession(value) &&
+        value.destination.kind === "thread" &&
+        value.destination.thread === thread
+        ? value
+        : null;
+    } catch {
+      return null;
     }
   }
   async function focus(thread: string) {
@@ -244,6 +365,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
         unavailable();
         return false;
       }
+      inlineAnswer.value = null;
       keepDraft();
       generation++;
       adopt(value);
@@ -258,8 +380,80 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
       return false;
     }
   }
+  async function beginInlineAnswer(unit: string, title: string, target: HomeAnswerTarget) {
+    if (inlineAnswer.value || sending.value) return false;
+    if (!(await focus(target.thread))) return false;
+    if (session.value?.destination.revision !== target.revision && !pendingSubmission.value) {
+      exitFocus();
+      notice.value = "The question changed. Open the original thread to review it.";
+      return false;
+    }
+    inlineAnswer.value = { ...target, unit, title };
+    return true;
+  }
+  function preserveInlineAnswer() {
+    if (sending.value) return;
+    inlineAnswer.value = null;
+    exitFocus();
+  }
+  async function loadHistory(address: string) {
+    const previous = session.value;
+    if (
+      !previous ||
+      status.value !== "ready" ||
+      sending.value ||
+      historyLoading.value ||
+      ![previous.history?.previousUrl, previous.history?.latestUrl].includes(address)
+    )
+      return false;
+    const mine = ++loadGeneration;
+    const destinationGeneration = generation;
+    const scope = privacyKey(previous),
+      destination = destinationKey(previous);
+    historyLoading.value = true;
+    try {
+      const response = await fetchFn(address, { credentials: "same-origin", headers: { accept: "application/json" } });
+      const value: unknown = await response.json();
+      if (
+        mine !== loadGeneration ||
+        destinationGeneration !== generation ||
+        !session.value ||
+        destinationKey(session.value) !== destination ||
+        activePrivacy !== scope ||
+        disposed
+      )
+        return false;
+      if (
+        !response.ok ||
+        !isHomeSession(value) ||
+        privacyKey(value) !== scope ||
+        destinationKey(value) !== destination
+      ) {
+        unavailable();
+        return false;
+      }
+      // Historical windows can precede live replies. Only a changed question or access scope invalidates them.
+      if (value.destination.kind === "thread" && value.destination.revision !== session.value.destination.revision)
+        return false;
+      keepDraft();
+      const retry = retries.get(destination);
+      if (retry) value.submissionKey = retry.key;
+      generation++;
+      adopt(value);
+      if (value.destination.kind === "broad") broad = value;
+      follow(value);
+      return true;
+    } catch {
+      if (mine === loadGeneration && destinationGeneration === generation)
+        notice.value = "This history page could not be loaded. The current window is shown.";
+      return false;
+    } finally {
+      if (mine === loadGeneration) historyLoading.value = false;
+    }
+  }
   function exitFocus() {
     if (!focused.value || !broad) return;
+    inlineAnswer.value = null;
     offer.value = null;
     generation++;
     keepDraft();
@@ -269,6 +463,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
   }
   function routeChanged(route: string) {
     if (route !== activeRoute) {
+      inlineAnswer.value = null;
       offer.value = null;
       generation++;
       keepDraft();
@@ -282,25 +477,73 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
     if (!context.value.some((v) => v.kind === value.kind && v.key === value.key))
       context.value = [...context.value, value];
   }
-  async function submit() {
+  async function submit(explicitText?: string) {
     const current = session.value;
     if (!current || !text.value.trim()) return;
     const rawDraft = text.value;
-    await send({ text: stripSlash(rawDraft.trim(), current.commands) }, rawDraft);
+    await send({ text: explicitText ?? stripSlash(rawDraft.trim(), current.commands) }, rawDraft);
   }
   async function submitConfirmation(choice: HomeConfirmationChoice) {
     if (!offer.value || offer.value.id !== choice.id || !["confirm", "cancel"].includes(choice.kind)) return;
     await send({ confirmation: { kind: choice.kind, id: choice.id } });
   }
+  function reviewDraft() {
+    if (!draftStale.value || !session.value?.destination.canWrite) return;
+    observedRevision.value = session.value.destination.revision;
+    notice.value = "Draft reviewed for the current question.";
+  }
+  async function removePrivate(entryId: string) {
+    const current = session.value;
+    const entry = current?.entries.find((entry) => entry.id === entryId);
+    if (
+      !current ||
+      current.destination.kind !== "broad" ||
+      !current.destination.canWrite ||
+      !entry?.deleteUrl ||
+      removing.value
+    )
+      return false;
+    const ownGeneration = generation;
+    const scope = privacyKey(current);
+    removing.value = entryId;
+    try {
+      const response = await fetchFn(entry.deleteUrl, {
+        method: "DELETE",
+        credentials: "same-origin",
+        headers: { accept: "application/json" },
+      });
+      const receipt = (await response.json()) as { status?: string };
+      if (ownGeneration !== generation || activePrivacy !== scope || !session.value) return false;
+      if (!response.ok || receipt.status !== "ok") {
+        notice.value = "Content removal could not be confirmed. Pending cleanup remains with the original owner.";
+        return false;
+      }
+      session.value = {
+        ...session.value,
+        entries: session.value.entries.filter((item) => item.deleteUrl !== entry.deleteUrl),
+      };
+      broad = session.value;
+      notice.value =
+        "Private request content removed. Its receipt remains. Existing runs and source messages are unchanged.";
+      return true;
+    } catch {
+      if (ownGeneration === generation && activePrivacy === scope)
+        notice.value = "Content removal could not be confirmed.";
+      return false;
+    } finally {
+      if (ownGeneration === generation && activePrivacy === scope) removing.value = null;
+    }
+  }
   async function send(input: { text: string } | { confirmation: HomeConfirmationChoice }, rawDraft?: string) {
     const s = session.value;
-    if (!s || status.value !== "ready" || !s.destination.canWrite || sending.value) return;
+    if (!s || status.value !== "ready" || (!s.destination.canWrite && !pendingSubmission.value) || sending.value)
+      return;
     const payload = {
       ...input,
       destination:
         s.destination.kind === "broad" ? { kind: "broad" } : { kind: "thread", thread: s.destination.thread },
-      revision: s.destination.revision,
-      context: context.value.map(({ kind, key }) => ({ kind, key })),
+      revision: "text" in input ? (observedRevision.value ?? s.destination.revision) : s.destination.revision,
+      context: "confirmation" in input ? [] : context.value.map(({ kind, key }) => ({ kind, key })),
     };
     const ownGeneration = generation;
     const ownSubmission = ++submissionGeneration;
@@ -323,7 +566,21 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
       revision: undefined,
       text: unchangedRaw ? undefined : "text" in payload ? payload.text : undefined,
     };
-    if (!retry || JSON.stringify(previousIntent) !== JSON.stringify(nextIntent)) {
+    const sameRetry =
+      !!retry &&
+      JSON.stringify(previousIntent) === JSON.stringify(nextIntent) &&
+      ("confirmation" in input || (retry.body as { revision: number }).revision === payload.revision);
+    if (!s.destination.canWrite && !sameRetry) {
+      notice.value = "This destination is read-only. Only the unchanged saved reply can be checked.";
+      sending.value = false;
+      return;
+    }
+    if ("text" in input && draftStale.value && !sameRetry) {
+      notice.value = "The question changed. Review the current question before sending this draft.";
+      sending.value = false;
+      return;
+    }
+    if (!sameRetry) {
       let key = s.submissionKey;
       if (retry || attempted.has(key)) {
         try {
@@ -345,11 +602,20 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
         if (ownSubmission === submissionGeneration) sending.value = false;
         return;
       }
-      retry = { key, body: { ...payload, key }, rawDraft };
+      retry = {
+        key,
+        body: { ...payload, key },
+        rawDraft,
+        ...("confirmation" in input && offer.value ? { savedOffer: offer.value } : {}),
+      };
       retries.set(draftKey, retry);
     }
     if (ownGeneration !== generation) {
       if (ownSubmission === submissionGeneration) sending.value = false;
+      return;
+    }
+    if (!retry) {
+      sending.value = false;
       return;
     }
     try {
@@ -431,21 +697,35 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
   }
   return {
     session,
+    inlineAnswer,
+    resetPrivate,
+    scopeChanging,
+    beginInlineAnswer,
+    preserveInlineAnswer,
     status,
     text,
     scroll,
     context,
     sending,
+    historyLoading,
+    removing,
+    draftStale,
     notice,
     offer,
+    pendingChoice,
+    pendingSubmission,
     focused,
     load,
+    loadHistory,
     focus,
+    peek,
     exitFocus,
     routeChanged,
     attach,
     submit,
     submitConfirmation,
+    reviewDraft,
+    removePrivate,
     dispose,
   };
 }

@@ -14,7 +14,7 @@
 }
 :root {
   color-scheme: light;
-  --ui-primary: #47611b;
+  --ui-primary: #3c6519;
   --ui-success: #3d7e20;
   --ui-info: #2474a2;
   --ui-warning: #796315;
@@ -35,7 +35,9 @@
   --ui-text-inverted: #fff;
   --green-sidebar: #fcfcfc;
   --green-hover: #f4f5f6;
-  --green-selected: #f6fdec;
+  --green-selected: #f1f8e8;
+  --green-accent: #a8e840;
+  --green-accent-text: #212c12;
   --sb-skill: #9755d7;
   --sb-review: #9755d7;
   --sb-research: #2474a2;
@@ -74,6 +76,11 @@
   --sb-review: #bf7dff;
   --sb-research: #40b8ff;
   --sb-heat-l: 0.8;
+}
+.green-shell .iconify {
+  display: inline-block;
+  vertical-align: -0.15em;
+  flex-shrink: 0;
 }
 @layer base {
   body {
@@ -142,8 +149,8 @@
   width: 26px;
   height: 26px;
   border-radius: 7px;
-  background: #a8e840;
-  color: #212c12;
+  background: var(--green-accent);
+  color: var(--green-accent-text);
   font-size: 17px;
   font-weight: 800;
 }
@@ -219,7 +226,7 @@
   border-bottom: 1px solid var(--ui-border);
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
   padding: 0 28px;
   background: var(--ui-bg);
 }
@@ -229,6 +236,7 @@
   align-items: center;
   font-size: 12px;
   color: var(--ui-text-muted);
+  min-width: 0;
 }
 .green-breadcrumb .iconify {
   width: 12px;
@@ -291,9 +299,9 @@
   background: var(--green-hover);
 }
 .green-button-primary {
-  background: #a8e840;
-  color: #212c12;
-  border-color: #a8e840;
+  background: var(--green-accent);
+  color: var(--green-accent-text);
+  border-color: var(--green-accent);
 }
 .green-button-primary:hover {
   background: #99d33a;
@@ -576,4 +584,50 @@
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+.green-slack-emoji {
+  display: inline-block;
+  width: 1.35em;
+  height: 1.35em;
+  object-fit: contain;
+  vertical-align: -0.25em;
+  margin: 0 0.1em;
+}
+.green-badge[data-state="Working"],
+.green-badge[data-state="Merged"],
+.green-badge[data-state="Done"] {
+  color: var(--ui-success);
+  background: color-mix(in srgb, var(--ui-success) 9%, var(--ui-bg));
+  border-color: color-mix(in srgb, var(--ui-success) 35%, var(--ui-border));
+}
+.green-badge[data-state="Waiting"] {
+  color: var(--ui-warning);
+  background: color-mix(in srgb, var(--ui-warning) 9%, var(--ui-bg));
+  border-color: color-mix(in srgb, var(--ui-warning) 35%, var(--ui-border));
+}
+.green-badge[data-state="Failed"],
+.green-badge[data-state="Error"] {
+  color: var(--ui-error);
+  background: color-mix(in srgb, var(--ui-error) 9%, var(--ui-bg));
+  border-color: color-mix(in srgb, var(--ui-error) 35%, var(--ui-border));
+}
+
+.green-breadcrumb strong {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+@media (max-width: 767px) {
+  .green-breadcrumb-label,
+  .green-breadcrumb > .iconify {
+    display: none;
+  }
+}
+.green-badge[data-state="merged"],
+.green-badge[data-state="done"],
+.green-badge[data-state="merge ready"] {
+  color: var(--ui-success);
+  background: color-mix(in srgb, var(--ui-success) 9%, var(--ui-bg));
+  border-color: color-mix(in srgb, var(--ui-success) 35%, var(--ui-border));
 }

@@ -228,6 +228,20 @@ function openRun(runId: string, turn?: number): void {
         <p v-if="view.ending?.report" class="whitespace-pre-wrap text-sm mt-5">{{ view.ending.report }}</p>
       </div>
     </section>
+    <section v-if="view.pr" id="changes" class="green-section">
+      <div class="green-section-heading"><h2>Changes</h2></div>
+      <div class="green-section-content flex gap-3 flex-wrap">
+        <button class="green-button" type="button" :disabled="findingDiff" @click="openRecordedDiff">
+          Recorded changes
+        </button>
+        <a v-if="prUrl" class="green-button" :href="prUrl" target="_blank" rel="noopener noreferrer"
+          >Current pull request ↗</a
+        >
+        <p class="text-xs text-muted w-full">
+          Recorded changes come from this unit's authorized runs. The current pull request may have changed.
+        </p>
+      </div>
+    </section>
     <ReadonlyThread v-if="view.threads.coding" :thread="view.threads.coding" />
     <FindingsBlock v-if="view.findings" :ledger="view.findings" :runs="view.runs" @open="openRun" />
     <section v-if="sessions.length" class="green-section">

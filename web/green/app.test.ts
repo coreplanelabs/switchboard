@@ -79,6 +79,13 @@ describe("Green App navigation", () => {
     router.addRoute({ path: "/home", component: defineComponent({ template: "<p>Home</p>" }) });
     await router.push("/threads/slack%3AC1%3A1");
     await flushPromises();
+    streams.created
+      .find((source) => source.url.includes("observe=1"))!
+      .emitMessage({
+        ...session,
+        destination: { kind: "thread", thread: "slack:C1:1", label: "Chosen thread", revision: 9, canWrite: true },
+      });
+    await flushPromises();
     await wrapper.find("textarea").setValue("Broad draft");
     await wrapper
       .findAll("button")
@@ -93,7 +100,7 @@ describe("Green App navigation", () => {
     expect(wrapper.find("textarea").element.value).toBe("Local reply draft");
     await router.push("/home");
     await flushPromises();
-    expect(wrapper.find(".green-destination").text()).toBe("Your messages to Switchboard");
+    expect(wrapper.find(".green-destination").text()).toBe("Messages");
     expect(wrapper.find("textarea").element.value).toBe("Broad draft");
   });
 });

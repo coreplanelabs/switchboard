@@ -21,7 +21,7 @@ function session(): HomeSession {
     actor: "access:alice",
     stream: "person:alice",
     bindingRevision: 0,
-    accessEpoch: "fixture:current-source",
+    accessEpoch: "fixture:policy",
     revision: 1,
     entries: [],
     submissionKey: "issued:one",
@@ -50,6 +50,27 @@ function body(fetcher: ReturnType<typeof vi.fn>, index: number) {
   return JSON.parse((fetcher.mock.calls[index][1] as RequestInit).body as string);
 }
 describe("Scoped saved action confirmation", () => {
+  it("uses the trusted saved action label with a collapsed typed reply and never infers Merge from prose", async () => {
+    const { home } = setup([
+      json({ ...session(), offer: { ...offer, line: "Merge this pull request", actionLabel: "Merge" } }),
+    ]);
+    await home.load();
+    const page = mountApp(ConversationDock, { provides: [[HomeSessionKey, home]] });
+    expect(page.findAll("button").map((button) => button.text())).toContain("Merge");
+    expect(page.find("textarea").exists()).toBe(false);
+    await page
+      .findAll("button")
+      .find((button) => button.text() === "Type a reply")!
+      .trigger("click");
+    expect(page.findAll("textarea")).toHaveLength(1);
+    home.dispose();
+    const generic = setup([json({ ...session(), offer: { ...offer, line: "Merge this pull request" } })]);
+    await generic.home.load();
+    const other = mountApp(ConversationDock, { provides: [[HomeSessionKey, generic.home]] });
+    expect(other.findAll("button").map((button) => button.text())).toContain("Confirm");
+    expect(other.findAll("button").map((button) => button.text())).not.toContain("Merge");
+    generic.home.dispose();
+  });
   it.each(["confirm", "cancel"] as const)(
     "preserves %s after a transient server response and retries its exact issued choice",
     async (kind) => {
@@ -60,8 +81,15 @@ describe("Scoped saved action confirmation", () => {
       ]);
       await home.load();
       const wrapper = mountApp(ConversationDock, { provides: [[HomeSessionKey, home]] });
-      const label = kind === "confirm" ? "Confirm saved action" : "Cancel";
-      const button = () => wrapper.findAll("button").find((item) => item.text() === label);
+      const label = kind === "confirm" ? "Confirm" : "Cancel";
+      const button = () =>
+        wrapper
+          .findAll("button")
+          .find(
+            (item) =>
+              item.text() === label ||
+              item.text() === (kind === "confirm" ? "Check saved action" : "Check cancellation"),
+          );
       await button()?.trigger("click");
       await flushPromises();
       expect(wrapper.find("[data-testid=confirmation-offer]").text()).toContain("Proceed with this saved action?");
@@ -89,7 +117,7 @@ describe("Scoped saved action confirmation", () => {
       await home.load();
       const wrapper = mountApp(ConversationDock, { provides: [[HomeSessionKey, home]] });
       expect(wrapper.find("[data-testid=confirmation-offer]").text()).toContain("repo offboard sample/api");
-      const label = kind === "confirm" ? "Confirm saved action" : "Cancel";
+      const label = kind === "confirm" ? "Confirm" : "Cancel";
       await wrapper
         .findAll("button")
         .find((button) => button.text() === label)
@@ -114,7 +142,8 @@ describe("Scoped saved action confirmation", () => {
     ]);
     await home.load();
     const wrapper = mountApp(ConversationDock, { provides: [[HomeSessionKey, home]] });
-    const confirm = () => wrapper.findAll("button").find((button) => button.text() === "Confirm saved action");
+    const confirm = () =>
+      wrapper.findAll("button").find((button) => ["Confirm", "Check saved action"].includes(button.text()));
     await confirm()?.trigger("click");
     await flushPromises();
     expect(wrapper.text()).toContain("The result could not be confirmed.");
@@ -144,6 +173,47 @@ describe("Scoped saved action confirmation", () => {
       context: [],
       key: "issued:one",
     });
+    home.dispose();
+  });
+  it("retains only the original unknown choice when a new frame removes or changes the saved offer", async () => {
+    const { home, fetcher, stream } = setup([
+      json(session()),
+      new Error("timeout"),
+      json({ status: "accepted", duplicate: true }),
+    ]);
+    await home.load();
+    const wrapper = mountApp(ConversationDock, { provides: [[HomeSessionKey, home]] });
+    const confirm = () =>
+      wrapper.findAll("button").find((button) => ["Confirm", "Check saved action"].includes(button.text()));
+    await confirm()?.trigger("click");
+    await flushPromises();
+    stream.created.at(-1)?.emitMessage({
+      ...session(),
+      revision: 2,
+      destination: { ...session().destination, revision: 2 },
+      offer: { ...offer, id: "saved:two", line: "A different action" },
+    });
+    await nextTick();
+    expect(wrapper.get("[data-testid=confirmation-offer]").text()).toContain("repo offboard sample/api");
+    expect(wrapper.get("[data-testid=confirmation-offer]").text()).not.toContain("A different action");
+    expect(
+      wrapper
+        .get("[data-testid=confirmation-offer]")
+        .findAll("button")
+        .map((button) => button.text()),
+    ).toEqual(["Check saved action"]);
+    home.attach({ kind: "unit", key: "a-different-unit", label: "Different unit" });
+    await confirm()?.trigger("click");
+    await flushPromises();
+    expect(fetcher.mock.calls[2][0]).toBe("/home/send");
+    expect(body(fetcher, 2)).toEqual(body(fetcher, 1));
+    expect(body(fetcher, 2)).toMatchObject({
+      key: "issued:one",
+      revision: 1,
+      confirmation: { kind: "confirm", id: "saved:one" },
+      context: [],
+    });
+    expect(home.notice.value).toBe("The original message was already accepted. It was not sent twice.");
     home.dispose();
   });
   it("removes offers when route or identity scope changes and ignores a late offer from the previous route", async () => {
@@ -178,7 +248,12 @@ describe("Scoped saved action confirmation", () => {
     await home.submit();
     const wrapper = mountApp(ConversationDock, { provides: [[HomeSessionKey, home]] });
     expect(wrapper.find("[data-testid=confirmation-offer]").text()).toContain("repo offboard sample/api");
-    expect(wrapper.find("textarea").element.value).toBe("");
+    expect(wrapper.find("textarea").exists()).toBe(false);
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "Type a reply")!
+      .trigger("click");
+    expect(wrapper.get("textarea").element.value).toBe("");
     home.dispose();
   });
 });

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 defineOptions({ name: "GreenThreadPage" });
-import { computed, ref } from "vue";
-import { useSeed, useViewingAs } from "../../src/lib/seed";
+import { computed, inject, ref } from "vue";
+import { SeedKey, useSeed, useViewingAs } from "../../src/lib/seed";
 import { useWallClock } from "../../src/lib/wallClock";
 import AssistantTurn from "../../src/components/home/AssistantTurn.vue";
 import PersonTurn from "../../src/components/home/PersonTurn.vue";
@@ -10,27 +10,36 @@ import ParentTurn from "../../src/components/home/ParentTurn.vue";
 import PageHeading from "../components/PageHeading.vue";
 import EmptyState from "../components/EmptyState.vue";
 import { useHomeSession } from "../lib/homeSession";
+import { useReadonlyThread } from "../lib/readonlyThread";
+import { formatDateTime, formatLocalIso } from "../../src/lib/format";
+import MarkdownText from "../../src/components/MarkdownText.vue";
 const seed = useSeed("home");
 const viewingAs = useViewingAs();
+const globalSeed = inject(SeedKey, null);
+const canReply = !viewingAs && (!globalSeed?.dataView || globalSeed.dataView.mode !== "person");
 const home = useHomeSession();
 const now = useWallClock(seed?.now);
 const busy = ref(false);
+const threadKey = computed(() =>
+  seed
+    ? !seed.conversation.includes(":") && seed.lane.startsWith("web:") && !seed.elsewhere
+      ? `${seed.lane}:${seed.conversation}`
+      : seed.conversation
+    : null,
+);
+const { session, status, canWrite } = useReadonlyThread(() => threadKey.value);
 const sourceUrl = computed(() =>
   seed?.elsewhere?.url && /^https?:\/\//.test(seed.elsewhere.url) ? seed.elsewhere.url : null,
 );
 const title = computed(() => {
-  const first = seed?.turns.find((turn) => !("kind" in turn));
-  return first && "request" in first ? first.request.slice(0, 100) : "Thread";
+  const first = session.value?.turns?.find((turn) => !("kind" in turn));
+  return first && "request" in first ? first.request.slice(0, 100) : (session.value?.destination.label ?? "Thread");
 });
 async function reply() {
   if (!seed || !home || busy.value) return;
   busy.value = true;
   try {
-    await home.focus(
-      !seed.conversation.includes(":") && seed.lane.startsWith("web:") && !seed.elsewhere
-        ? `${seed.lane}:${seed.conversation}`
-        : seed.conversation,
-    );
+    if (threadKey.value) await home.focus(threadKey.value);
   } finally {
     busy.value = false;
   }
@@ -39,14 +48,10 @@ async function reply() {
 <template>
   <PageHeading
     :title="title"
-    :description="
-      seed
-        ? 'This transcript is read-only until you choose to reply here.'
-        : 'This thread could not be loaded with your current access.'
-    "
+    description="This transcript is read-only until you choose to reply here."
     eyebrow="THREAD"
     ><button
-      v-if="seed && home && !viewingAs && !home.focused.value"
+      v-if="seed && home && canReply && !home.focused.value && status === 'ready' && canWrite"
       class="green-button green-button-primary"
       :disabled="busy || home.status.value !== 'ready'"
       type="button"
@@ -55,26 +60,31 @@ async function reply() {
       <UIcon name="i-lucide-reply" />{{ busy ? "Checking access…" : "Reply in this thread" }}
     </button></PageHeading
   >
-  <p v-if="seed?.elsewhere" class="green-notice" role="status">
+  <p v-if="seed?.elsewhere && status === 'ready'" class="green-notice" role="status">
     Source: {{ seed.elsewhere.surface
     }}<a v-if="sourceUrl" class="text-primary ml-3" :href="sourceUrl" target="_blank" rel="noopener noreferrer"
       >Open source ↗</a
     >. Browser replies keep their own source identity.
   </p>
-  <section v-if="!seed" class="green-section">
-    <EmptyState
-      title="Thread unavailable"
-      description="The thread could not be read. Its retained turns and reply access cannot be confirmed."
-    />
-  </section>
-  <section v-else class="green-section">
+  <section class="green-section">
     <div class="green-section-heading">
       <h2>Conversation</h2>
       <span v-if="home?.focused.value" class="green-badge">Replying here</span>
     </div>
     <div class="green-section-content">
-      <ol v-if="seed?.turns.length" class="list-none m-0 p-0 grid gap-6">
-        <li v-for="(turn, index) in seed.turns" :key="index">
+      <EmptyState
+        v-if="!seed"
+        title="Thread unavailable"
+        description="The thread is unknown or cannot be read with your current access."
+      />
+      <p v-else-if="status === 'loading'" class="text-xs text-muted" role="status">Checking current thread access…</p>
+      <EmptyState
+        v-else-if="status === 'unavailable'"
+        title="Conversation is unavailable"
+        description="The thread is unknown or cannot be read with your current access."
+      />
+      <ol v-else-if="session?.turns?.length" class="list-none m-0 p-0 grid gap-6">
+        <li v-for="(turn, index) in session.turns" :key="index">
           <template v-if="'kind' in turn"
             ><SilentTurn
               v-if="turn.kind === 'receipt'"
@@ -82,7 +92,10 @@ async function reply() {
               :decided-at="turn.decidedAt"
               :now="now" /><ParentTurn v-else :turn="turn" :now="now" /></template
           ><template v-else
-            ><PersonTurn :text="turn.request" :at="turn.receivedAt ?? turn.startedAt" :now="now" /><AssistantTurn
+            ><p class="text-xs text-muted mb-2">
+              {{ session.entries.find((entry) => entry.id === `${turn.id}:request`)?.authorLabel ?? "Unknown author" }}
+            </p>
+            <PersonTurn :text="turn.request" :at="turn.receivedAt ?? turn.startedAt" :now="now" /><AssistantTurn
               class="mt-3"
               :turn="turn"
               :live="
@@ -90,7 +103,6 @@ async function reply() {
                   ? {
                       eventsUrl: `/runs/${encodeURIComponent(turn.id)}/events${turn.token ? `?t=${encodeURIComponent(turn.token)}` : ''}`,
                       stopUrl: `/runs/${encodeURIComponent(turn.id)}/stop${turn.token ? `?t=${encodeURIComponent(turn.token)}` : ''}`,
-                      serverNow: seed.now,
                     }
                   : null
               "
@@ -98,11 +110,48 @@ async function reply() {
           /></template>
         </li>
       </ol>
+      <ol v-else-if="session?.entries.length" class="list-none m-0 p-0 grid gap-6">
+        <li
+          v-for="entry in session.entries"
+          :key="entry.id"
+          class="min-w-0"
+          :class="{ 'green-notice': entry.role === 'receipt' }"
+        >
+          <div class="flex justify-between flex-wrap gap-2 text-xs text-muted mb-2">
+            <span
+              >{{
+                entry.authorLabel ??
+                (entry.isViewer ? "You" : entry.role === "assistant" ? "Switchboard" : "Unknown author")
+              }}<template v-if="entry.source"> · {{ entry.source }}</template></span
+            >
+            <time
+              v-if="entry.at !== undefined"
+              :datetime="new Date(entry.at).toISOString()"
+              :title="formatLocalIso(entry.at)"
+              >{{ formatDateTime(entry.at, now) }}</time
+            >
+          </div>
+          <MarkdownText :text="entry.content" />
+        </li>
+      </ol>
       <EmptyState
         v-else
-        title="No conversation to show"
-        description="This authorized thread contains no retained turns."
+        title="No messages in the loaded thread window"
+        description="The loaded window contains no readable retained turns. Full history coverage is unknown."
       />
+      <template v-if="session?.turns?.length">
+        <div
+          v-for="entry in session?.entries.filter((entry) => entry.id.startsWith('question:')) ?? []"
+          :key="entry.id"
+          class="green-notice mt-4"
+        >
+          <h3 class="text-xs font-semibold mb-2">{{ entry.authorLabel }}</h3>
+          <MarkdownText :text="entry.content" />
+        </div>
+      </template>
+      <p v-if="status === 'ready'" class="text-xs text-muted mt-4">
+        Only the loaded retained thread window is shown. Full history coverage is unknown.
+      </p>
     </div>
   </section>
 </template>

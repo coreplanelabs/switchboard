@@ -56,21 +56,40 @@ const thread: HomeSeed = {
 describe("Green browser frontend", () => {
   it("keeps missing or denied thread reads unavailable without local reply while preserving the authenticated broad dock", async () => {
     const stream = fakeEventSourceFactory();
-    const home = createHomeSession((async () => json(session())) as typeof fetch, stream.factory);
+    const home = createHomeSession(
+      (async (url: string) =>
+        json(
+          url.includes("?thread=")
+            ? session({
+                turns: [],
+                destination: { kind: "thread", thread: "slack:C1:1", label: "Thread", revision: 0, canWrite: true },
+              })
+            : session(),
+        )) as typeof fetch,
+      stream.factory,
+    );
     await home.load();
     const host = defineComponent({ render: () => h("div", [h(ThreadPage), h(ConversationDock)]) });
     for (const seed of [null, { page: "runNotFound", retentionDays: 30 } as const]) {
-      const page = mountApp(host, { seed, provides: [[HomeSessionKey, home]] });
+      const page = mountApp(host, { seed, eventSource: stream.factory, provides: [[HomeSessionKey, home]] });
       expect(page.find(".green-empty h3").text()).toBe("Thread unavailable");
-      expect(page.text()).not.toContain("This authorized thread contains no retained turns.");
       expect(page.findAll("button").map((button) => button.text())).not.toContain("Reply in this thread");
-      expect(page.find(".green-destination").text()).toBe("Your messages to Switchboard");
+      expect(page.find(".green-dock-heading h2").text()).toBe("Messages");
       expect(page.findAll("textarea")).toHaveLength(1);
       page.unmount();
     }
-    const empty = mountApp(host, { seed: thread, provides: [[HomeSessionKey, home]] });
-    expect(empty.find(".green-empty h3").text()).toBe("No conversation to show");
-    expect(empty.text()).toContain("This authorized thread contains no retained turns.");
+    const empty = mountApp(host, { seed: thread, eventSource: stream.factory, provides: [[HomeSessionKey, home]] });
+    expect(empty.text()).toContain("Checking current thread access");
+    stream.created
+      .find((source) => source.url.includes("observe=1") && !source.closed)!
+      .emitMessage(
+        session({
+          turns: [],
+          destination: { kind: "thread", thread: "slack:C1:1", label: "Thread", revision: 0, canWrite: true },
+        }),
+      );
+    await flushPromises();
+    expect(empty.find(".green-empty h3").text()).toBe("No messages in the loaded thread window");
     expect(empty.findAll("button").map((button) => button.text())).toContain("Reply in this thread");
     home.dispose();
   });
@@ -85,6 +104,12 @@ describe("Green browser frontend", () => {
       let focusRequest: unknown;
       const fetcher = async (url: string, init?: RequestInit) => {
         if (url === "/home/session") return json(session());
+        if (url.startsWith("/home/session?thread="))
+          return json(
+            session({
+              destination: { kind: "thread", thread: target, label: "Chosen thread", revision: 9, canWrite: true },
+            }),
+          );
         focusRequest = JSON.parse(String(init?.body));
         if ((focusRequest as { thread: string }).thread !== target)
           return new Response(JSON.stringify({ status: "not_found" }), { status: 404 });
@@ -103,6 +128,15 @@ describe("Green browser frontend", () => {
         eventSource: stream.factory,
         provides: [[HomeSessionKey, home]],
       });
+      expect(page.findAll("button").some((button) => button.text() === "Reply in this thread")).toBe(false);
+      stream.created
+        .find((source) => source.url.includes("observe=1"))!
+        .emitMessage(
+          session({
+            destination: { kind: "thread", thread: target, label: "Chosen thread", revision: 9, canWrite: true },
+          }),
+        );
+      await flushPromises();
       await page
         .findAll("button")
         .find((button) => button.text() === "Reply in this thread")!
@@ -137,6 +171,14 @@ describe("Green browser frontend", () => {
     await home.load();
     const host = defineComponent({ render: () => h("div", [h(ThreadPage), h(ConversationDock)]) });
     const wrapper = mountApp(host, { seed: thread, eventSource: stream.factory, provides: [[HomeSessionKey, home]] });
+    stream.created
+      .find((source) => source.url.includes("observe=1"))!
+      .emitMessage(
+        session({
+          destination: { kind: "thread", thread: "slack:C1:1", label: "Unit A thread", revision: 9, canWrite: true },
+        }),
+      );
+    await flushPromises();
     expect(wrapper.findAll("textarea").length).toBe(1);
     await wrapper.find("textarea").setValue("Broad draft");
     const button = wrapper.findAll("button").find((candidate) => candidate.text() === "Reply in this thread");
@@ -149,7 +191,7 @@ describe("Green browser frontend", () => {
     await wrapper.find("textarea").setValue("Local draft");
     home.routeChanged("/home");
     await nextTick();
-    expect(wrapper.find(".green-destination").text()).toBe("Your messages to Switchboard");
+    expect(wrapper.find(".green-destination").text()).toBe("Messages");
     expect(wrapper.find("textarea").element.value).toBe("Broad draft");
     home.dispose();
   });

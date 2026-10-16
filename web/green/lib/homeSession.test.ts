@@ -11,7 +11,7 @@ function session(over: Partial<HomeSession> = {}): HomeSession {
     actor: "access:alice",
     stream: "person:alice",
     bindingRevision: 0,
-    accessEpoch: "fixture:current-source",
+    accessEpoch: "fixture:policy",
     revision: 4,
     entries: [],
     sendUrl: "/home/send",
@@ -49,6 +49,130 @@ function body(fetcher: ReturnType<typeof vi.fn>, index: number): Record<string, 
 }
 
 describe("Home conversation destination", () => {
+  it("does not retarget an unsent draft or attached context onto a changed shared question", async () => {
+    const { home, stream, fetcher } = harness([json(session()), json(focused())]);
+    await home.load();
+    await home.focus("slack:C1:1");
+    home.attach({ kind: "unit", key: "unit-a", label: "Unit A" });
+    stream.created
+      .at(-1)
+      ?.emitMessage({ ...focused(), revision: 5, destination: { ...focused().destination, revision: 10 } });
+    home.text.value = "My answer to the earlier question";
+    await home.submit();
+    expect(home.notice.value).toBe("The question changed. Review the current question before sending this draft.");
+    expect(home.text.value).toBe("My answer to the earlier question");
+    expect(fetcher.mock.calls).toHaveLength(2);
+    home.dispose();
+  });
+  it("pages an authorized history window without changing its draft or uncertain submission identity", async () => {
+    const latest = session({
+      history: { cursor: 20, hasMore: true, status: "partial", previousUrl: "/home/session?before=20" },
+    });
+    const older = session({
+      submissionKey: "issued:history",
+      eventsUrl: "/home/events?before=20",
+      entries: [{ id: "earlier", role: "user", content: "Earlier request", isViewer: true }],
+      history: { cursor: 1, hasMore: false, status: "complete", latestUrl: "/home/session" },
+    });
+    const { home, fetcher } = harness([
+      json(latest),
+      new Error("timeout"),
+      json(older),
+      json({ status: "accepted", duplicate: true }),
+    ]);
+    await home.load();
+    home.text.value = "Keep this draft";
+    await home.submit();
+    expect(await home.loadHistory("/home/session?before=20")).toBe(true);
+    expect(home.text.value).toBe("Keep this draft");
+    expect(home.session.value?.entries.map((entry) => entry.content)).toEqual(["Earlier request"]);
+    expect(home.session.value?.destination).toEqual({
+      kind: "broad",
+      label: "Your messages to Switchboard",
+      thread: null,
+      revision: 4,
+      canWrite: true,
+    });
+    await home.submit();
+    expect(body(fetcher, 1)).toEqual({
+      text: "Keep this draft",
+      destination: { kind: "broad" },
+      revision: 4,
+      context: [],
+      key: "issued:one",
+    });
+    expect(body(fetcher, 3)).toEqual({
+      text: "Keep this draft",
+      destination: { kind: "broad" },
+      revision: 4,
+      context: [],
+      key: "issued:one",
+    });
+    home.dispose();
+  });
+  it("cannot restore a delayed older window after another linked source changes the access epoch", async () => {
+    let resolve: (value: Response) => void = () => {};
+    const delayed = new Promise<Response>((done) => {
+      resolve = done;
+    });
+    const older = session({
+      entries: [{ id: "revoked", role: "user", content: "Revoked source content", isViewer: true }],
+    });
+    const { home, stream, fetcher } = harness([
+      json(
+        session({ history: { cursor: 20, hasMore: true, status: "partial", previousUrl: "/home/session?before=20" } }),
+      ),
+      delayed,
+    ]);
+    await home.load();
+    const paging = home.loadHistory("/home/session?before=20");
+    stream.created.at(-1)?.emitMessage(session({ accessEpoch: "fixture:source-revoked", revision: 5 }));
+    resolve(json(older));
+    expect(await paging).toBe(false);
+    expect(fetcher.mock.calls[1]?.[0]).toBe("/home/session?before=20");
+    expect(home.status.value).toBe("unavailable");
+    expect(home.session.value).toBe(null);
+    home.dispose();
+  });
+  it("opens a requested older window when ordinary live replies advance the broad revision", async () => {
+    let finish: (value: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    const latest = session({
+      history: { cursor: 20, hasMore: true, status: "partial", previousUrl: "/home/session?before=20" },
+    });
+    const { home, stream } = harness([json(latest), pending]);
+    await home.load();
+    home.text.value = "Draft";
+    const paging = home.loadHistory("/home/session?before=20");
+    stream.created.at(-1)?.emitMessage({ ...latest, revision: 5 });
+    finish(
+      json(
+        session({
+          eventsUrl: "/home/events?before=20",
+          entries: [{ id: "old", role: "user", isViewer: true, content: "Older request" }],
+          history: { cursor: 1, hasMore: true, status: "partial", latestUrl: "/home/session" },
+        }),
+      ),
+    );
+    expect(await paging).toBe(true);
+    expect(home.session.value?.entries.map((entry) => entry.content)).toEqual(["Older request"]);
+    expect(home.text.value).toBe("Draft");
+    home.dispose();
+  });
+  it("clears retained messages and drafts when the full access epoch changes without a browser binding change", async () => {
+    const { home, stream } = harness([
+      json(session({ entries: [{ id: "old", role: "user", content: "Earlier private message", isViewer: true }] })),
+    ]);
+    await home.load();
+    home.text.value = "Private draft";
+    stream.created.at(-1)?.emitMessage(session({ accessEpoch: "fixture:revoked-source", revision: 5 }));
+    expect(home.status.value).toBe("unavailable");
+    expect(home.session.value).toBe(null);
+    expect(home.text.value).toBe("");
+    home.dispose();
+  });
   it("accepts display entries without private storage fields and refuses malformed attribution frames", async () => {
     const entry = {
       id: "thread:one",
@@ -449,6 +573,23 @@ describe("Home conversation destination", () => {
     });
     home.dispose();
   });
+  it("accepts a lower new owner question revision and requires explicit review before the first send", async () => {
+    const { home, fetcher, stream } = harness([json(session()), json(focused()), json({ status: "accepted" })]);
+    await home.load();
+    await home.focus("slack:C1:1");
+    home.text.value = "Draft for the first question";
+    stream.created
+      .at(-1)
+      ?.emitMessage({ ...focused(), revision: 2, destination: { ...focused().destination, revision: 2 } });
+    expect(home.session.value?.destination.revision).toBe(2);
+    await home.submit();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(home.draftStale.value).toBe(true);
+    home.reviewDraft();
+    await home.submit();
+    expect(body(fetcher, 2)).toMatchObject({ text: "Draft for the first question", revision: 2 });
+    home.dispose();
+  });
   it("retains a refused local answer without falling back to the broad stream", async () => {
     const { home, fetcher } = harness([
       json(session()),
@@ -494,6 +635,42 @@ describe("Home conversation destination", () => {
       session: home.session.value,
     }).toEqual({ status: "unavailable", text: "", context: [], session: null });
     expect(home.notice.value).toBe("Conversation is unavailable with your current access.");
+    home.dispose();
+  });
+  it("retains a reconnectable snapshot but clears private words and drafts when the transport permanently denies a reconnect", async () => {
+    const { home, stream } = harness([
+      json(session({ entries: [{ id: "private", role: "user", isViewer: true, content: "Retained private words" }] })),
+    ]);
+    await home.load();
+    home.text.value = "Private draft";
+    stream.created[0].emitError(false);
+    expect(home.session.value?.entries[0].content).toBe("Retained private words");
+    expect(home.notice.value).toBe("Connection lost. The last confirmed conversation is shown.");
+    stream.created[0].emitError(true);
+    expect(home.status.value).toBe("unavailable");
+    expect(home.session.value).toBe(null);
+    expect(home.text.value).toBe("");
+    home.dispose();
+  });
+  it("ignores late frames from a replaced source after a refused focus lookup", async () => {
+    const { home, stream } = harness([json(session()), json({ status: "not_found" }, 404)]);
+    await home.load();
+    expect(await home.focus("slack:hidden:1")).toBe(false);
+    stream.created.at(-1)?.emitMessage(
+      session({
+        revision: 5,
+        entries: [{ id: "current", role: "assistant", content: "Current authorized reply", isViewer: false }],
+      }),
+    );
+    stream.created[0].emitMessage(
+      session({
+        revision: 6,
+        entries: [{ id: "late", role: "assistant", content: "Old source reply", isViewer: false }],
+      }),
+    );
+    expect(home.session.value?.entries.map((entry) => entry.content)).toEqual(["Current authorized reply"]);
+    stream.created[0].emitNamed("revoked");
+    expect(home.status.value).toBe("ready");
     home.dispose();
   });
   it("clears the prior actor's draft before adopting a different authenticated session", async () => {
