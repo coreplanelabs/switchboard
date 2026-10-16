@@ -285,8 +285,7 @@ describe("run-owned tool recovery", () => {
       isError: true,
     });
     expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
-    // Changing incidental prose cannot buy a fresh recovery allowance.
-    await f.call("two", "submit_verdict", { ...badVerdict, summary: "still checked" });
+    await f.call("two", "submit_verdict", badVerdict);
     expect(f.bearers.consumeTurn("r")).toEqual({
       ok: false,
       reason: "tool_recovery",
@@ -378,7 +377,7 @@ describe("run-owned tool recovery", () => {
         expect(f.bearers.consumeTurn("r")).toEqual({
           ok: false,
           reason: "tool_recovery",
-          stop: { tool: "submit_verdict", attempts: 3, reason: "repeated_failure" },
+          stop: { tool: "submit_verdict", attempts: 2, reason: "repeated_failure" },
         });
         return;
       }
@@ -475,16 +474,79 @@ describe("run-owned tool recovery", () => {
     });
   });
 
-  it("bounds varied failures and stores no argument or exception content", async () => {
-    const f = fixture();
-    for (let i = 0; i < 6; i++)
-      await f.recovery.record("c" + i, "tool" + i, { private: "SECRET" }, { text: "private failure SECRET" + i });
-    expect(f.bearers.consumeTurn("r")).toEqual({
+  it("allows changed arguments after the same error and retains them across reconstruction", async () => {
+    const read: RunnableTool = {
+      name: "find",
+      description: "",
+      inputSchema: {},
+      run: async () => {
+        throw new Error("search path is not a directory SECRET");
+      },
+    };
+    const first = fixture([read]);
+    for (let i = 0; i < 8; i++) {
+      expect(await first.call("c" + i, "find", { path: "missing", pattern: "SECRET" + i })).toEqual({
+        content: [{ type: "text", text: "Error: search path is not a directory SECRET" }],
+        isError: true,
+      });
+      expect(first.bearers.consumeTurn("r")).toEqual({ ok: true, turn: i + 1 });
+    }
+    const resumed = fixture([read], JSON.parse(JSON.stringify(first.saved.at(-1))));
+    expect(resumed.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+    await resumed.call("repeat", "find", { pattern: "SECRET0", path: "missing" });
+    expect(resumed.bearers.consumeTurn("r")).toEqual({
       ok: false,
       reason: "tool_recovery",
-      stop: { tool: "tool5", attempts: 6, reason: "recovery_limit" },
+      stop: { tool: "find", attempts: 2, reason: "repeated_failure" },
     });
-    expect(JSON.stringify(f.saved)).not.toContain("SECRET");
+    expect(JSON.stringify(first.saved)).not.toContain("SECRET");
+  });
+
+  it("allows a changed verdict with the same refusal before accepting its correction", async () => {
+    const f = fixture();
+    await f.call("one", "submit_verdict", badVerdict);
+    await f.call("two", "submit_verdict", { ...badVerdict, summary: "still checked" });
+    expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+    expect(await f.call("corrected", "submit_verdict", { ...badVerdict, findings: [] })).toEqual({
+      content: [{ type: "text", text: "verdict recorded: approve (0 findings)" }],
+      isError: false,
+    });
+    expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 2 });
+  });
+
+  it("retains a full correction checkpoint and blocks further model calls", async () => {
+    const f = fixture();
+    for (let i = 0; i < 256; i++)
+      await f.recovery.record("c" + i, "find", { pattern: "file" + i }, { text: "not found" });
+    const resumed = fixture(undefined, JSON.parse(JSON.stringify(f.saved.at(-1))));
+    expect(resumed.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+    await resumed.recovery.record("overflow", "find", { pattern: "another" }, { text: "not found" });
+    const stopped = fixture(undefined, JSON.parse(JSON.stringify(resumed.saved.at(-1))));
+    expect(stopped.bearers.consumeTurn("r")).toEqual({
+      ok: false,
+      reason: "tool_recovery",
+      stop: { tool: "find", attempts: 1, reason: "unavailable" },
+    });
+  });
+
+  it("keeps historical varied-failure stops terminal without applying their limit to new calls", async () => {
+    const f = fixture();
+    for (let i = 0; i < 6; i++)
+      await f.recovery.record("c" + i, "find", { pattern: "file" + i }, { text: "not found" });
+    expect(f.bearers.consumeTurn("r")).toEqual({ ok: true, turn: 1 });
+    const historical = JSON.parse(JSON.stringify(f.saved.at(-1)));
+    historical.stopped = { tool: "find", attempts: 6, reason: "recovery_limit" };
+    expect(fixture(undefined, historical).bearers.consumeTurn("r")).toEqual({
+      ok: false,
+      reason: "tool_recovery",
+      stop: { tool: "find", attempts: 6, reason: "recovery_limit" },
+    });
+    historical.stopped.attempts = 7;
+    expect(fixture(undefined, historical).bearers.consumeTurn("r")).toEqual({
+      ok: false,
+      reason: "tool_recovery",
+      stop: { tool: "tool", attempts: 1, reason: "unavailable" },
+    });
   });
 
   it("fails closed on refused checkpoints and malformed retained state", async () => {

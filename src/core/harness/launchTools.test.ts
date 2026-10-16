@@ -91,7 +91,9 @@ describe("runner-owned tool registration", () => {
       );
       await vi.advanceTimersByTimeAsync(90_000);
       expect(await settled).toBeNull();
-      expect(tools.map((tool) => tool.name)).toEqual(["report_status"]);
+      expect(tools.map((tool) => tool.name)).toEqual(
+        harness === "pi" ? ["report_status", "find", "ls"] : ["report_status"],
+      );
       expect(tools[0].description).toBe('Report "status" without evaluating ${code}.');
       expect(harness === "pi" ? tools[0].parameters : tools[0].input).toEqual(
         JSON.parse('{"type":"object","properties":{"message":{"type":"string"},"__proto__":{"type":"string"}}}'),
