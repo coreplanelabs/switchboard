@@ -317,7 +317,7 @@ describe("the pure pieces", () => {
       `[deploy:all] resident: fleet drained — /attach refuses new runs until ${UNTIL}; the runs in flight finish, new ones wait at their attach`,
     );
     expect(drainBeganLine("resident", { status: 401, body: { error: "unauthorized" } })).toContain(
-      "could NOT be drained (HTTP 401: unauthorized) — waiting without a drain",
+      "fleet drain was not acknowledged (HTTP 401); deployment stopped",
     );
     expect(drainSkippedLine("resident", RESIDENT_DRAIN_TOKEN_ENV)).toContain(
       "RESIDENT_DRAIN_TOKEN is not set — waiting without a drain",
@@ -508,34 +508,93 @@ describe("deployStep (resident) drains the fleet", () => {
     expect(h.plain().some((l) => l.includes("(30 min left)"))).toBe(true);
   });
 
-  it("a rejected drain bearer cannot reconcile an uploaded image, so it sends no lift", async () => {
+  it("a rejected drain stops before upload without lifting another deployment's fence", async () => {
     const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "stale" }, [
-      { status: 401, body: { error: "unauthorized" } },
-      { status: 401, body: { error: "unauthorized" } },
-      { status: 401, body: { error: "unauthorized" } },
+      { status: 409, body: { error: "deploy-fence: an upload already owns the fleet drain" } },
     ]);
+    h.deps.readHealth = async () => ({
+      status: 200,
+      body: {
+        draining: {
+          swapFence: true,
+          reason: "deploy abc1234",
+          since: "2026-09-18T04:40:00.000Z",
+          until: "2026-09-18T06:10:00.000Z",
+        },
+      },
+    });
     const r = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
-    expect(r.ok).toBe(false);
-    expect(r.reason).toContain("partial deployment");
-    expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "postJson"]);
-    expect(h.plain()[0]).toContain("could NOT be drained (HTTP 401: unauthorized)");
-    expect(h.plain().at(-2)).toContain("could NOT be reconciled onto the new image (HTTP 401: unauthorized)");
-    expect(h.plain().at(-1)).toContain("any drain that landed stays closed");
+    expect(r).toEqual({
+      ok: false,
+      live: "not deployed",
+      reason: "resident fleet drain refused: deployment fence or staging maintenance conflict (HTTP 409)",
+      noUpload: true,
+    });
+    expect(h.calls.map((c) => ({ dep: c.dep, url: c.args[0] }))).toEqual([
+      { dep: "postJson", url: "https://switchboard-resident.example.test/drain" },
+    ]);
+    expect(h.plain()).toContain(
+      "[deploy:all] resident: existing deployment fence — commit abc1234; since 2026-09-18T04:40:00.000Z; expires 2026-09-18T06:10:00.000Z; upload outcome remains unverified",
+    );
   });
 
-  it("a /drain whose answer was lost (the transport failed after the record may have landed) waits the undrained budget and still reconciles and lifts the drain after", async () => {
+  it("a lost drain response stops before upload and preserves the unknown drain state", async () => {
     const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [
       { error: "POST … failed: The operation was aborted" },
-      reconciled,
-      lifted,
     ]);
     const r = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 1));
-    expect(r.ok).toBe(true);
-    expect(h.calls.map((c) => c.dep)).toEqual(["postJson", "exec", "exec", "postJson", "postJson"]);
-    expect(h.plain().some((l) => l.includes("(30 min left)"))).toBe(true);
-    expect(h.plain().at(-2)).toBe(
-      "[deploy:all] resident: fleet reopened — the drain had landed although its answer was lost",
-    );
+    expect(r).toEqual({
+      ok: false,
+      live: "not deployed",
+      reason: "resident fleet drain response unavailable; drain state is unknown",
+      noUpload: true,
+    });
+    expect(h.calls.map((c) => ({ dep: c.dep, url: c.args[0] }))).toEqual([
+      { dep: "postJson", url: "https://switchboard-resident.example.test/drain" },
+    ]);
+  });
+
+  it.each([401, 403, 500, 200])(
+    "an unacknowledged HTTP %s drain cannot upload or print its response body",
+    async (status) => {
+      const h = harness({ RESIDENT_DRAIN_TOKEN: "fixture-drain-token" }, [
+        { status, body: { error: "private-response fixture-drain-token" } },
+      ]);
+      const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+      expect(result).toEqual({
+        ok: false,
+        live: "not deployed",
+        reason: `resident fleet drain was not acknowledged (HTTP ${status})`,
+        noUpload: true,
+      });
+      expect(h.calls.map((c) => ({ dep: c.dep, url: c.args[0] }))).toEqual([
+        { dep: "postJson", url: "https://switchboard-resident.example.test/drain" },
+      ]);
+      expect(h.plain().join("\n")).not.toMatch(/private-response|fixture-drain-token/);
+    },
+  );
+
+  it("an unavailable or malformed conflict readback cannot change the refusal or disclose its body", async () => {
+    for (const readback of [
+      { status: 403, body: { error: "private-readback" } },
+      { status: 200, body: { draining: { swapFence: true, reason: "private-readback" } } },
+    ]) {
+      const h = harness({ RESIDENT_READ_TOKEN: "read", RESIDENT_DRAIN_TOKEN: "drn" }, [
+        { status: 409, body: { error: "private-response" } },
+      ]);
+      h.deps.readHealth = async () => readback;
+      const result = await deployStep(residentStep, plan, HEAD, h.io, h.deps, exec(h, 0));
+      expect(result).toEqual({
+        ok: false,
+        live: "not deployed",
+        reason: "resident fleet drain refused: deployment fence or staging maintenance conflict (HTTP 409)",
+        noUpload: true,
+      });
+      expect(h.plain()).toContain(
+        "[deploy:all] resident: existing deployment fence details unavailable; no recovery attempted",
+      );
+      expect(h.plain().join("\n")).not.toMatch(/private-response|private-readback/);
+    }
   });
 
   it("refusing past the drained budget fails by name with the drained suffix — the fleet is still reopened, and NOT reconciled: nothing deployed, so there is no new image to reconcile onto", async () => {
