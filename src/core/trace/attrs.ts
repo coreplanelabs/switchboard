@@ -1,3 +1,10 @@
+import type {
+  AdmissionStage,
+  AdmissionReason,
+  AdmissionRefreshFailure,
+  AdmissionExceptionKind,
+} from "../organization/admissionTrace.js";
+import type { OrganizationSource } from "../organization/contract.js";
 import type { OrganizationOwnerFailure } from "../organization/contract.js";
 import type { GithubAccessDiagnostic } from "../references/githubAccessDiagnostic.js";
 import type { ErrorKind } from "./types.js";
@@ -136,6 +143,13 @@ export interface AttrDomain {
   requestDigest: string;
   /** Original ingress failure metadata; no source actor or content. */
   organizationReceiptId: string;
+  admissionStage: AdmissionStage;
+  admissionReason: AdmissionReason;
+  admissionRefreshFailure: AdmissionRefreshFailure;
+  admissionExceptionKind: AdmissionExceptionKind;
+  admissionSource: OrganizationSource;
+  credentialRelation: "same" | "different" | "unknown";
+  receiptObserved: boolean;
   buildCommit: string;
   ownerStage: OrganizationOwnerFailure["failure"]["stage"];
   ownerBranch: OrganizationOwnerFailure["branch"];
@@ -320,6 +334,13 @@ const ATTR_TYPE: Record<SpanAttrKey, "string" | "number" | "boolean"> = {
   stateWriteStage: "string",
   requestDigest: "string",
   organizationReceiptId: "string",
+  admissionStage: "string",
+  admissionReason: "string",
+  admissionRefreshFailure: "string",
+  admissionExceptionKind: "string",
+  admissionSource: "string",
+  credentialRelation: "string",
+  receiptObserved: "boolean",
   buildCommit: "string",
   ownerStage: "string",
   ownerBranch: "string",

@@ -1,3 +1,5 @@
+import { observeAdmission, type AdmissionObservation } from "../core/organization/admissionTrace.js";
+import type { TraceOptions } from "../core/trace/types.js";
 import { mapLimit } from "../core/mapLimit.js";
 import { HOME_PRIVATE_READ_CONCURRENCY } from "../core/budgets.js";
 import { createHash } from "node:crypto";
@@ -16,7 +18,12 @@ export interface HomeAccessEpochOptions {
 /** Each frame fences all retained source authorities, including older windows.
  * Bounded pages cover the complete catalogue, never just recent messages. */
 export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
-  const readEpoch = async (context: HomeRuntimeContext): Promise<string | undefined> => {
+  const readEpoch = async (
+    context: HomeRuntimeContext,
+    note: (gap: AdmissionObservation) => void,
+  ): Promise<string | undefined> => {
+    let gap: AdmissionObservation = { reason: "receiver-unavailable" };
+    let complete = false;
     try {
       const reference = context.authentication.sourceReference;
       if (!reference) return;
@@ -44,6 +51,7 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
       let accessRevision: number | undefined;
       let after: string | undefined;
       do {
+        gap = { reason: "catalogue-unavailable" };
         const catalogue = await options.store.execute({
           action: "source-catalogue",
           ...resolved,
@@ -54,6 +62,7 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
         if (catalogue.status !== "source-catalogue" || catalogue.revision === undefined) return;
         snapshotRevision ??= catalogue.revision;
         accessRevision ??= catalogue.accessRevision;
+        gap = { reason: "catalogue-changed" };
         if (catalogue.revision !== snapshotRevision || catalogue.accessRevision !== accessRevision) return;
         const decisions = await mapLimit(catalogue.entries, HOME_PRIVATE_READ_CONCURRENCY, async (source) => {
           const decision = source.allowed
@@ -66,7 +75,25 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
           return { source, decision };
         });
         for (const { source, decision } of decisions) {
-          if (decision.status === "unavailable") return;
+          if (decision.status === "unavailable") {
+            const original = source.sourceReference?.credentialDigest;
+            const receiver = context.authentication.sourceReference?.credentialDigest;
+            const sameIdentity =
+              source.actor.identity.issuer === context.authentication.identity.issuer &&
+              source.actor.identity.tenant === context.authentication.identity.tenant &&
+              source.actor.identity.subject === context.authentication.identity.subject;
+            gap = {
+              reason: "native-source-unavailable",
+              source: source.source,
+              credentialRelation:
+                source.source === context.authentication.source && original && receiver
+                  ? sameIdentity && original === receiver
+                    ? "same"
+                    : "different"
+                  : "unknown",
+            };
+            return;
+          }
           observations.set(source.authority, decision.status === "allowed" ? decision.policyFingerprint : null);
         }
         if (catalogue.next && after && Buffer.compare(Buffer.from(catalogue.next), Buffer.from(after)) <= 0) return;
@@ -76,6 +103,7 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
         return;
       // Register newly authorized scopes without rotating the loss epoch. The
       // store compares retained baselines transactionally across restarts.
+      gap = { reason: "policy-observe-unavailable" };
       const updates = [...observations].map(([authority, fingerprint]) => ({ authority, fingerprint }));
       for (let offset = 0; offset < updates.length; offset += 200) {
         const observed = await options.store.execute({
@@ -90,6 +118,7 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
       }
       // Native catalogue checks can outlive the viewer's signed credential.
       // Reprove this receiver after those awaits before publishing its epoch.
+      gap = { reason: "receiver-unavailable" };
       const receiver = await options.authentication.resolveAuthorization({
         ...resolved,
         source: context.authentication.source,
@@ -106,6 +135,7 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
         options.policyEpoch() !== nativePolicy
       )
         return;
+      gap = { reason: "catalogue-changed" };
       const final = await options.store.execute({ action: "get", organization: options.organizationId });
       if (
         final.status !== "state" ||
@@ -114,19 +144,28 @@ export function createHomeAccessEpoch(options: HomeAccessEpochOptions) {
         options.policyEpoch() !== nativePolicy
       )
         return;
-      return createHash("sha256")
+      const epoch = createHash("sha256")
         .update(JSON.stringify([current.policyFingerprint, accessRevision, nativePolicy]))
         .digest("hex");
+      complete = true;
+      return epoch;
     } catch {
+      gap = { reason: "epoch-exception" };
       return;
+    } finally {
+      if (!complete) note(gap);
     }
   };
-  return async (context: HomeRuntimeContext): Promise<string | undefined> => {
+  return async (context: HomeRuntimeContext, trace?: TraceOptions): Promise<string | undefined> => {
+    let lastGap: AdmissionObservation | undefined;
     // A scope may register while its predecessor is being checked. Restart the
     // complete scan, without treating ordinary traffic as permission loss.
     for (let attempt = 0; attempt < 3; attempt++) {
-      const epoch = await readEpoch(context);
+      const epoch = await readEpoch(context, (gap) => {
+        lastGap = gap;
+      });
       if (epoch !== undefined) return epoch;
     }
+    observeAdmission(trace, lastGap ?? { reason: "epoch-unavailable" });
   };
 }

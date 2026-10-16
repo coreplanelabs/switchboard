@@ -1,3 +1,5 @@
+import { finishAdmission, failedAdmission } from "../core/organization/admissionTrace.js";
+import type { TraceOptions } from "../core/trace/types.js";
 import { digestBearer } from "../mcp/personalTokens.js";
 import { timingSafeEqual, createHash, randomUUID } from "node:crypto";
 import type { OrganizationAdmissionInput } from "../core/organization/service.js";
@@ -88,6 +90,7 @@ export type OrganizationIngress = (
   io: ChannelIO,
   evidence: OrganizationNativeEvidence,
   continuation?: OrganizationAdmissionInput["continuation"],
+  trace?: TraceOptions,
 ) => Promise<OrganizationResult>;
 /** Receipt acknowledgement is distinct from model completion or channel delivery. */
 export function admissionResponse(result: OrganizationResult): IngressResponse {
@@ -370,7 +373,11 @@ async function handleAuthorized(
   if (keyError) return { status: 400, body: { error: keyError } };
   // The request's root (docs/reference/specs/tracing.md): started once the caller's
   // identity is established and the body parsed; `dispatch()` ends it.
-  const trace = startRequestRoot(deps, { channel: "http", receivedAt });
+  const trace = startRequestRoot(deps, {
+    channel: "http",
+    receivedAt,
+    ...(options.admit ? { attrs: { admissionStage: "host" as const, receiptObserved: false } } : {}),
+  });
   const msg: IncomingMessage = {
     ...incoming,
     receivedAt,
@@ -383,20 +390,30 @@ async function handleAuthorized(
       return { status: 400, body: { error: "Organization ingress does not accept caller-supplied history." } };
     }
     try {
-      const result = await options.admit(msg, io, { source: "http", identity, credentialDigest });
+      let result: OrganizationResult;
+      try {
+        result = await options.admit(msg, io, { source: "http", identity, credentialDigest }, undefined, {
+          span: trace.root,
+        });
+      } catch (error) {
+        failedAdmission(trace.root, error);
+        result = { status: "unavailable" };
+      }
       const answer = admissionResponse(result);
+      const diagnostic = finishAdmission(trace.root, result, answer.status);
       const runId = result.status === "receipt" ? result.receipt.ownerRunId : undefined;
       const base = options.publicBaseUrl?.replace(/\/+$/, "") ?? "";
       return {
         ...answer,
         body: {
           ...(answer.body as Record<string, unknown>),
+          diagnostic,
           ...(runId ? { runId, runUrl: `${base}/runs/${runId}`, threadKey: msg.threadKey } : {}),
           ...(deps.build ? { build: deps.build } : {}),
         },
       };
     } finally {
-      trace.root.end("ok");
+      trace.root.end();
     }
   }
   const dispatchFn = options.dispatch ?? realDispatch;
