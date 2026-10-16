@@ -384,6 +384,42 @@ describe("resolveGithubToken", () => {
 // Feature: docs/reference/specs/execution.md item 5 — the credential WITH its
 // expiry, for the sandbox executor's credential-file refresher (issue 1915).
 describe("resolveGithubCredential", () => {
+  it("leaves a noncanonical configured App ID unknown instead of coercing source identity", async () => {
+    configureApp();
+    process.env.GITHUB_APP_ID = "1e4";
+    vi.stubGlobal("fetch", mockMint("ghs_unknown", 60 * 60_000));
+    const mod = await freshModule();
+    const credential = await mod.resolveGithubCredential("read");
+    expect(credential?.token).toBe("ghs_unknown");
+    expect(Object.hasOwn(credential!, "source")).toBe(false);
+  });
+
+  it("keeps the installation that minted a cached credential and exposes it on the corresponding API read", async () => {
+    configureApp();
+    const mint = mockMint("ghs_original", 60 * 60_000);
+    vi.stubGlobal("fetch", async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith("/access_tokens")) return mint(url, init);
+      expect(init?.headers).toMatchObject({ authorization: "Bearer ghs_original" });
+      return new Response(JSON.stringify({ id: 101, number: 7, state: "closed", base: {}, head: {} }));
+    });
+    const mod = await freshModule();
+    const first = await mod.resolveGithubCredential("read");
+    expect(first).toMatchObject({
+      token: "ghs_original",
+      source: { host: "github.com", appId: 12345, installationId: 67890 },
+    });
+    process.env.GITHUB_APP_ID = "22222";
+    process.env.GITHUB_APP_INSTALLATION_ID = "33333";
+    expect(await mod.resolveGithubCredential("read")).toEqual(first);
+    const { RestGithubApi } = await import("./githubApi.js");
+    expect(await new RestGithubApi().getPullRequest("acme/api", 7)).toMatchObject({
+      id: 101,
+      source: { host: "github.com", appId: 12345, installationId: 67890 },
+    });
+    const next = await mod.resolveGithubCredential("read", { fresh: true });
+    expect(next).toMatchObject({ source: { host: "github.com", appId: 22222, installationId: 33333 } });
+  });
+
   it("answers the minted token with its expiry; `fresh` drops the cache slot so a refused token is never re-served", async () => {
     configureApp();
     const expiresInMs = 60 * 60_000;

@@ -269,6 +269,12 @@ The converter still has no receiver importer. Check/status and ref events, acces
 
 The next independent cut preserves native IDs in installation repository listings and PR reads, including separate PR, fork-head and base identities. Legacy missing fields remain unknown, and a deleted fork retains null head identity. Malformed supplied IDs cannot be coerced into identity. This uses existing read routes and both API implementations. It adds no matcher, backfill, permission or delivery authority; those integration steps remain pending.
 
+### GitHub read credential binding, 2026-10-16
+
+The existing credential resolver and mint cache now retain non-secret host/App/installation identity with each minted token. Repository listings and PR metadata bind that source to the response that used the token. Concurrent calls and pages keep separate source records. Configuration changes cannot relabel a cached token. A branch tip from a different source cannot override the PR read. Opaque credentials remain unknown, and no permission or HTTP route is added.
+
+This supplies the missing credential source for native task matching. It does not save task context, infer a fork's installation membership, prove current access or activate intake. Context persistence/backfill, matching, API repair and delivery remain pending. Step 4 remains in progress.
+
 ### Check and status facts, 2026-10-15
 
 The same inactive converter now covers check runs, check suites and commit statuses. Each fact keeps the checked commit independently of any PR association. Forks can have no association, and an association can name a later PR head. The converter makes neither a routing decision nor a current-head claim. Native snapshots retain check output and action-request data; a rerun request remains source data.

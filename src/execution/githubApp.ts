@@ -28,6 +28,20 @@ import { DOOR_PUSH_PERMISSIONS, verifyGithubMintScope } from "./githubMintScope.
 interface CachedToken {
   token: string;
   expiresAtMs: number;
+  source?: GithubCredentialSource;
+}
+
+/** Non-secret origin of an installation credential, captured when it is minted. */
+export interface GithubCredentialSource {
+  host: "github.com";
+  appId: number;
+  installationId: number;
+}
+
+export interface GithubCredential {
+  token: string;
+  expiresAtMs: number | null;
+  source?: GithubCredentialSource;
 }
 
 // Token scope decides the installation token's permissions at mint time:
@@ -151,22 +165,26 @@ export async function resolveGithubDoorToken(scope: GithubTokenScope, repo?: str
   return data.token;
 }
 
-/** Legacy credential with its expiry, for the standalone refresher utility
- *  (src/execution/sandboxCredentials.ts): a minted installation token and when
- *  it dies, or the static GH_TOKEN with no expiry (a PAT never needs the
- *  margin path), or null when the run holds no scope / no credential exists.
+/** Trusted credential with its expiry and optional non-secret mint source.
+ *  Also used by the standalone legacy refresher utility. An opaque GH_TOKEN
+ *  has no expiry or installation source; absent scope/credentials return null.
  *  `fresh` drops the scope's cache slot first — the 401-retry path, where
  *  re-serving a token GitHub just refused buys nothing. */
 export async function resolveGithubCredential(
   scope: GithubTokenScope | undefined,
-  opts?: { fresh?: boolean },
-): Promise<{ token: string; expiresAtMs: number | null } | null> {
+  opts?: { fresh?: boolean; span?: Span },
+): Promise<GithubCredential | null> {
   if (scope === undefined) return null;
   if (githubAppConfigured()) {
     if (opts?.fresh) cache.delete(scope);
-    const token = await mintInstallationToken(scope);
+    const token = await mintInstallationToken(scope, opts?.span);
     const entry = cache.get(scope);
-    return { token, expiresAtMs: entry !== undefined && entry.token === token ? entry.expiresAtMs : null };
+    const matched = entry?.token === token ? entry : undefined;
+    return {
+      token,
+      expiresAtMs: matched?.expiresAtMs ?? null,
+      ...(matched?.source ? { source: { ...matched.source } } : {}),
+    };
   }
   const staticToken = processSecrets.get("GH_TOKEN")?.reveal();
   return staticToken ? { token: staticToken, expiresAtMs: null } : null;
@@ -280,7 +298,14 @@ async function mintCore(scope: GithubTokenScope, span?: Span, signal?: AbortSign
   }
   const data = (await res.json()) as { token: string; expires_at: string };
   const expiresAtMs = Date.parse(data.expires_at);
-  cache.set(scope, { token: data.token, expiresAtMs });
+  // Read the captured mint credentials, never a later environment snapshot.
+  const nativeId = (value: string) =>
+    /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : undefined;
+  const appId = nativeId(credentials.appId.reveal());
+  const installationId = nativeId(credentials.installationId.reveal());
+  const source: GithubCredentialSource | undefined =
+    appId !== undefined && installationId !== undefined ? { host: "github.com", appId, installationId } : undefined;
+  cache.set(scope, { token: data.token, expiresAtMs, ...(source ? { source } : {}) });
   span?.setAttrs({ cached: false, expiresInMs: expiresAtMs - systemClock() });
   return data.token;
 }

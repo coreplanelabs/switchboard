@@ -1,6 +1,11 @@
 import { tracedFetch } from "../core/trace/tracedFetch.js";
 import type { Span } from "../core/trace/types.js";
-import { resolveGithubToken, type GithubTokenScope } from "./githubApp.js";
+import {
+  resolveGithubCredential,
+  type GithubCredential,
+  type GithubCredentialSource,
+  type GithubTokenScope,
+} from "./githubApp.js";
 import { classificationOf, classifyError } from "../core/trace/classify.js";
 import { redactAndCap } from "../core/redact.js";
 import { MINUTE_MS } from "../core/budgets.js";
@@ -66,6 +71,7 @@ export interface CodeSearchHit {
 export interface InstallationRepo {
   /** Native identity when supplied; older metadata remains unknown. */
   id?: number;
+  source?: GithubCredentialSource;
   fullName: string;
   private: boolean;
   defaultBranch: string;
@@ -141,6 +147,7 @@ export interface PullFeedback {
 export interface PullSummary {
   /** GitHub object ID, separate from the repository-local PR number. */
   id?: number;
+  source?: GithubCredentialSource;
   number: number;
   title: string;
   body: string;
@@ -317,7 +324,7 @@ export interface RestGithubApiOptions {
   /** Credential resolver per scope; defaults to the App installation token
    *  (read-scoped for reads, write-scoped for writes), else GH_TOKEN. The
    *  caller's span, when it has one, so a mint is a `github.token_mint` child. */
-  token?: (scope: GithubTokenScope, span?: Span) => Promise<string | null>;
+  token?: (scope: GithubTokenScope, span?: Span) => Promise<string | GithubCredential | null>;
 }
 
 /** The closed table of routes a `github.rest` span names — never the path,
@@ -355,13 +362,15 @@ const clipBody = (body: string | undefined): string | undefined =>
 
 export class RestGithubApi implements GithubApi {
   private readonly fetchImpl: typeof fetch;
-  private readonly token: (scope: GithubTokenScope, span?: Span) => Promise<string | null>;
+  private readonly token: NonNullable<RestGithubApiOptions["token"]>;
+  /** Per-response origin survives overlapping calls and later credential rotation. */
+  private readonly sources = new WeakMap<Response, GithubCredentialSource>();
   /** The span this view's calls hang under; the shared client has none. */
   private parent: Span | undefined;
 
   constructor(opts: RestGithubApiOptions = {}) {
     this.fetchImpl = opts.fetch ?? fetch;
-    this.token = opts.token ?? ((scope, span) => resolveGithubToken(scope, span));
+    this.token = opts.token ?? ((scope, span) => resolveGithubCredential(scope, { span }));
   }
 
   withSpan(span: Span): RestGithubApi {
@@ -385,10 +394,12 @@ export class RestGithubApi implements GithubApi {
         repositories?: Array<Record<string, unknown>>;
         total_count?: number;
       };
+      const source = this.sources.get(res);
       for (const r of body.repositories ?? []) {
         const id = nativeIdOf(r.id);
         out.push({
           ...(id !== undefined ? { id } : {}),
+          ...(source ? { source: { ...source } } : {}),
           fullName: String(r.full_name),
           // A missing visibility field is unknown, never evidence that a repo is public.
           private: r.private !== false,
@@ -559,6 +570,7 @@ export class RestGithubApi implements GithubApi {
 
   async getPullRequest(repo: string, number: number): Promise<PullSummary> {
     const res = await this.request("read", "GET", "pull", `/repos/${repo}/pulls/${number}`);
+    const source = this.sources.get(res);
     const decoded = await githubJson(res, "pull");
     if (!decoded || typeof decoded !== "object" || Array.isArray(decoded))
       throw new GithubResponseDecodeError(res.status, githubRequestId(res));
@@ -593,6 +605,7 @@ export class RestGithubApi implements GithubApi {
         );
         const data = (await githubJson(tip, "head_ref")) as { object?: { type?: unknown; sha?: unknown } } | null;
         if (
+          sameCredentialSource(source, this.sources.get(tip)) &&
           data?.object?.type === "commit" &&
           typeof data.object.sha === "string" &&
           /^[0-9a-f]{40}$/.test(data.object.sha)
@@ -607,6 +620,7 @@ export class RestGithubApi implements GithubApi {
     const requestId = githubRequestId(res);
     return {
       ...(id !== undefined ? { id } : {}),
+      ...(source ? { source: { ...source } } : {}),
       number: Number(row.number),
       title: String(row.title ?? ""),
       body: String(row.body ?? ""),
@@ -907,13 +921,16 @@ export class RestGithubApi implements GithubApi {
     accept = "application/vnd.github+json",
     opts: { redirect?: "manual" } = {},
   ): Promise<Response> {
-    let token: string | null;
+    let credential: string | GithubCredential | null;
     try {
-      token = await this.token(scope, this.parent);
+      credential = await this.token(scope, this.parent);
     } catch {
       throw new GithubCredentialUnavailable("failed");
     }
+    const token = typeof credential === "string" ? credential : credential?.token;
     if (!token) throw new GithubCredentialUnavailable();
+    const source =
+      typeof credential === "object" && credential?.source ? credentialSourceOf(credential.source) : undefined;
     // One `github.rest` span under the view's parent (docs/reference/specs/tracing.md item
     // 23): the route word, the method and the status — never the path. GitHub
     // is not one of our hosts, so no trace context leaves with the request.
@@ -959,8 +976,23 @@ export class RestGithubApi implements GithubApi {
         { kind: "http", code: String(res.status) },
       );
     }
+    if (source) this.sources.set(res, source);
     return res;
   }
+}
+
+function credentialSourceOf(source: GithubCredentialSource): GithubCredentialSource {
+  if (
+    source.host !== "github.com" ||
+    nativeIdOf(source.appId) === undefined ||
+    nativeIdOf(source.installationId) === undefined
+  )
+    throw new GithubApiError(502, "Invalid GitHub credential source");
+  return { host: source.host, appId: source.appId, installationId: source.installationId };
+}
+
+function sameCredentialSource(a?: GithubCredentialSource, b?: GithubCredentialSource): boolean {
+  return a?.host === b?.host && a?.appId === b?.appId && a?.installationId === b?.installationId;
 }
 
 /** Distinguishes a missing local credential from a GitHub HTTP 401. */
@@ -1185,6 +1217,7 @@ function toIssue(row: Record<string, unknown>): IssueSummary {
 
 export interface InMemoryRepo {
   id?: number;
+  source?: GithubCredentialSource;
   files?: Record<string, string>;
   issues?: IssueSummary[];
   pulls?: PullSummary[];
@@ -1247,8 +1280,10 @@ export class InMemoryGithubApi implements GithubApi {
   async listRepos(): Promise<InstallationRepo[]> {
     return [...this.repos.entries()].map(([fullName, r]) => {
       const id = nativeIdOf(r.id);
+      const source = r.source ? credentialSourceOf(r.source) : undefined;
       return {
         ...(id !== undefined ? { id } : {}),
+        ...(source ? { source } : {}),
         fullName,
         private: r.private ?? true,
         defaultBranch: r.defaultBranch ?? "main",
@@ -1350,6 +1385,7 @@ export class InMemoryGithubApi implements GithubApi {
     nativeIdOf(pull.id);
     if (pull.head.repositoryId !== null) nativeIdOf(pull.head.repositoryId);
     nativeIdOf(pull.base.repositoryId);
+    if (pull.source) credentialSourceOf(pull.source);
     return pull;
   }
 
