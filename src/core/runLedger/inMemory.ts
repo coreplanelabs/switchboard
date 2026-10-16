@@ -1912,6 +1912,10 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult> {
+    return this.appendInbox(runId, message);
+  }
+
+  private appendInbox(runId: string, message: Record<string, unknown>): InboxPushResult {
     const row = this.live.get(runId);
     if (!row) return { ok: false, reason: "not-live" };
     const stored = bindInboxCustody(message, {

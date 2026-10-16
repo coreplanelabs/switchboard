@@ -7305,27 +7305,28 @@ export class RunHistoryDO extends DurableObject<Env> {
   async pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult> {
     let out: InboxPushResult = { ok: false, reason: "not-live" };
     this.ctx.storage.transactionSync(() => {
-      const owner = this.liveRow(runId);
-      if (!owner) return;
-      const stored = bindInboxCustody(message, {
-        runId,
-        channelId: owner.meta.channelId,
-        threadKey: owner.meta.threadKey,
-        requester: owner.meta.userId,
-        producerGen: owner.ownerGen,
-      });
-      if (!stored) {
-        out = { ok: false, reason: "invalid-message" };
-        return;
-      }
-      const last = this.sql
-        .exec<{ m: number | null }>(`SELECT MAX(seq) AS m FROM run_inbox WHERE run_id = ?`, runId)
-        .one().m;
-      const seq = (last ?? 0) + 1;
-      this.sql.exec(`INSERT INTO run_inbox (run_id, seq, json) VALUES (?, ?, ?)`, runId, seq, JSON.stringify(stored));
-      out = { ok: true, seq };
+      out = this.appendInbox(runId, message);
     });
     return out;
+  }
+
+  private appendInbox(runId: string, message: Record<string, unknown>): InboxPushResult {
+    const owner = this.liveRow(runId);
+    if (!owner) return { ok: false, reason: "not-live" };
+    const stored = bindInboxCustody(message, {
+      runId,
+      channelId: owner.meta.channelId,
+      threadKey: owner.meta.threadKey,
+      requester: owner.meta.userId,
+      producerGen: owner.ownerGen,
+    });
+    if (!stored) return { ok: false, reason: "invalid-message" };
+    const last = this.sql
+      .exec<{ m: number | null }>(`SELECT MAX(seq) AS m FROM run_inbox WHERE run_id = ?`, runId)
+      .one().m;
+    const seq = (last ?? 0) + 1;
+    this.sql.exec(`INSERT INTO run_inbox (run_id, seq, json) VALUES (?, ?, ?)`, runId, seq, JSON.stringify(stored));
+    return { ok: true, seq };
   }
 
   /** The inbox past a seq (run-history item 40): the resume's re-read at adopt. */
