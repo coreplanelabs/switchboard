@@ -30,6 +30,7 @@ import { identityKey } from "../core/identity/engine.js";
 import type { IdentityNotice } from "../core/identity/linkContract.js";
 import { WorkerOrganizationStore } from "../core/organization/worker.js";
 import { createHomeRepositories } from "./homeRepositories.js";
+import { createOriginalUnitRecipient } from "./originalUnitRecipient.js";
 import { createBrowserHomeInstallation } from "./browserHomeInstallation.js";
 import { createOrganizationAuthentication } from "./organizationAuthentication.js";
 import { createOrganizationNativeSources, type OrganizationNativeSourcesOptions } from "./organizationNativeSources.js";
@@ -433,6 +434,7 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
           ),
         addressIO: options.legacySlackIo,
       });
+    let sourceRecipient!: ReturnType<typeof createOriginalUnitRecipient>;
     installation = createBrowserHomeInstallation({
       organizationId: org,
       store,
@@ -445,6 +447,9 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
       mergeLogin: options.mergeLogin,
       mergeFacts: options.mergeFacts,
       legacyRecipient: async (origin) => await legacyAudience?.recipient(origin),
+      originalUnitRecipient: (key) => sourceRecipient.read(key),
+      originalUnitRecipientPhase: (groups, phaseAuthentication) =>
+        sourceRecipient.metadataPhase(groups, phaseAuthentication),
       commands: options.commands,
       mappings,
       limits: options.limits,
@@ -515,6 +520,15 @@ export function createBrowserHomeWiring(options: BrowserHomeWiringOptions) {
         );
       },
       publicBaseUrl: options.publicBaseUrl,
+    });
+    sourceRecipient = createOriginalUnitRecipient({
+      organizationId: org,
+      store,
+      ledger: options.ledger,
+      organization: installation.organization,
+      coordinator: options.core.coordinatorInstances,
+      authentication,
+      now: options.now,
     });
     identity = createIdentityRuntime({
       config: options.config.config.dashboard?.identityLink,

@@ -1758,6 +1758,7 @@ export async function runBot(): Promise<void> {
         context.home ? browserWiring?.current()?.readThread(context.home, key) : undefined,
       privateUnit: async (context, instance, unit) =>
         !!context.home && !!(await browserWiring?.current()?.canReadPrivateUnit(context.home, instance, unit)),
+      privateRead: (context) => (context.home ? browserWiring?.current()?.privateRead(context.home) : undefined),
       privateEpoch: async (context) =>
         context.home ? browserWiring?.current()?.host.currentEpoch(context.home) : undefined,
       answers: async (context, snapshot) =>

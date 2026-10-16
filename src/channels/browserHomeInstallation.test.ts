@@ -9,6 +9,9 @@ import {
 import { buildCoreCommands } from "../core/commandCatalogue.js";
 import { secretsFrom } from "../secrets.js";
 // Feature: docs/reference/specs/browser-home.md — production composition preserves original execution owners.
+import { DatabaseSync } from "node:sqlite";
+import { SqliteOrganizationStore } from "../core/organization/sqlite.js";
+import type { DirectorySqlStorage } from "../core/identity/sqlite.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -42,6 +45,9 @@ import { ALL_CAPABILITIES } from "../core/capabilities.js";
 import { ThreadsElsewhere } from "../core/runLedger/threadsElsewhere.js";
 import type { Grants } from "../core/authz/types.js";
 import { ALL_GRANTS } from "../core/authz/grants.js";
+import { unitProgressBasis } from "../core/coordinator/unitProgress.js";
+import { contextCapsuleOf } from "../core/dispatch/unitContext.js";
+import { createHomeViewHandler } from "./homeView.js";
 import { DAY_MS } from "../core/budgets.js";
 import { CommandRegistry, bindCommands } from "../core/commandRegistry.js";
 import { InMemoryConfirmationStore } from "../core/confirmations.js";
@@ -118,6 +124,7 @@ async function fixture(
   metadataRecipient = false,
   personalApproved = false,
   observationBatchSize = 10,
+  sqlOrganization = false,
   nativeMcp?: ReturnType<typeof createOrganizationNativeSources>,
 ) {
   let now = 1000,
@@ -131,7 +138,31 @@ async function fixture(
     `organization: fixture\nproviders:\n  anthropic: { type: anthropic, apiKeyEnv: UNSET_FIXTURE_PROVIDER }\ndefaults:\n  agent: general\n  verbosity: debug\n  models: { general: anthropic/general-model, coding: anthropic/coding-model }\ngrants:\n  "access:alice": { actions: all, channels: all, repos: all, organizations: all }\n  "http:bot": { actions: all, channels: all, repos: all, organizations: all }\n  "mcp:bot": { actions: all, channels: all, repos: all, organizations: all }\n  "mcp:personal:alice": { actions: all, channels: all, repos: all, organizations: all }\n  "slack:UALICE": { actions: all, channels: all, repos: all, organizations: all }\nrouting: { operator: off }\nworkspaceDir: ${path}/workspaces\n`,
   );
   const config = new ConfigStore(join(path, "config.yaml"), join(path, "overrides.json"));
-  const store = new InMemoryOrganizationStore(() => now),
+  const database = sqlOrganization ? new DatabaseSync(":memory:") : undefined;
+  if (database) cleanups.push(() => database.close());
+  const storage: DirectorySqlStorage | undefined = database
+    ? {
+        sql: {
+          exec<T>(query: string, ...bindings: unknown[]) {
+            const statement = database.prepare(query);
+            const values = bindings as (string | number | null)[];
+            return (statement.columns().length ? statement.all(...values) : (statement.run(...values), [])) as T[];
+          },
+        },
+        transactionSync: (callback) => {
+          database.exec("BEGIN");
+          try {
+            const value = callback();
+            database.exec("COMMIT");
+            return value;
+          } catch (error) {
+            database.exec("ROLLBACK");
+            throw error;
+          }
+        },
+      }
+    : undefined;
+  const store = storage ? new SqliteOrganizationStore(storage, () => now) : new InMemoryOrganizationStore(() => now),
     ledger = new InMemoryRunLedger(() => now);
   const registry = new RunRegistry({ now: () => now });
   const runStore = new InMemoryRunStore({ now: () => now });
@@ -292,8 +323,11 @@ async function fixture(
     }
   }
   let installation!: ReturnType<typeof createBrowserHomeInstallation>;
+  const nativeCounts = { browser: 0, slack: 0, active: 0, max: 0 };
   let available = true,
+    slackAvailable = true,
     writable = true;
+  let slackReadHook: (() => void | Promise<void>) | undefined;
   let browserGrants: Grants = ALL_GRANTS;
   let contextReadable = true;
   const authentication = createOrganizationAuthentication({
@@ -307,8 +341,9 @@ async function fixture(
     directory: store.directory,
     store,
     ledger,
-    currentBrowser: async () =>
-      available
+    currentBrowser: async () => {
+      nativeCounts.browser++;
+      return available
         ? {
             status: "verified",
             identity,
@@ -318,9 +353,17 @@ async function fixture(
             privateSource: true,
             epoch: "native-session",
           }
-        : { status: "unavailable" },
-    currentSlack: async (_identity, _attestation, ref) =>
-      available && linkedSlack
+        : { status: "unavailable" };
+    },
+    currentSlack: async (_identity, _attestation, ref) => {
+      nativeCounts.slack++;
+      nativeCounts.active++;
+      nativeCounts.max = Math.max(nativeCounts.max, nativeCounts.active);
+      await Promise.resolve();
+      await slackReadHook?.();
+      nativeCounts.active--;
+      if (!slackAvailable) return { status: "fenced" };
+      return available && linkedSlack
         ? {
             status: "verified",
             identity: slackIdentity,
@@ -340,7 +383,8 @@ async function fixture(
               : {}),
             epoch: "native-slack",
           }
-        : { status: "unavailable" },
+        : { status: "unavailable" };
+    },
     questionOwner: (key) => installation.questionOwner(key),
   });
   installation = createBrowserHomeInstallation({
@@ -413,6 +457,16 @@ async function fixture(
     },
     ...(metadataRecipient
       ? {
+          originalUnitRecipientPhase: (groups, authentication) =>
+            createOriginalUnitRecipient({
+              organizationId: "fixture",
+              ledger,
+              store,
+              organization: installation.organization,
+              coordinator,
+              authentication,
+              now: () => now,
+            }).metadataPhase(groups, authentication),
           originalUnitRecipient: (key: import("../core/coordinator/instanceStore.js").UnitEventKey) =>
             createOriginalUnitRecipient({
               organizationId: "fixture",
@@ -519,6 +573,7 @@ async function fixture(
       mergeRead = read;
     },
     authentication,
+    nativeCounts,
     runs,
     denyContext: () => {
       contextReadable = false;
@@ -572,6 +627,15 @@ async function fixture(
         organizations: new Set(["fixture"]),
       };
     },
+    onSlackRead: (hook?: () => void | Promise<void>) => {
+      slackReadHook = hook;
+    },
+    revokeSlack: () => {
+      slackAvailable = false;
+    },
+    restoreSlack: () => {
+      slackAvailable = true;
+    },
     revoke: () => {
       available = false;
     },
@@ -580,7 +644,314 @@ async function fixture(
     },
   };
 }
+async function privatePipelines(s: Awaited<ReturnType<typeof fixture>>, count: number, distinct: boolean) {
+  const sourceIdentity = { issuer: "https://slack.com", tenant: "fixture-team", subject: "UALICE" };
+  for (let i = 0; i < count; i++) {
+    const msg = {
+      userId: "slack:UALICE",
+      channelId: "slack:D1",
+      threadKey: distinct ? `slack:D1:${i + 1}` : "slack:D1:1",
+      messageId: `${i + 1}`,
+      text: "Read-only source",
+    };
+    const native = await s.authentication.resolveNative(msg, { source: "slack", identity: sourceIdentity });
+    if (native.status !== "resolved") throw new Error("No native source");
+    const auth = {
+      ...native.authentication,
+      sourceReference: {
+        ...native.authentication.sourceReference!,
+        privateSource: true as const,
+        capturedPrivateEpoch: "a".repeat(64),
+        sourceRepository: "sample/api",
+      },
+    };
+    const key = `source-${i}`;
+    const admission = await s.installation.organization.admit(auth, {
+      key,
+      sourceEvent: key,
+      content: msg.text,
+      context: [],
+      target: null,
+      destination: { kind: "broad" },
+      workload: "message",
+    });
+    if (admission.status !== "receipt") throw new Error(`No source admission: ${admission.status}`);
+    const resolved = await s.installation.organization.resolve(auth);
+    if (!resolved) throw new Error("No source actor");
+    const submission = await s.store.execute({ action: "submission", ...resolved, source: "slack", key });
+    if (submission.status !== "submission") throw new Error("No source envelope");
+    const lease = await s.store.execute({ action: "claim", organization: "fixture", owner: "setup", leaseMs: DAY_MS });
+    if (lease.status !== "state") throw new Error("No source lease");
+    const owned = { organization: "fixture", owner: "setup", generation: lease.state.lease!.generation };
+    const effect = await s.store.execute({ action: "effect", ...owned, source: "slack", key, actor: resolved.actor });
+    if (effect.status !== "receipt" || !effect.receipt.effectKey) throw new Error("No source effect");
+    const origin = { ...submission.envelope, content: "", context: [] };
+    const ingress = await s.ledger.consumeIngress({
+      effectKey: effect.receipt.effectKey,
+      digest: admission.receipt.digest,
+      requester: msg.userId,
+      threadKey: msg.threadKey,
+      request: {},
+      contentExpiresAt: DAY_MS,
+      origin,
+      originExpiresAt: admission.receipt.expiresAt,
+      receiptId: admission.receipt.id,
+    });
+    if (ingress.status !== "claimed") throw new Error(`No source owner: ${ingress.status}`);
+    const runId = ingress.record.runId;
+    await s.ledger.finishIngress({
+      effectKey: ingress.record.effectKey,
+      digest: ingress.record.digest,
+      runId,
+      status: "completed",
+      outcome: "Original source completed",
+    });
+    await s.store.execute({
+      action: "settle",
+      ...owned,
+      receiptId: admission.receipt.id,
+      status: "accepted",
+      ownerRunId: runId,
+      reason: null,
+      reply: null,
+      contentTtlMs: DAY_MS,
+    });
+    await s.store.execute({ action: "complete", ...owned, through: lease.state.lease!.through });
+    const instance: CoordinatorInstance = {
+      id: `private-${i}`,
+      kind: "ship",
+      userId: msg.userId,
+      channelId: msg.channelId,
+      threadKey: msg.threadKey,
+      repo: "sample/api",
+      branch: `work-${i}`,
+      base: "main",
+      merge: "person",
+      plan: { id: `private-${i}` },
+      createdAt: 1000,
+      runId,
+    };
+    const unit: CoordinatorUnit = {
+      instanceId: instance.id,
+      unit: "task",
+      slug: "task",
+      title: `Private task ${i}`,
+      branch: instance.branch,
+      dependsOn: [],
+      rounds: [],
+      threadKey: privateWorkerThreadKey({ instanceId: instance.id, unit: "task" }),
+      workBrief: {
+        requesterId: msg.userId,
+        mainThreadKey: msg.threadKey,
+        actId: `act-${i}`,
+        repo: instance.repo,
+        base: "main",
+        question: "Private task question",
+        findings: [],
+        requestedChange: "Fix it",
+      },
+      context: contextCapsuleOf({
+        version: 1,
+        source: { runId, requester: msg.userId, channelId: msg.channelId, threadKey: msg.threadKey },
+        session: { key: "source", from: 0, to: -1 },
+        assets: [],
+      }),
+      idle: {
+        why: "awaiting human",
+        at: 1000,
+        renewalsLeft: 1,
+        wakes: 0,
+        spendUsd: null,
+        humanGate: {
+          assignedTo: "slack:UALICE",
+          pr: { number: 42, url: "https://github.com/sample/api/pull/42" },
+          round: 1,
+          verdict: "approve",
+          findings: [],
+          askedAt: 1000,
+        },
+      },
+    };
+    const messageId = `browser:${admission.receipt.revision}:${encodeURIComponent(msg.messageId)}`;
+    const turn = await s.coordinator.recordRequesterTurn({
+      requesterId: msg.userId,
+      threadKey: msg.threadKey,
+      messageId,
+    });
+    if (!turn.ok) throw new Error("No requester turn");
+    const created = await s.coordinator.claimMainTask(
+      { mainThreadKey: msg.threadKey, actId: `act-${i}` },
+      instance,
+      unit,
+      { requesterId: msg.userId, sourceMessageId: messageId, revision: turn.turn.revision, repo: instance.repo },
+    );
+    if (!created.ok) throw new Error("No canonical private task");
+  }
+}
+async function privateHome(s: Awaited<ReturnType<typeof fixture>>, enrichment?: () => void | Promise<void>) {
+  const home = createHomeService({
+    organizationId: "fixture",
+    instances: s.coordinator,
+    conditions: createHomeConditionReader(s.coordinator),
+  });
+  let resolve!: (value: { status: number; text: string }) => void;
+  const output = new Promise<{ status: number; text: string }>((done) => {
+    resolve = done;
+  });
+  let status = 0;
+  const handler = createHomeViewHandler(
+    home,
+    (_req, res, code, _actor, _title, seed) => {
+      res.writeHead(code);
+      res.end(JSON.stringify(seed));
+    },
+    "fixture",
+    {
+      privateRead: (context) => s.installation.privateRead(context.home!),
+      answers: async () => {
+        await enrichment?.();
+        return {};
+      },
+    },
+  );
+  const req = Object.assign(Readable.from([]), { method: "GET", url: "/home", headers: {} }) as IncomingMessage;
+  const res = {
+    writeHead(code: number) {
+      status = code;
+    },
+    setHeader() {},
+    end(text: string) {
+      resolve({ status, text });
+    },
+  } as unknown as ServerResponse;
+  expect(
+    handler(req, res, {
+      actor: s.context.actor,
+      organization: "fixture",
+      attentionRecipients: ["access:alice", "slack:UALICE"],
+      home: s.context,
+    }),
+  ).toBe(true);
+  return output;
+}
 describe("browser installation", () => {
+  it.each([false, true])(
+    "reads a thousand private generated pipelines with bounded fresh metadata phases (distinct sources: %s)",
+    async (distinct) => {
+      const s = await fixture(true, true, undefined, false, true, false, 10, true);
+      await privatePipelines(s, 1000, distinct);
+      const units = vi.spyOn(s.coordinator, "listUnits"),
+        get = vi.spyOn(s.coordinator, "get");
+      const catalogue = vi.spyOn(s.store, "execute");
+      s.nativeCounts.slack = 0;
+      s.nativeCounts.max = 0;
+      const read = await privateHome(s);
+      expect(read.status).toBe(200);
+      const seed = JSON.parse(read.text);
+      expect(seed.snapshot.needsYou).toHaveLength(1000);
+      expect(seed.snapshot.needsYou[0].unit.title).toContain("Private task");
+      expect(read.text).not.toContain("Private task question");
+      expect(units).toHaveBeenCalledTimes(3000);
+      expect(get).toHaveBeenCalledTimes(2000);
+      expect(catalogue.mock.calls.filter(([command]) => command.action === "source-catalogue")).toHaveLength(
+        distinct ? 10 : 2,
+      );
+      expect(s.nativeCounts.slack).toBe(distinct ? 4000 : 4);
+      expect(s.nativeCounts.max).toBe(distinct ? 8 : 1);
+      expect((await privateHome(s, () => s.revoke())).status).toBe(404);
+    },
+    60000,
+  );
+  it("rechecks only serialized private rows after a bounded projection omits another owned unit", async () => {
+    const s = await fixture(true, true, undefined, false, true);
+    await privatePipelines(s, 2, true);
+    const groups = await Promise.all(
+      ["private-0", "private-1"].map(async (id) => {
+        const instance = await s.coordinator.get(id);
+        if (!instance) throw new Error("No private pipeline");
+        return { instance, units: await s.coordinator.listUnits(id) };
+      }),
+    );
+    const guard = s.installation.privateRead(s.context);
+    expect(await guard.begin()).toBe(true);
+    expect([...(await guard.readMany(groups))]).toEqual([
+      ["private-0:task", true],
+      ["private-1:task", true],
+    ]);
+    guard.include!(["private-0:task"]);
+    const omitted = groups[1]!.units[0]!;
+    expect(
+      (
+        await s.coordinator.compareAndReplaceUnit(omitted, {
+          ...omitted,
+          idle: { ...omitted.idle!, humanGate: { ...omitted.idle!.humanGate!, assignedTo: "access:bob" } },
+        })
+      ).ok,
+    ).toBe(true);
+    const reads = vi.spyOn(s.coordinator, "get");
+    expect(await guard.canEmit()).toBe(true);
+    expect(reads.mock.calls).toEqual([["private-0"], ["private-0"]]);
+  });
+  it("starts the request source fence before projecting an inventory with no private rows", async () => {
+    const s = await fixture();
+    await s.seedQuestion();
+    const positive = await privateHome(s);
+    expect(positive.status).toBe(200);
+    expect(JSON.parse(positive.text).snapshot.needsYou[0].unit.title).toBe("Original unit");
+    expect(await privateHome(s, () => s.setPolicy())).toEqual({ status: 404, text: "not found" });
+  });
+  it("fences private metadata after exact source or canonical ownership changes without releasing history", async () => {
+    const s = await fixture(true, true, undefined, false, true);
+    await privatePipelines(s, 2, true);
+    const positive = await privateHome(s);
+    expect(positive.status).toBe(200);
+    expect(JSON.parse(positive.text).snapshot.needsYou).toHaveLength(2);
+    const instance = await s.coordinator.get("private-0"),
+      unit = (await s.coordinator.listUnits("private-0"))[0]!;
+    if (!instance) throw new Error("No canonical private pipeline");
+    expect(await s.installation.canReadPrivateUnit(s.context, instance, unit, true)).toBe(false);
+    const progress = await privateHome(s, async () => {
+      const recorded = await s.coordinator.compareAndReplaceUnit(unit, {
+        ...unit,
+        recordedProgress: {
+          version: 1,
+          revision: 1,
+          workflowId: instance.id,
+          ownerRunId: instance.runId,
+          step: "check-build",
+          at: 1000,
+          basis: unitProgressBasis(unit),
+          waiting: { kind: "retry" },
+        },
+      });
+      // A diagnostic update carries no replacement recipient authority.
+      if (!recorded.ok) throw new Error("No diagnostic update");
+    });
+    expect(progress.status).toBe(200);
+    const current = (await s.coordinator.listUnits("private-0"))[0]!;
+    const revoked = await privateHome(s, () => s.revokeSlack());
+    expect(revoked).toEqual({ status: 404, text: "not found" });
+    const denied = await privateHome(s);
+    expect(denied.status).toBe(200);
+    expect(JSON.parse(denied.text).snapshot.needsYou).toEqual([]);
+    expect(denied.text).not.toContain("Private task 0");
+    s.restoreSlack();
+    let changed = false;
+    const stale = await privateHome(s, () =>
+      s.onSlackRead(async () => {
+        if (changed) return;
+        changed = true;
+        const replaced = await s.coordinator.compareAndReplaceUnit(current, {
+          ...current,
+          idle: { ...current.idle!, humanGate: { ...current.idle!.humanGate!, assignedTo: "access:bob" } },
+        });
+        expect(replaced.ok).toBe(true);
+      }),
+    );
+    expect(stale).toEqual({ status: 404, text: "not found" });
+    s.onSlackRead();
+    expect((await privateHome(s)).status).toBe(200);
+  });
   it("gives real Core current quoted attached work metadata without changing the authored request or broad receiver", async () => {
     const completions: import("../core/provider.js").CompletionRequest[] = [];
     const provider: Provider = {
@@ -2462,7 +2833,7 @@ describe("browser installation", () => {
       },
     };
     const native = createOrganizationNativeSources(nativeOptions);
-    const s = await fixture(false, false, undefined, false, false, false, 10, native);
+    const s = await fixture(false, false, undefined, false, false, false, 10, false, native);
     const options: McpOptions = {
       auth: { tokens: s.tokens },
       sso,

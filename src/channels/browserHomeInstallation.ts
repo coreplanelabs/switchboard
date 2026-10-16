@@ -44,6 +44,10 @@ import type { RunLedger } from "../core/runLedger/ledger.js";
 import { defaultRunRegistry } from "../core/runRegistry.js";
 import type { RunsService, RunView } from "../core/runsService.js";
 import type { ChannelIO, IncomingMessage, HistoryItem } from "../core/types.js";
+import { mapLimit } from "../core/mapLimit.js";
+import { HOME_PRIVATE_READ_CONCURRENCY } from "../core/budgets.js";
+import type { HomePrivateReadGroup } from "../core/home/service.js";
+import type { HomePrivateReadGuard } from "./homeView.js";
 import type { HomeUnit } from "../core/home/service.js";
 import { hasWorkViewScope, resolveWorkViewScope, withWorkViewScope, workViewScopeOf } from "./workViewScope.js";
 import { createHomeHost } from "./homeHost.js";
@@ -64,6 +68,7 @@ import type {
   OrganizationQuestionOwner,
   ResolvedOrganizationAuthentication,
   OrganizationNativeEvidence,
+  OrganizationMetadataAuthentication,
 } from "./organizationAuthentication.js";
 
 export interface BrowserHomeInstallationOptions {
@@ -100,6 +105,11 @@ export interface BrowserHomeInstallationOptions {
   legacyRecipient?(origin: LegacySlackAudienceOrigin): Promise<LegacySlackRecipient | undefined>;
   /** Existing unit metadata only; never its private journal or prompt bytes. */
   originalUnitRecipient?(key: UnitEventKey): Promise<OriginalUnitRecipient | undefined>;
+  /** Request-phase metadata proof only; never reused for history or effects. */
+  originalUnitRecipientPhase?(
+    groups: readonly HomePrivateReadGroup[],
+    authentication: OrganizationMetadataAuthentication,
+  ): { read(key: UnitEventKey): Promise<OriginalUnitRecipient | undefined>; canEmit(): Promise<boolean> };
   /** Existing explicit GitHub binding for the actual credential; never the unit's requester. */
   mergeLogin?(actorId: string): Promise<string | undefined>;
   /** Existing authenticated GitHub read; no model or browser fields select its PR. */
@@ -214,12 +224,15 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
       return { status: "unavailable" };
     }
   }
-  async function current(context: HomeRuntimeContext): Promise<ResolvedOrganizationAuthentication | undefined> {
+  async function current(
+    context: HomeRuntimeContext,
+    authentication: Pick<typeof options.authentication, "resolveAuthorization"> = options.authentication,
+  ): Promise<ResolvedOrganizationAuthentication | undefined> {
     const reference = context.authentication.sourceReference;
     if (!reference) return;
     const resolved = await organization.resolve(context.authentication, true);
     if (!resolved) return;
-    const value = await options.authentication.resolveAuthorization({
+    const value = await authentication.resolveAuthorization({
       source: context.authentication.source,
       sourceReference: reference,
       organization: options.organizationId,
@@ -276,6 +289,194 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     canWriteThread: options.canWriteThread,
     privateThread: privateThread,
   });
+  const privateMetadataStamp = (instance: CoordinatorInstance, unit: CoordinatorUnit) =>
+    JSON.stringify([
+      instance.id,
+      instance.userId,
+      instance.authenticatedAs,
+      instance.postedBy,
+      instance.channelId,
+      instance.threadKey,
+      instance.repo,
+      instance.runId,
+      unit.instanceId,
+      unit.unit,
+      unit.workBrief,
+      unit.context,
+      unit.threadKey,
+      unit.idle?.humanGate
+        ? homeQuestionDigest(unit.idle.humanGate)
+        : unit.recoveryHold?.cause === "human"
+          ? homeQuestionDigest(unit.recoveryHold.gate)
+          : null,
+    ]);
+  /** One page's metadata proofs, followed by a separate fresh emission phase.
+   * Single-unit history, logs and actions keep their original strict readers. */
+  function privateRead(context: HomeRuntimeContext): HomePrivateReadGuard {
+    const candidates = new Map<string, { instance: CoordinatorInstance; unit: CoordinatorUnit }>();
+    let disclosed = candidates;
+    let initialEpoch: Promise<string | undefined> | undefined;
+    const phaseAuthentication = options.authentication.metadataPhase();
+    const readPhase = async (
+      groups: readonly HomePrivateReadGroup[],
+      authentication: OrganizationMetadataAuthentication,
+    ) => {
+      const results = new Map<string, boolean>();
+      const actual = await current(context, authentication);
+      const scope = (await options.viewScope?.(context)) ?? workViewScopeOf(context.actor).mode;
+      const fresh = scope !== "mine" ? await host.refresh(context) : undefined;
+      const ids = (await options.provedActorIds?.(context)) ?? [];
+      const sourceProof = options.originalUnitRecipientPhase?.(groups, authentication);
+      const rows = groups.flatMap(({ instance, units }) => units.map((unit) => ({ instance, unit })));
+      await mapLimit(rows, HOME_PRIVATE_READ_CONCURRENCY, async ({ instance, unit }) => {
+        const key = unitKeyOf(unit);
+        if (
+          unit.instanceId !== instance.id ||
+          !unit.workBrief ||
+          !actual ||
+          actual.actor.kind !== "user" ||
+          actual.actor.viewingAs
+        ) {
+          results.set(key, false);
+          return;
+        }
+        const entity = {
+          userId: instance.userId,
+          channelId: instance.channelId,
+          repo: instance.repo,
+          channelVisibility: "unknown" as const,
+        };
+        if (scope !== "mine") {
+          const selected = fresh && workViewScopeOf(fresh.actor);
+          results.set(
+            key,
+            !!fresh &&
+              holdsAll(actual.actor) &&
+              holdsAll(fresh.actor) &&
+              authorize(actual.actor, "organization:read", { type: "organization", id: options.organizationId })
+                .allow &&
+              (scope === "person"
+                ? selected?.mode === "person" && fresh.actor.viewingAs?.id === context.actor.viewingAs?.id
+                : !fresh.actor.viewingAs) &&
+              matchesPredicate(readableRuns(fresh.actor), entity),
+          );
+          return;
+        }
+        if (context.actor.viewingAs || !matchesPredicate(predicateFor(actual.actor, "runs:read", "run"), entity)) {
+          results.set(key, false);
+          return;
+        }
+        const proof = sourceProof && (await sourceProof.read({ instanceId: instance.id, unit: unit.unit }));
+        const source = unit.context && isUnitContext(unit.context) ? unit.context.handoff.source : undefined;
+        if (
+          proof &&
+          source &&
+          proof.sourceRunId === source.runId &&
+          proof.unitKey.instanceId === instance.id &&
+          proof.unitKey.unit === unit.unit &&
+          proof.requesterId === unit.workBrief.requesterId &&
+          proof.channelId === instance.channelId &&
+          proof.threadKey === unit.workBrief.mainThreadKey &&
+          (proof.actor.kind === "user" || proof.actor.onBehalfOf?.kind === "user") &&
+          (actual.actor.id === proof.actor.id ||
+            actual.actor.id === proof.actor.onBehalfOf?.id ||
+            ids.includes(proof.actor.id))
+        ) {
+          results.set(key, true);
+          return;
+        }
+        if (sourceProof && source) {
+          const original = await options.ledger.readIngressByRun(source.runId);
+          if (original.status !== "record" && original.status !== "not_found")
+            throw new Error("Current original-source proof is unavailable.");
+          if (original.status === "record" && original.record.origin) {
+            results.set(key, false);
+            return;
+          }
+        }
+        // Unknown/legacy implementations still use the exact existing reader.
+        results.set(key, await canReadPrivateUnit(context, instance, unit));
+      });
+      if (sourceProof && !(await sourceProof.canEmit())) throw new Error("The original private unit claim changed.");
+      return results;
+    };
+    return {
+      async begin() {
+        initialEpoch ??= host.currentEpoch(context);
+        return !!(await initialEpoch);
+      },
+      async readMany(groups) {
+        initialEpoch ??= host.currentEpoch(context);
+        if (!(await initialEpoch)) throw new Error("Current private metadata proof is unavailable.");
+        const result = await readPhase(groups, phaseAuthentication);
+        for (const { instance, units } of groups)
+          for (const unit of units)
+            if (result.get(unitKeyOf(unit))) candidates.set(unitKeyOf(unit), { instance, unit });
+        return result;
+      },
+      include(unitKeys) {
+        disclosed = new Map(
+          unitKeys.flatMap((key) => {
+            const row = candidates.get(key);
+            return row ? [[key, row] as const] : [];
+          }),
+        );
+      },
+      async canEmit() {
+        try {
+          const first = await (initialEpoch ??= host.currentEpoch(context));
+          if (!first) return false;
+          const ids = [...new Set([...disclosed.values()].map(({ instance }) => instance.id))];
+          const groups = await mapLimit(ids, HOME_PRIVATE_READ_CONCURRENCY, async (id) => {
+            const [instance, units] = await Promise.all([
+              options.coordinator.get(id),
+              options.coordinator.listUnits(id),
+            ]);
+            if (!instance) throw new Error("The original private unit is unavailable.");
+            return { instance, units };
+          });
+          const selected = groups.map(({ instance, units }) => ({
+            instance,
+            units: units.filter((unit) => disclosed.has(unitKeyOf(unit))),
+          }));
+          const final = await readPhase(selected, options.authentication.metadataPhase());
+          const currentRows = new Map<string, { instance: CoordinatorInstance; unit: CoordinatorUnit }[]>();
+          // Native reads are asynchronous. Re-read the canonical roster AFTER
+          // them, so a concurrent owner/question change cannot release old facts.
+          const reread = await mapLimit(ids, HOME_PRIVATE_READ_CONCURRENCY, async (id) => {
+            const [instance, units] = await Promise.all([
+              options.coordinator.get(id),
+              options.coordinator.listUnits(id),
+            ]);
+            if (!instance) throw new Error("The original private unit is unavailable.");
+            return { instance, units };
+          });
+          for (const { instance, units } of reread)
+            for (const unit of units) {
+              const key = unitKeyOf(unit),
+                rows = currentRows.get(key) ?? [];
+              rows.push({ instance, unit });
+              currentRows.set(key, rows);
+            }
+          for (const [key, saved] of disclosed) {
+            const rows = currentRows.get(key);
+            if (
+              rows?.length !== 1 ||
+              privateMetadataStamp(rows[0]!.instance, rows[0]!.unit) !==
+                privateMetadataStamp(saved.instance, saved.unit)
+            )
+              return false;
+          }
+          return (
+            [...disclosed.keys()].every((key) => final.get(key) === true) &&
+            first === (await host.currentEpoch(context))
+          );
+        } catch {
+          return false;
+        }
+      },
+    };
+  }
   async function canReadPrivateUnit(
     context: HomeRuntimeContext,
     instance: CoordinatorInstance,
@@ -1405,6 +1606,7 @@ export function createBrowserHomeInstallation(options: BrowserHomeInstallationOp
     observeMerge,
     queueMergeObservations,
     canReadPrivateUnit,
+    privateRead,
     questionOwner,
     readOriginalRun,
     originalBinding,

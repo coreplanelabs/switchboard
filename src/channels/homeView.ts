@@ -11,6 +11,12 @@ import type { HomeRuntimeContext, HomeThreadProjection } from "./homeRuntime.js"
 import { parsePrivateWorkerThreadKey } from "../core/privateWorkerLog.js";
 
 type HomeService = ReturnType<typeof createHomeService>;
+export interface HomePrivateReadGuard {
+  begin(): Promise<boolean>;
+  readMany: NonNullable<HomeReader["readPrivateUnits"]>;
+  include?(unitKeys: readonly string[]): void;
+  canEmit(): Promise<boolean>;
+}
 type PrivateUnitReader = NonNullable<HomeReader["readPrivateUnit"]>;
 export interface HomeViewContext {
   actor?: Actor;
@@ -58,6 +64,7 @@ export function createHomeViewHandler(
     now?: () => number;
     privateUnit?: (context: HomeViewContext, ...unit: Parameters<PrivateUnitReader>) => Promise<boolean>;
     privateEpoch?: (context: HomeViewContext) => Promise<string | undefined>;
+    privateRead?: (context: HomeViewContext) => HomePrivateReadGuard | undefined;
     thread?: (context: HomeViewContext, key: string) => Promise<HomeThreadProjection | undefined>;
     answers?: (
       context: HomeViewContext,
@@ -87,6 +94,12 @@ export function createHomeViewHandler(
     const actor = context.actor;
     const scope = workViewScopeOf(actor);
     const privateReads: Parameters<PrivateUnitReader>[] = [];
+    let guard: HomePrivateReadGuard | undefined;
+    const beginReadPhase = async () => {
+      guard = options.privateRead?.(context);
+      privateReads.length = 0;
+      return guard ? guard.begin() : !options.privateRead;
+    };
     const reader = {
       actorId: context.attentionRecipient ?? actor.viewingAs?.id ?? actor.id,
       scopeKey: JSON.stringify([scope.mode, scope.person?.id ?? null, [...scope.ownerIds].sort()]),
@@ -95,6 +108,12 @@ export function createHomeViewHandler(
       ],
       readableTo: predicateFor(actor, "runs:read", "run"),
       visibleTo: workReadPredicate(actor, predicateFor(actor, "runs:read", "run")),
+      ...(options.privateRead
+        ? {
+            readPrivateUnits: (groups: Parameters<NonNullable<HomeReader["readPrivateUnits"]>>[0]) =>
+              guard!.readMany(groups),
+          }
+        : {}),
       ...(options.privateUnit
         ? {
             readPrivateUnit: async (...unit: Parameters<PrivateUnitReader>) => {
@@ -106,8 +125,18 @@ export function createHomeViewHandler(
         : {}),
     };
     void (async () => {
-      const initialEpoch = await options.privateEpoch?.(context);
-      const canEmit = async () => {
+      if (!(await beginReadPhase())) {
+        plain(res, 404, "not found");
+        return;
+      }
+      const initialEpoch = guard ? undefined : await options.privateEpoch?.(context);
+      const canEmit = async (unitKeys: readonly string[] = []) => {
+        if (guard) {
+          guard.include?.(unitKeys);
+          if (await guard.canEmit()) return true;
+          plain(res, 404, "not found");
+          return false;
+        }
         // Legacy private sources need an exact current recipient proof even
         // when they do not participate in the organization's access epoch.
         for (const unit of privateReads) {
@@ -128,7 +157,7 @@ export function createHomeViewHandler(
         }
         return true;
       };
-      if (options.privateEpoch && !initialEpoch) {
+      if (!guard && options.privateEpoch && !initialEpoch) {
         plain(res, 404, "not found");
         return;
       }
@@ -173,7 +202,7 @@ export function createHomeViewHandler(
           plain(res, 404, "not found");
           return;
         }
-        if (await canEmit())
+        if (await canEmit(history.units.map((row) => row.unit.unit)))
           page(req, res, 200, actor, "Completed work", { page: "fleetHistory", history: { ...history, now } });
         return;
       }
@@ -195,7 +224,7 @@ export function createHomeViewHandler(
         const units = found.pipeline.units.map((row) =>
           moving.has(row.unit.unit) ? { ...row, activity: "moving" as const } : row,
         );
-        if (!(await canEmit())) return;
+        if (!(await canEmit(units.map((row) => row.unit.unit)))) return;
         page(req, res, 200, actor, "Pipeline", {
           page: "fleetPipeline",
           status: found.status,
@@ -211,7 +240,10 @@ export function createHomeViewHandler(
         return;
       }
       if (selected.kind === "snapshot") {
-        if (!(await canEmit())) return;
+        if (
+          !(await canEmit([...snapshot.needsYou, ...snapshot.moving, ...snapshot.waiting].map((row) => row.unit.unit)))
+        )
+          return;
         res.writeHead(200, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
         res.end(
           JSON.stringify({
@@ -229,7 +261,10 @@ export function createHomeViewHandler(
           options.actions && !actor.viewingAs && scope.mode !== "person"
             ? await options.actions(context, snapshot)
             : undefined;
-        if (!(await canEmit())) return;
+        if (
+          !(await canEmit([...snapshot.needsYou, ...snapshot.moving, ...snapshot.waiting].map((row) => row.unit.unit)))
+        )
+          return;
         page(req, res, 200, actor, "Home", {
           page: "fleetHome",
           snapshot,

@@ -755,3 +755,6 @@ export const REVIEW_FEEDBACK_LEASE_MS = 5 * 60_000;
 export const REVIEW_FEEDBACK_REQUEST_MS = 15_000;
 export const REVIEW_FEEDBACK_READ_MS = 30_000;
 export const REVIEW_FEEDBACK_PASS_MS = 45_000;
+
+/** Bounded canonical and native proof reads in each private Home metadata phase. */
+export const HOME_PRIVATE_READ_CONCURRENCY = 8;

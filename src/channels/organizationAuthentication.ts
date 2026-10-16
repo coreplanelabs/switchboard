@@ -69,6 +69,13 @@ export type OrganizationQuestionOwner =
       questionDigest?: string;
     }
   | { status: "fenced" | "unavailable" };
+export interface OrganizationMetadataAuthentication {
+  resolveEnvelope(envelope: OrganizationEnvelope): Promise<OrganizationAuthenticationResult>;
+  resolveAuthorization(
+    input: import("../core/organization/service.js").OrganizationAuthorization,
+  ): Promise<OrganizationAuthenticationResult>;
+}
+
 export interface OrganizationAuthenticationOptions {
   organization: string;
   mappings: readonly OrganizationMapping[];
@@ -546,7 +553,64 @@ export function createOrganizationAuthentication(options: OrganizationAuthentica
   return {
     resolveNative,
     resolveEnvelope,
-
+    /** Only underlying native reads are shared within this metadata phase.
+     * Policy and message attribution are rebuilt for each exact original source.
+     * A new phase must be created for the final emission fence. */
+    metadataPhase(): OrganizationMetadataAuthentication {
+      function memo<A extends unknown[], R>(key: (...args: A) => string, read: (...args: A) => Promise<R>) {
+        const reads = new Map<string, Promise<R>>();
+        return (...args: A) => {
+          const id = key(...args);
+          let value = reads.get(id);
+          if (!value) {
+            value = read(...args);
+            reads.set(id, value);
+          }
+          return value;
+        };
+      }
+      const nativeKey = (identity: ExternalIdentity, attestation?: unknown, ref?: OrganizationSourceReference) => {
+        // A message identifier is attribution, not native-source authority.
+        // Keep the exact address, credential, delegated requester, saved choice
+        // and question proof; unrelated private sources cannot share a result.
+        const { messageId: _message, browserRevision: _revision, ...authority } = ref ?? {};
+        return JSON.stringify([identity, attestation ?? null, authority]);
+      };
+      const phase = createOrganizationAuthentication({
+        ...options,
+        currentBrowser: memo(nativeKey, options.currentBrowser),
+        currentSlack: memo(nativeKey, options.currentSlack),
+        ...(options.currentMcp
+          ? {
+              currentMcp: memo(
+                (
+                  identity: ExternalIdentity | IngressIdentity,
+                  attestation?: unknown,
+                  ref?: OrganizationSourceReference,
+                ) => JSON.stringify([identity, attestation ?? null, ref]),
+                options.currentMcp,
+              ),
+            }
+          : {}),
+        ...(options.currentGithub ? { currentGithub: memo(nativeKey, options.currentGithub) } : {}),
+        ...(options.currentCli ? { currentCli: memo(nativeKey, options.currentCli) } : {}),
+        ...(options.channelsOf ? { channelsOf: memo((id: string) => id, options.channelsOf) } : {}),
+        directory: Object.assign(Object.create(options.directory) as PersonDirectory, {
+          resolve: memo(identityKey, (identity: ExternalIdentity) => options.directory.resolve(identity)),
+        }),
+        ...(options.personalTokens
+          ? {
+              personalTokens: Object.assign(Object.create(options.personalTokens) as PersonalTokenStore, {
+                get: memo(
+                  (digest: string) => digest,
+                  (digest: string) => options.personalTokens!.get(digest),
+                ),
+              }),
+            }
+          : {}),
+      });
+      return { resolveEnvelope: phase.resolveEnvelope, resolveAuthorization: phase.resolveAuthorization };
+    },
     resolveQuestion: async (
       current: ResolvedOrganizationAuthentication,
       unitKey: string,

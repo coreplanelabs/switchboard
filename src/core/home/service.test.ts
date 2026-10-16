@@ -356,6 +356,78 @@ describe("Home durable fleet", () => {
     expect((await home.snapshot(viewer)).access).toBe("authorized");
   });
 
+  it("bounds private history proofs by cursor scan and result lookahead before reading a large pipeline", async () => {
+    const rows = Array.from({ length: 1000 }, (_, index) =>
+      unit(`task-${String(index).padStart(4, "0")}`, {
+        title: `Private task ${index}`,
+        ending: { kind: "merged", at: 1, report: "Private conclusion" },
+        workBrief: {
+          requesterId: instance.userId,
+          mainThreadKey: instance.threadKey,
+          actId: `act-${index}`,
+          repo: instance.repo,
+          base: "main",
+          question: "Private source request",
+          findings: [],
+          requestedChange: "Fix it",
+        },
+      }),
+    ).reverse();
+    const home = createHomeService({
+      organizationId: "organization:example",
+      historyCursorKey: HISTORY_KEY,
+      maxUnits: 3,
+      instances: inventory(rows),
+    });
+    let allowed = true;
+    const proofs: string[][] = [];
+    const reader = {
+      ...viewer,
+      readPrivateUnits: async (
+        groups: Parameters<NonNullable<import("./service.js").HomeReader["readPrivateUnits"]>>[0],
+      ) => {
+        const keys = groups.flatMap(({ instance, units }) => units.map((unit) => `${instance.id}:${unit.unit}`));
+        proofs.push(keys);
+        return new Map(keys.map((key) => [key, allowed]));
+      },
+    };
+    const first = await home.history(reader, { limit: 1 });
+    expect(first.units.map((row) => row.unit.title)).toEqual(["Private task 0"]);
+    expect(proofs).toEqual([["old-work:task-0000", "old-work:task-0001"]]);
+    expect(first.cursor).toMatch(/^home1\./);
+    proofs.length = 0;
+    const next = await home.history(reader, { limit: 1, cursor: first.cursor });
+    expect(next.units.map((row) => row.unit.title)).toEqual(["Private task 1"]);
+    expect(proofs).toEqual([["old-work:task-0001", "old-work:task-0002"]]);
+    allowed = false;
+    proofs.length = 0;
+    const revoked = await home.history(reader, { limit: 1, cursor: next.cursor });
+    expect(revoked.units.map((row) => row.unit.unit)).toEqual(["old-work:task-0002"]);
+    expect(JSON.stringify(revoked)).not.toContain("Private task");
+    expect(JSON.stringify(revoked)).not.toContain("Private source request");
+    expect(JSON.stringify(revoked)).not.toContain("Private conclusion");
+    expect(proofs).toEqual([["old-work:task-0002", "old-work:task-0003"]]);
+    allowed = true;
+    proofs.length = 0;
+    const capped = createHomeService({
+      organizationId: "organization:example",
+      historyCursorKey: HISTORY_KEY,
+      maxUnits: 1,
+      instances: inventory(rows),
+    });
+    const bounded = await capped.history(reader, { limit: 10 });
+    expect(bounded).toMatchObject({
+      status: "partial",
+      units: [{ unit: { title: "Private task 0" } }],
+      cursor: expect.any(String),
+    });
+    expect(proofs).toEqual([["old-work:task-0000"]]);
+    proofs.length = 0;
+    const resumed = await capped.history(reader, { limit: 10, cursor: bounded.cursor });
+    expect(resumed.units.map((row) => row.unit.title)).toEqual(["Private task 1"]);
+    expect(proofs).toEqual([["old-work:task-0001"]]);
+  });
+
   it("continues completed history beyond its unit scan bound", async () => {
     const home = createHomeService({
       organizationId: "organization:example",
