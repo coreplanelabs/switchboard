@@ -16179,8 +16179,8 @@ describe("cancelled check terminal custody in real SQLite", () => {
           valid = await checkStateFixture(owner, {
             initial: valid,
             callId: `call-${index + 1}`,
-            output: "x".repeat(4000),
-            stderr: "y".repeat(4000),
+            output: "x".repeat(2000),
+            stderr: "y".repeat(2000),
           });
         checks = await checkStateFixture(owner, { initial: valid, callId: "call-32", unknown: true });
       }
@@ -16192,11 +16192,15 @@ describe("cancelled check terminal custody in real SQLite", () => {
             tool: "fixture",
             ok: true,
             summary: "saved result",
-            output: "é".repeat(680000),
+            output: "é".repeat(720000),
             seq: 1,
           },
         ];
         expect(new TextEncoder().encode(JSON.stringify(ending)).byteLength).toBeLessThan(MAX_RECORD_BYTES);
+        expect(
+          new TextEncoder().encode(JSON.stringify(ending)).byteLength +
+            new TextEncoder().encode(JSON.stringify(checks)).byteLength,
+        ).toBeGreaterThan(MAX_RECORD_BYTES);
       }
       if (fault === "oversized") {
         await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (ledger) => {
@@ -16638,8 +16642,8 @@ describe("recorded check terminal custody in real SQLite", () => {
       checks = await checkStateFixture(owner, {
         initial: checks,
         callId: `call-${index + 1}`,
-        output: "x".repeat(4000),
-        stderr: "y".repeat(4000),
+        output: "x".repeat(2000),
+        stderr: "y".repeat(2000),
       });
     checks = await checkStateFixture(owner, { initial: checks, callId: "call-32", unknown: true });
     const key = await setup({ checkExecutions: checks });
@@ -16651,12 +16655,16 @@ describe("recorded check terminal custody in real SQLite", () => {
           tool: "fixture",
           ok: true,
           summary: "saved result",
-          output: "é".repeat(680000),
+          output: "é".repeat(720000),
           seq: 1,
         },
       ],
     };
     expect(new TextEncoder().encode(JSON.stringify(finish)).byteLength).toBeLessThan(MAX_RECORD_BYTES);
+    expect(
+      new TextEncoder().encode(JSON.stringify(finish)).byteLength +
+        new TextEncoder().encode(JSON.stringify(checks)).byteLength,
+    ).toBeGreaterThan(MAX_RECORD_BYTES);
     expect((await post("/runs/finish", { storeKey: key, runId: id, gen: "g1", record: finish })).status).toBe(500);
     expect((await read(key, "call-32")).data).toMatchObject({
       kind: "source",

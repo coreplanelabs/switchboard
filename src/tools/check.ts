@@ -4,7 +4,7 @@ import { NOTEPAD_MAX_BYTES } from "../core/runLedger/sessionLog.js";
 import { utf8ByteLength } from "../core/runRecord.js";
 import { redactAndCap, redactSecrets } from "../core/runEvents.js";
 import type { CheckExecutionReceipt } from "../core/checkExecutionTypes.js";
-import { STREAM_CAP, RECEIPT_CAP } from "../core/checkExecutionSchema.js";
+import { COMMAND_CAP, STREAM_CAP, RECEIPT_CAP } from "../core/checkExecutionSchema.js";
 import type { RunnableTool } from "./runnableTool.js";
 import { typedExecutionDiagnosticFrom, type TypedExecutionDiagnostic } from "../execution/typedExecutionDiagnostic.js";
 
@@ -48,7 +48,7 @@ function verificationNotes(receipt: CheckExecutionReceipt): string {
 
 const inputSchema = z
   .object({
-    command: z.string().min(1).max(2_000),
+    command: z.string().min(1).max(COMMAND_CAP),
     purpose: z.enum(["baseline", "verification"]),
     checkpoint: checkpointSchema.optional(),
     timeoutMs: z.number().int().min(BASH_TIMEOUT_MIN_MS).max(BASH_TIMEOUT_MAX_MS).optional(),
@@ -65,7 +65,7 @@ export const runCheckTool: RunnableTool = {
       command: {
         type: "string",
         minLength: 1,
-        maxLength: 2_000,
+        maxLength: COMMAND_CAP,
         description: "The focused command to execute in the bound checkout.",
       },
       purpose: { type: "string", enum: ["baseline", "verification"] },
@@ -250,7 +250,23 @@ export const runCheckTool: RunnableTool = {
       receipt.outcome.kind === "completed" && receipt.outcome.truncated
         ? "\nOutput is truncated; this receipt is partial evidence. Use read or review_read for source text. For large read-only shell output, save it once under $TMPDIR and read the saved file. Do not run small shell slices or repeat a check only to recover output."
         : "";
-    const text = `${receipt.outcome.kind === "completed" ? "" : "error: "}${summary}${outputNotice}${diagnosticText}${checkpointResult ? `\n${checkpointResult}` : ""}\n<untrusted-check-evidence>\n${encoded}\n</untrusted-check-evidence>`;
+    // A long command or captured stream can fill the retained note. Keep the
+    // closed failure facts ahead of that excerpt; the full receipt stays saved.
+    const failureState = ["pending", "unknown"].includes(receipt.outcome.kind)
+      ? `\nCheck state: ${JSON.stringify({
+          callId: redactAndCap(receipt.callId, 200),
+          commandHash: receipt.commandHash,
+          outcome:
+            receipt.outcome.kind === "unknown"
+              ? {
+                  kind: "unknown",
+                  reason: receipt.outcome.reason,
+                  infrastructureReason: receipt.outcome.infrastructureReason,
+                }
+              : { kind: receipt.outcome.kind },
+        })}`
+      : "";
+    const text = `${receipt.outcome.kind === "completed" ? "" : "error: "}${summary}${outputNotice}${diagnosticText}${failureState}${checkpointResult ? `\n${checkpointResult}` : ""}\n<untrusted-check-evidence>\n${encoded}\n</untrusted-check-evidence>`;
     return ["pending", "unknown"].includes(receipt.outcome.kind) ? retainFailure(text) : text;
   },
 };

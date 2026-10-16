@@ -67,6 +67,15 @@ function infrastructureReasonOf(error: unknown): CheckMetadataFailure["infrastru
   return undefined;
 }
 
+/** Keep existing operation hashes when the original quoting fits. Double
+ * quoting bounds expansion to two characters per input character otherwise. */
+function checkCommand(workspace: string, command: string): string {
+  const prefix = `cd -- ${shellQuote(workspace)} && bash -c `;
+  const quoted = shellQuote(command);
+  if (prefix.length + quoted.length <= 64_000) return prefix + quoted;
+  return prefix + '"' + command.replace(/["\\$`]/g, "\\$&") + '"';
+}
+
 /** Fixed metadata only. Git output is a structural observation, never a control instruction. */
 function metadataCommand(workspace: string): string {
   const git = "git --no-optional-locks -c core.fsmonitor=false";
@@ -197,8 +206,7 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
       if (
         prior.checkOperation &&
         (prior.checkOperation.key !== operationKey(callId, inputHash) ||
-          prior.checkOperation.commandHash !==
-            hash(`cd -- ${shellQuote(prior.workspace.cwd)} && bash -c ${shellQuote(input.command)}`))
+          prior.checkOperation.commandHash !== hash(checkCommand(prior.workspace.cwd, input.command)))
       )
         return unavailable("invalid_state");
       if (["pending", "unknown"].includes(prior.outcome.kind) && (await inspect(prior, signal, control))) {
@@ -222,6 +230,14 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
     if (!workspace || !workspace.startsWith("/") || workspace.length > 4096 || /[\r\n\0]/.test(workspace))
       return unavailable("workspace_unavailable");
     if (state.receipts.length >= RECEIPT_CAP) return unavailable("receipt_limit");
+    // Keep check state within half the ledger request fence. Reserve the full
+    // result before effects: JSON can use six bytes per output character, and
+    // the fixed allowance covers the checkout path, hashes and phase metadata.
+    const receiptBytes = Buffer.byteLength(
+      JSON.stringify({ command: redactAndCap(input.command, COMMAND_CAP).slice(0, COMMAND_CAP), callId, owner }),
+    );
+    const reserveBytes = receiptBytes + 12 * STREAM_CAP + 32 * 1024;
+    if (Buffer.byteLength(JSON.stringify(state)) + reserveBytes > 256 * 1024) return unavailable("capacity");
     if (signal.aborted) return unavailable("stopped");
     const executor = binding.executor();
     if (!executor.execResult) return unavailable("unsupported_executor");
@@ -380,7 +396,7 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
         ? {
             checkOperation: {
               key: operationKey(callId, inputHash),
-              commandHash: hash(`cd -- ${shellQuote(fields[0]!)} && bash -c ${shellQuote(input.command)}`),
+              commandHash: hash(checkCommand(fields[0]!, input.command)),
             },
           }
         : {}),
@@ -410,15 +426,12 @@ export function createCheckExecution(binding: CheckExecutionBinding): CheckExecu
       try {
         const temporaryDirectory = binding.temporaryDirectory?.();
         const result = boundedResult(
-          await executor.execResult(
-            `cd -- ${shellQuote(receipt.workspace.cwd)} && bash -c ${shellQuote(input.command)}`,
-            {
-              timeoutMs: receipt.timeoutMs,
-              signal: commandSignal,
-              ...(receipt.checkOperation ? { checkOperation: receipt.checkOperation } : {}),
-              ...(temporaryDirectory ? { env: { TMPDIR: temporaryDirectory } } : {}),
-            },
-          ),
+          await executor.execResult(checkCommand(receipt.workspace.cwd, input.command), {
+            timeoutMs: receipt.timeoutMs,
+            signal: commandSignal,
+            ...(receipt.checkOperation ? { checkOperation: receipt.checkOperation } : {}),
+            ...(temporaryDirectory ? { env: { TMPDIR: temporaryDirectory } } : {}),
+          }),
         );
         receipt.outcome = !result
           ? { kind: "unknown", reason: "invalid_result" }
