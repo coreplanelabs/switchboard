@@ -10,10 +10,13 @@ import {
   type OrganizationResult,
   type OrganizationSource,
   type OrganizationStore,
+  type OrganizationSourceReference,
 } from "./contract.js";
 
 /** Facts from an authenticated adapter, never values taken from a message body. */
 export interface OrganizationAuthentication {
+  /** Set by the trusted adapter. Never copied from admission input. */
+  sourceReference?: OrganizationSourceReference;
   source: OrganizationSource;
   identity: ExternalIdentity;
   kind: "human" | "service";
@@ -29,20 +32,57 @@ export interface OrganizationMapping {
   organization: string;
 }
 export interface OrganizationAuthorization {
+  source: OrganizationSource;
+  sourceReference?: OrganizationSourceReference;
   organization: string;
   actor: OrganizationActor;
   destination: OrganizationEnvelope["destination"];
+  target: OrganizationEnvelope["target"];
+  continuation?: OrganizationEnvelope["continuation"];
   action: "read" | "send" | "effect";
   context: OrganizationEnvelope["context"];
 }
 export type OrganizationAdmissionInput = Pick<
   OrganizationEnvelope,
-  "sourceEvent" | "key" | "destination" | "workload" | "target" | "content" | "context"
+  "sourceEvent" | "key" | "destination" | "workload" | "target" | "content" | "context" | "continuation"
 >;
 export type ResolvedOrganization = { organization: string; actor: OrganizationActor };
+function sourceFacts(authentication: OrganizationAuthentication) {
+  return {
+    source: authentication.source,
+    ...(authentication.sourceReference ? { sourceReference: authentication.sourceReference } : {}),
+  };
+}
 async function hash(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+async function payloadDigest(envelope: OrganizationEnvelope): Promise<string> {
+  const { credentialDigest: _credentialDigest, ...browserReference } = envelope.sourceReference ?? {};
+  const reference =
+    envelope.source === "browser"
+      ? envelope.sourceReference
+        ? browserReference
+        : undefined
+      : envelope.sourceReference;
+  return hash(
+    JSON.stringify({
+      organization: envelope.organization,
+      source: envelope.source,
+      identity: envelope.actor.identity,
+      kind: envelope.actor.kind,
+      onBehalfOf: envelope.actor.onBehalfOf,
+      sourceEvent: envelope.sourceEvent,
+      key: envelope.key,
+      destination: envelope.destination,
+      workload: envelope.workload,
+      target: envelope.target,
+      content: envelope.content,
+      context: envelope.context,
+      ...(reference ? { sourceReference: reference } : {}),
+      ...(envelope.continuation ? { continuation: envelope.continuation } : {}),
+    }),
+  );
 }
 /** The logical identity is shared; model runs and unit owners remain replaceable evidence. */
 export class OrganizationService {
@@ -53,6 +93,16 @@ export class OrganizationService {
       mappings: readonly OrganizationMapping[];
       limits: OrganizationLimits;
       authorize: (input: OrganizationAuthorization) => Promise<boolean>;
+      currentIdentityRead?: (
+        identity: ExternalIdentity,
+        reference?: OrganizationSourceReference,
+        onBehalfOf?: ExternalIdentity | null,
+      ) => Promise<
+        | "allowed"
+        | "denied"
+        | "unavailable"
+        | { status: "allowed" | "denied" | "unavailable"; policyFingerprint?: string }
+      >;
     },
   ) {}
   async resolve(authentication: OrganizationAuthentication): Promise<ResolvedOrganization | undefined> {
@@ -97,7 +147,14 @@ export class OrganizationService {
     const resolved = await this.resolve(authentication);
     if (
       !resolved ||
-      !(await this.options.authorize({ ...resolved, destination: { kind: "broad" }, context: [], action: "send" }))
+      !(await this.options.authorize({
+        ...resolved,
+        ...sourceFacts(authentication),
+        destination: { kind: "broad" },
+        target: null,
+        context: [],
+        action: "send",
+      }))
     )
       return { status: "not_found" };
     return this.options.store.execute({ action: "issue", ...resolved, source: authentication.source, ttlMs });
@@ -111,12 +168,19 @@ export class OrganizationService {
     // Reserved fleet reconciliation comes from the internal owner, never an ingress payload.
     if (input.workload === "reconciliation") return { status: "invalid" };
     let envelope: OrganizationEnvelope = {
-      ...input,
+      sourceEvent: input.sourceEvent,
+      key: input.key,
+      destination: input.destination,
+      workload: input.workload,
+      target: input.target,
+      context: input.context,
+      ...(input.continuation ? { continuation: input.continuation } : {}),
       ...resolved,
       version: 1,
       source: authentication.source,
       content: input.content,
       digest: "0".repeat(64),
+      ...(authentication.sourceReference ? { sourceReference: authentication.sourceReference } : {}),
     };
     const parsed = envelopeSchema.safeParse(envelope);
     if (!parsed.success) return { status: "invalid" };
@@ -136,35 +200,123 @@ export class OrganizationService {
     if (
       !(await this.options.authorize({
         ...resolved,
+        ...sourceFacts(authentication),
         destination: input.destination,
+        target: parsed.data.target,
+        ...(parsed.data.continuation ? { continuation: parsed.data.continuation } : {}),
         context: input.context,
         action: "send",
       }))
     )
       return { status: "not_found" };
     // Identity-link changes never alter this retry scope or the historical actor.
-    envelope.digest = await hash(
-      JSON.stringify({
-        organization: parsed.data.organization,
-        source: parsed.data.source,
-        identity: parsed.data.actor.identity,
-        kind: parsed.data.actor.kind,
-        onBehalfOf: parsed.data.actor.onBehalfOf,
-        sourceEvent: parsed.data.sourceEvent,
-        key: parsed.data.key,
-        destination: parsed.data.destination,
-        workload: parsed.data.workload,
-        target: parsed.data.target,
-        content: parsed.data.content,
-        context: parsed.data.context,
-      }),
-    );
+    envelope.digest = await payloadDigest(parsed.data);
     return this.options.store.execute({ action: "admit", envelope, limits: this.options.limits });
   }
+  /** Replay is a read of the original disposition, not a new question admission. */
+  async replay(
+    authentication: OrganizationAuthentication,
+    input: Pick<OrganizationAdmissionInput, "key" | "content" | "context" | "destination" | "continuation"> & {
+      revision?: number;
+    },
+  ): Promise<OrganizationResult | undefined> {
+    const resolved = await this.resolve(authentication);
+    if (!resolved) return { status: "not_found" };
+    const original = await this.options.store.execute({
+      action: "submission",
+      ...resolved,
+      source: authentication.source,
+      key: input.key,
+    });
+    if (original.status === "not_found") return undefined;
+    if (original.status !== "submission") return original;
+    if (
+      original.envelope.sourceReference?.browserRevision !== undefined &&
+      input.revision !== original.envelope.sourceReference.browserRevision
+    )
+      return { status: "conflict" };
+    if (
+      !(await this.options.authorize({
+        ...resolved,
+        ...sourceFacts(authentication),
+        destination: original.envelope.destination,
+        target: null,
+        context: original.envelope.context,
+        action: "read",
+      }))
+    )
+      return { status: "not_found" };
+    if (
+      authentication.kind !== original.envelope.actor.kind ||
+      JSON.stringify(authentication.onBehalfOf ?? null) !== JSON.stringify(original.envelope.actor.onBehalfOf)
+    )
+      return { status: "conflict" };
+    if (
+      authentication.source !== "browser" &&
+      authentication.sourceReference?.credentialDigest !== original.envelope.sourceReference?.credentialDigest
+    )
+      return { status: "conflict" };
+    const compared = envelopeSchema.safeParse({
+      ...original.envelope,
+      content: input.content,
+      context: input.context,
+      destination: input.destination,
+      continuation: input.continuation,
+    });
+    if (!compared.success) return { status: "invalid" };
+    if ((await payloadDigest(compared.data)) !== original.receipt.digest) return { status: "conflict" };
+    return { status: "receipt", receipt: original.receipt, duplicate: true };
+  }
+  private async filterSources(resolved: ResolvedOrganization, result: OrganizationResult): Promise<OrganizationResult> {
+    if (result.status !== "stream" && result.status !== "stream_tail") return result;
+    if (!this.options.currentIdentityRead) return { status: "unavailable" };
+    const entries: typeof result.entries = [];
+    for (const entry of result.entries) {
+      const original = await this.options.store.execute({
+        action: "provenance",
+        ...resolved,
+        receiptId: entry.receiptId,
+      });
+      if (original.status !== "provenance") return { status: "unavailable" };
+      const decision = await this.options.currentIdentityRead(
+        original.provenance.actor.identity,
+        original.provenance.sourceReference,
+        original.provenance.actor.onBehalfOf,
+      );
+      const status = typeof decision === "string" ? decision : decision.status;
+      if (status === "unavailable") return { status: "unavailable" };
+      if (status === "allowed") entries.push(entry);
+    }
+    return { ...result, entries };
+  }
   async stream(authentication: OrganizationAuthentication, after = 0, limit = 100): Promise<OrganizationResult> {
+    return this.readStream(authentication, "stream", after, limit);
+  }
+  async streamTail(
+    authentication: OrganizationAuthentication,
+    limit = 100,
+    before?: number,
+  ): Promise<OrganizationResult> {
+    return this.readStream(authentication, "tail", before, limit);
+  }
+  private async readStream(
+    authentication: OrganizationAuthentication,
+    action: "stream" | "tail",
+    position: number | undefined,
+    limit: number,
+  ): Promise<OrganizationResult> {
     const resolved = await this.resolve(authentication);
     if (!resolved || !resolved.actor.stream) return { status: "not_found" };
-    if (!(await this.options.authorize({ ...resolved, destination: { kind: "broad" }, context: [], action: "read" })))
+    if (
+      !(await this.options.authorize({
+        ...resolved,
+        ...sourceFacts(authentication),
+        destination: { kind: "broad" },
+        target: null,
+        context: [],
+        action: "read",
+      }))
+    )
       return { status: "not_found" };
     let identities = [authentication.onBehalfOf ?? authentication.identity];
     if (resolved.actor.bindingRevision > 0) {
@@ -176,15 +328,17 @@ export class OrganizationService {
       if (result.status !== "identities") return { status: "unavailable" };
       identities = result.identities;
     }
-    return this.options.store.execute({
-      action: "stream",
+    const result = await this.options.store.execute({
+      ...(action === "tail"
+        ? { action: "tail", ...(position !== undefined ? { before: position } : {}) }
+        : { action: "stream", after: position ?? 0 }),
       organization: resolved.organization,
       stream: resolved.actor.stream,
       actor: resolved.actor,
-      after,
       limit,
       identities,
     });
+    return this.filterSources(resolved, result);
   }
   async streamForIdentities(
     authentication: OrganizationAuthentication,
@@ -194,7 +348,16 @@ export class OrganizationService {
   ): Promise<OrganizationResult> {
     const resolved = await this.resolve(authentication);
     if (!resolved || !resolved.actor.stream) return { status: "not_found" };
-    if (!(await this.options.authorize({ ...resolved, destination: { kind: "broad" }, context: [], action: "read" })))
+    if (
+      !(await this.options.authorize({
+        ...resolved,
+        ...sourceFacts(authentication),
+        destination: { kind: "broad" },
+        target: null,
+        context: [],
+        action: "read",
+      }))
+    )
       return { status: "not_found" };
     const eligible: ExternalIdentity[] = [];
     for (const identity of identities) {
@@ -205,7 +368,7 @@ export class OrganizationService {
       )
         eligible.push(identity);
     }
-    return this.options.store.execute({
+    const result = await this.options.store.execute({
       action: "stream",
       organization: resolved.organization,
       stream: resolved.actor.stream,
@@ -214,13 +377,21 @@ export class OrganizationService {
       limit,
       identities: eligible,
     });
+    return this.filterSources(resolved, result);
   }
   async delete(authentication: OrganizationAuthentication, receiptId: string): Promise<OrganizationResult> {
     const resolved = await this.resolve(authentication);
     if (
       !resolved ||
       !resolved.actor.stream ||
-      !(await this.options.authorize({ ...resolved, destination: { kind: "broad" }, context: [], action: "send" }))
+      !(await this.options.authorize({
+        ...resolved,
+        ...sourceFacts(authentication),
+        destination: { kind: "broad" },
+        target: null,
+        context: [],
+        action: "send",
+      }))
     )
       return { status: "not_found" };
     return this.options.store.execute({
@@ -230,6 +401,39 @@ export class OrganizationService {
       actor: resolved.actor,
       receiptId,
     });
+  }
+  private async authorizePreserved(envelope: OrganizationEnvelope, action: "read" | "effect"): Promise<boolean> {
+    const current = await this.resolve({
+      source: envelope.source,
+      identity: envelope.actor.identity,
+      kind: envelope.actor.kind,
+      organizations: [envelope.organization],
+      ...(envelope.actor.onBehalfOf ? { onBehalfOf: envelope.actor.onBehalfOf } : {}),
+    });
+    return (
+      !!current &&
+      current.organization === envelope.organization &&
+      current.actor.stream === envelope.actor.stream &&
+      current.actor.bindingRevision === envelope.actor.bindingRevision &&
+      (await this.options.authorize({
+        ...current,
+        source: envelope.source,
+        ...(envelope.sourceReference ? { sourceReference: envelope.sourceReference } : {}),
+        destination: envelope.destination,
+        target: envelope.target,
+        ...(envelope.continuation ? { continuation: envelope.continuation } : {}),
+        context: envelope.context,
+        action,
+      }))
+    );
+  }
+  /** Delayed owner output still needs current recipient permission. */
+  async authorizeReply(envelope: OrganizationEnvelope): Promise<boolean> {
+    return this.authorizePreserved(envelope, "read");
+  }
+  /** Scheduling never saves organization authority for a later execution. */
+  async authorizeExecution(envelope: OrganizationEnvelope): Promise<boolean> {
+    return this.authorizePreserved(envelope, "effect");
   }
   /** Reauthorize the preserved actor immediately before the existing owner consumes its effect key. */
   async authorizeEffect(
@@ -253,8 +457,12 @@ export class OrganizationService {
     if (
       !(await this.options.authorize({
         organization: envelope.organization,
+        source: envelope.source,
+        ...(envelope.sourceReference ? { sourceReference: envelope.sourceReference } : {}),
         actor: envelope.actor,
         destination: envelope.destination,
+        target: envelope.target,
+        ...(envelope.continuation ? { continuation: envelope.continuation } : {}),
         context: envelope.context,
         action: "effect",
       }))

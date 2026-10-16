@@ -6,6 +6,8 @@ import {
   type OrganizationCommand,
   type OrganizationResult,
   type OrganizationStore,
+  stateSchema,
+  bindingCutoffSchema,
 } from "./contract.js";
 import { executeOrganization, type OrganizationRows } from "./engine.js";
 
@@ -25,19 +27,74 @@ export class InMemoryOrganizationStore implements OrganizationStore {
           return this.rawDirectory.resolve(identity);
         }),
       change: (change) =>
-        this.serial(() => {
+        this.serial(async () => {
+          const snapshots = this.cutoffSnapshots();
           this.knownIdentities.set(identityKey(change.identity), change.identity);
-          return this.rawDirectory.change(change);
+          const result = await this.rawDirectory.change(change);
+          if (result.status === "changed") {
+            if (result.binding.state === "active")
+              this.stampCutoff(change.identity, result.binding.revision, snapshots);
+            this.advanceBindingProjection();
+          }
+          return result;
         }),
       receipts: (identity) => this.serial(() => this.rawDirectory.receipts(identity)),
       link: (command) =>
-        this.serial(() => {
+        this.serial(async () => {
+          const snapshots = this.cutoffSnapshots();
           this.knownIdentities.set(identityKey(command.auth.identity), command.auth.identity);
           if (command.action === "prove")
             this.knownIdentities.set(identityKey(command.proof.identity), command.proof.identity);
-          return this.rawDirectory.link(command);
+          const before = new Map<string, number>();
+          for (const identity of this.knownIdentities.values()) {
+            const resolved = await this.rawDirectory.resolve(identity);
+            if (resolved.status === "bound") before.set(identityKey(identity), resolved.binding.revision);
+          }
+          const result = await this.rawDirectory.link(command);
+          if (result.status === "committed")
+            for (const identity of this.knownIdentities.values()) {
+              const resolved = await this.rawDirectory.resolve(identity);
+              if (resolved.status === "bound" && before.get(identityKey(identity)) !== resolved.binding.revision) {
+                this.stampCutoff(identity, resolved.binding.revision, snapshots);
+                this.advanceBindingProjection();
+              }
+            }
+          return result;
         }),
     };
+  }
+  private cutoffSnapshots() {
+    return [...this.rows]
+      .filter(([key]) => (JSON.parse(key) as string[])[0] === "state")
+      .map(([, row]) => stateSchema.parse(row.value));
+  }
+  private advanceBindingProjection() {
+    for (const snapshot of this.cutoffSnapshots()) {
+      const key = JSON.stringify(["state", snapshot.organization, "state"]);
+      const row = this.rows.get(key)!;
+      snapshot.revision++;
+      snapshot.accessRevision++;
+      this.rows.set(key, { ...row, value: stateSchema.parse(snapshot) });
+    }
+  }
+  private stampCutoff(
+    identity: ExternalIdentity,
+    revision: number,
+    snapshots: ReturnType<InMemoryOrganizationStore["cutoffSnapshots"]>,
+  ): void {
+    const epoch = JSON.stringify([identityKey(identity), revision]);
+    const write = (organization: string, sequence: number) => {
+      const key = JSON.stringify(["binding-cutoff", organization, epoch]);
+      if (!this.rows.has(key))
+        this.rows.set(key, {
+          value: bindingCutoffSchema.parse({ version: 1, sequence }),
+          partition: "",
+          ordinal: 0,
+          expiry: Number.MAX_SAFE_INTEGER,
+        });
+    };
+    write("", 0);
+    for (const state of snapshots) write(state.organization, state.streamSequence);
   }
   private serial<T>(body: () => Promise<T>): Promise<T> {
     const next = this.tail.then(body, body);
@@ -54,12 +111,18 @@ export class InMemoryOrganizationStore implements OrganizationStore {
       const identities: ExternalIdentity[] = [...this.knownIdentities.values()];
       if (command.action === "admit")
         identities.push(command.envelope.actor.onBehalfOf ?? command.envelope.actor.identity);
-      if (command.action === "stream") identities.push(...command.identities);
+      if (command.action === "stream" || command.action === "tail") identities.push(...command.identities);
       if (
         command.action === "stream" ||
+        command.action === "tail" ||
         command.action === "delete" ||
         command.action === "issue" ||
-        command.action === "effect"
+        command.action === "effect" ||
+        command.action === "reply" ||
+        command.action === "execution" ||
+        command.action === "submission" ||
+        command.action === "provenance" ||
+        command.action === "source-catalogue"
       )
         identities.push(command.actor.onBehalfOf ?? command.actor.identity);
       for (const [key, row] of this.rows)
@@ -88,13 +151,14 @@ export class InMemoryOrganizationStore implements OrganizationStore {
                 tuple[1] === org &&
                 (options.partition === undefined || row.partition === options.partition) &&
                 (options.after === undefined || row.ordinal > options.after) &&
+                (options.before === undefined || row.ordinal < options.before) &&
                 (options.expiresBefore === undefined || row.expiry <= options.expiresBefore) &&
                 (options.receiptId === undefined ||
                   (row.value as { receiptId?: string }).receiptId === options.receiptId)
               );
             })
             .map(([, row]) => row)
-            .sort((a, b) => a.ordinal - b.ordinal)
+            .sort((a, b) => (options.descending ? b.ordinal - a.ordinal : a.ordinal - b.ordinal))
             .slice(0, options.limit)
             .map((row) => row.value),
         binding: (identity) => bindings.get(identityKey(identity)) ?? { status: "unknown" },

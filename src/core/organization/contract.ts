@@ -26,6 +26,35 @@ export const actorSchema = z
   })
   .strict();
 export type OrganizationActor = z.infer<typeof actorSchema>;
+/** Immutable authenticated lookup facts. Grants and membership are resolved afresh. */
+export const sourceReferenceSchema = z
+  .object({
+    /** Digest of the exact original credential; never its bearer bytes. */
+    credentialDigest: digest.optional(),
+    browserRevision: revision.optional(),
+    /** Server-attested private source and its retained-data policy at admission. */
+    privateSource: z.literal(true).optional(),
+    capturedPrivateEpoch: digest.optional(),
+    /** One source-bound repository selected and authorized by the host. */
+    sourceRepository: z
+      .string()
+      .regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/)
+      .optional(),
+    questionOwnership: z
+      .object({ unitKey: text, questionDigest: digest, requester: identitySchema })
+      .strict()
+      .optional(),
+    actorId: text,
+    userId: text,
+    authenticatedAs: text.optional(),
+    postedBy: text.optional(),
+    channelId: text,
+    threadKey: text,
+    messageId: text.optional(),
+    approvalConnection: z.object({ id: text, credentialId: text, requestHash: text }).strict().optional(),
+  })
+  .strict();
+export type OrganizationSourceReference = z.infer<typeof sourceReferenceSchema>;
 export const envelopeSchema = z
   .object({
     version: z.literal(1),
@@ -46,10 +75,30 @@ export const envelopeSchema = z
     context: z
       .array(z.object({ kind: z.enum(["unit", "pipeline", "thread", "run", "pull-request"]), key: text }).strict())
       .max(8),
+    sourceReference: sourceReferenceSchema.optional(),
+    continuation: z
+      .object({ kind: z.enum(["confirm", "cancel"]), id: z.string().uuid() })
+      .strict()
+      .optional(),
   })
   .strict()
-  .refine((e) => e.actor.kind === "human" || e.actor.stream === null || e.actor.onBehalfOf !== null);
+  .refine((e) => e.actor.kind === "human" || e.actor.stream === null || e.actor.onBehalfOf !== null)
+  .refine((e) => !e.continuation || (e.content === "" && e.workload === "act"));
 export type OrganizationEnvelope = z.infer<typeof envelopeSchema>;
+export const sourceProvenanceSchema = z
+  .object({
+    receiptId: text,
+    source: sourceSchema,
+    actor: actorSchema,
+    sourceReference: sourceReferenceSchema.optional(),
+    admissionSequence: revision.optional(),
+    retentionDeadline: instant.optional(),
+  })
+  .strict();
+export const replyAddressSchema = z
+  .object({ receiptId: text, envelope: envelopeSchema, ownerRunId: text, expiresAt: instant })
+  .strict();
+export const replyKeySchema = z.object({ key: z.string().min(1).max(8192), digest, expiresAt: instant }).strict();
 export const receiptSchema = z
   .object({
     version: z.literal(1),
@@ -66,6 +115,7 @@ export const receiptSchema = z
     target: text.nullable(),
     currentRevision: revision.nullable(),
     effectKey: text.nullable(),
+    ownerRunId: text.optional(),
     createdAt: instant,
     settledAt: instant.nullable(),
     expiresAt: instant,
@@ -76,6 +126,8 @@ export const streamEntrySchema = z
   .object({
     version: z.literal(1),
     sequence: revision,
+    /** Every reply inherits the original request's cross-source sharing boundary. */
+    admissionSequence: revision.optional(),
     stream: text,
     receiptId: text,
     source: sourceSchema,
@@ -95,6 +147,7 @@ export const stateSchema = z
     organization: text,
     orchestrator: text,
     revision,
+    accessRevision: revision.default(0),
     wakeSequence: revision,
     reconciledSequence: revision,
     streamSequence: revision,
@@ -106,6 +159,7 @@ export const stateSchema = z
   })
   .strict();
 export type OrganizationState = z.infer<typeof stateSchema>;
+export const bindingCutoffSchema = z.object({ version: z.literal(1), sequence: revision }).strict();
 export const limitsSchema = z
   .object({
     pendingPerActor: z.number().int().positive().max(10_000),
@@ -134,9 +188,34 @@ export const commandSchema = z.discriminatedUnion("action", [
     .strict(),
   z.object({ action: z.literal("identities"), organization: text, personId: text }).strict(),
   z.object({ action: z.literal("get"), ...addressed }).strict(),
+  z
+    .object({ action: z.literal("submission"), ...addressed, source: sourceSchema, actor: actorSchema, key: text })
+    .strict(),
+  z.object({ action: z.literal("provenance"), ...addressed, actor: actorSchema, receiptId: text }).strict(),
+  z
+    .object({
+      action: z.literal("source-catalogue"),
+      ...addressed,
+      actor: actorSchema,
+      limit: z.number().int().positive().max(200),
+    })
+    .strict(),
+  z.object({ action: z.literal("owner-clears"), ...addressed, limit: z.number().int().positive().max(100) }).strict(),
+  z.object({ action: z.literal("owner-cleared"), ...addressed, receiptId: text, effectKey: text }).strict(),
+  z
+    .object({
+      action: z.literal("owner-refused"),
+      ...addressed,
+      receiptId: text,
+      ownerRunId: text,
+      reason: text,
+      target: z.object({ key: text, revision }).strict().nullable().optional(),
+    })
+    .strict(),
   z.object({ action: z.literal("wake"), ...addressed }).strict(),
   z.object({ action: z.literal("claim"), ...addressed, owner: text, leaseMs: z.number().int().positive() }).strict(),
   z.object({ action: z.literal("complete"), ...owned, through: revision }).strict(),
+  z.object({ action: z.literal("yield"), ...owned }).strict(),
   z.object({ action: z.literal("effect"), ...owned, source: sourceSchema, key: text, actor: actorSchema }).strict(),
   z.object({ action: z.literal("observe"), ...addressed, target: text, revision }).strict(),
   z.object({ action: z.literal("admit"), envelope: envelopeSchema, limits: limitsSchema }).strict(),
@@ -147,9 +226,43 @@ export const commandSchema = z.discriminatedUnion("action", [
       ...owned,
       receiptId: text,
       status: z.enum(["accepted", "rejected"]),
+      ownerRunId: text.optional(),
       reason: text.nullable(),
       reply: z.string().max(32_768).nullable(),
       contentTtlMs: z.number().int().positive(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("reply"),
+      organization: text,
+      receiptId: text,
+      actor: actorSchema,
+      ownerRunId: text,
+      replyKey: text,
+      digest,
+      content: z.string().max(32_768),
+      contentTtlMs: z.number().int().positive(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("execution"),
+      organization: text,
+      receiptId: text,
+      actor: actorSchema,
+      ownerRunId: text,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("tail"),
+      organization: text,
+      stream: text,
+      actor: actorSchema,
+      before: revision.optional(),
+      limit: z.number().int().positive().max(200),
+      identities: z.array(identitySchema).max(100),
     })
     .strict(),
   z
@@ -168,6 +281,43 @@ export const commandSchema = z.discriminatedUnion("action", [
 ]);
 export type OrganizationCommand = z.infer<typeof commandSchema>;
 export const resultSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("submission"), envelope: envelopeSchema, receipt: receiptSchema }).strict(),
+  z.object({ status: z.literal("provenance"), provenance: sourceProvenanceSchema }).strict(),
+  z
+    .object({
+      status: z.literal("source-catalogue"),
+      accessRevision: revision,
+      entries: z
+        .array(
+          z
+            .object({
+              authority: z.string().min(1),
+              source: sourceSchema,
+              actor: actorSchema,
+              sourceReference: sourceReferenceSchema.optional(),
+              allowed: z.boolean(),
+            })
+            .strict(),
+        )
+        .max(200),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("owner-clears"),
+      items: z.array(z.object({ receiptId: text, effectKey: text }).strict()),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal("stream_tail"),
+      revision,
+      entries: z.array(streamEntrySchema),
+      cursor: revision,
+      beforeCursor: revision,
+      hasMore: z.boolean(),
+    })
+    .strict(),
   z.object({ status: z.literal("key"), key: text, expiresAt: instant }).strict(),
   z.object({ status: z.literal("identities"), identities: z.array(identitySchema) }).strict(),
   z.object({ status: z.literal("state"), state: stateSchema }).strict(),

@@ -27,6 +27,7 @@ function client(installation = crypto.randomUUID()) {
       receiptTtlMs: 365_000,
     },
     authorize: async () => true,
+    currentIdentityRead: async (source) => (source.issuer === identity.issuer ? "allowed" : "denied"),
   });
   return { store, service, installation };
 }
@@ -47,6 +48,172 @@ async function post(command: unknown, token = "test-token") {
   );
 }
 describe("OrganizationDO routes", () => {
+  it("keeps pre-link requests and their late replies private through native SQLite client replacement", async () => {
+    for (const delivery of ["settlement", "owner"] as const) {
+      const initial = client();
+      const person = await initial.store.directory.createPerson();
+      if (person.status !== "created") throw new Error("no person");
+      const peer = { ...identity, subject: "bob" };
+      const link = async (source: typeof identity) => {
+        expect(
+          await initial.store.directory.change({
+            action: "link",
+            identity: source,
+            personId: person.person.id,
+            expectedRevision: 0,
+            actor: source,
+            proof: { method: "dual-authentication", version: 1 },
+          }),
+        ).toMatchObject({ status: "changed" });
+      };
+      await link(identity);
+      const send = async (content: string) => {
+        const issued = await initial.service.issue(auth, 30_000);
+        if (issued.status !== "key") throw new Error("no key");
+        const receipt = await initial.service.admit(auth, {
+          key: issued.key,
+          sourceEvent: content,
+          content,
+          destination: { kind: "broad" },
+          workload: "message",
+          target: null,
+          context: [],
+        });
+        if (receipt.status !== "receipt") throw new Error("no receipt");
+        return receipt.receipt;
+      };
+      const finish = async (receipt: Awaited<ReturnType<typeof send>>, content: string) => {
+        const claimed = await initial.store.execute({
+          action: "claim",
+          organization: "org:test",
+          owner: "process",
+          leaseMs: 30_000,
+        });
+        if (claimed.status !== "state" || !claimed.state.lease) throw new Error("no lease");
+        const lease = { organization: "org:test", owner: "process", generation: claimed.state.lease.generation };
+        expect(
+          await initial.store.execute({
+            action: "settle",
+            ...lease,
+            receiptId: receipt.id,
+            status: "accepted",
+            ownerRunId: `owner:${receipt.id}`,
+            reason: null,
+            reply: delivery === "settlement" ? content : null,
+            contentTtlMs: 90_000,
+          }),
+        ).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+        await initial.store.execute({ action: "complete", ...lease, through: claimed.state.lease.through });
+        if (delivery === "owner")
+          expect(
+            await initial.store.execute({
+              action: "reply",
+              organization: "org:test",
+              receiptId: receipt.id,
+              actor: receipt.actor,
+              ownerRunId: `owner:${receipt.id}`,
+              replyKey: "answer",
+              digest: "a".repeat(64),
+              content,
+              contentTtlMs: 90_000,
+            }),
+          ).toEqual({ status: "ok", removed: 0 });
+      };
+      const old = await send("Private pre-link request");
+      await link(peer);
+      await finish(old, "Private late answer");
+      await finish(await send("Future request"), "Future answer");
+      const replacement = client(initial.installation);
+      const peerAuth = { ...auth, identity: peer };
+      const peerRead = await replacement.service.streamTail(peerAuth);
+      expect(peerRead.status === "stream_tail" ? peerRead.entries.map((entry) => entry.content) : null).toEqual([
+        "Future request",
+        "Future answer",
+      ]);
+      const own = await replacement.service.streamTail(auth);
+      expect(own.status === "stream_tail" ? own.entries.map((entry) => entry.content) : null).toEqual([
+        "Private pre-link request",
+        "Private late answer",
+        "Future request",
+        "Future answer",
+      ]);
+    }
+  });
+  it("reads the latest private page and persists original-owner replies after the lease ends", async () => {
+    const { service, store } = client();
+    let first: { receiptId: string; actor: OrganizationEnvelope["actor"] } | undefined;
+    for (let index = 1; index <= 3; index++) {
+      const issued = await service.issue(auth, 30_000);
+      if (issued.status !== "key") throw new Error("key unavailable");
+      const admitted = await service.admit(auth, {
+        key: issued.key,
+        sourceEvent: `latest-${index}`,
+        content: `Message ${index}`,
+        destination: { kind: "broad" },
+        workload: "message",
+        target: null,
+        context: [],
+      });
+      if (admitted.status !== "receipt") throw new Error("not admitted");
+      if (!first) first = { receiptId: admitted.receipt.id, actor: admitted.receipt.actor };
+      const claimed = await store.execute({
+        action: "claim",
+        organization: "org:test",
+        owner: "process",
+        leaseMs: 30_000,
+      });
+      if (claimed.status !== "state" || !claimed.state.lease) throw new Error("not claimed");
+      const lease = { organization: "org:test", owner: "process", generation: claimed.state.lease.generation };
+      expect(
+        await store.execute({
+          action: "settle",
+          ...lease,
+          receiptId: admitted.receipt.id,
+          status: "accepted",
+          ownerRunId: `original-${index}`,
+          reason: null,
+          reply: null,
+          contentTtlMs: 90_000,
+        }),
+      ).toMatchObject({ status: "receipt", receipt: { status: "accepted" } });
+      await store.execute({ action: "complete", ...lease, through: claimed.state.lease.through });
+    }
+    if (!first) throw new Error("no first receipt");
+    const reply = {
+      action: "reply" as const,
+      organization: "org:test",
+      receiptId: first.receiptId,
+      actor: first.actor,
+      ownerRunId: "original-1",
+      replyKey: "result",
+      digest: "a".repeat(64),
+      content: "Original result",
+      contentTtlMs: 90_000,
+    };
+    expect(await store.execute(reply)).toEqual({ status: "ok", removed: 0 });
+    expect(await store.execute(reply)).toEqual({ status: "ok", removed: 0 });
+    expect(await service.streamTail(auth, 2)).toMatchObject({
+      status: "stream_tail",
+      entries: [
+        { sequence: 3, content: "Message 3" },
+        { sequence: 4, content: "Original result" },
+      ],
+      cursor: 4,
+      beforeCursor: 3,
+      hasMore: true,
+    });
+    expect(await service.delete(auth, first.receiptId)).toEqual({ status: "ok", removed: 2 });
+    expect(await store.execute({ ...reply, replyKey: "late" })).toEqual({ status: "not_found" });
+    expect(await store.execute({ action: "owner-clears", organization: "org:test", limit: 10 })).toMatchObject({
+      status: "owner-clears",
+      items: [{ receiptId: first.receiptId }],
+    });
+    expect(await service.streamTail(auth, 2)).toMatchObject({
+      status: "stream_tail",
+      entries: [{ content: "Message 2" }, { content: "Message 3" }],
+      hasMore: false,
+    });
+  });
   it("applies bearer and schema fences before storage", async () => {
     expect(await post({ action: "get", organization: "org:test" }, "wrong-token")).toEqual({
       status: 401,
