@@ -6,6 +6,7 @@ import type { CostsByReport } from "../core/costsBy.js";
 import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
 import type { PlaneTable } from "../core/plane/table.js";
 import type { MetricsReport } from "../core/metrics.js";
+import type { ReviewsReportWithDataset } from "../core/reviewsService.js";
 import type { CostsView } from "./costsView.js";
 import type { RunCost } from "../core/modelPricing.js";
 import type { DeliveryReport } from "../core/delivery.js";
@@ -432,6 +433,14 @@ export interface MetricsSeed {
   report: MetricsReport;
 }
 
+/** The protected review report; the generic run trend remains a separate contract. */
+export interface ReviewsMetricsSeed {
+  page: "reviewsMetrics";
+  report: ReviewsReportWithDataset;
+  /** Display names supplied by the current protected directory, never identity joins. */
+  requesterNames?: Record<string, string>;
+}
+
 /** The plane's table (docs/reference/specs/orchestration-plane.md item 5;
  *  docs/decisions/0064): every live and recently ended run, every unit and
  *  every tracked pull request with its owner and health, as `plane show`
@@ -572,6 +581,7 @@ type PageData =
   | ResidentDetailSeed
   | CostsSeed
   | MetricsSeed
+  | ReviewsMetricsSeed
   | PlaneSeed
   | DeliverySeed
   | SettingsSeed

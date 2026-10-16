@@ -158,7 +158,7 @@ describe("Green browser frontend", () => {
   });
   it("keeps unavailable metrics distinct from a zero-usage report", () => {
     const wrapper = mountApp(MetricsPage, { seed: null });
-    expect(wrapper.text()).toContain("The data source is unavailable. No usage totals are shown.");
+    expect(wrapper.text()).toContain("The review report is unavailable. No usage totals are shown.");
     expect(wrapper.findAll(".green-stat")).toHaveLength(0);
     expect(wrapper.find('[aria-label="Metrics sections"] a[href="/metrics/health"]').text()).toBe("System health");
   });

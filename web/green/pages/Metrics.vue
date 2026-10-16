@@ -1,172 +1,213 @@
 <script setup lang="ts">
 defineOptions({ name: "GreenMetricsPage" });
 import { computed } from "vue";
+import { useSeed } from "../../src/lib/seed";
+import ReviewFeedback from "../../src/components/metrics/ReviewFeedback.vue";
+import CostChart from "../../src/components/costs/CostChart.vue";
 import PageHeading from "../components/PageHeading.vue";
 import StatTiles from "../components/StatTiles.vue";
 import EmptyState from "../components/EmptyState.vue";
-import CostChart from "../../src/components/costs/CostChart.vue";
-import TrendLineChart from "../../src/components/metrics/TrendLineChart.vue";
-import ReviewFeedback from "../../src/components/metrics/ReviewFeedback.vue";
-import { useSeed } from "../../src/lib/seed";
-import { monthDayOf, SERIES_SWATCH, usd } from "../../src/lib/costs";
+import { SERIES_SWATCH } from "../../src/lib/costs";
 import {
   countText,
-  failureRateChartOf,
-  footerSentencesOf,
-  metricsHrefOf,
-  metricsTilesOf,
-  pctText,
-  runsChartModelOf,
-  statusSeriesOf,
-  p50ChartOf,
+  histogramLabel,
+  durationText,
+  reviewDays,
+  reviewDayChart,
+  reviewMethod,
+  reviewsHref,
+  reviewUsageTiles,
+  surfaceText,
   wallText,
-} from "../../src/lib/metrics";
-
-// The run trend (docs/reference/specs/run-metrics.md item 10): the report the
-// `metrics trend` command answers, in the costs page's tokens and layout — the
-// tiles, a runs-per-day chart stacked by status, a failure-rate line, a
-// p50-wall line per agent, the by-agent table, and a footer naming the bucket,
-// the pricing, the completeness and the retention. Everything on the page is
-// the seed's report: the JSON twin (`/metrics.json`) carries exactly the same.
-
-const seed = useSeed("metrics");
+} from "../lib/reviews";
+const seed = useSeed("reviewsMetrics");
 const report = computed(() => seed?.report ?? null);
-const range = computed(() => report.value?.range ?? null);
-const tiles = computed(() =>
-  report.value ? metricsTilesOf(report.value).map((tile) => ({ ...tile, note: tile.sub })) : [],
+const days = computed(() => (report.value ? reviewDays(report.value) : null));
+const chart = computed(() =>
+  report.value
+    ? reviewDayChart(
+        report.value.usage.byDay.map((row) => ({ ...row, values: row.bySurface })),
+        surfaceText,
+      )
+    : null,
 );
-const statuses = computed(() => (report.value ? statusSeriesOf(report.value.byDay) : []));
-const runsModel = computed(() => (report.value ? runsChartModelOf(report.value.byDay, statuses.value) : null));
-const failureModel = computed(() => (report.value ? failureRateChartOf(report.value.byDay) : null));
-const p50Model = computed(() =>
-  report.value ? p50ChartOf(report.value.byDay, report.value.byAgent, report.value.p50ByDayAgent) : null,
-);
-const footer = computed(() => (range.value ? footerSentencesOf(range.value) : []));
-
-/** The range pills: the three windows the plan names, the current one solid. */
-const RANGES = [7, 30, 90];
-/** The agent pills: every agent in range, `All` first; the open filter survives a range switch. */
-const agents = computed(() => (report.value ? report.value.byAgent.map((r) => r.agent) : []));
-const currentAgent = computed(() => range.value?.agent);
-/** An ISO day out of the range's stamps: the header line reads at a glance. */
-const dayOf = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+const method = computed(() => (report.value ? reviewMethod(report.value) : []));
+const surfaceDurationRuns = (row: { surface: string; durationRuns?: number }): number | undefined => row.durationRuns;
 </script>
 <template>
-  <PageHeading title="Metrics" description="Track execution quality, duration, and usage across finished runs." />
+  <PageHeading title="Metrics" description="Recorded review usage and system outcomes." />
   <nav class="green-tabs" aria-label="Metrics sections">
-    <RouterLink to="/metrics" aria-current="page">Usage</RouterLink
-    ><RouterLink to="/metrics/health">System health</RouterLink>
+    <RouterLink :to="reviewsHref('/metrics', report)" aria-current="page">Usage</RouterLink>
+    <RouterLink :to="reviewsHref('/metrics/health', report)">System health</RouterLink>
   </nav>
-  <template v-if="report && range">
-    <div class="green-toolbar">
-      <nav class="flex gap-1" aria-label="Metrics range">
-        <RouterLink
-          v-for="days in RANGES"
-          :key="days"
-          class="green-button"
-          :to="metricsHrefOf(days, currentAgent)"
-          :aria-current="days === range.days ? 'page' : undefined"
-          >{{ days }}d</RouterLink
-        >
-      </nav>
-      <label class="text-xs text-muted"
-        >Agent<select
-          class="green-input ml-2"
-          :value="currentAgent ?? ''"
-          @change="$router.push(metricsHrefOf(range.days, ($event.target as HTMLSelectElement).value || undefined))"
-        >
-          <option value="">All agents</option>
-          <option v-for="agent in agents" :key="agent" :value="agent">{{ agent }}</option>
-        </select></label
-      >
-    </div>
-    <p class="text-xs text-muted mb-4">
-      {{ monthDayOf(dayOf(range.sinceMs)) }} – {{ monthDayOf(dayOf(range.untilMs - 1)) }} · {{ range.days }} days
+  <template v-if="report && days">
+    <form class="green-toolbar flex-wrap" method="get" action="/metrics" aria-label="Review date range">
+      <label class="text-xs"
+        >From (UTC)<input class="green-input block" type="date" name="from" :value="days.from" :max="days.to" required
+      /></label>
+      <label class="text-xs"
+        >To (UTC, included)<input
+          class="green-input block"
+          type="date"
+          name="to"
+          :value="days.to"
+          :min="days.from"
+          required
+      /></label>
+      <button class="green-button" type="submit">Apply range</button
+      ><span class="text-xs text-muted">Up to 90 days</span>
+    </form>
+    <p class="text-xs text-muted mb-4">{{ days.from }} – {{ days.to }} · {{ report.range.days }} UTC days</p>
+    <p v-if="report.maxSampleInterval > 1" class="text-xs text-muted mb-4">
+      Sampled rows; counts are weighted. Largest sample interval: {{ report.maxSampleInterval }}.
     </p>
-    <StatTiles :tiles="tiles" data-metrics-tiles />
+    <StatTiles :tiles="reviewUsageTiles(report)" />
     <ReviewFeedback v-if="report.feedback" :report="report.feedback" />
-    <div class="grid gap-5 xl:grid-cols-2">
-      <section class="green-section">
-        <div class="green-section-heading"><h2>Runs by outcome</h2></div>
-        <div class="green-section-content">
-          <CostChart
-            v-if="runsModel"
-            :model="runsModel"
-            :format="countText"
-            label="Finished runs per day, stacked by outcome"
-          />
-          <div class="flex gap-3 flex-wrap text-xs text-muted mt-3">
-            <span v-for="(status, index) in statuses" :key="status" class="inline-flex items-center gap-2"
-              ><span class="size-2 rounded-sm" :class="SERIES_SWATCH[index % SERIES_SWATCH.length]" />{{ status }}</span
-            >
-          </div>
-        </div>
-      </section>
-      <section class="green-section">
-        <div class="green-section-heading"><h2>Failure rate</h2></div>
-        <div class="green-section-content">
-          <TrendLineChart v-if="failureModel" :model="failureModel" label="Daily failure rate" />
-        </div>
-      </section>
-    </div>
     <section class="green-section">
-      <div class="green-section-heading">
-        <div>
-          <h2>Median run duration</h2>
-          <p>By agent · empty days remain gaps</p>
-        </div>
-      </div>
+      <div class="green-section-heading"><h2>Review runs by day</h2></div>
       <div class="green-section-content">
-        <TrendLineChart v-if="p50Model" :model="p50Model" label="Median wall duration by agent per day" />
+        <CostChart v-if="chart" :model="chart.model" :format="countText" label="Review runs by day and surface" />
+        <div class="flex flex-wrap gap-3 text-xs text-muted mt-3">
+          <span v-for="(label, index) in chart?.labels" :key="label" class="inline-flex gap-2 items-center"
+            ><span class="size-2 rounded-sm" :class="SERIES_SWATCH[index % SERIES_SWATCH.length]" />{{ label }}</span
+          >
+        </div>
       </div>
     </section>
     <section class="green-section">
-      <div class="green-section-heading"><h2>By agent</h2></div>
+      <div class="green-section-heading">
+        <div>
+          <h2>By requester</h2>
+          <p>Duration quantiles: successful runs only</p>
+        </div>
+      </div>
       <div class="green-table-scroll">
-        <table class="green-table">
+        <table class="green-table" data-table="requesters">
           <thead>
             <tr>
-              <th>Agent</th>
+              <th>Requester</th>
               <th>Runs</th>
-              <th>Failed</th>
+              <th>Succeeded</th>
+              <th>Total run time</th>
               <th>p50 duration</th>
               <th>p95 duration</th>
-              <th>Model cost</th>
-              <th>Turns</th>
-              <th>Unpriced tokens</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="agent in report.byAgent" :key="agent.agent">
-              <td>{{ agent.agent }}</td>
-              <td class="numeric">{{ countText(agent.runs) }}</td>
-              <td class="numeric">
-                {{ countText(agent.failed) }} ({{ pctText(agent.runs ? agent.failed / agent.runs : 0) }})
-              </td>
-              <td>{{ wallText(agent.p50WallMs) }}</td>
-              <td>{{ wallText(agent.p95WallMs) }}</td>
-              <td>{{ usd(agent.usd) }}</td>
-              <td>{{ countText(agent.turns) }}</td>
-              <td>{{ countText(agent.unpricedTokens) }}</td>
+            <tr v-for="row in report.usage.byRequester" :key="row.requester">
+              <td>{{ seed?.requesterNames?.[row.requester] ?? (row.requester || "Not recorded") }}</td>
+              <td class="numeric">{{ countText(row.runs) }}</td>
+              <td class="numeric">{{ countText(row.succeeded) }}</td>
+              <td>{{ wallText(row.wallMs) }}</td>
+              <td>{{ durationText(row.p50Ms, row.succeeded) }}</td>
+              <td>{{ durationText(row.p95Ms, row.succeeded) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="!report.usage.byRequester.length" class="green-section-content text-muted">
+          No recorded requesters in this range.
+        </p>
+      </div>
+    </section>
+    <section class="green-section">
+      <div class="green-section-heading">
+        <div>
+          <h2>By surface</h2>
+          <p>Unknown durations have no supplied successful-sample count.</p>
+        </div>
+      </div>
+      <div class="green-table-scroll">
+        <table class="green-table" data-table="surfaces">
+          <thead>
+            <tr>
+              <th>Surface</th>
+              <th>Runs</th>
+              <th>p50 duration</th>
+              <th>p95 duration</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in report.usage.bySurface" :key="row.surface">
+              <td>{{ surfaceText(row.surface) }}</td>
+              <td class="numeric">{{ countText(row.runs) }}</td>
+              <td>{{ durationText(row.p50Ms, surfaceDurationRuns(row)) }}</td>
+              <td>{{ durationText(row.p95Ms, surfaceDurationRuns(row)) }}</td>
             </tr>
           </tbody>
         </table>
       </div>
     </section>
+    <div class="grid gap-5 xl:grid-cols-2">
+      <section class="green-section">
+        <div class="green-section-heading"><h2>Run duration distribution</h2></div>
+        <div class="green-table-scroll">
+          <table class="green-table">
+            <thead>
+              <tr>
+                <th>Duration</th>
+                <th>Runs</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in report.usage.histogram" :key="row.minute">
+                <td>{{ histogramLabel(row.minute) }}</td>
+                <td class="numeric">{{ countText(row.runs) }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-if="!report.usage.histogram.length" class="green-section-content text-muted">
+            No recorded duration samples.
+          </p>
+        </div>
+      </section>
+      <section class="green-section">
+        <div class="green-section-heading"><h2>Review verdicts and findings</h2></div>
+        <dl class="green-section-content grid grid-cols-2 gap-3 text-sm">
+          <dt>Approved</dt>
+          <dd>{{ countText(report.usage.verdicts.approved) }}</dd>
+          <dt>Changes requested</dt>
+          <dd>{{ countText(report.usage.verdicts.changes_requested) }}</dd>
+          <dt>Total findings</dt>
+          <dd>{{ countText(report.usage.findings.total) }}</dd>
+          <template v-for="severity in ['blocking', 'major', 'minor', 'nit'] as const" :key="severity"
+            ><dt class="capitalize">{{ severity }}</dt>
+            <dd>{{ countText(report.usage.findings[severity]) }}</dd></template
+          >
+        </dl>
+      </section>
+    </div>
+    <section class="green-section">
+      <div class="green-section-heading"><h2>Reviews per pull request</h2></div>
+      <div v-if="report.usage.reviewsPerPullRequest" class="green-table-scroll">
+        <table class="green-table">
+          <thead>
+            <tr>
+              <th>Reviews</th>
+              <th>Pull requests</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in report.usage.reviewsPerPullRequest" :key="row.reviews">
+              <td>{{ countText(row.reviews) }}</td>
+              <td>{{ countText(row.pullRequests) }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="!report.usage.reviewsPerPullRequest.length" class="green-section-content text-muted">
+          No recorded pull requests in this range.
+        </p>
+      </div>
+      <p v-else class="green-section-content text-muted">Reviews per pull request unavailable for this report.</p>
+    </section>
     <details class="text-xs text-muted">
       <summary>Data and method</summary>
-      <p v-for="line in footer" :key="line" class="mt-2">{{ line }}</p>
-      <p class="mt-2">Dataset: {{ report.dataset }}</p>
-      <a
-        class="block text-primary mt-2"
-        :href="`/metrics.json?days=${range.days}${currentAgent ? `&agent=${encodeURIComponent(currentAgent)}` : ''}`"
-        >Download report as JSON</a
-      >
+      <p v-for="line in method" :key="line" class="mt-2">{{ line }}</p>
+      <a class="block text-primary mt-2" :href="reviewsHref('/metrics.json', report)">Download report as JSON</a>
     </details>
   </template>
   <EmptyState
     v-else
     title="Metrics could not be loaded"
-    description="The data source is unavailable. No usage totals are shown."
+    description="The review report is unavailable. No usage totals are shown."
   />
 </template>
