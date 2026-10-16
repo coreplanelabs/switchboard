@@ -1,5 +1,7 @@
+import { executeNotices, type NoticeCommand, type NoticeResult, type NoticeQuery } from "./notices.js";
 import {
   changeSchema,
+  bindingSchema,
   identitySchema,
   type BindingChange,
   type BindingResolution,
@@ -34,7 +36,7 @@ function decode(body: string): unknown {
   }
 }
 
-/** Durable implementation, deliberately not wired to an ingress or startup.
+/** Durable implementation over the authoritative directory database.
  * Primary keys and the transaction fence arbitrate writers, not a process lock.
  * Reads never use an in-process positive cache. */
 export class SqlitePersonDirectory implements PersonDirectory {
@@ -56,6 +58,12 @@ export class SqlitePersonDirectory implements PersonDirectory {
         );
         storage.sql.exec("CREATE TABLE IF NOT EXISTS person_link_intents (id TEXT PRIMARY KEY, body TEXT NOT NULL)");
         storage.sql.exec("CREATE TABLE IF NOT EXISTS person_link_outcomes (id TEXT PRIMARY KEY, body TEXT NOT NULL)");
+        storage.sql.exec(
+          "CREATE TABLE IF NOT EXISTS person_identity_notices (id TEXT PRIMARY KEY, body TEXT NOT NULL)",
+        );
+        storage.sql.exec(
+          "CREATE INDEX IF NOT EXISTS person_identity_notice_queue ON person_identity_notices (json_extract(body, '$.organization'), json_extract(body, '$.deliveredAt'))",
+        );
       });
     } catch {
       throw new Error("person directory unavailable");
@@ -132,6 +140,21 @@ export class SqlitePersonDirectory implements PersonDirectory {
       return this.storage.transactionSync(() =>
         executeLink(
           {
+            bindings: (personId) =>
+              [
+                ...this.storage.sql.exec<{ body: string }>(
+                  "SELECT body FROM person_bindings WHERE json_extract(body, '$.personId') = ? ORDER BY identity_key",
+                  personId,
+                ),
+              ].map((row) => bindingSchema.parse(decode(row.body))),
+            notices: (query) => this.noticeRows(query),
+            putNotice: (notice) => {
+              this.storage.sql.exec(
+                "INSERT INTO person_identity_notices (id, body) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET body = excluded.body",
+                notice.id,
+                JSON.stringify(notice),
+              );
+            },
             intent: (id) => this.linkRow("person_link_intents", id),
             audit: (id) => this.linkRow("person_link_outcomes", id),
             current: (identity) => this.current(identity),
@@ -154,7 +177,7 @@ export class SqlitePersonDirectory implements PersonDirectory {
             putBinding: (receipt) => {
               const key = identityKey(receipt.binding.identity);
               this.storage.sql.exec(
-                "INSERT INTO person_bindings (identity_key, body) VALUES (?, ?)",
+                "INSERT INTO person_bindings (identity_key, body) VALUES (?, ?) ON CONFLICT(identity_key) DO UPDATE SET body = excluded.body",
                 key,
                 JSON.stringify(receipt.binding),
               );
@@ -203,5 +226,64 @@ export class SqlitePersonDirectory implements PersonDirectory {
     } catch {
       return { status: "unavailable" };
     }
+  }
+  private noticeRows(query: NoticeQuery = {}) {
+    const where: string[] = [],
+      values: (string | number)[] = [];
+    if (query.organization) {
+      where.push("json_extract(body, '$.organization') = ?");
+      values.push(query.organization);
+    }
+    if (query.actor) {
+      where.push("json_extract(body, '$.actor') = ?");
+      values.push(JSON.stringify(query.actor));
+    }
+    if (query.recipient) {
+      where.push("json_extract(body, '$.identity') = ?");
+      values.push(JSON.stringify(query.recipient));
+    }
+    if (query.id) {
+      where.push("id = ?");
+      values.push(query.id);
+    }
+    if (query.slack)
+      where.push(
+        "json_extract(body, '$.identity.issuer') = 'https://slack.com' AND json_extract(body, '$.identity.tenant') IS NOT NULL",
+      );
+    if (query.pending) where.push("json_extract(body, '$.deliveredAt') IS NULL");
+    const sql = `SELECT body FROM person_identity_notices${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY ${query.retryOrder ? "COALESCE(json_extract(body, '$.attempts'), 0), COALESCE(json_extract(body, '$.attemptedAt'), 0), rowid" : "rowid"}${query.limit ? " LIMIT ?" : ""}`;
+    if (query.limit) values.push(query.limit);
+    return [...this.storage.sql.exec<{ body: string }>(sql, ...values)].map((row) => decode(row.body));
+  }
+  private async notice(command: NoticeCommand): Promise<NoticeResult> {
+    try {
+      return this.storage.transactionSync(() =>
+        executeNotices(
+          {
+            notices: (query) => this.noticeRows(query),
+            putNotice: (notice) => {
+              this.storage.sql.exec(
+                "UPDATE person_identity_notices SET body = ? WHERE id = ?",
+                JSON.stringify(notice),
+                notice.id,
+              );
+            },
+          },
+          command,
+          this.now(),
+        ),
+      );
+    } catch {
+      return { status: "unavailable" };
+    }
+  }
+  pendingNotices(organization: string, limit: number) {
+    return this.notice({ action: "pending", organization, limit });
+  }
+  markNoticeAttempted(organization: string, id: string) {
+    return this.notice({ action: "attempted", organization, id });
+  }
+  markNoticeDelivered(organization: string, id: string) {
+    return this.notice({ action: "delivered", organization, id });
   }
 }

@@ -214,6 +214,109 @@ describe("OrganizationDO routes", () => {
       hasMore: false,
     });
   });
+  it("retains operation-bound account notices across client replacement and acknowledges only the addressed Slack notice", async () => {
+    const first = client();
+    const now = Date.now();
+    const owner = {
+      identity,
+      audience: "app-test",
+      browserHash: "b".repeat(64),
+      proofVersion: 1,
+      organization: "org:test",
+      expiresAt: now + 90_000,
+    };
+    const policy = { tenant: "team-test", audience: "client-test", callbackUri: "https://app.test/callback" };
+    const began = await first.store.directory.link({
+      action: "begin",
+      auth: owner,
+      accessRevision: 0,
+      organization: "org:test",
+      operation: { kind: "link", target: "slack" },
+      slackPolicy: policy,
+      stateHash: "c".repeat(64),
+      nonceHash: "d".repeat(64),
+      expiresAt: now + 90_000,
+      resultExpiresAt: now + 180_000,
+    });
+    expect(began.status).toBe("ok");
+    if (began.status !== "ok") throw new Error("No operation");
+    const id = began.intent.id;
+    expect(
+      await first.store.directory.link({
+        action: "claim",
+        id,
+        auth: owner,
+        expectedRevision: 1,
+        stateHash: "c".repeat(64),
+      }),
+    ).toMatchObject({ status: "claimed" });
+    const slack = { issuer: "https://slack.com", tenant: "team-test", subject: "member-test" };
+    expect(
+      await first.store.directory.link({
+        action: "prove",
+        id,
+        auth: owner,
+        expectedRevision: 2,
+        proof: {
+          identity: slack,
+          audience: policy.audience,
+          callbackUri: policy.callbackUri,
+          nonceHash: "d".repeat(64),
+          expiresAt: now + 90_000,
+          expectedRevision: 0,
+        },
+      }),
+    ).toMatchObject({ status: "ok", intent: { state: "awaiting-consent" } });
+    const commit = { action: "commit" as const, id, auth: owner, expectedRevision: 3, consent: true };
+    const outcome = await first.store.directory.link(commit);
+    expect(outcome).toMatchObject({
+      status: "committed",
+      receipt: { operation: { kind: "link", target: "slack" }, outcome: "created" },
+    });
+    if (outcome.status !== "committed") throw new Error("No account outcome");
+    const replacement = client(first.installation);
+    expect(await replacement.store.directory.link(commit)).toEqual(outcome);
+    const binding = await replacement.store.directory.resolve(identity);
+    expect(binding).toMatchObject({ status: "bound", binding: { personId: outcome.receipt.personId, revision: 1 } });
+    const notices = await replacement.store.directory.link({ action: "notices", auth: owner });
+    expect(notices.status).toBe("notices");
+    if (notices.status !== "notices") throw new Error("No addressed notices");
+    expect(
+      notices.notices.map((row) => ({ id: row.id, identity: row.identity, deliveredAt: row.deliveredAt })),
+    ).toEqual([
+      { id: `${id}:access`, identity, deliveredAt: null },
+      { id: `${id}:slack`, identity: slack, deliveredAt: null },
+    ]);
+    expect(await replacement.store.directory.pendingNotices!("org:test", 1)).toMatchObject({
+      status: "notices",
+      notices: [{ id: `${id}:slack` }],
+    });
+    expect(await replacement.store.directory.markNoticeAttempted!("org:test", `${id}:slack`)).toEqual({
+      status: "attempted",
+    });
+    expect(await client(first.installation).store.directory.pendingNotices!("org:test", 1)).toMatchObject({
+      status: "notices",
+      notices: [{ id: `${id}:slack`, attempts: 1 }],
+    });
+    expect(await replacement.store.directory.markNoticeDelivered!("org:test", `${id}:access`)).toEqual({
+      status: "not_found",
+    });
+    expect(await replacement.store.directory.markNoticeDelivered!("org:test", `${id}:slack`)).toEqual({
+      status: "delivered",
+    });
+    expect(await client(first.installation).store.directory.markNoticeDelivered!("org:test", `${id}:slack`)).toEqual({
+      status: "delivered",
+    });
+    expect(await replacement.store.directory.pendingNotices!("org:test", 1)).toEqual({
+      status: "notices",
+      notices: [],
+    });
+    expect(await replacement.store.directory.link({ action: "notices", auth: owner })).toMatchObject({
+      status: "notices",
+      notices: [{ id: `${id}:access`, deliveredAt: null }],
+    });
+    expect(await replacement.store.directory.resolve(identity)).toEqual(binding);
+  });
   it("applies bearer and schema fences before storage", async () => {
     expect(await post({ action: "get", organization: "org:test" }, "wrong-token")).toEqual({
       status: 401,

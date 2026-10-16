@@ -1,3 +1,4 @@
+import { noticeCommandSchema, noticeResultSchema } from "../identity/notices.js";
 import { z } from "zod";
 import {
   bindingSchema,
@@ -7,8 +8,14 @@ import {
   receiptSchema,
   type PersonDirectory,
 } from "../identity/contract.js";
-import { linkAuditSchema, linkCommandSchema, linkIntentSchema } from "../identity/linkContract.js";
+import {
+  linkAuditSchema,
+  linkCommandSchema,
+  linkIntentSchema,
+  identityNoticeSchema,
+} from "../identity/linkContract.js";
 export const directoryCommandSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("notices"), command: noticeCommandSchema }).strict(),
   z.object({ action: z.literal("createPerson") }).strict(),
   z.object({ action: z.literal("resolve"), identity: identitySchema }).strict(),
   z.object({ action: z.literal("change"), change: changeSchema }).strict(),
@@ -18,6 +25,14 @@ export const directoryCommandSchema = z.discriminatedUnion("action", [
 export type DirectoryCommand = z.infer<typeof directoryCommandSchema>;
 export async function executeDirectory(directory: PersonDirectory, command: DirectoryCommand) {
   switch (command.action) {
+    case "notices": {
+      const c = command.command;
+      if (c.action === "pending")
+        return (await directory.pendingNotices?.(c.organization, c.limit)) ?? { status: "unavailable" };
+      if (c.action === "attempted")
+        return (await directory.markNoticeAttempted?.(c.organization, c.id)) ?? { status: "unavailable" };
+      return (await directory.markNoticeDelivered?.(c.organization, c.id)) ?? { status: "unavailable" };
+    }
     case "createPerson":
       return directory.createPerson();
     case "resolve":
@@ -33,6 +48,7 @@ export async function executeDirectory(directory: PersonDirectory, command: Dire
 const failure = <const T extends readonly [string, ...string[]]>(values: T) =>
   z.object({ status: z.enum(values) }).strict();
 export const directoryResponses = {
+  notices: noticeResultSchema,
   createPerson: z.union([
     z
       .object({
@@ -56,6 +72,22 @@ export const directoryResponses = {
     failure(["invalid", "conflict", "unavailable"]),
   ]),
   link: z.union([
+    z
+      .object({
+        status: z.literal("accounts"),
+        accounts: z.array(
+          z
+            .object({
+              identity: identitySchema,
+              state: z.enum(["active", "revoked", "unknown"]),
+              revision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+            })
+            .strict(),
+        ),
+      })
+      .strict(),
+    z.object({ status: z.literal("notices"), notices: z.array(identityNoticeSchema) }).strict(),
+    z.object({ status: z.literal("delivered") }).strict(),
     z
       .object({
         status: z.literal("context"),

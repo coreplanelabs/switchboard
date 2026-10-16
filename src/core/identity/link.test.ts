@@ -150,6 +150,197 @@ async function bind(directory: PersonDirectory, identity = access as typeof acce
   return person.person.id;
 }
 
+describe.each(["memory", "sqlite"])("identity operations (%s)", (kind) => {
+  it("pins the organization and operation through callback and consent and caps proof lifetime at ten minutes", async () => {
+    const h = harness(kind);
+    const scopedAuth = { ...auth, organization: "org:test" };
+    const id = await ready(h.directory, {
+      ...begin,
+      auth: scopedAuth,
+      organization: "org:test",
+      operation: { kind: "link", target: "slack" },
+    } as any);
+    expect(await h.directory.link({ ...commit(id), auth: { ...scopedAuth, organization: "org:other" } })).toEqual({
+      status: "not_found",
+    });
+    expect(
+      await h.directory.link({
+        ...commit(id),
+        auth: scopedAuth,
+        operation: { kind: "recover", target: "access" },
+      } as any),
+    ).toEqual({ status: "invalid" });
+    expect(await h.directory.resolve(access)).toEqual({ status: "unknown" });
+    expect(await h.directory.link({ ...commit(id), auth: scopedAuth })).toMatchObject({
+      status: "committed",
+      receipt: { organization: "org:test", operation: { kind: "link", target: "slack" } },
+    });
+    expect(await h.directory.link({ action: "notices", auth: { ...scopedAuth, organization: "org:other" } })).toEqual({
+      status: "notices",
+      notices: [],
+    });
+    const capped = await h.directory.link({
+      ...begin,
+      auth: { ...auth, expiresAt: 9000000 },
+      expiresAt: 9000000,
+      resultExpiresAt: 9000001,
+    });
+    expect(capped).toMatchObject({ status: "ok", intent: { expiresAt: 600042 } });
+  });
+  it("reads current browser notices before limiting undelivered Slack notices", async () => {
+    const h = harness(kind);
+    let newest = "";
+    for (let n = 0; n < 101; n++) {
+      const linked = await h.directory.link(
+        commit(
+          await ready(h.directory, { ...begin, accessRevision: n === 0 ? 0 : 1, organization: "org:test" } as any, {
+            ...proof,
+            identity: { ...slack, subject: `human-${n}` },
+          }),
+        ),
+      );
+      assert(linked.status === "committed");
+      newest = `${linked.receipt.id}:access`;
+      if (n < 100)
+        expect(await h.directory.link({ action: "notice-delivered", auth, noticeId: newest, ownOnly: true })).toEqual({
+          status: "delivered",
+        });
+    }
+    if (kind === "sqlite") h.reopen();
+    expect(await h.directory.link({ action: "notices", auth, ownOnly: true } as any)).toMatchObject({
+      status: "notices",
+      notices: [{ id: newest, identity: access, deliveredAt: null }],
+    });
+    const browser = await h.directory.link({ action: "notices", auth, ownOnly: true } as any);
+    assert(browser.status === "notices");
+    expect(browser.notices.map((row) => row.id)).toEqual([newest]);
+    expect(await h.directory.pendingNotices!("org:test", 100)).toMatchObject({
+      status: "notices",
+      notices: Array.from({ length: 100 }, (_, n) => ({ identity: { subject: `human-${n}` }, deliveredAt: null })),
+    });
+  });
+  it("rotates a bounded failed-notice batch durably so one unavailable recipient cannot starve later notices", async () => {
+    const h = harness(kind);
+    let last = "";
+    for (let n = 0; n < 21; n++) {
+      const linked = await h.directory.link(
+        commit(
+          await ready(h.directory, { ...begin, accessRevision: n === 0 ? 0 : 1, organization: "org:test" } as any, {
+            ...proof,
+            identity: { ...slack, subject: `human-${n}` },
+          }),
+        ),
+      );
+      if (linked.status !== "committed") throw new Error("No account operation");
+      last = `${linked.receipt.id}:slack`;
+    }
+    const batch = await h.directory.pendingNotices!("org:test", 20);
+    expect(batch.status).toBe("notices");
+    if (batch.status !== "notices") throw new Error("No pending batch");
+    expect(batch.notices).toHaveLength(20);
+    for (const notice of batch.notices)
+      expect(await h.directory.markNoticeAttempted!("org:test", notice.id)).toEqual({ status: "attempted" });
+    if (kind === "sqlite") h.reopen();
+    const next = await h.directory.pendingNotices!("org:test", 1);
+    expect(next).toMatchObject({ status: "notices", notices: [{ id: last, identity: { subject: "human-20" } }] });
+    expect(await h.directory.markNoticeDelivered!("org:test", last)).toEqual({ status: "delivered" });
+    expect(await h.directory.pendingNotices!("org:test", 1)).toMatchObject({
+      status: "notices",
+      notices: [{ attempts: 1, deliveredAt: null }],
+    });
+  });
+  it("retains a fixed-organization Slack notice across lost acknowledgments without acknowledging its browser counterpart", async () => {
+    const h = harness(kind);
+    const result = await h.directory.link(
+      commit(await ready(h.directory, { ...begin, organization: "org:test" } as any)),
+    );
+    assert(result.status === "committed");
+    const id = `${result.receipt.id}:slack`;
+    expect(await h.directory.pendingNotices!("org:test", 1)).toMatchObject({
+      status: "notices",
+      notices: [{ id, identity: slack, outcome: "created" }],
+    });
+    expect(await h.directory.pendingNotices!("org:other", 20)).toEqual({ status: "notices", notices: [] });
+    expect(await h.directory.markNoticeDelivered!("org:other", id)).toEqual({ status: "not_found" });
+    expect(await h.directory.markNoticeDelivered!("org:test", `${result.receipt.id}:access`)).toEqual({
+      status: "not_found",
+    });
+    if (kind === "sqlite") h.reopen();
+    expect(await h.directory.pendingNotices!("org:test", 20)).toMatchObject({ status: "notices", notices: [{ id }] });
+    expect(await h.directory.markNoticeDelivered!("org:test", id)).toEqual({ status: "delivered" });
+    if (kind === "sqlite") h.reopen();
+    expect(await h.directory.markNoticeDelivered!("org:test", id)).toEqual({ status: "delivered" });
+    expect(await h.directory.pendingNotices!("org:test", 20)).toEqual({ status: "notices", notices: [] });
+    expect(await h.directory.link({ action: "notices", auth })).toMatchObject({
+      status: "notices",
+      notices: [{ identity: access, deliveredAt: null }],
+    });
+    expect(h.counts()).toEqual([1, 2, 2, 1]);
+  });
+  it("requires a new two-sided challenge to unlink and recover the same person, and retains both notices", async () => {
+    const h = harness(kind);
+    const linked = await h.directory.link(commit(await ready(h.directory)));
+    assert(linked.status === "committed");
+    const personId = linked.receipt.personId;
+    const operation = { kind: "unlink", target: "slack" };
+    const unlink = await ready(
+      h.directory,
+      { ...begin, accessRevision: 1, operation, organization: "org:test" } as any,
+      { ...proof, expectedRevision: 1 },
+    );
+    const result = await h.directory.link(commit(unlink));
+    expect(result).toMatchObject({
+      status: "committed",
+      receipt: {
+        outcome: "unlinked",
+        personId,
+        access: { beforeRevision: 1, afterRevision: 1 },
+        slack: { beforeRevision: 1, afterRevision: 2 },
+      },
+    });
+    expect(await h.directory.resolve(slack)).toEqual({ status: "revoked", revision: 2 });
+    expect(await h.directory.link(commit(unlink))).toEqual(result);
+    const ordinary = await ready(h.directory, { ...begin, accessRevision: 1 }, { ...proof, expectedRevision: 2 });
+    expect(await h.directory.link(commit(ordinary))).toEqual({ status: "revoked" });
+    const recover = await ready(
+      h.directory,
+      { ...begin, accessRevision: 1, operation: { kind: "recover", target: "slack" }, organization: "org:test" } as any,
+      { ...proof, expectedRevision: 2 },
+    );
+    expect(await h.directory.link(commit(recover))).toEqual({ status: "invalid" });
+    const restored = await h.directory.link({ ...commit(recover), auth: { ...auth, recoveryAuthorized: true } } as any);
+    expect(restored).toMatchObject({
+      status: "committed",
+      receipt: { outcome: "recovered", personId, slack: { beforeRevision: 2, afterRevision: 3 } },
+    });
+    if (kind === "sqlite") h.reopen();
+    expect(await h.directory.resolve(slack)).toMatchObject({ status: "bound", binding: { personId, revision: 3 } });
+    const notices = await h.directory.link({ action: "notices", auth } as any);
+    expect(notices).toMatchObject({
+      status: "notices",
+      notices: [
+        { outcome: "created", identity: access },
+        { outcome: "created", identity: slack },
+        { outcome: "unlinked", identity: access },
+        { outcome: "unlinked", identity: slack },
+        { outcome: "revoked", identity: access },
+        { outcome: "revoked", identity: slack },
+        { outcome: "recovered", identity: access },
+        { outcome: "recovered", identity: slack },
+      ],
+    });
+    assert(notices.status === "notices");
+    const first = notices.notices[0];
+    expect(await h.directory.link({ action: "notice-delivered", auth, noticeId: first.id } as any)).toEqual({
+      status: "delivered",
+    });
+    expect(await h.directory.link({ action: "notices", auth } as any)).toMatchObject({
+      status: "notices",
+      notices: notices.notices.slice(1),
+    });
+  });
+});
+
 describe("atomic link contract", () => {
   for (const kind of ["memory", "sqlite"])
     describe(kind, () => {

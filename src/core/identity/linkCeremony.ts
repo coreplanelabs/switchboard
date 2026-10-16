@@ -8,7 +8,7 @@ import {
   type SlackPolicy,
   type SlackProofProvider,
 } from "./humanProof.js";
-import type { LinkCommand, LinkResult } from "./linkContract.js";
+import type { LinkCommand, LinkResult, IdentityOperation } from "./linkContract.js";
 
 type Auth = LinkCommand["auth"];
 export interface LinkBrowserSession {
@@ -18,8 +18,9 @@ export interface LinkBrowserSession {
 interface CeremonyDeps {
   directory: PersonDirectory;
   access: AccessProofProvider;
-  slack: SlackProofProvider;
+  slack?: SlackProofProvider;
   now: () => number;
+  organization?: string;
 }
 export interface LinkCallback {
   session: LinkBrowserSession;
@@ -36,14 +37,14 @@ const secret = () => randomBytes(32).toString("base64url");
  * POSTs and transports the session in a secure HttpOnly cookie; body/query
  * session secrets must never substitute for that trusted transport. */
 export class LinkCeremony {
-  private readonly policy: SlackPolicy;
+  private readonly policy?: SlackPolicy;
   private readonly cleanLocation: string;
   constructor(
     private readonly deps: CeremonyDeps,
-    policy: SlackPolicy,
+    policy?: SlackPolicy,
   ) {
-    this.policy = { ...policy };
-    this.cleanLocation = new URL("/", policy.callbackUri).href;
+    this.policy = policy ? { ...policy } : undefined;
+    this.cleanLocation = policy ? new URL("/", policy.callbackUri).href : "";
   }
   private async auth(evidence: AccessEvidence, browser: string): Promise<Auth | null> {
     try {
@@ -57,6 +58,7 @@ export class LinkCeremony {
         browserHash: proofDigest(browser),
         expiresAt: proof.expiresAt,
         proofVersion: 1,
+        ...(this.deps.organization ? { organization: this.deps.organization } : {}),
       };
     } catch {
       return null;
@@ -71,14 +73,24 @@ export class LinkCeremony {
   }
   private async revision(identity: ExternalIdentity): Promise<number | null> {
     const result = await this.deps.directory.resolve(identity);
-    return result.status === "unknown" ? 0 : result.status === "bound" ? result.binding.revision : null;
+    return result.status === "unknown"
+      ? 0
+      : result.status === "bound"
+        ? result.binding.revision
+        : result.status === "revoked"
+          ? result.revision
+          : null;
   }
   async begin(
     evidence: AccessEvidence,
+    operation: IdentityOperation = { kind: "link", target: "slack" },
   ): Promise<
     | { status: "started"; session: LinkBrowserSession; authorizationUrl: string; expiresAt: number }
     | { status: "invalid" | "unavailable" }
   > {
+    const policy = this.policy,
+      slack = this.deps.slack;
+    if (!policy || !slack) return { status: "unavailable" };
     try {
       const browser = secret(),
         state = secret(),
@@ -87,14 +99,16 @@ export class LinkCeremony {
       if (!auth) return { status: "invalid" };
       const accessRevision = await this.revision(auth.identity);
       if (accessRevision === null) return { status: "invalid" };
-      const authorizationUrl = await this.deps.slack.authorization({ policy: { ...this.policy }, state, nonce });
+      const authorizationUrl = await slack.authorization({ policy: { ...policy }, state, nonce });
       if (!authorizationUrl) return { status: "unavailable" };
       const expiresAt = Math.min(this.deps.now() + minutesToMs(10), auth.expiresAt);
       const result = await this.link({
         action: "begin",
         auth,
         accessRevision,
-        slackPolicy: this.policy,
+        ...(this.deps.organization ? { organization: this.deps.organization } : {}),
+        operation,
+        slackPolicy: policy,
         stateHash: proofDigest(state),
         nonceHash: proofDigest(nonce),
         expiresAt,
@@ -126,13 +140,16 @@ export class LinkCeremony {
     };
   }
   private async exchange(input: LinkCallback): Promise<LinkResult> {
+    const policy = this.policy,
+      slack = this.deps.slack;
+    if (!policy || !slack) return { status: "unavailable" };
     let claimed: { id: string; auth: Auth; expectedRevision: number } | undefined;
     try {
       const auth = await this.auth(input.evidence, input.session.browser);
       if (
         !auth ||
         input.method !== "GET" ||
-        input.callbackUri !== this.policy.callbackUri ||
+        input.callbackUri !== policy.callbackUri ||
         input.query.getAll("state").length !== 1 ||
         input.query.getAll("code").length !== 1 ||
         [...input.query.keys()].some((key) => key !== "code" && key !== "state")
@@ -147,9 +164,9 @@ export class LinkCeremony {
       if (i.state !== "pending") return { status: "already_claimed" };
       // Persisted policy is authoritative across reconstruction/config changes.
       if (
-        i.slackPolicy.audience !== this.policy.audience ||
-        i.slackPolicy.tenant !== this.policy.tenant ||
-        i.slackPolicy.callbackUri !== this.policy.callbackUri
+        i.slackPolicy.audience !== policy.audience ||
+        i.slackPolicy.tenant !== policy.tenant ||
+        i.slackPolicy.callbackUri !== policy.callbackUri
       )
         return { status: "invalid" };
       const result = await this.link({
@@ -161,7 +178,7 @@ export class LinkCeremony {
       });
       if (result.status !== "claimed") return result;
       claimed = { id: i.id, auth, expectedRevision: result.intent.revision };
-      const proof = await this.deps.slack.exchange({
+      const proof = await slack.exchange({
         code,
         policy: { ...i.slackPolicy },
         nonceHash: i.nonceHash,
@@ -210,11 +227,19 @@ export class LinkCeremony {
     evidence: AccessEvidence,
     expectedRevision: number,
     consent: boolean,
+    authorizeRecovery?: (identity: ExternalIdentity) => Promise<boolean>,
   ): Promise<LinkResult> {
+    if (!this.policy || !this.deps.slack) return { status: "unavailable" };
     const auth = await this.auth(evidence, session.browser);
-    return auth
-      ? this.link({ action: "commit", id: session.id, auth, expectedRevision, consent })
-      : { status: "invalid" };
+    if (!auth) return { status: "invalid" };
+    const context = await this.link({ action: "inspect", id: session.id, auth });
+    if (context.status === "context" && context.intent.operation?.kind === "recover") {
+      const target =
+        context.intent.operation.target === "access" ? context.intent.owner.identity : context.intent.slack?.identity;
+      if (!target || !(await authorizeRecovery?.(target))) return { status: "invalid" };
+      auth.recoveryAuthorized = true;
+    }
+    return this.link({ action: "commit", id: session.id, auth, expectedRevision, consent });
   }
   /** Internal consent context. The browser adapter must project an allowlist,
    * never serialize this persisted validation context directly. */
@@ -229,5 +254,24 @@ export class LinkCeremony {
   async read(session: LinkBrowserSession, evidence: AccessEvidence): Promise<LinkResult> {
     const auth = await this.auth(evidence, session.browser);
     return auth ? this.link({ action: "read", id: session.id, auth }) : { status: "invalid" };
+  }
+  async notices(evidence: AccessEvidence): Promise<LinkResult> {
+    const auth = await this.auth(evidence, secret());
+    return auth ? this.link({ action: "notices", auth, ownOnly: true }) : { status: "invalid" };
+  }
+  async delivered(evidence: AccessEvidence, noticeId: string): Promise<LinkResult> {
+    const auth = await this.auth(evidence, secret());
+    return auth ? this.link({ action: "notice-delivered", auth, noticeId }) : { status: "invalid" };
+  }
+  async accounts(evidence: AccessEvidence) {
+    const auth = await this.auth(evidence, secret());
+    if (!auth) return { status: "invalid" as const };
+    return this.link({ action: "accounts", auth });
+  }
+
+  async acknowledge(evidence: AccessEvidence, noticeId: string): Promise<LinkResult> {
+    const auth = await this.auth(evidence, secret());
+    if (!auth) return { status: "invalid" };
+    return this.link({ action: "notice-delivered", auth, noticeId, ownOnly: true });
   }
 }

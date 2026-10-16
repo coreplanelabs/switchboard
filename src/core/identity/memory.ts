@@ -1,3 +1,4 @@
+import { executeNotices, type NoticeCommand, type NoticeResult, type NoticeQuery } from "./notices.js";
 import {
   changeSchema,
   identitySchema,
@@ -12,7 +13,7 @@ import {
   type PersonDirectory,
   type ReceiptsResult,
 } from "./contract.js";
-import type { LinkAudit, LinkCommand, LinkIntent, LinkResult } from "./linkContract.js";
+import type { LinkAudit, LinkCommand, LinkIntent, LinkResult, IdentityNotice } from "./linkContract.js";
 import { executeLink } from "./linkEngine.js";
 import { decideChange, identityKey, mintPerson, readBinding, readReceipts, resolution } from "./engine.js";
 
@@ -25,6 +26,7 @@ export class InMemoryPersonDirectory implements PersonDirectory {
     history: new Map<string, BindingReceipt[]>(),
     intents: new Map<string, LinkIntent>(),
     audits: new Map<string, LinkAudit>(),
+    notices: new Map<string, IdentityNotice>(),
   };
   constructor(private readonly now: () => number) {}
 
@@ -75,9 +77,15 @@ export class InMemoryPersonDirectory implements PersonDirectory {
         history: new Map(this.state.history),
         intents: new Map(this.state.intents),
         audits: new Map(this.state.audits),
+        notices: new Map(this.state.notices),
       };
       const result = executeLink(
         {
+          bindings: (personId) => [...next.bindings.values()].filter((row) => row.personId === personId),
+          notices: (query) => this.noticeRows(next.notices, query),
+          putNotice: (notice) => {
+            next.notices.set(notice.id, notice);
+          },
           intent: (id) => next.intents.get(id),
           audit: (id) => next.audits.get(id),
           current: (identity) =>
@@ -114,5 +122,49 @@ export class InMemoryPersonDirectory implements PersonDirectory {
     const parsed = identitySchema.safeParse(identity);
     if (!parsed.success) return { status: "invalid" };
     return readReceipts(this.state.history.get(identityKey(parsed.data)) ?? [], parsed.data);
+  }
+  private noticeRows(rows: Map<string, IdentityNotice>, query: NoticeQuery = {}) {
+    return [...rows.values()]
+      .filter(
+        (row) =>
+          (!query.organization || row.organization === query.organization) &&
+          (!query.actor || identityKey(row.actor) === identityKey(query.actor)) &&
+          (!query.recipient || identityKey(row.identity) === identityKey(query.recipient)) &&
+          (!query.id || row.id === query.id) &&
+          (!query.slack || (row.identity.issuer === "https://slack.com" && row.identity.tenant !== null)) &&
+          (!query.pending || row.deliveredAt === null),
+      )
+      .sort((a, b) =>
+        query.retryOrder ? (a.attempts ?? 0) - (b.attempts ?? 0) || (a.attemptedAt ?? 0) - (b.attemptedAt ?? 0) : 0,
+      )
+      .slice(0, query.limit);
+  }
+  private async notice(command: NoticeCommand): Promise<NoticeResult> {
+    try {
+      const next = new Map(this.state.notices);
+      const result = executeNotices(
+        {
+          notices: (query) => this.noticeRows(next, query),
+          putNotice: (notice) => {
+            next.set(notice.id, notice);
+          },
+        },
+        command,
+        this.now(),
+      );
+      this.state = { ...this.state, notices: next };
+      return structuredClone(result);
+    } catch {
+      return { status: "unavailable" };
+    }
+  }
+  pendingNotices(organization: string, limit: number) {
+    return this.notice({ action: "pending", organization, limit });
+  }
+  markNoticeAttempted(organization: string, id: string) {
+    return this.notice({ action: "attempted", organization, id });
+  }
+  markNoticeDelivered(organization: string, id: string) {
+    return this.notice({ action: "delivered", organization, id });
   }
 }

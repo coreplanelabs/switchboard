@@ -69,6 +69,16 @@ function harness(kind: string, accessExpiry = start + 3600_000, slackExpiry = st
       },
     },
     {
+      credential: "fixture-current-session",
+      proof: {
+        kind: "human",
+        identity: accessIdentity,
+        audience: "application",
+        issuedAt: start - 3600_000,
+        expiresAt: accessExpiry,
+      },
+    },
+    {
       credential: "fixture-refreshed",
       proof: {
         kind: "human",
@@ -153,6 +163,49 @@ describe("offline link ceremony", () => {
         h.reopen();
         expect(await h.ceremony().read(b.session, evidence)).toEqual(result);
         expect(h.slack.exchanges).toBe(1);
+      });
+      it("revalidates a current Access session while each account change requires its own target challenge and consent", async () => {
+        const h = harness(kind);
+        const currentSession = { strategy: "access", token: "fixture-current-session" };
+        const ids: string[] = [];
+        for (const kind of ["link", "unlink", "recover"] as const) {
+          const started = await h.ceremony().begin(currentSession, { kind, target: "slack" });
+          assert(started.status === "started");
+          ids.push(started.session.id);
+          expect(started.expiresAt).toBe(start + 600_000);
+          expect(await h.ceremony().commit(started.session, currentSession, 1, true, async () => true)).toEqual({
+            status: kind === "recover" ? "invalid" : "not_ready",
+          });
+          const authorization = new URL(started.authorizationUrl);
+          const callback = {
+            session: started.session,
+            evidence: currentSession,
+            method: "GET",
+            callbackUri: policy.callbackUri,
+            query: new URLSearchParams({ state: authorization.searchParams.get("state")!, code: "fixture-code" }),
+          };
+          expect((await h.ceremony().callback(callback)).result).toMatchObject({
+            status: "ok",
+            intent: { state: "awaiting-consent", expiresAt: start + 300_000 },
+          });
+          expect(await h.ceremony().commit(started.session, currentSession, 3, false, async () => true)).toEqual({
+            status: "consent_required",
+          });
+          const result = await h.ceremony().commit(started.session, currentSession, 3, true, async () => true);
+          expect(result).toMatchObject({
+            status: "committed",
+            receipt: {
+              operation: { kind, target: "slack" },
+              outcome: kind === "link" ? "created" : kind === "unlink" ? "unlinked" : "recovered",
+            },
+          });
+          h.reopen();
+          expect(await h.ceremony().commit(started.session, currentSession, 3, true, async () => true)).toEqual(result);
+          expect((await h.ceremony().callback(callback)).result).toEqual({ status: "already_claimed" });
+        }
+        expect(new Set(ids).size).toBe(3);
+        expect(await h.directory.resolve(slackIdentity)).toMatchObject({ status: "bound", binding: { revision: 3 } });
+        expect(h.slack.exchanges).toBe(3);
       });
       it("rejects replay concurrent callbacks wrong state wrong browser and account switch", async () => {
         const h = harness(kind);

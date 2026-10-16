@@ -13,9 +13,19 @@ const digest = z.string().regex(/^[0-9a-f]{64}$/);
 const id = z.string().regex(/^link:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 const accessIdentity = identitySchema.extend({ tenant: z.null() });
 const ownerSchema = z
-  .object({ identity: accessIdentity, audience: text, browserHash: digest, proofVersion: version })
+  .object({
+    identity: accessIdentity,
+    audience: text,
+    browserHash: digest,
+    proofVersion: version,
+    organization: text.optional(),
+  })
   .strict();
-const authSchema = ownerSchema.extend({ expiresAt: instant });
+const authSchema = ownerSchema.extend({ expiresAt: instant, recoveryAuthorized: z.boolean().optional() });
+export const identityOperationSchema = z
+  .object({ kind: z.enum(["link", "unlink", "recover"]), target: z.enum(["access", "slack"]) })
+  .strict();
+export type IdentityOperation = z.infer<typeof identityOperationSchema>;
 const slackPolicySchema = z
   .object({ tenant: text, audience: text, callbackUri: z.url().startsWith("https://") })
   .strict();
@@ -34,13 +44,15 @@ const mutation = { ...addressed, expectedRevision: revision };
 
 /** These are assertions from an authenticated, authorized internal caller.
  * Hashes are SHA-256 projections, never browser secrets or OAuth credentials.
- * No production caller exists; this seam cannot authenticate a human itself. */
+ * The verified adapter supplies them; this seam cannot authenticate a human itself. */
 export const linkCommandSchema = z.discriminatedUnion("action", [
   z
     .object({
       action: z.literal("begin"),
       auth: authSchema,
       accessRevision: revision,
+      organization: text.optional(),
+      operation: identityOperationSchema.optional(),
       slackPolicy: slackPolicySchema,
       stateHash: digest,
       nonceHash: digest,
@@ -56,11 +68,21 @@ export const linkCommandSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("read"), ...addressed }).strict(),
   // Authenticated internal proof context, never exposed as a public response.
   z.object({ action: z.literal("inspect"), ...addressed }).strict(),
+  z.object({ action: z.literal("notices"), auth: authSchema, ownOnly: z.boolean().optional() }).strict(),
+  z.object({ action: z.literal("accounts"), auth: authSchema }).strict(),
+  z
+    .object({
+      action: z.literal("notice-delivered"),
+      auth: authSchema,
+      noticeId: z.string().regex(/^link:[0-9a-f-]{36}:(access|slack)$/),
+      ownOnly: z.boolean().optional(),
+    })
+    .strict(),
 ]);
 export type LinkCommand = z.infer<typeof linkCommandSchema>;
 const failureSchema = z.enum(["conflict", "stale", "revoked", "failed", "cancelled", "expired"]);
 export type LinkFailure = z.infer<typeof failureSchema>;
-const successes = ["created", "linked", "already-linked"] as const;
+const successes = ["created", "linked", "already-linked", "unlinked", "recovered"] as const;
 const outcomeSchema = z.enum([...successes, ...failureSchema.options]);
 function successful(outcome: z.infer<typeof outcomeSchema>): boolean {
   return successes.some((value) => value === outcome);
@@ -76,6 +98,8 @@ export const linkAuditSchema = z
   .object({
     id,
     actor: accessIdentity,
+    organization: text.optional(),
+    operation: identityOperationSchema.optional(),
     access: observationSchema,
     slack: observationSchema.nullable(),
     personId: personIdSchema.nullable(),
@@ -96,6 +120,18 @@ export const linkAuditSchema = z
       a.slack.identity.tenant === null
     )
       return false;
+    if (a.outcome === "unlinked" || a.outcome === "recovered") {
+      if (a.operation?.kind !== (a.outcome === "unlinked" ? "unlink" : "recover")) return false;
+      const selected = a.operation.target === "access" ? a.access : a.slack;
+      const other = a.operation.target === "access" ? a.slack : a.access;
+      return (
+        selected.beforeRevision > 0 &&
+        selected.afterRevision === selected.beforeRevision + 1 &&
+        other.beforeRevision > 0 &&
+        other.afterRevision === other.beforeRevision
+      );
+    }
+    if (a.operation && a.operation.kind !== "link") return false;
     const revisions = [a.access, a.slack];
     if (revisions.some((r) => r.afterRevision !== (r.beforeRevision || 1))) return false;
     const missing = revisions.filter((r) => r.beforeRevision === 0).length;
@@ -115,6 +151,8 @@ const activeSchema = z
     ...commonIntent,
     state: z.enum(["pending", "exchanging", "awaiting-consent"]),
     accessRevision: revision,
+    organization: text.optional(),
+    operation: identityOperationSchema.optional(),
     slackPolicy: slackPolicySchema,
     stateHash: digest,
     nonceHash: digest,
@@ -161,7 +199,40 @@ export const linkIntentSchema = z
 export type LinkIntent = z.infer<typeof linkIntentSchema>;
 export type ActiveLinkIntent = z.infer<typeof activeSchema>;
 export type LinkView = Pick<LinkIntent, "id" | "state" | "revision" | "expiresAt">;
+export const identityNoticeSchema = z
+  .object({
+    id: z.string().regex(/^link:[0-9a-f-]{36}:(access|slack)$/),
+    auditId: id,
+    actor: accessIdentity,
+    identity: identitySchema,
+    organization: text.optional(),
+    operation: identityOperationSchema.optional(),
+    outcome: outcomeSchema,
+    at: instant,
+    deliveredAt: instant.nullable(),
+    attempts: revision.optional(),
+    attemptedAt: instant.optional(),
+  })
+  .strict()
+  .refine((row) => {
+    const slack = row.identity.issuer === "https://slack.com" && row.identity.tenant !== null;
+    return (
+      row.id === `${row.auditId}:${slack ? "slack" : "access"}` &&
+      (slack || JSON.stringify(row.identity) === JSON.stringify(row.actor))
+    );
+  });
+export type IdentityNotice = z.infer<typeof identityNoticeSchema>;
 export type LinkResult =
+  | {
+      status: "accounts";
+      accounts: {
+        identity: z.infer<typeof identitySchema>;
+        state: "active" | "revoked" | "unknown";
+        revision: number;
+      }[];
+    }
+  | { status: "notices"; notices: IdentityNotice[] }
+  | { status: "delivered" }
   | { status: "context"; intent: ActiveLinkIntent }
   | { status: "ok" | "claimed"; intent: LinkView }
   | { status: "committed"; receipt: LinkAudit }
