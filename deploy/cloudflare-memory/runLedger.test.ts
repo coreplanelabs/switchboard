@@ -16670,6 +16670,41 @@ describe("saved source-event reception in SQLite", () => {
     payload: { text: "The changed branch has a missing check." },
   };
 
+  it("retains common text and facts and refuses changed content under the original delivery", async () => {
+    const key = storeKey();
+    const inputs = [
+      { ...event, version: 2, content: { kind: "text", state: "present", text: "Check the retry limit" } },
+      {
+        ...event,
+        version: 2,
+        deliveryId: "fact",
+        kind: "source-fact",
+        content: { kind: "facts", facts: { state: "closed", merged: false } },
+      },
+    ];
+    for (const input of inputs) {
+      const received = await post("/runs/source-events/receive", { storeKey: key, event: input });
+      expect(received).toMatchObject({ status: 200, data: { kind: "received" } });
+      const receipt = received.data.receipt as { key: string };
+      expect(await post("/runs/source-events/read", { storeKey: key, key: receipt.key })).toMatchObject({
+        status: 200,
+        data: { record: { event: input } },
+      });
+      expect(await post("/runs/source-events/receive", { storeKey: key, event: input })).toEqual({
+        status: 200,
+        data: { kind: "duplicate", receipt: received.data.receipt },
+      });
+      const content =
+        input.kind === "source-fact"
+          ? { kind: "facts", facts: { state: "open" } }
+          : { kind: "text", state: "present", text: "Changed text" };
+      expect(await post("/runs/source-events/receive", { storeKey: key, event: { ...input, content } })).toMatchObject({
+        status: 200,
+        data: { kind: "refused", reason: "delivery-conflict" },
+      });
+    }
+  });
+
   it("receives through the private HTTP route and reads the original event and pending job", async () => {
     const key = storeKey();
     const received = await post("/runs/source-events/receive", { storeKey: key, event });

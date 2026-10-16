@@ -75,30 +75,31 @@ export async function normalizeGithubInstallationActivity(
   const added = event === "installation_repositories" ? repositoryIds(native.repositories_added) : null;
   const removed = event === "installation_repositories" ? repositoryIds(native.repositories_removed) : null;
   if (repositories === undefined || added === undefined || removed === undefined) return refused("invalid-payload");
+  const activity = {
+    surface: "installation-access",
+    event,
+    action: native.action,
+    repositorySelection: selection,
+    installationRepositorySelection: installation.repository_selection,
+    repositoryIds: repositories,
+    addedRepositoryIds: added,
+    removedRepositoryIds: removed,
+    permissions: installation.permissions,
+    actorId: actor?.id ?? null,
+  };
   try {
     const prepared = await prepareSourceEvent({
-      version: 1,
+      version: 2,
       sourceId: `github:${host}:app:${appId}:installation:${installationId}`,
       deliveryId: delivery,
       objectId: `github:${host}:installation:${installationId}`,
       changeId: await sourceHash({ surface: "installation-access", event, native }),
       kind: "source-fact",
+      content: { kind: "facts", facts: activity },
       ...(actor ? { authorId: `github:${host}:user:${actor.id}` } : {}),
       payload: {
         version: 1,
         installation: { id: installationId, appId },
-        activity: {
-          surface: "installation-access",
-          event,
-          action: native.action,
-          repositorySelection: selection,
-          installationRepositorySelection: installation.repository_selection,
-          repositoryIds: repositories,
-          addedRepositoryIds: added,
-          removedRepositoryIds: removed,
-          permissions: installation.permissions,
-          actorId: actor?.id ?? null,
-        },
         native,
       },
     });
