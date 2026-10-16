@@ -30,7 +30,30 @@ function server(): SwitchboardServer {
 }
 
 describe("SwitchboardServer.fetch — container availability", () => {
-  beforeEach(() => vi.resetAllMocks());
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "info").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(["/v1/responses", "/harness/tool", "/webhooks/github"])(
+    "recovers one unavailable start before forwarding %s once with its original body",
+    async (path) => {
+      sdk.start
+        .mockRejectedValueOnce(new Error("There is no container instance that can be provided to this Durable Object"))
+        .mockResolvedValueOnce(undefined);
+      const request = new Request(`https://bot.example${path}`, { method: "POST", body: "request-fixture" });
+      sdk.fetch.mockImplementation(async (forwarded: Request) => new Response(await forwarded.text(), { status: 202 }));
+      const response = await server().fetch(request);
+      expect(response.status).toBe(202);
+      expect(await response.text()).toBe("request-fixture");
+      expect(sdk.start).toHaveBeenCalledTimes(2);
+      expect(sdk.fetch).toHaveBeenCalledExactlyOnceWith(request);
+      expect(vi.mocked(console.warn).mock.calls).toEqual([["[container-start]", { outcome: "retrying" }]]);
+      expect(vi.mocked(console.info).mock.calls).toEqual([["[container-start]", { outcome: "recovered" }]]);
+    },
+  );
 
   it("answers no-instance start failures with a private 503 without consuming or forwarding the request", async () => {
     sdk.start.mockRejectedValue(
@@ -41,8 +64,37 @@ describe("SwitchboardServer.fetch — container availability", () => {
     expect(response.status).toBe(503);
     expect(response.headers.get("retry-after")).toBe("1");
     expect(await response.text()).toBe("There is no Container instance available at this time.");
+    expect(sdk.start).toHaveBeenCalledTimes(2);
     expect(request.bodyUsed).toBe(false);
     expect(sdk.fetch).not.toHaveBeenCalled();
+    expect(vi.mocked(console.warn).mock.calls).toEqual([
+      ["[container-start]", { outcome: "retrying" }],
+      ["[container-start]", { outcome: "unavailable" }],
+    ]);
+  });
+
+  it("keeps the request unread during the advertised one-second wait", async () => {
+    vi.useFakeTimers();
+    try {
+      sdk.start
+        .mockRejectedValueOnce(new Error("Runtime signalled the container to exit due to a new version rollout: 0"))
+        .mockResolvedValueOnce(undefined);
+      sdk.fetch.mockResolvedValue(new Response("accepted", { status: 202 }));
+      const request = new Request("https://bot.example/v1/responses", { method: "POST", body: "request-fixture" });
+      const pending = server().fetch(request);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(sdk.start).toHaveBeenCalledTimes(1);
+      expect(request.bodyUsed).toBe(false);
+      expect(sdk.fetch).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      const response = await pending;
+      expect(response.status).toBe(202);
+      expect(await response.text()).toBe("accepted");
+      expect(sdk.start).toHaveBeenCalledTimes(2);
+      expect(sdk.fetch).toHaveBeenCalledExactlyOnceWith(request);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("answers the runtime rolling the container out with the same retryable 503", async () => {
@@ -52,6 +104,7 @@ describe("SwitchboardServer.fetch — container availability", () => {
     expect(response.status).toBe(503);
     expect(response.headers.get("retry-after")).toBe("1");
     expect(await response.text()).toBe("There is no Container instance available at this time.");
+    expect(sdk.start).toHaveBeenCalledTimes(2);
     expect(request.bodyUsed).toBe(false);
     expect(sdk.fetch).not.toHaveBeenCalled();
   });
@@ -84,6 +137,8 @@ describe("SwitchboardServer.fetch — container availability", () => {
     expect(await pending).toBe(response);
     expect(sdk.fetch).toHaveBeenCalledExactlyOnceWith(request);
     expect(request.bodyUsed).toBe(false);
+    expect(vi.mocked(console.warn).mock.calls).toEqual([]);
+    expect(vi.mocked(console.info).mock.calls).toEqual([]);
   });
 
   it("rethrows unrelated start failures by identity without forwarding", async () => {
@@ -91,6 +146,31 @@ describe("SwitchboardServer.fetch — container availability", () => {
     sdk.start.mockRejectedValue(error);
     await expect(server().fetch(new Request("https://bot.example/mcp"))).rejects.toBe(error);
     expect(sdk.fetch).not.toHaveBeenCalled();
+  });
+
+  it("records a non-availability retry failure without exposing its error or forwarding", async () => {
+    const error = new Error("private startup failure");
+    sdk.start
+      .mockRejectedValueOnce(new Error("There is no container instance that can be provided to this Durable Object"))
+      .mockRejectedValueOnce(error);
+    const request = new Request("https://bot.example/v1/responses", { method: "POST", body: "private-request" });
+    await expect(server().fetch(request)).rejects.toBe(error);
+    expect(request.bodyUsed).toBe(false);
+    expect(sdk.fetch).not.toHaveBeenCalled();
+    expect(vi.mocked(console.warn).mock.calls).toEqual([
+      ["[container-start]", { outcome: "retrying" }],
+      ["[container-start]", { outcome: "failed" }],
+    ]);
+  });
+
+  it("returns a downstream 503 unchanged without another start or request", async () => {
+    sdk.start.mockResolvedValue(undefined);
+    const response = new Response("provider unavailable", { status: 503 });
+    sdk.fetch.mockResolvedValue(response);
+    expect(await server().fetch(new Request("https://bot.example/v1/responses"))).toBe(response);
+    expect(await response.text()).toBe("provider unavailable");
+    expect(sdk.start).toHaveBeenCalledTimes(1);
+    expect(sdk.fetch).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -142,6 +222,8 @@ describe("SwitchboardServer.fetch — SDK port wait", () => {
     vi.resetAllMocks();
     vi.useFakeTimers();
     vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "info").mockImplementation(() => {});
   });
   afterEach(() => {
     vi.clearAllTimers();
@@ -155,15 +237,19 @@ describe("SwitchboardServer.fetch — SDK port wait", () => {
       const { instance, container, probe, state } = sdkServer();
       const error = new Error(message);
       // Acquisition succeeds; the subsequent port-ready probe loses the instance.
-      probe.mockResolvedValueOnce(new Response()).mockImplementationOnce(() => {
+      let probes = 0;
+      probe.mockImplementation(() => {
+        if (++probes % 2 === 1) return new Response();
         container.running = false;
         throw error;
       });
       const onError = vi.spyOn(instance, "onError");
       const request = new Request("https://bot.example/webhooks/github", { method: "POST", body: "event-fixture" });
-      const response = await instance.fetch(request);
-      expect(container.start).toHaveBeenCalledOnce();
-      expect(probe).toHaveBeenCalledTimes(2);
+      const pending = instance.fetch(request);
+      await vi.runAllTimersAsync();
+      const response = await pending;
+      expect(container.start).toHaveBeenCalledTimes(2);
+      expect(probe).toHaveBeenCalledTimes(4);
       expect(onError).toHaveBeenCalledWith(
         expect.objectContaining({ message: expect.stringContaining("Container crashed while checking for ports") }),
       );
@@ -178,16 +264,18 @@ describe("SwitchboardServer.fetch — SDK port wait", () => {
 
   it("answers 503 when acquisition succeeds but the container disappears before port waiting", async () => {
     const { instance, container, probe } = sdkServer();
-    probe
-      .mockImplementationOnce(() => {
-        container.running = false;
-        return new Response();
-      })
-      .mockRejectedValue(new Error("Network connection lost."));
-    const response = await instance.fetch(new Request("https://bot.example/webhooks/github"));
+    let probes = 0;
+    probe.mockImplementation(() => {
+      container.running = false;
+      if (++probes % 2 === 1) return new Response();
+      throw new Error("Network connection lost.");
+    });
+    const pending = instance.fetch(new Request("https://bot.example/webhooks/github"));
+    await vi.runAllTimersAsync();
+    const response = await pending;
     expect(response.status).toBe(503);
     expect(response.headers.get("retry-after")).toBe("1");
-    expect(probe).toHaveBeenCalledTimes(2);
+    expect(container.start).toHaveBeenCalledTimes(2);
     expect(sdk.fetch).not.toHaveBeenCalled();
   });
 
@@ -233,19 +321,24 @@ describe("SwitchboardServer.fetch — SDK port wait", () => {
     expect(sdk.fetch).not.toHaveBeenCalled();
   });
 
-  it("forwards after SDK readiness and does not carry port loss into the next request", async () => {
+  it("recovers lost SDK port readiness before forwarding once and starts the next request normally", async () => {
     const { instance, container, probe, state } = sdkServer();
     probe.mockResolvedValueOnce(new Response()).mockImplementationOnce(() => {
       container.running = false;
       throw new Error("Network connection lost.");
     });
-    expect((await instance.fetch(new Request("https://bot.example/mcp"))).status).toBe(503);
+    const firstResponse = new Response("recovered", { status: 202 });
+    sdk.fetch.mockResolvedValueOnce(firstResponse);
+    const pending = instance.fetch(new Request("https://bot.example/mcp"));
+    await vi.runAllTimersAsync();
+    expect(await pending).toBe(firstResponse);
     const request = new Request("https://bot.example/webhooks/github", { method: "POST", body: "event-fixture" });
     const response = new Response("accepted", { status: 202 });
     sdk.fetch.mockResolvedValueOnce(response);
     expect(await instance.fetch(request)).toBe(response);
-    expect(state.setHealthy).toHaveBeenCalledOnce();
+    expect(state.setHealthy).toHaveBeenCalledTimes(2);
     expect(request.bodyUsed).toBe(false);
-    expect(sdk.fetch).toHaveBeenCalledExactlyOnceWith(request);
+    expect(sdk.fetch).toHaveBeenCalledTimes(2);
+    expect(sdk.fetch).toHaveBeenLastCalledWith(request);
   });
 });

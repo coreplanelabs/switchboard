@@ -14,6 +14,7 @@ import { githubDoorEdgeRoute } from "../../src/channels/githubDoorPaths.ts";
 // `cron` identity, so it becomes an ordinary run.
 import { Container, getContainer, type WaitOptions } from "@cloudflare/containers";
 import { ContainerPortLostError, containerRollResponse, isContainerRollStartError } from "./containerStart.ts";
+import { SECOND_MS } from "../../src/core/budgets.ts";
 import { parseHealthz } from "../../src/deploy/liveGate.ts";
 import {
   COORDINATOR_AUTHORIZE_PATH,
@@ -216,13 +217,25 @@ export class SwitchboardServer extends Container<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
-    try {
-      await this.startBot();
-    } catch (error) {
-      // No instance, a runtime rollout, or a port wait losing its container is
-      // unavailable, so answer 503. Other startup faults still surface.
-      if (isContainerRollStartError(error)) return containerRollResponse();
-      throw error;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.startBot();
+        if (attempt === 1) console.info("[container-start]", { outcome: "recovered" });
+        break;
+      } catch (error) {
+        if (!isContainerRollStartError(error)) {
+          if (attempt === 1) console.warn("[container-start]", { outcome: "failed" });
+          throw error;
+        }
+        if (attempt === 1) {
+          console.warn("[container-start]", { outcome: "unavailable" });
+          return containerRollResponse();
+        }
+        console.warn("[container-start]", { outcome: "retrying" });
+        // Startup has not consumed or forwarded this request. Retry readiness
+        // once after the advertised wait; never retry the downstream fetch.
+        await new Promise((resolve) => setTimeout(resolve, SECOND_MS));
+      }
     }
     return super.fetch(request);
   }
