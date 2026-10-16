@@ -648,7 +648,7 @@ export function runToolCapabilities<D extends SpawnCoreDeps>(
       runId: run.runId,
     },
     steer: {
-      steer: (target, text) =>
+      steer: (target, text, messageId) =>
         steerRun(
           {
             config: core.config,
@@ -658,6 +658,7 @@ export function runToolCapabilities<D extends SpawnCoreDeps>(
           },
           {
             userId: run.msg.userId,
+            ...(messageId !== undefined ? { messageId } : {}),
             ...(run.msg.userName !== undefined ? { userName: run.msg.userName } : {}),
             ...(run.msg.authenticatedAs !== undefined ? { authenticatedAs: run.msg.authenticatedAs } : {}),
             ...(run.msg.postedBy !== undefined ? { postedBy: run.msg.postedBy } : {}),

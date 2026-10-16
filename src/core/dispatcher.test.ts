@@ -1186,7 +1186,7 @@ describe("dispatch", () => {
       ]);
       const tools = (requests[0]!.tools ?? []).map((tool) => tool.name);
       expect(tools).toEqual(expect.arrayContaining(["spawn_run", "await_runs", "list_runs", "get_run_status"]));
-      expect(tools).not.toContain("send_to_run");
+      expect(tools).toContain("send_to_run");
       expect(tools).not.toContain("work_start");
       expect(deps.operatorModel).not.toHaveBeenCalled();
       const child = deps.runRegistry!.listActive().find((run) => run.agent === "research");

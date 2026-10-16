@@ -57,6 +57,16 @@ describe("orchestrator decision records", () => {
     const rehosted = createOrchestratorDecisions({ owner, previous: restored.snapshot(), save: async () => true });
     expect(await rehosted.record(spawn)).toBe(true);
     expect(rehosted.snapshot().at(-1)).toMatchObject({ tool: "spawn_run", targetHash: "f".repeat(64) });
+    const steer = {
+      ...source,
+      id: JSON.stringify([owner.runId, "steer"]),
+      tool: "send_to_run" as const,
+      targetHash: "a".repeat(64),
+    };
+    expect(await rehosted.record(steer)).toBe(true);
+    const restoredSteer = createOrchestratorDecisions({ owner, previous: rehosted.snapshot(), save: async () => true });
+    expect(await restoredSteer.record(steer)).toBe(true);
+    expect(restoredSteer.snapshot().at(-1)).toMatchObject({ tool: "send_to_run" });
   });
   it("retains concurrent selections and reuses only an identical saved decision", async () => {
     let stored: readonly OrchestratorDecision[] = [];

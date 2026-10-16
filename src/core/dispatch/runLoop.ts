@@ -7,7 +7,7 @@ import {
 import { runCheckTool } from "../../tools/check.js";
 import { reviewHeadOf } from "../../directives.js";
 import { gitInCheckout } from "../../execution/workspaceAdvance.js";
-import type { ToolContext } from "../../tools/runnableTool.js";
+import type { RunnableTool, ToolContext } from "../../tools/runnableTool.js";
 import { PUSHED_MAX } from "../../execution/residentRebind.js";
 import {
   reviewPublicationOf,
@@ -205,10 +205,12 @@ import { RefusalError, refusalOf } from "../refusal.js";
 import { shellQuote } from "../../execution/shellQuote.js";
 import {
   requesterSpawnTool,
+  requesterSteerTool,
   awaitRunsTool,
   listRunsTool,
   getRunStatusTool,
   type RequesterSpawn,
+  type RequesterSteer,
   type RunsReadCapability,
   type SteerCapability,
 } from "../../tools/runs.js";
@@ -2240,6 +2242,61 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           return result;
         }
       : undefined;
+  const steerCalls = new Map<string, { identity: string; result: ReturnType<RunnableTool["run"]> }>();
+  const sendToChild: RequesterSteer | undefined =
+    publicActions && steer && ctx.runs && ctx.recordWorkDecision && ctx.captureParentContext
+      ? async (quote, input, callId, remainingMs, execute) => {
+          const started = clock();
+          if (!Number.isFinite(remainingMs) || remainingMs <= 0)
+            return "error: The parent's remaining budget could not be proved.";
+          const selected = mainSources.select(quote);
+          if (selected.kind === "refused") return "error: This call does not match the latest requester turn.";
+          const source = selected.source;
+          const current = () =>
+            requesterSourceCurrent(quote, source) && remainingMs - Math.max(0, clock() - started) > 0;
+          const identity = JSON.stringify([source.msg.messageId, quote, input]);
+          const previous = steerCalls.get(callId);
+          if (previous)
+            return previous.identity === identity
+              ? previous.result
+              : "error: This call already selected a different change.";
+          const result = commandEffectGate
+            .run(async () => {
+              if (!current()) return "error: Requester authority is unavailable.";
+              return execute({
+                steer: async (target, text) => {
+                  if (!current()) throw new Error("The requester source changed; no message was sent.");
+                  const context = await ctx.captureParentContext!();
+                  if (
+                    !current() ||
+                    !(await ctx.recordWorkDecision!(
+                      source.msg,
+                      callId,
+                      { tool: "send_to_run", target: { runId: target.runId } },
+                      { id: target.runId, text },
+                      context,
+                    )) ||
+                    !current()
+                  )
+                    throw new Error(
+                      "The child-steer decision could not be saved with current authority; no message was sent.",
+                    );
+                  try {
+                    return await steer.steer(target, text, `run:${JSON.stringify([run.id, callId])}`);
+                  } catch (error) {
+                    void commandEffectGate.revoke();
+                    throw new Error("The delivery outcome is unknown. This run will send no further changes.", {
+                      cause: error,
+                    });
+                  }
+                },
+              });
+            })
+            .then((reply) => reply ?? "error: Requester authority was withdrawn; no further change was sent.");
+          steerCalls.set(callId, { identity, result });
+          return result;
+        }
+      : undefined;
   const stageFollowUps = async (inputs: readonly FollowUpInput[]): Promise<string> => {
     const ready = async (line: string) => {
       if (privateAudienceLatch.revoked) await withdrawMainWork();
@@ -3564,6 +3621,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
                     ),
                     ...(command ? conversationCommandTools(deps.commands) : []),
                     ...(delegate ? [requesterSpawnTool(delegate), awaitRunsTool, listRunsTool, getRunStatusTool] : []),
+                    ...(sendToChild ? [requesterSteerTool(sendToChild)] : []),
                     ...(reviewCheckReady && commandPolicy === "hosted-review" && checkExecution ? [runCheckTool] : []),
                   ].filter((tool) => slackContext !== undefined || tool.name !== "slack_context"),
                   mcpForRun?.tools,

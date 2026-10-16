@@ -726,6 +726,8 @@ export interface SteerTarget {
  *  the parent runs in, with the parent's thread as the link — and the run
  *  itself as `from`. */
 export interface SteerSender {
+  /** Trusted internal message identity, such as the recorded decision ID. */
+  messageId?: string;
   userId: string;
   userName?: string;
   /** The bound credential behind the person (item 15) and the app that relayed for them (item 14): the steer's gate decides on the actor they make. */
@@ -807,6 +809,7 @@ export async function steerRun(
   }
   const at = (deps.clock ?? systemClock)();
   const msg: IncomingMessage = {
+    ...(sender.messageId !== undefined ? { messageId: sender.messageId } : {}),
     channelId: sender.channelId,
     userId: sender.userId,
     ...(sender.userName !== undefined ? { userName: sender.userName } : {}),
