@@ -619,7 +619,6 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
         verdict,
         digest: undefined,
         answer,
-        carried: undefined,
         hardStopped: false,
         guardTransition: true,
         fetchPrFacts: async () => facts,
@@ -647,7 +646,6 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
           verdict,
           digest: undefined,
           answer,
-          carried: undefined,
           hardStopped: false,
           guardTransition: true,
           fetchPrFacts: async () => ({ state: "open", headSha: remote, headBranchExists: true, sameRepoHead }),
@@ -682,7 +680,6 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       verdict,
       digest: undefined,
       answer,
-      carried: undefined,
       hardStopped: false,
       post: h.post,
       publicationJournal: h.publicationJournal,
@@ -710,7 +707,6 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       verdict,
       digest: undefined,
       answer,
-      carried: undefined,
       hardStopped: false,
       guardTransition: true,
       post: h.post,
@@ -740,7 +736,6 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
         verdict,
         digest: undefined,
         answer,
-        carried: undefined,
         hardStopped: false,
         guardTransition: true as const,
         post: h.post,
@@ -766,7 +761,6 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       verdict,
       digest: undefined,
       answer,
-      carried: undefined,
       hardStopped: false,
       post: h.post,
       publicationJournal: h.publicationJournal,
@@ -789,7 +783,6 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       verdict,
       digest: undefined,
       answer,
-      carried: undefined,
       hardStopped: false,
       post: h.post,
       publicationJournal: h.publicationJournal,
@@ -812,7 +805,6 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       verdict,
       digest: undefined,
       answer,
-      carried: undefined,
       hardStopped: false,
       publicationJournal: h.publicationJournal,
       post: async () => {
@@ -836,7 +828,6 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       verdict,
       digest: undefined,
       answer,
-      carried: undefined,
       hardStopped: true,
       post: h.post,
       publicationJournal: h.publicationJournal,
@@ -862,7 +853,6 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       heads: { reviewHead: HEAD, observedHead: HEAD },
       verdict,
       answer,
-      carried: undefined,
       hardStopped: false,
       post: h.post,
       publicationJournal: h.publicationJournal,
@@ -949,7 +939,6 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       verdict,
       digest: undefined,
       answer,
-      carried: undefined,
       hardStopped: false,
       post: h.post,
       publicationJournal: h.publicationJournal,
@@ -969,7 +958,7 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
       ]);
     });
 
-    it("a review carried across a rebase records the head it was pinned to — the current one — not the one it read", async () => {
+    it("legacy carry metadata cannot retarget the recorded review to an unreviewed head", async () => {
       const h = harness();
       const events: RunEvent[] = [];
       const out = await runReviewPostStep({
@@ -983,31 +972,25 @@ describe("runReviewPostStep (explicit AgentDef decides the post)", () => {
         },
         fetchPrHead: async () => OTHER,
       });
-      expect(out).toMatchObject({ posted: true, head: OTHER });
-      expect(events[0]).toMatchObject({ type: "review_posted", head: OTHER });
+      expect(out).toMatchObject({ posted: true, head: HEAD });
+      expect(events[0]).toMatchObject({ type: "review_posted", head: HEAD });
     });
 
-    it("the carried-review note is an acknowledgement (routing-and-config item 28): one line through `ack` when the caller gives one, never through `reply`; without `ack` it falls back to `reply`", async () => {
+    it("legacy carry metadata cannot add a carried-review note or footer", async () => {
       const h = harness();
       const acks: string[] = [];
-      await runReviewPostStep({
+      const out = await runReviewPostStep({
         ...base(h, []),
         carried: { reviewed: HEAD, current: OTHER, commits: 2 },
         fetchPrHead: async () => OTHER,
-        ack: async (text: string) => void acks.push(text),
+        ack: async (text) => void acks.push(text),
       });
-      expect(acks).toEqual([
-        `ℹ️ acme/api#42: review carried to ${OTHER.slice(0, 7)} — a rebase of the same 2 commits (reviewed ${HEAD.slice(0, 7)}).`,
-      ]);
-      expect(h.replies).toEqual([]);
-      const bare = harness();
-      await runReviewPostStep({
-        ...base(bare, []),
-        carried: { reviewed: HEAD, current: OTHER, commits: 2 },
-        fetchPrHead: async () => OTHER,
-      });
-      expect(bare.replies).toHaveLength(1);
-      expect(bare.replies[0]).toContain("review carried to");
+      expect(out).toMatchObject({ posted: true, head: HEAD });
+      expect(acks).toEqual([]);
+      expect(h.posts[0].target.commitId).toBe(HEAD);
+      expect(h.posts[0].body).not.toContain("review is posted against");
+      expect(h.replies).toHaveLength(1);
+      expect(h.replies[0]).toContain("will not auto-approve");
     });
 
     it("a skipped post (the reviewed-head guard) publishes a `review_not_posted` note carrying the reason the outcome carries — a recorded skip, distinguishable from a post GitHub has not surfaced yet", async () => {
@@ -1234,6 +1217,32 @@ describe("settleReviewedHead — the head-move re-review", () => {
     return { input, executor, events, replies, labels, moves };
   }
 
+  it.each([false, true])(
+    "matching commit metadata cannot carry approval to another head (session %s)",
+    async (session) => {
+      const followUp = vi.fn(async (input: FollowUpTurnInput) => {
+        input.toolContext.onVerdict?.({ verdict: "approve", summary: "Fresh review", head: OTHER, findings: [] });
+        return "Fresh review";
+      });
+      const w = moved(session ? { followUp } : {});
+      w.input.fetchPrCommits = async () => list(["Same message and paths"]);
+      const out = await settleReviewedHead(w.input);
+      expect(out).not.toHaveProperty("carried");
+      if (session) {
+        expect(w.moves).toEqual([OTHER]);
+        expect(followUp).toHaveBeenCalledOnce();
+        expect(out).toMatchObject({
+          reviewHead: OTHER,
+          observedHead: OTHER,
+          verdict: { head: OTHER, summary: "Fresh review" },
+        });
+      } else {
+        expect(w.moves).toEqual([]);
+        expect(out).toMatchObject({ reviewHead: HEAD, verdict: { head: HEAD } });
+      }
+    },
+  );
+
   it("an explicit standalone pin prevents adopting or re-reviewing a moved head and refuses a changed checkout", async () => {
     const w = moved({ followUp: async () => "must not review another head" });
     const out = await settleReviewedHead({ ...w.input, pinnedHead: HEAD });
@@ -1242,7 +1251,6 @@ describe("settleReviewedHead — the head-move re-review", () => {
       verdict: { verdict: "approve", summary: "ok", head: HEAD, findings: [] },
       reviewHead: HEAD,
       observedHead: HEAD,
-      carried: undefined,
     });
     expect(w.moves).toEqual([]);
     w.executor.execResult = async () => ({ exitCode: 0, stdout: `${OTHER}\n`, stderr: "", truncated: false });
@@ -1268,7 +1276,7 @@ describe("settleReviewedHead — the head-move re-review", () => {
       if (kind === "rebase") w.input.fetchPrCommits = async () => list(["feat: the change"]);
       const out = await settleReviewedHead({ ...w.input, publication });
       expect(out.reviewHead).toBe(HEAD);
-      expect(out.carried).toBeUndefined();
+      expect(out).not.toHaveProperty("carried");
       expect(w.moves).toEqual([]);
       expect(followUp).not.toHaveBeenCalled();
     },
@@ -1309,7 +1317,6 @@ describe("settleReviewedHead — the head-move re-review", () => {
       verdict: expect.objectContaining({ verdict: "request_changes", head: OTHER }),
       reviewHead: OTHER,
       observedHead: OTHER,
-      carried: undefined,
     });
     // the same notes around it
     expect(w.events).toEqual([expect.objectContaining({ type: "run_note", kind: "head_moved" })]);
@@ -1457,7 +1464,6 @@ describe("settleReviewedHead — the head-move re-review", () => {
       verdict: expect.objectContaining({ verdict: "approve", head: HEAD }),
       reviewHead: HEAD,
       observedHead: HEAD,
-      carried: undefined,
     });
     expect(w.input.messages).toHaveLength(1); // nothing appended: no turn was asked
   });
@@ -1562,7 +1568,6 @@ describe("runReviewPostStep durable original publication", () => {
       verdict,
       digest: undefined,
       answer: "original review bytes",
-      carried: undefined,
       hardStopped: false,
       publicationJournal,
       post: async (target: ReviewCommentTarget, body: string) => {

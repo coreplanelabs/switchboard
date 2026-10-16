@@ -1,33 +1,5 @@
-// Head moved during a review run (docs/reference/specs/agent-review.md items 10 and 12).
-//
-// A review is posted pinned to the head it examined (`RepoContext.headSha`);
-// if a push landed while the run was in flight, the PR head is now a different
-// commit and the org's auto-approve workflow will skip a review pinned to the
-// old one as stale (by design — never an approval of unreviewed code). Before
-// item 12 that was the whole story: post pinned to the old head, tell the
-// thread, ask for a re-request (`headMovedNote`). When the move is a rebase
-// onto main for a doc conflict — the same commits, the same review — that
-// re-request costs a second full run to reach the same verdict.
-//
-// Item 12 classifies the move from the two `base...head` commit lists GitHub's
-// compare endpoint answers (`classifyHeadMove`), pure:
-//   rebase      — same number of commits, same messages in the same order, and
-//                 the same set of touched files (a rebase onto main, conflict
-//                 resolutions included — a resolution edits files the PR already
-//                 touched). The review applies unchanged: it is posted pinned to
-//                 the NEW head, with a footer saying so.
-//   substantive — anything else (new/dropped/reordered/reworded commits, or a
-//                 same-message amend that reaches new files). The same run
-//                 re-reviews at the new head — a second model turn with
-//                 `rereviewFollowUp` — before posting.
-// The file-set check is a cheap guard against the one blind spot of a
-// message-only rule (an `--amend` that keeps the message): it catches an amend
-// that reaches a new file, not one confined to files the PR already touched.
-// GitHub caps the compare file list at 300 entries; a truncated list on either
-// side skips the file check rather than fake a mismatch.
-//
-// Every text here is deterministic given its input — the dispatcher decides
-// when to say it; this module only says it.
+// A PR head change requires a fresh review. Commit messages and file paths
+// describe the move for the reviewer; they never prove unchanged contents.
 
 import { sameCommit } from "./reviewedHead.js";
 
@@ -62,7 +34,7 @@ export interface PrCommitList {
 }
 
 export type HeadMove =
-  | { kind: "rebase"; commits: number }
+  | { kind: "matching-metadata"; commits: number }
   | {
       kind: "substantive";
       before: number;
@@ -79,7 +51,7 @@ export function classifyHeadMove(before: PrCommitList, after: PrCommitList): Hea
   const sameMessages = msgsBefore.length === msgsAfter.length && msgsBefore.every((m, i) => m === msgsAfter[i]);
   const filesComparable = !before.filesTruncated && !after.filesTruncated;
   const sameFiles = !filesComparable || setEqual(new Set(before.files), new Set(after.files));
-  if (sameMessages && sameFiles) return { kind: "rebase", commits: msgsAfter.length };
+  if (sameMessages && sameFiles) return { kind: "matching-metadata", commits: msgsAfter.length };
   const beforeSet = new Set(msgsBefore);
   const afterSet = new Set(msgsAfter);
   return {
@@ -91,38 +63,17 @@ export function classifyHeadMove(before: PrCommitList, after: PrCommitList): Hea
   };
 }
 
-/** Thread note for a carried-forward review (rebase-only move): one line, an
- *  acknowledgement of what the system did — `verbose` material (routing-and-
- *  config item 28); the verdict that follows is what the thread needs. */
-export function headCarriedNote(input: { where: string; reviewed: string; current: string; commits: number }): string {
-  const r = short(input.reviewed);
-  const c = short(input.current);
-  return `ℹ️ ${input.where}: review carried to ${c} — a rebase of the same ${plural(input.commits, "commit")} (reviewed ${r}).`;
-}
-
-/** Appended to the posted GitHub body of a carried-forward review, so the
- *  reader of the PR sees why a review "of" the new head names the old one. */
-export function carriedFooter(input: { reviewed: string; current: string; commits: number }): string {
-  const r = short(input.reviewed);
-  const c = short(input.current);
-  return `_Reviewed at ${r}; the head moved to ${c} during the review — a rebase of the same ${plural(input.commits, "commit")} — so this review is posted against ${c}._`;
-}
-
 const LISTED_SUBJECTS_MAX = 4;
 
 /** Thread note when the same run re-reviews at the new head. */
-export function headRereviewNote(input: {
-  where: string;
-  reviewed: string;
-  current: string;
-  move: Extract<HeadMove, { kind: "substantive" }>;
-}): string {
+export function headRereviewNote(input: { where: string; reviewed: string; current: string; move: HeadMove }): string {
   const r = short(input.reviewed);
   const c = short(input.current);
   return `🔀 ${input.where} moved during the run: reviewed ${r}, head is now ${c} — ${describeMove(input.move)}. Re-reviewing at ${c} before posting.`;
 }
 
-function describeMove(move: Extract<HeadMove, { kind: "substantive" }>): string {
+function describeMove(move: HeadMove): string {
+  if (move.kind === "matching-metadata") return "available commit metadata matches; changed contents still need review";
   const parts = [...move.added.map((s) => `+ “${s}”`), ...move.removed.map((s) => `− “${s}”`)];
   const shown = parts.slice(0, LISTED_SUBJECTS_MAX);
   if (parts.length > LISTED_SUBJECTS_MAX) shown.push(`+${parts.length - LISTED_SUBJECTS_MAX} more`);
@@ -138,7 +89,7 @@ export function rereviewFollowUp(input: {
   where: string;
   reviewed: string;
   current: string;
-  move: Extract<HeadMove, { kind: "substantive" }>;
+  move: HeadMove;
   before: PrCommitList;
   after: PrCommitList;
 }): string {
@@ -167,10 +118,6 @@ function subject(message: string): string {
 
 function short(sha: string): string {
   return sha.trim().toLowerCase().slice(0, 7);
-}
-
-function plural(n: number, noun: string): string {
-  return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
 
 function setEqual<T>(a: Set<T>, b: Set<T>): boolean {

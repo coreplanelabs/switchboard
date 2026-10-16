@@ -6807,9 +6807,8 @@ describe("review post-step", () => {
   });
 
   // docs/reference/specs/agent-review.md item 12: a head that moved while the review ran
-  // is classified from GitHub's compare lists — a rebase of the same commits
-  // carries the review to the new head; anything else makes the SAME run
-  // re-review at the new head before posting. Unknown → item 10's pinned post
+  // uses GitHub's compare lists as context. Matching metadata still needs a
+  // fresh review at the new head in the same run. Unknown → the pinned post
   // + note. Before either guard refuses, the current head is consulted.
   describe("head moved during the run (item 12)", () => {
     const THIRD = THIRD_HEAD;
@@ -6958,35 +6957,30 @@ describe("review post-step", () => {
       return { deps, spy, headAsks, commitAsks };
     }
 
-    it("rebase-only move → ONE model turn, review posted pinned to the NEW head with the carried footer, thread told, no worktree move", async () => {
-      const provider = turnsProvider([{ verdict: { verdict: "approve", head: PR_HEAD }, answer: "Looks solid." }]);
+    it("matching commit metadata still requires a fresh review at the new head", async () => {
+      const provider = turnsProvider([
+        { verdict: { verdict: "approve", head: PR_HEAD }, answer: "Old approval." },
+        { verdict: { verdict: "request_changes", head: OTHER_HEAD }, answer: "The new contents have a defect." },
+      ]);
       const ex = movableExecutor(PR_HEAD);
       const { deps, spy, commitAsks } = setup({ provider, heads: [OTHER_HEAD], commits: SAME });
       const { io, replies } = fakeIO();
       await dispatch(deps, msg("agent:review https://github.com/acme/api/pull/42"), io);
-      expect(reviewTurns(provider)).toHaveLength(1); // no re-review
-      expect(ex.moves).toEqual([]);
-      expect(ex.probeSpans.length).toBeGreaterThan(0);
-      expect(new Set(ex.probeSpans)).toEqual(
-        new Set([
-          "dispatch.gate.attached_head.prepare_checkout",
-          "dispatch.gate.attached_head.initial_head",
-          "run.settle_reviewed_head",
-        ]),
-      );
+      expect(reviewTurns(provider)).toHaveLength(2);
+      expect(ex.moves).toEqual([OTHER_HEAD]);
+      expect(ex.probeSpans).toContain("run.settle_reviewed_head");
+      expect(ex.moveSpans).toEqual(["run.settle_reviewed_head"]);
       expect(spy.calls).toHaveLength(1);
       expect(spy.calls[0].target).toEqual({ repo: "acme/api", number: 42, commitId: OTHER_HEAD });
-      expect(spy.calls[0].body).toMatch(
-        /^LGTM: no issues found\n\n_Reviewed at `d75b5a5`\._[\s\S]*### Full review\n\nLooks solid\.\n\n<\/details>\n\n<!-- switchboard:verdict [^\n]* -->\n\n_Reviewed at e8e43f4; the head moved to d75b5a5 during the review — a rebase of the same 2 commits — so this review is posted against d75b5a5\._$/,
-      );
+      expect(spy.calls[0].body.split("\n")[0]).toBe("Changes requested: 1 issue");
+      expect(spy.calls[0].body).toContain("The new contents have a defect.");
+      expect(spy.calls[0].body).not.toContain("review is posted against");
       expect(commitAsks).toEqual([
         { base: "main", sha: PR_HEAD },
         { base: "main", sha: OTHER_HEAD },
       ]);
-      expect(replies).toContain(
-        "ℹ️ acme/api#42: review carried to d75b5a5 — a rebase of the same 2 commits (reviewed e8e43f4).",
-      );
-      expect(replies.some((r) => r.includes("re-request"))).toBe(false);
+      expect(replies.some((reply) => reply.includes("changed contents still need review"))).toBe(true);
+      expect(replies.some((reply) => reply.includes("review carried"))).toBe(false);
     });
 
     it("substantive move → the same run re-reviews: note + card, worktree moved, second turn sees the new head and the follow-up, post pinned to the new head with the NEW verdict", async () => {

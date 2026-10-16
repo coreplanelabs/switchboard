@@ -9374,13 +9374,18 @@ describe("the pi harness — the review preset", () => {
         );
       };
       const posts: Array<{ target: ReviewCommentTarget; body: string }> = [];
+      let checkoutHead = HEAD;
       const s = setup("", {
         agent: "review",
         ...prThread,
         yaml: REVIEW_PI_YAML,
         executor: {
           ...prThread.executor,
-          execResult: async () => ({ exitCode: 0, stdout: HEAD + "\n", stderr: "", truncated: false }),
+          execResult: async () => ({ exitCode: 0, stdout: checkoutHead + "\n", stderr: "", truncated: false }),
+          moveTo: async (sha) => {
+            checkoutHead = sha;
+            return { sha };
+          },
         },
         harness: {
           harnesses: roster(),
@@ -9411,26 +9416,28 @@ describe("the pi harness — the review preset", () => {
         answer: report,
         status: rebased ? "failed" : "completed",
         verdict: rebased ? "none" : "approve",
-        prompts: rebased ? 1 : 2,
+        // A moved head adds a fresh review before the existing verdict correction.
+        prompts: rebased ? 3 : 2,
       });
       expect(posts).toEqual([
-        { target: { repo: "o/r", number: 42, commitId: HEAD }, body: expect.stringContaining(report) },
+        {
+          target: { repo: "o/r", number: 42, commitId: rebased ? nextHead : HEAD },
+          body: expect.stringContaining(report),
+        },
       ]);
       expect(posts[0].body).toContain(
         rebased
-          ? "Review incomplete — findings not validated.\n\n_Review target: `a1b2c3d`._"
+          ? "Review incomplete — findings not validated.\n\n_Review target: `d75b5a5`._"
           : "_Reviewed at `a1b2c3d`._",
       );
       expect(posts[0].body).not.toContain("a rebase of the same");
       expect(rec.reviewPost).toEqual({
         posted: true,
         target: { repo: "o/r", number: 42 },
-        head: HEAD,
+        head: rebased ? nextHead : HEAD,
         ...(rebased ? {} : { verdict: "approve" }),
       });
-      expect(rec.events.filter((event) => event.type === "run_note" && event.kind === "verdict_turn")).toHaveLength(
-        rebased ? 0 : 1,
-      );
+      expect(rec.events.filter((event) => event.type === "run_note" && event.kind === "verdict_turn")).toHaveLength(1);
     },
   );
 

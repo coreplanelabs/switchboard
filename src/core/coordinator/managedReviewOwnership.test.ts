@@ -302,9 +302,9 @@ describe("managed review publication ownership", () => {
   );
 
   it.each(["accepted", "refused"] as const)(
-    "uses the actual carried-head producer and releases its known %s receipt",
+    "retains a known historical carried-head %s receipt without republishing it",
     async (state) => {
-      const { ledger, store } = await fixture(null);
+      const { ledger, store } = await fixture(state);
       const targets: unknown[] = [];
       const result = await runReviewPostStep({
         agent: AGENTS.review,
@@ -336,8 +336,13 @@ describe("managed review publication ownership", () => {
             (await ledger.setState(runId, "g1", { reviewPublication })).ok ? "committed" : "refused",
         },
       });
-      expect(targets).toEqual([{ repo: instance.repo, number: 7, commitId: posted }]);
-      expect(result).toMatchObject({ posted: state === "accepted" });
+      expect(targets).toEqual([]);
+      expect(result).toEqual({
+        posted: false,
+        uncertain: true,
+        reason: "the review publication outcome is unconfirmed",
+      });
+      expect(ledger.live.get(runId)?.state.reviewPublication).toMatchObject({ state, target: { commitId: posted } });
       const settled = await store.transitionUnitEffect({
         kind: "settle",
         expected: row,

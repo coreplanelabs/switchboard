@@ -35,9 +35,7 @@ import { ResidentRegistrationMismatchError, type ResidentBinding } from "../exec
 import type { ReviewCommentTarget } from "../execution/githubComments.js";
 import type { FollowUpTurn } from "./harness/contract.js";
 import {
-  carriedFooter,
   classifyHeadMove,
-  headCarriedNote,
   headMovedNote,
   headRereviewNote,
   rereviewFollowUp,
@@ -546,7 +544,7 @@ export function makeSystemComposer(input: {
  *  not leak back through the first turn's hook). The turn is one more `prompt`
  *  on the run's own pi session, through `followUp` (harness-pi item 14). */
 export interface ReviewTurnSpec {
-  /** The preset with its effective budget: the re-review's own budget. */
+  /** The same preset; follow-up remains bounded by the original session deadline. */
   agent: AgentDef;
   toolContext: ToolContext;
   onEvent: (event: RunEvent) => void;
@@ -558,42 +556,19 @@ export interface ReviewTurnSpec {
   followUp?: FollowUpTurn;
 }
 
-/** What the settle decided the round actually reviewed — the values the post
- *  gate then checks. `carried` is set when the head moved by a rebase of the
- *  same commits (the post is pinned to `current` with a footer). */
+/** The exact commit the round reviewed and the observed checkout. */
 export interface SettledReviewHead {
   answer: string;
   verdict: ReviewVerdict | undefined;
   reviewHead: string | undefined;
   observedHead: string | undefined;
-  carried: { reviewed: string; current: string; commits: number } | undefined;
 }
 
-/**
- * After a review round's model turn, read the workspace HEAD (BEFORE the
- * workspace can be released — post-release a resident would re-attach at the
- * ref's CURRENT tip, which is not evidence of what was reviewed) and fetch
- * the PR head NOW, before anything is posted:
- *
- *   reviewed = current ≠ resolved → the round reviewed the PR's current head
- *     (a mid-run re-attach landed on a newer tip): adopt it only with a
- *     matching verdict and complete bound history; otherwise void stale
- *     evidence and re-review on the existing session, or remain not approving.
- *   reviewed = resolved ≠ current → the PR moved under the review: classify
- *     the move from GitHub's compare lists. A rebase of the same commits
- *     carries the review to the new head (`carried`); a substantive move
- *     voids the verdict and re-reviews at the new head — worktree moved, ONE
- *     more prompt on the run's pi session (`messages` is appended in place) —
- *     before returning; a round with no session left to prompt (a `finish`
- *     plan) keeps the verdict for the head it reviewed and says so.
- *     Unclassifiable → item 10 (the post gate pins to the reviewed head; the
- *     note follows the post). Once: a head that moves again after the
- *     re-review is item 10's problem, never a third turn.
- *   reviewed ≠ both → returned as-is; the post gate refuses (item 8).
- *
- * The caller decides whether to invoke this at all (a hard-stopped round
- * observes nothing and posts nothing).
- */
+/** Check the workspace before release. A different PR head needs a fresh
+ * review on the existing session. Commit messages and file lists are context,
+ * never proof that code stayed the same. A pinned request keeps its original
+ * target. Without a session, the post can name only the head already reviewed.
+ * A second move remains subject to the final publication guard. */
 export async function settleReviewedHead(input: SettleReviewedHeadInput): Promise<SettledReviewHead> {
   // The whole settle is one uncounted `run.settle_reviewed_head` span
   // (docs/reference/specs/tracing.md): its git and GitHub awaits are overhead by design,
@@ -685,9 +660,8 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
   let answer = input.answer;
   let verdict = input.verdict;
   let reviewHead = input.reviewHead;
-  let carried: { reviewed: string; current: string; commits: number } | undefined;
   let observedHead = await probeHead();
-  const outcome = (): SettledReviewHead => ({ answer, verdict, reviewHead, observedHead, carried });
+  const outcome = (): SettledReviewHead => ({ answer, verdict, reviewHead, observedHead });
   if (stopped()) return outcome();
   if (input.publication || input.pinnedHead !== undefined) {
     const bound = input.publication;
@@ -775,18 +749,13 @@ async function settle(input: SettleReviewedHeadInput, span: Span | undefined): P
       if (stopped()) return outcome();
       const move = classified?.move;
       const followUp = turn.followUp;
-      if (move?.kind === "rebase" && completeReviewVerdict(verdict)) {
-        console.log(
-          `[review] ${logKey} head moved during run: ${expected.slice(0, 7)} → ${current.slice(0, 7)} — rebase of the same ${move.commits} commit(s); review carried to ${current.slice(0, 7)} (${where})`,
-        );
-        carried = { reviewed: expected, current, commits: move.commits };
-      } else if (classified && move?.kind === "substantive" && !followUp) {
+      if (classified && !followUp) {
         // No session to re-review on (a `finish` plan): the review stands for
         // the head it read, said on the record, and the post gate pins it there.
         const summary = `head moved ${expected.slice(0, 7)} → ${current.slice(0, 7)} — not re-reviewed: the loop answered before a restart and its session is gone; the verdict stands for ${expected.slice(0, 7)}`;
         console.log(`[review] ${logKey} ${summary} (${where})`);
         turn.onEvent({ type: "run_note", kind: "head_moved", summary, at: systemClock() });
-      } else if (classified && move?.kind === "substantive" && followUp) {
+      } else if (classified && followUp && move) {
         // Mutate the shared history context before any re-review work: the
         // verdict-only turn later uses the original context, not this turn's
         // copied sink. Neither old pages nor a matching old SHA can authorize
@@ -911,7 +880,7 @@ export type ReviewPostOutcome = ReviewPost;
  * line), or the reviewed-head guard refuses (fail-closed: the commit the
  * round actually reviewed must BE the pinned head). Every
  * skip and failure is said out loud through `reply` (best-effort, never a
- * failed run): the Slack-only notes, the carried-forward note, and the
+ * failed run): the Slack-only notes and the
  * head-moved-after-post note (one best-effort GET; unknown → no note, never a
  * false alarm). Safe to call at any lifecycle position — it touches only its
  * inputs, so the plain dispatch path keeps calling it AFTER workspace release
@@ -933,7 +902,8 @@ export async function runReviewPostStep(
      *  `onDigest`), or undefined when it never called the tool. */
     digest: DigestReport | undefined;
     answer: string;
-    carried: { reviewed: string; current: string; commits: number } | undefined;
+    /** Legacy metadata is accepted for compatibility and cannot change the post target. */
+    carried?: { reviewed: string; current: string; commits: number };
     hardStopped: boolean;
     /** The GitHub post; the dispatcher passes `deps.postReviewComment ?? postReviewComment`. */
     post: (target: ReviewCommentTarget, body: string) => Promise<GithubReviewWriteResult | void>;
@@ -941,10 +911,7 @@ export async function runReviewPostStep(
     publicationJournal?: ReviewPublicationJournal;
     fetchPrHead: FetchPrHead;
     reply: (text: string) => Promise<void>;
-    /** An acknowledgement's reply (routing-and-config item 28) — the carried-
-     *  review note goes out through it, so the request's verbosity decides;
-     *  absent, `reply`. The notes that need the person (a review not posted, a
-     *  head that moved after the pin) stay on `reply`. */
+    /** Legacy reply seam; current review notices use reply. */
     ack?: (text: string) => Promise<void>;
     /** The run's stream (`registry.publish` bound to the run): the outcome is
      *  published as a `review_posted` event or a `review_not_posted` note for a
@@ -966,7 +933,7 @@ export async function runReviewPostStep(
       }
   ),
 ): Promise<ReviewPostOutcome> {
-  const { agent, repoCtx, carried, logKey } = input;
+  const { agent, repoCtx, logKey } = input;
   const verdict = input.reviewIncomplete !== undefined ? undefined : input.verdict;
   const { reviewHead, observedHead } = input.heads;
   // The record's fact (item 18): what a review round leaves behind about its
@@ -1019,8 +986,8 @@ export async function runReviewPostStep(
       !sameCommit(reviewHead ?? "", pinnedHead) ||
       !sameCommit(observedHead ?? "", pinnedHead) ||
       (verdict?.head !== undefined && !sameCommit(verdict.head, pinnedHead)) ||
-      (carried !== undefined &&
-        (!sameCommit(carried.reviewed, pinnedHead) || !sameCommit(carried.current, pinnedHead))))
+      (input.carried !== undefined &&
+        (!sameCommit(input.carried.reviewed, pinnedHead) || !sameCommit(input.carried.current, pinnedHead))))
   )
     return record({ posted: false, reason: "the saved review target was not confirmed" });
   let skipReason = "the round was hard-stopped — nothing is posted after an abort";
@@ -1106,7 +1073,7 @@ export async function runReviewPostStep(
     // that ref is at the commit this verdict covers. A head-only read can keep
     // reporting the last commit after a same-repository branch is deleted.
     const where = `${postTarget.repo}#${postTarget.number}`;
-    const pinned = carried?.current ?? reviewHead;
+    const pinned = reviewHead;
     const facts = await input
       .fetchPrFacts?.({ repo: postTarget.repo, number: postTarget.number })
       .catch(() => undefined);
@@ -1135,21 +1102,17 @@ export async function runReviewPostStep(
   }
   if (postTarget && reviewHead) {
     // narrowing only — the guard above already required it
-    // Pinned to the PR head the guard just verified was reviewed — or, for a
-    // review carried across a rebase (item 12), to the new head it applies
-    // to — so the org's auto-approve stale-review check bites on a later push
-    // and not on this one.
-    const pinned = carried?.current ?? reviewHead;
+    // Only the reviewed commit can receive this verdict.
+    const pinned = reviewHead;
     const target: ReviewCommentTarget = { ...postTarget, commitId: pinned };
     // The verdict line is built here, by code — the model's prose never
     // decides whether the body starts with "LGTM:" (auto-approve contract).
-    const rendered = buildReviewPostBody(
+    const body = buildReviewPostBody(
       input.answer,
       verdict,
       { repo: postTarget.repo, head: pinned },
       input.reviewIncomplete,
     );
-    const body = carried ? `${rendered}\n\n${carriedFooter(carried)}` : rendered;
     const where = `${postTarget.repo}#${postTarget.number}`;
     const uncertain = async (): Promise<ReviewPostOutcome> => {
       const reason = "the review publication outcome is unconfirmed";
@@ -1221,10 +1184,7 @@ export async function runReviewPostStep(
       // Keep the original pending receipt and never emit a not-posted claim.
       return uncertain();
     }
-    console.log(
-      `[review-post] ${logKey} → ${where} (${verdict?.verdict ?? "no verdict"})${carried ? ` carried ${carried.reviewed.slice(0, 7)} → ${pinned.slice(0, 7)}` : ""}`,
-    );
-    if (carried) await (input.ack ?? input.reply)(headCarriedNote({ where, ...carried })).catch(() => {});
+    console.log(`[review-post] ${logKey} → ${where} (${verdict?.verdict ?? "no verdict"})`);
     // Head-moved note (item 10): a push that landed after the head was last
     // checked makes this a review of an outdated commit — pinned, so it
     // will not auto-approve (correct) but silent in the thread (not). One

@@ -1484,10 +1484,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
   let rewrittenHead: { ref: string; sha: string } | undefined;
   // How the review post-step ended (agent-review.md item 18) — the record's fact.
   let reviewPost: ReviewPostOutcome | undefined;
-  // Set when the head moved during the run by a rebase of the same commits
-  // (item 12): the post is pinned to `current` with a footer, and the thread
-  // is told the review was carried forward.
-  let carried: { reviewed: string; current: string; commits: number } | undefined;
   let runFailed = false; // the runner threw → terminal status `failed`
   /** The runner threw the gate's bypass: what ran in the workspace was never vetted, so its release tears it down whatever the record shows in flight. */
   let gateBypassed = false;
@@ -1899,7 +1895,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     verdict = undefined;
     reviewHead = undefined;
     observedHead = undefined;
-    carried = undefined;
     reviewPost = undefined;
     return true;
   };
@@ -4023,7 +4018,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
         };
       reviewHead = settled.reviewHead;
       observedHead = settled.observedHead;
-      carried = settled.carried;
     }
     if (agent.name === "review" && reviewSubmission !== undefined) await persistReviewSubmission(reviewSubmission);
     // The verdict turn (agent-review item 5, verdictTurn.ts): the review prompt
@@ -4659,7 +4653,7 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
     // agent-review.md items 8, 10, 12, 15 and 18): a `review` run against a
     // resolved PR posts its findings back to that PR by default — no need to
     // ask — behind the reviewed-head guard (fail-closed) and pinned to the
-    // verified head (or the carried one). HERE, in the run loop BEFORE the
+    // verified head. HERE, in the run loop BEFORE the
     // finally below finish()es the stream — like the coding post-step above —
     // so the outcome is a fact of the record (`reviewPost`, the
     // `review_posted` event or the `review_not_posted` note) and a
@@ -4689,7 +4683,6 @@ export async function runLoop(deps: RunDeps, ctx: RunLoopContext): Promise<RunLo
           reviewIncomplete: reviewSubmissionFailure(reviewSubmission),
           digest,
           answer,
-          carried,
           hardStopped: false,
           ...(coordinator !== undefined || pinnedHead !== undefined
             ? {
