@@ -252,14 +252,14 @@
     "web/green/App.vue": "19d92e1d4094651b9166042b2a89e37c0acc28a59b48a0d331c6b30f4bfee740",
     "web/green/components/ConfirmationPrompt.vue": "e507475c724e1799d453f74ebc2793838cc66e941db656de80ef987d26734506",
     "web/green/components/ConversationComposer.vue": "0c34cda42bdbc13cac51579587eb1bd53cf00823b7b77514f96d13a7479671dd",
-    "web/green/components/ConversationDock.vue": "d0b5e3353ba66dd051882fae5765a90acf7f635b58adcc48a767170177e6c76a",
+    "web/green/components/ConversationDock.vue": "24bcceb989fb11f4928cacf869cff57fd02a409080babf7d631a8803845c1003",
     "web/green/components/EmptyState.vue": "b1417e9f01df5b3c276806ad0c6dbcffbdc19ae56c49a460a689bb58b1892424",
     "web/green/components/PageHeading.vue": "3eecaa4b240a2a817d673901890b304465b9cb94f84d535a6e497600b26500c5",
     "web/green/components/Shell.vue": "5b251b4cb4c08fead6f37b43785e3a65571b5688c65f015af27a7d7d9107873f",
     "web/green/components/StatTiles.vue": "0ba68004b9f541e6fc5cb42d6d133b6a6aa10bc8562215fb03715477fc9ac99f",
     "web/green/components/UserMenu.vue": "0f160c45a4a4ee7259d0761c5d056e442797b8dae544242fd9e4d8d850cd8993",
     "web/green/lib/emoji.ts": "e20deb0e4e5473e9640ad869df1c11ba46b13925a1a70483cd49c6125de07dcb",
-    "web/green/lib/homeSession.ts": "7d043e26de3490510ba5ef967e2983008b5186597130193300421340f03fe7b9",
+    "web/green/lib/homeSession.ts": "3baea58385a681fdbd86b57c5f58b1034cb457ca8f3f6a8567bab1bf50ba5755",
     "web/green/lib/navigation.ts": "0ab448d2dbf2129f078f6e2823632224e214773559442003ea7609fa48d69ded",
     "web/green/main.ts": "b954c7ebd1bdb85d5c22d62775b94744a854578308b54a8a449d8971fe805367",
     "web/green/pages/Costs.vue": "42b636513659cc58767b78f8b6316d37e0d64054278e0ca32c44216a57a1b475",
@@ -290,6 +290,7 @@
     "web/src/lib/githubLinks.ts": "31cccab8a0ae5305eddc02a4ff58ab2cac61caccbc3760ea3100092383fcc603",
     "web/src/lib/homeModel.ts": "e60f5baa96c1be10fa018a716b8e47beaa46a29a3c6ddc234309ada5c9ca9044",
     "web/src/lib/indexRow.ts": "0abb02cca18b4ad5f9aa6febbe074d86e86f1cac6e7b0c566e982da9bac08666",
+    "web/src/lib/prReviewCollector.ts": "833e8c16e9c6e3a9219b5983bb31de0f35ddad5aa7d40f2d84184c3134f3e12d",
     "web/src/lib/runPageModel.ts": "2d24ef43640ec1da84a27675cdedbf6204082630e955a9a66f07793c6c4a79e2",
     "web/src/lib/runStream.ts": "94a77b6f14a24ebd3fd297b8d16dc1c26fd0f7aeee7d796bce53180bcf71e6dc",
     "web/src/lib/seed.ts": "b7ac1e0780a5f69b2ef2d5d0c40e41119a015fd29fb63c4026d4425b02d53661",
@@ -300,6 +301,7 @@
     "web/src/lib/thinkingVerbs.ts": "a8b6fc8ff9d17b3e35dd64443e893415f25300e3e9d85b062cc7a6481360455a",
     "web/src/lib/uiTheme.ts": "ecfe9b9da372426af79e2eac87dc12b28e75c403ec2df9aa395da12c2aa6f4fd",
     "web/src/lib/wallClock.ts": "d81d36cd618a94540500e6ae2b6e867156dcad0e910b644cb6d7bf619a501c6f",
+    "web/src/modules/pr-review/types.ts": "91734e34b750e8b00565613f2533fd061730b1a613cf66af78e7dfd183d9eb0c",
     "web/vite.config.ts": "1924ef337874caf47fb5ad327fb9c8f200ed24738fdd7b6972e9485ff6431c2c"
   }
 }

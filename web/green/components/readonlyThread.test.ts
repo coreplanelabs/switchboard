@@ -58,6 +58,40 @@ function session(focused = false): HomeSession {
   };
 }
 describe("unfocused thread privacy", () => {
+  it("focuses the read-only unavailable explanation on explicit revocation without focusing network failures", async () => {
+    const stream = fakeEventSourceFactory();
+    const home = createHomeSession(
+      (async (url: string) => new Response(JSON.stringify(session(url.includes("thread="))))) as typeof fetch,
+      stream.factory,
+    );
+    await home.load();
+    const page = mountApp(ReadonlyThread, {
+      props: { thread },
+      eventSource: stream.factory,
+      provides: [[HomeSessionKey, home]],
+    });
+    await flushPromises();
+    (page.get("button").element as HTMLButtonElement).focus();
+    const observer = stream.created.find((source) => source.url.includes("observe=1"))!;
+    observer.emitError();
+    await flushPromises();
+    expect(document.activeElement?.getAttribute("tabindex")).not.toBe("-1");
+    expect(page.text()).toContain("Conversation is unavailable");
+    page.unmount();
+    const ready = mountApp(ReadonlyThread, {
+      props: { thread },
+      eventSource: stream.factory,
+      provides: [[HomeSessionKey, home]],
+    });
+    await flushPromises();
+    (ready.get("button").element as HTMLButtonElement).focus();
+    stream.created.at(-1)!.emitNamed("revoked");
+    await flushPromises();
+    expect(document.activeElement?.textContent).toContain("Conversation is unavailable");
+    expect(document.activeElement?.getAttribute("tabindex")).toBe("-1");
+    home.dispose();
+  });
+
   it("offers All people Reply only after the actual viewer's target session proves write access and holds unavailable private targets", async () => {
     const stream = fakeEventSourceFactory();
     const home = createHomeSession(

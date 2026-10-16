@@ -114,6 +114,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
   const session = ref<HomeSession | null>(null);
   const status = ref<HomeSessionStatus>("loading");
   const scopeChanging = ref(false);
+  const revocations = ref(0);
   const text = ref("");
   const scroll = ref(0);
   const context = ref<AttachedContext[]>([]);
@@ -265,7 +266,10 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
       if (incoming.destination.kind === "broad") broad = incoming;
     };
     attached.addEventListener("revoked", () => {
-      if (active()) unavailable();
+      if (active()) {
+        unavailable();
+        revocations.value++;
+      }
     });
     attached.addEventListener("unavailable", () => {
       if (active()) unavailable();
@@ -700,6 +704,7 @@ export function createHomeSession(fetchFn: typeof fetch, makeSource: EventSource
     inlineAnswer,
     resetPrivate,
     scopeChanging,
+    revocations,
     beginInlineAnswer,
     preserveInlineAnswer,
     status,
