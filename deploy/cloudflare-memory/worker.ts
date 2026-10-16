@@ -1,3 +1,11 @@
+import {
+  nativeRetirementTargetSchema,
+  nativeRetirementTargetKey,
+  nativeRetirementPermitSchema,
+  nativeRetirementSource,
+  type NativeRetirementTarget,
+  type NativeRetirementPreparation,
+} from "../../src/execution/nativeRetirement.js";
 import { INBOX_DELIVERY_RECEIPTS_MAX } from "../../src/core/budgets.ts";
 import {
   prepareInboxDelivery,
@@ -2599,6 +2607,8 @@ export class RunHistoryDO extends DurableObject<Env> {
         value INTEGER NOT NULL
       );
       INSERT OR IGNORE INTO resident_claim_clock (id, value) VALUES (1, 0);
+      CREATE TABLE IF NOT EXISTS native_scope_retirements (target_key TEXT PRIMARY KEY, run_id TEXT NOT NULL, permit_json TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS native_scope_retirements_run ON native_scope_retirements(run_id);
       CREATE TABLE IF NOT EXISTS workspace_settlements (
         owner_key TEXT NOT NULL,
         revision INTEGER NOT NULL DEFAULT 1,
@@ -2856,7 +2866,7 @@ export class RunHistoryDO extends DurableObject<Env> {
     // dedupe row and a parked run's wait live until the run's seal deletes them.
     const reservations = this.sql
       .exec<{ kind: string; key: string; run_id: string; at: number }>(
-        `SELECT * FROM plane_reservations WHERE kind != 'thread' OR at > ?`,
+        `SELECT * FROM plane_reservations WHERE (kind != 'thread' OR at > ?) AND NOT EXISTS (SELECT 1 FROM native_scope_retirements n WHERE n.run_id = plane_reservations.run_id)`,
         now - minutesToMs(PLANE.reservationMinutes),
       )
       .toArray()
@@ -2881,7 +2891,9 @@ export class RunHistoryDO extends DurableObject<Env> {
         position_at: number;
         queued_at: number;
         state: string;
-      }>(`SELECT * FROM plane_queue ORDER BY queued_at ASC, run_id ASC`)
+      }>(
+        `SELECT * FROM plane_queue WHERE NOT EXISTS (SELECT 1 FROM native_scope_retirements n WHERE n.run_id = plane_queue.run_id) ORDER BY queued_at ASC, run_id ASC`,
+      )
       .toArray()
       .map((r): PlaneQueueRow => ({
         runId: r.run_id,
@@ -3112,6 +3124,7 @@ export class RunHistoryDO extends DurableObject<Env> {
         // owner died leaves (run-history item 42), so the bot's reclaim sweep
         // restarts it from the stored request under this id.
         if (w.effect.kind === "admit") {
+          if (this.nativeRetirementFenced(w.effect.runId)) throw new Error("terminal native retirement is prepared");
           this.sql.exec(
             `INSERT OR IGNORE INTO live_runs (run_id, thread_key, owner_gen, lease_until, started_at, phase, stop, meta_json, card_json, system_text, tools_json, state_json)
              VALUES (?, ?, 'plane', ?, ?, 'attaching', NULL, ?, NULL, '', '[]', '{}')`,
@@ -6542,6 +6555,10 @@ export class RunHistoryDO extends DurableObject<Env> {
       reason: "unknown-run",
     };
     this.ctx.storage.transactionSync(() => {
+      if (this.nativeRetirementFenced(runId)) {
+        out = { ok: false, reason: "fenced" };
+        return;
+      }
       const row = this.liveRow(runId);
       if (!row) return;
       if (row.ownerGen !== gen || row.threadKey !== threadKey) {
@@ -7518,6 +7535,7 @@ export class RunHistoryDO extends DurableObject<Env> {
   }
 
   async claim(req: ClaimRequest, now: number, originalBodyJson?: string, nativeClient = false): Promise<ClaimResult> {
+    if (this.nativeRetirementFenced(req.runId)) throw new Error("terminal native retirement is prepared");
     if (this.liveRow(req.runId)?.state.cancellation !== undefined) throw new PromotionPendingError(req.runId);
     const originalExecution = workspaceDurabilityArchiveOf(this.allocationArchive(req.runId))?.residentExecution;
     if (!nativeClient && (originalExecution === "native-v1" || req.meta.residentExecution === "native-v1"))
@@ -7547,6 +7565,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       if (archive?.promotionCommit) {
         const allocationAck = allocationAckFromCanonical(this.allocationArchive(req.runId), this.liveRow(req.runId));
         if (!allocationAck) throw new PromotionPendingError(req.runId, "corrupt");
+        if (this.nativeRetirementFenced(req.runId)) throw new Error("terminal native retirement is prepared");
         return { ok: true, allocationAck, promotionCommit: structuredClone(archive.promotionCommit) };
       }
     }
@@ -7565,6 +7584,7 @@ export class RunHistoryDO extends DurableObject<Env> {
       let out: ClaimResult = { ok: true };
       let duplicateCommit = false;
       this.ctx.storage.transactionSync(() => {
+        if (this.nativeRetirementFenced(req.runId)) throw new Error("terminal native retirement is prepared");
         if (this.promotionHeld(req.runId, req.gen)) {
           const archive = workspaceDurabilityArchiveOf(this.allocationArchive(req.runId));
           if (
@@ -8592,6 +8612,7 @@ export class RunHistoryDO extends DurableObject<Env> {
               item.raw === canonicalSeedJson(this.allocationArchive(row.runId)),
           ),
       )) {
+        if (this.nativeRetirementFenced(row.runId)) continue;
         const prior = workspaceDurabilityArchiveOf(this.allocationArchive(row.runId));
         if (prior?.residentExecution === "native-v1" && !nativeClient) continue;
         if (row.meta.executionUnclaimed === true && this.allocationArchive(row.runId) === undefined) {
@@ -9022,6 +9043,52 @@ export class RunHistoryDO extends DurableObject<Env> {
       }
     }
     return { kind: "terminal", allocation: archive.allocation, disposition: archive.disposition };
+  }
+
+  nativeRetirementFenced(runId: string): boolean {
+    return (
+      this.sql.exec("SELECT 1 FROM native_scope_retirements WHERE run_id = ? LIMIT 1", runId).toArray().length !== 0
+    );
+  }
+  async prepareNativeRetirement(target: NativeRetirementTarget): Promise<NativeRetirementPreparation> {
+    let result: NativeRetirementPreparation = { kind: "held", reason: "terminal-source-unavailable" };
+    this.ctx.storage.transactionSync(() => {
+      const runId = target.scope.owner.runId;
+      if (this.liveRow(runId)) {
+        result = { kind: "held", reason: "owner-live" };
+        return;
+      }
+      const key = nativeRetirementTargetKey(target);
+      const prior = this.sql
+        .exec<{ permit_json: string }>("SELECT permit_json FROM native_scope_retirements WHERE target_key = ?", key)
+        .toArray()[0];
+      if (prior) {
+        const saved = nativeRetirementPermitSchema.safeParse(parseStoredJson(prior.permit_json));
+        if (saved.success && nativeRetirementTargetKey(saved.data.target) === key)
+          result = { kind: "prepared", permit: saved.data };
+        return;
+      }
+      const row = this.sql
+        .exec<{ summary_json: string }>("SELECT summary_json FROM runs WHERE run_id = ?", runId)
+        .toArray()[0];
+      const source = row && parseSummary(row) ? nativeRetirementSource(parseStoredJson(row.summary_json)) : undefined;
+      const parsed = nativeRetirementPermitSchema.safeParse({
+        version: 1,
+        purpose: "terminal-native-scope",
+        id: crypto.randomUUID(),
+        target,
+        source,
+      });
+      if (!parsed.success) return;
+      this.sql.exec(
+        "INSERT INTO native_scope_retirements(target_key,run_id,permit_json) VALUES(?,?,?)",
+        key,
+        runId,
+        JSON.stringify(parsed.data),
+      );
+      result = { kind: "prepared", permit: parsed.data };
+    });
+    return result;
   }
 
   async preservationOwner(runId: string, owner?: WorkspaceOwner): Promise<unknown> {
@@ -13111,6 +13178,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/reclaim",
   "/runs/live",
   "/runs/preservation-owner",
+  "/runs/native-retirement/prepare",
   "/runs/workspace-disposition",
   "/runs/workspace-ack",
   "/runs/live-events",
@@ -14181,6 +14249,8 @@ async function handleLedger(
     }
     const req = parseClaim(b);
     if (!req.ok) return json({ error: req.error }, 400);
+    if (await stub.nativeRetirementFenced(req.value.runId))
+      return json({ error: "terminal native retirement is prepared" }, 409);
     if (
       !nativeClient &&
       (req.value.meta.residentExecution === "native-v1" || (await stub.nativeExecutionRequired(req.value.runId)))
@@ -14208,6 +14278,11 @@ async function handleLedger(
     return result.ok ? json(result) : json(result, 409);
   }
   if (pathname === "/runs/live") return json({ runs: await stub.listLive() });
+  if (pathname === "/runs/native-retirement/prepare") {
+    const target = nativeRetirementTargetSchema.safeParse(b.target);
+    if (!target.success) return json({ error: "exact terminal native target is required" }, 400);
+    return json(await stub.prepareNativeRetirement(target.data));
+  }
   if (pathname === "/runs/preservation-owner") {
     const runId = parseRunId(b.runId);
     if (!runId.ok) return json({ error: runId.error }, 400);

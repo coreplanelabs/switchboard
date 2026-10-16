@@ -990,3 +990,9 @@ No source processor calls this operation. Recovery must read and match the saved
 | Successful HTTP saves and exact replays log the event key, fixed verdict/source and original save time. Refusals log the validated request's event key and fixed reason; malformed requests expose no raw key. Logs exclude private text, context coordinates and claim tokens. | `[worker]` `deploy/cloudflare-memory/runLedger.test.ts::source relevance diagnostics in SQLite::*` |
 | HTTP acknowledgments bind the exact source receipt and frozen result. Refusals stay explicit; missing or malformed responses remain unknown with no fallback operation. | `[unit]` `src/core/runLedgerWorker.test.ts::source relevance client::*` |
 | The source processor reuses a matching saved result and checks current context/access before an authorized route or fold. | `[gap]` No processor or source producer is enabled. This is storage support only. |
+
+## Terminal native retirement authority
+
+| Criterion | Proof |
+| --- | --- |
+| Memory prepares a terminal-native-scope permit only from an exact canonical terminal record with a finite seal, no raw provisional/restart marker, and no live row. Its durable run-ID fence orders cleanup against direct claims, queued live-row creation and reclaim. History remains unchanged. | `[unit]` `deploy/cloudflare-memory/runLedger.test.ts::terminal native retirement authority::*` |

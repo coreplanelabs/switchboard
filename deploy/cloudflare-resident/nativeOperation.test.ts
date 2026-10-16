@@ -1,3 +1,10 @@
+import {
+  nativeRetirementTargetSchema,
+  nativeRetirementPermitSchema,
+  nativeRetirementTargetKey,
+  type NativeRetirementPermit,
+} from "../../src/execution/nativeRetirement.js";
+import { isWorkspaceOwner, workspaceOwnerKey } from "../../src/core/workspaceSettlement.js";
 import { selectedResidentMember } from "../../src/execution/residentMembers";
 import ts from "typescript";
 import { runInNewContext } from "node:vm";
@@ -6,7 +13,7 @@ import { sanitizeResidentBody } from "../../src/execution/residentText.js";
 import { validNativeOperationKey } from "./nativeOperation.js";
 import { describe, expect, it } from "vitest";
 import { NativeOperationJournal, type NativeOperationStorage, type NativeOperationRows } from "./nativeOperation.js";
-import { NativeRunScopes } from "./nativeScope.js";
+import { NativeRunScopes, type NativeScopeTransport } from "./nativeScope.js";
 import { KeyedAsyncLock } from "./keyedAsyncLock.js";
 import { RUN_ID_PATTERN } from "../../src/core/runIdentity.js";
 
@@ -675,7 +682,16 @@ describe("native operation journal", () => {
   });
 });
 
-function httpFixture(h: ReturnType<typeof fixture>, running = false, reportError?: Error, failStub = false) {
+function httpFixture(
+  h: ReturnType<typeof fixture>,
+  running = false,
+  reportError?: Error,
+  failStub = false,
+  retirement?: {
+    native: NativeScopeTransport;
+    permit?: NativeRetirementPermit;
+  },
+) {
   const source = ts.createSourceFile("worker.ts", readSource("worker.ts"), ts.ScriptTarget.Latest, true);
   const functions = [
     "bearerToken",
@@ -686,9 +702,12 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false, reportError
     "parseThreadKey",
     "handleDebug",
     "handleRecoverNativeOperation",
+    "handleRetireNativeOperation",
     "json",
-  ].map((name) =>
-    source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name)!.getText(source),
+  ].map(
+    (name) =>
+      source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name)?.getText(source) ??
+      "",
   );
   const variables = [
     "ROUTES",
@@ -697,6 +716,13 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false, reportError
     "REPO_ID_RE",
     "SUPPORTED_RESOURCE_TYPES",
     "THREAD_KEY_RE",
+    "RESOURCE_KEY",
+    "THREAD_KEY_PREFIX",
+    "RUN_REG_KEY_PREFIX",
+    "RUN_FENCE_KEY_PREFIX",
+    "threadBindingKey",
+    "runRegKey",
+    "runFenceKey",
   ].map((name) =>
     source.statements
       .find(
@@ -711,8 +737,15 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false, reportError
   const fetch = object.properties.find(
     (node) => ts.isMethodDeclaration(node) && node.name.getText(source) === "fetch",
   )!;
+  const residentClass = source.statements.find(
+    (node): node is ts.ClassDeclaration => ts.isClassDeclaration(node) && node.name?.text === "ResidentDO",
+  )!;
+  const retireMethod = residentClass.members.find(
+    (node) => ts.isMethodDeclaration(node) && node.name.getText(source) === "retireNativeOperation",
+  );
+  const receiverSource = `class UnderTest { ${retireMethod?.getText(source) ?? ""} }; const receiver = new UnderTest();`;
   const compiled = ts.transpileModule(
-    [...functions, ...variables, `const worker = { ${fetch.getText(source)} };`].join("\n"),
+    [...functions, ...variables, receiverSource, `const worker = { ${fetch.getText(source)} };`].join("\n"),
     { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
   ).outputText;
   let nativeReads = 0;
@@ -720,11 +753,33 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false, reportError
   let terminated = false;
   const reports: unknown[] = [];
   const residentResources: string[] = [];
-  const worker = runInNewContext(compiled + "\nworker", {
+  const memoryRequests: unknown[] = [];
+  let receiver: { retireNativeOperation(target: unknown): Promise<unknown> };
+  const loaded = runInNewContext(compiled + "\n({worker,receiver})", {
     Request,
     Response,
     URL,
     TextEncoder,
+    AbortSignal,
+    NativeOperationJournal,
+    KeyedAsyncLock,
+    nativeRetirementTargetSchema,
+    nativeRetirementPermitSchema,
+    nativeRetirementTargetKey,
+    isWorkspaceOwner,
+    workspaceOwnerKey,
+    RUN_STORE_KEY: "runs:default",
+    RUN_STORE_TIMEOUT_MS: 10000,
+    fetch: async (_input: unknown, init: RequestInit) => {
+      memoryRequests.push(JSON.parse(String(init.body)));
+      return new Response(
+        JSON.stringify(
+          retirement?.permit
+            ? { kind: "prepared", permit: retirement.permit }
+            : { kind: "held", reason: "terminal-source-unavailable" },
+        ),
+      );
+    },
     sanitizeResidentBody,
     selectedResidentMember,
     registryStub: () => ({ getRepository: async (resource: string) => ({ resource }) }),
@@ -765,6 +820,7 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false, reportError
             : { threads: [] };
         },
         getNativeOperations: (cursor?: string) => h.journal.list(cursor),
+        retireNativeOperation: (target: unknown) => receiver.retireNativeOperation(target),
         recoverNativeOperation: (key: string, hash: string, terminate = false) =>
           h.journal.recover(
             key,
@@ -784,6 +840,14 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false, reportError
       };
     },
   });
+  const worker = loaded.worker;
+  receiver = loaded.receiver;
+  Object.assign(receiver, {
+    ctx: { storage: h.storage },
+    env: { STATE_WORKER_URL: "https://memory.invalid", MEMORY_TOKEN: "fixture" },
+    runCancellations: new KeyedAsyncLock(),
+    nativeScopeTransport: () => retirement?.native,
+  });
   const env = {
     RESIDENT_ADMIN_TOKEN: "admin",
     RESIDENT_READ_TOKEN: "reader",
@@ -800,6 +864,7 @@ function httpFixture(h: ReturnType<typeof fixture>, running = false, reportError
         }),
         env,
       ) as Promise<Response>,
+    memoryRequests,
     nativeReads: () => nativeReads,
     nativeControls: () => nativeControls,
     reports,
@@ -1059,4 +1124,274 @@ describe("native scope execution retirement", () => {
       expect(await h.journal.readEnding(h.key)).toEqual({ kind: "missing" });
     },
   );
+});
+
+describe("terminal native scope retirement", () => {
+  async function pendingScope(loseClose = false) {
+    const h = fixture();
+    const calls: Record<string, unknown>[] = [],
+      closed = new Set<string>();
+    let lose = loseClose,
+      authorities = 0;
+    const native = {
+      request: async (value: Record<string, unknown>) => {
+        calls.push(structuredClone(value));
+        const ref = value.ref as { id: string };
+        if (value.mode === "close") {
+          closed.add(ref.id);
+          if (lose) {
+            lose = false;
+            throw new Error("reply lost");
+          }
+        }
+        const result =
+          value.mode === "inspect"
+            ? { version: 1, boot: "11111111-1111-4111-8111-111111111111" }
+            : { ref, closed: closed.has(ref.id), ...(value.mode === "bootstrap" ? {} : { populated: false }) };
+        return { stdout: JSON.stringify(result), stderr: "", exitCode: 0, timedOut: false };
+      },
+    };
+    const scopes = new NativeRunScopes(h.storage, native);
+    const owner = { runId: "run-a", ownerGen: "gen-a", ownerFence: 3 },
+      thread = "thread-a";
+    await scopes.birth(thread, owner, true, async () => {});
+    const scope = await scopes.ensure(thread, owner, async () => {});
+    const key = `native-operation:${thread}:run-a:original`;
+    await h.journal.open(key, owner, thread);
+    await h.journal.bindScope(key, scope);
+    const attempt = await h.journal.begin(key, "process");
+    const original = structuredClone(h.rows.get(key));
+    const hash = (await h.journal.list()).operations.find((r) => r.key === key)!.recordHash;
+    const target = { resource: "repo:acme/app", key, recordHash: hash, scope };
+    const permit = {
+      version: 1 as const,
+      purpose: "terminal-native-scope" as const,
+      id: "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+      target,
+      source: {
+        id: "run-a",
+        threadKey: thread,
+        repo: "acme/app",
+        status: "failed" as const,
+        startedAt: 1,
+        finishedAt: 2,
+        sealedAt: 3,
+      },
+    };
+    const prepare = async () => {
+      authorities++;
+      return permit;
+    };
+    const retire = (allowed = true) => h.journal.retireScope(target, native, async () => allowed, prepare);
+    return {
+      ...h,
+      calls,
+      native,
+      scopes,
+      scope,
+      owner,
+      thread,
+      key,
+      attempt,
+      original,
+      target,
+      permit,
+      prepare,
+      retire,
+      authorities: () => authorities,
+    };
+  }
+  it("authorizes the real terminal HTTP receiver and freezes its exact Memory permit", async () => {
+    const h = await pendingScope();
+    h.rows.set("resident:resource", "repo:acme/app");
+    const api = httpFixture(h, false, undefined, false, { native: h.native, permit: h.permit });
+    expect((await api.request("/retire-native-operation", "reader", h.target)).status).toBe(401);
+    expect(api.memoryRequests).toEqual([]);
+    const response = await api.request("/retire-native-operation", "admin", h.target);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ state: "closed", originalOperationOutcome: "unknown" });
+    expect(api.memoryRequests).toEqual([{ storeKey: "runs:default", target: h.target }]);
+    expect(h.calls.filter((v) => v.mode === "close").map((v) => v.ref)).toEqual([h.scope]);
+    expect((await api.request("/retire-native-operation", "admin", h.target)).status).toBe(200);
+    expect(api.memoryRequests).toHaveLength(1);
+    expect(h.rows.get(h.key)).toEqual(h.original);
+  });
+  it("rejects malformed terminal HTTP selectors before Memory or native control", async () => {
+    const h = await pendingScope();
+    h.rows.set("resident:resource", "repo:acme/app");
+    const api = httpFixture(h, false, undefined, false, { native: h.native, permit: h.permit });
+    for (const extra of [
+      { terminate: true },
+      { resident: 0 },
+      { recordHash: "foreign" },
+      { scope: { ...h.scope, boot: "unknown" } },
+    ])
+      expect((await api.request("/retire-native-operation", "admin", { ...h.target, ...extra })).status).toBe(400);
+    expect(api.memoryRequests).toEqual([]);
+    expect((await h.journal.unresolved()).has(h.key)).toBe(true);
+    expect(h.calls.map((v) => v.mode)).toEqual(["inspect", "bootstrap"]);
+  });
+  it("closes only the selected terminal scope and retains its original unknown bytes", async () => {
+    const h = await pendingScope();
+    const other = { runId: "run-b", ownerGen: "gen-b", ownerFence: 4 };
+    await h.scopes.birth("thread-b", other, true, async () => {});
+    const neighbor = await h.scopes.ensure("thread-b", other, async () => {});
+    const foreign = "native-operation:thread-b:run-b:active";
+    await h.journal.open(foreign, other, "thread-b");
+    await h.journal.bindScope(foreign, neighbor);
+    await h.journal.begin(foreign, "process");
+    const foreignBytes = structuredClone(h.rows.get(foreign));
+    expect(await h.retire()).toMatchObject({
+      purpose: "terminal-native-scope",
+      state: "closed",
+      originalOperationOutcome: "unknown",
+      records: { [h.key]: h.target.recordHash },
+    });
+    expect([...(await h.journal.unresolved()).keys()]).toEqual([foreign]);
+    expect(h.rows.get(h.key)).toEqual(h.original);
+    expect(h.rows.get(foreign)).toEqual(foreignBytes);
+    expect(await h.scopes.ensure("thread-b", other, async () => {})).toEqual(neighbor);
+    expect(await h.journal.readEnding(h.key)).toEqual({ kind: "missing" });
+    const calls = h.calls.length;
+    expect(await h.retire()).toMatchObject({ state: "closed" });
+    expect(h.calls.length).toBe(calls);
+    expect(h.authorities()).toBe(1);
+  });
+  it("keeps lost closure held, freezes callbacks and continues the original close without a second signal", async () => {
+    const h = await pendingScope(true);
+    expect(await h.retire()).toMatchObject({
+      error: "native-operation-recovery-refused: terminal-scope-retirement-unconfirmed",
+    });
+    expect((await h.journal.unresolved()).has(h.key)).toBe(true);
+    await h.journal.settle(h.key, h.attempt);
+    await h.journal.close(h.key);
+    expect(h.rows.get(h.key)).toEqual(h.original);
+    await expect(h.journal.begin(h.key, "process")).rejects.toThrow("terminal retirement is prepared");
+    await expect(h.journal.bindScope(h.key, h.scope)).rejects.toThrow("terminal retirement is prepared");
+    await expect(h.journal.launched(h.key, h.attempt, identity)).rejects.toThrow("terminal retirement is prepared");
+    await expect(h.journal.open(`native-operation:${h.thread}:run-a:late`, h.owner, h.thread)).rejects.toThrow(
+      "run cancelled",
+    );
+    await expect(h.scopes.birth(h.thread, { ...h.owner, ownerFence: 99 }, true, async () => {})).rejects.toThrow(
+      "run cancelled",
+    );
+    expect(await h.retire()).toMatchObject({ state: "closed", originalOperationOutcome: "unknown" });
+    expect(h.calls.filter((c) => c.mode === "close").map((c) => c.ref)).toEqual([h.scope]);
+    expect(h.authorities()).toBe(1);
+  });
+  it.each(["owner", "hash", "scope", "authority"] as const)(
+    "refuses %s mismatch before native control",
+    async (fault) => {
+      const h = await pendingScope();
+      const before = structuredClone(h.rows);
+      if (fault === "hash") h.target.recordHash = "f".repeat(64);
+      if (fault === "scope") h.target.scope = { ...h.scope, id: "cccccccc-cccc-4ccc-cccc-cccccccccccc" };
+      const result = await h.journal.retireScope(
+        h.target,
+        h.native,
+        async () => fault !== "owner",
+        async () => (fault === "authority" ? undefined : h.permit),
+      );
+      expect(result).toMatchObject({ status: 409 });
+      expect(h.calls.filter((c) => c.mode === "close")).toEqual([]);
+      expect(h.rows).toEqual(before);
+      expect((await h.journal.unresolved()).has(h.key)).toBe(true);
+    },
+  );
+  it("refuses an oversized scope inventory without a partial close", async () => {
+    const h = await pendingScope();
+    for (let n = 0; n < 64; n++) {
+      const key = `native-operation:${h.thread}:run-a:extra-${n}`;
+      await h.journal.open(key, h.owner, h.thread);
+      await h.journal.bindScope(key, h.scope);
+    }
+    expect(await h.retire()).toMatchObject({ status: 409 });
+    expect(h.calls.map((v) => v.mode)).toEqual(["inspect", "bootstrap"]);
+    expect((await h.journal.unresolved()).size).toBe(65);
+  });
+  it.each(["prepared", "closed"] as const)(
+    "reads back a lost %s commit reply without a duplicate close",
+    async (lostState) => {
+      const h = await pendingScope();
+      let lost = false;
+      const journal = new NativeOperationJournal({
+        ...h.storage,
+        transaction: async (action) => {
+          const result = await h.storage.transaction(action);
+          const saved = h.rows.get("native-scope-retirement:thread-a:run-a:gen-a:3") as { state?: string } | undefined;
+          if (!lost && saved?.state === lostState) {
+            lost = true;
+            throw new Error("commit reply lost");
+          }
+          return result;
+        },
+      });
+      const invoke = () => journal.retireScope(h.target, h.native, matches, h.prepare);
+      expect(await invoke()).toMatchObject({ status: 409, purpose: "terminal-native-scope" });
+      expect(await invoke()).toMatchObject({ state: "closed", originalOperationOutcome: "unknown" });
+      expect(h.calls.filter((v) => v.mode === "close").map((v) => v.ref)).toEqual([h.scope]);
+      expect(h.rows.get(h.key)).toEqual(h.original);
+    },
+  );
+  it("refuses a mismatched native close receipt without releasing execution debt", async () => {
+    const h = await pendingScope();
+    const original = h.native.request;
+    h.native.request = async (value) => {
+      const answer = await original(value);
+      if (value.mode === "close")
+        answer.stdout = JSON.stringify({
+          ref: { ...h.scope, id: "dddddddd-dddd-4ddd-dddd-dddddddddddd" },
+          closed: true,
+          populated: false,
+        });
+      return answer;
+    };
+    expect(await h.retire()).toMatchObject({ status: 409, phase: "scope-close" });
+    expect((await h.journal.unresolved()).has(h.key)).toBe(true);
+    expect(h.rows.get(h.key)).toEqual(h.original);
+  });
+  it("refuses an older Memory reply without falling back to cancellation or SDK process control", async () => {
+    const h = await pendingScope();
+    h.rows.set("resident:resource", "repo:acme/app");
+    const api = httpFixture(h, false, undefined, false, { native: h.native });
+    expect((await api.request("/retire-native-operation", "admin", h.target)).status).toBe(409);
+    expect(api.memoryRequests).toEqual([{ storeKey: "runs:default", target: h.target }]);
+    expect(h.calls.map((v) => v.mode)).toEqual(["inspect", "bootstrap"]);
+    expect(api.nativeReads()).toBe(0);
+    expect(api.nativeControls()).toBe(0);
+    expect((await h.journal.unresolved()).has(h.key)).toBe(true);
+  });
+  it("freezes an already-started legacy recovery before its final journal mutation", async () => {
+    const h = await pendingScope(true);
+    const sibling = `native-operation:${h.thread}:run-a:sibling`;
+    await h.journal.open(sibling, h.owner, h.thread);
+    await h.journal.bindScope(sibling, h.scope);
+    const attempt = await h.journal.begin(sibling, "process");
+    await h.journal.launched(sibling, attempt, identity);
+    const item = (await h.journal.list()).operations.find((v) => v.key === sibling)!;
+    let release!: () => void, started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const wait = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const recovery = h.journal.recover(
+      sibling,
+      item.recordHash,
+      async () => {
+        started();
+        await wait;
+        return terminal;
+      },
+      matches,
+    );
+    await ready;
+    const original = structuredClone(h.rows.get(sibling));
+    expect(await h.retire()).toMatchObject({ status: 409 });
+    release();
+    expect(await recovery).toMatchObject({ error: "native-operation-recovery-refused: terminal-retirement-prepared" });
+    expect(h.rows.get(sibling)).toEqual(original);
+    expect((await h.journal.unresolved()).has(sibling)).toBe(true);
+  });
 });

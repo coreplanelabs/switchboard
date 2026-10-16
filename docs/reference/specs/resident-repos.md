@@ -802,3 +802,11 @@ Runtime infrastructure is shared. A trusted personal scope returns unavailable r
 | Criterion | Evidence |
 |---|---|
 | Runtime details retain provisioned/refresh times, worktree user/deps and exact eviction time/reason alongside the shared disk admission facts | `[unit]` `web/src/pages/residents.test.ts::ResidentDetailPage::shows the interesting facts: state, ref, sha, lockfile hash, provisioned/refreshed, snapshot stamp, schedules, command table`, `::lists thread worktrees (ref, sha linked to its commit, deps mechanism, attach times), newest first, marking evicted ones` |
+
+### Terminal native scope cleanup
+
+| Criterion | Proof |
+| --- | --- |
+| An admin can retire one exact ended run's original native scope with a terminal-purpose permit. The receiver freezes original journal fingerprints before control, keeps neighboring scopes active, and retains history, workspaces and unknown command outcomes. | `[unit]` `deploy/cloudflare-resident/nativeOperation.test.ts::terminal native scope retirement::closes only the selected terminal scope and retains its original unknown bytes`; `::authorizes the real terminal HTTP receiver and freezes its exact Memory permit` |
+| Missing terminal authority, changed owner/scope/hash, malformed selectors or an oversized inventory cannot start native control. Older authority replies cannot fall back to cancellation or process control. | `[unit]` `deploy/cloudflare-resident/nativeOperation.test.ts::terminal native scope retirement::*`; `deploy/cloudflare-resident/nativeScope.test.ts::native run scope reservations::refuses a changed expected scope before native control or closing the original` |
+| Prepared journal bytes remain immutable across late begin, identity, settlement, close and recovery callbacks. An identical retry continues only the prepared scope's monotonic closure; a completed receipt needs no further native request. Lost replies remain unconfirmed until exact readback succeeds. | `[unit]` `deploy/cloudflare-resident/nativeOperation.test.ts::terminal native scope retirement::*` |
