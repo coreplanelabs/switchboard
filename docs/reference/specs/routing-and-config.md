@@ -2,6 +2,8 @@
 
 Every message resolves to exactly one (agent, model, effort) triple through layered config, and permission gates run against the *resolved* agent so no layer can smuggle a restricted agent past them.
 
+- **Tests**: `src/core/evidenceRelevance.test.ts`
+
 - **Code**: `src/core/dispatch/operatorSmokeDiagnostic.ts`, `src/core/dispatch/operatorReadTools.ts` (closed candidate-only observations and the shared helper vocabulary), `src/core/dispatch/operatorTelemetry.ts` (bounded durable routing phase receipts), `src/core/routingTelemetry.ts` (Worker-safe receipt types and reconstruction)
 
 - **Code**: `src/configPublicationProtocol.ts` (Worker-safe snapshot-key grammar and source precondition type), `src/memorySqlLimits.ts` (unchanged limits outside the Worker entry module), `src/channels/adminReplyProbe.ts`, `src/intakeExperiment.ts`, `src/intakeModel.ts`, `src/core/dispatch/requesterText.ts` (item 29: shared requester text and whole URL token normalization for the typed PR evidence gate)
@@ -371,3 +373,21 @@ An accepted non-review operator bind carries its repository separately from the 
 
 | Base-document and runtime-override HTTP failures use the shared storage diagnostic: request start time, transport ID, frozen request digest, HTTP status, Ray and closed response formats. No body, arbitrary header or credential is retained. Response format does not prove its origin; diagnostic failures do not change reads, conflicts, unknown writes or retries. | `[unit]` `src/configStorageDiagnostics.test.ts::config storage failure evidence::*`; `src/config.test.ts::WorkerOverridesBacking (the ConfigDO client)::*` |
 | An explicit `agent:orchestrator` request enters its agent loop without a preceding operator-model call. This applies at the shared dispatcher for Slack, CLI, HTTP and MCP. Public and machine conversations do not gain private tools. The resolved actor and agent still pass normal authorization. Plain requests in other configured contexts retain the existing routing path until their action tools migrate. | `[unit]` `src/core/dispatcher.test.ts::dispatch::an explicit orchestrator request on…`; `::an explicit orchestrator request still requires the resolved sender's permission` |
+
+## Source evidence relevance
+
+The shared intake module can judge whether imported text concerns a task. Its caller supplies the task context and source message. The prompt treats both as untrusted data and applies the same relevance policy to human and bot authors and all comment locations. A relevant message need not address the bot. This policy reuses Slack intake's structured model-call loop, failure facts, reason redaction, output allowance and timeout. Slack's existing uncertainty policy stays unchanged.
+
+The result is a recommendation. `relevant` can be offered to the orchestrator. `unrelated` can be ignored only after the caller saves that decision against the original source and task context. `unsure`, malformed answers, timeouts, output limits and provider failures produce `unclassified`, so they cannot silently discard evidence. No result grants permission, answers a privileged question, selects a worker or renews a task.
+
+Input is bounded to 32 KiB of task context and 16 KiB of source text, measured as UTF-8 bytes. Missing or oversized input is held, never truncated and classified as unrelated. The caller's original cancellation signal and the classifier's deadline bound every attempt. Cancellation holds the input; a late answer cannot declare evidence unrelated after the deadline. Caller-side option changes do not replace the original signal.
+
+No producer calls this policy yet. Saving and replaying its decision in source jobs, typed delivery, exact consumption and live classification quality remain `[gap]`. The initial input limits also need capacity qualification before activation.
+
+| Criterion | Proof |
+| --- | --- |
+| Relevant, unrelated and unsure map to distinct results; malformed answers and model failures preserve an unclassified result and the structured attempts | `[unit]` `src/core/evidenceRelevance.test.ts::source evidence relevance::keeps the … result separate from requester authority`; `::retains an unclassified result…`; `::preserves the model failure…`; `::keeps an output cap failure…`; `::keeps a typed provider refusal…` |
+| A correction uses the original input, one signal and the configured output allowance; missing or oversized input stays held | `[unit]` `src/core/evidenceRelevance.test.ts::source evidence relevance::keeps the original input…`; `::holds missing or oversized input…` |
+| Cancellation stops a new model call or correction and remains bound to the original signal; a late unrelated answer after the deadline becomes unclassified | `[unit]` `src/core/evidenceRelevance.test.ts::source evidence relevance::holds cancellation…`; `::starts no model call…`; `::starts no correction call…`; `::keeps a late unrelated answer…` |
+| Both input blocks remain quoted despite embedded fence markers; accepted JSON text follows the same policy and its reason is redacted | `[unit]` `src/core/evidenceRelevance.test.ts::source evidence relevance::quotes both task context…`; `::accepts JSON text…` |
+| Slack still returns silence on uncertainty and preserves its existing receipt and provider-failure behavior | `[unit]` `src/core/intake.test.ts::decideIntake — the verdict from one forced tool call (routing-and-config item 27)::*` |
