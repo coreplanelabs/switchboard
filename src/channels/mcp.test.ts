@@ -107,7 +107,13 @@ describe("handleMcpRequest — tools/list", () => {
     expect(tools[0].name).toBe("dispatch");
     expect(tools[0].description).toBeTruthy();
     expect(tools[0].inputSchema.type).toBe("object");
-    expect(Object.keys(tools[0].inputSchema.properties).sort()).toEqual(["async", "channel", "text", "thread"]);
+    expect(Object.keys(tools[0].inputSchema.properties).sort()).toEqual([
+      "async",
+      "channel",
+      "idempotencyKey",
+      "text",
+      "thread",
+    ]);
     expect(tools[0].inputSchema.required).toEqual(["text"]);
   });
 });
