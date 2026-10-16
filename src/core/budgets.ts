@@ -190,6 +190,8 @@ export const DRAIN = {
  *  misconfigured writer cannot make retention unbounded. */
 export const INTAKE_WINDOW_MAX_MS = 30 * DAY_MS;
 /** Bound decision metadata in one orchestrator run's existing state row. */
+/** Retain inbox retry receipts without evicting an earlier delivery key. */
+export const INBOX_DELIVERY_RECEIPTS_MAX = 256;
 export const ORCHESTRATOR_DECISIONS_MAX = 256;
 export const ORCHESTRATOR_DECISION_BYTES_MAX = 256 * 1024;
 export function intakeReceiptRetentionMs(catchUpWindowMs: number): number {

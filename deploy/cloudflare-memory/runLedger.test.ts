@@ -14912,3 +14912,142 @@ describe("saved source-event jobs in SQLite", () => {
     });
   });
 });
+
+describe("keyed SQLite inbox delivery receipts", () => {
+  it("commits one inbox row and returns its original receipt after a lost acknowledgement", async () => {
+    const key = "keyed-delivery-replay";
+    await post("/runs/claim", claimBody(key, "r1", "slack:C1:keyed"));
+    const input = { version: 1, key: "decision-one", message: { text: "Focus on retries.", userId: "slack:UALICE" } };
+    const send = (delivery = input) => post("/runs/inbox/deliver", { storeKey: key, runId: "r1", delivery });
+    const first = await send();
+    expect(first.status).toBe(200);
+    expect(first.data).toMatchObject({
+      kind: "delivered",
+      receipt: { version: 1, runId: "r1", key: "decision-one", seq: 1 },
+    });
+    expect((await send()).data).toEqual({ kind: "duplicate", receipt: first.data.receipt });
+    expect((await send({ ...input, message: { ...input.message, text: "Changed input" } })).data).toEqual({
+      kind: "refused",
+      reason: "delivery-conflict",
+    });
+    const rows = await post("/runs/inbox/read", { storeKey: key, runId: "r1" });
+    expect(rows.data.items).toHaveLength(1);
+  });
+
+  it("rolls back the inbox row when its receipt cannot commit", async () => {
+    const key = "keyed-delivery-rollback";
+    const stub = env.RUNS.get(env.RUNS.idFromName(key));
+    await post("/runs/claim", claimBody(key, "r1", "slack:C1:keyed"));
+    await runInDurableObject(stub, async (owner: RunHistoryDO, state) => {
+      state.storage.sql.exec(
+        "CREATE TRIGGER reject_delivery BEFORE INSERT ON run_inbox_deliveries BEGIN SELECT RAISE(ABORT, 'receipt failed'); END",
+      );
+      await expect(
+        owner.deliverInbox("r1", { version: 1, key: "decision-one", message: { text: "Original input" } }),
+      ).rejects.toThrow();
+      expect(await owner.readInbox("r1", 0)).toEqual([]);
+      expect([...state.storage.sql.exec("SELECT * FROM run_inbox_deliveries")]).toEqual([]);
+      state.storage.sql.exec("DROP TRIGGER reject_delivery");
+      expect(
+        await owner.deliverInbox("r1", { version: 1, key: "decision-one", message: { text: "Original input" } }),
+      ).toMatchObject({ kind: "delivered", receipt: { seq: 1 } });
+    });
+  });
+});
+
+describe("keyed SQLite inbox retention", () => {
+  it("returns an earlier receipt at capacity and after target closure without another append", async () => {
+    const key = "keyed-delivery-capacity";
+    await post("/runs/claim", claimBody(key, "r1", "slack:C1:capacity"));
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const input = { version: 1, key: "first", message: { text: "Original input" } };
+      const first = await owner.deliverInbox("r1", input);
+      if (first.kind !== "delivered") throw new Error("expected first delivery");
+      for (let n = 1; n < 256; n++) await owner.deliverInbox("r1", { ...input, key: `key-${n}` });
+      expect(await owner.deliverInbox("r1", { ...input, key: "overflow" })).toEqual({
+        kind: "refused",
+        reason: "capacity",
+      });
+      expect(await owner.deliverInbox("r1", input)).toEqual({ kind: "duplicate", receipt: first.receipt });
+      expect(await owner.readInbox("r1", 0)).toHaveLength(256);
+      state.storage.sql.exec("DELETE FROM live_runs WHERE run_id=?", "r1");
+      expect(await owner.deliverInbox("r1", input)).toEqual({ kind: "duplicate", receipt: first.receipt });
+    });
+  });
+
+  it("holds unknown retained receipt schemas without rewriting the receipt or input", async () => {
+    const key = "keyed-delivery-unknown-schema";
+    await post("/runs/claim", claimBody(key, "r1", "slack:C1:unknown"));
+    await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(key)), async (owner: RunHistoryDO, state) => {
+      const input = { version: 1, key: "first", message: { text: "Original input" } };
+      await owner.deliverInbox("r1", input);
+      const unknown = '{"version":99}';
+      state.storage.sql.exec("UPDATE run_inbox_deliveries SET json=? WHERE run_id=?", unknown, "r1");
+      expect(await owner.deliverInbox("r1", input)).toEqual({ kind: "refused", reason: "unsupported-receipt" });
+      expect(
+        state.storage.sql.exec<{ json: string }>("SELECT json FROM run_inbox_deliveries WHERE run_id=?", "r1").one()
+          .json,
+      ).toBe(unknown);
+      expect(await owner.readInbox("r1", 0)).toHaveLength(1);
+    });
+  });
+});
+
+describe("keyed inbox refusal diagnostics", () => {
+  it("logs the run and refusal reason without the message or delivery key", async () => {
+    const storeKey = "keyed-inbox-refusal-log";
+    await post("/runs/claim", claimBody(storeKey, "r1", "slack:C1:diagnostic"));
+    const logs: unknown[][] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((...args) => {
+      logs.push(args);
+    });
+    try {
+      const delivery = { version: 1, key: "PRIVATE_DELIVERY_KEY", message: { text: "PRIVATE_MESSAGE_BODY" } };
+      const send = (input = delivery) => post("/runs/inbox/deliver", { storeKey, runId: "r1", delivery: input });
+      expect((await send()).data).toMatchObject({ kind: "delivered" });
+      expect((await send()).data).toMatchObject({ kind: "duplicate" });
+      expect(logs.filter((args) => args[0] === "[runs/inbox/deliver] refused")).toEqual([]);
+      expect((await send({ ...delivery, message: { text: "PRIVATE_CHANGED_BODY" } })).data).toEqual({
+        kind: "refused",
+        reason: "delivery-conflict",
+      });
+      expect(logs.filter((args) => args[0] === "[runs/inbox/deliver] refused")).toEqual([
+        ["[runs/inbox/deliver] refused", "r1", "delivery-conflict"],
+      ]);
+      expect(JSON.stringify(logs)).not.toContain("PRIVATE_");
+    } finally {
+      log.mockRestore();
+    }
+  });
+});
+
+describe("keyed receipt decode diagnostics", () => {
+  it.each(["invalid-json", "invalid-schema"])(
+    "distinguishes %s without logging stored receipt bytes",
+    async (cause) => {
+      const storeKey = `keyed-receipt-${cause}`;
+      await post("/runs/claim", claimBody(storeKey, "r1", "slack:C1:decode"));
+      const delivery = { version: 1, key: "PRIVATE_DELIVERY_KEY", message: { text: "PRIVATE_MESSAGE_BODY" } };
+      const send = () => post("/runs/inbox/deliver", { storeKey, runId: "r1", delivery });
+      expect((await send()).data).toMatchObject({ kind: "delivered" });
+      await runInDurableObject(env.RUNS.get(env.RUNS.idFromName(storeKey)), async (_owner: RunHistoryDO, state) => {
+        const retained =
+          cause === "invalid-json" ? "PRIVATE_STORED_BYTES{" : '{"version":99,"private":"PRIVATE_STORED_BYTES"}';
+        state.storage.sql.exec("UPDATE run_inbox_deliveries SET json=? WHERE run_id=?", retained, "r1");
+      });
+      const logs: unknown[][] = [];
+      const log = vi.spyOn(console, "log").mockImplementation((...args) => {
+        logs.push(args);
+      });
+      try {
+        expect((await send()).data).toEqual({ kind: "refused", reason: "unsupported-receipt" });
+        expect(logs.filter((args) => args[0] === "[runs/inbox/deliver] unreadable receipt")).toEqual([
+          ["[runs/inbox/deliver] unreadable receipt", "r1", cause],
+        ]);
+        expect(JSON.stringify(logs)).not.toContain("PRIVATE_");
+      } finally {
+        log.mockRestore();
+      }
+    },
+  );
+});

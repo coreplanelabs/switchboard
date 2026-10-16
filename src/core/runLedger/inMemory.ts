@@ -1,3 +1,10 @@
+import { INBOX_DELIVERY_RECEIPTS_MAX } from "../budgets.js";
+import {
+  prepareInboxDelivery,
+  replayInboxDelivery,
+  type InboxDeliveryResult,
+  type InboxDeliveryReceipt,
+} from "./inboxDelivery.js";
 import { parseStoredJson } from "../storedJson.js";
 import {
   captureCheckArchive,
@@ -997,6 +1004,7 @@ export class InMemoryRunLedger implements RunLedger {
   readonly steps = new Map<string, StepHistory>();
   readonly events = new Map<string, AppendableEvent[]>();
   readonly inbox = new Map<string, InboxItem[]>();
+  private readonly inboxDeliveries = new Map<string, Map<string, InboxDeliveryReceipt>>();
   readonly jobs = new Map<string, RunJob[]>();
   /** The transcript objects of runs claimed before the session log existed: a
    *  claim whose meta names no session. A run with a session has none. */
@@ -1912,6 +1920,31 @@ export class InMemoryRunLedger implements RunLedger {
   }
 
   async pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult> {
+    return this.appendInbox(runId, message);
+  }
+
+  async deliverInbox(runId: string, value: unknown): Promise<InboxDeliveryResult> {
+    const input = await prepareInboxDelivery(value);
+    if (!input || !runId || runId.length > 512) return { kind: "refused", reason: "invalid-delivery" };
+    const receipts = this.inboxDeliveries.get(runId) ?? new Map<string, InboxDeliveryReceipt>();
+    if (receipts.has(input.key)) return replayInboxDelivery(receipts.get(input.key), runId, input);
+    if (receipts.size >= INBOX_DELIVERY_RECEIPTS_MAX) return { kind: "refused", reason: "capacity" };
+    const pushed = this.appendInbox(runId, input.message);
+    if (!pushed.ok || pushed.seq === undefined)
+      return { kind: "refused", reason: pushed.reason === "not-live" ? "not-live" : "invalid-delivery" };
+    const receipt: InboxDeliveryReceipt = {
+      version: 1,
+      runId,
+      key: input.key,
+      seq: pushed.seq,
+      bodyHash: input.bodyHash,
+    };
+    receipts.set(input.key, receipt);
+    this.inboxDeliveries.set(runId, receipts);
+    return { kind: "delivered", receipt: structuredClone(receipt) };
+  }
+
+  private appendInbox(runId: string, message: Record<string, unknown>): InboxPushResult {
     const row = this.live.get(runId);
     if (!row) return { ok: false, reason: "not-live" };
     const stored = bindInboxCustody(message, {

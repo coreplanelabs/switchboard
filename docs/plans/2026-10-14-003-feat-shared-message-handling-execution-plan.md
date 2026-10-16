@@ -183,6 +183,12 @@ The next cut extends the existing saved job with bounded claims, expiring owners
 
 Claim and retry changes include their shared wake in one transaction. A stale process cannot release a newer process's job. A saved release returns its original result on replay, even after a later claim. Queue leases remain separate from agent execution time and permissions. No processor or completion path is enabled. Routing, saved handling stages and keyed internal delivery remain pending, so Step 2 is still in progress.
 
+### Keyed inbox receipt protocol, 2026-10-15
+
+The existing ledger now has an inactive keyed inbox protocol. It atomically saves the normal inbox row and its delivery receipt. A retry returns the original sequence; changed input under that key is held. The receipt remains readable after the target ends or the receipt count reaches its limit. A failed receipt write rolls back the input. The existing destination custody checks still apply.
+
+This is reader-first storage support. No dispatcher or source processor uses the protocol yet. A delivery receipt does not prove that a model consumed the row. Connecting saved orchestrator decisions, exact consumption proof, source-job settlement and unit-event delivery remains pending. Step 2 stays in progress.
+
 ## Step 3: preserve evidence through internal handoffs
 
 **Current source:** [intake](../../src/core/intake.ts), [inbox schema](../../src/core/runLedger/inboxMessage.ts), [thread admission](../../src/core/threadAdmission.ts), [unit events](../../src/core/coordinator/instanceStore.ts), and both runtime implementations.

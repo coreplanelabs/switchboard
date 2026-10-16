@@ -1358,3 +1358,52 @@ describe("saved source-event job client", () => {
     expect(await ledger.releaseSourceEvent(release)).toEqual({ kind: "released", receipt: released });
   });
 });
+
+describe("keyed inbox delivery client", () => {
+  it("accepts only a receipt for the exact run, key and frozen body", async () => {
+    const bodyHash = "0ea4bcbecf7550d342d3b668052a647debfe6ae5740fe7727312b1752761fc7c";
+    const w = stubWorker(() => ({
+      status: 200,
+      data: { kind: "delivered", receipt: { version: 1, runId: "r1", key: "decision-one", seq: 7, bodyHash } },
+    }));
+    const result = await w.ledger.deliverInbox("r1", {
+      version: 1,
+      key: "decision-one",
+      message: { text: "Original input" },
+    });
+    expect(result).toEqual({
+      kind: "delivered",
+      receipt: { version: 1, runId: "r1", key: "decision-one", seq: 7, bodyHash },
+    });
+    expect(w.calls).toMatchObject([
+      {
+        path: "/runs/inbox/deliver",
+        body: { runId: "r1", delivery: { version: 1, key: "decision-one", message: { text: "Original input" } } },
+      },
+    ]);
+  });
+  it.each([
+    { ok: true, seq: 7 },
+    { kind: "delivered", receipt: { version: 99 } },
+    {
+      kind: "delivered",
+      receipt: { version: 1, runId: "other", key: "decision-one", seq: 7, bodyHash: "a".repeat(64) },
+    },
+  ])("holds an unreadable or unrelated delivery acknowledgement (%#)", async (data) => {
+    const w = stubWorker(() => ({ status: 200, data }));
+    await expect(
+      w.ledger.deliverInbox("r1", { version: 1, key: "decision-one", message: { text: "Original input" } }),
+    ).rejects.toMatchObject({ name: "UncertainStoreError" });
+    expect(w.calls).toHaveLength(1);
+  });
+});
+
+describe("keyed inbox protocol compatibility", () => {
+  it("holds an old server without falling back to the ordinary inbox route", async () => {
+    const w = stubWorker(() => ({ status: 404, data: { error: "not found" } }));
+    await expect(
+      w.ledger.deliverInbox("r1", { version: 1, key: "one", message: { text: "Original input" } }),
+    ).rejects.toBeInstanceOf(RouteMissingError);
+    expect(w.calls.map((call) => call.path)).toEqual(["/runs/inbox/deliver"]);
+  });
+});

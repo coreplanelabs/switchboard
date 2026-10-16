@@ -2695,3 +2695,84 @@ describe("saved source-event jobs", () => {
     expect(await ledger.receiveSourceEvent(event)).toEqual({ kind: "duplicate", receipt: received.receipt });
   });
 });
+
+describe("keyed inbox delivery receipts", () => {
+  it("returns the original sequence across concurrent retries and holds changed input", async () => {
+    const ledger = new InMemoryRunLedger(() => 123);
+    await ledger.claim(claimReq("delivery-run", "slack:C1:delivery"));
+    const input = { version: 1, key: "decision-one", message: { text: "Focus on retries.", userId: "slack:UALICE" } };
+    const results = await Promise.all([
+      ledger.deliverInbox("delivery-run", input),
+      ledger.deliverInbox("delivery-run", input),
+    ]);
+    expect(results.map((result) => result.kind).sort()).toEqual(["delivered", "duplicate"]);
+    const first = results.find((result) => result.kind === "delivered")!;
+    const repeated = results.find((result) => result.kind === "duplicate");
+    expect(first).toMatchObject({
+      kind: "delivered",
+      receipt: { version: 1, runId: "delivery-run", key: "decision-one", seq: 1 },
+    });
+    if (first.kind !== "delivered") throw new Error("expected saved delivery");
+    expect(repeated).toEqual({ kind: "duplicate", receipt: first.receipt });
+    expect(
+      await ledger.deliverInbox("delivery-run", { ...input, message: { ...input.message, text: "Changed input" } }),
+    ).toEqual({ kind: "refused", reason: "delivery-conflict" });
+    expect(
+      (await ledger.readInbox("delivery-run", 0)).map((item) => ({ seq: item.seq, text: item.message.text })),
+    ).toEqual([{ seq: 1, text: "Focus on retries." }]);
+    ledger.live.delete("delivery-run");
+    expect(await ledger.deliverInbox("delivery-run", input)).toEqual({ kind: "duplicate", receipt: first.receipt });
+    expect(await ledger.deliverInbox("delivery-run", { ...input, key: "new-decision" })).toEqual({
+      kind: "refused",
+      reason: "not-live",
+    });
+  });
+});
+
+describe("keyed inbox delivery bounds", () => {
+  it("keeps the captured body and an original receipt when capacity is full", async () => {
+    const ledger = new InMemoryRunLedger(() => 123);
+    await ledger.claim(claimReq("r1", "slack:C1:bounded"));
+    const input = { version: 1, key: "first", message: { text: "Original input" } };
+    const pending = ledger.deliverInbox("r1", input);
+    input.message.text = "Later mutation";
+    const first = await pending;
+    expect((await ledger.readInbox("r1", 0))[0]?.message.text).toBe("Original input");
+    for (let n = 1; n < 256; n++)
+      await ledger.deliverInbox("r1", { version: 1, key: `key-${n}`, message: { text: "next" } });
+    expect(await ledger.deliverInbox("r1", { version: 1, key: "overflow", message: {} })).toEqual({
+      kind: "refused",
+      reason: "capacity",
+    });
+    if (first.kind !== "delivered") throw new Error("expected first delivery");
+    expect(await ledger.deliverInbox("r1", { ...input, message: { text: "Original input" } })).toEqual({
+      kind: "duplicate",
+      receipt: first.receipt,
+    });
+    expect(await ledger.readInbox("r1", 0)).toHaveLength(256);
+  });
+
+  it("holds unknown versions, supplied custody, oversized bodies and unsafe accessors without appending", async () => {
+    const ledger = new InMemoryRunLedger(() => 123);
+    await ledger.claim(claimReq("r1", "slack:C1:invalid"));
+    let reads = 0;
+    const unsafe = Object.defineProperty({}, "text", {
+      enumerable: true,
+      get: () => {
+        reads++;
+        return "unsafe";
+      },
+    });
+    for (const input of [
+      { version: 2, key: "one", message: {} },
+      { version: 1, key: "", message: {} },
+      { version: 1, key: "one", message: { target: {} } },
+      { version: 1, key: "one", message: { text: "x".repeat(400 * 1024) } },
+      { version: 1, key: "one", message: unsafe },
+    ]) {
+      expect(await ledger.deliverInbox("r1", input)).toEqual({ kind: "refused", reason: "invalid-delivery" });
+    }
+    expect(await ledger.readInbox("r1", 0)).toEqual([]);
+    expect(reads).toBe(0);
+  });
+});

@@ -1,3 +1,4 @@
+import type { InboxDeliveryResult } from "./inboxDelivery.js";
 import type {
   CanonicalCheckpointSource,
   ContextCheckpointRequest,
@@ -265,6 +266,8 @@ export interface RunLedger {
   setState(runId: string, gen: string, state: RunState): Promise<FenceResult>;
   /** Any generation: a steer arrives on whichever container is up. */
   pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult>;
+  /** Atomic keyed delivery; absent readers cannot accept a producer using this protocol. */
+  deliverInbox?(runId: string, delivery: unknown): Promise<InboxDeliveryResult>;
   /** The inbox items with `seq > afterSeq`, in seq order — the resume's re-read
    *  at adopt time (run-history item 40), so a steer that landed after the
    *  reclaim's snapshot is not lost. Empty for an unknown run. */

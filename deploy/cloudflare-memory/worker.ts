@@ -1,3 +1,10 @@
+import { INBOX_DELIVERY_RECEIPTS_MAX } from "../../src/core/budgets.ts";
+import {
+  prepareInboxDelivery,
+  replayInboxDelivery,
+  type InboxDeliveryResult,
+  type InboxDeliveryReceipt,
+} from "../../src/core/runLedger/inboxDelivery.ts";
 import { EXECUTION_PROTOCOL_HEADER } from "../../src/core/runLedger/types.js";
 import {
   isSourceEventKey,
@@ -2409,6 +2416,12 @@ export class RunHistoryDO extends DurableObject<Env> {
         seq INTEGER NOT NULL,
         json TEXT NOT NULL,
         PRIMARY KEY (run_id, seq)
+      );
+      CREATE TABLE IF NOT EXISTS run_inbox_deliveries (
+        run_id TEXT NOT NULL,
+        delivery_key TEXT NOT NULL,
+        json TEXT NOT NULL,
+        PRIMARY KEY (run_id, delivery_key)
       );
       CREATE TABLE IF NOT EXISTS run_jobs (
         run_id TEXT NOT NULL,
@@ -7305,27 +7318,85 @@ export class RunHistoryDO extends DurableObject<Env> {
   async pushInbox(runId: string, message: Record<string, unknown>): Promise<InboxPushResult> {
     let out: InboxPushResult = { ok: false, reason: "not-live" };
     this.ctx.storage.transactionSync(() => {
-      const owner = this.liveRow(runId);
-      if (!owner) return;
-      const stored = bindInboxCustody(message, {
-        runId,
-        channelId: owner.meta.channelId,
-        threadKey: owner.meta.threadKey,
-        requester: owner.meta.userId,
-        producerGen: owner.ownerGen,
-      });
-      if (!stored) {
-        out = { ok: false, reason: "invalid-message" };
-        return;
-      }
-      const last = this.sql
-        .exec<{ m: number | null }>(`SELECT MAX(seq) AS m FROM run_inbox WHERE run_id = ?`, runId)
-        .one().m;
-      const seq = (last ?? 0) + 1;
-      this.sql.exec(`INSERT INTO run_inbox (run_id, seq, json) VALUES (?, ?, ?)`, runId, seq, JSON.stringify(stored));
-      out = { ok: true, seq };
+      out = this.appendInbox(runId, message);
     });
     return out;
+  }
+
+  async deliverInbox(runId: string, value: unknown): Promise<InboxDeliveryResult> {
+    const input = await prepareInboxDelivery(value);
+    if (!input || !runId || runId.length > 512) return { kind: "refused", reason: "invalid-delivery" };
+    let out: InboxDeliveryResult = { kind: "refused", reason: "not-live" };
+    this.ctx.storage.transactionSync(() => {
+      const saved = this.sql
+        .exec<{ json: string }>(
+          "SELECT json FROM run_inbox_deliveries WHERE run_id=? AND delivery_key=?",
+          runId,
+          input.key,
+        )
+        .toArray()[0];
+      if (saved) {
+        let receipt: unknown;
+        try {
+          receipt = JSON.parse(saved.json);
+        } catch {
+          console.log("[runs/inbox/deliver] unreadable receipt", runId, "invalid-json");
+          out = { kind: "refused", reason: "unsupported-receipt" };
+          return;
+        }
+        out = replayInboxDelivery(receipt, runId, input);
+        if (out.kind === "refused" && out.reason === "unsupported-receipt")
+          console.log("[runs/inbox/deliver] unreadable receipt", runId, "invalid-schema");
+        return;
+      }
+      if (
+        this.sql
+          .exec<{ count: number }>("SELECT COUNT(*) AS count FROM run_inbox_deliveries WHERE run_id=?", runId)
+          .one().count >= INBOX_DELIVERY_RECEIPTS_MAX
+      ) {
+        out = { kind: "refused", reason: "capacity" };
+        return;
+      }
+      const pushed = this.appendInbox(runId, input.message);
+      if (!pushed.ok || pushed.seq === undefined) {
+        out = { kind: "refused", reason: pushed.reason === "not-live" ? "not-live" : "invalid-delivery" };
+        return;
+      }
+      const receipt: InboxDeliveryReceipt = {
+        version: 1,
+        runId,
+        key: input.key,
+        seq: pushed.seq,
+        bodyHash: input.bodyHash,
+      };
+      this.sql.exec(
+        "INSERT INTO run_inbox_deliveries(run_id,delivery_key,json) VALUES (?,?,?)",
+        runId,
+        input.key,
+        JSON.stringify(receipt),
+      );
+      out = { kind: "delivered", receipt };
+    });
+    return out;
+  }
+
+  private appendInbox(runId: string, message: Record<string, unknown>): InboxPushResult {
+    const owner = this.liveRow(runId);
+    if (!owner) return { ok: false, reason: "not-live" };
+    const stored = bindInboxCustody(message, {
+      runId,
+      channelId: owner.meta.channelId,
+      threadKey: owner.meta.threadKey,
+      requester: owner.meta.userId,
+      producerGen: owner.ownerGen,
+    });
+    if (!stored) return { ok: false, reason: "invalid-message" };
+    const last = this.sql
+      .exec<{ m: number | null }>(`SELECT MAX(seq) AS m FROM run_inbox WHERE run_id = ?`, runId)
+      .one().m;
+    const seq = (last ?? 0) + 1;
+    this.sql.exec(`INSERT INTO run_inbox (run_id, seq, json) VALUES (?, ?, ?)`, runId, seq, JSON.stringify(stored));
+    return { ok: true, seq };
   }
 
   /** The inbox past a seq (run-history item 40): the resume's re-read at adopt. */
@@ -12027,6 +12098,7 @@ const LEDGER_ROUTES = new Set([
   "/runs/step",
   "/runs/state",
   "/runs/inbox",
+  "/runs/inbox/deliver",
   "/runs/inbox/read",
   "/runs/stop",
   "/runs/handoff",
@@ -13444,6 +13516,11 @@ async function handleLedger(
 
   const runId = parseRunId(b.runId);
   if (!runId.ok) return json({ error: runId.error }, 400);
+  if (pathname === "/runs/inbox/deliver") {
+    const delivered = await stub.deliverInbox(runId.value, b.delivery);
+    if (delivered.kind === "refused") console.log("[runs/inbox/deliver] refused", runId.value, delivered.reason);
+    return json(delivered);
+  }
   if (pathname === "/runs/inbox") {
     if (typeof b.message !== "object" || b.message === null) return json({ error: "message must be an object" }, 400);
     return json(await stub.pushInbox(runId.value, b.message as Record<string, unknown>));
