@@ -263,6 +263,10 @@ The same inactive converter now covers check runs, check suites and commit statu
 
 This extends the existing source-event boundary. The receiver and existing checks handler are unchanged. Ref/access events, API baseline and repair, source matching, relevance and producer activation remain pending. Step 4 is still in progress.
 
+### Ref activity conversion, 2026-10-15
+
+The inactive converter now covers push and delete facts. It keeps native repository/full-ref identity, exact push SHAs and flags, and unknown delete SHAs. Branches and tags stay separate. No PR is inferred from a ref event. This extends the existing conversion path without a receiver, producer, task matcher, listener or delivery call. Access-change conversion, API repair, source matching and activation remain pending; Step 4 is still in progress.
+
 ## Step 5: continue a review when its head changes
 
 **Current source:** [head classification](../../src/core/headMoved.ts), [review settlement](../../src/core/reviewRound.ts), [run loop](../../src/core/dispatch/runLoop.ts), [history](../../src/core/reviewHistory.ts), and existing workspace/runtime contracts.

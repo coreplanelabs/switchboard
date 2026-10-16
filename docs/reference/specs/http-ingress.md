@@ -169,3 +169,18 @@ Each check keeps its native ID, checked commit, status, conclusion, producing Ap
 | Checks retain their exact commit separately from stale or empty PR associations, and preserve unknown actors without choosing a PR | `[unit]` `src/channels/githubActivity.test.ts::GitHub check and status normalization::keeps …`; `::keeps a fork check…` |
 | Status events need no action field and retain external or empty CI links; check transitions and action requests have distinct revisions independent of delivery identity | `[unit]` `src/channels/githubActivity.test.ts::GitHub check and status normalization::retains status…`; `::retains the checked commit…`; `::separates check transitions…` |
 | Malformed source, commit, state or PR association is held; unsupported check actions are ignored | `[unit]` `src/channels/githubActivity.test.ts::GitHub check and status normalization::holds…` |
+
+
+## GitHub ref activity conversion
+
+The same inactive converter accepts `push` and `delete` events. A source fact names the configured native repository and full ref. Branch and tag names stay separate. A delete event supplies a short ref name; conversion adds its type prefix without removing any literal prefix from that name. Push and delete facts for the same repository/ref use the same object identity.
+
+Push facts retain before/after SHAs, creation/deletion flags, the force-push flag and optional base ref. Zero SHAs remain sentinels for ref creation/deletion, not selected commits. Delete events supply no SHA, so those fields remain null. Source actor identity is data; pusher metadata cannot become requester authority. Full native payloads remain retained and byte-bounded by the existing source codec. Conversion does not claim a complete commit list or infer PR membership, current head, event order or permitted continuation.
+
+These fields follow the [GitHub push and delete webhook contracts](https://docs.github.com/en/webhooks/webhook-events-and-payloads). The receiver remains disconnected from this converter. Native source matching, API repair, access-change handling and runtime delivery still remain pending.
+
+| Criterion | Proof |
+| --- | --- |
+| Push facts retain exact ref and SHA data, including force pushes, creation/deletion sentinels and unknown/bot actors, without choosing a PR | `[unit]` `src/channels/githubActivity.test.ts::GitHub ref activity normalization::retains branch SHAs and force-push facts without selecting a PR`; `::keeps creation and deletion zero-SHA sentinels without guessing a commit`; `::preserves unknown actors and treats bot actors as source data` |
+| Push and delete use the same full-ref identity. Branches and tags remain distinct; short delete names keep literal prefixes. Delivery identity and immutable revisions stay separate. | `[unit]` `src/channels/githubActivity.test.ts::GitHub ref activity normalization::keeps delete facts on the same full ref and preserves absent SHA facts as null`; `::keeps branch and tag identities separate and does not strip literal ref prefixes`; `::separates delivery identity and changed ref snapshots while freezing input` |
+| Invalid ref fields, contradictory zero-SHA transitions and foreign configured sources stay held | `[unit]` `src/channels/githubActivity.test.ts::GitHub ref activity normalization::holds malformed transitions and foreign source identity while accepting a valid push` |
