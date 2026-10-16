@@ -801,7 +801,12 @@ describe("github_* reads", () => {
   });
 
   it("github_pull_get renders PR metadata and body, with number and 404 errors", async () => {
-    const ctx = ctxFor(mem());
+    const api = mem();
+    const pull = await api.getPullRequest("acme/api", 7);
+    pull.id = 101;
+    pull.head.repositoryId = 11;
+    pull.base.repositoryId = 11;
+    const ctx = ctxFor(api);
     const got = await text(githubPullGetTool, { repo: "acme/api", number: 7 }, ctx);
     expect(got).toContain("acme/api#7 [open] Fix login");
     expect(got).toContain("head: acme/api:fix/login @ " + "a".repeat(40));

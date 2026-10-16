@@ -1272,3 +1272,148 @@ describe("InMemoryGithubApi — Actions", () => {
     await expect(m.getActionsRun("acme/other", 123)).rejects.toMatchObject({ status: 404 });
   });
 });
+
+describe("GitHub native read identities", () => {
+  const row = {
+    id: 101,
+    number: 7,
+    title: "Fix retries",
+    body: "Context",
+    state: "closed",
+    merged: false,
+    draft: false,
+    html_url: "https://github.com/acme/api/pull/7",
+    user: { login: "author" },
+    updated_at: "2026-10-14T00:00:00Z",
+    head: { ref: "fix/retry", sha: "a".repeat(40), repo: { id: 22, full_name: "fork/api" } },
+    base: { ref: "main", repo: { id: 11, full_name: "acme/api" } },
+  };
+
+  it("retains distinct PR and fork/base repository IDs through the existing read route", async () => {
+    const { api: gh, calls } = api(() => ({ status: 200, body: row }));
+    expect(await gh.getPullRequest("acme/api", 7)).toMatchObject({
+      id: 101,
+      number: 7,
+      head: { repositoryId: 22, repo: "fork/api", sha: "a".repeat(40) },
+      base: { repositoryId: 11, repo: "acme/api" },
+    });
+    expect(
+      calls.map((call) => ({ url: call.url, method: call.method, authorization: call.headers.authorization })),
+    ).toEqual([
+      { url: "https://api.github.com/repos/acme/api/pulls/7", method: "GET", authorization: "Bearer tok-read" },
+    ]);
+  });
+
+  it("keeps native IDs when the existing branch-tip policy selects a newer same-repository commit", async () => {
+    const payload = { ...row, state: "open", head: { ...row.head, repo: { id: 11, full_name: "acme/api" } } };
+    const { api: gh, calls } = api(({ url }) => ({
+      status: 200,
+      body: url.includes("/git/ref/heads/") ? { object: { type: "commit", sha: "b".repeat(40) } } : payload,
+    }));
+    expect(await gh.getPullRequest("acme/api", 7)).toMatchObject({
+      id: 101,
+      number: 7,
+      head: { repositoryId: 11, ref: "fix/retry", sha: "b".repeat(40) },
+      base: { repositoryId: 11, ref: "main" },
+    });
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://api.github.com/repos/acme/api/pulls/7",
+      "https://api.github.com/repos/acme/api/git/ref/heads/fix/retry",
+    ]);
+  });
+
+  it("keeps repository identity when its name changes", async () => {
+    let name = "acme/api";
+    const { api: gh } = api(() => ({
+      status: 200,
+      body: { repositories: [{ id: 11, full_name: name, private: true, default_branch: "main" }] },
+    }));
+    expect(await gh.listRepos()).toEqual([
+      { id: 11, fullName: "acme/api", private: true, defaultBranch: "main", description: null },
+    ]);
+    name = "new-owner/new-api";
+    expect(await gh.listRepos()).toEqual([
+      { id: 11, fullName: "new-owner/new-api", private: true, defaultBranch: "main", description: null },
+    ]);
+  });
+
+  it("preserves a deleted fork as null and does not guess its repository from the base", async () => {
+    const { api: gh } = api(() => ({ status: 200, body: { ...row, head: { ...row.head, repo: null } } }));
+    expect(await gh.getPullRequest("acme/api", 7)).toMatchObject({
+      id: 101,
+      number: 7,
+      head: { repositoryId: null, repo: "", sha: "a".repeat(40) },
+      base: { repositoryId: 11 },
+    });
+  });
+
+  it("keeps old metadata readable without inventing missing IDs", async () => {
+    const legacy = {
+      number: 7,
+      title: "Old metadata",
+      state: "closed",
+      head: { ref: "fix/retry", sha: "a".repeat(40), repo: { full_name: "fork/api" } },
+      base: { ref: "main", repo: { full_name: "acme/api" } },
+    };
+    const { api: gh } = api(() => ({ status: 200, body: legacy }));
+    const result = await gh.getPullRequest("acme/api", 7);
+    expect(result).toMatchObject({
+      number: 7,
+      title: "Old metadata",
+      head: { repo: "fork/api" },
+      base: { repo: "acme/api" },
+    });
+    expect(Object.hasOwn(result, "id")).toBe(false);
+    expect(Object.hasOwn(result.head, "repositoryId")).toBe(false);
+    expect(Object.hasOwn(result.base, "repositoryId")).toBe(false);
+  });
+
+  it.each([0, -1, "101", null, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "refuses a supplied malformed native PR ID (%s)",
+    async (id) => {
+      const { api: gh } = api(() => ({ status: 200, body: { ...row, id } }));
+      await expect(gh.getPullRequest("acme/api", 7)).rejects.toMatchObject({
+        status: 502,
+        message: "Invalid GitHub native identity",
+      });
+    },
+  );
+
+  it("refuses malformed repository IDs in each read position", async () => {
+    for (const bad of [
+      { ...row, head: { ...row.head, repo: { ...row.head.repo, id: "22" } } },
+      { ...row, base: { ...row.base, repo: { ...row.base.repo, id: 0 } } },
+    ]) {
+      const { api: gh } = api(() => ({ status: 200, body: bad }));
+      await expect(gh.getPullRequest("acme/api", 7)).rejects.toMatchObject({ status: 502 });
+    }
+    const { api: gh } = api(() => ({ status: 200, body: { repositories: [{ id: null, full_name: "acme/api" }] } }));
+    await expect(gh.listRepos()).rejects.toMatchObject({ status: 502 });
+    const good = api(() => ({ status: 200, body: { repositories: [{ id: 11, full_name: "acme/api" }] } })).api;
+    expect(await good.listRepos()).toMatchObject([{ id: 11, fullName: "acme/api" }]);
+  });
+
+  it("retains native IDs in the in-memory implementation and keeps legacy IDs absent", async () => {
+    const pull = {
+      id: 101,
+      number: 7,
+      title: "Fix retries",
+      body: "Context",
+      state: "closed",
+      draft: false,
+      url: row.html_url,
+      author: "author",
+      updatedAt: row.updated_at,
+      head: { repositoryId: 22, repo: "fork/api", ref: "fix/retry", sha: "a".repeat(40) },
+      base: { repositoryId: 11, repo: "acme/api", ref: "main" },
+    };
+    const gh = new InMemoryGithubApi({ "acme/api": { id: 11, pulls: [pull] }, "acme/legacy": {} });
+    expect(await gh.listRepos()).toEqual([
+      { id: 11, fullName: "acme/api", private: true, defaultBranch: "main", description: null },
+      { fullName: "acme/legacy", private: true, defaultBranch: "main", description: null },
+    ]);
+    expect(await gh.getPullRequest("acme/api", 7)).toEqual(pull);
+    const malformed = new InMemoryGithubApi({ "acme/api": { id: 0 } });
+    await expect(malformed.listRepos()).rejects.toMatchObject({ status: 502 });
+  });
+});

@@ -261,6 +261,10 @@ The same inactive converter now covers selected PR head/base and lifecycle updat
 
 The converter still has no receiver importer. Check/status and ref events, access changes, API baseline/recovery merging, matching, relevance, ordering and delivery remain pending. A converted fact is not proof of the latest head or a successful delivery. Step 4 remains in progress.
 
+### Native identity in existing reads, 2026-10-15
+
+The next independent cut preserves native IDs in installation repository listings and PR reads, including separate PR, fork-head and base identities. Legacy missing fields remain unknown, and a deleted fork retains null head identity. Malformed supplied IDs cannot be coerced into identity. This uses existing read routes and both API implementations. It adds no matcher, backfill, permission or delivery authority; those integration steps remain pending.
+
 ### Check and status facts, 2026-10-15
 
 The same inactive converter now covers check runs, check suites and commit statuses. Each fact keeps the checked commit independently of any PR association. Forks can have no association, and an association can name a later PR head. The converter makes neither a routing decision nor a current-head claim. Native snapshots retain check output and action-request data; a rerun request remains source data.
