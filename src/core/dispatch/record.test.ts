@@ -480,6 +480,27 @@ describe("durable source archive assembly", () => {
 // an inline command run assemble are proven through `dispatch()` in
 // `src/core/dispatcher.test.ts` (`run history write path`).
 describe("the drain deadline's records", () => {
+  it("preserves the relay app separately from the requester and credential in an abandoned run", () => {
+    const registry = new RunRegistry({ genId: () => "relay-drain", genToken: () => "token", now: () => 1000 });
+    const run = registry.create("relayed", {
+      channelId: "slack:C1",
+      userId: "slack:UALICE",
+      threadKey: "slack:C1:relay",
+      authenticatedAs: "http:alice-key",
+      postedBy: "http:automation",
+    });
+    const record = interruptedRunRecord(registry.getById(run.id)!, registry.snapshotById(run.id)!, 2000);
+    expect(record).toMatchObject({
+      id: "relay-drain",
+      userId: "slack:UALICE",
+      authenticatedAs: "http:alice-key",
+      postedBy: "http:automation",
+      status: "interrupted",
+      provisional: true,
+    });
+    expect(isRunRecord(JSON.parse(JSON.stringify(record)))).toBe(true);
+  });
+
   it("interruptedRunRecord (the drain deadline's seam) builds a full-snapshot interrupted record from a live run's summary + snapshot", () => {
     const registry = new RunRegistry({ genId: () => "run-d", genToken: () => "tok" });
     const run = registry.create("coding · acme/x", {

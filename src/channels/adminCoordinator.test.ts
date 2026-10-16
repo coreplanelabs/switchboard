@@ -4801,7 +4801,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       },
       coordinator: { unit: "U12", instanceAttempt: 0 },
     });
-    expect(h.threadsAsked).toEqual([{ threadKey: instance.threadKey, userId: instance.userId }]);
+    expect(h.threadsAsked).toEqual([
+      { threadKey: instance.threadKey, userId: instance.userId, sourceRunId: "main-source" },
+    ]);
     expect((await log.list(`worker:${instance.id}:U12`)).map((event) => event.kind)).toEqual(["input", "reply"]);
     const row = (await h.instances.listUnits(instance.id))[0]!;
     await h.instances.putUnits([{ ...row, threadKey: "slack:C1:2.0" }]);
@@ -4809,7 +4811,9 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       status: 409,
       body: { error: "private_worker_thread_conflict" },
     });
-    expect(h.threadsAsked).toEqual([{ threadKey: instance.threadKey, userId: instance.userId }]);
+    expect(h.threadsAsked).toEqual([
+      { threadKey: instance.threadKey, userId: instance.userId, sourceRunId: "main-source" },
+    ]);
   });
 
   it("starts from the bounded work brief instead of a long main-run request", async () => {
@@ -7467,14 +7471,21 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
             why: "held",
             renewalsLeft: 0,
             spendUsd: 1,
-            humanGate: { pr, round: 1, findings: [finding], verdict: "request_changes", reviewRunId: "run-r1" },
+            humanGate: {
+              pr,
+              round: 1,
+              findings: [finding],
+              verdict: "request_changes",
+              reviewRunId: "run-r1",
+              assignedTo: "slack:forged",
+            },
           },
         })
       ).status,
     ).toBe(200);
     const [row] = await h.instances.listUnits(PLAN_INSTANCE.id);
     expect(row!.ending).toBeUndefined();
-    expect(row!.idle?.humanGate).toMatchObject({ round: 1, findings: [finding] });
+    expect(row!.idle?.humanGate).toMatchObject({ round: 1, findings: [finding], assignedTo: PLAN_INSTANCE.userId });
     expect(h.github.comments.get("acme/api#12")?.at(-1)?.body).toContain("waiting for a person");
     expect(h.github.comments.get("acme/api#12")?.at(-1)?.body).toContain("F2 — independent receipt missing");
   });
@@ -19873,7 +19884,10 @@ describe("POST /admin/coordinator/recover-unit — unchanged-head original-unit 
 
     expect(response.status).toBe(200);
     const [settled] = await h.instances.listUnits(INSTANCE.id);
-    expect(settled).toMatchObject({ ending: { kind: "held" }, recoveryHold: { cause: "human", gate: humanGate } });
+    expect(settled).toMatchObject({
+      ending: { kind: "held" },
+      recoveryHold: { cause: "human", gate: { ...humanGate, assignedTo: INSTANCE.userId } },
+    });
     expect(settled!.idle).toBeUndefined();
     expect(settled!.recovery).toBeUndefined();
   });

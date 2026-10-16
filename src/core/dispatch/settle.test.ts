@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { ALL_GRANTS } from "../authz/grants.js";
+import {
+  withOrganizationPrivateAudience,
+  withOriginalOrganizationDispatch,
+  organizationPrivateAudienceOf,
+  originalOrganizationDispatchOf,
+} from "./privateDestination.js";
 import { canOfferMainStart } from "../../tools/mainStart.js";
 import { channelOf, startRequestRoot } from "../requestTrace.js";
 import { RunControl } from "../runRegistry/runControl.js";
@@ -155,6 +161,43 @@ describe("settleThread — the thread when the request is over", () => {
 });
 
 describe("prepareFreshTurn — the one request the unconsumed follow-ups run as", () => {
+  it("keeps a single browser input's original owner and removes private proof from merged inputs", () => {
+    const first = followUp("fix signup", NOW - 2, [], "access:alice");
+    const plain = { ...first.msg, channelId: "http:home", threadKey: "http:home:alice", messageId: "browser:once" };
+    const audience = {
+      kind: "organization-private" as const,
+      organization: "acme",
+      stream: "person:alice",
+      actorId: plain.userId,
+      userId: plain.userId,
+      channelId: plain.channelId,
+      threadKey: plain.threadKey,
+    };
+    const owned = {
+      ...first,
+      msg: withOriginalOrganizationDispatch(withOrganizationPrivateAudience(plain, audience, 7), {
+        ingressRunId: "original-ingress",
+        organizationSequence: 7,
+        organizationRepo: "acme/api",
+      }),
+    };
+    const single = prepareFreshTurn(
+      { clock: () => NOW },
+      { agent: "orchestrator", pending: [owned], clock: () => NOW },
+    );
+    expect(originalOrganizationDispatchOf(single.msg)).toEqual({
+      ingressRunId: "original-ingress",
+      organizationSequence: 7,
+      organizationRepo: "acme/api",
+    });
+    expect(organizationPrivateAudienceOf(single.msg)).toEqual(audience);
+    const merged = prepareFreshTurn(
+      { clock: () => NOW },
+      { agent: "orchestrator", pending: [owned, followUp("Other words", NOW - 1, [], "access:bob")], clock: () => NOW },
+    );
+    expect(organizationPrivateAudienceOf(merged.msg)).toBeUndefined();
+    expect(originalOrganizationDispatchOf(merged.msg)).toBeUndefined();
+  });
   it("does not attest a merged fresh turn as one direct request", () => {
     const first = followUp("fix signup", NOW - 2, [], "slack:UA");
     const channelId = "slack:D1";

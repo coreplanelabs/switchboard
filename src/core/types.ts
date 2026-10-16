@@ -268,6 +268,8 @@ export interface UploadTicket {
  *  and which scope asked is an operator's fact (`config show` names it). */
 export interface ConfirmationOffer {
   id: string;
+  /** Trusted canonical saved action, never inferred from question or receipt prose. */
+  actionLabel?: "Merge" | "Confirm";
   line: string;
   risk: string;
   expiresAt: number;
@@ -283,6 +285,10 @@ export interface ChannelIO {
   /** Restore this exact consumed input's fresh Actor and receipt sink; absent proof holds it. */
   rehostOrganizationInput?(request: IncomingMessage): Promise<{ msg: IncomingMessage; io: ChannelIO } | undefined>;
   authoritativePrivateHistory?(request?: IncomingMessage): Promise<import("./dispatch/textTurns.js").TextTurn[]>;
+  /** Current source proof and retained history for an original source run. Missing proof holds. */
+  authoritativePrivateSourceHistory?(
+    sourceRunId: string,
+  ): Promise<import("./dispatch/textTurns.js").TextTurn[] | undefined>;
   /** Server-proved private browser destination; absent on shared or machine surfaces. */
   organizationPrivateAudience?(): import("./dispatch/privateDestination.js").OrganizationPrivateAudience | undefined;
   /** Re-proves the exact original source, current binding, grants and private reply address. */

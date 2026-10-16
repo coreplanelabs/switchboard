@@ -2978,6 +2978,8 @@ export type ActionContextDeps = Pick<
 /** Inputs shared by front-door context preparation and its action loop. */
 export interface ActionContextRequest {
   msg: IncomingMessage;
+  /** Only current projected evidence may supply a private routing target. */
+  authoritativeHistory?: true;
   /** Saved-context capability with current source and audience checks. */
   readNotes?: () => Promise<OperatorSavedContext>;
   readMemory?: () => Promise<{ memory?: string; unavailable: readonly string[]; context?: ContextDependencies }>;
@@ -3028,7 +3030,7 @@ export async function prepareActionContext(
       allowedPresets: presets.map((preset) => preset.name).filter((name) => deps.config.canRunAgent(actor, name)),
     });
   }
-  const newestFinishedRun = ctx.thread ? newestFinishedRunOf(ctx.thread) : undefined;
+  const newestFinishedRun = !ctx.authoritativeHistory && ctx.thread ? newestFinishedRunOf(ctx.thread) : undefined;
   const channelRepo = deps.config.scopes(msg.channelId, msg.userId).channel.repo;
   const preferredRepos = [newestFinishedRun?.repo, channelRepo].filter(
     (repo): repo is string => repo !== undefined && deps.config.canUseRepo(actor, repo),
@@ -3038,8 +3040,8 @@ export async function prepareActionContext(
     requester: msg.userId,
     channelId: msg.channelId,
     text: msg.text,
-    readNotes: ctx.readNotes,
-    readMemory: ctx.readMemory,
+    readNotes: ctx.authoritativeHistory ? undefined : ctx.readNotes,
+    readMemory: ctx.authoritativeHistory ? undefined : ctx.readMemory,
   });
   const briefsP = deps.github
     ? loadRepositoryBriefs({
@@ -3115,8 +3117,9 @@ export async function prepareActionContext(
     };
   }
   let requesterTarget: RequesterTarget | undefined;
-  const targetStore = deps.runLedger;
-  const typedTargetStoreUnavailable = !targetStore?.readRequesterTarget || !targetStore.checkpointRequesterTarget;
+  const targetStore = ctx.authoritativeHistory ? undefined : deps.runLedger;
+  const typedTargetStoreUnavailable =
+    !ctx.authoritativeHistory && (!targetStore?.readRequesterTarget || !targetStore.checkpointRequesterTarget);
   let targetStoreUnavailable = false;
   if (targetStore?.readRequesterTarget && targetStore.checkpointRequesterTarget) {
     const key = threadSessionKey(msg.threadKey);
@@ -3369,7 +3372,8 @@ export async function operatorStage(
           requesterId: msg.userId,
           ...(ctx.owner ? { owner: ctx.owner } : {}),
           typedTargetStoreUnavailable:
-            !deps.runLedger?.readRequesterTarget || !deps.runLedger.checkpointRequesterTarget,
+            !ctx.authoritativeHistory &&
+            (!deps.runLedger?.readRequesterTarget || !deps.runLedger.checkpointRequesterTarget),
           providers: Object.keys(cfg.providers ?? {}),
           ...(deps.providerModels ? { providerModels: deps.providerModels } : {}),
         };
@@ -3449,11 +3453,13 @@ export async function operatorStage(
       };
     } else {
       try {
-        const committed = await targetStore!.checkpointRequesterTarget!(
-          threadSessionKey(msg.threadKey),
-          msg.userId,
-          provisionalTarget,
-        );
+        const committed = ctx.authoritativeHistory
+          ? provisionalTarget
+          : await targetStore!.checkpointRequesterTarget!(
+              threadSessionKey(msg.threadKey),
+              msg.userId,
+              provisionalTarget,
+            );
         if (committed.conflict || committed.repo !== provisionalTarget.repo) throw new Error("target conflict");
         requesterTarget = committed;
       } catch {

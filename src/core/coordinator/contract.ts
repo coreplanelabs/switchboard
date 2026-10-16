@@ -1533,6 +1533,15 @@ const isRoundGate = (v: unknown): boolean =>
   v.findings.every((f) => typeof f === "string");
 export const isHumanGatePending = (v: unknown): v is HumanGatePending =>
   isObject(v) &&
+  (v.primaryAction === undefined ||
+    (isObject(v.primaryAction) &&
+      Object.keys(v.primaryAction).every((key) => key === "label" || key === "text") &&
+      typeof v.primaryAction.label === "string" &&
+      v.primaryAction.label.trim().length > 0 &&
+      v.primaryAction.label.length <= 64 &&
+      typeof v.primaryAction.text === "string" &&
+      v.primaryAction.text.trim().length > 0 &&
+      v.primaryAction.text.length <= 4096)) &&
   (v.assignedTo === undefined || (isText(v.assignedTo) && /^[a-z][a-z0-9-]*:[^\s]+$/i.test(v.assignedTo))) &&
   isObject(v.pr) &&
   typeof v.pr.number === "number" &&

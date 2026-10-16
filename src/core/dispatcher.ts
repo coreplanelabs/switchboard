@@ -2,7 +2,19 @@ import { bindConversationRead } from "./dispatch/conversationRead.js";
 import { wrapUntrusted } from "./untrusted.js";
 import { isResearchBrief, renderResearchBrief } from "./research/brief.js";
 import { researchFromRun, researchInputAnswers } from "./research/source.js";
+import { envelopeSchema } from "./organization/contract.js";
 import { runSessionIdentity } from "./dispatch/sessionIdentity.js";
+import { markPrivateConversation } from "./dispatch/privateConversation.js";
+import {
+  isOrganizationPrivateAudience,
+  withOrganizationPrivateAudience,
+  organizationPrivateAudienceOf,
+  privateDestinationOf,
+  verifyPrivateDestination,
+  requesterMessageId,
+  originalOrganizationDispatchOf,
+  withOriginalOrganizationDispatch,
+} from "./dispatch/privateDestination.js";
 import { resumedPilotBindingFor } from "./dispatch/readyBinding.js";
 import { appendThreadTurn } from "./runLedger/threadSession.js";
 import {
@@ -92,6 +104,7 @@ import {
   actorIdsOf,
   cancelPending,
   consumeAndRun,
+  currentConfirmationSource,
   OFFER_CONTEXT_LINE,
   OFFER_FOREIGN_LINE,
   OFFER_UNREADABLE_LINE,
@@ -116,7 +129,7 @@ import {
   type ReferenceDeps,
 } from "./dispatch/references.js";
 import { authorize } from "./authz/authorize.js";
-import { chatActorOf, resolveChatActor } from "./authz/actor.js";
+import { chatActorOf, resolveChatActor, withChatActor } from "./authz/actor.js";
 import { operatorModeOf, referencesOn } from "../config.js";
 import { parseChatCommand } from "./commandChat.js";
 import { parseDirectives, reviewHeadOf } from "../directives.js";
@@ -197,7 +210,6 @@ import {
   revalidateSavedSlackContextDecision,
   savedSlackContextNeedsRecheck,
 } from "./dispatch/privateAudience.js";
-import { directAudienceStampOf } from "./runLedger/inboxMessage.js";
 import { parsePrivateWorkerThreadKey } from "./privateWorkerLog.js";
 import { runLoop } from "./dispatch/runLoop.js";
 import { executeConversationCommand } from "./dispatch/conversationCommand.js";
@@ -275,6 +287,7 @@ import { createRunsService, PRIVATE_WORKER_INTERNAL_READ, type RunsService, type
 import {
   isExistingPrPublicationBinding,
   unitKeyOf,
+  parseUnitKey,
   unitNudgeEventType,
   unitOfIdempotencyKey,
   type CoordinatorTag,
@@ -391,8 +404,10 @@ async function answerUnitOwnedThread(
     clock: () => number;
     /** The request's level (routing-and-config item 28): the ack is `verbose` material. */
     verbosity: Verbosity;
+    expectedQuestion?: import("./ship/coordinator.js").HumanGatePending;
+    ingressRunId?: string;
   },
-): Promise<"acked" | "route-fresh" | "unconfirmed"> {
+): Promise<"acked" | "route-fresh" | "unconfirmed" | "refused" | "uncertain"> {
   const { msg, io, owner } = ctx;
   const store = deps.coordinatorInstances!;
   const key = { instanceId: owner.instanceId, unit: owner.unit.unit };
@@ -411,15 +426,25 @@ async function answerUnitOwnedThread(
   // A failed acknowledgment can follow a committed append. Keep this request
   // with its known owner; absence or failure does not select a fresh task.
   const appended = await store
-    .appendEvent(key, {
-      ...(messageId !== undefined ? { id: messageId } : {}),
-      sender: msg.userId,
-      ...(msg.userName !== undefined ? { senderName: msg.userName } : {}),
-      text: ctx.text,
-      ...(attachments.length > 0 ? { attachments } : {}),
-      mode: owner.unit.idle !== undefined ? "wake" : "steer",
-      at,
-    })
+    .appendEvent(
+      key,
+      {
+        ...(messageId !== undefined ? { id: messageId } : {}),
+        sender: msg.userId,
+        ...(ctx.ingressRunId !== undefined ? { organizationIngressRunId: ctx.ingressRunId } : {}),
+        ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+        ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
+        ...(msg.userName !== undefined ? { senderName: msg.userName } : {}),
+        text: ctx.text,
+        ...(attachments.length > 0 ? { attachments } : {}),
+        mode: owner.unit.idle !== undefined ? "wake" : "steer",
+        at,
+      },
+      ctx.expectedQuestion !== undefined ? true : undefined,
+      undefined,
+      undefined,
+      ctx.expectedQuestion !== undefined ? { expectedQuestion: ctx.expectedQuestion } : undefined,
+    )
     .catch((err: unknown) => {
       console.warn(
         `[dispatch] ${msg.threadKey}: unit ${unitKey} event append failed (${err instanceof Error ? err.message : String(err)}) — delivery unconfirmed`,
@@ -427,6 +452,14 @@ async function answerUnitOwnedThread(
       return { ok: false as const, reason: "unavailable" as const };
     });
   if (!appended.ok) {
+    if (ctx.expectedQuestion !== undefined) {
+      await io.reply(
+        appended.reason === "unavailable"
+          ? "The original question could not be verified. No new work started."
+          : "This question changed or is closed. No new work started.",
+      );
+      return appended.reason === "unavailable" ? "uncertain" : "refused";
+    }
     console.warn(`[dispatch] ${msg.threadKey}: unit ${unitKey} event append not confirmed (${appended.reason})`);
     return "unconfirmed";
   }
@@ -452,6 +485,12 @@ async function answerUnitOwnedThread(
       status.kind === "absent" ||
       (status.kind === "status" && ["complete", "errored", "terminated"].includes(status.status));
     if (gone) {
+      if (ctx.expectedQuestion !== undefined) {
+        await io.reply(
+          "Your answer is stored with the original unit. Its runner is unavailable; no replacement work started.",
+        );
+        return "acked";
+      }
       const why = status.kind === "absent" ? "no such instance" : status.status;
       if (owner.unit.recovery !== undefined) {
         const recovery = owner.unit.recovery;
@@ -551,6 +590,19 @@ export function activeRunCount(): number {
 }
 
 export interface DispatchOptions {
+  /** Trusted current private-conversation projection in `seed`. No automatic
+   * stored tails, notes, memory, artifacts or reflection may replace it. */
+  authoritativeHistory?: boolean;
+  /** Trusted organization front door; plain turns use the existing orchestrator. */
+  organizationConversation?: boolean;
+  /** Original durable admission ordinal, never a client-selected version. */
+  organizationSequence?: number;
+  /** One repository proved by the host from the authenticated source. */
+  organizationRepo?: string;
+  /** Original ingress ledger identity, after its effect key was consumed once. */
+  ingressRunId?: string;
+  /** Trusted saved question. Its original unit performs the atomic comparison. */
+  answerTarget?: { unitKey: string; expectedQuestion: import("./ship/coordinator.js").HumanGatePending };
   /** Trusted original action clock, without inventing run lineage. */
   parentRemainingMs?: number;
   /** The original action's absolute deadline. A sampled remainder cannot
@@ -689,6 +741,117 @@ export async function dispatch(
   io: ChannelIO,
   opts: DispatchOptions = {},
 ): Promise<DispatchOutcome> {
+  // A saved provider context cannot prove that excluded private bytes are absent.
+  // Preserve its original owner/workspace for reconciliation; never replay it as fresh.
+  if (
+    opts.resume?.row.meta.authoritativeHistory ||
+    opts.restart?.row.meta.authoritativeHistory ||
+    (opts.authoritativeHistory && (opts.resume || opts.restart || opts.restartOf))
+  ) {
+    await io.reply("The saved private run is held because its current context could not be verified.");
+    return { status: "refused", refusal: "setup_failed" };
+  }
+  const projectedSource = opts.parentContext?.handoff?.privateProjectionHash
+    ? opts.parentContext.handoff
+    : isChildHandoff(opts.childHandoff) && opts.childHandoff.privateProjectionHash
+      ? opts.childHandoff
+      : undefined;
+  if (projectedSource) {
+    const history = await io.authoritativePrivateSourceHistory?.(projectedSource.source.runId);
+    if (!history) {
+      await io.reply("The private source context could not be verified.");
+      return { status: "refused", refusal: "setup_failed" };
+    }
+    opts = { ...opts, authoritativeHistory: true, seed: history };
+  }
+  if (opts.authoritativeHistory && opts.seed === undefined) {
+    await io.reply("The private conversation could not be verified.");
+    return { status: "refused", refusal: "setup_failed" };
+  }
+  if (opts.authoritativeHistory) {
+    msg = markPrivateConversation(msg);
+    const originalIO = io;
+    // Routing and typed command context use the same current projection as model input.
+    io = Object.create(originalIO) as ChannelIO;
+    io.history = async () =>
+      originalIO.authoritativePrivateHistory
+        ? originalIO.authoritativePrivateHistory(msg)
+        : structuredClone(opts.seed!);
+  }
+  if (opts.organizationConversation && opts.authoritativeHistory && io.organizationPrivateAudience) {
+    const audience = io.organizationPrivateAudience();
+    const actor = chatActorOf(deps.config, msg);
+    if (
+      !isOrganizationPrivateAudience(audience) ||
+      audience.actorId !== actor.id ||
+      actor.kind !== "user" ||
+      actor.viewingAs ||
+      audience.channelId !== msg.channelId ||
+      audience.userId !== msg.userId ||
+      audience.threadKey !== msg.threadKey ||
+      !(await verifyPrivateDestination(io, audience)).ok
+    ) {
+      await io.reply("The private conversation could not be verified.");
+      return { status: "refused", refusal: "setup_failed" };
+    }
+    msg = withOrganizationPrivateAudience(msg, audience, opts.organizationSequence);
+  }
+  // The original owner pointer also rides HTTP/MCP inputs. It proves no
+  // private audience; each adapter still supplies its current source proof.
+  if (opts.ingressRunId && opts.organizationSequence !== undefined)
+    msg = withOriginalOrganizationDispatch(msg, {
+      ingressRunId: opts.ingressRunId,
+      organizationSequence: opts.organizationSequence,
+      ...(opts.organizationRepo ? { organizationRepo: opts.organizationRepo } : {}),
+    });
+  if (opts.answerTarget !== undefined) {
+    const key = parseUnitKey(opts.answerTarget.unitKey);
+    const store = deps.coordinatorInstances;
+    if (!key || !store || !msg.messageId) {
+      await io.reply("The original question could not be verified. No new work started.");
+      return { status: "refused", refusal: "setup_failed" };
+    }
+    const refused: DispatchOutcome = { status: "refused", refusal: "setup_failed" };
+    const gate = await authorizeAgent(deps, {
+      msg,
+      io,
+      agentName: "coding",
+      refuse: async (reason) => {
+        refused.refusal = reason.code;
+        await renderRefusal(reason, io);
+      },
+    });
+    if (gate.kind === "refused") return refused;
+    let units;
+    try {
+      units = await store.listUnits(key.instanceId);
+    } catch {
+      units = undefined;
+    }
+    const unit = units?.find(
+      (row) =>
+        row.unit === key.unit && (row.threadKey === msg.threadKey || row.reviewThread?.threadKey === msg.threadKey),
+    );
+    if (!unit) {
+      await io.reply("The original question could not be verified. No new work started.");
+      return { status: "failed", cause: "system" };
+    }
+    const result = await answerUnitOwnedThread(deps, {
+      msg,
+      io,
+      text: msg.text,
+      owner: { instanceId: key.instanceId, unit },
+      clock: deps.clock ?? systemClock,
+      verbosity: deps.config.verbosityFor(msg.channelId, msg.userId),
+      expectedQuestion: opts.answerTarget.expectedQuestion,
+      ingressRunId: opts.ingressRunId,
+    });
+    return result === "acked"
+      ? { status: "completed" }
+      : result === "uncertain"
+        ? { status: "failed", cause: "system" }
+        : refused;
+  }
   const confirmation =
     !opts.resume && !opts.restart && !opts.redispatch
       ? /^(confirm|cancel) ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/.exec(msg.text.trim())
@@ -703,7 +866,16 @@ export async function dispatch(
         io,
         connectionId: msg.approvalConnection?.id,
       },
-      { trace: opts.trace, threadKey: msg.threadKey },
+      {
+        trace: opts.trace,
+        threadKey: msg.threadKey,
+        ingressRunId: opts.ingressRunId,
+        authoritativeHistory: opts.authoritativeHistory,
+        organizationConversation: opts.organizationConversation,
+        organizationSequence: opts.organizationSequence,
+        organizationRepo: opts.organizationRepo,
+        seed: opts.seed,
+      },
     );
   // How this request ends, for the caller: every exit below returns this one
   // object and the outer finally stamps its status before the promise settles,
@@ -1003,7 +1175,7 @@ export async function dispatch(
     // A later DM turn may inherit private tool results from its session log.
     // Stop before the operator, history or seed can read that log unless Slack
     // still proves this is the same requester's private conversation.
-    const directDm = /^slack:D[A-Z0-9_]+$/.test(msg.channelId);
+    const directDm = /^slack:D[A-Z0-9_]+$/.test(msg.channelId) || organizationPrivateAudienceOf(msg) !== undefined;
     const workerIdentity = parsePrivateWorkerThreadKey(msg.threadKey);
     const boundPrivateWorker =
       workerIdentity !== undefined &&
@@ -1017,7 +1189,7 @@ export async function dispatch(
       const live = admission.get(msg.threadKey);
       if (live?.agent === "orchestrator") live.inbox.markUntrustedFollowUp();
     };
-    if (directDm && directAudienceStampOf(msg) === undefined) revokePrivateLive();
+    if (directDm && privateDestinationOf(msg) === undefined) revokePrivateLive();
     if (directDm || workerIdentity) {
       const checked =
         workerIdentity !== undefined
@@ -1048,7 +1220,7 @@ export async function dispatch(
         await deps.coordinatorInstances.recordRequesterTurn({
           threadKey: msg.threadKey,
           requesterId: msg.userId,
-          messageId: msg.messageId,
+          messageId: requesterMessageId(msg) ?? msg.messageId,
         });
       } catch {
         // The main agent may still answer; work_start fails closed when the
@@ -1078,7 +1250,8 @@ export async function dispatch(
     // Child requests and replay are not requester-authored evidence.
     if (!resume && !restart && !opts.parent && !opts.coordinator) {
       try {
-        await checkpointRequesterMessageTarget(deps.runLedger, msg.threadKey, msg.userId, msg.text);
+        if (!opts.authoritativeHistory)
+          await checkpointRequesterMessageTarget(deps.runLedger, msg.threadKey, msg.userId, msg.text);
       } catch {
         // An inherited write still requires a readable checkpoint at the door.
       }
@@ -1127,8 +1300,9 @@ export async function dispatch(
     // registry, and other channels keep the operator's normal routing.
     const mainScopes = deps.config.scopes(msg.channelId, msg.userId);
     const mainDm =
-      msg.channelId.startsWith("slack:D") &&
-      (mainScopes.user.agent ?? mainScopes.channel.agent ?? deps.config.config.defaults.agent) === "orchestrator";
+      opts.organizationConversation === true ||
+      ((msg.channelId.startsWith("slack:D") || opts.authoritativeHistory === true) &&
+        (mainScopes.user.agent ?? mainScopes.channel.agent ?? deps.config.config.defaults.agent) === "orchestrator");
     // A named PR Ship request is an action, not a continuation of the main
     // conversation. Let the operator's exact-target gate route it to Ship.
     const bareShipPrRequest = typedAgent === undefined && /^ship\s+\S/i.test(msg.text.trimStart()) && !!explicitPr;
@@ -1144,7 +1318,7 @@ export async function dispatch(
     // request; a preceding model cannot improve that explicit selection.
     let operatorMode =
       typedAgent === "orchestrator" ||
-      (mainDm && typedAgent !== "ship" && !bareShipPrRequest) ||
+      (mainDm && typedAgent !== "ship" && !bareShipPrRequest && (!opts.organizationConversation || !exactPrReply)) ||
       (configuredOperator === "on" && (originalRecoveryCommand || originalAdoptionCommand))
         ? "off"
         : configuredOperator;
@@ -1181,7 +1355,14 @@ export async function dispatch(
     // "yes" this event may be (routing-and-config item 29). Read here once and
     // reused below, so the operator costs the dispatch no second page.
     let operatorThread: RunView[] | undefined;
-    let establishedMainDm = false;
+    let establishedMainDm =
+      opts.organizationConversation === true &&
+      typedAgent === undefined &&
+      !exactPrReply &&
+      !resume &&
+      !restart &&
+      !opts.parent &&
+      !opts.coordinator;
     // The thread's owner off the page (record 0051's owner order), with unit
     // rows cached per instance so the operator view and an ended-owner check
     // still cost at most one durable read.
@@ -1327,7 +1508,7 @@ export async function dispatch(
       // line is what the operator decides, so the fragment
       // never becomes a request by itself.
       const pendingDecision =
-        operatorMode === "on" && operatorThread?.[0]?.operator?.outcome === "question"
+        !opts.authoritativeHistory && operatorMode === "on" && operatorThread?.[0]?.operator?.outcome === "question"
           ? await contextReader.readOperatorDecision(operatorThread[0].id)
           : undefined;
       const pendingQuestion = pendingDecision
@@ -1374,7 +1555,7 @@ export async function dispatch(
       operatorEvent = await root.span("dispatch.operator", async (span) => {
         const github = githubCapabilityFor(deps, chatActorOf(deps.config, msg), {
           requesterId: msg.userId,
-          verifiedDirectAudience: directAudienceVerified && directAudienceStampOf(msg) !== undefined,
+          verifiedDirectAudience: directAudienceVerified && privateDestinationOf(msg) !== undefined,
         });
         const event = await operatorStage(
           {
@@ -1388,48 +1569,62 @@ export async function dispatch(
           {
             msg: doorMsg,
             mode: operatorMode,
+            ...(opts.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
             pending: pendingQuestion,
             onContext: (context) => {
               operatorContext = mergeContextDependencies(context, ...(pendingContext ? [pendingContext] : []));
             },
             readTail: () =>
-              readOperatorTailContext({
-                ledger: deps.runLedger,
-                runs: operatorThread ?? [],
-                msg,
-                validateDependencies: contextReader.validateDependencies,
-                normalizeDependencies: contextReader.normalizeDependencies,
-              }),
+              opts.authoritativeHistory
+                ? Promise.resolve({
+                    turns: opts.seed!.map((turn) => ({
+                      text: `${turn.role}: ${turn.text}`,
+                      ...(turn.role === "user" && turn.user !== undefined ? { actor: turn.user } : {}),
+                    })),
+                    context: freshContext(),
+                    unavailable: [],
+                  })
+                : readOperatorTailContext({
+                    ledger: deps.runLedger,
+                    runs: operatorThread ?? [],
+                    msg,
+                    validateDependencies: contextReader.validateDependencies,
+                    normalizeDependencies: contextReader.normalizeDependencies,
+                  }),
             readNotes: () =>
-              readOperatorNotes({
-                ledger: deps.runLedger,
-                runs: operatorThread ?? [],
-                msg,
-                io,
-                validateDependencies: contextReader.validateDependencies,
-                normalizeDependencies: contextReader.normalizeDependencies,
-              }),
+              opts.authoritativeHistory
+                ? Promise.resolve({ notes: [], unavailable: [] })
+                : readOperatorNotes({
+                    ledger: deps.runLedger,
+                    runs: operatorThread ?? [],
+                    msg,
+                    io,
+                    validateDependencies: contextReader.validateDependencies,
+                    normalizeDependencies: contextReader.normalizeDependencies,
+                  }),
             readMemory: () =>
-              readOperatorMemory({
-                organization: deps.config.config.organization,
-                requester: msg.userId,
-                channelId: msg.channelId,
-                text: doorMsg.text,
-                memoryConfig: deps.config.config.memory,
-                memory: deps.memory,
-                canReadScope: (key) => {
-                  const kind = key.slice(0, key.indexOf(":"));
-                  return (
-                    (kind === "org" || kind === "user" || kind === "repo" || kind === "channel") &&
-                    authorize(
-                      reflectionActor(chatActorOf(deps.config, msg), { channelId: msg.channelId }),
-                      "memory:read",
-                      { type: "memory-scope", key, kind },
-                    ).allow
-                  );
-                },
-                authorizeSource: ({ candidate }) => contextReader.authorizeMemory(candidate),
-              }),
+              opts.authoritativeHistory
+                ? Promise.resolve({ unavailable: [] })
+                : readOperatorMemory({
+                    organization: deps.config.config.organization,
+                    requester: msg.userId,
+                    channelId: msg.channelId,
+                    text: doorMsg.text,
+                    memoryConfig: deps.config.config.memory,
+                    memory: deps.memory,
+                    canReadScope: (key) => {
+                      const kind = key.slice(0, key.indexOf(":"));
+                      return (
+                        (kind === "org" || kind === "user" || kind === "repo" || kind === "channel") &&
+                        authorize(
+                          reflectionActor(chatActorOf(deps.config, msg), { channelId: msg.channelId }),
+                          "memory:read",
+                          { type: "memory-scope", key, kind },
+                        ).allow
+                      );
+                    },
+                    authorizeSource: ({ candidate }) => contextReader.authorizeMemory(candidate),
+                  }),
             ...(operatorThread ? { thread: operatorThread } : {}),
             ...(opts.intake ? { intake: opts.intake } : {}),
             ...(threadOwner ? { owner: threadOwner } : {}),
@@ -1484,7 +1679,7 @@ export async function dispatch(
             contextDependencies: structuredClone(operatorContext),
             validateContext: () => revalidateAdmittedContext(() => operatorContext, contextReader.validateDependencies),
             appendReply: async (text) => {
-              if (!deps.runLedger.sessionPersistence) return;
+              if (!deps.runLedger.sessionPersistence || opts.authoritativeHistory) return;
               await appendThreadTurn(deps.runLedger, {
                 threadKey: msg.threadKey,
                 rowId: `${msg.messageId ?? `request:${root.traceId}:${root.id}`}:operator-reply:${operatorReplyIndex++}`,
@@ -1583,7 +1778,14 @@ export async function dispatch(
     if (
       operatorMode !== "on" &&
       operatorPreset === undefined &&
-      (await answerChatCommand(deps, { msg, io, ending, trace, ...(operatorEvent ? { operator: operatorEvent } : {}) }))
+      (await answerChatCommand(deps, {
+        msg,
+        io,
+        ending,
+        trace,
+        ingressRunId: opts.ingressRunId,
+        ...(operatorEvent ? { operator: operatorEvent } : {}),
+      }))
     )
       return ended;
 
@@ -1690,7 +1892,10 @@ export async function dispatch(
     // record has none. A later completed run's PR supersedes that publication.
     const laterPr = (runPr: ThreadPullRequest | undefined, releasedPr: ThreadPullRequest | undefined) =>
       releasedPr !== undefined && (runPr === undefined || releasedPr.at > runPr.at) ? releasedPr : runPr;
-    let threadPr = laterPr(thread ? threadPrOf(thread) : undefined, pageOwner?.releasedPr);
+    let threadPr = laterPr(
+      !opts.authoritativeHistory && thread ? threadPrOf(thread) : undefined,
+      pageOwner?.releasedPr,
+    );
     const barePrNumber = barePrNumberOf(msg.text);
     const currentPrNumber = explicitPr?.number ?? barePrNumber;
     let namedReleasedPr: ThreadPullRequest | undefined;
@@ -1710,7 +1915,7 @@ export async function dispatch(
       if (namedReleasedPr !== undefined) threadPr = namedReleasedPr;
     }
     const inheritedRepo =
-      (thread ? newestFinishedRunOf(thread)?.repo : undefined) ??
+      (opts.authoritativeHistory ? opts.organizationRepo : thread ? newestFinishedRunOf(thread)?.repo : undefined) ??
       deps.config.scopes(msg.channelId, msg.userId).channel.repo;
     const carriedTarget = resume
       ? carriedOperationTarget(resume.row)
@@ -1998,7 +2203,13 @@ export async function dispatch(
     }
     // A sticky follow-up may carry a historical router decision so its old
     // card remains legible; the door itself chose no route on this event.
-    if (route === undefined && stickyAgent !== undefined && agentSource === "sticky" && thread)
+    if (
+      !opts.authoritativeHistory &&
+      route === undefined &&
+      stickyAgent !== undefined &&
+      agentSource === "sticky" &&
+      thread
+    )
       route = threadRouteOf(thread, resolved.agentName);
     if (resume?.row.meta.route) route = resume.row.meta.route;
 
@@ -2200,6 +2411,11 @@ export async function dispatch(
     // along, and its outcome is the one the caller gets.
     if (outcome.kind === "redispatch")
       return dispatch(deps, msg, io, {
+        ingressRunId: opts.ingressRunId,
+        organizationConversation: opts.organizationConversation,
+        organizationSequence: opts.organizationSequence,
+        organizationRepo: opts.organizationRepo,
+        authoritativeHistory: opts.authoritativeHistory,
         ...(operationTarget !== undefined ? { operationTarget } : {}),
         ...(opts.parent ? { parent: opts.parent } : {}),
         ...(opts.seed ? { seed: opts.seed } : {}),
@@ -2212,6 +2428,7 @@ export async function dispatch(
       });
     // A reply folded into the live child of a spawned thread: its parent hears it now.
     if (outcome.kind === "steered") {
+      if (opts.ingressRunId) ended.inputQueued = { ...(outcome.runId ? { runId: outcome.runId } : {}) };
       await tellLineage({ kind: "steered" });
       // A decision that routed a preset into a live thread was folded by the
       // owner rule instead of starting a run: the decision's event rides the
@@ -2281,16 +2498,18 @@ export async function dispatch(
     // Cross-session memory — READ path, started here (dispatch/provision.ts) so
     // the memory Worker round trip overlaps the repo/PR resolution and the
     // attach; awaited when the prompt is composed.
-    const memoryBlockP = startMemoryRead(deps, {
-      msg,
-      directives,
-      repoCtxP,
-      root,
-      authorizeMemory: contextReader.authorizeMemory,
-      onContext: (context) => {
-        memoryContext = context;
-      },
-    });
+    const memoryBlockP = opts.authoritativeHistory
+      ? Promise.resolve(undefined)
+      : startMemoryRead(deps, {
+          msg,
+          directives,
+          repoCtxP,
+          root,
+          authorizeMemory: contextReader.authorizeMemory,
+          onContext: (context) => {
+            memoryContext = context;
+          },
+        });
 
     // Acknowledge NOW, before anything slow. Everything between here and the
     // model turn can take minutes — repo/PR resolution (GitHub REST), memory
@@ -2537,6 +2756,8 @@ export async function dispatch(
       clearInterval(setupHeartbeat);
       shipForked = true;
       const branchEnd = await (deps.shipBranch ?? runShipBranch)(deps, msg, io, {
+        ...(opts.ingressRunId ? { ingressRunId: opts.ingressRunId } : {}),
+        ...(opts.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
         agent,
         ...(context ? { context } : {}),
         profile,
@@ -2709,12 +2930,20 @@ export async function dispatch(
       throw new RefusalError(
         refusalOf("setup_failed", "I couldn't verify the original conversation, so no recovery started."),
       );
-    const sessionIdentity = runSessionIdentity(msg.threadKey, agent.name, coordinator, originalSession);
+    const sessionIdentity = runSessionIdentity(
+      msg.threadKey,
+      agent.name,
+      coordinator,
+      originalSession,
+      opts.authoritativeHistory ? (opts.ingressRunId ?? root.traceId) : undefined,
+    );
     const sameSessionScope = (view: RunView) =>
+      !opts.authoritativeHistory &&
       view.agent === agent.name &&
       (view.session?.key === sessionIdentity.key || view.session?.key.startsWith(`${sessionIdentity.key}:run:`));
     let sessionHistory = thread;
     if (
+      !opts.authoritativeHistory &&
       !resume &&
       !restart &&
       opts.restartOf === undefined &&
@@ -2730,7 +2959,9 @@ export async function dispatch(
         );
     }
     const previousSession =
-      !resume && !restart && opts.restartOf === undefined ? sessionHistory?.find(sameSessionScope)?.session : undefined;
+      !opts.authoritativeHistory && !resume && !restart && opts.restartOf === undefined
+        ? sessionHistory?.find(sameSessionScope)?.session
+        : undefined;
     let runSessionKey = previousSession?.key ?? sessionIdentity.key;
     const [fromSession, threadArtifacts] = await Promise.all([
       !resume && !opts.seed && !hasHandoff && thread
@@ -2751,7 +2982,7 @@ export async function dispatch(
             },
           })
         : undefined,
-      thread && agent.name !== "orchestrator"
+      thread && agent.name !== "orchestrator" && !opts.authoritativeHistory
         ? threadArtifactsFor({
             runs: runsService,
             thread,
@@ -2765,6 +2996,7 @@ export async function dispatch(
     // revision may have changed. Only the original requester can reuse it.
     let sourceContinuation: string | undefined;
     if (
+      !opts.authoritativeHistory &&
       (agent.name === "general" || agent.name === "research") &&
       requestText.trim().toLowerCase() === "continue" &&
       thread
@@ -2868,7 +3100,7 @@ export async function dispatch(
     const savedContextValid =
       fromSession?.seed !== undefined && (await contextReader.validateDependencies(candidateContext)).ok;
     let isolateExecutionSession = false;
-    if (!resume && !restart && opts.restartOf === undefined && !savedContextValid) {
+    if (!opts.authoritativeHistory && !resume && !restart && opts.restartOf === undefined && !savedContextValid) {
       const retainedSources =
         fromSession?.seed?.sources ??
         (await deps.runLedger.readSessionTail(runSessionKey, 1).catch(() => undefined))?.sources;
@@ -2886,7 +3118,7 @@ export async function dispatch(
     let seedContext = mergeContextDependencies(
       freshContext(),
       operatorContext,
-      ...(opts.seed ? [UNKNOWN_CONTEXT_DEPENDENCIES] : []),
+      ...(opts.seed ? [opts.authoritativeHistory ? freshContext() : UNKNOWN_CONTEXT_DEPENDENCIES] : []),
       contextForReferences(references, msg),
       ...(session ? [candidateContext] : []),
       ...(threadArtifacts?.context ? [threadArtifacts.context] : []),
@@ -3046,6 +3278,8 @@ export async function dispatch(
     const reserveIdentity = async (runId: string, channelVisibility: ChannelVisibility) => {
       assertOriginalActionBudget();
       const reservation = await reserveRun(deps, {
+        ingressRunId: opts.ingressRunId,
+        ...(opts.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
         msg,
         admissionIdentity,
         agent,
@@ -3126,6 +3360,7 @@ export async function dispatch(
     const registration = await registerRun(deps, {
       msg,
       io,
+      ...(opts.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
       ...((!resume && !restart) || hasHandoff
         ? {
             beforeRegister: async ({
@@ -3149,6 +3384,13 @@ export async function dispatch(
                 };
                 handoffAccess = await handoffFactory({ consumer: handoffConsumer, msg, io });
                 if (!handoffAccess) throw new Error("The child context storage and source checks are unavailable.");
+                handoffAccess.readPrivateProjection = async (source) => {
+                  const turns = await io.authoritativePrivateSourceHistory?.(source.source.runId);
+                  return turns?.map((turn) => ({
+                    role: turn.role,
+                    content: [{ type: "text" as const, text: turn.text }],
+                  }));
+                };
                 const checked = await validateChildHandoff({
                   value: incomingHandoff,
                   consumer: handoffConsumer,
@@ -3226,6 +3468,7 @@ export async function dispatch(
       carriedRow,
       resume,
       restart,
+      ...(opts.ingressRunId !== undefined ? { ingressRunId: opts.ingressRunId } : {}),
       startedAt,
       receivedAt,
       clock,
@@ -3307,7 +3550,12 @@ export async function dispatch(
     // reads them fresh.
     const artifactContexts: ContextDependencies[] = [];
     const ownThreadAssets: Promise<ThreadAsset[]> | undefined =
-      sourceIntake === "automatic" && !resume && deps.artifacts && thread && thread.length > 0
+      !opts.authoritativeHistory &&
+      sourceIntake === "automatic" &&
+      !resume &&
+      deps.artifacts &&
+      thread &&
+      thread.length > 0
         ? readThreadAssets(
             { runs: runsService, store: deps.artifacts, trustedCoordinatorChild: opts.coordinator !== undefined },
             msg.threadKey,
@@ -4265,6 +4513,8 @@ export async function dispatch(
             requester: msg.userId,
             channelId: msg.channelId,
             verifiedDirectAudience: directAudienceVerified,
+            verifiedOrganizationPrivateAudience:
+              organizationPrivateAudienceOf(msg) !== undefined && directAudienceVerified,
             servers: mcpForRun.servers,
             session,
             ...(resume
@@ -4350,11 +4600,13 @@ export async function dispatch(
     };
     ledgerRun = await claimRun(deps, {
       msg,
+      ...(opts.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
       startedAt,
       ...(carriedRow ? { carriedRow } : {}),
       sessionKey: runSessionKey,
       verifyDirectAudience: io.verifyDirectAudience?.bind(io),
-      privateWorkVerifierAvailable: io.verifyDirectAudience !== undefined,
+      privateWorkVerifierAvailable:
+        io.verifyDirectAudience !== undefined || io.verifyOrganizationPrivateAudience !== undefined,
       io,
       admitted: admitted!,
       agent,
@@ -4374,6 +4626,7 @@ export async function dispatch(
       system,
       mcpForRun,
       ...(mainAudience?.ok ? { mainAudienceChecked: true as const } : {}),
+      ingressRunId: opts.ingressRunId,
       messages,
       seedContext,
       ...(seedNotepad !== undefined ? { seedNotepad } : {}),
@@ -4456,6 +4709,18 @@ export async function dispatch(
       attempt: runId,
     };
     handoffAccess ??= await handoffFactory({ consumer: handoffConsumer, msg, io });
+    if (handoffAccess)
+      handoffAccess.readPrivateProjection = async (source) => {
+        if (source.source.runId === runId && opts.authoritativeHistory && io.authoritativePrivateHistory) {
+          const turns = await io.authoritativePrivateHistory(msg);
+          return [...turns, { role: "user" as const, text: msg.text }].map((turn) => ({
+            role: turn.role,
+            content: [{ type: "text" as const, text: turn.text }],
+          }));
+        }
+        const turns = await io.authoritativePrivateSourceHistory?.(source.source.runId);
+        return turns?.map((turn) => ({ role: turn.role, content: [{ type: "text" as const, text: turn.text }] }));
+      };
     if (ledgerRun?.tracked()) {
       const normalized = await ledgerRun.normalizeContextOrigins();
       if (normalized.ok) {
@@ -4501,7 +4766,7 @@ export async function dispatch(
                 }
               : undefined,
             deps.runLedger,
-            sourceIntake === "automatic" && deps.artifacts
+            !opts.authoritativeHistory && sourceIntake === "automatic" && deps.artifacts
               ? {
                   read: async () => {
                     const assets = await readThreadAssets(
@@ -4537,6 +4802,24 @@ export async function dispatch(
                 }
               : undefined,
             () => admitRunContext(runId),
+            opts.authoritativeHistory
+              ? async () => {
+                  if (projectedSource) {
+                    const turns = await io.authoritativePrivateSourceHistory?.(projectedSource.source.runId);
+                    if (!turns) throw new Error("The private context could not be verified.");
+                    return [...turns, { role: "user" as const, text: msg.text }].map((turn) => ({
+                      role: turn.role,
+                      content: [{ type: "text" as const, text: turn.text }],
+                    }));
+                  }
+                  if (!io.authoritativePrivateHistory) throw new Error("The private context could not be verified.");
+                  const turns = await io.authoritativePrivateHistory(msg);
+                  return [...turns, { role: "user" as const, text: msg.text }].map((turn) => ({
+                    role: turn.role,
+                    content: [{ type: "text" as const, text: turn.text }],
+                  }));
+                }
+              : undefined,
           );
     const captureParentContext = async (): Promise<ParentContext> => {
       if (!sessionTools?.captureHandoff || !ledgerRun?.tracked() || !handoffAccess)
@@ -4683,6 +4966,7 @@ export async function dispatch(
           deps,
           {
             msg: message,
+            ...(opts.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
             io,
             trace,
             ending,
@@ -4729,8 +5013,8 @@ export async function dispatch(
       restartBranchIdentityBaseline: restartEvidence?.branchIdentityBaseline,
       restartPushedBranch: restartEvidence?.pushedBranch,
       restartIdentityUncertain: restartEvidence?.identityUncertain,
-      ...(deps.config.scopes(msg.channelId, msg.userId).channel.repo !== undefined
-        ? { configuredRepo: deps.config.scopes(msg.channelId, msg.userId).channel.repo }
+      ...((opts.organizationRepo ?? deps.config.scopes(msg.channelId, msg.userId).channel.repo) !== undefined
+        ? { configuredRepo: opts.organizationRepo ?? deps.config.scopes(msg.channelId, msg.userId).channel.repo }
         : {}),
       ...(githubDoor ? { githubDoor } : {}),
       isPrReview,
@@ -4899,24 +5183,29 @@ export async function dispatch(
               let checking: AudienceRefusalCode = "direct-audience-unavailable";
               try {
                 const directSlack = /^slack:D[A-Z0-9_]+$/.test(msg.channelId);
+                const privateBrowser = organizationPrivateAudienceOf(msg) !== undefined;
                 const directCheck: AudienceCheck =
-                  directSlack || mainAudience.audience.sources.length > 0
+                  directSlack || privateBrowser || mainAudience.audience.sources.length > 0
                     ? await privateAudienceDecision(msg, io)
                     : { ok: true };
                 if (!directCheck.ok) return directCheck;
-                const directAudienceStillValid = directSlack || mainAudience.audience.sources.length > 0;
+                const directAudienceStillValid =
+                  directSlack || privateBrowser || mainAudience.audience.sources.length > 0;
                 checking = "mcp-check-unavailable";
                 const fresh = await deps.mcp.toolsFor("orchestrator", {
                   userId: msg.userId,
                   channelId: msg.channelId,
                   ...(msg.directAudience ? { directAudience: msg.directAudience } : {}),
+                  ...(organizationPrivateAudienceOf(msg)
+                    ? { organizationPrivateAudience: organizationPrivateAudienceOf(msg) }
+                    : {}),
                 });
                 checking = "github-check-unavailable";
                 const readable =
                   ran.githubReadRepos.length > 0 || ran.githubReadUnknown
                     ? await githubCapabilityFor(deps, chatActorOf(deps.config, msg), {
                         requesterId: msg.userId,
-                        verifiedDirectAudience: directAudienceStillValid && directAudienceStampOf(msg) !== undefined,
+                        verifiedDirectAudience: directAudienceStillValid && privateDestinationOf(msg) !== undefined,
                       }).readableRepos?.(ran.githubReadRepos)
                     : [];
                 if (!readable) return { ok: false, code: checking };
@@ -4970,21 +5259,22 @@ export async function dispatch(
 
     // After the reply (dispatch/reply.ts): the memory reflection pass. The
     // review post-step ran inside the run loop, before the stream finished.
-    afterReply(deps, {
-      msg,
-      resolved,
-      directives,
-      history,
-      repoCtx,
-      run,
-      channelVisibility,
-      referenceVisibilities: references.visibilities,
-      producerContext: await contextReader.readRunDependencies(run.id).catch(() => undefined),
-      admitMemory: contextReader.authorizeMemory,
-      stopped,
-      answer,
-      toolCalls,
-    });
+    if (!opts.authoritativeHistory)
+      afterReply(deps, {
+        msg,
+        resolved,
+        directives,
+        history,
+        repoCtx,
+        run,
+        channelVisibility,
+        referenceVisibilities: references.visibilities,
+        producerContext: await contextReader.readRunDependencies(run.id).catch(() => undefined),
+        admitMemory: contextReader.authorizeMemory,
+        stopped,
+        answer,
+        toolCalls,
+      });
     return ended;
   } catch (err) {
     // Promotion can discover a fence after the attach's ownership check. The
@@ -5289,6 +5579,7 @@ export async function dispatch(
       });
       const restarted = await dispatch(deps, restart.msg, io, {
         ...restart.opts,
+        ...(opts.authoritativeHistory ? { authoritativeHistory: true, seed: opts.seed } : {}),
         ...(boundHandoff ? { childHandoff: boundHandoff } : {}),
       }).catch((err: unknown) => {
         console.error(
@@ -5375,12 +5666,101 @@ export async function dispatch(
         );
       }
     } else if (settled.kind === "handed-on") {
-      const fresh = prepareFreshTurn(deps, { agent: settled.agent, pending: settled.pending, clock });
-      await dispatch(deps, fresh.msg, fresh.io, fresh.opts).catch((err: unknown) =>
-        console.error(
-          `[dispatch] ${msg.threadKey} fresh turn for unconsumed follow-ups failed: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      );
+      const groups = settled.pending.some((input) => originalOrganizationDispatchOf(input.msg))
+        ? settled.pending.map((input) => [input])
+        : [settled.pending];
+      for (const pending of groups) {
+        const fresh = prepareFreshTurn(deps, { agent: settled.agent, pending, clock });
+        const original = originalOrganizationDispatchOf(fresh.msg);
+        let claimUnread = false;
+        if (original) {
+          const receiverRunId = admitted?.runId;
+          const inboxSeq = pending[0]?.ledgerSeq;
+          if (inboxSeq !== undefined) {
+            if (!receiverRunId) continue;
+            let held;
+            try {
+              held = await deps.runLedger.holdUnreadIngress({
+                ingressRunId: original.ingressRunId,
+                receiverRunId,
+                receiverGen: deps.runLedger.gen,
+                inboxSeq,
+              });
+            } catch {
+              continue;
+            }
+            if (held.status !== "record" || held.record.unread?.status !== "pending") continue;
+            claimUnread = true;
+            // The receiver may have stripped routing directives from its inbox.
+            const retained = envelopeSchema.safeParse(held.record.request?.envelope);
+            if (retained.success) fresh.msg = { ...fresh.msg, text: retained.data.content };
+          } else if (pending[0]!.beforeReservation) {
+            // This local follow-up arrived before receiver reservation. It has
+            // no durable inbox custody to release; its original ingress owner
+            // remains the only writer. The IO must freshly re-prove that owner.
+            fresh.msg = { ...fresh.msg, text: pending[0]!.msg.text };
+          } else {
+            await fresh.io
+              .reply(
+                "Your original input is held because its receiver could not confirm whether it was saved. No replacement work started.",
+              )
+              .catch(() => undefined);
+            continue;
+          }
+          const tellHeld = () =>
+            fresh.io
+              .reply(
+                "Your original input is held because its current source could not be verified. No replacement work started.",
+              )
+              .catch(() => undefined);
+          if (!fresh.io.rehostOrganizationInput) {
+            await tellHeld();
+            continue;
+          }
+          try {
+            const rehosted = await fresh.io.rehostOrganizationInput(fresh.msg);
+            if (!rehosted) {
+              await tellHeld();
+              continue;
+            }
+            fresh.msg = rehosted.msg;
+            fresh.io = rehosted.io;
+          } catch {
+            await tellHeld();
+            continue;
+          }
+          if (!fresh.io.authoritativePrivateHistory) {
+            await tellHeld();
+            console.warn(
+              `[dispatch] ${msg.threadKey}: original private input ${original.ingressRunId} remains held; current history unavailable`,
+            );
+            continue;
+          }
+          try {
+            fresh.opts.seed = await fresh.io.authoritativePrivateHistory(fresh.msg);
+            Object.assign(fresh.opts, original, { authoritativeHistory: true, organizationConversation: true });
+          } catch {
+            await tellHeld();
+            console.warn(
+              `[dispatch] ${msg.threadKey}: original private input ${original.ingressRunId} remains held; current proof unavailable`,
+            );
+            continue;
+          }
+        }
+        if (original) {
+          await ledgerRun?.close();
+          await ledgerRun?.waitForFinish();
+          if (claimUnread) {
+            const claimed = await deps.runLedger.claimUnreadIngress(original.ingressRunId).catch(() => undefined);
+            if (claimed?.status !== "claimed") continue;
+          }
+        }
+        await dispatch(deps, fresh.msg, fresh.io, fresh.opts).catch((err: unknown) =>
+          console.error(
+            `[dispatch] ${msg.threadKey} fresh turn for unconsumed follow-ups failed: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+      }
     }
     // The ledger heartbeat stops with the run (the finish write, in flight
     // through the writer, closes the row itself).
@@ -5424,7 +5804,16 @@ export interface ClickRequest {
 export async function dispatchClick(
   deps: CoreDeps,
   click: ClickRequest,
-  opts: { trace?: RequestTrace; threadKey?: string } = {},
+  opts: Pick<
+    DispatchOptions,
+    | "trace"
+    | "ingressRunId"
+    | "authoritativeHistory"
+    | "organizationConversation"
+    | "organizationSequence"
+    | "organizationRepo"
+    | "seed"
+  > & { threadKey?: string } = {},
 ): Promise<DispatchOutcome> {
   const ended: DispatchOutcome = { status: "completed" };
   const clock = deps.clock ?? systemClock;
@@ -5435,7 +5824,8 @@ export async function dispatchClick(
       receivedAt: clock(),
     });
   const root = trace.root;
-  const io = click.io;
+  let io = click.io;
+  let executionActor = click.actor;
   const actorIds = actorIdsOf(click.actor);
   let caught = false;
   let refused = false;
@@ -5463,7 +5853,7 @@ export async function dispatchClick(
   try {
     // Text names only a saved id and must stay in the thread that received it.
     // Atomic consumption still checks identity, expiry and connection consent.
-    if (opts.threadKey !== undefined) {
+    {
       const store = deps.confirmations;
       if (!store?.get) {
         await refuse(refusalOf("confirmation_unreadable", OFFER_UNREADABLE_LINE));
@@ -5476,13 +5866,31 @@ export async function dispatchClick(
         await refuse(refusalOf("confirmation_unreadable", OFFER_UNREADABLE_LINE));
         return ended;
       }
-      if (row && row.message.threadKey !== opts.threadKey) {
+      if (row && opts.threadKey !== undefined && row.message.threadKey !== opts.threadKey) {
         await refuse(refusalOf("confirmation_foreign", OFFER_FOREIGN_LINE));
         return ended;
       }
+      if (row) {
+        const source = await currentConfirmationSource(row, click.actor, deps.guardOrganizationConfirmation);
+        if (source === false) {
+          await refuse(refusalOf("confirmation_unreadable", OFFER_CONTEXT_LINE));
+          return ended;
+        }
+        if (source) {
+          io = source.io;
+          executionActor = source.actor;
+        }
+      }
     }
     if (click.kind === "cancel") {
-      const res = await cancelPending(deps, { id: click.id, actorIds, connectionId: click.connectionId });
+      const res = await cancelPending(deps, {
+        id: click.id,
+        actorIds,
+        connectionId: click.connectionId,
+        actor: executionActor,
+        ...(opts.ingressRunId ? { ingressRunId: opts.ingressRunId } : {}),
+        ...(opts.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
+      });
       if (res.kind === "refused")
         await ending.sealAfterReply(
           async () => {},
@@ -5500,12 +5908,25 @@ export async function dispatchClick(
     // the click's drain slot handed over, the question's code on the record.
     const res = await consumeAndRun(
       deps,
-      { id: click.id, actorIds, connectionId: click.connectionId },
+      {
+        id: click.id,
+        actorIds,
+        connectionId: click.connectionId,
+        actor: executionActor,
+        ...(opts.ingressRunId ? { ingressRunId: opts.ingressRunId } : {}),
+        ...(opts.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
+      },
       io,
       ending,
       trace,
       (row) =>
-        dispatch(deps, row.message, io, {
+        dispatch(deps, opts.ingressRunId ? withChatActor(row.message, executionActor) : row.message, io, {
+          ingressRunId: opts.ingressRunId,
+          authoritativeHistory: opts.authoritativeHistory,
+          organizationConversation: opts.organizationConversation,
+          organizationSequence: opts.organizationSequence,
+          organizationRepo: opts.organizationRepo,
+          seed: opts.seed,
           redispatch: { code: row.code, ...(row.binding ? { binding: row.binding } : {}) },
         }),
       (context, message) =>
@@ -5513,6 +5934,9 @@ export async function dispatchClick(
           () => context,
           contextAccessForMessage(deps, { msg: message, io }).validateDependencies,
         ),
+      opts.ingressRunId
+        ? { actor: executionActor, ingressRunId: opts.ingressRunId, authoritativeHistory: opts.authoritativeHistory }
+        : undefined,
     );
     if (res.kind === "redispatched") {
       redispatched = res.outcome;

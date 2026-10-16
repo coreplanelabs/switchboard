@@ -1,5 +1,12 @@
 import { hasConfirmationConsent, type ConfirmationConsentSource } from "./confirmationConsent.js";
 export { hasConfirmationConsent } from "./confirmationConsent.js";
+import {
+  originalOrganizationDispatchOf,
+  type OriginalOrganizationDispatch,
+  withOriginalOrganizationDispatch,
+} from "./dispatch/originalOrganizationInput.js";
+import type { Actor } from "./authz/types.js";
+import type { ChannelIO } from "./types.js";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -59,6 +66,8 @@ export interface RunConfirmation {
   approvedBy?: ConfirmationConsentSource;
   /** null means no repository context existed when this action was offered. */
   originRepo?: string | null;
+  /** Protected original offer source. Lookup provenance, never cached authority. */
+  originalOrganization?: OriginalOrganizationDispatch;
   expiresAt: number;
 }
 
@@ -80,8 +89,19 @@ export interface RedispatchConfirmation {
   binding?: PrWorkBinding;
   browserApproved?: true;
   approvedBy?: ConfirmationConsentSource;
+  /** Protected original offer source. Lookup provenance, never cached authority. */
+  originalOrganization?: OriginalOrganizationDispatch;
   expiresAt: number;
 }
+
+export interface ConfirmationSource {
+  actor: Actor;
+  io: ChannelIO;
+}
+export type ConfirmationSourceGuard = (
+  row: Confirmation,
+  chooserActor?: Actor,
+) => Promise<ConfirmationSource | undefined>;
 
 /** One pending confirmation as the store holds it: the discriminated union of
  *  the routed write's row and the question's Yes. */
@@ -140,6 +160,13 @@ export interface ConfirmationStore {
 /** A fresh confirmation id: a UUID, the one token a channel's affordance carries. */
 export function newConfirmationId(): string {
   return randomUUID();
+}
+
+/** The persisted command is the action authority; a proposal's prose is not. */
+export function confirmationActionLabel(
+  row: Pick<RunConfirmation, "kind" | "command"> | Pick<RedispatchConfirmation, "kind">,
+): "Merge" | "Confirm" {
+  return row.kind === "run" && row.command === "pulls.merge" ? "Merge" : "Confirm";
 }
 
 // ---- the offer's words -------------------------------------------------------
@@ -244,6 +271,19 @@ function isRedispatchShape(v: Record<string, unknown>): boolean {
  *  stamped on the way out (record 0054: old rows still parse). */
 export function parsePendingConfirmation(v: unknown): PendingConfirmation | undefined {
   if (!isRecord(v)) return undefined;
+  if (v.originalOrganization !== undefined) {
+    const pointer = v.originalOrganization;
+    if (
+      !isRecord(pointer) ||
+      Object.keys(pointer).some((key) => !["ingressRunId", "organizationSequence", "organizationRepo"].includes(key))
+    )
+      return;
+    try {
+      withOriginalOrganizationDispatch({}, pointer as unknown as OriginalOrganizationDispatch);
+    } catch {
+      return;
+    }
+  }
   if (
     v.caller !== undefined &&
     (!isRecord(v.caller) ||
@@ -304,6 +344,14 @@ function isRefusal(v: unknown): v is ConfirmationRefusal {
   return typeof v === "string" && (CONFIRMATION_REFUSALS as readonly string[]).includes(v);
 }
 
+/** Every client mints provenance before JSON/structuredClone drops Symbols.
+ * A request-body field cannot choose or replace the original source. */
+function confirmationForStorage(row: PendingConfirmation): PendingConfirmation {
+  const { originalOrganization: _untrusted, ...rest } = row;
+  const original = originalOrganizationDispatchOf(row.message);
+  return { ...rest, ...(original ? { originalOrganization: { ...original } } : {}) } as PendingConfirmation;
+}
+
 // ---- the in-memory and file stores ----------------------------------------------
 
 /** The judgement every store makes, over the rows it holds, on its own clock.
@@ -358,6 +406,7 @@ export class InMemoryConfirmationStore implements ConfirmationStore {
     this.clock = opts.clock ?? systemClock;
   }
   async put(row: PendingConfirmation, ttlMs: number): Promise<Confirmation> {
+    row = confirmationForStorage(row);
     const stored: Confirmation = structuredClone({ ...row, expiresAt: this.clock() + ttlMs });
     replaceThreadRow(this.rows, stored);
     return structuredClone(stored);
@@ -425,6 +474,7 @@ export class FileConfirmationStore implements ConfirmationStore {
     writeFileSync(this.path, JSON.stringify({ confirmations: [...rows.values()] }, null, 2));
   }
   async put(row: PendingConfirmation, ttlMs: number): Promise<Confirmation> {
+    row = confirmationForStorage(row);
     const rows = this.read();
     const stored: Confirmation = { ...row, expiresAt: this.clock() + ttlMs };
     replaceThreadRow(rows, stored);
@@ -493,6 +543,7 @@ export class WorkerConfirmationStore implements ConfirmationStore {
     this.fetchImpl = opts.fetch ?? fetch;
   }
   async put(row: PendingConfirmation, ttlMs: number): Promise<Confirmation> {
+    row = confirmationForStorage(row);
     const body = await this.post("/config/confirmations/put", {
       id: row.id,
       threadKey: row.message.threadKey,

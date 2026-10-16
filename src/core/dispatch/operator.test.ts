@@ -4957,6 +4957,60 @@ describe("requester-authored repository inheritance for a plain fix", () => {
     expect(result).toMatchObject({ outcome: "binds", binds: [{ repo: "acme/sensors", repoSource: "thread" }] });
   });
 
+  it("keeps authoritative routing free of deleted requester checkpoints and finished-run targets", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "swb-private-target-")), "config.yaml");
+    writeFileSync(
+      path,
+      `organization: acme
+providers:
+  anthropic:
+    type: anthropic
+defaults:
+  agent: general
+  models:
+    general: anthropic/general-model
+`,
+    );
+    const config = new ConfigStore(path, join(path, "../overrides.json"));
+    const prompts: string[] = [];
+    const saved = { repo: "acme/deleted", issue: "acme/deleted#99", provenance: "DELETED_ROUTING_SOURCE" };
+    const deps = {
+      config,
+      runLedger: { readRequesterTarget: async () => saved, checkpointRequesterTarget: async () => saved } as never,
+      operatorModel: async (prompt: { user: string }) => {
+        prompts.push(prompt.user);
+        if (prompts.length % 2 === 1) return { tool: OPERATOR_READ_TOOLS.threadState, input: {} };
+        return { tool: OPERATOR_BIND_TOOL, input: { preset: "general", reason: "Read current context" } };
+      },
+    };
+    const ctx = {
+      msg: { channelId: "slack:D1", threadKey: "slack:D1:1", userId: requester, text: "Explain retained context" },
+      mode: "on" as const,
+      readTail: async () => ({
+        turns: [{ text: "user: RETAINED_ROUTING_SOURCE", actor: requester }],
+        unavailable: [],
+        context: freshContext(),
+      }),
+      readNotes: async () => ({
+        notes: [{ session: "private:old", text: "DELETED_ROUTING_NOTES", updatedAt: 1 }],
+        unavailable: [],
+        context: freshContext(),
+      }),
+      readMemory: async () => ({ memory: "DELETED_ROUTING_MEMORY", unavailable: [], context: freshContext() }),
+      thread: [{ finished: true, agent: "general", repo: "acme/old-run" }],
+    };
+    expect(await operatorStage(deps, { ...ctx, authoritativeHistory: true })).toMatchObject({ outcome: "binds" });
+    expect(prompts[1]).toContain("RETAINED_ROUTING_SOURCE");
+    expect(prompts[1]).not.toContain("DELETED_ROUTING_SOURCE");
+    expect(prompts[1]).not.toContain("acme/deleted");
+    expect(prompts[1]).not.toContain("acme/old-run");
+    expect(prompts[1]).not.toContain("DELETED_ROUTING_NOTES");
+    expect(prompts[1]).not.toContain("DELETED_ROUTING_MEMORY");
+    expect(await operatorStage(deps, ctx)).toMatchObject({ outcome: "binds" });
+    expect(prompts[3]).toContain("acme/deleted");
+    expect(prompts[3]).toContain("acme/old-run");
+  });
+
   const privateSourceIssue = 2430;
   it.each([
     {

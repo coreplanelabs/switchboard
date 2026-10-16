@@ -546,6 +546,8 @@ export interface PrRef {
  * findings and the pull request survive the wait; `reviewRunId` is absent when
  * an adopted attempt recovered the question from GitHub's verdict marker. */
 export interface HumanGatePending {
+  /** Explicit original-owner action. Legacy questions imply no named action. */
+  primaryAction?: { label: string; text: string };
   /** Explicit actor assigned by the original owner when this question is first persisted.
    * Legacy questions without an assignment remain unknown. */
   assignedTo?: string;

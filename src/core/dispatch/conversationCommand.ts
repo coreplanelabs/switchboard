@@ -29,6 +29,7 @@ export async function executeConversationCommand(
     trace: RequestTrace;
     ending: RunEnding;
     context: ContextDependencies;
+    authoritativeHistory?: true;
     invocationId: string;
     check: (currentSource?: boolean) => Promise<AudienceCheck>;
     recordDecision: (decision: OrchestratorCommandDecision) => Promise<boolean>;
@@ -43,7 +44,7 @@ export async function executeConversationCommand(
   if (!(await ctx.check()).ok || !ctx.trace.runId || !ctx.msg.messageId) return unavailable();
   const prepared = await prepareActionContext(
     { config: deps.config, commands: deps.commands, runLedger: deps.runLedger },
-    { msg: ctx.msg },
+    { msg: ctx.msg, ...(ctx.authoritativeHistory ? { authoritativeHistory: true as const } : {}) },
   );
   const command = prepared.input.projection.commands.find((entry) => entry.id === id);
   if (!command) return { ok: false, text: "This command is unavailable." };

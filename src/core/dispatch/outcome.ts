@@ -8,6 +8,8 @@
 // the stage (the dashboard's included). Every other caller may ignore it.
 
 export interface DispatchOutcome {
+  /** The original run owns this queued input; completion here does not prove consumption. */
+  inputQueued?: { runId?: string };
   status: "completed" | "refused" | "failed" | "stopped";
   refusal?: string;
   /** The refusal's cause, from the one code→cause table (src/core/refusal.ts). */

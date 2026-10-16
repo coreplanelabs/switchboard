@@ -1,4 +1,5 @@
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
+import { withOrganizationPrivateAudience } from "./privateDestination.js";
 import { booleanAudienceVerifier } from "../testing/audienceVerifier.js";
 import { describe, expect, it } from "vitest";
 import { privateWorkerThreadKey } from "../../channels/privateWorker.js";
@@ -81,6 +82,69 @@ async function claimLinkedWork(
 }
 
 describe("main worker capability", () => {
+  it("reads browser work progress only for the proved original private requester and current source", async () => {
+    const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
+    const owner = { ...instance, userId: "access:alice", channelId: "http:home", threadKey: "http:home:alice" };
+    const work = {
+      ...unit,
+      workBrief: { ...unit.workBrief!, requesterId: owner.userId, mainThreadKey: owner.threadKey },
+    };
+    await instances.recordRequesterTurn({
+      threadKey: owner.threadKey,
+      requesterId: owner.userId,
+      messageId: "browser:1:once",
+    });
+    expect(
+      await instances.claimMainTask({ mainThreadKey: owner.threadKey, actId: "fix-signups" }, owner, work, {
+        requesterId: owner.userId,
+        sourceMessageId: "browser:1:once",
+        revision: 1,
+        repo: owner.repo,
+      }),
+    ).toMatchObject({ ok: true });
+    const audience = {
+      kind: "organization-private" as const,
+      organization: "acme",
+      stream: "person:alice",
+      actorId: owner.userId,
+      userId: owner.userId,
+      channelId: owner.channelId,
+      threadKey: owner.threadKey,
+    };
+    const message = withOrganizationPrivateAudience(
+      {
+        userId: owner.userId,
+        channelId: owner.channelId,
+        threadKey: owner.threadKey,
+        messageId: "once",
+        text: "Progress?",
+      },
+      audience,
+      1,
+    );
+    let current = true;
+    const io = {
+      organizationPrivateAudience: () => audience,
+      verifyOrganizationPrivateAudience: async () =>
+        current ? { ok: true as const } : { ok: false as const, code: "direct-audience-denied" as const },
+    };
+    const deps = {
+      config: { grantsFor: () => ALL_GRANTS },
+      coordinatorInstances: instances,
+      privateWorkerLog: new InMemoryPrivateWorkerLog(),
+      clock: () => 20,
+    };
+    const capability = await mainWorkerCapabilityFor(deps, "orchestrator", message, io);
+    expect(await capability!.read({ actId: "fix-signups", afterSeq: 0 })).toMatchObject({
+      kind: "found",
+      observation: { requesterId: "access:alice", channelId: "http:home", mainThreadKey: "http:home:alice" },
+    });
+    current = false;
+    expect(await capability!.read({ actId: "fix-signups", afterSeq: 0 })).toEqual({ kind: "unavailable" });
+    expect(
+      await mainWorkerCapabilityFor(deps, "orchestrator", JSON.parse(JSON.stringify(message)), io),
+    ).toBeUndefined();
+  });
   it("restores the exact progress observation and refreshes a later canonical settlement", async () => {
     const instances = new InMemoryCoordinatorInstanceStore(new InMemoryRunLedger());
     await claimLinkedWork(instances);

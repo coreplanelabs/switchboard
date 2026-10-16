@@ -43,7 +43,9 @@ import { directAudienceStampOf } from "./runLedger/inboxMessage.js";
 const PACE_RING_CAP = 1_200;
 
 function privateMainRun(meta: RunMeta | undefined): boolean {
-  return meta?.agent === "orchestrator" && directAudienceStampOf(meta) !== undefined;
+  return (
+    meta?.agent === "orchestrator" && (meta.privateConversation === true || directAudienceStampOf(meta) !== undefined)
+  );
 }
 
 // The run registry is the unit-testable core of the external live-view page

@@ -1,3 +1,4 @@
+import { organizationPrivateAudienceOf } from "./privateDestination.js";
 import { answerOutcomeOf, type AnswerOutcome } from "../answerOutcome.js";
 import { runSetupOf, type RunSetup } from "../runSetup.js";
 import { publicationSettlementForRun, publicationSettlementOf } from "../publicationSettlement.js";
@@ -177,6 +178,7 @@ export function interruptedRunRecord(summary: RunSummary, snap: RunSnapshot, fin
         sourceUrl: summary.sourceUrl,
         userName: summary.userName,
         authenticatedAs: summary.authenticatedAs,
+        postedBy: summary.postedBy,
       },
       channelVisibility: summary.channelVisibility ?? "unknown",
       repo: summary.repo,
@@ -258,6 +260,11 @@ export function reclaimedRunRecord(input: {
     (publication && acceptedReviewPublication(publication)) ??
     (isReviewPostShape(saved.reviewPost) && !saved.reviewPost.posted ? saved.reviewPost : undefined);
   const snap: RunSnapshot = {
+    ...(row.meta.privateConversation ? { privateConversation: true as const } : {}),
+    ...(row.meta.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
+    ...(row.meta.organizationIngressRunId !== undefined
+      ? { organizationIngressRunId: row.meta.organizationIngressRunId }
+      : {}),
     events,
     finished: true,
     startedAt: row.startedAt,
@@ -521,7 +528,11 @@ export function assembleRunRecord(input: {
 }): RunRecord {
   const { run, snap, msg, seal } = input;
   const atFinish = snap?.events ?? [];
-  const privateMain = input.agent === "orchestrator" && directAudienceStampOf(msg) !== undefined;
+  const privateMain =
+    input.agent === "orchestrator" &&
+    (snap?.privateConversation === true ||
+      directAudienceStampOf(msg) !== undefined ||
+      organizationPrivateAudienceOf(msg) !== undefined);
   const rawEvents = seal && seal.events.length > 0 ? [...atFinish, ...seal.events] : atFinish;
   const events = privateMain ? rawEvents.map(privateMainEvent) : rawEvents;
   // The pull request the run reached (run-history item 2): the post-step's
@@ -550,6 +561,8 @@ export function assembleRunRecord(input: {
   const pipeline = input.pipeline ?? pipelineOfEvents(events);
   const fitted = fitRecordToBudget({
     id: run.id,
+    ...(privateMain ? { privateConversation: true as const } : {}),
+    ...(snap?.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
     ...(input.answerOutcome ? { answerOutcome: input.answerOutcome } : {}),
     ...(input.setup ? { setup: input.setup } : {}),
     ...(input.audienceRefusal ? { audienceRefusal: input.audienceRefusal } : {}),
@@ -564,6 +577,9 @@ export function assembleRunRecord(input: {
     userId: msg.userId,
     ...(msg.relayedBy !== undefined ? { relayedBy: msg.relayedBy } : {}),
     ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+    ...(input.snap?.organizationIngressRunId !== undefined
+      ? { organizationIngressRunId: input.snap.organizationIngressRunId }
+      : {}),
     ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
     ...(msg.directAudience !== undefined ? { directAudience: structuredClone(msg.directAudience) } : {}),
     threadKey: msg.threadKey,
@@ -700,7 +716,9 @@ export function writeTombstone(deps: RecordDeps, ctx: TombstoneContext): void {
     coordinator,
     seed,
   } = ctx;
-  const privateMain = agent.name === "orchestrator" && directAudienceStampOf(msg) !== undefined;
+  const privateMain =
+    agent.name === "orchestrator" &&
+    (directAudienceStampOf(msg) !== undefined || organizationPrivateAudienceOf(msg) !== undefined);
   // Tombstone-first: a provisional TERMINAL record — status
   // `interrupted`, `finishedAt` = `startedAt` — goes to the store now, built
   // from the events published so far (the setup spans, request, run_meta,
@@ -787,7 +805,9 @@ export function finishSetupRun(
   ending.finished(runId);
   const snap = registry.snapshotById(runId);
   const label = registry.getById(runId)?.label;
-  const privateMain = ctx.agent.name === "orchestrator" && directAudienceStampOf(ctx.msg) !== undefined;
+  const privateMain =
+    ctx.agent.name === "orchestrator" &&
+    (directAudienceStampOf(ctx.msg) !== undefined || organizationPrivateAudienceOf(ctx.msg) !== undefined);
   ending.register({
     runId,
     flipOnPostFinishFailure: false,
@@ -915,7 +935,9 @@ export function registerFinishRecord(deps: RecordDeps, ctx: FinishRecordContext)
     seed,
     failure,
   } = ctx;
-  const privateMain = agent.name === "orchestrator" && directAudienceStampOf(msg) !== undefined;
+  const privateMain =
+    agent.name === "orchestrator" &&
+    (directAudienceStampOf(msg) !== undefined || organizationPrivateAudienceOf(msg) !== undefined);
   // A tracked run finishes through the ledger: the record replaces its
   // live rows in one transaction (a refused finish falls back to the store).
   ending.register({

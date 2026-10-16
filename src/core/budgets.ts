@@ -73,6 +73,11 @@ export const DAY_MS = 24 * 60 * MINUTE_MS;
 /** One calendar week in milliseconds: the bucket the live false-silence ratio
  *  is printed per (docs/reference/specs/load-harness.md item 20). */
 export const WEEK_MS = 7 * DAY_MS;
+/** Private conversation bytes expire independently of replay and repair receipts. */
+export const ORG_PRIVATE_CONTENT_TTL_MS = WEEK_MS;
+export const ORG_RECEIPT_TTL_MS = 30 * DAY_MS;
+/** One bounded owner reconciliation pass; the existing run-ledger lease still applies. */
+export const ORG_RECONCILE_BATCH_MAX = 100;
 
 /** How long the confirmation a routed write is offered as stays pending
  *  (docs/decisions/0044; docs/reference/specs/routing-and-config.md item 25):

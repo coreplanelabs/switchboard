@@ -1,4 +1,5 @@
 import { withCommandConfirmation } from "../commandConfirmations.js";
+import { isPrivateConversation } from "./privateConversation.js";
 import type { AudienceRefusalReceipt } from "../audienceDecision.js";
 import { appendThreadTurn } from "../runLedger/threadSession.js";
 import {
@@ -63,6 +64,7 @@ export type OperatorEventFields = Omit<Extract<RunEvent, { type: "operator" }>, 
  *  `route` for a command the router bound and ran, `confirm` for a stored
  *  input run at a confirmation's click (record 0044). */
 export interface CommandRunOptions {
+  ingressRunId?: string;
   route?: RouteEventFields;
   /** The operator's decision for the same event (record 0057): written beside
    *  the run's `route` event, never acted on here. */
@@ -141,7 +143,7 @@ export async function runChatCommand(
       ? `invocation:${opts.invocationId}`
       : (msg.messageId ?? `request:${trace.root.traceId}:${trace.root.id}`);
   const persistText = async (text: string, suffix = "") => {
-    if (text && deps.runLedger?.sessionPersistence) {
+    if (text && deps.runLedger?.sessionPersistence && !isPrivateConversation(msg)) {
       await opts.beforePublish?.();
       const ledger = deps.runLedger;
       if (!ledger.appendSession) throw new Error("conversation storage is unavailable");
@@ -311,6 +313,7 @@ async function recordDoorDecision(
       receivedAt: trace.receivedAt,
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
       ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+      ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
     },
   );
   root.setAttrs({ runId: run.id });
@@ -479,6 +482,7 @@ export async function runInlineCommandRun<
     {
       agent: COMMAND_RUN_AGENT,
       ...(opts.parentRunId ? { parentRunId: opts.parentRunId } : {}),
+      ...(opts.ingressRunId ? { organizationIngressRunId: opts.ingressRunId } : {}),
       channelId: msg.channelId,
       userId: msg.userId,
       threadKey: msg.threadKey,
@@ -486,7 +490,9 @@ export async function runInlineCommandRun<
       receivedAt: trace.receivedAt,
       ...(msg.userName !== undefined ? { userName: msg.userName } : {}),
       ...(msg.authenticatedAs !== undefined ? { authenticatedAs: msg.authenticatedAs } : {}),
+      ...(msg.postedBy !== undefined ? { postedBy: msg.postedBy } : {}),
     },
+    opts.ingressRunId ? { id: opts.ingressRunId } : {},
   );
   // The command run rides the request's trace like an agent run: the setup
   // spans so far backfill, then `run.command` and the reply follow live. A

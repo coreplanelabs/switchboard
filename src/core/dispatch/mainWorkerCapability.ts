@@ -1,8 +1,9 @@
-import type { AudienceCheck } from "../audienceDecision.js";
 import type { ConfigStore } from "../../config.js";
 import type { ChannelIO, IncomingMessage } from "../types.js";
 import { chatActorOf } from "../authz/actor.js";
 import { visibilityOf } from "../authz/channelDirectory.js";
+import { canOfferMainStart } from "../../tools/mainStart.js";
+import { privateDestinationOf, verifyPrivateDestination } from "./privateDestination.js";
 import { createMainWorkerRelay } from "../coordinator/mainWorkerRelay.js";
 import type { CoordinatorInstanceStore } from "../coordinator/instanceStore.js";
 import type { PrivateWorkerLog } from "../privateWorkerLog.js";
@@ -15,28 +16,6 @@ import {
 } from "../coordinator/mainWorkObservation.js";
 import type { FollowUpInbox } from "../threadAdmission.js";
 import type { UnitSeedReader } from "../coordinator/mainActions.js";
-
-/** A main run's actor and origin are resolved once from its admitted request.
- * Neither the model nor a worker supplies them to the private relay. */
-type DirectAudience = {
-  kind: "slack-unshared-im";
-  channelId: string;
-  userId: string;
-  threadKey: string;
-};
-
-// The Slack adapter supplies this attestation at intake and checks it again at
-// use time. Keep the bridge structural while its channel seam lands separately.
-type DirectAudienceIO = ChannelIO | { verifyDirectAudience?: (audience: DirectAudience) => Promise<AudienceCheck> };
-
-async function verifiedDirectAudience(io: DirectAudienceIO | undefined, audience: DirectAudience): Promise<boolean> {
-  if (!io || !("verifyDirectAudience" in io) || !io.verifyDirectAudience) return false;
-  try {
-    return (await io.verifyDirectAudience(audience)).ok;
-  } catch {
-    return false;
-  }
-}
 
 /** The inbox retains only source facts after a drain. On rehost, a second
  * durable input cannot prove the original one-person source, so deny. */
@@ -58,44 +37,37 @@ export async function mainWorkerCapabilityFor(
     clock?: () => number;
   },
   agentName: string,
-  msg: IncomingMessage & { directAudience?: DirectAudience },
-  io?: DirectAudienceIO,
+  msg: IncomingMessage,
+  io?: Pick<ChannelIO, "verifyDirectAudience" | "organizationPrivateAudience" | "verifyOrganizationPrivateAudience">,
   sourceTrusted?: () => boolean,
   observeRead?: MainWorkReadObserver,
   readSeedReceipt?: UnitSeedReader,
 ): Promise<MainWorkerCapability | undefined> {
   if (agentName !== "orchestrator" || !deps.coordinatorInstances || !deps.privateWorkerLog) return undefined;
-  // Tool results persist in the main run's event log. A D-prefix cannot prove
-  // a single reader: Slack Connect can turn a DM into a shared conversation.
-  const audience = msg.directAudience;
-  if (
-    visibilityOf(msg.channelId) !== "dm" ||
-    !/^slack:D[A-Z0-9_]+$/.test(msg.channelId) ||
-    !msg.threadKey.startsWith(`${msg.channelId}:`) ||
-    !/^slack:[UW][A-Z0-9_]+$/.test(msg.userId) ||
-    audience?.kind !== "slack-unshared-im" ||
-    audience.channelId !== msg.channelId ||
-    audience.userId !== msg.userId ||
-    audience.threadKey !== msg.threadKey ||
-    msg.relayedBy !== undefined ||
-    msg.postedBy !== undefined ||
-    msg.authenticatedAs !== undefined
-  )
-    return undefined;
+  const audience = privateDestinationOf(msg);
+  const verify = async () => {
+    try {
+      return audience?.kind === "slack-unshared-im"
+        ? (await io?.verifyDirectAudience?.(audience))?.ok === true
+        : !!audience && (await verifyPrivateDestination(io, audience)).ok;
+    } catch {
+      return false;
+    }
+  };
   const actor = chatActorOf(deps.config, msg);
-  if (actor.kind !== "user" || actor.id !== msg.userId || !sourceTrusted?.()) return undefined;
-  if (!(await verifiedDirectAudience(io, audience))) return undefined;
-  if (!sourceTrusted()) return undefined;
+  if (!audience || !canOfferMainStart(agentName, visibilityOf(msg.channelId), msg, actor, true) || !sourceTrusted?.())
+    return undefined;
+  if (!(await verify()) || !sourceTrusted()) return undefined;
   const relay = createMainWorkerRelay({
     instances: deps.coordinatorInstances,
     privateWorkerLog: deps.privateWorkerLog,
     clock: deps.clock,
-    liveAuthority: { verify: () => verifiedDirectAudience(io, audience), active: sourceTrusted },
+    liveAuthority: { verify, active: sourceTrusted },
     readSeedReceipt,
   });
   const read: MainWorkerCapability["read"] = async (input) => {
     if (!sourceTrusted()) return { kind: "unavailable" };
-    if (!(await verifiedDirectAudience(io, audience))) return { kind: "unavailable" };
+    if (!(await verify())) return { kind: "unavailable" };
     if (!sourceTrusted()) return { kind: "unavailable" };
     const result = await relay.read(actor, input);
     if (!sourceTrusted()) return { kind: "unavailable" };

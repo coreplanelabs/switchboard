@@ -4,6 +4,11 @@ import type { PlaneService } from "./planeService.js";
 import { humanReview } from "./testing/humanReview.js";
 import { preapprovedCaller } from "./testing/callers.js";
 import { registerRunsCommands, type RunsCommandDeps } from "./commands/runs.js";
+import { withOriginalOrganizationDispatch } from "./dispatch/originalOrganizationInput.js";
+import { chatActorOf } from "./authz/actor.js";
+import { originalOrganizationDispatchOf } from "./dispatch/privateDestination.js";
+import { freshContext } from "./dispatch/contextSeed.js";
+import { contextThreadSessionKey } from "./runLedger/sessionLog.js";
 import { runShipBranch } from "./dispatch/ship.js";
 import { TerminalCommitmentUnknownError, terminalCommitmentUnknown } from "./runLedger/writeThrough.js";
 import { UncertainStoreError } from "./storeFailure.js";
@@ -73,7 +78,7 @@ import { InMemoryConfirmationStore, STORE_UNREACHABLE_LINE } from "./confirmatio
 import { OFFER_EXPIRED_LINE, QUESTION_EXPIRED_LINE } from "./dispatch/confirm.js";
 import { setShutdownNotice } from "./dispatch/run.js";
 import { HAND_BACK_PREFIX } from "./dispatch/handBack.js";
-import { operatorLine } from "./dispatch/operator.js";
+import { operatorLine, OPERATOR_READ_TOOLS } from "./dispatch/operator.js";
 import {
   createSteerSender,
   defaultAdmission,
@@ -503,6 +508,7 @@ describe("dispatch", () => {
         line: "config clear me",
         risk: "This will clear your saved settings.",
         expiresAt: expect.any(Number),
+        actionLabel: "Confirm",
       },
     ]);
     expect(replies).toEqual([]);
@@ -867,6 +873,795 @@ describe("dispatch", () => {
     }
   });
 
+  it.each(["off", "shadow"])(
+    "does not republish excluded routing prose in authoritative %s cards or records",
+    async (mode) => {
+      const provider = capturingProvider("Retained answer");
+      const deps = makeDeps(YAML_FIXTURE.replace("operator: off", `operator: ${mode}`), provider);
+      deps.runRegistry = new RunRegistry();
+      const ledger = wireChildLedger(deps);
+      const marker = "DELETED_PRIVATE_ROUTING_REASON";
+      await threadWithFinishedRun(deps, "general", {
+        route: { preset: "general", reason: marker, model: "anthropic/general-model" },
+      });
+      await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
+      deps.operatorModel = async () => ({
+        tool: "bind_preset",
+        input: { preset: "general", reason: "Current question" },
+      });
+      const { io, replies, statuses } = fakeIO();
+      const outcome = await dispatch(deps, msg("Continue explaining", "slack:UADMIN"), io, {
+        authoritativeHistory: true,
+        seed: [{ role: "user", text: "Retained context", user: "slack:UADMIN" }],
+      });
+      await deps.runHistoryWriter.settled();
+      expect(outcome).toMatchObject({ status: "completed" });
+      expect(replies.join("\n")).toContain("Retained answer");
+      expect([...ledger.finished.values()]).toMatchObject([{ agent: "general" }]);
+      expect(JSON.stringify([...ledger.finished.values()])).not.toContain(marker);
+      expect(JSON.stringify(statuses)).not.toContain(marker);
+      expect(JSON.stringify(provider.requests)).not.toContain(marker);
+    },
+  );
+  it("keeps ordinary native sticky routing prose available without crossing the private projection", async () => {
+    const provider = capturingProvider("Native answer");
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = new RunRegistry();
+    const ledger = wireChildLedger(deps);
+    await threadWithFinishedRun(deps, "general", {
+      route: { preset: "general", reason: "Known native route", model: "anthropic/general-model" },
+    });
+    await deps.config.setChannelOverride("slack:CX", { verbosity: "debug" });
+    const { io, replies, statuses } = fakeIO([{ role: "user", text: "Native retained history" }]);
+    expect(await dispatch(deps, msg("Continue explaining", "slack:UADMIN"), io)).toMatchObject({ status: "completed" });
+    await deps.runHistoryWriter.settled();
+    expect(replies.join("\n")).toContain("Native answer");
+    expect([...ledger.finished.values()]).toMatchObject([
+      { agent: "general", route: { reason: "Known native route" } },
+    ]);
+    expect(JSON.stringify(statuses)).toContain("Known native route");
+  });
+
+  it.each(["off", "on"])(
+    "does not recover an excluded finished PR during authoritative %s target resolution",
+    async (mode) => {
+      const provider = capturingProvider("Current work only");
+      const deps = makeDeps(YAML_FIXTURE.replace("operator: off", `operator: ${mode}`), provider);
+      deps.runRegistry = new RunRegistry();
+      await threadWithFinishedRun(deps, "coding", {
+        repo: "acme/api",
+        pr: { number: 77, url: "https://github.com/acme/api/pull/77" },
+      });
+      deps.operatorModel = async (prompt) =>
+        prompt.tool.name === "verify"
+          ? { tool: "verify", input: { agrees: true, reason: "Current task" } }
+          : {
+              tool: "bind_preset",
+              input: {
+                preset: "review",
+                repo: "acme/api",
+                prTarget: { number: 7, source: "request", quote: "PR #7" },
+                reason: "Current task",
+              },
+            };
+      const targets: string[] = [];
+      deps.resolveRepoContext = (_request, _history, records) => {
+        targets.push(records?.pr ? "deleted-private-branch" : "main");
+        return {
+          repo: "acme/api",
+          ref: records?.pr ? "deleted-private-branch" : "main",
+          ...(mode === "on"
+            ? { pr: records?.pr?.number ?? 7, closedPr: { number: records?.pr?.number ?? 7, merged: true } }
+            : records?.pr
+              ? { pr: records.pr.number }
+              : {}),
+        };
+      };
+      const { io, replies } = fakeIO();
+      const outcome = await dispatch(
+        deps,
+        msg(
+          mode === "on" ? "agent:review Review PR #7" : "agent:coding Implement the current task in acme/api",
+          "slack:UADMIN",
+        ),
+        io,
+        {
+          authoritativeHistory: true,
+          seed: [{ role: "user", text: "Current retained task" }],
+        },
+      );
+      expect(outcome, replies.join("\n")).toMatchObject({ status: "completed" });
+      expect(targets).toEqual(["main"]);
+      if (mode === "on") expect(replies.join("\n")).toContain("acme/api#7 merged; nothing to review.");
+      else {
+        expect(replies.join("\n")).toContain("Current work only");
+        expect(deps.runRegistry.listActive()[0]).toMatchObject({ agent: "coding", repo: "acme/api" });
+      }
+      expect(JSON.stringify(provider.requests)).not.toContain("DELETED_PRIVATE_SOURCE");
+    },
+  );
+
+  it.each(["requester", "foreign", "assistant", "unstamped"])(
+    "preserves only proved requester authorship in the authoritative operator tail (%s)",
+    async (author) => {
+      const deps = makeDeps(YAML_FIXTURE.replace("operator: off", "operator: on"), capturingProvider());
+      const identifier = "https://github.com/acme/api/pull/7";
+      let attempts = 0;
+      deps.operatorModel = async () =>
+        ++attempts === 1
+          ? {
+              tool: "bind_preset",
+              input: {
+                preset: "review",
+                repo: "acme/api",
+                prTarget: { number: 7, source: "thread", quote: identifier },
+                reason: "Review retained PR",
+              },
+            }
+          : { tool: "ask", input: { text: "Name the current PR.", reason: "Target missing" } };
+      deps.resolveRepoContext = () => ({ repo: "acme/api", pr: 7, closedPr: { number: 7, merged: true } });
+      const { io, replies } = fakeIO();
+      await dispatch(deps, msg("Review it", "slack:UADMIN"), io, {
+        authoritativeHistory: true,
+        seed: [
+          {
+            role: author === "assistant" ? "assistant" : "user",
+            text: `Review ${identifier}`,
+            ...(author === "unstamped" ? {} : { user: author === "foreign" ? "slack:UBOB" : "slack:UADMIN" }),
+          },
+        ],
+      });
+      if (author === "requester") {
+        expect(replies.join("\n")).toContain("acme/api#7 merged; nothing to review.");
+        expect(attempts).toBe(1);
+      } else expect(replies.join("\n")).toContain("Name the current PR.");
+    },
+  );
+
+  it.each([
+    [false, true],
+    [false, false],
+    [true, true],
+  ])("keeps original inputs queued during setup (reserved=%s, fresh proof=%s)", async (afterReservation, available) => {
+    const provider = capturingProvider("Queued original answered");
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = new RunRegistry({
+      genId: () => {
+        throw new Error("A rival original owner was minted");
+      },
+    });
+    deps.admission = new ThreadAdmission();
+    const ledger = wireChildLedger(deps);
+    const request = msg("First input", "slack:UADMIN");
+    const original = async (key: string, text: string) => {
+      const claimed = await ledger.consumeIngress({
+        effectKey: key,
+        digest: "a".repeat(64),
+        requester: request.userId,
+        threadKey: request.threadKey,
+        request: { text },
+        contentExpiresAt: Date.now() + 90_000,
+        originExpiresAt: Date.now() + 90_000,
+        origin: {
+          version: 1,
+          organization: "acme",
+          source: "slack",
+          sourceEvent: key,
+          key,
+          digest: "a".repeat(64),
+          actor: {
+            identity: { issuer: "slack", tenant: "workspace", subject: "UADMIN" },
+            kind: "human",
+            principal: "slack:UADMIN",
+            stream: "principal:alice",
+            bindingRevision: 0,
+            onBehalfOf: null,
+          },
+          destination: { kind: "broad" },
+          workload: "message",
+          target: null,
+          content: "",
+          context: [],
+        },
+      });
+      if (claimed.status !== "claimed") throw new Error("No original owner");
+      return claimed.record;
+    };
+    const first = await original("pre-first", "First input"),
+      second = await original("pre-second", "Second input");
+    let reached!: () => void, release!: () => void;
+    const opening = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const reserve = deps.runLedger.reserve.bind(deps.runLedger);
+    let reserves = 0;
+    deps.runLedger.reserve = async (input) => {
+      if (++reserves === 1 && !afterReservation) {
+        reached();
+        await blocked;
+        throw new Error("Original setup failed before reservation");
+      }
+      return reserve(input);
+    };
+    if (afterReservation) {
+      const pushInbox = deps.runLedger.pushInbox.bind(deps.runLedger);
+      deps.runLedger.pushInbox = async (...args) => {
+        await pushInbox(...args);
+        return undefined;
+      };
+      class PausedDiscovery extends NullMcpToolSource {
+        private paused = false;
+        override async toolsFor(name: string, caller: { userId: string; channelId?: string }) {
+          if (this.paused) return super.toolsFor(name, caller);
+          this.paused = true;
+          reached();
+          await blocked;
+          throw new Error("Receiver setup failed after an uncertain inbox write");
+        }
+      }
+      deps.mcp = new PausedDiscovery();
+    }
+    const initial = fakeIO(),
+      follow = fakeIO(),
+      continued = fakeIO();
+    follow.io.rehostOrganizationInput = async (input) => (available ? { msg: input, io: continued.io } : undefined);
+    continued.io.authoritativePrivateHistory = async () => [{ role: "user", text: "Current retained context" }];
+    const running = dispatch(deps, request, initial.io, {
+      ingressRunId: first.runId,
+      organizationSequence: 1,
+      authoritativeHistory: true,
+      seed: [],
+    });
+    await opening;
+    expect(
+      await dispatch(deps, { ...request, text: "Second input" }, follow.io, {
+        ingressRunId: second.runId,
+        organizationSequence: 2,
+        authoritativeHistory: true,
+        seed: [],
+      }),
+    ).toMatchObject({ inputQueued: {} });
+    release();
+    await running;
+    if (available && !afterReservation) {
+      expect(continued.replies.join("\n")).toContain("Queued original answered");
+      expect(deps.runRegistry.getById(second.runId)).toMatchObject({
+        id: second.runId,
+        organizationIngressRunId: second.runId,
+      });
+      expect(provider.requests).toHaveLength(1);
+    } else {
+      expect(await ledger.readIngress("pre-second")).toMatchObject({
+        status: "record",
+        record: { runId: second.runId, status: "dispatching", request: { text: "Second input" } },
+      });
+      expect(provider.requests).toEqual([]);
+      expect(follow.replies.join("\n")).toContain("Your original input is held");
+      expect(deps.runRegistry.getById(second.runId)).toBeNull();
+    }
+  });
+
+  it("continues an unread private input under its consumed original ledger identity with fresh history", async () => {
+    const source = { channelId: "http:home", userId: "access:alice", threadKey: "http:home:alice" };
+    const provider = capturingProvider("Original input answered");
+    const yaml = YAML_FIXTURE.replace(
+      '"slack:UADMIN": { actions: all, channels: all, repos: all }',
+      '"access:alice": { actions: all, channels: all, repos: all }',
+    );
+    const deps = makeDeps(yaml, provider);
+    const ledger = wireChildLedger(deps);
+    const original = async (key: string, text: string) => {
+      const claim = await ledger.consumeIngress({
+        effectKey: key,
+        digest: "a".repeat(64),
+        requester: source.userId,
+        threadKey: source.threadKey,
+        request: { text },
+        contentExpiresAt: Date.now() + 90_000,
+      });
+      if (claim.status !== "claimed") throw new Error("No original owner");
+      return claim.record;
+    };
+    const first = await original("first-owner", "First input");
+    const second = await original("second-owner", "Second input");
+    deps.runRegistry = new RunRegistry({
+      genId: () => {
+        throw new Error("A rival run was minted");
+      },
+    });
+    deps.admission = new ThreadAdmission();
+    let opened!: () => void, fail!: () => void;
+    const opening = new Promise<void>((resolve) => {
+      opened = resolve;
+    });
+    const failure = new Promise<never>((_, reject) => {
+      fail = () => reject(new Error("Original setup failed"));
+    });
+    let discoveries = 0;
+    class PausedMcp extends NullMcpToolSource {
+      override async toolsFor(name: string, caller: { userId: string; channelId?: string }) {
+        if (++discoveries === 1) {
+          opened();
+          return failure;
+        }
+        return super.toolsFor(name, caller);
+      }
+    }
+    deps.mcp = new PausedMcp();
+    const audience = {
+      kind: "organization-private" as const,
+      organization: "acme",
+      stream: "person:alice",
+      actorId: source.userId,
+      userId: source.userId,
+      channelId: source.channelId,
+      threadKey: source.threadKey,
+    };
+    const a = fakeIO(),
+      b = fakeIO(),
+      continued = fakeIO();
+    for (const io of [a.io, b.io, continued.io]) {
+      io.organizationPrivateAudience = () => audience;
+      io.verifyOrganizationPrivateAudience = async () => ({ ok: true });
+    }
+    // HTTP/MCP admission retains the original owner pointer even when its
+    // adapter does not supply a browser private-worker audience capability.
+    delete b.io.organizationPrivateAudience;
+    delete b.io.verifyOrganizationPrivateAudience;
+    const reads: string[] = [];
+    // A vanished source proof must leave a durable obligation before any new input.
+    b.io.rehostOrganizationInput = async () => undefined;
+    continued.io.authoritativePrivateHistory = async (input) => {
+      reads.push(originalOrganizationDispatchOf(input!)!.ingressRunId);
+      expect(await ledger.readIngress("second-owner")).toMatchObject({
+        status: "record",
+        record: { runId: second.runId, request: { text: "Second input" } },
+      });
+      return [{ role: "user", text: "Current retained private history" }];
+    };
+    const running = dispatch(deps, { ...source, messageId: "browser:first", text: "First input" }, a.io, {
+      ingressRunId: first.runId,
+      organizationSequence: 1,
+      organizationConversation: true,
+      authoritativeHistory: true,
+      seed: [],
+    });
+    await opening;
+    const queued = await dispatch(deps, { ...source, messageId: "browser:second", text: "Second input" }, b.io, {
+      ingressRunId: second.runId,
+      organizationSequence: 2,
+      organizationConversation: true,
+      authoritativeHistory: true,
+      seed: [{ role: "user", text: "DELETED_PRIVATE_SOURCE" }],
+    });
+    expect(queued).toMatchObject({ inputQueued: { runId: first.runId } });
+    fail();
+    await running;
+    expect(reads).toEqual([]);
+    expect(provider.requests).toEqual([]);
+    expect(await ledger.readIngress("second-owner")).toMatchObject({
+      status: "record",
+      record: { runId: second.runId, unread: { status: "pending" }, request: { text: "Second input" } },
+    });
+    await deps.runHistoryWriter.settled();
+    const continuedOwner = await ledger.claimUnreadIngress(second.runId);
+    expect(continuedOwner).toMatchObject({ status: "claimed", record: { runId: second.runId } });
+    if (continuedOwner.status !== "claimed") throw new Error("No continuation owner");
+    const restored = withOriginalOrganizationDispatch(
+      { ...source, messageId: "browser:second", text: "Second input" },
+      { ingressRunId: second.runId, organizationSequence: 2 },
+    );
+    const seed = await continued.io.authoritativePrivateHistory!(restored);
+    await dispatch(deps, restored, continued.io, {
+      ingressRunId: second.runId,
+      organizationSequence: 2,
+      organizationConversation: true,
+      authoritativeHistory: true,
+      seed,
+    });
+    expect(await ledger.claimUnreadIngress(second.runId)).toEqual({ status: "fenced" });
+    expect([...new Set(reads)]).toEqual([second.runId]);
+    expect(continued.replies.join("\n")).toContain("Original input answered");
+    expect(b.replies.join("\n")).not.toContain("Original input answered");
+    expect(await ledger.readIngress("second-owner")).toMatchObject({
+      status: "record",
+      record: { runId: second.runId, unread: { status: "claimed" } },
+    });
+    expect(deps.runRegistry.getById(second.runId)).toMatchObject({
+      id: second.runId,
+      organizationIngressRunId: second.runId,
+      agent: "orchestrator",
+    });
+    expect(ledger.finished.get(second.runId)).toMatchObject({
+      id: second.runId,
+      organizationIngressRunId: second.runId,
+      status: "completed",
+    });
+    expect(JSON.stringify(provider.requests)).toContain("Current retained private history");
+    expect(JSON.stringify(provider.requests)).not.toContain("DELETED_PRIVATE_SOURCE");
+  });
+  it("starts browser private work through the original owner with captured current context", async () => {
+    let calls = 0;
+    const provider: Provider = {
+      name: "fake",
+      complete: async () =>
+        ++calls === 1
+          ? {
+              content: [
+                {
+                  type: "tool_use",
+                  id: "start-browser-work",
+                  name: "work_start",
+                  input: {
+                    repo: "acme/api",
+                    question: "Fix signup",
+                    schemaVersion: 1,
+                    cause: { kind: "unknown", reason: "Not investigated" },
+                    evidence: { availability: "unavailable", reason: "Code-only change" },
+                    requirements: { analysis: "not_required", evidence: "may_be_unavailable" },
+                    acceptance: "Regression test passes",
+                    findings: [],
+                    requestedChange: "Fix signup",
+                    sourceMessage: "fix it",
+                  },
+                },
+              ],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "Started the original private worker." }], stopReason: "end_turn" },
+    };
+    const yaml = YAML_FIXTURE.replace(
+      '"slack:UADMIN": { actions: all, channels: all, repos: all }',
+      '"access:alice": { actions: all, channels: all, repos: all }',
+    );
+    const deps = makeDeps(yaml, provider);
+    const ledger = wireChildLedger(deps);
+    deps.runRegistry = new RunRegistry();
+    deps.coordinatorInstances = new InMemoryCoordinatorInstanceStore(ledger);
+    const starts: unknown[] = [];
+    deps.mainTaskStart = async (value) => {
+      starts.push(value);
+      return { kind: "accepted", actId: "work-one", instanceId: "unit-one", reply: "started" };
+    };
+    const request = {
+      channelId: "http:home",
+      userId: "access:alice",
+      threadKey: "http:home:alice",
+      messageId: "original-key",
+      text: "fix it",
+      organizationRepo: "attacker/repo",
+    };
+    const audience = {
+      kind: "organization-private" as const,
+      organization: "acme",
+      stream: "person:alice",
+      actorId: request.userId,
+      userId: request.userId,
+      channelId: request.channelId,
+      threadKey: request.threadKey,
+    };
+    const { io } = fakeIO();
+    io.authoritativePrivateHistory = async () => [];
+    io.organizationPrivateAudience = () => audience;
+    io.verifyOrganizationPrivateAudience = async () => ({ ok: true });
+    const runId = "22345678-1234-4234-8234-123456789012";
+    expect(
+      await dispatch(deps, request, io, {
+        organizationConversation: true,
+        organizationSequence: 7,
+        organizationRepo: "acme/api",
+        ingressRunId: runId,
+        authoritativeHistory: true,
+        seed: [],
+      }),
+    ).toMatchObject({ status: "completed" });
+    expect(starts).toHaveLength(1);
+    expect(starts[0]).toMatchObject({
+      actor: { id: "access:alice" },
+      msg: { messageId: "original-key", text: "fix it" },
+      mainRunId: runId,
+      authority: {
+        requesterId: "access:alice",
+        sourceMessageId: "browser:7:original-key",
+        revision: 1,
+        repo: "acme/api",
+      },
+      context: {
+        version: 1,
+        handoff: {
+          source: { runId, requester: "access:alice", channelId: "http:home" },
+          dependencies: { value: { status: "known" } },
+        },
+      },
+    });
+    expect(deps.runRegistry.snapshotById(runId)).toMatchObject({ privateConversation: true });
+    const raw = JSON.stringify(deps.runRegistry.snapshotById(runId)?.events);
+    expect(raw).not.toContain('"text":"fix it"');
+  });
+  it("keeps plain organization conversation on the orchestrator while honoring an explicit agent", async () => {
+    const provider = capturingProvider("Current answer");
+    const deps = makeDeps(YAML_FIXTURE.replace("operator: off", "operator: on"), provider);
+    deps.runRegistry = new RunRegistry();
+    const operator = vi.fn<RouteModel>(async () => ({
+      tool: "ask",
+      input: { text: "Wrong door", reason: "Wrong door" },
+    }));
+    deps.operatorModel = operator;
+    const { io } = fakeIO();
+    expect(
+      await dispatch(deps, msg("Explain leases", "slack:UADMIN"), io, {
+        organizationConversation: true,
+        authoritativeHistory: true,
+        seed: [],
+      }),
+    ).toMatchObject({ status: "completed" });
+    expect(deps.runRegistry.listActive().map((run) => run.agent)).toEqual(["orchestrator"]);
+    expect(
+      await dispatch(deps, msg("agent:general Explain retries", "slack:UADMIN"), io, {
+        organizationConversation: true,
+        authoritativeHistory: true,
+        seed: [],
+      }),
+    ).toMatchObject({ status: "completed" });
+    expect(deps.runRegistry.listActive().map((run) => run.agent)).toEqual(["general", "orchestrator"]);
+    expect(operator).not.toHaveBeenCalled();
+    expect(provider.requests).toHaveLength(2);
+  });
+  it("confirms a saved private proposal with the current full actor and retained history only", async () => {
+    const provider = capturingProvider("Current answer");
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    deps.runRegistry = new RunRegistry();
+    const ledger = wireChildLedger(deps);
+    const claimedOrigins: unknown[] = [];
+    const complete = provider.complete.bind(provider);
+    provider.complete = async (request) => {
+      claimedOrigins.push([...ledger.live.values()].map((row) => row.meta.organizationIngressRunId));
+      return complete(request);
+    };
+    const store = new InMemoryConfirmationStore();
+    deps.confirmations = store;
+    const request = msg("Explain leases", "slack:UADMIN");
+    const id = "12345678-1234-4234-8234-123456789012";
+    await store.put(
+      {
+        kind: "redispatch",
+        id,
+        message: request,
+        line: request.text,
+        evidence: "Saved proposal",
+        code: "profile_bounded",
+      },
+      QUESTION_TTL_MS,
+    );
+    const marker = "DELETED_PRIVATE_SOURCE";
+    const { io } = fakeIO([{ role: "user", text: marker }]);
+    const runId = "22345678-1234-4234-8234-123456789012";
+    const actor = { ...chatActorOf(deps.config, request), memberOf: new Set(["slack:CX"]) };
+    expect(
+      await dispatchClick(
+        deps,
+        { kind: "confirm", id, actor, io },
+        {
+          threadKey: request.threadKey,
+          ingressRunId: runId,
+          authoritativeHistory: true,
+          seed: [{ role: "user", text: "Retained source" }],
+        },
+      ),
+    ).toEqual({ status: "completed" });
+    expect(JSON.stringify(provider.requests)).toContain("Retained source");
+    expect(JSON.stringify(provider.requests)).not.toContain(marker);
+    expect(deps.runRegistry!.getById(runId)).toMatchObject({ organizationIngressRunId: runId });
+    const revoked = { ...actor, grants: { ...actor.grants, actions: new Set<string>() } };
+    const second = "32345678-1234-4234-8234-123456789012";
+    await store.put(
+      {
+        kind: "redispatch",
+        id: second,
+        message: request,
+        line: request.text,
+        evidence: "Saved proposal",
+        code: "profile_bounded",
+      },
+      QUESTION_TTL_MS,
+    );
+    expect(
+      await dispatchClick(
+        deps,
+        { kind: "confirm", id: second, actor: revoked, io },
+        {
+          threadKey: request.threadKey,
+          ingressRunId: "42345678-1234-4234-8234-123456789012",
+          authoritativeHistory: true,
+          seed: [],
+        },
+      ),
+    ).toMatchObject({ status: "refused", refusal: "agent_allowlist" });
+    expect(provider.requests).toHaveLength(1);
+    expect(claimedOrigins).toEqual([[runId]]);
+  });
+  it("keeps authoritative session tools and saved provider recovery behind the current private projection", async () => {
+    const requests: CompletionRequest[] = [];
+    const provider: Provider = {
+      name: "fake",
+      async complete(request): Promise<CompletionResult> {
+        requests.push(structuredClone(request));
+        return requests.length === 1
+          ? {
+              content: [
+                { type: "tool_use", id: "private-notes", name: "notes", input: {} },
+                { type: "tool_use", id: "private-recall", name: "recall", input: { query: "retained" } },
+                { type: "tool_use", id: "private-files", name: "recall", input: { assets: true } },
+              ],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "Current retained answer" }], stopReason: "end_turn" };
+      },
+    };
+    const deps = makeDeps(mainDmYaml, provider);
+    deps.runRegistry = new RunRegistry();
+    const ledger = wireChildLedger(deps);
+    let oldTailReads = 0;
+    const readOldTail = deps.runLedger.readSessionTail.bind(deps.runLedger);
+    deps.runLedger.readSessionTail = async (...args) => {
+      oldTailReads++;
+      return readOldTail(...args);
+    };
+    const marker = "DELETED_PRIVATE_SOURCE";
+    deps.runLedger.readNotepad = async () => ({ text: marker, updatedAt: 1 });
+    deps.runLedger.searchSession = async () => ({
+      hits: [{ idx: 0, part: 0, role: "user", kind: "text", text: marker }],
+      gaps: [],
+    });
+    const { io, replies } = mainDmIO([{ role: "user", text: marker }]);
+    io.authoritativePrivateHistory = async () => [{ role: "user", text: "Current retained context" }];
+    const runId = "92345678-1234-4234-8234-123456789012";
+    expect(
+      await dispatch(deps, mainDm("Explain retained context"), io, {
+        authoritativeHistory: true,
+        seed: [{ role: "user", text: "Current retained context" }],
+        ingressRunId: runId,
+      }),
+    ).toMatchObject({ status: "completed" });
+    expect(replies).toContain("Current retained answer");
+    expect(oldTailReads).toBe(0);
+    expect(requests).toHaveLength(2);
+    expect(JSON.stringify(requests[1].messages)).toContain("Current retained context");
+    expect(JSON.stringify(requests[1].messages)).toContain("your notes for this thread are empty");
+    expect(JSON.stringify(requests)).not.toContain(marker);
+    const stored = ledger.finished.get(runId)!;
+    expect(stored).toMatchObject({ authoritativeHistory: true, session: { key: `private:${runId}:@context-v1` } });
+    expect(
+      await ledger.claim({
+        runId: "saved-private",
+        threadKey: "http:machine:private",
+        gen: "old",
+        leaseMs: 30_000,
+        phase: "live",
+        startedAt: 1,
+        meta: {
+          agent: "general",
+          userId: "http:machine",
+          channelId: "http:private",
+          threadKey: "http:machine:private",
+          authoritativeHistory: true,
+        },
+        system: marker,
+        tools: [],
+      }),
+    ).toMatchObject({ ok: true });
+    ledger.live.get("saved-private")!.leaseUntil = 0;
+    const [reclaimed] = await ledger.reclaim("new", Date.now(), 30_000);
+    const { io: recoveredIO, replies: recoveredReplies } = fakeIO();
+    expect(
+      await dispatch(
+        deps,
+        { ...msg("Continue"), channelId: "http:private", threadKey: "http:machine:private", userId: "http:machine" },
+        recoveredIO,
+        { restart: { row: reclaimed.row, events: [], inbox: [] } },
+      ),
+    ).toEqual({ status: "refused", refusal: "setup_failed" });
+    expect(recoveredReplies).toEqual([
+      "The saved private run is held because its current context could not be verified.",
+    ]);
+    expect(
+      await dispatch(deps, msg("Continue"), recoveredIO, {
+        authoritativeHistory: true,
+        seed: [{ role: "user", text: marker }],
+        restartOf: "saved-private",
+      }),
+    ).toEqual({ status: "refused", refusal: "setup_failed" });
+    expect(requests).toHaveLength(2);
+    expect(ledger.live.get("saved-private")).toMatchObject({
+      runId: "saved-private",
+      ownerGen: "new",
+      meta: { authoritativeHistory: true },
+    });
+  });
+
+  it("refuses an authoritative private turn without a verified seed instead of reading stored history", async () => {
+    const provider = capturingProvider("must not run");
+    const deps = makeDeps(YAML_FIXTURE, provider);
+    const { io, replies } = fakeIO([{ role: "user", text: "DELETED_PRIVATE_SOURCE" }]);
+    expect(await dispatch(deps, msg("Explain leases"), io, { authoritativeHistory: true })).toEqual({
+      status: "refused",
+      refusal: "setup_failed",
+    });
+    expect(replies).toEqual(["The private conversation could not be verified."]);
+    expect(provider.requests).toEqual([]);
+  });
+  it("keeps private operator questions out of the shared stored conversation", async () => {
+    const provider = capturingProvider("must not run");
+    const deps = makeDeps(YAML_FIXTURE.replace("operator: off", "operator: on"), provider);
+    const ledger = wireChildLedger(deps);
+    deps.operatorModel = async () => ({ tool: "ask", input: { text: "Which project?", reason: "Needs a project" } });
+    const { io, replies } = fakeIO();
+    expect(await dispatch(deps, msg("Start work"), io, { seed: [], authoritativeHistory: true })).toMatchObject({
+      status: "completed",
+    });
+    expect(replies.join("\n")).toContain("Which project?");
+    expect((await ledger.readSession(contextThreadSessionKey(msg("x").threadKey), 0)).messages).toEqual([]);
+  });
+  it.each(["off", "on"])(
+    "uses only authoritative retained history with the operator %s after private deletion",
+    async (operatorMode) => {
+      const provider = capturingProvider("Fresh answer");
+      const deps = makeDeps(YAML_FIXTURE.replace("operator: off", `operator: ${operatorMode}`), provider);
+      const ledger = wireChildLedger(deps);
+      await threadWithFinishedRun(deps, "general", { repo: "acme/old-run" });
+      const marker = "DELETED_PRIVATE_SOURCE";
+      deps.runLedger.readRequesterTarget = async () => ({
+        repo: "acme/deleted",
+        issue: "acme/deleted#99",
+        provenance: marker,
+      });
+      deps.runLedger.checkpointRequesterTarget = async () => ({
+        repo: "acme/deleted",
+        issue: "acme/deleted#99",
+        provenance: marker,
+      });
+      deps.runLedger.readSessionTail = async () => ({
+        from: 0,
+        sources: { ...testSessionSources(msg("old request"), []), context: freshContext() },
+        transcript: {
+          complete: true,
+          turns: 1,
+          messages: [{ role: "user", content: [{ type: "text", text: marker }] }],
+          actors: ["slack:UADMIN"],
+          contexts: [freshContext()],
+          compactions: [],
+        },
+      });
+      deps.runLedger.readNotepad = async () => ({ text: `${marker} working notes`, updatedAt: 1 });
+      const prompts: RoutePrompt[] = [];
+      deps.operatorModel = async (prompt) => {
+        prompts.push(prompt);
+        if (prompts.length === 1) return { tool: OPERATOR_READ_TOOLS.threadState, input: {} };
+        return { tool: "bind_preset", input: { preset: "general", request: "Explain leases", reason: "Read ask" } };
+      };
+      const { io, replies } = fakeIO([{ role: "user", text: marker }]);
+      expect(
+        await dispatch(deps, msg("Explain leases"), io, {
+          seed: [{ role: "user", text: "Only retained history" }],
+          authoritativeHistory: true,
+        }),
+      ).toMatchObject({ status: "completed" });
+      expect(replies.join("\n")).toContain("Fresh answer");
+      const modelInput = JSON.stringify(provider.requests);
+      expect(modelInput).toContain("Only retained history");
+      expect(modelInput).not.toContain(marker);
+      if (operatorMode === "on") {
+        expect(JSON.stringify(prompts)).toContain("Only retained history");
+        expect(JSON.stringify(prompts)).not.toContain(marker);
+        expect(JSON.stringify(prompts)).not.toContain("acme/deleted");
+        expect(JSON.stringify(prompts)).not.toContain("acme/old-run");
+      }
+      expect((await ledger.readSession(contextThreadSessionKey(msg("x").threadKey), 0)).messages).toEqual([]);
+    },
+  );
   it("admits a bound internal worker only after fresh requester DM verification", async () => {
     const provider = capturingProvider("The private work is ready.");
     const deps = makeDeps(YAML_FIXTURE, provider);
@@ -27513,6 +28308,67 @@ describe("a unit-owned thread (record 0051's reply-as-event and gone-instance ru
     deps.operatorModel = operator;
     return operator;
   };
+  it("keeps a target-bound answer on its original unit and refuses a question changed at append", async () => {
+    const question = {
+      pr: { number: 7, url: "https://github.com/acme/api/pull/7" },
+      round: 1,
+      verdict: "request_changes" as const,
+      askedAt: 1,
+      assignedTo: "slack:UADMIN",
+      findings: [
+        { id: "F1", severity: "minor" as const, file: "app.ts", title: "Choose behavior", humanGated: true as const },
+      ],
+    };
+    const idle = {
+      why: "held",
+      from: "coding" as const,
+      at: 1,
+      renewalsLeft: 0,
+      spendUsd: 1,
+      wakes: 0,
+      humanGate: question,
+    };
+    const s = await unitOwnedSetup({ idle });
+    await s.instances.put({
+      id: INSTANCE,
+      kind: "ship",
+      userId: "slack:UADMIN",
+      channelId: "slack:CX",
+      threadKey: THREAD,
+      repo: "acme/api",
+      branch: "work",
+      createdAt: 1,
+    });
+    const { io } = fakeIO();
+    const input = { ...msg("Use the documented behavior", "slack:UADMIN"), messageId: "browser:original-key" };
+    const options = {
+      ingressRunId: "original-owner",
+      answerTarget: { unitKey: `${INSTANCE}:U12`, expectedQuestion: question },
+    };
+    expect(await dispatch(s.deps, input, io, options)).toEqual({ status: "completed" });
+    expect(await s.instances.listEvents(s.key)).toEqual([
+      expect.objectContaining({
+        id: "browser:original-key",
+        sender: "slack:UADMIN",
+        organizationIngressRunId: "original-owner",
+        text: "Use the documented behavior",
+      }),
+    ]);
+    expect(s.provider.requests).toEqual([]);
+    const append = s.instances.appendEvent.bind(s.instances);
+    s.instances.appendEvent = async (...args) => {
+      await s.instances.putUnits([unitRow({ idle: { ...idle, humanGate: { ...question, askedAt: 2 } } })]);
+      return append(...args);
+    };
+    expect(
+      await dispatch(s.deps, { ...input, messageId: "browser:new-key" }, io, {
+        ...options,
+        ingressRunId: "next-owner",
+      }),
+    ).toMatchObject({ status: "refused" });
+    expect(await s.instances.listEvents(s.key)).toHaveLength(1);
+    expect(s.provider.requests).toEqual([]);
+  });
 
   async function endedPrContinuationSetup() {
     const branch = "plan/fix-the-login-6435ec/u12";
@@ -30974,6 +31830,7 @@ describe("the operator behind routing.operator (record 0057; routing-and-config 
       {
         id: expect.stringMatching(/^[0-9a-f-]{36}$/),
         line: "config set me --agent review",
+        actionLabel: "Confirm",
         risk: "changes your own settings until you reset them",
         expiresAt: 1_000_000 + CONFIRMATION_TTL_MS,
       },

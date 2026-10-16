@@ -108,9 +108,61 @@ export function sessionCapabilityFor(
   inherited?: InheritedSessionContext,
   /** Revalidate and persist current session dependencies after bytes are read. */
   admitOwnContext?: () => Promise<boolean>,
+  /** A trusted current private projection replaces every stored context reader. */
+  authoritativeProjection?: () => Promise<ChatMessage[]>,
 ): SessionCapability | undefined {
   const session = run?.session;
   if (!session) return undefined;
+  if (authoritativeProjection) {
+    const read = async () => {
+      const messages = await authoritativeProjection();
+      if (admitOwnContext && !(await admitOwnContext())) throw new Error("The private context could not be verified.");
+      return structuredClone(messages);
+    };
+    return {
+      session,
+      search: async (query, limit) => {
+        const messages = await read();
+        const needle = query.toLocaleLowerCase();
+        const hits: SessionHit[] = [];
+        messages.forEach((message, idx) =>
+          message.content.forEach((part, position) => {
+            if (part.type === "text" && part.text.toLocaleLowerCase().includes(needle))
+              hits.push({
+                idx,
+                part: position,
+                role: message.role === "user" ? "user" : "assistant",
+                kind: "text",
+                text: part.text,
+              });
+          }),
+        );
+        return { hits: hits.slice(0, limit), gaps: [] };
+      },
+      readTurn: async (idx) => (await read())[idx],
+      readConversation: read,
+      readNotepad: async () => null,
+      writeNotepad: async () => ({ ok: false, reason: "fenced" }),
+      assets: async () => [],
+      captureHandoff: async (source, captureDependencies) => {
+        if (source.runId !== run.runId) throw new Error("parent context source does not match its run");
+        const messages = await read();
+        const snapshot: ChildHandoff = {
+          version: 1,
+          source,
+          session: { key: session.key, from: 0, to: -1 },
+          assets: [],
+          privateProjectionHash: await sourceHash({ messages, actors: [] }),
+          requiresFreshSources: true,
+        };
+        if (captureDependencies) {
+          const value = await captureDependencies(snapshot);
+          snapshot.dependencies = { value, hash: await contextDependenciesHash(value) };
+        }
+        return parentContextOf(messages, boundChildHandoff(snapshot));
+      },
+    };
+  }
   const admitRead = async (): Promise<boolean> => {
     if (!admitOwnContext) return true;
     try {

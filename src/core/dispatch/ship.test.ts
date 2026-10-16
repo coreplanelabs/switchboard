@@ -268,6 +268,69 @@ describe("runShipBranch — the agent:ship fork hands every admitted request to 
     },
   );
 
+  it.each(["work", "work_from_thread"] as const)(
+    "uses only fresh authoritative evidence for a thread-sourced %s handoff",
+    async (shipEntry) => {
+      const s = setup("slack:UADMIN", { text: "Fix it." });
+      Object.assign(s.ctx, {
+        authoritativeHistory: true,
+        agentSource: "operator",
+        shipEntry,
+        shipRepoSource: "thread",
+        operator: { binds: [{ repoSource: "thread" }] },
+        history: [
+          {
+            role: "user",
+            user: s.msg.userId,
+            text: "Investigate https://github.com/acme/api/issues/7 RETAINED_SHIP_SOURCE",
+          },
+          { role: "assistant", text: "Current source answer" },
+        ],
+      });
+      Object.assign(s.deps.runLedger!, {
+        readRequesterTarget: async () => ({
+          repo: "acme/api",
+          issue: "acme/api#99",
+          provenance: "DELETED_SHIP_SOURCE",
+        }),
+        readSessionTail: async () => ({
+          transcript: {
+            complete: true,
+            turns: 1,
+            compactions: [],
+            messages: [{ role: "user", content: [{ type: "text", text: "DELETED_SHIP_SOURCE" }] }],
+            actors: [s.msg.userId],
+          },
+        }),
+      });
+      await runShipBranch(s.deps, s.msg, s.io, s.ctx);
+      expect(s.created).toHaveLength(1);
+      const row = (await s.instances.listUnits(s.created[0]!))[0]!;
+      expect(row.threadEvidence).toContain("RETAINED_SHIP_SOURCE");
+      expect(row.threadEvidence).toContain("Current source answer");
+      expect(row.threadEvidence).not.toContain("DELETED_SHIP_SOURCE");
+      expect(row.threadEvidence).not.toContain("https://github.com/acme/api/issues/99");
+      const held = setup("slack:UADMIN", { text: "Fix it." });
+      Object.assign(held.ctx, {
+        authoritativeHistory: true,
+        agentSource: "operator",
+        shipEntry,
+        shipRepoSource: "thread",
+        operator: { binds: [{ repoSource: "thread" }] },
+        history: [],
+      });
+      Object.assign(held.deps.runLedger!, {
+        readRequesterTarget: s.deps.runLedger!.readRequesterTarget,
+        readSessionTail: s.deps.runLedger!.readSessionTail,
+      });
+      await runShipBranch(held.deps, held.msg, held.io, held.ctx);
+      expect(held.created).toEqual([]);
+      expect(held.replies.join(" ")).toContain(
+        "The earlier thread context could not be verified; no fix worker started.",
+      );
+    },
+  );
+
   it("uses the durable requester issue for a terse Ship brief after the source answer leaves the tail", async () => {
     const s = setup("slack:UADMIN", { text: "Fix it." });
     Object.assign(s.ctx, {
@@ -903,6 +966,14 @@ describe("runShipBranch — the host key and the hosted marker (record 0060)", (
     expect(s.registry.getById("run-s")).toMatchObject({ hosted: true, threadKey: THREAD });
   });
 
+  it("keeps the consumed original ingress identity on the hosted registry and recovery ledger", async () => {
+    const s = ledgerSetup();
+    const runId = "12345678-1234-4234-8234-123456789012";
+    await runShipBranch(s.deps, s.msg, s.io, { ...s.ctx, ingressRunId: runId });
+    expect(s.registry.getById(runId)).toMatchObject({ id: runId, hosted: true, organizationIngressRunId: runId });
+    expect(s.registry.getById("run-s")).toBeNull();
+    expect(s.claims[0]).toMatchObject({ runId, meta: { organizationIngressRunId: runId } });
+  });
   it("durably records a request-level verbosity override after the production input event strips its directive", async () => {
     const s = ledgerSetup();
     s.msg.text = "verbosity:debug agent:ship in acme/api: fix the login redirect";

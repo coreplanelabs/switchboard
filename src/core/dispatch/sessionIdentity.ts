@@ -10,7 +10,9 @@ export function runSessionIdentity(
   agent: string,
   coordinator?: CoordinatorTag,
   existing?: RunSession,
+  authoritativeRunId?: string,
 ): { key: string; legacyKey?: string } {
+  if (authoritativeRunId) return { key: `private:${authoritativeRunId}:@context-v1` };
   if (existing) return { key: existing.key };
   const ordinary = sessionKey(threadKey, agent);
   if (!coordinator?.unit || (agent !== "coding" && agent !== "review"))

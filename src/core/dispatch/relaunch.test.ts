@@ -148,6 +148,28 @@ const grant = (store: RunBearerStore, runId = "run-1") =>
   });
 
 describe("prepareRelaunch — the relaunch decided and prepared", () => {
+  it("holds authoritative private provider state without reattaching rotating or rebuilding its original run", async () => {
+    const d = deps();
+    const old = grant(d.runBearers);
+    const { ctx, saves } = context({
+      authoritativeHistory: true,
+      facts: facts(0, bearerHashOf(old)),
+      binding: { backend: "local" },
+    });
+    const before = reattachState.contexts.length;
+    expect(await prepareRelaunch(d, ctx)).toEqual({
+      kind: "paused",
+      reason: "private_context_unverified",
+      message: "The private run is held because its saved provider context cannot be verified.",
+    });
+    expect(saves).toEqual([]);
+    expect(reattachState.contexts).toHaveLength(before);
+    expect(d.runBearers.verify(old)).toMatchObject({ ok: true, grant: { runId: "run-1" }, turns: 0 });
+    expect(await prepareRelaunch(d, { ...ctx, authoritativeHistory: undefined })).toMatchObject({
+      kind: "relaunch",
+      resume: { messages: record.messages },
+    });
+  });
   it("an in-process relaunch carries its run ID and generation through reattach while the fleet gate requires ownership", async () => {
     const d = deps();
     grant(d.runBearers);

@@ -64,12 +64,15 @@ export interface FastPathDeps extends RecordDeps, Pick<ResolveDeps, "resolveRepo
    * click answers that the confirmation could not be read.
    */
   confirmations?: ConfirmationStore;
+  /** Channel-owned current source proof, before consuming a protected saved choice. */
+  guardOrganizationConfirmation?: import("../confirmations.js").ConfirmationSourceGuard;
 }
 
 /** What the fast path needs of the request: the message, its channel handle,
  *  the request's root trace and the run ending that seals a command run after
  *  its reply. */
 export interface RequestContext {
+  ingressRunId?: string;
   msg: IncomingMessage;
   io: ChannelIO;
   ending: RunEnding;
@@ -107,6 +110,7 @@ export async function answerChatCommand(deps: FastPathDeps, ctx: RequestContext)
     const chatCmd = parseChatCommand(msg.text, deps.commands);
     if (chatCmd) {
       const res = await runChatCommand(deps, msg, io, chatCmd, ending, trace, {
+        ...(ctx.ingressRunId ? { ingressRunId: ctx.ingressRunId } : {}),
         ...(ctx.operator ? { operator: ctx.operator } : {}),
       });
       // A failed command that carries a guess is one question (record 0054):

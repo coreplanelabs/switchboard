@@ -54,6 +54,8 @@ export interface McpRunCaller {
   channelId?: string;
   /** The adapter's one-person DM claim, rechecked by dispatch before discovery. */
   directAudience?: SlackDirectAudience;
+  /** Already verified private browser address; never a model or client body field. */
+  organizationPrivateAudience?: import("../core/dispatch/privateDestination.js").OrganizationPrivateAudience;
 }
 
 /** One server as the front door sees it (record 0040): a fact for the preset

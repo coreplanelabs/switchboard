@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CLI_ACTOR, actorIdFor, chatActorOf, resolveActor, resolveChatActor } from "./actor.js";
+import { CLI_ACTOR, actorIdFor, chatActorOf, resolveActor, resolveChatActor, withChatActor } from "./actor.js";
 import { effectiveGrants, principalOf } from "./authorize.js";
 import {
   ALL_GRANTS,
@@ -296,6 +296,47 @@ describe("resolveChatActor — a chat message's namespaced user id chooses the s
     const bound = chatActorOf(config, { ...msg("slack:UADMIN", "http:ops"), authenticatedAs: "http:alice" });
     expect(bound.id).toBe("http:alice");
     expect(effectiveGrants(bound).actions).toEqual(set("dispatch", "runs:read"));
+  });
+  it("preserves a fresh server actor across message copies but never accepts a JSON actor snapshot", () => {
+    const actor = {
+      kind: "service" as const,
+      id: "mcp:credential",
+      grants: grants({ actions: set("dispatch", "repo:exec"), repos: set("org/app") }),
+      onBehalfOf: {
+        kind: "user" as const,
+        id: "slack:UDEV",
+        grants: grants({ actions: set("dispatch"), repos: set("org/app") }),
+      },
+      origin: { channelId: "http:home", threadKey: "http:home:alice" },
+      self: ["mcp:credential", "slack:UDEV"],
+      memberOf: set("slack:PRIVATE"),
+      viewingAs: { id: "slack:UDEV" },
+      standingConsent: set("runs:write"),
+    };
+    const message = withChatActor(msg("slack:UDEV", "http:home"), actor);
+    const copied = { ...message, text: "copied" };
+    const currentLookup = (id: string) =>
+      id === actor.id ? actor.grants : id === actor.onBehalfOf.id ? actor.onBehalfOf.grants : lookup(id);
+    const resolved = chatActorOf({ grantsFor: currentLookup }, copied);
+    expect(resolved).toEqual(actor);
+    expect(effectiveGrants(resolved).actions).toEqual(set("dispatch"));
+    expect(resolved.memberOf).toEqual(set("slack:PRIVATE"));
+    const serialized = JSON.parse(JSON.stringify({ ...message, resolvedActor: actor }));
+    expect(chatActorOf({ grantsFor: lookup }, serialized)).toMatchObject({ id: "slack:UDEV", kind: "user" });
+    expect(chatActorOf({ grantsFor: lookup }, serialized).standingConsent).toBeUndefined();
+    const revoked = chatActorOf({ grantsFor: () => NO_GRANTS }, copied);
+    expect(effectiveGrants(revoked).actions).toEqual(set());
+    expect(revoked.memberOf).toEqual(set("slack:PRIVATE"));
+    expect(revoked.viewingAs).toEqual({ id: "slack:UDEV" });
+    expect(revoked.standingConsent).toEqual(set("runs:write"));
+  });
+  it("keeps the trusted local CLI's explicit grants without widening a narrowed CLI actor", () => {
+    const message = msg("cli:local", "cli:local");
+    expect(effectiveGrants(resolveChatActor(withChatActor(message, CLI_ACTOR), () => NO_GRANTS)).actions).toBe("all");
+    const narrow = { ...CLI_ACTOR, grants: grants({ actions: set("runs:read") }) };
+    expect(effectiveGrants(resolveChatActor(withChatActor(message, narrow), () => NO_GRANTS)).actions).toEqual(
+      set("runs:read"),
+    );
   });
 
   it("an unknown namespace stays a user with the id as given and whatever grants config names for it — never a crash, never widened", () => {

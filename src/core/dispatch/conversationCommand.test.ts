@@ -15,7 +15,8 @@ import { startRequestRoot } from "../requestTrace.js";
 import { createRunEnding } from "../runEnding.js";
 import { NullRunHistoryWriter } from "../runHistoryWriter.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
-import { contextThreadSessionKey } from "../runLedger/sessionLog.js";
+import { contextThreadSessionKey, threadSessionKey } from "../runLedger/sessionLog.js";
+import { markPrivateConversation } from "./privateConversation.js";
 import { RunRegistry } from "../runRegistry.js";
 import type { ChannelIO, ConfirmationOffer, IncomingMessage } from "../types.js";
 import { consumeAndRun } from "./confirm.js";
@@ -119,12 +120,19 @@ function fixture(persistent = true) {
     status: async () => ({ update: () => {}, done: async () => {} }),
     offer: async (offer) => void offers.push(offer),
   };
-  const invoke = async (id: string, input: CommandInput, callId: string, msg = message) => {
+  const invoke = async (
+    id: string,
+    input: CommandInput,
+    callId: string,
+    msg = message,
+    authoritativeHistory = false,
+  ) => {
     await ready;
     return executeConversationCommand(
       deps,
       {
         msg,
+        ...(authoritativeHistory ? { authoritativeHistory: true as const } : {}),
         io,
         trace,
         ending,
@@ -165,6 +173,55 @@ function fixture(persistent = true) {
 }
 
 describe("conversation command receipts", () => {
+  it("keeps private command preparation off retained requester checkpoints while ordinary commands still update them", async () => {
+    const f = fixture();
+    const key = threadSessionKey(f.message.threadKey);
+    const oldTarget = { repo: "acme/deleted", provenance: "Earlier private target" };
+    await f.ledger.checkpointRequesterTarget(key, f.message.userId, oldTarget);
+    const msg = markPrivateConversation({
+      ...f.message,
+      text: "Set my effort high for https://github.com/acme/current/issues/7",
+    });
+    const accepted = await f.invoke(
+      "config.set",
+      { args: ["me"], options: { effort: "high" } },
+      "private-current",
+      msg,
+      true,
+    );
+    expect(JSON.parse(accepted.text)).toEqual({ command: "config.set", outcome: "ran", resultDelivered: true });
+    expect(f.config.scopes(msg.channelId, msg.userId).user).toEqual({ effort: "high" });
+    expect(await f.ledger.readRequesterTarget(key, msg.userId)).toEqual({
+      repo: "acme/deleted",
+      provenance: "Earlier private target",
+    });
+    expect(f.saved()).toEqual([]);
+    expect(f.ledger.live.get(f.parent.id)?.state.orchestratorDecisions).toMatchObject([
+      { owner: { runId: f.parent.id, requesterId: msg.userId }, source: { messageId: "1" }, command: "config.set" },
+    ]);
+    f.admission.check = async () => ({ ok: false });
+    expect(await f.invoke("config.set", { args: ["me"], options: { effort: "low" } }, "revoked", msg, true)).toEqual({
+      ok: false,
+      text: "Requester source access is unavailable; no command ran.",
+    });
+    expect(f.config.scopes(msg.channelId, msg.userId).user).toEqual({ effort: "high" });
+
+    const ordinary = fixture();
+    const changed = await ordinary.invoke("config.set", { args: ["me"], options: { effort: "low" } }, "ordinary", {
+      ...ordinary.message,
+      text: "Set my effort low for https://github.com/acme/current/issues/7",
+    });
+    expect(JSON.parse(changed.text).outcome).toBe("ran");
+    expect(ordinary.config.scopes(ordinary.message.channelId, ordinary.message.userId).user).toEqual({ effort: "low" });
+    expect(
+      await ordinary.ledger.readRequesterTarget(threadSessionKey(ordinary.message.threadKey), ordinary.message.userId),
+    ).toEqual({
+      repo: "acme/current",
+      issue: "acme/current#7",
+      provenance: "Set my effort low for https://github.com/acme/current/issues/7",
+    });
+  });
+
   it("saves the orchestrator and source decision before applying a command", async () => {
     const f = fixture();
     let before: unknown;

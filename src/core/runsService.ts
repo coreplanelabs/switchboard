@@ -101,6 +101,8 @@ export type Result<T> =
  * expresses the outcome as `status`).
  */
 export interface RunView {
+  /** Stored private model context must not be restored without a current projection. */
+  authoritativeHistory?: true;
   answerOutcome?: AnswerOutcome;
   /** Admitted execution bounds, from the final persisted record. */
   profile?: RunRecord["profile"];
@@ -167,6 +169,8 @@ export interface RunView {
   userName?: string;
   /** The bound credential behind the person (`RunMeta.authenticatedAs` / `RunRecord.authenticatedAs`), when there was one. */
   authenticatedAs?: string;
+  /** The authenticated app that relayed this request for the credited person. */
+  postedBy?: string;
   /** The run that spawned this one (`RunMeta.parentRunId` / `RunRecord.parentRunId`,
    *  run-history item 46); absent on a run a person or a schedule started. */
   parentRunId?: string;
@@ -632,6 +636,8 @@ function ledgerView(row: LiveRunRow, events: readonly RunEvent[]): RunView {
     ...(m.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
     ...(m.userName !== undefined ? { userName: m.userName } : {}),
     ...(m.authenticatedAs !== undefined ? { authenticatedAs: m.authenticatedAs } : {}),
+    ...(m.postedBy !== undefined ? { postedBy: m.postedBy } : {}),
+    ...(m.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
     ...(m.parentRunId !== undefined ? { parentRunId: m.parentRunId } : {}),
     ...(m.route !== undefined ? { route: m.route } : {}),
     ...(m.parentInstanceId !== undefined ? { parentInstanceId: m.parentInstanceId } : {}),
@@ -679,6 +685,8 @@ function liveView(s: RunSummary): RunView {
     ...(s.sourceUrl !== undefined ? { sourceUrl: s.sourceUrl } : {}),
     ...(s.userName !== undefined ? { userName: s.userName } : {}),
     ...(s.authenticatedAs !== undefined ? { authenticatedAs: s.authenticatedAs } : {}),
+    ...(s.postedBy !== undefined ? { postedBy: s.postedBy } : {}),
+    ...(s.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
     ...(s.parentRunId !== undefined ? { parentRunId: s.parentRunId } : {}),
     ...(s.parentInstanceId !== undefined ? { parentInstanceId: s.parentInstanceId } : {}),
     ...(s.idempotencyKey !== undefined ? { idempotencyKey: s.idempotencyKey } : {}),
@@ -1140,6 +1148,8 @@ export function createRunsService(deps: RunsServiceDeps): RunsService {
               ...(m.sourceUrl !== undefined ? { sourceUrl: m.sourceUrl } : {}),
               ...(m.userName !== undefined ? { userName: m.userName } : {}),
               ...(m.authenticatedAs !== undefined ? { authenticatedAs: m.authenticatedAs } : {}),
+              ...(m.postedBy !== undefined ? { postedBy: m.postedBy } : {}),
+              ...(m.authoritativeHistory ? { authoritativeHistory: true as const } : {}),
             },
             channelVisibility: m.channelVisibility ?? "unknown",
             ...(m.repo !== undefined ? { repo: m.repo } : {}),
