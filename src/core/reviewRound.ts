@@ -43,13 +43,7 @@ import {
   type PrCommitList,
 } from "./headMoved.js";
 import { decideReviewPost, reviewPostIntended, reviewPostOptedOut, type ReviewPostTarget } from "./reviewPost.js";
-import {
-  buildReviewPostBody,
-  completeReviewVerdict,
-  REVIEW_FEEDBACK_INVITATION,
-  type ReviewPost,
-  type ReviewVerdict,
-} from "./reviewVerdict.js";
+import { buildReviewPostBody, completeReviewVerdict, type ReviewPost, type ReviewVerdict } from "./reviewVerdict.js";
 import { checkReviewedHead, normalizeHead, sameCommit } from "./reviewedHead.js";
 import { reviewTargetBlock } from "./reviewTarget.js";
 import { checkDigestCoverage, type PrSize } from "./digestCoverage.js";
@@ -1133,7 +1127,7 @@ export async function runReviewPostStep(
       bodyHash: await sourceHash(body),
       ...(completeReviewVerdict(verdict) ? { verdict: verdict!.verdict } : {}),
       state: "pending",
-      ...(body.includes(REVIEW_FEEDBACK_INVITATION) && verdict?.humanFindings !== undefined
+      ...(completeReviewVerdict(verdict) && verdict?.humanFindings !== undefined
         ? { feedback: { format: 1, findings: verdict.findings?.length ?? 0, at: systemClock() } }
         : {}),
     });

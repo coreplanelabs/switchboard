@@ -701,7 +701,7 @@ export function buildReviewPostBody(
   const head = target?.head ?? verdict?.head;
   if (head)
     fixedParts.push(`_${completeReviewVerdict(verdict) ? "Reviewed at" : "Review target:"} \`${head.slice(0, 7)}\`._`);
-  if (verdict?.humanFindings !== undefined && completeReviewVerdict(verdict))
+  if (verdict?.verdict === "request_changes" && verdict.humanFindings !== undefined && completeReviewVerdict(verdict))
     fixedParts.push(REVIEW_FEEDBACK_INVITATION);
   const agentParts: string[] = [];
   if (failure) agentParts.push(`**Validation:** ${redactAndCap(failure, 600)}`);
