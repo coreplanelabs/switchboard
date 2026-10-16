@@ -5,6 +5,7 @@ import { useSeed, useViewingAs } from "../../src/lib/seed";
 import ConfirmationPrompt from "./ConfirmationPrompt.vue";
 import MarkdownText from "../../src/components/MarkdownText.vue";
 import AssistantTurn from "../../src/components/home/AssistantTurn.vue";
+import type { HomeTurnSeed } from "@core/channels/webSeed.js";
 import { useWallClock } from "../../src/lib/wallClock";
 import { useHomeSession, type AttachedContext } from "../lib/homeSession";
 const home = useHomeSession();
@@ -18,7 +19,9 @@ const historyLine = computed(() => {
   if (history.hasMore) return "More retained messages exist beyond this page.";
   return "This page includes the complete retained conversation available to you.";
 });
-const liveTurns = computed(() => home?.session.value?.turns?.filter((turn) => !turn.finished) ?? []);
+const liveTurns = computed(
+  () => home?.session.value?.turns?.filter((turn): turn is HomeTurnSeed => !("kind" in turn) && !turn.finished) ?? [],
+);
 const commands = computed(() =>
   home?.text.value.startsWith("/")
     ? (home.session.value?.commands

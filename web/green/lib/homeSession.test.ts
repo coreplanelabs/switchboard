@@ -11,6 +11,7 @@ function session(over: Partial<HomeSession> = {}): HomeSession {
     actor: "access:alice",
     stream: "person:alice",
     bindingRevision: 0,
+    accessEpoch: "fixture:current-source",
     revision: 4,
     entries: [],
     sendUrl: "/home/send",
