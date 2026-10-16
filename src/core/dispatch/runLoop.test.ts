@@ -52,6 +52,7 @@ import { createRunHistoryWriter } from "../runHistoryWriter.js";
 import { RunRegistry } from "../runRegistry.js";
 import type { RunEvent } from "../runEvents.js";
 import { createRunsService } from "../runsService.js";
+import { chatActorOf } from "../authz/actor.js";
 import {
   createLedgerWriteThrough,
   NullLedgerRun,
@@ -2020,8 +2021,8 @@ describe("runLoop — the model turn and everything that rides on it", () => {
     expect(started).toHaveBeenCalledTimes(1);
   });
 
-  it("offers read delegation only to a fresh root with one requester source", async () => {
-    const offered: boolean[] = [];
+  it("offers child controls only to a fresh root with one requester source", async () => {
+    const offered: boolean[][] = [];
     for (const variant of ["fresh", "recovered", "delegated", "merged"] as const) {
       const base = watched(piHarness);
       const s = setup("Done.", {
@@ -2032,7 +2033,10 @@ describe("runLoop — the model turn and everything that rides on it", () => {
           harnesses: roster({
             ...base.harness,
             open: async (deps, run) => {
-              offered.push(run.tools.some((tool) => tool.name === "spawn_run"));
+              offered.push([
+                run.tools.some((tool) => tool.name === "spawn_run"),
+                run.tools.some((tool) => tool.name === "send_to_run"),
+              ]);
               return base.harness.open(deps, run);
             },
           }),
@@ -2049,11 +2053,22 @@ describe("runLoop — the model turn and everything that rides on it", () => {
         msg: { ...s.ctx.msg, ...(variant === "merged" ? { mergedFollowUps: true as const } : {}) },
         recordWorkDecision: async () => true,
         captureParentContext: async () => parentContextOf([]),
+        runs: {
+          service: createRunsService({ registry: s.registry, store: null }),
+          actor: chatActorOf(s.deps.config, s.ctx.msg),
+          runId: s.run.id,
+        },
+        steer: { steer: async () => ({ kind: "not_live" }) },
       });
       s.ending.drain(undefined);
       await s.writer.settled();
     }
-    expect(offered).toEqual([true, false, false, false]);
+    expect(offered).toEqual([
+      [true, true],
+      [false, false],
+      [false, false],
+      [false, false],
+    ]);
   });
 
   it.each(["saved", "storage failure", "source changed", "unknown budget"] as const)(
@@ -2161,6 +2176,140 @@ describe("runLoop — the model turn and everything that rides on it", () => {
       }
     },
   );
+
+  it.each([
+    "saved",
+    "storage failure",
+    "lookup changed source",
+    "save changed source",
+    "unknown budget",
+    "expired context",
+    "unknown delivery",
+  ] as const)("records child steers before the existing delivery path: %s", async (mode) => {
+    const records: unknown[] = [];
+    const deliveries: unknown[] = [];
+    const replies: string[] = [];
+    let now = NOW;
+    const base = watched(piHarness);
+    const s = setup("Done.", {
+      agent: "orchestrator",
+      userId: "slack:UADMIN",
+      harness: {
+        harnesses: roster({
+          ...base.harness,
+          open: async (deps, run) => {
+            const tool = run.tools.find((candidate) => candidate.name === "send_to_run")!;
+            const input = { id: "child", text: "Focus on retries.", sourceMessage: "initial request" };
+            const ctx = {
+              ...run.toolContext,
+              callId: "steer-one",
+              remainingMs: () => (mode === "unknown budget" ? Infinity : 600_000),
+            };
+            try {
+              replies.push(String(await tool.run(input, ctx)));
+            } catch (e) {
+              replies.push(String(e));
+            }
+            try {
+              replies.push(
+                String(
+                  await tool.run(input, { ...ctx, callId: mode === "unknown delivery" ? "new-call" : "steer-one" }),
+                ),
+              );
+            } catch (e) {
+              replies.push(String(e));
+            }
+            if (mode === "saved") replies.push(String(await tool.run({ ...input, text: "Different change." }, ctx)));
+            return base.harness.open(deps, run);
+          },
+        }),
+        registry: new HarnessRegistry(),
+        harnessUrl: "https://bot.example.com",
+        loopbackUrl: "http://127.0.0.1:8080",
+        containerFor: () => new FakeHarnessContainer(),
+      },
+    });
+    s.registry.create(
+      "child",
+      {
+        userId: s.ctx.msg.userId,
+        channelId: s.ctx.msg.channelId,
+        threadKey: "slack:CX:child",
+        agent: "research",
+        parentRunId: s.run.id,
+      },
+      { id: "child" },
+    );
+    const service = createRunsService({ registry: s.registry, store: null });
+    const getRun = service.getRun.bind(service);
+    service.getRun = async (...args) => {
+      const result = await getRun(...args);
+      if (mode === "lookup changed source")
+        s.ctx.admitted.inbox.push({
+          userId: "slack:UOTHER",
+          text: "foreign",
+          messageId: "foreign",
+          at: 2,
+          msg: { ...s.ctx.msg, userId: "slack:UOTHER", text: "foreign" },
+        });
+      return result;
+    };
+    await runLoop(s.deps, {
+      ...s.ctx,
+      clock: () => now,
+      msg: { ...s.ctx.msg, text: "initial request", messageId: "request-one" },
+      runs: { service, actor: chatActorOf(s.deps.config, s.ctx.msg), runId: s.run.id },
+      steer: {
+        steer: async (target, text, messageId) => {
+          expect(records).toHaveLength(1);
+          deliveries.push({ target: target.runId, text, messageId });
+          if (mode === "unknown delivery") throw new Error("lost storage acknowledgement");
+          return { kind: "steered", where: "here", at: 1, ledgerSeq: 1 };
+        },
+      },
+      captureParentContext: async () => {
+        if (mode === "expired context") now += 600_000;
+        return parentContextOf([]);
+      },
+      recordWorkDecision: async (message, callId, action) => {
+        records.push({ messageId: message.messageId, callId, action });
+        if (mode === "save changed source")
+          s.ctx.admitted.inbox.push({
+            userId: "slack:UOTHER",
+            text: "foreign",
+            messageId: "foreign",
+            at: 2,
+            msg: { ...s.ctx.msg, userId: "slack:UOTHER", text: "foreign" },
+          });
+        return mode !== "storage failure";
+      },
+    });
+    s.ending.drain(undefined);
+    await s.writer.settled();
+    if (mode === "saved") {
+      expect(replies.slice(0, 2).every((reply) => reply.includes("steered: folded into the research run child"))).toBe(
+        true,
+      );
+      expect(replies[2]).toContain("already selected a different change");
+      expect(deliveries).toEqual([
+        { target: "child", text: "Focus on retries.", messageId: `run:${JSON.stringify([s.run.id, "steer-one"])}` },
+      ]);
+    } else if (mode === "unknown delivery") {
+      expect(replies[0]).toContain("delivery outcome is unknown");
+      expect(replies[1]).toContain("withdrawn");
+      expect(deliveries).toHaveLength(1);
+    } else {
+      expect(replies[0]).toContain(
+        mode === "unknown budget"
+          ? "budget could not be proved"
+          : mode === "lookup changed source"
+            ? "source changed"
+            : "could not be saved",
+      );
+      expect(deliveries).toHaveLength(0);
+    }
+    expect(records).toHaveLength(["lookup changed source", "unknown budget", "expired context"].includes(mode) ? 0 : 1);
+  });
 
   it("holds shared commands on recovered root conversations and permits a fresh requester", async () => {
     const offered: boolean[] = [];

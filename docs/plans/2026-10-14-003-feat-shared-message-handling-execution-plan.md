@@ -147,6 +147,12 @@ The shared command path and parent launch checks are merged. The next cut gives 
 
 The same live call ID cannot launch a second child. Recovery keeps delegation tools held rather than replaying a selection with an unknown result. The current write-start and internal steer paths remain unchanged. Generic routing and live/unit fold migration remain pending; Step 1 is still in progress.
 
+### Child-steer decisions, 2026-10-15
+
+The read-delegation cut has current-head LGTM. This dependent cut gives the same fresh orchestrator the existing child-steer tool through a saved requester decision. It selects the source before target lookup, keeps the actual parent and requester, and links the durable input to the decision by message ID. Source changes, an ended budget and failed decision storage stop delivery. Repeated live call IDs return their original result; an unknown delivery closes further changes in that run.
+
+This uses existing child and inbox authorization. It does not provide keyed durable delivery receipts, control children from another parent run, migrate writer starts or normalize external source evidence. Generic routing and live/unit folds remain pending. Step 1 remains in progress.
+
 ## Step 2: save input and recover shared work
 
 **Current source:** [state worker](../../deploy/cloudflare-memory/worker.ts), [run-ledger contract](../../src/core/runLedger/types.ts), and [write-through client](../../src/core/runLedger/writeThrough.ts).

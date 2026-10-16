@@ -13,6 +13,7 @@ import { RunRegistry } from "../runRegistry.js";
 import { createRunsService, type RunsService } from "../runsService.js";
 import type { ChannelIO, IncomingMessage, OpenedThread } from "../types.js";
 import type { CoreDeps, DispatchOptions, DispatchOutcome } from "../dispatcher.js";
+import { steerRun } from "./admission.js";
 import {
   childRequestText,
   childThreadLead,
@@ -993,6 +994,43 @@ describe("tiers at spawn — the parent's model and effort in the child's reques
 });
 
 describe("child launch after asynchronous waits", () => {
+  it("keeps an internal decision message ID and parent provenance in durable steering input", async () => {
+    const sent: unknown[] = [];
+    const result = await steerRun(
+      {
+        config: configStore(),
+        clock: () => 123,
+        admission: { get: () => undefined },
+        runLedger: {
+          pushInbox: async (runId, message) => {
+            sent.push({ runId, message });
+            return 1;
+          },
+        },
+      },
+      {
+        userId: "slack:UALICE",
+        channelId: "slack:CX",
+        threadKey: "slack:CX:parent",
+        from: { runId: "parent" },
+        messageId: 'run:["parent","steer-one"]',
+      },
+      { runId: "child", agent: "research", threadKey: "slack:CX:child", parentRunId: "parent" },
+      "Focus on retries.",
+    );
+    expect(result).toEqual({ kind: "steered", where: "elsewhere", at: 123, ledgerSeq: 1 });
+    expect(sent).toMatchObject([
+      {
+        runId: "child",
+        message: {
+          messageId: 'run:["parent","steer-one"]',
+          userId: "slack:UALICE",
+          fromRunId: "parent",
+          text: "Focus on retries.",
+        },
+      },
+    ]);
+  });
   it("passes the action binder's PR target without replacing it with child prompt citations", async () => {
     const ch = channel();
     const { dispatch, calls } = fakeDispatch(registers("run-child"));

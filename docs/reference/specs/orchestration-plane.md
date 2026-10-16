@@ -226,12 +226,26 @@ A fresh public or machine orchestrator with operator mode `on` can use the exist
 
 Before a child thread opens, the parent saves the selection and its frozen context in the same bounded decision history as commands and private work. The original requester source must remain current through binding, context capture and thread creation. Time spent in those steps reduces the original launch budget. A repeated tool call returns its original in-process result; changed arguments under the same call ID are held. Recovered, delegated and merged-source conversations receive no delegation tools. Recovery does not replay a saved selection as a new launch.
 
-Write starts and internal steers keep their existing paths. Generic messages, live folds and unit folds still need front-door migration. This cut does not enable a GitHub event producer.
+Write starts keep their existing paths. The child-steer extension below uses the shared requester decision boundary. Generic messages, live folds and unit folds still need front-door migration. This cut does not enable a GitHub event producer.
 
 | Criterion | Proof |
 | --- | --- |
 | Fresh orchestrator conversations record the original requester and source before child thread creation across Slack, CLI, HTTP and MCP; no second routing model runs | `[unit]` `src/core/dispatcher.test.ts::dispatch::records requester delegation before opening a child thread on %s` |
 | The existing typed binder preserves a current requester-authored PR target and refuses missing, foreign or relabeled identifiers; a child's narrower budget stays separate from parent directives | `[unit]` `src/core/dispatch/conversationRead.test.ts::conversation read binding::*` |
-| Recovery, delegation and merged input withhold read delegation; saved decisions precede child launch; failed storage or changed sources hold; one call ID cannot create another child or select different work | `[unit]` `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::offers read delegation only to a fresh root with one requester source`, `::delegation keeps its saved source through the spawn path: %s` |
+| Recovery, delegation and merged input withhold read delegation; saved decisions precede child launch; failed storage or changed sources hold; one call ID cannot create another child or select different work | `[unit]` `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::offers child controls only to a fresh root with one requester source`, `::delegation keeps its saved source through the spawn path: %s` |
 | A source revoked during context or thread creation cannot dispatch a child; a new current call can still launch | `[unit]` `src/core/dispatch/spawn.test.ts::child launch after asynchronous waits::holds a revoked requester source after the %s wait` |
 | The requester tool reuses spawn validation, requires a source quote and forwards the original tool-call identity; saved spawn decisions survive the existing journal round trip | `[unit]` `src/tools/runs.test.ts::requester delegation tool::*`; `src/core/dispatch/orchestratorDecisions.test.ts::orchestrator decision records::uses one history and identity space for commands and worker decisions` |
+
+
+## Recorded child steers
+
+A fresh public or machine orchestrator can use `send_to_run` only for its own live children. It selects the delivered requester source before the existing target lookup. The current source, original parent and remaining budget are checked again before context capture, decision storage and delivery. The existing child ownership, requester permission and durable inbox checks remain in force.
+
+The existing bounded history saves the selected target and input/context hashes before a message is sent. An internal message ID links the input to that exact decision; the parent identity stays the actual sending run. An identical live call returns its original result. Changed input under the same call ID is held. An unconfirmed delivery closes further changes in that run. Recovery does not replay a saved selection. This does not add durable delivery receipts or migrate external source evidence.
+
+| Criterion | Proof |
+| --- | --- |
+| Source selection precedes target lookup and reuses the existing child gate | `[unit]` `src/tools/runs.test.ts::requester child steer tool::*` |
+| Canonical context avoids an earlier unneeded conversation read before source selection | `[unit]` `src/tools/runs.test.ts::requester delegation tool::uses canonical context without reading a second conversation before source selection` |
+| Child controls stay absent for recovery, delegated or merged sources; saved decisions precede delivery; storage/source failures hold; unknown delivery prevents another send | `[unit]` `src/core/dispatch/runLoop.test.ts::runLoop — the model turn and everything that rides on it::offers child controls only to a fresh root with one requester source`; `::records child steers before the existing delivery path: %s` |
+| The decision message ID and actual parent/requester survive the existing durable steer construction, and the new decision kind survives history replay | `[unit]` `src/core/dispatch/spawn.test.ts::child launch after asynchronous waits::keeps an internal decision message ID and parent provenance in durable steering input`; `src/core/dispatch/orchestratorDecisions.test.ts::orchestrator decision records::uses one history and identity space for commands and worker decisions` |

@@ -9,6 +9,7 @@ import { analyzeRunFriction } from "../core/runFriction.js";
 import type { RunEvent } from "../core/runEvents.js";
 import type { RunRecord } from "../core/runRecord.js";
 import type { ChatMessage } from "../core/chatMessage.js";
+import { parentContextOf } from "../core/dispatch/handoff.js";
 import type { SpawnCapability } from "../core/dispatch/spawn.js";
 import { steerRun, type DispatchFollowUp } from "../core/dispatch/admission.js";
 import { AWAIT_POLL_MS, waitCapabilityFor, type WaitCapability } from "../core/dispatch/awaitChildren.js";
@@ -26,6 +27,7 @@ import {
   sendToRunTool,
   spawnRunTool,
   requesterSpawnTool,
+  requesterSteerTool,
   type SteerCapability,
 } from "./runs.js";
 
@@ -43,6 +45,28 @@ const NOW = 100_000;
 const executor = {} as Executor;
 
 describe("requester delegation tool", () => {
+  it("uses canonical context without reading a second conversation before source selection", async () => {
+    const context = parentContextOf([]);
+    const captured: unknown[] = [];
+    const tool = requesterSpawnTool(async (_quote, _request, at) => {
+      captured.push(await at.context?.());
+      return { kind: "spawned", runId: "child", threadKey: "mcp:default:child" };
+    });
+    const result = await tool.run(
+      { preset: "research", prompt: "Inspect storage", sourceMessage: "research storage" },
+      {
+        executor,
+        callId: "one",
+        remainingMs: () => 600_000,
+        conversation: async () => {
+          throw new Error("unneeded asynchronous conversation read");
+        },
+        sourceContext: async () => context,
+      },
+    );
+    expect(result).toContain("spawned a research run: child");
+    expect(captured).toEqual([context]);
+  });
   it("keeps the existing spawn validation and binds a quote and tool call to the request", async () => {
     const seen: unknown[] = [];
     const tool = requesterSpawnTool(async (quote, request, at, callId) => {
@@ -69,6 +93,50 @@ describe("requester delegation tool", () => {
       ),
     ).toContain("budget");
     expect(seen).toHaveLength(1);
+  });
+});
+
+describe("requester child steer tool", () => {
+  it("selects the requester before the target lookup and preserves the existing child gate", async () => {
+    const w = world();
+    const child = w.registry.create("child", {
+      channelId: "slack:CX",
+      threadKey: "slack:CX:child",
+      userId: "slack:UADMIN",
+      agent: "research",
+      parentRunId: "parent",
+    });
+    const steps: unknown[] = [];
+    const getRun = w.service.getRun.bind(w.service);
+    vi.spyOn(w.service, "getRun").mockImplementation(async (...args) => {
+      steps.push("lookup");
+      return getRun(...args);
+    });
+    const tool = requesterSteerTool(async (quote, input, callId, remainingMs, execute) => {
+      steps.push({ quote, input, callId, remainingMs });
+      return execute({
+        steer: async (target, text) => {
+          steps.push({ runId: target.runId, text });
+          return { kind: "steered", where: "here", at: 1 };
+        },
+      });
+    });
+    const ctx = ctxFor(w, admin, { runId: "parent", callId: "steer-one", remainingMs: () => 600_000 });
+    expect(
+      await tool.run({ id: child.id, text: "Focus on retries.", sourceMessage: "focus on retries" }, ctx),
+    ).toContain("steered: folded into the research run");
+    expect(steps).toEqual([
+      {
+        quote: "focus on retries",
+        input: { id: child.id, text: "Focus on retries." },
+        callId: "steer-one",
+        remainingMs: 600_000,
+      },
+      "lookup",
+      { runId: child.id, text: "Focus on retries." },
+    ]);
+    expect(await tool.run({ id: child.id, text: "q" }, ctx)).toContain("sourceMessage");
+    expect(steps).toHaveLength(3);
   });
 });
 

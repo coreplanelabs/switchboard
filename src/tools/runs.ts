@@ -62,7 +62,7 @@ export interface RunsReadCapability {
  *  this run and its requester fixed as the sender — built by the dispatcher
  *  beside the reads; absent → the tool says so. */
 export interface SteerCapability {
-  steer(target: SteerTarget, text: string): Promise<SteerOutcome>;
+  steer(target: SteerTarget, text: string, messageId?: string): Promise<SteerOutcome>;
 }
 
 const UNAVAILABLE = "run tools are not available in this context.";
@@ -338,6 +338,7 @@ export function requesterSpawnTool(spawn: RequesterSpawn): RunnableTool {
       if (!callId) return "error: The delegation call could not be identified.";
       return spawnRunTool.run(input, {
         ...ctx,
+        ...(ctx.sourceContext ? { conversation: undefined } : {}),
         spawn: {
           ...(ctx.spawn ?? nullSpawnCapability),
           spawn: (request, at) => spawn(quote, request, at, callId, input.prTarget),
@@ -410,6 +411,41 @@ export const sendToRunTool: RunnableTool = {
     }
   },
 };
+
+export type RequesterSteer = (
+  quote: string,
+  input: { id: string; text: string },
+  callId: string,
+  remainingMs: number,
+  execute: (steer: SteerCapability) => ReturnType<RunnableTool["run"]>,
+) => ReturnType<RunnableTool["run"]>;
+
+/** Select the source before the existing tool reads and authorizes its target. */
+export function requesterSteerTool(steer: RequesterSteer): RunnableTool {
+  return {
+    ...sendToRunTool,
+    description:
+      "Send a change to one of this run's live children. Copy an exact quote from the latest requester turn into sourceMessage. The orchestrator saves its decision before the existing child and inbox gates deliver the message.",
+    inputSchema: {
+      ...sendToRunTool.inputSchema,
+      properties: Object.assign({}, sendToRunTool.inputSchema.properties, {
+        sourceMessage: { type: "string", description: "Exact quote from the latest requester turn" },
+      }),
+      required: ["id", "text", "sourceMessage"],
+      additionalProperties: false,
+    },
+    async run(input, ctx) {
+      const quote = input.sourceMessage;
+      if (typeof quote !== "string" || !quote.trim())
+        return "error: sourceMessage must quote the latest requester turn.";
+      if (!ctx.callId) return "error: The child-steer call could not be identified.";
+      const named = { id: String(input.id ?? ""), text: String(input.text ?? "").trim() };
+      return steer(quote, named, ctx.callId, ctx.remainingMs?.() ?? Infinity, (capability) =>
+        sendToRunTool.run(named, { ...ctx, steer: capability }),
+      );
+    },
+  };
+}
 
 /** The most runs one `await_runs` waits on: every child is polled per tick,
  *  including independent Ship units, so a list past this is a mistake. */
