@@ -8,12 +8,30 @@ import {
   verifyWebhookSignature,
   type CheckRunIntakeDeps,
   createMergeWaitRegistry,
+  verifyGithubQuestionAnswer,
+  findGithubCommentReplay,
+  type GithubQuestionAnswerInput,
 } from "./checksIntake.js";
 import { checksSettledEventType, unitNudgeEventType, type WorkflowSender } from "./contract.js";
 import { InMemoryCoordinatorInstanceStore } from "./instanceStore.js";
 import { InMemoryRunLedger } from "../runLedger/inMemory.js";
 import { findRunnerPullOwner, runnerPullOwnerOf } from "../runnerOwnership.js";
 import { isCoordinatorUnit, type CoordinatorUnit } from "./contract.js";
+import type { Actor } from "../authz/types.js";
+
+const requester: Actor = {
+  kind: "user",
+  id: "slack:UALICE",
+  memberOfOrganizations: new Set(["fixture"]),
+  grants: { actions: new Set(["steer:write"]), channels: new Set(), repos: new Set(["octo/repo"]) },
+};
+const verifyQuestion = async (input: GithubQuestionAnswerInput) =>
+  verifyGithubQuestionAnswer(input, {
+    organization: "fixture",
+    installationId: 17,
+    binding: { id: 42, login: "alice" },
+    requester: { status: "resolved", actor: requester },
+  });
 
 const SECRET = "hush";
 const HEAD = "a".repeat(40);
@@ -157,6 +175,7 @@ describe("the pull-request comment intake — a person's answer wakes the owning
         user: { login: "alice", id: 42, type },
       },
       repository: { full_name: "octo/repo" },
+      installation: { id: 17 },
     });
 
   async function liveInstances(recoveryRequested = false) {
@@ -181,7 +200,21 @@ describe("the pull-request comment intake — a person's answer wakes the owning
       dependsOn: [],
       rounds: [],
       pr: { number: 7, url: "https://github.com/octo/repo/pull/7" },
-      idle: { why: "held", at: 1, renewalsLeft: 0, spendUsd: 1, wakes: 0 },
+      idle: {
+        why: "held",
+        at: 1,
+        renewalsLeft: 0,
+        spendUsd: 1,
+        wakes: 0,
+        humanGate: {
+          pr: { number: 7, url: "https://github.com/octo/repo/pull/7" },
+          round: 1,
+          verdict: "request_changes",
+          askedAt: 1,
+          assignedTo: "slack:UALICE",
+          findings: [{ id: "F1", severity: "minor", file: "app.ts", title: "Choose behavior", humanGated: true }],
+        },
+      },
     };
     if (recoveryRequested) {
       delete row.idle;
@@ -228,6 +261,7 @@ describe("the pull-request comment intake — a person's answer wakes the owning
       ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
       instances,
       commenterAuthorized: async () => true,
+      verifyQuestionAnswer: verifyQuestion,
       workflow: w.sender,
       now: () => 1,
     });
@@ -248,6 +282,7 @@ describe("the pull-request comment intake — a person's answer wakes the owning
       ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
       instances,
       commenterAuthorized: async () => true,
+      verifyQuestionAnswer: verifyQuestion,
       workflow: w.sender,
       now: () => 1,
     });
@@ -264,6 +299,7 @@ describe("the pull-request comment intake — a person's answer wakes the owning
       ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
       instances,
       commenterAuthorized: async () => true,
+      verifyQuestionAnswer: verifyQuestion,
       workflow: {
         get: async () => {
           throw new Error("native Workflow unavailable");
@@ -285,6 +321,7 @@ describe("the pull-request comment intake — a person's answer wakes the owning
       ownerOf: async () => ({ ok: false, reason: "incomplete" }),
       instances,
       commenterAuthorized: async () => true,
+      verifyQuestionAnswer: verifyQuestion,
       workflow: w.sender,
       now: () => 1,
     });
@@ -316,6 +353,7 @@ describe("the pull-request comment intake — a person's answer wakes the owning
       ownerOf: async () => runnerPullOwnerOf({ ok: true, owners }),
       instances,
       commenterAuthorized: async () => true,
+      verifyQuestionAnswer: verifyQuestion,
       workflow: w.sender,
       now: () => 1,
     });
@@ -326,6 +364,8 @@ describe("the pull-request comment intake — a person's answer wakes the owning
 
   it("atomically refuses an ordinary comment when the unit ends after its owner read", async () => {
     const { instances, owner } = await liveInstances();
+    const [before] = await instances.listUnits(owner.instanceId);
+    await instances.putUnits([{ ...before!, idle: { ...before!.idle!, humanGate: undefined } }]);
     const w = workflow();
     const raw = commentBody();
     const result = await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
@@ -334,6 +374,7 @@ describe("the pull-request comment intake — a person's answer wakes the owning
       instances: {
         get: instances.get.bind(instances),
         listUnits: instances.listUnits.bind(instances),
+        listEvents: instances.listEvents.bind(instances),
         appendEvent: async (...args) => {
           const [row] = await instances.listUnits(owner.instanceId);
           await instances.putUnits([
@@ -352,6 +393,7 @@ describe("the pull-request comment intake — a person's answer wakes the owning
         },
       },
       commenterAuthorized: async () => true,
+      verifyQuestionAnswer: verifyQuestion,
       workflow: w.sender,
       now: () => 1,
     });
@@ -370,6 +412,7 @@ describe("the pull-request comment intake — a person's answer wakes the owning
       ownerOf: (repo: string, pr: number) => findRunnerPullOwner(instances, repo, pr),
       instances,
       commenterAuthorized: async () => true,
+      verifyQuestionAnswer: verifyQuestion,
       workflow: w.sender,
       now: () => 1,
     };
@@ -424,6 +467,7 @@ describe("the pull-request comment intake — a person's answer wakes the owning
       instances,
       commenterAuthorized: async (requester, author) =>
         requester === "slack:UALICE" && author.login === "alice" && author.id === 42,
+      verifyQuestionAnswer: verifyQuestion,
       workflow: w.sender,
       now: () => 1,
     });
@@ -431,7 +475,9 @@ describe("the pull-request comment intake — a person's answer wakes the owning
     expect(await instances.listEvents(owner)).toEqual([
       expect.objectContaining({
         id: "github:issue-comment:99",
-        sender: "github:42",
+        sender: "slack:UALICE",
+        authenticatedAs: "github:42",
+        postedBy: "github:installation:17",
         senderName: "alice",
         text: "The independent reader supplied the receipt.",
         mode: "wake",
@@ -449,11 +495,337 @@ describe("the pull-request comment intake — a person's answer wakes the owning
       ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
       instances,
       commenterAuthorized: async () => false,
+      verifyQuestionAnswer: async () => ({ status: "fenced" }),
       workflow: w.sender,
       now: () => 1,
     });
     expect(result).toEqual({ status: 200, body: { ok: true, ignored: "sender" } });
     expect(await instances.listEvents(owner)).toEqual([]);
+    expect(w.sent).toEqual([]);
+  });
+
+  it("replays the original saved question answer after its question resolves and the PR owner ends", async () => {
+    const { instances, owner } = await liveInstances();
+    const w = workflow();
+    const raw = commentBody();
+    const deps = {
+      secret: SECRET,
+      ownerOf: (repo: string, pr: number) => findRunnerPullOwner(instances, repo, pr),
+      instances,
+      replayOwnerOf: (repo: string, pr: number, id: string) => findGithubCommentReplay(instances, repo, pr, id),
+      commenterAuthorized: async () => true,
+      verifyQuestionAnswer: verifyQuestion,
+      workflow: w.sender,
+      now: () => 1,
+    };
+    const headers = { event: "issue_comment", signature: await sign(SECRET, raw) };
+    expect((await handleIssueCommentIntake(headers, raw, deps)).body).toEqual({
+      ok: true,
+      appended: true,
+      seq: 1,
+      nudge: "sent",
+    });
+    await instances.markConsumed(owner, [1], "original-child");
+    const [row] = await instances.listUnits(owner.instanceId);
+    await instances.putUnits([
+      {
+        ...row!,
+        idle: undefined,
+        ending: {
+          kind: "merged",
+          report: "Merged",
+          at: 3,
+          outcome: {
+            schemaVersion: 1,
+            kind: "merged",
+            reviewRounds: 1,
+            terminalPr: { state: "merged", number: 7, url: "https://github.com/octo/repo/pull/7", mergeSha: HEAD },
+          },
+        },
+      },
+    ]);
+    await instances.markStopped(owner.instanceId, 3);
+    expect(await findRunnerPullOwner(instances, "octo/repo", 7)).toEqual({ ok: true });
+    const replayDeps = {
+      ...deps,
+      instances: {
+        get: instances.get.bind(instances),
+        listUnits: instances.listUnits.bind(instances),
+        appendEvent: instances.appendEvent.bind(instances),
+        listEvents: async (...args: Parameters<typeof instances.listEvents>) =>
+          (await instances.listEvents(...args)).map(
+            (event) => Object.fromEntries(Object.entries(event).reverse()) as typeof event,
+          ),
+      },
+    };
+    expect((await handleIssueCommentIntake(headers, raw, replayDeps)).body).toEqual({
+      ok: true,
+      duplicate: true,
+      seq: 1,
+    });
+    expect(await instances.listEvents(owner)).toEqual([
+      expect.objectContaining({ sender: "slack:UALICE", authenticatedAs: "github:42", consumedBy: "original-child" }),
+    ]);
+    expect(w.sent).toHaveLength(1);
+    const changed = JSON.stringify({
+      ...JSON.parse(raw),
+      comment: { ...JSON.parse(raw).comment, body: "Changed answer" },
+    });
+    expect(
+      await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, changed) }, changed, deps),
+    ).toEqual({ status: 409, body: { error: "comment_conflict" } });
+  });
+
+  it("rejects a comment written before the current question and a requester assigned someone else's question", async () => {
+    const { instances, owner } = await liveInstances();
+    const w = workflow();
+    const raw = commentBody();
+    const [row] = await instances.listUnits(owner.instanceId);
+    const deps = {
+      secret: SECRET,
+      ownerOf: (repo: string, pr: number) => findRunnerPullOwner(instances, repo, pr),
+      instances,
+      commenterAuthorized: async () => true,
+      verifyQuestionAnswer: verifyQuestion,
+      workflow: w.sender,
+      now: () => 1,
+    };
+    await instances.putUnits([
+      {
+        ...row!,
+        idle: {
+          ...row!.idle!,
+          humanGate: { ...row!.idle!.humanGate!, askedAt: Date.parse(JSON.parse(raw).comment.created_at) + 1 },
+        },
+      },
+    ]);
+    const headers = { event: "issue_comment", signature: await sign(SECRET, raw) };
+    expect(await handleIssueCommentIntake(headers, raw, deps)).toEqual({
+      status: 200,
+      body: { ok: true, ignored: "stale_question" },
+    });
+    await instances.putUnits([
+      { ...row!, idle: { ...row!.idle!, humanGate: { ...row!.idle!.humanGate!, askedAt: undefined } } },
+    ]);
+    expect(await handleIssueCommentIntake(headers, raw, deps)).toEqual({
+      status: 503,
+      body: { error: "question_unavailable" },
+    });
+    await instances.putUnits([
+      { ...row!, idle: { ...row!.idle!, humanGate: { ...row!.idle!.humanGate!, assignedTo: "slack:UBOB" } } },
+    ]);
+    expect(await handleIssueCommentIntake(headers, raw, deps)).toEqual({
+      status: 200,
+      body: { ok: true, ignored: "sender" },
+    });
+    expect(await instances.listEvents(owner)).toEqual([]);
+    expect(w.sent).toEqual([]);
+  });
+
+  it("holds unavailable native proof and refuses current organization, steer, repository and exact source loss", async () => {
+    const { instances, owner } = await liveInstances();
+    const w = workflow();
+    const raw = commentBody();
+    for (const actor of [
+      { ...requester, memberOfOrganizations: new Set<string>() },
+      { ...requester, grants: { ...requester.grants, actions: new Set<string>() } },
+      { ...requester, grants: { ...requester.grants, repos: new Set(["other/repo"]) } },
+      { ...requester, id: "slack:UBOB" },
+    ]) {
+      expect(
+        await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
+          secret: SECRET,
+          ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
+          instances,
+          commenterAuthorized: async () => true,
+          verifyQuestionAnswer: async (input) =>
+            verifyGithubQuestionAnswer(input, {
+              organization: "fixture",
+              installationId: 17,
+              binding: { id: 42, login: "alice" },
+              requester: { status: "resolved", actor },
+            }),
+          workflow: w.sender,
+          now: () => 1,
+        }),
+      ).toEqual({ status: 200, body: { ok: true, ignored: "sender" } });
+    }
+    expect(
+      await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
+        secret: SECRET,
+        ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
+        instances,
+        commenterAuthorized: async () => true,
+        verifyQuestionAnswer: async () => ({ status: "unavailable" }),
+        workflow: w.sender,
+        now: () => 1,
+      }),
+    ).toEqual({ status: 503, body: { error: "source_unavailable" } });
+    expect(await instances.listEvents(owner)).toEqual([]);
+    expect(w.sent).toEqual([]);
+  });
+
+  it("holds a replay when retained inventory is incomplete instead of selecting a new owner", async () => {
+    const { instances, owner } = await liveInstances();
+    const raw = commentBody();
+    expect(
+      await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
+        secret: SECRET,
+        ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
+        instances,
+        replayOwnerOf: async () =>
+          findGithubCommentReplay(
+            { listUnits: instances.listUnits.bind(instances), listEvents: instances.listEvents.bind(instances) },
+            "octo/repo",
+            7,
+            "github:issue-comment:99",
+          ),
+        commenterAuthorized: async () => true,
+        verifyQuestionAnswer: verifyQuestion,
+        workflow: workflow().sender,
+        now: () => 1,
+      }),
+    ).toEqual({ status: 503, body: { error: "ownership_unavailable" } });
+    expect(await instances.listEvents(owner)).toEqual([]);
+  });
+
+  it("an answer racing a changed question cannot append to its original unit", async () => {
+    const { instances, owner } = await liveInstances();
+    const raw = commentBody();
+    const w = workflow();
+    const result = await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
+      secret: SECRET,
+      ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
+      instances: {
+        get: instances.get.bind(instances),
+        listUnits: instances.listUnits.bind(instances),
+        listEvents: instances.listEvents.bind(instances),
+        appendEvent: async (...args) => {
+          const [row] = await instances.listUnits(owner.instanceId);
+          await instances.putUnits([
+            { ...row!, idle: { ...row!.idle!, humanGate: { ...row!.idle!.humanGate!, round: 2 } } },
+          ]);
+          return instances.appendEvent(...args);
+        },
+      },
+      commenterAuthorized: async () => true,
+      verifyQuestionAnswer: verifyQuestion,
+      workflow: w.sender,
+      now: () => 1,
+    });
+    expect(result).toEqual({ status: 200, body: { ok: true, ignored: "stale_question" } });
+    expect(await instances.listEvents(owner)).toEqual([]);
+    expect(w.sent).toEqual([]);
+  });
+
+  it("uses both current policies for a verified delegated owner and refuses the actual source's revoked ceiling", async () => {
+    const { instances, owner } = await liveInstances();
+    const raw = commentBody();
+    const w = workflow();
+    const person: Actor = {
+      ...requester,
+      grants: {
+        ...requester.grants,
+        actions: new Set(["organization:send", "steer:write"]),
+        organizations: new Set(["fixture"]),
+      },
+    };
+    const source: Actor = {
+      kind: "service",
+      id: "http:verified-service",
+      self: ["http:verified-service"],
+      onBehalfOf: person,
+      grants: {
+        actions: new Set(["organization:send", "steer:write"]),
+        organizations: new Set(["fixture"]),
+        repos: new Set(["octo/repo"]),
+        channels: new Set(),
+      },
+    };
+    const deps = {
+      secret: SECRET,
+      ownerOf: (repo: string, pr: number) => findRunnerPullOwner(instances, repo, pr),
+      instances,
+      commenterAuthorized: async () => true,
+      workflow: w.sender,
+      now: () => 3,
+      verifyQuestionAnswer: async (input: GithubQuestionAnswerInput) =>
+        verifyGithubQuestionAnswer(input, {
+          organization: "fixture",
+          installationId: 17,
+          binding: { id: 42, login: "alice" },
+          requester: { status: "resolved", actor: source },
+        }),
+    };
+    const headers = { event: "issue_comment", signature: await sign(SECRET, raw) };
+    expect((await handleIssueCommentIntake(headers, raw, deps)).body).toEqual({
+      ok: true,
+      appended: true,
+      seq: 1,
+      nudge: "sent",
+    });
+    const revokedSource: Actor = { ...source, grants: { ...source.grants, repos: new Set(["other/repo"]) } };
+    expect(
+      await handleIssueCommentIntake(headers, raw, {
+        ...deps,
+        verifyQuestionAnswer: async (input) =>
+          verifyGithubQuestionAnswer(input, {
+            organization: "fixture",
+            installationId: 17,
+            binding: { id: 42, login: "alice" },
+            requester: { status: "resolved", actor: revokedSource },
+          }),
+      }),
+    ).toEqual({ status: 200, body: { ok: true, ignored: "sender" } });
+    expect(source.id).toBe("http:verified-service");
+    expect(source.self).toEqual(["http:verified-service"]);
+    expect((await instances.listEvents(owner)).map((event) => [event.sender, event.authenticatedAs])).toEqual([
+      ["slack:UALICE", "github:42"],
+    ]);
+    expect(w.sent).toHaveLength(1);
+  });
+
+  it("keeps the first browser answer when GitHub answers the same captured question", async () => {
+    const { instances, owner } = await liveInstances();
+    const [row] = await instances.listUnits(owner.instanceId);
+    const question = row!.idle!.humanGate!;
+    expect(
+      await instances.appendEvent(
+        owner,
+        {
+          id: "browser:original-answer",
+          sender: "slack:UALICE",
+          authenticatedAs: "access:owner",
+          text: "Use the original choice",
+          mode: "wake",
+          at: 2,
+        },
+        true,
+        undefined,
+        undefined,
+        { expectedQuestion: question },
+      ),
+    ).toEqual({ ok: true, seq: 1 });
+    const raw = commentBody();
+    const w = workflow();
+    expect(
+      await handleIssueCommentIntake({ event: "issue_comment", signature: await sign(SECRET, raw) }, raw, {
+        secret: SECRET,
+        ownerOf: (repo, pr) => findRunnerPullOwner(instances, repo, pr),
+        instances,
+        commenterAuthorized: async () => true,
+        verifyQuestionAnswer: verifyQuestion,
+        workflow: w.sender,
+        now: () => 3,
+      }),
+    ).toEqual({ status: 200, body: { ok: true, ignored: "stale_question" } });
+    expect(await instances.listEvents(owner)).toEqual([
+      expect.objectContaining({
+        id: "browser:original-answer",
+        authenticatedAs: "access:owner",
+        text: "Use the original choice",
+      }),
+    ]);
     expect(w.sent).toEqual([]);
   });
 
