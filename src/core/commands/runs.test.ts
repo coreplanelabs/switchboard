@@ -295,11 +295,35 @@ describe("provider diagnostics in machine history", () => {
             validation: "unknown action",
             validationCode: "proposal_unknown_action",
             requestId: "req_timing",
+            calls: [
+              {
+                tool: "bind_preset",
+                input: '{"preset":"review"}',
+                result: "invalid settings",
+                outcome: "rejected" as const,
+              },
+            ],
           },
         ],
       },
     };
-    await store.put(record("diag", NOW, { operator, events: [{ type: "operator", ...operator, seq: 1 }] }));
+    await store.put(
+      record("diag", NOW, {
+        operator,
+        events: [
+          { type: "operator", ...operator, seq: 1 },
+          {
+            type: "tool_call",
+            tool: "read",
+            summary: "read source",
+            input: '{"path":"src/file.ts"}',
+            callId: "c1",
+            seq: 2,
+          },
+          { type: "tool_input", callId: "c1", input: '{"path":"src/complete.ts"}', seq: 3 },
+        ],
+      }),
+    );
     const output = value<{ operator: typeof operator; events: RunEvent[] }>(
       await registry.invoke("runs.get", { args: ["diag"], options: { include: "messages" } }, cli, deps),
     );
@@ -314,9 +338,27 @@ describe("provider diagnostics in machine history", () => {
         question: expect.stringContaining(UNTRUSTED_OPEN),
         proposal: expect.stringContaining(UNTRUSTED_OPEN),
         validation: expect.stringContaining(UNTRUSTED_OPEN),
+        calls: [
+          {
+            tool: "bind_preset",
+            input: expect.stringContaining(UNTRUSTED_OPEN),
+            result: expect.stringContaining(UNTRUSTED_OPEN),
+            outcome: "rejected",
+          },
+        ],
       });
     }
     expect((await store.get("diag"))?.operator).toEqual(operator);
+    expect(output.events[1]).toMatchObject({
+      type: "tool_call",
+      callId: "c1",
+      input: expect.stringContaining(UNTRUSTED_OPEN),
+    });
+    expect(output.events[2]).toMatchObject({
+      type: "tool_input",
+      callId: "c1",
+      input: expect.stringContaining(UNTRUSTED_OPEN),
+    });
   });
   it.each([undefined, "messages", "audience"] as const)(
     "fences operator projections on runs.get with include %s",

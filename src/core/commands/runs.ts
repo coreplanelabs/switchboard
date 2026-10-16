@@ -180,6 +180,15 @@ function wrapOperator<
               ...(step.question === undefined ? {} : { question: wrapUntrusted(step.question) }),
               ...(step.proposal === undefined ? {} : { proposal: wrapUntrusted(step.proposal) }),
               ...(step.validation === undefined ? {} : { validation: wrapUntrusted(step.validation) }),
+              ...(step.calls === undefined
+                ? {}
+                : {
+                    calls: step.calls.map((call) => ({
+                      ...call,
+                      input: wrapUntrusted(call.input),
+                      ...(call.result === undefined ? {} : { result: wrapUntrusted(call.result) }),
+                    })),
+                  }),
             })),
           },
         }
@@ -226,7 +235,13 @@ export function wrapEvent(e: RunEvent): RunEvent {
     case "answer":
       return { ...e, text: wrapUntrusted(e.text) };
     case "tool_call":
-      return { ...e, summary: wrapUntrusted(e.summary) };
+      return {
+        ...e,
+        summary: wrapUntrusted(e.summary),
+        ...(e.input === undefined ? {} : { input: wrapUntrusted(e.input) }),
+      };
+    case "tool_input":
+      return { ...e, input: wrapUntrusted(e.input) };
     case "tool_result":
       return {
         ...e,

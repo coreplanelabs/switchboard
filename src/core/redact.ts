@@ -47,6 +47,14 @@ const REDACT: Array<{ re: RegExp; replace: string }> = [
 const SECRET_COMPONENT =
   /^(secret|token|password|passwd|pwd|credential|credentials|key|apikey|auth|session|sessionid|cookie)$/i;
 
+/** Structured tool evidence must hide opaque credentials by field name too. */
+export function isSecretField(name: string): boolean {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .split(/[_-]/)
+    .some((part) => SECRET_COMPONENT.test(part) || /^authorization$/i.test(part));
+}
+
 // An identifier component that marks the whole identifier as an ERROR CODE, not
 // a secret name: `github-token-mint-failed: HTTP 422 …` names a failure about a
 // token, and the word after the colon is diagnosis, never a credential. Without

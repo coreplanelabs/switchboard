@@ -448,6 +448,7 @@ export function analyzeRunFriction(events: readonly RunEvent[], opts: FrictionOp
       return;
     }
     if (
+      ev.type === "tool_input" ||
       ev.type === "skill_use" ||
       ev.type === "artifact" ||
       ev.type === "review_artifact" ||

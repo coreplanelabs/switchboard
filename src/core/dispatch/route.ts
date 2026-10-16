@@ -535,10 +535,11 @@ export function providerStructuredModel(
       requestId: result.requestId,
       ...(opts.price ? opts.price(result.usage) : {}),
     });
-    if (result.stopReason === "max_tokens") throw new OutputCapError(call.maxTokens);
     const calls = result.content.filter(
       (p): p is { type: "tool_use"; id: string; name: string; input: unknown } => p.type === "tool_use",
     );
+    if (calls.length) observe({ toolCalls: calls.map((c) => ({ id: c.id, tool: c.name, input: c.input })) });
+    if (result.stopReason === "max_tokens") throw new OutputCapError(call.maxTokens);
     // Parallel calls are switched off on the wire (piStreamOptions' payload
     // hook); a provider that sends two anyway did not answer the question. The
     // throw is typed and carries the calls (issue 2099): the operator's open

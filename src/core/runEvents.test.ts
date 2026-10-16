@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { analyzeRunFriction } from "./runFriction.js";
 import { isRunRecord } from "./runRecord.js";
+import { privateMainEvent } from "./privateMainEvent.js";
 import {
   TOOL_OUTPUT_CAP,
   type RunEvent,
@@ -8,6 +9,7 @@ import {
   toolTextFailed,
   prepareToolOutput,
   prepareToolResult,
+  prepareToolInput,
   redactAndCap,
   redactSecrets,
   serializedOnce,
@@ -16,6 +18,57 @@ import {
 } from "./runEvents.js";
 
 // Feature: docs/reference/specs/run-visibility.md — the run-event stream and its redaction.
+
+describe("tool input evidence", () => {
+  it("keeps later private arguments out of the shared diagnostic stream", () => {
+    const event = privateMainEvent({
+      type: "tool_input",
+      callId: "private-call",
+      input: '{"content":"private source bytes"}',
+    });
+    expect(event).toMatchObject({ type: "run_note", kind: "follow_up", summary: "Private conversation activity" });
+    expect(JSON.stringify(event)).not.toContain("private source bytes");
+  });
+  it("redacts original assignment strings before JSON encoding and keeps quoted arguments readable", () => {
+    expect(
+      prepareToolInput({
+        command: 'export API_TOKEN="opaque secret value"\necho done',
+        content: "PORT=3000\nPASSWORD=fixture-sensitive-value\nEND=yes",
+        receipt: "Authorization: Bearer «redacted»",
+      }),
+    ).toBe(
+      '{"command":"export API_TOKEN=\\"«redacted»\\"\\necho done","content":"PORT=3000\\nPASSWORD=«redacted»\\nEND=yes","receipt":"Authorization: Bearer «redacted»"}',
+    );
+  });
+  it("keeps credential-shaped property names redacted in valid JSON", () => {
+    expect(prepareToolInput({ ["ghp_" + "a".repeat(40)]: { password: "opaque" } })).toBe(
+      '{"«redacted-github-token»":{"password":"«redacted»"}}',
+    );
+  });
+  it("retains nested arguments while removing named credentials and control codes", () => {
+    expect(
+      prepareToolInput({
+        model: "openai/example",
+        flags: [true, 2],
+        nested: {
+          apiKey: "short",
+          password: ["opaque", "credential"],
+          Authorization: "opaque-header",
+          path: "src/\u001b[31mfile.ts",
+        },
+      }),
+    ).toBe(
+      '{"model":"openai/example","flags":[true,2],"nested":{"apiKey":"«redacted»","password":"«redacted»","Authorization":"«redacted»","path":"src/file.ts"}}',
+    );
+  });
+  it("marks capped and unserializable inputs without changing the call", () => {
+    expect(prepareToolInput({ text: "x".repeat(5000) })).toMatch(/…\[\d+ more chars\]$/);
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(prepareToolInput(circular)).toBe("[input unavailable: not JSON serializable]");
+    expect(prepareToolInput(undefined)).toBe("[input unavailable: undefined]");
+  });
+});
 
 describe("redactSecrets", () => {
   it("redacts known credential shapes", () => {

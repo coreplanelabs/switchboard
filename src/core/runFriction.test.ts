@@ -13,6 +13,15 @@ import {
 // Streams below are synthetic: one per friction category, plus edges.
 
 const T0 = 1_700_000_000_000;
+it("treats late argument evidence as a side fact without another tool execution", () => {
+  expect(
+    analyzeRunFriction([
+      { type: "tool_call", tool: "edit", callId: "c1", summary: "edit file", at: T0 },
+      { type: "tool_input", callId: "c1", input: '{"path":"src/file.ts"}', at: T0 + 5 },
+      { type: "tool_result", tool: "edit", callId: "c1", ok: true, summary: "edited", at: T0 + 100 },
+    ]),
+  ).toMatchObject({ eventCount: 2, toolCalls: 1, runMs: 100, findings: [] });
+});
 it.each([
   { mode: "on", phase: "model" },
   { mode: "shadow", phase: "model" },

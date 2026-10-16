@@ -68,3 +68,7 @@ Results pair with pending calls by `callId`, not completion order. A replayed st
 | Routing deadlines produce budget friction, with the active phase when recorded. Recorded routing model and context intervals contribute to thinking and preparation without inventing historical model time. | `[unit]` `src/core/runFriction.test.ts::attributes recorded routing phases and diagnoses a routing deadline` |
 | Concurrent routing and agent slow-model intervals count each wall-clock instant once in run-denominated totals, while preserving each individual finding; context, helper and catalogue phases are preparation. | `[unit]` `src/core/runFriction.test.ts::unions overlapping routing and agent slow-model intervals in …` |
 | System setup refusals produce an infrastructure finding; policy and request refusals do not. | `[unit]` `src/core/runFriction.test.ts::analyzeRunFriction…::reports system setup refusals as infrastructure failures while keeping policy and request refusals separate` |
+
+| Criterion | Proof |
+| --- | --- |
+| A call-linked `tool_input` update is a side fact. It adds no tool execution or friction event and does not change the original call/result interval. The event reader retains complete updates and skips malformed identity or input fields. | `[unit]` `src/core/runFriction.test.ts::treats late argument evidence as a side fact without another tool execution`; `src/core/runEventLines.test.ts::parseRunEventLines::keeps call-linked argument updates and rejects incomplete update frames` |

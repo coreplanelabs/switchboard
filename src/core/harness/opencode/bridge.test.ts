@@ -569,6 +569,198 @@ const called = (callId: string) =>
     executed: false,
   });
 
+describe("tool argument retention", () => {
+  it("retains observed malformed string arguments without treating them as a permission projection", () => {
+    const { bridge, events } = harness();
+    bridge.observe(inputStarted("c-malformed", "edit"));
+    bridge.observe(
+      ev("session.tool.called", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_a0",
+        id: "c-malformed",
+        input: "PORT=3000\nPASSWORD=fixture-sensitive-value",
+      }),
+    );
+    expect(events.find((event) => event.type === "tool_call")).toMatchObject({
+      callId: "c-malformed",
+      input: '"PORT=3000\\nPASSWORD=«redacted»"',
+    });
+  });
+  it.each([false, true])("keeps recovered input truthful after settlement, later arguments=%s", (laterArguments) => {
+    const { bridge, events } = harness();
+    bridge.observe({
+      feed: "permissions",
+      at: NOW,
+      sessionID: "ses_c",
+      reason: "reconnect",
+      data: [
+        {
+          id: "p-late",
+          sessionID: "ses_c",
+          action: "edit",
+          resources: ["src/file.ts"],
+          source: { type: "tool", messageID: "msg_a0", id: "c-late" },
+        },
+      ],
+    });
+    bridge.observe(ev("permission.replied", { sessionID: "ses_c", requestID: "p-late", reply: "once" }));
+    bridge.observe(
+      ev("session.tool.success", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_a0",
+        id: "c-late",
+        content: [{ type: "text", text: "edited" }],
+        executed: true,
+      }),
+    );
+    expect(events.find((event) => event.type === "tool_call")).toMatchObject({
+      callId: "c-late",
+      input: "[input unavailable: arguments not observed]",
+    });
+    expect(events.find((event) => event.type === "tool_result")).toMatchObject({ callId: "c-late", ok: true });
+    if (laterArguments)
+      bridge.observe(
+        ev("session.tool.called", {
+          sessionID: "ses_c",
+          assistantMessageID: "msg_a0",
+          id: "c-late",
+          input: { filePath: "src/file.ts", oldString: "before", newString: "after" },
+        }),
+      );
+    expect(events.filter((event) => event.type === "tool_input").map((event) => event.input)).toEqual(
+      laterArguments ? ['{"filePath":"src/file.ts","oldString":"before","newString":"after"}'] : [],
+    );
+    expect(bridge.toolCalls).toBe(1);
+    expect(doingWords(bridge.doingNow())).toBeUndefined();
+  });
+  it.each([
+    ["shell", { command: 'export API_TOKEN="opaque secret value"' }, '{"command":"export API_TOKEN=\\"«redacted»\\""}'],
+    [
+      "write",
+      { content: "PORT=3000\nPASSWORD=fixture-sensitive-value" },
+      '{"content":"PORT=3000\\nPASSWORD=«redacted»"}',
+    ],
+  ] as const)("redacts original string arguments on a failed %s call", (name, input, expected) => {
+    const { bridge, events } = harness();
+    bridge.observe(inputStarted("secret-call", name));
+    bridge.observe(
+      ev("session.tool.called", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_a0",
+        id: "secret-call",
+        input,
+        executed: false,
+      }),
+    );
+    bridge.observe(settled("session.tool.failed", "secret-call"));
+    expect(events.find((event) => event.type === "tool_call")).toMatchObject({
+      callId: "secret-call",
+      input: expected,
+    });
+    expect(events.find((event) => event.type === "tool_result")).toMatchObject({ callId: "secret-call", ok: false });
+  });
+
+  it.each(["called", "store"] as const)(
+    "records recovered arguments from %s without opening another tool call",
+    (arrival) => {
+      const { bridge, events } = harness();
+      bridge.observe({
+        feed: "permissions",
+        at: NOW,
+        sessionID: "ses_c",
+        reason: "reconnect",
+        data: [
+          {
+            id: "p-edit",
+            sessionID: "ses_c",
+            action: "edit",
+            resources: ["src/file.ts"],
+            source: { type: "tool", messageID: "msg_a0", id: "c-edit" },
+          },
+        ],
+      });
+      expect(events.find((event) => event.type === "tool_call")).toMatchObject({
+        callId: "c-edit",
+        input: "[input unavailable: arguments not observed]",
+      });
+      const full = {
+        filePath: "src/file.ts",
+        oldString: "before",
+        newString: "PORT=3000\nPASSWORD=fixture-sensitive-value",
+        replaceAll: false,
+      };
+      const message = (status: string, input: Record<string, unknown>): OpenCodeFeedRecord => ({
+        feed: "messages",
+        at: NOW,
+        sessionID: "ses_c",
+        reason: "session.step.ended",
+        data: [
+          {
+            id: "msg_a0",
+            type: "assistant",
+            agent: "switchboard",
+            model: { providerID: "switchboard", id: "m" },
+            content: [{ type: "tool", id: "c-edit", name: "edit", state: { status, input } }],
+            time: { created: NOW },
+          },
+        ],
+      });
+      if (arrival === "store") {
+        bridge.observe(message("pending", { filePath: "src/file.ts" }));
+        expect(events.filter((event) => event.type === "tool_input")).toEqual([]);
+        bridge.observe(message("running", full));
+        bridge.observe(message("running", full));
+      } else {
+        const event = ev("session.tool.called", {
+          sessionID: "ses_c",
+          assistantMessageID: "msg_a0",
+          id: "c-edit",
+          input: full,
+        });
+        bridge.observe(event);
+        bridge.observe(event);
+      }
+      expect(events.filter((event) => event.type === "tool_input")).toMatchObject([
+        {
+          type: "tool_input",
+          callId: "c-edit",
+          input:
+            '{"filePath":"src/file.ts","oldString":"before","newString":"PORT=3000\\nPASSWORD=«redacted»","replaceAll":false}',
+        },
+      ]);
+      expect(events.filter((event) => event.type === "tool_call").map((event) => event.callId)).toEqual(["c-edit"]);
+      expect(bridge.toolCalls).toBe(1);
+    },
+  );
+  it("records non-shell arguments and the paired failure with credentials redacted", () => {
+    const { bridge, events } = harness();
+    bridge.observe(inputStarted("c-input", "read"));
+    bridge.observe(
+      ev("session.tool.called", {
+        sessionID: "ses_c",
+        assistantMessageID: "msg_a0",
+        id: "c-input",
+        input: { path: "src/file.ts", options: { limit: 20, apiKey: "opaque-key" } },
+        executed: false,
+      }),
+    );
+    bridge.observe(settled("session.tool.failed", "c-input"));
+    expect(events.find((event) => event.type === "tool_call")).toMatchObject({
+      type: "tool_call",
+      callId: "c-input",
+      tool: "read",
+      input: '{"path":"src/file.ts","options":{"limit":20,"apiKey":"«redacted»"}}',
+    });
+    expect(events.find((event) => event.type === "tool_result")).toMatchObject({
+      type: "tool_result",
+      callId: "c-input",
+      tool: "read",
+      ok: false,
+    });
+    expect(JSON.stringify(events)).not.toContain("opaque-key");
+  });
+});
+
 describe("a pre-execution settlement is narrated by what the facts prove (F2), and a call open when the container is replaced is settled on the record", () => {
   it("a tool the identity's deny rules removed — absent from its own tools — settled with no ask is a tool_refused note naming the deny rules; a tool that is on the roster but errors before it runs is a harness_error, never dressed as a refusal", () => {
     // Under identity read, `write` is not one of the run's own tools: OpenCode

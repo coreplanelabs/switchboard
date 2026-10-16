@@ -75,6 +75,8 @@ function isRunEvent(v: unknown): v is RunEvent {
   switch (o.type) {
     case "tool_call":
       return typeof o.summary === "string" && typeof o.tool === "string";
+    case "tool_input":
+      return typeof o.callId === "string" && o.callId.length > 0 && typeof o.input === "string";
     case "tool_result":
       return typeof o.summary === "string" && typeof o.tool === "string" && typeof o.ok === "boolean";
     case "run_note":

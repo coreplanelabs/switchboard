@@ -2772,7 +2772,9 @@ export async function runOperator(
                     : answerOperatorRead(turn.tool, input))(),
             ),
           turn.tool,
+          typeof answer === "string" ? undefined : answer.input,
         );
+        recorder.finishCalls(modelStep, "completed", read, answer);
         finishDiagnostic?.(result);
         turns.push({ answer: answerText, violation: read });
         continue;
@@ -2814,6 +2816,7 @@ export async function runOperator(
       const beforeCheck = attempts.length;
       const fulfillmentViolation = await commandCheck(turn.decision);
       if (fulfillmentViolation !== undefined) {
+        recorder.finishCalls(modelStep, "rejected", fulfillmentViolation.violation, answer);
         // A confirmed rejection can be corrected into an action without another
         // read. An exhausted unconfirmed check cannot buy a verification call.
         if (
@@ -2826,6 +2829,7 @@ export async function runOperator(
       if (expired()) return answered({ kind: "non_decision", reason: "operator_timeout" });
       if (turn.decision.kind !== "non_decision" && attempts.length === beforeCheck)
         attempts.push({ outcome: "accepted" });
+      recorder.finishCalls(modelStep, "selected", turn.decision.kind, answer);
       return answered(turn.decision);
     }
   } catch (err) {

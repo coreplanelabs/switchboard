@@ -105,12 +105,35 @@ describe("PI_EVENT_DISPOSITION — every event kind pi's protocol documents is d
 });
 
 describe("the bridge speaks the loop's vocabulary — the same turn, the same events", () => {
+  it.each([
+    ["bash", { command: 'export API_TOKEN="opaque secret value"' }, '{"command":"export API_TOKEN=\\"«redacted»\\""}'],
+    [
+      "write",
+      { content: "PORT=3000\nPASSWORD=fixture-sensitive-value" },
+      '{"content":"PORT=3000\\nPASSWORD=«redacted»"}',
+    ],
+  ] as const)("redacts original string arguments on the %s call", (toolName, args, expected) => {
+    const { bridge, events } = harness();
+    bridge.observe({ type: "tool_execution_start", toolCallId: "secret-call", toolName, args });
+    expect(events.find((event) => event.type === "tool_call")).toMatchObject({
+      type: "tool_call",
+      callId: "secret-call",
+      input: expected,
+    });
+  });
   it("tool_call, tool_result and the model's narration are the events the native loop emitted for the same turn", async () => {
     const { bridge, events } = harness();
     for (const e of piStream) bridge.observe(e);
     expect(comparable(events)).toEqual([
       { type: "assistant", text: "Checking the tree." },
-      { type: "tool_call", tool: "bash", summary: `$ ${COMMAND}`, command: COMMAND, callId: "call_0" },
+      {
+        type: "tool_call",
+        tool: "bash",
+        summary: `$ ${COMMAND}`,
+        command: COMMAND,
+        input: '{"command":"git status --short"}',
+        callId: "call_0",
+      },
       {
         type: "tool_result",
         tool: "bash",

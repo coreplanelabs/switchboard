@@ -12,11 +12,21 @@ export interface RoutingModelObservation {
   usd?: number;
   feeUsd?: number;
   priceSource?: "provider" | "operator" | "registry" | "none";
+  /** Raw provider proposals, consumed and redacted by the recorder before retention. */
+  toolCalls?: readonly { id?: string; tool: string; input: unknown }[];
 }
 
 export type RoutingPhase = "model" | "command_fulfillment" | "context" | "helper" | "catalogue";
 
-export interface RoutingStep extends RoutingModelObservation {
+export interface RoutingToolCall {
+  id?: string;
+  tool: string;
+  input: string;
+  outcome: "proposed" | "selected" | "rejected" | "completed" | "error" | "timeout";
+  result?: string;
+}
+
+export interface RoutingStep extends Omit<RoutingModelObservation, "toolCalls"> {
   index: number;
   phase: RoutingPhase;
   startedAt: number;
@@ -31,6 +41,8 @@ export interface RoutingStep extends RoutingModelObservation {
   validationCode?: string;
   failureCause?: string;
   errorClass?: string;
+  calls?: RoutingToolCall[];
+  omittedCalls?: number;
 }
 
 export interface RoutingTelemetry {
