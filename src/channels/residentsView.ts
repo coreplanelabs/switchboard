@@ -1,3 +1,4 @@
+import { hasWorkViewScope, workViewScopeOf } from "./workViewScope.js";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { matchesPredicate, type Actor } from "../core/authz/index.js";
 import { RESIDENT_LISTING_POLL_MS } from "../core/budgets.js";
@@ -165,6 +166,16 @@ export function createResidentsViewHandler(
 
     if ((req.method ?? "GET").toUpperCase() !== "GET") {
       plain(res, 405, "method not allowed", { allow: "GET" });
+      return true;
+    }
+    if (hasWorkViewScope(ctx.actor) && workViewScopeOf(ctx.actor).mode !== "everyone") {
+      page(req, res, 403, ctx.actor, "Shared runtime", {
+        page: "residents",
+        scopeUnavailable: "Select All people to see the shared runtime.",
+        residents: [],
+        runs: [],
+        now: now(),
+      });
       return true;
     }
     const visibleTo = readableRuns(ctx.actor);

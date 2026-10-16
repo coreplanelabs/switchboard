@@ -404,7 +404,16 @@ describe("aggregateUsage", () => {
     const report = reportOfUsageRows(wire);
     expect(report.rows.map((r) => `${r.userId} ${r.threadKey}`)).toEqual(["slack:UALICE slack:C1:9.0"]);
     expect(report.shipRuns).toEqual([
-      { id: "c1", unitKey: "plan-example-1:U12", finishedAt: T0 + 20_000, costCapUsd: 50, usage: runs[3].usage },
+      {
+        id: "c1",
+        unitKey: "plan-example-1:U12",
+        userId: "slack:UALICE",
+        channelId: runs[3].channelId,
+        threadKey: runs[3].threadKey,
+        finishedAt: T0 + 20_000,
+        costCapUsd: 50,
+        usage: runs[3].usage,
+      },
     ]);
     expect(report).toMatchObject({ pending: 1, earliestFinishedAt: T0, retentionDays: 30 });
     expect(isRunUsageRows(wire)).toBe(true);

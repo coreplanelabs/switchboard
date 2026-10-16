@@ -782,3 +782,12 @@ predecessor = {
   request: { id, startedAt, recordSha256 }
 }
 ```
+
+
+### Attached browser work scope
+
+Runtime infrastructure is shared. A trusted personal scope returns unavailable runtime data and names the All people view; it does not report empty infrastructure or zero counts. All people and unscoped legacy callers retain current authorized runtime reads.
+
+| Criterion | Evidence |
+|---|---|
+| Shared runtime data is withheld only for an attached personal scope, while unscoped reads retain the live listing | `[unit]` `src/channels/residentsView.test.ts::createResidentsViewHandler::withholds shared runtime rows only for an attached personal view and preserves legacy unscoped reads` |

@@ -1,7 +1,15 @@
+import { readableRuns } from "./liveView/viewer.js";
+import { hasWorkViewScope, workViewScopeOf } from "./workViewScope.js";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
-import { predicateFor } from "../core/authz/predicate.js";
 import type { Actor } from "../core/authz/types.js";
-import { runFactsOf, type DeliveryRange, type DeliveryService, type RunFact } from "../core/delivery.js";
+import { predicateFor } from "../core/authz/predicate.js";
+import {
+  selectedDeliveryReport,
+  runFactsOf,
+  type DeliveryRange,
+  type DeliveryService,
+  type RunFact,
+} from "../core/delivery.js";
 import { RUN_LIST_MAX_LIMIT } from "../core/runRecord.js";
 import type { RunsService } from "../core/runsService.js";
 import type { PageSender } from "./webShell.js";
@@ -43,6 +51,11 @@ export interface DeliveryViewDeps {
   service: DeliveryService;
   /** The run history the report joins; absent → the pull requests' facts alone. */
   runs?: RunsService;
+  ownedPullRequests?: (
+    repo: string,
+    range: DeliveryRange,
+    actor: Actor,
+  ) => Promise<{ numbers: readonly number[]; status: "complete" | "partial" | "unavailable" }>;
 }
 
 export interface DeliveryViewContext {
@@ -104,20 +117,45 @@ export function createDeliveryViewHandler(
       if (!deps.runs) return [];
       const page = await deps.runs.listRuns({
         status: "finished",
-        visibleTo: predicateFor(ctx.actor, "runs:read", "run"),
+        visibleTo: hasWorkViewScope(ctx.actor) ? readableRuns(ctx.actor) : predicateFor(ctx.actor, "runs:read", "run"),
         sinceMs: Date.parse(`${range.since}T00:00:00Z`),
         limit: RUN_LIST_MAX_LIMIT,
       });
       return runFactsOf(page.runs, repo);
     };
+    const selections = new Map<
+      string,
+      Promise<{ numbers: readonly number[]; status: "complete" | "partial" | "unavailable" }>
+    >();
+    const work =
+      hasWorkViewScope(ctx.actor) && workViewScopeOf(ctx.actor).mode !== "everyone"
+        ? (range: DeliveryRange) => {
+            const key = JSON.stringify(range);
+            const cached = selections.get(key);
+            if (cached) return cached;
+            const pending = deps.ownedPullRequests
+              ? deps.ownedPullRequests(repo, range, ctx.actor)
+              : runs(range).then((ownedRuns) => ({
+                  numbers: [...new Set(ownedRuns.flatMap((run) => (run.pr === undefined ? [] : [run.pr])))],
+                  status: deps.runs ? ("partial" as const) : ("unavailable" as const),
+                }));
+            selections.set(key, pending);
+            return pending;
+          }
+        : undefined;
     deps.service
       .report(repo, {
         ...(weeksParam !== null ? { weeks: Number(weeksParam) } : {}),
         ...(sinceParam !== null ? { since: sinceParam } : {}),
         ...(fresh ? { fresh } : {}),
         runs,
+        ...(work ? { ownedPrs: work } : {}),
       })
-      .then((report) => {
+      .then(async (report) => {
+        if (work) {
+          const selection = await work(report.range);
+          report = selectedDeliveryReport(report, selection.numbers, selection.status);
+        }
         // The sender builds the body before it writes the head: one that throws
         // lands in the catch below as one 502, never a second set of headers.
         if (route.kind === "json") {

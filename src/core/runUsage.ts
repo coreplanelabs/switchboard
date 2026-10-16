@@ -286,6 +286,10 @@ export interface RunUsageReport {
 
 export interface ShipRunUsage {
   id: string;
+  /** Credited billing owner and native channel; older snapshots lack these facts. */
+  userId?: string;
+  channelId?: string;
+  threadKey?: string;
   unitKey: string;
   finishedAt: number;
   costCapUsd?: number;
@@ -294,7 +298,11 @@ export interface ShipRunUsage {
 }
 
 /** The unit identity comes from the coordinator's durable key, never a thread or branch guess. */
-export function shipRunsOf(runs: readonly UsageRun[]): ShipRunUsage[] {
+export function shipRunsOf(
+  runs: readonly UsageRun[],
+  lookupParent: (id: string) => UsageIdentity | undefined = () => undefined,
+): ShipRunUsage[] {
+  const batch = new Map(runs.map((run) => [run.id, run]));
   return runs.flatMap((run) => {
     if (!run.parentInstanceId || !run.idempotencyKey) return [];
     const unit = unitOfIdempotencyKey(run.idempotencyKey);
@@ -303,6 +311,9 @@ export function shipRunsOf(runs: readonly UsageRun[]): ShipRunUsage[] {
       {
         id: run.id,
         unitKey: `${run.parentInstanceId}:${unit}`,
+        userId: billedTo(run, batch, lookupParent).userId,
+        channelId: run.channelId,
+        threadKey: run.threadKey,
         finishedAt: run.finishedAt,
         ...(run.costCapUsd !== undefined ? { costCapUsd: run.costCapUsd } : {}),
         ...(run.usage !== undefined ? { usage: run.usage } : {}),
@@ -380,7 +391,7 @@ export function reportOfUsageRows(rows: RunUsageRows): RunUsageReport {
   const { rows: cells, pending } = aggregateUsage(rows.runs, (id) => rows.parents[id]);
   return {
     rows: cells,
-    shipRuns: shipRunsOf(rows.runs),
+    shipRuns: shipRunsOf(rows.runs, (id) => rows.parents[id]),
     // The store counts what it could not price; the fold sees the same runs without `usage`.
     pending: Math.max(pending, rows.pending),
     ...(rows.earliestFinishedAt !== undefined ? { earliestFinishedAt: rows.earliestFinishedAt } : {}),
@@ -452,6 +463,9 @@ function isShipRunUsage(v: unknown): v is ShipRunUsage {
   const r = v as ShipRunUsage;
   return (
     typeof r.id === "string" &&
+    (r.userId === undefined || typeof r.userId === "string") &&
+    (r.channelId === undefined || typeof r.channelId === "string") &&
+    (r.threadKey === undefined || typeof r.threadKey === "string") &&
     typeof r.unitKey === "string" &&
     typeof r.finishedAt === "number" &&
     Number.isFinite(r.finishedAt) &&

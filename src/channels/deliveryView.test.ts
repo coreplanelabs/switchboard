@@ -1,3 +1,5 @@
+import { ALL_GRANTS } from "../core/authz/grants.js";
+import { resolveWorkViewScope, withWorkViewScope } from "./workViewScope.js";
 import { describe, expect, it } from "vitest";
 import type { Actor } from "../core/authz/types.js";
 import { ALL_CAPABILITIES } from "../core/capabilities.js";
@@ -135,6 +137,32 @@ describe("parseDeliveryRoute", () => {
 // ---- handler ----------------------------------------------------------------------
 
 describe("createDeliveryViewHandler", () => {
+  it("filters pull requests and every aggregate using the canonical selected owner publication set", async () => {
+    const actor: Actor = { kind: "user", id: "access:owner", grants: ALL_GRANTS };
+    withWorkViewScope(actor, resolveWorkViewScope(actor, { organization: "installation" }));
+    const h = createDeliveryViewHandler(
+      {
+        service: fakeService(async () => report()),
+        ownedPullRequests: async () => ({ numbers: [], status: "complete" }),
+      },
+      page,
+    );
+    const io = fakeReqRes("GET", "/delivery/acme/api.json");
+    h(io.req, io.res, { actor });
+    await tick();
+    const body = JSON.parse(io.body()) as DeliveryReport;
+    expect(body.prs).toEqual([]);
+    expect(body.units).toEqual([]);
+    expect(body.weeks.every((week) => week.prs.length === 0 && week.prsMerged === 0)).toBe(true);
+    expect(body.totals.prsMerged).toBe(0);
+    expect(body.workCoverage).toBe("complete");
+    expect(io.body()).not.toContain("fix the build");
+    const legacy = fakeReqRes("GET", "/delivery/acme/api.json");
+    h(legacy.req, legacy.res, { actor: { ...actor } });
+    await tick();
+    expect((JSON.parse(legacy.body()) as DeliveryReport).prs.map((pr) => pr.number)).toEqual([42]);
+  });
+
   it("ignores paths it does not own", () => {
     const h = createDeliveryViewHandler({ service: fakeService(() => Promise.resolve(report())) }, page);
     const io = fakeReqRes("GET", "/runs");

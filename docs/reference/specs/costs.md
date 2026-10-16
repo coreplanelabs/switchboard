@@ -109,3 +109,11 @@ Container application ids: `GET /accounts/{id}/containers/applications`; DO name
 
 | Run usage includes measured routing-call counters exactly once, alongside agent turns. Character-based routing output estimates never enter token or cost accounting; absent provider counters are not fabricated. | `[unit]` `src/core/runUsage.test.ts::usageOfEvents::counts measured routing usage once alongside agent turns without using output estimates` |
 | Routing counters are priced through the selected model card and configured rates before merging with recorded agent charges; shared-model pricing preserves both charges. | `[unit]` `src/core/dispatch/operatorCompletion.test.ts::operatorCompletion::prices measured routing tokens without replacing a shared model's recorded agent charge` |
+
+### Attached browser work scope
+
+A trusted Mine or person scope receives measured owned-work costs without shared account bills or inferred cloud allocation. All people and unscoped legacy callers retain the shared report. Old unit-spend records without native owner facts remain partial or unavailable; they are never guessed into a personal report.
+
+| Criterion | Evidence |
+|---|---|
+| Personal cost bodies contain only readable owned work, and neither HTML nor JSON asks for shared bills | `[unit]` `src/core/costsService.test.ts::createCostsService::*`, `src/channels/costsView.test.ts::createCostsViewHandler::serves the personal work projection on HTML and JSON without asking for shared bills` |

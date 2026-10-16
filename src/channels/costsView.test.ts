@@ -1,8 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { ALL_GRANTS } from "../core/authz/grants.js";
+import { resolveWorkViewScope, withWorkViewScope } from "./workViewScope.js";
+import { describe, expect, it, vi } from "vitest";
 import type { CostReport } from "../core/costs.js";
 import type { CostsByReport } from "../core/costsBy.js";
 import type { CostsSnapshotStatus } from "../core/costsSnapshot.js";
-import { NoCostsSnapshotError, NullCostsService, type CostsService } from "../core/costsService.js";
+import {
+  NoCostsSnapshotError,
+  NullCostsService,
+  type CostsService,
+  type CostWorkReport,
+} from "../core/costsService.js";
 import { ACTORS } from "../core/authz/testing.js";
 import { createCostsViewHandler, parseCostsRoute, type CostsViewContext } from "./costsView.js";
 import { makePageSender } from "./webShell.js";
@@ -263,6 +270,46 @@ describe("parseCostsRoute", () => {
 // ---- handler ----------------------------------------------------------------------
 
 describe("createCostsViewHandler", () => {
+  it("serves the personal work projection on HTML and JSON without asking for shared bills", async () => {
+    const shared = vi.fn(() => Promise.resolve(report()));
+    const service = fakeService(shared);
+    const work = vi.fn(
+      async () =>
+        ({
+          scope: "personal",
+          group: "switchboard",
+          dimension: "model",
+          range: report().range,
+          coverage: { from: report().range.from, retentionDays: 30, clamped: false, historyOn: true },
+          rows: [],
+          days: [],
+          generatedAt: report().generatedAt,
+          infrastructure: "unattributed",
+          completeness: "complete",
+          unitSpendStatus: "unavailable",
+        }) satisfies CostWorkReport,
+    );
+    service.workReport = work;
+    const actor = { kind: "user" as const, id: "access:finance", grants: ALL_GRANTS };
+    withWorkViewScope(actor, resolveWorkViewScope(actor, { organization: "installation" }));
+    const handler = createCostsViewHandler(service, sendPage);
+    const page = fakeReqRes("GET", "/costs");
+    handler(page.req, page.res, { actor });
+    await tick();
+    expect(page.status).toBe(200);
+    expect(seedOf(page.body())).toMatchObject({
+      report: null,
+      work: { scope: "personal", infrastructure: "unattributed" },
+    });
+    const twin = fakeReqRes("GET", "/costs.json");
+    handler(twin.req, twin.res, { actor });
+    await tick();
+    expect(JSON.parse(twin.body())).toMatchObject({ scope: "personal", rows: [] });
+    expect(JSON.parse(twin.body())).not.toHaveProperty("account");
+    expect(shared).not.toHaveBeenCalled();
+    expect(work).toHaveBeenCalledWith("switchboard", null, "model", { kind: "user-is", userId: "access:finance" });
+  });
+
   it("ignores paths it does not own", () => {
     const h = createCostsViewHandler(
       fakeService(() => Promise.resolve(report())),

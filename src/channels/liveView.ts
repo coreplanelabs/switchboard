@@ -1,3 +1,4 @@
+import { hasWorkViewScope, workReadPredicate, workViewScopeOf } from "./workViewScope.js";
 import { cancellationFailureMessage } from "../core/runLedger/cancellation.js";
 import { publicationSettlementForRun, publicationSettlementOf } from "../core/publicationSettlement.js";
 import type { IncomingMessage as HttpRequest, ServerResponse } from "node:http";
@@ -22,6 +23,9 @@ import { INLINE_IMAGE_TYPES } from "../artifacts/contentType.js";
 import { safeBasename } from "../artifacts/keys.js";
 import type { RunRegistry } from "../core/runRegistry.js";
 import type { RunSummary } from "../core/runRegistry/projections.js";
+import { parseUnitKey, unitKeyOf, type CoordinatorUnit } from "../core/coordinator/contract.js";
+import type { UnitEventKey } from "../core/coordinator/instanceStore.js";
+import { unitFactsForPrivateRecipient } from "../core/unitRuns.js";
 import { pullRequestNumberOf } from "../core/runRecord.js";
 import {
   privateWorkerRun,
@@ -235,6 +239,9 @@ export interface LiveViewDeps {
   page: PageSender;
   /** Every run read and the tokenless stop go through the service. */
   service: RunsService;
+  /** Fresh original-recipient proof for owned metadata only. Thread links
+   * still use the independently authorized private-thread read route. */
+  readPrivateUnit?: (actor: Actor, key: UnitEventKey) => Promise<CoordinatorUnit | undefined>;
   /** The registry's index face: the live rows (with tokens, for their hrefs) and
    *  the live feed. The default `/runs` view is this plus the service's rows live
    *  elsewhere (run-history item 41); never the store. */
@@ -310,7 +317,11 @@ const RUNS_STOP: Resource = { type: "command", id: "runs.stop" };
  *  its own attributes — channel, user, stamped visibility. */
 function readDecision(actor: Actor, view: RunView): Decision {
   const admitted = authorize(actor, "runs:read", RUNS_GET);
-  return admitted.allow ? authorize(actor, "runs:read", runResource(view)) : admitted;
+  const decision = admitted.allow ? authorize(actor, "runs:read", runResource(view)) : admitted;
+  if (!decision.allow || !hasWorkViewScope(actor)) return decision;
+  return matchesPredicate(workReadPredicate(actor, { kind: "all" }), view)
+    ? decision
+    : { allow: false, reason: "outside-work-view" };
 }
 
 /** The tokenless stop is a WRITE: the same two questions `runs.stop` asks on the
@@ -320,6 +331,8 @@ function readDecision(actor: Actor, view: RunView): Decision {
  *  the run exists and is over. The capability-token stop is unchanged: the
  *  token IS the capability (live-view item 10). */
 function stopDecision(actor: Actor, view: RunView): Decision {
+  if (hasWorkViewScope(actor) && !matchesPredicate(workReadPredicate(actor, { kind: "all" }), view))
+    return { allow: false, reason: "outside-work-view" };
   const admitted = authorize(actor, "runs:write", RUNS_STOP);
   return admitted.allow ? authorize(actor, "runs:write", runResource(view)) : admitted;
 }
@@ -585,13 +598,12 @@ export function createLiveViewHandler(
     // live rows' token hrefs.
     if (route.kind === "index") {
       const all = url.searchParams.get("all") === "1";
-      // `?mine=1` narrows the viewer's predicate to their own runs (`ownedBy`:
-      // every id the viewer means by "me", record 0042) — the seed, the feed and
-      // the pager all through the ONE narrowed predicate, so nothing the policy
-      // hides appears and nothing shown is someone else's.
-      const mine = url.searchParams.get("mine") === "1";
+      // An attached global view narrows rows and their feed together. Legacy
+      // unscoped callers retain their explicit Mine filter.
+      const scoped = hasWorkViewScope(ctx.actor);
+      const mine = scoped ? workViewScopeOf(ctx.actor).mode !== "everyone" : url.searchParams.get("mine") === "1";
       const readable = readableRuns(ctx.actor);
-      const visibleTo = mine ? allOf([readable, ownedBy(ctx.actor)]) : readable;
+      const visibleTo = !scoped && mine ? allOf([readable, ownedBy(ctx.actor)]) : readable;
       if (url.searchParams.get("stream") === "1") {
         serveIndexEvents(
           visibleIndexFeed((onEvent) => index.subscribeIndex(onEvent), visibleTo),
@@ -690,18 +702,50 @@ export function createLiveViewHandler(
           notFoundPage(req, res, ctx.actor);
           return;
         }
+        const key = parseUnitKey(route.key);
+        let privateUnit: CoordinatorUnit | undefined;
+        if (key && deps.readPrivateUnit && hasWorkViewScope(ctx.actor)) {
+          try {
+            privateUnit = await deps.readPrivateUnit(ctx.actor, key);
+          } catch {
+            notFoundPage(req, res, ctx.actor);
+            return;
+          }
+          if (privateUnit && (!privateUnit.workBrief || unitKeyOf(privateUnit) !== found.value.unit)) {
+            notFoundPage(req, res, ctx.actor);
+            return;
+          }
+        }
+        const privateFacts = privateUnit ? unitFactsForPrivateRecipient(privateUnit) : undefined;
+        const view = privateFacts ? { ...found.value, ...privateFacts } : found.value;
         // The pull request's findings ledger (agent-ship item 18), under the
         // same predicate, when the unit row names one: the same read `runs
         // findings` makes; a ledger no run the viewer may see names is no key.
-        const findings = found.value.pr
-          ? await service.listFindings({ repo: found.value.instance.repo, number: found.value.pr.number }, visibleTo)
+        const findings = view.pr
+          ? await service.listFindings({ repo: view.instance.repo, number: view.pr.number }, visibleTo)
           : undefined;
+        if (privateFacts) {
+          let fresh: CoordinatorUnit | undefined;
+          try {
+            fresh = await deps.readPrivateUnit!(ctx.actor, key!);
+          } catch {
+            /* A failing source proof cannot certify private metadata. */
+          }
+          if (
+            !fresh?.workBrief ||
+            unitKeyOf(fresh) !== view.unit ||
+            JSON.stringify(unitFactsForPrivateRecipient(fresh)) !== JSON.stringify(privateFacts)
+          ) {
+            notFoundPage(req, res, ctx.actor);
+            return;
+          }
+        }
         const tokens = liveTokens();
         const seed: UnitSeed = {
           page: "unit",
           view: {
-            ...found.value,
-            runs: found.value.runs.map((r) => withLiveToken(r, tokens)),
+            ...view,
+            runs: view.runs.map((r) => withLiveToken(r, tokens)),
             ...(findings?.ok ? { findings: findings.value } : {}),
           },
           now: now(),
@@ -718,6 +762,14 @@ export function createLiveViewHandler(
     // ── Live path: the token checked out. Synchronous — the registry answers
     // from memory, never the store.
     if (access) {
+      if (route.kind === "stop" && ctx.actor.viewingAs) return refuseWhileViewing(res, ctx.actor.viewingAs);
+      if (hasWorkViewScope(ctx.actor)) {
+        const summary = index.listActive().find((row) => row.id === route.id);
+        if (!summary || !matchesPredicate(workReadPredicate(ctx.actor, { kind: "all" }), summary)) {
+          text(res, 404, NOT_FOUND);
+          return true;
+        }
+      }
       if (route.kind === "page") {
         const snap = access.snapshot();
         const summary = index.listActive().find((s) => s.id === route.id);
@@ -725,7 +777,12 @@ export function createLiveViewHandler(
         // live path never reads the store — in start order, live rows with
         // their tokens: the token that opened the parent's page opens no child,
         // so each child's row carries its own.
-        const active = index.listActive().filter((s) => !privateWorkerRun(s));
+        const active = index
+          .listActive()
+          .filter(
+            (s) =>
+              !privateWorkerRun(s) && (!hasWorkViewScope(ctx.actor) || matchesPredicate(readableRuns(ctx.actor), s)),
+          );
         // The way up (item 33), from the registry alone: the spawning run, or
         // the hosted parent whose instance this run is a child of. A LIVE
         // parent's link carries its token — a hosted parent is live for the
