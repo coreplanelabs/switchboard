@@ -52,6 +52,11 @@ export interface McpToolsForRun {
 export interface McpRunCaller {
   userId: string;
   channelId?: string;
+  /** Original private source address, copied internally with its non-JSON proofs. */
+  threadKey?: string;
+  authenticatedAs?: string;
+  postedBy?: string;
+  relayedBy?: string;
   /** The adapter's one-person DM claim, rechecked by dispatch before discovery. */
   directAudience?: SlackDirectAudience;
   /** Already verified private browser address; never a model or client body field. */
@@ -149,21 +154,32 @@ export abstract class DiscoveringMcpToolSource implements McpToolSource {
       const server = entry.spec;
       const revision = this.revisionOf(server);
       const client = this.clientFor(server, revision);
+      const currentSource = async () => {
+        try {
+          return (await this.resolve(agentName, caller)).some(
+            (entry) =>
+              "spec" in entry &&
+              entry.spec.id === server.id &&
+              entry.spec.connectionRevision === server.connectionRevision &&
+              this.revisionOf(entry.spec) === revision,
+          );
+        } catch {
+          return false;
+        }
+      };
       try {
         const { tools, instructions } = await this.discover(server, client, revision, opts?.signal);
+        if (server.id && !(await currentSource()))
+          return {
+            outcome: { server: server.name, unavailable: "the original source access changed during discovery" },
+            tools: [] as RunnableTool[],
+          };
         // Filter after bridging: duplicate remote names keep their first
         // declaration, so a later read hint cannot relabel an unknown/write tool.
         // Do not alter discovery's cache — another agent has its own tool policy.
         const bridged = bridgeMcpTools(server, client, tools, {
           budget,
-          currentSource: async () =>
-            (await this.resolve(agentName, caller)).some(
-              (entry) =>
-                "spec" in entry &&
-                entry.spec.id === server.id &&
-                entry.spec.connectionRevision !== undefined &&
-                entry.spec.connectionRevision === server.connectionRevision,
-            ),
+          currentSource,
         });
         const offered =
           agentName === "orchestrator"
@@ -190,6 +206,11 @@ export abstract class DiscoveringMcpToolSource implements McpToolSource {
           tools: offered,
         };
       } catch (err) {
+        if (server.id && !(await currentSource()))
+          return {
+            outcome: { server: server.name, unavailable: "the original source access changed during discovery" },
+            tools: [] as RunnableTool[],
+          };
         const reason = redactAndCap(err instanceof Error ? err.message : String(err), 160);
         return {
           outcome: { server: server.name, unavailable: reason } as McpServerOutcome,

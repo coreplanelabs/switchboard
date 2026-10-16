@@ -1,4 +1,9 @@
 import { prepareFreshTurn } from "./dispatch/settle.js";
+import { withChatActor } from "./authz/actor.js";
+import { ALL_GRANTS } from "./authz/grants.js";
+import { McpService } from "../mcp/service.js";
+import { InMemoryMcpSecretStore } from "../mcp/secretStore.js";
+import { importCredentialKey } from "../mcp/sealed.js";
 import { startRequestRoot } from "./requestTrace.js";
 import type { PlaneService } from "./planeService.js";
 import { humanReview } from "./testing/humanReview.js";
@@ -40,7 +45,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { processSecrets, Secret } from "../secrets.js";
+import { processSecrets, Secret, secretsFrom } from "../secrets.js";
 import { wrapUntrusted } from "./untrusted.js";
 import { ConfigStore } from "../config.js";
 import { MAX_INSTRUCTIONS_LENGTH } from "../config/validate.js";
@@ -33910,4 +33915,223 @@ describe("trusted original action remaining clock", () => {
     });
     expect(actualStarted).toBe(true);
   });
+});
+
+describe("delegated Main source discovery", () => {
+  it("refuses a foreign private address or lost source policy before exposing a delegated device's tools", async () => {
+    for (const failure of ["foreign", "revoked"] as const) {
+      const provider = capturingProvider("not reached");
+      const yaml = YAML_FIXTURE.replace(
+        "grants:\n",
+        'grants:\n  "access:alice": { actions: all, channels: all, repos: all, organizations: [acme] }\n  "mcp:personal:alice": { actions: all, channels: all, repos: all, organizations: [acme] }\n',
+      );
+      const deps = makeDeps(yaml, provider);
+      deps.runRegistry = new RunRegistry();
+      const actor: Actor = {
+        kind: "service",
+        id: "mcp:personal:alice",
+        grants: ALL_GRANTS,
+        onBehalfOf: { kind: "user", id: "access:alice", grants: ALL_GRANTS },
+      };
+      const msg = withChatActor(
+        {
+          userId: "access:alice",
+          authenticatedAs: actor.id,
+          channelId: "mcp:default",
+          threadKey: "mcp:default:alice",
+          messageId: "mcp:original",
+          text: "Explain the owned source",
+        },
+        actor,
+      );
+      const audience = {
+        kind: "organization-private" as const,
+        organization: "acme",
+        stream: "source:alice",
+        actorId: failure === "foreign" ? "mcp:personal:bob" : actor.id,
+        userId: msg.userId,
+        channelId: msg.channelId,
+        threadKey: msg.threadKey,
+      };
+      if (failure === "revoked") {
+        const grants = deps.config.grantsFor.bind(deps.config);
+        deps.config.grantsFor = (id) => (id === actor.id ? NO_GRANTS : grants(id));
+      }
+      const { io, replies } = fakeIO();
+      io.authoritativePrivateHistory = async () => [];
+      io.organizationPrivateAudience = () => audience;
+      io.verifyOrganizationPrivateAudience = async () => ({ ok: true });
+      const outcome = await dispatch(deps, msg, io, {
+        organizationConversation: true,
+        authoritativeHistory: true,
+        seed: [],
+      });
+      expect(outcome.status).toBe("refused");
+      expect(replies.join("\n")).toBe(
+        failure === "foreign"
+          ? "The private conversation could not be verified."
+          : "🚫 You don't have permission to use the `orchestrator` agent. For access, an admin can approve your request.",
+      );
+      expect(provider.requests).toEqual([]);
+    }
+  });
+
+  it("gives a verified delegated personal device its human's own MCP read tools through the actual dispatcher", async () => {
+    const provider = capturingProvider("Owned source ready");
+    const yaml = YAML_FIXTURE.replace(
+      "grants:\n",
+      'grants:\n  "access:alice": { actions: all, channels: all, repos: all, organizations: [acme] }\n  "mcp:personal:alice": { actions: all, channels: all, repos: all, organizations: [acme] }\n',
+    );
+    const deps = makeDeps(yaml, provider);
+    deps.runRegistry = new RunRegistry({ genId: () => "owned-source-run" });
+    const service = new McpService({
+      config: deps.config,
+      bearers: secretsFrom({}),
+      secrets: new InMemoryMcpSecretStore(),
+      key: importCredentialKey("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+      factory: () => new InMemoryMcpClient([{ name: "search", inputSchema: {}, annotations: { readOnlyHint: true } }]),
+    });
+    const human = { id: "access:alice", orgAdmin: false, channelAdmin: false };
+    await service.add(
+      human,
+      { kind: "user", id: human.id },
+      { name: "own", url: "https://own.example/mcp", auth: "none", agents: ["orchestrator"] },
+    );
+    deps.mcp = service.source;
+    const actor: Actor = {
+      kind: "service",
+      id: "mcp:personal:alice",
+      grants: ALL_GRANTS,
+      self: ["mcp:personal:alice"],
+      onBehalfOf: { kind: "user", id: human.id, grants: ALL_GRANTS, self: [human.id] },
+    };
+    const msg = withChatActor(
+      {
+        userId: human.id,
+        authenticatedAs: actor.id,
+        channelId: "mcp:default",
+        threadKey: "mcp:default:alice",
+        messageId: "mcp:original",
+        text: "Explain the owned source",
+      },
+      actor,
+    );
+    const audience = {
+      kind: "organization-private" as const,
+      organization: "acme",
+      stream: "source:alice",
+      actorId: actor.id,
+      userId: human.id,
+      channelId: msg.channelId,
+      threadKey: msg.threadKey,
+    };
+    const { io, replies } = fakeIO();
+    io.authoritativePrivateHistory = async () => [];
+    io.organizationPrivateAudience = () => audience;
+    io.verifyOrganizationPrivateAudience = async () => ({ ok: true });
+    const result = await dispatch(deps, msg, io, {
+      organizationConversation: true,
+      authoritativeHistory: true,
+      seed: [],
+    });
+    expect(result.status).toBe("completed");
+    expect(replies.join("\n")).toContain("Owned source ready");
+    expect(provider.requests.at(-1)?.tools?.map((tool) => tool.name)).toContain("mcp__own__search");
+    expect(deps.runRegistry.getById("owned-source-run")).toMatchObject({
+      userId: "access:alice",
+      authenticatedAs: "mcp:personal:alice",
+    });
+  });
+  it.each(["content", "error"])(
+    "withholds delegated source bytes when the original native proof is lost during the read (%s)",
+    async (outcome) => {
+      const provider = capturingProvider("Owned source ready");
+      let sourceValid = true;
+      provider.complete = async (request) => {
+        provider.requests.push(structuredClone(request));
+        return provider.requests.length === 1
+          ? {
+              content: [{ type: "tool_use", id: "private-read", name: "mcp__own__search", input: {} }],
+              stopReason: "tool_use",
+            }
+          : { content: [{ type: "text", text: "Finished private read" }], stopReason: "end_turn" };
+      };
+      const yaml = YAML_FIXTURE.replace(
+        "grants:\n",
+        'grants:\n  "access:alice": { actions: all, channels: all, repos: all, organizations: [acme] }\n  "mcp:personal:alice": { actions: all, channels: all, repos: all, organizations: [acme] }\n',
+      );
+      const deps = makeDeps(yaml, provider);
+      deps.runRegistry = new RunRegistry({ genId: () => "owned-source-run" });
+      const service = new McpService({
+        config: deps.config,
+        bearers: secretsFrom({}),
+        secrets: new InMemoryMcpSecretStore(),
+        key: importCredentialKey("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+        factory: () =>
+          new InMemoryMcpClient([
+            {
+              name: "search",
+              inputSchema: {},
+              annotations: { readOnlyHint: true },
+              handler: () => {
+                sourceValid = false;
+                if (outcome === "error") throw new Error("private-native-source-lost-bytes");
+                return { content: [{ type: "text", text: "private-native-source-lost-bytes" }] };
+              },
+            },
+          ]),
+      });
+      const human = { id: "access:alice", orgAdmin: false, channelAdmin: false };
+      await service.add(
+        human,
+        { kind: "user", id: human.id },
+        { name: "own", url: "https://own.example/mcp", auth: "none", agents: ["orchestrator"] },
+      );
+      deps.mcp = service.source;
+      const actor: Actor = {
+        kind: "service",
+        id: "mcp:personal:alice",
+        grants: ALL_GRANTS,
+        self: ["mcp:personal:alice"],
+        onBehalfOf: { kind: "user", id: human.id, grants: ALL_GRANTS, self: [human.id] },
+      };
+      const msg = withChatActor(
+        {
+          userId: human.id,
+          authenticatedAs: actor.id,
+          channelId: "mcp:default",
+          threadKey: "mcp:default:alice",
+          messageId: "mcp:original",
+          text: "Explain the owned source",
+        },
+        actor,
+      );
+      const audience = {
+        kind: "organization-private" as const,
+        organization: "acme",
+        stream: "source:alice",
+        actorId: actor.id,
+        userId: human.id,
+        channelId: msg.channelId,
+        threadKey: msg.threadKey,
+      };
+      const { io } = fakeIO();
+      io.authoritativePrivateHistory = async () => [];
+      io.organizationPrivateAudience = () => audience;
+      io.verifyOrganizationPrivateAudience = async () =>
+        sourceValid ? { ok: true } : { ok: false, code: "direct-audience-denied" };
+      await dispatch(deps, msg, io, {
+        organizationConversation: true,
+        authoritativeHistory: true,
+        seed: [],
+      });
+      expect(JSON.stringify(provider.requests)).not.toContain("private-native-source-lost-bytes");
+      expect(JSON.stringify(provider.requests)).toContain("Source unavailable: the original source access changed.");
+      expect(provider.requests.at(-1)?.tools?.map((tool) => tool.name)).toContain("mcp__own__search");
+      expect(deps.runRegistry.getById("owned-source-run")).toMatchObject({
+        userId: "access:alice",
+        authenticatedAs: "mcp:personal:alice",
+      });
+    },
+  );
 });

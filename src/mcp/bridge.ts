@@ -126,6 +126,15 @@ export function bridgeMcpTools(
           return `Refused: this run has reached its MCP call cap (${MCP_MAX_CALLS_PER_RUN} calls across all servers).`;
         }
         opts.budget.calls++;
+        const current = async () => {
+          if (!readOnly || !server.id || !opts.currentSource) return true;
+          try {
+            return await opts.currentSource();
+          } catch {
+            return false;
+          }
+        };
+        if (!(await current())) return "Source unavailable: the original source access changed.";
         // The remote call is one `mcp.<server>.<tool>` span under the tool
         // call's span (docs/reference/specs/tracing.md): ok and the result size as attrs,
         // the failure classified (never the body). Without a span (a bare tool
@@ -135,6 +144,10 @@ export function bridgeMcpTools(
           try {
             result = await client.callTool(t.name, input ?? {}, { signal: ctx.signal });
           } catch (err) {
+            if (!(await current())) {
+              span?.end("error", { ok: false, bytes: 0 });
+              return "Source unavailable: the original source access changed.";
+            }
             const message = err instanceof McpError ? err.message : err instanceof Error ? err.message : String(err);
             const failed = classifyError(
               new Error(`MCP ${server.name}/${t.name} failed: ${message}`, { cause: err }),
@@ -145,6 +158,10 @@ export function bridgeMcpTools(
             span?.fail(failed);
             span?.end("error", { ok: false, bytes: 0 });
             throw failed;
+          }
+          if (!(await current())) {
+            span?.end("error", { ok: false, bytes: 0 });
+            return "Source unavailable: the original source access changed.";
           }
           const text = renderContent(result);
           const clipped = clip(text, MCP_RESULT_CAP);

@@ -132,6 +132,12 @@ function currentBoundActor(actor: Actor, grantsFor: GrantsLookup): Actor {
   };
 }
 
+/** A current host-proved actor only. Names and JSON fields never supply this proof. */
+export function boundChatActorOf(config: { grantsFor: GrantsLookup }, source: object): Actor | undefined {
+  const actor = (source as { [trustedChatActor]?: Actor })[trustedChatActor];
+  return actor ? currentBoundActor(actor, (id) => config.grantsFor(id)) : undefined;
+}
+
 /** The actor every gate in the dispatch path decides on: `resolveChatActor`
  *  over the message, with config's grants lookup. Every `canRunAgent` /
  *  `canUseRepo` / `canManageRepos` / `canEditChannelConfig` question asks

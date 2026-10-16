@@ -2,6 +2,12 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { ChannelIO } from "../core/types.js";
+import type { ToolContext } from "../tools/runnableTool.js";
+import { withChatActor } from "../core/authz/actor.js";
+import { copyPrivateSourceFacts, withOrganizationPrivateAudience } from "../core/dispatch/privateDestination.js";
+import { NO_GRANTS, type Actor } from "../core/authz/types.js";
+import { ALL_GRANTS } from "../core/authz/grants.js";
 import { secretsFrom } from "../secrets.js";
 import { ConfigStore, InMemoryOverridesBacking } from "../config.js";
 import { fakeAuthorizationServer, InMemoryMcpClient, type FakeAuthorizationServerOptions } from "./fake.js";
@@ -1247,5 +1253,203 @@ describe("McpServiceError — one cause per code (record 0054)", () => {
     } as const;
     for (const [code, cause] of Object.entries(causes))
       expect(new McpServiceError(code as keyof typeof causes, "x").cause).toBe(cause);
+  });
+});
+
+describe("delegated Main personal MCP source", () => {
+  async function fixture() {
+    const h = harness({
+      yaml: YAML.replace(
+        "grants:\n",
+        'grants:\n  "access:alice": { actions: all, channels: all, repos: all, organizations: [acme] }\n  "mcp:personal:alice": { actions: all, channels: all, repos: all, organizations: [acme] }\n',
+      ),
+    });
+    const human = { id: "access:alice", orgAdmin: false, channelAdmin: false };
+    await h.service.add(human, ME(human), {
+      name: "own",
+      url: "https://own.example/mcp",
+      auth: "bearer",
+      agents: ["orchestrator"],
+    });
+    await h.service.completeTicket(
+      "nonce-00000000000000000001",
+      { sub: "alice", email: "unused@example.test" },
+      "own-token",
+    );
+    const actor: Actor = {
+      kind: "service",
+      id: "mcp:personal:alice",
+      grants: ALL_GRANTS,
+      self: ["mcp:personal:alice"],
+      onBehalfOf: { kind: "user", id: human.id, grants: ALL_GRANTS, self: [human.id] },
+    };
+    const audience = {
+      kind: "organization-private" as const,
+      organization: "acme",
+      stream: "source:alice",
+      actorId: actor.id,
+      userId: human.id,
+      channelId: "mcp:default",
+      threadKey: "mcp:default:alice",
+    };
+    const plain = {
+      userId: human.id,
+      channelId: audience.channelId,
+      threadKey: audience.threadKey,
+      authenticatedAs: actor.id,
+      organizationPrivateAudience: audience,
+    };
+    let nativeValid = true;
+    let currentAudience = audience;
+    const original = withOrganizationPrivateAudience(withChatActor({ ...plain, text: "" }, actor), audience);
+    const caller = copyPrivateSourceFacts(original, plain, {
+      organizationPrivateAudience: () => currentAudience,
+      verifyOrganizationPrivateAudience: async () =>
+        nativeValid ? { ok: true } : { ok: false, code: "direct-audience-denied" },
+    });
+    return {
+      ...h,
+      actor,
+      audience,
+      caller,
+      plain,
+      revokeNative: () => {
+        nativeValid = false;
+      },
+      changeAddress: () => {
+        currentAudience = { ...audience, threadKey: "mcp:default:another-source" };
+      },
+    };
+  }
+  it("opens only the credited human's own source with protected actual-service proof and closes on current role loss", async () => {
+    const h = await fixture();
+    const discovered = await h.service.source.toolsFor("orchestrator", h.caller);
+    expect(discovered.tools.map((t) => t.name)).toEqual(["mcp__own__search"]);
+    expect(await discovered.tools[0]!.run({}, {} as ToolContext)).toContain("search ok");
+    expect(await h.service.resolveForRun("orchestrator", h.caller)).toMatchObject([
+      { spec: { id: "user:access:alice/own", auth: { type: "bearer", token: "own-token" } } },
+    ]);
+    const current = h.config.grantsFor.bind(h.config);
+    for (const revoked of [h.actor.id, h.actor.onBehalfOf!.id]) {
+      h.config.grantsFor = (id) => (id === revoked ? NO_GRANTS : current(id));
+      expect(await h.service.source.toolsFor("orchestrator", h.caller)).toEqual({ tools: [], servers: [] });
+      expect(await discovered.tools[0]!.run({}, {} as ToolContext)).toBe(
+        "Source unavailable: the original source access changed.",
+      );
+      h.config.grantsFor = current;
+    }
+    expect((await h.service.source.toolsFor("orchestrator", h.caller)).tools.map((t) => t.name)).toEqual([
+      "mcp__own__search",
+    ]);
+  });
+  it.each(["content", "error"])(
+    "withholds discovered instructions, tools and errors when native access changes during discovery (%s)",
+    async (outcome) => {
+      const h = await fixture();
+      const remote = new InMemoryMcpClient(
+        [
+          {
+            name: "search",
+            description: "private-native-discovery-bytes",
+            inputSchema: {},
+            annotations: { readOnlyHint: true },
+          },
+        ],
+        { instructions: "private-native-discovery-bytes" },
+      );
+      const list = remote.listTools.bind(remote);
+      remote.listTools = async () => {
+        h.revokeNative();
+        if (outcome === "error") throw new Error("private-native-discovery-bytes");
+        return list();
+      };
+      const service = new McpService({
+        config: h.config,
+        secrets: h.secrets,
+        key: KEY,
+        bearers: secretsFrom({}),
+        factory: () => remote,
+      });
+      const discovered = await service.source.toolsFor("orchestrator", h.caller);
+      expect(discovered).toEqual({
+        tools: [],
+        servers: [{ server: "own", unavailable: "the original source access changed during discovery" }],
+      });
+      expect(JSON.stringify(discovered)).not.toContain("private-native-discovery-bytes");
+    },
+  );
+  it("retains the actual browser's native guard and never treats a protected service tuple as that browser", async () => {
+    const h = await fixture();
+    const human = h.actor.onBehalfOf!;
+    const audience = { ...h.audience, actorId: human.id };
+    const plain = { ...h.plain, authenticatedAs: undefined, organizationPrivateAudience: audience };
+    let valid = true;
+    const io: Pick<ChannelIO, "organizationPrivateAudience" | "verifyOrganizationPrivateAudience"> = {
+      organizationPrivateAudience: () => audience,
+      verifyOrganizationPrivateAudience: async () =>
+        valid ? { ok: true } : { ok: false, code: "direct-audience-denied" },
+    };
+    const source = withOrganizationPrivateAudience(withChatActor({ ...plain, text: "" }, human), audience);
+    const caller = copyPrivateSourceFacts(source, plain, io);
+    const offered = await h.service.source.toolsFor("orchestrator", caller);
+    expect(offered.tools.map((tool) => tool.name)).toEqual(["mcp__own__search"]);
+    valid = false;
+    expect(await offered.tools[0]!.run({}, {} as ToolContext)).toBe(
+      "Source unavailable: the original source access changed.",
+    );
+    valid = true;
+    const foreign = copyPrivateSourceFacts(
+      withOrganizationPrivateAudience(withChatActor({ ...plain, text: "" }, h.actor), audience),
+      plain,
+      io,
+    );
+    expect(await h.service.source.toolsFor("orchestrator", foreign)).toEqual({ tools: [], servers: [] });
+  });
+  it("refuses lost native proof and another private address while both policy ceilings stay valid", async () => {
+    for (const failure of ["revoked", "address"]) {
+      const h = await fixture();
+      const offered = await h.service.source.toolsFor("orchestrator", h.caller);
+      expect(offered.tools.map((tool) => tool.name)).toEqual(["mcp__own__search"]);
+      if (failure === "revoked") h.revokeNative();
+      else h.changeAddress();
+      expect(await h.service.source.toolsFor("orchestrator", h.caller)).toEqual({ tools: [], servers: [] });
+      expect(await offered.tools[0]!.run({}, {} as ToolContext)).toBe(
+        "Source unavailable: the original source access changed.",
+      );
+    }
+  });
+  it("withholds a private read result if source authority changes while the remote call returns", async () => {
+    const h = await fixture();
+    const offered = await h.service.source.toolsFor("orchestrator", h.caller);
+    expect(offered.tools.map((tool) => tool.name)).toEqual(["mcp__own__search"]);
+    const remote = h.clients.at(-1)!.client;
+    remote.callTool = async () => {
+      h.config.grantsFor = () => NO_GRANTS;
+      return { content: [{ type: "text", text: "Private source bytes" }] };
+    };
+    expect(await offered.tools[0]!.run({}, {} as ToolContext)).toBe(
+      "Source unavailable: the original source access changed.",
+    );
+  });
+  it("refuses bare, serialized, foreign, relayed and view-as proofs without lending a person's connection", async () => {
+    const h = await fixture();
+    expect((await h.service.source.toolsFor("orchestrator", h.caller)).tools.map((t) => t.name)).toEqual([
+      "mcp__own__search",
+    ]);
+    for (const caller of [
+      h.plain,
+      JSON.parse(JSON.stringify(h.caller)),
+      withChatActor(h.plain, h.actor),
+      withOrganizationPrivateAudience(h.plain, h.audience),
+      withOrganizationPrivateAudience(withChatActor({ ...h.plain, userId: "access:bob" }, h.actor), h.audience),
+      withOrganizationPrivateAudience(withChatActor(h.plain, { ...h.actor, id: "mcp:personal:bob" }), h.audience),
+      withOrganizationPrivateAudience(
+        withChatActor(h.plain, { ...h.actor, viewingAs: { id: "access:bob" } }),
+        h.audience,
+      ),
+      withOrganizationPrivateAudience(withChatActor({ ...h.plain, postedBy: "agent:worker" }, h.actor), h.audience),
+    ]) {
+      expect(await h.service.source.toolsFor("orchestrator", caller)).toEqual({ tools: [], servers: [] });
+    }
   });
 });
