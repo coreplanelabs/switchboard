@@ -8160,6 +8160,10 @@ export class RunHistoryDO extends DurableObject<Env> {
           console.log("[runs/inbox/deliver] unreadable receipt", runId, "invalid-schema");
         return;
       }
+      if (this.liveRow(runId)?.phase === "finishing") {
+        out = { kind: "refused", reason: "not-live" };
+        return;
+      }
       if (
         this.sql
           .exec<{ count: number }>("SELECT COUNT(*) AS count FROM run_inbox_deliveries WHERE run_id=?", runId)
