@@ -599,6 +599,46 @@ describe("createCommandHttpHandler — caller resolution", () => {
   });
 
   // Feature: docs/decisions/0053 — a write from a session viewing as a person is refused in the one sentence, whatever the person's grants say.
+  it("views a known offline Access requester through their current config ceiling without asserting native authentication", async () => {
+    const ceiling = {
+      actions: new Set(["runs:read"]),
+      channels: new Set(["slack:CREAD"]),
+      repos: new Set(["acme/app"]),
+    };
+    const grantsFor = (id: string) =>
+      id === "access:admin" ? ALL_GRANTS : id === "access:offline" ? ceiling : NO_GRANTS;
+    const channels: string[] = [];
+    const original = accessActor({ sub: "admin" }, grantsFor);
+    const viewed = await resolveAccessActor(
+      { sub: "admin", viewAs: "access:offline" },
+      {
+        grantsFor,
+        knownPerson: (id) => id === "access:offline",
+        channelsOf: async (id) => (channels.push(id), new Set(["slack:CFALSE"])),
+        personByEmail: async () => {
+          throw new Error("email is not a person proof");
+        },
+      },
+    );
+    expect(viewed.id).toBe("access:admin");
+    expect(viewed.grants).toBe(original.grants);
+    expect(viewed.viewingAs).toEqual({ id: "access:offline" });
+    expect(viewed.onBehalfOf).toEqual({
+      kind: "user",
+      id: "access:offline",
+      grants: ceiling,
+      self: ["access:offline"],
+      asUser: { id: "access:offline" },
+    });
+    expect(channels).toEqual([]);
+    expect(viewed.onBehalfOf).not.toHaveProperty("memberOfOrganizations");
+    expect(
+      await resolveAccessActor({ sub: "admin", viewAs: "access:unknown" }, { grantsFor, knownPerson: () => false }),
+    ).toEqual(original);
+    expect(
+      await resolveAccessActor({ sub: "admin", viewAs: "access:svc:bot" }, { grantsFor, knownPerson: () => true }),
+    ).toEqual(original);
+  });
   it("a session viewing as a person (record 0053) reads on runs.list and is refused POST runs.stop before the body is read with the view-as sentence, not the grant refusal; the same session without the cookie stops the run", async () => {
     const table = { grants: native(OPERATOR_AND_READER), commandGroups: ["runs"] };
     const { handler, reg, live } = await fixture({

@@ -4802,7 +4802,12 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       coordinator: { unit: "U12", instanceAttempt: 0 },
     });
     expect(h.threadsAsked).toEqual([
-      { threadKey: instance.threadKey, userId: instance.userId, sourceRunId: "main-source" },
+      {
+        threadKey: instance.threadKey,
+        userId: instance.userId,
+        sourceRunId: "main-source",
+        unitKey: { instanceId: instance.id, unit: "U12" },
+      },
     ]);
     expect((await log.list(`worker:${instance.id}:U12`)).map((event) => event.kind)).toEqual(["input", "reply"]);
     const row = (await h.instances.listUnits(instance.id))[0]!;
@@ -4812,7 +4817,12 @@ describe("the plan runner's steps — plan, unit-start, branch, round, unit-end,
       body: { error: "private_worker_thread_conflict" },
     });
     expect(h.threadsAsked).toEqual([
-      { threadKey: instance.threadKey, userId: instance.userId, sourceRunId: "main-source" },
+      {
+        threadKey: instance.threadKey,
+        userId: instance.userId,
+        sourceRunId: "main-source",
+        unitKey: { instanceId: instance.id, unit: "U12" },
+      },
     ]);
   });
 

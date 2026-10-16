@@ -12,7 +12,7 @@ import {
 } from "../core/privateWorkerLog.js";
 import type { AudienceCheck } from "../core/audienceDecision.js";
 import { mainTaskClaimMatches, type CoordinatorInstance, type CoordinatorUnit } from "../core/coordinator/contract.js";
-import type { CoordinatorInstanceStore } from "../core/coordinator/instanceStore.js";
+import type { CoordinatorInstanceStore, UnitEventKey } from "../core/coordinator/instanceStore.js";
 import { directAudienceStampOf } from "../core/runLedger/inboxMessage.js";
 import { isUnitContext } from "../core/dispatch/unitContext.js";
 import type { ChannelIO, HistoryItem, IncomingMessage, StatusHandle, StatusUpdate } from "../core/types.js";
@@ -44,6 +44,7 @@ export async function privateWorkerAudienceFor(
     threadKey: string;
     userId: string;
     sourceRunId?: string;
+    unitKey?: UnitEventKey;
   }) => ChannelIO | undefined | Promise<ChannelIO | undefined>,
   instances: Pick<CoordinatorInstanceStore, "getMainTask">,
 ): Promise<PrivateWorkerAudienceBinding | undefined> {
@@ -73,6 +74,7 @@ export async function privateWorkerAudienceFor(
       threadKey: brief.mainThreadKey,
       userId: brief.requesterId,
       ...(sourceRunId ? { sourceRunId } : {}),
+      unitKey: { instanceId: instance.id, unit: row.unit },
     });
   } catch {
     return undefined;
@@ -140,6 +142,7 @@ export function rehostPrivateWorkerIO(
       threadKey: string;
       userId: string;
       sourceRunId?: string;
+      unitKey?: UnitEventKey;
     }) => ChannelIO | undefined | Promise<ChannelIO | undefined>;
   },
 ): ChannelIO {

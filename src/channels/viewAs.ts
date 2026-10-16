@@ -1,3 +1,4 @@
+import { DATA_VIEW_COOKIE, DATA_VIEW_PATH, workViewScopeOf } from "./workViewScope.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Actor } from "../core/authz/types.js";
 import { MINUTE_MS } from "../core/budgets.js";
@@ -45,15 +46,15 @@ export function viewAsFromCookie(header: string | string[] | undefined): string 
 }
 
 export function isViewAsPath(pathname: string): boolean {
-  return pathname === VIEW_AS_PATH || pathname === VIEW_AS_EXIT_PATH;
+  return pathname === VIEW_AS_PATH || pathname === VIEW_AS_EXIT_PATH || pathname === DATA_VIEW_PATH;
 }
 
-/** The people a runs page can name for the picker: its rows' Slack requesters, once each, by name. */
+/** The people a runs page can name for the picker: its rows' human requesters, once each, by name. */
 export function requestersOf(rows: readonly RunView[]): ViewablePerson[] {
   return peopleOf(rows, []);
 }
 
-/** The picker's people: the page's Slack requesters and the installation's known people
+/** The picker's people: the page's human requesters and the installation's known people
  *  (`LiveViewDeps.people` — everyone the grants table names and every requester in run history),
  *  once each, a name kept from whichever source has one, sorted by name. A row's requester is
  *  always offered, so a page never names someone the picker cannot pick. */
@@ -71,7 +72,7 @@ export function peopleOf(rows: readonly RunView[], known: readonly ViewablePerso
 }
 
 export interface KnownPeopleDeps {
-  /** The grants table's Slack people (`ConfigStore.grantedPeople`). */
+  /** The grants table's human people (`ConfigStore.grantedPeople`). */
   granted: () => readonly string[];
   /** Every requester the run history holds: the service's list under the admin's own `all`. */
   requesters: () => Promise<readonly RunView[]>;
@@ -80,7 +81,7 @@ export interface KnownPeopleDeps {
 }
 
 /**
- * The installation's known people for the picker: the grants table's Slack people, named
+ * The installation's known people for the picker: the grants table's human people, named
  * through the directory, and every requester in the run history the service lists. A failing
  * directory leaves an id unnamed; a failing history read leaves only the granted people.
  */
@@ -160,6 +161,8 @@ export interface ViewAsDeps {
   /** `Secure` on the cookie: on for an https deployment, off for a local http one (the browser
    *  would drop a Secure cookie set over http). */
   secure: boolean;
+  /** Protected requesters the current superuser may select. */
+  people?: () => readonly ViewablePerson[];
 }
 
 export interface ViewAsContext {
@@ -167,7 +170,7 @@ export interface ViewAsContext {
   actor: Actor;
 }
 
-function cookieHeader(value: string, deps: ViewAsDeps, clear: boolean): string {
+function cookieHeader(value: string, deps: ViewAsDeps, clear: boolean, name = VIEW_AS_COOKIE): string {
   const attrs = [
     "Path=/",
     "HttpOnly",
@@ -175,7 +178,7 @@ function cookieHeader(value: string, deps: ViewAsDeps, clear: boolean): string {
     ...(deps.secure ? ["Secure"] : []),
     ...(clear ? ["Max-Age=0"] : []),
   ];
-  return `${VIEW_AS_COOKIE}=${encodeURIComponent(value)}; ${attrs.join("; ")}`;
+  return `${name}=${encodeURIComponent(value)}; ${attrs.join("; ")}`;
 }
 
 /**
@@ -204,13 +207,55 @@ export function createViewAsHandler(
       req.destroy();
       return true;
     }
-    if (!holdsAll(ctx.actor)) {
+    if (url.pathname === DATA_VIEW_PATH) {
+      if (ctx.actor.kind !== "user") {
+        json(res, 403, { error: "unauthorized" });
+        req.destroy();
+        return true;
+      }
+      readBody(req, MAX_BODY_BYTES)
+        .then((read) => {
+          if (!read.ok) {
+            json(res, 413, { error: "invalid_input" });
+            return;
+          }
+          let value: unknown;
+          try {
+            value = JSON.parse(read.body);
+          } catch {
+            value = undefined;
+          }
+          const mode =
+            value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 1
+              ? (value as { mode?: unknown }).mode
+              : undefined;
+          if (mode !== "mine" && mode !== "everyone") {
+            json(res, 400, { error: "invalid_input" });
+            return;
+          }
+          if (mode === "everyone" && (!holdsAll(ctx.actor) || !workViewScopeOf(ctx.actor).canEveryone)) {
+            json(res, 403, { error: "unauthorized" });
+            return;
+          }
+          res.writeHead(204, {
+            "set-cookie": [cookieHeader(mode, deps, false, DATA_VIEW_COOKIE), cookieHeader("", deps, true)],
+            "cache-control": "no-store",
+          });
+          res.end();
+        })
+        .catch(() => json(res, 400, { error: "invalid_input" }));
+      return true;
+    }
+    if (!holdsAll(ctx.actor) || !workViewScopeOf(ctx.actor).canEveryone) {
       json(res, 403, { error: "unauthorized", message: "Only a session holding every grant may view as a person." });
       req.destroy();
       return true;
     }
     if (url.pathname === VIEW_AS_EXIT_PATH) {
-      res.writeHead(204, { "set-cookie": cookieHeader("", deps, true), "cache-control": "no-store" });
+      res.writeHead(204, {
+        "set-cookie": [cookieHeader("", deps, true), cookieHeader("", deps, true, DATA_VIEW_COOKIE)],
+        "cache-control": "no-store",
+      });
       res.end();
       return true;
     }
@@ -226,11 +271,19 @@ export function createViewAsHandler(
         } catch {
           person = undefined;
         }
-        if (typeof person !== "string" || !isViewablePerson(person)) {
-          json(res, 400, { error: "invalid_input", message: "person must be a Slack person id" });
+        if (
+          typeof person !== "string" ||
+          !isViewablePerson(person) ||
+          ((person.startsWith("access:") || deps.people !== undefined) &&
+            !deps.people?.().some((known) => known.id === person))
+        ) {
+          json(res, 400, { error: "invalid_input", message: "person must name a known person" });
           return;
         }
-        res.writeHead(204, { "set-cookie": cookieHeader(person, deps, false), "cache-control": "no-store" });
+        res.writeHead(204, {
+          "set-cookie": [cookieHeader(person, deps, false), cookieHeader("", deps, true, DATA_VIEW_COOKIE)],
+          "cache-control": "no-store",
+        });
         res.end();
       })
       .catch(() => json(res, 400, { error: "invalid_input", message: "body unreadable" }));
