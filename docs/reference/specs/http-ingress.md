@@ -104,6 +104,20 @@ An asynchronous admission or synchronous response with a finished run includes t
 | An asynchronous admission carries the actual serving build before the run completes | `[unit]` `src/channels/http.test.ts::binds an asynchronous admission to the serving build before completion` |
 
 
+## Organization admission
+
+When the installation supplies `IngressOptions.admit`, HTTP admits work through the durable organization service instead of waiting for a model reply. The authenticated bearer digest stays server-only and identifies the exact key, even when active keys share a subject. The adapter does not correlate an email to a person. A supplied `idempotencyKey` is a string of 1 to 128 characters; its digest names the native message. Without a key, each send receives a new native message ID. Exact retry keeps the same credential, thread, text and key; changed payload conflicts. Caller-supplied conversation history is refused. Current authorization still applies to retries.
+
+A pending or accepted receipt returns 202, throttling returns 429, and rejected or stale receipts return 409. Receipt and original owner are reported when known; admission does not prove completion or delivery. Invalid admission returns 400, a missing or fenced authorization returns 403, and unavailable or busy admission returns 503. Without `admit`, the existing single-shot reply and async lifecycle remain available.
+
+| Criterion | Proof |
+| --- | --- |
+| Exact HTTP retry retains one durable receipt and original owner; changed text conflicts. | `[unit]` `src/channels/http.test.ts::HTTP organization admission::returns the original durable receipt and owner on exact retry, and conflicts on changed text` |
+| Two same-subject bearer keys retain distinct exact digests; body fields and matching email cannot substitute the authenticated actor. | `[unit]` `src/channels/http.test.ts::HTTP organization admission::keeps two same-subject keys distinct and ignores forged credential and email identity` |
+| Supplied history and malformed retry keys refuse before admission; current policy loss refuses the original retry. | `[unit]` `src/channels/http.test.ts::HTTP organization admission::refuses supplied history and malformed keys before admission and keeps current policy denial honest` |
+| Rejected and throttled receipts, unavailable admission, and invalid admission return their actual status without claiming acceptance or completion. | `[unit]` `src/channels/http.test.ts::HTTP organization admission::returns rejected and throttled receipts without claiming acceptance`, `src/channels/http.test.ts::HTTP organization admission::reports unavailable or invalid admission without claiming receipt or completion` |
+| The installation without organization admission retains its existing collected reply. | `[unit]` `src/channels/http.test.ts::handleIngressRequest (transport gating + dispatch)::valid token → dispatch called with the namespaced IncomingMessage; reply returned` |
+
 ## GitHub comment conversion
 
 The inactive `normalizeGithubActivity` adapter converts top-level PR comments, inline comments and replies, and submitted reviews into the common `SourceEvent` format. It handles comment creation, edits and deletion, plus review submission, edits and dismissal. Human and bot authors use the same `source-evidence` kind. Native authors, bodies, URLs, repository IDs and original payloads remain source data. They do not become requester identity, task selection or worker authority.

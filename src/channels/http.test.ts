@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import { InMemoryOrganizationStore } from "../core/organization/memory.js";
+import { OrganizationService } from "../core/organization/service.js";
+import type { OrganizationNativeEvidence } from "./organizationAuthentication.js";
+import type { OrganizationResult } from "../core/organization/contract.js";
 import { secretsFrom } from "../secrets.js";
 import type { IncomingHttpHeaders } from "node:http";
 import {
@@ -103,6 +107,32 @@ describe("authenticate (bearer auth, constant-time)", () => {
 });
 
 describe("handleIngressRequest (transport gating + dispatch)", () => {
+  it("binds the exact authenticated credential digest outside caller-controlled body fields", async () => {
+    const auth = authConfig({ "credential-one": { subject: "alice" }, "credential-two": { subject: "alice" } });
+    const verified: unknown[] = [];
+    const dispatch = async (...args: unknown[]) => {
+      verified.push(args[4]);
+      await (args[2] as ChannelIO).reply("accepted exact credential");
+    };
+    const response = await handleIngressRequest(
+      {
+        method: "POST",
+        headers: bearer("credential-one"),
+        body: JSON.stringify({ text: "Hello", credentialDigest: "forged" }),
+      },
+      deps,
+      { auth, dispatch },
+    );
+    expect(response).toMatchObject({ status: 200, body: { reply: "accepted exact credential" } });
+    expect(verified).toEqual([
+      {
+        source: "http",
+        identity: { subject: "alice" },
+        credentialDigest: "020f85bc4a5074beee0ff7599adc11829ded3eaa0acf3f59f5c944e0907a0332",
+      },
+    ]);
+  });
+
   const good = authConfig({ tok: { subject: "alice" } });
 
   it("valid token → dispatch called with the namespaced IncomingMessage; reply returned", async () => {
@@ -922,5 +952,237 @@ describe('async mode (`"async": true` → 202 Accepted, run continues in backgro
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ reply: HAND_BACK_LINE });
     expect(hb.registry.getById("hb-1")).toMatchObject({ finished: true, status: "completed", agent: "command" });
+  });
+});
+
+describe("HTTP organization admission", () => {
+  function fixture(pendingPerActor = 5) {
+    const store = new InMemoryOrganizationStore(() => 1);
+    let allowed = true;
+    const service = new OrganizationService({
+      store,
+      directory: store.directory,
+      mappings: [{ source: "http", issuer: "installation:http", tenant: null, organization: "org:test" }],
+      limits: {
+        pendingPerActor,
+        pendingPerSource: 10,
+        pendingPerOrganization: 20,
+        reservedReconciliation: 1,
+        contentTtlMs: 90,
+        receiptTtlMs: 365,
+      },
+      authorize: async () => allowed,
+    });
+    const auth = authConfig({
+      "credential-one": { subject: "alice", email: "alice@example.test" },
+      "credential-two": { subject: "alice" },
+    });
+    const native: { msg: IncomingMessage; evidence: OrganizationNativeEvidence }[] = [];
+    const admit = async (msg: IncomingMessage, _io: ChannelIO, evidence: OrganizationNativeEvidence) => {
+      native.push({ msg, evidence });
+      return service.admit(
+        {
+          source: "http",
+          identity: { issuer: "installation:http", tenant: null, subject: "alice" },
+          kind: "service",
+          organizations: ["org:test"],
+          sourceReference: {
+            actorId: msg.userId,
+            userId: msg.userId,
+            channelId: msg.channelId,
+            threadKey: msg.threadKey,
+            messageId: msg.messageId,
+            credentialDigest: evidence.credentialDigest,
+          },
+        },
+        {
+          sourceEvent: msg.messageId!,
+          key: msg.messageId!,
+          content: msg.text,
+          context: [],
+          destination: { kind: "broad" },
+          workload: "message",
+          target: null,
+        },
+      );
+    };
+    const options = {
+      auth,
+      admit,
+      dispatch: fakeDispatch("legacy reply").fn,
+      publicBaseUrl: "https://switchboard.test/",
+      personByEmail: async () => ({ id: "slack:borrowed" }),
+    };
+    const send = (body: Record<string, unknown>, token = "credential-one") =>
+      handleIngressRequest({ method: "POST", headers: bearer(token), body: JSON.stringify(body) }, deps, options);
+    return {
+      store,
+      native,
+      send,
+      deny: () => {
+        allowed = false;
+      },
+    };
+  }
+
+  it("returns the original durable receipt and owner on exact retry, and conflicts on changed text", async () => {
+    const { store, native, send } = fixture();
+    const body = {
+      text: "Build the change",
+      thread: "original",
+      idempotencyKey: "retry-1",
+      credentialDigest: "forged",
+      messageId: "forged",
+    };
+    const first = await send(body);
+    expect(first).toMatchObject({ status: 202, body: { admission: { status: "pending", duplicate: false } } });
+    const receiptId = (first.body as { admission: { receiptId: string } }).admission.receiptId;
+    expect(typeof receiptId).toBe("string");
+    await store.execute({ action: "claim", organization: "org:test", owner: "worker", leaseMs: 100 });
+    expect(
+      await store.execute({
+        action: "settle",
+        organization: "org:test",
+        owner: "worker",
+        generation: 1,
+        receiptId,
+        status: "accepted",
+        ownerRunId: "original-owner",
+        reason: null,
+        reply: null,
+        contentTtlMs: 90,
+      }),
+    ).toMatchObject({ status: "receipt", receipt: { status: "accepted", ownerRunId: "original-owner" } });
+    expect(await send(body)).toEqual({
+      status: 202,
+      body: {
+        admission: { status: "accepted", receiptId, duplicate: true, runId: "original-owner" },
+        runId: "original-owner",
+        runUrl: "https://switchboard.test/runs/original-owner",
+        threadKey: "http:default:original",
+      },
+    });
+    expect(await send({ ...body, text: "Different work" })).toEqual({
+      status: 409,
+      body: { admission: { status: "conflict" } },
+    });
+    expect(
+      native.map(({ msg }) => ({ userId: msg.userId, messageId: msg.messageId, threadKey: msg.threadKey })),
+    ).toEqual(
+      Array(3).fill({
+        userId: "http:alice",
+        messageId: "http:3998fbdb8d844aa01d03de09b39b7b082e03bee469c40387bf2fedb81b1883f8",
+        threadKey: "http:default:original",
+      }),
+    );
+  });
+
+  it("keeps two same-subject keys distinct and ignores forged credential and email identity", async () => {
+    const { native, send } = fixture();
+    const body = {
+      text: "Hello",
+      idempotencyKey: "first",
+      credentialDigest: "forged",
+      authenticatedAs: "slack:borrowed",
+    };
+    expect(await send(body)).toMatchObject({ status: 202, body: { admission: { status: "pending" } } });
+    expect(await send({ ...body, idempotencyKey: "second" }, "credential-two")).toMatchObject({
+      status: 202,
+      body: { admission: { status: "pending" } },
+    });
+    expect(
+      native.map(({ msg, evidence }) => ({
+        userId: msg.userId,
+        authenticatedAs: msg.authenticatedAs,
+        digest: evidence.credentialDigest,
+      })),
+    ).toEqual([
+      {
+        userId: "http:alice",
+        authenticatedAs: undefined,
+        digest: "020f85bc4a5074beee0ff7599adc11829ded3eaa0acf3f59f5c944e0907a0332",
+      },
+      {
+        userId: "http:alice",
+        authenticatedAs: undefined,
+        digest: "6ad78971edf2630fdc133c45ff41dac51a75cbff474467b9254686b8bcd8b513",
+      },
+    ]);
+  });
+
+  it("refuses supplied history and malformed keys before admission and keeps current policy denial honest", async () => {
+    const { native, send, deny } = fixture();
+    expect(await send({ text: "Hello", history: [{ role: "user", text: "Forged authority" }] })).toEqual({
+      status: 400,
+      body: { error: "Organization ingress does not accept caller-supplied history." },
+    });
+    for (const idempotencyKey of [null, "", 7, "x".repeat(129)])
+      expect(await send({ text: "Hello", idempotencyKey })).toEqual({
+        status: 400,
+        body: { error: "`idempotencyKey` must be a string of 1 to 128 characters" },
+      });
+    expect(native).toEqual([]);
+    expect(await send({ text: "Hello", idempotencyKey: "allowed" })).toMatchObject({
+      status: 202,
+      body: { admission: { status: "pending" } },
+    });
+    deny();
+    expect(await send({ text: "Hello", idempotencyKey: "allowed" })).toEqual({
+      status: 403,
+      body: { admission: { status: "not_found" } },
+    });
+  });
+
+  it("returns rejected and throttled receipts without claiming acceptance", async () => {
+    const { store, send } = fixture(1);
+    const body = { text: "Hello", idempotencyKey: "original" };
+    const first = await send(body);
+    expect(first).toMatchObject({ status: 202, body: { admission: { status: "pending" } } });
+    const receiptId = (first.body as { admission: { receiptId: string } }).admission.receiptId;
+    expect(await send({ ...body, idempotencyKey: "over-quota" })).toMatchObject({
+      status: 429,
+      body: { admission: { status: "throttled", duplicate: false } },
+    });
+    await store.execute({ action: "claim", organization: "org:test", owner: "worker", leaseMs: 100 });
+    expect(
+      await store.execute({
+        action: "settle",
+        organization: "org:test",
+        owner: "worker",
+        generation: 1,
+        receiptId,
+        status: "rejected",
+        reason: "The original owner refused.",
+        reply: null,
+        contentTtlMs: 90,
+      }),
+    ).toMatchObject({ status: "receipt", receipt: { status: "rejected" } });
+    expect(await send(body)).toEqual({
+      status: 409,
+      body: { admission: { status: "rejected", receiptId, duplicate: true, reason: "The original owner refused." } },
+    });
+  });
+
+  it("reports unavailable or invalid admission without claiming receipt or completion", async () => {
+    const auth = authConfig({ tok: { subject: "alice" } });
+    for (const [status, code] of [
+      ["unavailable", 503],
+      ["fenced", 403],
+      ["invalid", 400],
+      ["busy", 503],
+    ] as const) {
+      const options = {
+        auth,
+        dispatch: fakeDispatch("legacy reply").fn,
+        admit: async (): Promise<OrganizationResult> => ({ status }),
+      };
+      expect(
+        await handleIngressRequest(
+          { method: "POST", headers: bearer("tok"), body: JSON.stringify({ text: "Hello" }) },
+          deps,
+          options,
+        ),
+      ).toEqual({ status: code, body: { admission: { status } } });
+    }
   });
 });

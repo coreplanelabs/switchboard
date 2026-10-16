@@ -1,4 +1,8 @@
-import { timingSafeEqual } from "node:crypto";
+import { digestBearer } from "../mcp/personalTokens.js";
+import { timingSafeEqual, createHash, randomUUID } from "node:crypto";
+import type { OrganizationAdmissionInput } from "../core/organization/service.js";
+import type { OrganizationResult } from "../core/organization/contract.js";
+import type { OrganizationNativeEvidence } from "./organizationAuthentication.js";
 import type { IncomingHttpHeaders, IncomingMessage as HttpRequest, ServerResponse } from "node:http";
 import { dispatch as realDispatch, type CoreDeps, type DispatchOptions } from "../core/dispatcher.js";
 import { startRequestRoot } from "../core/requestTrace.js";
@@ -66,12 +70,70 @@ export interface IngressConfig {
 }
 
 /** The dispatch signature; injectable so tests never hit real providers. */
-export type DispatchFn = (deps: CoreDeps, msg: IncomingMessage, io: ChannelIO, opts?: DispatchOptions) => Promise<void>;
+export interface AuthenticatedHttpDispatch {
+  source: "http";
+  identity: IngressIdentity;
+  credentialDigest: string;
+}
+export type DispatchFn = (
+  deps: CoreDeps,
+  msg: IncomingMessage,
+  io: ChannelIO,
+  opts?: DispatchOptions,
+  authenticated?: AuthenticatedHttpDispatch,
+) => Promise<void>;
 
+export type OrganizationIngress = (
+  msg: IncomingMessage,
+  io: ChannelIO,
+  evidence: OrganizationNativeEvidence,
+  continuation?: OrganizationAdmissionInput["continuation"],
+) => Promise<OrganizationResult>;
+/** Receipt acknowledgement is distinct from model completion or channel delivery. */
+export function admissionResponse(result: OrganizationResult): IngressResponse {
+  if (result.status === "receipt")
+    return {
+      status:
+        result.receipt.status === "accepted" || result.receipt.status === "pending"
+          ? 202
+          : result.receipt.status === "throttled"
+            ? 429
+            : 409,
+      body: {
+        admission: {
+          status: result.receipt.status,
+          receiptId: result.receipt.id,
+          duplicate: result.duplicate,
+          ...(result.receipt.ownerRunId ? { runId: result.receipt.ownerRunId } : {}),
+          ...(result.receipt.reason ? { reason: result.receipt.reason } : {}),
+        },
+      },
+    };
+  return {
+    status:
+      result.status === "conflict"
+        ? 409
+        : result.status === "invalid"
+          ? 400
+          : result.status === "not_found" || result.status === "fenced"
+            ? 403
+            : 503,
+    body: { admission: { status: result.status } },
+  };
+}
+export function nativeMessageId(source: "http" | "mcp", key?: string): string {
+  return `${source}:${key ? createHash("sha256").update(key).digest("hex") : randomUUID()}`;
+}
+export function idempotencyKeyError(key: unknown): string | undefined {
+  return key !== undefined && (typeof key !== "string" || key.length < 1 || key.length > 128)
+    ? "`idempotencyKey` must be a string of 1 to 128 characters"
+    : undefined;
+}
 export interface IngressOptions {
   auth: IngressConfig;
   /** Defaults to the real core dispatch(); overridden in tests. */
   dispatch?: DispatchFn;
+  admit?: OrganizationIngress;
   /** The person an entry's `email` names (authorization.md item 15): the
    *  Slack adapter's cached reverse lookup. Absent (no Slack app up) → every
    *  token is its own requester, exactly as before the binding existed. */
@@ -116,6 +178,16 @@ export function authenticate(headers: IncomingHttpHeaders, config: IngressConfig
   return identity;
 }
 
+/** Called only after the header was authenticated. This digest names that
+ * exact key even when another active key shares its configured subject. */
+function authenticatedDigest(headers: IncomingHttpHeaders): string {
+  const header = headers.authorization;
+  const raw = Array.isArray(header) ? header[0] : header;
+  const match = /^Bearer\s+(.+)$/i.exec(raw?.trim() ?? "");
+  if (!match) throw new Error("Authenticated credential is unavailable.");
+  return digestBearer(match[1]);
+}
+
 /** Parsed, validated request payload. */
 interface IngressBody {
   text: string;
@@ -124,6 +196,7 @@ interface IngressBody {
   history: HistoryItem[];
   /** `"async": true` => acknowledge with 202 + run id; run continues in background. */
   async: boolean;
+  idempotencyKey?: string;
 }
 
 /** Build the namespaced IncomingMessage from an authed identity + the body.
@@ -180,6 +253,8 @@ function parseBody(raw: string): { body: IngressBody } | { error: string } {
   if (obj.async !== undefined && typeof obj.async !== "boolean") {
     return { error: "`async` must be a boolean" };
   }
+  const keyError = idempotencyKeyError(obj.idempotencyKey);
+  if (keyError) return { error: keyError };
   const history: HistoryItem[] = [];
   if (obj.history !== undefined) {
     if (!Array.isArray(obj.history)) return { error: "`history` must be an array" };
@@ -200,6 +275,7 @@ function parseBody(raw: string): { body: IngressBody } | { error: string } {
       thread: obj.thread as string | undefined,
       history,
       async: obj.async === true,
+      idempotencyKey: obj.idempotencyKey as string | undefined,
     },
   };
 }
@@ -278,6 +354,7 @@ async function handleAuthorized(
   body: string,
   deps: CoreDeps,
   options: IngressOptions,
+  credentialDigest: string,
 ): Promise<IngressResponse> {
   const parsed = parseBody(body);
   if ("error" in parsed) {
@@ -288,20 +365,47 @@ async function handleAuthorized(
     if (error) return { status: 400, body: { error } };
   }
   const receivedAt = systemClock();
-  const incoming = await toIncomingMessage(identity, parsed.body, options.personByEmail);
+  const incoming = await toIncomingMessage(identity, parsed.body, options.admit ? undefined : options.personByEmail);
   const keyError = ingressThreadKeyError(incoming.threadKey);
   if (keyError) return { status: 400, body: { error: keyError } };
   // The request's root (docs/reference/specs/tracing.md): started once the caller's
   // identity is established and the body parsed; `dispatch()` ends it.
   const trace = startRequestRoot(deps, { channel: "http", receivedAt });
-  const msg: IncomingMessage = { ...incoming, receivedAt };
+  const msg: IncomingMessage = {
+    ...incoming,
+    receivedAt,
+    ...(options.admit ? { messageId: nativeMessageId("http", parsed.body.idempotencyKey) } : {}),
+  };
   const io = new HttpIO(parsed.body.history, msg.threadKey);
+  if (options.admit) {
+    if (parsed.body.history.length) {
+      trace.root.end("ok", { status: "refused" });
+      return { status: 400, body: { error: "Organization ingress does not accept caller-supplied history." } };
+    }
+    try {
+      const result = await options.admit(msg, io, { source: "http", identity, credentialDigest });
+      const answer = admissionResponse(result);
+      const runId = result.status === "receipt" ? result.receipt.ownerRunId : undefined;
+      const base = options.publicBaseUrl?.replace(/\/+$/, "") ?? "";
+      return {
+        ...answer,
+        body: {
+          ...(answer.body as Record<string, unknown>),
+          ...(runId ? { runId, runUrl: `${base}/runs/${runId}`, threadKey: msg.threadKey } : {}),
+          ...(deps.build ? { build: deps.build } : {}),
+        },
+      };
+    } finally {
+      trace.root.end("ok");
+    }
+  }
   const dispatchFn = options.dispatch ?? realDispatch;
   const result = await dispatchSingleShot({
     deps,
     msg,
     io,
-    dispatch: dispatchFn,
+    dispatch: (core, message, handle, dispatchOptions) =>
+      dispatchFn(core, message, handle, dispatchOptions, { source: "http", identity, credentialDigest }),
     trace,
     async: parsed.body.async,
     publicBaseUrl: options.publicBaseUrl,
@@ -327,7 +431,7 @@ export async function handleIngressRequest(
   if ("status" in gate) return gate;
   const scopeRefusal = requireDispatch(gate.identity, (id) => deps.config.grantsFor(id));
   if (scopeRefusal) return scopeRefusal;
-  return handleAuthorized(gate.identity, req.body, deps, options);
+  return handleAuthorized(gate.identity, req.body, deps, options, authenticatedDigest(req.headers));
 }
 
 /**
@@ -389,7 +493,13 @@ export function createIngressHandler(
           req.destroy();
           return;
         }
-        const result = await handleAuthorized(gate.identity, read.body, deps, options);
+        const result = await handleAuthorized(
+          gate.identity,
+          read.body,
+          deps,
+          options,
+          authenticatedDigest(req.headers),
+        );
         write(res, result.status, result.body);
       } catch (err) {
         // dispatch() catches its own errors and replies, so reaching here means
