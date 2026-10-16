@@ -6,12 +6,14 @@ import {
   parseSmokeConfig,
   PRODUCT_ACCEPTANCE_GAP,
   runAgentSmoke,
+  SmokeReaderError,
 } from "../src/deploy/agentSmoke.js";
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
   options: {
     check: { type: "boolean" },
+    "check-reader": { type: "boolean" },
     model: { type: "string" },
     "review-transport": { type: "string" },
     "review-effort": { type: "string" },
@@ -19,9 +21,9 @@ const { positionals, values } = parseArgs({
   },
 });
 const [planPath, receiptPath] = positionals;
-if (!planPath || !receiptPath || positionals.length !== 2) {
+if (!planPath || !receiptPath || positionals.length !== 2 || (values["check-reader"] && !values.check)) {
   throw new Error(
-    "usage: smoke:ingress <deploy-plan.json> <receipt.json> [--check] [--model provider/model] [--review-transport http|mcp] [--review-effort high] [--require-vouched-controls]",
+    "usage: smoke:ingress <deploy-plan.json> <receipt.json> [--check [--check-reader]] [--model provider/model] [--review-transport http|mcp] [--review-effort high] [--require-vouched-controls]",
   );
 }
 // Outside the tree, written atomically before admission and after each known phase.
@@ -74,18 +76,55 @@ try {
   if (slackConfig && !process.env.SMOKE_EXPECTED_COMMIT)
     throw new Error("Slack acceptance requires an exact candidate commit");
   if (values.check) {
+    let readerCheck:
+      { outcome: "passed" | "incomplete"; observationError?: SmokeReaderError["observation"] } | undefined;
+    if (values["check-reader"]) {
+      await save({
+        version: 1,
+        scope: "deployment-capability-smoke",
+        capabilityOutcome: "incomplete",
+        reason: "reader_unproven",
+      });
+      try {
+        if (!transport.readerReady) throw new SmokeReaderError({ code: "reader_unavailable" });
+        await transport.readerReady();
+        readerCheck = { outcome: "passed" };
+      } catch (error) {
+        readerCheck = {
+          outcome: "incomplete",
+          observationError: error instanceof SmokeReaderError ? error.observation : { code: "reader_check_failed" },
+        };
+      }
+    }
     await save({
       version: 1,
       scope: "deployment-capability-smoke",
       capabilityOutcome: "incomplete",
       productAcceptance: PRODUCT_ACCEPTANCE_GAP,
-      reason: "configured_not_executed",
+      reason:
+        readerCheck?.outcome === "incomplete"
+          ? "reader_unproven"
+          : readerCheck
+            ? "reader_verified"
+            : "configured_not_executed",
+      ...(readerCheck ? { readerCheck } : {}),
       ...(config.model ? { requestedModel: config.model } : {}),
       reviewTransport: config.review.transport ?? "http",
       ...(config.review.effort ? { requestedReviewEffort: config.review.effort } : {}),
       ...(config.review.transport === "mcp" ? { mcpPermissions: "unverified" } : {}),
     });
-    process.stdout.write("Smoke configured; acceptance not executed.\n");
+    if (readerCheck?.outcome === "incomplete") {
+      const error = readerCheck.observationError;
+      const detail = error ? ` (${error.code}${error.http ? `, HTTP ${error.http.status}` : ""})` : "";
+      process.stderr.write(`Smoke reader not verified${detail}. No agent started.\n`);
+      process.exitCode = 1;
+    } else {
+      process.stdout.write(
+        readerCheck
+          ? "Smoke reader verified; acceptance not executed.\n"
+          : "Smoke configured; acceptance not executed.\n",
+      );
+    }
   } else {
     if (!process.env.SMOKE_INGRESS_THREAD)
       throw new Error("SMOKE_INGRESS_THREAD is not set; use a fresh disposable thread prefix");
@@ -114,9 +153,15 @@ try {
       });
       if (slackCommand.outcome !== "passed") receipt.capabilityOutcome = "incomplete";
     }
-    process.stdout.write(
-      `Deployment capability acceptance: ${receipt.capabilityOutcome}. Private draft-PR path remains unproven.\n`,
-    );
+    process.stdout.write(`Deployment capability acceptance: ${receipt.capabilityOutcome}.\n`);
+    for (const row of receipt.scenarios) {
+      const observation = row.observationError;
+      const detail = observation
+        ? ` (${observation.code}${observation.http ? `, HTTP ${observation.http.status}` : ""})`
+        : "";
+      process.stdout.write(`${row.id}: ${row.outcome}${detail}\n`);
+    }
+    process.stdout.write("Private draft-PR acceptance: unproven.\n");
     if (receipt.capabilityOutcome !== "passed") process.exitCode = 1;
   }
 } catch {
